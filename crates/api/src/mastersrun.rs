@@ -249,10 +249,10 @@ fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetche
         tried.waited_ms(),
         // R4-28 (DLY-09): the dated snapshot and, for the Kite dump, the diff's
         // counts and every named change. `null` for a source not snapshotted.
-        tried
-            .snapshot
-            .as_ref()
-            .map_or_else(|| "null".to_owned(), pull::master_snapshots::Snapshotted::json),
+        tried.snapshot.as_ref().map_or_else(
+            || "null".to_owned(),
+            pull::master_snapshots::Snapshotted::json
+        ),
     );
     match *landed {
         Ok(Landed::Written { bytes, changed }) => format!(

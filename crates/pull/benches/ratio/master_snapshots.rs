@@ -60,7 +60,10 @@ pub(crate) fn token_on_is_flat() -> bool {
             refuse("a real day")
         };
         let day = if count == 1 { last.day } else { day };
-        if !matches!(book.token_on(day, "NFO", 9_000_500), TokenOn::Resolved { .. }) {
+        if !matches!(
+            book.token_on(day, "NFO", 9_000_500),
+            TokenOn::Resolved { .. }
+        ) {
             refuse("the probed token resolves");
         }
         costs.push(cost_ps(200_000, || {

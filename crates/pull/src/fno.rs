@@ -322,17 +322,17 @@ pub fn day_candles_url(
     window: crate::session::Window,
     continuous: bool,
 ) -> Result<String, String> {
-    let route = spec
-        .fno
-        .by_token()
-        .ok_or_else(|| "this feed has no futures token route, so no request was built".to_owned())?;
+    let route = spec.fno.by_token().ok_or_else(|| {
+        "this feed has no futures token route, so no request was built".to_owned()
+    })?;
     let rung = route.granularity;
     let interval = spec
         .granularity_token(rung)
         .ok_or_else(|| format!("this feed cannot spell the {rung:?} rung"))?;
     let from = crate::http::HttpSource::on_the_wire(window.from(), spec.date_format);
-    let to = crate::http::HttpSource::wire_end(window.to(), spec.range_end_for(rung), spec.date_format)
-        .map_err(|why| why.to_string())?;
+    let to =
+        crate::http::HttpSource::wire_end(window.to(), spec.range_end_for(rung), spec.date_format)
+            .map_err(|why| why.to_string())?;
     let mut out = String::from(spec.base_url);
     for segment in spec.path_for(rung) {
         out.push('/');

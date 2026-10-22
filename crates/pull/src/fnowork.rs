@@ -767,7 +767,9 @@ pub fn futures_plan(
             }
         }
         let Some(contract) = future_contract(expiry) else {
-            refused.push(format!("contract_unnamed: {label}: no contract segment renders"));
+            refused.push(format!(
+                "contract_unnamed: {label}: no contract segment renders"
+            ));
             continue;
         };
         asks.push(FuturesAsk {
@@ -990,7 +992,9 @@ async fn pull_one<D: crate::chain::Discovery>(
         let body = match from.get(&url).await {
             Ok(body) => body,
             Err(refusal) => {
-                return out.stop(format!("history_ends: the vendor refused {span}: {refusal}"));
+                return out.stop(format!(
+                    "history_ends: the vendor refused {span}: {refusal}"
+                ));
             }
         };
         let raw = match crate::http::decode_body(&body, spec, crate::vendor::Listing::Derivative) {

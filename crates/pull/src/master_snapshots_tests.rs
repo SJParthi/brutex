@@ -29,10 +29,8 @@ fn scratch(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!(
-        "brutex-r428-{name}-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("brutex-r428-{name}-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&dir).expect("a scratch folder");
     dir
 }
@@ -47,7 +45,17 @@ fn stamp(day: Day, ordinal: u32) -> Stamp {
 
 /// One invented dump row.
 #[allow(clippy::too_many_arguments, reason = "one argument per Kite column")]
-fn row(token: u64, symbol: &str, name: &str, expiry: &str, strike: &str, lot: u32, kind: &str, segment: &str, exchange: &str) -> String {
+fn row(
+    token: u64,
+    symbol: &str,
+    name: &str,
+    expiry: &str,
+    strike: &str,
+    lot: u32,
+    kind: &str,
+    segment: &str,
+    exchange: &str,
+) -> String {
     format!(
         "{token},{},{symbol},\"{name}\",0,{expiry},{strike},0.05,{lot},{kind},{segment},{exchange}",
         token / 256
@@ -55,7 +63,9 @@ fn row(token: u64, symbol: &str, name: &str, expiry: &str, strike: &str, lot: u3
 }
 
 fn fut(token: u64, symbol: &str, expiry: &str, lot: u32) -> String {
-    row(token, symbol, "ZQIDX", expiry, "0", lot, "FUT", "NFO-FUT", "NFO")
+    row(
+        token, symbol, "ZQIDX", expiry, "0", lot, "FUT", "NFO-FUT", "NFO",
+    )
 }
 
 fn share(token: u64, symbol: &str, name: &str) -> String {
@@ -129,10 +139,18 @@ fn one_token_two_dates_resolves_to_two_contracts() {
     let root = scratch("two-dates");
     let (d1, d2) = two_days(&root);
     let book = Book::open(&root).expect("a book");
-    let TokenOn::Resolved { snapshot: s1, listed: on_first } = book.token_on(d1, "NFO", 9_000_001) else {
+    let TokenOn::Resolved {
+        snapshot: s1,
+        listed: on_first,
+    } = book.token_on(d1, "NFO", 9_000_001)
+    else {
         panic!("the first date resolves");
     };
-    let TokenOn::Resolved { snapshot: s2, listed: on_second } = book.token_on(d2, "NFO", 9_000_001) else {
+    let TokenOn::Resolved {
+        snapshot: s2,
+        listed: on_second,
+    } = book.token_on(d2, "NFO", 9_000_001)
+    else {
         panic!("the second date resolves");
     };
     assert_eq!((s1, s2), (stamp(d1, 1), stamp(d2, 1)));
@@ -140,7 +158,10 @@ fn one_token_two_dates_resolves_to_two_contracts() {
     assert_eq!(on_first.expiry(), Some(day(2026, 1, 29)));
     assert_eq!(on_second.tradingsymbol(), "ZQIDX26APRFUT");
     assert_eq!(on_second.expiry(), Some(day(2026, 4, 28)));
-    assert!(!on_first.same_contract(&on_second), "one token, two contracts");
+    assert!(
+        !on_first.same_contract(&on_second),
+        "one token, two contracts"
+    );
 }
 
 #[test]
@@ -155,7 +176,10 @@ fn a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contra
         }
         other => panic!("a reused token between snapshots is ambiguous, got {other:?}"),
     }
-    assert_eq!(book.token_on(between, "NFO", 9_000_001).word(), "token_ambiguous");
+    assert_eq!(
+        book.token_on(between, "NFO", 9_000_001).word(),
+        "token_ambiguous"
+    );
     // A token both snapshots map to one contract is believed between them.
     let TokenOn::Resolved { snapshot, listed } = book.token_on(between, "NFO", 9_000_002) else {
         panic!("an agreeing token resolves");
@@ -181,7 +205,10 @@ fn a_date_before_the_first_snapshot_resolves_nothing() {
         }
     }
     let empty = Book::open(&scratch("no-snapshot")).expect("an empty book");
-    assert!(matches!(empty.token_on(d1, "NFO", 9_000_001), TokenOn::NoSnapshot));
+    assert!(matches!(
+        empty.token_on(d1, "NFO", 9_000_001),
+        TokenOn::NoSnapshot
+    ));
     assert_eq!(empty.newest(), None);
 }
 
@@ -221,7 +248,10 @@ fn a_snapshot_is_never_rewritten() {
     );
     // AND THE WRITER ITSELF REFUSES AN EXISTING NAME.
     let refused = write_new(&body, b"over").expect_err("O_EXCL refuses an existing file");
-    assert!(refused.contains("no existing file was touched"), "{refused}");
+    assert!(
+        refused.contains("no existing file was touched"),
+        "{refused}"
+    );
     assert_eq!(fs::read(&body).unwrap(), body_bytes);
     assert_eq!(read_body(&root, Kind::Kite, stamp(d1, 1)).unwrap(), first);
 }
@@ -241,7 +271,11 @@ fn a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used(
     let catalog = Catalog::read(&root).unwrap();
     assert!(catalog.receipted(Kind::Kite).is_empty());
     assert_eq!(catalog.incomplete().len(), 1);
-    assert!(catalog.incomplete()[0].contains("never read"), "{:?}", catalog.incomplete());
+    assert!(
+        catalog.incomplete()[0].contains("never read"),
+        "{:?}",
+        catalog.incomplete()
+    );
     assert!(matches!(
         Book::open(&root).unwrap().token_on(d1, "NFO", 9_000_021),
         TokenOn::NoSnapshot
@@ -270,7 +304,17 @@ fn diff_days(root: &Path) -> (Stamp, Stamp) {
     let first = dump(&[
         fut(9_100_001, "ZQIDX26MARFUT", "2026-03-26", 75),
         fut(9_100_002, "ZQIDX26APRFUT", "2026-04-30", 75),
-        row(9_100_003, "ZQIDX26MAR1000CE", "ZQIDX", "2026-03-26", "1000", 75, "CE", "NFO-OPT", "NFO"),
+        row(
+            9_100_003,
+            "ZQIDX26MAR1000CE",
+            "ZQIDX",
+            "2026-03-26",
+            "1000",
+            75,
+            "CE",
+            "NFO-OPT",
+            "NFO",
+        ),
         fut(9_100_005, "ZQIDX26MAYFUT", "2026-05-28", 75),
         share(9_200_001, "ZQALPHA", "ZQ ALPHA"),
         share(9_200_002, "ZQBETA", "ZQ BETA"),
@@ -282,7 +326,17 @@ fn diff_days(root: &Path) -> (Stamp, Stamp) {
         fut(9_100_001, "ZQIDX26MARFUT", "2026-03-26", 65),
         fut(9_100_002, "ZQIDX26APRFUT", "2026-04-29", 75),
         fut(9_100_006, "ZQIDX26MAYFUT", "2026-05-28", 75),
-        row(9_100_007, "ZQIDX26MAR900PE", "ZQIDX", "2026-03-26", "900.0", 75, "PE", "NFO-OPT", "NFO"),
+        row(
+            9_100_007,
+            "ZQIDX26MAR900PE",
+            "ZQIDX",
+            "2026-03-26",
+            "900.0",
+            75,
+            "PE",
+            "NFO-OPT",
+            "NFO",
+        ),
         share(9_200_001, "ZQALPHA", "ZQ ALPHA"),
         share(9_200_002, "ZQBETANEW", "ZQ BETA"),
         share(9_200_004, "ZQDELTA", "ZQ DELTA"),
@@ -319,14 +373,70 @@ fn expected_items() -> Vec<Item> {
         new: new.to_owned(),
     };
     let mut items = vec![
-        one(Change::Listing, "NFO", 9_100_007, "ZQIDX26MAR900PE", "", "ZQIDX26MAR900PE"),
-        one(Change::Delisting, "NFO", 9_100_003, "ZQIDX26MAR1000CE", "ZQIDX26MAR1000CE", ""),
-        one(Change::Symbol, "NSE", 9_200_002, "ZQBETANEW", "ZQBETA", "ZQBETANEW"),
-        one(Change::Symbol, "NSE", 9_200_004, "ZQDELTA", "ZQGAMMA", "ZQDELTA"),
-        one(Change::Isin, "NSE", 9_200_001, "ZQALPHA", "INE0ZQ000011", "INE0ZQ000012"),
-        one(Change::LotSize, "NFO", 9_100_001, "ZQIDX26MARFUT", "75", "65"),
-        one(Change::Expiry, "NFO", 9_100_002, "ZQIDX26APRFUT", "2026-04-30", "2026-04-29"),
-        one(Change::Token, "NFO", 9_100_006, "ZQIDX26MAYFUT", "9100005", "9100006"),
+        one(
+            Change::Listing,
+            "NFO",
+            9_100_007,
+            "ZQIDX26MAR900PE",
+            "",
+            "ZQIDX26MAR900PE",
+        ),
+        one(
+            Change::Delisting,
+            "NFO",
+            9_100_003,
+            "ZQIDX26MAR1000CE",
+            "ZQIDX26MAR1000CE",
+            "",
+        ),
+        one(
+            Change::Symbol,
+            "NSE",
+            9_200_002,
+            "ZQBETANEW",
+            "ZQBETA",
+            "ZQBETANEW",
+        ),
+        one(
+            Change::Symbol,
+            "NSE",
+            9_200_004,
+            "ZQDELTA",
+            "ZQGAMMA",
+            "ZQDELTA",
+        ),
+        one(
+            Change::Isin,
+            "NSE",
+            9_200_001,
+            "ZQALPHA",
+            "INE0ZQ000011",
+            "INE0ZQ000012",
+        ),
+        one(
+            Change::LotSize,
+            "NFO",
+            9_100_001,
+            "ZQIDX26MARFUT",
+            "75",
+            "65",
+        ),
+        one(
+            Change::Expiry,
+            "NFO",
+            9_100_002,
+            "ZQIDX26APRFUT",
+            "2026-04-30",
+            "2026-04-29",
+        ),
+        one(
+            Change::Token,
+            "NFO",
+            9_100_006,
+            "ZQIDX26MAYFUT",
+            "9100005",
+            "9100006",
+        ),
         one(Change::Listing, "NSE", 9_200_011, "ZQNEW", "", "ZQNEW"),
         // NAMED THE DAY EACH BECOMES UNKNOWN: KAPPA left the NSE file, NEW was
         // never in it. OMEGA is unknown on both days: counted, not named again.
@@ -341,31 +451,52 @@ fn expected_items() -> Vec<Item> {
 fn the_diff_of_two_days_lists_exactly_the_injected_changes() {
     let root = scratch("diff");
     let (a, b) = diff_days(&root);
-    let summary = diff_for(&root, b).unwrap().expect("a previous snapshot exists");
+    let summary = diff_for(&root, b)
+        .unwrap()
+        .expect("a previous snapshot exists");
     assert_eq!(summary.previous, a);
     assert_eq!(summary.current, b);
     assert_eq!(summary.counts, [2, 1, 2, 1, 1, 1, 1, 2]);
-    assert_eq!(summary.isin_unknown_total, 3, "OMEGA, KAPPA and NEW have no ISIN on day two");
+    assert_eq!(
+        summary.isin_unknown_total, 3,
+        "OMEGA, KAPPA and NEW have no ISIN on day two"
+    );
     assert_eq!(
         summary.counts_line(),
         "listing=2 delisting=1 symbol=2 isin=1 lot_size=1 expiry=1 token=1 isin_unknown=2 isin_unknown_total=3"
     );
     let expected = expected_items();
-    let named: Vec<Item> = expected.iter().filter(|one| one.change.named()).cloned().collect();
-    assert_eq!(summary.named, named, "every symbol, ISIN, lot, expiry and token change is named");
+    let named: Vec<Item> = expected
+        .iter()
+        .filter(|one| one.change.named())
+        .cloned()
+        .collect();
+    assert_eq!(
+        summary.named, named,
+        "every symbol, ISIN, lot, expiry and token change is named"
+    );
     // THE FILE HOLDS EXACTLY THE INJECTED CHANGES, in fixed records.
     let text = fs::read_to_string(root.join(diff_name(b))).unwrap();
     assert_eq!(text.len(), RECORD_LEN * (expected.len() + 1));
     assert!(text.lines().all(|line| line.len() == RECORD_LEN - 1));
     let (head, items) = parse_diff(&text).unwrap();
-    assert_eq!((head.previous.as_str(), head.current.as_str()), ("2026-03-02", "2026-03-03"));
+    assert_eq!(
+        (head.previous.as_str(), head.current.as_str()),
+        ("2026-03-02", "2026-03-03")
+    );
     assert_eq!((head.records, head.isin_unknown_total), (expected.len(), 3));
     assert_eq!(items, expected);
     // READ BACK, NOT RECOMPUTED, on the next call; and never rewritten.
-    let modified = fs::metadata(root.join(diff_name(b))).unwrap().modified().unwrap();
+    let modified = fs::metadata(root.join(diff_name(b)))
+        .unwrap()
+        .modified()
+        .unwrap();
     assert_eq!(diff_for(&root, b).unwrap().unwrap(), summary);
     assert_eq!(
-        fs::metadata(root.join(diff_name(b))).unwrap().modified().unwrap(),
+        fs::metadata(root.join(diff_name(b)))
+            .unwrap()
+            .modified()
+            .unwrap(),
         modified
     );
     // The first day has nothing to compare against.
@@ -377,10 +508,18 @@ fn an_isin_change_between_masters_is_named() {
     let root = scratch("isin");
     let (_, b) = diff_days(&root);
     let summary = diff_for(&root, b).unwrap().unwrap();
-    let isin: Vec<&Item> = summary.named.iter().filter(|one| one.change == Change::Isin).collect();
+    let isin: Vec<&Item> = summary
+        .named
+        .iter()
+        .filter(|one| one.change == Change::Isin)
+        .collect();
     assert_eq!(isin.len(), 1);
     assert_eq!(
-        (isin[0].key.as_str(), isin[0].old.as_str(), isin[0].new.as_str()),
+        (
+            isin[0].key.as_str(),
+            isin[0].old.as_str(),
+            isin[0].new.as_str()
+        ),
         ("ZQALPHA", "INE0ZQ000011", "INE0ZQ000012")
     );
 }
@@ -389,7 +528,10 @@ fn an_isin_change_between_masters_is_named() {
 fn a_day_without_its_own_nse_file_counts_every_share_isin_unknown_and_infers_nothing() {
     let (a, b) = (day(2026, 3, 9), day(2026, 3, 10));
     let root = scratch("no-nse");
-    let rows = [share(9_300_001, "ZQONE", "ZQ ONE"), share(9_300_002, "ZQTWO", "ZQ TWO")];
+    let rows = [
+        share(9_300_001, "ZQONE", "ZQ ONE"),
+        share(9_300_002, "ZQTWO", "ZQ TWO"),
+    ];
     snapshot(&root, Kind::Kite, a, URL, dump(&rows).as_bytes()).unwrap();
     // An NSE file of ANOTHER day must not be borrowed.
     snapshot(
@@ -414,16 +556,33 @@ fn the_landing_hook_snapshots_both_masters_and_reports_the_diff() {
     let root = dir.join(SNAPSHOT_DIR);
     let (a, b) = (day(2026, 4, 6), day(2026, 4, 7));
     let nse = nse_file(&[("ZQALPHA", "INE0ZQ000011")]);
-    let first = dump(&[share(9_400_001, "ZQALPHA", "ZQ ALPHA"), fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 75)]);
-    let second = dump(&[share(9_400_001, "ZQALPHA", "ZQ ALPHA"), fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 30)]);
+    let first = dump(&[
+        share(9_400_001, "ZQALPHA", "ZQ ALPHA"),
+        fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 75),
+    ]);
+    let second = dump(&[
+        share(9_400_001, "ZQALPHA", "ZQ ALPHA"),
+        fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 30),
+    ]);
 
-    let n = after_land(&dir, nse_source(), &nse, &written(), Ok(a)).expect("the NSE file is snapshotted");
+    let n = after_land(&dir, nse_source(), &nse, &written(), Ok(a))
+        .expect("the NSE file is snapshotted");
     assert_eq!(n.kind, Kind::NseTotalMarket);
     assert_eq!(n.wrote, Ok(Wrote::New(stamp(a, 1))));
     assert_eq!(n.diff, None);
-    let k1 = after_land(&dir, kite_source(), &first, &written(), Ok(a)).expect("the Kite dump is snapshotted");
-    assert_eq!(k1.diff, Some(Ok(None)), "the first Kite snapshot has nothing to compare");
-    assert!(k1.json().contains(r#""note":"the first snapshot: nothing to compare""#), "{}", k1.json());
+    let k1 = after_land(&dir, kite_source(), &first, &written(), Ok(a))
+        .expect("the Kite dump is snapshotted");
+    assert_eq!(
+        k1.diff,
+        Some(Ok(None)),
+        "the first Kite snapshot has nothing to compare"
+    );
+    assert!(
+        k1.json()
+            .contains(r#""note":"the first snapshot: nothing to compare""#),
+        "{}",
+        k1.json()
+    );
     let k2 = after_land(&dir, kite_source(), &second, &written(), Ok(b)).unwrap();
     let json = k2.json();
     assert!(json.contains(r#""wrote":"new""#), "{json}");
@@ -437,7 +596,10 @@ fn the_landing_hook_snapshots_both_masters_and_reports_the_diff() {
         .find(|source| source.vendor == Some(Vendor::Groww))
         .unwrap();
     assert_eq!(after_land(&dir, groww, "x", &written(), Ok(a)), None);
-    assert_eq!(Catalog::read(&root).unwrap().receipted(Kind::Kite), &[stamp(a, 1), stamp(b, 1)]);
+    assert_eq!(
+        Catalog::read(&root).unwrap().receipted(Kind::Kite),
+        &[stamp(a, 1), stamp(b, 1)]
+    );
 }
 
 #[test]
@@ -457,10 +619,16 @@ fn a_refused_landing_writes_no_snapshot_and_the_newest_stands() {
         Ok(day(2026, 4, 7)),
     )
     .unwrap();
-    let why = refused.wrote.clone().expect_err("no snapshot for a refused landing");
+    let why = refused
+        .wrote
+        .clone()
+        .expect_err("no snapshot for a refused landing");
     assert!(why.contains("the newest one stands"), "{why}");
     assert!(refused.json().contains(r#""wrote":"refused""#));
-    assert_eq!(Catalog::read(&root).unwrap().receipted(Kind::Kite), &[stamp(a, 1)]);
+    assert_eq!(
+        Catalog::read(&root).unwrap().receipted(Kind::Kite),
+        &[stamp(a, 1)]
+    );
     assert_eq!(newest_snapshot_day(&root), Ok(Some(a)));
 }
 
@@ -484,7 +652,10 @@ fn newest_snapshot_day_is_read_from_the_receipt_and_a_torn_one_is_refused_not_re
         other => panic!("a torn snapshot is unreadable, got {other:?}"),
     }
     // The older snapshot is still read for its own day.
-    assert!(matches!(book.token_on(d1, "NFO", 9_000_001), TokenOn::Resolved { .. }));
+    assert!(matches!(
+        book.token_on(d1, "NFO", 9_000_001),
+        TokenOn::Resolved { .. }
+    ));
 }
 
 #[test]
@@ -505,14 +676,32 @@ fn a_body_that_does_not_match_its_receipt_is_refused() {
 #[test]
 fn every_refusal_of_a_dump_is_named() {
     let s = stamp(day(2026, 5, 4), 1);
-    assert_eq!(snapshot(&scratch("empty"), Kind::Kite, s.day, URL, b"").unwrap_err(), "an empty body is not a master; no snapshot was written");
+    assert_eq!(
+        snapshot(&scratch("empty"), Kind::Kite, s.day, URL, b"").unwrap_err(),
+        "an empty body is not a master; no snapshot was written"
+    );
     let missing = Snapshot::parse(s, "instrument_token,tradingsymbol\n1,ZQ\n").unwrap_err();
     assert!(missing.contains("no column \"name\""), "{missing}");
-    let garbage = Snapshot::parse(s, &dump(&["abc,1,ZQ,\"ZQ\",0,,0,0.05,1,EQ,NSE,NSE".to_owned()])).unwrap_err();
-    assert!(garbage.contains("line 2") && garbage.contains("instrument_token"), "{garbage}");
-    let bad_expiry = Snapshot::parse(s, &dump(&[fut(9_700_001, "ZQIDX26MAYFUT", "26-05-2026", 75)])).unwrap_err();
+    let garbage = Snapshot::parse(
+        s,
+        &dump(&["abc,1,ZQ,\"ZQ\",0,,0,0.05,1,EQ,NSE,NSE".to_owned()]),
+    )
+    .unwrap_err();
+    assert!(
+        garbage.contains("line 2") && garbage.contains("instrument_token"),
+        "{garbage}"
+    );
+    let bad_expiry = Snapshot::parse(
+        s,
+        &dump(&[fut(9_700_001, "ZQIDX26MAYFUT", "26-05-2026", 75)]),
+    )
+    .unwrap_err();
     assert!(bad_expiry.contains("expiry"), "{bad_expiry}");
-    let open_quote = Snapshot::parse(s, &format!("{HEAD}\n9700002,1,ZQ,\"ZQ,0,,0,0.05,1,EQ,NSE,NSE\n")).unwrap_err();
+    let open_quote = Snapshot::parse(
+        s,
+        &format!("{HEAD}\n9700002,1,ZQ,\"ZQ,0,,0,0.05,1,EQ,NSE,NSE\n"),
+    )
+    .unwrap_err();
     assert!(open_quote.contains("not closed"), "{open_quote}");
     assert!(Snapshot::parse(s, "").unwrap_err().contains("empty"));
 }
@@ -520,20 +709,57 @@ fn every_refusal_of_a_dump_is_named() {
 #[test]
 fn one_row_a_quoted_comma_and_a_respelled_strike_all_read() {
     let s = stamp(day(2026, 5, 4), 1);
-    let one = Snapshot::parse(s, &dump(&[row(9_800_001, "ZQIDX26MAY1000CE", "ZQ, INDEX", "2026-05-26", "1000.0", 75, "CE", "NFO-OPT", "NFO")])).unwrap();
+    let one = Snapshot::parse(
+        s,
+        &dump(&[row(
+            9_800_001,
+            "ZQIDX26MAY1000CE",
+            "ZQ, INDEX",
+            "2026-05-26",
+            "1000.0",
+            75,
+            "CE",
+            "NFO-OPT",
+            "NFO",
+        )]),
+    )
+    .unwrap();
     assert_eq!(one.len(), 1);
     let Lookup::Listed(listed) = one.lookup("NFO", 9_800_001) else {
         panic!("one row is found");
     };
     assert_eq!(listed.name(), "ZQ, INDEX");
     assert_eq!(listed.strike(), "1000");
-    let other = Snapshot::parse(s, &dump(&[row(9_800_001, "ZQIDX26MAY1000CE", "ZQ, INDEX", "2026-05-26", "1000", 75, "CE", "NFO-OPT", "NFO")])).unwrap();
+    let other = Snapshot::parse(
+        s,
+        &dump(&[row(
+            9_800_001,
+            "ZQIDX26MAY1000CE",
+            "ZQ, INDEX",
+            "2026-05-26",
+            "1000",
+            75,
+            "CE",
+            "NFO-OPT",
+            "NFO",
+        )]),
+    )
+    .unwrap();
     let Lookup::Listed(again) = other.lookup("NFO", 9_800_001) else {
         panic!("found");
     };
-    assert!(listed.same_contract(&again), "1000.0 and 1000 are one strike");
-    assert!(matches!(one.lookup("", 0), Lookup::Absent), "garbage parameters find nothing");
-    assert!(matches!(one.lookup("NSE", 9_800_001), Lookup::Absent), "the exchange is part of the key");
+    assert!(
+        listed.same_contract(&again),
+        "1000.0 and 1000 are one strike"
+    );
+    assert!(
+        matches!(one.lookup("", 0), Lookup::Absent),
+        "garbage parameters find nothing"
+    );
+    assert!(
+        matches!(one.lookup("NSE", 9_800_001), Lookup::Absent),
+        "the exchange is part of the key"
+    );
 }
 
 #[test]
@@ -546,9 +772,18 @@ fn a_token_twice_in_one_snapshot_is_believed_for_neither_row() {
     ]);
     snapshot(&root, Kind::Kite, d1, URL, body.as_bytes()).unwrap();
     let book = Book::open(&root).unwrap();
-    assert!(matches!(book.token_on(d1, "NFO", 9_900_001), TokenOn::Duplicated { .. }));
-    assert_eq!(book.token_on(d1, "NFO", 9_900_001).word(), "token_duplicated");
-    assert!(matches!(book.token_on(d1, "NFO", 1), TokenOn::NotListed { .. }));
+    assert!(matches!(
+        book.token_on(d1, "NFO", 9_900_001),
+        TokenOn::Duplicated { .. }
+    ));
+    assert_eq!(
+        book.token_on(d1, "NFO", 9_900_001).word(),
+        "token_duplicated"
+    );
+    assert!(matches!(
+        book.token_on(d1, "NFO", 1),
+        TokenOn::NotListed { .. }
+    ));
 }
 
 #[test]
@@ -566,13 +801,19 @@ fn the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day() {
         other => panic!("resolves, got {other:?}"),
     };
     assert_eq!(symbol(end), ("ZQIDX25DECFUT".to_owned(), stamp(end, 1)));
-    assert_eq!(symbol(start), ("ZQIDX26JANFUTB".to_owned(), stamp(start, 2)), "the day's newest ordinal");
+    assert_eq!(
+        symbol(start),
+        ("ZQIDX26JANFUTB".to_owned(), stamp(start, 2)),
+        "the day's newest ordinal"
+    );
     assert_eq!(symbol(day(2026, 3, 1)).1, stamp(start, 2));
-    assert!(Book::of(vec![
-        Snapshot::parse(stamp(end, 1), &body("A")).unwrap(),
-        Snapshot::parse(stamp(end, 1), &body("B")).unwrap(),
-    ])
-    .is_err());
+    assert!(
+        Book::of(vec![
+            Snapshot::parse(stamp(end, 1), &body("A")).unwrap(),
+            Snapshot::parse(stamp(end, 1), &body("B")).unwrap(),
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -586,9 +827,24 @@ fn concurrent_refreshes_of_one_day_write_one_snapshot_or_one_each() {
             std::thread::spawn(move || snapshot(&root, Kind::Kite, d1, URL, same.as_bytes()))
         })
         .collect();
-    let outcomes: Vec<Wrote> = handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
-    assert_eq!(outcomes.iter().filter(|w| matches!(w, Wrote::New(_))).count(), 1);
-    assert_eq!(outcomes.iter().filter(|w| matches!(w, Wrote::AlreadyHeld(_))).count(), 3);
+    let outcomes: Vec<Wrote> = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|w| matches!(w, Wrote::New(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|w| matches!(w, Wrote::AlreadyHeld(_)))
+            .count(),
+        3
+    );
     let d2 = day(2026, 6, 2);
     let handles: Vec<_> = (0..4_u32)
         .map(|n| {
@@ -611,10 +867,23 @@ fn concurrent_refreshes_of_one_day_write_one_snapshot_or_one_each() {
 fn a_day_past_its_last_ordinal_is_refused_by_name() {
     let root = scratch("max-ordinal");
     let d1 = day(2026, 6, 3);
-    fs::write(root.join(file_name(Kind::Kite, stamp(d1, MAX_ORDINAL))), b"cut").unwrap();
-    let why = snapshot(&root, Kind::Kite, d1, URL, dump(&[fut(9_930_001, "ZQIDX26JUNFUT", "2026-06-30", 75)]).as_bytes())
-        .unwrap_err();
-    assert!(why.contains("refused rather than numbered without end"), "{why}");
+    fs::write(
+        root.join(file_name(Kind::Kite, stamp(d1, MAX_ORDINAL))),
+        b"cut",
+    )
+    .unwrap();
+    let why = snapshot(
+        &root,
+        Kind::Kite,
+        d1,
+        URL,
+        dump(&[fut(9_930_001, "ZQIDX26JUNFUT", "2026-06-30", 75)]).as_bytes(),
+    )
+    .unwrap_err();
+    assert!(
+        why.contains("refused rather than numbered without end"),
+        "{why}"
+    );
 }
 
 #[test]
@@ -655,7 +924,10 @@ fn file_names_round_trip_and_strangers_are_ignored() {
         assert_eq!(parse_name(&receipt_name(kind, s)), Some((kind, s, true)));
     }
     assert_eq!(diff_name(s), "20261022_2.diff");
-    assert_eq!(file_name(Kind::Kite, stamp(s.day, 1)), "instruments_20261022.csv.gz");
+    assert_eq!(
+        file_name(Kind::Kite, stamp(s.day, 1)),
+        "instruments_20261022.csv.gz"
+    );
     for stranger in [
         "instruments_20261022_1.csv.gz",
         "instruments_20261022_02.csv.gz",
@@ -683,9 +955,21 @@ fn a_clock_that_names_no_day_writes_no_snapshot_and_says_so() {
     .unwrap();
     assert_eq!(outcome.day, None);
     let why = outcome.wrote.clone().unwrap_err();
-    assert!(why.contains("no snapshot was written") && why.contains("1970"), "{why}");
-    assert!(outcome.json().contains(r#""day":null"#), "{}", outcome.json());
-    assert!(Catalog::read(&dir.join(SNAPSHOT_DIR)).unwrap().receipted(Kind::Kite).is_empty());
+    assert!(
+        why.contains("no snapshot was written") && why.contains("1970"),
+        "{why}"
+    );
+    assert!(
+        outcome.json().contains(r#""day":null"#),
+        "{}",
+        outcome.json()
+    );
+    assert!(
+        Catalog::read(&dir.join(SNAPSHOT_DIR))
+            .unwrap()
+            .receipted(Kind::Kite)
+            .is_empty()
+    );
 }
 
 /// The measured cost of a real-size dump (docs/06-limits.md L-R428-01..03):
@@ -735,7 +1019,9 @@ fn a_real_size_dump_is_measured() {
         .collect();
     ns.sort_unstable();
     let n = ns.len();
-    let compressed = fs::metadata(root.join(file_name(Kind::Kite, stamp(d1, 1)))).unwrap().len();
+    let compressed = fs::metadata(root.join(file_name(Kind::Kite, stamp(d1, 1))))
+        .unwrap()
+        .len();
     println!(
         "real-size dump: rows={} body_bytes={} compressed_bytes={compressed} write_ms={write_ms} \
          parse_ms={parse_ms} diff_ms={diff_ms} diff={} first_token_on={first} cold_ms={cold_ms} \

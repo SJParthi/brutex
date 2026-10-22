@@ -20543,3 +20543,44 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
 | L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
 | L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |
+
+## Dated Kite masters and futures day candles (R4-28; D-6892, D-6893)
+
+Measured on 22 Oct 2026 on this machine (M4 Pro, dev profile, opt-level 3)
+over a COPY of the Kite dump the operator's app landed on 6 Oct 2026
+(108,915 rows, 8,854,256 bytes; nothing of it is in the repository), through
+the ignored test
+`pull::master_snapshots::tests::a_real_size_dump_is_measured`. A second agent
+repeats it with `BRUTEX_KITE_DUMP=<a copy of a landed dump>` and
+`cargo test -p pull --lib -- --ignored --exact --nocapture master_snapshots::tests::a_real_size_dump_is_measured`.
+
+- One snapshot write (gzip, listing, receipt, three syncs): 223 ms; the
+  snapshot is 1,446,540 bytes.
+- One parse and index of the dump: 115 ms.
+- One diff of two such snapshots (two reads, two parses, the comparison and
+  the `.diff` write): 419 ms.
+- `token_on` the first time a book needs two snapshots (both read, checked
+  and indexed): 331 ms. After that, n=200 tokens spread over the dump, one
+  call each, sequential: p50 1.25 µs, p99 5.3 µs, max 230 µs (one outlier).
+- C-MS-01 (`crates/pull/benches/ratio/master_snapshots.rs`, gate 8): one
+  `token_on` between two snapshots at 1, 10 and 100 snapshots of 2,000
+  invented rows each, held to the 3.0x ceiling; the harness prints p50, p99
+  and max of single calls beside each ratio.
+
+**Disk, projected from the measured snapshot (an extrapolation):** one
+attended refresh writes the Kite snapshot (about 1.45 MB), the NSE Total
+Market snapshot (about 50 KB before compression) and one `.diff` of
+`(records + 1) x 192` bytes, five files with the receipts. At one refresh a
+trading day, about 250 refreshes a year: about 0.4 GB and 1,250 files a year,
+plus the diffs, whose daily size is not measured (each records one line per
+listing, delisting and change). A same-day refresh with the same bytes writes
+nothing.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R428-01 | The first `token_on` into a snapshot not yet loaded reads, checks and parses it | a snapshot is held only after its first use; the day table finds it in one index | O(rows of that snapshot) once per book (331 ms for two real-size snapshots); then one index and at most two probes (p99 5.3 µs) | R4-28 |
+| L-R428-02 | Memory of a book grows with the snapshots it has loaded | each loaded snapshot keeps its rows and index; a walk that must not keep them uses `Book::with_snapshot`, which reads one at a time | about one parsed dump per loaded snapshot; the day table is one `u32` per calendar day spanned, at most 40 years | R4-28 |
+| L-R428-03 | The diff is O(rows of both snapshots) | it compares two whole dumps, once per refresh that lands a new Kite snapshot, at operator time | 419 ms at 108,915 rows | R4-28 |
+| L-R428-04 | `fnowork::futures_plan` reads every receipted snapshot on or before the window's end, one at a time | the first snapshot that lists each future is the start of the days its token is believed to name it | O(snapshots x rows) once per `/pull/fno` futures run, 115 ms a snapshot; one hash probe per contract against the newest | R4-28 |
+| L-R428-05 | Which contract a continuous candle came from is UNVERIFIED | the vendor states no roll day | the continuous series is filed as answered under `<UNDERLYING>-FUT-C1` and never split into contracts | R4-28 |
+| L-R428-06 | Contracts that expired before the first snapshot have no per-contract series | no token of theirs was ever cached; the vendor reaches them only through `continuous=1` | their days are in `<UNDERLYING>-FUT-C1` only, labelled | R4-28 |

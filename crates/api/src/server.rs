@@ -13966,6 +13966,14 @@ async fn fno_futures(
         plan.asks.retain(|ask| {
             matches!(ask.series, pull::fnowork::FuturesSeries::Contract { expiry: held, .. } if held == expiry)
         });
+        if plan.asks.is_empty() && plan.refused.is_empty() {
+            let why = format!(
+                "no dated master snapshot lists a future of {} expiring on {expiry} inside \
+                 the window, so nothing was sent",
+                asked.underlying.as_str()
+            );
+            return page.say(facts, unavailable, audit::Outcome::NotStarted, &why);
+        }
     }
     facts.push(("Dated master snapshot", plan.newest.to_string()));
     facts.push(("Series asked", plan.asks.len().to_string()));
@@ -30192,6 +30200,51 @@ mod tests {
     /// contract fetched and filed"*, because every contract that WAS discovered
     /// was.
     ///
+    /// R4-28 (CON-12; D-6893): the futures route asks for FUTURES at the DAY
+    /// rung and nothing else. Zerodha's descriptor carries the token route, an
+    /// options request and a minute request are refused before any credential
+    /// or snapshot is read, and a futures day request is not refused here.
+    #[test]
+    fn the_futures_route_refuses_options_and_minutes_by_name() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        let route = spec.fno.by_token().expect("Zerodha serves futures through a token");
+        assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
+        let asked = |series, granularity| ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series,
+            expiry: None,
+            window: pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31))
+                .expect("a window"),
+            feed: pull::vendor::Feed::Zerodha,
+            granularity,
+            rate: None,
+            clamped_from: None,
+        };
+        let options = futures_refusal(
+            &asked(ingest::Series::Options, pull::vendor::Granularity::Day1),
+            route,
+        )
+        .expect("options are refused");
+        assert!(options.contains("FUTURES day candles only"), "{options}");
+        let minutes = futures_refusal(
+            &asked(ingest::Series::Futures, pull::vendor::Granularity::Minute1),
+            route,
+        )
+        .expect("minutes are refused");
+        assert!(minutes.contains("UNVERIFIED"), "{minutes}");
+        assert_eq!(
+            futures_refusal(
+                &asked(ingest::Series::Futures, pull::vendor::Granularity::Day1),
+                route
+            ),
+            None
+        );
+    }
+
     /// This is the operator's requirement stated plainly — *press Pull and the
     /// entire window is pulled* — and the shape that broke it is the hardest
     /// kind to see: not an error, a smaller question answered perfectly.

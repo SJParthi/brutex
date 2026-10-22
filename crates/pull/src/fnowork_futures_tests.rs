@@ -136,7 +136,12 @@ fn january_reply(url: &str) -> Result<String, Refusal> {
         (8_000_001, false) => (100, 1_000),
         (8_000_002, false) => (110, 2_000),
         (8_000_001, true) => (120, 3_000),
-        _ => return Err(Refusal::answered(400, "InputException: unknown token".to_owned())),
+        _ => {
+            return Err(Refusal::answered(
+                400,
+                "InputException: unknown token".to_owned(),
+            ));
+        }
     };
     let candles: Vec<String> = january()
         .into_iter()
@@ -173,12 +178,23 @@ fn rolling_reply(url: &str) -> Result<String, Refusal> {
     let days = [21, 22, 23, 27, 28, 29, 30];
     let candles: Vec<String> = days
         .iter()
-        .map(|d| candle(day(2026, 1, *d), if *d < 27 { 100 } else { 140 }, 7_000 + u64::from(*d)))
+        .map(|d| {
+            candle(
+                day(2026, 1, *d),
+                if *d < 27 { 100 } else { 140 },
+                7_000 + u64::from(*d),
+            )
+        })
         .collect();
     Ok(answer(&candles))
 }
 
-fn bars_of(root: &Path, symbol: &str, contract: Option<Contract>, month: YearMonth) -> Vec<store::format::Bar> {
+fn bars_of(
+    root: &Path,
+    symbol: &str,
+    contract: Option<Contract>,
+    month: YearMonth,
+) -> Vec<store::format::Bar> {
     let path = StorePath::new(PathParts {
         vendor: Vendor::Zerodha,
         exchange: "NSE",
@@ -192,7 +208,8 @@ fn bars_of(root: &Path, symbol: &str, contract: Option<Contract>, month: YearMon
     .expect("a store path");
     #[expect(clippy::cast_possible_truncation, reason = "the store's own fold")]
     let symbol_id = brutex_core::universe::fnv1a(symbol) as u32;
-    let file = store::file::BarFile::open_existing(root, path, symbol_id).expect("the month is held");
+    let file =
+        store::file::BarFile::open_existing(root, path, symbol_id).expect("the month is held");
     file.read_range(0, file.records()).expect("every bar")
 }
 
@@ -219,7 +236,11 @@ fn the_futures_url_spells_the_vendors_own_words() {
     else {
         panic!("Groww is an HTTP feed");
     };
-    assert!(crate::fno::day_candles_url(&groww, 1, jan, false).unwrap_err().contains("no futures token route"));
+    assert!(
+        crate::fno::day_candles_url(&groww, 1, jan, false)
+            .unwrap_err()
+            .contains("no futures token route")
+    );
 }
 
 #[test]
@@ -232,7 +253,8 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
             fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27"),
             fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24"),
             // AN OPTION AND A SHARE: never futures, never planned.
-            "8000003,31250,ZQIDX26JAN100CE,\"ZQIDX\",0,2026-01-27,100,0.05,75,CE,NFO-OPT,NFO".to_owned(),
+            "8000003,31250,ZQIDX26JAN100CE,\"ZQIDX\",0,2026-01-27,100,0.05,75,CE,NFO-OPT,NFO"
+                .to_owned(),
             "8000004,31250,ZQIDX,\"ZQIDX\",0,,0,0.05,1,EQ,NSE,NSE".to_owned(),
         ],
     );
@@ -286,26 +308,47 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
         "test://futures",
     ));
     assert!(landed.failed.is_empty(), "{:?}", landed.failed);
-    assert_eq!((landed.requests, landed.rows_read, landed.bars_stored), (3, 15, 15));
+    assert_eq!(
+        (landed.requests, landed.rows_read, landed.bars_stored),
+        (3, 15, 15)
+    );
     let month = YearMonth::new(2026, 1).unwrap();
     // EACH CONTRACT UNDER ITS OWN EXPIRY, WITH ITS OWN OPEN INTEREST.
     let jan = bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month);
     let feb = bars_of(&store_root, "ZQIDX", Some(contract(2026, 2, 24)), month);
     let c1 = bars_of(&store_root, "ZQIDX-FUT-C1", None, month);
-    assert_eq!(jan.iter().map(|b| b.open_interest).collect::<Vec<_>>(), [1_005, 1_006, 1_007, 1_008, 1_009]);
-    assert_eq!(feb.iter().map(|b| b.open_interest).collect::<Vec<_>>(), [2_005, 2_006, 2_007, 2_008, 2_009]);
-    assert_eq!(c1.iter().map(|b| b.open_interest).collect::<Vec<_>>(), [3_005, 3_006, 3_007, 3_008, 3_009]);
+    assert_eq!(
+        jan.iter().map(|b| b.open_interest).collect::<Vec<_>>(),
+        [1_005, 1_006, 1_007, 1_008, 1_009]
+    );
+    assert_eq!(
+        feb.iter().map(|b| b.open_interest).collect::<Vec<_>>(),
+        [2_005, 2_006, 2_007, 2_008, 2_009]
+    );
+    assert_eq!(
+        c1.iter().map(|b| b.open_interest).collect::<Vec<_>>(),
+        [3_005, 3_006, 3_007, 3_008, 3_009]
+    );
     assert_eq!(jan[0].open, 10_050, "₹100.50 in paisa");
     assert_eq!(c1[0].close, 12_075);
     let seen = vendor.seen.borrow();
-    assert_eq!(seen.iter().filter(|url| url.contains("continuous=1")).count(), 1);
+    assert_eq!(
+        seen.iter()
+            .filter(|url| url.contains("continuous=1"))
+            .count(),
+        1
+    );
     assert!(seen.iter().all(|url| url.contains("&oi=1")), "{seen:?}");
 }
 
 #[test]
 fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
     let (masters, store_root) = (scratch("reuse-masters"), scratch("reuse-store"));
-    snapshot_on(&masters, day(2026, 1, 2), &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")]);
+    snapshot_on(
+        &masters,
+        day(2026, 1, 2),
+        &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")],
+    );
     // PULL 1, while the token names JANUARY.
     let first = futures_plan(
         &Book::open(&masters).unwrap(),
@@ -320,7 +363,14 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
         seen: RefCell::new(Vec::new()),
         reply: january_reply,
     };
-    block_on(pull_futures_day(&vendor, &spec(), &first, &store_root, Vendor::Zerodha, "test://futures"));
+    block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &first,
+        &store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ));
     let month = YearMonth::new(2026, 1).unwrap();
     let january_bars = bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month);
     assert_eq!(january_bars.len(), 5);
@@ -350,8 +400,16 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
     .unwrap();
     // JANUARY IS NOT ASKED THROUGH A TOKEN THAT NOW NAMES APRIL.
     assert_eq!(second.refused.len(), 1, "{:?}", second.refused);
-    assert!(second.refused[0].starts_with("token_reused:"), "{:?}", second.refused);
-    assert!(second.refused[0].contains("ZQIDX26APRFUT"), "{:?}", second.refused);
+    assert!(
+        second.refused[0].starts_with("token_reused:"),
+        "{:?}",
+        second.refused
+    );
+    assert!(
+        second.refused[0].contains("ZQIDX26APRFUT"),
+        "{:?}",
+        second.refused
+    );
     let series: Vec<FuturesSeries> = second.asks.iter().map(|ask| ask.series).collect();
     assert_eq!(
         series,
@@ -368,18 +426,42 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
         ]
     );
     assert_eq!(second.asks[1].token, 8_000_001);
-    assert_eq!(second.asks[1].window, window(day(2026, 2, 2), day(2026, 2, 6)));
-    assert_eq!(second.asks[2].token, 8_000_002, "the near month on the day asked");
+    assert_eq!(
+        second.asks[1].window,
+        window(day(2026, 2, 2), day(2026, 2, 6))
+    );
+    assert_eq!(
+        second.asks[2].token, 8_000_002,
+        "the near month on the day asked"
+    );
     let vendor = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: february_reply,
     };
-    let landed = block_on(pull_futures_day(&vendor, &spec(), &second, &store_root, Vendor::Zerodha, "test://futures"));
+    let landed = block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &second,
+        &store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ));
     assert!(landed.failed.is_empty(), "{:?}", landed.failed);
     // JANUARY IS EXACTLY WHAT PULL 1 FILED; APRIL HOLDS ONLY ITS OWN DAYS.
-    assert_eq!(bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month), january_bars);
-    let april = bars_of(&store_root, "ZQIDX", Some(contract(2026, 4, 28)), YearMonth::new(2026, 2).unwrap());
-    assert_eq!(april.iter().map(|b| b.open_interest).collect::<Vec<_>>(), [4_002, 4_003, 4_004, 4_005, 4_006]);
+    assert_eq!(
+        bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month),
+        january_bars
+    );
+    let april = bars_of(
+        &store_root,
+        "ZQIDX",
+        Some(contract(2026, 4, 28)),
+        YearMonth::new(2026, 2).unwrap(),
+    );
+    assert_eq!(
+        april.iter().map(|b| b.open_interest).collect::<Vec<_>>(),
+        [4_002, 4_003, 4_004, 4_005, 4_006]
+    );
 }
 
 #[test]
@@ -401,7 +483,10 @@ fn a_future_is_never_sweepable() {
             underlying: continuous_symbol(underlying).unwrap(),
             kind: Kind::Index,
         };
-        assert!(!continuous.is_sweepable(), "{underlying}{CONTINUOUS_SUFFIX}");
+        assert!(
+            !continuous.is_sweepable(),
+            "{underlying}{CONTINUOUS_SUFFIX}"
+        );
         assert!(!brutex_core::universe::FNO_INDEX.contains(continuous.underlying.as_str()));
     }
     // NOT VACUOUS: the spot index the futures are written on is swept.
@@ -432,7 +517,11 @@ fn a_futures_plan_before_any_snapshot_is_refused_by_name() {
 #[test]
 fn an_underlying_with_no_live_future_names_the_continuous_series_it_cannot_ask() {
     let masters = scratch("no-live");
-    snapshot_on(&masters, day(2026, 1, 2), &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")]);
+    snapshot_on(
+        &masters,
+        day(2026, 1, 2),
+        &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")],
+    );
     let book = Book::open(&masters).unwrap();
     // An underlying the snapshot does not list, and garbage words.
     for underlying in ["ZQNONE", "", "zqidx"] {
@@ -446,7 +535,12 @@ fn an_underlying_with_no_live_future_names_the_continuous_series_it_cannot_ask()
         )
         .unwrap();
         assert!(plan.asks.is_empty(), "{underlying}: {:?}", plan.asks);
-        assert!(plan.refused.iter().any(|why| why.starts_with("no_live_future:")), "{underlying}");
+        assert!(
+            plan.refused
+                .iter()
+                .any(|why| why.starts_with("no_live_future:")),
+            "{underlying}"
+        );
     }
     // AFTER THE ONLY FUTURE EXPIRED: its own days are still owed, the
     // continuous series has no live token.
@@ -460,8 +554,16 @@ fn an_underlying_with_no_live_future_names_the_continuous_series_it_cannot_ask()
     )
     .unwrap();
     assert_eq!(late.asks.len(), 1);
-    assert_eq!(late.asks[0].window, window(day(2026, 1, 20), day(2026, 1, 27)), "never past its expiry");
-    assert!(late.refused.iter().any(|why| why.starts_with("no_live_future:")));
+    assert_eq!(
+        late.asks[0].window,
+        window(day(2026, 1, 20), day(2026, 1, 27)),
+        "never past its expiry"
+    );
+    assert!(
+        late.refused
+            .iter()
+            .any(|why| why.starts_with("no_live_future:"))
+    );
 }
 
 #[test]
@@ -488,27 +590,59 @@ fn an_expired_token_the_vendor_no_longer_serves_ends_its_history_by_name() {
         seen: RefCell::new(Vec::new()),
         reply: january_reply,
     };
-    let landed = block_on(pull_futures_day(&vendor, &spec(), &plan, &store_root, Vendor::Zerodha, "test://futures"));
+    let landed = block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &plan,
+        &store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ));
     // THE MARCH TOKEN IS REFUSED BY THE VENDOR; THE OTHER TWO SERIES LAND.
     assert_eq!(landed.failed.len(), 1, "{:?}", landed.failed);
-    assert!(landed.failed[0].contains("history_ends"), "{:?}", landed.failed);
-    assert!(landed.failed[0].contains("2026-03-31-FUT"), "{:?}", landed.failed);
+    assert!(
+        landed.failed[0].contains("history_ends"),
+        "{:?}",
+        landed.failed
+    );
+    assert!(
+        landed.failed[0].contains("2026-03-31-FUT"),
+        "{:?}",
+        landed.failed
+    );
     assert_eq!(landed.bars_stored, 10);
     let quiet = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: empty_reply,
     };
-    let none = block_on(pull_futures_day(&quiet, &spec(), &plan, &scratch("ends-empty"), Vendor::Zerodha, "test://futures"));
+    let none = block_on(pull_futures_day(
+        &quiet,
+        &spec(),
+        &plan,
+        &scratch("ends-empty"),
+        Vendor::Zerodha,
+        "test://futures",
+    ));
     // AN EMPTY ANSWER ENDS A CONTRACT'S HISTORY BY NAME; THE CONTINUOUS
     // SERIES SIMPLY HOLDS NOTHING FOR THOSE DAYS.
-    assert_eq!(none.failed.iter().filter(|why| why.contains("answered no candle")).count(), 2);
+    assert_eq!(
+        none.failed
+            .iter()
+            .filter(|why| why.contains("answered no candle"))
+            .count(),
+        2
+    );
     assert_eq!(none.bars_stored, 0);
 }
 
 #[test]
 fn a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_split() {
     let (masters, store_root) = (scratch("roll-masters"), scratch("roll-store"));
-    snapshot_on(&masters, day(2026, 1, 2), &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")]);
+    snapshot_on(
+        &masters,
+        day(2026, 1, 2),
+        &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")],
+    );
     let book = Book::open(&masters).unwrap();
     let mut plan = futures_plan(
         &book,
@@ -519,14 +653,27 @@ fn a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_spli
         day(2026, 1, 30),
     )
     .unwrap();
-    plan.asks.retain(|ask| ask.series == FuturesSeries::Continuous);
+    plan.asks
+        .retain(|ask| ask.series == FuturesSeries::Continuous);
     let vendor = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: rolling_reply,
     };
-    let landed = block_on(pull_futures_day(&vendor, &spec(), &plan, &store_root, Vendor::Zerodha, "test://futures"));
+    let landed = block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &plan,
+        &store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ));
     assert!(landed.failed.is_empty(), "{:?}", landed.failed);
-    let c1 = bars_of(&store_root, "ZQIDX-FUT-C1", None, YearMonth::new(2026, 1).unwrap());
+    let c1 = bars_of(
+        &store_root,
+        "ZQIDX-FUT-C1",
+        None,
+        YearMonth::new(2026, 1).unwrap(),
+    );
     assert_eq!(
         c1.iter().map(|b| b.open_interest).collect::<Vec<_>>(),
         [7_021, 7_022, 7_023, 7_027, 7_028, 7_029, 7_030]

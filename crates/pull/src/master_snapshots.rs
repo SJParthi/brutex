@@ -64,7 +64,7 @@
 //! The day table makes the snapshot lookup an index rather than a search: it
 //! holds one entry per calendar day the snapshots span. Measured by
 //! `crates/pull/benches/ratio/master_snapshots.rs` (C-MS-01) at 1, 10 and 100
-//! snapshots; `docs/06-limits.md` L-R428-01..03 record the bounds.
+//! snapshots; `docs/06-limits.md` L-R428-01..06 record the bounds.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -424,7 +424,8 @@ fn parse_receipt(text: &str) -> Option<Receipt> {
 
 /// Reads at most `limit` bytes of a regular file.
 fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+    let file =
+        File::open(path).map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
     let metadata = file
         .metadata()
         .map_err(|why| format!("{} could not be inspected: {why}", path.display()))?;
@@ -447,8 +448,12 @@ fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
 fn read_checked(root: &Path, kind: Kind, stamp: Stamp) -> Result<(Receipt, Vec<u8>), String> {
     let receipt_path = root.join(receipt_name(kind, stamp));
     let text = read_limited(&receipt_path, MAX_RECEIPT)?;
-    let text = String::from_utf8(text)
-        .map_err(|_| format!("{} is not UTF-8; refused, never read", receipt_path.display()))?;
+    let text = String::from_utf8(text).map_err(|_| {
+        format!(
+            "{} is not UTF-8; refused, never read",
+            receipt_path.display()
+        )
+    })?;
     let receipt = parse_receipt(&text)
         .filter(|receipt| render_receipt(kind, stamp, receipt) == text)
         .ok_or_else(|| {
@@ -460,7 +465,8 @@ fn read_checked(root: &Path, kind: Kind, stamp: Stamp) -> Result<(Receipt, Vec<u
         })?;
     let body_path = root.join(file_name(kind, stamp));
     let bytes = read_limited(&body_path, MAX_COMPRESSED)?;
-    if bytes.len() as u64 != receipt.compressed_bytes || hex(&Sha256::digest(&bytes)) != receipt.sha256
+    if bytes.len() as u64 != receipt.compressed_bytes
+        || hex(&Sha256::digest(&bytes)) != receipt.sha256
     {
         return Err(format!(
             "{} does not match its receipt (length or SHA-256); refused, never read",
@@ -497,7 +503,8 @@ fn expand(compressed: &[u8], receipt: &Receipt) -> Result<String, String> {
     if !decoder.into_inner().is_empty() {
         return Err("the snapshot carries bytes after its gzip member; refused".to_owned());
     }
-    if body.len() as u64 != receipt.body_bytes || hex(&Sha256::digest(&body)) != receipt.body_sha256 {
+    if body.len() as u64 != receipt.body_bytes || hex(&Sha256::digest(&body)) != receipt.body_sha256
+    {
         return Err("the snapshot's body does not match its receipt; refused".to_owned());
     }
     String::from_utf8(body).map_err(|_| "the snapshot's body is not UTF-8; refused".to_owned())
@@ -591,7 +598,13 @@ impl Wrote {
 ///
 /// An empty or oversized body, a day past [`MAX_ORDINAL`] snapshots, and every
 /// filesystem refusal, each named. Nothing is overwritten on any path.
-pub fn snapshot(root: &Path, kind: Kind, day: Day, url: &str, body: &[u8]) -> Result<Wrote, String> {
+pub fn snapshot(
+    root: &Path,
+    kind: Kind,
+    day: Day,
+    url: &str,
+    body: &[u8],
+) -> Result<Wrote, String> {
     if body.is_empty() {
         return Err("an empty body is not a master; no snapshot was written".to_owned());
     }
@@ -791,9 +804,7 @@ impl Snapshot {
     /// skipped.
     pub fn parse(stamp: Stamp, csv: &str) -> Result<Self, String> {
         let mut lines = csv.lines();
-        let header = lines
-            .next()
-            .ok_or_else(|| "the dump is empty".to_owned())?;
+        let header = lines.next().ok_or_else(|| "the dump is empty".to_owned())?;
         let header = split_line(header.trim_start_matches('\u{feff}'))?;
         let mut at = [0_usize; KITE_COLUMNS.len()];
         for (slot, column) in at.iter_mut().zip(KITE_COLUMNS) {
@@ -802,8 +813,18 @@ impl Snapshot {
                 .position(|name| name.trim() == column)
                 .ok_or_else(|| format!("the dump has no column {column:?}"))?;
         }
-        let [token_at, symbol_at, name_at, expiry_at, strike_at, tick_at, lot_at, kind_at, segment_at, exchange_at] =
-            at;
+        let [
+            token_at,
+            symbol_at,
+            name_at,
+            expiry_at,
+            strike_at,
+            tick_at,
+            lot_at,
+            kind_at,
+            segment_at,
+            exchange_at,
+        ] = at;
         let mut snapshot = Self {
             stamp,
             words: Vec::new(),
@@ -819,7 +840,8 @@ impl Snapshot {
             }
             let fields = split_line(line).map_err(|why| format!("line {}: {why}", number + 2))?;
             let cell = |at: usize| fields.get(at).map_or("", String::as_str);
-            let refuse = |what: &str| format!("line {}: {what} {:?} does not read", number + 2, line);
+            let refuse =
+                |what: &str| format!("line {}: {what} {:?} does not read", number + 2, line);
             let token: u64 = cell(token_at)
                 .trim()
                 .parse()
@@ -830,7 +852,10 @@ impl Snapshot {
             };
             let strike = decimal(cell(strike_at)).ok_or_else(|| refuse("strike"))?;
             let tick = decimal(cell(tick_at)).ok_or_else(|| refuse("tick_size"))?;
-            let lot: u32 = cell(lot_at).trim().parse().map_err(|_| refuse("lot_size"))?;
+            let lot: u32 = cell(lot_at)
+                .trim()
+                .parse()
+                .map_err(|_| refuse("lot_size"))?;
             let exchange = snapshot.intern(cell(exchange_at).trim())?;
             let segment = snapshot.intern(cell(segment_at).trim())?;
             let kind = snapshot.intern(cell(kind_at).trim())?;
@@ -1164,7 +1189,9 @@ impl Book {
             {
                 at += 1;
             }
-            table.push(u32::try_from(at).map_err(|_| "more snapshots than a u32 counts".to_owned())?);
+            table.push(
+                u32::try_from(at).map_err(|_| "more snapshots than a u32 counts".to_owned())?,
+            );
         }
         Ok(Self {
             root,
@@ -1261,7 +1288,12 @@ impl Book {
         };
         let governing = match self.snapshot(at) {
             Ok(snapshot) => snapshot,
-            Err(why) => return TokenOn::Unreadable { snapshot: stamp, why },
+            Err(why) => {
+                return TokenOn::Unreadable {
+                    snapshot: stamp,
+                    why,
+                };
+            }
         };
         let listed = match governing.lookup(exchange, token) {
             Lookup::Listed(listed) => listed,
@@ -1282,7 +1314,12 @@ impl Book {
         };
         let later = match self.snapshot(at + 1) {
             Ok(snapshot) => snapshot,
-            Err(why) => return TokenOn::Unreadable { snapshot: newer, why },
+            Err(why) => {
+                return TokenOn::Unreadable {
+                    snapshot: newer,
+                    why,
+                };
+            }
         };
         match later.lookup(exchange, token) {
             Lookup::Listed(again) if again.same_contract(&listed) => TokenOn::Resolved {
@@ -1464,7 +1501,12 @@ fn item(change: Change, listed: &Listed<'_>, old: String, new: String) -> Item {
               order they are tried; split apart, each arm would sit away from the reason it \
               comes before the next"
 )]
-pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins: Option<&Isins>) -> Vec<Item> {
+pub fn diff(
+    old: &Snapshot,
+    new: &Snapshot,
+    old_isins: Option<&Isins>,
+    new_isins: Option<&Isins>,
+) -> Vec<Item> {
     let old_rows: Vec<Listed<'_>> = old.rows().collect();
     let new_rows: Vec<Listed<'_>> = new.rows().collect();
     let old_keys: HashMap<Key<'_>, usize> = old_rows
@@ -1475,10 +1517,14 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
     let new_keys: HashSet<Key<'_>> = new_rows.iter().map(key).collect();
     let mut old_tokens: HashMap<(&str, u64), usize> = HashMap::new();
     for (at, listed) in old_rows.iter().enumerate() {
-        old_tokens.entry((listed.exchange(), listed.token())).or_insert(at);
+        old_tokens
+            .entry((listed.exchange(), listed.token()))
+            .or_insert(at);
     }
     let isin_of = |isins: Option<&Isins>, listed: &Listed<'_>| {
-        isins.and_then(|isins| isins.of(listed.tradingsymbol())).map(str::to_owned)
+        isins
+            .and_then(|isins| isins.of(listed.tradingsymbol()))
+            .map(str::to_owned)
     };
     // OLD SHARES THAT ARE GONE, BY THEIR OWN DATE'S ISIN: the other half of a
     // rename that kept the ISIN and changed the token.
@@ -1495,7 +1541,9 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
     let mut out = Vec::new();
     for listed in &new_rows {
         if let Some(&at) = old_keys.get(&key(listed)) {
-            let Some(before) = old_rows.get(at) else { continue };
+            let Some(before) = old_rows.get(at) else {
+                continue;
+            };
             if let Some(slot) = matched.get_mut(at) {
                 *slot = true;
             }
@@ -1523,7 +1571,12 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
                     // KNOWN ON THE OLD DATE, UNKNOWN ON THE NEW: named the day
                     // it happens; never carried over from the old date.
                     (Some(_), None) => {
-                        out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
+                        out.push(item(
+                            Change::IsinUnknown,
+                            listed,
+                            String::new(),
+                            String::new(),
+                        ));
                     }
                     _ => {}
                 }
@@ -1588,12 +1641,22 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
             ));
             continue;
         }
-        out.push(item(Change::Listing, listed, String::new(), listed.tradingsymbol().to_owned()));
+        out.push(item(
+            Change::Listing,
+            listed,
+            String::new(),
+            listed.tradingsymbol().to_owned(),
+        ));
         unknown_if_new(&mut out, listed, new_isins);
     }
     for (at, before) in old_rows.iter().enumerate() {
         if !matched.get(at).copied().unwrap_or(true) && !new_keys.contains(&key(before)) {
-            out.push(item(Change::Delisting, before, before.tradingsymbol().to_owned(), String::new()));
+            out.push(item(
+                Change::Delisting,
+                before,
+                before.tradingsymbol().to_owned(),
+                String::new(),
+            ));
         }
     }
     out.sort_unstable();
@@ -1608,7 +1671,12 @@ fn unknown_if_new(out: &mut Vec<Item>, listed: &Listed<'_>, new_isins: Option<&I
             .and_then(|isins| isins.of(listed.tradingsymbol()))
             .is_none()
     {
-        out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
+        out.push(item(
+            Change::IsinUnknown,
+            listed,
+            String::new(),
+            String::new(),
+        ));
     }
 }
 
@@ -1727,7 +1795,9 @@ fn header_field<'a>(part: Option<&'a str>, name: &str) -> Result<&'a str, String
 /// A file that is not whole fixed-length lines of this format, named.
 pub fn parse_diff(text: &str) -> Result<(DiffHead, Vec<Item>), String> {
     if !text.len().is_multiple_of(RECORD_LEN) {
-        return Err(format!("a diff is whole {RECORD_LEN}-byte lines; this one is torn"));
+        return Err(format!(
+            "a diff is whole {RECORD_LEN}-byte lines; this one is torn"
+        ));
     }
     let mut lines = text.as_bytes().chunks(RECORD_LEN).map(|line| {
         core::str::from_utf8(line)
@@ -1766,7 +1836,9 @@ pub fn parse_diff(text: &str) -> Result<(DiffHead, Vec<Item>), String> {
         items.push(Item {
             change: Change::parse(word).ok_or_else(|| format!("{word:?} is not a change"))?,
             exchange: (*exchange).to_owned(),
-            token: token.parse().map_err(|_| format!("{token:?} is not a token"))?,
+            token: token
+                .parse()
+                .map_err(|_| format!("{token:?} is not a token"))?,
             key: (*key).to_owned(),
             old: (*old).to_owned(),
             new: (*new).to_owned(),
@@ -1800,7 +1872,13 @@ pub struct DiffSummary {
 }
 
 impl DiffSummary {
-    fn of(previous: Stamp, current: Stamp, file: String, items: &[Item], isin_unknown_total: u64) -> Self {
+    fn of(
+        previous: Stamp,
+        current: Stamp,
+        file: String,
+        items: &[Item],
+        isin_unknown_total: u64,
+    ) -> Self {
         let mut counts = [0_u64; 8];
         for one in items {
             if let Some(at) = Change::ALL.iter().position(|change| *change == one.change)
@@ -1815,7 +1893,11 @@ impl DiffSummary {
             file,
             counts,
             isin_unknown_total,
-            named: items.iter().filter(|one| one.change.named()).cloned().collect(),
+            named: items
+                .iter()
+                .filter(|one| one.change.named())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -1884,7 +1966,9 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
         Err(why) => return Err(why),
     }
     held.release().map_err(|why| why.to_string())?;
-    Ok(Some(DiffSummary::of(previous, current, file, &items, total)))
+    Ok(Some(DiffSummary::of(
+        previous, current, file, &items, total,
+    )))
 }
 
 // ──────────────────────────── the landing hook ────────────────────────────
@@ -1926,7 +2010,9 @@ impl Snapshotted {
         };
         let diff = match self.diff {
             None => "null".to_owned(),
-            Some(Ok(None)) => r#"{"previous":null,"note":"the first snapshot: nothing to compare"}"#.to_owned(),
+            Some(Ok(None)) => {
+                r#"{"previous":null,"note":"the first snapshot: nothing to compare"}"#.to_owned()
+            }
             Some(Err(ref why)) => format!(r#"{{"refusal":{}}}"#, json_string(why)),
             Some(Ok(Some(ref summary))) => {
                 let counts: Vec<String> = Change::ALL
@@ -2012,13 +2098,21 @@ pub fn after_land(
 /// The events of one hook call.
 fn note(outcome: &Snapshotted) {
     let (level, message, detail) = match (&outcome.wrote, &outcome.diff) {
-        (Err(why), _) => (telemetry::Level::Error, "no master snapshot was written", why.clone()),
+        (Err(why), _) => (
+            telemetry::Level::Error,
+            "no master snapshot was written",
+            why.clone(),
+        ),
         (Ok(_), Some(Err(why))) => (
             telemetry::Level::Error,
             "the master was snapshotted, and its diff could not be made",
             why.clone(),
         ),
-        (Ok(Wrote::New(_)), _) => (telemetry::Level::Info, "a dated master snapshot was written", String::new()),
+        (Ok(Wrote::New(_)), _) => (
+            telemetry::Level::Info,
+            "a dated master snapshot was written",
+            String::new(),
+        ),
         (Ok(Wrote::AlreadyHeld(_)), _) => (
             telemetry::Level::Info,
             "the day already holds this master, byte for byte; nothing was written",
