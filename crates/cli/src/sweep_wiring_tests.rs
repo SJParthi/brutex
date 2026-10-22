@@ -187,6 +187,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 // The measured basis runs and corporate-action ledger (R4-26,
                 // D-6892): reference tables folded from DATA-1's factor.
                 | "basis-runs"
+                // The tradable-day page (D-5153): reads tables, never a sweep.
+                | "calendar-days"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

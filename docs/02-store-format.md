@@ -1132,6 +1132,20 @@ audits the raw form, and refuses unless the two have one header and one
 records BLAKE3; a sealed month with no raw form beside it has no strict
 receipt and says so.
 
+**Writing: a sealed month is never appended to (D-5904, SC-4).** The writer
+door `BarFile::open_or_create` asks for the `.sbar` after it holds the month's
+exclusive lock (the sealer holds it shared from its first step to its last)
+and before it opens or creates the `.bin`, through the read door's own open;
+a month held sealed is opened in that form, a damaged or misfiled one is
+`SealedRefused`, and no `.bin` is ever made beside a `.sbar`. `append` then
+answers a batch the month holds bit for bit `AlreadyPresent` and any other
+`StoreError::Sealed`, naming the first offered bar it does not hold and what
+the raw form would have done (`SealedOffer::Follows` or `Disagrees`); nothing
+is written. A bar a sealed month lacks lands only as its successor generation
+through `repair::repair_month` (D-3350), which reads the sealed month through
+the read door and writes the successor raw; a revision ordinal already
+holding a `.sbar` is stepped over.
+
 ### 8.6 `.sum` — month summary, version 1 (D-4980)
 
 What a reader needs to know about a month without reading its bars (R3-06):
