@@ -365,6 +365,28 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
         1
     );
     assert!(seen.iter().all(|url| url.contains("&oi=1")), "{seen:?}");
+    // THE CENSUS COUNTS EACH CONTRACT BY UNDERLYING AND EXPIRY, AND THE
+    // CONTINUOUS SERIES UNDER ITS OWN NAME, so the coverage board and `/db`
+    // read them as any other held series.
+    let census = crate::ingest::census_store::read_vendor(&store_root, Vendor::Zerodha).unwrap();
+    let key = |symbol: &str, contract| EntryKey {
+        contract,
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: Segment::Fno,
+        symbol: Symbol::new(symbol).unwrap(),
+        timeframe: Timeframe::DAY_1,
+        month,
+    };
+    for one in [
+        key("ZQIDX", Some(contract(2026, 1, 27))),
+        key("ZQIDX", Some(contract(2026, 2, 24))),
+        key("ZQIDX-FUT-C1", None),
+    ] {
+        assert!(
+            census.iter().any(|read| read.census.held(&one).is_some()),
+            "{one:?} is counted"
+        );
+    }
 }
 
 #[test]
