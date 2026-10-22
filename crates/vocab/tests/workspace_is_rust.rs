@@ -620,8 +620,23 @@ fn the_dependency_set_has_not_moved_without_review() {
     // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
     // The scan is recorded beside the count above, and no other package's
     // `dependencies` list moved.
+    // 0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C IS TWO VERSION BUMPS, NOT A
+    // NEW PACKAGE (D-5890, R3-24 repair rounds 2 and 3): `rustls-webpki`
+    // 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and `webpki-roots` 1.0.9 ->
+    // 1.0.10 (RUSTSEC-2026-0381), both reached through `reqwest` and
+    // `hyper-rustls` from `pull`. The count is still 194 and the lock's diff
+    // against `feat/db-fix` is the two versions and their checksums: no
+    // `dependencies` list moved. Repair round 2 bumped the lock without this
+    // re-pin, and this test failed on its head (B10). The scan, over both
+    // registry sources: no .c/.cc/.cpp/.h/.S/.s/.asm/.js and no `build.rs` in
+    // either; their non-Rust files are `LICENSE`, the packaged `Cargo.lock`,
+    // `Cargo.toml.orig`, `.cargo_vcs_info.json` and DER certificate data
+    // (`rustls-webpki` 0.103.16 ships 11 `.der` files where 0.103.15 shipped
+    // 3: the 8 new ones are the distrusted emSign intermediates' public keys,
+    // `src/data/distrusted/*.spki.der`, data the fix reads; `webpki-roots`
+    // 1.0.10 ships 3 test certificates under `tests/data/`, as 1.0.9 did).
     assert_eq!(
-        h, 0x8070_52EA_72E5_1027,
+        h, 0x57F8_69FF_1E0D_4A5C,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

@@ -75781,6 +75781,54 @@ each now with a test that failed on that head:
   now take `no_fork_in_flight()`, as the crate's older ones do; the suite
   then passed three times in a row.
 
+**Repair round 3 (22 Oct, after the fourth check).**
+
+- *A time span's end that cannot be read is UNKNOWN, recorded as unknown,
+  named, and never a reason to pass a file over (R324-29, R324-30).* The
+  check found two ways a reopen invented a span. Over a file whose last
+  64 KiB held no line that decodes, the reopen took the generation's last
+  time to be its first line's, and the next roll closed it as
+  `[first, first]` (B9). Over a generation with no believable span image
+  whose first line does not decode (every generation a build before R3-24
+  wrote), the first line this process appended recorded its own time as
+  the generation's first (B3); and `span_page` passed a kept file whose
+  first line will not decode over by its `let`-`else`. Each lost every
+  older line to a span search, and each answer called itself complete. Now
+  `telemetry::AuditSpan::first_ms` is an `Option` like `last_ms`, and
+  `None` at either end overlaps every span. An unread last is kept as
+  `i64::MAX` (the image's existing "unknown" value, which `audit_span`
+  already answers as open-ended for a closed file), and no later line
+  lowers it. An unread first records no span file, and only a generation
+  that held no byte takes an appended line's time as its first
+  (`SpanStart::{Empty, At, Unknown}`). `audit_span` answers a span for
+  every kept file that holds a byte. `span_page` reads a file with an
+  unknown end and names it in `damage`. The reopen names the damage in
+  `AuditHealth::span_damage`, which is loud and is served on `/logs.json`
+  (`span_damage`) and `/logs`.
+  *Rejected:* scanning back past the 64 KiB block for the last line that
+  decodes. The check's damage was 64 MiB long, so a bounded scan still
+  ends in "unknown". An unbounded one is a scan at every start.
+  *Rejected:* taking the first line that DOES decode as the first time.
+  It is a true lower bound only for the lines that decode, and it would
+  name nothing. Unknown costs a search reads (L-R324-24) and never lines.
+- *`Cargo.lock`'s two bumps of repair round 2 are re-pinned in `vocab`'s
+  dependency fingerprint, with the scan recorded beside it (B10).* Repair
+  round 2 moved `rustls-webpki` 0.103.15 -> 0.103.16 and `webpki-roots`
+  1.0.9 -> 1.0.10 for RUSTSEC-2026-0381/-0382 and did not run
+  `the_dependency_set_has_not_moved_without_review`. That test failed on
+  the head and on every merge with `feat/db-fix`, and the round's report
+  called the tests green because the run never included `-p vocab`. The
+  registry sources of both new versions were scanned: no
+  .c/.cc/.cpp/.h/.S/.s/.asm/.js, no `build.rs`. Their only non-Rust files
+  are `LICENSE`, the packaged `Cargo.lock`, `Cargo.toml.orig`,
+  `.cargo_vcs_info.json` and DER data (`rustls-webpki` 0.103.16 ships 11 `.der`
+  files where 0.103.15 shipped 3: the 8 new ones are the distrusted emSign
+  intermediates' public keys, `src/data/distrusted/*.spki.der`, which the
+  fix reads; `webpki-roots` 1.0.10 ships 3 test certificates, as 1.0.9
+  did). The
+  count stays 194. No `dependencies` list moved: the lock's diff against
+  `feat/db-fix` is the two versions and their checksums.
+
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
 The store-compression design (`state/design/store-compression-20261012.md`

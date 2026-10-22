@@ -10029,7 +10029,10 @@ mod state_tests {
                 last_ms: None,
             }
         );
-        assert!(closed.overlaps(times[2], times[2]), "the third line is found");
+        assert!(
+            closed.overlaps(times[2], times[2]),
+            "the third line is found"
+        );
         drop(again);
         let _ignored = std::fs::remove_dir_all(&dir);
     }

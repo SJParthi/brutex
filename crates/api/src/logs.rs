@@ -12416,7 +12416,10 @@ mod r3_24_torn_tests {
         for (serial, open) in [(0u64, false), (1, true)] {
             let span = telemetry::run_dirs::audit_span(&stream, 1, serial).expect("a span");
             assert_eq!(span.first_ms, None, "file {serial}");
-            assert!(super::unknown_span_words(&span, open).is_some(), "file {serial}");
+            assert!(
+                super::unknown_span_words(&span, open).is_some(),
+                "file {serial}"
+            );
         }
         for (span, wanted, named) in [
             ((1002, 1004), vec![3u64, 2], 1usize),
@@ -12424,8 +12427,7 @@ mod r3_24_torn_tests {
             ((1000, 2004), vec![7, 6, 5, 4, 3, 2, 1], 2),
         ] {
             for take in [1, 1000] {
-                let (seqs, damage) =
-                    every_span_page(&stream, span, take).expect("the pages end");
+                let (seqs, damage) = every_span_page(&stream, span, take).expect("the pages end");
                 assert_eq!(seqs, wanted, "span {span:?} take {take}");
                 let unknown = damage
                     .iter()
