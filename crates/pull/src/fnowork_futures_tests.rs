@@ -189,6 +189,29 @@ fn rolling_reply(url: &str) -> Result<String, Refusal> {
     Ok(answer(&candles))
 }
 
+/// The plan for 2026-01-01..09 asked on 2026-01-12 from one snapshot of
+/// 2026-01-02 listing the January and February futures: each contract from
+/// the snapshot's day, the continuous series through January's token.
+fn january_asks() -> Vec<FuturesAsk> {
+    let contract_ask = |token, y, m, d| FuturesAsk {
+        token,
+        series: FuturesSeries::Contract {
+            contract: contract(y, m, d),
+            expiry: day(y, m, d),
+        },
+        window: window(day(2026, 1, 2), day(2026, 1, 9)),
+    };
+    vec![
+        contract_ask(8_000_001, 2026, 1, 27),
+        contract_ask(8_000_002, 2026, 2, 24),
+        FuturesAsk {
+            token: 8_000_001,
+            series: FuturesSeries::Continuous,
+            window: window(day(2026, 1, 1), day(2026, 1, 9)),
+        },
+    ]
+}
+
 /// Plans `ZQIDX` over `asked` from the snapshots in `masters`, its last day
 /// settled, and pulls it into `store_root` from a vendor answering `reply`.
 fn plan_and_pull(
@@ -295,32 +318,7 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
     )
     .unwrap();
     assert!(plan.refused.is_empty(), "{:?}", plan.refused);
-    assert_eq!(
-        plan.asks,
-        vec![
-            FuturesAsk {
-                token: 8_000_001,
-                series: FuturesSeries::Contract {
-                    contract: contract(2026, 1, 27),
-                    expiry: day(2026, 1, 27),
-                },
-                window: window(day(2026, 1, 2), day(2026, 1, 9)),
-            },
-            FuturesAsk {
-                token: 8_000_002,
-                series: FuturesSeries::Contract {
-                    contract: contract(2026, 2, 24),
-                    expiry: day(2026, 2, 24),
-                },
-                window: window(day(2026, 1, 2), day(2026, 1, 9)),
-            },
-            FuturesAsk {
-                token: 8_000_001,
-                series: FuturesSeries::Continuous,
-                window: window(day(2026, 1, 1), day(2026, 1, 9)),
-            },
-        ]
-    );
+    assert_eq!(plan.asks, january_asks());
     let vendor = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: january_reply,
@@ -365,26 +363,34 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
         1
     );
     assert!(seen.iter().all(|url| url.contains("&oi=1")), "{seen:?}");
-    // THE CENSUS COUNTS EACH CONTRACT BY UNDERLYING AND EXPIRY, AND THE
-    // CONTINUOUS SERIES UNDER ITS OWN NAME, so the coverage board and `/db`
-    // read them as any other held series.
-    let census = crate::ingest::census_store::read_vendor(&store_root, Vendor::Zerodha).unwrap();
-    let key = |symbol: &str, contract| EntryKey {
-        contract,
-        exchange: brutex_core::instrument::Exchange::Nse,
-        segment: Segment::Fno,
-        symbol: Symbol::new(symbol).unwrap(),
-        timeframe: Timeframe::DAY_1,
+    assert_counted(
+        &store_root,
         month,
-    };
-    for one in [
-        key("ZQIDX", Some(contract(2026, 1, 27))),
-        key("ZQIDX", Some(contract(2026, 2, 24))),
-        key("ZQIDX-FUT-C1", None),
-    ] {
+        &[
+            ("ZQIDX", Some(contract(2026, 1, 27))),
+            ("ZQIDX", Some(contract(2026, 2, 24))),
+            ("ZQIDX-FUT-C1", None),
+        ],
+    );
+}
+
+/// THE CENSUS COUNTS EACH CONTRACT BY UNDERLYING AND EXPIRY, AND THE
+/// CONTINUOUS SERIES UNDER ITS OWN NAME, so the coverage board and `/db` read
+/// them as any other held series.
+fn assert_counted(store_root: &Path, month: YearMonth, series: &[(&str, Option<Contract>)]) {
+    let census = crate::ingest::census_store::read_vendor(store_root, Vendor::Zerodha).unwrap();
+    for &(symbol, contract) in series {
+        let key = EntryKey {
+            contract,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: Segment::Fno,
+            symbol: Symbol::new(symbol).unwrap(),
+            timeframe: Timeframe::DAY_1,
+            month,
+        };
         assert!(
-            census.iter().any(|read| read.census.held(&one).is_some()),
-            "{one:?} is counted"
+            census.iter().any(|read| read.census.held(&key).is_some()),
+            "{key:?} is counted"
         );
     }
 }
