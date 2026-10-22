@@ -3471,6 +3471,7 @@ mod tests {
             counted: 194,
             census: census(0, 170, 0, 0),
             failures: Vec::new(),
+            door_kind: None,
         }
     }
 

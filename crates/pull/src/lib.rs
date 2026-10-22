@@ -202,6 +202,8 @@ pub mod gdfl_v3;
 pub mod groww;
 pub mod http;
 pub mod ingest;
+/// The one append of every `audit/<vendor>.<name>` ledger (IA-16, D-4888).
+pub use ingest::audit_ledger;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
 /// A CASH security's listing day and end of history, from the receipted NSE

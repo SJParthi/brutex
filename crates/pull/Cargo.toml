@@ -109,6 +109,11 @@ telemetry = { path = "../telemetry", version = "0.1.0" }
 # D-0071 and registered in docs/06-limits.md; §2 itself is untouched.
 reqwest = { workspace = true }
 rustls-graviola = { workspace = true }
+# One `statfs(2)` (macOS) or `statvfs(2)` for the GDFL import's free-space
+# floor (IA-16, CONC-031), the call `/disk.json` makes (D-5240): safe
+# wrappers, since this crate is `#![forbid(unsafe_code)]`, and no child
+# process, which the no-runtime-spawn gate refuses.
+rustix = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 

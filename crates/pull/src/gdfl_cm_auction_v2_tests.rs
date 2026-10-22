@@ -354,7 +354,7 @@ fn an_out_of_order_record_is_refused_and_the_file_unchanged() {
 #[test]
 fn a_torn_tail_or_a_truncated_header_is_refused_by_ordinal() {
     let on = day(2026, 9, 23);
-    let (root, path) = filed("ag04-torn", on, &two());
+    let (_root, path) = filed("ag04-torn", on, &two());
     let good = std::fs::read(&path).unwrap();
     // Killed mid-append: a part of record 2.
     let mut torn = good.clone();
@@ -367,12 +367,14 @@ fn a_torn_tail_or_a_truncated_header_is_refused_by_ordinal() {
             .contains("record 2 is torn (17 of its 32 bytes)"),
         "{refusal}"
     );
+    // Every READER refuses it, and leaves it as it is (the next append is
+    // what cuts it back: IA-16's an_interrupted_auction_append_is_repaired_by_the_next).
     std::fs::write(&path, &torn).unwrap();
-    assert!(sidecar_why(append(&root, &key(), day(2026, 9, 24), &two())).contains("torn"));
+    assert!(read(&path).unwrap_err().why.contains("torn"));
     assert_eq!(
         std::fs::read(&path).unwrap(),
         torn,
-        "refused, never repaired"
+        "a reader repairs nothing"
     );
     // A whole-length tail of zeros (a size that reached the disk before its
     // bytes did) fails its checksum at its ordinal.
@@ -491,4 +493,77 @@ fn a_records_ist_day_is_the_day_it_was_filed_on() {
     let record = Record::of(on, &print(0, 9, 9));
     assert_eq!(ist_day(record.t_micros), i64::from(on.days_from_epoch()));
     assert!(Path::new(&path(Path::new("/s"), &key(), on).unwrap()).ends_with("1s/2026-09.auc"));
+}
+
+/// IA-16 (IA-AUC-01, FM-099): a TORN TAIL a killed append left is cut back by
+/// the next append, under the exclusive lock, to the last whole record that
+/// verifies, and the append then lands whole: the day the kill cut short
+/// (offered again by its resume) and a later day alike. A tail of zero
+/// bytes the length reached the disk with is cut the same way, and a
+/// partial header of a file that held no record is cut to nothing and
+/// written fresh. Damage that is not the tail (a flipped bit in a whole
+/// record, garbage) is still refused by name and the file left unchanged.
+#[test]
+fn an_interrupted_auction_append_is_repaired_by_the_next() {
+    let on = day(2026, 9, 23);
+    let next = day(2026, 9, 24);
+    let later = [
+        print(at(15, 29, 5), 444_670, 77),
+        print(at(15, 29, 6), 444_671, 78),
+    ];
+    // Killed mid-append of `next`: 17 bytes of its first record.
+    let (root, path) = filed("ia16-auc-torn", on, &two());
+    let good = std::fs::read(&path).unwrap();
+    let mut torn = good.clone();
+    torn.extend_from_slice(&Record::of(next, &later[0]).encode(VERSION, 2)[..17]);
+    std::fs::write(&path, &torn).unwrap();
+    assert!(read(&path).is_err(), "a reader refuses the torn file");
+    assert_eq!(append(&root, &key(), next, &later).unwrap().written, 2);
+    let held = read(&path).unwrap().unwrap();
+    assert_eq!(
+        held.records.len(),
+        4,
+        "the two held and the day offered again"
+    );
+    assert_eq!(
+        &std::fs::read(&path).unwrap()[..good.len()],
+        &good[..],
+        "held bytes kept"
+    );
+    // Its resume offers the same day again: nothing new, nothing refused.
+    assert_eq!(append(&root, &key(), next, &later).unwrap().written, 0);
+
+    // A whole-length tail of zeros.
+    let (root, path) = filed("ia16-auc-zeros", on, &two());
+    let good = std::fs::read(&path).unwrap();
+    let mut zeros = good.clone();
+    zeros.extend_from_slice(&[0; RECORD_LEN * 2]);
+    std::fs::write(&path, &zeros).unwrap();
+    assert_eq!(append(&root, &key(), next, &later).unwrap().written, 2);
+    assert_eq!(read(&path).unwrap().unwrap().records.len(), 4);
+
+    // A partial header of a file that held no record: written fresh.
+    let root = scratch("ia16-auc-header");
+    let path = super::path(&root, &key(), on).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &header_of(VERSION)[..10]).unwrap();
+    assert_eq!(append(&root, &key(), on, &two()).unwrap().written, 2);
+    let fresh = read(&path).unwrap().unwrap();
+    assert_eq!((fresh.version, fresh.records.len()), (VERSION, 2));
+
+    // Damage inside a whole record is not a torn tail: refused, unchanged.
+    let (root, path) = filed("ia16-auc-bent", on, &two());
+    let mut bent = std::fs::read(&path).unwrap();
+    bent[HEADER_LEN + 9] ^= 0x10;
+    bent.extend_from_slice(&[7; 5]);
+    std::fs::write(&path, &bent).unwrap();
+    assert!(sidecar_why(append(&root, &key(), next, &later)).contains("record"));
+    assert_eq!(std::fs::read(&path).unwrap(), bent, "never cut past damage");
+    // Garbage shorter than a header that is not one: refused, unchanged.
+    let root = scratch("ia16-auc-garbage");
+    let path = super::path(&root, &key(), on).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"NOTAUC").unwrap();
+    assert!(append(&root, &key(), on, &two()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"NOTAUC");
 }

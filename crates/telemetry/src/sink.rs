@@ -3384,6 +3384,28 @@ pub fn audit_postings_before(
     Ok(out)
 }
 
+/// `Ok` while the sink's own directory is a directory. Every directory the
+/// audit stream makes below it (`audit.idx/`, a generation, a posting's
+/// folders, `audit.idx.gone/`) is made only then: `create_dir_all` beneath a
+/// directory that went away would make it and every ancestor again, and a
+/// run's log directory sits under the store's root, so an unplugged store
+/// volume came back as a new root on whatever disk held its path (FM-125,
+/// D-4852; IA-16 repair 1, which found it at the `cli` level). The refusal is
+/// the posting's failure, counted in [`AuditHealth::index_failures`] and
+/// named in [`AuditHealth::last_error`]; nothing is made. One `metadata`
+/// call, on a path that opens or makes a file only.
+fn sink_dir_there(dir: &Path) -> Result<(), String> {
+    if dir.is_dir() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: the telemetry directory went away, so nothing is made beneath it (a writer \
+             never makes a directory's ancestors again, FM-125)",
+            dir.display()
+        ))
+    }
+}
+
 /// The audit stream's writer, behind the sink's lock.
 #[derive(Debug)]
 struct Audit {
@@ -4214,6 +4236,7 @@ impl Audit {
         // `audit.idx/`, where a reader already takes it for rolled off.
         let _there = audit_gone_is_ours(&aside)
             .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?;
+        sink_dir_there(&self.dir)?;
         std::fs::create_dir_all(&aside)
             .map_err(|e| format!("{}: cannot create — {e}", aside.display()))?;
         // WHICH FOLDER the generation is renamed into, asked again now that
@@ -4281,6 +4304,10 @@ impl Audit {
         }
         if text.is_empty() {
             return Ok(());
+        }
+        if let Err(why) = sink_dir_there(&self.dir) {
+            self.health.last_error = Some(why.clone());
+            return Err(why);
         }
         std::fs::create_dir_all(&generation)
             .and_then(|()| {
@@ -4430,6 +4457,7 @@ impl Audit {
             Entry::Vacant(slot) => {
                 let path = slot.key();
                 if let Some(parent) = path.parent() {
+                    sink_dir_there(&self.dir)?;
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("{}: cannot create — {e}", parent.display()))?;
                 }
@@ -4475,6 +4503,7 @@ impl Audit {
         let next = self.serial.saturating_add(1);
         let path = audit_serial_path(&self.dir);
         let staged = path.with_extension("next");
+        sink_dir_there(&self.dir)?;
         std::fs::create_dir_all(self.dir.join(AUDIT_INDEX_DIR))
             .and_then(|()| std::fs::write(&staged, next.to_le_bytes()))
             .and_then(|()| std::fs::rename(&staged, &path))
@@ -7599,6 +7628,45 @@ mod tests {
         assert!(!health.is_loud());
         assert_eq!(health.current_bytes, audit.len() as u64);
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SINK WHOSE DIRECTORY WENT AWAY NEVER MAKES IT AGAIN** (FM-125,
+    /// D-4852; IA-16 repair 1): a run's log directory sits under the store's
+    /// root, so a refusal posted after the store's volume went away made the
+    /// root again with `create_dir_all`. Now the posting is refused by name,
+    /// counted as an index failure, and neither the directory nor its parent
+    /// comes back.
+    #[test]
+    fn a_sink_whose_directory_went_away_never_makes_it_again() {
+        let root = scratch("audit-dir-gone");
+        let dir = root.join("store").join("logs");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let refusal = |day: &'static str| {
+            Event::error("gdfl.import", "refused")
+                .with("feed", "gdfl")
+                .with("instrument", "NIFTY")
+                .with("day", day)
+        };
+        assert!(sink.emit(&refusal("2022-03-07")).is_written());
+        let before = sink.audit_health().expect("a stream").index_failures;
+        let gone = root.join("store.gone");
+        std::fs::rename(root.join("store"), &gone).expect("the volume goes");
+        let _said = sink.emit(&refusal("2022-03-08"));
+        assert!(
+            !root.join("store").exists(),
+            "the store's root was made again"
+        );
+        let health = sink.audit_health().expect("a stream");
+        assert!(health.index_failures > before, "{health:?}");
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("went away")),
+            "{health:?}"
+        );
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 
     /// **WHAT IS AUDITED, BY RULE**: every `error`; a lifecycle word or a

@@ -1700,7 +1700,9 @@ fn a_file_or_copy_refusal_journals_its_stage_and_leaves_the_day_incomplete() {
     let line = line_of(&store, "indices", "2024-04-01");
     assert!(
         line.starts_with("incomplete indices 2024-04-01 ")
-            && line.contains(" stage=file reason=filing run="),
+            // The store's refusal by its kind (IA-16, D-4890): a held bar
+            // read differently, a hole no repair fills.
+            && line.contains(" stage=file reason=bars_differ_held run="),
         "{line}"
     );
     let path = root.join("ts/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts");
@@ -1905,6 +1907,23 @@ fn import_only(
     store: &Path,
     only: &[String],
 ) -> Report {
+    import_only_with(
+        root,
+        (src, kind),
+        (from, to),
+        (store, only),
+        RunOptions::default(),
+    )
+}
+
+/// [`import_only`] with the run's `options` (IA-16: a repair reason, D-4889).
+fn import_only_with(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    (store, only): (&Path, &[String]),
+    options: RunOptions<'_>,
+) -> Report {
     let run = Run {
         kind,
         from,
@@ -1913,12 +1932,18 @@ fn import_only(
         store_root: store,
     };
     match (src, kind) {
-        (Src::Store, ImportKind::Options) => run_nfo(&NfoTickStore::new(&root.join("ts")), &run),
-        (Src::Zips, ImportKind::Options) => {
-            run_nfo(&NfoZips::new(&root.join("zips/options")), &run)
+        (Src::Store, ImportKind::Options) => {
+            run_nfo_from(&NfoTickStore::new(&root.join("ts")), &run, options)
         }
-        (Src::Store, _) => run_cm(&TickStore::new(&root.join("ts")), &run),
-        (Src::Zips, _) => run_cm(&Archive::open(&root.join("zips/cm.zip")).unwrap(), &run),
+        (Src::Zips, ImportKind::Options) => {
+            run_nfo_from(&NfoZips::new(&root.join("zips/options")), &run, options)
+        }
+        (Src::Store, _) => run_cm_from(&TickStore::new(&root.join("ts")), &run, options),
+        (Src::Zips, _) => run_cm_from(
+            &Archive::open(&root.join("zips/cm.zip")).unwrap(),
+            &run,
+            options,
+        ),
     }
     .unwrap()
 }
@@ -2310,6 +2335,10 @@ fn closed_unmeasured_special_and_missing_days_are_each_named() {
 /// refused by the store and stayed `incomplete` for ever: the append-only
 /// month cannot take a day before its first. `gdfl_backfill_tests` proves
 /// the shape the real store has, a day between held ones.
+///
+/// ONLY A RUN THAT CARRIES A REPAIR REASON back-fills (IA-16, D-4889): the
+/// same run without one leaves the day the hole `needs_month_generation`,
+/// writing nothing.
 #[test]
 fn a_day_older_than_what_the_month_holds_lands_as_a_new_generation() {
     let root = scratch("import-order");
@@ -2318,7 +2347,25 @@ fn a_day_older_than_what_the_month_holds_lands_as_a_new_generation() {
     import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
     let held = bars(&store, "INDEX", "NIFTY", None);
     let originals = tree(&store.join("bars"));
-    let late = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    let unasked = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    assert_eq!(unasked.months_repaired, 0);
+    assert_eq!(unasked.closed_incomplete, vec![d1()]);
+    assert_eq!(
+        tree(&store.join("bars")),
+        originals,
+        "nothing written unasked"
+    );
+    let options = RunOptions {
+        repair_reason: Some("IA-16 test: the earlier day"),
+        ..RunOptions::default()
+    };
+    let late = import_only_with(
+        &root,
+        (Src::Store, ImportKind::Indices),
+        (d1(), d1()),
+        (&store, &[]),
+        options,
+    );
     assert!(late.failures.is_empty(), "{:?}", late.failures);
     assert_eq!(late.months_repaired, late.files);
     assert!(late.seconds_committed > 0);
@@ -3142,6 +3189,18 @@ fn run_from(
     (store, only): (&Path, &[String]),
     origin: bool,
 ) -> Report {
+    run_from_with(root, (src, kind), (from, to), (store, only), origin, None)
+}
+
+/// [`run_from`] carrying `repair_reason` (IA-16, D-4889).
+fn run_from_with(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    (store, only): (&Path, &[String]),
+    origin: bool,
+    repair_reason: Option<&str>,
+) -> Report {
     let run = Run {
         kind,
         from,
@@ -3154,6 +3213,7 @@ fn run_from(
     let options = RunOptions {
         origin: origin.then_some(&measured),
         retry_refused: false,
+        repair_reason,
         ..RunOptions::default()
     };
     match (src, kind) {
@@ -3262,16 +3322,16 @@ fn index_shapes(on: Day) -> Vec<(String, Vec<u8>)> {
 
 /// The two index lines [`index_shapes`] makes, from the tick store.
 const INDEX_SHAPE_LINES: [&str; 2] = [
-    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=4 member_bytes=0 late=12 \
+    "flags indices 2019-05-30 BANKNIFTY v=2 src=import definition=4 member_bytes=0 late=12 \
      max_back_s=19799 deferred_s=1 rows_refused=1 rows=22468 seconds=22454 session_s=22500 \
      ss_distinct=60 holes_5s=2 hole_max_s=34 hole_max_at=12:21:40 dual_spread_s=1 \
      dual_spread_max_bps=20 zero_ltp_rows=1 halt_s=0 halt_held_s=0 flat_max_s=1 \
-     flat_max_at=09:15:00 max_defer_s=19812 member_src=none",
-    "flags indices 2019-05-30 NIFTY v=1 src=import definition=4 member_bytes=0 late=0 \
+     flat_max_at=09:15:00 separator_backslash=0 max_defer_s=19812 member_src=none",
+    "flags indices 2019-05-30 NIFTY v=2 src=import definition=4 member_bytes=0 late=0 \
      max_back_s=0 deferred_s=0 rows_refused=0 rows=376 seconds=375 session_s=22500 \
      ss_distinct=1 holes_5s=375 hole_max_s=59 hole_max_at=09:15:00 dual_spread_s=0 \
      dual_spread_max_bps=0 zero_ltp_rows=0 halt_s=0 halt_held_s=0 flat_max_s=1 \
-     flat_max_at=09:15:59 max_defer_s=0 member_src=none",
+     flat_max_at=09:15:59 separator_backslash=0 max_defer_s=0 member_src=none",
 ];
 
 /// D-3335's index line, every count exact, for 30 May 2019's minute-stamped
@@ -3461,16 +3521,16 @@ fn the_day_ledger_counts_late_first_trades_shared_holes_and_new_untraded_prices(
     assert_eq!(
         flags_lines(&store),
         [
-            "flags stocks 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
+            "flags stocks 2019-05-30 * v=2 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=10 files_traded=10 \
              first_trade_p50=11:57:48 shared_holes=1 shared_hole_max_s=9768 \
              shared_hole_max_at=09:15:00 ltq0_new_ltp_rows=10 auction_prints=0 halt_s=0 \
-             halt_held_s=0 max_defer_s=0 member_src=none",
-            "flags stocks 2022-03-07 * v=1 src=import definition=4 member_bytes=0 late=0 \
+             halt_held_s=0 volume_saturated_files=0 separator_backslash=0 max_defer_s=0 member_src=none",
+            "flags stocks 2022-03-07 * v=2 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=11 files_traded=11 \
              first_trade_p50=09:15:00 shared_holes=1 shared_hole_max_s=1359 \
              shared_hole_max_at=09:16:44 ltq0_new_ltp_rows=0 auction_prints=0 halt_s=0 \
-             halt_held_s=0 max_defer_s=0 member_src=none",
+             halt_held_s=0 volume_saturated_files=0 separator_backslash=0 max_defer_s=0 member_src=none",
         ]
     );
     // The cumulative first print is filed as the bar it is: flagged, never
@@ -3578,7 +3638,7 @@ fn the_day_ledger_counts_zero_quote_files_and_leading_marker_rows() {
         false,
     );
     assert!(got.failures.is_empty(), "{:?}", got.failures);
-    let want = "flags options 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
+    let want = "flags options 2019-05-30 * v=2 src=import definition=4 member_bytes=0 late=0 \
                 max_back_s=0 deferred_s=0 rows_refused=0 files=5 files_traded=4 \
                 zero_quote_files=3 ltq1_lead_files=3 ltq1_lead_rows=6 ltq0_new_ltp_rows=1 \
                 first_trade_p50=09:15:30 halt_s=0 halt_held_s=0 max_defer_s=0 \
@@ -4533,6 +4593,25 @@ fn run_durable(
     store: &Path,
     (workers, origin, durability): (usize, &Origin, Durability),
 ) -> Result<Report, ImportRefusal> {
+    run_durable_with(
+        root,
+        (src, kind),
+        (from, to),
+        store,
+        (workers, origin, durability),
+        None,
+    )
+}
+
+/// [`run_durable`] carrying `repair_reason` (IA-16, D-4889).
+fn run_durable_with(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    store: &Path,
+    (workers, origin, durability): (usize, &Origin, Durability),
+    repair_reason: Option<&str>,
+) -> Result<Report, ImportRefusal> {
     let run = Run {
         kind,
         from,
@@ -4549,6 +4628,10 @@ fn run_durable(
         observer: None,
         run: None,
         stop: None,
+        repair_reason,
+        skip_restated: false,
+        free_floor: 0,
+        free_space: None,
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -4769,6 +4852,10 @@ fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
             observer: None,
             run: None,
             stop: None,
+            repair_reason: None,
+            skip_restated: false,
+            free_floor: 0,
+            free_space: None,
         };
         run_cm_from(&source, &run, options).unwrap()
     };
@@ -5742,12 +5829,15 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
                     }),
                 )
             };
-            let report = run_durable(
+            // THE BACK-FILL IS ASKED FOR (IA-16, D-4889): only a run with a
+            // repair reason lands day 1 under the later days.
+            let report = run_durable_with(
                 &root,
                 (Src::Zips, ImportKind::Options),
                 (d1(), d3()),
                 &store,
                 (workers, &origin, durability),
+                Some("IA-16 test: back-fill day 1 under the later days"),
             )
             .unwrap();
             drop(hook);
@@ -5815,6 +5905,11 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
 
 #[path = "gdfl_backfill_tests.rs"]
 mod backfill;
+
+/// IA-16: failure kinds, `admit`'s table, the holes, the held-back set and
+/// the run's end (D-4885, D-4889, D-4890, D-4851, D-4852).
+#[path = "gdfl_ia16_tests.rs"]
+mod ia16;
 
 // SC-4, D-5904: a late day for a sealed month, and a day it holds.
 #[path = "gdfl_sealed_tests.rs"]

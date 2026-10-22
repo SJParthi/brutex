@@ -91,8 +91,9 @@ fn the_request_line_carries_a_256_name_filter_and_a_snapshot_intact() {
     );
     assert_eq!(
         line.split(' ').count(),
-        14,
-        "two head words and twelve fields"
+        18,
+        "two head words and sixteen fields (IA-16: repair_reason, skip_restated, \
+         accept_open_month, free_floor)"
     );
     let back = Request::from_line(&line).unwrap();
     assert_eq!(back, asked);
@@ -503,6 +504,12 @@ fn every_run_refusal_has_its_own_code() {
         RunRefusal::ClockImplausible { why: String::new() },
         RunRefusal::RunsLedgerUnwritten { why: String::new() },
         RunRefusal::ClaimUnwritten { why: String::new() },
+        // IA-16's: the one repair-reason rule (D-4874, IA-GR-42).
+        RunRefusal::RepairReasonInvalid { bytes: 0 },
+        // IA-16's: a repair in a month still being traded (D-4876).
+        RunRefusal::RepairInOpenMonth {
+            month: String::new(),
+        },
     ];
     let codes: Vec<&str> = all.iter().map(RunRefusal::code).collect();
     assert_eq!(codes, RunRefusal::CODES);
@@ -510,8 +517,8 @@ fn every_run_refusal_has_its_own_code() {
     assert_eq!(unique.len(), codes.len());
     assert_eq!(
         all.iter().filter(|r| r.misuse()).count(),
-        7,
-        "the request's seven, never the process's"
+        8,
+        "the request's eight (IA-16 added `repair_reason_invalid`), never the process's"
     );
 }
 

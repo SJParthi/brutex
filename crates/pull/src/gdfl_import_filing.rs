@@ -8,7 +8,7 @@ use brutex_core::vendor::Vendor;
 use store::format::Bar;
 
 use crate::fetch::BarRequest;
-use crate::ingest::{Filed as Landed, Ingested, from_rows, repair_rows};
+use crate::ingest::{FailKind, Filed as Landed, Ingested, from_rows, repair_rows};
 use crate::manifest::Held;
 use crate::session::Day;
 
@@ -378,6 +378,15 @@ pub(super) struct Filing<'a> {
     pub(super) confirm: Option<&'a store::file::DurableBatch>,
     /// The run's id, which a back-fill's reason and event name (D-3350).
     pub(super) id: u64,
+    /// The operator's repair reason (D-4874, D-4889): only a run that
+    /// carries one hands a refused month to the back-fill door.
+    pub(super) repair_reason: Option<&'a str>,
+    /// Busy-month retries made by every worker of the day
+    /// ([`super::MONTH_BUSY_RETRY`]), counted into the report.
+    pub(super) retries: std::sync::atomic::AtomicUsize,
+    /// The store root's identity when the run began (RA-284), which the
+    /// loss probe compares against.
+    pub(super) store_id: Option<StoreId>,
 }
 
 /// What a file's landing left beside the bars it committed.
@@ -422,6 +431,101 @@ pub(super) struct Filed {
     pub(super) held: Option<Held>,
     /// Its failures, in the order they arose.
     pub(super) failures: Vec<Staged>,
+    /// The instrument-month the file files into (D-4851): what a failure of
+    /// it holds back for the rest of the run.
+    pub(super) held_key: Option<super::HeldKey>,
+    /// The store said the disk is full (D-4851, FM-085): the run ends after
+    /// the day in hand. The store's words.
+    pub(super) disk_full: Option<String>,
+    /// A loss probe found the store's root gone after a refused write
+    /// (D-4852, FM-086): the run ends. What failed, and the probe's answer.
+    pub(super) store_lost: Option<String>,
+    /// The host refused a write to the store for permission or a read-only
+    /// volume with the root still there (FM-129): the run ends
+    /// `store_not_writable` once the day is closed. What failed and the fix.
+    pub(super) not_writable: Option<String>,
+}
+
+impl Filed {
+    /// Whether a failure of this file holds its instrument-month back for
+    /// the rest of the run (D-4851): one that keeps the day open and is not
+    /// a store hole (a hole's month already holds later days, so holding
+    /// them back protects nothing) and not the run's own end.
+    pub(super) fn holds_back(&self) -> bool {
+        self.failures.iter().any(|one| holds_back(one.cause))
+    }
+}
+
+/// The store root's identity: its device and inode numbers, as the host
+/// answers one `metadata` call. `None` when the root is not a directory the
+/// host can describe (a fresh store before its first line, or a lost root).
+pub(super) type StoreId = (u64, u64);
+
+/// The identity of the directory at `store_root` (RA-284), or `None` when
+/// there is no directory there. One `metadata` call.
+pub(super) fn store_identity(store_root: &Path) -> Option<StoreId> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(store_root)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// THE STORE'S LOSS PROBE (D-4852, FM-086, RA-284): `None` while the store's
+/// root is still the directory the run began on; otherwise the probe's
+/// answer in words. A root that is a directory again but another one (a
+/// volume unplugged and mounted back, under its old name or with an empty
+/// folder left at its path) is lost as surely as a root that is gone: its
+/// device or inode number is not the one `at_start` recorded, and writing on
+/// would file the run's lines and bars into a folder that is not the store.
+/// `at_start` is `None` when the run began before the root existed (a fresh
+/// store): then only its being a directory is asked. The root is never
+/// created here or anywhere below it (FM-125). One `metadata` call.
+pub(super) fn store_root_lost(store_root: &Path, at_start: Option<StoreId>) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    match std::fs::metadata(store_root) {
+        Ok(meta) if meta.is_dir() => match at_start {
+            Some((dev, ino)) if (meta.dev(), meta.ino()) != (dev, ino) => Some(format!(
+                "the loss probe found {} is another directory than the run began on (device \
+                 {dev} inode {ino} then, device {} inode {} now): the store's volume went away \
+                 and came back, or a folder was left at its path, so nothing more is written \
+                 there",
+                store_root.display(),
+                meta.dev(),
+                meta.ino()
+            )),
+            _ => None,
+        },
+        Ok(_) => Some(format!(
+            "the loss probe found {} is no longer a directory: the store's root went away",
+            store_root.display()
+        )),
+        Err(why) => Some(format!(
+            "the loss probe could not reach {} ({why}): the store's root went away (drive gone)",
+            store_root.display()
+        )),
+    }
+}
+
+/// The words of FM-129's stop: the refusal, the store's root, and the fix
+/// the host's refusal names (the alert that was to carry them is dropped,
+/// D-6900 keep item 6). Never a file failure repeated across days: the run
+/// ends once the day is closed, and the next run stops at the same file by
+/// the same words until the store takes writes again.
+pub(super) fn not_writable_said(why: &str) -> String {
+    format!(
+        "{why}; the store does not take writes (permission or a read-only volume), so the run \
+         ends here: clear the file's immutable flag (`chflags nouchg <file>`; `ls -lO` shows \
+         it), remove a restrictive ACL (`chmod -N <file>`; `ls -le` shows it), or remount the \
+         volume read-write, then resume"
+    )
+}
+
+/// Whether a failure with `cause` holds its instrument-month back for the
+/// rest of the run (D-4851, IA-GR-18): open, not a hole, not the run's own
+/// stage (a stop or a full disk ends the run instead).
+pub(super) fn holds_back(cause: super::Cause) -> bool {
+    !cause.closes && !cause.is_hole() && cause.stage != super::Stage::Run
 }
 
 /// A file's quality (D-3335), from its rows, the bars it built and what its
@@ -496,6 +600,12 @@ impl Filing<'_> {
     /// refused the file and committed nothing: the answer is then not the
     /// file's, nothing of it is to be counted, and the caller files it again
     /// through [`Door::BackFill`], whose answer is always the file's.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one file through its door: the fold, the typed door refusal and the run's \
+                  end it may name (IA-16), the provenance and the counts, in the one order the \
+                  store and the journal need"
+    )]
     pub(super) fn file(
         &self,
         handed: &Handed,
@@ -526,9 +636,30 @@ impl Filing<'_> {
         if converted.seconds.is_empty() {
             return (filed, false);
         }
+        // THE ROOT BEFORE EVERY FILE'S FIRST WRITE (IA-16 repair 1; FM-125,
+        // FM-086, RA-284): one `metadata` call. A root that went away, or that
+        // is another directory than the run began on, takes neither the
+        // day's `begin` nor this file's bars: the store's writer refuses only
+        // a MISSING root (D-1522), so a folder left at the root's path would
+        // otherwise take the rest of the day.
+        if let Some(gone) = store_root_lost(run.store_root, self.store_id) {
+            let why = format!("{} was not written: {gone}", file.name);
+            filed.failures.push(note_staged(
+                run,
+                self.day,
+                &file.name,
+                &ImportRefusal::Filing { why: why.clone() },
+            ));
+            filed.store_lost = Some(why);
+            return (filed, false);
+        }
         let begin_line = match begin() {
             Ok(line) => line,
             Err(why) => {
+                // A refused `begin` is a refused store write: loss-probed.
+                if let Some(gone) = store_root_lost(run.store_root, self.store_id) {
+                    filed.store_lost = Some(format!("{why}; {gone}"));
+                }
                 filed
                     .failures
                     .push(note_staged(run, self.day, "journal", &why));
@@ -593,8 +724,27 @@ impl Filing<'_> {
             }
         }
         filed.held = done.pending;
-        for failure in done.failures {
-            let refusal = ImportRefusal::Filing { why: failure.why };
+        filed.held_key = self
+            .day
+            .year_month()
+            .ok()
+            .map(|month| (file.symbol.clone(), file.contract, month));
+        // THE DOOR'S KIND, NEVER ITS WORDS (IA-16; D-4851, D-4890): a door
+        // that refused files nothing after its refusal, so its failure is
+        // the last; every other failure of the file is the filing's own.
+        let door = done.door_kind;
+        let last = done.failures.len();
+        for (at, failure) in done.failures.into_iter().enumerate() {
+            let refusal = match door {
+                Some(kind) if at + 1 == last => {
+                    self.ends_with(kind, &failure.why, &mut filed);
+                    ImportRefusal::Store {
+                        kind,
+                        why: failure.why,
+                    }
+                }
+                _ => ImportRefusal::Filing { why: failure.why },
+            };
             filed
                 .failures
                 .push(note_staged(run, self.day, &file.name, &refusal));
@@ -605,7 +755,33 @@ impl Filing<'_> {
                 .with("rows", p.rows)
                 .with("seconds", converted.seconds.len()),
         );
+        #[cfg(test)]
+        inject::after_landed(run.store_root, &file.name);
         (filed, false)
+    }
+
+    /// Whether the door's refusal of `kind` ends the run (D-4851, D-4852):
+    /// a full disk ends it after the day in hand (FM-085); EVERY OTHER
+    /// refusal is loss-probed, and one whose probe finds the store's root
+    /// gone or replaced ends it with nothing more written (FM-086; IA-16
+    /// repair 1: a missing root reaches the door as the store's
+    /// `NotADirectory`, not only as a host `Io`). One `metadata` call, on a
+    /// refused write only.
+    fn ends_with(&self, kind: FailKind, why: &str, filed: &mut Filed) {
+        if kind == FailKind::DiskFull {
+            filed.disk_full = Some(why.to_owned());
+            return;
+        }
+        if let Some(gone) = store_root_lost(self.run.store_root, self.store_id) {
+            filed.store_lost = Some(format!("{why}; {gone}"));
+        } else if let FailKind::Io { kind: host, .. } = kind
+            && matches!(
+                host,
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        {
+            filed.not_writable = Some(not_writable_said(why));
+        }
     }
 
     /// Offers a file's bars to the store through `door`: what the store
@@ -620,20 +796,74 @@ impl Filing<'_> {
     ) -> Option<(Ingested, Landed)> {
         let run = self.run;
         let month = || plan(run.kind, self.request, file.contract);
+        #[cfg(test)]
+        if door == Door::Append
+            && let Some(done) = inject::answer(run.store_root, file)
+        {
+            return Some((done, Landed::Appended));
+        }
         match door {
             Door::Append => {
-                let done = from_rows(seconds, &[], &file.symbol, origin, run.store_root, month());
-                (done.bars_committed > 0 || done.failures.is_empty())
-                    .then_some((done, Landed::Appended))
+                let (attempts, apart) = super::MONTH_BUSY_RETRY;
+                let mut tried = 1;
+                loop {
+                    let done =
+                        from_rows(seconds, &[], &file.symbol, origin, run.store_root, month());
+                    if done.bars_committed > 0 || done.failures.is_empty() {
+                        return Some((done, Landed::Appended));
+                    }
+                    match done.door_kind {
+                        // A MONTH ANOTHER PROCESS HOLDS FOR A MOMENT (D-4851,
+                        // F30, FM-066): asked again, bounded, at this call
+                        // site and never inside the store's door.
+                        Some(FailKind::MonthBusy) if tried < attempts => {
+                            tried += 1;
+                            let _counted = self
+                                .retries
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            std::thread::sleep(apart);
+                        }
+                        // A MONTH THE WRITER DOOR NEVER APPENDS TO, WHOSE
+                        // RAW FORM WOULD APPEND THE FILE (SC-4 D-5904,
+                        // D-6247; IA-16 repair 2, D-7131): the back-fill
+                        // door files it as the month's next successor
+                        // generation, with or without a repair reason. A
+                        // sealed month's late day is never a hole.
+                        Some(kind) if kind.files_as_successor() => return None,
+                        // ONLY A RUN THAT CARRIES A REPAIR REASON hands a
+                        // month the append-only store refused to the
+                        // back-fill door (D-4889, critic X-1): without one
+                        // the refusal is the file's, a named hole.
+                        // A month still busy past the retry is judged by its
+                        // shape there too: one that lacks the whole day is
+                        // repaired (a reader keeps the generation it opened).
+                        Some(kind)
+                            if (kind.repairable() || kind == FailKind::MonthBusy)
+                                && self.repair_reason.is_some() =>
+                        {
+                            return None;
+                        }
+                        _ => return Some((done, Landed::Appended)),
+                    }
+                }
             }
             Door::BackFill => {
-                let reason = format!(
+                // The operator's text first, the import's own sentence after
+                // it (D-4889): the repair journal says who asked and why. A
+                // sealed month's successor is filed with no repair reason
+                // (D-7131): the import's sentence alone, after the door's
+                // own `sealed-month successor` head.
+                let own = format!(
                     "gdfl-import {} {} {} run:{}: a day the month lacks where no append can land it",
                     run.kind.as_str(),
                     self.day,
                     file.name,
                     self.id
                 );
+                let reason = match self.repair_reason {
+                    Some(asked) => format!("{asked} | {own}"),
+                    None => own,
+                };
                 // OUTSIDE THE DAY'S BATCH, whichever thread this is: the
                 // repair's flushes are its own (D-3350), and so are those of
                 // an append the door takes this second time.
@@ -837,6 +1067,20 @@ pub(super) struct DayFiler<'a> {
     /// day then closes `incomplete stage=run reason=stopped` when its `begin`
     /// was written, and writes no line when not.
     pub(super) stopped: bool,
+    /// The store said the disk is full on a file of the day (D-4851,
+    /// FM-085): no further file of the day was taken, and the run ends
+    /// `disk_full` once the day is closed. The store's words.
+    pub(super) disk_full: Option<String>,
+    /// A loss probe found the store's root gone (D-4852, FM-086): the run
+    /// ends `store_lost` once the day is closed.
+    pub(super) store_lost: Option<String>,
+    /// The store refused a write for permission or a read-only volume
+    /// (FM-129): the run ends `store_not_writable` once the day is closed.
+    pub(super) not_writable: Option<String>,
+    /// The held-back set met [`super::HELD_BACK_CAP`] (RA-209): the run ends
+    /// `held_back_cap` once the day is closed, naming the first pair it
+    /// could not hold and the count.
+    pub(super) held_back_cap: Option<(String, usize)>,
 }
 
 impl<'a> DayFiler<'a> {
@@ -879,6 +1123,10 @@ impl<'a> DayFiler<'a> {
             confirmed: 0,
             ask: Ask::All,
             stopped: false,
+            disk_full: None,
+            store_lost: None,
+            not_writable: None,
+            held_back_cap: None,
         }
     }
 }
@@ -888,12 +1136,117 @@ impl DayFiler<'_> {
     /// the run's workers; folds each file into the day in `jobs` order and
     /// answers how each read went, in that order.
     ///
+    /// THE HELD-BACK CHECK COMES FIRST (IA-16; D-4851, IA-GR-18, round 5
+    /// SF-11): a job whose instrument-month ([`super::HeldKey`], by `key_of`)
+    /// an earlier file of this run failed in is not read at all, so neither
+    /// its bars nor its closing-auction prints (`.auc`) reach the store: it
+    /// answers `held_back{after}`, an open cause. One hash probe a job, on
+    /// this thread, before any worker takes one.
+    ///
     /// With one worker, or one job, nothing is started: the jobs run on this
     /// thread, as before WP-16. A run that cannot start a single worker
     /// thread says so at `warn` and runs the day here too, never silently.
     pub(super) fn file_all<J: Sync>(
         &mut self,
         jobs: &[J],
+        key_of: &dyn Fn(&J) -> Option<super::HeldKey>,
+        read: &(dyn Fn(&J) -> ReadJob + Sync),
+    ) -> Vec<JobRead> {
+        let keys: Vec<Option<super::HeldKey>> = jobs.iter().map(key_of).collect();
+        let after: Vec<Option<Day>> = {
+            let set = self.ctx.held_back.borrow();
+            keys.iter()
+                .map(|key| key.as_ref().and_then(|key| set.get(key).copied()))
+                .collect()
+        };
+        let todo: Vec<&J> = jobs
+            .iter()
+            .zip(&after)
+            .filter_map(|(job, held)| held.is_none().then_some(job))
+            .collect();
+        let mut answered = self.file_jobs(&todo, read).into_iter();
+        let mut out = Vec::with_capacity(jobs.len());
+        for (key, held) in keys.into_iter().zip(after) {
+            let one = match held {
+                Some(failed_on) => {
+                    self.report.files_held_back += 1;
+                    JobRead::Refused(Self::held_back(key.as_ref(), failed_on))
+                }
+                // A stop left the rest of the day untaken: the answers are a
+                // prefix of `jobs`, as before the check.
+                None => match answered.next() {
+                    Some(one) => one,
+                    None => break,
+                },
+            };
+            // A READER'S OR A SOURCE'S REFUSAL THAT KEEPS THE DAY OPEN holds
+            // the month back too (a CRC or length fault in the copy, an I/O
+            // error): a filed file's own is held back as it is folded.
+            if let (JobRead::Refused(refused), Some(key)) = (&one, key)
+                && holds_back(refused.cause)
+            {
+                self.hold_back(key);
+            }
+            out.push(one);
+        }
+        out
+    }
+
+    /// The refusal of a job held back since `failed_on` (D-4851): named by
+    /// its instrument-month, an open cause; its day and its event are given
+    /// where every refusal a source hands on gets them.
+    fn held_back(key: Option<&super::HeldKey>, failed_on: Day) -> Refused {
+        let month = key.map_or_else(|| "-".to_owned(), held_key_text);
+        let refusal = ImportRefusal::HeldBack {
+            month: month.clone(),
+            after: failed_on,
+        };
+        let cause = super::import_cause(&refusal);
+        // A READER'S REFUSAL IS NAMED ONCE: the day's own `take_read` gives it
+        // its day and its event, as for every refusal a source hands on, so it
+        // is built here as the readers build theirs, never already dated (a
+        // second `note_failure` named the day twice and logged it twice).
+        Refused::at(cause, super::failure(&month, refusal.to_string()))
+    }
+
+    /// Adds `key` to the run's held-back set as failing on this day, once;
+    /// at [`super::HELD_BACK_CAP`] the pair is not added and the run ends
+    /// `held_back_cap` after this day (RA-209), never silently.
+    fn hold_back(&mut self, key: super::HeldKey) {
+        let mut set = self.ctx.held_back.borrow_mut();
+        if set.contains_key(&key) {
+            return;
+        }
+        if set.len() >= super::HELD_BACK_CAP {
+            if self.held_back_cap.is_none() {
+                self.held_back_cap = Some((held_key_text(&key), set.len().saturating_add(1)));
+            }
+            return;
+        }
+        let text = held_key_text(&key);
+        let day_text = self.day.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                TARGET,
+                "an instrument-month is held back for the rest of the run: a file of it failed",
+            )
+            .with("kind", self.ctx.run.kind.as_str())
+            .with("day", day_text.as_str())
+            .with("month", text.as_str())
+            .with("code", "held_back"),
+        );
+        let _first = set.insert(key, self.day);
+    }
+
+    /// [`DayFiler::file_all`]'s jobs that were not held back, filed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the workers' one shared loop: the run's end inside a day (IA-16) is one \
+                  flag every worker reads before it takes a job, so it cannot move out"
+    )]
+    fn file_jobs<J: Sync>(
+        &mut self,
+        jobs: &[&J],
         read: &(dyn Fn(&J) -> ReadJob + Sync),
     ) -> Vec<JobRead> {
         let session = self.ledger.as_ref().map(|ledger| *ledger.session());
@@ -908,6 +1261,42 @@ impl DayFiler<'_> {
             source: self.source.as_ref(),
             confirm: self.batch.as_ref().filter(|_| self.confirm),
             id: self.ctx.id,
+            repair_reason: self.ctx.options.repair_reason,
+            retries: std::sync::atomic::AtomicUsize::new(0),
+            store_id: self.ctx.store_id.get(),
+        };
+        // THE RUN'S END INSIDE A DAY (D-4851, D-4852): once a file met a full
+        // disk or a lost store, no further file of the day is taken; each is
+        // named at stage `run`, so the day closes `incomplete` with that
+        // reason and the run ends once it is closed.
+        let ended = std::sync::atomic::AtomicU8::new(0);
+        let (kind, day) = (self.ctx.run.kind, self.day);
+        let take = |job: &J, file: &dyn Fn(&Handed) -> (Filed, bool)| -> JobDone {
+            match ended.load(std::sync::atomic::Ordering::Acquire) {
+                0 => {}
+                code => return JobDone::Refused(not_taken(kind, day, code)),
+            }
+            match read(job) {
+                Ok((handed, contract)) => match file(&handed) {
+                    (_, true) => JobDone::BackFill(Box::new(handed), contract),
+                    (filed, false) => {
+                        let code = if filed.disk_full.is_some() {
+                            1
+                        } else if filed.store_lost.is_some() {
+                            2
+                        } else if filed.not_writable.is_some() {
+                            3
+                        } else {
+                            0
+                        };
+                        if code != 0 {
+                            ended.store(code, std::sync::atomic::Ordering::Release);
+                        }
+                        JobDone::Filed(Box::new(filed), contract)
+                    }
+                },
+                Err(refused) => JobDone::Refused(refused),
+            }
         };
         let mut done: Option<Vec<JobDone>> = None;
         if self.workers > 1 && jobs.len() > 1 {
@@ -920,15 +1309,9 @@ impl DayFiler<'_> {
                 &mut || ctx.append(&format!("begin {key}")),
                 &|job| {
                     let _in_the_day = batch.map(store::file::DurableBatch::enter);
-                    match read(job) {
-                        Ok((handed, contract)) => {
-                            match filing.file(&handed, &|| gate.line(), Door::Append) {
-                                (_, true) => JobDone::BackFill(Box::new(handed), contract),
-                                (filed, false) => JobDone::Filed(Box::new(filed), contract),
-                            }
-                        }
-                        Err(refused) => JobDone::Refused(refused),
-                    }
+                    take(job, &|handed| {
+                        filing.file(handed, &|| gate.line(), Door::Append)
+                    })
                 },
                 stop,
             );
@@ -964,13 +1347,7 @@ impl DayFiler<'_> {
             let all = jobs
                 .iter()
                 .take_while(|_| !stop.is_some_and(crate::gdfl_run::stop::StopControl::requested))
-                .map(|job| match read(job) {
-                    Ok((handed, contract)) => match filing.file(&handed, &begin, Door::Append) {
-                        (_, true) => JobDone::BackFill(Box::new(handed), contract),
-                        (filed, false) => JobDone::Filed(Box::new(filed), contract),
-                    },
-                    Err(refused) => JobDone::Refused(refused),
-                })
+                .map(|job| take(job, &|handed| filing.file(handed, &begin, Door::Append)))
                 .collect();
             self.begin = line.get();
             all
@@ -981,6 +1358,7 @@ impl DayFiler<'_> {
             self.stopped = true;
         }
         let done = back_fill(&filing, self.begin, done);
+        self.report.month_busy_retries += filing.retries.load(std::sync::atomic::Ordering::Relaxed);
         done.into_iter()
             .map(|one| match one {
                 Ok((filed, contract)) => {
@@ -1022,6 +1400,23 @@ impl DayFiler<'_> {
         }
         self.confirmed += usize::from(filed.confirmed);
         self.held.extend(filed.held);
+        // A FILED FILE THAT FAILED holds its instrument-month back for the
+        // rest of the run (D-4851), and a full disk or a lost store ends the
+        // run once the day is closed (D-4852).
+        if filed.holds_back()
+            && let Some(key) = filed.held_key.clone()
+        {
+            self.hold_back(key);
+        }
+        if self.disk_full.is_none() {
+            self.disk_full.clone_from(&filed.disk_full);
+        }
+        if self.store_lost.is_none() {
+            self.store_lost.clone_from(&filed.store_lost);
+        }
+        if self.not_writable.is_none() {
+            self.not_writable.clone_from(&filed.not_writable);
+        }
         self.failures.extend(filed.failures);
     }
 }
@@ -1088,6 +1483,22 @@ pub(super) fn stop_at_durability(
         "the day's writes could not be made durable, so nothing of its ledger, census or \
          closing line was written and the day stays open: {why}"
     );
+    // THE BARRIER'S REFUSAL IS A REFUSED STORE WRITE, AND IS LOSS-PROBED
+    // (IA-16 repair 1; FM-086, D-4852, critic IA-16-5 / D-4901): a root that
+    // went away or came back as another directory leaves the barrier
+    // syncing directories that are not there, and the run then ends
+    // `store_lost`, naming the drive, never `durability`.
+    if let Some(gone) = store_root_lost(ctx.run.store_root, ctx.store_id.get()) {
+        report
+            .failures
+            .extend(failures.into_iter().map(|one| one.failure));
+        return ImportRefusal::StoreLost {
+            kind,
+            day,
+            why: format!("{words}; {gone}"),
+            done: Box::new(report),
+        };
+    }
     let day_text = day.to_string();
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::error(TARGET, "day not made durable; run stopped")
@@ -1108,5 +1519,135 @@ pub(super) fn stop_at_durability(
         day,
         why: words,
         done: Box::new(report),
+    }
+}
+
+/// The words an instrument-month of the held-back set is named by:
+/// `<symbol>[ <contract>] <yyyy-mm>`.
+pub(super) fn held_key_text((symbol, contract, month): &super::HeldKey) -> String {
+    match contract {
+        Some(contract) => format!("{symbol} {contract:?} {month}"),
+        None => format!("{symbol} {month}"),
+    }
+}
+
+/// A file of a day the run ends at, not taken (D-4851, D-4852): `code` 1 is
+/// a full disk, 2 a lost store, 3 a store not writable. At stage `run`, so the day closes
+/// `incomplete` with that reason, never `done`.
+fn not_taken(kind: ImportKind, day: Day, code: u8) -> Refused {
+    let reason = match code {
+        1 => "disk_full",
+        2 => "store_lost",
+        _ => "store_not_writable",
+    };
+    let cause = super::Cause::open(super::Stage::Run, reason);
+    let why = format!(
+        "not taken: an earlier file of the day met {reason}, so the run ends at this day and no \
+         further file is written; a resume reads the day again"
+    );
+    Refused::at(cause, super::note_failure(kind, day, "file", &why, cause))
+}
+
+/// THE STORE FAULTS A TEST ASKS THE APPEND DOOR TO ANSWER (IA-16, FM-085,
+/// FM-086): a full disk and a lost drive cannot be made on demand under a
+/// test's store, so a test names one file of one store root and the kind
+/// the door answers it with, and whether the store's root goes away first
+/// (renamed aside, the way an unplugged volume leaves its mount point).
+/// Everything after the door (the kind's failure, the hold-back, the
+/// day's close, the run's end, the loss probe) is the real path.
+#[cfg(test)]
+pub(super) mod inject {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use crate::ingest::{FailKind, Failure, Ingested};
+
+    /// One planted answer: the store root, the file name, the kind, and
+    /// whether the root is renamed to `<root>.gone` before it is answered
+    /// (`1`), and an empty directory then made at its path (`2`, RA-284: a
+    /// volume that came back, or a folder left at its mount point).
+    type Planted = (PathBuf, String, FailKind, u8);
+
+    static PLANTED: Mutex<Vec<Planted>> = Mutex::new(Vec::new());
+
+    /// Plants `kind` for the next append of `file` under `root`.
+    pub(in crate::gdfl_import) fn plant(root: &Path, file: &str, kind: FailKind, lose_root: bool) {
+        PLANTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                root.to_path_buf(),
+                file.to_owned(),
+                kind,
+                u8::from(lose_root),
+            ));
+    }
+
+    /// Plants `kind` for the next append of `file` under `root`, the root
+    /// renamed aside and an empty directory made at its path (RA-284).
+    pub(in crate::gdfl_import) fn plant_swapped(root: &Path, file: &str, kind: FailKind) {
+        PLANTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), file.to_owned(), kind, 2));
+    }
+
+    /// The roots swapped once a named file's bars have LANDED (IA-16 repair
+    /// 1): the store's root and the file's name.
+    static AFTER: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
+
+    /// Swaps `root` for an empty directory once `file`'s bars have landed
+    /// under it, with no refused write to probe: the volume unplugged and
+    /// mounted back between a day's last file and its durability barrier.
+    pub(in crate::gdfl_import) fn plant_swap_after(root: &Path, file: &str) {
+        AFTER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), file.to_owned()));
+    }
+
+    /// Makes the swap planted for `file` under `root`, once.
+    pub(super) fn after_landed(root: &Path, file: &str) {
+        let mut after = AFTER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(at) = after.iter().position(|(r, name)| r == root && name == file) else {
+            return;
+        };
+        let _taken = after.remove(at);
+        drop(after);
+        let mut gone = root.as_os_str().to_owned();
+        gone.push(".gone");
+        if std::fs::rename(root, &gone).is_ok() {
+            let _made = std::fs::create_dir(root);
+        }
+    }
+
+    /// The planted answer for `file` under `root`, taken once.
+    pub(super) fn answer(root: &Path, file: &super::TickFile) -> Option<Ingested> {
+        let mut planted = PLANTED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = planted
+            .iter()
+            .position(|(r, name, _, _)| r == root && *name == file.name)?;
+        let (_, _, kind, lose_root) = planted.remove(at);
+        drop(planted);
+        if lose_root > 0 {
+            let mut gone = root.as_os_str().to_owned();
+            gone.push(".gone");
+            std::fs::rename(root, &gone).ok()?;
+            if lose_root == 2 {
+                std::fs::create_dir(root).ok()?;
+            }
+        }
+        Some(Ingested {
+            failures: vec![Failure::new(
+                file.symbol.as_str(),
+                format!("{}: planted by the test", kind.code()),
+            )],
+            door_kind: Some(kind),
+            ..Ingested::default()
+        })
     }
 }

@@ -941,6 +941,7 @@ dependencies = [
  "greeks",
  "hmac",
  "reqwest",
+ "rustix",
  "rustls-graviola",
  "ruzstd",
  "serde_json",
