@@ -155,7 +155,9 @@ pub(super) fn drop_is_linear() {
                 file: FileKind::Bars,
             })
             .unwrap_or_else(|e| refuse(&format!("{e}")));
-            let (first, _) = month.ist_bounds_micros();
+            // 09:15 IST on the 1st: on every rung's grid, the hour's included
+            // (it is aligned to the open).
+            let first = month.ist_bounds_micros().0 + 33_300_000_000;
             let step = i64::from(rung.secs()) * 1_000_000;
             let rows: Vec<Bar> = (0..bars)
                 .map(|i| Bar {
