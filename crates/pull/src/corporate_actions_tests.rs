@@ -683,7 +683,10 @@ fn malformed_duplicate_overlapping_and_oversized_tables_are_refused_by_name() {
             nse("MANYCO", at, Kind::Dividend, "1")
         })
         .collect();
-    assert!(refused(&actions_draft(Standing::Sourced, &many)).contains("more than 64 rows"));
+    assert!(
+        refused(&actions_draft(Standing::Sourced, &many))
+            .contains(&format!("more than {MAX_ACTIONS_PER_SYMBOL} rows"))
+    );
     // Basis runs: overlapping, a ratio outside its interval, a sourced file.
     let runs = fold_runs("SPLITCO", split_days()).unwrap();
     let mut overlap = runs_draft(&runs);
@@ -1002,4 +1005,130 @@ fn runs_whose_day_tables_would_pass_the_bound_are_refused_by_name() {
     .to_string();
     assert!(two.contains("share-days"), "{two}");
     assert!(two.contains("\"BCO\""), "{two}");
+}
+
+#[test]
+fn a_step_the_data_cannot_tell_from_none_makes_no_row_and_is_asked_none() {
+    // Two runs whose bands do not separate: the step's factor interval holds
+    // one. It ends a run and makes no ledger row; the checker asks none.
+    let band = |symbol: &str, first: Day, last: Day, low: &str, high: &str, end| Run {
+        symbol: symbol.to_owned(),
+        first,
+        last,
+        ratio: Ratio::simplest_between(r(low), r(high)).unwrap(),
+        low: r(low),
+        high: r(high),
+        days: 5,
+        end,
+    };
+    let runs = [
+        // NOISECO: [0.998, 1.002] then [0.999, 1.003]: factor in [0.997, 1.005].
+        band(
+            "NOISECO",
+            day(2022, 1, 3),
+            day(2022, 1, 7),
+            "998/1000",
+            "1002/1000",
+            RunEnd::Step,
+        ),
+        band(
+            "NOISECO",
+            day(2022, 1, 10),
+            day(2022, 1, 14),
+            "999/1000",
+            "1003/1000",
+            RunEnd::Open,
+        ),
+        // REALCO: 1/2 then 1: factor in [1.99, 2.01], proven.
+        band(
+            "REALCO",
+            day(2022, 1, 3),
+            day(2022, 1, 7),
+            "4995/10000",
+            "5005/10000",
+            RunEnd::Step,
+        ),
+        band(
+            "REALCO",
+            day(2022, 1, 10),
+            day(2022, 1, 14),
+            "9995/10000",
+            "10005/10000",
+            RunEnd::Open,
+        ),
+    ];
+    let store = scratch("cor-noise");
+    let landed = write(&store, &runs_draft(&runs)).unwrap();
+    let table = load_runs(&store).table().unwrap().clone();
+    let noise = steps_of(table.of("NOISECO"));
+    assert_eq!(noise.len(), 1);
+    assert!(!noise[0].proven(), "{:?}", noise[0]);
+    let real = steps_of(table.of("REALCO"));
+    assert!(real[0].proven(), "{:?}", real[0]);
+    // The ledger holds REALCO's row alone.
+    let rows = measured_rows(&table, landed.generation);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].symbol.as_str(), rows[0].ratio), ("REALCO", r("2")));
+    // Against an empty table only the proven step is a finding.
+    write(&store, &actions_draft(Standing::Measured, &[])).unwrap();
+    let empty = load_actions(&store).table().unwrap().clone();
+    let found = check(&table, &empty);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(matches!(&found[0], Finding::NoRow(step) if step.symbol == "REALCO"));
+}
+
+#[test]
+fn an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured() {
+    // One share with 1, 64 and 4,096 rows (one a day from 2010-01-01; the
+    // real measured ledger reached 121 for one share): every lookup answers
+    // the right rows and its median holds flat.
+    let mut medians = Vec::new();
+    for count in [1_u32, 64, 4_096] {
+        let base = day(2010, 1, 1).days_from_epoch();
+        let rows: Vec<Action> = (0..count)
+            .map(|i| {
+                nse(
+                    "DEEPCO",
+                    Day::from_days(base + i).unwrap(),
+                    Kind::Dividend,
+                    "1",
+                )
+            })
+            .collect();
+        let store = scratch("cor-deep");
+        write(&store, &actions_draft(Standing::Sourced, &rows)).unwrap();
+        let table = load_actions(&store).table().unwrap().clone();
+        let last = Day::from_days(base + count - 1).unwrap();
+        // The first row, the last, the day after the last, the day before the first.
+        assert_eq!(table.labels("DEEPCO", None, day(2010, 1, 1)).len(), 1);
+        assert_eq!(table.labels("DEEPCO", None, last).len(), 1);
+        assert_eq!(
+            table.labels("DEEPCO", None, Day::from_days(base + count).unwrap()),
+            []
+        );
+        assert_eq!(table.labels("DEEPCO", None, day(2009, 12, 31)), []);
+        // A window over every row returns every row.
+        assert_eq!(
+            table.labels("DEEPCO", Some(day(2009, 12, 31)), last).len(),
+            usize::try_from(count).unwrap()
+        );
+        assert_eq!(
+            table.excuse("DEEPCO", None, last).map(|a| a.ex_date),
+            Some(last)
+        );
+        let mid = Day::from_days(base + count / 2).unwrap();
+        let (p50, p99, max) = time(2_000, || {
+            std::hint::black_box(
+                table
+                    .labels(std::hint::black_box("DEEPCO"), None, mid)
+                    .len(),
+            );
+        });
+        println!("action lookup at {count} rows: p50 {p50} ns, p99 {p99} ns, max {max} ns, n 2000");
+        medians.push(p50);
+    }
+    assert!(
+        medians[2] <= medians[0].max(200) * 4,
+        "an action lookup's median at 1, 64 and 4,096 rows: {medians:?} ns"
+    );
 }

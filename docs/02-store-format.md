@@ -4907,7 +4907,10 @@ circular or basis-run step the row rests on. An `nse` row needs a file whose
 status is `sourced` and must name its kind; a `measured` row is always
 `unclassed`. Rows ascend by symbol, then by `ex_date`, then by `kind` in
 the order listed above; a row out of that order is refused as `row` and two
-rows of one (symbol, ex-date, kind) as `duplicate`; at most 64 rows a share. An ex-date on a day with no session
+rows of one (symbol, ex-date, kind) as `duplicate`; at most 4,096 rows a
+share, and its day table (one `u16` per day from its first ex-date to its
+last) within the same 2^22 share-days in all. A measured row is written
+only for a PROVEN step, one whose factor interval excludes 1. An ex-date on a day with no session
 applies at the next session: a reader asks for `(previous session, session]`.
 
 ## F&O membership month files, version 1 (PIT-1; D-5163)

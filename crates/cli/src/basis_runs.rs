@@ -524,13 +524,21 @@ pub(crate) fn command_with(
     for (symbol, why) in &folded.refused {
         let _ = writeln!(out, "refused {symbol}: {why}");
     }
-    let mut steps = 0_usize;
+    let (mut steps, mut proven) = (0_usize, 0_usize);
     for runs in folded.runs.chunk_by(|a, b| a.symbol == b.symbol) {
         for step in corporate_actions::steps_of(runs) {
             steps += 1;
+            // PROVEN: the factor's interval excludes one, so the step makes a
+            // ledger row; otherwise it ends a run and makes none.
+            let word = if step.proven() {
+                proven += 1;
+                "step"
+            } else {
+                "step_within_noise"
+            };
             let _ = writeln!(
                 out,
-                "step {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]",
+                "{word} {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]",
                 step.symbol,
                 step.after,
                 step.ex_date,
@@ -542,7 +550,11 @@ pub(crate) fn command_with(
             );
         }
     }
-    let _ = writeln!(out, "steps {steps}");
+    let _ = writeln!(
+        out,
+        "steps {steps}, proven {proven} (a ledger row each), within_noise {}",
+        steps - proven
+    );
     let Some(fetched) = today else {
         let _ = writeln!(
             out,

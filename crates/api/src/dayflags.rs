@@ -647,8 +647,8 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
 /// other notes kept), and answers the table the rows came from: served with
 /// its receipt, or its refusal by name (absent, checksum, ...). A measured
 /// row LABELS: its note says it excuses nothing (R4-26, `CLAUDE.md` §3
-/// rule 1). O(days in the page): one hash and a walk of at most
-/// `MAX_ACTIONS_PER_SYMBOL` (64) rows a day, no search.
+/// rule 1). O(days in the page): one hash and two indexes into the share's
+/// day table a day, no search.
 fn corporate_action_notes(root: &Path, symbol: &str, days: &[Day], records: &mut [Value]) -> Value {
     let tables = super::basis_route::tables(root);
     let said = super::basis_route::slot_json(&tables.actions);

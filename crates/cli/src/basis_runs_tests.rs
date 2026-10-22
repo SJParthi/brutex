@@ -248,7 +248,10 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
     let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
     assert_eq!(code, OK, "{text}");
     // ONE STEP, factor 2, from the vendor ratio 1/2 to 1/1.
-    assert!(text.contains("steps 1\n"), "{text}");
+    assert!(
+        text.contains("steps 1, proven 1 (a ledger row each), within_noise 0\n"),
+        "{text}"
+    );
     assert!(
         text.contains("step SPLITCO (2025-03-05, 2025-03-06]: ratio 1/2 to 1/1, factor 2/1"),
         "{text}"

@@ -23,8 +23,8 @@
 //!
 //! The tables are kept per store root, keyed by one `stat` of each table's
 //! directory and one of the file served: a request costs those `stat`s,
-//! one hash of the symbol and one index into that share's day table (or a
-//! walk of at most 64 action rows), O(1). A new generation (a new name in the directory) or a
+//! one hash of the symbol and one or two indexes into that share's day
+//! table, O(1). A new generation (a new name in the directory) or a
 //! served file changed in place is read again, once, O(rows), and told as
 //! the loader's event. Without `day` the answer lists the share's runs and
 //! actions, at most `MAX_RUNS_PER_SYMBOL` and `MAX_ACTIONS_PER_SYMBOL`.

@@ -3744,8 +3744,8 @@ struct DayContext<'a> {
 /// `null` and the reason is named, never borrowed from a neighbour; a table
 /// that is absent or refused says so by name. The day's corporate actions
 /// ride beside it, each with what it may do (a measured row labels only).
-/// O(1): one hash and one index into the share's day table for the run, and
-/// a walk of at most `MAX_ACTIONS_PER_SYMBOL` (64) rows for the actions.
+/// O(1): one hash and one or two indexes into the share's day table on each
+/// table, no search.
 fn measured_run_json(context: &DayContext<'_>, day: Day) -> Value {
     let Some((tables, symbol)) = &context.measured else {
         return Value::Null;

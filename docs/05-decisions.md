@@ -78918,12 +78918,21 @@ unattended.
    rows ascend by symbol, then by ex-date and kind (actions) or first day
    (runs); a row out of that order is refused by name and the load sorts
    nothing. A run lookup is one hash and one index into the share's day
-   table (how many runs start on or before each day of its span), bounded
-   in all by `MAX_INDEXED_DAYS` (2^22 share-days); an action lookup walks at
-   most the share's 64 rows. `cli basis-runs` writes only with `--apply`
+   table (how many of its rows start on or before each day of its span),
+   bounded in all by `MAX_INDEXED_DAYS` (2^22 share-days), and so is an
+   action lookup: the measured ledger reached 121 rows for one share on real
+   data, so a walk would not be the bound; at most 4,096 rows a share. `cli basis-runs` writes only with `--apply`
    (the flag `gdfl-rekey` and `zerodha-gaps` already use) and is in the
    cli's `WRITERS`, so an unstamped run or a store whose bars folder is a
    link is refused before anything is written.
+8. **A measured row only for a proven step.** A step whose factor interval
+   (from the two runs' bands) still holds 1 ends a run but writes no ledger
+   row, and the checker asks none of it: the measurement cannot tell it from
+   no action. On DATA-1's full run (105 months) 101 of 208 shares carry a
+   proven step, the count D-3323 recorded. A few shares still carry many
+   proven steps on that run (UNIONBANK 121, BANKBARODA 101, VEDL 60); why
+   their ratio moves that often is NOT PROVED here, and every such row is
+   measured: it labels and never excuses.
 
 **Not done here.** The NSE file itself (an operator download, then a charter
 row); the refusal on `/health` and `/ingest` (L-R426-07); `restatement.rs`'s
