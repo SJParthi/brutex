@@ -276,6 +276,7 @@ fn diff_days(root: &Path) -> (Stamp, Stamp) {
         share(9_200_002, "ZQBETA", "ZQ BETA"),
         share(9_200_003, "ZQGAMMA", "ZQ GAMMA"),
         share(9_200_009, "ZQOMEGA", "ZQ OMEGA"),
+        share(9_200_010, "ZQKAPPA", "ZQ KAPPA"),
     ]);
     let second = dump(&[
         fut(9_100_001, "ZQIDX26MARFUT", "2026-03-26", 65),
@@ -286,11 +287,14 @@ fn diff_days(root: &Path) -> (Stamp, Stamp) {
         share(9_200_002, "ZQBETANEW", "ZQ BETA"),
         share(9_200_004, "ZQDELTA", "ZQ DELTA"),
         share(9_200_009, "ZQOMEGA", "ZQ OMEGA"),
+        share(9_200_010, "ZQKAPPA", "ZQ KAPPA"),
+        share(9_200_011, "ZQNEW", "ZQ NEW"),
     ]);
     let nse_a = nse_file(&[
         ("ZQALPHA", "INE0ZQ000011"),
         ("ZQBETA", "INE0ZQ000022"),
         ("ZQGAMMA", "INE0ZQ000033"),
+        ("ZQKAPPA", "INE0ZQ000044"),
     ]);
     let nse_b = nse_file(&[
         ("ZQALPHA", "INE0ZQ000012"),
@@ -323,7 +327,11 @@ fn expected_items() -> Vec<Item> {
         one(Change::LotSize, "NFO", 9_100_001, "ZQIDX26MARFUT", "75", "65"),
         one(Change::Expiry, "NFO", 9_100_002, "ZQIDX26APRFUT", "2026-04-30", "2026-04-29"),
         one(Change::Token, "NFO", 9_100_006, "ZQIDX26MAYFUT", "9100005", "9100006"),
-        one(Change::IsinUnknown, "NSE", 9_200_009, "ZQOMEGA", "", ""),
+        one(Change::Listing, "NSE", 9_200_011, "ZQNEW", "", "ZQNEW"),
+        // NAMED THE DAY EACH BECOMES UNKNOWN: KAPPA left the NSE file, NEW was
+        // never in it. OMEGA is unknown on both days: counted, not named again.
+        one(Change::IsinUnknown, "NSE", 9_200_010, "ZQKAPPA", "", ""),
+        one(Change::IsinUnknown, "NSE", 9_200_011, "ZQNEW", "", ""),
     ];
     items.sort_unstable();
     items
@@ -336,10 +344,11 @@ fn the_diff_of_two_days_lists_exactly_the_injected_changes() {
     let summary = diff_for(&root, b).unwrap().expect("a previous snapshot exists");
     assert_eq!(summary.previous, a);
     assert_eq!(summary.current, b);
-    assert_eq!(summary.counts, [1, 1, 2, 1, 1, 1, 1, 1]);
+    assert_eq!(summary.counts, [2, 1, 2, 1, 1, 1, 1, 2]);
+    assert_eq!(summary.isin_unknown_total, 3, "OMEGA, KAPPA and NEW have no ISIN on day two");
     assert_eq!(
         summary.counts_line(),
-        "listing=1 delisting=1 symbol=2 isin=1 lot_size=1 expiry=1 token=1 isin_unknown=1"
+        "listing=2 delisting=1 symbol=2 isin=1 lot_size=1 expiry=1 token=1 isin_unknown=2 isin_unknown_total=3"
     );
     let expected = expected_items();
     let named: Vec<Item> = expected.iter().filter(|one| one.change.named()).cloned().collect();
@@ -348,8 +357,9 @@ fn the_diff_of_two_days_lists_exactly_the_injected_changes() {
     let text = fs::read_to_string(root.join(diff_name(b))).unwrap();
     assert_eq!(text.len(), RECORD_LEN * (expected.len() + 1));
     assert!(text.lines().all(|line| line.len() == RECORD_LEN - 1));
-    let (previous, current, items) = parse_diff(&text).unwrap();
-    assert_eq!((previous.as_str(), current.as_str()), ("2026-03-02", "2026-03-03"));
+    let (head, items) = parse_diff(&text).unwrap();
+    assert_eq!((head.previous.as_str(), head.current.as_str()), ("2026-03-02", "2026-03-03"));
+    assert_eq!((head.records, head.isin_unknown_total), (expected.len(), 3));
     assert_eq!(items, expected);
     // READ BACK, NOT RECOMPUTED, on the next call; and never rewritten.
     let modified = fs::metadata(root.join(diff_name(b))).unwrap().modified().unwrap();
@@ -376,7 +386,7 @@ fn an_isin_change_between_masters_is_named() {
 }
 
 #[test]
-fn a_day_without_its_own_nse_file_names_every_share_isin_unknown_and_infers_nothing() {
+fn a_day_without_its_own_nse_file_counts_every_share_isin_unknown_and_infers_nothing() {
     let (a, b) = (day(2026, 3, 9), day(2026, 3, 10));
     let root = scratch("no-nse");
     let rows = [share(9_300_001, "ZQONE", "ZQ ONE"), share(9_300_002, "ZQTWO", "ZQ TWO")];
@@ -392,7 +402,9 @@ fn a_day_without_its_own_nse_file_names_every_share_isin_unknown_and_infers_noth
     .unwrap();
     snapshot(&root, Kind::Kite, b, URL, dump(&rows).as_bytes()).unwrap();
     let summary = diff_for(&root, stamp(b, 1)).unwrap().unwrap();
-    assert_eq!(summary.counts, [0, 0, 0, 0, 0, 0, 0, 2]);
+    // ONE NAMED (known on day one, unknown on day two), BOTH COUNTED.
+    assert_eq!(summary.counts, [0, 0, 0, 0, 0, 0, 0, 1]);
+    assert_eq!(summary.isin_unknown_total, 2);
     assert!(summary.named.is_empty());
 }
 
@@ -626,13 +638,13 @@ fn a_value_wider_than_its_field_writes_no_diff() {
         old: String::new(),
         new: String::new(),
     };
-    let why = render_diff(s.0, s.1, &[wide]).unwrap_err();
+    let why = render_diff(s.0, s.1, &[wide], 0).unwrap_err();
     assert!(why.contains("does not fit"), "{why}");
     let separator = Item {
         key: "ZQ|X".to_owned(),
         ..expected_items()[0].clone()
     };
-    assert!(render_diff(s.0, s.1, &[separator]).is_err());
+    assert!(render_diff(s.0, s.1, &[separator], 0).is_err());
 }
 
 #[test]
@@ -655,4 +667,85 @@ fn file_names_round_trip_and_strangers_are_ignored() {
     ] {
         assert_eq!(parse_name(stranger), None, "{stranger}");
     }
+}
+
+#[test]
+fn a_clock_that_names_no_day_writes_no_snapshot_and_says_so() {
+    let dir = scratch("clock");
+    let body = dump(&[fut(9_940_001, "ZQIDX26JUNFUT", "2026-06-30", 75)]);
+    let outcome = after_land(
+        &dir,
+        kite_source(),
+        &body,
+        &written(),
+        Err("the clock is before 1970".to_owned()),
+    )
+    .unwrap();
+    assert_eq!(outcome.day, None);
+    let why = outcome.wrote.clone().unwrap_err();
+    assert!(why.contains("no snapshot was written") && why.contains("1970"), "{why}");
+    assert!(outcome.json().contains(r#""day":null"#), "{}", outcome.json());
+    assert!(Catalog::read(&dir.join(SNAPSHOT_DIR)).unwrap().receipted(Kind::Kite).is_empty());
+}
+
+/// The measured cost of a real-size dump (docs/06-limits.md L-R428-01..03):
+/// one snapshot write, one parse, one diff, and `token_on` p50/p99/max over
+/// n=200 tokens between two snapshots. Read only: `BRUTEX_KITE_DUMP` names a
+/// COPY of a landed dump; every file this writes goes to a new scratch folder.
+#[test]
+#[ignore = "measures a real-size dump; run by hand with BRUTEX_KITE_DUMP set"]
+fn a_real_size_dump_is_measured() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    let Some(path) = std::env::var_os("BRUTEX_KITE_DUMP") else {
+        panic!("set BRUTEX_KITE_DUMP to a copy of a landed Kite dump");
+    };
+    let body = fs::read_to_string(&path).unwrap();
+    let root = scratch("real-size");
+    let (d1, d2, between) = (day(2026, 10, 15), day(2026, 10, 22), day(2026, 10, 18));
+    let started = Instant::now();
+    snapshot(&root, Kind::Kite, d1, URL, body.as_bytes()).unwrap();
+    let write_ms = started.elapsed().as_millis();
+    let changed = body.replacen(",75,FUT,", ",65,FUT,", 3);
+    snapshot(&root, Kind::Kite, d2, URL, changed.as_bytes()).unwrap();
+    let started = Instant::now();
+    let parsed = Snapshot::parse(stamp(d1, 1), &body).unwrap();
+    let parse_ms = started.elapsed().as_millis();
+    let started = Instant::now();
+    let summary = diff_for(&root, stamp(d2, 1)).unwrap().unwrap();
+    let diff_ms = started.elapsed().as_millis();
+    let book = Book::open(&root).unwrap();
+    let step = (parsed.len() / 200).max(1);
+    let tokens: Vec<(String, u64)> = parsed
+        .rows()
+        .step_by(step)
+        .take(200)
+        .map(|listed| (listed.exchange().to_owned(), listed.token()))
+        .collect();
+    let started = Instant::now();
+    let first = book.token_on(between, &tokens[0].0, tokens[0].1).word();
+    let cold_ms = started.elapsed().as_millis();
+    let mut ns: Vec<u128> = tokens
+        .iter()
+        .map(|(exchange, token)| {
+            let started = Instant::now();
+            black_box(book.token_on(black_box(between), exchange, *token));
+            started.elapsed().as_nanos()
+        })
+        .collect();
+    ns.sort_unstable();
+    let n = ns.len();
+    let compressed = fs::metadata(root.join(file_name(Kind::Kite, stamp(d1, 1)))).unwrap().len();
+    println!(
+        "real-size dump: rows={} body_bytes={} compressed_bytes={compressed} write_ms={write_ms} \
+         parse_ms={parse_ms} diff_ms={diff_ms} diff={} first_token_on={first} cold_ms={cold_ms} \
+         token_on n={n} p50_ns={} p99_ns={} max_ns={}",
+        parsed.len(),
+        body.len(),
+        summary.counts_line(),
+        ns[n / 2],
+        ns[n * 99 / 100],
+        ns[n - 1],
+    );
+    assert_eq!(summary.counts[4], 3, "the three injected lot changes");
 }

@@ -13894,6 +13894,24 @@ fn rolling_receipt(
     )
 }
 
+/// Why a futures-through-a-token feed sends nothing for `asked`: options, or
+/// a rung the route does not serve (R4-28, CON-12; D-6893).
+fn futures_refusal(
+    asked: &ingest::FnoRequest,
+    route: pull::vendor::ContinuousSpec,
+) -> Option<&'static str> {
+    if matches!(asked.series, ingest::Series::Options) {
+        return Some(
+            "this feed serves expired FUTURES day candles only, through a token; nothing \
+             was sent rather than futures being filed under an options request",
+        );
+    }
+    (asked.granularity != route.granularity).then_some(
+        "this feed serves expired futures as day candles only; minute candles of an \
+         expired future are UNVERIFIED (charter §4z), so nothing was sent",
+    )
+}
+
 /// `POST /pull/fno` on a feed that serves futures day candles through a token
 /// (R4-28, CON-12; D-6893): stored, never swept.
 ///
@@ -13910,23 +13928,8 @@ async fn fno_futures(
     route: pull::vendor::ContinuousSpec,
 ) -> (axum::http::StatusCode, String) {
     let unavailable = axum::http::StatusCode::SERVICE_UNAVAILABLE;
-    if matches!(asked.series, ingest::Series::Options) {
-        return page.say(
-            facts,
-            unavailable,
-            audit::Outcome::NotStarted,
-            "this feed serves expired FUTURES day candles only, through a token; nothing \
-             was sent rather than futures being filed under an options request",
-        );
-    }
-    if asked.granularity != route.granularity {
-        return page.say(
-            facts,
-            unavailable,
-            audit::Outcome::NotStarted,
-            "this feed serves expired futures as day candles only; minute candles of an \
-             expired future are UNVERIFIED (charter §4z), so nothing was sent",
-        );
+    if let Some(why) = futures_refusal(asked, route) {
+        return page.say(facts, unavailable, audit::Outcome::NotStarted, why);
     }
     let book = match masters_dir().and_then(|dir| {
         pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))

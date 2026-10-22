@@ -1010,7 +1010,10 @@ impl<'a> Listed<'a> {
     /// Whether it is an NSE cash share, the rows an ISIN applies to.
     #[must_use]
     pub fn is_nse_share(&self) -> bool {
-        self.exchange() == "NSE" && self.instrument_type() == "EQ"
+        // THE CASH SEGMENT, NOT THE INDEX ROWS: the dump files NSE's indices
+        // under the same exchange and type with segment `INDICES` (136 rows
+        // in the dump landed 6 Oct 2026), and an index has no ISIN.
+        self.exchange() == "NSE" && self.instrument_type() == "EQ" && self.segment() == "NSE"
     }
 }
 
@@ -1357,7 +1360,9 @@ pub enum Change {
     /// The same key under a new token.
     Token,
     /// An NSE share the same-date NSE file does not list: its ISIN is
-    /// unknown that day and is never inferred.
+    /// unknown that day and is never inferred. Named the day it becomes
+    /// unknown (known on the old date) or appears (a new key); the day's
+    /// total is [`DiffSummary::isin_unknown_total`].
     IsinUnknown,
 }
 
@@ -1395,7 +1400,7 @@ impl Change {
 
     /// Whether every change of this kind is named in the refresh outcome and
     /// on `/logs` (listings, delistings and unknown ISINs are counted there
-    /// and named only in the `.diff`).
+    /// and named in the `.diff`).
     #[must_use]
     pub const fn named(self) -> bool {
         matches!(
@@ -1510,11 +1515,18 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
                     listed.token().to_string(),
                 ));
             }
-            if listed.is_nse_share()
-                && let (Some(was), Some(now)) = (isin_of(old_isins, before), isin_of(new_isins, listed))
-                && was != now
-            {
-                out.push(item(Change::Isin, listed, was, now));
+            if listed.is_nse_share() {
+                match (isin_of(old_isins, before), isin_of(new_isins, listed)) {
+                    (Some(was), Some(now)) if was != now => {
+                        out.push(item(Change::Isin, listed, was, now));
+                    }
+                    // KNOWN ON THE OLD DATE, UNKNOWN ON THE NEW: named the day
+                    // it happens; never carried over from the old date.
+                    (Some(_), None) => {
+                        out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
+                    }
+                    _ => {}
+                }
             }
             continue;
         }
@@ -1555,6 +1567,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
                     listed.lot_size().to_string(),
                 ));
             }
+            unknown_if_new(&mut out, listed, new_isins);
             continue;
         }
         // THE SAME ISIN UNDER A NEW SYMBOL, from each date's own NSE file.
@@ -1576,19 +1589,43 @@ pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins
             continue;
         }
         out.push(item(Change::Listing, listed, String::new(), listed.tradingsymbol().to_owned()));
+        unknown_if_new(&mut out, listed, new_isins);
     }
     for (at, before) in old_rows.iter().enumerate() {
         if !matched.get(at).copied().unwrap_or(true) && !new_keys.contains(&key(before)) {
             out.push(item(Change::Delisting, before, before.tradingsymbol().to_owned(), String::new()));
         }
     }
-    for listed in &new_rows {
-        if listed.is_nse_share() && isin_of(new_isins, listed).is_none() {
-            out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
-        }
-    }
     out.sort_unstable();
     out
+}
+
+/// A share appearing under a new key with no same-date ISIN is named
+/// `isin_unknown` the day it appears.
+fn unknown_if_new(out: &mut Vec<Item>, listed: &Listed<'_>, new_isins: Option<&Isins>) {
+    if listed.is_nse_share()
+        && new_isins
+            .and_then(|isins| isins.of(listed.tradingsymbol()))
+            .is_none()
+    {
+        out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
+    }
+}
+
+/// How many NSE shares of `new` the NSE file of its own date does not list:
+/// each has an unknown ISIN that day, whether or not the diff names it.
+#[must_use]
+pub fn unknown_isins(new: &Snapshot, new_isins: Option<&Isins>) -> u64 {
+    let count = new
+        .rows()
+        .filter(|listed| {
+            listed.is_nse_share()
+                && new_isins
+                    .and_then(|isins| isins.of(listed.tradingsymbol()))
+                    .is_none()
+        })
+        .count();
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 /// Field widths of one record: kind, exchange, token, key, old, new.
@@ -1614,9 +1651,13 @@ fn fixed(fields: [&str; 6]) -> Result<String, String> {
     Ok(line)
 }
 
-/// The header line: the format, the two snapshots and the record count.
-fn header_line(previous: Stamp, current: Stamp, records: usize) -> Result<String, String> {
-    let line = format!("{DIFF_FORMAT}|previous={previous}|current={current}|records={records}|");
+/// The header line: the format, the two snapshots, the record count and how
+/// many NSE shares of the current snapshot have no same-date ISIN.
+fn header_line(head: &DiffHead) -> Result<String, String> {
+    let line = format!(
+        "{DIFF_FORMAT}|previous={}|current={}|records={}|isin_unknown_total={}|",
+        head.previous, head.current, head.records, head.isin_unknown_total
+    );
     if line.len() >= RECORD_LEN {
         return Err("the diff header is wider than the record length".to_owned());
     }
@@ -1626,14 +1667,38 @@ fn header_line(previous: Stamp, current: Stamp, records: usize) -> Result<String
     Ok(line)
 }
 
+/// A `.diff` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffHead {
+    /// The snapshot compared against, as its stamp prints.
+    pub previous: String,
+    /// The snapshot compared.
+    pub current: String,
+    /// How many records follow.
+    pub records: usize,
+    /// How many NSE shares of the current snapshot the NSE file of its own
+    /// date does not list (named only the day each became unknown).
+    pub isin_unknown_total: u64,
+}
+
 /// The `.diff` bytes for `items`.
 ///
 /// # Errors
 ///
 /// A value wider than its field, or holding a separator: named, and nothing
 /// is written.
-pub fn render_diff(previous: Stamp, current: Stamp, items: &[Item]) -> Result<String, String> {
-    let mut out = header_line(previous, current, items.len())?;
+pub fn render_diff(
+    previous: Stamp,
+    current: Stamp,
+    items: &[Item],
+    isin_unknown_total: u64,
+) -> Result<String, String> {
+    let mut out = header_line(&DiffHead {
+        previous: previous.to_string(),
+        current: current.to_string(),
+        records: items.len(),
+        isin_unknown_total,
+    })?;
     for one in items {
         let token = one.token.to_string();
         out.push_str(&fixed([
@@ -1648,12 +1713,19 @@ pub fn render_diff(previous: Stamp, current: Stamp, items: &[Item]) -> Result<St
     Ok(out)
 }
 
-/// A `.diff` read back: its two snapshots and its records.
+/// The value of one `name=value` header field.
+fn header_field<'a>(part: Option<&'a str>, name: &str) -> Result<&'a str, String> {
+    part.and_then(|part| part.strip_prefix(name))
+        .and_then(|rest| rest.strip_prefix('='))
+        .ok_or_else(|| format!("the diff header carries no {name}"))
+}
+
+/// A `.diff` read back: its header and its records.
 ///
 /// # Errors
 ///
 /// A file that is not whole fixed-length lines of this format, named.
-pub fn parse_diff(text: &str) -> Result<(String, String, Vec<Item>), String> {
+pub fn parse_diff(text: &str) -> Result<(DiffHead, Vec<Item>), String> {
     if !text.len().is_multiple_of(RECORD_LEN) {
         return Err(format!("a diff is whole {RECORD_LEN}-byte lines; this one is torn"));
     }
@@ -1664,18 +1736,20 @@ pub fn parse_diff(text: &str) -> Result<(String, String, Vec<Item>), String> {
     });
     let header = lines.next().ok_or_else(|| "an empty diff".to_owned())??;
     let mut parts = header.split('|');
-    let (Some(DIFF_FORMAT), Some(previous), Some(current), Some(records)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    if parts.next() != Some(DIFF_FORMAT) {
         return Err(format!("not a {DIFF_FORMAT} header"));
+    }
+    let head = DiffHead {
+        previous: header_field(parts.next(), "previous")?.to_owned(),
+        current: header_field(parts.next(), "current")?.to_owned(),
+        records: header_field(parts.next(), "records")?
+            .parse()
+            .map_err(|_| "the diff header's record count is not a number".to_owned())?,
+        isin_unknown_total: header_field(parts.next(), "isin_unknown_total")?
+            .parse()
+            .map_err(|_| "the diff header's unknown-ISIN total is not a number".to_owned())?,
     };
-    let previous = previous.strip_prefix("previous=").unwrap_or_default().to_owned();
-    let current = current.strip_prefix("current=").unwrap_or_default().to_owned();
-    let records: usize = records
-        .strip_prefix("records=")
-        .and_then(|n| n.parse().ok())
-        .ok_or_else(|| "the diff header carries no record count".to_owned())?;
-    let mut items = Vec::with_capacity(records);
+    let mut items = Vec::with_capacity(head.records);
     for line in lines {
         let line = line?;
         let fields: Vec<&str> = line.split('|').map(str::trim_end).collect();
@@ -1698,13 +1772,14 @@ pub fn parse_diff(text: &str) -> Result<(String, String, Vec<Item>), String> {
             new: (*new).to_owned(),
         });
     }
-    if items.len() != records {
+    if items.len() != head.records {
         return Err(format!(
-            "the header counts {records} records and the file holds {}",
+            "the header counts {} records and the file holds {}",
+            head.records,
             items.len()
         ));
     }
-    Ok((previous, current, items))
+    Ok((head, items))
 }
 
 /// One diff, as the refresh outcome reports it.
@@ -1718,12 +1793,14 @@ pub struct DiffSummary {
     pub file: String,
     /// How many records of each kind, in [`Change::ALL`] order.
     pub counts: [u64; 8],
+    /// How many NSE shares of `current` have no same-date ISIN.
+    pub isin_unknown_total: u64,
     /// Every record of a [`Change::named`] kind.
     pub named: Vec<Item>,
 }
 
 impl DiffSummary {
-    fn of(previous: Stamp, current: Stamp, file: String, items: &[Item]) -> Self {
+    fn of(previous: Stamp, current: Stamp, file: String, items: &[Item], isin_unknown_total: u64) -> Self {
         let mut counts = [0_u64; 8];
         for one in items {
             if let Some(at) = Change::ALL.iter().position(|change| *change == one.change)
@@ -1737,19 +1814,23 @@ impl DiffSummary {
             current,
             file,
             counts,
+            isin_unknown_total,
             named: items.iter().filter(|one| one.change.named()).cloned().collect(),
         }
     }
 
-    /// `listing=1 delisting=0 ...`, the counts as one line.
+    /// `listing=1 delisting=0 ... isin_unknown_total=9`, the counts as one
+    /// line.
     #[must_use]
     pub fn counts_line(&self) -> String {
-        Change::ALL
+        let mut line = Change::ALL
             .iter()
             .zip(self.counts)
             .map(|(change, count)| format!("{}={count}", change.word()))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        let _infallible = write!(line, " isin_unknown_total={}", self.isin_unknown_total);
+        line
     }
 }
 
@@ -1773,8 +1854,14 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
     match fs::read(&path) {
         Ok(bytes) => {
             let text = String::from_utf8(bytes).map_err(|_| format!("{file} is not UTF-8"))?;
-            let (_, _, items) = parse_diff(&text).map_err(|why| format!("{file}: {why}"))?;
-            return Ok(Some(DiffSummary::of(previous, current, file, &items)));
+            let (head, items) = parse_diff(&text).map_err(|why| format!("{file}: {why}"))?;
+            return Ok(Some(DiffSummary::of(
+                previous,
+                current,
+                file,
+                &items,
+                head.isin_unknown_total,
+            )));
         }
         Err(why) if why.kind() == ErrorKind::NotFound => {}
         Err(why) => return Err(format!("{file} could not be read: {why}")),
@@ -1784,7 +1871,8 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
     let old_isins = isins_on(root, &catalog, previous.day)?;
     let new_isins = isins_on(root, &catalog, current.day)?;
     let items = diff(&old, &new, old_isins.as_ref(), new_isins.as_ref());
-    let rendered = render_diff(previous, current, &items)?;
+    let total = unknown_isins(&new, new_isins.as_ref());
+    let rendered = render_diff(previous, current, &items, total)?;
     let held = lock(root)?;
     match write_new(&path, rendered.as_bytes()) {
         Ok(()) => sync_dir(root)?,
@@ -1796,7 +1884,7 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
         Err(why) => return Err(why),
     }
     held.release().map_err(|why| why.to_string())?;
-    Ok(Some(DiffSummary::of(previous, current, file, &items)))
+    Ok(Some(DiffSummary::of(previous, current, file, &items, total)))
 }
 
 // ──────────────────────────── the landing hook ────────────────────────────
@@ -1862,11 +1950,12 @@ impl Snapshotted {
                     })
                     .collect();
                 format!(
-                    r#"{{"previous":{},"current":{},"file":{},"counts":{{{}}},"named":[{}]}}"#,
+                    r#"{{"previous":{},"current":{},"file":{},"counts":{{{}}},"isin_unknown_total":{},"named":[{}]}}"#,
                     json_string(&summary.previous.to_string()),
                     json_string(&summary.current.to_string()),
                     json_string(&summary.file),
                     counts.join(","),
+                    summary.isin_unknown_total,
                     named.join(","),
                 )
             }
