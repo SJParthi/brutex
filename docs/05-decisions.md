@@ -74987,6 +74987,352 @@ entry here. Each says where its citation resolves.
   wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
   citation of either resolves to D-5901 until its own entry is written.
 
+### D-5160 — The rank pool on day D is that day's F&O members only: a share outside F&O on D gets no rank and no intraday leverage; `FNO_UNDERLYINGS` stays the 2026-08-01 snapshot and is never edited for this — 2026-10-17
+
+**Implemented by** PIT-1 (`pull::fno_membership`: `Membership::members`,
+`is_member`, `pool_size`, `spans`; `cli fno-membership build|show|bench`;
+tests in `crates/pull/src/fno_membership_tests.rs` and
+`crates/cli/src/fno_membership_command_tests.rs`). **Why**: attack issue H6 of
+the 15 October deep check (`state/charges-deep-check-20261015.json`, key
+`handover`, location "MAIN STRATEGY (f)"): `core::universe::FNO_UNDERLYINGS`
+is one snapshot (2026-08-01, 213 names), so ranking 2018-2026 movers inside it
+is survivorship plus look-ahead, and renamed shares are dropped or mis-joined.
+
+1. **A share is in the rank pool on D only when it is one of
+   `Membership::members(D)`.** Ranks, top-N and every per-day statistic of the
+   pool are computed among that day's members, and the pool size of the day
+   (`pool_size(D)`) is shown beside every rank.
+2. **Outside F&O on D = no rank and no intraday leverage** (operator, 16 Oct
+   17:15 IST, "NOTHING TYPED" item 4, replacing the typed "5x"). A leverage
+   figure, where one is shown, comes from a dated, charter-sourced margin
+   source; none is in `docs/00-charter.md`, so it reads
+   `pull::fno_membership::LEVERAGE`, "leverage unknown", UNVERIFIED. It never
+   changes P&L at the report sizes.
+3. **A day without an answer is not ranked.** "membership unknown" (D-5162)
+   is never replaced by today's list or any other list.
+4. **Nothing in the swept surface changes.** `CLAUDE.md` §1 names
+   `FNO_UNDERLYINGS` as the swept equity list; this decision decides which of
+   those shares a DAY may rank, not what is swept. Wiring the membership into
+   `api::schedule`'s `DayUniverse`, the coverage board and the research
+   consumers is R4-26's: its COR-08 item names
+   `crates/pull/src/fno_membership.rs` and `cli fno-membership`, the module and
+   verb this package ships, and it adopts their API unchanged (`spans()` gives
+   its `(underlying, entry_day, exit_day, source)` rows with
+   `source = inferred_gdfl_options`; `is_member` is its O(1) probe).
+
+### D-5161 — A share is a member on D when one of its stock-option contracts' lives covers D; a life runs from the first IST day a record of the contract is stored to its settled expiry; a sourced rename is one spelling, an unsourced one a measured handover inside one series — 2026-10-17
+
+1. **The life of a contract** is `[the first IST day any record of it is
+   stored, its settled expiry]` (judge follow-up, 16 Oct). The first day is
+   the first options day file of the GDFL tick store holding a file of it.
+   NSE's listing day is not in the charter (UNVERIFIED), and a listing day
+   with no stored record is invisible, so membership may start LATE, never
+   early: each spelling records the days between the start of its first
+   contract's expiry series as stored (`Spelling::series_start`, the first day
+   any share's contract of that expiry was stored) and its own first record
+   (`Spelling::listing_lag_days`); `docs/06-limits.md` L-PIT-3 states the
+   measured bias, an UPPER bound. The build's report counts only the
+   spelling that opens a series: a spelling joined to an earlier series by a
+   measured handover (item 4) continues a series that was a member under its
+   earlier spelling, so it is named apart and never counted as a lag (PIT-23;
+   the first real report counted `BSOFT` and `TATACONSUM` as lags of 88 and
+   90 days). The settled expiry is `pull::gdfl_nfo::decode_ticker`'s,
+   which applies the measured re-datings and the sourced early settlements.
+2. **Member on D ⇔ the latest settled expiry among the share's contracts first
+   stored on or before D is on or after D.** One number per live spelling
+   carries from one day to the next (the fold's `State`), so a day computes
+   only itself; no listing after D decides D.
+3. **Listed but untraded counts**: a contract whose life covers D makes its
+   share a member on D whether or not a file of it exists on D;
+   `Member::filed` says whether the share listed any file that day ("listed a
+   file", not "traded": a file may hold quotes only). **An expired contract
+   does not count.**
+4. **A rename is one series.** The decoder files every ticker under the newest
+   symbol NSE's dated changes reach (`brutex_core::alias::LINEAGE`, 18 sourced
+   rows, the same key the cash store files under), so `ZOMATO` and `ETERNAL`
+   are one spelling. A rename the table does not hold (`TATAGLOBAL ->
+   TATACONSUM`, `KPIT -> BSOFT`; D-3354) is not invented as an alias: on a
+   session where a live spelling lists no file and a spelling never seen
+   before lists a STRICT MAJORITY of the contract keys (settled expiry, strike,
+   side) the first one listed on the previous session, the new spelling joins
+   the old one's series and the old spelling's life ends. A pair either side of
+   which matches a second candidate is ambiguous and is not joined (reported).
+   The record is in the month file, labelled `measured`. A majority is the
+   smallest share no second candidate can also hold, which is why it is the
+   threshold and not a tuned number.
+5. **Index underlyings are not shares** (`brutex_core::alias::option_underlying`
+   segment `INDEX`): counted per day, never members; asking for one is refused
+   (`NotAShare`).
+6. **The store's FNO bars are not the source.** Measured READ-ONLY on 18 Oct
+   2026 in the real store (`bars/gdfl/NSE/FNO`): it holds share-option folders
+   from the 2018-09-27 expiry on (`RELIANCE`, `TATAGLOBAL`; month file
+   `2018-09.bin`), but the import resumed on 2020-09-16 (OWED-01, batch O1)
+   filed share options under a 277-name filter that leaves out the 13 held
+   renames, IDFCFIRSTB, COFORGE, INDUSTOWER, ZYDUSLIFE, MOTHERSON, SHRIRAMFIN,
+   PVRINOX, ARE&M, LTF, UNITDSPR, SAMMAANCAP, GMRAIRPORT and TMPV
+   (`state/data-census-20261013/options-import-held-renames.txt`;
+   `IDFCFIRSTB`'s folders stop at the 2020-11 expiries).
+   Deriving membership from the store would drop those shares silently. The
+   tick store's day files hold every entry of every vendor day zip (verified
+   byte for byte, its RESUME.md), so every name is read, and only the index of
+   each day file is read, never a tick row.
+
+### D-5162 — The span is measured, never typed; every day outside it, and every session inside it without a share-option record, is refused as "membership unknown" and counted per year as a running sum; nothing is filled from today's list — 2026-10-17
+
+Operator, 16 Oct 17:15 IST, "NOTHING TYPED" items 1, 3 and 6, replacing the
+typed span (2018-09..2020-09-15 refused, data from 2020-09-16, end 2026-09-24).
+
+1. **`known_from` and `known_to` are the first and last IST day holding a
+   stored stock-derivative contract record**, measured by the build's own pass
+   over the source: `known_from` is written into every month header and
+   `known_to` is the last month's last sealed record (the span always ends on a
+   known record). Options now; futures, once a futures source lands, are a new
+   file version.
+2. **Outside the span** every day is refused (`UnknownWhy::BeforeSpan`,
+   `AfterSpan`), including 2018-01..2018-08, which the typed span omitted.
+3. **Inside the span** a day is known only when the IST calendar
+   (`pull::calendar::sourced_kind_of`) says it is a session AND the tick store
+   holds a valid options day file listing at least one share option. Otherwise
+   its sealed status says why: `not_a_session`, `no_source`, `source_refused`
+   (with the source's own words in the build's report), `no_calendar`,
+   `no_share_options`, `source_on_closed_day` (a file on a closed day is named
+   and not folded). `members`, `is_member` and `pool_size` refuse every such
+   day with "membership unknown" and its reason. A chartered historical source
+   found later becomes a new file version.
+4. **Per-year refused-session counts are running sums indexed by day**: each
+   sealed row carries the refused sessions of its year through that day
+   (`DayRow::refused_in_year`, `Membership::refused_through`, O(1));
+   `cli fno-membership build` prints each year's known, refused-inside and
+   outside-the-span session counts.
+5. **Census counts are dated cross-checks only.** The 13 Oct census figures
+   (277+ option underlyings imported, 337 share series, 347 option
+   underlyings, no futures files) are never constants or assertions here; the
+   build prints the series, spellings and handovers it read.
+
+### D-5163 — The membership is a new append-only file kind: `<dir>/<YYYY-MM>-g<GGGGGG>.fnm`, magic `BRXFNM01`, version 1, sealed day records per month; a build resumes after the last sealed record and runs to `known_to`; a typed window is for scratch only; one pass and day-by-day builds are byte-identical — 2026-10-17
+
+`docs/02-store-format.md`, "F&O membership month files, version 1", gives
+every byte. A month file holds the sealed records of its month from its first
+to its last record: per day a row (status, pool, filed count, the running sum
+of refused sessions, name counts, a BLAKE3 of the evidence the fold consumed),
+the day's member entries in series order, the spellings first seen that month,
+the carry it started from and ended with, its measured handovers, and a BLAKE3
+of its own bytes. No time, host, commit or generation is written, so the same
+records give the same bytes.
+
+1. **Resume, never retype** (operator item 2). `cli fno-membership build --out
+   DIR` resumes after the last sealed record (from the IST calendar's first day
+   when none is held), probes to the calendar's last day and seals records up
+   to the last known day; trailing days without a known record are not written
+   and are probed again next time. `build FROM|resume TO` is a typed window for
+   synthetic stores and scratch copies only and is refused when `DIR` lies in
+   the operator's store. A window that starts on or before a sealed record is
+   refused (`Overlap`: a sealed record is never rebuilt) and one that leaves a
+   gap after it is refused (`Gap`).
+2. **Append-only.** A month that gained records is written as its next
+   generation, which must extend the current one record for record
+   (`WouldRewrite` otherwise); an unchanged month is not written. Each
+   generation is an exclusive hidden temporary, flushed, hard-linked to its
+   final name (refused if the name exists), unlinked, and the directory
+   flushed: a reader never sees a half-written file. The reader serves each
+   month's highest generation, refuses it by name when it fails a check and
+   never falls back to an older one.
+3. **One pass and day-by-day builds are byte-identical** because the
+   generation is in the name only and a resumed build re-enters the open month
+   from its sealed records and carry. Before extending, the last sealed
+   session's listing is re-read and must hash to its sealed evidence, or the
+   build refuses (`SourceChanged`): the store is not extended from changed
+   evidence.
+4. **The chain is checked.** Each month records its carry in, spellings
+   before and series before; the reader refuses a month whose month before
+   does not end with exactly that (`Stale`), a gap between months, a span that
+   does not start on the first month's first record or end on a known record,
+   and spellings that name series out of order.
+5. **The real build is a store write** run by the main session after the
+   merge: `--out <store>/reference/fno-membership-v1` (PIT-1 report,
+   `store_writes_needed`). `fno-membership` is a store writer in its `build`
+   form (`cli::store_write::WRITERS`): an unstamped build refuses unless
+   `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`.
+
+### D-5164 — Membership lookups are O(1) and measured; the build reads each day's index once, months in order, the days of a month on up to four readers by default — 2026-10-17
+
+`members(D)`, `pool_size(D)` and `refused_through(D)`: one subtraction into a
+fixed-stride index of day slots (`Membership::slot`), one row, one slice of a
+contiguous member array. `is_member(name, D)`: the dated symbol changes walked
+from `name` (`LINEAGE.current`, bounded by its 18 rows), one hash probe for the
+series, the slot, one bit of a per-day bitset. Opening a directory reads every
+month once (O(records + entries)) and builds the index; `spans()` and
+`year_counts()` are reports, not request paths. The build is O(names listed)
+per day plus O(pool) to fold it; months are folded in order (the carry), the
+days of a month are read in parallel, `--workers` 1..=14 (default 4, the
+operator's ceiling for read-only evidence runs against the real stores).
+Measured figures (n, p50, p99, max, method) are in `docs/06-limits.md`,
+"Point-in-time F&O membership".
+
+### D-5165 — The membership's reader API is the one consumers adopt: `members(day) -> Result<&[Member], MembershipUnknown>` sorted by a series id stable across renames, each member's store-key spelling that day and its current-list flag; `max_pool` sizes a rank network; `file_digest()` names the membership in run identities — 2026-10-17
+
+Judge follow-up of 16 Oct (high) and operator "NOTHING TYPED" item 5.
+
+1. **`Member { series_id, symbol_on_day, in_current_list, filed }`.**
+   `series_id` is dense in first-appearance order and stable across renames
+   (every spelling of a series maps to it). `symbol_on_day` is the spelling the
+   series was filed under that day, which is the store key of its GDFL cash
+   series that day (measured 17 Oct in the real store: cash folders exist for
+   `ETERNAL`, `LTM`, `TMPV`, `TATAGLOBAL` and `TATACONSUM`, none for `ZOMATO`
+   or `LTI`, so a sourced rename files under its newest symbol and an
+   unsourced one under each spelling in turn). `in_current_list` is true when
+   the series' newest spelling is a share of `FNO_UNDERLYINGS` less
+   `FNO_INDEX_UNDERLYINGS` (`CLAUDE.md` §1's traded surface). Members are
+   sorted by `series_id`; `is_member` and `pool_size` are thin wrappers over
+   the same day slot.
+2. **Rank width is not a trial.** Every month header carries its `max_pool`
+   and `Membership::max_pool()` is the largest of any held day. A rank network
+   sizes itself at run start to the next power of two at or above the largest
+   pool it reads; ties go by `series_id`, so ranks are identical at any width
+   and the width is neither a trial nor a run-identity term. 256 is a test
+   fixture, never a constant.
+3. **`Membership::file_digest()`** is a BLAKE3 over each served month's year,
+   month and file digest, in month order (not the generation or the path), so
+   a run that reads the membership can record which one it read; one pass and
+   a day-by-day build give the same digest.
+
+### D-5166 — A measured handover needs a strict majority of BOTH sides and at least two shared keys; a series is live under one spelling, its newest, so a file under a spelling it moved on from is filed under the newest and named, never a second member and never a stop; the carry keys live series by series id — 2026-10-20
+
+verify-PIT-1-r1 (19 Oct 2026) blocking 4, reproduced here before the change
+(`a_handover_needs_a_majority_of_both_sides_and_two_shared_keys` and
+`a_file_under_a_spelling_its_series_moved_on_from_is_filed_under_the_newest`
+failed on the code of D-5161: the first joined `ZZILLIQ` to `ZZNEWBIE`, the
+second stopped with "one series would be live as ZZOLDCO and as ZZNEWCO").
+
+1. **Both sides.** D-5161 joined a never-seen spelling to a live spelling
+   that listed nothing when the keys they shared were a strict majority of
+   the OLD spelling's previous-session keys only. A one-key illiquid member
+   was therefore joined to any entrant listing that key among others: two
+   companies became one `series_id`, the pool fell by one and the old share
+   left it while its contract was live. The rule is now: shared keys a
+   strict majority of BOTH the series' previous-session keys and the new
+   spelling's keys, and at least `MIN_HANDOVER_KEYS` = 2. The 2 is a rule of
+   evidence, not a tuned value (operator rule 5 governs values learnt from
+   data; this decides what counts as evidence at all): one shared key is the
+   coincidence any two shares listing one round strike of one expiry make.
+   Every pair the old-side majority alone would have joined and these rules
+   do not is reported by name with why, as is every pair a side of which
+   matches a second candidate (unchanged). A pair not joined is two series:
+   the old one stays a member to its own expiry with no file, which is the
+   safe direction (a pool one too large for at most one expiry, named),
+   never a merge of two companies.
+2. **One live spelling per series.** D-5161 kept the old spelling's id and
+   refused a day on which both spellings of a series were live
+   (`SeriesTwiceLive`), so one stray old-name file after a handover stopped
+   every future build on that day. The fold now keys its live set by SERIES
+   and files every file of a series under its newest spelling (the registry
+   names it); a file under an older spelling is a STRAY: it keeps the series
+   live and `filed`, is reported per day by name in the month's report and
+   its `cli.fno_membership` event (`strays`), and changes nothing else. A
+   series cannot be live twice, so the refusal is gone with its cause.
+   Limit L-PIT-9: a different company relisted later under a retired
+   spelling while the series is live would be filed under that series;
+   every such day is named, none is silent.
+3. **The carry's live pairs are `(series id, live until)`** (was spelling
+   id). The member order is the live set's own key order, so no day's
+   members are sorted. Version 1 had not landed (no `.fnm` file was ever
+   written to the store: the store step of D-5163 was never run), so this is
+   a change to the unmerged v1, not a rewrite of a landed version; directories
+   built in scratch before 20 Oct 2026 (`scratch-PIT-1/r4/fnm-*`,
+   `scratch/verify-PIT-1-c*-out/real-*`, `shadow/PIT-1`) are not to be
+   resumed by this build.
+
+### D-5167 — Any prefix of a build's installs is a servable, resumable directory: the last month may end on the closed days after `known_to`; `known_to` is the last KNOWN record and `sealed_through` the last sealed one; a sealed record after `known_to` is answered as after the span — 2026-10-20
+
+verify-PIT-1-r1 blocking 1, reproduced here before the change
+(`a_kill_between_two_month_installs_leaves_a_servable_resumable_directory`
+failed: `open` refused "the span does not end on a known record").
+
+1. A month is installed with the closed days that end it (Sat 31 Aug 2024)
+   when the next month's first known day (Mon 2 Sep) is folded, BEFORE the
+   next month is installed; a kill, a crash, a full disk or a failed write
+   between the two installs left a directory whose last month ended on a
+   closed day. The chain refused that ("the span does not end on a known
+   record") and the build opens the directory first, so neither a reader nor
+   the resume could get past it; the only way out was deleting the last
+   month, which `CLAUDE.md` §3 rule 8 forbids. The verifier measured 4 of 10
+   real kills ending there.
+2. The chain no longer requires the last record to be known. `known_span()`
+   ends on the last KNOWN record (`known_to`); `sealed_through()` is the last
+   sealed record, where the resume continues. A day after `known_to` is
+   answered `AfterSpan` even when a closed day there is sealed, so a reader
+   sees what a build that ended on `known_to` would show, and the resumed
+   directory ends byte for byte where one pass ends (tested by a kill and by
+   a refused write between the installs).
+3. Two installs are not made atomic with a marker: a marker would be a third
+   file to keep consistent, and every prefix is already a true, sealed state.
+
+### D-5168 — A day whose day file the source refused is never sealed: the build installs every record before it, stops naming the day and the source's words, and the next build resumes at it; the fold refuses to seal one and the decoder refuses a file holding one — 2026-10-20
+
+verify-PIT-1-r1 follow-up ("a transient SourceRefused or reader panic followed
+by a known day is sealed as refused for ever"). A refusal can be transient (a
+read that failed, a reader thread that panicked); sealing it made one bad
+moment a permanent "membership unknown" in an append-only file. Status code 4
+stays in the format's code list and is refused by the decoder. A day file
+that is refused every time stops every build at that day, loudly, until the
+source is repaired or a new source version is chosen (L-PIT-10): an operator
+sees it on `/logs` (`membership build refused`) and in the exit code. The
+real tick store refused no day over the whole span (18 Oct 2026, read-only),
+so the real build is unaffected.
+
+### D-5169 — The verifier's remaining PIT-1 findings, each at its cause: the temporary through `store::staging::create`; a missing directory named; the typed-window guard widened; the lookups' flatness measured by C-PIT-01; gate 11 and 1d declarations with their reasons; the post-build open failure logged — 2026-10-20
+
+1. **Gate 28.** `install` created its own `.<name>.tmp.<pid>` with
+   `create_new`; it now asks `store::staging::create`, gate 28's one door,
+   and unlinks the temporary whether the link succeeded or not, so a refused
+   install (the lost link race included) leaves none. Only a kill can, and
+   that is counted by `generations` and never read. The door's answer is
+   kept, not dropped: a dead writer's leftover under the install's own
+   temporary name is cleared by `store::staging::create`, which says how
+   many bytes it held, and `install` returns that in `Installed::Written`'s
+   `cleared`, which `cli fno-membership build` prints on the month's line and
+   in its `membership month` event (`cleared_bytes`); the final name is
+   flushed into the directory before a failed unlink of the temporary's
+   second name is refused (PIT-31).
+2. **A missing directory is refused by name** by `open`, `show` and `bench`
+   ("no such membership directory"); `build` is the one caller that starts
+   from nothing and makes it.
+3. **The typed window** (scratch only, D-5163) is also refused inside the
+   `--store ROOT` named on the same line and at any directory laid out as
+   `reference/fno-membership-v1`, not only inside `$BRUTEX_STORE` or
+   `$HOME/.brutex/store`.
+4. **Gate 12.** Every O(1) claim of `pull::fno_membership` names
+   `pull::bench::fno_membership_lookup_is_flat` (C-PIT-01), a ratio bench at
+   1x, 10x and 100x the held days over `members` and `is_member` on known
+   days and `members` on refused and outside days, with p50/p99/max printed.
+5. **Gate 11.** The fold's per-day sort is gone (D-5166 item 3); the two
+   handover counters are pre-sized; the handover-day check reads the
+   month's own row instead of a range test. Three constructs are declared with
+   their bound in `.github/gates_ledger.rs`: the name decoder's search inside
+   its fixed `NAME_LEN` bytes (rule 6), `cli fno-membership`'s four sorts
+   of its own report and bench samples, once per run (rule 4), and the
+   `fno-membership` arm of `store_write::writes_the_store`,
+   `arguments.contains(&"build")`, the arm shape gate 30 reads, over the
+   verb's own arguments (rule 7, that file 4 -> 5); all three in
+   `docs/06-limits.md` L-PIT-8.
+6. **Gate 1d.** The module's, its tests' and its bench's segment-shaped
+   literals are declared as `PIT_1_LITERAL` in `.github/gates_tree.rs`, each
+   read first: the format's words, the status and refusal words, and the
+   tests' scratch labels; none is a credential path segment.
+7. **`/logs`.** A build whose directory does not serve afterwards emits
+   `membership built and does not serve` (error) with the reason, as the
+   refused build already did.
+8. **No table is served short.** The day index read a day's members as
+   `entries.get(at..end).unwrap_or_default()`: a table whose pool ran past
+   its entries would have served that day with no member and its pool
+   count, a fallback that hides a failure (`CLAUDE.md` §4). A file's
+   decoder already refused it; a table served without a file
+   (`Membership::of`) did not. The index now refuses it by name ("a day's
+   members run past the month's entries"), and every chain and index check
+   is hit by its own damaged table in
+   `every_chain_check_refuses_its_own_damage` (PIT-32; ten checks: nine no test reached before, by the line coverage
+   measured on 20 Oct 2026, and the tenth is new).
+
 ### D-5902 — The sealed codec's bounds say what the code does: an accepted frame grows the caller's buffer by `Vec`'s amortised rule, not by its rows, and a frame of `m` rows is at most `56m + 172` bytes; D-4939 #5 amended by addition (AH-05, g-sc1-codec-3, g-sc1-codec-4) — 2026-10-19
 
 **Findings** g-sc1-codec-3 and g-sc1-codec-4 (both low; the 14 October attack
