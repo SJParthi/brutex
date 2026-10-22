@@ -52,7 +52,7 @@
 //!
 //! | operation | cost |
 //! |---|---|
-//! | [`listing`], every snapshot taken in | the absorbed log (one ~100-byte line per snapshot) and one underlying's file (one line per contract it ever listed); no snapshot is opened |
+//! | [`listing`], every snapshot taken in | the absorbed log (one 60-byte line per snapshot) and one underlying's file (one line per contract it ever listed); no snapshot is opened |
 //! | taking one snapshot in | one read and parse of that snapshot, and one read and append per underlying with a new contract — once per snapshot, when it is written |
 
 use std::collections::{BTreeMap, HashMap};
