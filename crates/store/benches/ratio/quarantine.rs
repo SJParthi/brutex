@@ -1,4 +1,4 @@
-//! C-QU-01 and C-QU-02: the quarantine probe (R4-18, D-6892).
+//! C-QU-01 and C-QU-02: the quarantine probe (R4-18, D-7121).
 //!
 //! C-QU-01 times `store::quarantine::probe` against an index holding 1x, 10x
 //! and 100x quarantined months (12, 120 and 1,200 months of one share across

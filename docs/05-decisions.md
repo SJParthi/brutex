@@ -79334,7 +79334,161 @@ and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
 
-### D-6892 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
+### D-7120 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 in `Cargo.lock` only, clearing RUSTSEC-2026-0382 and RUSTSEC-2026-0381; and the C-HA-01 cost row R4-09a named and never landed (BASE-REDS-1021) — 2026-10-21
+
+**Context** (BASE-REDS-1021). The full gate on `feat/db-fix` at 8c67456ac
+(`state/fix/gate-8c67456a.sh`, one private target directory, log
+`state/fix/gate-8c67456a.log`, EXIT 1 on 21 Oct 2026 at 10:47 IST) found
+exactly two reds; fmt, clippy, the web tests and the web build were green.
+
+1. `cargo deny check` failed `advisories` (bans, licenses and sources ok) on
+   two advisories published after DENY-1 (D-5090) made it green on 17 Oct:
+   **RUSTSEC-2026-0382**, dated 2026-10-20, "Certificate verification may
+   accept distrusted intermediates", against `rustls-webpki` 0.103.15,
+   patched `>= 0.103.16, < 0.104.0-alpha.1` or `>= 0.104.0-alpha.8`; and
+   **RUSTSEC-2026-0381**, dated 2026-10-19, "Bundled root certificates allow
+   trust in distrusted emSign intermediates", against `webpki-roots` 1.0.9,
+   patched `>= 1.0.10`. Both carry the alias CVE-2026-111943 and concern
+   emSign (eMudhra) intermediates whose private keys the advisories say are
+   now well known. Read from the advisory database `cargo deny` fetched, at
+   its commit `e6f94f3760d5e6c54c1b05f204002263bc025524` (2026-10-20 21:24
+   +0200); `docs/00-charter.md` records both files' digests.
+2. `cargo test -p core --test cost_invariants` failed
+   `every_measured_cost_invariant_is_declared` on `["C-HA-01"]`: the store
+   bench prints `C-HA-01` (R4-09a, D-6240) and no row of
+   `docs/04-invariants.md` declares it. HA-03 names C-HA-01 in its proof
+   cell, but the test counts a line as declaring an id only when the id is
+   its FIRST cell, so a citation is not a declaration (the test's own
+   `declared_rows`). D-6240 ends "Invariants HA-01 to HA-04, C-HA-01": the
+   row was intended and missed.
+
+**Decision.**
+
+1. **A lock-only bump, and nothing else moved.** `cargo update -p
+   rustls-webpki -p webpki-roots` locked exactly two packages,
+   `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10, the
+   newest versions the resolver offers. `git diff Cargo.lock` is their
+   `version` and `checksum` lines, four out and four in: no other package and
+   no `dependencies` list moved. No `Cargo.toml` changes. Nothing in the
+   workspace names either crate; both arrive through `reqwest` 0.12.28's
+   `rustls-tls-webpki-roots-no-provider` feature, and both new versions are
+   patch releases inside the ranges their parents declare. `cargo tree -i`:
+   `rustls-webpki` ← `rustls` 0.23.46 ← `hyper-rustls` 0.27.9, `reqwest`
+   0.12.28, `rustls-graviola` 0.4.0 and `tokio-rustls` 0.26.4 ← `pull` ←
+   `api`, `cli`; `webpki-roots` ← `hyper-rustls` 0.27.9 and `reqwest` 0.12.28
+   ← `pull` ← `api`, `cli`.
+2. **Why a lock bump is enough, read from the registry sources.**
+   `rustls-webpki` 0.103.16 adds one fixed list, `DISTRUSTED_SPKIS`, of eight
+   emSign intermediate public keys (`src/data/distrusted/*.spki.der`, compiled
+   in with `include_bytes!` in `src/verify_cert.rs`), and refuses a path whose
+   certificate or trust anchor carries one with the new
+   `Error::CertDistrusted`. `webpki-roots` 1.0.10 removes exactly one trust
+   anchor, `emSign ECC Root CA - G3` (121 `TrustAnchor` entries in
+   `src/lib.rs` → 120). Neither touches an API this workspace calls: `pull`
+   hands `reqwest` its roots through the feature above and names neither
+   crate. Each manifest moves only `version` (and `rustls-webpki`'s
+   `rust-version`, 1.70 → 1.71, under the pinned 1.97.1): the same features,
+   so `ring` stays off by default and D-1435's skipped `rustls-webpki ->
+   ring` edge is still weak.
+3. **The scan the dependency fingerprint demands, then the re-pin.**
+   `crates/vocab/tests/workspace_is_rust.rs` hashes every package's version
+   (D-1611), so the bump moved its pin, 0x8070_52EA_72E5_1027 →
+   0x57F8_69FF_1E0D_4A5C. Over both registry sources before and after:
+   neither ships a `build.rs` or any `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.s`,
+   `.asm` or `.js` file; `webpki-roots` 1.0.10's file set equals 1.0.9's;
+   `rustls-webpki` 0.103.16's adds only the eight `.der` keys. The package
+   count stays 194 and `DECLARED` is unchanged. `docs/06-limits.md`'s D-1435
+   paragraph said the fingerprint hashed "never versions", which D-1611 made
+   untrue; it is corrected there, since this bump is the case it described.
+4. **What changes at run time, stated rather than hidden.** A TLS connection
+   `pull` makes through `reqwest` (the broker, the Dropbox fetch, AWS
+   Parameter Store) to a server whose chain passes through one of the eight
+   intermediates, or anchors only at the removed root, is now refused with a
+   certificate error by the call site's existing refusal: loudly, never
+   retried on weaker verification. Whether any host this repository contacts
+   chains through them is **UNVERIFIED**: this package made no connection to
+   any vendor host (`docs/06-limits.md` L-BREDS-1).
+5. **Green is a property of the advisory database, not only of the tree.**
+   The tree did not change between DENY-1's green and this red; the database
+   did. This decision's green was taken twice: at the database commit above,
+   and again on the final tree at `4b587f00996ebe5c05a73eaef105ef241e876414`
+   (2026-10-21 08:20 +0200). The two commits between them change
+   `RUSTSEC-2026-0381.md` only by marking `webpki-roots` 0.26.11, a
+   compatibility package this lock does not hold, unaffected, and add no
+   advisory against a package it holds (`docs/06-limits.md` L-BREDS-2).
+6. **The C-HA-01 row is landed** as the last row of R4-09a's table in
+   `docs/04-invariants.md`, after HA-01 to HA-06, in the form of every other
+   cost row: what it proves (auditing a header's slots costs the same at 1x,
+   10x and 100x the region, inside gate 8's 3.0x ceiling, p50, p99 and max
+   printed beside it), the bench and its three printed labels, the O(1)
+   shape test `slot_audit::it_reads_exactly_max_slots_positions_whatever_the_region_holds_beyond`
+   and `docs/06-limits.md` L-HA-01. The test is unchanged. **One row, not
+   two:** the branch `fix/db-BASE-GATE11`, not merged on 21 Oct, adds its own
+   C-HA-01 row at the same line (its D-6625). The two state one invariant and
+   are placed on the same line on purpose, so whichever merges second meets a
+   conflict there instead of landing a second row beside the first; the
+   resolution keeps one row, this one carrying the proofs the other names
+   only by the bench. A resolution that kept both is CI gate 10b's refusal:
+   `gates_tree gate-10b` (built from `.github/gates_tree.rs` as CI builds it)
+   prints "OK — every invariant identifier is unique." on this tree and
+   refuses a copy of it holding both rows with "INVARIANT IDENTIFIER DEFINED
+   MORE THAN ONCE: C-HA-01". `cost_invariants` alone would not see it: it
+   reads rows into a map, so a second row replaces the first.
+7. **Why the merges after 20 Oct 09:26 IST did not stop on red 2.** R4-09a's
+   gates and its second check ran `cargo test -p store -p pull -p cli -p api`;
+   `cost_invariants` lives in `core`, which R4-09a did not touch, and reads
+   files of other crates (every `benches/ratio.rs` and
+   `docs/04-invariants.md`). The merge step runs `cargo check --workspace
+   --all-targets` and, when `docs/04`, `docs/06` or `docs/07` changes, only
+   `store`'s `cited_commits`. Stale artefacts in a shared target pool were
+   not the cause: the later runs did build and run `cost_invariants`, and it
+   failed for them. At least thirteen package runs or second checks between
+   20 Oct 11:09 IST and 21 Oct 13:15 IST (AG-06, PREC-1's second check,
+   R3-13, R4-17, BASE-GATE11, CLOUD-RUST1, DATA-1, R3-15, R3-24, CLOUD-CHG1,
+   R3-30, CAL-1 and PIT-1, each in its `state/fix/round2/` report) saw it,
+   judged it pre-existing on `feat/db-fix`, and recorded it; BASE-GATE11 also
+   wrote the row on its own branch, not yet merged. No step routes a red
+   judged pre-existing to an owner or holds a merge on it, so it waited for
+   the next full gate. What would have caught it at R4-09a's merge: the merge
+   step running `cargo test -p core --test cost_invariants --locked` whenever
+   a merge touches `docs/04-invariants.md` or any `benches/ratio.rs`, beside
+   the `cited_commits` run it already makes for `docs/04`; or a package gate
+   that runs the `core` document tests whenever a package touches a document
+   they read. Either is a launcher change, outside this repository.
+8. **An offline floor, so the bump cannot be undone by a merge in silence.**
+   `cargo deny` needs the advisory database at run time; the launcher's
+   merge step does not run it and its full gate runs it "if installed",
+   while a `Cargo.lock` conflict settled by taking the older side would
+   quietly restore 0.103.15 and 1.0.9.
+   `crates/vocab/tests/workspace_is_rust.rs`, the test that already parses the
+   lock for the dependency pin, now holds `FLOORS`: each advisory's own
+   `patched` and `unaffected` lines, judged by semver precedence over every
+   locked copy, with a version or comparator it cannot read refused by name
+   and never cleared (invariants BREDS-01 to BREDS-04). Run against
+   `feat/db-fix`'s lock it fails naming both packages and both advisories,
+   and it passes on this one (`run2/floor-before-after.log`). It is a
+   floor for these two advisories, not a second `cargo deny`
+   (`docs/06-limits.md` L-BREDS-3).
+
+**Proof.** `cargo deny check` after the bump: advisories ok, bans ok,
+licenses ok, sources ok.
+`cost_invariants::every_measured_cost_invariant_is_declared` fails before
+(the gate log above) and passes after;
+`workspace_is_rust::the_dependency_set_has_not_moved_without_review` failed on
+the bumped lock with the old pin and passes with the new one. Logs:
+`state/fix/round2/logs-BASE-REDS-1021/` (the first run) and its `run2/`:
+every gate on the tree after merging `feat/db-fix` at 5ff4956cc
+(`gates-own-summary.log`: 10,034 tests passed, none failed), and the
+document tests, `cargo check` and `cargo deny` again after merging R3-19
+(`merge-summary.log`), whose only meeting with this change is the ledger
+ends.
+
+**Cost.** No repository operation changes: two lock versions and one
+document row. The added verification work is `rustls-webpki`'s comparison of
+a path's certificates against a fixed list of eight keys, once per TLS
+handshake, bounded by that constant and not measured here.
+
+### D-7121 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
 
 Findings ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6, DLY-08 (the policy;
 the classifier is R4-23's).

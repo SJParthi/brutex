@@ -5018,7 +5018,7 @@ L-PIT-1 to L-PIT-11 in `docs/06-limits.md`.
 line above is a `fno-membership-v2` directory beside this one, never a rewrite
 of `v1`.
 
-## The quarantine: `audit/<feed>.quarantine.ledger` and `audit/<feed>.quarantine` (R4-18, D-6892)
+## The quarantine: `audit/<feed>.quarantine.ledger` and `audit/<feed>.quarantine` (R4-18, D-7121)
 
 A month's bars that are not its instrument's own (before listing, a zero
 price, another price basis) are set aside without a byte of the month

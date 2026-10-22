@@ -1,4 +1,4 @@
-//! The quarantine of named bars: an append-only ledger that is the truth, and
+//! The quarantine of named bars (D-7121): an append-only ledger that is the truth, and
 //! an index every reader probes in ONE positional read. R4-18; findings
 //! ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6.
 //!
