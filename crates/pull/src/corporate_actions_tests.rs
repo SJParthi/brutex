@@ -144,7 +144,10 @@ fn the_simplest_fraction_is_the_one_inside_the_interval_with_the_smallest_terms(
     assert_eq!(simplest("1999/4000", "2001/4000"), Some(r("1/2")));
     assert_eq!(simplest("1999/2000", "2001/2000"), Some(r("1")));
     assert_eq!(simplest("3/10", "3/10"), Some(r("3/10")));
-    assert_eq!(simplest("31/100", "33/100"), Some(r("1/3")));
+    // 1/3 lies just outside [0.31, 0.33]; 5/16 (0.3125) is the simplest inside,
+    // and 1/3 is the simplest inside [0.32, 0.34].
+    assert_eq!(simplest("31/100", "33/100"), Some(r("5/16")));
+    assert_eq!(simplest("32/100", "34/100"), Some(r("1/3")));
     assert_eq!(simplest("2/1", "5/2"), Some(r("2")));
     assert_eq!(
         simplest("1/2", "1/3"),
@@ -306,14 +309,15 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
 fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
     // Three shares: a 2:1 split, a 1:1 bonus then a 1:5 split (two steps), and
     // a rights-style factor that is no integer at all.
-    let mut runs = fold_runs("SPLITCO", split_days()).unwrap();
+    // Written in the table's canonical order: shares ascending.
     let mut bonus = weekdays(day(2019, 1, 1), day(2019, 1, 31), "1/10");
     bonus.extend(weekdays(day(2019, 2, 1), day(2019, 9, 19), "1/5"));
     bonus.extend(weekdays(day(2019, 9, 20), day(2019, 12, 31), "1"));
-    runs.extend(fold_runs("BONUSCO", bonus).unwrap());
+    let mut runs = fold_runs("BONUSCO", bonus).unwrap();
     let mut rights = weekdays(day(2021, 5, 3), day(2021, 5, 28), "10000/10481");
     rights.extend(weekdays(day(2021, 5, 31), day(2021, 6, 30), "1"));
     runs.extend(fold_runs("RIGHTSCO", rights).unwrap());
+    runs.extend(fold_runs("SPLITCO", split_days()).unwrap());
     let store = scratch("cor-every-run");
     let landed = write(&store, &runs_draft(&runs)).unwrap();
     let loaded = load_runs(&store).table().unwrap().clone();
@@ -929,9 +933,9 @@ fn a_run_lookup_answers_every_edge_of_the_day_table() {
     // Inside: first day, last day, the one-day run, the run right after it.
     assert_eq!(ratio(day(2024, 1, 1)), Ok("1/2".to_owned()));
     assert_eq!(ratio(day(2024, 1, 31)), Ok("1/2".to_owned()));
-    assert_eq!(ratio(day(2024, 2, 10)), Ok("1".to_owned()));
-    assert_eq!(ratio(day(2024, 2, 11)), Ok("2".to_owned()));
-    assert_eq!(ratio(day(2024, 3, 31)), Ok("2".to_owned()));
+    assert_eq!(ratio(day(2024, 2, 10)), Ok("1/1".to_owned()));
+    assert_eq!(ratio(day(2024, 2, 11)), Ok("2/1".to_owned()));
+    assert_eq!(ratio(day(2024, 3, 31)), Ok("2/1".to_owned()));
     // Before the first run, in the gap, after the last: named, never borrowed.
     assert_eq!(
         table.run_on("EDGECO", day(2023, 12, 31)),
