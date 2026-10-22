@@ -843,3 +843,68 @@ fn a_futures_plan_over_a_book_with_no_directory_is_refused_by_name() {
         "{why}"
     );
 }
+
+/// R4-28 repair 1, measured on a real-size dump: `futures_plan` for NIFTY at
+/// 1, 10 and 100 snapshots of one dump, each a request's whole work (the book
+/// opened, the plan made), n = 50 single calls a size. Needs
+/// `BRUTEX_KITE_DUMP`, the path of a COPY of a Kite instrument dump: it is read,
+/// never written and never copied into the repository. The snapshots go under
+/// the system temporary directory and stay there. Held to the ratio harness's
+/// ceiling (3x) at 100 snapshots against 1.
+#[test]
+#[ignore = "needs BRUTEX_KITE_DUMP, the path of a copy of a real Kite instrument dump"]
+fn a_real_size_plan_does_not_grow_with_the_snapshots_held() {
+    let path = std::env::var_os("BRUTEX_KITE_DUMP").expect("BRUTEX_KITE_DUMP");
+    let body = std::fs::read(path).expect("the dump reads");
+    let root = scratch("real-size");
+    let first = day(2026, 10, 6);
+    let asked = window(day(2026, 10, 1), day(2026, 12, 31));
+    let mut held = 0_u32;
+    let mut p50s = Vec::new();
+    for count in [1_u32, 10, 100] {
+        while held < count {
+            let on = Day::from_days(first.days_from_epoch() + held).expect("a real day");
+            let started = std::time::Instant::now();
+            master_snapshots::snapshot(&root, Master::Kite, on, URL, &body).expect("a snapshot");
+            println!(
+                "MEASURED snapshot {} written, its futures taken in: {} ms",
+                held + 1,
+                started.elapsed().as_millis()
+            );
+            held += 1;
+        }
+        let mut ns: Vec<u128> = (0..50)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let book = Book::open(&root).expect("a book");
+                let plan = futures_plan(
+                    &book,
+                    route(),
+                    "NIFTY",
+                    asked,
+                    day(2026, 10, 22),
+                    day(2026, 12, 31),
+                )
+                .expect("a plan");
+                assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+                assert!(!plan.asks.is_empty(), "NIFTY futures are asked");
+                started.elapsed().as_nanos()
+            })
+            .collect();
+        ns.sort_unstable();
+        println!(
+            "MEASURED futures_plan NIFTY at {count} snapshots: p50 {} us, p99 {} us, max {} us, n={}",
+            ns[24] / 1_000,
+            ns[48] / 1_000,
+            ns[49] / 1_000,
+            ns.len()
+        );
+        p50s.push(ns[24]);
+    }
+    assert!(
+        p50s[2] <= p50s[0] * 3,
+        "100 snapshots cost {} ns a plan against {} ns at 1",
+        p50s[2],
+        p50s[0]
+    );
+}
