@@ -555,10 +555,7 @@ pub(super) const MONTH_QUARANTINED: &str = "month_quarantined";
 
 /// `/bars.json`'s answer for a month the quarantine names whole, or for an
 /// index it cannot read; `None` for every other month (R4-18).
-fn quarantine_answer(
-    site: &Loaded,
-    asked: &Addressed,
-) -> Option<(axum::http::StatusCode, String)> {
+fn quarantine_answer(site: &Loaded, asked: &Addressed) -> Option<(axum::http::StatusCode, String)> {
     let path = store::path::StorePath::new(store::path::PathParts {
         vendor: asked.vendor,
         exchange: &asked.exchange,
@@ -607,7 +604,10 @@ fn quarantine_answer(
 }
 
 /// One month's quarantine as every JSON answer spells it (R4-18).
-pub(crate) fn quarantine_json(entry: &store::quarantine::Entry, feed: brutex_core::vendor::Vendor) -> String {
+pub(crate) fn quarantine_json(
+    entry: &store::quarantine::Entry,
+    feed: brutex_core::vendor::Vendor,
+) -> String {
     format!(
         r#"{{"scope":{},"cause":{},"bars":{},"revision":{},"ledger":{},"ledger_at":{},"written_at_micros":{}}}"#,
         render::json_string(entry.scope.code()),

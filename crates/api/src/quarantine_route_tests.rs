@@ -1,4 +1,9 @@
-#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::unwrap_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 //! The quarantine's routes and its readers by name: `/bars.json` answers a
 //! month quarantined whole by name, `/bars/window.json` names it and serves
 //! the rest, `/instruments.json` flags the series, and the plan and the press
@@ -109,9 +114,14 @@ async fn get(site: &Loaded, uri: &str) -> (StatusCode, Value) {
     for _ in 0..400 {
         let parsed: axum::http::Uri = uri.parse().expect("URI");
         let (status, _, body) = if uri.starts_with("/bars/window.json") {
-            super::super::bars_route::bars_window_json(axum::extract::State(Loaded::clone(site)), parsed).await
+            super::super::bars_route::bars_window_json(
+                axum::extract::State(Loaded::clone(site)),
+                parsed,
+            )
+            .await
         } else if uri.starts_with("/bars.json") {
-            super::super::bars_route::bars_json(axum::extract::State(Loaded::clone(site)), parsed).await
+            super::super::bars_route::bars_json(axum::extract::State(Loaded::clone(site)), parsed)
+                .await
         } else {
             quarantine_plan_json(axum::extract::State(Loaded::clone(site)), parsed).await
         };
@@ -143,7 +153,8 @@ fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 async fn bars_json_answers_a_quarantined_month_by_name() {
     let fixture = Fixture::new("r418-bars-by-name");
     fixture.month(ym(2018, 3), 99_500, 3);
-    let uri = format!("/bars.json?feed=zerodha&exchange=NSE&segment=CASH&symbol={SYMBOL}&month=2018-03");
+    let uri =
+        format!("/bars.json?feed=zerodha&exchange=NSE&segment=CASH&symbol={SYMBOL}&month=2018-03");
     let (status, before) = get(&fixture.site, &uri).await;
     assert_eq!(status, StatusCode::OK, "{before}");
     assert_eq!(before.as_array().map(Vec::len), Some(3));
@@ -154,8 +165,15 @@ async fn bars_json_answers_a_quarantined_month_by_name() {
     assert_eq!(body["quarantine"]["scope"], "whole_month");
     assert_eq!(body["quarantine"]["cause"], "before_listing");
     assert_eq!(body["quarantine"]["bars"], 3);
-    assert_eq!(body["quarantine"]["ledger"], "audit/zerodha.quarantine.ledger");
-    assert!(body["quarantine"]["ledger_at"].as_u64().is_some_and(|at| at > 0));
+    assert_eq!(
+        body["quarantine"]["ledger"],
+        "audit/zerodha.quarantine.ledger"
+    );
+    assert!(
+        body["quarantine"]["ledger_at"]
+            .as_u64()
+            .is_some_and(|at| at > 0)
+    );
     assert!(body.get("bars").is_none(), "never its bars: {body}");
     // A torn index answers by name, never the bars.
     let index = store::quarantine::index_path(&fixture.root, Vendor::Zerodha);
@@ -180,8 +198,14 @@ async fn a_window_names_its_quarantined_month_and_serves_the_rest() {
     assert!(status.is_success(), "{status} {body}");
     let text = body.to_string();
     assert!(text.contains("2018-03: quarantined, not served"), "{text}");
-    assert!(!text.contains("99500"), "no quarantined bar is served: {text}");
-    assert!(text.contains(&february[0].ts_micros.to_string()) || text.contains("410"), "{text}");
+    assert!(
+        !text.contains("99500"),
+        "no quarantined bar is served: {text}"
+    );
+    assert!(
+        text.contains(&february[0].ts_micros.to_string()) || text.contains("410"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -189,8 +213,11 @@ fn instruments_json_flags_a_quarantined_series() {
     let fixture = Fixture::new("r418-instruments");
     fixture.month(ym(2018, 3), 99_500, 3);
     fixture.quarantine_whole(ym(2018, 3), 3);
-    let key = brutex_core::instrument::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, SYMBOL)
-        .expect("a share");
+    let key = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        SYMBOL,
+    )
+    .expect("a share");
     let summary = store::quarantine::Summary::load(&fixture.root, Vendor::Zerodha);
     let flag = super::super::instruments_route::quarantine_of(&summary, &key);
     let value: Value = serde_json::from_str(&flag).expect("JSON");
@@ -198,9 +225,15 @@ fn instruments_json_flags_a_quarantined_series() {
     assert_eq!(value["whole_months"], 1);
     assert_eq!(value["bars"], 3);
     assert_eq!(value["causes"], serde_json::json!(["before_listing"]));
-    let other = brutex_core::instrument::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "QFIXR")
-        .expect("a share");
-    assert_eq!(super::super::instruments_route::quarantine_of(&summary, &other), "null");
+    let other = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        "QFIXR",
+    )
+    .expect("a share");
+    assert_eq!(
+        super::super::instruments_route::quarantine_of(&summary, &other),
+        "null"
+    );
     let unreadable = Err(store::quarantine::QuarantineError::Reason("x".to_owned()));
     assert_eq!(
         super::super::instruments_route::quarantine_of(&unreadable, &key),
@@ -210,7 +243,13 @@ fn instruments_json_flags_a_quarantined_series() {
 
 #[test]
 fn the_question_is_refused_by_name_before_the_verb_runs() {
-    assert!(arguments("symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing", false).is_ok());
+    assert!(
+        arguments(
+            "symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing",
+            false
+        )
+        .is_ok()
+    );
     for bad in [
         "",
         "symbol=IRFC&from=2018-01-01&to=2020-12-31",
@@ -220,21 +259,35 @@ fn the_question_is_refused_by_name_before_the_verb_runs() {
     ] {
         assert!(arguments(bad, false).is_err(), "{bad:?}");
     }
-    let long = format!("symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing&reason={}", "x".repeat(201));
+    let long = format!(
+        "symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing&reason={}",
+        "x".repeat(201)
+    );
     assert!(arguments(&long, true).is_err(), "a reason past 200 bytes");
     assert!(
-        arguments("symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing", true).is_err(),
+        arguments(
+            "symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=before_listing",
+            true
+        )
+        .is_err(),
         "a press names its reason"
     );
-    let args = arguments("symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=zero_price&reason=r&segment=CASH", true)
-        .expect("ok");
+    let args = arguments(
+        "symbol=IRFC&from=2018-01-01&to=2020-12-31&cause=zero_price&reason=r&segment=CASH",
+        true,
+    )
+    .expect("ok");
     assert_eq!(args.last().map(String::as_str), Some("--apply"));
 }
 
 fn plan(root: &Path, stamps: &[i64]) {
     let dir = root.join("audit").join("series-identity");
     fs::create_dir_all(&dir).expect("dir");
-    let listed = stamps.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+    let listed = stamps
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     fs::write(
         dir.join(format!("zerodha-CASH-{SYMBOL}-00aa00aa00aa00aa.plan")),
         format!(
@@ -258,15 +311,28 @@ async fn the_plan_writes_nothing_and_the_press_applies_once() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["applied"], false);
-    assert!(body["report"].as_str().unwrap().contains("plan: 1 bar(s)"), "{body}");
+    assert!(
+        body["report"].as_str().unwrap().contains("plan: 1 bar(s)"),
+        "{body}"
+    );
     assert_eq!(files_under(&fixture.root), before, "the plan wrote nothing");
-    let form = format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=invented");
-    let (status, _, text) = quarantine_apply(axum::extract::State(Loaded::clone(&fixture.site)), form.clone()).await;
+    let form = format!(
+        "symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=invented"
+    );
+    let (status, _, text) = quarantine_apply(
+        axum::extract::State(Loaded::clone(&fixture.site)),
+        form.clone(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{text}");
     let body: Value = serde_json::from_str(&text).expect("JSON");
     assert_eq!(body["applied"], true);
-    assert!(body["report"].as_str().unwrap().contains("DROPPED 1 of 5"), "{body}");
-    let (_, _, again) = quarantine_apply(axum::extract::State(Loaded::clone(&fixture.site)), form).await;
+    assert!(
+        body["report"].as_str().unwrap().contains("DROPPED 1 of 5"),
+        "{body}"
+    );
+    let (_, _, again) =
+        quarantine_apply(axum::extract::State(Loaded::clone(&fixture.site)), form).await;
     assert!(again.contains("already_dropped"), "{again}");
     // A SECOND PRESS WHILE ONE RUNS is refused by name, never queued.
     super::PRESSING.store(true, std::sync::atomic::Ordering::Release);

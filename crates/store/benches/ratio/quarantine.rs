@@ -48,7 +48,9 @@ fn path(symbol: &'static str, n: u16) -> StorePath<'static> {
     .unwrap_or_else(|e| refuse(&format!("a bench path: {e}")))
 }
 
-const SYMBOLS: [&str; 10] = ["QBA", "QBB", "QBC", "QBD", "QBE", "QBF", "QBG", "QBH", "QBI", "QBJ"];
+const SYMBOLS: [&str; 10] = [
+    "QBA", "QBB", "QBC", "QBD", "QBE", "QBF", "QBG", "QBH", "QBI", "QBJ",
+];
 
 fn filled(months: u16) -> PathBuf {
     let root = root(&format!("m{months}"));
@@ -87,15 +89,28 @@ pub(super) fn run() -> bool {
         let clear = path("QZZ", 0);
         let hit = cost_ps(200, || store::quarantine::probe(root, held));
         let miss = cost_ps(200, || store::quarantine::probe(root, clear));
-        spread(&format!("C-QU-01 probe, quarantined month, {months} held"), CALLS, || {
-            let _ = std::hint::black_box(store::quarantine::probe(root, held));
-        });
-        spread(&format!("C-QU-01 probe, clear month, {months} held"), CALLS, || {
-            let _ = std::hint::black_box(store::quarantine::probe(root, clear));
-        });
-        spread(&format!("C-QU-02 Snapshot::load, {months} held (once per body)"), 50, || {
-            let _ = std::hint::black_box(store::quarantine::Snapshot::load(root, Vendor::Zerodha));
-        });
+        spread(
+            &format!("C-QU-01 probe, quarantined month, {months} held"),
+            CALLS,
+            || {
+                let _ = std::hint::black_box(store::quarantine::probe(root, held));
+            },
+        );
+        spread(
+            &format!("C-QU-01 probe, clear month, {months} held"),
+            CALLS,
+            || {
+                let _ = std::hint::black_box(store::quarantine::probe(root, clear));
+            },
+        );
+        spread(
+            &format!("C-QU-02 Snapshot::load, {months} held (once per body)"),
+            50,
+            || {
+                let _ =
+                    std::hint::black_box(store::quarantine::Snapshot::load(root, Vendor::Zerodha));
+            },
+        );
         costs.push((hit, miss));
     }
     if let (Some(base), Some(mid), Some(top)) = (costs.first(), costs.get(1), costs.last()) {

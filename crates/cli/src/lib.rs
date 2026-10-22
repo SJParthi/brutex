@@ -120,13 +120,13 @@ mod tix_rebuilder;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
 /// the store and the calendar with no vendor call (R3-18).
 mod zerodha_gaps_command;
+/// `cli zerodha-quarantine`: the bars R4-17's plan names set aside, a month
+/// recorded whole or served as a new generation without them (R4-18).
+mod zerodha_quarantine;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
 /// for every series, or repaired to a new generation from bars another store
 /// holds (D-3350, WP-13c).
 mod zerodha_repair;
-/// `cli zerodha-quarantine`: the bars R4-17's plan names set aside, a month
-/// recorded whole or served as a new generation without them (R4-18).
-mod zerodha_quarantine;
 
 /// `cli zerodha-quarantine` over a store root the caller holds: the API's
 /// `GET /pull/quarantine.json` (with `--plan`) and `POST /pull/quarantine`
@@ -3066,7 +3066,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 56] = [
+const COMMANDS: [&str; 57] = [
     "alerts",
     "audit",
     "audit-audited-range",

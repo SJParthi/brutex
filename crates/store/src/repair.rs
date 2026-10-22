@@ -536,8 +536,7 @@ pub fn publish_without(
 ) -> Result<Published, RepairError> {
     check_kind(path)?;
     check_named(drop)?;
-    crate::quarantine::check_reason(reason)
-        .map_err(|why| RepairError::Reason(why.to_string()))?;
+    crate::quarantine::check_reason(reason).map_err(|why| RepairError::Reason(why.to_string()))?;
     check_header(path, expected_source)?;
     let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
     let source_lock = shared_lock(lock_path.clone())?;
@@ -559,8 +558,7 @@ pub fn publish_without(
     let receipt_path = physical.with_extension("repair-v1");
     let published = if exists(&physical.with_extension("reserved-v1"))? {
         let reader = RevisionReader::open(root, path, symbol_id, revision)?;
-        if reader.source_header() != expected_source
-            || reader.header().n_valid != kept.len() as u64
+        if reader.source_header() != expected_source || reader.header().n_valid != kept.len() as u64
         {
             return Err(RepairError::Conflict);
         }
@@ -585,7 +583,7 @@ pub fn publish_without(
 
 /// `drop` is not empty and strictly ascending.
 fn check_named(drop: &[i64]) -> Result<(), RepairError> {
-    if drop.is_empty() || drop.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if drop.is_empty() || drop.windows(2).any(|pair| matches!(pair, [a, b] if a >= b)) {
         return Err(RepairError::NothingNamed);
     }
     Ok(())
@@ -1020,8 +1018,7 @@ pub fn restate_month(
     reason: &str,
 ) -> Result<MonthRestate, RepairError> {
     check_kind(path)?;
-    crate::quarantine::check_reason(reason)
-        .map_err(|why| RepairError::Reason(why.to_string()))?;
+    crate::quarantine::check_reason(reason).map_err(|why| RepairError::Reason(why.to_string()))?;
     check_rows(path, corrected.len() as u64)?;
     survey(corrected)?;
     Admission::new(path.month(), path.timeframe().secs()).admit(corrected)?;

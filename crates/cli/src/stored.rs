@@ -3939,11 +3939,20 @@ mod tests {
     #[test]
     fn a_stored_sweep_refuses_a_quarantined_month() {
         let r = seeded("quarantined", Vendor::Zerodha, 4);
-        assert!(load(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8).is_ok(), "clear before");
+        assert!(
+            load(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8).is_ok(),
+            "clear before"
+        );
         let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("an index");
         let ym = YearMonth::new(2026, 8).expect("a month");
-        let path = StorePath::for_key(Vendor::Zerodha, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
-            .expect("a path");
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::MINUTE_1,
+            ym,
+            FileKind::Bars,
+        )
+        .expect("a path");
         store::quarantine::record(
             &r,
             &store::quarantine::Record {
@@ -3964,13 +3973,18 @@ mod tests {
             Err(LoadFailure::Missing(why)) => panic!("refused as missing: {why}"),
             Ok(loaded) => panic!("a quarantined month loaded {} bars", loaded.bars.len()),
         };
-        assert!(why.contains("QUARANTINED (whole_month foreign_level, 4 bar(s)"), "{why}");
+        assert!(
+            why.contains("QUARANTINED (whole_month foreign_level, 4 bar(s)"),
+            "{why}"
+        );
         assert!(why.contains("zerodha.quarantine.ledger"), "{why}");
         // A torn index is not "clear": the month is refused, naming it.
         let index = store::quarantine::index_path(&r, Vendor::Zerodha);
         let bytes = std::fs::read(&index).expect("the index");
         std::fs::write(&index, &bytes[..100]).expect("torn");
-        let Err(LoadFailure::Refused(torn)) = load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8) else {
+        let Err(LoadFailure::Refused(torn)) =
+            load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8)
+        else {
             panic!("a torn index must refuse");
         };
         assert!(torn.contains("quarantine_index_torn"), "{torn}");

@@ -85,7 +85,11 @@ fn parse_day(text: &str) -> Result<Day, String> {
     let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(format!("`{text}` is not a day spelled YYYY-MM-DD"));
     };
-    let number = |field: &str| field.parse::<u16>().map_err(|_| format!("`{text}` is not a day spelled YYYY-MM-DD"));
+    let number = |field: &str| {
+        field
+            .parse::<u16>()
+            .map_err(|_| format!("`{text}` is not a day spelled YYYY-MM-DD"))
+    };
     let (year, month, day) = (number(year)?, number(month)?, number(day)?);
     Day::new(
         year,
@@ -117,7 +121,8 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     if from > to {
         return Err(format!("FROM {from} is after TO {to}"));
     }
-    let (mut cause, mut reason, mut segment, mut plan_file, mut mode) = (None, None, "CASH", None, None);
+    let (mut cause, mut reason, mut segment, mut plan_file, mut mode) =
+        (None, None, "CASH", None, None);
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         let mut value = |name: &str| {
@@ -185,7 +190,9 @@ pub(crate) struct Row {
 pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
     let mut lines = text.lines();
     if lines.next() != Some(PLAN_HEAD) {
-        return Err(format!("the plan does not begin `{PLAN_HEAD}`; it is not read"));
+        return Err(format!(
+            "the plan does not begin `{PLAN_HEAD}`; it is not read"
+        ));
     }
     let prefix = format!("NSE-{}-", ask.segment);
     let (first_month, last_month) = (month_of(ask.from)?, month_of(ask.to)?);
@@ -201,7 +208,10 @@ pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         let [key, rung, month, scope, cause, action, bars, stamps] = fields.as_slice() else {
-            return Err(format!("a plan row has {} fields, not 8: `{line}`", fields.len()));
+            return Err(format!(
+                "a plan row has {} fields, not 8: `{line}`",
+                fields.len()
+            ));
         };
         let Some(symbol) = key.strip_prefix(prefix.as_str()) else {
             continue;
@@ -217,7 +227,8 @@ pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
             "1day" => Timeframe::DAY_1,
             other => return Err(format!("a plan row names rung `{other}`: `{line}`")),
         };
-        let month = parse_month(month).ok_or_else(|| format!("a plan row names month `{month}`"))?;
+        let month =
+            parse_month(month).ok_or_else(|| format!("a plan row names month `{month}`"))?;
         if month < first_month || month > last_month {
             continue;
         }
@@ -230,7 +241,10 @@ pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| format!("a plan row's stamps do not parse: `{key} {month}`"))?;
                 if bars.parse::<usize>().ok() != Some(listed.len()) {
-                    return Err(format!("a plan row counts {bars} bars and lists {}: `{key} {month}`", listed.len()));
+                    return Err(format!(
+                        "a plan row counts {bars} bars and lists {}: `{key} {month}`",
+                        listed.len()
+                    ));
                 }
                 Some(listed)
             }
@@ -299,7 +313,12 @@ fn plan_path(root: &Path, ask: &Ask) -> Result<PathBuf, String> {
     })
 }
 
-fn path_of<'a>(segment: &'a str, symbol: &'a str, rung: Timeframe, month: YearMonth) -> Result<StorePath<'a>, String> {
+fn path_of<'a>(
+    segment: &'a str,
+    symbol: &'a str,
+    rung: Timeframe,
+    month: YearMonth,
+) -> Result<StorePath<'a>, String> {
     StorePath::new(PathParts {
         vendor: Vendor::Zerodha,
         exchange: "NSE",
@@ -315,7 +334,11 @@ fn path_of<'a>(segment: &'a str, symbol: &'a str, rung: Timeframe, month: YearMo
 
 /// Every bar the served month holds; `Ok(None)` for a month not held.
 fn held_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Option<Vec<Bar>>, String> {
-    match store::file::BarFile::open_existing(root, path, pull::ingest::repair_plan::symbol_id(symbol)) {
+    match store::file::BarFile::open_existing(
+        root,
+        path,
+        pull::ingest::repair_plan::symbol_id(symbol),
+    ) {
         Err(store::file::StoreError::Missing { .. }) => Ok(None),
         Err(why) => Err(why.to_string()),
         Ok(file) => (0..file.header().n_valid)
@@ -328,7 +351,8 @@ fn held_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Option<Ve
 /// Every bar the served month holds.
 fn served_bars(root: &Path, path: StorePath<'_>, symbol: &str) -> Result<Vec<Bar>, String> {
     let id = pull::ingest::repair_plan::symbol_id(symbol);
-    let file = store::file::BarFile::open_existing(root, path, id).map_err(|why| why.to_string())?;
+    let file =
+        store::file::BarFile::open_existing(root, path, id).map_err(|why| why.to_string())?;
     (0..file.header().n_valid)
         .map(|index| file.read_record(index).map_err(|why| why.to_string()))
         .collect()
@@ -373,7 +397,9 @@ fn check_listing(root: &Path, ask: &Ask, symbol: &str, stamps: &[i64]) -> Result
         ));
     };
     let Some(listed) = span.listed_on() else {
-        return Err(format!("{symbol}: its master states no listing day; refused"));
+        return Err(format!(
+            "{symbol}: its master states no listing day; refused"
+        ));
     };
     if let Some(after) = stamps
         .iter()
@@ -436,7 +462,9 @@ fn outcome_text(outcome: &Outcome) -> String {
         Outcome::Planned(count) => format!("plan: {count} bar(s) would be set aside"),
         Outcome::Done(Applied::Nothing { why }) => format!("nothing written ({why})"),
         Outcome::Done(Applied::WholeMonth { bars, ledger_at }) => {
-            format!("RECORDED WHOLE: {bars} bar(s), no generation published (ledger at {ledger_at})")
+            format!(
+                "RECORDED WHOLE: {bars} bar(s), no generation published (ledger at {ledger_at})"
+            )
         }
         Outcome::Done(Applied::Dropped { drop, ledger_at }) => format!(
             "DROPPED {} of {} bar(s): generation {} -> {} served (ledger at {ledger_at})",
@@ -446,7 +474,9 @@ fn outcome_text(outcome: &Outcome) -> String {
             drop.to.ordinal()
         ),
         Outcome::Done(Applied::Resumed { bars, ledger_at }) => {
-            format!("RESUMED: {bars} bar(s) a killed run dropped, now recorded (ledger at {ledger_at})")
+            format!(
+                "RESUMED: {bars} bar(s) a killed run dropped, now recorded (ledger at {ledger_at})"
+            )
         }
         Outcome::Refused(why) => format!("REFUSED: {why}"),
     }
@@ -456,7 +486,9 @@ fn note(ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, outcome: &Ou
     let month = month.to_string();
     let text = outcome_text(outcome);
     let event = match outcome {
-        Outcome::Refused(_) => telemetry::Event::warn(EVENT_TARGET, "zerodha quarantine refused a month"),
+        Outcome::Refused(_) => {
+            telemetry::Event::warn(EVENT_TARGET, "zerodha quarantine refused a month")
+        }
         _ => telemetry::Event::info(EVENT_TARGET, "zerodha quarantine month"),
     };
     crate::note(
@@ -465,7 +497,10 @@ fn note(ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, outcome: &Ou
             .with("rung", telemetry::Value::Str(rung.as_str()))
             .with("month", telemetry::Value::Str(&month))
             .with("cause", telemetry::Value::Str(ask.cause.code()))
-            .with("mode", telemetry::Value::Str(if ask.apply { "apply" } else { "plan" }))
+            .with(
+                "mode",
+                telemetry::Value::Str(if ask.apply { "apply" } else { "plan" }),
+            )
             .with("reason", telemetry::Value::Str(&ask.reason))
             .with("outcome", telemetry::Value::Str(&text)),
     );
@@ -475,7 +510,14 @@ fn note(ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, outcome: &Ou
 const EVENT_TARGET: &str = "cli.zerodha_quarantine";
 
 /// One month of one rung: planned, or applied.
-fn act(root: &Path, ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, stamps: &[i64]) -> Outcome {
+fn act(
+    root: &Path,
+    ask: &Ask,
+    symbol: &str,
+    rung: Timeframe,
+    month: YearMonth,
+    stamps: &[i64],
+) -> Outcome {
     if !ask.apply {
         return Outcome::Planned(stamps.len());
     }
@@ -486,7 +528,11 @@ fn act(root: &Path, ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, 
     let reason = if rung == Timeframe::MINUTE_1 || rung == Timeframe::DAY_1 {
         ask.reason.clone()
     } else {
-        let derived = format!("{} (a {} bucket of a quarantined 1min bar)", ask.reason, rung.as_str());
+        let derived = format!(
+            "{} (a {} bucket of a quarantined 1min bar)",
+            ask.reason,
+            rung.as_str()
+        );
         if derived.len() <= store::quarantine::MAX_REASON {
             derived
         } else {
@@ -498,7 +544,13 @@ fn act(root: &Path, ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, 
         who: "cli zerodha-quarantine",
         reason: &reason,
     };
-    match store::quarantine::apply_month(root, path, pull::ingest::repair_plan::symbol_id(symbol), stamps, why) {
+    match store::quarantine::apply_month(
+        root,
+        path,
+        pull::ingest::repair_plan::symbol_id(symbol),
+        stamps,
+        why,
+    ) {
         Ok(applied) => Outcome::Done(applied),
         Err(why) => Outcome::Refused(why.to_string()),
     }
@@ -520,7 +572,10 @@ pub(crate) fn command_with(
     let root = match store() {
         Ok(root) => root,
         Err(why) => {
-            let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED: {why}. Nothing was read or written.");
+            let _ = writeln!(
+                out,
+                "ZERODHA QUARANTINE REFUSED: {why}. Nothing was read or written."
+            );
             return FAILED;
         }
     };
@@ -531,14 +586,21 @@ pub(crate) fn command_with(
     }) {
         Ok(plan) => plan,
         Err(why) => {
-            let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED: {why}. Nothing was written.");
+            let _ = writeln!(
+                out,
+                "ZERODHA QUARANTINE REFUSED: {why}. Nothing was written."
+            );
             return FAILED;
         }
     };
     let rows = match rows_of(&plan.1, &ask) {
         Ok(rows) => rows,
         Err(why) => {
-            let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED: {}: {why}. Nothing was written.", plan.0.display());
+            let _ = writeln!(
+                out,
+                "ZERODHA QUARANTINE REFUSED: {}: {why}. Nothing was written.",
+                plan.0.display()
+            );
             return FAILED;
         }
     };
@@ -550,11 +612,18 @@ pub(crate) fn command_with(
         ask.from,
         ask.to,
         ask.cause.code(),
-        if ask.apply { "APPLY" } else { "plan only: nothing is written" },
+        if ask.apply {
+            "APPLY"
+        } else {
+            "plan only: nothing is written"
+        },
         plan.0.display()
     );
     if rows.is_empty() {
-        let _ = writeln!(out, "  the plan names no bar of this cause in the window: nothing to do");
+        let _ = writeln!(
+            out,
+            "  the plan names no bar of this cause in the window: nothing to do"
+        );
         return OK;
     }
     let mut failed = false;
@@ -566,7 +635,14 @@ pub(crate) fn command_with(
             Ok(stamps) => stamps,
             Err(why) => {
                 let outcome = Outcome::Refused(why);
-                let _ = writeln!(out, "  {} {} {}: {}", row.symbol, row.rung.as_str(), row.month, outcome_text(&outcome));
+                let _ = writeln!(
+                    out,
+                    "  {} {} {}: {}",
+                    row.symbol,
+                    row.rung.as_str(),
+                    row.month,
+                    outcome_text(&outcome)
+                );
                 note(&ask, &row.symbol, row.rung, row.month, &outcome);
                 failed = true;
                 continue;
@@ -599,7 +675,13 @@ pub(crate) fn command_with(
                 Ok(None) => continue,
                 Err(why) => {
                     let outcome = Outcome::Refused(why);
-                    let _ = writeln!(out, "    {} {}: {}", rung.as_str(), row.month, outcome_text(&outcome));
+                    let _ = writeln!(
+                        out,
+                        "    {} {}: {}",
+                        rung.as_str(),
+                        row.month,
+                        outcome_text(&outcome)
+                    );
                     note(&ask, &row.symbol, rung, row.month, &outcome);
                     failed = true;
                     continue;

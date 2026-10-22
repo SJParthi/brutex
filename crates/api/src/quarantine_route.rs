@@ -87,7 +87,12 @@ pub(crate) fn arguments(raw: &str, apply: bool) -> Result<Vec<String>, String> {
     }
     let symbol = param(raw, "symbol");
     let (from, to, cause) = (param(raw, "from"), param(raw, "to"), param(raw, "cause"));
-    for (name, value) in [("symbol", &symbol), ("from", &from), ("to", &to), ("cause", &cause)] {
+    for (name, value) in [
+        ("symbol", &symbol),
+        ("from", &from),
+        ("to", &to),
+        ("cause", &cause),
+    ] {
         if value.is_empty() {
             return Err(format!("name `{name}`"));
         }
@@ -97,7 +102,15 @@ pub(crate) fn arguments(raw: &str, apply: bool) -> Result<Vec<String>, String> {
         reason = "plan".to_owned();
     }
     store::quarantine::check_reason(&reason).map_err(|why| why.to_string())?;
-    let mut out = vec![symbol, from, to, "--cause".to_owned(), cause, "--reason".to_owned(), reason];
+    let mut out = vec![
+        symbol,
+        from,
+        to,
+        "--cause".to_owned(),
+        cause,
+        "--reason".to_owned(),
+        reason,
+    ];
     let segment = param(raw, "segment");
     if !segment.is_empty() {
         out.push("--segment".to_owned());
@@ -129,7 +142,13 @@ pub(super) async fn quarantine_plan_json(
 ) -> Answer {
     let args = match arguments(uri.query().unwrap_or(""), false) {
         Ok(args) => args,
-        Err(why) => return refused(axum::http::StatusCode::BAD_REQUEST, "quarantine_question", &why),
+        Err(why) => {
+            return refused(
+                axum::http::StatusCode::BAD_REQUEST,
+                "quarantine_question",
+                &why,
+            );
+        }
     };
     let root = site.store_root.clone();
     let run = crate::detail::run_store_read(move || {
@@ -161,7 +180,13 @@ pub(super) async fn quarantine_apply(
 ) -> Answer {
     let args = match arguments(&body, true) {
         Ok(args) => args,
-        Err(why) => return refused(axum::http::StatusCode::BAD_REQUEST, "quarantine_question", &why),
+        Err(why) => {
+            return refused(
+                axum::http::StatusCode::BAD_REQUEST,
+                "quarantine_question",
+                &why,
+            );
+        }
     };
     if PRESSING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

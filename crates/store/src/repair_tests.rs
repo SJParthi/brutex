@@ -1,5 +1,5 @@
 #![cfg(test)]
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 //! A refused release of the shared lock `repair` takes is the caller's
 //! `RepairError::Io`, with the host's kind and the visibility the moment
 //! deserves. D-0693.
@@ -711,15 +711,35 @@ fn a_drop_naming_an_unheld_stamp_is_refused() {
     let header = fixture.source(&rows);
     let before = files_under(&fixture.root);
     let unheld = bar(3).ts_micros;
-    for drop in [vec![unheld], vec![rows[0].ts_micros, unheld], vec![bar(40).ts_micros]] {
+    for drop in [
+        vec![unheld],
+        vec![rows[0].ts_micros, unheld],
+        vec![bar(40).ts_micros],
+    ] {
         let refused = super::publish_without(
-            &fixture.root, path(), SYMBOL, revision(), header, &drop, "named unheld",
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            header,
+            &drop,
+            "named unheld",
         );
-        assert!(matches!(refused, Err(RepairError::UnheldStamp(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(RepairError::UnheldStamp(_))),
+            "{refused:?}"
+        );
         let month = super::drop_month(&fixture.root, path(), SYMBOL, &drop, "named unheld");
-        assert!(matches!(month, Err(RepairError::UnheldStamp(_))), "{month:?}");
+        assert!(
+            matches!(month, Err(RepairError::UnheldStamp(_))),
+            "{month:?}"
+        );
     }
-    for garbage in [vec![], vec![rows[2].ts_micros, rows[1].ts_micros], vec![rows[1].ts_micros; 2]] {
+    for garbage in [
+        vec![],
+        vec![rows[2].ts_micros, rows[1].ts_micros],
+        vec![rows[1].ts_micros; 2],
+    ] {
         let refused = super::drop_month(&fixture.root, path(), SYMBOL, &garbage, "garbage");
         assert_eq!(refused, Err(RepairError::NothingNamed));
     }
@@ -738,8 +758,15 @@ fn a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source() {
     let header = fixture.source(&rows);
     let original = files_under(&fixture.root.join("bars"));
     let drop = [rows[0].ts_micros, rows[5].ts_micros];
-    let published =
-        super::publish_without(&fixture.root, path(), SYMBOL, revision(), header, &drop, "edges");
+    let published = super::publish_without(
+        &fixture.root,
+        path(),
+        SYMBOL,
+        revision(),
+        header,
+        &drop,
+        "edges",
+    );
     assert_eq!(published, Ok(Published::Created));
     let reader = fixture.read().expect("the revision opens");
     assert_eq!(reader.header().n_valid, 4);
@@ -747,11 +774,27 @@ fn a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source() {
         assert_eq!(reader.read_record(index as u64).expect("a record"), *kept);
     }
     assert_eq!(
-        super::publish_without(&fixture.root, path(), SYMBOL, revision(), header, &drop, "edges"),
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            header,
+            &drop,
+            "edges"
+        ),
         Ok(Published::Reused)
     );
     assert_eq!(
-        super::publish_without(&fixture.root, path(), SYMBOL, revision(), header, &drop[..1], "other"),
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            header,
+            &drop[..1],
+            "other"
+        ),
         Err(RepairError::Conflict),
         "another request at a held ordinal"
     );
@@ -768,7 +811,10 @@ fn a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source() {
         &drop,
         "stale",
     );
-    assert!(matches!(stale, Err(RepairError::StaleSource | RepairError::Store(_))), "{stale:?}");
+    assert!(
+        matches!(stale, Err(RepairError::StaleSource | RepairError::Store(_))),
+        "{stale:?}"
+    );
     // BEING WRITTEN: a writer holds the month's lock; the door names it.
     let lock = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
     let writer = Flock::try_lock(File::open(&lock).expect("lock"), lock.clone()).expect("held");
@@ -783,7 +829,10 @@ fn a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source() {
 /// **THE 1,024-REVISION LIMIT IS NAMED**, never a wrap and never a reuse.
 #[test]
 fn a_drop_past_the_last_ordinal_is_the_revision_limit() {
-    assert_eq!(Revision::new(super::MAX_REVISIONS + 1), Err(RepairError::RevisionLimit));
+    assert_eq!(
+        Revision::new(super::MAX_REVISIONS + 1),
+        Err(RepairError::RevisionLimit)
+    );
     assert_eq!(Revision::new(0), Err(RepairError::RevisionLimit));
     let fixture = Fixture::new("drop-limit");
     let rows: Vec<Bar> = (0..3).map(bar).collect();
@@ -797,7 +846,11 @@ fn a_drop_past_the_last_ordinal_is_the_revision_limit() {
         &[rows[1].ts_micros],
         "the last ordinal",
     );
-    assert_eq!(refused, Ok(Published::Created), "the last ordinal itself is usable");
+    assert_eq!(
+        refused,
+        Ok(Published::Created),
+        "the last ordinal itself is usable"
+    );
 }
 
 /// **DLY-08: THE RESTATE POLICY** publishes corrected values at kept stamps
@@ -842,8 +895,16 @@ fn the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation() 
     let mut expected = rows.clone();
     expected[2] = corrected;
     expected.push(added);
-    assert_eq!(all_bars(&fixture.root), expected, "every held stamp kept, one corrected, one added");
-    assert_eq!(files_under(&fixture.root.join("bars")), original, "the old generation is untouched");
+    assert_eq!(
+        all_bars(&fixture.root),
+        expected,
+        "every held stamp kept, one corrected, one added"
+    );
+    assert_eq!(
+        files_under(&fixture.root.join("bars")),
+        original,
+        "the old generation is untouched"
+    );
     let again = super::restate_month(
         &fixture.root,
         path(),

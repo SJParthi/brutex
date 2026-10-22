@@ -902,9 +902,11 @@ pub(super) fn store_response(
         match format {
             // THE QUARANTINE READ ONCE PER CACHED BODY (R4-18): a ledger that
             // will not read refuses the body by name, never drops the field.
-            store_wire::Format::Expanded => store::quarantine::Summary::load(&site.store_root, feed)
-                .map(|summary| store_body_with(row, &entries, feed, Some(&summary)))
-                .map_err(|why| why.to_string()),
+            store_wire::Format::Expanded => {
+                store::quarantine::Summary::load(&site.store_root, feed)
+                    .map(|summary| store_body_with(row, &entries, feed, Some(&summary)))
+                    .map_err(|why| why.to_string())
+            }
             store_wire::Format::Compact => store_wire::compact(row, &entries, feed),
         }
     }) {

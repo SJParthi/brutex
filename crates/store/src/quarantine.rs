@@ -124,7 +124,15 @@ pub const MAGIC: [u8; 8] = *b"BRXQIX01";
 pub const LEDGER_HEAD: &str = "brutex quarantine ledger v1";
 
 const SLOT: usize = 64;
+const SLOT_U32: u32 = 64;
+const HEADER: usize = 64;
 const BUCKET_BYTES: usize = SLOT * 8;
+/// [`INDEX_LEN`] as a length in memory.
+const INDEX_BYTES: usize = HEADER + (8_192 + 8 - 1) * SLOT;
+const _: () = assert!(
+    INDEX_BYTES as u64 == INDEX_LEN,
+    "the index length in two units"
+);
 
 /// Why a bar is quarantined. Fixed by the plan that named it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -352,7 +360,11 @@ impl fmt::Display for QuarantineError {
 
 impl std::error::Error for QuarantineError {}
 
-fn io_at<T>(result: io::Result<T>, path: &Path, operation: &'static str) -> Result<T, QuarantineError> {
+fn io_at<T>(
+    result: io::Result<T>,
+    path: &Path,
+    operation: &'static str,
+) -> Result<T, QuarantineError> {
     result.map_err(|why| QuarantineError::Io {
         path: path.to_path_buf(),
         operation,
@@ -369,11 +381,13 @@ pub fn index_path(root: &Path, feed: Vendor) -> PathBuf {
 /// `<root>/audit/<feed>.quarantine.ledger`.
 #[must_use]
 pub fn ledger_path(root: &Path, feed: Vendor) -> PathBuf {
-    root.join(DIR).join(format!("{}.quarantine.ledger", feed.as_str()))
+    root.join(DIR)
+        .join(format!("{}.quarantine.ledger", feed.as_str()))
 }
 
 fn lock_path(root: &Path, feed: Vendor) -> PathBuf {
-    root.join(DIR).join(format!("{}.quarantine.lock", feed.as_str()))
+    root.join(DIR)
+        .join(format!("{}.quarantine.lock", feed.as_str()))
 }
 
 /// The series a month belongs to, as the ledger and the index name it:
@@ -427,7 +441,11 @@ fn field<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
 /// What one slot's 64 bytes say.
 enum Slot {
     Free,
-    Held { hash: [u8; 16], month: u32, entry: Option<Entry> },
+    Held {
+        hash: [u8; 16],
+        month: u32,
+        entry: Option<Entry>,
+    },
     Damaged,
 }
 
@@ -554,10 +572,12 @@ fn find_in_run(
                 month: at,
                 entry,
             } if held == *hash && at == month => {
-                return entry.map(Probe::Quarantined).ok_or(QuarantineError::Damaged {
-                    path: index.to_path_buf(),
-                    slot,
-                });
+                return entry
+                    .map(Probe::Quarantined)
+                    .ok_or(QuarantineError::Damaged {
+                        path: index.to_path_buf(),
+                        slot,
+                    });
             }
             Slot::Held { .. } => {}
         }
@@ -582,21 +602,19 @@ impl Snapshot {
     /// As [`probe`], for any slot of the index.
     pub fn load(root: &Path, feed: Vendor) -> Result<Self, QuarantineError> {
         let index = index_path(root, feed);
-        let image = match read_image(&index)? {
-            Some(image) => image,
-            None => return Ok(Self::default()),
+        let Some(image) = read_image(&index)? else {
+            return Ok(Self::default());
         };
         let mut months = HashMap::new();
         for (slot, bytes) in image
-            .get(HEADER_LEN as usize..)
+            .get(HEADER..)
             .unwrap_or(&[])
             .chunks_exact(SLOT)
             .enumerate()
         {
             match decode_slot(bytes, slot as u64) {
                 Slot::Free => {}
-                Slot::Damaged
-                | Slot::Held { entry: None, .. } => {
+                Slot::Damaged | Slot::Held { entry: None, .. } => {
                     return Err(QuarantineError::Damaged {
                         path: index,
                         slot: slot as u64,
@@ -660,8 +678,12 @@ fn read_image(index: &Path) -> Result<Option<Vec<u8>>, QuarantineError> {
             len,
         });
     }
-    let mut image = Vec::with_capacity(INDEX_LEN as usize);
-    io_at(file.read_to_end(&mut image), index, "read the quarantine index")?;
+    let mut image = Vec::with_capacity(INDEX_BYTES);
+    io_at(
+        file.read_to_end(&mut image),
+        index,
+        "read the quarantine index",
+    )?;
     if image.len() as u64 != INDEX_LEN {
         return Err(QuarantineError::Torn {
             path: index.to_path_buf(),
@@ -692,11 +714,14 @@ pub fn digest_of(bars: &[Bar]) -> [u8; 32] {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        out.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
-        out.push(char::from(b"0123456789abcdef"[usize::from(byte & 15)]));
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            for nibble in [byte >> 4, byte & 15] {
+                out.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
+            }
+            out
+        })
 }
 
 /// One act, as [`record`] writes it.
@@ -823,14 +848,12 @@ fn audit_dir(root: &Path) -> Result<PathBuf, QuarantineError> {
     match fs::symlink_metadata(&dir) {
         Ok(meta) if meta.file_type().is_symlink() => Err(QuarantineError::Linked(dir)),
         Ok(_) => Ok(dir),
-        Err(why) if why.kind() == io::ErrorKind::NotFound => {
-            match fs::create_dir(&dir) {
-                Err(why) if why.kind() != io::ErrorKind::AlreadyExists => {
-                    io_at(Err(why), &dir, "create the audit directory")
-                }
-                _ => Ok(dir),
+        Err(why) if why.kind() == io::ErrorKind::NotFound => match fs::create_dir(&dir) {
+            Err(why) if why.kind() != io::ErrorKind::AlreadyExists => {
+                io_at(Err(why), &dir, "create the audit directory")
             }
-        }
+            _ => Ok(dir),
+        },
         Err(why) => io_at(Err(why), &dir, "inspect the audit directory"),
     }
 }
@@ -901,7 +924,13 @@ fn record_held(root: &Path, act: &Record<'_>) -> Result<Recorded, QuarantineErro
             revision: act.revision,
             written_at: now_micros(),
         };
-        upsert(&mut image, &hash_of(&key, act.path.month()), month_code(act.path.month()), entry, &index)?;
+        upsert(
+            &mut image,
+            &hash_of(&key, act.path.month()),
+            month_code(act.path.month()),
+            entry,
+            &index,
+        )?;
     }
     publish_image(root, feed, &image)?;
     Ok(Recorded {
@@ -914,7 +943,9 @@ fn record_held(root: &Path, act: &Record<'_>) -> Result<Recorded, QuarantineErro
 fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| i64::try_from(since.as_micros()).unwrap_or(i64::MAX))
+        .map_or(0, |since| {
+            i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+        })
 }
 
 fn ledger_line(key: &str, act: &Record<'_>, written_at: i64) -> String {
@@ -947,7 +978,11 @@ fn ledger_line(key: &str, act: &Record<'_>, written_at: i64) -> String {
 /// append) is ended with one first. Answers the line's offset.
 fn append_line(path: &Path, line: &str) -> Result<(u64, bool), QuarantineError> {
     let mut file = io_at(
-        OpenOptions::new().read(true).append(true).create(true).open(path),
+        OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(path),
         path,
         "open the quarantine ledger",
     )?;
@@ -956,18 +991,30 @@ fn append_line(path: &Path, line: &str) -> Result<(u64, bool), QuarantineError> 
     let mut at = len;
     if len == 0 {
         let head = format!("{LEDGER_HEAD}\n");
-        io_at(file.write_all(head.as_bytes()), path, "write the ledger head")?;
+        io_at(
+            file.write_all(head.as_bytes()),
+            path,
+            "write the ledger head",
+        )?;
         at = head.len() as u64;
     } else {
         let mut last = [0u8; 1];
-        io_at(file.read_exact_at(&mut last, len - 1), path, "read the ledger tail")?;
+        io_at(
+            file.read_exact_at(&mut last, len - 1),
+            path,
+            "read the ledger tail",
+        )?;
         if last != *b"\n" {
             io_at(file.write_all(b"\n"), path, "end a torn ledger line")?;
             ended_torn = true;
             at = len + 1;
         }
     }
-    io_at(file.write_all(line.as_bytes()), path, "append to the quarantine ledger")?;
+    io_at(
+        file.write_all(line.as_bytes()),
+        path,
+        "append to the quarantine ledger",
+    )?;
     io_at(file.sync_all(), path, "sync the quarantine ledger")?;
     Ok((at, ended_torn))
 }
@@ -1022,7 +1069,11 @@ pub fn read_ledger(root: &Path, feed: Vendor) -> Result<Ledger, QuarantineError>
     let bytes = match crate::safe_open::open_read(&path) {
         Ok(mut file) => {
             let mut bytes = Vec::new();
-            io_at(file.read_to_end(&mut bytes), &path, "read the quarantine ledger")?;
+            io_at(
+                file.read_to_end(&mut bytes),
+                &path,
+                "read the quarantine ledger",
+            )?;
             bytes
         }
         Err(why) if why.is_missing() => return Ok(Ledger::default()),
@@ -1068,8 +1119,20 @@ fn parse_line(text: &str, at: u64) -> Option<Line> {
         return None;
     }
     let fields: Vec<&str> = body.split('\t').collect();
-    let [written_at, _feed, key, month, scope, cause, bars, revision, digest, who, reason, stamps] =
-        fields.as_slice()
+    let [
+        written_at,
+        _feed,
+        key,
+        month,
+        scope,
+        cause,
+        bars,
+        revision,
+        digest,
+        who,
+        reason,
+        stamps,
+    ] = fields.as_slice()
     else {
         return None;
     };
@@ -1120,11 +1183,11 @@ pub fn ledger_stamps(root: &Path, path: StorePath<'_>) -> Result<Vec<i64>, Quara
 }
 
 fn empty_image() -> Vec<u8> {
-    let mut image = vec![0u8; INDEX_LEN as usize];
+    let mut image = vec![0u8; INDEX_BYTES];
     let fields: [(usize, &[u8]); 5] = [
         (0, &MAGIC),
         (8, &1u32.to_le_bytes()),
-        (12, &(SLOT as u32).to_le_bytes()),
+        (12, &SLOT_U32.to_le_bytes()),
         (16, &CAPACITY.to_le_bytes()),
         (24, &BUCKET.to_le_bytes()),
     ];
@@ -1150,7 +1213,7 @@ fn image_trusted(image: &[u8]) -> bool {
         && u32::from_le_bytes(field(image, 60)) == crc32c(image.get(..60).unwrap_or(&[]));
     header_ok
         && image
-            .get(HEADER_LEN as usize..)
+            .get(HEADER..)
             .unwrap_or(&[])
             .chunks_exact(SLOT)
             .enumerate()
@@ -1173,7 +1236,7 @@ fn upsert(
 ) -> Result<(), QuarantineError> {
     let home = home_of(hash);
     for slot in home..home + BUCKET {
-        let at = (HEADER_LEN + slot * SLOT_LEN) as usize;
+        let at = usize::try_from(HEADER_LEN + slot * SLOT_LEN).unwrap_or(usize::MAX);
         let bytes = image.get(at..at + SLOT).unwrap_or(&[]);
         match decode_slot(bytes, slot) {
             Slot::Held {
@@ -1199,7 +1262,7 @@ fn upsert(
             dst.copy_from_slice(&encoded);
         }
         let entries = image
-            .get(HEADER_LEN as usize..)
+            .get(HEADER..)
             .unwrap_or(&[])
             .chunks_exact(SLOT)
             .filter(|bytes| bytes.iter().any(|byte| *byte != 0))
@@ -1236,7 +1299,13 @@ fn image_from_ledger(root: &Path, feed: Vendor) -> Result<Vec<u8>, QuarantineErr
             revision: line.revision,
             written_at: line.written_at,
         };
-        upsert(&mut image, &hash_of(&line.key, month), month_code(month), entry, &index)?;
+        upsert(
+            &mut image,
+            &hash_of(&line.key, month),
+            month_code(month),
+            entry,
+            &index,
+        )?;
     }
     Ok(image)
 }
@@ -1259,9 +1328,17 @@ fn publish_image(root: &Path, feed: Vendor, image: &[u8]) -> Result<(), Quaranti
         operation: "create the index staging file",
         kind: staging_kind(&why),
     })?;
-    io_at(staged.file.write_all(image), &staging, "write the index image")?;
+    io_at(
+        staged.file.write_all(image),
+        &staging,
+        "write the index image",
+    )?;
     io_at(staged.file.sync_all(), &staging, "sync the index image")?;
-    io_at(fs::rename(&staging, &index), &index, "publish the index image")?;
+    io_at(
+        fs::rename(&staging, &index),
+        &index,
+        "publish the index image",
+    )?;
     io_at(
         File::open(&dir).and_then(|handle| handle.sync_all()),
         &dir,
@@ -1301,7 +1378,7 @@ pub fn rebuild(root: &Path, feed: Vendor) -> Result<Rebuilt, QuarantineError> {
         let ledger = read_ledger(root, feed)?;
         let image = image_from_ledger(root, feed)?;
         let months = image
-            .get(HEADER_LEN as usize..)
+            .get(HEADER..)
             .unwrap_or(&[])
             .chunks_exact(SLOT)
             .filter(|bytes| bytes.iter().any(|byte| *byte != 0))
@@ -1399,7 +1476,8 @@ impl Summary {
         if self.instruments.is_empty() {
             return None;
         }
-        self.instruments.get(&format!("{exchange}/{segment}/{symbol}"))
+        self.instruments
+            .get(&format!("{exchange}/{segment}/{symbol}"))
     }
 
     /// The month's quarantine.
@@ -1501,6 +1579,108 @@ pub struct Why<'a> {
     pub reason: &'a str,
 }
 
+/// The served month's bars at `named` stamps, the named stamps it does not
+/// hold, and its committed count. One pass, O(held + named).
+fn split_named(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    named: &[i64],
+) -> Result<(Vec<Bar>, Vec<i64>, u64), ApplyError> {
+    let source = crate::file::BarFile::open_existing(root, path, symbol_id)?;
+    let n_valid = source.header().n_valid;
+    let mut held_named = Vec::with_capacity(named.len());
+    let mut unheld = Vec::new();
+    let mut wanted = named.iter().copied().peekable();
+    for index in 0..n_valid {
+        let bar = source.read_record(index)?;
+        while let Some(early) = wanted.next_if(|at| *at < bar.ts_micros) {
+            unheld.push(early);
+        }
+        if wanted.next_if(|at| *at == bar.ts_micros).is_some() {
+            held_named.push(bar);
+        }
+    }
+    unheld.extend(wanted);
+    Ok((held_named, unheld, n_valid))
+}
+
+/// Refuses a named stamp the month does not hold unless a ledger line set it
+/// aside, and answers the intent a killed run left: a `dropping` line whose
+/// stamps no `dropped` line names and the served month no longer holds.
+fn resumable_intent(
+    root: &Path,
+    path: StorePath<'_>,
+    unheld: &[i64],
+) -> Result<Option<Line>, ApplyError> {
+    let ledger = read_ledger(root, path.vendor())?;
+    let key = series_key(path);
+    let month = path.month().to_string();
+    let mine: Vec<&Line> = ledger
+        .lines
+        .iter()
+        .filter(|line| line.key == key && line.month == month)
+        .collect();
+    let set_aside = |at: i64, scope: Scope| {
+        mine.iter()
+            .any(|line| line.scope == scope && line.stamps.binary_search(&at).is_ok())
+    };
+    if let Some(at) = unheld
+        .iter()
+        .find(|at| !set_aside(**at, Scope::Dropped) && !set_aside(**at, Scope::Dropping))
+    {
+        return Err(crate::repair::RepairError::UnheldStamp(*at).into());
+    }
+    Ok(mine
+        .iter()
+        .rev()
+        .find(|line| {
+            line.scope == Scope::Dropping
+                && line.stamps.iter().all(|at| !set_aside(*at, Scope::Dropped))
+                && line
+                    .stamps
+                    .iter()
+                    .all(|at| unheld.binary_search(at).is_ok())
+        })
+        .map(|line| (*line).clone()))
+}
+
+/// Writes the `dropped` line and the index a killed run owed, from its
+/// intent: the generation served now is the one it promoted.
+fn finish_resume(
+    root: &Path,
+    path: StorePath<'_>,
+    intent: &Line,
+    why: Why<'_>,
+) -> Result<Applied, ApplyError> {
+    let served = crate::generation::served(root, path)?;
+    let mut digest = [0u8; 32];
+    for (at, pair) in digest.iter_mut().zip(intent.digest.as_bytes().chunks(2)) {
+        *at = std::str::from_utf8(pair)
+            .ok()
+            .and_then(|text| u8::from_str_radix(text, 16).ok())
+            .unwrap_or(0);
+    }
+    let done = record(
+        root,
+        &Record {
+            path,
+            scope: Scope::Dropped,
+            cause: intent.cause,
+            stamps: &intent.stamps,
+            bars: intent.bars,
+            revision: served.ordinal(),
+            source_digest: digest,
+            who: why.who,
+            reason: why.reason,
+        },
+    )?;
+    Ok(Applied::Resumed {
+        bars: intent.bars,
+        ledger_at: done.ledger_at,
+    })
+}
+
 /// Sets aside the bars stamped `named` in `path`'s month: the whole month by
 /// record when every held bar is named, otherwise a new generation without
 /// them through [`crate::repair::drop_month`]. LEDGERED FIRST: the intent
@@ -1540,24 +1720,7 @@ pub fn apply_month(
         }
         other => other?,
     };
-    let source = crate::file::BarFile::open_existing(root, path, symbol_id)?;
-    let n_valid = source.header().n_valid;
-    let mut held_named = Vec::with_capacity(named.len());
-    let mut unheld = Vec::new();
-    {
-        let mut wanted = named.iter().copied().peekable();
-        for index in 0..n_valid {
-            let bar = source.read_record(index)?;
-            while let Some(early) = wanted.next_if(|at| *at < bar.ts_micros) {
-                unheld.push(early);
-            }
-            if wanted.next_if(|at| *at == bar.ts_micros).is_some() {
-                held_named.push(bar);
-            }
-        }
-        unheld.extend(wanted);
-    }
-    drop(source);
+    let (held_named, unheld, n_valid) = split_named(root, path, symbol_id, &named)?;
     if let Probe::Quarantined(entry) = probed
         && entry.scope == Scope::WholeMonth
         && held_named.len() as u64 == n_valid
@@ -1566,69 +1729,18 @@ pub fn apply_month(
             why: "already_whole",
         });
     }
-    let mut resumable = None;
-    if !unheld.is_empty() {
-        let ledger = read_ledger(root, path.vendor())?;
-        let key = series_key(path);
-        let month = path.month().to_string();
-        let mine: Vec<&Line> = ledger
-            .lines
-            .iter()
-            .filter(|line| line.key == key && line.month == month)
-            .collect();
-        let set_aside = |at: i64, scope: Scope| {
-            mine.iter()
-                .any(|line| line.scope == scope && line.stamps.binary_search(&at).is_ok())
-        };
-        for at in &unheld {
-            if !set_aside(*at, Scope::Dropped) && !set_aside(*at, Scope::Dropping) {
-                return Err(crate::repair::RepairError::UnheldStamp(*at).into());
-            }
-        }
-        // AN INTENT WITH NO `dropped` LINE whose bars the served month no
-        // longer holds: a run killed after the promotion. Finished now.
-        resumable = mine
-            .iter()
-            .rev()
-            .find(|line| {
-                line.scope == Scope::Dropping
-                    && line.stamps.iter().all(|at| !set_aside(*at, Scope::Dropped))
-                    && line.stamps.iter().all(|at| unheld.binary_search(at).is_ok())
-            })
-            .map(|line| (*line).clone());
-    }
+    let resumable = if unheld.is_empty() {
+        None
+    } else {
+        resumable_intent(root, path, &unheld)?
+    };
     if held_named.is_empty() {
-        let Some(intent) = resumable else {
-            return Ok(Applied::Nothing {
+        return match resumable {
+            Some(intent) => finish_resume(root, path, &intent, why),
+            None => Ok(Applied::Nothing {
                 why: "already_dropped",
-            });
+            }),
         };
-        let served = crate::generation::served(root, path)?;
-        let mut digest = [0u8; 32];
-        for (at, pair) in digest.iter_mut().zip(intent.digest.as_bytes().chunks(2)) {
-            *at = std::str::from_utf8(pair)
-                .ok()
-                .and_then(|text| u8::from_str_radix(text, 16).ok())
-                .unwrap_or(0);
-        }
-        let done = record(
-            root,
-            &Record {
-                path,
-                scope: Scope::Dropped,
-                cause: intent.cause,
-                stamps: &intent.stamps,
-                bars: intent.bars,
-                revision: served.ordinal(),
-                source_digest: digest,
-                who: why.who,
-                reason: why.reason,
-            },
-        )?;
-        return Ok(Applied::Resumed {
-            bars: intent.bars,
-            ledger_at: done.ledger_at,
-        });
     }
     let stamps: Vec<i64> = held_named.iter().map(|bar| bar.ts_micros).collect();
     let digest = digest_of(&held_named);
