@@ -1005,7 +1005,7 @@ impl DropCensus {
     ///
     /// # The one place this is not the sum of its reasons
     ///
-    /// Exactly the sum of the four counters while that sum fits `u32`, and
+    /// Exactly the sum of the five counters while that sum fits `u32`, and
     /// **saturated at `u32::MAX` above it**, which is the one arithmetic in
     /// this file whose answer can be smaller than the truth. It is stated
     /// rather than hidden: reaching it needs more than 4.29 billion drops in
@@ -1204,6 +1204,11 @@ impl Window {
         // became wrong in the one place it matters most.
         //
         // NSE's CAS change (NSE/CMTR/74466) moved the three segments apart:
+        // [SC-CLOSE-24: the next six lines are the reasoning this function once
+        // followed and that was RETRACTED (operator, 2026-08-20; the vendor
+        // measurement in `only_derivatives_moved_on_2026_08_03_and_the_index_kept_its_close`):
+        // the index KEPT its 15:30 close and only derivatives moved, to 15:40.
+        // The tables in `crate::vendor` now say so; the text is kept as history.]
         // the swept INDEX now stops at 15:15, because every share it is
         // computed from is CAS-eligible and leaves continuous trading then;
         // cash keeps 15:30; derivatives extend to 15:40. `crate::vendor` had
@@ -1274,7 +1279,7 @@ impl Window {
 /// Any other minute outside every window — after the last window, or in the
 /// halt between two — is [`DropReason::AtOrAfterSessionClose`]: it is at or
 /// after the close of the window it follows. No third reason is minted, so the
-/// census, the receipt and the audit page keep their four named counters.
+/// census, the receipt and the audit page keep their five named counters.
 fn irregular_verdict(session: crate::calendar::Session, minute: u32) -> Option<DropReason> {
     // A minute of the day is below 1,440 and always fits; one that did not
     // would saturate to a minute outside every window and after the first

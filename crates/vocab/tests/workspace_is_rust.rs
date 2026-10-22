@@ -563,9 +563,27 @@ fn the_dependency_set_has_not_moved_without_review() {
     // The cookie feature that would have arrived alongside it was NOT taken --
     // `cargo deny` refused the `time 0.3.45` it dragged in -- so `cookie`,
     // `cookie_store` and `time` are absent from this count. D-0311.
+    //
+    // 192 -> 194 BY `rustix`, AND THE SCAN WAS RUN BEFORE THIS NUMBER MOVED.
+    //
+    // `api` names `rustix` 1.1.4 (`std`, `fs`, no defaults) so `/disk.json`
+    // measures its filesystem with one `statvfs(2)` instead of starting
+    // `/bin/df` (D-5240). Two packages arrived and no others: `rustix` and
+    // `linux-raw-sys` 0.12.1; the four others `rustix` names (`bitflags`,
+    // `errno`, `libc`, `windows-sys` 0.61.2) were already locked at the version
+    // it takes. Measured over the registry sources of both:
+    //   * **zero** files matching .c .cc .cpp .h .S .s .asm .js -- `rustix`
+    //     ships 318 `.rs` files and `linux-raw-sys` 462, the rest licences,
+    //     manifests and Markdown -- so neither is added to DECLARED. On Linux
+    //     `rustix` makes its system calls through `core::arch::asm!`, ordinary
+    //     stable Rust, as `graviola` does;
+    //   * `linux-raw-sys` has no `build.rs`. `rustix`'s runs `$RUSTC` (or a
+    //     `RUSTC_WRAPPER`) on feature probes and prints `cfg`s, the probe
+    //     `docs/06-limits.md` §96 records for thirteen packages already; §96
+    //     now lists fourteen. It is not a new exception and not treated as one.
     assert_eq!(
         names.len(),
-        192,
+        194,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
@@ -596,17 +614,26 @@ fn the_dependency_set_has_not_moved_without_review() {
     // LICENSE and three `.zst` test fixtures); `rustls` 0.23.46's file set
     // outside .rs/.md/.toml/.json equals 0.23.45's and its `build.rs` is
     // byte-identical to the one already in the tree.
-    // 0xFFDD_76EA_1ADA_B2F7 -> 0x79FE_A712_E0CC_24EC IS TWO VERSION BUMPS, NOT A
-    // NEW PACKAGE (D-5916): `rustls-webpki` 0.103.15 -> 0.103.16
-    // (RUSTSEC-2026-0382) and `webpki-roots` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381),
-    // in `Cargo.lock` only. The count is still 195 and neither dependency list
-    // moved. The scan: neither ships a `build.rs` or any .c/.cc/.cpp/.h/.S/.s/.asm;
+    // 0xFFDD_76EA_1ADA_B2F7 -> 0x8070_52EA_72E5_1027 IS `rustix` 1.1.4 AND
+    // `linux-raw-sys` 0.12.1 ARRIVING WITH THE ONE NEW ARROW `api -> rustix`
+    // (D-5240), merged onto the two bumps above; on its own branch, from
+    // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
+    // The scan is recorded beside the count above, and no other package's
+    // `dependencies` list moved.
+    // 0x8070_52EA_72E5_1027 -> 0x0000_0000_0000_0000 IS TWO VERSION BUMPS, NOT A
+    // NEW PACKAGE (D-5916), merged onto `rustix` above; on its own branch, from
+    // 0xFFDD_76EA_1ADA_B2F7, the same two bumps pinned 0x79FE_A712_E0CC_24EC.
+    // `rustls-webpki` 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and
+    // `webpki-roots` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381), in `Cargo.lock`
+    // only. The count does not move (it is the 194 asserted above; on its own
+    // branch it was the 192 asserted there) and neither dependency list moved.
+    // The scan: neither ships a `build.rs` or any .c/.cc/.cpp/.h/.S/.s/.asm;
     // `webpki-roots` 1.0.10's file set outside .rs/.md/.toml/.json equals
     // 1.0.9's, and `rustls-webpki` 0.103.16 adds exactly eight `.spki.der` files
     // under `src/data/distrusted/` -- the public keys it now refuses, data
     // rather than code.
     assert_eq!(
-        h, 0x79FE_A712_E0CC_24EC,
+        h, 0x0000_0000_0000_0000,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

@@ -186,6 +186,10 @@ pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
+/// The `_v3` extraction ledger, read only, as evidence never a source: the
+/// manifest of an options day, trusted by its ok marker, against the day's
+/// listing. D-4814, D-4867.
+pub mod gdfl_v3;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an
@@ -216,6 +220,11 @@ pub mod nse;
 pub mod nseindex;
 pub mod pricing;
 pub mod rate;
+/// Reference tables as store data, through ONE loader (R3-30): the calendar
+/// of record, index identity rows, symbol changes, the F&O list, moved
+/// expiries, lot sizes and the risk-free rate, each with source, checksum
+/// and date, refused by name when it fails its checksum.
+pub mod reference_data;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
 /// which no retry decision in this workspace read before this module.
 ///

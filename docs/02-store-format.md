@@ -4833,3 +4833,40 @@ start is refused `clock_implausible`.
 lock holds the claim above, not §41's `gdfl-lock v1` record; a lock file
 holding a v1 record an older build left is still read and named as a dead
 holder's (`pid=` and `run_started=`).
+
+## Reference tables, format version 1 (R3-30, D-6246)
+
+`<store>/reference/v1/<table>/<generation:020>.ref`, one directory per table:
+`calendar`, `index_identity`, `symbol_changes`, `fno_list`, `expiry_moves`,
+`lot_sizes`, `risk_free_rate`. The newest generation is served; no
+generation is rewritten. Writers stage at
+`.<generation:020>.<pid>.<serial>.staging` in the same directory, sync,
+hard-link to the final name (an existing name refuses the write as a race)
+and sync the directory.
+
+A file is UTF-8 text, at most 8 MiB, one field per line:
+
+```
+brutex-reference 1
+table <table>
+generation <n>
+source <one line>
+source_sha256 <64 lower-case hex | ->
+fetched <YYYY-MM-DD>
+status <sourced | measured | unverified>
+decision <D-number>
+columns <name>|<name>|...
+row <field>|<field>|...        (one per row, at most 200,000)
+rows <count>
+sha256 <64 lower-case hex of every byte above this line>
+```
+
+A field is non-empty, unpadded, at most 2,048 bytes, and holds no `|` or
+line break; `-` is an empty value. Each table's columns are
+`pull::reference_data::Table::columns`; every row of `lot_sizes` and
+`index_identity` carries its own standing and source. `risk_free_rate` rows
+are the RBI 91-day T-bill table's eight columns (`pull::riskfree::HEADER`),
+gap rows included (D-6246 item 3). A file that fails any line of this is
+refused by name with its kind (`read`, `too_large`, `not_text`, `magic`,
+`version`, `wrong_table`, `generation`, `header`, `columns`, `row`,
+`duplicate`, `row_count`, `checksum`, `too_many`, `absent`).

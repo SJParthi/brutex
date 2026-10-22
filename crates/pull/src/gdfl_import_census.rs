@@ -6,7 +6,6 @@ use std::path::Path;
 
 use brutex_core::vendor::Vendor;
 
-use crate::ingest::record_held;
 use crate::manifest::{ENTRY_STRIDE, HEADER_LEN, Held, MAX_ENTRIES, Manifest, manifest_path};
 use crate::session::Day;
 
@@ -50,20 +49,31 @@ impl CensusRoom {
 /// entry ceiling is a 268 MB file and not a thing a unit test builds (the
 /// reason `pull::unit`'s ceiling checks give for their own arithmetic).
 pub(super) trait Census {
-    /// Publishes `held`, or says why not, as [`record_held`] does: all or
-    /// nothing.
+    /// Publishes `held`, or says why not, as [`crate::ingest::record_held`]
+    /// does: all or nothing.
     fn publish(&mut self, store_root: &Path, held: &[Held]) -> Option<String>;
 
     /// The census's room for `held`, measured from its file.
     fn room(&self, store_root: &Path, held: &[Held]) -> Result<CensusRoom, String>;
 }
 
-/// The store's census of the `gdfl` feed.
-pub(super) struct StoreCensus;
+/// The store's census of the `gdfl` feed, with the run's memory of it
+/// (R3-19): each census the run has read is kept decoded between its days,
+/// so a day's publish reads one header region and probes only its own keys
+/// (`crate::ingest::census_store::Kept`), and leaves the bytes
+/// `crate::ingest::record_held` leaves.
+#[derive(Debug, Default)]
+pub(super) struct StoreCensus {
+    kept: crate::ingest::census_store::Kept,
+}
 
 impl Census for StoreCensus {
     fn publish(&mut self, store_root: &Path, held: &[Held]) -> Option<String> {
-        record_held(store_root, Vendor::Gdfl, held)
+        if held.is_empty() {
+            return None;
+        }
+        crate::ingest::census_store::record_kept(&mut self.kept, store_root, Vendor::Gdfl, held)
+            .err()
     }
 
     fn room(&self, store_root: &Path, held: &[Held]) -> Result<CensusRoom, String> {

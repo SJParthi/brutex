@@ -608,6 +608,501 @@ pub fn notional(unit_price: Paisa, quantity: i64) -> Result<Paisa, CostError> {
         })
 }
 
+// ===========================================================================
+// THE LOT TABLE AS STORE DATA (R3-30; the store side of DB-G76).
+//
+// The tables above are compiled: a lot revision the exchange publishes needs
+// a code change and a rebuild, and no other underlying can have a lot at all.
+// [`LotTable`] is the same dated history as DATA: `pull::reference_data`
+// reads the store's `lot_sizes` table (source, checksum and date on the file
+// and on every row) and hands its rows here, so this crate names `core`
+// alone and never `pull` (CLAUDE.md section 5). A row added to that table
+// changes the next lookup with no code change.
+//
+// THE RULE EVERY ROW IS HELD TO (CLAUDE.md section 3 rule 1): a row is
+// APPLIED only when it is `sourced` -- its source is a document recorded in
+// `docs/00-charter.md`, with the sha256 of the bytes read and the day they
+// were read. Any other row is listed, so a reader sees it, and ABSENT for a
+// lookup: the answer names the row and why it does not apply. An underlying
+// or a day no row covers is a named absence too. Nothing here infers a lot
+// (the vendor's `ltq` GCD and its `inferred` label are composed downstream,
+// R3-10-OPT) and nothing stretches a row backwards: before an underlying's
+// first row the answer is [`LotAbsence::BeforeFirstRow`], which for NIFTY and
+// BANKNIFTY carries the compiled `LOT_GAP` text unchanged.
+// ===========================================================================
+
+/// The most rows one underlying may hold in a [`LotTable`]: a lookup is one
+/// hash probe and a binary search of at most this many rows (at most seven
+/// compares), so its cost does not grow with the table.
+pub const MAX_LOT_ROWS_PER_UNDERLYING: usize = 64;
+
+/// The most rows a [`LotTable`] may hold.
+pub const MAX_LOT_ROWS: usize = 100_000;
+
+/// The longest underlying symbol, citation or digest a row may carry, in
+/// bytes.
+pub const MAX_LOT_TEXT_BYTES: usize = 2_048;
+
+/// The sha256 of `NSE/FAOP/64625` as read, recorded in `docs/00-charter.md`
+/// ("NSE F&O circulars read for the options lineage", D-3357).
+pub const FAOP64625_SHA256: &str =
+    "ee1169239eed9cc06519537c6af53751e031903fe709b2bf296283412dc028f8";
+
+/// The sha256 of `NSE/FAOP/70616` as read, recorded in `docs/00-charter.md`
+/// ("NSE F&O circulars read for the options lineage", D-3357).
+pub const FAOP70616_SHA256: &str =
+    "0718cf0cc7e6c74105dc946497369270fca807f59912586560c9552cad8050ef";
+
+/// The day both circulars were read, as the charter records it.
+const CIRCULARS_READ: TradeDay = boundary!(2026 - 10 - 10);
+
+/// The citation of a compiled row with no circular recorded in the charter.
+const NOT_IN_CHARTER: &str = "UNVERIFIED -- no circular fixing this revision is recorded in \
+     docs/00-charter.md (its section 'NSE F&O circulars read for the options lineage' says so \
+     for July 2021, June 2023, April 2024 and July 2025, and the 2021-01-01 row is a value the \
+     source extended back to its own floor). Listed, never applied.";
+
+/// What a lot row rests on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LotStanding {
+    /// Its source is recorded in `docs/00-charter.md`, with the digest of the
+    /// bytes read and the day: the row is applied.
+    Sourced,
+    /// Listed so a reader sees it; never applied.
+    Unverified,
+}
+
+impl LotStanding {
+    /// The wire word.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Sourced => "sourced",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    /// The standing a word names, or `None`.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "sourced" => Some(Self::Sourced),
+            "unverified" => Some(Self::Unverified),
+            _ => None,
+        }
+    }
+}
+
+/// One dated lot row: from `effective` until the underlying's next row,
+/// contracts introduced on a day carry `units` per lot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LotRow {
+    /// The underlying the row is for, as its derivatives name it.
+    pub underlying: String,
+    /// The first trade day the row governs.
+    pub effective: TradeDay,
+    /// Units per lot; strictly positive.
+    pub units: u32,
+    /// What the row rests on.
+    pub standing: LotStanding,
+    /// The citation: the document and what it says.
+    pub source: String,
+    /// The sha256 of the source bytes as read; required for a sourced row.
+    pub source_sha256: Option<String>,
+    /// The day the source was read; required for a sourced row.
+    pub read: Option<TradeDay>,
+}
+
+/// Why a [`LotTable`] was refused, naming the row (one-based, in the order
+/// handed in).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LotTableError {
+    /// More rows than [`MAX_LOT_ROWS`].
+    TooManyRows {
+        /// How many were handed in.
+        rows: usize,
+    },
+    /// An underlying, a citation or a digest is empty, padded or longer than
+    /// [`MAX_LOT_TEXT_BYTES`].
+    Text {
+        /// The row.
+        row: usize,
+        /// The column.
+        column: &'static str,
+    },
+    /// A lot of zero units.
+    ZeroLot {
+        /// The row.
+        row: usize,
+    },
+    /// A sourced row without the digest of its source or the day it was read,
+    /// or a digest that is not 64 lower-case hex.
+    SourcedWithoutReceipt {
+        /// The row.
+        row: usize,
+    },
+    /// The underlying's rows do not strictly ascend by effective day.
+    NotAscending {
+        /// The row.
+        row: usize,
+    },
+    /// More rows for one underlying than [`MAX_LOT_ROWS_PER_UNDERLYING`].
+    TooManyForUnderlying {
+        /// The row.
+        row: usize,
+    },
+}
+
+impl core::fmt::Display for LotTableError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooManyRows { rows } => {
+                write!(
+                    f,
+                    "the lot table holds {rows} rows, more than {MAX_LOT_ROWS}"
+                )
+            }
+            Self::Text { row, column } => write!(
+                f,
+                "lot row {row}: {column} is empty, padded or longer than {MAX_LOT_TEXT_BYTES} bytes"
+            ),
+            Self::ZeroLot { row } => write!(f, "lot row {row}: a lot of zero units"),
+            Self::SourcedWithoutReceipt { row } => write!(
+                f,
+                "lot row {row}: a sourced row needs the sha256 of its source and the day it was read"
+            ),
+            Self::NotAscending { row } => write!(
+                f,
+                "lot row {row}: the underlying's rows do not strictly ascend by effective day"
+            ),
+            Self::TooManyForUnderlying { row } => write!(
+                f,
+                "lot row {row}: more than {MAX_LOT_ROWS_PER_UNDERLYING} rows for one underlying"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for LotTableError {}
+
+/// Why a lookup has no lot: a NAMED absence, never a guessed, inferred or
+/// stretched lot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LotAbsence {
+    /// The table holds no row for the underlying.
+    NoRow {
+        /// The underlying asked.
+        underlying: String,
+    },
+    /// The day is before the underlying's first row. `gap` is the compiled
+    /// `LOT_GAP` text for NIFTY and BANKNIFTY, and a generic statement for
+    /// every other underlying.
+    BeforeFirstRow {
+        /// The underlying asked.
+        underlying: String,
+        /// The day asked.
+        day: TradeDay,
+        /// The underlying's first row.
+        first: TradeDay,
+        /// Why nothing earlier is known.
+        gap: &'static str,
+    },
+    /// The row in force is UNVERIFIED: listed, never applied.
+    Unverified {
+        /// The underlying asked.
+        underlying: String,
+        /// The day asked.
+        day: TradeDay,
+        /// The row's effective day.
+        effective: TradeDay,
+        /// The row's units, shown and not applied.
+        units: u32,
+        /// The row's citation.
+        source: String,
+    },
+}
+
+impl LotAbsence {
+    /// The wire word: `no_row`, `before_first_row` or `unverified`.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::NoRow { .. } => "no_row",
+            Self::BeforeFirstRow { .. } => "before_first_row",
+            Self::Unverified { .. } => "unverified",
+        }
+    }
+}
+
+impl core::fmt::Display for LotAbsence {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoRow { underlying } => write!(
+                f,
+                "no sourced lot: the lot table holds no row for {underlying}; no lot is inferred"
+            ),
+            Self::BeforeFirstRow {
+                underlying,
+                day,
+                first,
+                gap,
+            } => write!(
+                f,
+                "no sourced lot for {underlying} on {day}: its first row is {first}; {gap}"
+            ),
+            Self::Unverified {
+                underlying,
+                day,
+                effective,
+                units,
+                source,
+            } => write!(
+                f,
+                "no sourced lot for {underlying} on {day}: the row of {effective} ({units} units) \
+                 is unverified and is not applied: {source}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for LotAbsence {}
+
+/// A lot the table answers, and the row that gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LotAnswer<'a> {
+    /// The lot.
+    pub lot: LotSize,
+    /// The sourced row in force.
+    pub row: &'a LotRow,
+}
+
+/// The dated lot history of every underlying the store's table holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LotTable {
+    rows: Vec<LotRow>,
+    /// Per underlying, the range of `rows` holding its rows, ascending.
+    by_underlying: std::collections::HashMap<String, core::ops::Range<usize>>,
+}
+
+/// Text a row may carry: not empty, not padded, no line break, bounded.
+fn lot_text_ok(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_LOT_TEXT_BYTES
+        && text.trim() == text
+        && !text.contains(['\n', '\r'])
+}
+
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl LotTable {
+    /// Builds the table from `rows`, in any underlying order; each
+    /// underlying's own rows must strictly ascend. O(rows), once.
+    ///
+    /// # Errors
+    ///
+    /// Every [`LotTableError`], naming the row. Nothing is repaired.
+    pub fn from_rows(rows: Vec<LotRow>) -> Result<Self, LotTableError> {
+        if rows.len() > MAX_LOT_ROWS {
+            return Err(LotTableError::TooManyRows { rows: rows.len() });
+        }
+        for (at, row) in rows.iter().enumerate() {
+            let number = at + 1;
+            if !lot_text_ok(&row.underlying) {
+                return Err(LotTableError::Text {
+                    row: number,
+                    column: "underlying",
+                });
+            }
+            if !lot_text_ok(&row.source) {
+                return Err(LotTableError::Text {
+                    row: number,
+                    column: "source",
+                });
+            }
+            if row.units == 0 {
+                return Err(LotTableError::ZeroLot { row: number });
+            }
+            let receipt_ok =
+                row.source_sha256.as_deref().is_some_and(is_sha256_hex) && row.read.is_some();
+            if row.standing == LotStanding::Sourced && !receipt_ok {
+                return Err(LotTableError::SourcedWithoutReceipt { row: number });
+            }
+        }
+        // Stable by underlying, so each underlying's rows keep the order they
+        // were handed in, which must already ascend.
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_by(|a, b| {
+            let (left, right) = (rows.get(*a), rows.get(*b));
+            left.map(|r| r.underlying.as_str())
+                .cmp(&right.map(|r| r.underlying.as_str()))
+                .then(a.cmp(b))
+        });
+        let mut slots: Vec<Option<LotRow>> = rows.into_iter().map(Some).collect();
+        let mut sorted = Vec::with_capacity(slots.len());
+        let mut by_underlying: std::collections::HashMap<String, core::ops::Range<usize>> =
+            std::collections::HashMap::new();
+        for at in order {
+            let Some(row) = slots.get_mut(at).and_then(Option::take) else {
+                continue;
+            };
+            let number = at + 1;
+            let range = by_underlying
+                .entry(row.underlying.clone())
+                .or_insert(sorted.len()..sorted.len());
+            if range.end > range.start
+                && sorted
+                    .last()
+                    .is_some_and(|previous: &LotRow| !previous.effective.before(row.effective))
+            {
+                return Err(LotTableError::NotAscending { row: number });
+            }
+            if range.len() >= MAX_LOT_ROWS_PER_UNDERLYING {
+                return Err(LotTableError::TooManyForUnderlying { row: number });
+            }
+            range.end += 1;
+            sorted.push(row);
+        }
+        Ok(Self {
+            rows: sorted,
+            by_underlying,
+        })
+    }
+
+    /// Every row, grouped by underlying, each underlying's rows ascending.
+    #[must_use]
+    pub fn rows(&self) -> &[LotRow] {
+        &self.rows
+    }
+
+    /// The rows of `underlying`, ascending; empty when it has none.
+    #[must_use]
+    pub fn rows_of(&self, underlying: &str) -> &[LotRow] {
+        self.by_underlying
+            .get(underlying)
+            .and_then(|range| self.rows.get(range.clone()))
+            .unwrap_or(&[])
+    }
+
+    /// How many underlyings the table names.
+    #[must_use]
+    pub fn underlyings(&self) -> usize {
+        self.by_underlying.len()
+    }
+
+    /// The lot of contracts introduced on `day` for `underlying`: the
+    /// underlying's latest row on or before `day`, when that row is sourced.
+    ///
+    /// # Errors
+    ///
+    /// [`LotAbsence`], by name: no row for the underlying, a day before its
+    /// first row, or an unverified row in force. There is no default lot.
+    ///
+    /// # Cost
+    ///
+    /// One hash probe and one binary search of at most
+    /// [`MAX_LOT_ROWS_PER_UNDERLYING`] rows: bounded, whatever the table
+    /// holds. Measured by `costs::lot::table_tests::a_lookup_is_flat_in_the_table`.
+    pub fn lot_on(&self, underlying: &str, day: TradeDay) -> Result<LotAnswer<'_>, LotAbsence> {
+        let rows = self.rows_of(underlying);
+        let Some(first) = rows.first() else {
+            return Err(LotAbsence::NoRow {
+                underlying: underlying.to_owned(),
+            });
+        };
+        let after = rows.partition_point(|row| !day.before(row.effective));
+        let Some(row) = after.checked_sub(1).and_then(|at| rows.get(at)) else {
+            return Err(LotAbsence::BeforeFirstRow {
+                underlying: underlying.to_owned(),
+                day,
+                first: first.effective,
+                gap: if InstrumentKey::SWEPT
+                    .iter()
+                    .any(|(_, swept)| *swept == underlying)
+                {
+                    LOT_GAP
+                } else {
+                    "no sourced row fixes the lot before it, and none is stretched backwards"
+                },
+            });
+        };
+        if row.standing != LotStanding::Sourced {
+            return Err(LotAbsence::Unverified {
+                underlying: underlying.to_owned(),
+                day,
+                effective: row.effective,
+                units: row.units,
+                source: row.source.clone(),
+            });
+        }
+        Ok(LotAnswer {
+            lot: LotSize::new_const(row.units),
+            row,
+        })
+    }
+}
+
+/// The NIFTY and BANKNIFTY rows of the compiled [`LOT_SIZES`], UNCHANGED in
+/// day, units and citation, as table rows: what `pull::reference_data` seeds
+/// the store's `lot_sizes` table with. A row is `sourced` exactly when a
+/// sourced contract rule of [`CONTRACT_RULES`] turns at its day (its circular
+/// is recorded in `docs/00-charter.md` with the digest of the bytes read);
+/// every other row is `unverified` and carries [`NOT_IN_CHARTER`] beside its
+/// own citation. The compiled `LOT_GAP` anchor is not a row: it is the
+/// [`LotAbsence::BeforeFirstRow`] answer before the first one.
+#[must_use]
+pub fn compiled_rows() -> Vec<LotRow> {
+    let mut out = Vec::new();
+    for (slot, table) in LOT_SIZES.iter().enumerate() {
+        let Some((_, underlying)) = InstrumentKey::SWEPT.get(slot) else {
+            continue;
+        };
+        let rules = CONTRACT_RULES.get(slot);
+        for row in std::iter::once(&table.anchor).chain(table.later.iter().flatten()) {
+            let Dated::Verified(lot) = row.value else {
+                continue;
+            };
+            let rule = rules.and_then(|rules| rules.iter().find(|rule| rule.boundary == row.start));
+            let (standing, source, sha, read) = match rule {
+                Some(rule) => (
+                    LotStanding::Sourced,
+                    format!("{} Contract rule: {}", row.source, rule.citation),
+                    Some(
+                        if rule.citation == FAOP64625 {
+                            FAOP64625_SHA256
+                        } else {
+                            FAOP70616_SHA256
+                        }
+                        .to_owned(),
+                    ),
+                    Some(CIRCULARS_READ),
+                ),
+                None => (
+                    LotStanding::Unverified,
+                    format!("{} {NOT_IN_CHARTER}", row.source),
+                    None,
+                    None,
+                ),
+            };
+            out.push(LotRow {
+                underlying: (*underlying).to_owned(),
+                effective: row.start,
+                units: lot.units(),
+                standing,
+                source: source.split_whitespace().collect::<Vec<_>>().join(" "),
+                source_sha256: sha,
+                read,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "lot_table_tests.rs"]
+mod table_tests;
+
 #[cfg(test)]
 // A money literal is written `rupees_paisa` — `24_012_00` reads as the twelve
 // rupees over twenty-four thousand a circular or a screen would show, where

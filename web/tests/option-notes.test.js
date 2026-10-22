@@ -176,3 +176,15 @@ test('the page tallies its refusals above the grid and names each family once', 
   assert.match(cells, /ask\(`\/aliases\.json\?\$\{new URLSearchParams\(\{ symbol: u \}\)\}`/);
   assert.match(cells, /if \(!s \|\| s\.why !== 'no_spot_file'\) continue;/);
 });
+
+test('a rate carried over a documented gap is named on the cell’s title, a fresh one is not (DB-B44, R3-30)', () => {
+  const base = { premium: 1, spot: 2, spot_age_s: 0, tenor_s: 7, tenor_y: 7 / 31536000, rate: 0.06, auction: '2099-08-01' };
+  const carried = greekInputs({ ...base, rate_state: 'rate_carried', rate_gap: { kind: 'cancelled', released: '2099-08-12' } });
+  assert.match(carried, /RBI 91-day T-bill released 2099-08-01/);
+  assert.match(carried, /CARRIED rate_carried over the documented gap cancelled released 2099-08-12: the rate is CARRIED/);
+  // A carried state with no gap named still says carried, and says the gap is unnamed.
+  assert.match(greekInputs({ ...base, rate_state: 'rate_carried', rate_gap: null }), /CARRIED rate_carried over the documented gap \? released \?/);
+  for (const fresh of [{ ...base, rate_state: 'rate_fresh', rate_gap: null }, base]) assert.doesNotMatch(greekInputs(fresh), /CARRIED|rate_carried/);
+  // The refusal past the carried bound has a word on the cell.
+  assert.equal(refusalWord('rate_carried_too_long'), 'rate old');
+});

@@ -1637,19 +1637,37 @@ fn d_0955_each_census_write_reads_the_whole_census_and_the_register_says_so() {
         item(INGEST, "fn record_all(").contains("census_store::record(store_root, vendor, held)"),
         "`record_all` goes through the census cycle"
     );
+    // R3-19 (D-6891): `cycle` and `record` are `cycle_with` and
+    // `record_with` without a run's kept census, and without one the cycle
+    // reads the whole census, as before. Only `record_kept`, the GDFL
+    // import's run door, passes one; the bullet names it.
     assert!(
-        item(store, "pub fn cycle(").contains("target.load()"),
-        "and every cycle reads the whole census"
+        item(store, "pub fn cycle(").contains("cycle_with(target, held, mode, None)"),
+        "`cycle` keeps nothing"
+    );
+    assert!(
+        item(store, "pub fn record(").contains("record_with(root, vendor, held, None)"),
+        "`record` keeps nothing"
+    );
+    assert!(
+        item(store, "fn cycle_with(")
+            .contains("None => (target.load()?, CensusRead::Whole(\"unkept\"))"),
+        "and every cycle without a run's memory reads the whole census"
+    );
+    assert!(
+        d_0955_bullet("W1-pull2-6").contains("`record_kept`"),
+        "the bullet names the one door that does not read whole on every call"
     );
     let reads = store
-        .split_once("pub fn load(&self)")
-        .expect("Target::load exists")
+        .split_once("fn load_whole(&self)")
+        .expect("Target::load_whole exists")
         .1
         .split_once("\n    }\n")
-        .expect("Target::load ends")
+        .expect("Target::load_whole ends")
         .0;
-    assert!(reads.contains("read_census(&path, self.vendor)"));
+    assert!(reads.contains("read_single(&path, self.vendor)"));
     assert!(reads.contains("read_epoch(&path, self.vendor, segment)"));
+    assert!(item(store, "fn read_single(").contains("read_census(path, vendor)"));
     assert!(item(INGEST, "fn read_census(").contains("fs::read(path)"));
     assert!(item(INGEST, "pub fn record_held(").contains("record_all(store_root, vendor, held)"));
     assert!(

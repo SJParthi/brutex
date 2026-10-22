@@ -6314,8 +6314,13 @@ the packages `cargo tree -e normal,build -i` finds in the native host graph:
 | `crc32fast` `getrandom` `zerocopy` | `Command::new` |
 | `ahash` `generic-array` | `version_check` (which runs `rustc`) |
 | `num-traits` | `autocfg` (`emit_expression_cfg` compiles probes with `rustc`) |
+| `rustix` | `std::process::Command::new` on `$RUSTC` or `RUSTC_WRAPPER` (feature probes; D-5240) |
 
-Thirteen packages. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
+Fourteen packages: the thirteen D-2328 measured, and `rustix` 1.1.4, which
+`api` took on 2026-10-16 so `/disk.json` calls `statvfs(2)` instead of starting
+`/bin/df` (D-5240) — a run-time child process traded for a build-time `rustc`
+probe of the kind already listed, its registry source read before the lock
+moved. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
 in `Cargo.lock` but not in the native graph, and missed `num-traits`. `ring`,
 `rustversion` and `wasm-bindgen-shared` also spawn, and are in `Cargo.lock` for
 other targets only; `cargo tree -i` on the host finds none of them.
@@ -6326,8 +6331,8 @@ from this workspace, so **the ban as written cannot be held at the dependency
 level**, and the sentence in §2 is stronger than the tree.
 
 **Why this is recorded rather than fixed.** A gate banning dependency build
-scripts would fail on `serde`. A gate with an allowlist of the thirteen would
-pass everything on the list forever and say nothing about the fourteenth. Neither
+scripts would fail on `serde`. A gate with an allowlist of the fourteen would
+pass everything on the list forever and say nothing about the fifteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
@@ -6345,7 +6350,7 @@ named binding libraries.
 
 **What is not held**: the literal sentence, against dependencies. A reader
 finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
-something true and something this workspace already contains thirteen of. See
+something true and something this workspace already contains fourteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
 
@@ -12125,7 +12130,12 @@ read from the source.
 * **W1-pull2-6 — `record_all`, through `record_held`, once per rolling answer.**
   The same `read_census` per call, O(manifest bytes + E_v), plus O(offered) to
   fold the rows in. Its own doc says "Per call: Θ(entries) for the read"; it is
-  now in this register. Kept for the reason above.
+  now in this register. Kept for the reason above. Since R3-19 (D-6891) the
+  GDFL import's day publish no longer goes through `record_held`: it goes
+  through `record_kept` (in `census_store`), which reads each census whole
+  once per run and then one header region per day while the file is still
+  the one it kept (L-IA-11). `record`, `record_all`, `record_held` and
+  `cycle` keep nothing and still read the whole census on every call.
 * **W1-pull2-5 — `committed_cash_days`, once per minute equity request.**
   `api::server::prepare_cash_schedule` calls it for every month the request
   touches, and it reads every committed record of each month
@@ -17842,11 +17852,53 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   1,055 of 80,000 with waits of up to 869 ms. A request that finds the
   ledger longer reads and indexes the bytes appended since the last request
   under the vendor's lock: O(appended), at most 16 MiB.
-- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One `df -Pk`,
-  a stat of each census file, each feed's scrub state. Its uncached
-  measurement at 385,440 standing findings: 3.1–4.5 ms (it was 84–92 ms: a
-  walk and a sort of every finding for 16 names); cached, n=200, 0.06 / 0.17
-  / 1.79 ms.
+- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One
+  `statvfs(2)` and a `stat` per directory from the store root up to its mount
+  point — on macOS one `statfs(2)` and no directory walk, the mount point
+  being the call's own `f_mntonname` (D-5241) — (a `/bin/df -Pk` child
+  process until D-5240), a stat of each census
+  file, each feed's scrub state. Misses that arrive together take ONE
+  measurement: the first measures and the rest wait for it, then serve its
+  answer (D-5245, RUST1-14); until then each of them measured, up to the
+  operations pool's four at a time, so "at most once in 30 s" did not hold
+  under concurrent misses. A waiting caller waits as long as the measurement
+  takes, which a hung filesystem makes unbounded (L-RUST1-5). Its uncached measurement at 385,440 standing
+  findings: 3.1–4.5 ms (it was 84–92 ms: a walk and a sort of every finding
+  for 16 names); cached, n=200, 0.06 / 0.17 / 1.79 ms. That figure included
+  the `df` child, which was not timed apart on the operator's machine and the
+  figure was not re-taken there after D-5240. On the 4-core cloud container on
+  16 Oct 2026, the build before and the build after run in three interleaved
+  rounds (n=1,000 each after 50 warm-up calls, one test thread, an empty store
+  in a temporary directory, nearest rank; ranges across the rounds): the
+  filesystem step alone was p50 1.49–1.53 ms, p99 2.18–3.00 ms, max
+  4.60–5.85 ms with the child and is p50 3.0–4.5 µs, p99 7.1–11.2 µs, max
+  36–85 µs with `statvfs(2)`; the `GET /disk.json` handler with its cache
+  cleared before each call, through the operations pool, was p50 1.62–1.65 ms,
+  p99 2.35–3.27 ms, max 4.66–9.66 ms and is p50 67–72 µs, p99 136–152 µs, max
+  0.21–0.85 ms; with the cache warm it is unchanged, p50 39–41 µs. **On the
+  operator's machine, 17 Oct 2026** (M4 Pro, load average 28 on 14 cores from
+  other builds, the test profile, one test thread; RUST1-10,
+  `the_call_at_its_p99_costs_less_than_the_df_child_at_its_p50`, two rounds,
+  n = 1,000 each after 50 warm-ups, interleaved, nearest rank; logs
+  `state/fix/round2/logs-CLOUD-RUST1/timing.log` and `timing-r2.log`): the
+  `/bin/df -Pk` child the route started was p50 1.51–1.77 ms, p99
+  2.61–4.50 ms, max 3.33–6.68 ms; one `statfs(2)` is p50 6.6–9.0 µs, p99
+  36–68 µs, max 81–383 µs (boot volume and the external drive alike); the
+  whole uncached answer on an empty store p50 30–43 µs, p99 117–167 µs, max
+  0.30–0.33 ms; the `GET /disk.json` handler through the operations pool with
+  its cache cleared before each call p50 43–45 µs, p99 282–353 µs, max
+  0.47–0.94 ms, and warm p50 3.3–3.4 µs, p99 32–58 µs, max 0.18–0.44 ms.
+  Over HTTP, the release build serving a shadow of the real store (bars
+  linked, the rest cloned; GDFL census 2,098,428 months; `state/fix/shadow.sh`,
+  `serve.sh`, port 9301, GET only, one keep-alive connection, `curl
+  %{time_total}`): n = 300 sequential GETs, all 200 and all but the first
+  inside the 30 s cache, p50 0.22 ms, p99 2.03 ms, max 2.59 ms; n = 12 GETs
+  spaced 31 s apart so each misses the cache and measures the whole answer,
+  p50 2.13 ms, max 14.10 ms (min 1.18 ms) — a sample of twelve, so no p99 is
+  claimed for it. The real store records no full-block scrub of either feed
+  today (`scrub.recorded` false for `gdfl` and `zerodha`), so no findings
+  index was read and this is not the 385,440-finding figure above re-taken.
+  Logs `state/fix/round2/logs-CLOUD-RUST1/http-hit-300.txt`, `http-miss.txt`.
 - **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
   O(blocks of that month) in TIME; its answer is constant-size.** Every block
   is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar
@@ -17903,8 +17955,11 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   census file: O(epochs), a handful today). It grows by one census epoch per
   compaction — about the size of the live census each time. NOT DONE: a
   bound, an alarm at a threshold, or an archive step that moves older epochs
-  off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
-  of its own (L-WP81-4), cached for 30 s in the operations pool.
+  off the store's drive; `/disk.json`'s one `statfs(2)` (macOS, D-5241) or
+  `statvfs(2)` (elsewhere) has no timeout of
+  its own either: a filesystem that hangs the call hangs the measurement, as
+  it hung the `df -Pk` child the call replaced (L-WP81-4, D-5240), cached for
+  30 s in the operations pool.
 
 ## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
 
@@ -18861,7 +18916,7 @@ log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
 | L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | **Re-measured under `ruzstd` 0.9.1** (D-5090 point 8; 17 October 2026, the same three read-only day zips and the same test, log `state/fix/deny-1-logs/tsw-measure-ruzstd-0.9.1-20261017.log`, each file verified entry for entry against its zip): 1.57 to 2.04 times the tool's bytes for the same day (indices 16,385,730 B against 8,042,422, stocks 59,143,634 against 37,566,114, options 253,387,791 against 151,027,298). Under 0.8.2 (14 October) the same days were 16,400,878, 60,066,755 and 255,904,074 B (1.60 to 2.04 times): 0.9.1's Raw fallback stores 1.0% fewer bytes over the three days, never more. About 329 MB a trading day against 197 MB, about 33 GB more a year (EXTRAPOLATION from three days; 332 MB and 34 GB under 0.8.2). Why, read from `ruzstd`'s source and unchanged in 0.9.1: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more (`MIN_MATCH_LEN`, `encoding/match_generator.rs`) over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08, DENY-1 |
 | L-TSW-5 | One entry rebuilt | a file is decoded whole | O(the file's bytes), the reader's (`gdfl_tickstore::rebuild`), unchanged: from this writer's options day p50 0.30 ms, p99 81 ms, max 275 ms (n = 20,054), from the tool's p50 0.30 ms, p99 93 ms; indices files (3.7 MB each) p50 125 ms, p99 260 ms (n = 141) | R4-08 |
 | L-TSW-6 | Point lookup on a written day | none: it is O(1) | the readers' listing, one probe: p50 41 ns, p99 125 ns, max 0.34 ms (scheduler), n = 200,540 on the options day and 36,820 on the stocks day; the tool's own figure was 208 ns p99. Bench C-TSW-02 on a written 4,000-member day: p50 41 ns, p99 42 ns, max 167 ns, n = 20,000; flat at 10x and 100x members (1.03x, 1.04x) | R4-08 |
-| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
+| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it; `rustix`, whose safe `statvfs` `api` takes for `/disk.json` (D-5240), is not a `pull` dependency | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 329 MB of new day files a trading day under `ruzstd` 0.9.1 (L-TSW-4; 332 MB under 0.8.2), three files a day | R4-08 |
 | L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
 | L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
 
@@ -19456,6 +19511,150 @@ always was.
 |---|---|---|---|---|
 | L-R335-01 | The importer's files are still edited in order, and M1's chain is not shorter | the split separates files, not dependencies: IA-1 → IA-2 → IA-3 → IA-16 → IA-10a → IA-12a are ordered by declared dependencies (types, the stop, the cause arms), and a package's seam can sit in a file another package also edits | **Derived from the text of `state/design/ingest-automation.md` §16.2 and `fix-plan.json`'s owners, not measured.** Each row's seam, in the file that now holds it: IA-1 `gdfl_import.rs` (`Run`, `RunOptions`, `Report`) and `gdfl_import_journal.rs` (`Journal::refresh`); IA-2 `gdfl_import_journal.rs` (the journal lock, `read_line`, the closes), `gdfl_import_causes.rs` (`Stage::Run`, `import_cause`), `gdfl_import_day.rs` (the stop's close rules) and the check before each file (`gdfl_import.rs` jobs or `gdfl_import_filing.rs` `on_workers`); IA-3 `gdfl_import_causes.rs` only; IA-16 `gdfl_import_day.rs` (`admit`, `decisive`), `gdfl_import_causes.rs`, `gdfl_import_filing.rs` (the held-back set) and `gdfl_import_quality.rs`; IA-4 `gdfl_import_journal.rs` (`BAR_DEFINITION`, `definition_is_current`), `gdfl_import.rs` (`option_handed`) and `gdfl_import_causes.rs` (`nfo_cause`); IA-7 `gdfl_import_filing.rs` and `gdfl_import_day.rs` (`record_close`); IA-17's gather `gdfl_import_filing.rs`; R3-23 the journal; R3-26 all six; R4-09 the day loop; R4-22 the causes. **The longest chain left is `gdfl_import_causes.rs`: IA-2 → IA-3 → IA-16 in M1, then IA-4 → R3-26 → R4-22, six packages**, against the eleven that would still edit the one file unsplit (IA-1, IA-2, IA-3, IA-16, IA-4, IA-7, IA-17, R3-23, R3-26, R4-09, R4-22); the day loop and the journal have five each, the filing four or five and `gdfl_import.rs` three or four (by where IA-2 puts its check before each file), the census one (R3-26). Shortening it further needs the cause arms (`cm_cause`, `nfo_cause`) apart from `Stage` and `ImportRefusal`, which is not one of the five seams this package was given | R3-35 |
 | L-R335-02 | The line proof needs the split's own bytes or the history | `the_split_moves_lines_and_changes_none` reads the six files while they are the split's bytes and from their git blobs once a later package edits one | where neither holds them (no `git`, a `cargo-mutants` copy without `.git`, a history without the split's commit) it prints `SKIPPING` (gate 23 declares the one `println!`) and proves nothing there; CI checks out with `fetch-depth: 0`, so CI always holds the blobs. The byte proof (`the_split_importer_writes_the_same_bytes`) needs no history and runs everywhere. Measured, the six-run fixture import (the byte test's whole process), unsplit against split, interleaved, n = 200 each, 17 Oct 2026, dev profile, a loaded machine: p50 156.2 against 158.1 ms, p99 732.7 against 411.4 ms, max 849.0 against 751.1 ms, 0 failures | R3-35 |
+## Feed reconcile: `cli feed-reconcile` — D-5172 to D-5177, measured 18 October 2026
+
+What is constant, what is bounded, and what was measured. Every figure below
+is wall clock of the format-2 verb (commit `dedcb99a`, which is in neither
+`main`'s history nor this section's branch: a work-in-progress commit squashed
+before the merge; release build) over the
+operator's store, READ-ONLY, `--workers 4`, 18 Oct 2026: the whole span
+2018-01 to 2026-09 (105 months, 35,385 share-months, every one with its
+"share-month reconciled" event), each month after the one before it. The host
+was shared with other agents' builds and the API, so a tail can be the host's.
+
+- **Per bar: constant.** A GDFL second, a Zerodha minute or a Zerodha day bar
+  is one positional record read (`BarFile::read_record`) and one write into a
+  slot addressed by the bar's own offset from the month's IST start (a GDFL
+  second's slot is tagged with its day, so no slot is cleared per day): no
+  search, no map, no allocation. Per bar, over the 16,922 share-months of at
+  least 100,000 bars: **p50 296 ns, p99 544 ns, max 6,113 ns**.
+- **Per stock-day: a fixed walk, bounded by the clock, not by the bars.** Each
+  day both feeds hold costs one walk of 86,400 second slots
+  (`Seconds::fill`), the 1,440-minute matching at the applied lag with at most
+  60 seconds a minute, the lag scan of 119 lags × 1,440 minutes (each window's
+  last second found in O(1) from the filled slots) with one selection over at
+  most 1,440 ratios per lag, the 1,440-minute unverified-phase sum and the
+  session-cut walk. Per matched stock-day (the share-month's time over its
+  days, bars included): **p50 2.6 ms, p99 4.2 ms, max 38.3 ms** (n = 18,706
+  share-months with a matched day). A day with few bars costs about the same
+  as a full one: this is the fixed cost the operator's O(1) rule names, and it
+  does not grow with the store.
+- **Per share-month: the fixed walks plus its bars.** Two clears of 44,640
+  minute slots and the month's days: **p50 44.2 ms, p99 85.1 ms, max 803.6 ms**
+  over the 30,895 share-months that hold a bar (p50 109,032 bars, max 493,636).
+  The 14 share-months above 150 ms are host stalls, not data: four
+  consecutive shares of 2025-06 (HINDPETRO to HONAUT, 11,670 to 171,127 bars)
+  each took about 0.8 s at the same moment. A share-month with no bar costs a
+  listing entry and one event. Per bar over every share-month that holds one
+  is p50 289 ns, p99 1,243 ns, and max 922 µs for a share-month of one day bar,
+  which is the fixed share-month cost divided by one.
+- **Per month: generated workers, bounded.** The workers start at 1 and double
+  while the last full round's throughput rises, up to
+  `min(available_parallelism, share-months)`; `--workers` overrides, and the
+  bytes are the same at any count (FR-14, FR-15). A share whose first day has
+  no lag of its own is read a second time once the pooled lag of the earlier
+  days is known, so a month reads at most twice its bars (in 2019-02, 2025-02
+  and 2026-07, whose previous month had no file, 172 to 208 shares were read
+  twice). **A whole month: p50 3.0 s, max 4.4 s; the 105 months in 302 s** on
+  4 workers.
+- **Per run: bounded by name.** Listing is one directory read per feed (337
+  share directories). Publishing lists the output directory once to find the
+  newest version, so it costs one entry per file already there (one version
+  file per month and re-run); a race to one name takes the next free number,
+  never replacing a file. The whole file is built in memory before it is
+  written: 0.7 to 2.3 MB a month for 3,231 to 7,160 rows, maximum resident
+  set 13.6 to 35.3 MB at 4 workers.
+- **The factor reader: O(1) per lookup.** `FactorIndex::load` is one pass over
+  a version file; `factor_of` is one hash of the share's name and one
+  fixed-stride index (share slot × day of month). Measured with
+  `cli feed-reconcile factor SYMBOL DAY --dir DIR --repeat 1000` on five
+  stock-days (M&M, RELIANCE, TECHM, NMDC, GVT&D; answers and refusals):
+  **p50 41 to 42 ns, p99 42 to 84 ns, max 208 to 1,583 ns** (n = 1,000 each,
+  one thread, sequential).
+- **Disk: measured.** The 105 version files of the full span hold 194,924,111
+  bytes (0.7 to 2.3 MB a month); each re-run adds a NEW version of about the
+  same size, never a replacement, and nothing is ever removed by the verb.
+- **The full run on the store (D-5172 item 9), for the main session after
+  the merge.** It reads bars only and writes only under its `--out`, which
+  must already exist (the verb never creates it), oldest month first because
+  each month carries from the one before:
+
+  ```text
+  mkdir <store>/audit/feed-reconcile
+  cli feed-reconcile months | grep -E '^[0-9]{4}-[0-9]{2}$' |
+    while read -r m; do cli feed-reconcile "$m" --out <store>/audit/feed-reconcile || break; done
+  ```
+
+  Measured as a READ-ONLY rehearsal into a scratch directory: 105 months in
+  302 s on 4 workers (one month p50 3.0 s), 194,924,111 bytes written, no
+  `read_failed` row. Generated workers on the store may use more cores; that
+  count is not measured.
+- **Gate 11.** `crates/cli/src/feed_reconcile.rs` is allowlisted for two
+  floats (two percentages of volumes, statistics at full precision), one
+  unsized map (the empty carry of a month with no previous file, never
+  inserted into) and four bounded sorts (the lower median over at most 1,440
+  ratios, and per-run timing percentiles). `crates/cli/src/store_write.rs`
+  rose from 4 to 5 membership probes: `feed-reconcile` writes only with
+  `--out`, a probe of the verb's own argument slice. A `--symbols` key is
+  checked against the share listing by one probe of a hash set sized from
+  that listing (D-5178), never by a search of the sorted listing: the first
+  repair's `binary_search_by` was refused by gate 11 rule 1 and is gone.
+- **Gates 12 and 28.** The five cost claims of
+  `crates/cli/src/feed_reconcile.rs` (the module header, `Running::admit`,
+  `Seconds::last_in`, `FactorIndex::load` and `factor_of`) are the timings
+  this section measured over the operator's store, and `factor --repeat`'s;
+  where a claim says "no loop" it is by construction. No test or bench
+  gates any of those timings, so each claim says UNVERIFIED as a gated
+  bound, which is what gate 12 asks of a claim with no test, bench or
+  invariant row timing it. Gate 12 refused all five (naming no proof) and
+  gate 28 refused the publish temporary until the DATA-1 repair round of
+  20 Oct 2026; no earlier round of this package ran either gate.
+- **`factor --repeat` is bounded (D-5178 item 5).** At most `MAX_REPEAT` =
+  1,000,000 timed lookups, whose timings take 8 MB; a larger count is
+  refused by name before anything is allocated.
+- **Loading a month checks the whole file once (D-5174 item 6).**
+  `FactorIndex::load`, `file_digest` and the next month's carry each read
+  the newest file in one piece and pass over its lines once more to check it
+  is whole (its own month's summary line last, a carry line for every
+  share with rows, through one hash set sized from the carry-line count):
+  O(lines of one month's file, at most 2.3 MB measured) per LOAD, never per
+  lookup; `factor_of` is unchanged, one hash and one multiply-add. Every
+  `factor` call prints the load's own time (`loaded in N us`: read, whole
+  check and index together), so the cost is measured where it is paid; the
+  extra pass is not timed apart from the rest of the load. The figures of a
+  release build over the 105 format-3 files are in the package's repair
+  report (`state/fix/round2/fix-DATA-1.json`, 19 Oct 2026), not restated
+  here.
+- **A killed publish can leave one temporary (D-5178 item 5), named here
+  rather than swept.** `publish` writes
+  `.feed-reconcile-YYYY-MM.tmp-<pid>-<nanos>` in `--out`, makes it durable,
+  links it to the next version name and removes it; every failure it can
+  see removes it too. A `kill -9` (or a power cut) between the create and
+  the remove leaves it: before the link it is a partial or whole unpublished
+  file, after the link a second name of the published version. It is never
+  read as a version (the reader takes only `feed-reconcile-YYYY-MM.v<N>.csv`
+  and `.symbols.v<N>.csv` names), never replaces one, and costs one listing
+  entry per publish. The verb does not sweep it, because a concurrent run
+  may own a temporary of the same month; removing one whose process is gone
+  is the operator's, by hand. NOT measured: how often this happens. The
+  temporary is created by `store::staging::create` (D-5172 item 2, gate 28):
+  one host call on a free name, at most four over a one-name leftover at the
+  same name (L-IA-44), once per run, not per bar; the leftover a `kill -9`
+  leaves holds another process id and instant in its name, so a later run's
+  door never meets it and it stays until removed by hand.
+- **An `--out` inside the tick store is refused only when the tick store is
+  named (D-5178 item 3).** `command` reads `BRUTEX_GDFL_TICKSTORE` (the
+  variable `cli gdfl-import tickstore` reads, `pull::gdfl_run::TICKSTORE_VAR`)
+  once and compares canonical paths, as it does for the store. With the
+  variable unset or empty no crate states where the tick store is, so an
+  `--out` inside it is not caught by this verb: the operator's setting is the
+  only guard there, and the full run's command in this section names an
+  `--out` under the store's `audit/` instead. One extra `canonicalize` per
+  run, not per bar.
+- **NOT measured:** a cold page cache (the runs read months the host had
+  cached or not as it happened), more than 4 workers on the real store (the
+  read-only rule of this run), and the generated worker count on the real
+  store.
 
 ## The GDFL Dropbox fetch and the shared disk projection — D-4986, D-4987, 17 October 2026
 
@@ -20307,3 +20506,75 @@ Two refusals on the same run are feat/db-fix's own, present there
 without R4-17 and not R4-17's files: rule 3 at
 pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ~~~~
+
+## `/disk.json` without a child process, and the run-time spawn gate (RUST-1; D-5240, D-5241, D-5242)
+
+Measured on the operator's machine, 17 Oct 2026. The timings are L-WP81-4's.
+
+| Id | What is not held | Why | Measured, and what is done instead |
+|---|---|---|---|
+| L-RUST1-1 | On APFS `used_bytes` is not the volume's own used space | `statfs(2)`'s `f_blocks` and `f_bfree` are the APFS container's, shared by every volume in it, and no field of that structure carries the volume's own allocation, which macOS `df` prints in its Used column; how `df` reads it was not read (UNVERIFIED), and any other call would be a foreign one gate 16 refuses | `used_bytes` stays `f_blocks − f_bfree` and the module header, D-5241 and RUST1-09 say so. Boot volume: 426,123,862,016 bytes against `df`'s 335,261,478,912 (the container's other volumes, about 90.9 GB); the external drive holding the store: 6,263,293,562,880 against 6,262,437,662,720 (0.86 GB). The re-check of 19 Oct 2026 reported the widest gap, on the sealed read-only system volume: 331.7 GB against `df`'s 13.7 GB (`state/fix/round2/verify-CLOUD-RUST1-r1.json`, its follow-ups; not re-measured here). An API reader tells the container's figure from `filesystem.source`, `statfs`; no field names the scope, since RUST1-07 pins the shape. `total_bytes`, `free_bytes` and `mount` equal `df`'s byte for byte on both. No page reads `used_bytes`: `web/src/lib/disk.js` shows free of total |
+| L-RUST1-2 | The spawn gate sees only the spellings it lists, and does not read dependencies, generated code, foreign calls, the `cfg` it does not evaluate, or a build that sets `test` outside the harness | It is a model of `rustc` and Cargo written as a lexer and path rules, not the compiler: it lexes the `.rs` files under `crates/`, reads every `Cargo.toml` there and the workspace's, and lists every other file there, and it claims exactly the spellings its header lists, each planted in its own tests; a spelling the header does not list is not claimed. Out of its sight: a dependency that starts a program at run time, a dependency's re-export of the type under another name, a dependency's macro whose own body spells the type (only what the call site hands it is read), code a procedural macro or a build script generates, a `posix_spawn` through FFI, a `cfg` other than one holding only under `test` (its code is read as shipped), `--cfg test` from `RUSTFLAGS`, a `.cargo/config.toml` or a build script's `cargo:rustc-cfg=test` (the scan takes `test` to hold only under the harness), and a file Cargo reads unasked outside `crates/` | Gate 16 (`#![forbid(unsafe_code)]` on every crate root) closes the FFI door; `crates/vocab/tests/workspace_is_rust.rs` pins the dependency set so a new package is reviewed, and on 20 Oct 2026 `Cargo.lock` held none of `open`, `duct`, `subprocess`, `xshell`, `which`, `async-process`, `cmd_lib`, `execute`, `run_script`, `command-group`, `opener`, `webbrowser` or `nix` (`cc` is there, a build dependency of `ring`, L-RUST1-3); an `include!` of no plain string (the build-script door) is refused; WHAT THE MODEL CANNOT PLACE IS REFUSED BY NAME (RUST1-13, D-5244): a shipped declaration with no `.rs` file where it looks, an inline or inner `#[path]`, a module file or `include!` in a macro body, a manifest target of another kind or with no source, a multi-line manifest value, and anything a declaration or a manifest names outside `crates/`; an unevaluated `cfg` errs towards failing, never passing; the gate's own module header lists the same blind spots. Proof it fails: a spawn planted in `disk_route::measure` on 17 Oct 2026 failed `no_shipped_code_starts_a_program_outside_the_allowlist` with `crates/api/src/disk_route.rs:207 in fn measure names the process-spawning type` (log `state/fix/round2/logs-CLOUD-RUST1/planted-spawn.log`); on 19 Oct 2026 the re-check's 27 probe cases and allowlist spoof, run against the repaired gate, were all as claimed and its planted tree failed naming all five plants; on 20 Oct 2026 a second pass's 30-case probe went from 26 missed to none, and four of its spellings planted in a copy of the merged tree each failed (`r1b-c7-probe-on-new-gate.log`, `r1b-plant-c7.log`, `r1b-probe-on-old-gate.log`, `r1b-probe-on-new-gate.log`, `r1b-plant-merged.log` in the same folder; D-5244) |
+| L-RUST1-3 | `rustix`'s build script starts `rustc` | its feature probes; §96 lists it as the fourteenth such package, and whether §2's build-script sentence binds dependencies is the owner's open question (D-2328, D-5242) | one cold build: 3 `rustc --emit=metadata` probes, the build-script run 0.6 s (`libc`'s, already present, 1 `rustc --version`, 0.4 s); a measurement of one build on a loaded machine. No crate already in `Cargo.lock` gives a safe `statvfs` (D-5242) |
+| L-RUST1-4 | `the_filesystem_numbers_are_what_the_call_returns` and the macOS `df` comparison retry a race | on a busy volume a quiet round (the counts equal before and after) can still disagree with the measurement taken between them: once on 17 Oct 2026, `used` one fragment off | the round is retried, up to 200, and three must agree exactly; a wrong formula disagrees on every round, and the formula on counts whose free and available fragments differ is pinned by `counts_no_filesystem_can_have_are_refused_by_name` |
+| L-RUST1-5 | A `/disk.json` miss can wait for another caller's measurement | single flight (D-5245): a caller that misses while another measures waits on the measuring lock and serves that answer, so concurrent misses take one measurement | the wait is at most the rest of one uncached measurement, the handler's miss figures in L-WP81-4 (operator's machine, 17 Oct 2026: p50 43–45 µs, p99 282–353 µs, max 0.47–0.94 ms on an empty store); the hit path is unchanged, one `Mutex` read. A `statfs(2)` or `statvfs(2)` that hangs holds every waiting caller, as before D-5245 it held each caller in its own call; the operations pool still bounds them at four, and neither shape has a timeout (L-WP81-4, the NOT DONE beside it) |
+| L-RUST1-6 | The spawn gate's `#[test]` and attribute placement are a model of `rustc`, not its resolver, and an attribute macro's output is unseen | Repair round 2 (D-5246) found the gate placing attributes on more than they are on: a gated generic or closure parameter ran on through the body after it, a field or argument named `union` swallowed the ones after it, and a bare `#[test]` exempted whatever an import had re-pointed `test` to. What `#[test]` names is decided by name resolution, which a lexer cannot run; and an attribute macro on an inline module or a function receives its tokens and may drop or rewrite a `#[cfg(test)]` or `#[test]` inside it that the scan honoured, which D-5249 now answers by reading everything such a macro is handed as shipped (L-RUST1-8) | The gate now places an attribute by where it stands and ends a non-item at `,`, `>` or `\|` (RUST1-15); a bare `#[test]` exempts only a free fn directly in a module in a file with no `use` or `extern crate` spelling `test` and no `include!`, which closes every re-pointing rustc 1.97.1 compiled on 20 Oct 2026 (`use .. as test`, a group member, a raw `r#test`, a block `use`, `#[macro_use] extern crate`, a derive helper, an `impl`, a macro body), since a glob or a macro-expanded binding is refused by rustc as ambiguous (E0659), `#[macro_use] extern crate` and a pasted file's bare `#[test]` are refused by name, and an import the model misreads only exempts less. `cfg` cannot be re-pointed (a reserved name). An attribute macro's OUTPUT stays out of sight, as every procedural macro's output already was (L-RUST1-2); its input no longer exempts anything (D-5249, RUST1-18). The model is of the pinned toolchain: a test-only attribute on a `where`-clause predicate, which rustc 1.97.1 refuses (E0658, `r2t-rustc-proofs.log`, 21 Oct 2026) and the gate once exempted the body after, is refused by name (RUST1-19), but other syntax a later toolchain stabilises is not modelled until a toolchain bump, itself a decision, re-checks the gate. Proof: `r2-probe-on-old-gate.log` (30 of 33 missed), `r2-probe-on-new-gate.log` (none), `r2-verifier-probe-on-new-gate.log` (26 of 26 as claimed), `r2-plant-verifier-tree.log` (the three plants each named) and `r2-rustc-proofs.log`, in `state/fix/round2/logs-CLOUD-RUST1/` |
+| L-RUST1-7 | A spawn a macro is handed after a `#[cfg(test)]` fails the gate even when the macro keeps the attribute on it | D-5248: a macro's input and a `macro_rules!` body are tokens, not code yet, and the scan cannot expand a macro to learn whether it drops the attribute, moves it, or puts it on what a variable or a repetition pastes; rustc 1.97.1 compiled each of those into a binary that ran the program (`r2r-rustc-proofs.log` a1, a2, a6, a7). Erring towards failing costs a false refusal, never a pass | The gate reads everything after such an attribute as shipped (RUST1-17). Test code that needs a spawn inside a macro puts the `#[cfg(test)]` on the call (`#[cfg(test)] m! {..}`) or on the module around it, which the scan honours. The merged tree has no such case: `no_shipped_code_starts_a_program_outside_the_allowlist` passes on it. Proof: `r2r-probe-on-old-gate.log` (12 of 12 missed), `r2r-probe-on-new-gate.log` (none; its 3 controls exempt), `r2r-hand-mutants.log` (6 of 6 killed), in `state/fix/round2/logs-CLOUD-RUST1/` |
+| L-RUST1-8 | An attribute that is not a built-in costs its item every exemption, even when no macro is behind it | D-5249: an attribute macro is handed the item it is on, the attributes after it and everything inside, and rustc 1.97.1 does not evaluate the `cfg`s there first; it shipped a `#[test]` fn after one and a `#[cfg(test)]` statement, field, parameter, `impl` fn or module `#[test]` fn inside one (`r2s-rustc-proofs.log` q1, q2, r1 to r8). A lexer cannot tell a macro from a derive helper or a tool attribute, so anything but `cfg`, twenty measured built-ins, a `cfg_attr` of those, and an un-re-pointed `test` or `derive` is taken for one: `#[serde(..)]`, `#[default]`, `#[rustfmt::skip]`, `#[tokio::main]`, `#[unsafe(..)]` and a raw name included. Erring towards failing costs a false refusal (a gated spawn inside such an item, a `#[test]` before or after one), never a pass | The gate reads the whole item as shipped (RUST1-18); `#[cfg(test)]` beside such an attribute still takes the item, since rustc evaluates `cfg` first (q4, q7). Test code that needs a spawn under such an attribute puts it in a `#[cfg(test)]` module or item, which the scan honours. The merged tree has no such case: `no_shipped_code_starts_a_program_outside_the_allowlist` passes on it, and the twenty built-ins were each measured on 20 Oct 2026 rather than taken from a list. Proof: `r2s-d5249-probe-old-vs-new.log` (15 of 15 missed before, none after; 7 controls exempt), `r2s-hand-mutants.log` (13 of 13 killed), `r2s-plant-real-tree.log` (a copy of the real tree with two planted files passed before and fails naming both), in `state/fix/round2/logs-CLOUD-RUST1/` |
+
+## A day's census publish through a run's kept census; the AG-05 follow-ups (R3-19, D-6891)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-IA-11 | **A day's census publish costs its own rows, measured** (closes the whole-list read per day) | `census_store::Kept` keeps each census a run has read, decoded, between its days; a day reads one 32 KiB header region and probes its own keys, and appends them with the three flushes of WP-16. The first day of every run still reads its census whole, once, and so does a day after another writer moved the file (`census published` says `read=whole` and why) | measured, release test build, n = 50 days of 64 new keys at each size (`R319_BENCH_ROOT=<dir> cargo test -p pull --release --lib kept_tests::the_kept_publish_is_flat_measured -- --ignored --nocapture --test-threads=1`, 21 Oct 2026, invented censuses whose every entry is its own key, on a host with 5 GB of swap in use and about 30 GB in the memory compressor): 0.4 M entries p50 4.28 ms, p99 30.71 ms, max 30.71 ms (that run's first day, the whole read, 116.3 ms); 2 M p50 4.04 ms, p99 6.85 ms, max 6.85 ms (whole 797.1 ms); 4 M p50 6.86 ms, p99 39.03 ms, max 39.03 ms (whole 1.94 s); 8.4 M p50 17.51 ms, p99 65.86 ms, max 65.86 ms (whole 4.46 s). **The ratio gate is NOT met at the 8.4-million-key point**: p50(8.4 M) / p50(0.4 M) = 4.09, past 3, and the test fails its own assertion there; it is flat to 1.7x through 4 M, and the kept day is 255x cheaper than the whole read at 8.4 M. The cause is NOT PROVED; the suspect is the resident size of an 8.4-million-key decoded census (about 3.4 GB by L-R319-01's stated sizes) under that memory pressure, since the day's own work is 64 probes, 64 appends and three flushes. On clones (`cp -c`) of two real GDFL FNO epochs (`R319_REAL_ROOT=<clone root> ... kept_tests::the_kept_publish_on_a_copy_of_a_real_epoch_measured`, n = 50 days of 64 invented keys): epoch 5, 2,069,010 entries and as many keys, p50 13.97 ms, p99 99.77 ms, max 99.77 ms, whole read 1.27 s; epoch 2, 8,385,104 entries over 1.19 M keys, p50 14.02 ms, p99 29.96 ms, max 29.96 ms, whole read 3.40 s: flat (p50 ratio 1.00) on the operator's own census | R3-19 |
+| L-R319-01 | What the kept path still costs that is not constant | per day and per segment: the partition's listing (one `lstat` of the segment directory and one directory listing, O(epochs), one epoch per compaction); per run: one whole read of each census the run touches, Θ(entries); per run, memory: the decoded census the cycle held anyway, now held until the run ends — by `pull::manifest`'s own stated sizes (96 bytes of log and about 300 bytes of index per entry, UNVERIFIED as a measurement there) about 3.4 GB for the 8.4-million-entry options partition. NOT MEASURED here: the resident size | the listing O(epochs) per day; the whole read once per run; the memory until the run's `StoreCensus` drops | R3-19 |
+| L-R319-02 | A segment directory swapped for a link between the one look and the calls after it | the look is one `lstat` of `manifest/v4/<vendor>/<SEGMENT>` before a listing and before an install stages anything (`census_store::kept_tests::a_symlinked_segment_directory_is_refused_by_name_on_install`, `census_store::kept_tests::a_file_where_a_segment_directory_belongs_is_refused_by_name`); `std` has no `openat` without `unsafe` (L-R316-01), so a directory renamed away and a link put in its place between that `lstat` and the `store::staging::create` after it is followed. An ABSENT segment directory is made by `mkdir` of that one name, which refuses anything planted since the look. The install's counted host calls are 2 on a free name and 5 over a leftover (`census_store::link_tests::an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`) | a race inside the operator's own store, under the partition's lock, which every census writer takes; constant per install, 2 host calls on a free name and 5 over a leftover. Measured n = 200 each by L-AG05-04's method (`cargo test -p pull --locked --lib link_tests::an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured -- --nocapture --test-threads=1`, debug test build, 21 Oct 2026, a machine running six other builds): the pre-AG-05 sequence (`File::create`) p50 32.99 ms, p99 61.30 ms, max 76.32 ms; with the look, free name p50 28.15 ms, p99 69.16 ms, max 136.53 ms; with the look, over a leftover p50 26.48 ms, p99 78.56 ms, max 610.99 ms. Two `fsync`s dominate every series; the one `lstat` added is not separable from their noise here (AG-05 measured the door alone at p50 16.00 ms on 18 Oct, a quieter host), and the leftover series' max is one outlier of 200 | R3-19 |
+| L-R319-03 | Closes L-AG05-01 | the single-file census publish creates `<vendor>.man.writing` through `store::staging::create`: a symbolic or hard link there is refused `staging_not_regular` or `staging_linked` by name and its target unchanged (`census_store::kept_tests::a_link_at_the_census_writing_name_is_refused_and_its_target_unchanged`); `ingest.rs` is struck from gate 28's LEGACY list (5 rows to 4) | constant: the staging door's 1 call on a free name, 4 over a leftover | R3-19 |
+| L-R319-04 | Closes L-AG05-05 | `api::census::current_epoch` is `pull::ingest::census_store::current_epoch_in`, and both `sized_epoch` (an epoch) and `sized_with_id` (the single file `manifest/<vendor>.man`) open through `open_unfollowed`, which is `store::safe_open::open_read` (`O_NOFOLLOW | O_NONBLOCK`, the type from that handle's `fstat`): a link at an epoch's, the segment's or the single file's name is a named `Refused` fault with nothing behind it read (`api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`, `api::census::epoch_link_tests::api_census_refuses_a_symlinked_single_file_by_name`, `api::census::tests::a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`). A socket at either name stays an I/O fault (`Unsupported`, with the door's sentence), as before, so the census cache still declines it (`server::census_request_tests::a_manifest_that_stats_but_will_not_open_is_not_cached`, D-0695). What stays: the tail reads (`Part::read_back`, `Part::still_holds_last_of`, `extend`) still open with `open_without_waiting`, which follows a final link, but they read only when the handle's device and inode are the ones the no-follow whole read took, so a link swapped in afterwards fails that identity check and the next read is the no-follow whole read | constant per census file: one `lstat` of the segment directory more, the epochs' types from the listing, one no-follow open. In-process, n = 200 each (`cargo test -p api --locked --lib epoch_link_tests::the_census_cold_read_is_measured -- --nocapture --test-threads=1`, debug test build, 21 Oct 2026): one segment's listing and epoch read before p50 36.08 us, p99 217.38 us, max 265.58 us; after p50 39.38 us, p99 183.04 us, max 444.42 us (p50 ratio 1.09, inside the ratio gate's 3x); the cold `read_vendor` of a three-segment census, n = 50, p50 91.42 us, p99 670.96 us, max 670.96 us. On the shadow: `/census/facets.json?feed=gdfl`, n = 200 each, release builds over one shadow, interleaved: round 1 before p50 1.327 ms, p99 5.41 ms, max 9.62 ms, after p50 1.272 ms, p99 7.83 ms, max 19.45 ms; round 2 before p50 1.290 ms, p99 5.61 ms, max 7.18 ms, after p50 1.223 ms, p99 11.49 ms, max 94.55 ms; every census answer byte-identical before and after (gdfl, zerodha, gdfl FNO, gdfl INDEX). What stays open: the census cache's stamp of the single file follows a final link (`std::fs::metadata` in `census_cache::vendor_stamp`), so a link swapped in that names the very file already cached keeps the cached answer (the bytes read earlier without following) until the stamp moves; a link to any other file moved the stamp and was refused by name within seconds on the shadow | R3-19 |
+| L-R319-05 | Closes L-AG05-07 | a symbolic link at `manifest/<vendor>.man` is named `census_not_regular (symlink)` with its path wherever `census_store` loads the single file (a cycle, `read_vendor`, the migration); one `lstat` on the refusal's path only (`census_store::kept_tests::a_link_at_the_single_census_is_named_as_a_link_at_load`) | constant, on the failure path only | R3-19 |
+| L-R319-06 | The seal-stub check on `/disk.json`'s path | one no-follow, non-blocking open, its `fstat` and one 16-byte read; a pipe or link swapped in answers `false` at once (`census_store::kept_tests::a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check`, `census_store::kept_tests::a_link_swapped_in_after_the_look_is_not_a_stub`) | constant: one open, one `fstat`, one 16-byte read. In-process, n = 200 each (`cargo test -p pull --locked --lib kept_tests::the_stub_check_costs_one_open_measured -- --nocapture --test-threads=1`, debug test build, 21 Oct 2026): before (`lstat`, then `File::open`) p50 11.29 us, p99 52.13 us, max 61.83 us; after (`open_read_len`) p50 10.04 us, p99 42.63 us, max 56.88 us. `/disk.json` on the shadow: n = 200 sequential GETs each, release builds over one shadow, interleaved A/B (before: the CLOUD-RUST1 verify build, which has no R3-19 change; after: this branch), most answers from the `DISK_TTL` cache: round 1 before p50 0.726 ms, p99 6.86 ms, max 12.44 ms, after p50 0.722 ms, p99 9.83 ms, max 16.45 ms; round 2 before p50 0.686 ms, p99 3.89 ms, max 5.76 ms, after p50 0.730 ms, p99 12.67 ms, max 30.62 ms. p50 unchanged. The after's p99 was the higher in both rounds; the route's only R3-19 changes are this check (faster in-process, above) and one `lstat` per segment listing, so the spread is attributed to the host (5 GB swapped), UNVERIFIED: NOT PROVED either way | R3-19 |
+| L-R319-07 | **NOT DONE: the census time on `/ingest` and the Speed page** | the import's "day imported" carries `census_ms` and `pull.census` "census published" carries `read`, `why`, `load_us` and `total_us`, both searchable on `/logs`; no route or page shows them as columns yet: `api/src/imports.rs` and the `/ingest` panels are not R3-19's files | none: a log field until a page reads it | R3-19 → owners of `api/src/imports.rs` and `web/src/routes/ingest` |
+
+## The `_v3` ledger check per options day, and the year-zip directory walk (IA-3-OPT; D-4814, D-4867, D-6890)
+
+**Measured** on 20 Oct 2026 on the M4 Pro, a loaded shared machine. The
+build is the dev profile (opt-level 3, overflow checks on). Calls are
+sequential, one call per sample, all read only, through the ignored test
+`the_real_v3_ledger_agrees_with_the_real_year_zips`. The ledger is the
+operator's `/Volumes/WD_BLACK/NSE_Options_Tick` and the sources are the year
+zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
+`BRUTEX_GDFL_V3_LEDGER` and `BRUTEX_GDFL_NFO_ARCHIVES` set and
+`cargo test -p pull --lib -- --ignored --nocapture --exact gdfl_v3::tests::the_real_v3_ledger_agrees_with_the_real_year_zips`.
+
+- The ledger holds 79, 245, 252, 248, 248, 246, 249, 249 and 181 manifests
+  a year for 2018 to 2026, with exactly as many ok markers (1,997 each).
+- Every one of the 1,997 days the year zips hold agrees: 20,825,675 lines.
+  Each marker's `crc` and `size` are its day zip's own.
+- The check per day, first run (files cold): n=1,997, p50 7.8 ms, p99
+  52.7 ms, max 134.9 ms. Second run, minutes later: n=1,997, p50 5.7 ms, p99
+  10.7 ms, max 12.8 ms. Each check is one read of a manifest of up to about
+  3 MB and of its marker, from the external drive, plus one sha256 and one
+  pass.
+- The largest day's shape in memory (26,820 invented lines, 3,234,350 bytes,
+  `the_v3_extremes_are_each_named`): one check in 14.9 ms, including the
+  reads from the scratch directory.
+- The first day asked (the directory listed, the 9 year zips' central
+  directories walked): 16.1 ms in the first run and 12.4 ms in the second. A
+  later day's listing: 5.9 ms and 1.8 ms, which is the day zip's own
+  directory read from disk, not the lookup.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA3OPT-01 | The `_v3` check of one options day (`V3Ledger::check`) | it reads the day's manifest and ok marker, takes one sha256 of the manifest, and makes one pass over its lines against the listing: O(entries of the day). A line that agrees allocates nothing; only the first difference is built | a manifest over `MANIFEST_MAX_BYTES` (64 MiB) or a marker over `MARKER_MAX_BYTES` (4 KiB) is `Unverified` and is never read whole. The largest day measured is 26,820 lines. Measured above: p99 52.7 ms per day with the files cold and 10.7 ms warm, mostly the drive's read | IA-3-OPT |
+| L-IA3OPT-02 | The options year-zip directory walk (`NfoZips::list`) | to name a day zip filed in another zip (FM-043), the first day asked lists the directory and walks every `*.zip`'s central directory once: O(names in the directory) plus O(entries) per zip, once per source object (one run). After that, each day is one hash probe of its year's index and one of the notes | the real directory holds 9 year zips of 84 to 265 entries each (2,103 in all, counted by `zipinfo -1`), walked in 12.4 to 16.1 ms. The source cache that would keep the walk across runs (D-4802) is NOT BUILT | IA-3-OPT |
+| L-IA3OPT-03 | A year zip that refuses is walked again on each day of its year | a zip that refuses is not kept, as before this change, so each of its days names the refusal anew and a zip mended mid-run is read: O(entries of that zip) per day of its year while it refuses | only while it refuses. A zip of any other name that refuses is not asked again for the life of the source, so every day held nowhere answers its refusal until the next run | IA-3-OPT |
+
+## Reference tables as store data (R3-30, D-6246)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R330-01 | `reference_data::load` is not O(1): it lists each table directory and builds each table | it runs once per process start or import run, never per request | O(generations + rows) per load, each listing capped at `MAX_GENERATIONS` names and each file at `MAX_FILE_BYTES`; measured n=100: p50 745 us, p99 1490 us (dev profile) | R3-30 |
+| L-R330-02 | `write` reads the newest generation to decide idempotence | it compares bytes, once per write, operator time | one read of at most `MAX_FILE_BYTES` | R3-30 |
+| L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
+| L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
+| L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |

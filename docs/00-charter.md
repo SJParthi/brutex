@@ -1288,6 +1288,155 @@ record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
 
+## Zerodha and GDFL cash feeds per stock-day — measured 2026-10-18 (D-5170 to D-5177)
+
+`CLAUDE.md` §3 rule 1 requires every vendor claim the code applies to trace to
+a source recorded here. D-5170 applies four: Zerodha's history is
+corporate-action adjusted and GDFL's is raw, Zerodha's minute volume is not its
+own day bar's, Zerodha's minutes of the closing-auction era stop at 15:14, and
+some Zerodha minute volume disagrees with its day bar beyond any rounding.
+**No row of this section is a vendor statement, and no vendor row is quoted**:
+each figure is an aggregate `cli feed-reconcile` (format 2,
+`crates/cli/src/feed_reconcile.rs`, commit `dedcb99a`) computed on 18 Oct 2026
+(IST), read-only, from the operator's store as it stood that day
+(`--workers 4`; the bars were opened through the read door and the version
+files, summary log and events went to a scratch directory outside the store;
+each month was run after the month before it, so every applied lag came from
+earlier days). Anyone with that store can repeat each figure with the command
+in D-5172. Where the store is mounted is machine layout and is not recorded.
+
+| Month | Shares listed (both feeds / GDFL only / Zerodha only / no day) | Stock-days: matched / gdfl_only / zerodha_only / no_overlap / not_aligned / read_failed | Adjusted shares (days) | `ex_date` days (close / range basis) | `factor_not_constant` days | `range_not_constant` days | Minute sum above the day bar beyond the allowance | Matched days of 360 Zerodha minutes |
+|---|---|---|---|---|---|---|---|---|
+| 2019-03 | 337 (172 / 115 / 5 / 45) | 3,268 / 2,185 / 84 / 0 / 0 / 0 | 91 (1,720) | 103 (3 / 100) | 3,135 | 267 | 35 | 7 |
+| 2025-03 | 337 (208 / 104 / 0 / 25) | 3,952 / 1,976 / 0 / 0 / 0 / 0 | 49 (931) | 1 (0 / 1) | 3,948 | 27 | 8 | 0 |
+| 2026-08 | 337 (208 / 100 / 0 / 29) | 4,368 / 2,094 / 0 / 0 / 0 / 0 | 2 (14) | 2 (0 / 2) | 4,366 | 1 | 0 | 4,366 |
+
+**Which run the table is, and what format 3 changed** (19 Oct 2026,
+D-5178, D-5179). The table above is the format-2 runs of two months each
+(2019-02..03, 2025-02..03, 2026-07..08, each first month with no previous
+file, `state/fix/round2/data1-real-r5-20261018/`). The whole-span run, where
+every month carries its lags and intervals from the month before since
+2018-01, gives the same figures except three: `factor_not_constant` 3,136 and
+`range_not_constant` 266 in 2019-03, and `range_not_constant` 14 in 2025-03
+(a different applied lag on a few days; format 2 and format 3 agree on all
+three). **Format 3** (D-5179: an ex-date is judged only on an interval that
+holds the day's own median pair) changes three columns and no other: `ex_date`,
+the `ex_date` flag in `flags`, and `grid_z`. Measured READ-ONLY on 19 Oct
+2026 over the same 105 months, oldest
+first, `--workers 4`, by a stamped release build of `abce27790`
+(`scratch/verify-DATA-1-r1e-runs/full/`, D-5179 item 3): 635,381 rows, 0
+`read_failed`; `ex_date` is set on **63 / 1 / 2** days in the three months
+(all on the range basis; 63 on 15 shares in 2019-03, against 103 on 21 in
+format 2), and on **4,504 days of 102 shares** over the span (11 on the
+close basis, 4,493 on the range basis), against 6,839 days of 118 shares in
+format 2. **None of the 4,504 sits between days whose median ratios are
+equal** (format 2: 136, 27 of them both exactly `n/n`). 5,687 rows are
+`unchecked:interval_excludes_median` (judged against nothing, handing nothing
+on) and 17,018 `unchecked:no_interval`, as in format 2. 17 ex-date days
+follow an unchecked day whose median ratio equals their own: the move came on
+or before that unchecked day, and the flag lands on the first day after it
+that has a basis. The single-day candidates of 2019-03 named below (BSE
+03-18 and 03-19, MCX 03-08) are no longer flagged in format 3; NMDC
+2025-03-21, INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 still are. Every
+other column of every row is byte for byte the format-2 value; `ex_date`
+differs on 6,972 rows, `flags` on 2,831 (the `ex_date` flag) and `grid_z`, now
+the grid as of the row's own day, on 289 (joined on share and day, every row
+of both runs joined).
+
+What the code relies on, and what is not known:
+
+- **Zerodha adjusted, GDFL raw — prices and volumes.** On an unadjusted
+  matched day the median pair is exactly `n/n`. On an adjusted day Zerodha's
+  volumes are adjusted too, and not always by the price factor: TATASTEEL on
+  2019-03-01 has the median pair 4583/50485 (a price ratio of 1 to 11.02) and
+  day volumes of 6,670,866 (GDFL) and 66,725,690 (Zerodha), a volume ratio of
+  10.00. So `gdfl_vs_day_pct` compares two bases on an adjusted day
+  (|difference| p50 0.12 / 0.022 / 0.031%, p99 91.1 / 80.0 / 4.96% over the
+  three months' matched days), the short is printed on both bases, and the
+  conversion by `g/z` is only as good as Zerodha's own rule, which is
+  UNVERIFIED (D-5171 item 8).
+- **The two feeds' minute closes are often different trades of one minute.**
+  The share of a day's Zerodha minutes whose close equals the factor-converted
+  GDFL close at lag 0 is p50 0.928 / 0.816 / 0.872 (p1 0.17 / 0.59 / 0.74). The
+  operator's close intersection empties on 3,135, 3,948 and 4,366 matched days
+  (96%, 99.9%, 99.95%); the range intersection on 267, 27 and 1 (D-5176).
+- **The clock.** The best lag is 0 s on 2,881 / 2,749 / 3,395 matched days and
+  +1 s on 222 / 999 / 777, and lies in −5..+4 s in 2025-03 and −2..+4 s in
+  2026-08; 72 days of 2019-03 reach beyond ±4 s, often as a near tie
+  (ADANIPOWER 2019-03-20: +16 s at 371/375 against 367/375 at lag 0). The lag applied
+  (from earlier days only, D-5175) is +1 s on 22 / 1,698 / 147 days, +2 or +3 s
+  on 114 days of 2025-03, 0 otherwise.
+- **A level-dependent ratio on some adjusted shares, cause UNVERIFIED.** TECHM
+  in 2019-03: median pair 77250/83515 (0.92498) on 03-01 and 72650/78700
+  (0.92313) on 03-19 as the price fell. An adjustment with a subtractive term
+  (a dividend taken off before scaling) would do this; that is a hypothesis,
+  not a measurement. 2019-03's 103 `ex_date` days fall on 21 adjusted shares,
+  most of them repeatedly (TECHM 11, ASHOKLEY 10, UNIONBANK, LICHSGFIN and
+  BANKBARODA 9 each; in format 3, 63 days on 15 shares, LICHSGFIN and
+  BANKBARODA 9, UNIONBANK and TECHM 7): a level-dependent ratio moves a day's interval as the
+  price moves, so `ex_date` marks two days no single factor explains, a
+  corporate action or a level move, and which is which is R4-26's to confirm
+  (WIPRO, NTPC and IDEA have one such day each in the month). A
+  consumer converting a level far from the median minute's price on such a
+  day has the day's min and max pairs to bound its error (D-5174).
+- **Factor jumps at a single day, cause UNVERIFIED**: NMDC 2025-03-21 (median
+  6514/6712), INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 (36770/38665 and
+  37165/39080 on 08-12 and 08-13, then 37270/37270: Zerodha's adjustment ends
+  at that day), BSE 2019-03-18 and 03-19 and MCX 2019-03-08 (close basis). No
+  circular was read.
+- **Zerodha's minute volume is not its day bar's.** The minute sum is below
+  the day bar on most matched days (p50 −0.21 / −0.35 / −2.17%, p1 −3.1 /
+  −16.1 / −39.0%). Above it beyond the rounding allowance on 35, 8 and 0 days:
+  PIIND on 9 days of 2019-03 (up to +324.6%), and RELIANCE on 39 consecutive
+  matched days from 2019-02-01, where the minute sum agrees with GDFL's day
+  converted by the day's factor (2019-03-01: 16,766,764 against 7,919,821 ×
+  122690/57925 = 16,774,844) and the day bar (16,622,986) is the short one.
+  The flag names the disagreement, not which series is wrong.
+- **The 15:14 stop.** In 2026-08, 4,366 of 4,368 matched days hold exactly 360
+  Zerodha minutes, none in `[15:15, 15:30)`, and GDFL holds volume in those
+  minutes on 4,309 of them (`gdfl_unverified_phase_volume`); 2026-07 holds 375
+  on every matched day. The auction rule itself is §9's (NSE/CMTR/73845).
+  `zerodha_session_cut` does not fire on these days because per-share
+  eligibility is not joined, so 15:15-15:29 is `Unverified`, never a gap
+  (D-5171 item 10).
+- **One-feed shares are renames or other instruments, cause UNVERIFIED.** The
+  2019-03 Zerodha-only shares are TATACONSUM, UNOMINDA, NAM-INDIA and GVT&D
+  (19 days each; their GDFL months of then are under other keys) and IRFC (8
+  days of minutes with no day bar). Joining keys across a rename is the dated
+  rename table's work (R4-21), not this verb's.
+- **Over the whole span** (2018-01 to 2026-09, 105 months, the same verb and
+  store, `state/fix/round2/data1-full-r5-20261018/`): no `read_failed` row.
+  PIIND carries `zerodha_minute_sum_exceeds_day_bar` in every month of
+  2018-09 to 2019-08, on 114 days (p50 +92.9%, max +11,409% over the day bar;
+  57 days above twice it), and on 156 days in all; RELIANCE on 543 days (on
+  2019-03-01, above, the day bar is the short series). `zerodha_session_cut`
+  is set on 182 days: 181 shares on 2021-02-24 at 15:45, the calendar's
+  220-bar day, where Zerodha's minutes stop before the resumed session GDFL
+  traded in, and KPITTECH on 2019-09-23, a day the calendar has not
+  measured. Causes UNVERIFIED. `ex_date` is set on 6,839 days of 118 shares:
+  6,399 of them on 20 shares that repeat it as their level moves (UNIONBANK
+  632, TECHM 629, BPCL 510), while 82 shares have at most three, the
+  single-day candidates R4-26 is to confirm (format 2; in format 3, D-5179,
+  4,504 days of 102 shares: 4,374 on 20 repeating shares, UNIONBANK 488,
+  TECHM 477 and LICHSGFIN 393, while 76 shares have at most three, on 97
+  days).
+- **The untracked scratch check of 15 Oct, joined on (share, day)**
+  (`state/fix/round2/data1-real-r5-20261018/compare-vs-scratch.txt`): it wrote
+  3,249, 3,914 and 4,326 rows for the three months and the verb holds every
+  one of them (none missing). On every joined row the GDFL day volume, the
+  Zerodha day volume and the Zerodha minute sum are equal. Every other
+  difference is explained: matched minutes, factor and high-match share differ
+  only on rows whose applied lag is not 0 (the scratch matched at lag 0
+  always), except five factors of 2019-03 at lag 0 — four days with an even
+  count of matched minutes, where the scratch averaged the two middle ratios
+  and the verb keeps the lower median's exact pair (D-5171 item 4), and MCX
+  2019-03-01, whose first minutes of the month have no grid yet and admit no
+  factor (D-5171 item 1). What the verb adds (handover H7): M&M (19, 19 and 21
+  matched days) and GVT&D (19 Zerodha-only days in 2019-03, 19 and 21 matched
+  days later), every one-feed day (2,269, 1,976 and 2,094 rows), and no
+  invented factor (the scratch wrote 1.0 on a day with no matched minute; none
+  of its rows in these three months had one).
+
 ## Dropbox API v2: what the GDFL Dropbox fetch relies on (R4-07, E2E-01; D-4986)
 
 Read 16 Oct 2026 from Dropbox's own published API specification, the Stone
@@ -1347,3 +1496,36 @@ has an UNKNOWN listing day, and nothing is refused on it. Whether the
 expulsion date is the last day traded or the first day not traded is
 UNVERIFIED: `pull::listing` treats only days strictly AFTER it as past the
 end of history, so the expulsion day itself is never refused.
+
+## Filesystem counts for `/disk.json` — read 16 Oct 2026 (D-5240, D-5241)
+
+`/disk.json` reports the store's filesystem from one system call made in the
+server process (it started `/bin/df -Pk` until D-5240). Which call, and in
+which units, rests on the operating system's own declarations, read from the
+macOS SDK on the operator's machine (Command Line Tools
+`MacOSX27.0.sdk`, macOS 27.0.1, build 26A434) and from the `rustix` 1.1.4
+registry source the build compiles. The digest is of the bytes read; another
+SDK may declare otherwise.
+
+| Source | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|
+| `usr/include/sys/_types.h` | `863c4f07045775002b63b7e616742d9f746e4a02da4441442d8fe1138bbd0ff9` | line 70: `typedef unsigned int __darwin_fsblkcnt_t; /* Used by statvfs and fstatvfs */` — 32 bits | macOS reads `statfs(2)`, not `statvfs(2)` (D-5241) |
+| `usr/include/sys/statvfs.h` | `658ae523adc689c84eef80fd16a9dbd7d4f00fbc7eba0499f96c1afba6033ace` | `struct statvfs`: `f_blocks`, `f_bfree`, `f_bavail` are `fsblkcnt_t`, "in units of `f_frsize`" | the counts off macOS (`statvfs`, D-5240); why not on macOS (D-5241) |
+| `usr/include/sys/mount.h` | `45872741bb916b92bddd2e562d2047b552af1f68269081a0aeb58a3e5a2b8a51` | `__DARWIN_STRUCT_STATFS64`: `uint32_t f_bsize` "fundamental file system block size"; `uint64_t f_blocks`, `f_bfree`, `f_bavail` ("free blocks avail to non-superuser"); `char f_mntonname[MAXPATHLEN]` "directory on which mounted" | the counts and the mount point on macOS (D-5241) |
+| `rustix-1.1.4/src/backend/libc/fs/types.rs` (crates.io) | not recorded: the lock's own checksum pins the package | line 1069: `pub type StatFs = c::statfs;` on the libc backend, so `rustix::fs::statfs` hands back the SDK's struct unchanged; `StatVfs` widens every count to `u64` | the fields `disk_route::counts_and_mount` reads |
+
+**What is NOT sourced here.** How Darwin's `statvfs` folds a volume of 2^32
+fragments or more into its 32-bit counts — truncation, or a larger `f_frsize`
+— was not read: Apple's libc source was not consulted, and no such volume was
+measured. It is UNVERIFIED, and it is why macOS does not use that call. The
+`df` behaviour the route matches (total = every fragment, free = what an
+unprivileged writer may take, the mount point `df` prints) is checked by
+measurement, not by source: `on_macos_total_free_and_mount_are_what_bin_df_printed`
+compares the route with `/bin/df -Pk` on this machine, and the Linux branch was
+compared with GNU `df -Pk` by hand in the cloud container (D-5240). **What it
+does not match, measured 17 Oct 2026**: on APFS macOS `df`'s Used column is
+not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
+425,294,667,776), and no field of the `statfs` structure above carries the
+figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
+route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
+`docs/06-limits.md` L-RUST1-1).
