@@ -1678,3 +1678,31 @@ not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
 figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
 route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
 `docs/06-limits.md` L-RUST1-1).
+
+## RustSec advisories RUSTSEC-2026-0381 and RUSTSEC-2026-0382 — read 21 Oct 2026 (D-7120)
+
+Two advisories turned `cargo deny check` red on an unchanged tree. What they
+say, and what the patched releases do, rests on the files below: the
+advisory database `cargo deny` fetched (its own git checkout under
+`~/.cargo/advisory-dbs/`, at the commit D-7120 names, dated 2026-10-20) and
+the crates.io sources the build compiles. The digest is of the bytes read.
+
+| Source | sha256 of the bytes read | What it says, as far as the decision relies on it | Where it is applied |
+|---|---|---|---|
+| `crates/rustls-webpki/RUSTSEC-2026-0382.md` (RustSec advisory database) | `525ad607d24f67fd22a20e70b28b3962a9039962340e3ad1f351c9611772e671` | dated 2026-10-20, alias CVE-2026-111943: affected versions "may accept certificate paths containing distrusted emSign intermediate public keys"; patched `>= 0.103.16, < 0.104.0-alpha.1` and `>= 0.104.0-alpha.8` | `rustls-webpki` 0.103.16 in `Cargo.lock` (D-7120 point 1) |
+| `crates/webpki-roots/RUSTSEC-2026-0381.md` (RustSec advisory database) | `71e69321b86b520406ff2bb529bc3abfaed7493a12712b0eb38dc2c360878d81` | dated 2026-10-19, alias CVE-2026-111943: affected versions include `emSign ECC Root CA - G3`; "Version 1.0.10+ removes this root"; patched `>= 1.0.10` | `webpki-roots` 1.0.10 in `Cargo.lock` (D-7120 point 1) |
+| `rustls-webpki-0.103.16/src/verify_cert.rs` (crates.io) | `73e60395e81a8c2ac7c276ee49bd501208876855fd820d83c386ce29f376c4d8` | `DISTRUSTED_SPKIS`: eight `include_bytes!` keys under `data/distrusted/`; a path whose certificate or trust anchor carries one is refused with `Error::CertDistrusted` | what changes at run time (D-7120 point 4, `docs/06-limits.md` L-BREDS-1) |
+| `webpki-roots-1.0.10/src/lib.rs` (crates.io) | `3575e50b19f48e368b254e25abfacb300264d3728d12c89363306695c537e62a` | 120 `TrustAnchor` entries against 1.0.9's 121; the one removed is `emSign ECC Root CA - G3` (eMudhra Technologies Limited) | D-7120 point 2 |
+
+The digests are of both advisories at the database commit
+`e6f94f3760d5e6c54c1b05f204002263bc025524`. At the later commit
+`4b587f00996ebe5c05a73eaef105ef241e876414` (2026-10-21), which the final
+`cargo deny check` read, `RUSTSEC-2026-0381.md` hashes to
+`9be83b1a3b668d3b3ccb720faf514e1ac5f42754bd03cb2b7900f5f9157a9300`: six
+added lines mark the `webpki-roots` 0.26.11 compatibility package, which
+`Cargo.lock` does not hold, unaffected; the affected and patched ranges
+above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
+
+**What is NOT sourced here.** Which certificate chains the hosts `pull`
+contacts present was not read: no connection was made. It is UNVERIFIED
+(`docs/06-limits.md` L-BREDS-1).

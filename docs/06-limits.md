@@ -12060,12 +12060,17 @@ would close this.
   that a later feature change made real on the host (for example a release of
   `rustls-webpki` turning `ring` on by default) would not be seen by this test.
   The fingerprint pin catches that change only when it moves a `dependencies`
-  list. The fingerprint hashes names and dependency strings, never versions,
-  so a version bump that leaves every `dependencies` list unchanged (the
+  list. **Corrected 21 Oct 2026 (D-7120):** this paragraph said the
+  fingerprint hashes names and dependency strings and never versions; since
+  D-1611 it hashes each package's version too, so a version-only bump (the
   `rustls-webpki` example: only its version and checksum lines move, its list
-  still reads `"ring"`) is invisible to both the walk and the fingerprint.
-  `cargo deny check` (gate 3, `ring` and `cc` banned) is the only check on
-  that case.
+  still reads `"ring"`) does move the pin and stops the build until the scan
+  is done. D-7120's `rustls-webpki` 0.103.15 → 0.103.16 did exactly that. What
+  stays unseen by the walk and the fingerprint alike is the feature flip
+  itself: the lock records no features, so a new version that turned `ring`
+  on by default would re-pin like any other version bump, and only the scan
+  of its manifest (D-7120 read it: the same features) or `cargo deny check`
+  (gate 3, `ring` and `cc` banned) catches it.
 - **Names only, as before.** A native crate under a name `DECLARED` does not
   list is caught by the fingerprint pin, not by the reachability walk.
 - **Cost.** One parse of the lock and one O(V + E) walk (about 195 packages),
@@ -21056,3 +21061,11 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
 | L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
 | L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |
+
+## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-BREDS-1 | Which hosts `pull` contacts chain through the distrusted emSign keys is not known | RUSTSEC-2026-0382 and RUSTSEC-2026-0381 are cleared by refusing, during certificate verification, a path through any of the eight emSign intermediate keys `rustls-webpki` 0.103.16 lists, or one that anchors only at `emSign ECC Root CA - G3`, which `webpki-roots` 1.0.10 removed. A host `pull` reaches through `reqwest` (the broker, the Dropbox fetch, AWS Parameter Store) that presents such a chain is now refused. No handshake was made from this package: no gate contacts a vendor host, and none was contacted to find out. **UNVERIFIED** | the refusal is the call site's existing TLS error, named and never retried on weaker verification; nothing falls back to the old roots. The added work is a comparison against a fixed list of eight keys per certificate in a path, once per handshake, never per bar or per request served; not measured | BASE-REDS-1021 |
+| L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
+| L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
