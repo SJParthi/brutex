@@ -1627,6 +1627,11 @@ test('a report costs the same however long the failure\'s text, and a cut text a
   assert.equal(decodeURIComponent(String(reportBody('/db', '\u0001'.repeat(5_000))).split('what=')[1]), '…', 'a cut text that cleans to nothing is still said as cut');
   assert.equal(reportBody(`/${'a'.repeat(4_000_000)}`, 'x'), null, 'a page path of any length is refused as past 256 bytes');
   assert.equal(reportBody('/db', 'é'.repeat(MAX_REPORT_BYTES + 1)), reportBody('/db', 'é'.repeat(2_000)), 'one code point past the cut is cut');
+  // Longer than the cut in UTF-16 units but not in code points (an emoji is two units, one code point): not cut
+  // early, only fitted, whole code points and `…`, the same body as for a text the cut did shorten.
+  const wide = decodeURIComponent(String(reportBody('/db', '😀'.repeat(600))).split('what=')[1]);
+  assert.ok(wide.endsWith('…') && [...wide.slice(0, -1)].every((c) => c === '😀'), wide);
+  assert.equal(reportBody('/db', '😀'.repeat(600)), reportBody('/db', '😀'.repeat(MAX_REPORT_BYTES * 2)));
   // The reporter keys and sends the cut text: one long failure is one report.
   /** @type {string[]} */
   const sent = [];
