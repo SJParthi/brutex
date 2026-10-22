@@ -77,7 +77,7 @@ fn store_path(rel: &str) -> (StorePath<'static>, &'static str) {
 }
 
 /// Seals every month of `store` beside its raw form, and answers them.
-fn seal_every_month(store: &Path) -> Vec<StorePath<'static>> {
+pub(super) fn seal_every_month(store: &Path) -> Vec<StorePath<'static>> {
     let all = months(store);
     assert!(!all.is_empty(), "the import filled months to seal");
     for &(path, symbol) in &all {

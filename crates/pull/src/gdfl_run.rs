@@ -356,6 +356,12 @@ const fn kind_code(kind: ImportKind) -> u8 {
 /// `BRUTEX_GDFL_DURABILITY` into this, and an api child takes them from its
 /// request line only.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one field of the request line the operator sets by name \
+              (--stored, --retry-refused, skip_restated, --accept-open-month); folding them \
+              into an enum would rename fields the line format already fixes"
+)]
 pub struct Request {
     /// The mode.
     pub mode: Mode,
@@ -385,6 +391,27 @@ pub struct Request {
     /// [`SNAPSHOT_MAX`] bytes of letters, digits, `.`, `-` and `_`, beginning
     /// with a letter or a digit.
     pub snapshot: Option<String>,
+    /// The operator's repair reason (D-4874, D-4889; IA-16): `Some` is the only
+    /// run that lands a month the append-only store refuses through the
+    /// back-fill door and reads the repairable hole days of its range
+    /// (design §5.5 row 4a). Judged by [`crate::ingest::repair_reason_ok`],
+    /// the one repair-reason rule both feeds use (D-4874, round 6 SF-10).
+    pub repair_reason: Option<String>,
+    /// Skip the days done under a definition no longer current for their
+    /// kind (`admit` row 3, D-4885); `false` reads them again (D-2822).
+    pub skip_restated: bool,
+    /// The operator accepts a repair in a month still being traded (IA-16,
+    /// D-4876 (2), D-6900 keep item 3): without it a repair-reason request
+    /// whose range touches a month whose last trading day has not passed is
+    /// refused `repair_in_open_month` by [`plan`], before any lock, because
+    /// the repair would make every later day of that month
+    /// `month_superseded`. Ignored without a repair reason.
+    pub accept_open_month: bool,
+    /// The free-space floor in bytes, checked before the run's first day and
+    /// before each day it reads (IA-16, CONC-031, D-6900 keep item 5;
+    /// [`crate::gdfl_import::DEFAULT_FREE_FLOOR`] unless the operator sets
+    /// one; `0` checks nothing).
+    pub free_floor: u64,
 }
 
 impl Request {
@@ -406,6 +433,10 @@ impl Request {
             durability: Durability::DEFAULT,
             by: By::Cli,
             snapshot: None,
+            repair_reason: None,
+            skip_restated: false,
+            accept_open_month: false,
+            free_floor: crate::gdfl_import::DEFAULT_FREE_FLOOR,
         }
     }
 
@@ -444,6 +475,16 @@ impl Request {
                 name: shown(name, SNAPSHOT_MAX),
             });
         }
+        // THE ONE REPAIR-REASON RULE FOR BOTH FEEDS (D-4874, IA-GR-42): an
+        // empty reason, one over 200 bytes or one holding a control character
+        // is refused before anything is read, as `POST /pull/repair` refuses it.
+        if let Some(reason) = &self.repair_reason
+            && !crate::ingest::repair_reason_ok(reason)
+        {
+            return Some(RunRefusal::RepairReasonInvalid {
+                bytes: reason.len(),
+            });
+        }
         None
     }
 
@@ -465,7 +506,8 @@ impl Request {
         let only: Vec<String> = self.only.iter().map(|name| encode(name)).collect();
         let line = format!(
             "{REQUEST_HEAD} mode={} kinds={} source={} from={} to={} only={} stored={} \
-             retry_refused={} workers={} durability={} by={} snapshot={}",
+             retry_refused={} workers={} durability={} by={} snapshot={} repair_reason={} \
+             skip_restated={} accept_open_month={} free_floor={}",
             self.mode.as_str(),
             kinds.join(","),
             self.source.as_str(),
@@ -478,6 +520,12 @@ impl Request {
             self.durability.as_str(),
             self.by.as_str(),
             self.snapshot.as_deref().map_or_else(String::new, encode),
+            self.repair_reason
+                .as_deref()
+                .map_or_else(String::new, encode),
+            u8::from(self.skip_restated),
+            u8::from(self.accept_open_month),
+            self.free_floor,
         );
         if line.len() > REQUEST_LINE_MAX {
             return Err(RunRefusal::RequestLineInvalid {
@@ -498,6 +546,11 @@ impl Request {
     /// [`REQUEST_LINE_MAX`], another head or version, a field missing, out of
     /// order, repeated or unknown, or a value that is not one; then what
     /// [`Request::misuse`] refuses. Refused before any lock.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field of the line after another, each refused by name in its order; \
+                  the order is the format"
+    )]
     pub fn from_line(line: &str) -> Result<Self, RunRefusal> {
         let invalid = |why: String| RunRefusal::RequestLineInvalid { why };
         if line.len() > REQUEST_LINE_MAX {
@@ -568,9 +621,36 @@ impl Request {
             "" => None,
             name => Some(decode(name).map_err(invalid)?),
         };
+        // IA-16'S FOUR FIELDS END THE LINE, and a line written before them
+        // (one that ends at `snapshot=`) is still read, each at its default:
+        // a format version is never changed in place (CLAUDE.md §3 rule 8).
+        let (repair_reason, skip_restated, accept_open_month, free_floor) =
+            if fields.clone().next().is_none() {
+                (None, false, false, crate::gdfl_import::DEFAULT_FREE_FLOOR)
+            } else {
+                let mut next = |name: &'static str| field_of(&mut fields, name);
+                let repair_reason = match next("repair_reason")? {
+                    "" => None,
+                    reason => Some(decode(reason).map_err(invalid)?),
+                };
+                let skip_restated = flag(next("skip_restated")?).map_err(invalid)?;
+                let accept_open_month = flag(next("accept_open_month")?).map_err(invalid)?;
+                let floor_word = next("free_floor")?;
+                let free_floor = floor_word
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|_| {
+                        floor_word.bytes().all(|b| b.is_ascii_digit())
+                            && (floor_word == "0" || !floor_word.starts_with('0'))
+                    })
+                    .ok_or_else(|| {
+                        invalid(format!("{} is not a count of bytes", shown(floor_word, 32)))
+                    })?;
+                (repair_reason, skip_restated, accept_open_month, free_floor)
+            };
         if let Some(extra) = fields.next() {
             return Err(invalid(format!(
-                "a field after snapshot: {}",
+                "a field after free_floor: {}",
                 shown(extra, 64)
             )));
         }
@@ -587,6 +667,10 @@ impl Request {
             durability,
             by,
             snapshot,
+            repair_reason,
+            skip_restated,
+            accept_open_month,
+            free_floor,
         };
         request.misuse().map_or(Ok(request), Err)
     }
@@ -867,6 +951,22 @@ pub enum RunRefusal {
         /// Why.
         why: String,
     },
+    /// A repair reason that is not one (D-4874, IA-GR-42): empty, over
+    /// [`crate::ingest::MAX_REPAIR_REASON`] bytes, or holding a control
+    /// character. The one rule both feeds use.
+    RepairReasonInvalid {
+        /// Its length in bytes.
+        bytes: usize,
+    },
+    /// A repair-reason request whose range touches a month whose last
+    /// trading day by the calendar of record has not passed, not accepted
+    /// (IA-16; D-4876 (2), D-6900 keep item 3): a repair there would make
+    /// every later day of the month `month_superseded`. Refused before any
+    /// lock; repair after the month ends, or accept it by name.
+    RepairInOpenMonth {
+        /// The first such month, `yyyy-mm`.
+        month: String,
+    },
 }
 
 impl From<locks::LockFault> for RunRefusal {
@@ -928,6 +1028,8 @@ impl RunRefusal {
             Self::ClockImplausible { .. } => "clock_implausible",
             Self::RunsLedgerUnwritten { .. } => "runs_ledger_unwritten",
             Self::ClaimUnwritten { .. } => "claim_unwritten",
+            Self::RepairReasonInvalid { .. } => "repair_reason_invalid",
+            Self::RepairInOpenMonth { .. } => "repair_in_open_month",
         }
     }
 
@@ -944,12 +1046,13 @@ impl RunRefusal {
                 | Self::FilterTooLong { .. }
                 | Self::SnapshotInvalid { .. }
                 | Self::SymbolInvalid { .. }
+                | Self::RepairReasonInvalid { .. }
         )
     }
 
     /// Every code, in the order of the enum: the table a reader names a code
     /// by, and the test that no two variants share one.
-    pub const CODES: [&'static str; 22] = [
+    pub const CODES: [&'static str; 24] = [
         "request_line_invalid",
         "stored_with_options",
         "range_backwards",
@@ -972,6 +1075,8 @@ impl RunRefusal {
         "clock_implausible",
         "runs_ledger_unwritten",
         "claim_unwritten",
+        "repair_reason_invalid",
+        "repair_in_open_month",
     ];
 }
 
@@ -1010,6 +1115,19 @@ impl core::fmt::Display for RunRefusal {
             | Self::ClockImplausible { why }
             | Self::RunsLedgerUnwritten { why }
             | Self::ClaimUnwritten { why } => f.write_str(why),
+            Self::RepairReasonInvalid { bytes } => write!(
+                f,
+                "the repair reason ({bytes} bytes) is not one: 1 to {} bytes on one line, no \
+                 control character, the rule both feeds use (D-4874): nothing was read or written",
+                crate::ingest::MAX_REPAIR_REASON
+            ),
+            Self::RepairInOpenMonth { month } => write!(
+                f,
+                "the range touches {month}, whose last trading day by the calendar of record \
+                 has not passed: a repair there would make every later day of {month} a \
+                 month_superseded hole (D-4876). Nothing was read or written; repair after the \
+                 month ends, or accept a repair in an open month by name"
+            ),
             Self::SourceUnset { var } => write!(
                 f,
                 "{var} is not set; it names where the GDFL data is read from and has no default"
@@ -1138,6 +1256,16 @@ pub fn plan(
 ) -> Result<Plan, RunRefusal> {
     if let Some(misuse) = request.misuse() {
         return Err(misuse);
+    }
+    // A REPAIR IN A MONTH STILL BEING TRADED IS ASKED FOR BY NAME (IA-16;
+    // D-4876 (2), D-6900 keep item 3): the cli does not pause for an answer,
+    // so the warning a plan page was to show is a refusal here, before any
+    // lock and before anything is read.
+    if request.repair_reason.is_some()
+        && !request.accept_open_month
+        && let Some(month) = open_month_in((request.from, request.to), today_ist())
+    {
+        return Err(RunRefusal::RepairInOpenMonth { month });
     }
     if let LogState::Refused(why) = process.log {
         // THE HOLDER BEFORE THE SINK (IA-2 repair 1; FM-064): a run logs in
@@ -1300,6 +1428,62 @@ fn now_unix_s() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
+/// Today in IST by the host's clock, or `None` when the clock cannot name a
+/// day (before 1970, or past the session's range).
+fn today_ist() -> Option<Day> {
+    let secs = i64::try_from(now_unix_s()).ok()?;
+    crate::session::IstMoment::from_epoch_secs(secs)
+        .ok()
+        .map(crate::session::IstMoment::day)
+}
+
+/// The first month of `from..=to` whose last trading day by the calendar of
+/// record has not passed on `today`, as `yyyy-mm` (IA-16, D-4876 (2), D-6900
+/// keep item 3); `None` when every month of the range has ended its
+/// trading. A month that ended before `today` costs one comparison; the
+/// month holding `today` asks the calendar of its remaining days (at most
+/// 31 probes, [`crate::calendar::kind_of`]), any one not proved closed
+/// keeping it open (a day the calendar has not measured is never assumed
+/// closed); a later month is open. A clock that names no day keeps the
+/// first month open. O(months in the range).
+#[must_use]
+pub fn open_month_in((from, to): (Day, Day), today: Option<Day>) -> Option<String> {
+    use crate::calendar::{DayKind, kind_of};
+    let month = |day: Day| format!("{:04}-{:02}", day.year(), day.month());
+    let Some(today) = today else {
+        return Some(month(from));
+    };
+    let mut first = Day::new(from.year(), from.month(), 1).ok()?;
+    loop {
+        let end = first.end_of_month();
+        if today <= end {
+            if first > today {
+                return Some(month(first));
+            }
+            let mut day = today;
+            loop {
+                if !matches!(kind_of(i64::from(day.days_from_epoch())), DayKind::Closed) {
+                    return Some(month(first));
+                }
+                if day >= end {
+                    break;
+                }
+                let Ok(next) = day.succ() else {
+                    return Some(month(first));
+                };
+                day = next;
+            }
+        }
+        if end >= to {
+            return None;
+        }
+        let Ok(next) = end.succ() else {
+            return None;
+        };
+        first = next;
+    }
+}
+
 // ═══ Execution ══════════════════════════════════════════════════════════════
 
 /// How one kind of a run ended.
@@ -1367,6 +1551,10 @@ fn execute_with(
     let options = RunOptions {
         origin: Some(&kind.origin),
         retry_refused: plan.request.retry_refused,
+        repair_reason: plan.request.repair_reason.as_deref(),
+        skip_restated: plan.request.skip_restated,
+        free_floor: plan.request.free_floor,
+        free_space: None,
         workers: plan.request.workers,
         durability: plan.request.durability,
         observer,
@@ -1615,13 +1803,45 @@ impl CensusHold {
 /// and every other refusal [`claim_with`] can give.
 pub fn claim_census(store: &Path, mode: &str) -> Result<CensusHold, RunRefusal> {
     let taken = locks::RunLocks::take_store(store, locks::PROBE_RETRY)?;
+    claim_verb(store, taken, (mode, "census"))
+}
+
+/// The mode a `cli gdfl-dayflags` rescan claims under (IA-16; design §5.3,
+/// D-6900 keep item 1).
+pub const DAYFLAGS_MODE: &str = "dayflags";
+
+/// Takes the locks a run of `kind` takes (the kind lock on v4, the store
+/// lock on v3: IA-2's [`locks::RunLocks::take`]) for `cli gdfl-dayflags`,
+/// with the probe retry and no longer wait, allocates its id from the runs
+/// ledger and writes its claim (`mode=dayflags kind=<kind> by=cli`, a word
+/// both mode tables already hold): so the rescan never reads a day an import
+/// of that kind is writing, and an import pressed while it rescans is told
+/// who holds the kind (IA-16, D-6900 keep item 1, IA-GR-14). Its ledger
+/// appends stay under the journal lock.
+///
+/// # Errors
+///
+/// [`RunRefusal`] by name: `run_busy` naming the run that holds the kind,
+/// and every other refusal [`claim_census`] can give.
+pub fn claim_dayflags(store: &Path, kind: ImportKind) -> Result<CensusHold, RunRefusal> {
+    let taken = locks::RunLocks::take(store, kind.as_str(), locks::PROBE_RETRY)?;
+    claim_verb(store, taken, (DAYFLAGS_MODE, kind.as_str()))
+}
+
+/// The id and the claim of a verb that took `taken` (a census verb, or
+/// `cli gdfl-dayflags`), `mode` and `kind` as its claim names them.
+fn claim_verb(
+    store: &Path,
+    taken: locks::RunLocks,
+    (mode, kind): (&str, &str),
+) -> Result<CensusHold, RunRefusal> {
     let now = now_unix_s();
     let mut hold = ledger::LedgerHold::take(store, locks::LOCK_WAIT)?;
     let pid = std::process::id();
     let run = hold.allocate(&ledger::Entry {
         id: 0,
         mode: mode.to_owned(),
-        kind: "census".to_owned(),
+        kind: kind.to_owned(),
         by: "cli".to_owned(),
         pid,
         started: now,
@@ -1630,8 +1850,15 @@ pub fn claim_census(store: &Path, mode: &str) -> Result<CensusHold, RunRefusal> 
     let claim = locks::Claim {
         run,
         mode: mode.to_owned(),
-        kind: "census".to_owned(),
-        batch: format!("census:{run}"),
+        kind: kind.to_owned(),
+        batch: format!(
+            "{}:{run}",
+            if kind == "census" {
+                "census"
+            } else {
+                "dayflags"
+            }
+        ),
         source: "-".to_owned(),
         from: "-".to_owned(),
         to: "-".to_owned(),
@@ -1660,7 +1887,7 @@ pub fn claim_census(store: &Path, mode: &str) -> Result<CensusHold, RunRefusal> 
     drop(hold);
     let event = telemetry::Event::info(locks::TARGET, "run claimed")
         .with("run", run)
-        .with("kind", "census")
+        .with("kind", kind)
         .with("mode", mode)
         .with("by", "cli")
         .with("lock", taken.claim_name());
@@ -2472,7 +2699,9 @@ impl ProgressFile {
             let opened = self
                 .path
                 .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
+                // `imports/` alone, never a store root that went away
+                // (FM-125; IA-16 repair 1).
+                .map_or(Ok(()), crate::gdfl_import::make_leaf_dir)
                 .and_then(|()| {
                     use std::os::unix::fs::OpenOptionsExt as _;
                     // A LINK OR A PIPE AT THE NAME IS REFUSED, NEVER FOLLOWED

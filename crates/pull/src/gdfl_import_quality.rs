@@ -18,7 +18,7 @@
 //!
 //! # The line (D-3335's names, in its order)
 //!
-//! `flags <kind> <day> <scope> v=1 src=<import|rescan> definition=<n>
+//! `flags <kind> <day> <scope> v=<1|2> src=<import|rescan> definition=<n>
 //! <fields> max_defer_s=<n> member_src=<zip|none>`, D-3317's line rules (one space between
 //! fields, every field after the key `name=value`), the last line of a key
 //! wins. `<scope>` is the index's store symbol for `indices` and `*` for the
@@ -41,6 +41,17 @@
 //! - `options`: `files`, `files_traded`, `zero_quote_files`,
 //!   `ltq1_lead_files`, `ltq1_lead_rows`, `ltq0_new_ltp_rows`,
 //!   `first_trade_p50`.
+//!
+//! **`v=2` (D-4841; IA-16).** This build writes `v=2`: every `v=1` field,
+//! then, before `max_defer_s`, the `v=2` fields it counts: `indices`
+//! `separator_backslash` (0 or 1: the day zip named a file of its folder
+//! with `\`, D-4828); `stocks` `volume_saturated_files` (files whose running
+//! LTQ sum stopped at the vendor's 32-bit limit, [`VOLUME_LIMITS`], D-4830)
+//! and `separator_backslash`. The design's other `v=2` fields
+//! (`dup_traded_rows`, `dup_traded_files`, `dup_echo_rows`, `snapped_rows`,
+//! `trailing_empty_files`) need counts only the readers' raw rows hold
+//! (`gdfl_cm.rs`, `gdfl_nfo.rs`): until a reader counts one it is ABSENT
+//! from the line, never 0, and `/dayflags.json` reads it as `null`.
 //!
 //! `max_defer_s` and `member_src` are this writer's additions, which
 //! D-3335's reader keeps out of the record ("a field a later writer adds"):
@@ -120,6 +131,19 @@ pub const INDEX_HOLE_S: u32 = 5;
 
 /// A shared share hole is at least this many seconds (D-3335, chosen).
 pub const SHARED_HOLE_S: u32 = 300;
+
+/// The running LTQ sums at which a share's cumulative volume is taken to
+/// have stopped at the vendor's 32-bit limit (D-4830, D-4841): 2^31 - 1 and
+/// 2^31, the two IDEA days measured stopping there (design row F35,
+/// 2024-04-26 and 2024-04-25).
+pub const VOLUME_LIMITS: [u64; 2] = [2_147_483_647, 2_147_483_648];
+
+/// The version of the flags line this writer writes (D-3335, D-4841): `v=2`
+/// carries every `v=1` field, then the `v=2` fields this build counts (IA-16:
+/// `separator_backslash` for indices and stocks, `volume_saturated_files`
+/// for stocks). A `v=2` field this build does not count is ABSENT, never
+/// written as 0, and a reader reads it as unknown.
+pub const FLAGS_VERSION: u32 = 2;
 
 /// A shared hole is shared by at least this percentage of the day's traded
 /// share files (D-3335, chosen).
@@ -319,6 +343,11 @@ pub struct FileQuality {
     /// An index file: the longest run of in-session rows carrying one
     /// unchanged value, as `(its first stamp, its length in seconds)`.
     pub flat_max: Option<(u32, u32)>,
+    /// A share file whose running LTQ sum stopped at the vendor's 32-bit
+    /// limit (D-4830, D-4841 `volume_saturated_files`; IA-16): its last
+    /// traded row brought the sum to [`VOLUME_LIMITS`], and no later row
+    /// traded. The bars are unchanged; the day counts it.
+    pub volume_saturated: bool,
 }
 
 /// A run of in-session index rows, in file order, carrying one value.
@@ -392,6 +421,8 @@ pub fn measure_file(
     let mut leading = true;
     let mut minute_seconds: u64 = 0;
     let mut flat: Option<FlatRun> = None;
+    let mut volume: u64 = 0;
+    let mut at_limit = false;
     for tick in ticks {
         if kind == ImportKind::Indices {
             if in_session(tick.sod) {
@@ -401,6 +432,8 @@ pub fn measure_file(
             continue;
         }
         if tick.ltq > 0 {
+            volume = volume.saturating_add(tick.ltq);
+            at_limit = VOLUME_LIMITS.contains(&volume);
             if !quality.traded {
                 quality.traded = true;
                 quality.first_trade = Some(tick.sod);
@@ -448,6 +481,7 @@ pub fn measure_file(
         ImportKind::Stocks => {
             quality.ltq1_lead_rows = 0;
             quality.ltq1_lead = false;
+            quality.volume_saturated = at_limit;
             if quality.traded {
                 for span in &spans {
                     quality.share_gaps.extend(
@@ -568,6 +602,11 @@ pub struct DayLedger {
     halt_held_s: u64,
     /// A stocks day's difference array of files in a long gap, by second.
     shared: Vec<i32>,
+    /// A stocks day's files whose volume stopped at the 32-bit limit
+    /// ([`FileQuality::volume_saturated`]).
+    volume_saturated_files: u64,
+    /// Whether the day zip named a file with `\` (D-4828, D-4841).
+    separator_backslash: bool,
 }
 
 impl DayLedger {
@@ -596,6 +635,8 @@ impl DayLedger {
             } else {
                 Vec::new()
             },
+            volume_saturated_files: 0,
+            separator_backslash: false,
         }
     }
 
@@ -657,6 +698,13 @@ impl DayLedger {
         self.member_bytes = bytes;
     }
 
+    /// Records whether the day zip named any file of the day with `\`
+    /// (D-4828): D-4841's `separator_backslash`, 0 or 1 on an indices or a
+    /// stocks line.
+    pub const fn set_separator_backslash(&mut self, backslash: bool) {
+        self.separator_backslash = backslash;
+    }
+
     /// How many files were taken.
     #[must_use]
     pub const fn files(&self) -> u64 {
@@ -700,6 +748,9 @@ impl DayLedger {
         self.auction_prints = self
             .auction_prints
             .saturating_add(file.reader.auction_prints);
+        if file.volume_saturated {
+            self.volume_saturated_files += 1;
+        }
         if file.reader.quoted_rows == Some(0) && file.rows > 0 {
             self.zero_quote_files += 1;
         }
@@ -804,7 +855,9 @@ impl DayLedger {
         };
         let src_of = |bytes: Option<u64>| if bytes.is_some() { "zip" } else { "none" };
         let (kind, day) = (self.kind, self.day);
-        let head = move |scope: &str| format!("flags {} {day} {scope} v=1", kind.as_str());
+        let head =
+            move |scope: &str| format!("flags {} {day} {scope} v={FLAGS_VERSION}", kind.as_str());
+        let backslash = u8::from(self.separator_backslash);
         let p50 = self.first_trade_p50();
         let session_s = session_seconds(&self.session);
         let halt_s = self.halt_s();
@@ -818,7 +871,7 @@ impl DayLedger {
                         " rows={} seconds={} session_s={session_s} ss_distinct={} holes_5s={} \
                          hole_max_s={} hole_max_at={} dual_spread_s={} dual_spread_max_bps={} \
                          zero_ltp_rows={} halt_s={halt_s} halt_held_s={} flat_max_s={} \
-                         flat_max_at={} max_defer_s={} member_src={}",
+                         flat_max_at={} separator_backslash={backslash} max_defer_s={} member_src={}",
                         line.rows,
                         line.seconds,
                         line.ss_distinct,
@@ -844,8 +897,8 @@ impl DayLedger {
                     text,
                     " files={} files_traded={} first_trade_p50={} shared_holes={holes} \
                      shared_hole_max_s={} shared_hole_max_at={} ltq0_new_ltp_rows={} \
-                     auction_prints={} halt_s={halt_s} halt_held_s={} max_defer_s={} \
-                     member_src={}",
+                     auction_prints={} halt_s={halt_s} halt_held_s={} volume_saturated_files={} \
+                     separator_backslash={backslash} max_defer_s={} member_src={}",
                     self.files,
                     self.files_traded,
                     clock(p50),
@@ -854,6 +907,7 @@ impl DayLedger {
                     self.ltq0_new_ltp_rows,
                     self.auction_prints,
                     self.halt_held_s,
+                    self.volume_saturated_files,
                     self.every.max_defer_s,
                     src_of(self.member_bytes),
                 );
@@ -885,7 +939,7 @@ impl DayLedger {
     }
 }
 
-/// One whole flags line: `head`, `v=1` already in it, then `src=`,
+/// One whole flags line: `head`, its version (`v=2`, [`FLAGS_VERSION`]) already in it, then `src=`,
 /// `definition=` and the fields.
 #[must_use]
 pub fn render(head: &str, src: Src, fields: &str) -> String {

@@ -78113,6 +78113,385 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
 
+### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
+
+**Number** reserved for IA-16 by the ingest automation design (§15, round 4,
+critic BL-B, SF-18); unused in the ledger until this change.
+
+**Decided.**
+
+1. `pull::gdfl_import::day::admit_rule(&KeyState, Asks) -> Admit` is rows 2
+   to 4b of design §5.5's table, the first matching row deciding, a pure
+   `const fn` of the key's journal state (five hash probes,
+   `KeyState::of`) and the run's asks (`retry_refused`, `skip_restated`,
+   whether a repair reason is carried). `Admit` is `Read` or
+   `Skip(Done | Restated | Hole(reason) | Unrepairable(reason))` (D-4910's
+   answer, less `Reopen`, which stays `widen`'s, row 1, WP-12f). Row 5 is
+   the calendar gate, unchanged; row 6 reads.
+2. A key is a hole when its LAST line is `incomplete` with one of the five
+   store-hole reasons (`HOLE_REASONS`: `needs_month_generation`,
+   `month_superseded`, `repair_refused`, `bars_differ_held`,
+   `repair_impossible`). A later `begin`, `refused` or `done` ends it. The
+   reason is IA-2's `Journal::hole_reason`, never re-read from the store.
+3. Row 4a (the first three) is skipped and counted `holes_skipped` without
+   a repair reason and read with one; row 4b (the last two) is skipped and
+   counted `holes_unrepairable` by every run, a repair-reason run included:
+   only IA-18's restate run may read it (D-4912; until then it is "held under
+   an earlier reading", never "unrepairable for ever" in any new text). Each
+   skipped hole is in `Report::holes_in_range` with its reason and says so
+   at `warn` (`code=hole_skipped`, `repairable=`), and nothing of the day is
+   read or written.
+4. **Row 3's sense is kept, deliberately.** The design names a `restate`
+   flag whose `0` skips a restated day. No cli or api caller sets such a
+   flag yet, so a default of "skip" would silently stop D-2822's re-read for
+   every caller. The field is `skip_restated` (`RunOptions`, `gdfl_run::Request`
+   and its request line), default `false` = today's rule; `true` skips and
+   counts `restated_skipped`. Flipping the default is a later change with
+   the cli flag (IA-1's owner), not this one.
+5. Not built here: row 4c (`source_lacks`, D-4910). In the run the read is
+   itself the one probe of the source's day table and a re-refusal is not
+   written again (`refused_close`), so nothing loops; the plan that would
+   count it (`to_import`) does not exist at the head. Row 4d
+   (`store_damaged`, D-4911) needs the damaged months recorded per key, and
+   is not built.
+
+**Proof.** `pull::gdfl_import::tests::ia16::admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`,
+`…::a_hole_is_known_by_the_last_line_alone`,
+`…::a_passed_day_is_named_and_never_read_in_a_loop`,
+`…::a_restated_day_with_other_bars_is_named_once`.
+
+### D-4889 — The GDFL back-fill door opens only for a run that carries a repair reason; without one a passed day is a named hole (IA-16; critic X-1; the field D-4874 left to IA-16) — 2026-10-20
+
+**Number** the critic's resolution D-4889 (critic-round7, "lands with IA-16").
+
+**Decided.** WP-12d filed every GDFL file through `ingest::repair_rows`, so
+any run back-filled a month unasked: one whole-month copy per file, kept for
+ever (L-IA-26). Now:
+
+1. `RunOptions::repair_reason` and `gdfl_run::Request::repair_reason`
+   (written to and read from the request line as `repair_reason=`, percent
+   encoded) carry the operator's reason, judged by
+   `ingest::repair_reason_ok` (D-4890 item 5); a bad one is
+   `RunRefusal::RepairReasonInvalid` (`repair_reason_invalid`, a misuse)
+   before anything is read.
+2. The filing step tries the append door. Only when the append was refused
+   `NotHeld` or `Superseded` AND the run carries a reason does the file go
+   to the back-fill door, whose journal reason is the operator's text first
+   and the import's own sentence after it. Every other refusal, and every
+   refusal of a run with no reason, is the file's, typed
+   (`ImportRefusal::Store { kind, why }`, code = the kind's code).
+3. WP-12d's tests pass a reason (`gdfl_backfill_tests.rs`, item (c) of the
+   critic's resolution); the no-reason behaviour is IA-16's
+   `a_passed_day_is_named_and_never_read_in_a_loop`.
+4. Named interim, still true: the cli has no `--repair-reason` flag in this
+   change (`crates/cli/src/gdfl_import_command.rs` is not IA-16's file), so a
+   cli import cannot back-fill until that flag lands; the api's request line
+   can carry the reason.
+
+### D-4890 — Two doors over one repair, both typed; the append door judges a refused day's hole by the month's shape; the repair journal's three writers under the ledger lock (IA-16; critic X-2; amends D-4851, D-4888) — 2026-10-20
+
+**Number** the critic's resolution D-4890 (critic-round7, "lands with IA-16").
+
+**Decided.**
+
+1. `ingest::FailKind` (`ingest_failkind.rs`) is design §5.8's table, one row
+   per `StoreError` and `RepairError` variant (`of_store`, `of_repair`); the
+   store's `#[non_exhaustive]` wildcard answers `Other` (`filing`), and
+   IA-GR-39 builds every variant this build knows and fails if one reaches
+   it. `SealedRefused` (SC-3/SC-4's sealed form failing its check) and
+   `Misfiled` are `StoreDamaged`; `SortIndex` (WP-39) too.
+2. Every door returns `DoorRefusal { kind, why }` instead of `String`. The
+   Zerodha door (`repair_or_append`) and the GDFL back-fill door
+   (`back_fill_or_append`) hand a month to the one repair (`repair_after`)
+   only when the append's kind is `NotHeld` or `Superseded`; any other
+   append refusal is answered as itself, kind and words. **What a Zerodha
+   repair lands is unchanged; what it prints for any other refusal is the
+   append's own words, without "the versioned repair refused it too".**
+   One refinement, GDFL's door only and only for a run with a repair
+   reason: a month still busy past the retry (`MonthBusy`, a reader's
+   shared lock among them) is judged by its shape too, and repaired only
+   when it lacks the whole batch (`Lack::Lacked`); a busy month holding
+   bars inside the span stays `month_busy`, never `bars_differ_held`,
+   since the busy append compared nothing (WP-12d's
+   `a_reader_open_across_a_back_fill_keeps_the_generation_it_opened`).
+3. WP-12d's `Lack` is mapped: `Overlaps` is `Differs` (`bars_differ_held`),
+   `Lacked` repairs, `AppendDoors` keeps the append's kind, a month that
+   cannot be judged takes its refusal's kind. The APPEND door does the same
+   judgement on a `NotHeld` refusal with no repair reason (`ingest::judged`,
+   read only, on a refusal only), so a half-filled contract-month whose held
+   bars differ is `bars_differ_held` (row 4b), and one that holds nothing of
+   the day is `needs_month_generation` (row 4a) (FM-067).
+4. A repair refusal splits: `HeldBarDiffers`, `IndexedSibling`,
+   `RevisionLimit` are `RepairImpossible`; `RowLimit`, `NoBasisWitness`,
+   `UnsealedSource`, `Conflict`, `Incomplete`, `InvalidReceipt` are
+   `RepairRefused`; `StaleSource` is `MonthBusy`; `BeforePromote` and an I/O
+   error with `publication_may_be_visible` are never a hole.
+5. `MAX_REPAIR_REASON` (200 bytes) and `repair_reason_ok` (not empty, at
+   most 200 bytes, no control character) are the one repair-reason rule for
+   both feeds (D-4874, round 6 SF-10, IA-GR-42); IA-10c's `POST /pull/repair`
+   is to call it.
+6. All three writers of `audit/<vendor>.repairs` (`journal_intent`'s
+   `repairing`, `journal_repair`'s `repair`, `journal_refusal`'s `refused`)
+   append through `ingest::audit_ledger::append` (D-4888).
+
+### D-4851 — A failure never strands an earlier day: the store never closes a day, holes are reasons, the held-back set, the busy-month retry, a full disk ends the run (IA-16) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15); unused until this change.
+
+**Decided.**
+
+1. A store or repair door's refusal is an OPEN cause at stage `file` whose
+   code is its `FailKind`'s; it never closes a day. `decisive()` takes the
+   census's cause, else the run's, else the first open cause that is NOT a
+   hole, else the first hole (round 4, BL-C): a day closes with a hole
+   reason only when every open failure of it is a hole, so a busy month on
+   day D is never hidden behind another instrument's hole.
+2. A file that fails with an open cause that is not a hole and not the
+   run's own (a busy month past its retry, a CRC fault in the copy, a host
+   error, a damaged month, a batch refused) adds its instrument-month
+   (`HeldKey`: symbol, contract, month) to the run's held-back set. Every
+   later file of it in the run is not read (so neither its bars nor its
+   `.auc` prints reach the store) and fails `held_back{after}`. The check is
+   one hash probe a job on the coordinating thread, before any worker takes
+   a file. At `HELD_BACK_CAP` (4,096) the run ends `held_back_cap`, naming
+   the pair and the count, after the day in hand.
+3. `MONTH_BUSY_RETRY`: a month another process holds is asked again up to 20
+   times, 100 ms apart (at most 2 s per file), at the import's call site,
+   never inside `BarFile::open_or_create`. Every attempt after the first is
+   counted (`Report::month_busy_retries`).
+4. The store's `DiskFull` (and a repair's `StorageFull`) is `disk_full`: no
+   further file of the day is taken (each untaken file is named at stage
+   `run`), the day closes `incomplete reason=disk_full`, and the run ends
+   `disk_full` with no new `begin`.
+5. Not changed: the store's `Locked` text still says "another writer holds"
+   (design: "another process holds"); the words are pinned by `cli`'s
+   `vix_reference` test, which is not IA-16's file.
+6. THE FREE-SPACE FLOOR (CONC-031, FM-085; D-6900 keep item 5, the stop
+   that replaces the dropped `disk_full` alert): before the run's first day
+   and before each day it reads, the store volume's free space (one
+   `statfs(2)` through `rustix`, `gdfl_import::volume_space`, the call
+   `/disk.json` makes since D-5240; never a child process) is compared with the request's
+   `free_floor` (`DEFAULT_FREE_FLOOR`, 10 GiB, chosen: L-IA16-12; the cli's
+   `BRUTEX_GDFL_FREE_FLOOR`; `0` checks nothing). Below it the run ends
+   `disk_full` naming both figures before the day is begun; a meter that
+   cannot answer ends it `free_space_unknown`. The stop is on the receipt
+   (stdout) before exit, so a disk too full for the journal's close is still
+   named, and the next run's check names it before its first write.
+7. A STORE THAT TAKES NO WRITES (FM-129; D-6900 keep item 6): a host refusal
+   for permission or a read-only volume with the root still there ends the
+   run `store_not_writable` once the day is closed, naming the store's words
+   and the fix (`chflags nouchg`, `chmod -N`, a read-write remount), never a
+   file failure repeated on every later day.
+8. THE `.auc` TORN TAIL (IA-AUC-01, FM-099): the next append cuts a killed
+   append's torn tail (a partial record, whole records of zero bytes, a
+   partial header of a file with no record) back to the last whole record
+   that verifies, under the exclusive lock, and then lands whole; every
+   reader still refuses a torn file, and any other damage stays refused. The
+   held-back check (item 2) runs before the `.auc` append, so a held-back
+   day writes no print.
+
+### D-4852 — Loss is detected per refused write and per unreachable source day: a gone store root ends the run with nothing more written and is never recreated; a gone source root ends it `source_lost` and names no day not held (IA-16; FM-086, FM-125) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15).
+
+**Decided.** A door refusal of kind `Io` is followed by ONE `metadata` of the
+store's root (`filing::store_root_lost`). A root that is not a directory or
+cannot be reached ends the run `store_lost`: the day's flush, ledger lines,
+census batch and close are not written, and neither is the run's `run …
+ended=` line (`end_line` probes the root first), because the journal's
+append makes its directory and would make a phantom root on whatever disk
+holds the mount point. The day stays begun; a resume once the volume is back
+reads it again.
+
+**The source's half** (FM-086, IA-GR-09, INFRA-024; added at landing). A
+day the source says it does not hold, or one of whose files it could not
+reach at all (`archive_unavailable`, `tick_store_unavailable`, the codes an
+options source's faults share), is followed by ONE `metadata` of the
+source's root as the run's `Origin` names it (`day::source_lost`). A root
+that does not answer ends the run `source_lost`, with words that name the
+root, why, and, since macOS answers a revoked volume with a refusal rather
+than an absence, where its access is given back. A day nothing of which
+reached the store gets NO line, so an unplugged drive is never journalled as
+days the vendor does not hold (`refused day_not_held`); a day some of whose
+files already landed closes `incomplete stage=run reason=source_lost`
+(`decisive` takes the run's cause first) and the run ends after it. A run
+that names no origin (a test's bare reader) has no root to ask and closes the
+day by its own refusals. Proof:
+`pull::gdfl_import::tests::ia16::a_lost_source_or_store_stops_the_run_at_the_failing_file`,
+over the four sources (both tick stores, the outer zip through a `ReadAt` that
+fails EIO, and the yearly options zips).
+
+**The root's identity** (RA-284; added at landing). A root that is a
+directory again but ANOTHER one (a volume unplugged and mounted back, under
+its old name or with an empty folder left at its mount point) is lost as
+surely as one that is gone: writing on would file the run's lines and bars
+into a folder that is not the store. The run records the root's device and
+inode numbers when it begins (`filing::store_identity`; a run that began
+before its root existed learns them before the day after its first lines),
+and the probe compares them: after a refused write as above, and before each
+calendar day (`day::root_check`, one `metadata` call per day, never per
+file), where a root gone or changed ends the run `store_lost` before the day
+is begun. A re-mounted volume whose device number changed is lost even when
+it is the same drive, because the run's open files died with the mount; a
+resume once it is back reads the day again. What it does not see, a swap in
+the middle of a day whose writes all succeed into the new folder until the
+next day's check, is L-IA16-13. Proof:
+`pull::gdfl_import::tests::ia16::a_store_root_that_came_back_as_another_directory_is_store_lost`,
+`pull::gdfl_import::tests::ia16::a_fresh_store_learns_its_root_and_is_never_lost`;
+bench C-GR-11 (`the_loss_probes_cost_one_metadata_call_each`) prints the
+probe's p50, p99 and max.
+
+### D-4872 — Day-close rules: an unfiltered day with no wanted file is refused `no_wanted_file`; a swept index absent from an indices day is named `absent_from_listing` (IA-16; F10, FM-038, FM-073; with D-4833) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15).
+
+**Decided.** For a day the source holds, read whole (never a member key's
+pass), and whose listing refused nothing by name:
+
+1. an UNFILTERED run (no `only`) whose listing held entries and NOT ONE of
+   them under the day's own folder (another day's folder, a renamed folder,
+   an extra level of nesting; for options, nothing under `Options\`) is
+   refused `no_wanted_file{skipped}` (stage `vendor`, an open cause, a
+   failure of the DAY and of no entry, so every entry is still one file,
+   skip or refusal), never `done files=0`, and is read again after a
+   corrected delivery. A filtered run's empty day, an empty listing and a
+   listing of files off the scope (IA-3's FM-119 day) still close `done`
+   (L-IA16-08);
+2. in an UNFILTERED run, an indices day with at least one wanted file that
+   lacks a swept index (`InstrumentKey::SWEPT`, the one table of them) is
+   refused `absent_from_listing{instrument}`, a day failure,
+   a vendor cause that closes the day `done … vendor_refused=<n>` with the
+   index named (D-4833: the vendor's own listing reads the same each time;
+   `--retry-refused` reads it again). FM-073's "never done" is answered by
+   that close: the day is done WITH the refusal, never clean;
+3. `stored_index_absent` (D-4833) is a variant with its code and words and
+   is not raised: no listing span of a stored alias index is recorded in the
+   charter (`STORED_INDEX_SPANS_RECORDED = false`; IA-0b records them).
+
+### D-4888 — Every `audit/<vendor>.<name>` append is locked, bounded and closes a torn tail; the repair journal moves to it (IA-16; SF-4, RA-125, FM-127) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15, round 6).
+
+**Decided.** `pull::audit_ledger::append(store_root, vendor, name, lines)`
+refuses a name that is not one lower-case word and a root that is not a
+directory (it never creates a root or an ancestor, FM-125), takes
+`<store>/audit/<vendor>.<name>.lock` exclusive within `LOCK_WAIT` (D-4906;
+past it the holder is named and nothing is written), then appends through
+the ledger's own torn-tail rule (`request_minutes::append_named`: a last line
+with no line break is closed first, the line rules checked, the write
+synced). The repair journal's three writers use it (D-4890 item 6). The gap
+ledger's writers move with IA-10b, which owns `request_minutes.rs`; until
+then they take the ledger file's own `flock`, which this append also takes
+inside its lock, so the two never interleave a batch. Cost: O(1) in the
+ledger's length (bench-style test `appends_cost_the_same_at_any_ledger_length`).
+
+### D-4876 — A repair-reason run whose range touches a month still being traded is refused by name before any lock, unless accepted (IA-16; round 5 SF-9, as the one-command cut D-6900 keep item 3 amends it) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15, round 5 items (2) and (3)).
+
+**Decided.** (1) A month served from a repair revision answers held bars
+`AlreadyPresent` and names a new bar `month_superseded`, a store hole a
+repair-reason run fills (D-4851, `FailKind::Superseded`; built by D-4890).
+(2) The design's plan warning `repair_in_open_month{month}` has no page to
+be shown on: `/gdfl/plan.json` is dropped, and `cli gdfl-import` does not
+pause for an answer (D-6900 keep item 3). So `gdfl_run::plan` REFUSES, before
+any lock and before anything is read, a request that carries a repair
+reason and whose range touches a month whose last trading day by the
+calendar of record has not passed (`RunRefusal::RepairInOpenMonth`, code
+`repair_in_open_month`, naming the first such month), unless the request
+says `accept_open_month` (`cli gdfl-import … --accept-open-month`; the
+request line's last field, `accept_open_month=0|1`). The rule
+(`gdfl_run::open_month_in`): a month that ended before today has passed; in
+today's month every remaining day, today included, is asked of the calendar
+(`calendar::kind_of`), and any day not proved `Closed` (an unmeasured day
+included) keeps the month open; a later month is open; a clock that names no
+day keeps the first month open. A request without a repair reason is never
+asked. (3) Repairs run after the month ends (IA-14's runbook rule): the same
+request the day after the month's last trading day passes the check, and one
+repair-reason Resume lands the month's remaining days in one more repair.
+
+**Cost.** O(months in the range) comparisons and at most 31 calendar probes,
+once per request (L-IA16-11).
+
+**Proof:** IA16-18,
+`pull::gdfl_import::tests::ia16::a_repair_in_an_open_month_is_refused_unless_accepted_and_converges_after_the_month_ends`.
+
+### D-4841 — The D-3335 day ledger's flags line at `v=2`: what this build counts, and one reader of `v=1` and `v=2` alike that never reads a missing field as 0 (IA-16; with the reader moved in from IA-10b by D-6900) — 2026-10-20
+
+**Number** of the ingest automation design (§6.4); named pending until now in
+the "Cited, never written" note above (D-4809 point 2). One authority per
+per-day quality fact stays the rule: the ledger holds the per-day counts, the
+verdict records hold what verification found.
+
+**Decided.** (1) The importer and `cli gdfl-dayflags` (the one function
+`DayLedger::lines`) write `flags <kind> <day> <scope> v=2 …`: every `v=1`
+field in its place, then, before `max_defer_s`, the `v=2` fields this build
+counts: `indices` `separator_backslash` (0 or 1: the day zip named a file of
+its folder with `\`, D-4828); `stocks` `volume_saturated_files` (files whose
+running LTQ sum reached 2,147,483,647 or 2,147,483,648 on their last traded
+row, the IDEA shape of design row F35, D-4830; bars unchanged) and
+`separator_backslash`; `options` no `v=2` field yet. (2) The design's other
+`v=2` fields (`dup_traded_rows`, `dup_traded_files`, `dup_echo_rows`,
+`snapped_rows`, `trailing_empty_files`) need counts only the readers' raw
+rows hold (`gdfl_cm.rs`, `gdfl_nfo.rs`; IA-4 owns the options header): until
+a reader counts one, the field is ABSENT from the line, never written as 0
+(L-IA16-10). (3) `api`'s `/dayflags.json` reader reads `v=1` and `v=2` lines
+alike: every `v=2` field is an optional later field, a key of every record
+and `null` where the line lacks it; a version other than 1 or 2 is a fault
+named with its reason. The gap-line and derive-line readers stay `v=1`-only
+until some part writes `v=2` of those lines (D-6900).
+
+**Proof:** IA16-19,
+`pull::gdfl_import::tests::ia16::a_volume_stopped_at_the_32_bit_limit_is_counted_and_the_line_is_v2`,
+`api::dayflags::v2_tests::a_v2_flags_line_reads_like_v1_and_a_missing_v2_field_is_never_zero`
+(a file R3-13 does not edit, so a merge that reverts the reader fails), and
+`api::dayflags::tests::a_line_this_reader_cannot_name_is_counted_with_its_reason`
+(its unknown version moved to `v=3`).
+
+#### Cited, never written
+
+Each number below is cited under `crates/` by IA-16 and heads no entry here.
+Each says where its citation resolves.
+
+* **D-4829 and D-4830.** Numbers of the ingest automation design
+  (`state/design/ingest-automation.md` §15, outside this repository) for the
+  options header's trailing empty columns and a share's volume stopped at
+  the vendor's 32-bit limit. The day-ledger halves IA-16 cites them for are
+  recorded by D-4841 items (1) and (2); a citation of either resolves to
+  D-4841.
+* **D-4833.** The design's number for "a vendor fact the listing shows reads
+  the same every time" (the stored alias indices' listing spans). The half
+  IA-16 cites it for is D-4872 item 3; a citation resolves to D-4872.
+* **D-4873.** The design's number for the bar definition a held day was built
+  under. IA-16 cites it beside the hole reasons; the rule is D-4885's row 4b
+  and D-4851; a citation resolves to D-4885.
+* **D-4910 and D-4912.** Critic round 7's numbers for `admit`'s skip classes
+  (row 4c, `source_lacks`) and row 4b's restate exception. Both are recorded
+  in D-4885, whose title names them; row 4c is not built (L-IA16-03). A
+  citation resolves to D-4885.
+* **D-6900.** The one-command cut's decision (block D-6900..D-6909,
+  `state/oneclick-cut-20261020/decision.md`, outside this repository), whose
+  entry the main session lands. The parts IA-16 cites it for are recorded
+  here: the open-month refusal (D-4876 item 2), the `v=2` reader moved in
+  from IA-10b (D-4841 item 3), and the dayflags lock, the holes on the
+  receipt and the named stops that replace the dropped alerts (invariants
+  IA16-16, IA16-17 and IA16-20). A citation resolves to those until D-6900's
+  own entry is written.
+  D-6900 also amends D-4883's caller list: the line naming "IA-16
+  (`disk_full`, `hole`, `store_damaged`)" as a queue caller no longer holds.
+  IA-16 writes no `alerts::put`; each of the three is a typed `FailKind`
+  named by stage and reason on the journal close, the cli receipt and the
+  exit code (IA16-08, IA16-17, IA16-20, IA16-23).
+
+**D-4878's round-5 ledger sentence (IA-GR-40, round 5 B3), which WP-12f
+merged without.** A member-key close (`<filter>+<member>`) writes no D-3335
+whole-day line: a stocks or options day's `*` line stays the base close's,
+byte for byte, after a wider scope reopens the day for a new member (a
+`.BE`/`.BZ` spell, a new index), and an index member key writes its own
+index's line and no other. The rule was already the code's
+(`write_flags` is asked `whole` only for an unfiltered base key); IA16-30
+pins it.
+
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's
@@ -80195,3 +80574,156 @@ ends.
 document row. The added verification work is `rustls-webpki`'s comparison of
 a path's certificates against a fixed list of eight keys, once per TLS
 handshake, bounded by that constant and not measured here.
+
+### D-7130 — IA-16 repair 1: a hole is asked before a restated `done`; no writer below a store root makes the root; `absent_from_listing` names the stems no scope files — 2026-10-22
+
+From the block D-7130..D-7134 recorded for IA-16 repair 1 in
+`state/decision-blocks.json`. It amends D-4885 (the admit table's order),
+D-4852 (who may make a store root) and D-4833 / design §5.8 (what
+`absent_from_listing` names). The second agent's check of IA-16
+(`state/fix/round2/verify-IA-16-r1.json`) found all three by reproduction.
+
+1. **A hole is the key's last line and is asked before row 3.** A day
+   done under a definition no longer current (an option day under 2, a
+   share day of the closing auction's era under 2 or 3) is read again, and
+   a re-read whose bars differ at held seconds closes `incomplete
+   reason=bars_differ_held`, a hole no repair fills (D-4912). `admit_rule`
+   asked row 3 first and the journal kept the key in its restated set, so
+   every later run read the day again, a repair-reason run included: 226
+   files and 79 refusals per run on a clone of a real NIFTY options month.
+   Now `KeyState::of` calls a key restated only while its last close is a
+   `done` or `recounted` line (D-3317: the last line wins), and
+   `admit_rule` asks rows 4a and 4b before row 3, so a hand-built state
+   with both is judged by its hole. A restated day closed any other way
+   (`stopped`, `refused`) is row 6's and is read, a run that skips
+   restated days included. D-2822's naming of a re-read day as restated
+   is unchanged.
+2. **A store root is made once, by the run, and by no writer below it.**
+   The journal, the day, lineage, lot and scope ledgers and the progress
+   record made their directory with `create_dir_all`, which made a root
+   that went away mid-run again on whatever disk held its path, and the
+   rest of the day landed there while the stop said nothing more was
+   written. Each now makes only its own `imports/` under a root that is a
+   directory (`gdfl_import::make_leaf_dir`), as `audit_ledger::append` and
+   the store's bar writer (D-1522) already did; the telemetry sink, whose
+   run log sits under the store's root, makes nothing beneath its own
+   directory once that directory went away (`telemetry::sink`'s audit
+   postings, generations and roll), the posting counted as an index
+   failure and named in its last error. A fresh store's root is
+   made once by the run before its journal is read, under a parent that is
+   there (`fresh_root`); a missing parent is refused `store_lost`. The
+   root's identity is asked before every file's first write, after the
+   day's files, and after every refused store write: the durability
+   barrier's refusal at a lost root ends the run `store_lost`, never
+   `durability`, and the options day's lineage is not folded into a lost
+   root. The race this leaves (a root swapped between one file's probe and
+   its open, and the census writer's own `create_dir_all`) is L-IA16-13.
+3. **`absent_from_listing` names the stems no scope files.** Beside the
+   swept index it misses, the refusal names the first four stems of the
+   day's folder that `filing` files under no key, in listing order, and
+   how many there were (design §5.8's `unknown: ≤4`, §9's "Renamed file"
+   row, D21). No table of every index name exists to rank them by, so they
+   are not ranked: on a day whose listing holds a hundred unfiled indices a
+   renamed stem is named only when it is among the first four, and is
+   always among the counted ones.
+
+Proof: `pull::gdfl_import::tests::ia16::admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`,
+`a_hole_is_known_by_the_last_line_alone`, `a_restated_day_with_other_bars_is_named_once`
+(its option restated instance), `a_root_lost_inside_a_run_is_never_made_again_and_takes_nothing`,
+`a_durability_refusal_at_a_lost_root_is_store_lost`,
+`a_store_on_a_missing_volume_is_refused_and_nothing_is_made`,
+`telemetry::sink::tests::a_sink_whose_directory_went_away_never_makes_it_again` and
+`a_swept_stem_absent_from_a_held_day_is_named_with_the_unknown_stems`
+(docs/04-invariants.md IA16-01, IA16-02, IA16-05, IA16-09, IA16-11, IA16-32).
+
+### D-7131 — IA-16 repair 2: `Sealed` is a failure kind; a month the writer door never appends to is answered as its raw form, typed; only `Sealed` crosses D-4889's gate without a repair reason — 2026-10-22
+
+From the block D-7130..D-7134 recorded for IA-16 repair 1 in
+`state/decision-blocks.json`. It amends D-4851 / design §5.8 (the store's
+refusal table gains a row), D-4889 (which refusals reach the GDFL back-fill
+door without a repair reason) and D-4890 (how a month served from a repair
+revision is judged), and it merges with SC-4's D-5904 and D-6247 without
+changing what either lands.
+
+**Context.** SC-4 merged into `feat/db-fix` (667db8e2a) while IA-16 was in
+its first repair. It added `StoreError::Sealed` (the store's 36th variant)
+and carried the append door's refusal as `Unwritten { why: String, follows }`,
+filing a batch the month's raw form would append as the month's successor
+generation (D-5904, and D-6247 for a month already served from a revision).
+IA-16 had made the same door return a typed `DoorRefusal` and had gated the
+GDFL back-fill door behind a repair reason (D-4889). The second agent's check
+(`state/fix/round2/verify-IA-16-r2.json`) measured the collision: four files
+conflicted; `FailKind::of_store`'s wildcard named `Sealed` `Other`
+(`filing`), so IA-GR-39 counted 36 variants against the 35 it asserted; and
+the GDFL import, which hands a refused file to the back-fill door only with a
+repair reason, would have made every sealed month's late day a named
+`filing` failure in a plain run, against SC-4's
+`a_late_day_for_a_sealed_month_lands_as_its_successor_generation`.
+
+**Decided.**
+
+1. `Unwritten { why: DoorRefusal, follows: Option<Follows> }`: the typed
+   refusal every caller acts on, and SC-4's fact of which month a successor
+   follows. `follows` is `Some` exactly when the kind is `Sealed`.
+2. A new kind, `FailKind::Sealed`, code `month_sealed`: a month the writer
+   door never appends to whose RAW form would commit the batch, whether the
+   month is held sealed (`StoreError::Sealed` with `SealedOffer::Follows`) or
+   is served from a repair revision whose served generation says the same
+   (`BarFile::offer`, D-6247). Never a hole; it holds back like every non-hole
+   kind; it reaches a journal only when the successor's `repairing` line was
+   refused before the repair (the repair's own refusal keeps the repair's
+   kind). `SealedOffer::Disagrees(c)`, at a sealed month and at a revision,
+   is the raw form's own `OverlapDisagrees(c)` row (`FailKind::of_conflict`):
+   `NotHeld` is `needs_month_generation`, `Restated` and `Skipped` are
+   `bars_differ_held`. The form and the generation are never the kind.
+3. `FailKind::files_as_successor` is true of `Sealed` alone, and the GDFL
+   coordinator hands a file the append door refused `Sealed` to the
+   back-fill door with or without a repair reason; D-4889 stands for every
+   other refusal. The back-fill door asks the successor first (SC-4's arm),
+   then IA-16's judgement of a `NotHeld`, `Superseded` or busy month. A
+   successor filed with no repair reason journals the import's own sentence
+   after the door's `sealed-month successor` or `revision successor` head,
+   never a stand-in for the operator's words.
+4. A month served from a repair revision is judged by SC-4's `offer`, not by
+   IA-16's bar-by-bar compare: a day after its last held bar is its next
+   successor (D-6247), so IA-GR-31's "a day with NEW bars is
+   `month_superseded`" is restated: a new bar AFTER the last held one is
+   filed, a new bar INSIDE the held range is `needs_month_generation`, named
+   once and landed by one repair-reason run. `month_superseded` stays the row
+   of the store's own `StoreError::Superseded`.
+5. The Zerodha repair door (`repair_or_append`) hands `Sealed` to the repair
+   as SC-4 did, beside `NotHeld` and `Superseded` (D-4890's round-6 rule is
+   unchanged for every other kind).
+
+**Rejected.** Mapping `Sealed` to `Other` and leaving the wildcard to answer
+it: IA-GR-39 exists to refuse exactly that. Making `Sealed` repairable:
+`repairable` is what a repair REASON unlocks, and a sealed month's late day
+must land in the daily run with no person asked (D-6247's own rejection of a
+manual step). Two kinds, one per form: a successor of a sealed month and of a
+revision are filed by one door with one bound (L-SC4-01), and a reader of the
+journal or the receipt has nothing to do differently.
+
+**Also (cheap follow-ups of the same check).** `repair_reason_ok` refuses a
+reason of zero-width marks alone and any U+2028 or U+2029 (one line), which
+`char::is_control` does not count. `absent_from_listing` names the four
+unfiled stems CLOSEST to the missing swept symbol (its distinct letter pairs
+the stem holds; ties in listing order), kept per swept index while the
+listing is read, O(4) a stem, instead of the first four in listing order: a
+real indices day holds about seventy unfiled stems, so a renamed NIFTY Bank
+was named only when it happened to be listed early (FM-073, D21). It is a
+ranking for a reader, never a filing rule.
+
+**Proved by** `pull::ingest::failkind::tests::every_store_and_repair_refusal_maps_to_its_row`
+(36 variants, 42 rows), `a_sealed_months_refusal_is_its_raw_forms_answer`,
+`each_kind_is_a_hole_holds_back_or_is_repaired_by_its_row`,
+`one_repair_reason_rule_for_both_feeds`,
+`pull::gdfl_import::tests::ia16::a_sealed_months_late_day_is_its_successor_never_a_hole_nor_filing`,
+`a_repaired_month_answers_held_bars_and_names_new_ones_as_a_hole`,
+`a_swept_stem_absent_from_a_held_day_is_named_with_the_unknown_stems`,
+`the_unfiled_stems_are_ranked_by_closeness_to_the_swept_name`, and SC-4's
+`gdfl_sealed_tests` and `crates/pull/tests/sealed_month.rs` unchanged
+(docs/04-invariants.md IA16-11, IA16-13, IA16-14, IA16-33, IA16-34).
+
+**Cost.** No new operation: a `Sealed` refusal costs the successor door
+SC-4 already bounds (L-SC4-01, `docs/06-limits.md`); the kind is one match
+arm.

@@ -58,6 +58,34 @@ fn run_on(
     run_cm(&source, &run)
 }
 
+/// [`run_on`] carrying a repair reason (IA-16, D-4889): the only run whose
+/// filing lands a day its month already passed, as a new generation.
+fn run_repairing(
+    root: &Path,
+    kind: ImportKind,
+    (from, to): (Day, Day),
+    store: &Path,
+    scope: Option<Arc<CmScope>>,
+) -> Result<Report, ImportRefusal> {
+    let source = TickStore::new(&root.join("ts"));
+    let source = match scope {
+        Some(scope) => source.with_scope(scope),
+        None => source,
+    };
+    let run = Run {
+        kind,
+        from,
+        to,
+        only: &[],
+        store_root: store,
+    };
+    let options = RunOptions {
+        repair_reason: Some("WP-12f test: land the earlier days under the later one"),
+        ..RunOptions::default()
+    };
+    run_cm_from(&source, &run, options)
+}
+
 /// Whether the store holds the April 2024 one-second month of `symbol`,
 /// the month every day of these worlds lies in.
 fn held(store: &Path, segment: &str, symbol: &str) -> bool {
@@ -293,13 +321,14 @@ fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
     )
     .unwrap();
     assert!(late.failures.is_empty(), "{:?}", late.failures);
-    let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+    // THE BACK-FILL IS ASKED FOR (IA-16, D-4889).
+    let narrow = run_repairing(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
     assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
     let only_late = month(&store, "INDEX", "INDIAVIX");
     assert!(!only_late.is_empty(), "the month holds the later day alone");
 
     let range = (d1(), d3());
-    let wide = run_on(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
+    let wide = run_repairing(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
     assert!(wide.failures.is_empty(), "{:?}", wide.failures);
     assert_eq!(
         (wide.days_widened, wide.members_reopened, wide.days_skipped),
@@ -1577,6 +1606,8 @@ fn ctx_of<'a>(
             beyond: std::cell::RefCell::new(HashMap::new()),
             shares: std::cell::RefCell::new(HashMap::new()),
         }),
+        held_back: std::cell::RefCell::new(HashMap::new()),
+        store_id: std::cell::Cell::new(None),
     }
 }
 

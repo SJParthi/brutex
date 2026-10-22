@@ -622,9 +622,11 @@ const LEFT: [(&str, &str); 68] = [
         "bars/gdfl/NSE/INDEX/NIFTY/1s/2024-04.prv",
         "388a2caddc70cb43371bf5c4a6803a7e19030fa4a123cb47d6f66ab2d9d2d1b1",
     ),
+    // IA-16 (D-4841): the day ledger's lines are `v=2`, with the separator
+    // and the stocks volume-limit count; no other byte moved.
     (
         "imports/gdfl.dayflags",
-        "4466ea7b57d0aaef4fab0a26ee4ee4921d97b205b730240a034a688e07377b0e",
+        "53ca50e327fbfd83192f8faa6601832c0eddac6022bb3acd1fee5f2c75722a20",
     ),
     // IA-3 (D-5903, DB-A49): every close now says what its listing was
     // (`skipped=`, `entries=`, `listing=`); no other byte the runs leave

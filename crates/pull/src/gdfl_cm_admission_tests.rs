@@ -202,9 +202,12 @@ fn zero_ltp_rows_are_refused_by_name_and_the_index_day_is_read() {
         CmScope::swept(),
         &[],
     );
-    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert!(only_banknifty_absent(&got.failures), "{:?}", got.failures);
     assert_eq!((got.days_imported, got.files, got.files_refused), (1, 1, 0));
-    assert!(got.closed_with_refusals.is_empty() && got.closed_refused.is_empty());
+    // BANKNIFTY absent from the vendor's listing closes the day done WITH the
+    // refusal, named (IA-16, D-4872 item 2), never clean and never refused.
+    assert_eq!(got.closed_with_refusals, vec![d], "{got:?}");
+    assert!(got.closed_refused.is_empty());
     let bars = held(&store, "INDEX", "NIFTY", d).unwrap();
     assert_eq!(bars.len(), 150);
     assert!(bars.iter().all(|b| b.close > 0));
@@ -375,7 +378,11 @@ fn special_session_days_are_imported_inside_their_windows() {
             CmScope::swept(),
             &[],
         );
-        assert!(got.failures.is_empty(), "{d}: {:?}", got.failures);
+        assert!(
+            only_banknifty_absent(&got.failures),
+            "{d}: {:?}",
+            got.failures
+        );
         assert_eq!((got.days_imported, got.days_refused), (1, 0), "{d}");
         let bars: Vec<Bar> = held(&store, "INDEX", "NIFTY", d)
             .unwrap()
@@ -935,7 +942,7 @@ fn a_stored_index_run_files_the_alias_indices_and_india_vix() {
     let stored_scope = || CmScope::stored(std::iter::empty::<&str>()).unwrap();
     let a = root.join("A");
     let got = import(&root, &a, (ImportKind::Indices, d, d), stored_scope(), &[]);
-    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert!(only_banknifty_absent(&got.failures), "{:?}", got.failures);
     assert_eq!((got.files, got.files_skipped), (3, 1));
     assert_eq!(held(&a, "INDEX", "NIFTY", d).unwrap().len(), 20);
     assert_eq!(held(&a, "INDEX", "NIFTYFINSERVICE", d).unwrap().len(), 20);
@@ -1696,14 +1703,28 @@ fn the_auction_sidecar_is_append_only_and_idempotent() {
             .len(),
         2
     );
-    // A torn tail or a foreign header is refused, never repaired.
-    let mut torn = std::fs::read(&path).unwrap();
+    // A torn tail is refused by every reader and cut back by the next append
+    // (IA-16, IA-AUC-01, FM-099), which then lands whole; a foreign header
+    // is refused, never repaired.
+    let whole = std::fs::read(&path).unwrap();
+    let mut torn = whole.clone();
     torn.push(0);
     std::fs::write(&path, &torn).unwrap();
-    assert!(matches!(
-        auction::append(&root, &key, day(2026, 9, 25), &one),
-        Err(CmRefusal::AuctionSidecar { why }) if why.contains("whole number")
-    ));
+    assert!(
+        auction::read(&path)
+            .unwrap_err()
+            .why
+            .contains("whole number")
+    );
+    assert_eq!(
+        auction::append(&root, &key, day(2026, 9, 25), &one)
+            .unwrap()
+            .written,
+        1
+    );
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(&after[..whole.len()], &whole[..], "the held bytes kept");
+    assert_eq!(after.len(), whole.len() + auction::RECORD_LEN);
     assert!(auction::parse(b"BRTXAUC2\x01\x00\x20\x00\x00\x00\x00\x00").is_err());
     assert!(auction::parse(b"short").is_err());
     let mut bent = auction::header().to_vec();
@@ -1818,4 +1839,14 @@ fn every_new_refusal_says_what_it_refused() {
     ] {
         assert!(why.to_string().contains(words), "{why}");
     }
+}
+
+/// Whether every failure of a fixture day holding no BANKNIFTY file is the
+/// day's naming of that absence (IA-16, D-4833 `absent_from_listing`): the
+/// fixture is a NIFTY day, so an unfiltered run names its missing swept
+/// index, and nothing else fails.
+fn only_banknifty_absent(failures: &[crate::ingest::Failure]) -> bool {
+    failures
+        .iter()
+        .all(|one| one.instrument.ends_with("BANKNIFTY") && one.why.contains("absent"))
 }

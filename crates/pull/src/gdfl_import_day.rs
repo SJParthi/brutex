@@ -11,7 +11,9 @@ use crate::ingest::Failure;
 use crate::session::{Day, Window};
 use crate::vendor::Granularity;
 
-use super::causes::{Cause, ImportRefusal, Outcome, Stage, cm_cause, import_cause};
+use super::causes::{
+    Cause, HOLE_REASONS, ImportRefusal, Outcome, REPAIRABLE_HOLES, Stage, cm_cause, import_cause,
+};
 use super::census::{Census, StoreCensus, stop_at_census};
 use super::filing::{DayFiler, make_durable, stop_at_durability};
 use super::journal::{BAR_DEFINITION, Journal, ScopeHeld, closing_line, journal_path, run_line};
@@ -84,13 +86,27 @@ impl Close {
 
 /// The day's decisive failure: the census's, else the run's (a stop, IA-2,
 /// D-4853: a stopped day says `reason=stopped` even when an earlier file
-/// failed), else the first that keeps the day from closing, else the first
-/// (D-3317: its `stage=` and `reason=`).
-fn decisive(failures: &[Staged]) -> Option<&Staged> {
+/// failed), else the first that keeps the day from closing AND IS NOT A
+/// HOLE, else the first hole, else the first (D-3317: its `stage=` and
+/// `reason=`).
+///
+/// **NON-HOLE BEFORE HOLE (IA-16, round 4 BL-C).** A day whose open failures
+/// include an instrument Y that met a store hole (its month already holds
+/// later days) and an instrument X whose month was merely busy must close
+/// with X's cause: closed with Y's hole reason, `admit` would skip the day
+/// for ever and X's day D would never be read again, while X's later days
+/// (held back in this run) land on the next. A hole closes a day only when
+/// every open failure of the day is a hole. O(failures).
+pub(super) fn decisive(failures: &[Staged]) -> Option<&Staged> {
     failures
         .iter()
         .find(|one| one.cause.stage == Stage::Census)
         .or_else(|| failures.iter().find(|one| one.cause.stage == Stage::Run))
+        .or_else(|| {
+            failures
+                .iter()
+                .find(|one| !one.cause.closes && !one.cause.is_hole())
+        })
         .or_else(|| failures.iter().find(|one| !one.cause.closes))
         .or_else(|| failures.first())
 }
@@ -229,6 +245,19 @@ pub(super) struct Ctx<'a> {
     /// it (WP-12f, D-4878); `None` for a run whose members are not recorded
     /// (an options run, a test's bare reader).
     pub(super) scoped: Option<Scoped<'a>>,
+    /// THE HELD-BACK SET (IA-16; D-4851, IA-GR-18): each instrument-month a
+    /// file of which failed in this run with a cause that keeps its day open
+    /// and is not a hole, with the day it failed on. Every later file of it
+    /// is not filed (`held_back`), so its month never takes a later day while
+    /// an earlier one is owed. At most [`super::HELD_BACK_CAP`]; one hash
+    /// probe per file, made before the file is read (and so before its
+    /// `.auc` append, round 5 SF-11). Ends with the run.
+    pub(super) held_back: std::cell::RefCell<HashMap<super::HeldKey, Day>>,
+    /// THE STORE ROOT'S IDENTITY (IA-16, RA-284, D-4852): its device and
+    /// inode numbers when the run began, or, for a store whose root the run
+    /// itself made, when the first day after it was asked. The loss probe
+    /// names a root that is another directory now as lost.
+    pub(super) store_id: std::cell::Cell<Option<super::filing::StoreId>>,
 }
 
 /// How many distinct scopes, and distinct other filters, a run's maps are
@@ -529,11 +558,35 @@ pub(super) fn close_day(
 /// session (a closed day is counted, any other calendar answer is a named
 /// failure and a `refused` line), and named as resumed when the journal
 /// sends it back.
+///
+/// **ONE ORDERED TABLE (IA-16; D-4885, D-4910, design §5.5).** Rows 2 to 4b
+/// are [`admit_rule`]'s, a pure function of the key's journal state and the
+/// run's asks, so the plan and the run count the same days; row 1 (a wider
+/// scope's member keys, WP-12f) is [`widen`]'s, asked before this; row 5 is
+/// the calendar gate below; row 6 reads. A hole day (rows 4a, 4b) is named
+/// in [`Report::holes_in_range`] and counted, never read and never written.
 fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
     let retried = ctx.options.retry_refused && ctx.journal.with_refusals.contains(key);
-    if ctx.journal.done.contains(key) && !retried {
-        report.days_skipped += 1;
-        return false;
+    match admit_rule(&KeyState::of(ctx.journal, key), Asks::of(&ctx.options)) {
+        Admit::Read => {}
+        Admit::Skip(Skip::Done) => {
+            report.days_skipped += 1;
+            return false;
+        }
+        Admit::Skip(Skip::Restated) => {
+            report.restated_skipped += 1;
+            return false;
+        }
+        Admit::Skip(skip @ (Skip::Hole(reason) | Skip::Unrepairable(reason))) => {
+            if matches!(skip, Skip::Hole(_)) {
+                report.holes_skipped += 1;
+            } else {
+                report.holes_unrepairable += 1;
+            }
+            report.holes_in_range.push((day, reason.to_owned()));
+            note_hole_skipped(ctx, (key, day), skip);
+            return false;
+        }
     }
     match session_gate(day) {
         Ok(()) => {}
@@ -566,6 +619,204 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
     }
     name_retried(ctx.journal, ctx.run.kind, (key, day, retried), report);
     true
+}
+
+/// What [`admit_rule`] answers for one key (D-4885, D-4910): go on to the
+/// calendar gate and read, or skip it for a named class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Admit {
+    /// Rows 2 to 4b do not skip it: the calendar gate (row 5) decides, then
+    /// row 6 reads it.
+    Read,
+    /// Skipped unread, for this class.
+    Skip(Skip),
+}
+
+/// Why [`admit_rule`] skipped a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Skip {
+    /// Row 2: `done` under a current definition.
+    Done,
+    /// Row 3: `done` under a definition no longer current for the kind, in
+    /// a run that asked not to restate ([`RunOptions::skip_restated`]).
+    Restated,
+    /// Row 4a: a store hole a repair can fill, in a run with no repair
+    /// reason. Its reason.
+    Hole(&'static str),
+    /// Row 4b: a store hole no repair fills (`bars_differ_held`,
+    /// `repair_impossible`), with or without a repair reason (D-4912: only
+    /// IA-18's restate run reads one). Its reason.
+    Unrepairable(&'static str),
+}
+
+/// What [`admit_rule`] reads of one key: a probe of each journal set its
+/// rows need, so a key costs O(1) in the journal's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct KeyState {
+    /// Closed `done` under a current definition.
+    pub(super) done: bool,
+    /// ... with `vendor_refused=` above zero.
+    pub(super) with_refusals: bool,
+    /// Its LAST close is a `done` (or `recounted`) naming a definition no
+    /// longer current for its kind: a later `incomplete` or `refused` line
+    /// is the key's last word instead (D-3317, FM-095).
+    pub(super) restated: bool,
+    /// Its LAST line is `incomplete` with one of the five store-hole
+    /// reasons ([`HOLE_REASONS`]): that reason.
+    pub(super) hole: Option<&'static str>,
+}
+
+impl KeyState {
+    /// `key`'s state in `journal`: five hash probes. A key whose last line is
+    /// `incomplete` is in `incomplete` and in neither `open` (a later
+    /// `begin`) nor `refused_close` (a later `refused`); the reason that line
+    /// carried is [`Journal::hole_reason`]'s.
+    pub(super) fn of(journal: &Journal, key: &str) -> Self {
+        let last_incomplete = journal.incomplete.contains(key)
+            && !journal.open.contains(key)
+            && !journal.refused_close.contains_key(key);
+        let hole = if last_incomplete {
+            journal.hole_reason.get(key).and_then(|reason| {
+                HOLE_REASONS
+                    .iter()
+                    .copied()
+                    .find(|one| *one == reason.as_str())
+            })
+        } else {
+            None
+        };
+        Self {
+            done: journal.done.contains(key),
+            with_refusals: journal.with_refusals.contains(key),
+            // `restated` keeps the key's last `done` (D-2822, which names the
+            // day restated when it is read again); a later `incomplete` or
+            // `refused` puts the key in `incomplete`, and that line, not the
+            // older `done`, is what row 3 or 4 judges.
+            restated: journal.restated.contains(key) && !journal.incomplete.contains(key),
+            hole,
+        }
+    }
+}
+
+/// THE STORE'S STANDING HOLES (IA-16, D-6900 keep item 2): every key of
+/// `journal` whose last line is `incomplete` with one of the five hole
+/// reasons ([`KeyState::of`]'s answer, so the receipt and `admit` can never
+/// disagree), counted by `(kind, reason)` in that order. One pass over the
+/// keys that ever closed `incomplete` (the map the load already kept), once
+/// per run: O(those keys), never per day or per file (L-IA16-09).
+pub(super) fn standing_holes(journal: &Journal) -> Vec<(String, String, usize)> {
+    let mut counted: std::collections::BTreeMap<(&str, &'static str), usize> =
+        std::collections::BTreeMap::new();
+    for key in journal.hole_reason.keys() {
+        if let Some(reason) = KeyState::of(journal, key).hole {
+            let kind = key.split(' ').next().unwrap_or_default();
+            *counted.entry((kind, reason)).or_default() += 1;
+        }
+    }
+    counted
+        .into_iter()
+        .map(|((kind, reason), keys)| (kind.to_owned(), reason.to_owned(), keys))
+        .collect()
+}
+
+/// What a run asks that [`admit_rule`] reads (D-4885).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct Asks {
+    /// `--retry-refused` (D-3317 item 2): a day done with refusals is read
+    /// again. Never admits a hole.
+    pub(super) retry_refused: bool,
+    /// Row 3's skip ([`RunOptions::skip_restated`]).
+    pub(super) skip_restated: bool,
+    /// The run carries a repair reason (D-4874): row 4a reads.
+    pub(super) repair_reason: bool,
+}
+
+impl Asks {
+    /// What `options` asks.
+    pub(super) const fn of(options: &RunOptions<'_>) -> Self {
+        Self {
+            retry_refused: options.retry_refused,
+            skip_restated: options.skip_restated,
+            repair_reason: options.repair_reason.is_some(),
+        }
+    }
+}
+
+/// `admit`'s rows 2 to 4b (design §5.5, D-4885, D-4912), the first that
+/// matches deciding: a pure function, so the plan and the run that call it
+/// count the same days (IA-GR-19, IA-GR-37). O(1).
+///
+/// | # | the key's state | without a repair reason | with one |
+/// |---|---|---|---|
+/// | 2 | `done`, current definition | skip (`retry_refused` reads one done with refusals) | the same |
+/// | 4a | last line `incomplete`, a repairable hole | skip, `holes_skipped` | read |
+/// | 4b | last line `incomplete`, a hole no repair fills | skip, `holes_unrepairable` | skip |
+/// | 3 | last close `done`, a definition no longer current | read, or skip when `skip_restated` | the same |
+/// | — | anything else | read (the calendar gate, row 5, first) | read |
+///
+/// **A HOLE IS ASKED BEFORE ROW 3 (IA-16 repair 1; FM-095, IA-GR-30,
+/// D-4873).** A hole is the key's LAST line (D-3317), and a restated day is
+/// exactly the day a re-read can close as one: done under definition 2,
+/// read again under the current one, and refused `bars_differ_held` because
+/// a held bar is never changed. Asked first, row 3 read that hole again in
+/// every later run, a repair-reason run included, which D-4912 forbids
+/// (only IA-18's restate run reads one). [`KeyState::of`] no longer calls a
+/// key restated whose last close is not a `done` either, so the two rows
+/// cannot both match a key a journal describes; the order is kept for the
+/// state a caller builds by hand (`admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`).
+pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
+    if state.done {
+        return if asks.retry_refused && state.with_refusals {
+            Admit::Read
+        } else {
+            Admit::Skip(Skip::Done)
+        };
+    }
+    match state.hole {
+        Some(reason) if is_repairable_hole(reason) => {
+            return if asks.repair_reason {
+                Admit::Read
+            } else {
+                Admit::Skip(Skip::Hole(reason))
+            };
+        }
+        Some(reason) => return Admit::Skip(Skip::Unrepairable(reason)),
+        None => {}
+    }
+    if state.restated && asks.skip_restated {
+        return Admit::Skip(Skip::Restated);
+    }
+    Admit::Read
+}
+
+/// Whether `reason` is one of [`REPAIRABLE_HOLES`] (row 4a).
+fn is_repairable_hole(reason: &str) -> bool {
+    REPAIRABLE_HOLES.contains(&reason)
+}
+
+/// Says a hole day was passed over unread (D-4851): at `warn`, with its
+/// reason and whether a repair reason could fill it, so a search for the
+/// day finds why no run reads it.
+fn note_hole_skipped(ctx: &Ctx<'_>, (key, day): (&str, Day), skip: Skip) {
+    let (reason, repairable) = match skip {
+        Skip::Hole(reason) => (reason, true),
+        Skip::Unrepairable(reason) => (reason, false),
+        Skip::Done | Skip::Restated => return,
+    };
+    let day_text = day.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            TARGET,
+            "a store hole day is passed over: its month already passed it, so no append \
+             lands it",
+        )
+        .with("kind", ctx.run.kind.as_str())
+        .with("day", day_text.as_str())
+        .with("key", key)
+        .with("reason", reason)
+        .with("repairable", repairable)
+        .with("code", "hole_skipped"),
+    );
 }
 
 /// Closes `key` `refused` with [`RESTATED_AUCTION_BAND`], named in the
@@ -937,7 +1188,16 @@ where
                 }))
             })
             .collect();
-        let _reads = filer.file_all(&handed, &|slot| {
+        let month = day.year_month().ok();
+        let key_of = |slot: &std::sync::Mutex<Option<Handed>>| {
+            let held = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.as_ref()
+                .zip(month)
+                .map(|(one, month)| (one.file.symbol.clone(), one.file.contract, month))
+        };
+        let _reads = filer.file_all(&handed, &key_of, &|slot| {
             // Each slot is one job, taken once, so it is always full here.
             slot.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -960,7 +1220,11 @@ where
 fn write_flags(
     (run, whole): (&Run<'_>, bool),
     flags: &mut quality::Ledger,
-    (day, ledger, member_bytes): (Day, Option<quality::DayLedger>, Option<u64>),
+    (day, ledger, (member_bytes, backslash)): (
+        Day,
+        Option<quality::DayLedger>,
+        (Option<u64>, bool),
+    ),
     report: &mut Report,
     failures: &mut Vec<Staged>,
 ) {
@@ -968,6 +1232,7 @@ fn write_flags(
         return;
     };
     ledger.set_member_bytes(member_bytes);
+    ledger.set_separator_backslash(backslash);
     note_sampled(
         ledger.kind(),
         ledger.day(),
@@ -1081,6 +1346,7 @@ where
         granularity: Granularity::Second1,
     };
     run.check_filter()?;
+    fresh_root(run)?;
     let journal = Journal::load(journal_path(run.store_root))?;
     let mut flags = quality::Ledger::load(quality::dayflags_path(run.store_root))
         .map_err(|why| ImportRefusal::DayLedger { why })?;
@@ -1111,6 +1377,8 @@ where
         started,
         announced: std::cell::Cell::new(false),
         scoped,
+        held_back: std::cell::RefCell::new(HashMap::new()),
+        store_id: std::cell::Cell::new(super::filing::store_identity(run.store_root)),
     };
     let _key = RunKey::claim(ctx.id);
     if let Some(observer) = options.observer {
@@ -1118,7 +1386,10 @@ where
     }
     note_started(&ctx, &filter);
     note_torn(&ctx);
-    let mut report = Report::default();
+    let mut report = Report {
+        standing_holes: standing_holes(&journal),
+        ..Report::default()
+    };
     let ended = run_days(
         &ctx,
         (&filter, &request),
@@ -1149,6 +1420,19 @@ fn end_line(ctx: &Ctx<'_>, ended: &Result<Report, ImportRefusal>) {
         Ok(_) => "finished",
         Err(refusal) => refusal.code(),
     };
+    // A STORE WHOSE ROOT WENT AWAY IS NOT WRITTEN TO AGAIN (D-4852, FM-125):
+    // the journal's append makes its directory, which would make a phantom
+    // root on whatever disk now holds the mount point.
+    if let Some(gone) = super::filing::store_root_lost(ctx.run.store_root, ctx.store_id.get()) {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error(TARGET, "run end line not written")
+                .with("run", ctx.id)
+                .with("outcome", outcome)
+                .with("why", gone.as_str())
+                .with("code", "store_lost"),
+        );
+        return;
+    }
     let line = format!(
         "run {} ended={} outcome={outcome} definition={BAR_DEFINITION}",
         ctx.id,
@@ -1201,6 +1485,9 @@ where
     if let Some(refusal) = stopped(ctx, None, report) {
         return Err(refusal);
     }
+    // THE FLOOR BEFORE THE FIRST DAY (IA-16, CONC-031): a full disk is named
+    // before the run writes anything, the reach-back included.
+    floor_check(ctx, run.from, report)?;
     let state = (&mut *report, &mut *flags);
     reach_back(ctx, filter, state, &mut *census, &mut *read_day)?;
     let range = days(run.from, run.to);
@@ -1209,6 +1496,7 @@ where
         if let Some(refusal) = stopped(ctx, None, report) {
             return Err(refusal);
         }
+        root_check(ctx, day, report)?;
         if let Some(observer) = options.observer {
             observer.day_begun(run.kind, day, (index, total));
         }
@@ -1228,6 +1516,9 @@ where
             if !admit(ctx, &key, day, report) {
                 break 'day;
             }
+            // AND BEFORE EACH DAY IT READS (IA-16, CONC-031): never a day begun
+            // that the volume cannot take.
+            floor_check(ctx, day, report)?;
             let pass = Pass {
                 key: &key,
                 day,
@@ -1245,6 +1536,112 @@ where
     }
     note_finished(ctx, report);
     Ok(())
+}
+
+/// A FRESH STORE IS MADE ONCE, BY THE RUN, BEFORE ANYTHING IS READ OR
+/// WRITTEN (IA-16 repair 1; FM-125, D-4852): its root alone, under a parent
+/// that is there, never an ancestor, so a store on a volume that is not
+/// mounted is refused `store_lost` rather than born on the boot disk. Every
+/// writer below the root then refuses a root that is not there
+/// ([`super::make_leaf_dir`]) instead of making one, so a root that goes away
+/// mid-run is never made again and the run's identity check
+/// ([`super::filing::store_root_lost`]) has the root it began on to compare.
+/// The `cli` verb refuses a missing root before this (its lock); this is the
+/// library's own door. One `metadata` call; one `mkdir` for a fresh store.
+fn fresh_root(run: &Run<'_>) -> Result<(), ImportRefusal> {
+    let root = run.store_root;
+    // Only a path where NOTHING is is a fresh store. A directory is the
+    // store; anything else there (a file, an unreadable entry) is left to
+    // the journal's load, which refuses it by name as it always has.
+    match std::fs::symlink_metadata(root) {
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Ok(()),
+    }
+    let parent_there = root
+        .parent()
+        .is_some_and(|parent| parent.as_os_str().is_empty() || parent.is_dir());
+    let made = if parent_there {
+        match std::fs::create_dir(root) {
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists && root.is_dir() => Ok(()),
+            made => made.map_err(|why| why.to_string()),
+        }
+    } else {
+        Err(
+            "its parent is not a directory, and a run never makes an ancestor of a store root \
+             (the store's volume is not mounted)"
+                .to_owned(),
+        )
+    };
+    made.map_err(|why| ImportRefusal::StoreLost {
+        kind: run.kind,
+        day: run.from,
+        why: format!(
+            "{} is not a store root a run can begin: {why}",
+            root.display()
+        ),
+        done: Box::default(),
+    })
+}
+
+/// THE STORE ROOT BEFORE EACH DAY (IA-16; RA-284, D-4852, FM-125): one
+/// `metadata` call per calendar day of the range, before anything of the day
+/// is asked or written. A root that went away, or that is another directory
+/// than the run began on (a volume unplugged and mounted back, or an empty
+/// folder left at its mount point), ends the run `store_lost` before the day
+/// is begun, so no line and no bar of it lands in a folder that is not the
+/// store and no writer recreates a root that is gone. A run that began
+/// before its root existed (a fresh store) learns the root's identity here,
+/// once a day's lines have made it.
+fn root_check(ctx: &Ctx<'_>, day: Day, report: &mut Report) -> Result<(), ImportRefusal> {
+    let root = ctx.run.store_root;
+    let Some(at_start) = ctx.store_id.get() else {
+        ctx.store_id.set(super::filing::store_identity(root));
+        return Ok(());
+    };
+    match super::filing::store_root_lost(root, Some(at_start)) {
+        None => Ok(()),
+        Some(why) => Err(ImportRefusal::StoreLost {
+            kind: ctx.run.kind,
+            day,
+            why: format!("{why}; {day} was not begun"),
+            done: Box::new(std::mem::take(report)),
+        }),
+    }
+}
+
+/// THE FREE-SPACE FLOOR (IA-16; FM-085, CONC-031, D-6900 keep item 5): the
+/// store volume's free space, measured once ([`RunOptions::free_space`], the
+/// host's `statfs(2)` by default), against [`RunOptions::free_floor`]. Below it the
+/// run ends `disk_full` before `day` is begun, naming both figures; a meter
+/// that cannot answer ends it `free_space_unknown`, never assumed to hold.
+/// A floor of 0 measures nothing. One measurement per call: before the first
+/// day and before each day read, never per file.
+fn floor_check(ctx: &Ctx<'_>, day: Day, report: &mut Report) -> Result<(), ImportRefusal> {
+    let floor = ctx.options.free_floor;
+    if floor == 0 {
+        return Ok(());
+    }
+    let measure = ctx.options.free_space.unwrap_or(super::volume_space);
+    let kind = ctx.run.kind;
+    match measure(ctx.run.store_root) {
+        Ok(space) if space.free >= floor => Ok(()),
+        Ok(space) => Err(ImportRefusal::DiskFull {
+            kind,
+            day,
+            why: format!(
+                "the store's volume has {} bytes free of {}, below the free-space floor of \
+                 {floor} bytes (CONC-031): {day} was not begun",
+                space.free, space.total
+            ),
+            done: Box::new(std::mem::take(report)),
+        }),
+        Err(why) => Err(ImportRefusal::FreeSpaceUnknown {
+            kind,
+            day,
+            why,
+            done: Box::new(std::mem::take(report)),
+        }),
+    }
 }
 
 /// The days of `from`'s month before it, in order: none when `from` is the
@@ -1688,6 +2085,12 @@ fn note_examined(ctx: &Ctx<'_>, asked: &Asked<'_>, opened: usize, report: &mut R
 /// One key of one day through the source's `read_day` and the common filing
 /// path: its files written, the day's batch made durable, its ledger lines,
 /// its census batch and its closing line, in that order.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the day's one ordered sequence (read, the loss probe, the stop, the flush, \
+              the ledger lines, the census batch, the close, the run's end) is one state \
+              machine over one filer; its run-end checks already live in `run_end`"
+)]
 fn day_pass<F>(
     ctx: &Ctx<'_>,
     request: &BarRequest,
@@ -1729,8 +2132,48 @@ where
         confirmed,
         stopped,
         begin,
+        disk_full,
+        store_lost,
+        not_writable,
+        held_back_cap,
         ..
     } = files_of_day;
+    // THE STORE'S ROOT WENT AWAY (D-4852, FM-086): nothing more is written,
+    // not the day's flush, its ledger lines, its census batch or its close,
+    // so no writer recreates a root that is gone (FM-125). The day stays
+    // begun, and a resume once the volume is back reads it again.
+    if let Some(why) = store_lost {
+        take_read((run.kind, day), (read, extras), report, &mut failures);
+        name_staged(report, failures);
+        return Err(ImportRefusal::StoreLost {
+            kind: run.kind,
+            day,
+            why,
+            done: Box::new(std::mem::take(report)),
+        });
+    }
+    // THE SOURCE'S ROOT WENT AWAY with the store still there (D-4852,
+    // FM-086, INFRA-024): a day nothing of which reached the store gets no
+    // line at all, so a drive merely unplugged never reads as days the
+    // vendor does not hold (`refused day_not_held`), and the run ends
+    // `source_lost`. A day some of whose files already landed closes
+    // `incomplete stage=run reason=source_lost` (`decisive` takes the run's
+    // cause first) and the run ends after it. Either way a resume once the
+    // volume is back reads the day again.
+    let source_gone = source_lost(ctx, &read);
+    if let Some(why) = &source_gone {
+        if begin.is_none() {
+            take_read((run.kind, day), (read, extras), report, &mut failures);
+            name_staged(report, failures);
+            return Err(ImportRefusal::SourceLost {
+                kind: run.kind,
+                day,
+                why: why.clone(),
+                done: Box::new(std::mem::take(report)),
+            });
+        }
+        failures.push(note_source_lost_day(run.kind, day, why));
+    }
     // A STOP BEFORE THE DAY'S FIRST WRITE (D-4853): no file reached the
     // store, so nothing of the day was started and the journal has nothing
     // to close. The files read before the stop are counted and named.
@@ -1755,7 +2198,28 @@ where
             &why,
         ));
     }
-    let (held_day, member_bytes, listing) = (read.held, extras.member_bytes, extras.listing);
+    // THE ROOT ONCE MORE BEFORE THE DAY'S LEDGER, CENSUS AND CLOSE (IA-16
+    // repair 1; FM-125, RA-284): one `metadata` call per day. A root that
+    // went away or was replaced after the day's last file takes none of
+    // them, so no ledger line, census or closing line lands in a folder that
+    // is not the store, and the day stays begun for a resume.
+    if let Some(gone) = super::filing::store_root_lost(run.store_root, ctx.store_id.get()) {
+        take_read((run.kind, day), (read, extras), report, &mut failures);
+        name_staged(report, failures);
+        return Err(ImportRefusal::StoreLost {
+            kind: run.kind,
+            day,
+            why: format!(
+                "after the day's files and before its ledger, census and closing line: {gone}"
+            ),
+            done: Box::new(std::mem::take(report)),
+        });
+    }
+    let (held_day, member_bytes, listing) = (
+        read.held,
+        (extras.member_bytes, extras.backslash),
+        extras.listing,
+    );
     take_read((run.kind, day), (read, extras), report, &mut failures);
     if !held_day {
         close_missing(ctx, (key, day), report, failures);
@@ -1818,7 +2282,108 @@ where
         failures,
         Some(census_ms),
     );
+    if let Some(why) = source_gone {
+        return Err(ImportRefusal::SourceLost {
+            kind: run.kind,
+            day,
+            why,
+            done: Box::new(std::mem::take(report)),
+        });
+    }
+    run_end(
+        (run.kind, day),
+        (disk_full, not_writable, held_back_cap),
+        report,
+    )?;
     Ok(Some(outcome))
+}
+
+/// The source refusal codes that ask whether the source's root is still
+/// there (D-4852): the archive or the tick store could not be reached at all
+/// ([`cm_cause`]; an options source's faults are the same codes).
+const SOURCE_UNREACHED: [&str; 2] = ["archive_unavailable", "tick_store_unavailable"];
+
+/// THE SOURCE'S LOSS PROBE (D-4852, FM-086, INFRA-024): asked only of a day
+/// the source says it does not hold, or one of whose files it could not
+/// reach, never of a day read whole, so it costs one `metadata` call per
+/// such day and nothing on the hot path. The answer names the root and why,
+/// and, since macOS answers a volume whose access it revoked with a refusal
+/// rather than an absence, where that access is given back. `None` when the
+/// root answers, or when the run names no origin (a test's bare reader):
+/// there is then no root to ask, and the day closes by its own refusals.
+fn source_lost(ctx: &Ctx<'_>, read: &DayRead) -> Option<String> {
+    let suspect = !read.held
+        || read
+            .refused
+            .iter()
+            .any(|refused| SOURCE_UNREACHED.contains(&refused.cause.code));
+    if !suspect {
+        return None;
+    }
+    let root = &ctx.options.origin?.path;
+    match std::fs::metadata(root) {
+        Ok(_) => None,
+        Err(why) => Some(format!(
+            "the loss probe could not reach the source's root {} ({why}): the source went away \
+             (the drive is gone, or the host revoked this process's access to the volume; on \
+             macOS, System Settings > Privacy & Security > Files & Folders > Removable Volumes \
+             gives it back), so no day after it is read and none is named not held",
+            root.display()
+        )),
+    }
+}
+
+/// The failure a lost source leaves on a day some of whose files already
+/// landed (D-4852), at the run's stage, with its event.
+fn note_source_lost_day(kind: ImportKind, day: Day, why: &str) -> Staged {
+    let cause = Cause::open(Stage::Run, "source_lost");
+    Staged {
+        cause,
+        failure: super::note_failure(kind, day, "source", why, cause),
+    }
+}
+
+/// THE RUN ENDS ONCE THE DAY IS CLOSED (D-4851, RA-209, FM-129): a full disk
+/// after the files in hand, a store that takes no writes (one named stop,
+/// never a file failure repeated on every later day), the held-back set at
+/// its cap. No new day begins; the closed day is `incomplete` and a resume
+/// reads it again.
+fn run_end(
+    (kind, day): (ImportKind, Day),
+    (disk_full, not_writable, held_back_cap): (
+        Option<String>,
+        Option<String>,
+        Option<(String, usize)>,
+    ),
+    report: &mut Report,
+) -> Result<(), ImportRefusal> {
+    let done = |report: &mut Report| Box::new(std::mem::take(report));
+    if let Some(why) = disk_full {
+        return Err(ImportRefusal::DiskFull {
+            kind,
+            day,
+            why,
+            done: done(report),
+        });
+    }
+    if let Some(why) = not_writable {
+        return Err(ImportRefusal::StoreNotWritable {
+            kind,
+            day,
+            why,
+            done: done(report),
+        });
+    }
+    if let Some((first, count)) = held_back_cap {
+        return Err(ImportRefusal::HeldBackCap {
+            kind,
+            day,
+            first,
+            count,
+            done: done(report),
+        });
+    }
+    Ok(())
 }
 
 /// The failure a stop leaves on a day it cut short after its `begin`
@@ -1887,7 +2452,16 @@ fn record_close(
     match outcome {
         Outcome::Done => {}
         Outcome::DoneWithRefusals => named(&mut report.closed_with_refusals),
-        Outcome::Incomplete => named(&mut report.closed_incomplete),
+        Outcome::Incomplete => {
+            named(&mut report.closed_incomplete);
+            // A HOLE THIS RUN MADE (D-6900 keep item 2): the close's own
+            // decisive cause, as [`close_of`] chose it, named on the receipt.
+            if let Some(hole) = decisive(&failures).filter(|one| one.cause.is_hole())
+                && report.holes_made.last().is_none_or(|(at, _)| *at != day)
+            {
+                report.holes_made.push((day, hole.cause.code.to_owned()));
+            }
+        }
         Outcome::Refused => named(&mut report.closed_refused),
     }
     name_staged(report, failures);
