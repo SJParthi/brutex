@@ -402,20 +402,20 @@ fn current_epoch_refuses_a_symlinked_epoch_by_name() {
     std::os::unix::fs::symlink(&one, &two).expect("a symlinked epoch");
     let why = current_epoch(root, Vendor::Gdfl, Segment::Fno).expect_err("refused");
     assert!(why.contains(&two.display().to_string()), "{why}");
-    assert!(why.contains("a symbolic link (symlink)"), "{why}");
+    assert!(why.contains("epoch_not_regular (symlink): "), "{why}");
     let why = read_epoch(&two, Vendor::Gdfl, Segment::Fno).expect_err("refused");
-    assert!(why.contains("a symbolic link (symlink)"), "{why}");
+    assert!(why.contains("epoch_not_regular (symlink): "), "{why}");
     assert!(!why.contains("levels of symbolic links"), "named: {why}");
     // A write to the partition is refused by the same sentence, nothing done.
     let before = inode(&one);
     let why = withdraw_key0(root).expect_err("refused");
-    assert!(why.contains("a symbolic link (symlink)"), "{why}");
+    assert!(why.contains("epoch_not_regular (symlink): "), "{why}");
     assert_eq!(inode(&one), before);
     std::fs::remove_file(&two).expect("the link removed");
 
     std::fs::create_dir(&two).expect("a directory at an epoch's name");
     let why = current_epoch(root, Vendor::Gdfl, Segment::Fno).expect_err("refused");
-    assert!(why.contains("a directory (directory)"), "{why}");
+    assert!(why.contains("epoch_not_regular (directory): "), "{why}");
     std::fs::remove_dir(&two).expect("removed");
     assert_eq!(current_epoch(root, Vendor::Gdfl, Segment::Fno), Ok(Some(1)));
 }
@@ -719,13 +719,17 @@ fn install_as_before(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::
 /// `install_epoch` on a free staging name (one `open`, as before), and through
 /// `install_epoch` over a dead writer's leftover at every name (four calls:
 /// `open`, `lstat`, `unlink`, `open`). Every install lands as the next epoch,
-/// and the staging door's own count of host calls is ASSERTED: exactly 1 on
-/// every free name and exactly 4 over every leftover, the same at the 1st
-/// install and the 200th. NO WALL-CLOCK BOUND IS ASSERTED (AG-05 repair 1):
+/// and the install's count of host calls before the image is written is
+/// ASSERTED: exactly 2 on every free name and exactly 5 over every leftover
+/// (R3-19 added the one look at the segment directory to the staging door's
+/// 1 and 4), the same at the 1st install and the 200th. NO WALL-CLOCK BOUND
+/// IS ASSERTED (AG-05 repair 1):
 /// on this shared host one failed at p99 617 ms while the unchanged
 /// `File::create` series beside it measured p99 309 ms, so a bound measured
 /// the load, not the code. p50, p99 and max are printed for docs/06-limits.md;
-/// two `fsync`s dominate all three series.
+/// two `fsync`s dominate all three series. Proof of the constant count: this
+/// test, `pull::ingest::census_store::link_tests::an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`
+/// (docs/06-limits.md L-AG05-04, L-R319-02).
 #[test]
 fn an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured() {
     const N: u32 = 200;
@@ -767,7 +771,10 @@ fn an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured()
         )
         .expect("installed");
         free.push(start.elapsed().as_micros());
-        assert_eq!(calls, 1, "epoch {epoch}: one open on a free name");
+        assert_eq!(
+            calls, 2,
+            "epoch {epoch}: the segment directory's look and one open on a free name (R3-19)"
+        );
     }
     let mut leftover = Vec::new();
     for epoch in 2 + N..2 + 2 * N {
@@ -785,8 +792,8 @@ fn an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured()
         .expect("installed over the leftover");
         leftover.push(start.elapsed().as_micros());
         assert_eq!(
-            calls, 4,
-            "epoch {epoch}: open, lstat, unlink, open over a leftover"
+            calls, 5,
+            "epoch {epoch}: the segment directory's look, then open, lstat, unlink, open over a leftover (R3-19)"
         );
     }
     drop(lock);

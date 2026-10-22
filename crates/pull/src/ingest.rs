@@ -5157,9 +5157,23 @@ fn install_locked(_lock: &CensusLock, path: &Path, image: &[u8]) -> Result<(), S
 }
 
 /// The five calls [`install`] is, kept apart from the sentence it fails with.
+///
+/// **The temporary is born new, never opened** (R3-19, L-AG05-01; RA-290):
+/// `<vendor>.man.writing` is created through `store::staging::create`, as
+/// `census_store`'s epochs, stub and receipt are since AG-05. It was
+/// `File::create` — create, truncate, following links — so a symbolic link
+/// planted at that name sent the census image into whatever it named, and a
+/// hard link cut the other name's file to zero. Now a link of either kind,
+/// a directory or a pipe there is refused `staging_not_regular` or
+/// `staging_linked` by name, with nothing removed, truncated or written, and
+/// a dead writer's one-name leftover is cleared (the census lock makes it a
+/// dead writer's). Then the image is written, flushed, renamed into place
+/// and the directory flushed, as before.
 fn publish(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
-    let mut file = fs::File::create(tmp)?;
+    let mut file = store::staging::create(tmp)
+        .map_err(|refused| std::io::Error::other(refused.to_string()))?
+        .file;
     file.write_all(image)?;
     // The bytes before the rename, always. A rename that beats its own
     // contents to the disk publishes a name over nothing.

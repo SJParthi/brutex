@@ -1364,6 +1364,9 @@ const ALLOW_SEARCH: Allow = &[
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
 const ALLOW_FLOAT: Allow = &[
+    // DATA-1 (D-5171 item 12): the percentage difference of two day volumes,
+    // a statistic at full precision (CLAUDE.md section 7), never a price.
+    ("crates/cli/src/feed_reconcile.rs", 2),
     ("crates/api/src/ingest.rs", 1),
     ("crates/api/src/server.rs", 4),
     ("crates/api/src/optiongreeks.rs", 1),
@@ -1403,6 +1406,10 @@ const ALLOW_FLOAT: Allow = &[
 
 /// Rule 3. docs/07 law 2: pre-size every map.
 const ALLOW_UNSIZED: Allow = &[
+    // DATA-1: the carry of a month with no previous file is empty and never
+    // inserted into; the parsed carry and the factor index are pre-sized
+    // from the file's own carry lines.
+    ("crates/cli/src/feed_reconcile.rs", 1),
     ("crates/api/src/catalog.rs", 1),
     ("crates/pull/src/manifest.rs", 1),
     ("crates/api/src/autopilot.rs", 1),
@@ -1494,6 +1501,10 @@ const ALLOW_UNSIZED: Allow = &[
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
 const ALLOW_SORT: Allow = &[
+    // DATA-1: the lower median over at most MINUTES_PER_DAY (1,440) matched
+    // minutes of one stock-day, and per-run timing percentiles over the
+    // run's share-months and its `--repeat` lookups (docs/06-limits.md).
+    ("crates/cli/src/feed_reconcile.rs", 4),
     ("crates/runner/src/audit.rs", 2),
     ("crates/runner/src/bootstrap.rs", 4),
     ("crates/runner/src/bootstrap_family_pass.rs", 1),
@@ -1637,6 +1648,14 @@ const ALLOW_SORT: Allow = &[
     // answer over its fixed table of `PICTURE_CODES` = 16 entries; reason in
     // docs/06-limits.md, "Gate 11 — R3-24".
     ("crates/telemetry/src/sink.rs", 1),
+    // PIT-1 (D-5164, docs/06-limits.md L-PIT-8): `cli fno-membership` sorts
+    // only its own report and bench samples, once per run, never a lookup:
+    // the build's per-month timings (at most the months it wrote), the
+    // listing-lag list and its days (at most the series, 338 on the real
+    // span) and the bench's timings (one per day it times), each for one
+    // p50/p99/max line. The membership's own fold sorts nothing: its live
+    // series are keyed in member order (D-5166).
+    ("crates/cli/src/fno_membership_command.rs", 4),
     // R4-17 repair 2, 18 Oct 2026: reason in docs/06-limits.md, "Gate 11 —
     // R4-17, declared at its merge": the master files of one directory, once
     // per load; one series' in-session jumps, once per scan.
@@ -1788,6 +1807,10 @@ const ALLOW_SCAN: Allow = &[
     // the 23-row compile-time `TABLE`; reason in docs/06-limits.md, "Gate 11
     // — R3-24".
     ("crates/telemetry/src/state_events.rs", 1),
+    // PIT-1 (D-5163, docs/06-limits.md L-PIT-8): the membership file's name
+    // decoder finds the end of one zero-padded name inside its fixed
+    // `NAME_LEN` bytes, a compile-time width; never a search over the data.
+    ("crates/pull/src/fno_membership.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1901,7 +1924,13 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/logs.rs", 6), // 5 -> 6, R3-24 (docs/06-limits.md)
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
-    ("crates/cli/src/store_write.rs", 4),
+    // 4 -> 5, DATA-1 (D-5172): `feed-reconcile` writes only with `--out`, a
+    // probe of the verb's own argument slice, bounded by its argument count.
+    // 5 -> 6, PIT-1 (D-5163, docs/06-limits.md L-PIT-8): the
+    // `fno-membership` arm `arguments.contains(&"build")` is one of the three
+    // arm shapes gate 30's `form_of` reads, over the verb's own command line
+    // (a handful of words), never the data.
+    ("crates/cli/src/store_write.rs", 6),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),

@@ -72186,6 +72186,526 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+### D-5170 — Volume is GDFL's, never Zerodha's minutes; decisions are taken on Zerodha minutes, GDFL only at the seconds level, and the per-stock-day factor converts at the fill boundary — 2026-10-16
+
+**Context** (DATA-1; hand-over FINDING 2, FINDING 3, FINDING 4 and the DATA
+FLAGS paragraph of step 0b2; deep check of 15 Oct, `data` claims and handover
+issues H7 and H8). Three stored views of one cash share disagree in ways that
+change any volume condition, any capacity figure and any cross-feed fill:
+Zerodha's `1min` volumes are short of Zerodha's own `1day` bar on most days of
+some months (and far above it on a few), Zerodha's history is
+corporate-action adjusted while GDFL's is raw, and from the closing-auction
+era Zerodha's minutes of many shares stop before 15:15. The numbers that first
+showed this came from an untracked scratch check over `/bars.json` that
+skipped `M&M` and `GVT&D` every month, turned every failure into "feed
+missing", wrote an invented factor 1.0 on days with no matched minute and
+dropped days one feed held. `docs/00-charter.md` §"Zerodha and GDFL cash feeds
+per stock-day" holds the measurements of its replacement (D-5172).
+
+**Three wordings, and the latest operator rule wins** (the hand-over's
+PRECEDENCE paragraph). The package said "the price basis for the intraday
+search is GDFL raw with Zerodha converted by the per-stock-day factor (test
+both, the run decides)". The operator's FEEDS BY LEVEL rule (16 Oct 08:45
+IST) settled that question the other way, and the design judge's follow-up
+wrote it with "2..60-minute candles". The operator's NOTHING TYPED rule (16
+Oct 17:15 IST, item 8) replaced that typed range. All three are recorded here;
+the decision is the last.
+
+**Decision.**
+
+1. **Zerodha minute volume is never used** for a volume condition, a volume
+   rank, a liquidity or capacity figure, or a fill's size. **GDFL's `1s`
+   volume is**, summed as stored (into a Zerodha minute, the GDFL seconds
+   inside it; a minute with no GDFL second has no volume value, never 0).
+   Zerodha's `1day` volume is a cross-check of GDFL's day, never a substitute
+   for it.
+2. **Decisions are taken on Zerodha 1-minute bars and on the candles folded
+   from them at the timeframes the search generates, with day bars as context
+   from earlier days; GDFL is used only at the seconds level (fills at the
+   worst price of each second, order flow); the per-stock-day factor converts
+   Zerodha-basis price levels into GDFL raw prices at the fill boundary**
+   (operator, 16 Oct 2026 17:15 IST, item 8). The earlier "test both price
+   bases" question is settled by this rule.
+3. **The conversion is exact.** The factor is a paisa PAIR, never a float
+   (D-5171 item 4), and `FactorPair::to_gdfl(level)` returns
+   `level × gdfl_close / zerodha_close` as an exact fraction: the consumer
+   rounds once, at its own grid (CLAUDE.md §7). A day with no factor has no
+   conversion: its refusal is named (`FactorRefusal`, D-5174), never 1.0.
+4. **Which corporate action explains a factor is UNVERIFIED.** An `ex_date`
+   row is `yes:unsourced:<basis>` (D-5177) until the dated corporate-action
+   rows of R4-26 are merged and a row confirms it; the factor is a measurement
+   of the two feeds, not a claim about the action.
+
+**Rejected.** Zerodha minute volume where GDFL has no second (it is the series
+measured short); one factor per month (wrong across an ex-date); converting
+GDFL onto Zerodha's adjusted basis (the adjustment changes whenever a later
+corporate action happens, so every stored result would drift with it); a
+second search on GDFL-raw decision candles (settled by the operator); a float
+ratio as the factor (a converted level would be rounded twice).
+
+### D-5171 — The feed reconcile's rules, every number generated from the data (operator 16 Oct 2026 17:15 IST, "nothing typed") — 2026-10-16
+
+The first version of these rules (a 1% threshold on the minute sum, "far
+above" the day bar, a 360-minute session from a typed date, a median ratio
+with a spread test) is superseded by the operator's rule of 17:15 IST and is
+recorded only as history. Every rule below reads the stored bars of the
+share's own days; nothing is a constant chosen here.
+
+1. **Grid.** Each feed's grid `s` for a series-month is the gcd of the
+   differences between its distinct paisa prints so far, updated per bar; a
+   minute carries the grid as it stood when it was printed, so no later bar
+   decides an earlier minute (CLAUDE.md §3 rule 7). Below two distinct prints
+   the operator's rule says "use the exchange tick, labelled": **no exchange
+   tick size is recorded in `docs/00-charter.md`**, so such a minute is counted
+   `grid_unknown_minutes` and admits no factor. A typed 5 paisa would be the
+   invention §3 rule 1 forbids.
+2. **Matched minute.** A Zerodha `1min` bar stamped on its minute, and at
+   least one GDFL `1s` bar in `[HH:MM:00 + L, HH:MM+1:00 + L)` IST, where `L`
+   is the day's APPLIED lag (D-5175). The GDFL minute close is the close of
+   the last stored second in that window, left-labelled like Zerodha's
+   minute. A minute with no GDFL second is unmatched.
+3. **Allowance.** A matched minute (Zerodha close `z`, GDFL close `g`) admits
+   every factor in `[(2z − s_z − 2t)/(2g + s_g), (2z + s_z)/(2g − s_g)]`,
+   with `t` = 1 paisa only where `vendor_truncated` is PROVEN for the series:
+   `pull::daycheck` proves it for a Zerodha day bar against its own minutes,
+   never for a minute series, so `t` = 0 here. Every comparison is an `i128`
+   cross-multiplication. A minute with `2g ≤ s_g` has no upper bound and
+   admits nothing (`interval_unbounded_minutes`).
+4. **Factor.** The exact paisa pair `(z, g)` of the matched minute whose ratio
+   is the LOWER median of the day's matched minutes (ratios ordered by
+   cross-multiplication, ties by minute), plus the pairs of the smallest and
+   the largest ratio. Empty — never 1.0 — when no minute matched.
+5. **`factor_not_constant`**: the day's running intersection of allowance
+   intervals becomes empty. The minute that emptied it (`emptied_at`), its
+   pair and the pair holding the opposing bound are printed. Such a day keeps
+   its median pair in the row and the reader refuses it by name.
+6. **`adjusted`**: 1 lies outside the allowance interval of the median pair.
+7. **`ex_date`**: two consecutive matched days (each with a non-empty
+   intersection) have disjoint intervals, across a month boundary through the
+   carry line. `yes:unsourced` (no R4-26 row is merged), `no`, or
+   `unchecked:<why>` when no earlier interval is held.
+8. **Zerodha minutes short.** `short = (day bar − minute sum) − explained`;
+   `explained` = the GDFL volume in seconds outside the continuous-phase
+   minutes Zerodha printed (pre-open, every phase `pull::calendar::phase_at`
+   does not call continuous, and minutes Zerodha omitted), at the applied lag.
+   Always reported in shares and as a pair over the day bar; on an adjusted
+   day also on Zerodha's basis (`explained × g / z`, half up; Zerodha's own
+   adjustment rule is UNVERIFIED). The FLAG is set beyond the share's ENV-1
+   recurrence envelope (PREC-3), pooled over swept shares: **ENV-1 is not on
+   `feat/db-fix`**, so every computed day says `unjudged:no_env1_envelope` and
+   no flag is set. Without GDFL seconds the day is `not_checked:no_gdfl_seconds`.
+   Report only.
+9. **`zerodha_minute_sum_exceeds_day_bar`**: the minute sum exceeds the day
+   bar by more than the rounding allowance — 0 shares on an unadjusted day,
+   `ceil((printed minutes + 1) / 2)` on an adjusted one, and the wider room,
+   labelled `unknown`, when the day has no factor. Consecutive flagged days
+   are printed as `# span` lines, carried across months while open. PIIND
+   2018-09 to 2019-08 is the proof expectation (charter §"Zerodha and GDFL
+   cash feeds per stock-day").
+10. **`zerodha_session_cut`** (with the cut minute): GDFL trades in a
+    continuous-phase minute after the day's last Zerodha minute; the cut
+    minute is the first continuous minute after it, and each share's onset is
+    printed once (`# onset`). An eligible share's 15:15-15:29 is its closing
+    auction, never a gap: **per-share eligibility is not joined here** (the
+    dated flag in `pull::cash_session_cache` is keyed by symbol AND ISIN, and
+    a share's month holds no ISIN), so those minutes are `Unverified` for
+    every share, never counted as a gap, and their GDFL volume is printed
+    (`gdfl_unverified_phase_volume`). A cut inside them is therefore not seen
+    for an ineligible share: a stated limit, not a guess. NOT_CHECKED without
+    GDFL seconds or without an applied lag.
+11. **Data faults are counted, never misfiled**: an off-grid Zerodha minute
+    (`zerodha_unaligned_minutes`), a second minute in one slot
+    (`zerodha_duplicate_minutes`), a second day bar on one IST day
+    (`zerodha_duplicate_day_bar`, the first is used), a non-positive price,
+    bars outside the month, GDFL seconds off the second.
+12. **Percentages keep full precision** (CLAUDE.md §7): the shortest decimal
+    that round-trips the `f64`. Every price and pair is integer paisa.
+
+**Rejected.** Every typed threshold of the first version (above); a float
+median ratio and a spread test on it; a typed exchange tick.
+
+### D-5172 — `cli feed-reconcile`: a store reader that writes a NEW version file per run, never replacing one; workers and span generated, not typed — 2026-10-16
+
+1. **Reads the store directly** through `store::file::BarFile::open_existing`
+   (the served generation, every sealed block checked), never over HTTP and
+   never through `:8080`. A share is named by its stored directory, so a name
+   with `&` is read by its own key.
+2. **One CSV per month per run**: `feed-reconcile-YYYY-MM.v<N>.csv`, `N` the
+   first version not already present. First line `# brutex feed-reconcile 2`
+   (a new column or rule is a new number; version 1, the float ratio, is never
+   read as version 2), then the month, store, commit, symbols and the previous
+   month's file it carried from, the rules, the column line, one row per
+   stock-day, the carry lines, the spans, the onsets and the summary. Written
+   whole to a temporary, `fsync`ed, linked to its name with `hard_link` (which
+   refuses rather than replaces), the temporary removed and the directory
+   synced: a reader never sees half a file and a re-run never overwrites one.
+   The bytes do not depend on the worker count, the time or the version.
+   **The temporary is created by `store::staging::create`** (gate 28, R3-16,
+   D-4951), never by an open of the module's own: a second name of another
+   file, a symbolic link or a directory at the staging name is refused by
+   name and left as it is, so nothing is written through it, and a one-name
+   leftover (a dead writer's, at a name holding the process id and the
+   clock's nanoseconds) is cleared first and said on the screen and in the run
+   event (`staging_cleared`). Corrected before the merge by the DATA-1 repair
+   round of 20 Oct 2026: the first version opened the temporary itself with
+   `create_new` and gate 28 refused `crates/cli/src/feed_reconcile.rs` from
+   DATA-1's first commit on; no earlier round of this package ran that gate
+   (`the_temporary_is_created_through_the_staging_door`).
+3. **Carry, so a new month computes only itself.** `# carry,<symbol>,lags=…,
+   interval=…,exceed_open=…,cut_onset=…` and `# pooled,lags=…` hand the next
+   month each share's lag history, last interval, open span and session-cut
+   onset; a month reads only the previous month's newest version file. Absent,
+   the header says `none:no_file_for_<month>`. **A full run therefore goes
+   month by month, oldest first.**
+4. **One summary line per run** is appended to `feed-reconcile.summary.log`
+   beside the files, with the per-share-month and per-bar timings, which the
+   CSV never carries.
+5. **Workers are generated** (operator 17:15 IST, item 5): the ceiling is
+   `min(available_parallelism, share-months)`; a run starts at 1 and doubles
+   while the throughput (bars per microsecond) of the last full round still
+   rises. No memory probe: each worker's buffers are sized once from the
+   month's shape (31 × 1,440 minute slots, 86,400 second slots). `--workers N`
+   overrides. Results are put back in share order, so the bytes are identical
+   at any count.
+6. **One telemetry event per share-month** (`cli.feed_reconcile`, Error when a
+   month could not be read) **and one per run**, emitted from the coordinating
+   thread; the per-bar loop calls nothing (gate 17's shape).
+7. **A store writer by name** (`cli::store_write::WRITERS`): its files are
+   audit records `/ingest` is to serve and their proposed home is the store's
+   audit area (`<store>/audit/feed-reconcile/`), so an unstamped build is
+   refused and a store whose `bars` is a link is refused. `factor` (reads a
+   version file) and `months` (reads the census) are its read-only forms;
+   the rule `writes_the_store` states is "writes when `--out` is given",
+   which the month run requires and neither read-only form takes, and which
+   is a shape gate 30 reads (`arguments.contains(&"--out")`).
+8. **The span is the census's** (operator 17:15 IST, item 6): `cli
+   feed-reconcile months` lists every month in which any NSE cash share holds
+   a GDFL `1s`, Zerodha `1min` or Zerodha `1day` month of at least one row, as
+   `pull::ingest::census_store::read_vendor` records it, oldest first. A census
+   that will not load refuses; no directory walk stands in for it. Folding
+   each sealed stock-day into a day segment at import time is the
+   ingest-automation package's hook and is not built here.
+9. **The full run is the main session's, after the merge**, because its
+   output is to sit in the store's audit area: the command is in
+   `docs/06-limits.md` §"Feed reconcile". It writes no bar, sidecar or census
+   byte. Serving the files on `/ingest` is a separate change.
+10. Exit 0 when every share-month was read; 1 when any was not (the file is
+    still written, those rows say `read_failed:<file>:<why>`); 2 for a misuse.
+11. **A share is a key exactly as stored.** `--symbols` and every listed
+    directory must equal its own `Symbol` form: a word the constructor would
+    upper-case is refused by name with the key it would have meant.
+
+### D-5173 — Every stock-day either feed holds is a row; an unreadable month is `read_failed` by name; no factor without a matched minute — 2026-10-16
+
+The four defects handover H7 named in the scratch check, each closed by a
+rule and a test:
+
+1. `M&M`, `GVT&D`, `ARE&M`, `M&MFIN` are read by their stored keys
+   (`names_with_an_ampersand_are_read_by_their_stored_key`).
+2. A month file that exists and cannot be read makes every day the other
+   files hold `read_failed:<file>:<why>` with no half-read number, and a share
+   with no readable day still has one row (`day` = `-`); a directory that is
+   no share key is a row `read_failed:not_a_share_key:<why>`. Never "feed
+   missing" (`a_month_that_cannot_be_read_is_read_failed_never_absent`,
+   `a_share_with_no_readable_day_still_has_its_failure_row`).
+3. A day with no matched minute, or no applied lag, has an EMPTY factor
+   (`every_status_comes_from_its_own_shape_and_no_factor_is_invented`).
+4. A day one feed holds is a row: `gdfl_only` or `zerodha_only`; both feeds
+   with no matched minute is `no_overlap`; both feeds and no lag yet is
+   `not_aligned` (same test).
+5. **A month held sealed is read through the one door** (added when
+   `feat/db-fix` 5cec3e7cd, which carries SC-3's read door, was merged in,
+   20 Oct 2026): every month file is opened by `BarFile::open_existing`,
+   which since D-5899 opens `<yyyy-mm>.sbar` first and the raw `.bin`
+   second. A share-month held only sealed (after a retirement) gives the raw
+   form's file byte for byte but the store root its `# month` line names; a
+   damaged sealed form beside an intact `.bin` makes every day of that
+   share-month `read_failed:gdfl_1s:<the door's refusal>` and the run exits 1,
+   never answered from the `.bin` and never `absent`
+   (`a_sealed_month_is_read_through_the_door_like_its_raw_form`). The verb
+   adds no sealed reader of its own. The real store held no `.sbar` on
+   20 Oct 2026 (a READ-ONLY `find bars -name '*.sbar'` printed nothing), so
+   no figure of D-5179 item 3 changes; a sealed record's read cost is the
+   door's: a cache miss decodes one frame of at most 256 rows and a
+   neighbouring row is a copy (`docs/06-limits.md` L-SC-1, L-SC-22, measured
+   by SC-3), O(1) a record, not measured again by this verb.
+
+### D-5174 — One authority for the per-stock-day factor: `cli::feed_reconcile::FactorIndex`, read by FIB-10 and OF-2, never recomputed — 2026-10-16
+
+1. `FactorIndex::load(dir, month)` reads the NEWEST version file of the month
+   once into a fixed-stride table (share slot × 31 days of the month).
+   `factor_of(symbol, day)` is one hash of the symbol and one multiply-add:
+   O(1) per lookup, measured in `docs/06-limits.md` §"Feed reconcile".
+2. It answers `FactorPair` — the median, min and max paisa pairs, the day's
+   intersected interval and the lag it was matched at — or a `FactorRefusal`
+   by name: `NoOverlap`, `FactorNotConstant { minute, pair }` (the day's
+   whole `FactorPair`, both intersections included, D-5176), `ReadFailed`,
+   `NotChecked` (no row, another month, or a share the file does not hold),
+   `NotAligned` and `OneFeed`. No refusal is ever answered as a factor of 1.
+3. `file_digest(dir, month)` names the newest file and the BLAKE3 of its
+   bytes, so a run that converted levels names exactly which factors it used
+   (CLAUDE.md §3 rule 3).
+4. An older format is refused by name, never read as this one (the format
+   is 3 since D-5178 item 4).
+5. `cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]`
+   answers one lookup from the shell and times `N` of them.
+6. **A cut or damaged file is refused by name, never read as whole**
+   (DATA-1 verification round 1, fifth pass, 19 Oct 2026: `FactorIndex::load`
+   served a file cut at a line boundary as if it were whole, and the next
+   month's carry silently lost the history of every share whose carry line
+   was gone; a paisa price of 0 in a pair was served, `median 283090/0`, and
+   `to_gdfl` then divided by it or returned 0). One check, `whole`, is read
+   by `FactorIndex::load`, `file_digest` and the next month's carry alike, so
+   a run identity never names a file the reader refuses: the file must end
+   with a newline after its `# summary: feed-reconcile YYYY-MM:` line for
+   its own month (the line `render` writes last, so any cut loses it); every
+   share with a row under its stored key must have a `# carry,` line; and
+   the carry lines, with the shares whose names are not keys (which carry
+   nothing), must number at least the shares the summary counts. And
+   `FactorIndex::load`, the one reader of the pairs, refuses a matched row
+   whose median, min or max pair holds a paisa price below 1. A refusal
+   names the file and the first thing wrong; the run that needed the carry
+   stops `FEED RECONCILE FAILED` with nothing written. Proof:
+   `a_cut_or_damaged_file_is_refused_by_name` (a whole file loads; a file
+   without its last line, one cut among its rows, one without a share's
+   carry line and one whose summary names another month are each refused by
+   `load`, `file_digest` and the carry; a 0 and a negative price in a pair
+   are refused by `load`, by the column's name).
+
+### D-5175 — The Zerodha-to-GDFL clock alignment has one owner: the feed reconcile's lag scan — 2026-10-16
+
+1. **Measured per stock-day, every lag from −59 to +59 s** (operator 17:15
+   IST, item 7): at each lag, the Zerodha minutes whose close EQUALS the GDFL
+   close at that lag converted by that lag's own lower-median ratio (the ratio
+   lies in the minute's allowance interval). Lag 0's share, the best lag (ties
+   to the smallest |L|, then the negative) and its share are stored, over the
+   Zerodha minutes with a known grid.
+2. **The lag APPLIED on day D comes only from earlier days**: the share's most
+   frequent earlier best lag (a 119-bin count, carried across months); else
+   every share's earlier days for the same feed pair (GDFL `1s` against
+   Zerodha `1min`, the one pair this verb reads), labelled `pooled`; else the
+   day is `not_aligned` and has no factor. Day D's own best lag is reported,
+   never applied on D (CLAUDE.md §3 rule 7).
+3. **Replaced, not adopted**: the judge's "the smallest window holding 99% of
+   the best lags measured on the 2025-03 sample" was one sample's number fixed
+   for every month; 2025-03 is now only the proof month.
+4. OF-2 and the Fib run read the stored lag and never recompute it.
+
+### D-5176 — The range intersection: a labelled companion to `factor_not_constant`, because the two feeds' minute closes are often different trades of one minute — 2026-10-18
+
+1. **Measured first** (READ-ONLY run of `cli feed-reconcile 2025-03` over the
+   real store, 18 Oct 2026, `state/fix/round2/data1-real-20261018/pre/`): the
+   operator's close rule (D-5171 item 5) emptied the running intersection on
+   3,948 of 3,952 matched stock-days, and on 3,951 of 3,952 in 2025-02. A
+   typical unadjusted day (an unadjusted share, median pair exactly 1/1) had
+   lag-0 equality on 252 of 375 minutes: one minute in three closes on a
+   different trade in each feed (a different last trade before the minute
+   edge), which empties a close intersection whose basis never moved.
+2. **Kept, not replaced**: `factor_not_constant` stays the operator's rule,
+   computed and printed exactly as written. Beside it, the same running
+   intersection is taken over each matched minute's RANGES,
+   `[(2·z_low − s_z)/(2·g_high + s_g), (2·z_high + s_z)/(2·g_low − s_g)]`,
+   every factor for which the two ranges, each widened by half its own grid
+   step, can hold one trade. It is flagged `range_not_constant` when it
+   empties, with `range_lo`, `range_hi` and `range_emptied_at` in the row.
+   A minute's close interval lies inside its range interval, so the range
+   intersection contains the close intersection whenever that is non-empty.
+3. **What it separates**: different trades of one minute share the minute's
+   range and do not empty it; a minute on another basis (a split, an
+   adjustment applied mid-day, a fault) still does
+   (`a_minute_from_another_basis_empties_the_interval_and_is_named`,
+   `a_different_trade_of_one_minute_empties_the_closes_and_not_the_ranges`).
+4. **The reader does not choose for its consumer**: `FactorIndex::factor_of`
+   still refuses a `factor_not_constant` day as `FactorNotConstant`, and the
+   refusal carries the day's whole `FactorPair` (median, min and max pairs,
+   both intersections, the lag), so FIB-10 and OF-2 decide by their own
+   stated rule without recomputing (D-5174).
+
+### D-5177 — An ex-date is judged on each day's close intersection, or where that emptied, its range intersection — 2026-10-18
+
+1. **The defect**: D-5171 item 7 compared consecutive matched days' running
+   CLOSE intersections. By D-5176 item 1 that intersection is empty on almost
+   every real matched day, and a day with no interval was skipped, so on the
+   real store `ex_date` could not fire: 0 ex-date days in 2025-02 and 2025-03
+   across 208 shares, by construction rather than by measurement.
+2. **The rule now**: a day's interval for the ex-date is its close
+   intersection when non-empty, else its range intersection (D-5176), and the
+   `ex_date` column names which (`yes:unsourced:close|range`,
+   `no:close|range`, `unchecked:<why>:close|range`). Both are sets of factors
+   that the whole day admits, so two consecutive matched days whose sets are
+   disjoint admit no one factor between them. A day whose two intersections
+   both emptied is `unchecked:no_interval`, is judged against nothing, and
+   hands nothing to the next day; the next day is compared with the last day
+   that had an interval (the carry). This supersedes D-5171 item 7's
+   "each with a non-empty intersection" and its `yes:unsourced` and `no`.
+3. **Still unsourced**: no corporate-action source is merged (R4-26), so every
+   ex-date is `unsourced`. Proof:
+   `an_ex_date_is_judged_on_the_ranges_where_the_closes_emptied`.
+
+### D-5178 — A `--symbols` run is never the month's authority; a key neither feed holds, and a month neither feed holds, are refused before anything is written — 2026-10-19
+
+1. **The defect** (DATA-1 verification round 1, 19 Oct 2026,
+   `state/fix/round2/verify-DATA-1-r1.json`): a `--symbols` run was published
+   as the month's next version, and the newest version is the one authority
+   (D-5174). `FactorIndex::load`, `factor_of` and `file_digest` then read the
+   partial file, so every share left off the list answered `NotChecked`. The
+   next month carried from it: each unlisted share got back the carry that
+   came INTO the month (two months old), and `# pooled` came from the listed
+   shares alone. Measured by the verifier, READ-ONLY on the real store: after
+   a `2025-03 --symbols RELIANCE` run, 512 rows of 2025-04 across 74 shares
+   differed from the run without it (wrong applied lag, wrong median pair,
+   spurious `ex_date`). A key neither feed holds (`RELIANC`) exited 0 and
+   published a version of 0 rows, after which every share of the month
+   answered `NotChecked`.
+2. **The rule now**: a `--symbols` run is published as
+   `feed-reconcile-YYYY-MM.symbols.v<N>.csv`, numbered on its own, and its
+   header says `# scope symbols`. The month's authority is the newest
+   `feed-reconcile-YYYY-MM.v<N>.csv` only (`# scope all`): the next month's
+   carry, `FactorIndex` and `file_digest` never read a `.symbols.` file, so a
+   `--symbols` run changes no later month's bytes and no other share's
+   answer. A `--symbols` file repeats no unlisted share's carry line.
+3. **Refused, nothing written**: a `--symbols` key for which neither feed
+   holds a share directory (named in the refusal); a store where neither
+   feed holds any share directory; a month where no listed share holds a
+   bar of either feed; a store root that is not a
+   directory; an `--out` inside the store anywhere but under its audit area
+   `audit/` (compared on canonical paths); an `--out` anywhere inside the
+   tick store `BRUTEX_GDFL_TICKSTORE` names, and a named tick store that
+   cannot be resolved for a reason other than not existing (added by DATA-1
+   verification round 1, fifth pass, whose verifier could not try it: the
+   tick store is read-only to this repository; with the variable unset or
+   empty no root is known and none is compared, `docs/06-limits.md`). Each
+   prints `FEED RECONCILE
+   REFUSED` or `FAILED` with the reason and exits 1. **The listing is of
+   share directories, not of one month's files** (corrected before merge,
+   DATA-1 verification round 1, fourth pass): a share directory
+   `bars/<vendor>/NSE/CASH/<symbol>/` holds every month's files of every
+   rung, the day bars included (one file a month, `1day/2018-01.bin` on),
+   so the first two refusals are not checks of the month, and their texts
+   say "in YYYY-MM or any other month". A held key with no file of the month
+   reads as no row; a month where no listed key has one is the third
+   refusal. The first draft of this item tied the share directory to the
+   month and gave a wrong reason (a day-bar partition longer than a month)
+   for a directory without a bar.
+4. **Format 3** (`# brutex feed-reconcile 3`), so no format-2 file (which may
+   hold a partial authority, and ex-dates judged under D-5177's rule) is ever
+   carried into, or read as, this format.
+5. **Housekeeping found by the same verification, in the same module**: a
+   failed publish (a write, a sync, a link, or no version number left)
+   removes its own temporary; a version name that does not round-trip
+   (`v+7`, `v007`) is not a version; the summary log line, the screen and the
+   run event name the carry (`carry none:<why>` when there is none, with a
+   `FEED RECONCILE NOTE` on the screen; the exit status stays 0, because the
+   first month of the span has no previous file by construction); and the
+   generated worker count goes back to the fastest count when a doubling's
+   full round was slower, instead of keeping the slower one. A typed
+   `--workers` is still capped only by the share count: the operator's rule
+   (17:15 item 5) says it overrides. `factor --repeat` is bounded by its
+   timing buffer, `MAX_REPEAT` = 1,000,000 lookups (8 MB of timings), and a
+   larger count is refused by name: `--repeat 18446744073709551615` aborted
+   the process with a capacity overflow (fourth pass). A `kill -9` between
+   creating a publish's temporary and removing it leaves that dot-named
+   temporary (`.feed-reconcile-YYYY-MM.tmp-<pid>-<nanos>`) beside the
+   versions: it is never read as a version and never replaces one, and the
+   verb does not sweep it, because another run may own it (docs/06-limits.md).
+6. **Proof**: `a_symbols_run_is_never_the_months_authority_and_feeds_no_later_month`,
+   `the_out_directory_may_sit_in_the_store_only_under_its_audit_area`,
+   `an_out_inside_the_tick_store_is_refused_by_name`,
+   `an_empty_month_is_refused_and_a_missing_carry_is_said_out_loud`,
+   `a_version_name_must_round_trip_and_a_failed_publish_leaves_no_temporary`,
+   `the_scheduler_doubles_while_throughput_rises_and_returns_to_the_fastest_count`,
+   `publishing_takes_the_next_free_version_and_replaces_nothing`,
+   `names_with_an_ampersand_are_read_by_their_stored_key`,
+   `the_arguments_parse_to_what_they_name` (the `--repeat` bound).
+
+### D-5179 — An ex-date is judged only on an interval that holds the day's own median pair — 2026-10-19
+
+1. **The defect** (DATA-1 verification round 1): D-5177 judged a day on its
+   close intersection, else its range intersection, even when that interval
+   excluded the day's own median pair. One discordant minute (the two feeds'
+   minute ranges holding no common trade at the day's factor) narrows an
+   intersection off the rest of the day WITHOUT emptying it, which D-5176
+   item 3 did not foresee. ICICIBANK 2024-12-13: median pair 133425/133425,
+   range intersection [264415/264375 .. 264855/264805] = [1.000151 ..
+   1.000189], narrowed by the 10:00 IST minute, where GDFL holds one second
+   against 36 to 38 in the neighbouring minutes (a gap, cause UNVERIFIED), so
+   that day and the next were `yes:unsourced:range` on a basis that never
+   moved. **The false-positive rate of D-5177, measured** (awk over the
+   format-2 full-span output, `state/fix/round2/data1-full-r5-20261018/out`,
+   105 months, reproducing the verifier's figures exactly): 6,370 rows were
+   judged on a basis interval that excluded their own median ratio; of the
+   6,839 `ex_date` flags, **136 (2.0%) sat between days whose median ratios
+   were equal**, 27 of them both exactly `n/n` — false by construction.
+2. **The rule now**: a day's basis is its close intersection if it holds the
+   ratio of the day's own median pair, else its range intersection if that
+   holds it. A day where an intersection survived and neither holds the
+   median is `unchecked:interval_excludes_median:<close+range|range>`, is
+   judged against nothing and hands nothing on; the next day is compared with
+   the last day that had a basis (the carry). Two days whose median ratios
+   are equal then always share that ratio, so **no ex-date can fire between
+   equal median ratios** (0 by construction, and 0 measured in item 3). A day
+   whose two intersections both emptied is still `unchecked:no_interval`.
+   This amends D-5177 item 2 (which basis) and corrects D-5176 item 3's
+   claim that such a minute always empties the range intersection.
+3. **What remains, measured** (format 3, the same 105 months, oldest first,
+   READ-ONLY, `--workers 4`, 19 Oct 2026 20:22-20:30 IST, 505 s, by a
+   stamped release build of `abce27790` made by the verifier of DATA-1
+   verification round 1, fifth pass: the run is
+   `scratch/verify-DATA-1-r1e-runs/full/` (`out/` holds the 105 files,
+   `done.txt` ends `EXIT 0`), its gates and binaries
+   `state/fix/round2/logs-verify-DATA-1-r1e/`; every figure below was counted
+   again from that `out/` by the repair that wrote this item, with the same
+   result): 635,381 rows, 0 `read_failed`. `ex_date` is set on **4,504 days of 102
+   shares** (11 on the close basis, 4,493 on the range basis), against
+   6,839 days of 118 shares in format 2, and **0 of them sit between days
+   whose median ratios are equal** (format 2: 136). 5,687 rows are
+   `unchecked:interval_excludes_median` and 17,018 `unchecked:no_interval`
+   (format 2: 0 and 17,018). The proof months 2019-03 / 2025-03 / 2026-08
+   give 63 / 1 / 2 ex-date days (format 2: 103 / 1 / 2). Joined on share and
+   day with the format-2 span, every row of both joins, and every column is
+   byte for byte format 2's except `ex_date` (6,972 rows), the `ex_date`
+   flag in `flags` (2,831) and `grid_z` (289, item 4). 17 flags follow an
+   unchecked day whose median ratio equals their own: the move came on or
+   before that unchecked day, which had no basis to be judged on, and the
+   flag lands on the next day that has one. The verifier's independent
+   format-3 run (`68f7437e4`, `scratch/verify-DATA-1-r1d-runs/full/`) gave
+   the same figures, byte for byte on every one of the 105 files except the
+   `# month` line naming the commit. The first draft of this item shipped a
+   placeholder where these figures stand, and the second cited a run
+   directory that a stopped build had left empty; both were caught before
+   the merge. Every remaining flag is
+   still `unsourced`: no
+   corporate-action source is merged (R4-26), and a flag between two
+   slightly different median ratios may still be a narrow interval rather than
+   an action; only that source can say which.
+4. **`grid_z` is the Zerodha grid as of the row's own day** (its last folded
+   minute, else the last earlier day's), not the share-month's grid after the
+   whole month: a later bar's information in an earlier row. No decision read
+   it; the column was the only place it showed.
+5. **Proof**: `an_interval_off_its_own_median_is_no_basis_for_an_ex_date`
+   (three days on factor 1, one discordant minute on the middle day: the
+   middle day is `unchecked:interval_excludes_median:range`, the third is
+   `no:close` judged against the first, and the month has 0 ex-date days),
+   `an_adjusted_day_is_an_exact_pair_and_a_disjoint_interval_is_an_ex_date`
+   (a real basis change still fires, and `grid_z` per day), and for item 6
+   `a_days_basis_is_the_first_intersection_holding_its_own_median` and the
+   end of the first test (the reader gives the 4th and the 6th a close basis
+   and the 5th none).
+6. **The consumer's rule, stated** (DATA-1 verification round 1, fourth
+   pass: `factor_of` refuses `FactorNotConstant` on about 99.9% of real
+   days, even where the median is `n/n`, so a consumer had no stated rule
+   for using a factor at all): **a consumer (FIB-10, OF-2) converts a
+   Zerodha-basis level into GDFL raw prices only on a day whose pair has a
+   basis**, read as `FactorPair::basis()`, whether `factor_of` answered `Ok`
+   or `FactorNotConstant` (whose pair it carries). `basis()` is the item 2
+   rule, computed by the same function (`basis_of`) as the `ex_date`
+   judgement, so the reader and the column can never disagree about which
+   days have one factor. A day with no basis (`None`: neither intersection
+   holds its own median) has no single factor; the consumer refuses it by
+   name and never picks a factor of its own. `Ok` alone is not enough
+   either: a close intersection can survive off the median, and then the
+   range intersection, or nothing, is the basis.
+
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 
 **Implemented by** GF-1 (`.github/gates_platform.rs`, the `macos` job of
@@ -73157,6 +73677,628 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-5110 — Package CHG-1: a charge stack for one executed order and one client-security-day, precise by default, in new modules of `crates/costs` — 2026-10-16
+
+**Implemented by** `costs::exact`, `costs::charge_error`, `costs::schedule`,
+`costs::stack` and `costs::dhan_calc`, exported from `crates/costs/src/lib.rs`;
+tests in each module and in `crates/costs/tests/dhan_calculator.rs`; the bench
+`crates/costs/benches/stack.rs`. **Number block** D-5110 to D-5139 was assigned
+to CHG-1; D-5110 was free on the base `cloud/base-20261016` (`c9e3472`).
+
+**Decision.** `crates/costs` prices equity cash (intraday, delivery, MTF),
+futures and options under the contract-note method, plus Dhan's own fees.
+**Precise is the default mode**; a replica of Dhan's public calculator exists
+for comparison only (D-5112). Every money value is paisa `i64` at every
+boundary; every rate is an exact integer fraction (`exact::Ratio`, numerator
+over denominator, both fixed at compile time beside their source); no float
+appears on any path. Intermediate products are formed in `i128` and narrowed
+once, refused rather than saturated. The existing options API (`trip`,
+`regime`, `rate`, `venue`, `money`, `fill`, `lot`) is **unchanged**:
+`regime.rs`, `rate.rs` and `venue.rs` are not edited, because package CHG-0 is
+editing `regime.rs` in parallel.
+
+**Why new modules rather than widening `trip`.** `trip` prices one index-option
+round trip with deliberately adverse ceilings (`money`, D-0044 and §27 of
+`docs/06-limits.md`); a contract note rounds to the nearest unit and aggregates
+per client per security per day. Folding the second contract into the first
+would change every figure the existing tests pin.
+
+### D-5111 — The intraday transaction tax is levied on the non-delivery quantity at the day's VWAP of every trade; delivery is decided by the day's quantities — 2026-10-16
+
+The operator's five contract-note vectors were re-derived from the rules as
+written. All five agree (V1 ₹73.90, V2 ₹403.39, V3 ₹0.78, V4 ₹1,829.14, V5
+₹400.63) **only** when the equity intraday STT is 0.025% of the non-delivery
+quantity × the volume-weighted average price of all the client's trades in the
+security that day — buys and sells together, the NSE basis the brief cites as
+`NSE/CMTR/5588`. On the sell-value basis Dhan's calculator uses, V2, V4 and V5
+move by ₹1–₹7 (`costs::stack::the_sell_value_basis_disagrees_with_three_of_the_five_vectors`).
+For a squared-off day the VWAP value is half the turnover, so the tax is
+`0.025% × turnover / 2`, the halving folded into the rate's divisor so the
+tax is rounded once.
+
+Delivery versus non-delivery is decided by the day's **quantities**, as the
+exchange nets them, not by the product label: equal sides are non-delivery
+(STT 0.025% on the VWAP value, stamp 0.003% on the buy value); one side only is
+delivery (STT 0.1% of that side, stamp 0.015% of the buys, DP on a sell). The
+product decides only brokerage and DP. A one-sided **intraday** day is refused
+(`OpenIntradayPosition`) — its exit order is missing. A delivery or MTF day
+with both sides of unequal size is refused (`PartlySquaredDay`): stamp duty is
+on the FIFO buy value of the non-deliverable quantity (`NCL/CMPT/43115`), and
+day totals cannot give a FIFO split. Futures and options pay STT on every sell
+and stamp on every buy, with no netting. Option exercise pays STT on intrinsic
+value at the exercise rate, as its own line.
+
+### D-5112 — Dhan's calculator is reproduced line by line, labelled an estimate, and its last paisa is left UNVERIFIED with every miss pinned — 2026-10-16
+
+`costs::dhan_calc::quote` reproduces `https://dhan.co/calculators/brokerage-calculator/`
+as the operator measured it on 15 and 16 Oct 2026: brokerage Σ min(₹20, 0.0003
+× order value) per executed order (delivery ₹0, MTF as intraday, F&O ₹20 per
+order); exchange on turnover at the page's constants; SEBI at 0.000001; STT and
+stamp at the page's bases, shown half-up to the rupee; DP ₹14.75 on a delivery
+or MTF sell; GST 0.18 × (brokerage + exchange rounded to 4 decimals), the SEBI
+fee **not** in it; total = the exact sum of the lines with STT and stamp
+**unrounded**, rounded half-up to the paisa. Every unrounded line is an integer
+count of 10⁻⁷ paisa (10⁻⁹ rupee), so the page's floating-point sum is
+reproduced by its exact value. Every output carries `Dhan calculator
+(estimate)`; it is never a contract note.
+
+**Measured on the 48 readings the brief carries** (it says 49 were measured):
+every displayed line equals the page (336 lines), the 15 Oct readings'
+unrounded lines to the billionth of a rupee; the total is exact on 33 and one
+paisa off on 15 — 8 page-higher, 7 page-lower — pinned by name and direction in
+`costs::dhan_calculator::the_one_paisa_total_misses_are_listed_with_their_direction`
+so a rule that fits all of them can be proven later. Neither a floor nor a
+ceiling fits all 15. The page's last-paisa rule is UNVERIFIED.
+
+### D-5113 — The precise stack rounds half-up, each line at the level a contract note shows it; the half's direction and the aggregation level are UNVERIFIED — 2026-10-16
+
+Brokerage: per executed order, half-up to the paisa. Exchange transaction
+charge **with the IPFT folded in, as one line**, and the SEBI fee: on the
+client-security-day's turnover, half-up to the paisa, once. STT and stamp
+duty: per client per security per day, half-up to the rupee. GST: 18% of
+(brokerage + exchange + SEBI), half-up to the paisa, once; DP and the
+square-off fee carry their own 18% lines. Evidence for the levels: V1's SEBI
+fee is ₹0.15 on turnover where per-order rounding gives ₹0.16, and V4's
+exchange line is ₹308.54 as one line where FA73061's two parts rounded apart
+give ₹308.53. **No source recorded here states which way an exact half goes,
+nor whether a note totals these lines per security or per note**; half-up and
+per-security are choices, and `docs/06-limits.md` §CHG-1 records both.
+
+### D-5114 — The charge stack refuses by name wherever Dhan's page would print a zero or NaN, and never prints a zero in place of an answer — 2026-10-16
+
+`costs::charge_error::ChargeError` carries every refusal. Refused: an order or
+a quote with a quantity or a price that is not strictly positive
+(`CostError::NotPositive`, naming which); a quote with neither price
+(`NoOrder`); a client-security-day with nothing traded or exercised
+(`EmptyDay`); an open intraday day and a partly squared delivery day (D-5111);
+an exercise on anything but an option, or of a non-positive intrinsic value;
+the net P&L of a one-sided quote (`OneSided`); BSE futures and options in
+calculator mode (`NotOnPage` — never read from the page) and BSE futures under
+today's rates (`NoRate` — no figure recorded); every arithmetic site that
+could leave `i64` (`CostError::Overflow`, naming the operation). A breakeven
+"that cannot be computed" is the quantity-zero case, refused at `quote`; a
+refused order leaves the day exactly as it was. Buy-only and sell-only quotes
+are supported in calculator mode as one executed order.
+
+### D-5115 — Rates by date: today's rates on every trade date is the default, labelled; the dated regime stays exactly as it was, and the FA73061-dependent tests wait for package CHG-0 — 2026-10-16
+
+`schedule::RateSelector::CurrentOnEveryDate` (the `Default`) applies the table
+read on `schedule::CURRENT_AS_OF` (2026-10-16) to every trade date, back to 2018
+and beyond — the operator's choice for backtests. Every precise output carries
+`RateBasis`, rendered `today's rates applied to <date>`.
+`RateSelector::Dated` reads `crate::regime`, unchanged, and covers index
+options only: equity and futures under it are a `Refusal` on every date (no
+dated history of those rates is recorded), never today's rate applied
+backwards without a label. For a dated NSE options day the exchange line is the
+regime's row plus `rate::NSE_IPFT` before `FA73061`'s effective date
+(2026-03-01) and the regime row alone from it, because `FA73061` states the
+0.03553% with the IPFT folded in; BSE adds `rate::BSE_IPFT`'s UNVERIFIED zero.
+Today's table carries 0.03553% for NSE options itself, naming `FA73061`.
+Until package CHG-0's dated row lands, the regime answers 0.03503% for October
+2026, so
+`costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+is `#[ignore = "needs CHG-0's FA73061 regime row"]`; it fails today by exactly
+the IPFT, and the local merge un-ignores it.
+
+### D-5116 — The intraday ceiling square-off fee is a separate line, applied only when the caller says the broker exited — 2026-10-16
+
+A position still open at the 15:10 intraday ceiling is squared off by Dhan's
+risk system at ₹20 + 18% GST per order. `stack::Order::squared_off_by_broker`
+marks such an exit; the order then carries `square_off_fee` ₹20 and
+`square_off_gst` ₹3.60 as their own lines, and nothing else on the day moves.
+The stack never infers it from a time. Refused on a delivery or MTF day, which
+is carried rather than squared off. Applied on futures and options when asked,
+and that F&O applicability (and its cut-off time) is UNVERIFIED.
+
+### D-5117 — Today's rate table records each figure's provenance, and four figures are priced while UNVERIFIED — 2026-10-16
+
+Each rate is a `schedule::Cited`: the exact ratio, the source string and a
+`Status`. `Cited` means the brief or the repository names a circular, notice,
+statute or page for it (`docs/00-charter.md`, "CHG-1 charge-stack rate
+sources"). Four are `Unverified` and are still priced because the brief orders
+them: BSE cash ₹375 per crore all-in; BSE options' IPFT zero; equity delivery
+STT 0.1%; futures STT 0.05%. A settled day lists the UNVERIFIED sources it
+actually used (`DayCharges::unverified_sources`) and prints them under its
+lines. The options STT and exercise rates equal the regime's rows on the as-of
+day, held together by a test. The session could not fetch any source itself
+(`nsearchives.nseindia.com` and `dhan.co` refused by the network policy), so
+no circular body was read and no digest is recorded.
+
+### D-5118 — The charge stack's cost is measured as p50, p99 and max per call, and gated by ratios of medians — 2026-10-16
+
+`crates/costs/benches/stack.rs`, `harness = false`, no framework: 20,000
+samples per measurement, each a batch of 16 calls timed by one pair of
+`Instant` reads, after 2,000 untimed; p50, p99 and max per call. Gated only by
+five ratios of medians under the shared 3.0× ceiling (C-CHG-01..05): a crore of
+shares against one, the 2,000,001st order against the first, a huge day against
+a small one, settling two million orders against two, a huge calculator quote
+against a small one. Absolute figures are printed and not gated. A sixth
+measurement, a day at the widest `i64` allows, is printed beside C-CHG-03 and
+not gated: its rate products pass 2^64, where `i128` division takes the
+compiler's software routine, measured at about 1.26× a normal day. That is a
+second constant, bounded by the 128-bit width, not a cost that grows; gating it
+at 3.0× would hold, but a ratio between two different constants is not the
+claim the gate exists to check. The bench refuses to time the widest day unless
+it settles, so a refusal can never stand in for it.
+
+### D-5119 — Invariant ids `CHG-nn` and bench ids `C-CHG-nn` — 2026-10-16
+
+CHG-1's rows in `docs/04-invariants.md` take a prefix no row uses, rather than
+`K-54` onward, because about twenty packages are adding rows in parallel and
+gates 10b and 27 refuse a reused id at merge.
+
+### D-5120 — The cost-row reconciliation reads every bench binary, not only `ratio.rs` — 2026-10-16
+
+`core::cost_invariants` read the printed ids only from each crate's
+`benches/ratio.rs`, so C-CHG-01..05 (D-5118), which
+`crates/costs/benches/stack.rs` prints, failed
+`every_declared_cost_invariant_reaches_a_bench` as unbenched. Yet gate 8's
+`cargo bench --workspace --locked` runs that bench in the same step as every
+`ratio.rs`.
+
+**Chosen:** the two reconciliation tests read every top-level
+`crates/<name>/benches/*.rs`, the root file of each bench binary.
+`every_crate_carries_a_ratio_bench` still walks `ratio.rs` alone, because one
+per crate is gate 8's premise. The wider walk asserts that it read every
+`ratio.rs` the narrower one did, so it cannot quietly read less.
+
+**Rejected:**
+- Citing a C-K id in each C-CHG row. That would pass the test, but the C-K
+  benches measure the options trip, not this stack, so the citation would be
+  false.
+- Moving the stack bench into `benches/ratio/` as a module. The test does not
+  read modules, so the five rows would still fail.
+- Merging it into `costs/benches/ratio.rs`. That would rewrite gate 8's
+  harness, which gate 14 counts point by point, for no gain.
+
+**Seen and not changed:** files under `benches/ratio/` are modules, and this
+walk still does not read them. `store/benches/ratio/safe_files.rs` prints
+C-SF-01..04, and no row in `docs/04-invariants.md` declares any of the four.
+RC-01's direction would refuse them if it could see them. That is a separate
+change to another crate's ledger; it is not widened into package CHG-1.
+
+Landed on `feat/db-fix` by the CLOUD-CHG1 merge-back (17 Oct 2026) with this number,
+which the cloud branch `cloud/chg1-20261016` gave it; the local merge's own entries
+that had used D-5120 to D-5125 for other choices are D-5121 to D-5126.
+
+### D-5121 — STT and stamp duty are rounded the way NSE/CMTR/5588 and NCL/CMPT/43115 state it: the VWAP and each security's figure to the paisa, the client's day total to the rupee; this supersedes D-5113's "per client per security per day, half-up to the rupee" — 2026-10-16
+
+**Found at the local merge of the cloud work (package CLOUD-CHG1).** D-5113
+rounded STT and stamp duty straight to the rupee on each client-security-day.
+The 15 Oct 2026 attack run read the two circulars
+(`state/charges-deep-check-20261015.json`, `rateVerdicts`): `NSE/CMTR/5588`
+(10 Nov 2004) takes the VWAP `(BVAL + SVAL) / (BQTY + SQTY)` "rounded off to
+two decimals", the non-delivery value as `min(BQTY, SQTY) x VWAP`, each
+security's STT to two decimals, and in section D the client's total to the
+nearest rupee (14.50 -> 15, 14.49 -> 14); `NCL/CMPT/43115` Annexure 1 rounds
+each security's duty to two decimals (item 1.2(b)(I)) and the client total to
+the nearest rupee (item 2). Three things followed, each proven by a test that
+failed on the cloud code:
+
+* the VWAP is rounded to the paisa before it values the quantity —
+  `costs::stack::the_intraday_tax_is_on_the_vwap_rounded_to_the_paisa_as_nse_cmtr_5588_states`
+  (100000 @ 50.01 -> 50.02: ₹1,251, where half the turnover gave ₹1,250);
+* each security's STT and stamp go to the paisa before the rupee —
+  `costs::stack::the_intraday_tax_and_stamp_round_to_the_paisa_before_the_rupee`
+  (STT 19.497 -> 19.50 -> ₹20, where the straight rounding gave ₹19; stamp
+  0.4995 -> 0.50 -> ₹1, where it gave ₹0);
+* `stack::ClientDay` sums every settled security of one client's day in one
+  segment of one exchange and rounds the STT and the stamp duty once
+  (`costs::stack::a_client_day_rounds_stt_and_stamp_once_across_its_securities`:
+  two securities of ₹0.30 STT each are ₹0 alone and ₹1 together). It refuses
+  a security of another day or rate set, exchange or segment
+  (`ChargeError::MixedClientDay`), all or nothing.
+
+A `DayCharges` settled alone still rounds as if its security were the client's
+only one that day, and equals a one-security `ClientDay` exactly; the
+exercise STT line is what the exercise adds to the day's STT rounded once.
+The VWAP's exact-half direction, and the same two steps for F&O (no F&O
+circular on the method was read), are UNVERIFIED (`docs/06-limits.md` §CHG-1).
+None of the five contract-note vectors, and none of the 49 golden readings'
+precise totals, moved.
+
+### D-5122 — The contract-note vectors are the operator's derivation under assumptions, not evidence of a rounding level; four assumptions are now named UNVERIFIED — 2026-10-16
+
+D-5113 offered V1's ₹0.15 SEBI fee and V4's ₹308.54 exchange line as
+"evidence for the levels". They are not: the vectors were built under those
+assumptions. The attack run (15 Oct) recomputed every vector under the
+alternatives and found each total moves: rounding NSE's ₹306.99 and IPFT's
+₹0.01 as separate lines (as Dhan's pricing page lists them) gives V2 ₹403.38
+and V4 ₹1,829.12; rounding the SEBI fee per leg gives V1 ₹73.91; rounding a
+CGST 9% + SGST 9% split separately gives V1 ₹73.89, V2 ₹403.38, V4 ₹1,829.13
+and V5 ₹400.64. The stack keeps the single-line, per-day, single-GST choices
+(they reproduce the operator's five figures) and records each as an
+UNVERIFIED assumption, beside a fourth: whether Dhan's ₹20 auto square-off
+fee replaces the square-off order's own brokerage or comes on top of it
+(priced on top; the pricing page does not say). Only a real contract note
+decides any of the four.
+
+### D-5123 — Every rate cites the primary source the 13 Oct and 15 Oct runs read; delivery and futures STT are Cited, F&O stamp duty cites NCL/CMPT/43116 — 2026-10-16
+
+The cloud session could fetch no source and wrote that no circular body had
+been read. Two local runs had read them: the 13 Oct sources run
+(`state/fno-winners-20261013/sources-charges.json`, 45 rows) and the 15 Oct
+attack run (13 of 15 rows confirmed). The rate table now cites what they read:
+`NSE/FA/73061` dated 2026-02-27, effective 2026-03-01 (rows E-01..E-04);
+`NSE/FATAX/73524` dated 2026-03-31 for every STT rate — so **equity delivery
+STT 0.1% (S-05) and futures STT 0.05% from 2026-04-01 (S-02) move from
+UNVERIFIED to Cited**; `NSE/CMTR/5588` for the non-delivery STT method;
+`NCL/CMPT/43115` (from 2020-07-01 per `NCL/CMPT/44032`) for cash non-delivery
+stamp duty; NSE's levies page for delivery stamp duty (T-04); **`NCL/CMPT/43116`
+for futures and options stamp duty (T-02, T-03), where the cloud code had
+cited 43115**; SEBI's 2019 notification annexed to `FA40632` for the SEBI fee.
+Proven by `costs::schedule::every_rate_names_the_primary_source_the_sourced_rows_read`,
+which failed on the cloud code. Only the two BSE rows stay UNVERIFIED. No
+digest of any circular is recorded; a citation here says what an agent read
+on a date.
+
+### D-5124 — A trade's result is its gross less the ENTIRE precise charge stack, and it is a win only if that net is above zero — 2026-10-16
+
+The operator's rule of 16 Oct 2026, 11:13 IST: every decision and every
+reported number is net of the entire precise Dhan charges of each trade, and
+a trade is a win only if its net P&L > 0; gross is a labelled extra column,
+never used to decide. `stack::NetTrade` is that figure: `of_day` for a round
+trip on one client-security-day (intraday, long or short), `of_days` for one
+opened and closed on two (delivery, MTF, a carried F&O position, long or
+short); `net = (sold - bought) - every charge of every day`, and `is_win` is
+`net > 0`, so break-even is not a win. Refused by name: a day that does not
+close itself, an exercise (the exercised quantity is not recorded), and two
+days that are not one buy side and one sell side of the same units, kind and
+exchange (`ChargeError::UnmatchedRoundTrip`). Proven on constructed trades
+(`costs::stack::a_trade_is_a_win_only_if_its_net_after_every_charge_is_above_zero`)
+and on every golden round trip
+(`costs::dhan_calculator::every_golden_round_trip_is_netted_of_its_entire_precise_charges`).
+Package CHG-2 wires it into the reports.
+
+### D-5125 — An ETF and a commodity are refused by name in both modes — 2026-10-16
+
+The CHG-1 specification: ETFs and commodities are priced in calculator mode
+only if a golden case exists, and refused by name in precise mode. No golden
+case exists for either, and no ETF charge row has been read; commodities trade
+on MCX, outside the engine's scope (`CLAUDE.md` §1, D-0017). `TradeKind::Etf`
+and `TradeKind::Commodity` exist so a caller can ask, and every entry point
+refuses: `RateCard::resolve` under either selector and `dhan_brokerage` with
+`ChargeError::OutOfScope` (`schedule::ETF_REFUSAL`,
+`schedule::COMMODITY_REFUSAL`), `dhan_calc::quote` with `NotOnPage`.
+Proven by `costs::schedule::an_etf_and_a_commodity_are_refused_by_name_in_every_entry_point`
+and `costs::dhan_calc::every_input_the_page_shows_as_zero_or_nan_is_refused_by_name`.
+
+### D-5126 — The golden file holds all 49 readings — 2026-10-16
+
+The cloud brief carried 48 of the operator's 49 readings; the missing one is
+the 15 Oct UI reading of V1's inputs (HDFC Bank, ₹74.28), which agrees with
+the endpoint reading line for line
+(`costs::dhan_calculator::the_endpoint_and_the_ui_readings_of_the_v1_inputs_agree_line_for_line`).
+With it the calculator replica is exact on 34 totals and one paisa off on 15,
+the count the capture itself recorded. The 33 readings of
+`state/charges/dhan-golden-20261016.json` were compared field by field with
+the test's table (quantity in units, both prices, all eight lines): all 33
+equal.
+
+### D-5127 — A backtest prices charges through one `DayLedger` per client-security-day, closed in a named mode under a named rate set; neither the ledger nor the rate set has a `Default`, and a part-filled order is one executed order — 2026-10-17
+
+The design judge's binding follow-up to the CHG-1 spec (16 Oct 2026): the Fib
+winner gate applies charges per trade at two sizes inside the lattice visitor,
+where STT and stamp duty round once per client per security per day across the
+mix's trades in one stock (`NSE/CMTR/5588` section D, `NCL/CMPT/43115`
+Annexure 1), and where a fill spilled over several one-second bars is one
+executed order. The spec priced "one executed order and one
+client-security-day" without saying how a caller accumulates a day, so FIB-11
+would have re-implemented the day rounding or guessed.
+
+**Chosen** (`crates/costs/src/ledger.rs`):
+
+- `DayLedger::new(kind, exchange, day)`; `add(ExecutedOrder { side, qty,
+  value_paisa, broker_square_off })` in O(1) — a fixed handful of checked
+  additions and one brokerage (C-CHG-07); `close(mode, rate_set)` in O(1) — one
+  card resolution and a fixed sequence of exact-rate products (C-CHG-08).
+- The close returns the same `DayCharges` the stack does, now carrying its
+  `Mode`, every line unrounded (`unrounded_lines`, units of 10⁻⁹ rupee) and
+  rounded (`lines`), the total, and `rounding_adjustment` = total − the exact
+  sum of the unrounded lines. Precise mode is `ClientSecurityDay::settle`'s own
+  code (`settle_precise`); calculator mode is the page's own arithmetic
+  (`dhan_calc::page_lines`, which `quote` now calls too). Both are proven on
+  every golden reading, so there is no third arithmetic.
+- `order_lines_unrounded(kind, exchange, day, order, mode, rate_set)` gives one
+  order's exact share of each line: linear lines sum over a day's orders to the
+  day's unrounded line; precise intraday STT is half the order's value at the
+  rate (the day's tax is on the squared quantity at the VWAP of buys and sells
+  together); GST is 18% of the order's own unrounded base, half-up to the unit;
+  DP is carried by a delivery or MTF sell order.
+- **One order filled in parts is ONE executed order**: `ExecutedOrder::with_part`
+  joins a part's units and value, and brokerage is charged once on the whole.
+  That this is how **Dhan** charges is **UNVERIFIED** until a Dhan contract
+  note shows a part-filled order (`docs/06-limits.md` §CHG-1).
+- `RateSelector` loses its `Default`: every caller names the set. Its
+  `version()` — `todays-rates/2026-10-16/r1` and `dated-regime/r1` — and
+  `Mode::version()` — `precise/r1` and `dhan-calculator/2026-10-16/r1` — are
+  what a run identity records. Each rate-set version is pinned beside a
+  fingerprint of the table it names
+  (`costs::schedule::the_rate_set_versions_are_pinned_to_the_tables_they_name`),
+  so a changed rate fails the build until its version moves. **Package CHG-0's
+  FA73061 regime row will move the dated fingerprint**: its merge must bump
+  `DATED_RATES_VERSION` to `r2` and re-pin, which is the point.
+- `Mode` keeps a `Default` (`Precise`), because the spec names precise the
+  default; the ledger's `close` still takes it explicitly.
+- A calculator-mode day is refused by `ClientDay::add` and `NetTrade` by name
+  (`ChargeError::NotPrecise`): a win or a loss is decided net of the precise
+  stack only (D-5124).
+
+**Rejected:**
+- A `RateSet` enum beside `RateSelector`. Two enums for one choice is the
+  drift this repository refuses; the existing selector lost its `Default`
+  instead, and every call site now names it.
+- A ledger method that merges a fill into "the last order". It would need the
+  ledger to guess which order a fill belongs to; the caller knows, and joins
+  the parts before the order is added.
+- Pricing each trade alone and summing. That rounds STT and stamp duty once
+  per trade, which no contract note does.
+
+### D-5128 — The winner-gate page's ₹82.65 and ₹224.43 are the Dhan calculator's figures; the precise stack gives ₹82.68 and ₹224.61, and the page is marked for correction — 2026-10-17
+
+The winner gate is judged at ₹1,00,000 and ₹5,00,000 trade sizes (confirmed
+16 Oct 11:12 IST), and `state/pages-20261016/winner-gate.html` shows round-trip
+charges of ₹82.65 and ₹224.43 for an equal-price NSE equity intraday round trip
+"from our formula". The judge's follow-up made those two numbers a test that
+must reproduce them in precise mode **or report the difference with both
+numbers — never tune the stack to match**.
+
+**Measured** (`costs::ledger::the_winner_gate_pages_round_trip_charges_are_the_calculators_not_the_precise_stacks`,
+100 and 500 units at ₹1,000 bought and sold):
+
+| Size | Page | Calculator mode | Precise mode | Gap |
+|---|---|---|---|---|
+| ₹1,00,000 | ₹82.65 | ₹82.65 | ₹82.68 | ₹0.03 |
+| ₹5,00,000 | ₹224.43 | ₹224.43 | ₹224.61 | ₹0.18 |
+
+The whole gap is GST on the SEBI fee: the calculator's GST base leaves the
+SEBI fee out (D-5112) and the precise base includes it (Dhan's pricing page,
+row G-02, and `NSE/FATAX/52993`, row G-03). STT (₹25 and ₹125) and stamp duty
+(₹3 and ₹15) are whole rupees at these sizes, so the two modes' other
+difference does not show.
+
+**Chosen:** the stack is unchanged; the page is **marked for correction** — its
+"our formula" figures are the calculator replica's, and every win the gate
+decides is net of the precise figure (D-5124). The page lives outside the
+repository and its owner (the main session) corrects it; this entry and the
+test are the record.
+
+### D-5129 — The CLOUD-CHG1 merge-back: the cloud branch's D-5120 keeps its number, the local merge's own entries move up by one, and a shared target directory is rebuilt from this worktree's sources — 2026-10-17
+
+The cloud session pushed `cloud/chg1-20261016` with D-5110 to D-5120, its
+D-5120 being the cost-row reconciliation that reads every bench binary. The
+first local merge applied the branch before that last commit landed and gave
+D-5120 to D-5125 to its own choices. Two meanings for one number would make the
+ledger lie, so the cloud's D-5120 and its invariant CHG-19 land here under
+those numbers and the local entries are D-5121 to D-5126 and CHG-20 to CHG-25;
+every citation in `crates/costs`, `docs/00-charter.md`, `docs/04-invariants.md`
+and `docs/06-limits.md` moved with them.
+
+**Seen, and named for the operator:** the package's target directory
+(`tgt/pool-7`) is shared between worktrees, and Cargo hashes a workspace
+member by its path relative to the workspace, so another worktree's `costs`
+rlib — newer than this worktree's sources — was taken as fresh, and the
+integration tests failed to resolve `costs::charge_error`. Touching this
+worktree's sources forced the rebuild. Any package on a shared target directory
+can be tested against another worktree's crate this way; it is a property of
+the build queue, not of this repository, and is recorded in `docs/06-limits.md`
+§CHG-1.
+
+### D-5130 — An option exercise names its settlement, and a stock option settled by physical delivery is refused by name — 2026-10-19
+
+**Observed at the third local merge (19 Oct).** The CHG-1 specification lists
+"a stock option settled by physical delivery" among the option cases that need
+a test. The stack priced every exercise the same way — STT at the exercise rate
+on the intrinsic value (sources row `S-04`, which covers stock and index options
+alike) — and had no way to be told that a stock option held in the money to
+expiry settles by delivery. Such an exercise was therefore priced, silently,
+without the two charges delivery adds: Dhan's brokerage of 0.10% of the contract
+value (row `B-06`, read from Dhan's pricing page on 13 Oct 2026 with **no
+effective date**) and the delivery leg's STT (row `S-06`, **never read** from a
+source). The cloud report listed physical settlement as "not priced"; the code
+did not refuse it.
+
+**Chosen.** `ClientSecurityDay::exercise` and `DayLedger::exercise` take a
+`schedule::Settlement` the caller must name, with no `Default`:
+`Settlement::Cash` (an index option) is priced exactly as before;
+`Settlement::PhysicalDelivery` is refused by name with
+`schedule::PHYSICAL_DELIVERY_REFUSAL` (`ChargeError::OutOfScope`, naming
+`B-06` and `S-06`), at every intrinsic value and on both exchanges, and the day
+is left exactly as it was. A non-option is still refused as a non-option first.
+Proven by `costs::stack::a_stock_option_settled_by_physical_delivery_is_refused_by_name_and_changes_nothing`
+and the ledger's refusal test.
+
+**Not chosen.** Pricing B-06 now: its effective date was not read, and the
+delivery leg's STT has no source at all, so any figure would be the invention
+`CLAUDE.md` §3 rule 1 forbids. Inferring the settlement from the instrument:
+`TradeKind::Options` does not say whether the underlying is a stock or an
+index, and the caller does. The operator's backtests are intraday, so no
+backtest reaches an exercise; the refusal is for any caller that holds to
+expiry. `docs/06-limits.md` §CHG-1 records the gap; a read of B-06's effective
+date and S-06's rate closes it as a new rate row.
+
+### D-5131 — CLOUD-CHG1 repair 1: the dated options card adds the IPFT on every day as the trip stack does (`dated-regime/r2`); one order's lines are priced against its own day's netting; a net refuses two rate sets and out-of-order legs and names its versions — 2026-10-20
+
+**Number** inside the cloud block D-5110..D-5139 (D-5131 was free on this
+branch and on `feat/db-fix` at `453de6989`).
+
+**What was observed** (second check of CLOUD-CHG1,
+`state/fix/round2/verify-CLOUD-CHG1-r1.json`, all three reproduced here first,
+`state/fix/round2/chg1-logs-r8/probe-before.log`):
+
+1. `RateSelector::Dated` dropped the NSE options IPFT from FA73061's effective
+   date (2026-03-01), on the expectation that package CHG-0's FA73061 row
+   would be the regime row in force. That row is not in `crate::regime`, so
+   the row in force was FA64232's 0.03503% and every dated NSE options day
+   from 2026-03-01 was charged 0.03503% — the IPFT's 0.0005% short, ₹5.01
+   against ₹5.08 exchange charge (GST ₹8.10 against ₹8.12) on the NIFTY 25300
+   CE 65 × 100 → 120 reading — labelled "rates in force on" and cited. Today's
+   table, `trip::Rates::resolve` and source row `E-03` all give 0.03553%. The
+   test that showed it was `#[ignore]`d, so no gate could fail.
+2. `ledger::order_lines_unrounded` priced every delivery or MTF order as
+   delivery: 0.1% STT on its whole value, 0.015% stamp duty, DP on every sell.
+   The day nets by quantities, so a squared delivery or MTF day pays 0.025% STT
+   on the squared quantity at the VWAP, 0.003% stamp and no DP. On the
+   verifier's ₹15,000 / ₹14,800 day the orders summed to STT ₹29.80, stamp
+   ₹2.25 and DP ₹12.50 against the day's ₹3.725, ₹0.45 and nil.
+3. The CHG-1 block of `crates/costs/src/lib.rs` claimed O(1) and named no
+   proof gate 12 accepts — the one gate-12 refusal this package added.
+
+**Decision.**
+
+1. The dated options card's exchange charge is the regime row in force plus
+   the IPFT `crate::rate::ipft` gives — the same two figures, read the same
+   way, as `trip::Rates::resolve` — on every day, never dropped by date: on
+   and after 2026-03-01 that is 0.03553%, the total FA73061 states. The dated
+   rate set moves to `dated-regime/r2` with its fingerprint re-pinned. Proved
+   by `costs::schedule::the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
+   (every day 2018-2027, both venues),
+   `costs::schedule::the_dated_option_card_is_the_regime_on_the_trade_day_plus_the_ipft_on_every_day`,
+   and the un-ignored
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`,
+   which now checks 2026-03-01 on every line but STT (the dated 0.1% against
+   today's 0.15%, a real difference of rates, which the ignored version would
+   have failed on had it ever run). All three fail on the old card (checked
+   by building the old rule into a copy).
+2. **One netting rule, read by both.** `stack::equity_netting` is the rule
+   the day's taxes are levied by, and a new
+   `DayLedger::order_lines_unrounded(&self, order, mode, rate_set)` prices
+   one of the day's orders by the same rule: squared (any product) — the
+   non-delivery rates and no DP; one-sided delivery or MTF — the delivery
+   rates and, for a sell, its value-share of the day's one DP and its GST,
+   half-up to 10⁻⁹ rupee. The day-less `ledger::order_lines_unrounded`
+   refuses a delivery or MTF order by name (`ChargeError::NeedsItsDay`); the
+   ledger method refuses an order larger than its day's side
+   (`ChargeError::OrderNotInDay`) and, in precise mode, whatever the day's
+   close refuses. Proved by
+   `costs::ledger::a_days_orders_sum_to_its_unrounded_lines_on_every_netting`
+   (squared intraday, delivery and MTF days, one-sided days of two orders,
+   futures and options, both modes) and
+   `costs::ledger::a_days_order_lines_refuse_what_the_day_cannot_hold_or_price_by_name`.
+   Measured as C-CHG-09.
+3. The lib.rs block names `crates/costs/benches/stack.rs` and C-CHG-07..09.
+4. Follow-ups taken, in the same files: `NetTrade::of_days` refuses two legs
+   priced under different rate sets and a closing day on or before the
+   opening day (`ChargeError::MismatchedLegs`), and a `NetTrade` carries
+   `rate_set()` and `versions()` for a run identity
+   (`costs::stack::a_net_across_two_rate_sets_or_out_of_order_days_is_refused_and_a_net_names_its_versions`);
+   the stack bench prints the ledger's steps one call per sample beside two
+   clock reads alone, so the per-call p99 is shown undiluted (reported, not
+   gated).
+
+**Not chosen.** (a) Dropping the IPFT only when the row in force starts on
+or after 2026-03-01: it needs the regime row's start, which `crate::regime`
+does not expose, and CHG-0 replaces the flat IPFT with a dated one anyway —
+reading the IPFT where `trip` reads it is one rule that survives that merge.
+(b) Refusing a dated NSE options day from 2026-03-01: the total is sourced
+(`E-03`), so a refusal would withhold a cited figure. (c) An explicit
+`squared` / `one-sided` argument on the day-less function: a caller could
+pass the wrong one; the ledger knows. (d) Carrying a delivery sell's DP on
+each sell "as if the day's only sell": it charges a two-sell day twice.
+
+**What CHG-0's merge must do** is in `docs/06-limits.md` §CHG-1: read the
+IPFT in the dated card from the function `trip` then reads it from; the r2
+figures do not change at that merge.
+
+**A citation, explained rather than edited.** D-5110 names `c9e3472`, the
+cloud base. That commit is the snapshot of `feat/db-fix` at `4756cce0`
+(D-5400), reachable from `origin/cloud/base-20261016` and not from
+`feat/db-fix`'s own history; D-5110 stands as written.
+
+### D-5132 — CLOUD-CHG1 repair 2: an option exercise pays Dhan's ₹20 brokerage and its GST (sources row B-05), the precise method moves to `precise/r2`, and an expiry or an assignment is listed NOT PRICED — 2026-10-21
+
+**Number** inside the cloud block D-5110..D-5139 (D-5132 was free on this
+branch and on `feat/db-fix` at `8c67456ac`).
+
+**What was observed** (second check of CLOUD-CHG1, round 2,
+`state/fix/round2/verify-CLOUD-CHG1-r2.json`, reproduced here first).
+`Totals::exercise` recorded only the intrinsic value. An NSE options day with
+nothing but an exercise of ₹10,000 closed at ₹15.00 (the exercise STT alone),
+and a buy plus an exercise paid one ₹20 of brokerage. Sources row B-05 (Dhan's
+pricing page, read 13 Oct 2026) applies the ₹20 per executed order *"also ...
+to Options Contracts that are expired, exercised, or assigned"*, and
+`schedule::DHAN_FNO_BROKERAGE`'s doc and the `docs/00-charter.md` CHG-1 row
+both said the stack charged it on an exercise. So a figure labelled precise and
+cited was ₹23.60 short per exercise, and a unit test pinned the short ₹15.00.
+
+**Decision.**
+
+1. `Totals::exercise` — the one path `ClientSecurityDay::exercise` and
+   `DayLedger::exercise` share — adds `DHAN_FNO_BROKERAGE` to the day's
+   brokerage, both rounded and unrounded. The 18% GST follows through the
+   day's GST base. The exercise is counted in a new `exercises()`, not in
+   `orders()`: it is not an order the client placed. The brokerage is the
+   constant B-05 names, never `dhan_brokerage(kind, intrinsic)`. That would
+   price the same ₹20, but through a branch that cannot fail, which leaves an
+   unreachable `?`. The move is all or nothing across its four totals.
+   An exercise-only day is now ₹15 + ₹20 + ₹3.60 = ₹38.60. The verifier's
+   buy of 75 at ₹100 plus the exercise is ₹40 of brokerage and ₹65.35 in all.
+   Proved by
+   `costs::ledger::an_exercise_pays_dhans_brokerage_and_its_gst_as_an_executed_order_does`
+   and the re-pinned
+   `costs::stack::options_pay_tax_on_premium_and_the_exercise_rate_on_intrinsic_value`.
+   Both fail with the two brokerage lines removed: checked by building the old
+   rule into a scratch copy of `crates/costs/src` with `rustc`,
+   `state/fix/round2/chg1-logs-r10/before-old-rule.log`, and again as the
+   `no-brokerage` hand mutant, `state/fix/round2/chg1-logs-r11/hmut.out`.
+   CHG-38.
+2. `PRECISE_VERSION` moves from `precise/r1` to `precise/r2`. The method now
+   prices a day with an exercise differently, so a run identity recorded under
+   r1 must not name the new figures (`CLAUDE.md` §3 rule 3). A day without an
+   exercise prices exactly as before.
+3. An **expiry** and an **assignment**, which B-05 also names, are not inputs
+   of the stack: no day can record one. `NetTrade` refuses a bought option
+   that is never sold and a written option that is never bought, so a position
+   held to either is refused rather than netted short. The two are listed
+   by name as NOT PRICED in `docs/06-limits.md` §CHG-1. The
+   `schedule::DHAN_FNO_BROKERAGE` doc and the `docs/00-charter.md` row now say
+   exactly that, not "also on an option expired, exercised or assigned".
+4. Measured as C-CHG-10: the ledger exercise, now four checked additions,
+   costs the same for the 1,000,001st exercise as for the first and for
+   ₹1,000 crore as for ₹1. A day of 1,000,000 exercises closes at the cost of
+   one.
+5. Follow-up taken in the same files: `ChargeError::SquareOffNotApplicable`
+   says that an equity intraday, futures or options position is squared off
+   at the ceiling, never a delivery or MTF holding. It used to say "only an
+   intraday position", which contradicted `can_be_squared_off_by_broker`.
+6. An exercise is not an order, so its lines belong to no order. On a day
+   with exercises the orders' unrounded brokerage from
+   `DayLedger::order_lines_unrounded` sums to the day's less ₹20 per
+   exercise, and STT on exercise is in no order's lines. The method's own
+   statement of what the orders sum to, and rows CHG-29 and CHG-38, now say
+   so. The ledger test above asserts the difference is exactly ₹20 per
+   exercise.
+
+**Not chosen.** (a) Counting the exercise in `orders()`. That would make an
+exercise-only day report one executed order, which no order book shows.
+(b) Modelling expiry and assignment now. Netting a position held to
+either needs a closing leg that is not an order (premium lost, or intrinsic
+value paid), and `NetTrade` has no such leg. Inventing one inside a repair
+is the silent scope change §3 rule 2 forbids; it is listed as open work.
+(c) Pricing the exercise brokerage only in the ledger. The ledger and the
+stack share `Totals` so that they can never disagree
+(`costs::ledger::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles`).
 
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
@@ -74855,6 +75997,352 @@ entry here. Each says where its citation resolves.
   key's closes (the last `incomplete` line's `reason=`, the first close that
   wrote seconds, the last `done`), is recorded by D-5901 item (1) above. A
   citation of either resolves to D-5901 until its own entry is written.
+
+### D-5160 — The rank pool on day D is that day's F&O members only: a share outside F&O on D gets no rank and no intraday leverage; `FNO_UNDERLYINGS` stays the 2026-08-01 snapshot and is never edited for this — 2026-10-17
+
+**Implemented by** PIT-1 (`pull::fno_membership`: `Membership::members`,
+`is_member`, `pool_size`, `spans`; `cli fno-membership build|show|bench`;
+tests in `crates/pull/src/fno_membership_tests.rs` and
+`crates/cli/src/fno_membership_command_tests.rs`). **Why**: attack issue H6 of
+the 15 October deep check (`state/charges-deep-check-20261015.json`, key
+`handover`, location "MAIN STRATEGY (f)"): `core::universe::FNO_UNDERLYINGS`
+is one snapshot (2026-08-01, 213 names), so ranking 2018-2026 movers inside it
+is survivorship plus look-ahead, and renamed shares are dropped or mis-joined.
+
+1. **A share is in the rank pool on D only when it is one of
+   `Membership::members(D)`.** Ranks, top-N and every per-day statistic of the
+   pool are computed among that day's members, and the pool size of the day
+   (`pool_size(D)`) is shown beside every rank.
+2. **Outside F&O on D = no rank and no intraday leverage** (operator, 16 Oct
+   17:15 IST, "NOTHING TYPED" item 4, replacing the typed "5x"). A leverage
+   figure, where one is shown, comes from a dated, charter-sourced margin
+   source; none is in `docs/00-charter.md`, so it reads
+   `pull::fno_membership::LEVERAGE`, "leverage unknown", UNVERIFIED. It never
+   changes P&L at the report sizes.
+3. **A day without an answer is not ranked.** "membership unknown" (D-5162)
+   is never replaced by today's list or any other list.
+4. **Nothing in the swept surface changes.** `CLAUDE.md` §1 names
+   `FNO_UNDERLYINGS` as the swept equity list; this decision decides which of
+   those shares a DAY may rank, not what is swept. Wiring the membership into
+   `api::schedule`'s `DayUniverse`, the coverage board and the research
+   consumers is R4-26's: its COR-08 item names
+   `crates/pull/src/fno_membership.rs` and `cli fno-membership`, the module and
+   verb this package ships, and it adopts their API unchanged (`spans()` gives
+   its `(underlying, entry_day, exit_day, source)` rows with
+   `source = inferred_gdfl_options`; `is_member` is its O(1) probe).
+
+### D-5161 — A share is a member on D when one of its stock-option contracts' lives covers D; a life runs from the first IST day a record of the contract is stored to its settled expiry; a sourced rename is one spelling, an unsourced one a measured handover inside one series — 2026-10-17
+
+1. **The life of a contract** is `[the first IST day any record of it is
+   stored, its settled expiry]` (judge follow-up, 16 Oct). The first day is
+   the first options day file of the GDFL tick store holding a file of it.
+   NSE's listing day is not in the charter (UNVERIFIED), and a listing day
+   with no stored record is invisible, so membership may start LATE, never
+   early: each spelling records the days between the start of its first
+   contract's expiry series as stored (`Spelling::series_start`, the first day
+   any share's contract of that expiry was stored) and its own first record
+   (`Spelling::listing_lag_days`); `docs/06-limits.md` L-PIT-3 states the
+   measured bias, an UPPER bound. The build's report counts only the
+   spelling that opens a series: a spelling joined to an earlier series by a
+   measured handover (item 4) continues a series that was a member under its
+   earlier spelling, so it is named apart and never counted as a lag (PIT-23;
+   the first real report counted `BSOFT` and `TATACONSUM` as lags of 88 and
+   90 days). The settled expiry is `pull::gdfl_nfo::decode_ticker`'s,
+   which applies the measured re-datings and the sourced early settlements.
+2. **Member on D ⇔ the latest settled expiry among the share's contracts first
+   stored on or before D is on or after D.** One number per live spelling
+   carries from one day to the next (the fold's `State`), so a day computes
+   only itself; no listing after D decides D.
+3. **Listed but untraded counts**: a contract whose life covers D makes its
+   share a member on D whether or not a file of it exists on D;
+   `Member::filed` says whether the share listed any file that day ("listed a
+   file", not "traded": a file may hold quotes only). **An expired contract
+   does not count.**
+4. **A rename is one series.** The decoder files every ticker under the newest
+   symbol NSE's dated changes reach (`brutex_core::alias::LINEAGE`, 18 sourced
+   rows, the same key the cash store files under), so `ZOMATO` and `ETERNAL`
+   are one spelling. A rename the table does not hold (`TATAGLOBAL ->
+   TATACONSUM`, `KPIT -> BSOFT`; D-3354) is not invented as an alias: on a
+   session where a live spelling lists no file and a spelling never seen
+   before lists a STRICT MAJORITY of the contract keys (settled expiry, strike,
+   side) the first one listed on the previous session, the new spelling joins
+   the old one's series and the old spelling's life ends. A pair either side of
+   which matches a second candidate is ambiguous and is not joined (reported).
+   The record is in the month file, labelled `measured`. A majority is the
+   smallest share no second candidate can also hold, which is why it is the
+   threshold and not a tuned number.
+5. **Index underlyings are not shares** (`brutex_core::alias::option_underlying`
+   segment `INDEX`): counted per day, never members; asking for one is refused
+   (`NotAShare`).
+6. **The store's FNO bars are not the source.** Measured READ-ONLY on 18 Oct
+   2026 in the real store (`bars/gdfl/NSE/FNO`): it holds share-option folders
+   from the 2018-09-27 expiry on (`RELIANCE`, `TATAGLOBAL`; month file
+   `2018-09.bin`), but the import resumed on 2020-09-16 (OWED-01, batch O1)
+   filed share options under a 277-name filter that leaves out the 13 held
+   renames, IDFCFIRSTB, COFORGE, INDUSTOWER, ZYDUSLIFE, MOTHERSON, SHRIRAMFIN,
+   PVRINOX, ARE&M, LTF, UNITDSPR, SAMMAANCAP, GMRAIRPORT and TMPV
+   (`state/data-census-20261013/options-import-held-renames.txt`;
+   `IDFCFIRSTB`'s folders stop at the 2020-11 expiries).
+   Deriving membership from the store would drop those shares silently. The
+   tick store's day files hold every entry of every vendor day zip (verified
+   byte for byte, its RESUME.md), so every name is read, and only the index of
+   each day file is read, never a tick row.
+
+### D-5162 — The span is measured, never typed; every day outside it, and every session inside it without a share-option record, is refused as "membership unknown" and counted per year as a running sum; nothing is filled from today's list — 2026-10-17
+
+Operator, 16 Oct 17:15 IST, "NOTHING TYPED" items 1, 3 and 6, replacing the
+typed span (2018-09..2020-09-15 refused, data from 2020-09-16, end 2026-09-24).
+
+1. **`known_from` and `known_to` are the first and last IST day holding a
+   stored stock-derivative contract record**, measured by the build's own pass
+   over the source: `known_from` is written into every month header and
+   `known_to` is the last month's last sealed record (the span always ends on a
+   known record). Options now; futures, once a futures source lands, are a new
+   file version.
+2. **Outside the span** every day is refused (`UnknownWhy::BeforeSpan`,
+   `AfterSpan`), including 2018-01..2018-08, which the typed span omitted.
+3. **Inside the span** a day is known only when the IST calendar
+   (`pull::calendar::sourced_kind_of`) says it is a session AND the tick store
+   holds a valid options day file listing at least one share option. Otherwise
+   its sealed status says why: `not_a_session`, `no_source`, `source_refused`
+   (with the source's own words in the build's report), `no_calendar`,
+   `no_share_options`, `source_on_closed_day` (a file on a closed day is named
+   and not folded). `members`, `is_member` and `pool_size` refuse every such
+   day with "membership unknown" and its reason. A chartered historical source
+   found later becomes a new file version.
+4. **Per-year refused-session counts are running sums indexed by day**: each
+   sealed row carries the refused sessions of its year through that day
+   (`DayRow::refused_in_year`, `Membership::refused_through`, O(1));
+   `cli fno-membership build` prints each year's known, refused-inside and
+   outside-the-span session counts.
+5. **Census counts are dated cross-checks only.** The 13 Oct census figures
+   (277+ option underlyings imported, 337 share series, 347 option
+   underlyings, no futures files) are never constants or assertions here; the
+   build prints the series, spellings and handovers it read.
+
+### D-5163 — The membership is a new append-only file kind: `<dir>/<YYYY-MM>-g<GGGGGG>.fnm`, magic `BRXFNM01`, version 1, sealed day records per month; a build resumes after the last sealed record and runs to `known_to`; a typed window is for scratch only; one pass and day-by-day builds are byte-identical — 2026-10-17
+
+`docs/02-store-format.md`, "F&O membership month files, version 1", gives
+every byte. A month file holds the sealed records of its month from its first
+to its last record: per day a row (status, pool, filed count, the running sum
+of refused sessions, name counts, a BLAKE3 of the evidence the fold consumed),
+the day's member entries in series order, the spellings first seen that month,
+the carry it started from and ended with, its measured handovers, and a BLAKE3
+of its own bytes. No time, host, commit or generation is written, so the same
+records give the same bytes.
+
+1. **Resume, never retype** (operator item 2). `cli fno-membership build --out
+   DIR` resumes after the last sealed record (from the IST calendar's first day
+   when none is held), probes to the calendar's last day and seals records up
+   to the last known day; trailing days without a known record are not written
+   and are probed again next time. `build FROM|resume TO` is a typed window for
+   synthetic stores and scratch copies only and is refused when `DIR` lies in
+   the operator's store. A window that starts on or before a sealed record is
+   refused (`Overlap`: a sealed record is never rebuilt) and one that leaves a
+   gap after it is refused (`Gap`).
+2. **Append-only.** A month that gained records is written as its next
+   generation, which must extend the current one record for record
+   (`WouldRewrite` otherwise); an unchanged month is not written. Each
+   generation is an exclusive hidden temporary, flushed, hard-linked to its
+   final name (refused if the name exists), unlinked, and the directory
+   flushed: a reader never sees a half-written file. The reader serves each
+   month's highest generation, refuses it by name when it fails a check and
+   never falls back to an older one.
+3. **One pass and day-by-day builds are byte-identical** because the
+   generation is in the name only and a resumed build re-enters the open month
+   from its sealed records and carry. Before extending, the last sealed
+   session's listing is re-read and must hash to its sealed evidence, or the
+   build refuses (`SourceChanged`): the store is not extended from changed
+   evidence.
+4. **The chain is checked.** Each month records its carry in, spellings
+   before and series before; the reader refuses a month whose month before
+   does not end with exactly that (`Stale`), a gap between months, a span that
+   does not start on the first month's first record or end on a known record,
+   and spellings that name series out of order.
+5. **The real build is a store write** run by the main session after the
+   merge: `--out <store>/reference/fno-membership-v1` (PIT-1 report,
+   `store_writes_needed`). `fno-membership` is a store writer in its `build`
+   form (`cli::store_write::WRITERS`): an unstamped build refuses unless
+   `BRUTEX_ALLOW_UNSTAMPED_WRITE=1`.
+
+### D-5164 — Membership lookups are O(1) and measured; the build reads each day's index once, months in order, the days of a month on up to four readers by default — 2026-10-17
+
+`members(D)`, `pool_size(D)` and `refused_through(D)`: one subtraction into a
+fixed-stride index of day slots (`Membership::slot`), one row, one slice of a
+contiguous member array. `is_member(name, D)`: the dated symbol changes walked
+from `name` (`LINEAGE.current`, bounded by its 18 rows), one hash probe for the
+series, the slot, one bit of a per-day bitset. Opening a directory reads every
+month once (O(records + entries)) and builds the index; `spans()` and
+`year_counts()` are reports, not request paths. The build is O(names listed)
+per day plus O(pool) to fold it; months are folded in order (the carry), the
+days of a month are read in parallel, `--workers` 1..=14 (default 4, the
+operator's ceiling for read-only evidence runs against the real stores).
+Measured figures (n, p50, p99, max, method) are in `docs/06-limits.md`,
+"Point-in-time F&O membership".
+
+### D-5165 — The membership's reader API is the one consumers adopt: `members(day) -> Result<&[Member], MembershipUnknown>` sorted by a series id stable across renames, each member's store-key spelling that day and its current-list flag; `max_pool` sizes a rank network; `file_digest()` names the membership in run identities — 2026-10-17
+
+Judge follow-up of 16 Oct (high) and operator "NOTHING TYPED" item 5.
+
+1. **`Member { series_id, symbol_on_day, in_current_list, filed }`.**
+   `series_id` is dense in first-appearance order and stable across renames
+   (every spelling of a series maps to it). `symbol_on_day` is the spelling the
+   series was filed under that day, which is the store key of its GDFL cash
+   series that day (measured 17 Oct in the real store: cash folders exist for
+   `ETERNAL`, `LTM`, `TMPV`, `TATAGLOBAL` and `TATACONSUM`, none for `ZOMATO`
+   or `LTI`, so a sourced rename files under its newest symbol and an
+   unsourced one under each spelling in turn). `in_current_list` is true when
+   the series' newest spelling is a share of `FNO_UNDERLYINGS` less
+   `FNO_INDEX_UNDERLYINGS` (`CLAUDE.md` §1's traded surface). Members are
+   sorted by `series_id`; `is_member` and `pool_size` are thin wrappers over
+   the same day slot.
+2. **Rank width is not a trial.** Every month header carries its `max_pool`
+   and `Membership::max_pool()` is the largest of any held day. A rank network
+   sizes itself at run start to the next power of two at or above the largest
+   pool it reads; ties go by `series_id`, so ranks are identical at any width
+   and the width is neither a trial nor a run-identity term. 256 is a test
+   fixture, never a constant.
+3. **`Membership::file_digest()`** is a BLAKE3 over each served month's year,
+   month and file digest, in month order (not the generation or the path), so
+   a run that reads the membership can record which one it read; one pass and
+   a day-by-day build give the same digest.
+
+### D-5166 — A measured handover needs a strict majority of BOTH sides and at least two shared keys; a series is live under one spelling, its newest, so a file under a spelling it moved on from is filed under the newest and named, never a second member and never a stop; the carry keys live series by series id — 2026-10-20
+
+verify-PIT-1-r1 (19 Oct 2026) blocking 4, reproduced here before the change
+(`a_handover_needs_a_majority_of_both_sides_and_two_shared_keys` and
+`a_file_under_a_spelling_its_series_moved_on_from_is_filed_under_the_newest`
+failed on the code of D-5161: the first joined `ZZILLIQ` to `ZZNEWBIE`, the
+second stopped with "one series would be live as ZZOLDCO and as ZZNEWCO").
+
+1. **Both sides.** D-5161 joined a never-seen spelling to a live spelling
+   that listed nothing when the keys they shared were a strict majority of
+   the OLD spelling's previous-session keys only. A one-key illiquid member
+   was therefore joined to any entrant listing that key among others: two
+   companies became one `series_id`, the pool fell by one and the old share
+   left it while its contract was live. The rule is now: shared keys a
+   strict majority of BOTH the series' previous-session keys and the new
+   spelling's keys, and at least `MIN_HANDOVER_KEYS` = 2. The 2 is a rule of
+   evidence, not a tuned value (operator rule 5 governs values learnt from
+   data; this decides what counts as evidence at all): one shared key is the
+   coincidence any two shares listing one round strike of one expiry make.
+   Every pair the old-side majority alone would have joined and these rules
+   do not is reported by name with why, as is every pair a side of which
+   matches a second candidate (unchanged). A pair not joined is two series:
+   the old one stays a member to its own expiry with no file, which is the
+   safe direction (a pool one too large for at most one expiry, named),
+   never a merge of two companies.
+2. **One live spelling per series.** D-5161 kept the old spelling's id and
+   refused a day on which both spellings of a series were live
+   (`SeriesTwiceLive`), so one stray old-name file after a handover stopped
+   every future build on that day. The fold now keys its live set by SERIES
+   and files every file of a series under its newest spelling (the registry
+   names it); a file under an older spelling is a STRAY: it keeps the series
+   live and `filed`, is reported per day by name in the month's report and
+   its `cli.fno_membership` event (`strays`), and changes nothing else. A
+   series cannot be live twice, so the refusal is gone with its cause.
+   Limit L-PIT-9: a different company relisted later under a retired
+   spelling while the series is live would be filed under that series;
+   every such day is named, none is silent.
+3. **The carry's live pairs are `(series id, live until)`** (was spelling
+   id). The member order is the live set's own key order, so no day's
+   members are sorted. Version 1 had not landed (no `.fnm` file was ever
+   written to the store: the store step of D-5163 was never run), so this is
+   a change to the unmerged v1, not a rewrite of a landed version; directories
+   built in scratch before 20 Oct 2026 (`scratch-PIT-1/r4/fnm-*`,
+   `scratch/verify-PIT-1-c*-out/real-*`, `shadow/PIT-1`) are not to be
+   resumed by this build.
+
+### D-5167 — Any prefix of a build's installs is a servable, resumable directory: the last month may end on the closed days after `known_to`; `known_to` is the last KNOWN record and `sealed_through` the last sealed one; a sealed record after `known_to` is answered as after the span — 2026-10-20
+
+verify-PIT-1-r1 blocking 1, reproduced here before the change
+(`a_kill_between_two_month_installs_leaves_a_servable_resumable_directory`
+failed: `open` refused "the span does not end on a known record").
+
+1. A month is installed with the closed days that end it (Sat 31 Aug 2024)
+   when the next month's first known day (Mon 2 Sep) is folded, BEFORE the
+   next month is installed; a kill, a crash, a full disk or a failed write
+   between the two installs left a directory whose last month ended on a
+   closed day. The chain refused that ("the span does not end on a known
+   record") and the build opens the directory first, so neither a reader nor
+   the resume could get past it; the only way out was deleting the last
+   month, which `CLAUDE.md` §3 rule 8 forbids. The verifier measured 4 of 10
+   real kills ending there.
+2. The chain no longer requires the last record to be known. `known_span()`
+   ends on the last KNOWN record (`known_to`); `sealed_through()` is the last
+   sealed record, where the resume continues. A day after `known_to` is
+   answered `AfterSpan` even when a closed day there is sealed, so a reader
+   sees what a build that ended on `known_to` would show, and the resumed
+   directory ends byte for byte where one pass ends (tested by a kill and by
+   a refused write between the installs).
+3. Two installs are not made atomic with a marker: a marker would be a third
+   file to keep consistent, and every prefix is already a true, sealed state.
+
+### D-5168 — A day whose day file the source refused is never sealed: the build installs every record before it, stops naming the day and the source's words, and the next build resumes at it; the fold refuses to seal one and the decoder refuses a file holding one — 2026-10-20
+
+verify-PIT-1-r1 follow-up ("a transient SourceRefused or reader panic followed
+by a known day is sealed as refused for ever"). A refusal can be transient (a
+read that failed, a reader thread that panicked); sealing it made one bad
+moment a permanent "membership unknown" in an append-only file. Status code 4
+stays in the format's code list and is refused by the decoder. A day file
+that is refused every time stops every build at that day, loudly, until the
+source is repaired or a new source version is chosen (L-PIT-10): an operator
+sees it on `/logs` (`membership build refused`) and in the exit code. The
+real tick store refused no day over the whole span (18 Oct 2026, read-only),
+so the real build is unaffected.
+
+### D-5169 — The verifier's remaining PIT-1 findings, each at its cause: the temporary through `store::staging::create`; a missing directory named; the typed-window guard widened; the lookups' flatness measured by C-PIT-01; gate 11 and 1d declarations with their reasons; the post-build open failure logged — 2026-10-20
+
+1. **Gate 28.** `install` created its own `.<name>.tmp.<pid>` with
+   `create_new`; it now asks `store::staging::create`, gate 28's one door,
+   and unlinks the temporary whether the link succeeded or not, so a refused
+   install (the lost link race included) leaves none. Only a kill can, and
+   that is counted by `generations` and never read. The door's answer is
+   kept, not dropped: a dead writer's leftover under the install's own
+   temporary name is cleared by `store::staging::create`, which says how
+   many bytes it held, and `install` returns that in `Installed::Written`'s
+   `cleared`, which `cli fno-membership build` prints on the month's line and
+   in its `membership month` event (`cleared_bytes`); the final name is
+   flushed into the directory before a failed unlink of the temporary's
+   second name is refused (PIT-31).
+2. **A missing directory is refused by name** by `open`, `show` and `bench`
+   ("no such membership directory"); `build` is the one caller that starts
+   from nothing and makes it.
+3. **The typed window** (scratch only, D-5163) is also refused inside the
+   `--store ROOT` named on the same line and at any directory laid out as
+   `reference/fno-membership-v1`, not only inside `$BRUTEX_STORE` or
+   `$HOME/.brutex/store`.
+4. **Gate 12.** Every O(1) claim of `pull::fno_membership` names
+   `pull::bench::fno_membership_lookup_is_flat` (C-PIT-01), a ratio bench at
+   1x, 10x and 100x the held days over `members` and `is_member` on known
+   days and `members` on refused and outside days, with p50/p99/max printed.
+5. **Gate 11.** The fold's per-day sort is gone (D-5166 item 3); the two
+   handover counters are pre-sized; the handover-day check reads the
+   month's own row instead of a range test. Three constructs are declared with
+   their bound in `.github/gates_ledger.rs`: the name decoder's search inside
+   its fixed `NAME_LEN` bytes (rule 6), `cli fno-membership`'s four sorts
+   of its own report and bench samples, once per run (rule 4), and the
+   `fno-membership` arm of `store_write::writes_the_store`,
+   `arguments.contains(&"build")`, the arm shape gate 30 reads, over the
+   verb's own arguments (rule 7, that file 4 -> 5); all three in
+   `docs/06-limits.md` L-PIT-8.
+6. **Gate 1d.** The module's, its tests' and its bench's segment-shaped
+   literals are declared as `PIT_1_LITERAL` in `.github/gates_tree.rs`, each
+   read first: the format's words, the status and refusal words, and the
+   tests' scratch labels; none is a credential path segment.
+7. **`/logs`.** A build whose directory does not serve afterwards emits
+   `membership built and does not serve` (error) with the reason, as the
+   refused build already did.
+8. **No table is served short.** The day index read a day's members as
+   `entries.get(at..end).unwrap_or_default()`: a table whose pool ran past
+   its entries would have served that day with no member and its pool
+   count, a fallback that hides a failure (`CLAUDE.md` §4). A file's
+   decoder already refused it; a table served without a file
+   (`Membership::of`) did not. The index now refuses it by name ("a day's
+   members run past the month's entries"), and every chain and index check
+   is hit by its own damaged table in
+   `every_chain_check_refuses_its_own_damage` (PIT-32; ten checks: nine no test reached before, by the line coverage
+   measured on 20 Oct 2026, and the tenth is new).
 
 ### D-5902 — The sealed codec's bounds say what the code does: an accepted frame grows the caller's buffer by `Vec`'s amortised rule, not by its rows, and a frame of `m` rows is at most `56m + 172` bytes; D-4939 #5 amended by addition (AH-05, g-sc1-codec-3, g-sc1-codec-4) — 2026-10-19
 
@@ -76734,3 +78222,1029 @@ field must be refused, so a checker that refuses nothing fails the build.
 Proof: `no_store_or_census_key_is_built_from_a_token`,
 `the_module_list_is_closed_over_every_definition_of_a_key`,
 `a_token_field_in_a_fixture_key_builder_is_refused`.
+
+### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
+
+**Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026
+found every tracked file conforming to `CLAUDE.md` §2, and two places in
+shipped code that start an outside program anyway:
+`crates/api/src/disk_route.rs:127` ran `/bin/df -Pk <store root>` for
+`/disk.json`'s free space, and `crates/api/src/server.rs:18999`
+(`open_unless_suppressed`) opens the operator's browser through the platform's
+URL handler when the server starts. Nothing refused a run-time spawn: gate 2
+reads build scripts only, and no test read shipped code for one.
+
+**Decision.**
+
+1. **`/disk.json` measures in this process.** One `statvfs(2)` gives the three
+   numbers, each a count of `f_frsize`-byte fragments: `total_bytes` is
+   `f_blocks`, `used_bytes` is `f_blocks − f_bfree`, `free_bytes` is
+   `f_bavail` — the same three fields `df -Pk` printed in 1024-byte blocks, so
+   on a filesystem whose fragment is a multiple of 1 KiB the bytes are the ones
+   it gave, and on any other they are exact where it rounded. `mount` is where
+   the filesystem is mounted: on macOS `statfs(2)`'s `f_mntonname`, the field
+   BSD `df` prints; elsewhere the highest directory above the canonical root
+   still on its device, as coreutils' `find_mount_point` finds it. The keys,
+   their order and their types are unchanged; `source` reads `statvfs` instead
+   of `df -Pk`. Two refusals are new and name the root: one that does not exist
+   (`df` refused it too, in its own words) and one that is no directory (`df`
+   measured the filesystem around a file). `parse_df` and its test are removed:
+   nothing prints `df` output for it to read.
+2. **A new dependency, `rustix` 1.1.4**, `default-features = false`, features
+   `std` and `fs`, with `linux-raw-sys` 0.12.1 behind it on Linux; every other
+   package it names (`bitflags`, `errno`, `libc`, `windows-sys`) was already
+   locked at the version it takes. The `libc` already in the lock does not fit:
+   `api` is `#![forbid(unsafe_code)]` and every call through `libc` is
+   `unsafe`. `nix` was read and refused: its `Statfs` exposes no mount point on
+   macOS. `docs/07-plan.md` had already audited `rustix` 1.1.4 as locally
+   auditable with no native source. The registry scan, run before the pin
+   moved: `rustix` ships 318 `.rs` files and `linux-raw-sys` 462, and neither
+   ships a `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.asm` or `.js` file. On Linux
+   `rustix` makes the system call itself through `core::arch::asm!`, ordinary
+   stable Rust as `graviola`'s is; on macOS it calls `libc`. `linux-raw-sys`
+   has no `build.rs`. `rustix`'s `build.rs` runs `rustc` (or a
+   `RUSTC_WRAPPER`) on feature probes and emits `cfg`s: the same probe the
+   thirteen packages of `docs/06-limits.md` §96 run, so §96 now lists fourteen.
+   The `vocab` lockfile pin moves from 192 packages to 194 and to the new
+   fingerprint, with this scan recorded beside it.
+3. **A gate refuses a run-time spawn outside an allowlist.**
+   `crates/vocab/tests/no_runtime_spawn.rs` walks every `.rs` file under
+   `crates/`, lexes it (comments, strings, raw strings, chars and lifetimes
+   recognised; a file it cannot lex is a failure) and fails on any naming, in
+   shipped code, of the type the `process` modules of `std` and `tokio` start a
+   child with — the path with any spacing or a raw identifier, an import group
+   holding it, a glob import of the module and a renamed module. The needle is
+   assembled with `concat!`. Its allowlist holds exactly one function,
+   `open_unless_suppressed` in `crates/api/src/server.rs`, once, because it
+   *opens the operator's own browser, front-end launch, never a build or data
+   step*; an entry that stops matching, or a second naming in the same
+   function, is a failure. Test code is what only the test harness compiles:
+   any file under `crates/<crate>/tests/`; an item, statement, field, arm or
+   argument behind `#[test]` or a `cfg` that holds only under `test`
+   (`any(test, X)` and `not(test)` are shipped); a module file a test-only
+   `mod` declaration or `include!` names, by `rustc`'s path rules, closed over
+   every module those files declare; and a file under `#![cfg(test)]`. A file
+   named `*_tests.rs` that no test-only declaration reaches is shipped, and the
+   gate fails on its name. Benches, examples, binaries and build scripts are
+   scanned whole. On the tree before this change it failed with exactly one
+   line, `crates/api/src/disk_route.rs:127 in fn measure`; after it, it passes,
+   with the browser opener matched and the test-code namings counted.
+
+**Measured on the 4-core cloud container on 16 Oct 2026**: the base commit
+and this change, each with the same timing harness, run in three
+interleaved rounds; n = 1,000 each after 50 warm-up calls, one test thread, an
+empty store in a temporary directory, nearest rank; ranges are across the
+rounds. The harness was removed before this entry's commit.
+
+| What | Before (`/bin/df -Pk` child) p50 / p99 / max | After (`statvfs(2)`) p50 / p99 / max |
+|---|---|---|
+| `measure`, the filesystem step alone | 1.49–1.53 ms / 2.18–3.00 ms / 4.60–5.85 ms | 3.0–4.5 µs / 7.1–11.2 µs / 36–85 µs |
+| `measured`, the whole uncached answer | 1.54 ms / 2.16–2.31 ms / 4.16–6.95 ms | 17.4–23.2 µs / 44–76 µs / 91–561 µs |
+| `GET /disk.json` handler, cache cleared before each call | 1.62–1.65 ms / 2.35–3.27 ms / 4.66–9.66 ms | 67–72 µs / 136–152 µs / 0.21–0.85 ms |
+| `GET /disk.json` handler, cache warm | 39–40 µs / 82–140 µs / 0.13–2.38 ms | 39–41 µs / 94–130 µs / 0.27–0.46 ms |
+
+The handler rows go through `run_ops_read`'s admission and blocking pool, as a
+request does; the HTTP framing around them is not timed. The route serves a
+cached answer for 30 s, so a page's poll still costs one `Mutex` read between
+measurements; what changed is the cost of the read that misses. The
+operator's-machine figure in `docs/06-limits.md` L-WP81-4 included the child
+and was not re-taken.
+
+**What this does not decide.** Whether §2's build-script sentence should reach
+dependencies stays the owner's open question (D-2328, D-0555, D-1602), and this
+dependency adds one more probe to that inventory rather than answering it. The
+browser opener stays a spawn: the operating system's URL handler is the only
+way to open the browser the operator chose, and the allowlist names it rather
+than pretend it is not there. A dependency that spawns at run time is not under
+`crates/` and is not read by the gate; `crates/vocab/tests/workspace_is_rust.rs`
+pins the dependency set so a new one is reviewed. Nor does it build the
+tick-store writer's free-space floor: D-4967's "pure Rust has no `statvfs`
+without `libc`" stops being true of this workspace with this change, but
+`pull` does not depend on `rustix`, so `docs/06-limits.md` L-TSW-7 stands and
+taking it there is that floor's owner's choice (FM-055, R4-08).
+
+### D-5241 — On macOS `/disk.json` reads `statfs(2)`, not `statvfs(2)`; counts no filesystem can have are refused by name (RUST-1, completed on the operator's machine) — 2026-10-16
+
+**Finding.** D-5240 was built and run in a Linux container. Read on the
+operator's machine, two of its choices do not hold there. First, Darwin
+declares `fsblkcnt_t` 32 bits wide (`sys/_types.h` line 70, recorded with its
+digest in `docs/00-charter.md`, "Filesystem counts for `/disk.json`"), so
+`statvfs(2)`'s `f_blocks`, `f_bfree` and `f_bavail` cannot hold a volume of
+2^32 fragments or more (16 TiB at 4 KiB), and how Darwin folds such a volume
+into them was not read (UNVERIFIED). `statfs(2)`'s 64-bit structure carries
+64-bit counts and `f_mntonname`, the mount point BSD `df` prints. Second, the
+walk upward for the mount point names `/` for a directory behind APFS's
+`/private` firmlink, where `df` names `/System/Volumes/Data`: `stat -f '%d'`
+gave `/`, `/private`, `/private/var/folders` and `/System/Volumes/Data` one
+device, 16777232, on the operator's machine on 17 Oct 2026, and
+`/Volumes/WD_BLACK` another. And on every
+platform the byte arithmetic was `saturating_`: a 0-byte fragment answered 0
+bytes, more free fragments than fragments clamped `used` to 0, and an overflow
+answered `u64::MAX` — a wrong number served as a measurement, the quiet
+fallback `CLAUDE.md` §4 bans.
+
+**Decision.**
+
+1. **On macOS one `statfs(2)`** (`rustix::fs::statfs`, whose libc-backend
+   `StatFs` is the SDK's own `struct statfs`): `total_bytes` is `f_blocks`,
+   `used_bytes` `f_blocks − f_bfree`, `free_bytes` `f_bavail`, each times
+   `f_bsize`; `mount` is `f_mntonname`, refused by name when it is not
+   absolute. Off macOS D-5240 stands: `statvfs(2)` in `f_frsize` fragments and
+   the walk upward. `filesystem.source` names the call made, `statfs` on macOS
+   and `statvfs` elsewhere. No page reads `source` (`web/src` has no reader of
+   it), so the change is the label only. **ON APFS `used_bytes` IS NOT `df`'s
+   USED.** `total_bytes`, `free_bytes` and `mount` are what `/bin/df -Pk`
+   printed, byte for byte; `used_bytes` is too off APFS. On APFS several
+   volumes share one container, `f_blocks` and `f_bfree` are the container's,
+   and `df` prints the volume's own allocation in its Used column, which no
+   field of `statfs(2)` carries (how `df` reads it was not read: UNVERIFIED).
+   There `used_bytes` is the container's allocation, at least `df`'s figure
+   and above it by what the container's other volumes and reserves hold: on
+   the operator's machine about 90.9 GB on the boot volume and 0.86 GB
+   (855,900,160 bytes, the same on every quiet round) on the external drive
+   holding the store, `docs/06-limits.md` L-RUST1-1. No page reads
+   `used_bytes` (`web/src/lib/disk.js` shows free of total); an API reader
+   tells which call measured it by `filesystem.source`.
+2. **An answer no filesystem can give is refused by name**, never turned into
+   a number: a fragment of 0 bytes, more free or more available fragments
+   than there are, and a byte count above 64 bits. The refusal is the
+   answer's `filesystem.error`, naming the root, the impossibility and the
+   counts.
+
+**Proof.** `the_filesystem_numbers_are_what_the_call_returns`,
+`counts_no_filesystem_can_have_are_refused_by_name` and, on macOS only,
+`on_macos_total_free_and_mount_are_what_bin_df_printed` in
+`crates/api/src/disk_route.rs` (RUST1-05, RUST1-08, RUST1-09). The last starts
+`/bin/df -Pk` from the test and, on the temporary directory (the boot volume
+behind the firmlink) and on the crate's own directory (the external drive),
+three quiet rounds each, holds `total_bytes`, `free_bytes` and `mount` equal
+to `df`'s byte for byte, and `used_bytes` equal to `df`'s Used off APFS and at
+least it on APFS; it prints each pair. A round whose counts moved between the
+reads around it, or whose total or free bytes still disagree, is retried, up
+to 200 (L-RUST1-4). *Proof and the APFS sentence of item 1 corrected on 19 Oct
+2026, before this entry landed: it named a test that does not exist and
+claimed `df`'s figures byte for byte with no APFS exception (D-5244, the
+re-check that found it).*
+
+### D-5242 — `rustix` stays as `/disk.json`'s one new dependency: no crate already in `Cargo.lock` gives a safe `statvfs`; its build script's `rustc` probes are measured and listed, not exempted (RUST-1 merge-back) — 2026-10-17
+
+**Question.** D-5240 took `rustix` 1.1.4, whose `build.rs` starts `rustc` on
+feature probes. `CLAUDE.md` §2 forbids "any `build.rs` that invokes an
+external process", and whether that sentence reaches a dependency's build
+script is the owner's open question (D-2328, D-0555, D-1602). The merge-back
+was asked to settle it the safe way: take `statvfs` through a crate ALREADY in
+`Cargo.lock` that adds no new build script, and only if none fits keep
+`rustix`, measured.
+
+**What was checked** (on `fix/db-CLOUD-RUST1` after merging `feat/db-fix` at
+`62396df0`, aarch64-apple-darwin, 17 Oct 2026):
+
+| Candidate | In `Cargo.lock`? | Evidence | Verdict |
+|---|---|---|---|
+| `libc` 0.2.189 | yes | `cargo tree --locked -e normal,build -i libc` reaches it through `tokio`, `mio`, `socket2`, `signal-hook-registry`, `getrandom`, `cpufeatures`, `errno` and others | **does not fit**: every `libc::statvfs` or `libc::statfs` call is `unsafe`, and gate 16 makes every crate root `#![forbid(unsafe_code)]` (all fifteen roots under `crates/` carry it); calling it would mean lifting that for a crate, which gate 16 refuses |
+| `nix` | **no** | `cargo tree --locked -i nix`: "did not match any packages" | **does not fit the rule** (not in the lock). Read anyway, 0.30.1 from the local registry: its `build.rs` starts no process (`cfg_aliases` only), but it brings two packages (`nix`, `cfg_aliases`) and its `Statfs` has no mount-point accessor (no `f_mntonname` in `src/sys/statfs.rs`), so the macOS mount would need the walk upward D-5241 refused |
+| `std` | — | no `statvfs` or `statfs` in `std::fs` or `std::os::unix` | does not fit |
+| `rustix` 1.1.4 | added by D-5240 | safe `statvfs` and, on macOS, safe `statfs` whose `StatFs` is the SDK's `struct statfs` with `f_mntonname` | **kept** |
+
+**Decision.** `rustix` stays. What it adds, measured rather than argued:
+
+1. **To the native graph on this host, one package.** `cargo tree --locked
+   -e normal,build -i rustix` names `api` alone; `-p rustix` names
+   `bitflags`, `errno` and `libc`, all already locked. `linux-raw-sys` 0.12.1
+   is in `Cargo.lock` for Linux targets only (`-i linux-raw-sys` on this
+   host prints nothing). The lock grows 195 → 197 `[[package]]` entries.
+2. **At build time, three `rustc` probes.** A cold `cargo build -p rustix
+   --locked --offline --timings` in a new target directory, every `rustc`
+   invocation logged through a `RUSTC_WRAPPER` that records its arguments:
+   `rustix`'s build script ran `rustc --crate-type=rlib --emit=metadata` on
+   standard input 3 times, and its run took 0.6 s (cargo's timing report);
+   `libc`'s, already in the graph, ran `rustc --version` once in 0.4 s. One
+   build, on a machine running other builds: a measurement of one, not a
+   distribution. No probe compiles or links anything into the binary: each
+   emits metadata to a file in `OUT_DIR` and its exit status picks a `cfg`.
+   `docs/06-limits.md` §96 lists `rustix` as the fourteenth such package.
+3. **At run time, no child process** (D-5240), and the cost is measured on
+   the operator's machine by RUST1-10 (`docs/06-limits.md` L-WP81-4).
+
+**What this settles and what it does not.** For this dependency the trade is
+recorded: a shipped run-time child process (`/bin/df`, which the new gate
+`no_runtime_spawn` refuses) for three build-time `rustc` metadata probes of
+the kind thirteen packages already run, with no crate in the lock able to do
+the job under gate 16. The general question — whether §2's build-script
+sentence binds dependencies — stays the owner's, as D-2328 left it; this entry
+neither widens §2 nor exempts `rustix` from a future answer to it. If the owner
+rules that it binds, `rustix` is one of fourteen packages to replace, and
+`/disk.json` would have no in-process measurement left (`libc` and `nix` each
+fail as above).
+
+### D-5243 — The spawn gate's allowlist takes the watchdog's notice opener as its second entry (RUST-1 met R3-32) — 2026-10-17
+
+**Finding.** RUST-1's gate (D-5240) and R3-32's watchdog (D-4996) were built
+on two branches. Merged with `feat/db-fix` at `50093fa3` on 17 Oct 2026,
+`no_shipped_code_starts_a_program_outside_the_allowlist` failed with exactly
+one line: `crates/cli/src/watchdog_command.rs:739 in fn notify names the
+process-spawning type`. That is `Opener::notify`, which hands the watchdog's
+notice page (the app is down, or back) to `open`, the platform's URL handler.
+D-4996 chose it over a Notification Center banner because a banner needs
+`osascript` (an interpreter, gate 0) or an Objective-C binding, both refused by
+§2.
+
+**Decision.** Both intents are kept. The start is the same kind as the one
+entry D-5240 allowed — a page shown in the operator's own browser, never a
+build or data step — so `ALLOWED` takes it as its second entry:
+`crates/cli/src/watchdog_command.rs`, `notify`, count 1, reason *opens the
+watchdog's notice page in the operator's own browser, never a build or data
+step (D-4996)*. The count binds every `fn notify` in that file together, so a
+second spawn in `RecordOnly::notify` or another fails the gate. The test that
+pinned one entry is now `the_allowlist_is_the_two_browser_openers_alone`,
+which pins both entries field for field and fails on a third. Nothing in
+`watchdog_command.rs` changes. What the gate does not decide: whether a
+notice should one day be delivered without a child process (no Rust-only way
+to show a page in the operator's browser is known here), which stays R3-32's.
+
+**Proof.** `no_shipped_code_starts_a_program_outside_the_allowlist` failed
+before the entry with the line above and passes after it;
+`the_allowlist_is_the_two_browser_openers_alone` (RUST1-01).
+
+*Entry narrowed on 19 Oct 2026, before it landed: the allowlist names a
+function by its whole path in its file, `<Notify for Opener>::notify`, so
+another `notify` (`RecordOnly`'s, or one in a nested module) no longer shares
+the count; a spawn in one fails as not allowed (D-5244).*
+
+### D-5244 — The spawn gate is a model of `rustc` and Cargo that claims only the spellings it lists and refuses what it cannot place: import groups, macro variables and repetitions, shebang lines, whitespace and escapes as `rustc` reads them, what shipped code reaches under `tests/`, every directory and manifest; an allowlist entry is a function's whole path (RUST-1, repair round 1) — 2026-10-19
+
+**Finding.** A re-check of `fix/db-CLOUD-RUST1` at `8929f991` (19 Oct 2026,
+`state/fix/round2/verify-CLOUD-RUST1-r1.json`) planted spawns in shipped code
+and found six the gate (D-5240) passed with nothing allowed, each compiling
+under `#![forbid(unsafe_code)]` with rustc 1.97.1: `use std::process::{self as
+q}` then `q::Command`; the same from `tokio`; `use std::process::{*}`; a macro
+body `std::process::$t::new(..)` called as `mk!(Command)`; a first line
+`#!/x "`, which `rustc` drops as a shebang and the gate lexed as a string
+opening that hid the rest of the file; and a shipped `#[path =
+"../tests/h.rs"] pub mod h;`, whose file the gate exempted for sitting under
+`tests/`. Its walk skipped every directory named `target` at any depth, so
+`crates/api/src/target/mod.rs` went unread, and its allowlist matched a file
+and a bare function name, so `mod sneaky { fn open_unless_suppressed() { .. }
+}` in `server.rs` took the entry over. Reproduced here with the checker's own
+probe before any change: the six MISSED and the spoof passed. The gate's
+header, RUST1-02, RUST1-03 and L-RUST1-2 claimed coverage it did not have. Two
+more were found while fixing: a `#[path]` on `pub mod name;` was dropped,
+because the visibility was read as the item's start and took the attributes
+with it; and an integration test that `#[path]`s the crate root in made the
+crate root, and every module it declares, test code.
+
+**A second pass on 20 Oct 2026, before landing** (repair round 1b), attacked
+the repaired gate the same way. A 30-case probe (26 spellings, 4 controls)
+found all 26 passed, and two placements besides; each compiled with rustc
+1.97.1 on the operator's APFS drive and started `/bin/echo`, the four
+manifest ones as a crate Cargo built (`scratch/fix-CLOUD-RUST1-r1b/compile/`,
+`manifest/`, `state/fix/round2/logs-CLOUD-RUST1/r1b-manifest-cargo-build.log`): a macro repetition
+joining the path (`$($s::)*Command`, `$(::$b)*::Command`, `$($p)*::Command`),
+the module before a variable or a repetition (`std::process $(::$t)*`,
+`std::process $b $a`), a macro body handing one half on beside a variable
+(`j!($($s)* Command)`, `j!(std process $t)`, `k!(Command, $($s)*)`); a
+left-to-right mark inside the path, whitespace to `rustc` and not to
+`char::is_whitespace` (a right-to-left one after `::` was refused by chance); `include!` in brackets or braces, under
+`r#include`, or imported under another name; `#[r#path]`; the first of two
+`#[path]`s (the gate kept the last); a path spelled with `\x2f` or `\u{2f}`,
+which the lexer did not decode; an inline module given a `#[path]` or an
+inner `#![path]`; an `include!` or a `#[path] mod` in a `macro_rules!` body
+called from another directory, which `rustc` resolves at the call; a
+`#[path]` inside an inline module of a `#[path]`-loaded file, read without
+its stem; and in a manifest, a quoted key, a `#` inside a value, a
+multi-line value and a `\u002F` escape. Found while fixing, planted in the
+gate's tests and not built: a nested package's manifest, which went unread,
+and a value spelling `["test"]` on its own line, read as a `[[test]]` header.
+The two placements: a
+name in another case, which the case-insensitive disk finds, and an
+`include!` of a `.md` file. The title this entry
+had, "reads what `rustc` reads", claimed what a lexer cannot claim.
+
+**Decision.** Each is closed at its cause in
+`crates/vocab/tests/no_runtime_spawn.rs`, the gate claims only what it lists
+and plants, and what is still not seen is said:
+
+1. **Spellings.** Refused, besides the path, a group holding the type,
+   `process::*` and `process as`: a `process::{..}` group holding at any
+   nesting a `*`, a `self as` or a macro variable; a path going on from
+   `process::` with anything but a plain name, and the module's name straight
+   before a macro variable or a repetition; the type after a `::` that
+   follows no identifier (a generated segment, a group, a repetition),
+   straight after a repetition, or straight after a macro variable
+   (`$m::Command`, or `$s Command` where `$s` is `::`); two variables joined
+   (`$m::$t`); a `use` built from a macro variable; a macro invocation handed
+   the bare module name and the type apart, or either beside a macro
+   variable; `mod $name;`; an `include!` of no plain string, and a `use`
+   naming `include`. `$crate`, `x::`, `<S as T>::` before the type are plain
+   paths. Attribute bodies are read for the same spellings.
+2. **Lexing.** A leading byte-order mark and then a shebang line are dropped
+   as `rustc_lexer::strip_shebang` drops one: `#!` whose next token, past
+   whitespace and plain comments, is not `[`. `#!` before `[` is an inner
+   attribute and is read. Checked against rustc 1.97.1 on 19 Oct 2026 with
+   `--emit=metadata` on six scratch files: `#!/x "` and then code compiles
+   (the line is dropped), with a byte-order mark before it or not;
+   `#! /* c */ [allow(unused)]`, and `#!` with `[allow(unused)]` on the next
+   line, compile as inner attributes; `#! /// doc` with `[allow(unused)]` on
+   the next line fails with "expected item, found `[`", the doc comment having
+   ended the search, as this lexer reads it. `\r\n` is `\n`; whitespace is
+   `rustc_lexer::is_whitespace`'s set; a string's escapes are decoded (`\x`,
+   `\u{..}`, a line continuation and the whitespace after it); a raw
+   identifier is the same name (`r#include`, `r#path`).
+3. **What ships.** A file is test code by RUST1-03's rules and shipped
+   whenever shipped code reaches it: a `mod` by its default paths, its first
+   `#[path]` and every later one, or a `cfg_attr` path; an `include!` in any
+   delimiters; a module beside a `#[path]`-loaded file, and what a
+   non-`mod.rs` file declares looked for both under its stem and as a
+   `mod.rs` names it; a manifest target other than a `[[test]]`, the manifest
+   read as TOML; and a crate root the build compiles (the library, a binary,
+   the build script, a bench or an example) whatever else names it, so an
+   integration test that `#[path]`s one in exempts nothing. Closed over what
+   each reached file declares, under `tests/` or not. Only `#![cfg(test)]`
+   keeps a declared file test code.
+4. **What it cannot place is refused by name** (RUST1-13): a shipped
+   declaration with no `.rs` file where the model looks; an inline module
+   given a `#[path]` and any inner `#![path]`; an `include!` or `mod name;` in
+   a `macro_rules!` body; a manifest target of another kind or naming no
+   source; a manifest value in a multi-line string; and a shipped declaration,
+   a manifest target, a path dependency, a `[patch]` or a workspace member
+   outside `crates/`. A model that cannot place a file now fails loudly
+   where it used to pass quietly, which is what made most of the second
+   pass's spellings possible.
+5. **The walk.** Nothing under `crates/` is skipped by name; every
+   `Cargo.toml` there at any depth and the workspace's are read; every other
+   file is listed unread; a link is refused by name rather than passed over.
+6. **The allowlist.** An entry is the function's whole path in its file:
+   inline modules, traits, `impl` headers with generics and `where` dropped,
+   enclosing functions. The watchdog's entry is `<Notify for Opener>::notify`
+   (D-5243's note); `the_allowlist_is_the_two_browser_openers_alone` also
+   checks the file still has `impl Notify for Opener {`.
+
+**Still not seen**, and said in the gate's header and L-RUST1-2: a spelling
+the header does not list (the list is the claim, not a proof that no other
+exists); a dependency's own code, its re-export of the type under another
+name, and a dependency's macro whose own body spells the type; what a
+procedural macro or a build script generates; a foreign call (gate 16 closes
+it); the `cfg` predicates the gate does not evaluate, which it reads as
+shipped, erring towards failing; a build that sets `test` outside the harness
+(`--cfg test` in `RUSTFLAGS` or a `.cargo/config.toml`, a build script's
+`cargo:rustc-cfg=test`); and a file Cargo reads unasked outside `crates/`,
+such as a `.cargo/config.toml` overriding a dependency's source.
+`Cargo.lock` holds no crate whose run-time API starts a program besides
+`std` and `tokio` among `open`, `duct`, `subprocess`, `xshell`, `which`,
+`async-process`, `cmd_lib`, `execute`, `run_script`, `command-group`,
+`opener`, `webbrowser` and `nix` (none is in it; `cc` is, as a build
+dependency of `ring`, L-RUST1-3), checked on 20 Oct 2026.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` (RUST1-02),
+`test_code_is_what_cfg_test_compiles_followed_through_module_files`
+(RUST1-03), `the_allowlist_is_exact_about_file_function_and_count`
+(RUST1-04), `what_shipped_code_reaches_is_shipped_even_under_tests`
+(RUST1-11), `the_walk_reads_everything_under_crates_and_names_each_link`
+(RUST1-12), `what_this_scan_cannot_place_is_refused_by_name` and
+`what_a_macro_body_pastes_is_refused_by_name` (RUST1-13). The
+checker's probe (`scratch/verify-CLOUD-RUST1-c7-probe/gate/probe.rs`: 27
+cases and the spoof) run against the final gate: every case AS-CLAIMED and
+the spoof refused (`state/fix/round2/logs-CLOUD-RUST1/r1b-c7-probe-on-new-gate.log`).
+Its planted tree (`scratch/verify-CLOUD-RUST1-c7-plant`) fails naming all
+five plants: `disk_route.rs:207`, `target/mod.rs:1`, `zz_selfas.rs:1`,
+`zz_shebang.rs:2`, `zz_tokio_selfas.rs:1` (`r1b-plant-c7.log`). The second
+pass's 30-case probe (26 spellings and 4 controls,
+`scratch/fix-CLOUD-RUST1-r1b/probe/cases2.rs`): before, 26 missed
+(`r1b-probe-on-old-gate.log`); after, all 30 as expected
+(`r1b-probe-on-new-gate.log`). The five tests this pass changed or added, run against the gate before this
+pass, fail (`r1b-new-tests-on-old-gate.log`); all nine pass after.
+A copy of the tree merged with `feat/db-fix` at `dad1a760` with four of the
+new spellings planted fails naming each (`r1b-plant-merged.log`); the tree
+itself is green with its two entries.
+
+### D-5245 — `/disk.json` misses that arrive together take one measurement (RUST-1, repair round 1c) — 2026-10-20
+
+**Finding.** The re-check of 19 Oct 2026 (`state/fix/round2/verify-CLOUD-RUST1-r1.json`,
+its follow-ups) noted that the answer cache WP-81 gave `/disk.json` had no
+single flight: `answer` looked in the cache and, on a miss, measured, so
+misses arriving together each measured, up to the operations pool's four at
+a time, while `docs/06-limits.md` L-WP81-4 said the route "is measured at most
+once in 30 s".
+
+**Decision.** One measurement at a time per process, behind a second lock:
+a caller that misses takes the measuring lock, looks in the cache again (the
+caller ahead of it may have just filled it), and measures only if it is still
+empty, stale or for another root. The cache lock is never held while the
+measuring lock is asked for, so the two cannot deadlock; a poisoned lock is
+taken as it stands, as the cache's own lock already was. The hit path is
+unchanged. `measured` and the answer's bytes are unchanged, so RUST1-07 holds.
+
+**Proof.** `misses_that_arrive_together_take_one_measurement` in
+`crates/api/src/disk_route.rs` (RUST1-14): eight callers released together
+on an empty cache with a 50 ms measurement measure once and serve one answer.
+The same test against the old shape fails with 8 measurements on 30 of 30
+runs and passes against the new one on 30 of 30
+(`scratch/fix-CLOUD-RUST1-r1c/singleflight/before-after-30.txt`).
+
+**Cost.** L-RUST1-5: a waiting caller waits the rest of one uncached
+measurement; a hung filesystem holds the waiters as it held each caller
+before.
+
+### D-5246 — The spawn gate places an attribute by where it stands, and a bare `#[test]` exempts only what the built-in one takes (RUST-1, repair round 2) — 2026-10-20
+
+**Finding.** The re-check of 20 Oct 2026
+(`state/fix/round2/verify-CLOUD-RUST1-r2.json`) found the gate of D-5244
+exempting shipped code in three shapes, each compiled by rustc 1.97.1
+without `--test` into a binary that started a program: (a) `#[cfg(test)]` on
+a generic parameter (a type, a const or a lifetime; on a fn, a struct, an
+`impl` or a trait) or on a closure's parameter, whose span ran on through the
+whole item body because `item_end` counted neither `<` `>` nor `|` as
+brackets; (b) `#[cfg(test)]` on a field, an argument, a struct expression's
+field or a variant named `union`, `auto` or `macro_rules`, which `is_item`
+read as an item, so a comma no longer ended it and it swallowed every later
+field or argument; (c) `#[test]` where an import re-points the name
+(`use tokio::main as test;`). Seventeen probe cases were missed. Reproduced
+here before any change: the round's own 33 planted shapes, run against the
+gate at `2efdfeed0`, are missed 30 times (`r2-probe-on-old-gate.log`).
+Searching for the same class found more that rustc 1.97.1 compiles with the
+program kept: a binding named `union` in a match arm followed by a comma, the
+`use` inside a function body, `use pm::{passthru as r#test}`, `use pm::test;`,
+`#[macro_use] extern crate` of a crate with a macro named `test`, a field
+marked `#[test]` under a derive whose helper is named `test`, a `#[test]` fn
+in an `impl` or in a macro body invoked beside such a `use`
+(`r2-rustc-proofs.log`, all in `state/fix/round2/logs-CLOUD-RUST1/`).
+
+**Decision.**
+
+1. **Where the attributes stand decides what they are on.** Only at the
+   start, or straight after `;`, `{`, `}` or the `]` closing another
+   attribute, can an attribute be on an item; after `<`, `,`, `(`, `|` or
+   `=` it is on a parameter, a field or an expression whatever keyword
+   follows (`<#[cfg(test)] const N: usize>`).
+2. **`union`, `auto` and `macro_rules` begin an item only in item syntax**:
+   `union Name {`, `union Name<` or `union Name where`; `auto trait`;
+   `macro_rules!`.
+3. **What is not an item also ends before a `>` that is not half of `->` or
+   `=>`, and before a `|`**, so a gated generic parameter ends at the `>`
+   closing its list and a closure's at the `|` closing its own. **An item
+   also ends at a `,` outside its generics and its `where` clause**, the only
+   places an item has one outside brackets, so an item a macro is handed in a
+   list does not run into the next. Ending early only reads more as shipped.
+4. **A bare `#[test]` exempts only a free `fn` written directly in a module**
+   (the file's or an inline one's), in a file holding no `use` or
+   `extern crate` that spells `test` anywhere and no `include!`. rustc
+   refuses the built-in `#[test]` on anything but a free function, so a
+   `#[test]` that compiles elsewhere is not the built-in one; a glob import
+   and a macro-expanded binding cannot re-point it (rustc 1.97.1 refuses both
+   as ambiguous with the prelude, E0659: `w5`, `p2`, `p4` in the proofs log);
+   `cfg` cannot be re-pointed at all ("name `cfg` is reserved in attribute
+   namespace", `w2`). `#![test]` no longer makes a file test code (rustc
+   refuses it at crate level and inside a module).
+5. **Refused by name**: a shipped `#[macro_use] extern crate`, which
+   re-points `#[test]` in every file of its crate, and a fn only a bare
+   `#[test]` exempts in a file an `include!` pastes into shipped code, where
+   `test` resolves in the file that pastes it.
+6. A naming in a fn's signature, before its body opens, is placed in that fn
+   (`crates/x/src/lib.rs:3 in fn run`), not in no function.
+
+The verifier's own suggestion for (c) was to stop exempting in a file whose
+import binds `test`; that is item 4's first half, and the rest (free fn,
+directly in a module, no `include!`, the two refusals) closes the doors its
+suggestion left open: the block `use`, `#[macro_use]`, a derive helper, a
+macro body and a pasted file.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants all
+33 shapes in shipped code and each is refused, with 14 exempt controls
+(RUST1-15); against the gate before this round the same 33 are missed 30
+times, the three caught being controls the old gate already held. The
+re-check's own probe (17 missed cases, 9 controls) built against this gate is
+26 of 26 as claimed, its file probe 8 of 8, and its tree with three planted
+shipped files fails naming `zz_r2b_field.rs:1`, `zz_r2b_generic.rs:1`,
+`zz_r2b_param.rs:1 in fn run` and the control. On the merged tree the gate
+passes with both allowlist entries at their counts (RUST1-01).
+
+**Cost.** One pass per file for `may_rebind_test`, and a backward bracket
+match for a `]` before an attribute run: test-time only, no shipped code.
+L-RUST1-6 says what stays a model rather than the resolver.
+
+### D-5247 — An empty store root is refused by name at `/disk.json`, and an unreadable workspace manifest fails the spawn gate's walk (RUST-1, repair round 2) — 2026-10-20
+
+**Finding.** The same re-check noted two quiet paths: `measure("")` gave
+`statfs("")`'s ENOENT sentence, which names nothing; and `sources_under`
+read the workspace `Cargo.toml` with `if let Ok`, so a manifest it could not
+read was skipped without a word.
+
+**Decision.** `measure` refuses an empty root first, with *the store root is
+empty: it names no directory, so no filesystem is measured for it*, on both
+platforms; the server already refuses an empty `BRUTEX_STORE` at start
+(`server::tests::an_empty_folder_or_a_relative_home_is_refused_not_resolved`,
+CE-33), so this is the door of any other caller. `sources_under` panics with
+the manifest's path and the error, as it already did for every other file it
+cannot read.
+
+**Proof.** `an_empty_root_is_refused_by_name` (the sentence, and the answer's
+`filesystem.error` with no `free_bytes`) and
+`the_walk_reads_everything_under_crates_and_names_each_link` (a tree with no
+workspace manifest panics, then with one is read) — RUST1-16.
+
+**Cost.** One emptiness check before the measurement's `statfs(2)`.
+
+### D-5248 — An attribute inside a macro call's input or a `macro_rules!` body exempts nothing from the spawn gate (RUST-1, repair round 2, self-check) — 2026-10-20
+
+**Finding.** Repair round 2's self-check, looking for the class the re-check
+of 20 Oct 2026 found (an attribute placed on more than it is on), found the
+gate of D-5246 honouring a `#[cfg(test)]` that stands inside a macro's
+tokens. Those tokens are not code yet. rustc 1.97.1, without `--test`,
+compiled each of these into a binary that ran the program
+(`state/fix/round2/logs-CLOUD-RUST1/r2r-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2r/rc/`): a1, a call
+`m! { #[cfg(test)] pub fn run() { .. } }` to a `macro_rules!` whose arm
+`(#[$a:meta] $($t:tt)*)` drops the attribute; a2, a `macro_rules!` body
+writing `#[cfg(test)] $(fn $n() {})* pub fn run() { .. }`, where the
+attribute lands on the first repeated fn and `run` ships; a6, the same with
+an item variable, `#[cfg(test)] $i pub fn run()`; a7, a comma list
+`#[cfg(test)] const A: bool = 1 < 2, const B: fn() = || { .. }` a matcher
+takes, whose `<` kept D-5246's item rule from ending `A` at its comma. The
+gate before this change missed all twelve shapes planted for it
+(`r2r-probe-on-old-gate.log`). Checked and refused by rustc, so no door:
+attributes in a `where` clause (a3, E0658), a `macro_rules!` used as an
+attribute named `test` (a4, E0658), and an `include!` of a file that opens
+with `#![cfg(test)]` (a5, "an inner attribute is not permitted in this
+context"). `cfg(r#test)` is `test` (b1), as the gate reads it.
+
+**Decision.** Inside a macro call's input (`name!(..)`, `name![..]`,
+`name! {..}`, through a path or a raw name) or a `macro_rules!` body, a
+`#[cfg(test)]` exempts nothing: what stands after it is read as shipped. The
+gate's pass keeps the depth each such bracket opened at, and an attribute
+read there does not gate. A `!` after a keyword (`if !{..}`,
+`return !(..)`) is a negation and opens no macro input. A `#[cfg(test)]` on
+the call itself or on the `macro_rules!` item is outside its tokens and
+still takes the whole of it; a bare `#[test]` was already held to a fn
+directly in a module (D-5246), which a macro's input is not. Erring towards
+failing costs a false refusal of a spawn some macro really does keep under
+test, never a pass; L-RUST1-7 says so and names the two places such test
+code can put the attribute instead.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants the
+twelve shapes, each refused, with six exempt controls (the gated call in
+two forms, three negations, and a gated fn and module after a call closes) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-17); `r2r-probe-on-new-gate.log`
+has none missed, and six hand mutants of the new code (never leaving a
+macro, a keyword before `!` opening one, the check dropped, any
+`ident ! ident {` taken for a `macro_rules!` body, `k > 3`, leaving at any
+closing bracket) each fail that test (`r2r-hand-mutants.log`). `no_shipped_code_starts_a_program_outside_the_allowlist`
+passes on this branch after its merge of `feat/db-fix` on 20 Oct 2026, with both
+allowlist entries at their counts.
+
+**Cost.** One look back of at most three tokens at each opening bracket the
+pass steps over, and a stack of open macro depths: test-time only, no
+shipped code.
+
+### D-5249 — What an attribute macro is handed exempts nothing from the spawn gate, and a bare `#[test]` beside one exempts nothing (RUST-1, repair round 2, resumed self-check) — 2026-10-20
+
+**Finding.** The resumed self-check of repair round 2, looking again for the
+class the re-check of 20 Oct 2026 found (an attribute honoured where `rustc`
+does not honour it), found the gate of D-5248 trusting attributes that an
+attribute macro is handed. An attribute macro receives the item it is on,
+the attributes after it on that item and every token inside the item, and
+returns whatever it likes. rustc 1.97.1 does not evaluate the `cfg`s inside
+that input first. With a proc-macro crate `pm2` written for the proof
+(`strip`, which drops the attributes after it, and `strip_all`, which drops
+every attribute in the item), rustc compiled each of these without `--test`
+into a binary that ran the program or kept the field
+(`state/fix/round2/logs-CLOUD-RUST1/r2s-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2s/rc/`): q1 `#[pm2::strip] #[test] pub fn
+launch()`; q2 the same through `#[cfg_attr(all(), pm2::strip)]`; and, under
+`#[pm2::strip_all]`, r1 a module holding a `#[test]` fn, r2 a fn holding a
+`#[cfg(test)]` statement, r3 a struct holding a `#[cfg(test)]` field, r4 a
+fn with a `#[cfg(test)]` parameter, r5 an `impl` holding a `#[cfg(test)]`
+fn, r6 a struct whose generics hold a brace (`<const N: usize = { 3 }>`), r7
+a `static` whose value holds a `#[cfg(test)]` fn in its second block, and r8
+an `impl Tr<{ 1 }>`. The gate before this change missed all fifteen shapes
+planted for it, and a copy of the real tree with two such files passed it
+(`r2s-d5249-probe-old-vs-new.log`, `r2s-plant-real-tree.log`).
+
+Which names an import can re-point was measured, not assumed:
+`use pm2::strip as <name>; #[<name>] #[test] pub fn launch()` kept the
+built-in and dropped `launch` for each of `allow`, `automatically_derived`,
+`cold`, `deny`, `deprecated`, `doc`, `expect`, `forbid`, `ignore`, `inline`,
+`macro_export`, `macro_use`, `must_use`, `non_exhaustive`, `path`, `repr`,
+`should_panic`, `track_caller`, `used` and `warn`, and ran the macro and
+shipped `launch` for `derive`, `default`, `global_allocator`, `test_case`,
+`cfg_eval` and `bench`. Checked and refused by rustc, so no door: an
+attribute macro on a statement (st1, E0658 "custom attributes cannot be
+applied to statements") and an inner attribute macro (i1, E0658 "inner macro
+attributes are unstable"). And `cfg` comes first: `#[pm2::strip]
+#[cfg(test)]` and `#[cfg(test)] #[pm2::strip]` both dropped the fn (q4, q7),
+as did `#[test] #[pm2::strip]` (q3) and `#[inline] #[test]` (q5).
+
+**Decision.** An attribute MAY BE A MACRO unless it is `cfg`, one of the
+twenty built-ins above, a `cfg_attr` all of whose attributes are not, or
+`test` or `derive` in a file where no `use`, `extern crate` or `include!`
+can re-point the name; a path (`tokio::main`, `rustfmt::skip`) and a raw
+name may be one. Where one stands on an item, from the item's start to its
+end no attribute exempts anything: the end is the item's `;`, or the brace
+closing its body, which is the first `{` outside its generics, and for a
+`const`, `static`, `type`, `use` or `extern crate` only its `;`, so the end
+errs late, never early. A bare `#[test]` with one beside it exempts nothing.
+A `#[cfg(test)]` beside one still takes the whole item. Erring wide costs a
+false refusal (`#[test] #[pm2::strip]`, which rustc drops, and a
+`#[cfg(test)]` inside a `#[serde(..)]` struct, are refused); L-RUST1-8 says
+so. The merged tree has no such case.
+
+**Proof.** `a_planted_spawn_is_refused_by_file_line_and_function` plants
+the fifteen shapes, each refused, with seven exempt controls (`cfg` beside a
+macro, `#[inline] #[test]`, a `derive`, `#[must_use]`, the tree's own
+`cfg_attr(not(test), expect(..))` before `#[test]`, and a gated fn after a
+macro's item and after a bodiless `const`) and the placement
+`crates/x/src/lib.rs:4 in fn run` (RUST1-18). Thirteen hand mutants of the
+new code (no attribute a macro, `derive` always built-in, no region kept,
+the body at the first brace, `#[test]` beside a macro exempting, `cfg_attr`
+never a macro, nothing bodiless, generics ignored, the region unread, `test`
+never a macro, a path built-in, an item's region ended as a non-item's, the
+region never taken) each fail that test (`r2s-hand-mutants.log`). The re-check's 26-case probe is 26 as
+claimed and its planted tree still fails naming all four files
+(`r2s-verifier-probe-on-new-gate.log`, `r2s-plant-trees-on-new-gate.log`);
+`no_shipped_code_starts_a_program_outside_the_allowlist` passes on this
+branch's tree with both allowlist entries at their counts.
+
+**Cost.** One look at each outer attribute's first tokens, a second
+file-wide look for `derive` beside the one for `test`, and one forward walk
+per item an attribute macro may be on: test-time only, no shipped code.
+
+**Addendum, 21 Oct 2026 (repair round 2, resumed again): a test-only
+attribute on a `where`-clause predicate is refused by name.** This block's
+numbers end here, so the last self-check of the round is recorded in the
+entry it extends rather than in a new one. Looking once more for the same
+class, a 42-case probe found four shapes the gate still exempted:
+`where #[cfg(test)] T: Copy { body }` on a fn, an `impl` and a struct, and
+`where T: Copy, #[cfg(test)] U: Copy { body }`. A predicate is not an item,
+so its exemption ran under `item_end`'s non-item rule, and with no `,`, `>`
+or `|` before the body it ran on through the body
+(`state/fix/round2/logs-CLOUD-RUST1/r2t-selfcheck-probe-on-old-gate.log`).
+rustc 1.97.1, the pinned toolchain, refuses all four (E0658, *attributes in
+`where` clause are unstable*; `r2t-rustc-proofs.log`, sources in
+`scratch/fix-CLOUD-RUST1-r2t/rc/`), so none can ship today, but the gate's
+header promises that what it cannot place is refused by name, and a
+toolchain that stabilised the syntax would turn the miss into a real one.
+
+*Decision.* An attribute that would exempt (a test-only `cfg`), standing
+straight after `where` or after a `,` with a `where` before it in the same
+brackets and no `;` or `{` between, is refused by name as *puts a test-only
+attribute on a where-clause predicate, which rustc 1.97.1 refuses (E0658):
+this scan cannot place what it is on*, and exempts nothing, so the body
+after it is read as shipped. A gated parameter of a function-pointer type
+inside a predicate (`T: Into<fn(u8, #[cfg(test)] u8)>`) is inside brackets
+the `where` is not, so it is placed as before; rustc compiled that one
+without `--test` into a binary that ran the program (`fp1.rs`). Refusing
+rather than modelling the clause errs towards failing.
+
+*Proof.* `an_attribute_on_a_where_predicate_is_refused_by_name` plants five
+refused shapes (also after `F: Fn(u8) -> u8,` and beside another attribute),
+each failing by file, line and scope together with the naming in the body,
+and ten placed controls (a gated parameter before the clause, a gated field
+in the body, also after another field, a `where` closed inside brackets,
+test code, a fn after a clause's item, the function-pointer parameter, and
+generics after a `;`-ended item's clause or with nothing before them). It fails on the gate before this
+change and passes after; twelve hand mutants of the new code each fail it
+(`r2t-hand-mutants.log`; a thirteenth is equivalent, since an exempting
+attribute is never in test code). The probe is 42 of 42 on the new gate
+(`r2t-selfcheck-probe-on-new-gate.log`), the re-check's 26-case probe stays
+26 of 26, a copy of the real tree with two such files fails naming both, and
+the three earlier planted trees fail naming every file as before
+(`r2t-plant-trees-on-new-gate.log`). RUST1-19; L-RUST1-6 says the model is
+of the pinned toolchain.
+
+*Cost.* One look at the token before each exempting attribute and, after a
+`,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
+test-time only, no shipped code.
+
+### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
+
+The design's own id (`state/design/ingest-automation.md` §16, D-4814),
+landed with that number by IA-3-OPT, the options remainder of IA-3, whose
+report left it parked as options work. The 20 Oct options replan withdrew
+the parking.
+
+1. **Read only, and never a source.** `pull::gdfl_v3` opens two files per
+   options day, `<root>/<yyyy>/_v3/manifest/<hex>.ok.tsv` and
+   `<root>/<yyyy>/_v3/ok/<hex>.ok`, where `<hex>` is the lowercase hex of the
+   day zip's name inside its year zip (`NfoZips::day_zip_name`,
+   `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`). Each is opened with one
+   read-only `File::open` and read up to a cap of 64 MiB for a manifest and
+   4 KiB for a marker. A larger file is `Unverified` and is never read whole.
+   Nothing in the ledger is written, created, renamed, removed, locked or
+   flocked, and `lock.guard` and `place.lock` are never named. A
+   source-shape test pins this. No bar is ever read from the ledger.
+2. **Trust.** A manifest is compared only when its ok marker agrees with it.
+   The marker's measured shape is `x3-marker 1` followed by one `key=value`
+   line each for `name_hex`, `crc`, `size`, `manifest_sha256`, `day_hex`,
+   `files`, `bytes` and `run`. It must name this day zip (`name_hex`, and
+   `day_hex` without `.zip`). Its `crc` must be 8 hex digits and its `size`,
+   `files` and `bytes` decimal. Its `manifest_sha256` must equal the sha256
+   of the manifest's bytes, and its `files` and `bytes` must equal the
+   manifest's count of file lines and the sum of its sizes. Any other marker
+   makes the day `V3::Unverified { why }`, which is never compared and so
+   never `Agrees`. **This corrects the design, by measurement over all
+   1,997 markers:** `crc` and `size` are the *day zip's* CRC-32 and size as
+   its year zip records them, not the manifest's. The reader holds `size` to
+   the day zip's member bytes wherever the source read them.
+3. **A line is exactly 6 tab fields.** Field 2 (the size) must be decimal,
+   field 3 (the CRC) 8 hex digits, and fields 4 and 5 decimal. Fields 4 and
+   5 are read and never interpreted: what they mean is **UNVERIFIED**
+   (design §3.11). A line of 5 or 7 fields, a non-hex CRC, a non-decimal
+   size, a byte that is not UTF-8 or a last line with no newline (torn) is
+   `V3::Malformed { line, why }`, named by its one-based line number. It is
+   never skipped, and its day is told as unverified.
+4. **The mapping and the comparison.** A listing entry maps to `<MON_yyyy>/`
+   plus the entry with every `\` turned to `/`. Directory lines are kept on
+   both sides (design §6.1, :2221). Manifest line `i` is held to listing
+   entry `i` on path, size, CRC-32 and source day zip, in that order, with at
+   most one difference per line, and the day zip's size is held to the
+   marker. The answer is `Agrees { lines }`, or `Disagrees { count, first }`
+   naming the first differing path and what differs there. The cost is
+   O(entries of the day) plus one sha256 of the manifest: one pass, no map,
+   no sort, and no allocation for a line that agrees.
+5. **Absence is named and is not an error of the day.** A day for which the
+   ledger holds neither a manifest nor a marker is
+   `Absent { why: "no manifest for <day zip>" }`. A marker without its
+   manifest is `Unverified`. `V3::code` gives the day block's byte: 0
+   absent, 1 agrees, 2 disagrees, 3 unverified or malformed.
+6. **Not built here (IA-6's, after this part).** The completeness sweep's
+   per-day check, the day flag `v3_manifest_disagrees` with
+   `manifest{count, first}`, and test IA-GV-07.
+
+Tests (`pull::gdfl_v3::tests`): `a_v3_manifest_line_maps_to_its_listing_path`,
+`a_disagreeing_v3_manifest_names_its_first_difference`,
+`an_unverified_v3_manifest_is_not_trusted`,
+`a_malformed_v3_line_is_named_with_its_line_number`,
+`the_v3_extremes_are_each_named`, `the_v3_ledger_is_never_opened_for_writing`,
+and the ignored, read-only
+`the_real_v3_ledger_agrees_with_the_real_year_zips`. Invariants IA3OPT-01 to
+IA3OPT-07 and IA3OPT-11. Limit L-IA3OPT-01.
+
+### D-4867 — The `_v3` ledger's root is `BRUTEX_GDFL_V3_LEDGER`, read through the one source-root rule, with no default (IA-3-OPT) — 2026-10-20
+
+The design's own id (`state/design/ingest-automation.md` §16, D-4867),
+landed with that number by IA-3-OPT.
+
+`V3Ledger::from_env` reads the variable through `gdfl_run::source_root`,
+the rule every `BRUTEX_GDFL_*` source root is read by (D-4801). Unset or
+empty, it is `V3Ledger::Unset`, and every day answers
+`v3: absent (BRUTEX_GDFL_V3_LEDGER unset)`. There is no default path, and no
+path literal appears in tracked code. The design's further sentence, "and
+`/gdfl/sources.json` names the variable", is **NOT BUILT here**: there is no
+such route on `feat/db-fix`. It belongs to whichever package builds the page
+that lists the import's sources.
+
+Test: `an_unset_v3_ledger_is_named_never_defaulted`. Invariant IA3OPT-04.
+
+### D-6246 — R3-30: the reference tables are store data read through one loader; a rate carried over a documented RBI gap is labelled on the wire and bounded — 2026-10-20
+
+Number taken from the ledger head at commit (amendment A6); the landing
+renumbers it if another package lands D-6246 first.
+
+Findings DB-B44, DB-G76 (store side), SC-CLOSE-15 (partial), SC-CLOSE-23,
+SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
+`verify-R3-30-r1`.
+
+1. **Seven tables, one loader.** `calendar`, `index_identity`,
+   `symbol_changes`, `fno_list`, `expiry_moves`, `lot_sizes` and
+   `risk_free_rate` are files under `<store>/reference/v1/<table>/`
+   (`docs/02-store-format.md`, "Reference tables, format version 1").
+   `pull::reference_data::load` reads the newest generation of each, checks
+   its sha256, and serves it labelled `store`; a file that fails any check is
+   refused by name (table, file, generation, kind) and nothing of that table
+   is served, never the compiled copy in its place. A table with no
+   generation is served from the copy this build compiled, labelled
+   `compiled`; `risk_free_rate` has no compiled copy and answers a named
+   absence. Each load is one event per table; an absence of a table with no
+   compiled copy is told at `warn` (`table absent`), a refused file at
+   `error`.
+2. **Writes append.** A generation is staged under the writer's own name,
+   synced, hard-linked to `<generation:020>.ref` and the directory synced; no
+   generation is rewritten. Bytes identical to the newest generation land
+   nothing (`Written::landed` is `false`); generation `u64::MAX` refuses the
+   next write by name (`WriteError::Exhausted`), never as a race. Names in a
+   table directory that are not generations are never served and never
+   ignored in silence: `Reference::strays` keeps them and one `warn` event
+   per table names them.
+3. **A documented RBI gap carries the rate, labelled (DB-B44).** The T-bill
+   table may hold a gap row (`cut_off_price` `CANCELLED`, `NA` or
+   `NOT_HELD`, no yield, an RBI URL). It restarts the 14-day staleness clock
+   (`MAX_AGE_DAYS`, D-2810), and a day it covers is priced on the previous
+   result's rate with `rate_state` `rate_carried` and `rate_gap` (kind and
+   release day) on every `/greeks.json` cell; the `rate` header counts
+   `gaps` beside `auctions`, and `/db` tags the IV cell `C` and names the gap
+   in its title. A run of gaps carries a result at most
+   `MAX_CARRIED_AGE_DAYS` = 28 days (two staleness windows: the operator's
+   table holds at most two consecutive weeks without a 91-day cut-off);
+   past it every cell is refused `rate_carried_too_long`. A gap nobody
+   documented is refused `rate_stale` exactly as before.
+4. **Lot rows carry their standing (DB-G76, store side).** Every lot row has
+   its source, source sha256 and read day; only a row whose source is
+   recorded in `docs/00-charter.md` applies, others are listed `unverified`
+   and not applied, and an underlying or day with no applied row is a named
+   absence. `costs::lot::LotTable` is built from rows `pull` hands it, so
+   `costs` still names `core` alone. The compiled `costs::lot::lot_size`
+   path is unchanged, so until R3-10-OPT moves readers onto the table the two
+   answers differ on the spans whose revisions are unsourced; the table is
+   the authority for every new reader.
+5. **A reused symbol closes its day (FM-112).** `nfo_cause`'s
+   `UnderlyingStale` is a vendor cause that closes, like `cm_cause`'s
+   `SymbolNotInUse`: one action item per symbol change, never a nightly
+   incomplete; the day is read again only by a named re-read once an alias
+   row lands.
+6. **A calendar extension lists, never re-files (FM-109).**
+   `expiry_alias::rekey_plan(contracts, held, newer)` lists every contract
+   that settles `as_stated_unmeasured` under the calendar the store holds
+   now and that the newer calendar settles elsewhere or refuses; applying it
+   is the rekey writer's (R4-21).
+7. **Every expiry row says what it rests on.** Five NIFTY rows cite
+   NSE/FAOP/68747 (D-3358), five DB-B01 rows are inferred with their cause
+   UNVERIFIED, and the rest are census measurements.
+8. **A dated record that ends, or is not served, is an alert.**
+   `Reference::horizons` answers each table's refusal rather than `None`, and
+   `Reference::horizon_alerts` names every record within
+   `HORIZON_ALERT_DAYS` of its end, past it, or absent. The tile is R3-25's.
+9. **A loaded row keeps its own provenance.** The seed writes each
+   citation as `<url> read <day>` with ` sha256 <hex>` when the charter
+   records one, and the loader reads a source column in exactly that shape
+   back as the row's own citations (URL, read day, checksum); a source in
+   any other words cites the file that holds it, with the row's words as
+   what it says.
+
+### D-6247 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
+
+Number taken from the ledger head at commit (amendment A6; `feat/db-fix`'s
+head is D-6245 and D-6246 is R3-30's own); the landing renumbers it if
+another package lands D-6247 first. Amends D-6246 item 3; finding DB-B44,
+blocking issue of `verify-R3-30-r2`.
+
+1. **What was wrong.** D-6246 item 3 let a gap row restart the 14-day clock
+   whatever came before it. A gap row released MORE than `MAX_AGE_DAYS`
+   after the previous row therefore restarted a clock that had already run
+   out: a result refused `rate_stale` (an auction nobody explained is
+   missing) was priced again from the day after the gap, labelled
+   `rate_carried` as if the gap were the only reason. Reproduced by the
+   second agent on invented rows and on the wire (2024-09-26 `rate_stale`,
+   2024-09-30 priced on the same 2024-09-11 rate).
+2. **The rule.** A gap row documents ONE scheduled auction. It continues a
+   clock only when the row before it (a result, or a gap row that itself
+   continues one) is at most `MAX_AGE_DAYS` older: the clock still running
+   on the gap's release day. Otherwise the gap row carries nothing: the days
+   it owns are refused `LookupError::HoleBeforeGap`, naming it, served on
+   `/greeks.json` as `rate_stale` with that sentence as the detail, and a
+   gap row after it carries nothing either. A result always starts a clock.
+   `MAX_CARRIED_AGE_DAYS` still bounds every carried run.
+3. **Said, not silent.** `Series::unlinked_gaps` lists such rows; the
+   `/greeks.json` rate header counts them as `unlinked_gaps`; loading a
+   stored table that holds one emits one `warn` event (`rate gap rows after
+   an unexplained hole`). The table is still served: one hole refuses its
+   own days, not every day of the table.
+4. **Why not refuse the table.** A refusal at parse would withdraw every
+   rate in the table over one undocumented week, so every greek on every
+   other day would be refused for a fault that is not theirs. The days the
+   fault touches are refused by name instead. The operator's documented
+   gaps (2024-09-18, 2024-09-25, 2025-02-20, 2026-03-25, the week of
+   2026-03-30) each fall 6 to 14 days after the previous row and are
+   unaffected.
+5. **Followups taken.** `below_zero_carry_bound` and `iv_unsolved` computed
+   on a carried rate say so in their detail. A source part is read as a
+   row's own citation only when its read day is a real calendar day and its
+   location is an `http(s)` URL with a host or a path (what
+   `brutex_core::alias::Citation::url` says a location is); other words cite
+   the file. The five NSE/FAOP/68747 expiry rows carry the checksum the
+   charter records for the bytes read.
+
+### D-6890 — An options day zip filed anywhere but its own place in its own year's zip is named where it lies, never "not held" (IA-3-OPT; FM-043) — 2026-10-20
+
+From the block D-6890..D-6899 recorded for IA-3-OPT in
+`state/decision-blocks.json` by the 20 Oct options replan.
+
+Before this, `NfoZips::day` looked only in `<the day's year>.zip`, under the
+exact name `<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`. A day zip packed
+anywhere else was therefore never listed and never flagged, and its day read
+as not held. That covered 2025-12-31 packed into `2026.zip`, a day under
+another month's folder or at the zip's root, and a day inside a fiscal-year
+`2025-26.zip`.
+
+1. **One walk, then one probe per day.** On the first day asked, the source
+   lists its directory once and walks every `*.zip` in it. Each `<yyyy>.zip`
+   becomes that year's index, keyed by day, holding only the day zips at
+   their own place. Every `GFDLNFO_TICK_<ddmmyyyy>.zip` entry found anywhere
+   else, and every day zip in a zip of any other name, is noted under its
+   day as `<zip>:<entry>`. The cost is O(names in the directory) plus
+   O(entries) per zip, once per source object. After that, a day costs one
+   probe of its year's index and one probe of the notes. Names that do not
+   end `.zip` (`.DS_Store`, `2024.zip.part`) are never opened.
+2. **D-4818's one rule files each copy**, as `gdfl_archive::file_copy` does
+   for the capital-market archive. One copy at its own place reads. One copy
+   only elsewhere refuses `day_zip_misfiled { found, expected }`, where
+   `found` is `<zip>:<entry>` and `expected` is
+   `<yyyy>.zip:<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.zip`. Two copies anywhere,
+   within one zip or across two, refuse `archive_duplicate_day`. Both reach
+   `cm_cause` through `NfoRefusal::Source` unchanged and stay open: neither
+   closes the day.
+3. **An unread zip never lets a day read as not held.** A zip that refuses
+   while the directory is listed is kept as unread. A day of its own year
+   refuses with its refusal when asked, as before. A day held nowhere
+   readable answers the first unread zip's refusal, never `Ok(None)`,
+   because that zip may hold it. Once the zip reads, it is walked and leaves
+   the unread set.
+4. **Known gaps, named.** `archive_duplicate_day` names the day, not both
+   zips: `CmRefusal::ArchiveDuplicateDay { day }` is the capital-market
+   archive's variant (`gdfl_cm.rs`), and widening it is outside this part's
+   files. The refusal an unread zip passes to a day held nowhere is that
+   zip's own refusal, which does not name the zip.
+
+Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
+`a_misfiled_or_unread_options_day_zip_is_never_read_as_not_held` and
+`pull::gdfl_import::ia3_tests::every_options_source_refusal_reaches_its_cm_arm`
+(IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
+L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
+
+### D-6891 — R3-19: a day's census publish reads one header region, not the whole list; a segment directory is never followed; the AG-05 follow-ups closed — 2026-10-21
+
+The number is the ledger head + 1 (amendment A6): this entry was written as
+D-6246 and renumbered when IA-3-OPT's D-6890 landed first; it is taken again
+from the head at landing if another package lands first.
+
+1. **A run keeps the census it has read, decoded, between its days.**
+   `census_store::Kept` is the memory of one run; `census_store::record_kept`
+   is `record` with it, and the GDFL import's `StoreCensus` holds one per
+   run (every `drive*` door makes a new one). After a cycle publishes, the
+   census in memory is exactly what the file holds — the cycle computed
+   every entry and commit it wrote — so it is kept with the file's device,
+   inode and length. The next cycle, under the lock every writer takes,
+   lists the partition as always, opens the file without following it,
+   compares the identity and reads the header region (32 KiB): when the
+   identity and the newest committed header are the ones kept, the kept
+   census is the census, and the day costs its own rows. Anything else
+   (another writer's append, an epoch installed by a compaction or a re-key,
+   a repair, a file replaced, a header that does not decode) reads the
+   census whole once and says why. A census that loaded degraded, was
+   upgraded, was compacted or had no file before the cycle is never kept,
+   and a cycle that fails keeps nothing. `record` and every other caller
+   keep nothing and read whole, as before. The bytes left are the bytes
+   `record` leaves (`census_store::kept_tests::the_census_after_n_days_is_the_same_bytes_as_before`).
+   Proof of the cost: `census_store::kept_tests::a_days_publish_reads_only_its_own_keys`
+   (a counting reader: one header region a day at 1,000 and at 20,000
+   entries) and the measured `kept_tests::the_kept_publish_is_flat_measured`
+   (docs/06-limits.md L-IA-11). Measured on 21 Oct 2026: within the ratio
+   gate through 4 million invented keys and on clones of two real GDFL FNO
+   epochs (2.07 and 8.39 million entries, p50 14.0 ms each), and NOT within
+   it at 8.4 million invented keys (p50 4.1x the 0.4-million figure, under
+   heavy memory pressure; the cause is not proved). A whole read there took
+   4.46 s; the kept day 17.5 ms.
+2. **Every kept-path cycle says what it cost.** `pull.census` "census
+   published" (info): vendor, census, `read` (`kept` or `whole`), `why`,
+   offered, recorded, entries, `load_us`, `total_us` and `kept`. The GDFL
+   import's "day imported" carries `census_ms`, the day's publish in
+   milliseconds. Neither event changes any byte the run leaves.
+3. **A segment directory is never followed** (verify-AG-05-r3). One `lstat`
+   of `manifest/v4/<vendor>/<SEGMENT>` before a listing and before an epoch
+   install stages anything: a symbolic link, a regular file or anything else
+   that is not a directory is refused `segment_dir_not_directory (<word>)`
+   by name, in `store::safe_open::Found`'s word and sentence (`file`, "a
+   regular file", where `Found` has no kind), and nothing is followed,
+   created or removed. An absent segment directory is made by `mkdir` of
+   that one name (its parents as before), which refuses anything planted
+   since the look. The install's counted host calls before the image are
+   now 2 on a free name and 5 over a leftover. The race between the look
+   and the calls after it is docs/06-limits.md L-R319-02.
+4. **The seal-stub check never waits and never follows.**
+   `holds_sealed_stub` (on `/disk.json`'s request path) opens through
+   `store::safe_open::open_read_len` and tests the length of that handle:
+   one open, one `fstat`, one 16-byte read. A pipe or a link swapped in
+   answers `false` at once; it used to `lstat` and then `File::open`, which
+   blocked on a FIFO and followed a link.
+5. **A link at a single-file census is named as one at load** (L-AG05-07):
+   `census_not_regular (symlink): <path> is a symbolic link ...`, not the
+   host's ELOOP words, wherever census_store reads the single file (a
+   cycle's load, `read_vendor`, the migration).
+6. **The single-file census publish's `.writing` temporary is born through
+   `store::staging::create`** (L-AG05-01): a link of either kind, a
+   directory or a pipe there is refused `staging_not_regular` or
+   `staging_linked` by name with its target unchanged. `ingest.rs` is struck
+   from gate 28's LEGACY list (5 rows to 4); every census temporary is now
+   born through the door.
+7. **`api`'s census reads take the writer's listing rule and a no-follow
+   open** (L-AG05-05): `api::census::current_epoch` is
+   `pull::ingest::census_store::current_epoch_in`, and both `sized_epoch` (an
+   epoch) and `sized_with_id` (the single file `manifest/<vendor>.man`) open
+   through one helper, `open_unfollowed`, which is
+   `store::safe_open::open_read`. A refused name reaches the census answer as
+   `Census::Unreadable` with `Fault::Refused` and the door's or the writer's
+   sentence, never as an empty census and never as the link's target served
+   as the census; `census_cache`'s stamp records it as a fault. A link at the
+   single file's name used to be followed and a regular file behind it read
+   (L-R319-04). A socket at either name stays what it was before, an I/O
+   fault (`Unsupported`, carrying the door's sentence) that the census cache
+   declines to keep (D-0695), since the host will not open one at all.
+8. **An epoch's refusal says its kind once**:
+   `epoch_not_regular (<word>): <path> is <sentence>, not a regular file ...`,
+   as `store::safe_open::ReadRefusal` says one; it printed `is a pipe (FIFO)
+   (pipe)`.
+
+Proof: `census_store::kept_tests::*` (twenty tests, named in
+docs/04-invariants.md R319-01..R319-12), the updated
+`census_store::link_tests::current_epoch_refuses_a_symlinked_epoch_by_name`
+and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
+`api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
+and gate 28's own test with the ingest row struck.
