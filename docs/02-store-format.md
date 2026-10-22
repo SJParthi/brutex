@@ -5017,3 +5017,35 @@ L-PIT-1 to L-PIT-11 in `docs/06-limits.md`.
 **Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
 line above is a `fno-membership-v2` directory beside this one, never a rewrite
 of `v1`.
+
+## The quarantine: `audit/<feed>.quarantine.ledger` and `audit/<feed>.quarantine` (R4-18, D-6892)
+
+A month's bars that are not its instrument's own (before listing, a zero
+price, another price basis) are set aside without a byte of the month
+changing. `store::quarantine` holds the format; `crates/store/src/quarantine.rs`'s
+module header is the byte table.
+
+**The ledger** (the truth, append-only text): first line
+`brutex quarantine ledger v1`, then one line per act, tab-separated:
+`written_at_utc_micros`, `feed`, series key (`NSE/CASH/IRFC/1min`), `yyyy-mm`,
+scope (`dropping` | `dropped` | `whole_month`), cause (`before_listing` |
+`foreign_level` | `zero_price`), bars, revision, the BLAKE3 hex of the named
+bars as held (each bar's seven `i64` fields, little-endian), who, the reason
+(1 to 200 bytes, no tab or line break), the stamps (comma-separated UTC
+micros, or `-` for a whole month), and the CRC-32C hex of everything before
+its tab. A last fragment with no newline is a torn append: never a line, and
+ended by a newline before the next line is written.
+
+**The index** (derived, rebuilt from the ledger): exactly 524,800 bytes — a
+64-byte header (`BRXQIX01`, version 1, slot length 64, capacity 8,192,
+bucket 8, entries, CRC-32C at 60) and 8,199 slots of 64 bytes, open-addressed
+by the BLAKE3 of (series key, month); a key lives in the first free or
+matching slot of the 8 from its home, which never wrap. Slot: 16-byte hash,
+month `yyyy*100+mm`, scope (1 whole month, 2 dropped), cause (1, 2, 3), bars,
+ledger offset, revision, written at, CRC-32C of bytes 0..60 and the slot's
+index. Every write is a whole new image, staged, synced and renamed.
+
+**A dropped month** is a new generation under `bar-revisions-v1/<n>` through
+`store::repair::publish_without` and `generation::promote`; a month named
+whole publishes no generation. **Version 1 is frozen**: another layout is a
+new name beside this one.

@@ -8305,3 +8305,21 @@ directory.
 | R330-18 | **`/greeks.json` prices no cell over a hole before a gap row** and the header counts such rows as `unlinked_gaps`; a stored table holding one is told at load | `api::optiongreeks_route_tests::a_gap_row_after_an_unexplained_hole_prices_no_cell`, `pull::reference_data::tests::a_stored_rate_gap_after_an_unexplained_hole_is_told_at_load` | ✓ |
 | R330-19 | **A refusal computed on a carried rate says so** (`below_zero_carry_bound`, `iv_unsolved`) | `api::optiongreeks_route_tests::a_refusal_computed_on_a_carried_rate_names_the_gap` | ✓ |
 | R330-20 | **A source part is a citation only with a real read day and a location** (an `http(s)` URL or a path), and the five NSE/FAOP/68747 expiry rows carry the charter's checksum | `pull::reference_data::tests::a_loaded_row_cites_its_own_source_and_checksum`, `pull::reference_data::tests::the_sourced_expiry_rows_carry_the_charters_checksum` | ✓ |
+
+## The quarantine (R4-18, D-6892)
+
+| ID | Invariant | Proof | Status |
+|---|---|---|---|
+| R418-01 | **A quarantine publishes a generation without exactly the named bars and ledgers each**, the intent before the door and the drop after it, with the named bars' digest | `store::quarantine::tests::a_quarantine_publishes_a_generation_without_the_named_bars_and_ledgers_each` | ✓ |
+| R418-02 | **The original generation is byte-identical after a quarantine** | `store::quarantine::tests::the_original_generation_is_byte_identical_after_a_quarantine`, `store::repair::tests::a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source` | ✓ |
+| R418-03 | **A drop naming an unheld stamp is refused and nothing is written**; an empty, unsorted or repeated list likewise | `store::repair::tests::a_drop_naming_an_unheld_stamp_is_refused`, `store::quarantine::tests::a_named_stamp_neither_held_nor_ledgered_is_refused_and_nothing_is_written` | ✓ |
+| R418-04 | **A second quarantine apply writes nothing**; a run killed after its promotion is finished from its intent | `store::quarantine::tests::a_second_quarantine_apply_writes_nothing`, `store::quarantine::tests::a_run_killed_after_the_promotion_is_resumed_from_its_ledgered_intent`, `cli::zerodha_quarantine::tests::plan_writes_nothing_and_apply_drops_the_named_minutes_and_their_buckets_once` | ✓ |
+| R418-05 | **A whole foreign month is a record, not an empty generation** | `store::quarantine::tests::a_whole_foreign_month_is_a_record_not_an_empty_generation` | ✓ |
+| R418-06 | **A quarantine probe is one read, and a torn tail is repaired**: a torn index or a damaged slot is named, never "clear", and rebuilt from the ledger | `store::quarantine::tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`, `store::quarantine::tests::a_damaged_slot_is_named_and_a_record_rebuilds_the_index` | ✓ |
+| R418-07 | **The restate policy publishes corrected values at kept stamps, reads back, then flips; the old generation is kept** | `store::repair::tests::the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation` | ✓ |
+| R418-08 | **`/bars.json` answers a quarantined month by name**, 409 `month_quarantined`, never its bars | `api::server::quarantine_route::tests::bars_json_answers_a_quarantined_month_by_name` | ✓ |
+| R418-09 | **A window names its quarantined month and serves the rest** | `api::server::quarantine_route::tests::a_window_names_its_quarantined_month_and_serves_the_rest` | ✓ |
+| R418-10 | **A stored sweep refuses a quarantined month by name** | `cli::stored::tests::a_stored_sweep_refuses_a_quarantined_month` | ✓ |
+| R418-11 | **`/instruments.json` flags a quarantined series** | `api::server::quarantine_route::tests::instruments_json_flags_a_quarantined_series` | ✓ |
+| R418-12 | **A quarantine press sends one request with its reason** | `web/tests/quarantine.test.js` `a_quarantine_press_sends_one_request_with_its_reason` | ✓ |
+| R418-13 | **One writer at a time**: a second waits, then is refused naming the holder; a linked audit directory is refused | `store::quarantine::tests::a_second_writer_waits_then_names_the_holder`, `store::quarantine::tests::a_linked_audit_directory_is_refused` | ✓ |

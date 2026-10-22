@@ -79,7 +79,7 @@
 //!
 //! [`probe`]: one `open` (ENOENT for a feed never quarantined), one `fstat`
 //! and one 512-byte positional read — O(1). [`Snapshot::load`]: one read of
-//! the whole index (524,352 bytes), once per cached body; each lookup after
+//! the whole index (524,800 bytes), once per cached body; each lookup after
 //! it O(1). [`record`]: one ledger append and one index image — O(index) on
 //! the write path, never on a read. [`rebuild`] and [`ledger_stamps`]: one
 //! pass over the ledger, on the write path only.
