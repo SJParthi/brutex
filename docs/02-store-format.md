@@ -4888,8 +4888,11 @@ per stock-day factor intervals (`cli::feed_reconcile::FactorPair::basis`).
 each widened by D-3339's 0.2%) and `ratio` the simplest fraction inside it,
 each `num/den` reduced (terms at most 10^18); `days` the days with a basis it
 holds; `end` is `step` (the next day's interval lies more than 0.2% from the
-last day's: D-3339's `basis_step`), `drift` (the ratio walked out of the band) or `open` (the last run read). Two runs of one share never
-overlap; at most 4,096 runs a share. The receipt's `source` names the
+last day's: D-3339's `basis_step`), `drift` (the ratio walked out of the band) or `open` (the last run read). Rows ascend by symbol, then by
+`first`; a row out of that order, or two runs of one share that overlap,
+is refused by name (the loader sorts nothing). At most 4,096 runs a share,
+and the per-share day tables a load builds (one `u16` per day of a share's
+span) at most 2^22 share-days in all. The receipt's `source` names the
 feed-reconcile directory and months read (and how many were missing), and
 `source_sha256` is the SHA-256 of the list `<month> <file> <blake3>\n` of
 every file read.
@@ -4902,8 +4905,9 @@ or `measured`; `after` (`-` for an `nse` row) is the last day seen on the old
 basis, so a measured ex-date lies in `(after, ex_date]`; `evidence` the
 circular or basis-run step the row rests on. An `nse` row needs a file whose
 status is `sourced` and must name its kind; a `measured` row is always
-`unclassed`. Two rows of one (symbol, ex-date, kind) are refused as
-`duplicate`; at most 64 rows a share. An ex-date on a day with no session
+`unclassed`. Rows ascend by symbol, then by `ex_date`, then by `kind` in
+the order listed above; a row out of that order is refused as `row` and two
+rows of one (symbol, ex-date, kind) as `duplicate`; at most 64 rows a share. An ex-date on a day with no session
 applies at the next session: a reader asks for `(previous session, session]`.
 
 ## F&O membership month files, version 1 (PIT-1; D-5163)

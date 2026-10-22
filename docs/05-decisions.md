@@ -78914,6 +78914,16 @@ unattended.
    every series with its own past, entrants and leavers named. Nothing
    registers it with a scheduler (the one-command cut, D-6900 in the run
    state); R4-26 builds no membership module of its own.
+7. **Canonical files, an O(1) run lookup, a listed writer.** Both tables'
+   rows ascend by symbol, then by ex-date and kind (actions) or first day
+   (runs); a row out of that order is refused by name and the load sorts
+   nothing. A run lookup is one hash and one index into the share's day
+   table (how many runs start on or before each day of its span), bounded
+   in all by `MAX_INDEXED_DAYS` (2^22 share-days); an action lookup walks at
+   most the share's 64 rows. `cli basis-runs` writes only with `--apply`
+   (the flag `gdfl-rekey` and `zerodha-gaps` already use) and is in the
+   cli's `WRITERS`, so an unstamped run or a store whose bars folder is a
+   link is refused before anything is written.
 
 **Not done here.** The NSE file itself (an operator download, then a charter
 row); the refusal on `/health` and `/ingest` (L-R426-07); `restatement.rs`'s
