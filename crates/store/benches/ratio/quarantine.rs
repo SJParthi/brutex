@@ -125,7 +125,7 @@ pub(super) fn run() -> bool {
     ok
 }
 
-/// C-QU-03: `repair::drop_month` at 183, 7,875 and 472,445 bars (a day
+/// C-QU-03: `repair::drop_month` at 183, 7,875 and 472,445 bars (an hour
 /// month, a minute month, a one-second month), one bar named each time: the
 /// door reads and writes the whole month, O(month), and says so with its
 /// three sizes rather than a ratio.
@@ -133,7 +133,10 @@ pub(super) fn drop_is_linear() {
     use store::file::BarFile;
     use store::format::Bar;
     for (rung, bars) in [
-        (Timeframe::DAY_1, 183_i64),
+        (
+            Timeframe::from_secs(3_600).unwrap_or(Timeframe::MINUTE_1),
+            183_i64,
+        ),
         (Timeframe::MINUTE_1, 7_875),
         (Timeframe::SECOND_1, 472_445),
     ] {
