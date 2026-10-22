@@ -211,21 +211,28 @@ impl Ratio {
     }
 }
 
-/// The simplest fraction in `[a/b, c/d]`, `a/b <= c/d`, all positive.
-fn simplest(a: u128, b: u128, c: u128, d: u128) -> Option<(u128, u128)> {
-    let q = a.checked_div(b)?;
-    let r = a.checked_rem(b)?;
-    if r == 0 {
-        return Some((q, 1));
+/// The simplest fraction in `[low_num / low_den, high_num / high_den]`, the
+/// low end at most the high, all positive.
+fn simplest(
+    low_num: u128,
+    low_den: u128,
+    high_num: u128,
+    high_den: u128,
+) -> Option<(u128, u128)> {
+    let whole = low_num.checked_div(low_den)?;
+    let rest = low_num.checked_rem(low_den)?;
+    if rest == 0 {
+        return Some((whole, 1));
     }
-    let next = q.checked_add(1)?;
-    if next.checked_mul(d)? <= c {
+    let next = whole.checked_add(1)?;
+    if next.checked_mul(high_den)? <= high_num {
         return Some((next, 1));
     }
-    // Both ends lie in (q, q + 1): x = q + 1 / y, y in [d / (c - qd), b / r].
-    let c_less = c.checked_sub(q.checked_mul(d)?)?;
-    let (p, s) = simplest(d, c_less, b, r)?;
-    Some((q.checked_mul(p)?.checked_add(s)?, p))
+    // Both ends lie in (whole, whole + 1): x = whole + 1 / y, with y in
+    // [high_den / (high_num - whole x high_den), low_den / rest].
+    let high_rest = high_num.checked_sub(whole.checked_mul(high_den)?)?;
+    let (num, den) = simplest(high_den, high_rest, low_den, rest)?;
+    Some((whole.checked_mul(num)?.checked_add(den)?, num))
 }
 
 impl Ord for Ratio {
@@ -398,7 +405,8 @@ pub struct CorporateActions {
     by_symbol: HashMap<String, Vec<Action>>,
 }
 
-/// A refusal of a row of `table` at `line` in the file at `path`.
+/// A refusal of a row of `table` at `line` in the file at `path`; line 0
+/// is the whole file.
 fn refusal(
     table: Table,
     parsed: &Parsed,
@@ -412,7 +420,13 @@ fn refusal(
         path: path.to_path_buf(),
         generation: Some(parsed.receipt.generation),
         kind,
-        detail: format!("line {line}: {detail}"),
+        detail: if line == 0 {
+            detail
+        } else {
+            let mut said = detail;
+            said.insert_str(0, &format!("line {line}: "));
+            said
+        },
     }
 }
 
@@ -442,6 +456,11 @@ impl CorporateActions {
     /// measured row that names a kind, an `nse` row that does not, two rows
     /// of one (symbol, ex-date, kind), or more than
     /// [`MAX_ACTIONS_PER_SYMBOL`] rows for one symbol; each by name.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row read field by field and judged against the law in the order the \
+                  columns run; split, the law would sit away from the fields it reads"
+    )]
     pub fn build(parsed: &Parsed, path: &Path) -> Result<Self, Refusal> {
         let table = Table::CorporateActions;
         let standing = parsed.receipt.standing;
@@ -808,7 +827,7 @@ impl BasisRuns {
             held.push(run);
         }
         for (symbol, runs) in &mut by_symbol {
-            runs.sort_by(|a, b| a.first.cmp(&b.first));
+            runs.sort_by_key(|run| run.first);
             if let Some(pair) = runs.windows(2).find(|pair| match pair {
                 [a, b] => a.last >= b.first,
                 _ => false,

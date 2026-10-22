@@ -408,7 +408,10 @@ fn a_measured_row_never_suppresses_a_refusal_or_decides_a_class() {
     write(&store, &actions_draft(Standing::Measured, std::slice::from_ref(&measured))).unwrap();
     let table = load_actions(&store).table().unwrap().clone();
     // IT LABELS ...
-    assert_eq!(table.labels("SPLITCO", Some(day(2023, 6, 30)), on), [measured.clone()]);
+    assert_eq!(
+        table.labels("SPLITCO", Some(day(2023, 6, 30)), on),
+        std::slice::from_ref(&measured)
+    );
     // ... AND NEVER EXCUSES, NEVER CLASSES.
     assert_eq!(table.excuse("SPLITCO", Some(day(2023, 6, 30)), on), None);
     assert_eq!(table.class_of("SPLITCO", Some(day(2023, 6, 30)), on), None);
