@@ -75702,6 +75702,450 @@ its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
 written. (6) A runs ledger whose last id is `u64::MAX` refuses
 `runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
 
+### D-5890 — Logs and audit: a never-rolling state stream laid out as an audit stream and seeded once, one table of state-change events, `target=` alone and a time span through the index, a capped answer that continues, and the `/logs` picture kept at write time (R3-24) — 2026-10-18
+
+R3-24 was built by a cloud session (branch `cloud/db-R3-24-20261017`) and
+finished on the Mac. Its spec (`reports/db-specs-20261016/R3-24.md`) names no
+decision block; the number is taken from the ledger's head at landing (A6),
+past the numbers other branches in flight already hold.
+
+**The who-did-what lines get their own stream, and it never rolls.** The
+audit stream took an event by its SHAPE (every `error`; at `info` or above a
+target ending `lifecycle` or `access`, or a lifecycle word), so a state change
+whose words missed that shape reached the 8 MiB x 8 ring alone and was gone
+within minutes of a pull's flood (DB-023: one file rolled about every 35 s),
+and refusals rolled even the audit stream (DB-G88). Every state change and
+every lifecycle line is now also appended to `<log dir>/audit.state/`, laid
+out exactly as an audit stream (same files, index, pointers and readers) but
+never rolled and never reaped. Refusals are not state changes and stay in the
+rolling stream, which is what lets this one never roll. A directory an earlier
+build wrote is seeded once at open from its audit stream and ring, merged by
+`seq`, a line both hold copied once. It is loud past 256 MiB
+(`STATE_LOUD_BYTES`), a size to look at, not a bound: it never drops a line.
+Considered and not taken: keeping refusals out of the audit stream instead
+(the operator searches refusals there by run and code, FM-203), and
+aggregating repeated refusals at their emit sites (DB-G88's fix hint), which is
+`crates/pull` and `crates/store` code this package does not own; the flood's
+volume is unchanged and is named as such in `docs/06-limits.md`.
+
+**State changes are named, not guessed.** `telemetry::run_dirs::state_events::TABLE`
+holds one row per `(target, message)` a writer emits as a state change, with
+its levels, its class (operator, server, maintenance, lag, run) and the file
+its emit sits in; `is_audited` takes every row at `info` or above whatever its
+words. A test reads each row's emit site as text, because `telemetry` may
+depend on nothing, so a message renamed at its site fails the build here. The
+table is hosted in `run_dirs.rs` with `#[path]` and its names are re-exported
+through `telemetry::run_dirs::`, because `crates/telemetry/src/lib.rs` is not
+this package's file; moving them to the crate root changes nothing else.
+
+**More keys, through the index.** `month=`, `reason=` and `kind=` are keys;
+`reason` and `kind` are new index dimensions, recorded per generation in its
+`dims` file so an older generation is named as not covering them. `target=`
+alone goes through the index over every audited line instead of filtering the
+newest 4 MiB of the ring (DB-023). A time span (`from=`/`to=`, epoch ms or an
+IST or UTC day, minute or second) uses the 16-byte `span` file each audit
+generation keeps (first and last event time): beside a key it passes every
+generation whose span misses; alone it reads the files its time meets by one
+span probe and one binary search over byte offsets per generation, and at most
+`SPAN_SLICE_BYTES` = 1 MiB of backward reads in all, saying "at least N" when
+it stopped there. A capped answer says "the first 2,000 of N" and hands back a
+cursor that continues it. Every answer says how far back it reaches, with one
+alert while the audited history is younger than 30 days.
+
+**A contradicted "day imported" line is marked, not rewritten** (DB-A48). The
+old CLI log called days "imported" that the import journal closed
+`incomplete`; the log is append-only history and is never edited, so the
+reader marks each such line with the journal's outcome and line beside it.
+`/imports.json` is `crates/api/src/imports.rs`, not this package's: the mark is
+one call to `logs::contradicted` for that file's owner.
+
+**A "day imported" line that cannot be checked says UNCHECKED** (the Mac's
+finishing pass, 19 Oct). The cloud's reader took a journal it could not read
+as "nothing to compare with" and left the line unmarked, and a line naming no
+kind and day it parses went unmarked the same way; an unmarked line is what a
+line the journal agrees with looks like, so both were a failure dressed as
+agreement (`CLAUDE.md` section 4). Each now carries
+`journal_outcome: "unchecked"` with the reason in its note, and the page marks
+it UNCHECKED, never CONFLICT and never nothing
+(`a_day_imported_line_beside_an_unreadable_journal_is_said_unchecked`, which
+failed on the cloud's reader). A store with no journal at all is still
+"nothing to compare with": there is no record that could disagree.
+
+**What a page request may read is fixed.** The `/logs` picture (events per
+minute by level for 60 minutes, a 16-code space-saving table of top codes, the
+ring's oldest line) is counted by the sink at write time, and the live tail is
+its in-memory copy of the newest 512 lines, so the page reads no log file. An
+importer's refusal lines are read at most 256 KiB per request
+(`REQUEST_SLICE_BYTES`); one background thread reads 1 MiB slices of each
+followed directory every 100 ms, and a directory still behind says how many
+bytes are unread, never "none".
+
+**What the Mac's finishing pass changed (19 Oct), each with a test that failed
+on the cloud's code first.** Run over a shadow of the real store, with a clone
+of the live server's own log directory (`<store>/telemetry`, 82 MB):
+
+- *A target alone reads the index only.* The cloud read the newest 4 MiB of
+  every ring beside the index on a target-alone first page, so
+  `target=pull.spot` cost p50 94 ms, p99 197 ms on the real logs, against the
+  5 ms every keyed search is held to. The ring's newest bytes are now read only
+  on `ring=1`, as for every other key, and the answer's `keyed.ring.note` says
+  so (`a_target_alone_reads_every_audited_line_not_the_newest_4_mib`).
+- *A day that did not close done is a state change; "day imported" is not.*
+  "day incomplete" and "day refused" (a handful a run, each a day the store
+  lacks) are rows of the state-change table (class `run`), so each is kept
+  for good and found by its day, and a new state stream copies the old ring's
+  ones when it is seeded (`an_old_day_incomplete_line_is_found_by_its_day_once_seeded`,
+  `a_day_that_did_not_close_done_is_a_state_change_and_a_day_imported_is_not`).
+  "day imported" was a row too for one build and was taken out, measured: on
+  the shadow, seeding the store's `logs/cli` copied 11,497 of them (27,445
+  lines, 6.6 MB, a 47 MB index), and a `contract=` search, which reads the
+  `gdfl.import` lines, then read 2,000 of 12,048 and found nothing on its
+  first page (p50 29 ms, p99 52 ms). It is the bulk of every run (about 6,000
+  a full import); the import journal is its record. What that experiment
+  also showed, on real data: of the "day imported" lines the store's ring
+  still holds, the journal's newest close contradicts two (options
+  2018-11-06 and 2018-11-09, `incomplete`), and with the line found the mark
+  is right (`journal_outcome: incomplete, journal_line: 8029`); the other 210
+  days DB-A48 counted were since closed `recounted`, which the journal reader
+  takes as done. Those lines sit in the oldest file of the store's
+  `logs/cli` ring, which no request reaches without a key, so no page shows
+  them unmarked.
+- *The seed names a file it could not read*, in the state stream's health
+  (served on every `/logs.json`), instead of passing it over in silence; a file
+  that is not there is no failure (`a_seed_names_a_file_it_could_not_read`).
+- *`run=` alone stays the ring's filter* (a page polls it for a live sweep); a
+  run is found in the durable streams with `durable=1`, and the ring answer
+  says how far back the audited history reaches beyond the ring (FM-203,
+  `a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`).
+- *The three findings are stated once more through `/logs.json`'s public body*
+  in `crates/api/tests/logs_r3_24.rs`, which compiles unchanged on the base
+  and fails there on all three (DB-G88, DB-023, DB-A48).
+- *`/audit.json` reads the directory a server on the store logs to.* Its
+  served half was `<store>/logs`, which holds only the run directories beneath
+  it; a server started on the store logs to `<store>/telemetry`
+  (`telemetry::dir_beneath_store`). On the shadow the answer named no state
+  change at all while the server's own state stream held 141. It now reads
+  `<store>/telemetry` as served
+  (`the_audit_answer_reads_the_directory_a_server_on_the_store_logs_to`).
+
+**What the Mac's second finishing pass found and changed (19 Oct), running
+the cloud report's NEEDS THE MAC list on the Mac.** Each change has a test
+that failed on the code before it; the measurements are `docs/06-limits.md`
+L-R324-01 to L-R324-14.
+
+- *A `/db` read named by `key=` is filed under its instrument* (the NIFTY
+  check). Since R3-07 the bar window names its series
+  `key=NSE-INDEX-NIFTY`, and the access line carried that key alone, so the
+  audit index filed no NIFTY read of the page under an instrument and
+  `/logs.json?instrument=NIFTY` found none of them. An access line whose
+  query names no `symbol` and no `instrument` now takes the exchange,
+  segment, symbol and contract its key names, through the route's own reader
+  (`bars::SeriesKey::parse`), symbol first so the field cap keeps it; the
+  query's own value of a name wins. Taken over teaching the telemetry index
+  to read a `key` field, which other events use for other things. Checked on
+  the shadow for NIFTY spot, a NIFTY option, BANKNIFTY, RELIANCE and a far
+  RECLTD strike (`a_db_read_named_by_key_is_filed_under_its_instrument`).
+- *A file a key does not index is said, never answered for.* Over the real
+  logs `kind=options` read "0 of 0 indexed line(s) read: every match the
+  streams hold is on this page" while `logs/cli`'s audit stream held 487
+  importer lines carrying `kind`, all written before `kind` was a dimension.
+  The posting probe already named such files (`uncovered`); the words did
+  not. The answer now leads with how many files each probed key does not
+  index and how to reach their lines, and says "every match the INDEXED
+  lines hold" (`a_file_the_key_does_not_index_is_said_never_answered_for`).
+  Re-indexing old generations was not taken: it is a write on the log
+  directory, and its cost is unmeasured.
+- *A span probe reads 4 KiB first.* Each probe of the span search read two
+  lines' ceiling, 128 KiB, so placing one cut in a 64 MiB audit file read
+  about 3 MiB, outside the 1 MiB the span's bound named, and C-LG-03's
+  `span alone` measured p50 5.6 ms at its 10x store. A probe now reads
+  `PROBE_FIRST_BYTES` = 4 KiB and the full ceiling only when no whole line
+  follows its cut, placing the same line
+  (`a_probe_reads_a_few_kib_and_still_places_a_long_line_whole`).
+- *A key beside a span passes the lines after the span by a search.* Over
+  the shadow, `from=2026-10-16&to=2026-10-17&code=vendor_empty` read the
+  lines of the days after the span one by one, up to the 2,000-line budget,
+  to find 20 (p50 26.7 ms, p99 41.1 ms): a key's posting is pruned by whole
+  files, and a file whose span meets the span asked was read line by line.
+  The second Mac pass (19 Oct) places the span's end by a gallop and a
+  bisection over the fetched pointers (their lines are in time order, the
+  premise `end_of_span` already rests on), each probe settled by its file's
+  span when it can be, else one line read against the request's budget, and
+  ends a stream at the first line older than the span, which before read on
+  to the budget's end. Pointers passed over are counted in `passed` and said
+  beside the lines read. Taken over pruning by byte range inside a file
+  (two binary searches per file over byte offsets, about 36 probe reads a
+  file): the pointers are already in memory and already in time order, so
+  their own order is the cheaper index
+  (`a_key_beside_a_span_passes_the_lines_after_it_by_a_search`, R324-16).
+- *Measured, not changed:* the 2 GiB proof at the real bounds on WD_BLACK
+  (51.8 s, peak 1.33 GiB); the audit roll at n=40 on WD_BLACK; C-LG-03 for
+  one client, 60 clients and beside a writer (the 5 ms target holds for one
+  client and is not met for 60 clients or beside a writer on this machine
+  under load, L-R324-07); every key, the page and `/audit.json` over the
+  shadow of the real store.
+
+**What the Mac's third pass found and changed (19 Oct)**, running the cloud
+report's NEEDS THE MAC list once more on the merged tree and on a fresh
+shadow of the real store. Each change has a test that failed on the code
+before it.
+
+- *A new state stream is seeded aside and named by one rename.* The seed
+  wrote under `audit.state/` itself, and a stream is seeded only when it has
+  never existed, so a start stopped part-way left a stream holding the first
+  lines of its seed that every later start took for a whole one: the state
+  changes after the stop were missing for good, and nothing said so
+  (`CLAUDE.md` section 4). The seed is now written in
+  `<dir>/audit.state.seeding/` (`run_dirs::STATE_SEEDING_DIR`), synced, and
+  renamed to `audit.state/`, the tmp + rename every writer here keeps; a seed
+  an earlier start left there is moved aside to `audit.state.seeding.<ms>`,
+  kept and never deleted, named in the state stream's health, and the seed is
+  run again whole. A seed that cannot be named is refused by name and nothing
+  is opened half-way (R324-17,
+  `a_seed_stopped_part_way_leaves_no_half_seeded_stream`, which stops a seed
+  after one line by a panic, as a kill would, and failed on the seed written
+  in place). Considered and not taken: resuming a stopped seed from its last
+  `seq` (two lines may share one, `a_ring_line_sharing_a_seq_with_another_is_seeded_too`,
+  so the cut is not exact) and a completion marker beside a stream seeded in
+  place (a reader would still see the half-seeded stream until the marker
+  check ran).
+- *A line written per minute or per request is no state change.* On the
+  fresh shadow the state stream's first start seeded 265 lines, and 186 were
+  `api.speed minute ended` (one per route asked in each minute, taken as a
+  lifecycle by the word `ended`) and 4 `api.bars request abandoned; work
+  stopped` (one per request a reader left): a never-rolling stream growing
+  with traffic, and `/audit.json`'s newest state changes were all
+  "minute ended". `state_events::SAMPLED` names them; the rolling audit
+  stream keeps them, the state stream neither writes nor seeds them, and each
+  row is checked against its emit site (R324-18,
+  `a_sampled_line_is_audited_and_is_no_state_change`,
+  `a_sampled_line_reaches_the_audit_stream_and_never_the_state_stream`).
+  Taken over narrowing the lifecycle word rule, which the rolling audit stream
+  and the importer's run lines share. Re-measured: the same seed now takes
+  83 lines, about 6.4 a day (L-R324-01).
+- *Four mutants of the span search survived and are now killed*: a probe
+  settled by its file's span costs no line read
+  (`a_probe_is_settled_by_its_files_span_before_any_line_is_read`), a stream
+  the search left at its newest pointer keeps that pointer for the next page
+  (`a_stream_placed_at_its_newest_pointer_keeps_it_for_the_next_page`: a
+  search that marked it consumed while passing nothing would have lost that
+  line from every page), and a stream reads no line once the request's budget
+  is spent (`a_stream_with_no_budget_left_reads_no_line`). L-R324-14.
+- *Measured, not changed:* every route R3-24 touched on the final build over
+  the fresh shadow, NIFTY first (L-R324-15). A span beside a key now answers
+  in p99 1.7 ms where it took 41.1 ms before the second pass's search; the
+  two contract searches, `kind=` by day and `/imports.json` stay over the
+  5 ms target at p99, named there. The second pass's `/imports.json` figure
+  was of the route's refusal of a request naming no feed and is corrected in
+  L-R324-04.
+
+**What the repair round found and changed (20 Oct)**, after a second check of
+the committed head (`dbfa9074a`) reproduced two defects this package made,
+each now with a test that failed on that head:
+
+- *Two per-request lines still reached the never-rolling stream.* The CSV
+  export's `api.bars export abandoned; work stopped` and `export stopped
+  short` hold the lifecycle words `stopped`, so the word rule took one line
+  per export a reader left or that stopped short; five abandoned exports on
+  the shadow wrote five lines, and `/audit.json` listed them as `run` state
+  changes. Both are rows of `SAMPLED` now, and the list is no longer kept by
+  hand alone: `every_lifecycle_word_emit_in_the_server_is_classified` scans
+  every `Event` constructor outside test code in `crates/api/src` and fails
+  on any emit the rule takes that is no row of `TABLE`, of `SAMPLED`, of its
+  reviewed `KEPT` list (twelve lines written once per run, start or stop) or
+  of its `DYNAMIC` list (six sites whose message is a variable) (R324-19).
+  The second check's other offer, narrowing `is_state_change` to `TABLE`
+  rows and targets ending `.lifecycle`, was not taken: it would drop the
+  run lifecycles no table row names (`pull.run started` and `finished`,
+  `pull.recovery recovery ended`, `gdfl.import run started`, the stops a
+  refusal ends a run with), which the stream exists to keep. `/audit.json`
+  also puts each line it reads to the rule again, so a line an earlier rule
+  let in is left out of its rows and counted in `passed_over`, never shown
+  as a state change and never hidden; and its 64 KiB slice no longer skips
+  its first piece unread, which lost a whole line whenever the slice began
+  on a line's first byte (found by the mutation run, R324-21).
+- *A span alone after a torn line answered short and called itself
+  complete.* The span search's probe answered "no line" for a first line
+  that did not decode, and the search read that as "nothing starts below
+  here" and cut the span above the torn line. The probe now steps past an
+  undecodable line, at most `MAX_UNDECODABLE_STEPS` = 16 in a row, and
+  places the span by the first line that decodes; past the bound, or on a
+  read that fails, the span is refused in that file by name (R324-20,
+  L-R324-16). Any answer with a stream or line it could not read now says
+  so and never "every match the streams hold is on this page" (R324-22).
+- *Taken from the check's follow-ups, in this package's files:* a span
+  image no writer makes (first at or before 1970, last before first, or not
+  16 bytes) is read from the file's own lines instead, so a zeroed span can
+  no longer end a span search (R324-23). The span file itself is still
+  rewritten in place, NOT converted to a temporary and a rename: gate 28
+  allows a crate one door for a temporary, `store::staging::create`, which
+  `telemetry` (depending on nothing) cannot call, and a temporary of its own
+  is the refusal that gate exists for. What a crash mid-write can leave is
+  each read from the file's lines, and the first time never changes within
+  a generation, so an eight-byte half of each image is still a true span
+  (L-R324-18). Also NOT DONE, named: syncing the seed's index files and its parent directory
+  (the index of the rolling stream is not synced per append either, and a
+  whole-tree sync of a large seed is thousands of full syncs at one start),
+  the state stream's index growth by one posting file per run, and the
+  per-rung and per-stage CLI lines' growth of the stream (L-R324-17);
+  the first two now have rows of their own, L-R324-20 and L-R324-21.
+
+**The repair round, finished (20 Oct, after its first agent stopped mid-check).**
+- *A seed beside a taken name is kept, never copied again* (R324-24, from
+  the check's follow-ups): a start that finds an earlier seed under
+  `audit.state.seeding/` while `audit.state` is held by something a rename
+  cannot replace refuses the stream by name before it moves or seeds
+  anything. Each such start used to move the seed aside, seed again and fail
+  the same rename, one more whole copy per start with no bound. A refusal
+  was chosen over a cap on the copies: a cap still copies, and a copy that
+  cannot be named helps no later start.
+- *A span search these tests ask for answers inside a deadline*: six
+  mutants of `end_of_span` that make its loop endless ran to the mutation
+  run's 600 s timeout, because the tests called it with no deadline. They
+  now ask through a 20 s deadline and fail by name, so such a mutant is
+  caught. The walk's early stop at a closed file whose last line is the
+  span's start is pinned by a test (it survived `<` made `<=` and `==`).
+- *Gate 21 counts the seed's new listing.* `name_taken` lists
+  `<dir>/audit.state` to tell an empty directory a seed may be renamed onto
+  from a name something else holds, which is a second `std::fs::read_dir`
+  in `telemetry`'s sink; the gate's declaration still said one, so gate 21
+  failed on the finished tree. The declaration now counts two and says
+  which path the second lists and why. Found by running the local CI rows
+  on the finished tree, which the round's earlier agents had not.
+- *Measured on the final tree beside the head it repaired*, interleaved on
+  one shadow at one load (L-R324-19): the 150-line span page is over the
+  5 ms target at p99 on both builds, the final tree's p99 0.6 to 0.9 ms
+  above the repaired head's in each of the two rounds and its p50 within
+  0.2 ms, which two rounds under that load cannot tell from noise (named,
+  not claimed either way); the mutation run over the repair's search
+  (`end_of_span`, `span_page`, `line_after`, `line_within`,
+  `state_changes_json`) finished at 50 mutants, 48 caught, 2 unviable, none
+  missed.
+
+**Repair round 2 (20 Oct, after the third check).**
+- *A run of damage longer than a probe's window cut a span short and the
+  page called itself complete.* Each step of the span probe read at most
+  two lines' ceiling, 128 KiB, and answered "no line" for a window holding
+  no newline though bytes were left before the search's end, so a NUL run
+  a later open closed with its newline cut every span over it: the third
+  check's shadow answered 80 of 150 lines at `limit=20`, the last page
+  saying every match was there. The probe now reads on, to the newline it
+  looks for, within `MAX_PROBE_BYTES` (1 MiB, the span page's own slice)
+  in all, and says "no line" only when its read reached the end (R324-25).
+- *Past a probe's bounds the search now goes around the damage instead of
+  refusing the span in that file.* Chosen over the refusal the check also
+  offered because a refusal cannot be honest across pages: either the
+  cursor stands still (the check's follow-up: `next` did not move and
+  `more` stayed true, so a client looped) or it moves past the file and a
+  later page calls itself complete with that file's lines unread. Going
+  around is sound by the stream's time order: a line stamped after the
+  span's end found below the damage proves every line from it on, and the
+  cut is exact again; else the cut is the lowest place proved, and the
+  backward walk passes the lines stamped after the span over by their
+  time. The damage costs reads (at most `MAX_PROBE_BYTES` a probe), never
+  lines, and is named in the posting's `damage` and in `said` (R324-26,
+  L-R324-22). A slice of more than two lines' ceiling no line starts in is
+  read past and named, and a page that stopped short says where it goes
+  on from, so the cursor moves on every page (R324-27). A span open at its
+  end is not searched at all.
+- *Taken from the check's follow-ups, in this package's files:* one file
+  that will not read is named once per stream with a count, not once per
+  pointer; `/audit.json`'s state changes name an absent state stream
+  (`no_stream`) and the serving sink's refusal of its own
+  (`served_state_error`) (R324-28); the new mode-bit test in `telemetry`
+  (`a_name_is_taken_by_anything_a_rename_cannot_replace`) runs through
+  `where_permission_binds` (D-0995), so it holds as root in a cloud
+  container; the open-ended span over history is measured (L-R324-23).
+- *What damage costs, measured, and what it does not cost.* On a shadow of
+  the real store, a 3 MiB NUL run in the served audit file made every span
+  search ending after it 3.4 to 7 ms slower at p50 (5.81 against 2.40 at
+  `limit=20` at load average 12 to 14, 9.42 against 2.53 at 18 to 21), a
+  200 KiB run nothing measurable; every line was answered
+  once across both, at `limit=20` and 200, and following `next` from 0
+  reached the end of the kept history (L-R324-22, L-R324-23). Remembering,
+  within one search, a stretch a probe found holds no newline would spare
+  the probes below it reading the run again; not done, and named there.
+- *`cargo deny` went red on 21 Oct with two new advisories, fixed by their
+  own named solutions:* RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 may
+  accept distrusted emSign intermediates; fixed in 0.103.16) and
+  RUSTSEC-2026-0381 (`webpki-roots` 1.0.9 bundles roots that trust them;
+  fixed in 1.0.10), both reached through `reqwest` and `hyper-rustls` from
+  `pull`. `Cargo.lock` takes `rustls-webpki` 0.103.16 and `webpki-roots`
+  1.0.10, resolved offline from crates already in the local registry
+  cache; no manifest changes and no other crate moves. A new advisory is a
+  finding to fix, never a baseline, as DENY-1 fixed the last ones under
+  D-5090.
+- *The mutation run over this round's lines found 11 survivors, and each is
+  repaired* (L-R324-14). The probe's read now ends on what was read: a
+  read's own "I read a byte" answer is gone, so no wrong answer can spin
+  it, and a redundant guard went with it; a short read is the file's end,
+  never a bound met first (`a_file_shorter_than_the_search_end_answers_no_line`).
+  New tests pin the first read's size, a page already full, the span
+  stream's cursor and the damage sentence. Run again: 0 missed.
+- *`telemetry`'s reopen tests hold the fork gate* (D-1462). Wrapping the
+  mode-bit test in `where_permission_binds` (above) put one more forking
+  test beside the state-stream and picture tests that drop a sink and open
+  it again on the same directory; a child forked in that window holds the
+  one-writer lock, and two of them failed once under load ("another sink
+  ... holds this telemetry directory"). The twelve such tests R3-24 wrote
+  now take `no_fork_in_flight()`, as the crate's older ones do; the suite
+  then passed three times in a row.
+
+**Repair round 3 (22 Oct, after the fourth check).**
+
+- *A time span's end that cannot be read is UNKNOWN, recorded as unknown,
+  named, and never a reason to pass a file over (R324-29, R324-30).* The
+  check found two ways a reopen invented a span. Over a file whose last
+  64 KiB held no line that decodes, the reopen took the generation's last
+  time to be its first line's, and the next roll closed it as
+  `[first, first]` (B9). Over a generation with no believable span image
+  whose first line does not decode (every generation a build before R3-24
+  wrote), the first line this process appended recorded its own time as
+  the generation's first (B3); and `span_page` passed a kept file whose
+  first line will not decode over by its `let`-`else`. Each lost every
+  older line to a span search, and each answer called itself complete. Now
+  `telemetry::AuditSpan::first_ms` is an `Option` like `last_ms`, and
+  `None` at either end overlaps every span. An unread last is kept as
+  `i64::MAX` (the image's existing "unknown" value, which `audit_span`
+  already answers as open-ended for a closed file), and no later line
+  lowers it. An unread first records no span file, and only a generation
+  that held no byte takes an appended line's time as its first
+  (`SpanStart::{Empty, At, Unknown}`). `audit_span` answers a span for
+  every kept file that holds a byte. `span_page` reads a file with an
+  unknown end and names it in `damage`. The reopen names the damage in
+  `AuditHealth::span_damage`, which is loud and is served on `/logs.json`
+  (`span_damage`) and `/logs`.
+  *Rejected:* scanning back past the 64 KiB block for the last line that
+  decodes. The check's damage was 64 MiB long, so a bounded scan still
+  ends in "unknown". An unbounded one is a scan at every start.
+  *Rejected:* taking the first line that DOES decode as the first time.
+  It is a true lower bound only for the lines that decode, and it would
+  name nothing. Unknown costs a search reads (L-R324-24) and never lines.
+- *`Cargo.lock`'s two bumps of repair round 2 are re-pinned in `vocab`'s
+  dependency fingerprint, with the scan recorded beside it (B10).* Repair
+  round 2 moved `rustls-webpki` 0.103.15 -> 0.103.16 and `webpki-roots`
+  1.0.9 -> 1.0.10 for RUSTSEC-2026-0381/-0382 and did not run
+  `the_dependency_set_has_not_moved_without_review`. That test failed on
+  the head and on every merge with `feat/db-fix`, and the round's report
+  called the tests green because the run never included `-p vocab`. The
+  registry sources of both new versions were scanned: no
+  .c/.cc/.cpp/.h/.S/.s/.asm/.js, no `build.rs`. Their only non-Rust files
+  are `LICENSE`, the packaged `Cargo.lock`, `Cargo.toml.orig`,
+  `.cargo_vcs_info.json` and DER data (`rustls-webpki` 0.103.16 ships 11 `.der`
+  files where 0.103.15 shipped 3: the 8 new ones are the distrusted emSign
+  intermediates' public keys, `src/data/distrusted/*.spki.der`, which the
+  fix reads; `webpki-roots` 1.0.10 ships 3 test certificates, as 1.0.9
+  did). The
+  count stays 194. No `dependencies` list moved: the lock's diff against
+  `feat/db-fix` is the two versions and their checksums. `feat/db-fix`
+  then took the same two bumps itself (D-7120) and pinned the same
+  fingerprint, `0x57F8_69FF_1E0D_4A5C`; the merge keeps its comment and adds
+  one line naming this round, and `Cargo.lock` equals `feat/db-fix`'s.
+- *Taken from the check's follow-ups, in this package's files:* a time span
+  with an end that does not read names every end given (R324-31). A good
+  end beside a bad one is named as not applied; before, it was dropped
+  without a word.
+
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
 The store-compression design (`state/design/store-compression-20261012.md`

@@ -635,6 +635,9 @@ fn the_dependency_set_has_not_moved_without_review() {
     // above is still a weak one. DECLARED is unchanged.
     // R3-17 (D-6271) made the same two bumps on its own branch, to the same
     // `Cargo.lock` bytes and the same pin, with the same scan result.
+    // R3-24 repair round 3 (D-5890) made the same two bumps and its own scan
+    // of both registry sources independently, and reached this same pin: its
+    // repair round 2 had bumped the lock without the re-pin (B10).
     assert_eq!(
         h, 0x57F8_69FF_1E0D_4A5C,
         "the dependency SET or GRAPH changed — a package was added, removed, \

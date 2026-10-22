@@ -134,7 +134,7 @@ struct Asked {
 
 /// Every parameter `/logs.json` and `/logs` read. Any other is named under
 /// `ignored` and logged once, never dropped in silence (WP-33c, DB-A45).
-pub(crate) const PARAMS: [&str; 12] = [
+pub(crate) const PARAMS: [&str; 17] = [
     "limit",
     "level",
     "target",
@@ -147,7 +147,63 @@ pub(crate) const PARAMS: [&str; 12] = [
     "ring",
     "before",
     "durable",
+    "month",
+    "reason",
+    "kind",
+    "from",
+    "to",
 ];
+
+/// IST's offset from UTC, in milliseconds: a `from` or `to` without a zone is
+/// read as IST, the clock every page of this application shows
+/// (`crate::server::ist_stamp`).
+const IST_OFFSET_MS: i64 = 19_800_000;
+
+/// The instant `text` names, in epoch milliseconds (R3-24): a whole number of
+/// milliseconds; a day `YYYY-MM-DD` (its first millisecond, or its last when
+/// `end`); or `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS`, whose first (or,
+/// when `end`, last) millisecond is meant. A day or time is IST unless it
+/// ends in `Z`, which is UTC. `None` for anything else, which the caller
+/// names as ignored.
+fn instant_of(text: &str, end: bool) -> Option<i64> {
+    if !text.is_empty() && text.len() <= 16 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return text.parse::<i64>().ok();
+    }
+    let (body, utc) = text
+        .strip_suffix('Z')
+        .map_or((text, false), |body| (body, true));
+    let (day, clock) = body.split_once('T').unwrap_or((body, ""));
+    let day = crate::server::import_journal::parse_day(day)?;
+    let number = |part: &str, most: i64| -> Option<i64> {
+        (part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<i64>().ok())
+            .flatten()
+            .filter(|n| *n <= most)
+    };
+    let (from_ms, width_ms) = if clock.is_empty() {
+        (0, 86_400_000)
+    } else {
+        let mut parts = clock.split(':');
+        let hours = number(parts.next()?, 23)?;
+        let minutes = number(parts.next()?, 59)?;
+        let (seconds, width) = match parts.next() {
+            Some(seconds) => (number(seconds, 59)?, 1_000),
+            None => (0, 60_000),
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        (((hours * 60 + minutes) * 60 + seconds) * 1_000, width)
+    };
+    let midnight = i64::from(day.days_from_epoch()) * 86_400_000;
+    let start = midnight + from_ms - if utc { 0 } else { IST_OFFSET_MS };
+    Some(if end { start + width_ms - 1 } else { start })
+}
+
+/// A month as a request names it: `YYYY-MM`, the month a real calendar has.
+fn is_month(text: &str) -> bool {
+    text.len() == 7 && crate::server::import_journal::parse_day(&format!("{text}-01")).is_some()
+}
 
 /// The names `query` carries that `known` does not hold, in the order sent,
 /// each once. A name is the text before its `=`, as [`crate::server::param`]
@@ -233,6 +289,18 @@ fn asked(raw: &str) -> Asked {
                 "1 with no run, target or key to probe the index by".to_owned(),
             ));
         }
+    }
+    // A TARGET ALONE IS A KEY (R3-24, DB-023): it is answered from the index
+    // of every half, all of its history. It used to read the newest 4 MiB of
+    // each ring and stop. The ring's newest bytes, for its lines no stream
+    // audits, are read only on `ring=1`, as for every other key: forced on a
+    // first page they cost every target-alone request a 4 MiB scan of each
+    // ring (p99 197 ms over the real store's logs on the R3-24 shadow, 19
+    // Oct, against the 5 ms every keyed search is held to). The answer's
+    // `keyed.ring.note` says so. `run=` stays the ring's filter for the
+    // reason `durable=1` gives above.
+    if keys.is_empty() && run == 0 && !target.is_empty() {
+        keys.target = Some(target.clone());
     }
     let before_word = crate::server::param(raw, "before");
     let before = if before_word.is_empty() {
@@ -329,6 +397,71 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
             keys.code = Some(code);
         } else {
             ignored.push(("code", code));
+        }
+    }
+    // A MONTH, A REASON AND AN IMPORT KIND (R3-24): each one posting of the
+    // index, read exactly as a day or a code is.
+    let month = crate::server::param(raw, "month");
+    if !month.is_empty() {
+        if is_month(&month) {
+            keys.month = Some(month);
+        } else {
+            ignored.push(("month", month));
+        }
+    }
+    let reason = crate::server::param(raw, "reason");
+    if !reason.is_empty() {
+        if reason.len() <= MAX_CONTRACT_ASKED && !reason.contains(['/', '\\']) {
+            keys.reason = Some(reason);
+        } else {
+            ignored.push(("reason", reason));
+        }
+    }
+    let kind = crate::server::param(raw, "kind");
+    if !kind.is_empty() {
+        match pull::gdfl_import::ImportKind::parse(&kind) {
+            Ok(parsed) => keys.kind = Some(parsed.as_str().to_owned()),
+            Err(_) => ignored.push(("kind", kind)),
+        }
+    }
+    // A TIME SPAN (R3-24): either end may be left open; one that does not
+    // read, or a span that ends before it starts, is named and not applied.
+    let (from_word, to_word) = (
+        crate::server::param(raw, "from"),
+        crate::server::param(raw, "to"),
+    );
+    let from = (!from_word.is_empty()).then(|| instant_of(&from_word, false));
+    let to = (!to_word.is_empty()).then(|| instant_of(&to_word, true));
+    match (from, to) {
+        (None, None) => {}
+        // AN END THAT DOES NOT READ takes the span with it, and EVERY end
+        // given is named (R3-24 repair round 3, the fourth check's
+        // follow-up): a bad `from` used to drop a good `to`, and a bad `to`
+        // beside a bad `from`, without a word.
+        (from, to) if from == Some(None) || to == Some(None) => {
+            for (name, read, word, other) in
+                [("from", from, from_word, "to"), ("to", to, to_word, "from")]
+            {
+                match read {
+                    None => {}
+                    Some(None) => ignored.push((name, word)),
+                    Some(Some(_)) => {
+                        ignored
+                            .push((name, format!("{word} (not applied: {other}= did not read)")));
+                    }
+                }
+            }
+        }
+        (from, to) => {
+            let (from, to) = (
+                from.flatten().unwrap_or(i64::MIN),
+                to.flatten().unwrap_or(i64::MAX),
+            );
+            if from <= to {
+                keys.span = Some((from, to));
+            } else {
+                ignored.push(("from", format!("{from_word} is after to={to_word}")));
+            }
         }
     }
     keys
@@ -629,12 +762,525 @@ fn dirs_json(halves: &[Half]) -> String {
     out
 }
 
-/// `body`, a JSON object, with [`dirs_json`] as its last member.
+/// `body`, a JSON object, with [`dirs_json`] and [`reach_json`] as its last
+/// members.
 fn with_dirs(body: &str, halves: &[Half]) -> String {
     let mut out = body.strip_suffix('}').unwrap_or(body).to_owned();
     out.push(',');
     out.push_str(&dirs_json(halves));
+    out.push(',');
+    out.push_str(&reach_json(halves, telemetry::now_millis()));
+    out.push(',');
+    out.push_str(&picture_json(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    out.push(',');
+    out.push_str(&streams_json(audit.as_ref(), state.as_ref()));
     out.push('}');
+    out
+}
+
+/// An audit history younger than this many days raises the one alert every
+/// log answer carries (R3-24, DB-G88): the operator's evidence for a month
+/// ago is then simply not kept.
+pub const YOUNG_AUDIT_DAYS: i64 = 30;
+
+/// What every log answer says of how far back it reaches (R3-24): each
+/// directory's three streams, the oldest audited line any of them keeps, and
+/// one alert when that is younger than [`YOUNG_AUDIT_DAYS`] or there is none.
+struct Reached {
+    /// Per directory read, its reach.
+    halves: Vec<(&'static str, telemetry::run_dirs::Reach)>,
+    /// The oldest line either durable stream of any directory keeps.
+    audited_from: Option<i64>,
+    /// Whole days from it to `now`.
+    days: Option<i64>,
+    /// The one alert, in words, or `None`.
+    alert: Option<String>,
+}
+
+/// How far back `halves` reach at `now` (epoch ms). Per directory, what
+/// `telemetry::run_dirs::reach_of` reads: a few small reads, never a walk.
+fn reached(halves: &[Half], now: i64) -> Reached {
+    let halves: Vec<(&'static str, telemetry::run_dirs::Reach)> = halves
+        .iter()
+        .map(|half| {
+            (
+                half.name,
+                telemetry::run_dirs::reach_of(&half.path, telemetry::DEFAULT_KEEP_FILES),
+            )
+        })
+        .collect();
+    let audited_from = halves
+        .iter()
+        .filter_map(|(_, reach)| reach.audited_from())
+        .min();
+    let days = audited_from.map(|from| now.saturating_sub(from).div_euclid(86_400_000));
+    // NO RENDERED CLOCK IN THE WORDS: the JSON's times are epoch
+    // milliseconds (`audited_from`), and the page adds its IST stamp itself.
+    let alert = match days {
+        Some(days) if days < YOUNG_AUDIT_DAYS => Some(format!(
+            "the audit history reaches back {days} day(s): younger than {YOUNG_AUDIT_DAYS} days, \
+             so nothing audited before then can be answered"
+        )),
+        Some(_) => None,
+        _ => Some(
+            "no directory read keeps an audit history: nothing audited can be answered for any \
+             time"
+                .to_owned(),
+        ),
+    };
+    Reached {
+        halves,
+        audited_from,
+        days,
+        alert,
+    }
+}
+
+/// `"reach":{...}`: [`reached`] as JSON, each time in epoch milliseconds or
+/// `null` for a stream with no line.
+fn reach_json(halves: &[Half], now: i64) -> String {
+    format!("\"reach\":{}", reach_object(halves, now))
+}
+
+/// The log directories of a store an `/audit.json` answer reads (R3-24): the
+/// directory a server started on the store logs to
+/// ([`telemetry::dir_beneath_store`], `<store>/telemetry`) as `served`, then
+/// every run directory. (`<store>/logs` itself holds no log: only the run
+/// directories beneath it.)
+pub(crate) fn store_halves(store_root: &std::path::Path) -> Vec<Half> {
+    halves_of(
+        Some(telemetry::dir_beneath_store(store_root)),
+        Some(store_root),
+    )
+}
+
+/// The most state-change lines `/audit.json` names (R3-24).
+pub const STATE_CHANGES_SHOWN: usize = 20;
+
+/// The bytes read from the end of one state stream for `/audit.json`'s
+/// state changes: a fixed slice, whatever the stream holds.
+const STATE_TAIL_BYTES: u64 = 64 * 1024;
+
+/// The newest state-change lines of every directory in `halves`, newest
+/// first, at most `limit`, each with its class (R3-24): what `/audit.json`
+/// shows of who did what. Per directory one read of at most
+/// [`STATE_TAIL_BYTES`] at the end of its state stream, which never rolls,
+/// so the newest lines are always there; a stream that is not there is
+/// named in `no_stream`, one that cannot be read in `unread`.
+///
+/// **A LINE THE STREAM HOLDS THAT IS NO STATE CHANGE BY TODAY'S RULE IS NOT
+/// SHOWN AS ONE, AND IS COUNTED** (R3-24 repair round 1): a stream written
+/// by an earlier build keeps every line it took (it is append-only), so the
+/// per-request `api.bars export abandoned; work stopped` lines an earlier
+/// rule let in stay on disk. Each line read is put to
+/// [`telemetry::run_dirs::state_events::is_state_change`] again; one it
+/// refuses is left out of `rows` and counted in `passed_over`, so twenty real
+/// state changes are never pushed out by traffic, and nothing is hidden.
+///
+/// **A STREAM THAT IS NOT THERE IS NAMED, AND SO IS THE SERVING SINK'S OWN
+/// REFUSAL** (R3-24 repair round 2, the third check's follow-up): a stream
+/// absent from a directory used to be passed over unsaid, so when the sink
+/// refused the served state stream (`name_taken`, R324-24) this answered 0
+/// state changes with `unread: []`, which reads as "nothing happened". Each
+/// absent stream is now listed in `no_stream`, and `served` (the serving
+/// sink's state-stream health, `None` for a process with no sink) puts its
+/// last failure in `served_state_error`.
+pub(crate) fn state_changes_json(
+    halves: &[Half],
+    limit: usize,
+    served: Option<&telemetry::AuditHealth>,
+) -> String {
+    use std::io::{Read as _, Seek as _};
+    let mut found: Vec<(&'static str, telemetry::Record)> = Vec::new();
+    let mut passed_over = 0u64;
+    let mut unread: Vec<String> = Vec::new();
+    let mut no_stream: Vec<String> = Vec::new();
+    for half in halves {
+        let path = telemetry::audit_current_path(&telemetry::run_dirs::state_stream_of(&half.path));
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                no_stream.push(format!(
+                    r#"{{"half":{},"path":{}}}"#,
+                    render::json_string(half.name),
+                    render::json_string(&path.display().to_string())
+                ));
+                continue;
+            }
+            Err(e) => {
+                unread.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        let from = len.saturating_sub(STATE_TAIL_BYTES);
+        let mut bytes = Vec::new();
+        if let Err(e) = std::fs::File::open(&path).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(from))?;
+            file.take(STATE_TAIL_BYTES).read_to_end(&mut bytes)
+        }) {
+            unread.push(format!("{}: {e}", path.display()));
+            continue;
+        }
+        // A READ THAT BEGAN MID-FILE may begin mid-line: that first piece is
+        // the end of a line, which never decodes (a record opens with its
+        // own `{"seq"`), so it is passed like any undecodable piece. A read
+        // that began exactly on a line's first byte keeps that line (R3-24
+        // repair round 1: the first piece used to be skipped unread, which
+        // lost that whole line).
+        let lines = bytes.split(|&byte| byte == b'\n');
+        for record in lines.filter_map(|line| telemetry::Record::decode(line).ok()) {
+            if telemetry::run_dirs::state_events::is_state_change(
+                record.level,
+                &record.target,
+                &record.message,
+            ) {
+                found.push((half.name, record));
+            } else {
+                passed_over = passed_over.saturating_add(1);
+            }
+        }
+    }
+    found.sort_by(|left, right| {
+        right
+            .1
+            .at_unix_millis
+            .cmp(&left.1.at_unix_millis)
+            .then_with(|| right.1.seq.cmp(&left.1.seq))
+    });
+    found.truncate(limit);
+    let rows: Vec<String> = found
+        .iter()
+        .map(|(half, record)| {
+            let class =
+                telemetry::run_dirs::state_events::class_of(&record.target, &record.message)
+                    .unwrap_or(telemetry::run_dirs::state_events::Class::Run);
+            format!(
+                r#"{{"half":{},"ts":{},"level":{},"target":{},"message":{},"class":{},"run":{}}}"#,
+                render::json_string(half),
+                record.at_unix_millis,
+                render::json_string(record.level.label()),
+                render::json_string(&record.target),
+                render::json_string(&record.message),
+                render::json_string(class.as_str()),
+                run_of(record).map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
+            )
+        })
+        .collect();
+    let unread: Vec<String> = unread.iter().map(|why| render::json_string(why)).collect();
+    format!(
+        r#"{{"rows":[{}],"limit":{limit},"unread":[{}],"no_stream":[{}],"served_state_error":{},"passed_over":{passed_over},"passed_over_means":"lines the streams hold, in the slice read, that are no state change by this build's rule (written under an earlier one); left out of rows","from":"the never-rolling state stream of each log directory"}}"#,
+        rows.join(","),
+        unread.join(","),
+        no_stream.join(","),
+        served
+            .and_then(|health| health.last_error.as_deref())
+            .map_or_else(|| "null".to_owned(), render::json_string),
+    )
+}
+
+/// [`reached`] as one JSON object.
+pub(crate) fn reach_object(halves: &[Half], now: i64) -> String {
+    let reach = reached(halves, now);
+    let at = |ms: Option<i64>| ms.map_or_else(|| "null".to_owned(), |ms| ms.to_string());
+    let mut out = String::from("{\"halves\":[");
+    for (n, (half, one)) in reach.halves.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"half":{},"ring_from":{},"audit_from":{},"state_from":{}}}"#,
+            render::json_string(half),
+            at(one.ring_from),
+            at(one.audit_from),
+            at(one.state_from),
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"audited_from":{},"days":{},"young_below_days":{YOUNG_AUDIT_DAYS},"alert":{}}}"#,
+        at(reach.audited_from),
+        at(reach.days),
+        reach
+            .alert
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+    );
+    out
+}
+
+/// `"picture":{...}`: the served sink's counters (R3-24) as JSON, or `null`
+/// for a process with no sink. Read from [`telemetry::Sink::picture`], a copy
+/// of a fixed-size table: no file is opened.
+fn picture_json(picture: Option<&telemetry::run_dirs::Picture>) -> String {
+    let Some(p) = picture else {
+        return "\"picture\":null".to_owned();
+    };
+    let mut out = String::from("\"picture\":{\"levels\":[");
+    for (n, level) in telemetry::LEVELS.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        out.push_str(&render::json_string(level.label()));
+    }
+    out.push_str("],\"minutes\":[");
+    for (n, (from, counts)) in p.minutes.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let counts: Vec<String> = counts.iter().map(u64::to_string).collect();
+        let _ = write!(out, r#"{{"from":{from},"counts":[{}]}}"#, counts.join(","));
+    }
+    out.push_str("],\"codes\":[");
+    for (n, (code, count)) in p.codes.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"code":{},"count":{count}}}"#,
+            render::json_string(code)
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"codes_replaced":{},"oldest_ms":{},"counted":{},"since_ms":{},"from":"counters"}}"#,
+        p.codes_replaced,
+        p.oldest_ms
+            .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
+        p.counted,
+        p.since_ms,
+    );
+    out
+}
+
+/// The served sink's picture, when this process writes a log.
+fn served_picture() -> Option<telemetry::run_dirs::Picture> {
+    telemetry::global().map(telemetry::Sink::picture)
+}
+
+/// `"audit_stream":{...},"state_stream":{...}`: both durable streams of the
+/// served sink, their counters and the roll's waiting deletes (R3-24: the
+/// waiting-delete counters are served on every answer, not only a keyed
+/// one).
+fn streams_json(
+    audit: Option<&telemetry::AuditHealth>,
+    state: Option<&telemetry::AuditHealth>,
+) -> String {
+    format!(
+        r#""audit_stream":{},"state_stream":{}"#,
+        audit_json_of(audit),
+        audit_json_of(state)
+    )
+}
+
+/// The page's line for both durable streams of the served sink: their size,
+/// and the index generations a roll renamed aside that wait to be deleted.
+fn streams_note(
+    audit: Option<&telemetry::AuditHealth>,
+    state: Option<&telemetry::AuditHealth>,
+) -> String {
+    let Some(audit) = audit else {
+        return "<p class=\"lead\">This process keeps no audit stream.</p>".to_owned();
+    };
+    let mut out = format!(
+        "<p class=\"{}\">Audit stream: file {} at {} byte(s), {} roll(s); {} index \
+         generation(s) wait to be deleted, {} deleted, {} delete(s) failed{}.",
+        if audit.is_loud() || state.is_some_and(|state| state.span_damage.is_some()) {
+            "halt"
+        } else {
+            "lead"
+        },
+        audit.serial,
+        audit.current_bytes,
+        audit.rotations,
+        audit.gone_waiting,
+        audit.reaped,
+        audit.reap_failures,
+        if audit.reaper_behind() {
+            " — the deletes are behind the rolls"
+        } else {
+            ""
+        },
+    );
+    if let Some(state) = state {
+        let _ = write!(
+            out,
+            " State stream (never rolls): {} byte(s), {} line(s) written by this process{}.",
+            state.current_bytes,
+            state.written,
+            if state.grown_past_loud() {
+                " — past its loud size: look at what writes it"
+            } else {
+                ""
+            },
+        );
+    }
+    if let Some(why) = audit.last_error.as_deref() {
+        let _ = write!(out, " Most recent failure: {}.", render::escape(why));
+    }
+    // A SPAN END THE REOPEN COULD NOT READ, of either stream (R3-24 repair
+    // round 3): named, and the paragraph is loud.
+    for (stream, health) in [("Audit", Some(audit)), ("State", state)] {
+        if let Some(why) = health.and_then(|h| h.span_damage.as_deref()) {
+            let _ = write!(
+                out,
+                " {stream} stream damage met on reopening: {}.",
+                render::escape(why)
+            );
+        }
+    }
+    out.push_str("</p>");
+    out
+}
+
+/// The served sink's two durable streams' health.
+fn served_streams() -> (
+    Option<telemetry::AuditHealth>,
+    Option<telemetry::AuditHealth>,
+) {
+    telemetry::global().map_or((None, None), |sink| {
+        (sink.audit_health(), sink.state_health())
+    })
+}
+
+/// The colour each level's bar is drawn in, by rank.
+const LEVEL_FILL: [&str; 5] = ["#cbd5e1", "#94a3b8", "#4f46e5", "#d97706", "#dc2626"];
+
+/// The `/logs` picture (R3-24), drawn here from the served sink's counters:
+/// an hour of lines per minute, stacked by level, the codes written most and
+/// the ring's oldest line. Plain HTML and one inline SVG, no script. `None`
+/// draws the one line that says this process keeps no counters.
+fn picture_note(picture: Option<&telemetry::run_dirs::Picture>) -> String {
+    /// One minute's bar, wide, in the picture's own units.
+    const BAR: usize = 8;
+    /// The tallest bar.
+    const HIGH: u64 = 64;
+    let Some(p) = picture else {
+        return "<p class=\"lead\">No picture: this process writes no log, so it counted \
+                nothing.</p>"
+            .to_owned();
+    };
+    let width = BAR * p.minutes.len();
+    let most = p
+        .minutes
+        .iter()
+        .map(|(_, counts)| counts.iter().sum::<u64>())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut bars = String::new();
+    for (n, (from, counts)) in p.minutes.iter().enumerate() {
+        let mut top = HIGH;
+        for (rank, count) in counts.iter().enumerate() {
+            if *count == 0 {
+                continue;
+            }
+            let tall = (count.saturating_mul(HIGH).div_ceil(most)).min(top);
+            top = top.saturating_sub(tall);
+            let _ = write!(
+                bars,
+                "<rect x=\"{}\" y=\"{top}\" width=\"{}\" height=\"{tall}\" fill=\"{}\">\
+                 <title>{} · {count} {}</title></rect>",
+                n.saturating_mul(BAR),
+                BAR.saturating_sub(1),
+                LEVEL_FILL.get(rank).copied().unwrap_or("#000"),
+                render::escape(&crate::server::ist_stamp(from.div_euclid(1_000))),
+                telemetry::LEVELS
+                    .get(rank)
+                    .map_or("?", |level| level.label()),
+            );
+        }
+    }
+    let mut legend = String::new();
+    for (rank, level) in telemetry::LEVELS.iter().enumerate() {
+        let total: u64 = p
+            .minutes
+            .iter()
+            .map(|(_, counts)| counts.get(rank).copied().unwrap_or(0))
+            .sum();
+        let _ = write!(
+            legend,
+            " <span style=\"color:{}\">■</span> {} {total};",
+            LEVEL_FILL.get(rank).copied().unwrap_or("#000"),
+            level.label(),
+        );
+    }
+    let mut codes = String::new();
+    for (code, count) in &p.codes {
+        let _ = write!(
+            codes,
+            "<tr><td class=\"mono\">{}</td><td>{count}</td></tr>",
+            render::escape(code)
+        );
+    }
+    format!(
+        "<section class=\"lead\"><b>The last hour, per minute</b> (from the sink's own \
+         counters, kept as it writes; no file read):{legend} peak {most} a minute.\
+         <svg role=\"img\" viewBox=\"0 0 {width} {HIGH}\" width=\"100%\" height=\"{HIGH}\" \
+         preserveAspectRatio=\"none\"><title>lines per minute by level</title>{bars}</svg>\
+         <br>Oldest line the ring holds: {oldest}. {counted} line(s) counted since {since}.\
+         {replaced}</section>{table}",
+        oldest = render::escape(&p.oldest_ms.map_or_else(
+            || "none".to_owned(),
+            |ms| crate::server::ist_stamp(ms.div_euclid(1_000))
+        )),
+        counted = p.counted,
+        since = render::escape(&crate::server::ist_stamp(p.since_ms.div_euclid(1_000))),
+        replaced = if p.codes_replaced > 0 {
+            format!(
+                " The code table is full and a new code took the least-counted one's place \
+                 {} time(s): a count may be over by the count it took over.",
+                p.codes_replaced
+            )
+        } else {
+            String::new()
+        },
+        table = if codes.is_empty() {
+            "<p class=\"lead\">No line carried a code.</p>".to_owned()
+        } else {
+            format!(
+                "<div class=\"hscroll\"><table class=\"codes\"><thead><tr><th>Code</th>\
+                 <th>Lines</th></tr></thead><tbody>{codes}</tbody></table></div>"
+            )
+        },
+    )
+}
+
+/// The page's reach line, and its one alert when there is one.
+fn reach_note(halves: &[Half], now: i64) -> String {
+    let reach = reached(halves, now);
+    let mut out = String::new();
+    if let Some(ref alert) = reach.alert {
+        let _ = write!(
+            out,
+            "<p class=\"halt\"><b>Audit history is short</b>{}{}.</p>",
+            render::escape(alert),
+            reach.audited_from.map_or_else(String::new, |from| format!(
+                " (its oldest line: {})",
+                render::escape(&crate::server::ist_stamp(from.div_euclid(1_000)))
+            )),
+        );
+    }
+    out.push_str("<p class=\"lead\">Reaches back:");
+    for (half, one) in &reach.halves {
+        let when = |ms: Option<i64>| {
+            ms.map_or_else(
+                || "nothing".to_owned(),
+                |ms| crate::server::ist_stamp(ms.div_euclid(1_000)),
+            )
+        };
+        let _ = write!(
+            out,
+            " <code>{}</code> ring {}, audit {}, state {};",
+            render::escape(half),
+            render::escape(&when(one.ring_from)),
+            render::escape(&when(one.audit_from)),
+            render::escape(&when(one.state_from)),
+        );
+    }
+    out.push_str("</p>");
     out
 }
 
@@ -664,13 +1310,97 @@ fn dirs_note(halves: &[Half]) -> String {
 /// directory's own walk, so the limit, the caps and `missing` combine exactly
 /// as they did for two. At most 8 walks of at most [`SCAN_BYTES`] each.
 fn all_halves(halves: &[Half], query: &telemetry::Query) -> telemetry::Tail {
-    let mut walks = halves
-        .iter()
-        .map(|half| telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query));
+    all_halves_live(halves, query, telemetry::global())
+}
+
+/// [`all_halves`], the directory `live` writes answered from its copy in
+/// memory ([`live_tail`], R3-24) and every other directory from its files.
+fn all_halves_live(
+    halves: &[Half],
+    query: &telemetry::Query,
+    live: Option<&telemetry::Sink>,
+) -> telemetry::Tail {
+    let mut walks =
+        halves.iter().map(
+            |half| match live.filter(|sink| sink.dir() == half.path.as_path()) {
+                Some(sink) => live_tail(sink, &half.path, query),
+                None => telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query),
+            },
+        );
     let Some(first) = walks.next() else {
         return telemetry::Tail::default();
     };
     walks.fold(first, |so_far, next| merged(so_far, next, query.limit))
+}
+
+/// Whether the live tail keeps `record` for `query`: its floor, its run (the
+/// line's own stamp, as the ring's filter reads it), its target or beneath it,
+/// and its `since`. The rule `telemetry::Query` applies to a file's lines.
+fn live_admits(query: &telemetry::Query, record: &telemetry::Record) -> bool {
+    query
+        .min_level
+        .is_none_or(|floor| record.level.at_least(floor))
+        && query.run.is_none_or(|run| record.run == run)
+        && query
+            .target
+            .as_deref()
+            .is_none_or(|target| target_admits(&record.target, target))
+        && query
+            .since_unix_millis
+            .is_none_or(|since| record.at_unix_millis >= since)
+}
+
+/// The served directory's tail from the copy its sink keeps in memory
+/// (R3-24): the newest [`telemetry::run_dirs::RECENT_LINES`] lines, filtered,
+/// with no file opened and no byte read. A copy that cannot fill the page
+/// (a filter that admits fewer lines than asked) is not passed off as the
+/// whole answer: the files are read, exactly as before.
+///
+/// # Cost
+///
+/// One lock and a copy of at most [`telemetry::run_dirs::RECENT_LINES`]
+/// lines, then a decode of each outside the lock: a constant of this build,
+/// whatever the ring holds. Only the fallback reads the files.
+fn live_tail(
+    sink: &telemetry::Sink,
+    dir: &std::path::Path,
+    query: &telemetry::Query,
+) -> telemetry::Tail {
+    let (records, malformed) = sink.recent();
+    let kept: Vec<telemetry::Record> = records
+        .into_iter()
+        .filter(|record| live_admits(query, record))
+        .take(query.limit)
+        .collect();
+    if kept.len() < query.limit {
+        return telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, query);
+    }
+    // A GAP IN `seq` among the copies is a line the sink numbered and did not
+    // keep; under a filter a gap means nothing, as the file tail says.
+    let filtered = query.min_level.is_some()
+        || query.target.is_some()
+        || query.run.is_some()
+        || query.since_unix_millis.is_some();
+    let missing = (!filtered).then(|| {
+        kept.windows(2)
+            .map(|pair| {
+                pair.first().zip(pair.get(1)).map_or(0, |(newer, older)| {
+                    newer.seq.saturating_sub(older.seq).saturating_sub(1)
+                })
+            })
+            .sum::<u64>()
+    });
+    telemetry::Tail {
+        records: kept,
+        bytes_read: 0,
+        files_read: 0,
+        malformed,
+        hit_scan_cap: false,
+        reached_oldest: false,
+        partial_tail: false,
+        errors: Vec::new(),
+        missing,
+    }
 }
 
 /// [`json_over`] across every directory in `halves`.
@@ -679,7 +1409,181 @@ fn json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
         return NO_LOG_JSON.to_owned();
     };
     let tail = all_halves(halves, &asked.query);
-    with_dirs(&json_of(&tail, asked, health, pair), halves)
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    with_dirs(&json_of_marked(&tail, asked, health, pair, &marks), halves)
+}
+
+/// The message the GDFL importer closes a day `done` with (its
+/// `summary_words`): the line the import journal can contradict.
+pub(crate) const DAY_IMPORTED: &str = "day imported";
+
+/// A "day imported" line the import journal contradicts (DB-A48, R3-24).
+///
+/// # Why a log line can be wrong about its own day
+///
+/// Before the importer's fix of 10 Oct (`3cd0623c`), a day the census refused
+/// still closed in the log as "day imported" at `info`: 212 options days the
+/// journal closed `incomplete`, and two days the journal holds no line for at
+/// all. The journal is the record (`pull::gdfl_import`'s closing lines); the
+/// log is what a run said as it went. So a reader that shows such a line
+/// shows the journal's outcome beside it and never lets the line stand alone
+/// as the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Contradicted {
+    /// The journal's outcome for the day's key, as `/imports.json` spells it,
+    /// `no journal line` when the journal holds none for it, or `unchecked`.
+    pub(crate) journal: &'static str,
+    /// The journal's deciding line, from 1; `None` with no line.
+    pub(crate) line: Option<u64>,
+    /// Why the line could not be checked, when it could not (`journal` is
+    /// then `unchecked`): the journal could not be read, or the line names no
+    /// kind and day. Said, never shown unmarked as if the journal agreed
+    /// (`CLAUDE.md` section 4).
+    pub(crate) unchecked: Option<String>,
+}
+
+impl Contradicted {
+    /// As a record's `conflict` member.
+    fn json(&self) -> String {
+        format!(
+            r#"{{"with":"import journal","journal_outcome":{},"journal_line":{},"note":{}}}"#,
+            render::json_string(self.journal),
+            self.line
+                .map_or_else(|| "null".to_owned(), |line| line.to_string()),
+            render::json_string(&self.words()),
+        )
+    }
+
+    /// The page's mark: CONFLICT when the journal says otherwise, UNCHECKED
+    /// when the line could not be checked against it.
+    const fn label(&self) -> &'static str {
+        if self.unchecked.is_some() {
+            "UNCHECKED"
+        } else {
+            "CONFLICT"
+        }
+    }
+
+    /// In the operator's words.
+    fn words(&self) -> String {
+        if let Some(why) = &self.unchecked {
+            return format!(
+                "this line is not checked against the import journal: {why}; whether this \
+                 day was imported is not known here"
+            );
+        }
+        match self.line {
+            Some(line) => format!(
+                "the import journal closed this day {} (line {line}): it was not imported, \
+                 whatever this line says",
+                self.journal
+            ),
+            None => "the import journal holds no line for this day: it was not imported, \
+                     whatever this line says"
+                .to_owned(),
+        }
+    }
+}
+
+/// The store root a set of halves was resolved under: the directory two
+/// levels (or three, for `gdfl/<kind>`) above any run directory. `None` when
+/// only the server's own directory was read.
+fn store_of(halves: &[Half]) -> Option<std::path::PathBuf> {
+    halves
+        .iter()
+        .find(|half| half.name != "served")
+        .and_then(|half| {
+            let depth = std::path::Path::new(telemetry::run_dirs::LOGS)
+                .join(half.name)
+                .components()
+                .count();
+            half.path
+                .ancestors()
+                .nth(depth)
+                .map(std::path::Path::to_path_buf)
+        })
+}
+
+/// Per record of `records`, what the import journal under `store` says
+/// against it: `Some` for a "day imported" line whose day's key the journal
+/// closed other than `done` or holds no line for, `None` for every other
+/// record (and for every record when there is no journal to compare with).
+/// A "day imported" line that cannot be checked, because the journal could
+/// not be read or the line names no kind and day this reader parses, is
+/// `Some` too and says so: UNCHECKED, never shown as if the journal agreed.
+///
+/// # Cost
+///
+/// One [`crate::server::import_journal::snapshot`] (a tail: only the bytes
+/// appended since its last read), taken only when a record is a "day
+/// imported" line, and one range probe of one day per such record:
+/// O(log days) each, at most the page's limit of them.
+fn contradicted(
+    records: &[telemetry::Record],
+    store: Option<&std::path::Path>,
+) -> Vec<Option<Contradicted>> {
+    use crate::server::import_journal::{parse_day, snapshot};
+    type Read = Result<Option<std::sync::Arc<crate::server::import_journal::Parsed>>, String>;
+    let unchecked = |why: String| Contradicted {
+        journal: "unchecked",
+        line: None,
+        unchecked: Some(why),
+    };
+    let mut journal: Option<Read> = None;
+    records
+        .iter()
+        .map(|record| {
+            if record.target != pull::gdfl_import::TARGET || record.message != DAY_IMPORTED {
+                return None;
+            }
+            let key = text_of(record, "kind")
+                .and_then(|kind| pull::gdfl_import::ImportKind::parse(kind).ok())
+                .zip(text_of(record, "day").and_then(parse_day));
+            let Some((kind, day)) = key else {
+                return Some(unchecked(
+                    "it names no import kind and day this reader can parse".to_owned(),
+                ));
+            };
+            let read = journal.get_or_insert_with(|| match store {
+                None => Ok(None),
+                Some(root) => snapshot(root).map(|read| read.present.then_some(read.parsed)),
+            });
+            let parsed = match read {
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => return None,
+                Err(why) => {
+                    return Some(unchecked(format!(
+                        "the import journal could not be read ({why})"
+                    )));
+                }
+            };
+            // A DAY'S CLOSE is the whole tree's key (`*`) when the journal
+            // holds one, else the first key of that kind and day. (A member
+            // key's close is "member imported", never this message.)
+            let rows: Vec<_> = parsed
+                .range(day, day)
+                .filter(|row| row.kind == kind)
+                .collect();
+            let row = rows
+                .iter()
+                .find(|row| row.filter == "*")
+                .or_else(|| rows.first())
+                .copied();
+            match row {
+                Some(row) if row.outcome.is_done() => None,
+                Some(row) => Some(Contradicted {
+                    journal: row.outcome.as_str(),
+                    line: Some(row.line),
+                    unchecked: None,
+                }),
+                None => Some(Contradicted {
+                    journal: "no journal line",
+                    line: None,
+                    unchecked: None,
+                }),
+            }
+        })
+        .collect()
 }
 
 /// What a request answers when no directory resolved at all.
@@ -811,11 +1715,26 @@ fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> teleme
 /// and `errors` needs an unreadable file — none of them reachable from a unit
 /// test, so every branch that reports one would otherwise render for the first
 /// time in production. `Tail`'s fields are `pub`; the state can be stated.
+#[cfg(test)]
 fn json_of(
     tail: &telemetry::Tail,
     asked: &Asked,
     health: Option<&telemetry::Health>,
     read: (&std::path::Path, Option<&std::path::Path>),
+) -> String {
+    json_of_marked(tail, asked, health, read, &[])
+}
+
+/// [`json_of`], with each record the import journal contradicts carrying its
+/// `conflict` beside it (`marks[n]` for `tail.records[n]`, DB-A48). A record
+/// with no mark carries no `conflict` member, so every other answer is
+/// byte for byte what it was.
+fn json_of_marked(
+    tail: &telemetry::Tail,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+    read: (&std::path::Path, Option<&std::path::Path>),
+    marks: &[Option<Contradicted>],
 ) -> String {
     let mut out = String::from("{\"records\":[");
     for (n, record) in tail.records.iter().enumerate() {
@@ -835,6 +1754,9 @@ fn json_of(
             record.cut,
             record.dropped_fields,
         );
+        if let Some(Some(mark)) = marks.get(n) {
+            let _ = write!(out, r#","conflict":{}"#, mark.json());
+        }
         out.push_str(",\"fields\":{");
         // The durable invocation namespace exceeds JavaScript's safe integer
         // range. Derive aliases from typed Rust values, before JSON can round
@@ -1061,29 +1983,44 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
              read.</p>",
         );
     };
+    let now = telemetry::now_millis();
     if asked.keys.is_empty() {
         let tail = all_halves(halves, &asked.query);
-        let mut page = page_of(&tail, asked, health, pair);
+        let marks = contradicted(&tail.records, store_of(halves).as_deref());
+        let mut page = page_of_marked(&tail, asked, health, pair, &marks);
         page.push_str(&dirs_note(halves));
+        page.push_str(&reach_note(halves, now));
+        page.push_str(&picture_note(served_picture().as_ref()));
+        let (audit, state) = served_streams();
+        page.push_str(&streams_note(audit.as_ref(), state.as_ref()));
         return page;
     }
-    let (tail, _keyed, next) = keyed_walk(halves, asked);
-    let mut page = page_of(&tail, asked, health, pair);
+    let (tail, _keyed, next, said) = keyed_walk_said(halves, asked);
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    let mut page = page_of_marked(&tail, asked, health, pair, &marks);
     page.push_str(&dirs_note(halves));
+    page.push_str(&reach_note(halves, now));
+    page.push_str(&picture_note(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    page.push_str(&streams_note(audit.as_ref(), state.as_ref()));
     match next {
         Some(cursor) => {
             let _ = write!(
                 page,
-                "<p class=\"lead\">Read from the durable audit index, newest first. \
+                "<p class=\"lead\">Read from the durable audit index, newest first: {}. \
                  <a href=\"/logs{}&amp;before={}\">Older matches</a></p>",
+                render::escape(&said),
                 json_query(asked),
                 render::query_value(&cursor),
             );
         }
-        None => page.push_str(
-            "<p class=\"lead\">Read from the durable audit index: every match it holds is \
-             above.</p>",
-        ),
+        None => {
+            let _ = write!(
+                page,
+                "<p class=\"lead\">Read from the durable audit index: {}.</p>",
+                render::escape(&said),
+            );
+        }
     }
     page
 }
@@ -1096,11 +2033,24 @@ fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health
 /// `read` is the pair of directories the walk covered, in [`json_of`]'s order
 /// and for its reason: a page that names one of two directories invites the
 /// reader to conclude the other was empty.
+#[cfg(test)]
 fn page_of(
     tail: &telemetry::Tail,
     asked: &Asked,
     health: Option<&telemetry::Health>,
     read: (&std::path::Path, Option<&std::path::Path>),
+) -> String {
+    page_of_marked(tail, asked, health, read, &[])
+}
+
+/// [`page_of`], each row the import journal contradicts marked beside it
+/// (DB-A48), exactly as [`json_of_marked`] marks the JSON.
+fn page_of_marked(
+    tail: &telemetry::Tail,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+    read: (&std::path::Path, Option<&std::path::Path>),
+    marks: &[Option<Contradicted>],
 ) -> String {
     let mut body = String::new();
     let _ = write!(
@@ -1198,7 +2148,7 @@ fn page_of(
         return page_shell(asked, &body);
     }
 
-    body.push_str(&rows_table(tail));
+    body.push_str(&rows_table(tail, marks));
     page_shell(asked, &body)
 }
 
@@ -1369,14 +2319,17 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
 }
 
 /// The events themselves, newest first.
-fn rows_table(tail: &telemetry::Tail) -> String {
+fn rows_table(tail: &telemetry::Tail, marks: &[Option<Contradicted>]) -> String {
     let mut out = String::from(
         "<div class=\"hscroll\"><table><thead><tr>\
          <th>When (IST)</th><th>Level</th><th>Target</th><th>Message</th>\
          <th>Fields</th></tr></thead><tbody>",
     );
-    for record in &tail.records {
-        let loud = record.level.at_least(telemetry::Level::Warn);
+    for (n, record) in tail.records.iter().enumerate() {
+        let mark = marks.get(n).and_then(Option::as_ref);
+        // A CONTRADICTED LINE IS SHOWN AS A FAULT, whatever its level: it
+        // says a day was imported that was not (DB-A48).
+        let loud = record.level.at_least(telemetry::Level::Warn) || mark.is_some();
         let mut fields = String::new();
         for (n, (key, value)) in record.fields.iter().enumerate() {
             if n > 0 {
@@ -1401,6 +2354,14 @@ fn rows_table(tail: &telemetry::Tail) -> String {
                 fields,
                 " <i>({} field(s) counted, not kept)</i>",
                 record.dropped_fields
+            );
+        }
+        if let Some(mark) = mark {
+            let _ = write!(
+                fields,
+                " <b>{}</b> <i>({})</i>",
+                mark.label(),
+                render::escape(&mark.words())
             );
         }
         let _ = write!(
@@ -1478,6 +2439,23 @@ fn json_query(asked: &Asked) -> String {
         ("day", keys.day.map(|d| d.to_string())),
         ("contract", keys.contract.clone()),
         ("code", keys.code.clone()),
+        ("month", keys.month.clone()),
+        ("reason", keys.reason.clone()),
+        ("kind", keys.kind.clone()),
+        (
+            "from",
+            keys.span
+                .map(|(from, _)| from)
+                .filter(|from| *from != i64::MIN)
+                .map(|from| from.to_string()),
+        ),
+        (
+            "to",
+            keys.span
+                .map(|(_, to)| to)
+                .filter(|to| *to != i64::MAX)
+                .map(|to| to.to_string()),
+        ),
     ] {
         if let Some(value) = value {
             let _ = write!(q, "&{name}={}", render::query_value(&value));
@@ -1545,6 +2523,11 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Day<input type=\"text\" name=\"day\" value=\"{day}\" placeholder=\"YYYY-MM-DD\"></label>\
          <label>Contract<input type=\"text\" name=\"contract\" value=\"{contract}\"></label>\
          <label>Code<input type=\"text\" name=\"code\" value=\"{code}\" placeholder=\"too_many_entries\"></label>\
+         <label>Reason<input type=\"text\" name=\"reason\" value=\"{reason}\"></label>\
+         <label>Month<input type=\"text\" name=\"month\" value=\"{month}\" placeholder=\"YYYY-MM\"></label>\
+         <label>Import kind<input type=\"text\" name=\"kind\" value=\"{kind}\" placeholder=\"indices, stocks, options\"></label>\
+         <label>From<input type=\"text\" name=\"from\" value=\"{from}\" placeholder=\"YYYY-MM-DD[THH:MM] IST\"></label>\
+         <label>To<input type=\"text\" name=\"to\" value=\"{to}\" placeholder=\"YYYY-MM-DD[THH:MM] IST\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -1574,7 +2557,21 @@ fn page_shell(asked: &Asked, body: &str) -> String {
             .map_or_else(String::new, |day| day.to_string()),
         contract = render::escape(asked.keys.contract.as_deref().unwrap_or("")),
         code = render::escape(asked.keys.code.as_deref().unwrap_or("")),
+        reason = render::escape(asked.keys.reason.as_deref().unwrap_or("")),
+        month = render::escape(asked.keys.month.as_deref().unwrap_or("")),
+        kind = render::escape(asked.keys.kind.as_deref().unwrap_or("")),
+        from = span_end(&asked.keys, false),
+        to = span_end(&asked.keys, true),
     )
+}
+
+/// One end of a request's span as its form field holds it: the epoch
+/// milliseconds, or nothing for an end left open.
+fn span_end(keys: &Keys, to: bool) -> String {
+    keys.span
+        .map(|(from, until)| if to { until } else { from })
+        .filter(|at| *at != i64::MIN && *at != i64::MAX)
+        .map_or_else(String::new, |at| at.to_string())
 }
 
 /// Every HTTP request, once, with what it did and how long it took.
@@ -1832,15 +2829,54 @@ fn is_db_read(path: &str) -> bool {
 
 /// The selection a read named, from its query: each of [`ACCESS_KEYS`] it
 /// carries, decoded, in that order.
+///
+/// **A SERIES NAMED BY `key=` IS FILED UNDER ITS PARTS** (R3-24, the NIFTY
+/// check of 19 Oct). Since R3-07 the bar window `/db` asks names its series
+/// `key=NSE-INDEX-NIFTY` (or `key=NSE-FNO-NIFTY-2023-06-29-1210000-PE`), not
+/// `symbol=`, so its access line carried no `symbol` and the audit index filed
+/// it under no instrument: `/logs.json?instrument=NIFTY` could not find a
+/// single NIFTY read of the page. A query that names no `symbol` and no
+/// `instrument` now takes the exchange, segment, symbol and contract its
+/// `key=` names (`crate::bars::SeriesKey::parse`, the route's own reader), in
+/// [`ACCESS_KEYS`]' order, so `symbol` is kept first. A query's own value of a
+/// name always wins over the key's, and a key that does not parse adds
+/// nothing. A line written before this change carries the key alone and is
+/// not filed under an instrument (`docs/06-limits.md` L-R324-12).
 fn selection_of(query: &str) -> Vec<(&'static str, String)> {
+    let named = |name: &str| crate::server::param(query, name);
+    let series = (named("symbol").is_empty() && named("instrument").is_empty())
+        .then(|| crate::bars::SeriesKey::parse(&named("key")))
+        .flatten();
     ACCESS_KEYS
         .iter()
         .filter_map(|name| {
-            let value = crate::server::param(query, name);
+            let value = named(name);
+            let value = if value.is_empty() {
+                series
+                    .as_ref()
+                    .map(|series| part_of(series, name))
+                    .unwrap_or_default()
+            } else {
+                value
+            };
             (!value.is_empty()).then_some((*name, value))
         })
         .take(telemetry::MAX_FIELDS.saturating_sub(4))
         .collect()
+}
+
+/// The part of `series` an access record names `name`, or nothing.
+fn part_of(series: &crate::bars::SeriesKey, name: &str) -> String {
+    match name {
+        "exchange" => series.exchange.clone(),
+        "segment" => series.segment.clone(),
+        "symbol" => series.symbol.clone(),
+        "contract" => series
+            .contract
+            .map(|contract| contract.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 // THE PER-ROUTE MINUTE COUNTER LIVES IN `crate::speed` (R3-14): one module
@@ -2198,8 +3234,19 @@ pub(crate) struct Keys {
     /// A run, probed in the index's `run` posting: set by `durable=1`.
     pub(crate) run: Option<u64>,
     /// A target, probed in the index's `target` posting: set by `durable=1`
-    /// with no run.
+    /// with no run, and by a `target=` that names no other key (R3-24).
     pub(crate) target: Option<String>,
+    /// A month, `YYYY-MM`: a line's own `month`, or its `day`'s (R3-24).
+    pub(crate) month: Option<String>,
+    /// A line's own `reason` (R3-24).
+    pub(crate) reason: Option<String>,
+    /// An import kind, as `pull::gdfl_import::ImportKind` spells it (R3-24).
+    pub(crate) kind: Option<String>,
+    /// A time span, `from..=to` in epoch milliseconds, either end open as
+    /// `i64::MIN` or `i64::MAX` (R3-24). Alone it is read through the audit
+    /// files whose time span meets it ([`span_page`]); beside another key it
+    /// narrows that key's answer and passes over every file outside it.
+    pub(crate) span: Option<(i64, i64)>,
 }
 
 impl Keys {
@@ -2212,6 +3259,10 @@ impl Keys {
             && self.code.is_none()
             && self.run.is_none()
             && self.target.is_none()
+            && self.month.is_none()
+            && self.reason.is_none()
+            && self.kind.is_none()
+            && self.span.is_none()
     }
 }
 
@@ -2409,6 +3460,30 @@ pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
     {
         return None;
     }
+    // R3-24's KEYS: each a field the line itself carries, or its time.
+    if let Some(ref month) = keys.month {
+        let held = text_of(record, "month")
+            .filter(|held| is_month(held))
+            .or_else(|| text_of(record, "day").and_then(|day| day.get(..7)));
+        if held != Some(month.as_str()) {
+            return None;
+        }
+    }
+    if let Some(ref reason) = keys.reason
+        && text_of(record, "reason") != Some(reason.as_str())
+    {
+        return None;
+    }
+    if let Some(ref kind) = keys.kind
+        && text_of(record, "kind") != Some(kind.as_str())
+    {
+        return None;
+    }
+    if let Some((from, to)) = keys.span
+        && (record.at_unix_millis < from || record.at_unix_millis > to)
+    {
+        return None;
+    }
     Some(scope)
 }
 
@@ -2496,6 +3571,12 @@ fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
         }
     } else if let Some(ref code) = keys.code {
         out.push(("code", code.clone()));
+    } else if let Some(ref reason) = keys.reason {
+        out.push(("reason", reason.clone()));
+    } else if let Some(ref month) = keys.month {
+        out.push(("month", month.clone()));
+    } else if let Some(ref kind) = keys.kind {
+        out.push(("kind", kind.clone()));
     } else if let Some(run) = keys.run {
         out.push(("run", run.to_string()));
     } else if let Some(ref feed) = keys.feed {
@@ -2505,14 +3586,633 @@ fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
         }
     } else if let Some(ref target) = keys.target {
         out.push(("target", target.clone()));
+    } else if let Some((from, to)) = keys.span {
+        // A SPAN ALONE names no posting: its stream reads the audit files
+        // whose time span meets it ([`span_page`]).
+        out.push((SPAN_PROBE, format!("{from}..{to}")));
     }
     out
+}
+
+/// The probe a span alone is read by, in place of a posting's dimension.
+const SPAN_PROBE: &str = "span";
+
+/// How many bytes a span stream reads from one audit file per request, at
+/// most, beside its binary search: a fixed slice, so a span over a busy
+/// hour costs what one over a quiet one does, and the cursor reaches the
+/// rest.
+pub const SPAN_SLICE_BYTES: u64 = 1024 * 1024;
+
+/// One line of an audit file found by [`line_after`]: where it starts, its
+/// length with its newline, and the record.
+struct Placed {
+    start: u64,
+    len: u64,
+    record: telemetry::Record,
+}
+
+/// What one probe of [`end_of_span`] finds: the first line that DECODES
+/// starting at or after the cut (every line between the cut and it being
+/// undecodable), `Nothing` when the read reached `end` with no such line,
+/// or `Damaged` when it could reach neither within its bounds.
+enum Probe {
+    Line(Placed),
+    /// The read reached `end` (or the file's end) and no line that decodes
+    /// starts between the cut and it: never said of bytes left unread.
+    Nothing,
+    /// The probe stopped at one of its bounds with bytes left before `end`:
+    /// more than [`MAX_UNDECODABLE_STEPS`] undecodable lines in a row, or
+    /// [`MAX_PROBE_BYTES`] read with no line that decodes in them. Named,
+    /// and never taken for "no line here" (R3-24 repair round 2).
+    Damaged(String),
+}
+
+/// The most undecodable lines one probe of [`end_of_span`] steps past before
+/// it stops and names the damage (R3-24 repair round 1). A torn line is at
+/// most one per kill mid-append, so a file holds a few; a run longer than
+/// this is a damaged file, and the search says so by name rather than
+/// answer short.
+pub const MAX_UNDECODABLE_STEPS: u32 = 16;
+
+/// The most bytes one probe of [`end_of_span`] reads, its steps together
+/// (R3-24 repair round 2): a probe reads on through an undecodable line of
+/// any length up to this, so a run of damage with no newline in it, longer
+/// than two lines' ceiling, is read past rather than taken for the end of
+/// the file. The same slice a span page reads backwards ([`SPAN_SLICE_BYTES`]).
+pub const MAX_PROBE_BYTES: u64 = SPAN_SLICE_BYTES;
+
+/// The bytes one probe has read forward from `base`, never past `end` nor
+/// [`MAX_PROBE_BYTES`] in all: [`PROBE_FIRST_BYTES`] first, then two lines'
+/// ceiling a read, and only as far as the newline it looks for.
+struct Ahead<'p> {
+    path: &'p std::path::Path,
+    base: u64,
+    end: u64,
+    bytes: Vec<u8>,
+    /// Whether the bytes reach `end`, or the file ended before it: nothing
+    /// is left to read.
+    reached: bool,
+}
+
+/// Where [`Ahead::newline_from`] found the next newline.
+enum Newline {
+    At(u64),
+    /// None before `end`.
+    Ended,
+    /// None in the [`MAX_PROBE_BYTES`] read, with bytes left before `end`.
+    Bounded,
+}
+
+impl<'p> Ahead<'p> {
+    fn new(path: &'p std::path::Path, base: u64, end: u64) -> Self {
+        Self {
+            path,
+            base,
+            end,
+            bytes: Vec::new(),
+            reached: base >= end,
+        }
+    }
+
+    /// Reads on, one read: [`PROBE_FIRST_BYTES`] first, then two lines'
+    /// ceiling, never past `end` nor [`MAX_PROBE_BYTES`] held in all, and
+    /// records whether nothing is left before `end` to read. Nothing is read
+    /// once a bound is met; a read after a short one finds the file's end
+    /// again and reads nothing.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be opened, sought or read.
+    fn read_on(&mut self) -> Result<(), String> {
+        use std::io::{Read as _, Seek as _};
+        let held = u64::try_from(self.bytes.len()).unwrap_or(u64::MAX);
+        let ceiling = u64::try_from(telemetry::MAX_LINE_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2);
+        let step = if held == 0 {
+            PROBE_FIRST_BYTES
+        } else {
+            ceiling
+        };
+        let at = self.base.saturating_add(held);
+        let want = step
+            .min(MAX_PROBE_BYTES.saturating_sub(held))
+            .min(self.end.saturating_sub(at));
+        if want == 0 {
+            return Ok(());
+        }
+        let got = std::fs::File::open(self.path)
+            .and_then(|mut file| {
+                file.seek(std::io::SeekFrom::Start(at))?;
+                file.take(want).read_to_end(&mut self.bytes)
+            })
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let got = u64::try_from(got).unwrap_or(u64::MAX);
+        // A SHORT READ is the file's end: nothing past it to read.
+        self.reached = got < want || at.saturating_add(got) >= self.end;
+        Ok(())
+    }
+
+    /// The first newline at or after `at` (never before `base`), reading on
+    /// as far as it takes, within `end` and [`MAX_PROBE_BYTES`].
+    ///
+    /// **IT STOPS WHEN A READ ADDS NOTHING** (R3-24 repair round 2, the
+    /// mutation run of 21 Oct): the bytes held only grow, by at most
+    /// [`MAX_PROBE_BYTES`] in all, so the loop's end rests on what was read,
+    /// never on what a read says of itself. It used to stop on the read's own
+    /// "I read a byte", and the mutation that made that answer always yes
+    /// spun the probe until the run's 300 s timeout.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::read_on`]'s.
+    fn newline_from(&mut self, at: u64) -> Result<Newline, String> {
+        let mut from = at.max(self.base);
+        loop {
+            let skip = usize::try_from(from.saturating_sub(self.base)).unwrap_or(usize::MAX);
+            if let Some(found) = self
+                .bytes
+                .get(skip..)
+                .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+            {
+                return Ok(Newline::At(
+                    from.saturating_add(u64::try_from(found).unwrap_or(u64::MAX)),
+                ));
+            }
+            let held = self.bytes.len();
+            from = self
+                .base
+                .saturating_add(u64::try_from(held).unwrap_or(u64::MAX));
+            self.read_on()?;
+            if self.bytes.len() == held {
+                return Ok(if self.reached {
+                    Newline::Ended
+                } else {
+                    Newline::Bounded
+                });
+            }
+        }
+    }
+
+    /// The bytes `from..to`, both read.
+    fn between(&self, from: u64, to: u64) -> Option<&[u8]> {
+        let at = |place: u64| usize::try_from(place.checked_sub(self.base)?).ok();
+        self.bytes.get(at(from)?..at(to)?)
+    }
+}
+
+/// The first whole line of `path` that decodes, starting at or after `at`
+/// and before `end`. It reads [`PROBE_FIRST_BYTES`] first and on, two lines'
+/// ceiling ([`telemetry::MAX_LINE_BYTES`]) a read, only as far as the next
+/// newline: an undecodable line is stepped past, at most
+/// [`MAX_UNDECODABLE_STEPS`] of them and at most [`MAX_PROBE_BYTES`] read in
+/// all, so a probe costs at most that whatever the file holds.
+///
+/// **AN UNDECODABLE LINE IS STEPPED PAST, NEVER TAKEN FOR "NO LINE HERE"**
+/// (the second check of 20 Oct): this used to answer `None` for a first
+/// line that did not decode, which [`end_of_span`] read as "no line starts
+/// below `high`" and so cut the span above the torn line: a span alone
+/// answered 2 of 120 lines and called the page complete.
+///
+/// **NOR IS A WINDOW WITH NO NEWLINE IN IT** (the third check of 20 Oct):
+/// each step used to read at most two lines' ceiling, 128 KiB, and answer
+/// "no line" when that window held no newline, though bytes were left
+/// before `end`. A run of damage longer than the window (a NUL run a later
+/// open closed with its newline) so cut every span over it short: 80 of 150
+/// lines answered, the page calling itself complete. Now `Nothing` is said
+/// only when the read reached `end`; a bound met first is [`Probe::Damaged`].
+///
+/// # Errors
+///
+/// The file cannot be read: named, never answered as "no line here".
+fn line_after(path: &std::path::Path, at: u64, end: u64) -> Result<Probe, String> {
+    line_after_in(&mut Ahead::new(path, at.saturating_sub(1), end), at)
+}
+
+/// [`line_after`] through a reader the caller made from the byte before
+/// `at` (from 0 at 0), so a test can see how much one probe read.
+///
+/// # Errors
+///
+/// [`line_after`]'s.
+fn line_after_in(ahead: &mut Ahead<'_>, at: u64) -> Result<Probe, String> {
+    let path = ahead.path;
+    let bounded = |from: u64| {
+        format!(
+            "{}: no line that decodes in the {MAX_PROBE_BYTES} bytes read on from byte {from}, \
+             a run longer than any line the sink writes ({} bytes)",
+            path.display(),
+            telemetry::MAX_LINE_BYTES
+        )
+    };
+    let mut at = at;
+    for _ in 0..=MAX_UNDECODABLE_STEPS {
+        // AT 0 THE FIRST LINE STARTS THERE; else after the first newline from
+        // the byte before `at`, so a line starting exactly at `at` is found.
+        let start = if at == 0 {
+            0
+        } else {
+            match ahead.newline_from(at.saturating_sub(1))? {
+                Newline::At(newline) => newline.saturating_add(1),
+                Newline::Ended => return Ok(Probe::Nothing),
+                Newline::Bounded => return Ok(Probe::Damaged(bounded(at))),
+            }
+        };
+        let newline = match ahead.newline_from(start)? {
+            Newline::At(newline) => newline,
+            // A LINE WITH NO NEWLINE BEFORE `end` is no whole line.
+            Newline::Ended => return Ok(Probe::Nothing),
+            Newline::Bounded => return Ok(Probe::Damaged(bounded(start))),
+        };
+        let len = newline.saturating_sub(start).saturating_add(1);
+        match ahead.between(start, newline).map(telemetry::Record::decode) {
+            Some(Ok(record)) => return Ok(Probe::Line(Placed { start, len, record })),
+            // THE NEXT LINE STARTS RIGHT AFTER IT, and is read from there.
+            _ => at = newline.saturating_add(1),
+        }
+    }
+    Ok(Probe::Damaged(format!(
+        "{}: more than {MAX_UNDECODABLE_STEPS} undecodable lines run on to byte {at}",
+        path.display()
+    )))
+}
+
+/// How much one probe of [`end_of_span`] reads first (the Mac's bench of 19
+/// Oct): every probe used to read two lines' ceiling, 128 KiB, so a binary
+/// search over a 64 MiB audit file read about 3 MiB to place one cut, and
+/// `span alone` at C-LG-03's 10x store cost p50 5.6 ms. A line is a few
+/// hundred bytes, so a probe reads this much and on only when no whole line
+/// follows the cut inside it; the line it places is the same either way.
+const PROBE_FIRST_BYTES: u64 = 4 * 1024;
+
+/// Where [`end_of_span`] cut a file.
+#[derive(Debug, PartialEq, Eq)]
+struct Cut {
+    /// Every line that decodes starting at or after it is stamped after the
+    /// span's end.
+    at: u64,
+    /// `None`: every line that decodes before `at` is stamped at or before
+    /// the span's end, so `at` is exact. Named when a probe met damage it
+    /// could not read past and the search could not place the end below it:
+    /// `at` is then the lowest place PROVED, a line's start or the end, and
+    /// the lines between it and the span are passed over by their time
+    /// ([`span_backwards`]), never answered and never lost.
+    damage: Option<String>,
+}
+
+/// The offset in `path` where the first line stamped after `to` starts, below
+/// `end`: every line before it that decodes is stamped at or before `to`,
+/// and every one from it on after `to`. A binary search over byte offsets,
+/// each step one [`line_after`] probe, so O(log(file size)) probes whatever
+/// the file holds. Lines are in time order: the sink stamps them under its
+/// lock and clamps its clock, so `ms` order is file order (`telemetry`
+/// `Inner::stamp`).
+///
+/// **DAMAGE IS SEARCHED AROUND, NEVER GUESSED ACROSS** (R3-24 repair round
+/// 2): a probe that meets damage ([`Probe::Damaged`]) tells nothing about
+/// the lines after its cut, so the search goes on below it unproved. A line
+/// stamped after `to` found below the damage proves every line from it on
+/// (time order), and the cut is exact again; else the answer is the lowest
+/// place proved, with the damage named. Damage past the span's end so costs
+/// nothing once a line between the span's end and it is found, and any other
+/// damage costs reads (the walk passes the lines after the span over by
+/// their time), never lines.
+///
+/// # Errors
+///
+/// [`line_after`]'s: a probe that cannot read. The search never guesses a
+/// cut.
+fn end_of_span(path: &std::path::Path, end: u64, to: i64) -> Result<Cut, String> {
+    // `low` is always a line's start: every line starting before it that
+    // decodes is stamped at or before `to`. `high` bounds the search, and
+    // when `sure` it is proved: every line starting at or after it that
+    // decodes is stamped after `to`. `known` is the lowest LINE START (or
+    // `end`) proved so, the answer when `high` is not.
+    //
+    // A probe that finds no line that DECODES starting in `middle..end`
+    // narrows to `middle` and loses nothing: the line straddling `middle`
+    // starts below it and is read whole, to `end`, when a later probe reaches
+    // it, and if it is at or before `to` then `low` moves past it to where
+    // `high` was. What it passes over in `middle..high` is undecodable lines
+    // alone, which have no time to place.
+    //
+    // An undecodable line BEFORE a decoded one is that line's elder in the
+    // file, so it is at or before the decoded line's time and moves with it.
+    //
+    // A SPAN OPEN AT ITS END cuts at `end`: every line is at or before it,
+    // so nothing is searched, and damage costs it no probe.
+    if to == i64::MAX {
+        return Ok(Cut {
+            at: end,
+            damage: None,
+        });
+    }
+    let (mut low, mut high, mut known, mut sure) = (0u64, end, end, true);
+    let mut damage = None;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match line_after(path, middle, end)? {
+            Probe::Line(line) if line.start < high && line.record.at_unix_millis > to => {
+                high = line.start;
+                known = line.start;
+                sure = true;
+            }
+            Probe::Line(line) if line.start < high => low = line.start.saturating_add(line.len),
+            Probe::Line(_) | Probe::Nothing => high = middle,
+            Probe::Damaged(why) => {
+                high = middle;
+                sure = false;
+                damage.get_or_insert(why);
+            }
+        }
+    }
+    Ok(if sure {
+        Cut {
+            at: low,
+            damage: None,
+        }
+    } else {
+        Cut {
+            at: low.max(known),
+            damage,
+        }
+    })
+}
+
+/// One page of pointers a [`Stream`] reads: a posting's, or a span's as
+/// [`span_page`] answers it.
+#[derive(Debug, Default)]
+struct Fetched {
+    page: telemetry::PostingsPage,
+    /// Whether older pointers may remain: for a posting, a page as full as
+    /// asked; for a span, a walk that stopped at `take` lines or at its byte
+    /// slice. Never a guess.
+    more: bool,
+    /// Where the next page goes on from once every pointer of this one is
+    /// consumed: the place the walk stopped, every line starting at or after
+    /// it in that file read (R3-24 repair round 2). `None` when it did not
+    /// stop short. A walk that stopped before it found a line still moves
+    /// the cursor, so a client following `next` never asks the same page
+    /// twice.
+    resume: Option<telemetry::PostingAt>,
+    /// Lines the walk read and passed over because they are stamped after
+    /// the span's end: only behind a cut that damage made conservative.
+    passed: u64,
+    /// The damage met, each stretch named: what the search could not read
+    /// past, and what the walk read past.
+    damage: Vec<String>,
+}
+
+/// One page of a span read alone (R3-24): the lines of the kept audit files
+/// stamped `from..=to`, newest first, strictly older than `before`, at most
+/// `take`, as places and pointers a [`Stream`] reads exactly as it reads a
+/// posting's. A place is `(serial, the line's byte offset)`.
+///
+/// # Cost
+///
+/// Per kept generation, newest first: one `metadata` call and one
+/// [`telemetry::run_dirs::audit_span`] probe (a file whose span misses
+/// `from..=to` is never opened; one whose span is unknown at an end is read
+/// and named in `damage`, R3-24 repair round 3), one binary
+/// search ([`end_of_span`]) and backward reads of at most
+/// [`SPAN_SLICE_BYTES`] in all. The walk stops at the first line older than
+/// `from`: every older line is older still.
+///
+/// **DAMAGE COSTS READS, NEVER LINES, AND IS NAMED** (R3-24 repair round 2):
+/// a span whose end the search cannot place exactly is read from the lowest
+/// place proved, its later lines passed over by time, and a stretch no line
+/// starts in is read past a slice at a time; each is named in `damage`, and
+/// the cursor moves on every page.
+///
+/// # Errors
+///
+/// The serial, or a file that is there and cannot be read: the answer names
+/// it in `errors` and never calls itself complete ([`read_words`]).
+fn span_page(
+    dir: &std::path::Path,
+    (from, to): (i64, i64),
+    take: usize,
+    before: Option<telemetry::PostingAt>,
+) -> Result<Fetched, String> {
+    let current = telemetry::audit_serial(dir)?;
+    let oldest = current.saturating_sub(u64::from(telemetry::AUDIT_KEEP_FILES.saturating_sub(1)));
+    let mut out = Fetched::default();
+    let mut budget = SPAN_SLICE_BYTES;
+    for serial in (oldest..=current).rev() {
+        if before.is_some_and(|at| serial > at.serial) {
+            continue;
+        }
+        let Some(path) = telemetry::audit_path_for(dir, current, serial) else {
+            continue;
+        };
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        if len == 0 {
+            continue;
+        }
+        // A KEPT FILE THAT HOLDS BYTES IS NEVER PASSED OVER UNNAMED (R3-24
+        // repair round 3, B3): on repair round 2's head a file whose first
+        // line would not decode answered no span and was skipped here, its
+        // lines lost and the page still called complete. Its span is now
+        // unknown at that end, and a span that cannot be had at all is
+        // unknown at both.
+        let span = telemetry::run_dirs::audit_span(dir, current, serial).unwrap_or(
+            telemetry::run_dirs::AuditSpan {
+                first_ms: None,
+                last_ms: None,
+            },
+        );
+        if span.last_ms.is_some_and(|last| last < from) {
+            // EVERY OLDER FILE IS OLDER STILL.
+            return Ok(out);
+        }
+        if !span.overlaps(from, to) {
+            continue;
+        }
+        if let Some(why) = unknown_span_words(&span, serial == current) {
+            out.damage.push(format!(
+                "{} (audit file {serial}): {why}, so it is read whatever the span asked",
+                path.display()
+            ));
+        }
+        let end = before
+            .filter(|at| at.serial == serial)
+            .map_or(len, |at| at.index.min(len));
+        let cut = end_of_span(&path, end, to)?;
+        if let Some(why) = cut.damage {
+            out.damage.push(format!(
+                "{why}: the span's end is not placed exactly in this file, so it is read from \
+                 byte {} and the lines stamped after the span are passed over by their time",
+                cut.at
+            ));
+        }
+        match span_backwards(
+            &path,
+            serial,
+            (cut.at, (from, to)),
+            take,
+            &mut budget,
+            &mut out,
+        )? {
+            Walked::Older => return Ok(out),
+            Walked::Stopped(at) => {
+                out.more = true;
+                out.resume = Some(telemetry::PostingAt { serial, index: at });
+                return Ok(out);
+            }
+            Walked::FileStart => {}
+        }
+    }
+    Ok(out)
+}
+
+/// What a span search cannot know of one audit file's span, in words: an
+/// unknown first time, or, for a file that is no longer `open`, an unknown
+/// last one (R3-24 repair round 3). `None` when both ends are known, or the
+/// last is open only because the file is still being appended to.
+fn unknown_span_words(span: &telemetry::run_dirs::AuditSpan, open: bool) -> Option<String> {
+    let mut unknown = Vec::new();
+    if span.first_ms.is_none() {
+        unknown.push("its first line's time cannot be read");
+    }
+    if !open && span.last_ms.is_none() {
+        unknown.push("its last line's time cannot be read");
+    }
+    (!unknown.is_empty()).then(|| unknown.join(" and "))
+}
+
+/// How a backward walk of one audit file ended.
+enum Walked {
+    /// It reached a line older than the span: every older line is older.
+    Older,
+    /// It took `take` lines or spent its slice: older lines may remain, and
+    /// every line starting at or after this place has been read.
+    Stopped(u64),
+    /// It reached the file's first line.
+    FileStart,
+}
+
+/// Reads `path` backwards from `cut`, one slice at a time and whole lines
+/// only, pushing every line stamped `from..=to` until `take`, the slice
+/// `budget` or a line older than `from`. A line stamped after `to` is
+/// passed over and counted (there is one only behind a conservative cut,
+/// [`Cut`]). A slice of more than [`NO_LINE_BYTES`] that no line starts in
+/// is part of a line no writer makes: it is read past and named, so a walk
+/// never stands still on damage (R3-24 repair round 2).
+fn span_backwards(
+    path: &std::path::Path,
+    serial: u64,
+    (mut cut, (from, to)): (u64, (i64, i64)),
+    take: usize,
+    budget: &mut u64,
+    out: &mut Fetched,
+) -> Result<Walked, String> {
+    use std::io::{Read as _, Seek as _};
+    while cut > 0 {
+        if *budget == 0 || out.page.pointers.len() >= take {
+            return Ok(Walked::Stopped(cut));
+        }
+        let slice = (*budget).min(cut);
+        let start = cut.saturating_sub(slice);
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|mut file| {
+                file.seek(std::io::SeekFrom::Start(start))?;
+                file.take(slice).read_to_end(&mut bytes)
+            })
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        *budget = budget.saturating_sub(slice);
+        // A SLICE THAT DOES NOT START THE FILE starts mid-line: what is
+        // before its first newline belongs to the next slice.
+        let first = if start == 0 {
+            Some(0)
+        } else {
+            bytes
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|at| at.saturating_add(1))
+        };
+        let base = first.map_or(cut, |first| {
+            start.saturating_add(u64::try_from(first).unwrap_or(u64::MAX))
+        });
+        if base >= cut {
+            // NO LINE STARTS IN THE SLICE: it is all one line's. Longer than
+            // any line the sink writes, it is damage, read past and named;
+            // else the slice was the end of the budget, and the next page's
+            // whole slice reads the line.
+            if slice <= u64::try_from(NO_LINE_BYTES).unwrap_or(u64::MAX) {
+                return Ok(Walked::Stopped(cut));
+            }
+            out.damage.push(format!(
+                "{}: no line starts in the {slice} bytes before byte {cut}, part of a line \
+                 longer than any the sink writes ({} bytes); read past",
+                path.display(),
+                telemetry::MAX_LINE_BYTES
+            ));
+            cut = start;
+            continue;
+        }
+        let whole = bytes.get(first.unwrap_or(0)..).unwrap_or_default();
+        let mut lines: Vec<(u64, &[u8])> = Vec::new();
+        let mut offset = base;
+        for line in whole.split_inclusive(|&byte| byte == b'\n') {
+            lines.push((offset, line));
+            offset = offset.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX));
+        }
+        // `done`: every line starting at or after it has been read.
+        let mut done = cut;
+        for (at, line) in lines.into_iter().rev() {
+            if out.page.pointers.len() >= take {
+                return Ok(Walked::Stopped(done));
+            }
+            done = at;
+            let Ok(record) = telemetry::Record::decode(line.strip_suffix(b"\n").unwrap_or(line))
+            else {
+                out.page.malformed = out.page.malformed.saturating_add(1);
+                continue;
+            };
+            if record.at_unix_millis < from {
+                return Ok(Walked::Older);
+            }
+            if record.at_unix_millis > to {
+                out.passed = out.passed.saturating_add(1);
+                continue;
+            }
+            out.page.total = out.page.total.saturating_add(1);
+            out.page.pointers.push((
+                telemetry::PostingAt { serial, index: at },
+                telemetry::AuditPointer {
+                    serial,
+                    offset: at,
+                    seq: record.seq,
+                    len: u32::try_from(line.len()).unwrap_or(u32::MAX),
+                    level: record.level,
+                },
+            ));
+        }
+        cut = base;
+    }
+    Ok(Walked::FileStart)
 }
 
 /// One posting of one half, read newest first from a place (WP-33c, DB-A44).
 struct Stream<'d> {
     half: &'static str,
+    /// Which of the half's two durable streams this reads: `audit`, the
+    /// rolling one, or `state`, the never-rolling one (R3-24).
+    source: &'static str,
     dir: &'d std::path::Path,
+    /// A span the request narrows to, beside a key: a pointer into a file
+    /// whose time span misses it is passed over unread (R3-24).
+    prune: Option<(i64, i64)>,
+    /// The spans looked up so far, by serial: one small read per file.
+    spans: std::collections::HashMap<u64, Option<telemetry::run_dirs::AuditSpan>>,
+    /// Whether this page's pointers stamped after the span's end have been
+    /// passed over by [`Stream::place_in_span`]'s binary search: once a page.
+    placed: bool,
     /// The half's current serial, as the pointers were read.
     serial: u64,
     dimension: &'static str,
@@ -2531,6 +4231,21 @@ struct Stream<'d> {
     head: Option<(telemetry::AuditPointer, telemetry::Record)>,
     /// Pointers this page consumed.
     read: usize,
+    /// Of those, the pointers passed over because their file or their place
+    /// puts their line outside the span asked (R3-24); for a span stream,
+    /// also the lines its walk passed over by their time ([`Fetched::passed`]).
+    passed: u64,
+    /// Where a span stream goes on from once every pointer is consumed
+    /// ([`Fetched::resume`]); `None` for a posting.
+    resume: Option<telemetry::PostingAt>,
+    /// The damage a span stream met, each stretch named ([`Fetched::damage`]).
+    damage: Vec<String>,
+    /// Pointers whose line would not read, and where in `errors` the first
+    /// one's reason stands: each stream names its first and counts the rest,
+    /// so one unreadable file is said once, never once per pointer (R3-24
+    /// repair round 2: 29 copies of one reason at `limit=5`).
+    unreadable: u64,
+    unread_at: Option<usize>,
 }
 
 /// Where one stream of a keyed answer stands, as a cursor names it.
@@ -2590,22 +4305,161 @@ impl Stream<'_> {
     /// line has rolled off or will not read (each counted). One positional
     /// read per pointer, each against `budget`.
     fn fill(&mut self, budget: &mut usize, rolled_off: &mut u64, errors: &mut Vec<String>) {
+        // THE LINES STAMPED AFTER THE SPAN are passed over by a binary
+        // search, once a page, never read one by one (R3-24). A span left
+        // open at its end has none to pass over.
+        if let Some((_, to)) = self.prune
+            && to < i64::MAX
+            && !self.placed
+        {
+            self.place_in_span(to, budget);
+        }
         while self.head.is_none() && *budget > 0 {
             let Some(&(at, pointer)) = self.page.pointers.get(self.next) else {
                 return;
             };
+            // A FILE OUTSIDE THE SPAN ASKED FOR is passed over unread: its
+            // pointers cost a lookup, never a line read (R3-24).
+            if let Some((from, to)) = self.prune
+                && self
+                    .span_of(pointer.serial)
+                    .is_some_and(|span| !span.overlaps(from, to))
+            {
+                self.consume(at);
+                self.passed = self.passed.saturating_add(1);
+                continue;
+            }
             *budget = budget.saturating_sub(1);
             match telemetry::audit_read(self.dir, self.serial, &pointer) {
+                // A LINE STAMPED BEFORE THE SPAN ENDS THE STREAM: its pointers
+                // are newest first and its lines in time order (see
+                // [`end_of_span`]), so every pointer after this one, fetched or
+                // not, is older still. Passed over, and the stream is done
+                // (R3-24): before, the walk read on to the budget's end.
+                telemetry::AuditLine::Found(record)
+                    if self
+                        .prune
+                        .is_some_and(|(from, _)| record.at_unix_millis < from) =>
+                {
+                    self.consume(at);
+                    self.pass_to(self.page.pointers.len());
+                    self.more = false;
+                }
                 telemetry::AuditLine::Found(record) => self.head = Some((pointer, record)),
                 telemetry::AuditLine::RolledOff => {
                     *rolled_off = rolled_off.saturating_add(1);
                     self.consume(at);
                 }
                 telemetry::AuditLine::Unreadable(why) => {
-                    errors.push(why);
+                    if self.unread_at.is_none() {
+                        self.unread_at = Some(errors.len());
+                        errors.push(why);
+                    }
+                    self.unreadable = self.unreadable.saturating_add(1);
                     self.consume(at);
                 }
             }
+        }
+    }
+
+    /// The time span of audit file `serial`, looked up once a page: one small
+    /// read per file.
+    fn span_of(&mut self, serial: u64) -> Option<telemetry::run_dirs::AuditSpan> {
+        let (dir, current) = (self.dir, self.serial);
+        *self
+            .spans
+            .entry(serial)
+            .or_insert_with(|| telemetry::run_dirs::audit_span(dir, current, serial))
+    }
+
+    /// Passes over, by binary search, the fetched pointers whose lines are
+    /// stamped after the span's end `to` (R3-24). The Mac's shadow of 19 Oct:
+    /// `from=2026-10-16&to=2026-10-17&code=vendor_empty` read the lines of
+    /// the days after the span one by one, up to the 2,000-line budget, to
+    /// find 20, p50 26.7 ms and p99 41.1 ms.
+    ///
+    /// The pointers are newest first and a stream's lines are in time order
+    /// (see [`end_of_span`]), so their times never rise along the page. The
+    /// search gallops from the newest pointer (1, 2, 4 ... further on) and
+    /// then bisects what the gallop bracketed, so a span ending at the newest
+    /// line costs one probe and one ending `k` lines back about 2 log2(k).
+    /// A probe is settled by its file's span when the span lies wholly on one
+    /// side of `to`, else by one line read against `budget`. A probe whose
+    /// line will not read, or that no budget is left for, stops the search
+    /// where it stands, and the walk reads on from there line by line, as it
+    /// always did, counting what it finds: nothing is passed over that the
+    /// search did not place after `to`.
+    fn place_in_span(&mut self, to: i64, budget: &mut usize) {
+        self.placed = true;
+        // EVERY POINTER BEFORE `low` IS STAMPED AFTER `to`; the one at
+        // `high`, when there is one, at or before it.
+        let (mut low, mut high) = (self.next, self.page.pointers.len());
+        let (mut probe, mut step) = (low, 1usize);
+        while probe < high {
+            match self.after_span(probe, to, budget) {
+                Some(true) => {
+                    low = probe.saturating_add(1);
+                    probe = probe.saturating_add(step);
+                    step = step.saturating_mul(2);
+                }
+                // THE FIRST PROBE AT OR BEFORE `to` CLOSES THE BRACKET: the
+                // gallop is done, and nothing is probed twice.
+                Some(false) => {
+                    high = probe;
+                    break;
+                }
+                None => {
+                    self.pass_to(low);
+                    return;
+                }
+            }
+        }
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.after_span(middle, to, budget) {
+                Some(true) => low = middle.saturating_add(1),
+                Some(false) => high = middle,
+                None => break,
+            }
+        }
+        self.pass_to(low);
+    }
+
+    /// Whether the line at page index `index` is stamped after `to`: by its
+    /// file's span when that settles it, else by one line read against
+    /// `budget`. `None` when it cannot be told: no budget left, or a line
+    /// that will not read (the walk meets it again and counts it).
+    fn after_span(&mut self, index: usize, to: i64, budget: &mut usize) -> Option<bool> {
+        let &(_, pointer) = self.page.pointers.get(index)?;
+        match self.span_of(pointer.serial) {
+            Some(span) if span.first_ms.is_some_and(|first| first > to) => return Some(true),
+            Some(span) if span.last_ms.is_some_and(|last| last <= to) => return Some(false),
+            _ => {}
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget = budget.saturating_sub(1);
+        match telemetry::audit_read(self.dir, self.serial, &pointer) {
+            telemetry::AuditLine::Found(record) => Some(record.at_unix_millis > to),
+            telemetry::AuditLine::RolledOff | telemetry::AuditLine::Unreadable(_) => None,
+        }
+    }
+
+    /// Steps past every pointer before `index`, unread, as [`Stream::consume`]
+    /// steps past one: each is counted in `read`.
+    fn pass_to(&mut self, index: usize) {
+        if index > self.next
+            && let Some(&(at, _)) = self.page.pointers.get(index.saturating_sub(1))
+        {
+            let passed = index.saturating_sub(self.next);
+            self.read = self.read.saturating_add(passed);
+            self.passed = self
+                .passed
+                .saturating_add(u64::try_from(passed).unwrap_or(u64::MAX));
+            self.last = Some(at);
+            self.next = index;
+            self.head = None;
         }
     }
 
@@ -2624,12 +4478,19 @@ impl Stream<'_> {
             .and_then(|_| self.page.pointers.get(self.next).map(|(at, _)| *at))
     }
 
-    /// Where the stream stands for the next page.
+    /// Where the stream stands for the next page. A span stream whose every
+    /// pointer was consumed goes on from where its walk stopped, which is
+    /// older than every pointer it fetched: a walk that found no line still
+    /// moves the cursor (R3-24 repair round 2).
     fn slot(&self) -> Slot {
-        if self.head.is_none() && self.next >= self.page.pointers.len() && !self.more {
+        let spent = self.head.is_none() && self.next >= self.page.pointers.len();
+        if spent && !self.more {
             return Slot::Done;
         }
-        self.last.map_or(self.from, Slot::At)
+        match self.resume {
+            Some(at) if spent => Slot::At(at),
+            _ => self.last.map_or(self.from, Slot::At),
+        }
     }
 }
 
@@ -2637,8 +4498,9 @@ impl Stream<'_> {
 /// read them.
 #[derive(Debug, Default)]
 struct Indexed {
-    /// `(half, scope, record)`, newest first.
-    rows: Vec<(&'static str, Scope, telemetry::Record)>,
+    /// `(half, source, scope, record)`, newest first: `source` is the stream
+    /// the line was read from, `audit` or `state` (R3-24).
+    rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)>,
     /// The postings JSON, one object per (half, posting).
     postings: Vec<String>,
     /// The cursor for the next page, or `None` when every stream is done.
@@ -2649,11 +4511,40 @@ struct Indexed {
     rolled_off: u64,
     /// Lines read.
     reads: usize,
+    /// Pointers passed over, every stream together, because their file or
+    /// their place puts their line outside the span asked (R3-24): consumed,
+    /// so a cursor never offers them again. A line the search read to place
+    /// the span is counted here and in `reads` both.
+    passed: u64,
+    /// Stretches of damage the span streams met and read past or around,
+    /// every stream together, each named in its posting's `damage` (R3-24
+    /// repair round 2). They cost reads, never lines, so they never make a
+    /// page incomplete; they are said, never silent.
+    damage: usize,
     /// A cursor that does not fit this request, named.
     cursor_refused: Option<String>,
     /// Failures, in their own words.
     errors: Vec<String>,
+    /// Pointers the probed postings hold in all, every stream together: the
+    /// `N` of "the first 2,000 of N" a capped answer says (R3-24). A line
+    /// held in two postings, or in both of a half's streams, is counted in
+    /// each, so it is an upper bound on the lines, never a count of matches.
+    of: u64,
+    /// Whether a span stream's count is open: it reads a span's lines a slice
+    /// at a time, so it knows how many it found and not how many there are.
+    of_open: bool,
+    /// Per probed dimension, how many audit files hold lines that dimension
+    /// does not index (R3-24, the shadow check of 19 Oct): a file written
+    /// before the dimension existed (`reason` and `kind` are R3-24's own), or
+    /// whose `dims` file cannot be read. Its lines are not searched by that
+    /// key and are not in `of`, so an answer that misses them must say so,
+    /// never "every match the streams hold". At most one entry per probe.
+    unindexed: Vec<(&'static str, u64)>,
 }
+
+/// One durable stream a keyed answer reads: the half it belongs to, which of
+/// the half's two streams it is (`audit` or `state`, R3-24), and where.
+type IndexDir<'d> = (&'static str, &'static str, &'d std::path::Path);
 
 /// The index half of a keyed answer: every (half, posting) stream merged
 /// newest first, read from the cursor, a line in two postings of one half
@@ -2670,16 +4561,59 @@ struct Indexed {
 /// starts where the last one stopped, so every match can be reached and none
 /// is shown twice. Lines appended later are newer than every place already
 /// handed out, so they never shift a later page.
-fn index_rows(halves: &[(&'static str, &std::path::Path)], asked: &Asked) -> Indexed {
+fn index_rows(halves: &[IndexDir<'_>], asked: &Asked) -> Indexed {
     let mut out = Indexed::default();
     let probes = probes(&asked.keys);
     let wanted = halves.len().saturating_mul(probes.len());
     let Some(slots) = cursor_slots(asked.before.as_deref(), wanted, &mut out) else {
         return out;
     };
-    let mut opened = open_streams(halves, &probes, &slots, &mut out);
+    let mut opened = open_streams(halves, &probes, &slots, &asked.keys, &mut out);
+    out.of = opened
+        .streams
+        .iter()
+        .fold(0u64, |sum, stream| sum.saturating_add(stream.page.total));
+    out.of_open = opened
+        .streams
+        .iter()
+        .any(|stream| stream.dimension == SPAN_PROBE && stream.more);
+    // WHAT THE INDEX CANNOT ANSWER FOR, per probed dimension: the files each
+    // stream's probe named as not indexed by it. At most the probes (three)
+    // times the streams (two per half, the fixed directories).
+    for (dimension, _) in &probes {
+        let mut files = 0u64;
+        for stream in &opened.streams {
+            if stream.dimension == *dimension {
+                files = files
+                    .saturating_add(u64::try_from(stream.page.uncovered.len()).unwrap_or(u64::MAX));
+            }
+        }
+        if files > 0 {
+            out.unindexed.push((*dimension, files));
+        }
+    }
     let budget = merge_streams(&mut opened.streams, asked, &mut out);
     out.reads = MAX_KEYED_READS.saturating_sub(budget);
+    out.passed = opened
+        .streams
+        .iter()
+        .fold(0u64, |sum, stream| sum.saturating_add(stream.passed));
+    out.damage = opened.streams.iter().fold(0usize, |sum, stream| {
+        sum.saturating_add(stream.damage.len())
+    });
+    // ONE UNREADABLE FILE IS SAID ONCE PER STREAM, with how many of the
+    // stream's lines it kept from being read.
+    for stream in &opened.streams {
+        if stream.unreadable > 1
+            && let Some(why) = stream.unread_at.and_then(|at| out.errors.get_mut(at))
+        {
+            let _ = write!(
+                why,
+                " ({} line(s) of the {} posting {}={} would not read; the first is named)",
+                stream.unreadable, stream.source, stream.dimension, stream.value
+            );
+        }
+    }
     let cursor: Vec<Slot> = opened
         .slot_of
         .iter()
@@ -2728,9 +4662,10 @@ struct Opened<'d> {
 /// [`telemetry::audit_postings_before`] each. A half with no audit stream is
 /// named in `out` (DB-A46), never read as one holding nothing.
 fn open_streams<'d>(
-    halves: &[(&'static str, &'d std::path::Path)],
+    halves: &[IndexDir<'d>],
     probes: &[(&'static str, String)],
     slots: &[Slot],
+    keys: &Keys,
     out: &mut Indexed,
 ) -> Opened<'d> {
     let mut opened = Opened {
@@ -2738,7 +4673,7 @@ fn open_streams<'d>(
         slot_of: Vec::new(),
         fixed: Vec::new(),
     };
-    for (h, &(half, dir)) in halves.iter().enumerate() {
+    for (h, &(half, source, dir)) in halves.iter().enumerate() {
         let state = telemetry::audit_state(dir);
         for (p, (dimension, value)) in probes.iter().enumerate() {
             let from = slots
@@ -2750,8 +4685,9 @@ fn open_streams<'d>(
                 // never `total: 0`.
                 Ok(None) => {
                     out.postings.push(format!(
-                        r#"{{"half":{},"dimension":{},"value":{},"state":"no audit stream","total":null,"read":0}}"#,
+                        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"no {source} stream","total":null,"read":0}}"#,
                         render::json_string(half),
+                        render::json_string(source),
                         render::json_string(dimension),
                         render::json_string(value),
                     ));
@@ -2776,14 +4712,27 @@ fn open_streams<'d>(
                     continue;
                 }
             };
-            match telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before) {
-                Ok(page) => {
-                    let more = page.pointers.len() >= MAX_KEYED_READS;
+            // A SPAN ALONE is read from the files its time meets; every other
+            // probe is a posting (R3-24).
+            match fetch(dir, (dimension, value), keys.span, before) {
+                Ok(Fetched {
+                    page,
+                    more,
+                    resume,
+                    passed,
+                    damage,
+                }) => {
                     opened.slot_of.push(Some(opened.streams.len()));
                     opened.fixed.push(from);
                     opened.streams.push(Stream {
                         half,
+                        source,
                         dir,
+                        prune: keys.span.filter(|_| *dimension != SPAN_PROBE),
+                        spans: std::collections::HashMap::with_capacity(
+                            usize::from(telemetry::AUDIT_KEEP_FILES).saturating_add(2),
+                        ),
+                        placed: false,
                         serial,
                         dimension,
                         value: value.clone(),
@@ -2794,6 +4743,11 @@ fn open_streams<'d>(
                         more,
                         head: None,
                         read: 0,
+                        passed,
+                        resume,
+                        damage,
+                        unreadable: 0,
+                        unread_at: None,
                     });
                 }
                 Err(why) => {
@@ -2807,6 +4761,30 @@ fn open_streams<'d>(
     opened
 }
 
+/// One stream's first page: a span alone is read from the files its time
+/// meets ([`span_page`]); every other probe is a posting, whose page is as
+/// full as asked when older pointers may remain.
+fn fetch(
+    dir: &std::path::Path,
+    (dimension, value): (&str, &str),
+    span: Option<(i64, i64)>,
+    before: Option<telemetry::PostingAt>,
+) -> Result<Fetched, String> {
+    match span {
+        Some(span) if dimension == SPAN_PROBE => span_page(dir, span, MAX_KEYED_READS, before),
+        _ => telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before).map(
+            |page| {
+                let more = page.pointers.len() >= MAX_KEYED_READS;
+                Fetched {
+                    page,
+                    more,
+                    ..Fetched::default()
+                }
+            },
+        ),
+    }
+}
+
 /// Merges the streams newest first into `out.rows` until `asked.limit` rows
 /// bear on the keys or the read budget is spent; answers the budget left.
 fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -> usize {
@@ -2816,21 +4794,30 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
             stream.fill(&mut budget, &mut out.rolled_off, &mut out.errors);
         }
         // A STREAM WITH POINTERS LEFT AND NO HEAD READ could hold the newest
-        // line: with the budget spent, the page stops rather than guess.
+        // line: with the budget spent, the page stops rather than guess. So
+        // does one whose fetched page is spent while its posting holds older
+        // pointers (`more`): a line from another stream could be older than
+        // one it has not fetched yet (R3-24).
         if streams
             .iter()
-            .any(|s| s.head.is_none() && s.next < s.page.pointers.len())
+            .any(|s| s.head.is_none() && (s.next < s.page.pointers.len() || s.more))
         {
             out.capped = true;
             break;
         }
+        // NEWEST FIRST; on a tie (the same line in a half's two streams) the
+        // rolling audit stream's copy, which is where it was first written.
         let best = streams
             .iter()
             .enumerate()
             .filter_map(|(at, stream)| {
                 stream.head.as_ref().map(|(_, record)| {
                     let half_rank = usize::from(stream.half != "served");
-                    (at, (record.at_unix_millis, half_rank, record.seq))
+                    let source_rank = usize::from(stream.source == "audit");
+                    (
+                        at,
+                        (record.at_unix_millis, half_rank, record.seq, source_rank),
+                    )
                 })
             })
             .max_by_key(|(_, key)| *key)
@@ -2845,10 +4832,17 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
         chosen.consume(at);
         // THE SAME LINE IN ANOTHER POSTING OF THIS HALF is the same line: it
         // stands at every such stream's head now, and is consumed there too.
+        // So is its copy in the half's other stream: a state change is in
+        // both the rolling audit stream and the state stream, at different
+        // places, as the same line with the same `seq` and time (R3-24).
+        let source = chosen.source;
         for other in streams.iter_mut() {
             if other.half == half
-                && other.head.as_ref().is_some_and(|(held, _)| {
-                    held.serial == pointer.serial && held.offset == pointer.offset
+                && other.head.as_ref().is_some_and(|(held, line)| {
+                    (other.source == source
+                        && held.serial == pointer.serial
+                        && held.offset == pointer.offset)
+                        || (line.seq == record.seq && line.at_unix_millis == record.at_unix_millis)
                 })
                 && let Some(at) = other.head_at()
             {
@@ -2858,7 +4852,7 @@ fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -
         if let Some(scope) = bears(&record, &asked.keys)
             && admitted(&record, asked)
         {
-            out.rows.push((half, scope, record));
+            out.rows.push((half, source, scope, record));
         }
     }
     budget
@@ -2878,14 +4872,21 @@ fn posting_json(stream: &Stream<'_>) -> String {
         })
         .collect();
     format!(
-        r#"{{"half":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
+        r#"{{"half":{},"source":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}],"damage":[{}]}}"#,
         render::json_string(stream.half),
+        render::json_string(stream.source),
         render::json_string(stream.dimension),
         render::json_string(&stream.value),
         stream.page.total,
         stream.read,
         stream.page.malformed,
         uncovered.join(","),
+        stream
+            .damage
+            .iter()
+            .map(|why| render::json_string(why))
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -2993,36 +4994,59 @@ fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::
         return NO_LOG_JSON.to_owned();
     };
     let (tail, keyed, _next) = keyed_walk(halves, asked);
-    let body = json_of(&tail, asked, health, pair);
+    let marks = contradicted(&tail.records, store_of(halves).as_deref());
+    let body = json_of_marked(&tail, asked, health, pair, &marks);
     let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
     out.push_str(&keyed);
     out.push(',');
     out.push_str(&dirs_json(halves));
-    let _ = write!(
-        out,
-        r#","audit_stream":{}}}"#,
-        audit_json_of(
-            telemetry::global()
-                .and_then(telemetry::Sink::audit_health)
-                .as_ref()
-        ),
-    );
+    out.push(',');
+    out.push_str(&reach_json(halves, telemetry::now_millis()));
+    out.push(',');
+    out.push_str(&picture_json(served_picture().as_ref()));
+    let (audit, state) = served_streams();
+    out.push(',');
+    out.push_str(&streams_json(audit.as_ref(), state.as_ref()));
+    out.push('}');
     out
 }
 
 /// A keyed answer's records as a [`telemetry::Tail`] and its `keyed` object,
 /// shared by `/logs.json` and the `/logs` page.
 fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option<String>) {
+    let (tail, keyed, next, _said) = keyed_walk_said(named, asked);
+    (tail, keyed, next)
+}
+
+/// [`keyed_walk`], with what it read in words ([`read_note`]).
+fn keyed_walk_said(
+    named: &[Half],
+    asked: &Asked,
+) -> (telemetry::Tail, String, Option<String>, String) {
     let halves: Vec<(&'static str, &std::path::Path)> = named
         .iter()
         .map(|half| (half.name, half.path.as_path()))
         .collect();
-    let indexed = index_rows(&halves, asked);
-    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = indexed
-        .rows
+    // EACH HALF'S TWO DURABLE STREAMS (R3-24): the rolling audit stream and
+    // the never-rolling state stream beside it, so a who-did-what line the
+    // refusals rolled out of the first is still found in the second.
+    let state_dirs: Vec<std::path::PathBuf> = named
         .iter()
-        .map(|(half, scope, record)| (*half, "audit", *scope, record.clone()))
+        .map(|half| telemetry::run_dirs::state_stream_of(&half.path))
         .collect();
+    let streams: Vec<IndexDir<'_>> = named
+        .iter()
+        .zip(&state_dirs)
+        .flat_map(|(half, state)| {
+            [
+                (half.name, "audit", half.path.as_path()),
+                (half.name, "state", state.as_path()),
+            ]
+        })
+        .collect();
+    let indexed = index_rows(&streams, asked);
+    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> =
+        indexed.rows.clone();
     // THE RING, ONLY WHEN ASKED, ONLY ON A FIRST PAGE: its rows move as the
     // ring moves and cannot be paged, so they are never mixed in unasked.
     let scan_ring = asked.ring && asked.before.is_none();
@@ -3078,7 +5102,8 @@ fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option
     };
     let mut keyed = String::new();
     keyed_object(&mut keyed, asked, &rows, &indexed, scan_ring);
-    (tail, keyed, indexed.next)
+    let said = read_note(&indexed);
+    (tail, keyed, indexed.next, said)
 }
 
 /// The `keyed` object a keyed answer carries: the keys, the rows' half, source
@@ -3095,7 +5120,7 @@ fn keyed_object(
     let text = |value: Option<&str>| value.map_or_else(|| "null".to_owned(), render::json_string);
     let _ = write!(
         out,
-        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"matched":{},"rows":["#,
+        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"month":{},"reason":{},"kind":{},"span":{},"matched":{},"rows":["#,
         text(keys.feed.as_deref()),
         text(keys.instrument.as_ref().map(|i| i.asked.as_str())),
         keys.day.map_or_else(
@@ -3107,6 +5132,25 @@ fn keyed_object(
         keys.run
             .map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
         text(keys.target.as_deref()),
+        text(keys.month.as_deref()),
+        text(keys.reason.as_deref()),
+        text(keys.kind.as_deref()),
+        keys.span.map_or_else(
+            || "null".to_owned(),
+            |(from, to)| format!(
+                r#"{{"from":{},"to":{}}}"#,
+                if from == i64::MIN {
+                    "null".to_owned()
+                } else {
+                    from.to_string()
+                },
+                if to == i64::MAX {
+                    "null".to_owned()
+                } else {
+                    to.to_string()
+                }
+            )
+        ),
         rows.len(),
     );
     for (n, (half, source, scope, record)) in rows.iter().enumerate() {
@@ -3124,11 +5168,15 @@ fn keyed_object(
     }
     let _ = write!(
         out,
-        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
+        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{},"passed":{},"of":{},"of_open":{},"said":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
         indexed.postings.join(","),
         indexed.reads,
         indexed.capped,
         indexed.rolled_off,
+        indexed.passed,
+        indexed.of,
+        indexed.of_open,
+        render::json_string(&read_note(indexed)),
         indexed
             .next
             .as_deref()
@@ -3149,13 +5197,104 @@ fn keyed_object(
     );
 }
 
+/// What a keyed answer read, in words (R3-24): a capped answer says it read
+/// "the first 2,000 of N" and that `next` continues it, so a page that
+/// stopped at its read budget is never taken for every match there is.
+///
+/// **A FILE THE KEY DOES NOT INDEX IS SAID, never answered for** (the shadow
+/// check of 19 Oct): over the real logs `kind=options` read "0 of 0 indexed
+/// line(s): every match the streams hold is on this page", while the store's
+/// `logs/cli` audit stream held 487 importer lines carrying `kind`, every one
+/// written before `kind` was a dimension. Each probed dimension with such
+/// files now leads the words with how many and how to reach them.
+fn read_note(indexed: &Indexed) -> String {
+    let read = read_words(indexed);
+    if indexed.unindexed.is_empty() {
+        return read;
+    }
+    let unindexed: Vec<String> = indexed
+        .unindexed
+        .iter()
+        .map(|(dimension, files)| format!("{files} audit file(s) by {dimension}"))
+        .collect();
+    format!(
+        "NOT EVERY LINE IS INDEXED BY THIS KEY: {} hold lines written before that key was \
+         indexed, which this answer did not search and does not count; ask by day=, month=, \
+         target= or from=/to= to reach them. Of the indexed lines: {read}",
+        unindexed.join(" and ")
+    )
+}
+
+/// [`read_note`]'s words for the lines the index does cover.
+fn read_words(indexed: &Indexed) -> String {
+    let of = if indexed.of_open {
+        format!("at least {}", indexed.of)
+    } else {
+        indexed.of.to_string()
+    };
+    // POINTERS PASSED OVER are said beside the lines read (R3-24): the span
+    // put their lines outside it, by their file's span or by the search.
+    let mut passed = if indexed.passed == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {} pointer(s) passed over, their file or their place outside the span asked",
+            indexed.passed
+        )
+    };
+    // DAMAGE IS SAID beside them (R3-24 repair round 2): read past or around,
+    // it holds no line that decodes, so it costs the page no match.
+    if indexed.damage > 0 {
+        let _ = write!(
+            passed,
+            "; {} damaged stretch(es) of the audit files read past or around, each named in \
+             its posting's damage",
+            indexed.damage
+        );
+    }
+    if indexed.capped {
+        format!(
+            "capped: the first {} of {of} indexed line(s) were read{passed}, newest first; ask \
+             again with before=<next> to continue from where this page stopped",
+            indexed.reads
+        )
+    } else if indexed.next.is_some() {
+        format!(
+            "{} of {of} indexed line(s) read{passed} for this page; ask again with before=<next> \
+             for older matches",
+            indexed.reads
+        )
+    } else if !indexed.errors.is_empty() {
+        // A STREAM OR LINE THAT COULD NOT BE READ leaves its matches out, so
+        // the page is never called complete (R3-24 repair round 1).
+        format!(
+            "{} of {of} indexed line(s) read{passed}, but {} stream(s) or line(s) could not be \
+             read (each named in errors), so this page may not hold every match",
+            indexed.reads,
+            indexed.errors.len()
+        )
+    } else if indexed.unindexed.is_empty() {
+        format!(
+            "{} of {of} indexed line(s) read{passed}: every match the streams hold is on this \
+             page or an earlier one",
+            indexed.reads
+        )
+    } else {
+        format!(
+            "{} of {of} indexed line(s) read{passed}: every match the INDEXED lines hold is on \
+             this page or an earlier one",
+            indexed.reads
+        )
+    }
+}
+
 /// The served sink's audit stream, as JSON; `null` when it keeps none.
 fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
     let Some(h) = health else {
         return "null".to_owned();
     };
     format!(
-        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{},"never_rolls":{},"loud_bytes":{},"span_damage":{}}}"#,
         render::json_string(&h.path.display().to_string()),
         h.serial,
         h.current_bytes,
@@ -3181,8 +5320,29 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
-        telemetry::AUDIT_MAX_FILE_BYTES,
-        telemetry::AUDIT_KEEP_FILES,
+        // THE STATE STREAM HAS NO ROLL BOUND (R3-24): `null`, never the
+        // audit stream's, and the size past which it is loud instead.
+        if h.never_rolls {
+            "null".to_owned()
+        } else {
+            telemetry::AUDIT_MAX_FILE_BYTES.to_string()
+        },
+        if h.never_rolls {
+            "null".to_owned()
+        } else {
+            telemetry::AUDIT_KEEP_FILES.to_string()
+        },
+        h.never_rolls,
+        if h.never_rolls {
+            telemetry::run_dirs::STATE_LOUD_BYTES.to_string()
+        } else {
+            "null".to_owned()
+        },
+        // WHAT THE REOPEN COULD NOT READ of the generation it resumed (R3-24
+        // repair round 3): that end of its span is unknown, and loud.
+        h.span_damage
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
     )
 }
 
@@ -3531,7 +5691,48 @@ struct RefusalTail {
     /// request.
     read_error: Option<String>,
     built: std::sync::Arc<DirRefusals>,
+    /// The rolled files not read to their end yet, oldest first (R3-24): a
+    /// ring read afresh is read a slice at a time from here, by a request
+    /// and by the follower, never whole inside one request.
+    queue: std::collections::VecDeque<Queued>,
+    /// The current file's length when a read reached its end and what was
+    /// left unparsed was a line not yet whole (a writer mid-line, or one
+    /// killed there): not behind, so never "not read yet" for ever. A file
+    /// that grows past it is read on.
+    fragment_end: u64,
 }
+
+/// One rolled ring file still to be read: where, how long it was when the
+/// ring was read afresh, and how far it has been read.
+#[derive(Debug)]
+struct Queued {
+    path: std::path::PathBuf,
+    len: u64,
+    at: u64,
+}
+
+/// The most ring bytes one page request reads of one directory's importer
+/// evidence (R3-24): a fixed slice, so no request waits on a 64 MiB ring;
+/// the follower reads the rest ([`follow_refusals`]). Twice the widest line
+/// at least, so every slice makes progress.
+pub const REQUEST_SLICE_BYTES: u64 = 256 * 1024;
+
+/// A read of a ring this wide with no newline in it holds no line the writer
+/// could have made (its widest is under [`telemetry::MAX_LINE_BYTES`]): it is
+/// counted as malformed and stepped over, never waited on for ever.
+const NO_LINE_BYTES: usize = 2 * telemetry::MAX_LINE_BYTES;
+
+/// The most ring bytes the follower reads of one directory per turn, and how
+/// long it waits between turns: one directory's lock is held for one slice at
+/// a time, so a request waits at most that long for it.
+pub const FOLLOW_SLICE_BYTES: u64 = 1024 * 1024;
+
+/// How long the follower sleeps between turns.
+const FOLLOW_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many directories the follower keeps following, newest asked last:
+/// the five of a store, for a few stores.
+const FOLLOWED_DIRS: usize = 32;
 
 /// Every `cli` directory read so far.
 fn refusal_tails()
@@ -3868,15 +6069,20 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
     let read: Vec<DirEvidence> = import_dirs()
         .map(|half| {
             let path = store_root.join(telemetry::run_dirs::LOGS).join(half);
-            let held = refusals_in(&path);
+            // FOLLOWED FROM HERE ON (R3-24): what this request leaves unread
+            // the follower reads, a slice at a time, off every request.
+            follow(&path);
+            let (held, behind) = refusals_in(&path, REQUEST_SLICE_BYTES);
             // THE DISK'S ANSWER FIRST, then the tail's: a directory that can
             // be searched whose ring file could not be read is unread in
-            // part, and cannot vouch for "none" either.
+            // part, and cannot vouch for "none" either. Nor can one whose
+            // ring is still being read: it is named with what is left.
             let state = match DirState::of(&path) {
-                DirState::Read => held
-                    .errors
-                    .first()
-                    .map_or(DirState::Read, |why| DirState::Unreadable(why.clone())),
+                DirState::Read => match held.errors.first() {
+                    Some(why) => DirState::Unreadable(why.clone()),
+                    None if behind > 0 => DirState::Unreadable(behind_words(behind)),
+                    None => DirState::Read,
+                },
                 other @ (DirState::Absent | DirState::Unreadable(_)) => other,
             };
             DirEvidence {
@@ -3900,18 +6106,38 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
     merged
 }
 
-/// One directory's importer evidence, read through its tail.
+/// A directory whose ring is still being read, in words: it is not `read`,
+/// and an answer of "none" may not rest on it (R3-24).
+fn behind_words(behind: u64) -> String {
+    behind_words_with(behind, FOLLOWER_FAILED.get().map(String::as_str))
+}
+
+/// [`behind_words`] with the follower's start failure, when it has one.
+fn behind_words_with(behind: u64, failed: Option<&str>) -> String {
+    match failed {
+        None => format!(
+            "{behind} byte(s) of its ring are not read yet: the follower reads them a slice at \
+             a time, off every request; ask again"
+        ),
+        Some(why) => format!("{behind} byte(s) of its ring are not read yet, and {why}; ask again"),
+    }
+}
+
+/// One directory's importer evidence, read through its tail, at most `slice`
+/// bytes of it in this call; and how many bytes of its ring are still unread
+/// after it (R3-24).
 ///
 /// # Cost
 ///
-/// The first call reads the directory's whole ring once (at most its 64 MiB
-/// ceiling; `logs/cli` held 1,158,202 bytes on the operator's store, 9 Oct
-/// 2026). After that, while only the current file grows, a call reads only
-/// the bytes appended since; a roll, a file replaced, or a file whose
-/// `metadata` answers differently (there, not there, or failing, in other
-/// words than before) reads the ring again. A line is decoded only when it
-/// names the importer's target. One `metadata` call per ring file per call
-/// (8). `docs/06-limits.md` L-IA-37.
+/// At most `slice` bytes read, whatever the ring holds: a request passes
+/// [`REQUEST_SLICE_BYTES`], the follower [`FOLLOW_SLICE_BYTES`]. A ring read
+/// afresh (the first call, a roll, a file replaced, or a file whose
+/// `metadata` answers differently: there, not there, or failing, in other
+/// words than before) is queued, not read, and the slices work through it
+/// oldest file first, then the current file's new bytes. Whole lines only: a
+/// slice ends at its last newline and the next starts there. A line is
+/// decoded only when it names the importer's target. One `metadata` call per
+/// ring file per call (8). `docs/06-limits.md` L-IA-37.
 ///
 /// # Errors are the read's, not the process's
 ///
@@ -3920,18 +6146,19 @@ pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<Im
 /// ([`Seen`]), a file that stays unreadable is named once however many
 /// calls find it so, and one that becomes readable again is read and its
 /// error dropped.
-fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
+fn refusals_in(dir: &std::path::Path, slice: u64) -> (std::sync::Arc<DirRefusals>, u64) {
     let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
-    let Some((current, rolled_paths)) = paths.split_first() else {
-        return std::sync::Arc::default();
-    };
-    // OLDEST FIRST, as the ring was written.
-    let rolled: Vec<(&std::path::PathBuf, Seen)> = rolled_paths
+    // THE CURRENT FILE IS ALWAYS NAMED FIRST, whatever the keep; the rolled
+    // ones follow it, OLDEST FIRST here, as the ring was written.
+    let current = telemetry::current_path(dir);
+    let rolled: Vec<(&std::path::PathBuf, Seen)> = paths
+        .get(1..)
+        .unwrap_or_default()
         .iter()
         .rev()
         .map(|path| (path, Seen::of(path)))
         .collect();
-    let now = Seen::of(current);
+    let now = Seen::of(&current);
     let len = now.len();
     let mut held = refusal_tails()
         .lock()
@@ -3943,16 +6170,109 @@ fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
         || !tail.current.same_file(&now)
         || len < tail.parsed;
     if fresh {
-        *tail = RefusalTail::read_ring(&rolled, current, now);
+        *tail = RefusalTail::queue_ring(&rolled, &current, now);
     }
-    if len > tail.parsed {
-        tail.read_appended(current, len);
+    let left = tail.read_queued(slice);
+    if len > tail.parsed && left > 0 && len != tail.fragment_end {
+        tail.read_appended(&current, len, left);
     }
-    std::sync::Arc::clone(&tail.built)
+    let behind = tail.behind(len);
+    (std::sync::Arc::clone(&tail.built), behind)
+}
+
+/// One directory's evidence read to its end, a request's slice at a time:
+/// what a test of the fold reads, where the slicing is not the question.
+/// Stops after as many slices as a ring at its ceiling takes.
+#[cfg(test)]
+fn refusals_whole(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
+    let most = (64 * 1024 * 1024 / REQUEST_SLICE_BYTES).saturating_add(8);
+    let mut held = std::sync::Arc::default();
+    for _ in 0..most {
+        let (read, behind) = refusals_in(dir, REQUEST_SLICE_BYTES);
+        held = read;
+        if behind == 0 {
+            break;
+        }
+    }
+    held
+}
+
+/// The directories the follower reads, oldest asked first, at most
+/// [`FOLLOWED_DIRS`]; and whether its thread has been started.
+fn followed() -> &'static std::sync::Mutex<(std::collections::VecDeque<std::path::PathBuf>, bool)> {
+    static FOLLOWED: std::sync::OnceLock<
+        std::sync::Mutex<(std::collections::VecDeque<std::path::PathBuf>, bool)>,
+    > = std::sync::OnceLock::new();
+    FOLLOWED.get_or_init(|| std::sync::Mutex::new((std::collections::VecDeque::new(), false)))
+}
+
+/// Follows `dir` from now on (R3-24): the follower reads what a request
+/// left unread there. The first call starts the follower's thread; a thread
+/// that cannot start is named once on the importer's evidence log line and
+/// leaves every request reading its own slice, which still answers, only
+/// more slowly. One lock and a scan of at most [`FOLLOWED_DIRS`] paths.
+fn follow(dir: &std::path::Path) {
+    let mut held = followed()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (dirs, started) = &mut *held;
+    if !dirs.iter().any(|known| known == dir) {
+        if dirs.len() >= FOLLOWED_DIRS {
+            let _oldest = dirs.pop_front();
+        }
+        dirs.push_back(dir.to_path_buf());
+    }
+    if !*started {
+        *started = true;
+        let failed = start_follower(|| {
+            std::thread::Builder::new()
+                .name("api-refusal-follower".to_owned())
+                .spawn(follow_refusals)
+                .map(|_detached| ())
+        });
+        let _first_failure_kept = failed.map(|why| FOLLOWER_FAILED.set(why));
+    }
+}
+
+/// Why the follower's thread could not start, once that was found: every
+/// later answer of a directory still behind says so (R3-24). Never cleared:
+/// a process whose follower did not start reads each ring one request's
+/// slice at a time for its whole life, and says that, never "none".
+static FOLLOWER_FAILED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Starts the follower through `spawn`, answering the failure in words, or
+/// `None` once it runs. The start is handed in so a test can state one that
+/// fails, which no test can cause.
+fn start_follower(spawn: impl FnOnce() -> std::io::Result<()>) -> Option<String> {
+    spawn().err().map(|e| {
+        format!(
+            "the follower's thread could not start ({e}), so only each request's slice reads it"
+        )
+    })
+}
+
+/// The follower (R3-24): every [`FOLLOW_PAUSE`], one slice of at most
+/// [`FOLLOW_SLICE_BYTES`] of each followed directory that is behind. It
+/// holds the tails' lock for one slice of one directory at a time, so a
+/// request waits at most that long, and it never ends: the process does.
+fn follow_refusals() {
+    loop {
+        std::thread::sleep(FOLLOW_PAUSE);
+        let dirs: Vec<std::path::PathBuf> = followed()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .iter()
+            .cloned()
+            .collect();
+        for dir in dirs {
+            let _read = refusals_in(&dir, FOLLOW_SLICE_BYTES);
+        }
+    }
 }
 
 impl RefusalTail {
-    /// A directory nothing has been read from yet: its first question reads
+    /// A directory nothing has been read from yet: its first question queues
     /// its ring.
     fn unread() -> Self {
         Self {
@@ -3962,36 +6282,32 @@ impl RefusalTail {
             counted: false,
             read_error: None,
             built: std::sync::Arc::default(),
+            queue: std::collections::VecDeque::new(),
+            fragment_end: 0,
         }
     }
 
-    /// The ring read afresh: every rolled file that is there, oldest first,
-    /// and the current file left for [`Self::read_appended`] to read from its
-    /// start. A file that could not be asked about, rolled or current, is
-    /// named in `errors` and not read.
-    fn read_ring(
+    /// The ring read afresh: every rolled file that is there queued, oldest
+    /// first, nothing read yet, and the current file left for
+    /// [`Self::read_appended`] to read from its start. A file that could not
+    /// be asked about, rolled or current, is named in `errors` and not
+    /// queued.
+    fn queue_ring(
         rolled: &[(&std::path::PathBuf, Seen)],
         current: &std::path::Path,
         now: Seen,
     ) -> Self {
         let mut built = DirRefusals::default();
+        let mut queue = std::collections::VecDeque::new();
         for (path, seen) in rolled {
             match seen {
                 Seen::Absent => {}
                 Seen::Failed(why) => built.errors.push(format!("{}: {why}", path.display())),
-                Seen::There { .. } => match std::fs::read(path) {
-                    Ok(bytes) => {
-                        built.files = built.files.saturating_add(1);
-                        built.bytes = built
-                            .bytes
-                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                        for line in bytes.split(|&byte| byte == b'\n') {
-                            built.fold(line);
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => built.errors.push(format!("{}: {e}", path.display())),
-                },
+                Seen::There { len, .. } => queue.push_back(Queued {
+                    path: (*path).clone(),
+                    len: *len,
+                    at: 0,
+                }),
             }
         }
         if let Seen::Failed(why) = &now {
@@ -4004,18 +6320,113 @@ impl RefusalTail {
             counted: false,
             read_error: None,
             built: std::sync::Arc::new(built),
+            queue,
+            fragment_end: 0,
         }
     }
 
-    /// Reads the current file's bytes from [`Self::parsed`] to `len` and
-    /// folds its whole lines in. A read that fails is named in `errors` in
-    /// one slot, replaced and never appended to; one that succeeds drops it.
-    fn read_appended(&mut self, current: &std::path::Path, len: u64) {
+    /// Bytes of the ring not read yet, the current file being `len` long.
+    fn behind(&self, len: u64) -> u64 {
+        let current = if len == self.fragment_end {
+            0
+        } else {
+            len.saturating_sub(self.parsed)
+        };
+        self.queue.iter().fold(current, |sum, file| {
+            sum.saturating_add(file.len.saturating_sub(file.at))
+        })
+    }
+
+    /// Reads the queued rolled files, oldest first, at most `slice` bytes in
+    /// all, whole lines only (a file's last fragment is folded at its end, as
+    /// a whole read folds it); answers the slice left. A file read to its end
+    /// is counted and leaves the queue; one that cannot be read is named and
+    /// leaves it too.
+    fn read_queued(&mut self, slice: u64) -> u64 {
+        use std::io::{Read as _, Seek as _};
+        let mut left = slice;
+        while left > 0 {
+            let Some(file) = self.queue.front_mut() else {
+                break;
+            };
+            let take = left.min(file.len.saturating_sub(file.at));
+            let mut bytes = Vec::new();
+            let read = std::fs::File::open(&file.path).and_then(|mut opened| {
+                opened.seek(std::io::SeekFrom::Start(file.at))?;
+                opened.take(take).read_to_end(&mut bytes)
+            });
+            let built = std::sync::Arc::make_mut(&mut self.built);
+            match read {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let _gone = self.queue.pop_front();
+                    continue;
+                }
+                Err(e) => {
+                    built.errors.push(format!("{}: {e}", file.path.display()));
+                    let _named = self.queue.pop_front();
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            let at_end = file
+                .at
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                >= file.len
+                || bytes.is_empty();
+            // WHOLE LINES: through the last newline, or the whole rest at the
+            // file's end. A slice with no newline short of the end stops here
+            // and the next, wider in all, goes on.
+            let used = if at_end {
+                bytes.len()
+            } else {
+                match bytes.iter().rposition(|&byte| byte == b'\n') {
+                    Some(last) => last.saturating_add(1),
+                    // WIDER THAN ANY LINE AND NO NEWLINE: not a line the
+                    // writer could have made. Counted and stepped over,
+                    // or the ring would never be read past it.
+                    None if bytes.len() >= NO_LINE_BYTES => {
+                        built.malformed = built.malformed.saturating_add(1);
+                        file.at = file
+                            .at
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        built.bytes = built
+                            .bytes
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        left = left.saturating_sub(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        continue;
+                    }
+                    None => break,
+                }
+            };
+            for line in bytes
+                .get(..used)
+                .unwrap_or_default()
+                .split(|&byte| byte == b'\n')
+            {
+                built.fold(line);
+            }
+            let used = u64::try_from(used).unwrap_or(u64::MAX);
+            built.bytes = built.bytes.saturating_add(used);
+            file.at = file.at.saturating_add(used);
+            left = left.saturating_sub(used.max(1));
+            if at_end {
+                built.files = built.files.saturating_add(1);
+                let _done = self.queue.pop_front();
+            }
+        }
+        left
+    }
+
+    /// Reads the current file's bytes from [`Self::parsed`] toward `len`, at
+    /// most `slice` of them, and folds its whole lines in. A read that fails
+    /// is named in `errors` in one slot, replaced and never appended to; one
+    /// that succeeds drops it.
+    fn read_appended(&mut self, current: &std::path::Path, len: u64, slice: u64) {
         use std::io::{Read as _, Seek as _};
         let mut bytes = Vec::new();
         let read = std::fs::File::open(current).and_then(|mut file| {
             file.seek(std::io::SeekFrom::Start(self.parsed))?;
-            file.take(len.saturating_sub(self.parsed))
+            file.take(len.saturating_sub(self.parsed).min(slice))
                 .read_to_end(&mut bytes)
         });
         let why = match read {
@@ -4035,6 +6446,16 @@ impl RefusalTail {
             self.read_error = Some(why);
             return;
         }
+        let mut used = 0usize;
+        // WIDER THAN ANY LINE AND NO NEWLINE: stepped over and counted, as
+        // [`Self::read_queued`] steps over one.
+        if bytes.len() >= NO_LINE_BYTES && !bytes.contains(&b'\n') {
+            built.malformed = built.malformed.saturating_add(1);
+            used = bytes.len();
+            self.parsed = self
+                .parsed
+                .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
+        }
         if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
             for line in bytes
                 .get(..last)
@@ -4043,19 +6464,30 @@ impl RefusalTail {
             {
                 built.fold(line);
             }
+            used = last.saturating_add(1);
             self.parsed = self
                 .parsed
-                .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
-                .saturating_add(1);
+                .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
         }
         // THE CURRENT FILE IS ONE FILE, counted the first time any of it is
         // read, whether or not the ring was read afresh in this call: a ring
         // first seen empty used to stay at 0 files while its bytes grew.
         built.files = built.files.saturating_add(u64::from(!self.counted));
         self.counted = true;
+        // THE BYTES FOLDED, not the bytes read: a line not yet whole is read
+        // again with the next slice and counted then, once.
         built.bytes = built
             .bytes
-            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(used).unwrap_or(u64::MAX));
+        // A READ THAT REACHED THE END and left bytes unparsed left a line not
+        // yet whole: the file is read, not behind, until it grows.
+        let reached_end = len.saturating_sub(self.parsed)
+            <= u64::try_from(bytes.len().saturating_sub(used)).unwrap_or(u64::MAX);
+        self.fragment_end = if reached_end && self.parsed < len {
+            len
+        } else {
+            0
+        };
     }
 }
 
@@ -4152,40 +6584,59 @@ fn audited_in(
     keep: impl Fn(&telemetry::Record) -> bool,
 ) -> Audited {
     let mut out = Audited::default();
-    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len());
+    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len().saturating_mul(2));
     for half in halves {
         let dir = store_root.join("logs").join(half);
-        let serial = match telemetry::audit_state(&dir) {
-            Ok(Some(serial)) => serial,
-            Ok(None) => continue,
-            Err(why) => {
-                out.unread.push(format!("logs/{half} audit stream: {why}"));
-                continue;
-            }
-        };
-        let postings = match telemetry::audit_postings(&dir, dimension, value, MAX_KEYED_READS) {
-            Ok(postings) => postings,
-            Err(why) => {
-                out.unread.push(format!("logs/{half} audit stream: {why}"));
-                continue;
-            }
-        };
-        out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
-        let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
-        for pointer in &postings.pointers {
-            match telemetry::audit_read(&dir, serial, pointer) {
-                telemetry::AuditLine::Found(record) if keep(&record) => found.push(record),
-                telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
-                telemetry::AuditLine::Unreadable(why) => {
-                    out.unread.push(format!("logs/{half} audit stream: {why}"));
+        // BOTH DURABLE STREAMS OF THE DIRECTORY (R3-24): a run's lifecycle
+        // the refusals rolled out of the audit stream is still in the state
+        // stream. A line in both is one line: same `seq`, same time.
+        let mut held_here = false;
+        let mut seen: std::collections::HashSet<(u64, i64)> =
+            std::collections::HashSet::with_capacity(MAX_KEYED_READS.saturating_mul(2));
+        for (stream, at) in [
+            ("audit stream", dir.clone()),
+            ("state stream", telemetry::run_dirs::state_stream_of(&dir)),
+        ] {
+            let serial = match telemetry::audit_state(&at) {
+                Ok(Some(serial)) => serial,
+                Ok(None) => continue,
+                Err(why) => {
+                    out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    continue;
+                }
+            };
+            let postings = match telemetry::audit_postings(&at, dimension, value, MAX_KEYED_READS) {
+                Ok(postings) => postings,
+                Err(why) => {
+                    out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    continue;
+                }
+            };
+            out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
+            let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
+            for pointer in &postings.pointers {
+                match telemetry::audit_read(&at, serial, pointer) {
+                    telemetry::AuditLine::Found(record)
+                        if keep(&record) && seen.insert((record.seq, record.at_unix_millis)) =>
+                    {
+                        found.push(record);
+                    }
+                    telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
+                    telemetry::AuditLine::Unreadable(why) => {
+                        out.unread.push(format!("logs/{half} {stream}: {why}"));
+                    }
                 }
             }
+            if !found.is_empty() {
+                // NEWEST FIRST AS READ; oldest first as answered, each
+                // stream's list merged with the rest below, never sorted.
+                found.reverse();
+                held_here = true;
+                lists.push(found);
+            }
         }
-        if !found.is_empty() {
-            // NEWEST FIRST AS READ; oldest first as answered.
-            found.reverse();
+        if held_here {
             out.from.push(format!("logs/{half}"));
-            lists.push(found);
         }
     }
     let lists: Vec<&[telemetry::Record]> = lists.iter().map(Vec::as_slice).collect();
@@ -5441,14 +7892,17 @@ mod tests {
             telemetry::Level::Error,
             &[("bars", 806), ("gaps", 2)],
         )]);
-        let html = rows_table(&two);
+        let html = rows_table(&two, &[]);
         assert!(
             html.contains("<b>bars</b>=806 <b>gaps</b>=2"),
             "exactly one space between fields, none leading: {html}"
         );
         assert!(
-            rows_table(&walk(vec![rec(1, telemetry::Level::Info, &[("bars", 1)])]))
-                .contains("<td class=\"wide\"><b>bars</b>=1<"),
+            rows_table(
+                &walk(vec![rec(1, telemetry::Level::Info, &[("bars", 1)])]),
+                &[]
+            )
+            .contains("<td class=\"wide\"><b>bars</b>=1<"),
             "and no leading space when there is only one"
         );
 
@@ -5457,14 +7911,14 @@ mod tests {
         let mut marked = rec(1, telemetry::Level::Warn, &[("bars", 1)]);
         marked.dropped_fields = 4;
         marked.cut = true;
-        let html = rows_table(&walk(vec![marked]));
+        let html = rows_table(&walk(vec![marked]), &[]);
         assert!(html.contains("4 field(s) counted, not kept"), "{html}");
         assert!(html.contains("a value was cut at its ceiling"), "{html}");
         assert!(
-            !rows_table(&two).contains("counted, not kept"),
+            !rows_table(&two, &[]).contains("counted, not kept"),
             "no mark when nothing was dropped"
         );
-        assert!(!rows_table(&two).contains("cut at its ceiling"));
+        assert!(!rows_table(&two, &[]).contains("cut at its ceiling"));
     }
 
     /// The level `<select>` marks the level that was asked for, and only it.
@@ -6160,11 +8614,12 @@ mod tests {
     }
 
     /// **A PARAMETER NO FILTER READS IS NAMED, NEVER DROPPED** (WP-33c,
-    /// DB-A45): `reason=`, `why=` and any other name come back under
-    /// `ignored`, and a cursor with no key to page is named too.
+    /// DB-A45): `cause=`, `why=` and any other name come back under
+    /// `ignored`, and a cursor with no key to page is named too. (`reason=`
+    /// was this test's unknown name until R3-24 made it a key.)
     #[test]
     fn a_parameter_no_filter_reads_is_named_never_dropped() {
-        let read = asked("reason=census&why=x&bogus=1&before=1.2");
+        let read = asked("cause=census&why=x&bogus=1&before=1.2");
         let named: Vec<(&str, &str)> = read
             .ignored
             .iter()
@@ -6174,7 +8629,7 @@ mod tests {
             named,
             [
                 ("before", "1.2"),
-                ("unknown parameter", "reason"),
+                ("unknown parameter", "cause"),
                 ("unknown parameter", "why"),
                 ("unknown parameter", "bogus"),
             ]
@@ -6316,6 +8771,111 @@ mod tests {
         assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
     }
 
+    /// **A `/db` READ NAMED BY `key=` IS FILED UNDER ITS INSTRUMENT** (R3-24,
+    /// the NIFTY check of 19 Oct): the bar window names its series `key=`
+    /// since R3-07, and the access line carried the key alone, so the audit
+    /// index filed NIFTY's reads under no instrument. Now NIFTY spot, a NIFTY
+    /// option, BANKNIFTY, an F&O share with a dash in its name and a far
+    /// strike each give their symbol (and a contract its contract) through the
+    /// route's own key reader, the query's own value of a name wins, and a key
+    /// that does not parse adds nothing. Then a line carrying that selection
+    /// is found by `instrument=` and `contract=` through the index alone.
+    #[test]
+    fn a_db_read_named_by_key_is_filed_under_its_instrument() {
+        let window = |key: &str| {
+            selection_of(&format!(
+                "feed=gdfl&timeframe=1s&from=2020-03&to=2020-03&key={key}&sort=ts&limit=50"
+            ))
+        };
+        assert_eq!(
+            window("NSE-INDEX-NIFTY"),
+            [
+                ("feed", "gdfl".to_owned()),
+                ("symbol", "NIFTY".to_owned()),
+                ("segment", "INDEX".to_owned()),
+                ("exchange", "NSE".to_owned()),
+                ("timeframe", "1s".to_owned()),
+                ("from", "2020-03".to_owned()),
+                ("to", "2020-03".to_owned()),
+                ("key", "NSE-INDEX-NIFTY".to_owned()),
+            ]
+        );
+        let option = window("NSE-FNO-NIFTY-2019-03-28-1150000-CE");
+        assert_eq!(
+            option.get(..5),
+            Some(
+                &[
+                    ("feed", "gdfl".to_owned()),
+                    ("symbol", "NIFTY".to_owned()),
+                    ("segment", "FNO".to_owned()),
+                    ("exchange", "NSE".to_owned()),
+                    ("contract", "2019-03-28-1150000-CE".to_owned()),
+                ][..]
+            ),
+            "{option:?}"
+        );
+        assert_eq!(
+            option.len(),
+            telemetry::MAX_FIELDS - 4,
+            "the cap keeps the parts first: {option:?}"
+        );
+        for (key, symbol) in [
+            ("NSE-INDEX-BANKNIFTY", "BANKNIFTY"),
+            ("NSE-CASH-BAJAJ-AUTO", "BAJAJ-AUTO"),
+            ("NSE-FNO-ZYDUSLIFE-2024-09-26-9990000-PE", "ZYDUSLIFE"),
+        ] {
+            let got = window(key);
+            assert!(
+                got.contains(&("symbol", symbol.to_owned())),
+                "{key}: {got:?}"
+            );
+        }
+        // THE QUERY'S OWN NAMES WIN, and a key that does not parse adds none.
+        let both = selection_of("symbol=RELIANCE&segment=CASH&key=NSE-INDEX-NIFTY");
+        assert!(
+            both.contains(&("symbol", "RELIANCE".to_owned())),
+            "{both:?}"
+        );
+        assert!(!both.contains(&("exchange", "NSE".to_owned())), "{both:?}");
+        assert_eq!(
+            selection_of("feed=gdfl&key=NIFTY"),
+            [("feed", "gdfl".to_owned()), ("key", "NIFTY".to_owned())]
+        );
+        // THROUGH THE INDEX: the line the window's selection writes is found
+        // by `instrument=` and by `contract=` alone.
+        let dir = crate::scratch::path("logs-key-filed");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("a sink");
+            for selection in [window("NSE-INDEX-NIFTY"), option] {
+                let mut line = telemetry::Event::warn("api.access", "read refused")
+                    .with("route", telemetry::Value::Str("/bars/window.json"))
+                    .with("status", telemetry::Value::Uint(429));
+                for (name, value) in &selection {
+                    line = line.with(name, telemetry::Value::Str(value));
+                }
+                let _ = sink.emit(&line);
+            }
+        }
+        let store = crate::scratch::path("logs-key-filed-store");
+        let _ignored = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).expect("a store");
+        let found = |query: &str| -> Vec<String> {
+            let body = logs_json_over(Some(&dir), &store, query);
+            let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            got["records"]
+                .as_array()
+                .expect("records")
+                .iter()
+                .map(|record| record["fields"]["key"].as_str().unwrap_or("").to_owned())
+                .collect()
+        };
+        assert_eq!(found("instrument=NSE-INDEX-NIFTY"), ["NSE-INDEX-NIFTY"]);
+        assert_eq!(found("instrument=NIFTY").len(), 2, "spot and option");
+        assert_eq!(found("contract=2019-03-28-1150000-CE").len(), 1);
+        assert!(found("instrument=BANKNIFTY").is_empty());
+    }
+
     /// **A 501 IS A PLACEHOLDER, NOT A FAILURE THE AUDIT STREAM KEEPS**
     /// (WP-33c, DB-A52), and a server error's durable copy has its own ration.
     #[test]
@@ -6399,7 +8959,7 @@ mod tests {
             line(1, "error", "2019-11-14") + &line(2, "info", "2019-11-14"),
         )
         .expect("write");
-        let first = refusals_in(&dir);
+        let first = refusals_whole(&dir);
         assert_eq!(first.of("options", "2019-11-14").len(), 1);
         let bytes = first.bytes;
         std::fs::OpenOptions::new()
@@ -6408,7 +8968,7 @@ mod tests {
             .expect("open")
             .write_all(line(3, "error", "2019-11-15").as_bytes())
             .expect("append");
-        let second = refusals_in(&dir);
+        let second = refusals_whole(&dir);
         assert_eq!(second.of("options", "2019-11-15").len(), 1);
         assert_eq!(
             second.bytes - bytes,
@@ -6419,7 +8979,7 @@ mod tests {
         // A ROLL READS THE RING AGAIN, oldest file first.
         std::fs::rename(&current, telemetry::rotated_path(&dir, 1)).expect("roll");
         std::fs::write(&current, line(4, "error", "2019-11-18")).expect("write");
-        let third = refusals_in(&dir);
+        let third = refusals_whole(&dir);
         assert_eq!(third.of("options", "2019-11-14").len(), 1);
         assert_eq!(third.of("options", "2019-11-18").len(), 1);
         assert_eq!(third.files, 2);
@@ -6781,7 +9341,7 @@ mod tests {
         let dir = crate::scratch::path("logs-ring-file-unreadable");
         let _ignored = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let empty = refusals_in(&dir);
+        let empty = refusals_whole(&dir);
         assert_eq!((empty.files, empty.bytes), (0, 0));
         let line = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
              \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
@@ -6795,9 +9355,9 @@ mod tests {
                 std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
             panic!("mode 000 does not stop this process from reading: run as a user it binds");
         }
-        let first = refusals_in(&dir);
-        let second = refusals_in(&dir);
-        let third = refusals_in(&dir);
+        let first = refusals_whole(&dir);
+        let second = refusals_whole(&dir);
+        let third = refusals_whole(&dir);
         let _restored = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
         assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
         assert!(
@@ -6817,7 +9377,7 @@ mod tests {
         );
 
         // READABLE: read, counted as one file, and the error dropped.
-        let readable = refusals_in(&dir);
+        let readable = refusals_whole(&dir);
         assert!(readable.errors.is_empty(), "{:?}", readable.errors);
         assert_eq!(readable.of("options", "2019-11-14").len(), 1);
         assert_eq!(
@@ -7031,5 +9591,2960 @@ mod tests {
                 (9, "r9")
             ]
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_tests {
+    //! R3-24: the never-rolling state stream read, the new keys, a capped
+    //! answer continued, every answer's reach, and the import journal's
+    //! contradiction of an old "day imported" line (DB-G88, DB-023, DB-A48).
+
+    use super::{
+        Half, IST_OFFSET_MS, MAX_KEYED_READS, SCAN_BYTES, YOUNG_AUDIT_DAYS, asked, instant_of,
+        json_over, keyed_json, logs_json_over, page_over, reach_json, store_of,
+    };
+
+    /// A fresh directory and a sink writing every level into it.
+    fn sink_in(name: &str) -> (std::path::PathBuf, telemetry::Sink) {
+        let dir = crate::scratch::path(&format!("logs-r324-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        (dir, sink)
+    }
+
+    /// The keyed `/logs.json` body over `dir` alone.
+    fn keyed(dir: &std::path::Path, query: &str) -> serde_json::Value {
+        let asked = asked(query);
+        assert!(!asked.keys.is_empty(), "{query} names a key");
+        // INSIDE A DEADLINE: a span search that spins fails the test.
+        let dir = dir.to_path_buf();
+        let body = super::r3_24_edge_tests::in_time(move || keyed_json(&dir, None, &asked, None));
+        serde_json::from_str(&body).expect("JSON")
+    }
+
+    /// The records of an answer, as `(target, message)`.
+    fn named(got: &serde_json::Value) -> Vec<(String, String)> {
+        got["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| {
+                (
+                    record["target"].as_str().unwrap().to_owned(),
+                    record["message"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The names an answer lists as ignored.
+    fn ignored(got: &serde_json::Value) -> Vec<String> {
+        got["ignored"]
+            .as_array()
+            .expect("ignored")
+            .iter()
+            .map(|entry| entry["param"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// **A CAPPED ANSWER CAN BE CONTINUED** (R3-24): 2,100 lines of one code
+    /// stand newer than the one the request's target admits, so the first
+    /// page reads its 2,000 lines, finds nothing, and says so: "the first
+    /// 2000 of 2101", `capped`, and a cursor. The cursor's page reads on from
+    /// there and finds the line. Before R3-24 the answer named no `of` and
+    /// said nothing of how many it had not read.
+    #[test]
+    fn a_capped_answer_can_be_continued() {
+        let (dir, sink) = sink_in("capped");
+        let _ = sink.emit(
+            &telemetry::Event::error("gdfl.import", "refused")
+                .with("code", "too_many_entries")
+                .with("kind", "options")
+                .with("day", "2020-01-02"),
+        );
+        for n in 0..2_100u32 {
+            let _ = sink.emit(
+                &telemetry::Event::error("pull.spot", "member did not land")
+                    .with("code", "too_many_entries")
+                    .with("n", n),
+            );
+        }
+        let query = "code=too_many_entries&target=gdfl.import&limit=5";
+        let first = keyed(&dir, query);
+        let index = &first["keyed"]["index"];
+        assert_eq!(first["records"].as_array().unwrap().len(), 0, "{index:#}");
+        assert_eq!(index["capped"], true);
+        assert_eq!(index["reads"], MAX_KEYED_READS);
+        assert_eq!(index["of"], 2_101);
+        let said = index["said"].as_str().expect("words");
+        assert!(said.contains("the first 2000 of 2101"), "{said}");
+        assert!(said.contains("before=<next>"), "{said}");
+        let next = first["keyed"]["next"].as_str().expect("a cursor");
+        let second = keyed(&dir, &format!("{query}&before={next}"));
+        assert_eq!(
+            named(&second),
+            [("gdfl.import".to_owned(), "refused".to_owned())]
+        );
+        assert_eq!(second["keyed"]["index"]["capped"], false);
+        assert!(second["keyed"]["next"].is_null(), "every line read");
+        assert!(
+            second["keyed"]["index"]["said"]
+                .as_str()
+                .unwrap()
+                .contains("every match")
+        );
+        // A SPAN ALONE that stopped at its read budget has not counted the
+        // rest: "at least", never a total.
+        let span = keyed(&dir, "from=0&limit=5");
+        let index = &span["keyed"]["index"];
+        assert_eq!(index["of_open"], true, "{index:#}");
+        let said = index["said"].as_str().expect("words");
+        assert!(said.contains("of at least 2000"), "{said}");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PROBE READS A FEW KIB, AND A LONG LINE IS STILL PLACED WHOLE** (the
+    /// Mac's bench of 19 Oct): the span search's probe reads
+    /// `PROBE_FIRST_BYTES` first and two lines' ceiling only when no whole
+    /// line follows the cut inside it. A line longer than the first read, a
+    /// cut inside it, a cut on a line's first byte, a cut at 0 and a cut past
+    /// the last line each place exactly what the full read placed.
+    #[test]
+    fn a_probe_reads_a_few_kib_and_still_places_a_long_line_whole() {
+        let dir = crate::scratch::path("logs-r324-probe");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let line = |seq: u32, pad: usize| {
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{},\"level\":\"info\",\
+                 \"target\":\"x\",\"msg\":\"m\",\"fields\":{{\"pad\":\"{}\"}}}}\n",
+                1_791_171_078_967_u64,
+                "p".repeat(pad)
+            )
+        };
+        let (short, long) = (
+            line(1, 10),
+            line(2, 3 * usize::try_from(super::PROBE_FIRST_BYTES).unwrap()),
+        );
+        let text = format!("{short}{long}{}", line(3, 10));
+        let path = dir.join("audit.ndjson");
+        std::fs::write(&path, &text).expect("a file");
+        let end = text.len() as u64;
+        // ONE PROBE READS `PROBE_FIRST_BYTES` when a whole line follows the
+        // cut inside it, never two lines' ceiling (repair round 2: the
+        // mutation that read the ceiling first went uncaught).
+        assert!(
+            end > super::PROBE_FIRST_BYTES,
+            "premise: longer than one read"
+        );
+        let mut ahead = super::Ahead::new(&path, 0, end);
+        assert!(matches!(
+            super::line_after_in(&mut ahead, 0),
+            Ok(super::Probe::Line(_))
+        ));
+        assert_eq!(
+            ahead.bytes.len() as u64,
+            super::PROBE_FIRST_BYTES,
+            "one first read"
+        );
+        let placed = |at: u64| match super::line_after(&path, at, end).expect("readable") {
+            super::Probe::Line(got) => Some((got.start, got.len, got.record.seq)),
+            super::Probe::Nothing => None,
+            super::Probe::Damaged(why) => panic!("no damage in this file: {why}"),
+        };
+        let first = short.len() as u64;
+        let third = first + long.len() as u64;
+        assert_eq!(placed(0), Some((0, first, 1)), "a cut at 0");
+        assert_eq!(
+            placed(1),
+            Some((first, long.len() as u64, 2)),
+            "the long line, whole"
+        );
+        assert_eq!(
+            placed(first),
+            Some((first, long.len() as u64, 2)),
+            "on its first byte"
+        );
+        assert_eq!(
+            placed(first + 100),
+            Some((third, line(3, 10).len() as u64, 3)),
+            "inside it"
+        );
+        assert_eq!(placed(third + 1), None, "past the last line's start");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FILE SHORTER THAN THE SEARCH'S END ANSWERS "NO LINE", NEVER
+    /// DAMAGE** (R3-24 repair round 2, the mutation run of 21 Oct): a file
+    /// cut short under a search (a foreign truncation; the sink only appends)
+    /// ends before the `end` the search was given, and its read comes back
+    /// short. That is the file's end, so a probe past its last whole line
+    /// says `Nothing`, as at the end proper; taken for a bound met first it
+    /// would name damage that is not there. Also at the end proper, with a
+    /// last line no newline closes.
+    #[test]
+    fn a_file_shorter_than_the_search_end_answers_no_line() {
+        let dir = crate::scratch::path("logs-r324-short-file");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let whole = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1000,\"level\":\"info\",\
+                     \"target\":\"x\",\"msg\":\"m\",\"fields\":{}}\n";
+        let text = format!("{whole}{{\"seq\":2,\"ts\":");
+        let path = dir.join("audit.ndjson");
+        std::fs::write(&path, &text).expect("a file");
+        let len = text.len() as u64;
+        let first = whole.len() as u64;
+        let kind = |at: u64, end: u64| match super::line_after(&path, at, end) {
+            Ok(super::Probe::Line(got)) => format!("line {}", got.record.seq),
+            Ok(super::Probe::Nothing) => "nothing".to_owned(),
+            Ok(super::Probe::Damaged(why)) => format!("damaged: {why}"),
+            Err(why) => format!("refused: {why}"),
+        };
+        for end in [len, len + 1000, len + 10 * super::PROBE_FIRST_BYTES] {
+            assert_eq!(kind(0, end), "line 1", "end {end}");
+            assert_eq!(
+                kind(1, end),
+                "nothing",
+                "a cut inside the first line, end {end}"
+            );
+            assert_eq!(kind(first, end), "nothing", "on the torn tail, end {end}");
+            assert_eq!(kind(len, end), "nothing", "at the file's end, end {end}");
+        }
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FILE THE KEY DOES NOT INDEX IS SAID, NEVER ANSWERED FOR** (the
+    /// shadow check of 19 Oct). Over the real logs `kind=options` answered "0
+    /// of 0 indexed line(s) read: every match the streams hold is on this
+    /// page", while the store's `logs/cli` audit stream held 487 importer
+    /// lines carrying `kind`, each written before `kind` was a dimension. Here
+    /// a generation an older build wrote (lines and postings, no `dims` file)
+    /// holds an options refusal: `kind=options` finds nothing in it and now
+    /// says that one audit file is not indexed by `kind` and how to reach it;
+    /// `day=`, a dimension every generation carries, finds the line, and its
+    /// words carry no such sentence.
+    #[test]
+    fn a_file_the_key_does_not_index_is_said_never_answered_for() {
+        let (dir, sink) = sink_in("unindexed");
+        let _ = sink.emit(
+            &telemetry::Event::error("gdfl.import", "refused")
+                .with("kind", "options")
+                .with("day", "2020-01-02")
+                .with("reason", "census_full"),
+        );
+        drop(sink);
+        // AN OLDER BUILD'S GENERATION: no `dims` file, and no posting of the
+        // two dimensions R3-24 added.
+        let generation = telemetry::audit_generation_path(&dir, 0);
+        std::fs::remove_file(generation.join(telemetry::AUDIT_DIMS_FILE))
+            .expect("this build wrote one");
+        for dimension in ["kind", "reason"] {
+            std::fs::remove_dir_all(generation.join(dimension)).expect("this build posted it");
+        }
+        for query in ["kind=options", "reason=census_full"] {
+            let got = keyed(&dir, query);
+            assert!(
+                got["records"].as_array().unwrap().is_empty(),
+                "{query}: {got:#}"
+            );
+            let said = got["keyed"]["index"]["said"].as_str().expect("words");
+            assert!(
+                said.starts_with("NOT EVERY LINE IS INDEXED BY THIS KEY"),
+                "{query}: {said}"
+            );
+            assert!(said.contains("1 audit file(s) by "), "{query}: {said}");
+            assert!(
+                !said.contains("every match the streams hold"),
+                "{query}: {said}"
+            );
+            assert!(said.contains("day=, month="), "{query}: {said}");
+        }
+        let by_day = keyed(&dir, "day=2020-01-02");
+        assert_eq!(by_day["records"].as_array().unwrap().len(), 1, "{by_day:#}");
+        let said = by_day["keyed"]["index"]["said"].as_str().expect("words");
+        assert!(!said.contains("NOT EVERY LINE"), "{said}");
+        assert!(said.contains("every match the streams hold"), "{said}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE LOG IS ASKED BY MONTH, BY REASON, BY IMPORT KIND AND BY A TIME
+    /// SPAN** (R3-24): each through its own posting or the files its time
+    /// meets, each narrowing a key beside it, each garbage value named.
+    #[test]
+    fn the_log_is_asked_by_month_reason_kind_and_span() {
+        let (dir, sink) = sink_in("keys");
+        let refusal = |kind: &'static str, day: &'static str, code: &'static str, reason| {
+            telemetry::Event::error("gdfl.import", "refused")
+                .with("kind", kind)
+                .with("day", day)
+                .with("code", code)
+                .with("reason", reason)
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        let _ = sink.emit(&refusal("options", "2020-01-02", "A", "census_full"));
+        pause();
+        let _ = sink.emit(&refusal("stocks", "2020-02-03", "B", "census_full"));
+        pause();
+        let _ = sink.emit(&refusal("options", "2020-02-04", "C", "bad_row"));
+        let days = |got: &serde_json::Value| -> Vec<String> {
+            got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["fields"]["day"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            days(&keyed(&dir, "month=2020-02")),
+            ["2020-02-04", "2020-02-03"]
+        );
+        assert_eq!(
+            days(&keyed(&dir, "reason=census_full")),
+            ["2020-02-03", "2020-01-02"],
+            "found by reason though each code differs"
+        );
+        assert_eq!(
+            days(&keyed(&dir, "kind=options")),
+            ["2020-02-04", "2020-01-02"]
+        );
+        assert_eq!(
+            days(&keyed(&dir, "kind=stocks&month=2020-02")),
+            ["2020-02-03"]
+        );
+        // A KEY BESIDE THE ONE PROBED filters what the probe found.
+        assert!(
+            keyed(&dir, "code=C&reason=census_full")["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            days(&keyed(&dir, "reason=census_full&month=2020-01")),
+            ["2020-01-02"]
+        );
+        let by_kind = keyed(&dir, "kind=options");
+        assert_eq!(
+            by_kind["keyed"]["kind"], "options",
+            "the importer's spelling"
+        );
+        assert_eq!(asked("kind=Options").ignored[0].0, "kind", "and only it");
+
+        // A SPAN ALONE: exactly the line stamped inside it.
+        let all = keyed(&dir, "month=2020-01");
+        let at = all["records"][0]["ts"].as_i64().unwrap();
+        let got = keyed(&dir, &format!("from={at}&to={at}"));
+        assert_eq!(days(&got), ["2020-01-02"], "{got:#}");
+        assert_eq!(got["keyed"]["span"]["from"], at);
+        assert_eq!(got["keyed"]["index"]["postings"][0]["dimension"], "span");
+        let open_ended = keyed(&dir, &format!("from={at}"));
+        assert_eq!(open_ended["records"].as_array().unwrap().len(), 3);
+        assert!(open_ended["keyed"]["span"]["to"].is_null());
+        // A SPAN BESIDE A KEY narrows it, and one before every line is empty.
+        assert_eq!(
+            days(&keyed(&dir, &format!("reason=census_full&to={at}"))),
+            ["2020-01-02"]
+        );
+        assert!(
+            keyed(&dir, "to=2020-01-01")["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // GARBAGE IS NAMED, never read as no filter.
+        let bad = serde_json::from_str::<serde_json::Value>(&json_over(
+            &dir,
+            None,
+            &asked("month=2020-13&kind=futures&reason=a/b&from=yesterday&to=x"),
+            None,
+        ))
+        .expect("JSON");
+        // BOTH bad ends are named (R3-24 repair round 3): `to=x` was dropped
+        // without a word beside a bad `from`.
+        assert_eq!(ignored(&bad), ["month", "reason", "kind", "from", "to"]);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN END THAT DOES NOT READ takes the span with it, and every end
+    /// given is named** (R3-24 repair round 3, the fourth check's follow-up):
+    /// a reversed span, a lone bad end, and a good end beside a bad one, which
+    /// is named as not applied rather than dropped in silence.
+    #[test]
+    fn every_span_end_given_is_named_when_one_does_not_read() {
+        let reversed = asked("from=2026-10-17&to=2026-10-16");
+        assert!(reversed.keys.span.is_none());
+        assert_eq!(reversed.ignored[0].0, "from");
+        let only_to = asked("to=junk");
+        assert_eq!(only_to.ignored, [("to", "junk".to_owned())]);
+        // A GOOD END BESIDE A BAD ONE is named as not applied, never dropped
+        // in silence (the fourth check's follow-up), either way round.
+        for (query, bad, good, said) in [
+            (
+                "from=junk&to=2026-10-16",
+                ("from", "junk"),
+                "to",
+                "2026-10-16 (not applied: from= did not read)",
+            ),
+            (
+                "from=2026-10-16&to=junk",
+                ("to", "junk"),
+                "from",
+                "2026-10-16 (not applied: to= did not read)",
+            ),
+        ] {
+            let got = asked(query);
+            assert!(got.keys.span.is_none(), "{query}");
+            assert_eq!(got.ignored.len(), 2, "{query}: {:?}", got.ignored);
+            assert!(
+                got.ignored.contains(&(bad.0, bad.1.to_owned()))
+                    && got.ignored.contains(&(good, said.to_owned())),
+                "{query}: {:?}",
+                got.ignored
+            );
+        }
+    }
+
+    /// An instant is a number of milliseconds, an IST day or minute or second,
+    /// or the same in UTC with `Z`; the end of a day or minute is its last
+    /// millisecond; nothing else reads.
+    #[test]
+    fn an_instant_is_read_in_ist_unless_it_says_utc() {
+        let midnight_utc = 20_378 * 86_400_000_i64; // 2025-10-17
+        assert_eq!(instant_of("2025-10-17Z", false), Some(midnight_utc));
+        assert_eq!(
+            instant_of("2025-10-17", false),
+            Some(midnight_utc - IST_OFFSET_MS)
+        );
+        assert_eq!(
+            instant_of("2025-10-17", true),
+            Some(midnight_utc - IST_OFFSET_MS + 86_400_000 - 1)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15", false),
+            Some(midnight_utc - IST_OFFSET_MS + (9 * 60 + 15) * 60_000)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15", true),
+            Some(midnight_utc - IST_OFFSET_MS + (9 * 60 + 16) * 60_000 - 1)
+        );
+        assert_eq!(
+            instant_of("2025-10-17T09:15:30Z", true),
+            Some(midnight_utc + ((9 * 60 + 15) * 60 + 31) * 1_000 - 1)
+        );
+        assert_eq!(instant_of("1760659200000", false), Some(1_760_659_200_000));
+        for garbage in [
+            "",
+            "abc",
+            "2025-10-17T24:00",
+            "2025-10-17T09:60",
+            "2025-10-17T09:15:60",
+            "2025-10-17T09",
+            "2025-10-17T9:15",
+            "2025-10-17T09:15:30:00",
+            "2025-13-01",
+            "12345678901234567",
+        ] {
+            assert_eq!(instant_of(garbage, false), None, "{garbage:?}");
+        }
+    }
+
+    /// **A TARGET ALONE READS EVERY AUDITED LINE, NOT THE NEWEST 4 MiB**
+    /// (R3-24, DB-023): one refusal, then more than [`SCAN_BYTES`] of other
+    /// lines over it. `target=` used to be the ring's filter and stopped at
+    /// the scan cap without it; it is the index's key now, and the ring's
+    /// newest bytes are read beside it only when `ring=1` asks.
+    #[test]
+    fn a_target_alone_reads_every_audited_line_not_the_newest_4_mib() {
+        let (dir, sink) = sink_in("target-alone");
+        let _ = sink.emit(
+            &telemetry::Event::error("pull.spot", "member did not land").with("instrument", "ACC"),
+        );
+        let wide = "w".repeat(telemetry::MAX_STR_VALUE_BYTES);
+        let mut written = 0u64;
+        while written < SCAN_BYTES + 512 * 1024 {
+            let before = sink.health().current_bytes;
+            let _ =
+                sink.emit(&telemetry::Event::info("api.noise", "busy").with("w", wide.as_str()));
+            written += sink.health().current_bytes - before;
+        }
+        let read = asked("target=pull.spot");
+        assert_eq!(read.keys.target.as_deref(), Some("pull.spot"));
+        // THE INDEX ALONE, as for every key: the ring's newest bytes only on
+        // `ring=1`, so a target alone never pays a 4 MiB scan of each ring.
+        assert!(!read.ring, "no ring scan unasked");
+        let got = keyed(&dir, "target=pull.spot");
+        assert_eq!(
+            named(&got),
+            [("pull.spot".to_owned(), "member did not land".to_owned())],
+            "{:#}",
+            got["keyed"]
+        );
+        assert_eq!(got["keyed"]["rows"][0]["source"], "audit");
+        assert_eq!(got["keyed"]["ring"]["scanned"], false, "{:#}", got["keyed"]);
+        assert_eq!(
+            got["bytes_read"], 0,
+            "no ring byte read: {:#}",
+            got["keyed"]
+        );
+        // ASKED FOR THE RING TOO, the scan stops at its cap and the line is
+        // still the index's, once: the ring alone would have missed it.
+        let with_ring = keyed(&dir, "target=pull.spot&ring=1");
+        assert_eq!(named(&with_ring), named(&got));
+        assert_eq!(
+            with_ring["hit_scan_cap"], true,
+            "the ring alone would have missed it"
+        );
+        // A RUN BESIDE IT keeps `target=` a filter of the ring, as before.
+        assert!(asked("target=pull.spot&run=7").keys.is_empty());
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A TWO-WEEK-OLD REFUSAL IS FOUND BY RUN, DAY, SYMBOL AND CODE**
+    /// (R3-24, FM-203), from the stream that keeps it after the ring has
+    /// rolled it away. Age is VOLUME here, not the clock: the sink stamps a
+    /// line with the host clock, and what takes a line away is its ring
+    /// rolling past it, so the refusal is followed by more lines than the
+    /// whole ring keeps. Each key alone finds it (a run through `durable=1`,
+    /// since `run=` alone stays the ring's filter for a live sweep, and its
+    /// empty answer says the audited history reaches further than the ring),
+    /// and so do the four together. An empty answer names every stream it
+    /// searched with what it found there, and a stream that is gone is named
+    /// as gone, never read as "none".
+    #[test]
+    fn a_two_week_old_refusal_is_found_by_run_day_symbol_and_code() {
+        let dir = crate::scratch::path("logs-r324-two-weeks");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir)
+                .with_min_level(telemetry::Level::Trace)
+                .with_max_file_bytes(32 * 1024)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+        let _ = sink.emit(
+            &telemetry::Event::error("gdfl.import", "refused")
+                .with("run", 41u64)
+                .with("day", "2026-10-02")
+                .with("instrument", "NIFTY")
+                .with("code", "zip_member_missing"),
+        );
+        let wide = "w".repeat(1024);
+        for _ in 0..200 {
+            let _ =
+                sink.emit(&telemetry::Event::info("api.noise", "busy").with("w", wide.as_str()));
+        }
+        drop(sink);
+        // PREMISE: no file of the ring holds the refusal any more.
+        let mut ring_files = 0;
+        for entry in std::fs::read_dir(&dir).expect("the directory") {
+            let path = entry.expect("an entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("events") && name.ends_with(".ndjson") {
+                ring_files += 1;
+                let text = std::fs::read_to_string(&path).expect("a ring file");
+                assert!(
+                    !text.contains("zip_member_missing"),
+                    "premise: the ring rolled the refusal away ({name})"
+                );
+            }
+        }
+        assert!(ring_files > 0, "premise: the ring was written");
+        for query in [
+            "run=41&durable=1",
+            "day=2026-10-02",
+            "instrument=NIFTY",
+            "code=zip_member_missing",
+            "run=41&day=2026-10-02&instrument=NIFTY&code=zip_member_missing",
+        ] {
+            let got = keyed(&dir, query);
+            assert_eq!(
+                named(&got),
+                [("gdfl.import".to_owned(), "refused".to_owned())],
+                "{query}: {:#}",
+                got["keyed"]
+            );
+            assert_eq!(got["keyed"]["rows"][0]["source"], "audit", "{query}");
+            assert_eq!(got["records"][0]["fields"]["run"], 41, "{query}");
+        }
+        // `run=` WITHOUT `durable=1` IS THE RING'S FILTER (a page polls it for a
+        // live sweep, whose progress lines no stream audits), so after the roll
+        // it finds nothing; its answer says how far back the ring reaches and
+        // that the audited history reaches further, so an empty ring is never
+        // read as "it did not happen".
+        let ring_only: serde_json::Value =
+            serde_json::from_str(&json_over(&dir, None, &asked("run=41"), None)).expect("JSON");
+        assert!(
+            ring_only["records"].as_array().expect("records").is_empty(),
+            "{ring_only:#}"
+        );
+        let reach = &ring_only["reach"];
+        let ring_from = reach["halves"][0]["ring_from"]
+            .as_i64()
+            .expect("the ring's oldest line");
+        let audited_from = reach["audited_from"].as_i64().expect("the audited history");
+        assert!(audited_from < ring_from, "{reach:#}");
+        // AN EMPTY ANSWER SAYS WHERE IT LOOKED: each stream, by name, held.
+        let none = keyed(&dir, "code=never_logged");
+        assert_eq!(named(&none), Vec::<(String, String)>::new());
+        let searched: Vec<(String, String)> = none["keyed"]["index"]["postings"]
+            .as_array()
+            .expect("postings")
+            .iter()
+            .map(|p| {
+                (
+                    p["source"].as_str().unwrap().to_owned(),
+                    p["state"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            searched,
+            [
+                ("audit".to_owned(), "held".to_owned()),
+                ("state".to_owned(), "held".to_owned())
+            ],
+            "{:#}",
+            none["keyed"]
+        );
+        // AND A STREAM THAT IS GONE IS NAMED, NEVER ANSWERED AS NONE.
+        std::fs::remove_file(telemetry::audit_current_path(&dir)).expect("the audit file");
+        std::fs::remove_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("its index");
+        let gone = keyed(&dir, "code=zip_member_missing");
+        assert_eq!(named(&gone), Vec::<(String, String)>::new());
+        let audit = &gone["keyed"]["index"]["postings"][0];
+        assert_eq!(audit["source"], "audit");
+        assert_eq!(audit["state"], "no audit stream", "{:#}", gone["keyed"]);
+        assert_eq!(audit["total"], serde_json::Value::Null);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STATE CHANGE THE AUDIT STREAM LOST IS ANSWERED FROM THE STATE
+    /// STREAM** (R3-24, DB-G88), and one both streams hold is shown once.
+    #[test]
+    fn a_state_change_is_found_in_the_state_stream_once() {
+        let (dir, sink) = sink_in("state");
+        let _ = sink.emit(&telemetry::Event::warn("autopilot", "paused").with("epoch", 3u64));
+        let _ = sink.emit(&telemetry::Event::error("x", "refused"));
+        let both = keyed(&dir, "target=autopilot");
+        assert_eq!(both["keyed"]["matched"], 1, "{:#}", both["keyed"]);
+        assert_eq!(both["records"].as_array().unwrap().len(), 1);
+        let sources: Vec<&str> = both["keyed"]["index"]["postings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|posting| posting["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, ["audit", "state"]);
+        drop(sink);
+        // AS IF THE REFUSALS HAD ROLLED IT AWAY: the audit stream is gone.
+        std::fs::remove_file(telemetry::audit_current_path(&dir)).expect("the audit file");
+        std::fs::remove_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("its index");
+        let lost = keyed(&dir, "target=autopilot");
+        assert_eq!(
+            named(&lost),
+            [("autopilot".to_owned(), "paused".to_owned())]
+        );
+        assert_eq!(lost["keyed"]["rows"][0]["source"], "state");
+        assert_eq!(
+            lost["keyed"]["index"]["postings"][0]["state"], "no audit stream",
+            "the gone stream is named, never read as empty"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EVERY LOG ANSWER SAYS HOW FAR BACK IT REACHES, WITH ONE ALERT WHEN
+    /// THE AUDIT HISTORY IS YOUNGER THAN 30 DAYS** (R3-24, DB-G88).
+    #[test]
+    fn every_log_answer_says_how_far_back_it_reaches() {
+        let (dir, sink) = sink_in("reach");
+        let _ = sink.emit(&telemetry::Event::info("cli.lifecycle", "command started"));
+        let _ = sink.emit(&telemetry::Event::error("x", "refused"));
+        let first = serde_json::from_str::<serde_json::Value>(&json_over(
+            &dir,
+            None,
+            &asked("limit=5"),
+            None,
+        ))
+        .expect("JSON");
+        let started = first["records"][1]["ts"].as_i64().unwrap();
+        let reach = &first["reach"];
+        assert_eq!(reach["halves"][0]["half"], "served");
+        assert_eq!(reach["halves"][0]["ring_from"], started);
+        assert_eq!(reach["halves"][0]["state_from"], started);
+        assert_eq!(reach["audited_from"], started);
+        assert_eq!(reach["young_below_days"], YOUNG_AUDIT_DAYS);
+        assert!(
+            reach["alert"]
+                .as_str()
+                .is_some_and(|alert| alert.contains("younger than 30 days")),
+            "{reach:#}"
+        );
+        // THE KEYED ANSWER SAYS IT TOO.
+        assert_eq!(keyed(&dir, "target=x")["reach"]["audited_from"], started);
+        // THIRTY-ONE DAYS ON there is no alert.
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let later: serde_json::Value = serde_json::from_str(&format!(
+            "{{{}}}",
+            reach_json(&halves, started + 31 * 86_400_000)
+        ))
+        .expect("JSON");
+        assert!(later["reach"]["alert"].is_null(), "{later:#}");
+        assert_eq!(later["reach"]["days"], 31);
+        let quiet = super::reach_note(&halves, started + 31 * 86_400_000);
+        assert!(
+            quiet.starts_with("<p class=\"lead\">Reaches back:"),
+            "{quiet}"
+        );
+        assert!(!quiet.contains("Audit history is short"));
+        // NOTHING KEPT is the alert, never a quiet answer.
+        let empty = [Half {
+            name: "served",
+            path: dir.join("nothing-here"),
+        }];
+        let none: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", reach_json(&empty, started))).expect("JSON");
+        assert!(
+            none["reach"]["alert"]
+                .as_str()
+                .unwrap()
+                .contains("no directory read keeps an audit history")
+        );
+        assert!(none["reach"]["halves"][0]["ring_from"].is_null());
+        // THE PAGE says it, the alert first.
+        let page = page_over(&dir, None, &asked("limit=5"), None);
+        assert!(page.contains("Audit history is short"), "{page}");
+        assert!(page.contains("Reaches back:"));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A CONTRADICTED DAY-IMPORTED LINE IS MARKED** (R3-24, DB-A48): the
+    /// import journal closed 2020-01-02 `incomplete` and holds no line for
+    /// 2022-03-07, so the log's "day imported" for each carries a conflict
+    /// with the journal's outcome beside it; 2020-01-03, which the journal
+    /// closed `done`, does not; nor does any other line.
+    #[test]
+    fn a_contradicted_day_imported_line_is_marked() {
+        let root = crate::server::import_journal::tests::journal(
+            "r324-contradicted",
+            "begin options 2020-01-02 *\n\
+             incomplete options 2020-01-02 * definition=2 files=12 seconds=333 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+             begin options 2020-01-03 *\n\
+             done options 2020-01-03 * definition=2 files=11 seconds=222 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+        );
+        let cli = root.join("logs").join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            for day in ["2020-01-02", "2020-01-03", "2022-03-07"] {
+                let day: &'static str = Box::leak(day.to_owned().into_boxed_str());
+                let _ = sink.emit(
+                    &telemetry::Event::info("gdfl.import", "day imported")
+                        .with("kind", "options")
+                        .with("day", day),
+                );
+            }
+            let _ = sink.emit(
+                &telemetry::Event::info("gdfl.import", "day incomplete")
+                    .with("kind", "options")
+                    .with("day", "2020-01-02"),
+            );
+        }
+        let got: serde_json::Value =
+            serde_json::from_str(&logs_json_over(None, &root, "limit=10")).expect("JSON");
+        let conflict_of = |day: &str, message: &str| -> serde_json::Value {
+            got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["fields"]["day"] == day && record["message"] == message)
+                .unwrap_or_else(|| panic!("{day} {message}: {got:#}"))
+                .get("conflict")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let incomplete = conflict_of("2020-01-02", "day imported");
+        assert_eq!(
+            incomplete["journal_outcome"], "incomplete",
+            "{incomplete:#}"
+        );
+        assert_eq!(incomplete["journal_line"], 2);
+        assert_eq!(incomplete["with"], "import journal");
+        assert!(conflict_of("2020-01-03", "day imported").is_null());
+        let unlined = conflict_of("2022-03-07", "day imported");
+        assert_eq!(unlined["journal_outcome"], "no journal line");
+        assert!(unlined["journal_line"].is_null());
+        assert!(conflict_of("2020-01-02", "day incomplete").is_null());
+        // THE PAGE marks the same rows.
+        let halves = super::halves_of(None, Some(&root));
+        assert_eq!(store_of(&halves).as_deref(), Some(root.as_path()));
+        let page = super::page_across(&halves, &asked("limit=10"), None);
+        assert_eq!(page.matches("<b>CONFLICT</b>").count(), 2, "{page}");
+        assert!(page.contains("closed this day incomplete (line 2)"));
+        // NO STORE, NO JOURNAL: nothing to compare with, nothing marked.
+        assert!(
+            store_of(&[Half {
+                name: "served",
+                path: cli.clone(),
+            }])
+            .is_none()
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A "DAY IMPORTED" LINE BESIDE A JOURNAL THAT CANNOT BE READ IS SAID
+    /// UNCHECKED** (R3-24, DB-A48; `CLAUDE.md` section 4). The journal's name
+    /// is a directory here, so it exists and every read of it fails. Before
+    /// this, the failed read was taken as "nothing to compare with" and the
+    /// line stood unmarked, which is what a line the journal agrees with
+    /// looks like; now it carries the read's failure, and the page says
+    /// UNCHECKED, never CONFLICT and never nothing.
+    #[test]
+    fn a_day_imported_line_beside_an_unreadable_journal_is_said_unchecked() {
+        let root = crate::scratch::path("logs-r324-unread-journal");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let journal = pull::gdfl_import::journal_path(&root);
+        std::fs::create_dir_all(&journal).expect("a directory where the journal is");
+        std::fs::write(journal.join("not-a-journal"), "x\n").expect("a file inside it");
+        let cli = root.join("logs").join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            for (message, kind, day) in [
+                ("day imported", "options", "2020-01-02"),
+                ("day incomplete", "options", "2020-01-02"),
+                // A "DAY IMPORTED" LINE NAMING NO KIND THIS READER PARSES.
+                ("day imported", "no-such-kind", "2020-01-03"),
+            ] {
+                let _ = sink.emit(
+                    &telemetry::Event::info("gdfl.import", message)
+                        .with("kind", kind)
+                        .with("day", day),
+                );
+            }
+        }
+        let got: serde_json::Value =
+            serde_json::from_str(&logs_json_over(None, &root, "limit=10")).expect("JSON");
+        let of = |message: &str, day: &str| -> serde_json::Value {
+            got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["message"] == message && record["fields"]["day"] == day)
+                .unwrap_or_else(|| panic!("{message} {day}: {got:#}"))
+                .clone()
+        };
+        let imported = of("day imported", "2020-01-02");
+        assert_eq!(
+            imported["conflict"]["journal_outcome"], "unchecked",
+            "{got:#}"
+        );
+        assert!(imported["conflict"]["journal_line"].is_null());
+        let note = imported["conflict"]["note"].as_str().expect("a note");
+        assert!(note.contains("could not be read"), "{note}");
+        assert!(note.contains(&journal.display().to_string()), "{note}");
+        let unparsed = of("day imported", "2020-01-03");
+        assert_eq!(unparsed["conflict"]["journal_outcome"], "unchecked");
+        let note = unparsed["conflict"]["note"].as_str().expect("a note");
+        assert!(note.contains("names no import kind and day"), "{note}");
+        assert!(of("day incomplete", "2020-01-02").get("conflict").is_none());
+        let halves = super::halves_of(None, Some(&root));
+        let page = super::page_across(&halves, &asked("limit=10"), None);
+        assert_eq!(page.matches("<b>UNCHECKED</b>").count(), 2, "{page}");
+        assert_eq!(page.matches("<b>CONFLICT</b>").count(), 0, "{page}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN OLD "DAY INCOMPLETE" LINE IS FOUND BY ITS DAY ONCE ITS DIRECTORY
+    /// IS SEEDED; THE "DAY IMPORTED" BESIDE IT STAYS THE RING'S** (R3-24), as
+    /// on the operator's store, whose `logs/cli` ring was written by builds
+    /// that audited neither. The first sink of this build to open the
+    /// directory seeds its state stream from that ring, and a day that did not
+    /// close done is a state change now, so a keyed `day=` search finds it
+    /// from the streams that keep it. "day imported" is not one (it is the
+    /// bulk of every run), so the same search, which reads no ring byte
+    /// unasked, does not show it.
+    #[test]
+    fn an_old_day_incomplete_line_is_found_by_its_day_once_seeded() {
+        let root = crate::scratch::path("logs-r324-seeded-days");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let cli = root.join("logs").join("cli");
+        {
+            // AN EARLIER BUILD: no audit stream, no state stream, the ring only.
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli).with_audit(false))
+                .expect("opens");
+            for event in [
+                telemetry::Event::info("gdfl.import", "day imported"),
+                telemetry::Event::warn("gdfl.import", "day incomplete"),
+            ] {
+                let _ = sink.emit(&event.with("kind", "options").with("day", "2020-01-02"));
+            }
+        }
+        let query = "day=2020-01-02&kind=options&limit=10";
+        // PREMISE: nothing indexes either yet.
+        let before: serde_json::Value =
+            serde_json::from_str(&logs_json_over(None, &root, query)).expect("JSON");
+        assert_eq!(named(&before), Vec::<(String, String)>::new(), "{before:#}");
+        // THIS BUILD OPENS THE DIRECTORY ONCE.
+        drop(telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens"));
+        let got: serde_json::Value =
+            serde_json::from_str(&logs_json_over(None, &root, query)).expect("JSON");
+        assert_eq!(
+            named(&got),
+            [("gdfl.import".to_owned(), "day incomplete".to_owned())],
+            "{got:#}"
+        );
+        let state_day: Vec<&serde_json::Value> = got["keyed"]["index"]["postings"]
+            .as_array()
+            .expect("postings")
+            .iter()
+            .filter(|p| p["half"] == "cli" && p["source"] == "state" && p["dimension"] == "day")
+            .collect();
+        assert_eq!(state_day.len(), 1, "{got:#}");
+        assert_eq!(state_day[0]["total"], 1, "the never-rolling copy: {got:#}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_picture_tests {
+    //! R3-24: the `/logs` picture from counters, the live tail from memory,
+    //! and both durable streams' health on every answer.
+
+    use super::{
+        Half, all_halves_live, asked, live_admits, picture_json, picture_note, streams_json,
+        streams_note,
+    };
+
+    fn sink_in(name: &str) -> (std::path::PathBuf, telemetry::Sink) {
+        let dir = crate::scratch::path(&format!("logs-r324p-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        (dir, sink)
+    }
+
+    /// **THE LOGS PICTURE IS READ FROM COUNTERS, NOT FROM FILES** (R3-24):
+    /// every ring file deleted under the sink, the picture still says how
+    /// many lines of each level were written, which codes most, and the
+    /// ring's oldest line, and the page draws it from the same counters.
+    #[test]
+    fn the_logs_picture_is_read_from_counters_not_from_files() {
+        let (dir, sink) = sink_in("picture");
+        let _ = sink.emit(&telemetry::Event::info("a", "one"));
+        let _ = sink.emit(&telemetry::Event::info("a", "two"));
+        let _ = sink.emit(&telemetry::Event::warn("a", "three").with("code", "late"));
+        for _ in 0..3 {
+            let _ = sink.emit(&telemetry::Event::error("a", "refused").with("code", "census_full"));
+        }
+        for path in telemetry::paths_newest_first(&dir, telemetry::DEFAULT_KEEP_FILES) {
+            let _gone = std::fs::remove_file(path);
+        }
+        assert!(
+            telemetry::tail(&dir, 8, &telemetry::Query::last(10))
+                .records
+                .is_empty(),
+            "premise: no file holds a line"
+        );
+        let picture = sink.picture();
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", picture_json(Some(&picture)))).expect("JSON");
+        let p = &json["picture"];
+        assert_eq!(p["from"], "counters");
+        assert_eq!(p["counted"], 6);
+        assert_eq!(p["levels"][4], "error");
+        let mut by_level = [0u64; 5];
+        for minute in p["minutes"].as_array().expect("minutes") {
+            for (sum, count) in by_level
+                .iter_mut()
+                .zip(minute["counts"].as_array().unwrap())
+            {
+                *sum += count.as_u64().unwrap();
+            }
+        }
+        assert_eq!(by_level, [0, 0, 2, 1, 3]);
+        assert_eq!(p["minutes"].as_array().unwrap().len(), 60);
+        assert_eq!(p["codes"][0]["code"], "census_full");
+        assert_eq!(p["codes"][0]["count"], 3);
+        assert!(p["oldest_ms"].is_i64(), "{p:#}");
+        let page = picture_note(Some(&picture));
+        assert!(page.contains("<svg"), "{page}");
+        assert!(page.contains("no file read"));
+        assert!(page.contains("census_full"));
+        assert!(page.matches("<rect").count() >= 2, "{page}");
+        assert!(page.contains("error 3;"), "{page}");
+        // A PROCESS WITH NO SINK says so, in both.
+        assert_eq!(picture_json(None), "\"picture\":null");
+        assert!(picture_note(None).contains("No picture"));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A full code table says a count may be over, and a page with no code
+    /// says that too.
+    #[test]
+    fn the_picture_says_when_its_code_table_replaced_one() {
+        let picture = telemetry::run_dirs::Picture {
+            codes_replaced: 2,
+            ..telemetry::run_dirs::Picture::default()
+        };
+        let page = picture_note(Some(&picture));
+        assert!(page.contains("took the least-counted one's place 2 time(s)"));
+        assert!(page.contains("No line carried a code"));
+        assert!(page.contains("Oldest line the ring holds: none"));
+    }
+
+    /// **THE LIVE TAIL IS A COPY FROM MEMORY, NOT A FILE SCAN** (R3-24): the
+    /// ring's file deleted, the served directory's newest lines still answer,
+    /// with no byte read; a filter the copy cannot fill reads the files, as
+    /// it always did.
+    #[test]
+    fn the_live_tail_is_a_copy_from_memory() {
+        let (dir, sink) = sink_in("live");
+        for n in 0..60u32 {
+            let _ = sink.emit(&telemetry::Event::info("a.b", "line").with("n", n));
+        }
+        std::fs::remove_file(telemetry::current_path(&dir)).expect("the ring file");
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let tail = all_halves_live(&halves, &asked("limit=50").query, Some(&sink));
+        assert_eq!(tail.records.len(), 50);
+        assert_eq!((tail.bytes_read, tail.files_read), (0, 0));
+        assert_eq!(
+            tail.records[0]
+                .field("n")
+                .and_then(telemetry::OwnedValue::as_u64),
+            Some(59)
+        );
+        assert_eq!(tail.missing, Some(0));
+        assert!(!tail.reached_oldest, "the copy is the newest lines only");
+        let filtered = all_halves_live(&halves, &asked("limit=5&level=info").query, Some(&sink));
+        assert_eq!(filtered.records.len(), 5);
+        assert_eq!(filtered.missing, None, "a gap means nothing under a filter");
+        // NOT ENOUGH IN THE COPY: the files answer, and the file is gone.
+        let narrow = all_halves_live(&halves, &asked("limit=5&level=error").query, Some(&sink));
+        assert!(narrow.records.is_empty());
+        // ANOTHER DIRECTORY is never answered from this sink's copy.
+        let other = [Half {
+            name: "cli",
+            path: dir.join("elsewhere"),
+        }];
+        assert!(
+            all_halves_live(&other, &asked("limit=5").query, Some(&sink))
+                .records
+                .is_empty()
+        );
+        // THE LIVE FILTER IS THE FILE TAIL'S: floor, run, target, since.
+        let record = &tail.records[0];
+        let query = |q: &str| asked(q).query;
+        assert!(live_admits(&query("level=info&target=a"), record));
+        assert!(!live_admits(&query("level=warn"), record));
+        assert!(!live_admits(&query("target=a.bc"), record));
+        assert!(!live_admits(&query("run=4"), record));
+        assert!(live_admits(
+            &telemetry::Query::last(1).since(record.at_unix_millis),
+            record
+        ));
+        assert!(!live_admits(
+            &telemetry::Query::last(1).since(record.at_unix_millis + 1),
+            record
+        ));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **BOTH DURABLE STREAMS ARE SERVED, WITH THE ROLL'S WAITING DELETES**
+    /// (R3-24): on the JSON and the page, loud when the reaper is behind or
+    /// the state stream has grown past its loud size.
+    #[test]
+    fn both_streams_and_their_waiting_deletes_are_served() {
+        let audit = telemetry::AuditHealth {
+            serial: 7,
+            current_bytes: 100,
+            rotations: 3,
+            gone_waiting: u64::from(telemetry::AUDIT_KEEP_FILES) + 1,
+            reaped: 4,
+            reap_failures: 1,
+            last_error: Some("a <failure>".to_owned()),
+            ..telemetry::AuditHealth::default()
+        };
+        let state = telemetry::AuditHealth {
+            never_rolls: true,
+            current_bytes: telemetry::run_dirs::STATE_LOUD_BYTES + 1,
+            written: 9,
+            ..telemetry::AuditHealth::default()
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", streams_json(Some(&audit), Some(&state))))
+                .expect("JSON");
+        assert_eq!(json["audit_stream"]["gone_waiting"], 17);
+        assert_eq!(json["audit_stream"]["reaper_behind"], true);
+        assert_eq!(json["state_stream"]["loud"], true);
+        assert_eq!(json["state_stream"]["written"], 9);
+        assert!(
+            json["state_stream"]["max_file_bytes"].is_null(),
+            "it never rolls"
+        );
+        assert!(json["state_stream"]["keep_files"].is_null());
+        assert_eq!(json["state_stream"]["never_rolls"], true);
+        assert_eq!(
+            json["state_stream"]["loud_bytes"],
+            telemetry::run_dirs::STATE_LOUD_BYTES
+        );
+        assert_eq!(
+            json["audit_stream"]["max_file_bytes"],
+            telemetry::AUDIT_MAX_FILE_BYTES
+        );
+        assert!(json["audit_stream"]["loud_bytes"].is_null());
+        let page = streams_note(Some(&audit), Some(&state));
+        assert!(page.starts_with("<p class=\"halt\">"), "{page}");
+        assert!(
+            page.contains(
+                "17 index generation(s) wait to be deleted, 4 deleted, 1 delete(s) failed"
+            )
+        );
+        assert!(page.contains("the deletes are behind the rolls"));
+        assert!(page.contains("past its loud size"));
+        assert!(page.contains("a &lt;failure&gt;"));
+        let quiet = streams_note(Some(&telemetry::AuditHealth::default()), None);
+        assert!(quiet.starts_with("<p class=\"lead\">"), "{quiet}");
+        assert!(!quiet.contains("behind"));
+        assert!(streams_note(None, None).contains("keeps no audit stream"));
+        let none: serde_json::Value =
+            serde_json::from_str(&format!("{{{}}}", streams_json(None, None))).expect("JSON");
+        assert!(none["audit_stream"].is_null() && none["state_stream"].is_null());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_follow_tests {
+    //! R3-24: the importer's refusal lines are followed on a background
+    //! thread, and no page request reads more than a fixed slice.
+
+    use super::{REQUEST_SLICE_BYTES, import_refusals, refusals_in};
+
+    /// A ring of rolled files holding `days` x `per_day` importer refusals of
+    /// the options kind, written by a sink whose files roll at 256 KiB, under
+    /// `<root>/logs/cli`. Answers the root.
+    fn big_ring(name: &str, days: u32, per_day: u32) -> std::path::PathBuf {
+        let root = crate::scratch::path(&format!("logs-r324f-{name}"));
+        let _ignored = std::fs::remove_dir_all(&root);
+        let dir = root.join("logs").join("cli");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir)
+                .with_max_file_bytes(256 * 1024)
+                .with_audit(false),
+        )
+        .expect("opens");
+        let why = "a reason long enough to make the ring several slices wide ".repeat(4);
+        for day in 0..days {
+            let text: &'static str =
+                Box::leak(format!("2020-01-{:02}", day % 28 + 1).into_boxed_str());
+            for n in 0..per_day {
+                let _ = sink.emit(
+                    &telemetry::Event::error("gdfl.import", "refused")
+                        .with("kind", "options")
+                        .with("day", text)
+                        .with("n", n)
+                        .with("why", why.as_str()),
+                );
+            }
+        }
+        assert!(
+            sink.health().rotations >= 4,
+            "premise: a ring of rolled files"
+        );
+        root
+    }
+
+    /// The refusals the evidence holds for every January 2020 day.
+    fn held_in(refusals: &super::DirRefusals) -> usize {
+        (1..=28)
+            .map(|day| refusals.of("options", &format!("2020-01-{day:02}")).len())
+            .sum()
+    }
+
+    /// **NO PAGE REQUEST READS MORE THAN A FIXED SLICE** (R3-24): a ring
+    /// several slices wide is read across calls, each folding at most
+    /// [`REQUEST_SLICE_BYTES`], each saying how much is left, and the last
+    /// holds every refusal. It used to be read whole inside the first
+    /// request.
+    #[test]
+    fn a_request_reads_at_most_its_slice() {
+        let root = big_ring("slice", 28, 100);
+        let dir = root.join("logs").join("cli");
+        let mut calls = 0u32;
+        let mut read = 0u64;
+        let mut last_behind = u64::MAX;
+        let held = loop {
+            let (held, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+            assert!(
+                held.bytes - read <= REQUEST_SLICE_BYTES,
+                "call {calls} read {} bytes",
+                held.bytes - read
+            );
+            assert!(behind < last_behind, "every slice makes progress");
+            read = held.bytes;
+            last_behind = behind;
+            calls += 1;
+            if behind == 0 {
+                break held;
+            }
+        };
+        assert!(
+            calls >= 4,
+            "a ring several slices wide took {calls} call(s)"
+        );
+        assert_eq!(held_in(&held), 28 * 100);
+        assert!(held.errors.is_empty(), "{:?}", held.errors);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE FOLLOWER READS THE REST, OFF EVERY REQUEST** (R3-24): the first
+    /// question of a wide ring answers its slice and names the directory as
+    /// not read yet, never "none"; the follower catches up in the background
+    /// and a later question holds every refusal.
+    #[test]
+    fn the_follower_reads_what_a_request_left() {
+        let root = big_ring("follow", 28, 100);
+        let first = import_refusals(&root);
+        let unread = first.unread("options");
+        assert!(
+            unread
+                .iter()
+                .any(|why| why.contains("logs/cli") && why.contains("not read yet")),
+            "{unread:?}"
+        );
+        let started = std::time::Instant::now();
+        let caught_up = loop {
+            let now = import_refusals(&root);
+            if now
+                .unread("options")
+                .iter()
+                .all(|why| !why.contains("logs/cli"))
+            {
+                break now;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_mins(1),
+                "the follower did not catch up: {:?}",
+                now.unread("options")
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let cli = caught_up
+            .dirs()
+            .iter()
+            .find(|dir| dir.half == "cli")
+            .expect("the cli directory");
+        assert_eq!(cli.state, super::DirState::Read);
+        let total: usize = (1..=28)
+            .map(|day| caught_up.of("options", &format!("2020-01-{day:02}")).len())
+            .sum();
+        assert_eq!(total, 28 * 100);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_follower_start_tests {
+    //! The follower's start, stated as failing, which no test can cause.
+
+    /// **A FOLLOWER THAT CANNOT START IS SAID, NEVER SILENT** (R3-24): its
+    /// words name the failure and what still reads the ring, and a directory
+    /// still behind says them; one that starts says nothing.
+    #[test]
+    fn a_follower_that_cannot_start_is_said() {
+        let failed = super::start_follower(|| Err(std::io::Error::other("no threads left")));
+        let words = failed.expect("a failure in words");
+        assert!(words.contains("no threads left"), "{words}");
+        assert!(words.contains("only each request's slice reads it"));
+        assert_eq!(super::start_follower(|| Ok(())), None);
+        let behind = super::behind_words_with(7, Some(&words));
+        assert!(behind.starts_with("7 byte(s) of its ring are not read yet, and the follower"));
+        assert!(super::behind_words_with(7, None).contains("off every request"));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_ring_edge_tests {
+    //! R3-24: a ring the follower reads a slice at a time never stalls on
+    //! bytes that hold no line, and never reads a line not yet whole as one
+    //! still to read.
+
+    use super::{REQUEST_SLICE_BYTES, refusals_in};
+
+    /// **A REGION WIDER THAN ANY LINE, WITH NO NEWLINE, IS STEPPED OVER AND
+    /// COUNTED**, in a rolled file and in the current one, so the ring is read
+    /// to its end and the refusal after it is found; and the current file's
+    /// last bytes, a line not yet whole, leave the directory read, not
+    /// behind.
+    #[test]
+    fn a_region_with_no_line_in_it_never_stalls_the_ring() {
+        let root = crate::scratch::path("logs-r324e-noline");
+        let _ignored = std::fs::remove_dir_all(&root);
+        // ONE REAL REFUSAL LINE, as the sink writes it.
+        let source = root.join("source");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&source).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(
+                &telemetry::Event::error("gdfl.import", "refused")
+                    .with("kind", "options")
+                    .with("day", "2020-02-03"),
+            );
+        }
+        let line = std::fs::read(telemetry::current_path(&source)).expect("the line");
+        let dir = root.join("logs").join("cli");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let mut rolled = vec![b'x'; 600 * 1024];
+        rolled.push(b'\n');
+        rolled.extend_from_slice(&line);
+        std::fs::write(telemetry::rotated_path(&dir, 1), &rolled).expect("a rolled file");
+        let mut current = vec![b'y'; 300 * 1024];
+        current.push(b'\n');
+        current.extend_from_slice(&line);
+        current.extend_from_slice(b"{\"seq\":9,\"a line not yet wh");
+        std::fs::write(telemetry::current_path(&dir), &current).expect("the current file");
+        let mut calls = 0;
+        let held = loop {
+            let (held, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+            calls += 1;
+            assert!(calls < 20, "the ring stalled: {behind} byte(s) behind");
+            if behind == 0 {
+                break held;
+            }
+        };
+        assert_eq!(held.of("options", "2020-02-03").len(), 2, "{held:?}");
+        assert!(
+            held.malformed >= 2,
+            "each wide region counted: {}",
+            held.malformed
+        );
+        // ASKED AGAIN with nothing new: the fragment is not read again.
+        let (again, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+        assert_eq!(behind, 0);
+        assert!(std::sync::Arc::ptr_eq(&held, &again));
+        // THE LINE COMPLETED: read on.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current file");
+            file.write_all(b"ole\"}\n").expect("append");
+        }
+        let (grown, behind) = refusals_in(&dir, REQUEST_SLICE_BYTES);
+        assert_eq!(behind, 0);
+        assert!(
+            !std::sync::Arc::ptr_eq(&held, &grown),
+            "the grown file was read"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_edge_tests {
+    //! R3-24: a span read across generations and every way it stops, and the
+    //! streams that are there and will not answer, each named.
+
+    use super::{Fetched, Half, RefusalTail, Seen, Walked, span_backwards, span_page};
+    use std::fmt::Write as _;
+
+    /// How long one search a test asks for may take before the test fails:
+    /// each answers here in milliseconds, so this is a spin, not a slow
+    /// machine.
+    const SPAN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// `work`'s answer, asked on a thread of its own; the test FAILS when no
+    /// answer came within [`SPAN_DEADLINE`], and a panic inside `work` is the
+    /// test's own panic. A span search whose loop a change turned endless
+    /// (the binary search's `low < high` made `<=`, a probe that never
+    /// narrows) fails the test by name instead of hanging the suite, so a
+    /// mutation run counts it caught, never timed out (R3-24 repair round 1:
+    /// six such mutants of `end_of_span` ran to the 600 s timeout).
+    pub(super) fn in_time<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        within(SPAN_DEADLINE, work)
+    }
+
+    /// [`in_time`] with its deadline given.
+    fn within<T: Send + 'static>(
+        deadline: std::time::Duration,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (answered, answer) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _gone = answered.send(work());
+        });
+        match answer.recv_timeout(deadline) {
+            Ok(got) => got,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("no answer within {deadline:?}: the search spins")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that sent no answer panicked"),
+            ),
+        }
+    }
+
+    /// **A SEARCH THAT NEVER ANSWERS FAILS ITS TEST BY NAME, AND A PANIC IN
+    /// IT IS THE TEST'S OWN**: the deadline [`in_time`] puts on every span
+    /// search these tests ask for.
+    #[test]
+    fn a_search_that_never_answers_fails_its_test() {
+        assert_eq!(in_time(|| 7), 7, "an answer is handed back");
+        // A SHORT DEADLINE AND A LONGER SLEEP: the sleeper is left behind,
+        // as a spinning search is, and ends with the test process.
+        let spun = std::panic::catch_unwind(|| {
+            within(std::time::Duration::from_millis(50), || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            });
+        })
+        .expect_err("past its deadline");
+        assert!(
+            spun.downcast_ref::<String>()
+                .is_some_and(|why| why.contains("the search spins")),
+            "named"
+        );
+        let own = std::panic::catch_unwind(|| in_time(|| -> u8 { panic!("the work's own") }))
+            .expect_err("the work panicked");
+        assert_eq!(own.downcast_ref::<&str>(), Some(&"the work's own"));
+    }
+
+    /// A fresh scratch directory.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = crate::scratch::path(&format!("logs-r324x-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// One audit line stamped `ms`, its `seq` as given.
+    fn line(seq: u64, ms: i64) -> String {
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"error\",\
+             \"target\":\"span.test\",\"msg\":\"at {ms}\",\"fields\":{{\"day\":\"2020-01-02\"}}}}\n"
+        )
+    }
+
+    /// An audit stream written by hand into `dir`: one generation per entry
+    /// of `gens`, oldest first, the last the file being appended to; each line
+    /// stamped with its time; each generation with its span file (the current
+    /// one open-ended) and its `day` posting (2020-01-02). `seq` runs from 1.
+    fn hand_stream(dir: &std::path::Path, gens: &[&[i64]]) {
+        let current = u64::try_from(gens.len() - 1).unwrap();
+        std::fs::create_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(dir), current.to_le_bytes()).expect("serial");
+        let mut seq = 0u64;
+        for (serial, times) in (0u64..).zip(gens) {
+            let (mut file, mut posting) = (Vec::new(), Vec::new());
+            for &ms in *times {
+                seq += 1;
+                let text = line(seq, ms);
+                posting.extend_from_slice(
+                    &telemetry::AuditPointer {
+                        serial,
+                        offset: u64::try_from(file.len()).unwrap(),
+                        seq,
+                        len: u32::try_from(text.len()).unwrap(),
+                        level: telemetry::Level::Error,
+                    }
+                    .image(),
+                );
+                file.extend_from_slice(text.as_bytes());
+            }
+            let path = telemetry::audit_path_for(dir, current, serial).expect("a kept file");
+            std::fs::write(&path, &file).expect("the audit file");
+            let last = if serial == current {
+                i64::MAX
+            } else {
+                *times.last().unwrap()
+            };
+            let generation = telemetry::audit_generation_path(dir, serial);
+            std::fs::create_dir_all(&generation).expect("a generation");
+            std::fs::write(
+                generation.join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+                [times[0].to_le_bytes(), last.to_le_bytes()].concat(),
+            )
+            .expect("a span file");
+            let posting_path =
+                telemetry::audit_posting_path(dir, serial, "day", "2020-01-02").expect("a name");
+            std::fs::create_dir_all(posting_path.parent().unwrap()).expect("a dimension");
+            std::fs::write(posting_path, posting).expect("a posting");
+        }
+    }
+
+    /// Three generations of three lines, a second apart.
+    const GENS: [&[i64]; 3] = [
+        &[1000, 1001, 1002],
+        &[2000, 2001, 2002],
+        &[3000, 3001, 3002],
+    ];
+
+    /// The `(serial, seq)` of a page's lines, newest first.
+    fn seqs(page: &telemetry::PostingsPage) -> Vec<(u64, u64)> {
+        page.pointers
+            .iter()
+            .map(|(at, pointer)| (at.serial, pointer.seq))
+            .collect()
+    }
+
+    /// **A SPAN IS READ ACROSS GENERATIONS, NEWEST FIRST, AND STOPS WHERE IT
+    /// MUST** (R3-24): a newer file whose span misses is passed over unread,
+    /// an older one wholly before the span ends the walk, a line older than
+    /// the span ends it mid-file, `take` stops it and says more may remain,
+    /// and a cursor reads strictly older lines.
+    #[test]
+    fn a_span_is_read_across_generations_and_stops_where_it_must() {
+        let dir = scratch("gens");
+        hand_stream(&dir, &GENS);
+        // EVERY PAGE INSIDE A DEADLINE: a search that spins fails this test.
+        let page = |span: (i64, i64), take: usize, before: Option<telemetry::PostingAt>| {
+            let dir = dir.clone();
+            in_time(move || span_page(&dir, span, take, before).map(|got| (got.page, got.more)))
+        };
+        let (middle, more) = page((1500, 2500), 100, None).expect("a page");
+        assert_eq!(seqs(&middle), [(1, 6), (1, 5), (1, 4)]);
+        assert!(!more, "the older file is wholly before the span");
+        let (two, more) = page((1500, 2500), 2, None).expect("a page");
+        assert_eq!(seqs(&two), [(1, 6), (1, 5)]);
+        assert!(more, "stopped at take: older lines may remain");
+        let (wide, more) = page((1001, 3001), 100, None).expect("a page");
+        assert_eq!(
+            seqs(&wide),
+            [(2, 8), (2, 7), (1, 6), (1, 5), (1, 4), (0, 3), (0, 2)]
+        );
+        assert!(!more, "a line older than the span ends it");
+        let cursor = middle.pointers[1].0;
+        let (older, _) = page((1001, 3001), 100, Some(cursor)).expect("a page");
+        assert_eq!(seqs(&older), [(1, 4), (0, 3), (0, 2)], "strictly older");
+        // A SPAN STARTING ON A CLOSED FILE'S LAST LINE reads that line: the
+        // file ends at the span's start, not before it (R3-24 repair round 1:
+        // the walk's early stop survived `<` made `<=` and `==`).
+        let (edge, more) = page((2002, 2500), 100, None).expect("a page");
+        assert_eq!(
+            seqs(&edge),
+            [(1, 6)],
+            "the line stamped at the span's start"
+        );
+        assert!(!more);
+        // A LINE THAT IS NOT ONE is counted and passed over.
+        let one = telemetry::audit_path_for(&dir, 2, 1).unwrap();
+        let held = std::fs::read(&one).expect("the file");
+        std::fs::write(&one, [b"not a line\n".as_slice(), &held].concat()).expect("rewritten");
+        let (counted, _) = page((1500, 2500), 100, None).expect("a page");
+        assert_eq!(seqs(&counted), [(1, 6), (1, 5), (1, 4)]);
+        assert_eq!(counted.malformed, 1);
+        // A FILE GONE UNDER ITS SPAN is passed over; one that cannot be
+        // asked about is the page's error, named.
+        std::fs::remove_file(&one).expect("removed");
+        let (none, more) = page((1500, 2500), 100, None).expect("a page");
+        assert!(none.pointers.is_empty() && !more);
+        std::os::unix::fs::symlink(&one, &one).expect("a link to itself");
+        let refused = page((1500, 2500), 100, None).expect_err("refused");
+        assert!(refused.contains(&one.display().to_string()), "{refused}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A WALK WITH NO SLICE LEFT, OR A SLICE INSIDE ONE LINE, STOPS AND
+    /// SAYS MORE MAY REMAIN**, never reads past its budget.
+    #[test]
+    fn a_walk_out_of_slice_stops_and_says_so() {
+        let dir = scratch("slice");
+        hand_stream(&dir, &GENS);
+        let path = telemetry::audit_path_for(&dir, 2, 0).unwrap();
+        let len = std::fs::metadata(&path).expect("the file").len();
+        let all = (0, i64::MAX);
+        let mut out = Fetched::default();
+        let spent = span_backwards(&path, 0, (len, all), 100, &mut 0, &mut out);
+        assert!(
+            matches!(spent, Ok(Walked::Stopped(at)) if at == len),
+            "where it stood"
+        );
+        // A SLICE SHORTER THAN THE FILE starts mid-line: the piece before its
+        // first newline is left for a later slice, never read as a line, and
+        // the walk stops on the first line it read.
+        let mut half = len / 2;
+        let mut part = Fetched::default();
+        let walked = span_backwards(&path, 0, (len, all), 100, &mut half, &mut part);
+        assert_eq!(seqs(&part.page), [(0, 3)]);
+        let first = part.page.pointers[0].1.offset;
+        assert!(
+            matches!(walked, Ok(Walked::Stopped(at)) if at == first),
+            "{first}"
+        );
+        assert_eq!(part.page.malformed, 0);
+        // A TORN END: the slice holds part of one line and no newline. A
+        // slice this short may be a whole line's end, so the walk stands
+        // where it was for the next page's whole slice, naming no damage.
+        let mut budget = 10;
+        let torn = span_backwards(&path, 0, (len - 1, all), 100, &mut budget, &mut out);
+        assert!(matches!(torn, Ok(Walked::Stopped(at)) if at == len - 1));
+        assert_eq!(budget, 0, "the slice was spent");
+        assert!(out.page.pointers.is_empty() && out.damage.is_empty());
+        // A PAGE ALREADY AS FULL AS ASKED reads nothing: the walk stands
+        // where it was and leaves its slice to the next page (repair round 2:
+        // the mutation that read a slice on went uncaught).
+        let mut left = 1000;
+        let full = span_backwards(&path, 0, (len, all), 0, &mut left, &mut Fetched::default());
+        assert!(matches!(full, Ok(Walked::Stopped(at)) if at == len));
+        assert_eq!(left, 1000, "nothing read");
+        let gone = span_backwards(&dir.join("absent"), 0, (len, all), 100, &mut 99, &mut out);
+        assert!(gone.is_err());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN STREAM GOES ON FROM WHERE ITS WALK STOPPED ONCE EVERY POINTER
+    /// IS CONSUMED, AND FROM ITS LAST CONSUMED POINTER BEFORE THAT** (R324-27;
+    /// the mutation run of 21 Oct found `Stream::slot`'s guard untested by
+    /// the library's own tests): a walk that stopped on damage with no line
+    /// still moves the cursor, and a page that took fewer pointers than were
+    /// handed out offers the rest again, never skips them.
+    #[test]
+    fn a_span_stream_goes_on_from_where_its_walk_stopped() {
+        use super::Slot;
+        let dir = std::path::Path::new("/nonexistent-r324-slot");
+        let at = |index: u64| telemetry::PostingAt { serial: 3, index };
+        let stream = |pointers: &[u64], next: usize, more: bool, resume: Option<u64>| {
+            let page = telemetry::PostingsPage {
+                pointers: pointers
+                    .iter()
+                    .map(|&index| {
+                        let pointer = telemetry::AuditPointer {
+                            serial: 3,
+                            offset: index,
+                            seq: index,
+                            len: 10,
+                            level: telemetry::Level::Info,
+                        };
+                        (at(index), pointer)
+                    })
+                    .collect(),
+                ..telemetry::PostingsPage::default()
+            };
+            super::Stream {
+                half: "served",
+                source: "audit",
+                dir,
+                prune: None,
+                spans: std::collections::HashMap::new(),
+                placed: false,
+                serial: 3,
+                dimension: super::SPAN_PROBE,
+                value: String::new(),
+                page,
+                next,
+                last: next.checked_sub(1).map(|n| at(pointers[n])),
+                from: Slot::At(at(900)),
+                more,
+                head: None,
+                read: next,
+                passed: 0,
+                resume: resume.map(at),
+                damage: Vec::new(),
+                unreadable: 0,
+                unread_at: None,
+            }
+        };
+        // NO POINTER, THE WALK STOPPED ON DAMAGE: on from where it stopped.
+        assert_eq!(stream(&[], 0, true, Some(500)).slot(), Slot::At(at(500)));
+        // ONE OF THREE CONSUMED: on from it, the other two offered again.
+        assert_eq!(
+            stream(&[800, 700, 600], 1, true, Some(500)).slot(),
+            Slot::At(at(800))
+        );
+        // NONE CONSUMED, no place to go on from: where the page started.
+        assert_eq!(stream(&[800], 0, true, None).slot(), Slot::At(at(900)));
+        // EVERY ONE CONSUMED: on from where the walk stopped, older than all.
+        assert_eq!(
+            stream(&[800, 700, 600], 3, true, Some(500)).slot(),
+            Slot::At(at(500))
+        );
+        // EVERY ONE CONSUMED of a posting, which names no such place.
+        assert_eq!(stream(&[800, 700], 2, true, None).slot(), Slot::At(at(700)));
+        // NOTHING MORE: done, whatever the walk's place.
+        assert_eq!(stream(&[800], 1, false, Some(500)).slot(), Slot::Done);
+        assert_eq!(stream(&[], 0, false, None).slot(), Slot::Done);
+    }
+
+    /// **ONE FILE THAT WILL NOT READ IS SAID ONCE PER STREAM, WITH HOW MANY
+    /// LINES IT KEPT FROM BEING READ** (R3-24 repair round 2, the third
+    /// check's follow-up: one unreadable stream was repeated once per pointer
+    /// read, 29 copies at `limit=5`). The middle generation's audit file is
+    /// replaced by a directory, so each of its three pointers fails to read:
+    /// the answer names the failure once, counts the three, and still
+    /// answers the lines around it and never calls itself complete.
+    #[test]
+    fn one_unreadable_file_is_said_once_per_stream() {
+        let dir = scratch("unread-once");
+        hand_stream(&dir, &GENS);
+        let middle = telemetry::audit_path_for(&dir, 2, 1).unwrap();
+        std::fs::remove_file(&middle).expect("removed");
+        std::fs::create_dir_all(&middle).expect("a directory where the file was");
+        let (got, found) = ask_ts(&dir, "day=2020-01-02&limit=50");
+        assert_eq!(found, [3002, 3001, 3000, 1002, 1001, 1000], "{got:#}");
+        let errors: Vec<&str> = got["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|why| why.as_str().unwrap())
+            .collect();
+        let named = middle.display().to_string();
+        assert_eq!(
+            errors.iter().filter(|why| why.contains(&named)).count(),
+            1,
+            "named once: {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|why| why.contains("(3 line(s) of the audit posting day=")),
+            "{errors:#?}"
+        );
+        let said = got["keyed"]["index"]["said"].as_str().unwrap();
+        assert!(said.contains("may not hold every match"), "{said}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+
+        // ONE LINE THAT WILL NOT READ is named as it is, with no count to add.
+        let lone = scratch("unread-lone");
+        hand_stream(&lone, &[&[1000, 1001, 1002], &[2000], &[3000, 3001, 3002]]);
+        let middle = telemetry::audit_path_for(&lone, 2, 1).unwrap();
+        std::fs::remove_file(&middle).expect("removed");
+        std::fs::create_dir_all(&middle).expect("a directory where the file was");
+        let (got, found) = ask_ts(&lone, "day=2020-01-02&limit=50");
+        assert_eq!(found, [3002, 3001, 3000, 1002, 1001, 1000], "{got:#}");
+        let named = middle.display().to_string();
+        let errors: Vec<&str> = got["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|why| why.as_str().unwrap())
+            .filter(|why| why.contains(&named))
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(!errors[0].contains("line(s) of the"), "{errors:#?}");
+        let _ignored = std::fs::remove_dir_all(&lone);
+    }
+
+    /// **A KEY BESIDE A SPAN PASSES A GENERATION THE SPAN MISSES UNREAD**
+    /// (R3-24): its pointers are consumed, never their lines read.
+    #[test]
+    fn a_key_beside_a_span_passes_a_generation_unread() {
+        let dir = scratch("prune");
+        hand_stream(&dir, &GENS);
+        let query = "day=2020-01-02&from=1500&to=2500&limit=50";
+        let (got, found) = ask_ts(&dir, query);
+        assert_eq!(found, [2002, 2001, 2000], "{:#}", got["keyed"]);
+        let probed: Vec<&str> = got["keyed"]["index"]["postings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|posting| posting["dimension"].as_str().unwrap())
+            .collect();
+        assert!(
+            probed.contains(&"day") && !probed.contains(&"span"),
+            "premise: a key's posting, not a span alone: {probed:?}"
+        );
+        // THE PASSED-OVER FILES COULD NOT HAVE BEEN READ: gone, every line
+        // of them would have been an error or a roll-off.
+        for serial in [0, 2] {
+            std::fs::remove_file(telemetry::audit_path_for(&dir, 2, serial).unwrap())
+                .expect("removed");
+        }
+        let (again, found) = ask_ts(&dir, query);
+        assert_eq!(found, [2002, 2001, 2000], "{:#}", again["keyed"]);
+        assert_eq!(
+            again["keyed"]["index"]["rolled_off"], 0,
+            "{:#}",
+            again["keyed"]
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// How long a test's keyed search may take before the test fails: each
+    /// answers here in milliseconds, so this is a spin, not a slow machine.
+    const SEARCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// A keyed answer over `dir` alone, and its lines' times, newest first.
+    ///
+    /// Asked on a thread of its own, and the test FAILS when no answer came
+    /// within [`SEARCH_DEADLINE`]: a search that spins (a loop whose bound a
+    /// change turned endless) fails the test by name instead of hanging the
+    /// suite, so a mutation run counts it caught, never timed out.
+    fn ask_ts(dir: &std::path::Path, query: &str) -> (serde_json::Value, Vec<i64>) {
+        let (dir, query) = (dir.to_path_buf(), query.to_owned());
+        let (answered, answer) = std::sync::mpsc::channel();
+        let _search = std::thread::spawn(move || {
+            let asked = super::asked(&query);
+            let _gone = answered.send(super::keyed_json(&dir, None, &asked, None));
+        });
+        let body = answer
+            .recv_timeout(SEARCH_DEADLINE)
+            .expect("the search answered within its deadline");
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let ts = got["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["ts"].as_i64().unwrap())
+            .collect();
+        (got, ts)
+    }
+
+    /// The lines an answer read.
+    fn reads(got: &serde_json::Value) -> u64 {
+        got["keyed"]["index"]["reads"].as_u64().expect("reads")
+    }
+
+    /// **A KEY BESIDE A SPAN PASSES THE LINES STAMPED AFTER THE SPAN BY A
+    /// SEARCH, AND STOPS AT THE FIRST LINE STAMPED BEFORE IT** (R3-24, the
+    /// Mac's shadow of 19 Oct: `from=2026-10-16&to=2026-10-17&code=vendor_empty`
+    /// read the lines of the days since one by one, up to the 2,000-line
+    /// budget, p50 26.7 ms and p99 41.1 ms). 1,900 lines a millisecond apart in
+    /// one file, one page of pointers: a span 1,881 lines back is found by a
+    /// gallop and a bisection, and one at the newest end by one probe; each
+    /// walk ends at the line before its span. Before, each read all 1,900.
+    #[test]
+    fn a_key_beside_a_span_passes_the_lines_after_it_by_a_search() {
+        let dir = scratch("place");
+        let times: Vec<i64> = (1..=1_900).collect();
+        hand_stream(&dir, &[&times]);
+        let (old, ts) = ask_ts(&dir, "day=2020-01-02&from=10&to=19&limit=50");
+        assert_eq!(
+            ts,
+            (10..=19).rev().collect::<Vec<_>>(),
+            "{:#}",
+            old["keyed"]
+        );
+        assert_eq!(old["keyed"]["index"]["capped"], false);
+        assert!(
+            old["keyed"]["next"].is_null(),
+            "every line of the span read"
+        );
+        // 2 log2(1,881) probes at most, the span's ten lines, the one that
+        // ends the walk.
+        assert!(reads(&old) <= 22 + 10 + 1, "{:#}", old["keyed"]["index"]);
+        // 1,881 placed after the span by the search, 8 after the line that
+        // ended the walk.
+        assert_eq!(old["keyed"]["index"]["passed"], 1_889);
+        let said = old["keyed"]["index"]["said"].as_str().expect("words");
+        assert!(said.contains("1889 pointer(s) passed over"), "{said}");
+        let (new, ts) = ask_ts(&dir, "day=2020-01-02&from=1891&to=1900&limit=50");
+        assert_eq!(ts, (1_891..=1_900).rev().collect::<Vec<_>>());
+        assert_eq!(new["keyed"]["index"]["capped"], false);
+        assert!(new["keyed"]["next"].is_null());
+        assert_eq!(reads(&new), 1 + 10 + 1, "{:#}", new["keyed"]["index"]);
+        assert_eq!(new["keyed"]["index"]["passed"], 1_889);
+        // A SPAN LEFT OPEN AT ITS END has no line after it to pass over, so it
+        // costs no search and no probe read: the span's ten lines and the one
+        // that ends the walk (a search over an open end read one line more).
+        let (open, ts) = ask_ts(&dir, "day=2020-01-02&from=1891&limit=50");
+        assert_eq!(ts, (1_891..=1_900).rev().collect::<Vec<_>>());
+        assert_eq!(reads(&open), 10 + 1, "{:#}", open["keyed"]["index"]);
+        assert_eq!(open["keyed"]["index"]["passed"], 1_889);
+        // A SPAN BEFORE EVERY LINE is answered empty, at a search's cost.
+        let (none, ts) = ask_ts(&dir, "day=2020-01-02&from=0&to=0&limit=50");
+        assert!(ts.is_empty(), "{:#}", none["keyed"]);
+        assert_eq!(none["keyed"]["index"]["capped"], false);
+        assert!(none["keyed"]["next"].is_null());
+        assert!(reads(&none) <= 22, "{:#}", none["keyed"]["index"]);
+        assert_eq!(none["keyed"]["index"]["passed"], 1_900);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A GALLOP THAT REACHES THE PAGE'S END STILL BISECTS WHAT IT
+    /// BRACKETED** (R3-24): 15 lines a millisecond apart, a span of the
+    /// oldest alone. The gallop probes 0, 1, 3 and 7 (each after the span),
+    /// its next step lands exactly on the page's end, and the bisection of
+    /// 8..15 probes 11, 13 and 14: seven probe reads place the span, one
+    /// more reads its line, and the 14 pointers before it are passed over.
+    /// A gallop that probed the page's end itself would find no pointer
+    /// there, stop, and leave the walk to read 8..14 one by one.
+    #[test]
+    fn a_gallop_that_reaches_the_page_end_still_bisects_what_it_bracketed() {
+        let dir = scratch("place-end");
+        let times: Vec<i64> = (1..=15).collect();
+        hand_stream(&dir, &[&times]);
+        let (got, ts) = ask_ts(&dir, "day=2020-01-02&from=1&to=1&limit=50");
+        assert_eq!(ts, [1], "{:#}", got["keyed"]);
+        assert_eq!(got["keyed"]["index"]["passed"], 14, "{:#}", got["keyed"]);
+        assert_eq!(reads(&got), 7 + 1, "{:#}", got["keyed"]["index"]);
+        assert_eq!(got["keyed"]["index"]["capped"], false);
+        assert!(got["keyed"]["next"].is_null());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PROBE IS SETTLED BY ITS FILE'S SPAN WHEN THE SPAN LIES WHOLLY ON
+    /// ONE SIDE, AND BY ITS LINE ONLY WHEN IT DOES NOT** (R3-24, the Mac's
+    /// third pass: three mutants of `after_span` survived the suite because
+    /// no test counted what a probe cost). Four generations of four lines
+    /// (10..13, 20..23, 30..33, and 40..43 still appended to), a span of
+    /// 11..=21. The gallop probes 0, 1 and 3 (the open file, first line after
+    /// the span: no read) and 7 (a closed file wholly after it: no read), then
+    /// 15 (a closed file wholly before the span's end: no read); the bisection
+    /// of 8..15 reads lines 20, 22 and 21, the only file the span's end falls
+    /// inside. Three probe reads, the span's five lines and the one that ends
+    /// the walk: nine. A probe that read its line where its file's span
+    /// settles it costs a read more each; one that took a file whose last
+    /// line is after the span's end for one wholly before it would hand the
+    /// walk lines stamped after the span.
+    #[test]
+    fn a_probe_is_settled_by_its_files_span_before_any_line_is_read() {
+        let dir = scratch("place-spans");
+        let gens: [&[i64]; 4] = [
+            &[10, 11, 12, 13],
+            &[20, 21, 22, 23],
+            &[30, 31, 32, 33],
+            &[40, 41, 42, 43],
+        ];
+        hand_stream(&dir, &gens);
+        let (got, ts) = ask_ts(&dir, "day=2020-01-02&from=11&to=21&limit=50");
+        assert_eq!(ts, [21, 20, 13, 12, 11], "{:#}", got["keyed"]);
+        assert_eq!(reads(&got), 3 + 5 + 1, "{:#}", got["keyed"]["index"]);
+        assert_eq!(got["keyed"]["index"]["passed"], 10, "{:#}", got["keyed"]);
+        assert_eq!(got["keyed"]["index"]["capped"], false);
+        assert!(got["keyed"]["next"].is_null());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STREAM WHOSE PLACE THE SEARCH LEFT AT ITS NEWEST POINTER KEEPS IT
+    /// FOR THE NEXT PAGE** (R3-24, the Mac's third pass: a mutant of
+    /// `pass_to` that "passed" zero pointers survived). Two halves: the
+    /// served one holds 100..=110, the importer's one line at 105, each in
+    /// the span 100..=200, so each search places its stream at its newest
+    /// pointer and passes nothing. A first page of three is filled from the
+    /// served half alone; the importer's 105 was read as its stream's head
+    /// and not shown, so the cursor must start that stream from its newest
+    /// again, and the next page shows both 105s. A search that marked its
+    /// newest pointer consumed while passing nothing would hand back a cursor
+    /// past it, and that line would never be shown on any page.
+    #[test]
+    fn a_stream_placed_at_its_newest_pointer_keeps_it_for_the_next_page() {
+        let (served, importer) = (scratch("place-keep-api"), scratch("place-keep-cli"));
+        let times: Vec<i64> = (100..=110).collect();
+        hand_stream(&served, &[&times]);
+        hand_stream(&importer, &[&[105]]);
+        let ask = |query: String| -> (serde_json::Value, Vec<i64>) {
+            let (api, cli) = (served.clone(), importer.clone());
+            let (answered, answer) = std::sync::mpsc::channel();
+            let _search = std::thread::spawn(move || {
+                let asked = super::asked(&query);
+                let _gone = answered.send(super::keyed_json(&api, Some(&cli), &asked, None));
+            });
+            let body = answer
+                .recv_timeout(SEARCH_DEADLINE)
+                .expect("the search answered within its deadline");
+            let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            let ts = got["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| record["ts"].as_i64().unwrap())
+                .collect();
+            (got, ts)
+        };
+        let query = "day=2020-01-02&from=100&to=200";
+        let (first, ts) = ask(format!("{query}&limit=3"));
+        assert_eq!(ts, [110, 109, 108], "{:#}", first["keyed"]);
+        assert_eq!(first["keyed"]["index"]["passed"], 0, "{:#}", first["keyed"]);
+        let next = first["keyed"]["next"].as_str().expect("a cursor");
+        let (second, ts) = ask(format!("{query}&limit=50&before={next}"));
+        assert_eq!(
+            ts,
+            [107, 106, 105, 105, 104, 103, 102, 101, 100],
+            "the importer's 105 is on the next page: {:#}",
+            second["keyed"]
+        );
+        assert!(second["keyed"]["next"].is_null(), "{:#}", second["keyed"]);
+        let _ignored = std::fs::remove_dir_all(&served);
+        let _ignored = std::fs::remove_dir_all(&importer);
+    }
+
+    /// **A STREAM WITH NO BUDGET LEFT READS NO LINE, AND THE ANSWER SAYS IT
+    /// WAS CAPPED** (R3-24, the Mac's third pass: a mutant of `fill` that
+    /// read on with nothing left survived, because every capped test ran out
+    /// of budget and of fetched pointers at the same line). Two halves of
+    /// 1,500 lines each, every one on the day asked and none carrying the
+    /// code asked, so each line read is passed over and none shown: the
+    /// request's 2,000 reads run out while both fetched pages still hold
+    /// pointers. The answer stops there, capped, with a cursor for the rest;
+    /// a walk that read past its budget would read all 3,000 lines and say
+    /// every match was read.
+    #[test]
+    fn a_stream_with_no_budget_left_reads_no_line() {
+        let (served, importer) = (scratch("budget-api"), scratch("budget-cli"));
+        let times: Vec<i64> = (1..=1_500).collect();
+        hand_stream(&served, &[&times]);
+        hand_stream(&importer, &[&times]);
+        let (api, cli) = (served.clone(), importer.clone());
+        let (answered, answer) = std::sync::mpsc::channel();
+        let _search = std::thread::spawn(move || {
+            let asked = super::asked("day=2020-01-02&code=absent_code&limit=5");
+            let _gone = answered.send(super::keyed_json(&api, Some(&cli), &asked, None));
+        });
+        let body = answer
+            .recv_timeout(SEARCH_DEADLINE)
+            .expect("the search answered within its deadline");
+        let got: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let index = &got["keyed"]["index"];
+        assert!(got["records"].as_array().unwrap().is_empty(), "{index:#}");
+        assert_eq!(reads(&got), 2_000, "{index:#}");
+        assert_eq!(index["capped"], true, "{index:#}");
+        assert!(got["keyed"]["next"].is_string(), "{:#}", got["keyed"]);
+        let _ignored = std::fs::remove_dir_all(&served);
+        let _ignored = std::fs::remove_dir_all(&importer);
+    }
+
+    /// **A SPAN PAST THE FETCHED PAGE COSTS A SEARCH, NOT THE BUDGET**
+    /// (R3-24): 2,600 lines, a page holds the newest 2,000, and the span is
+    /// older than all of them. The first page passes them over by the search
+    /// and hands back a cursor (the posting holds older pointers); the
+    /// cursor's page finds the span. Before, the first page read its whole
+    /// 2,000-line budget to find nothing.
+    #[test]
+    fn a_span_past_the_fetched_page_costs_a_search_not_the_budget() {
+        let dir = scratch("place-far");
+        let times: Vec<i64> = (1..=2_600).collect();
+        hand_stream(&dir, &[&times]);
+        let query = "day=2020-01-02&from=10&to=19&limit=50";
+        let (first, ts) = ask_ts(&dir, query);
+        assert!(ts.is_empty(), "{:#}", first["keyed"]);
+        assert_eq!(first["keyed"]["index"]["capped"], true);
+        assert!(reads(&first) <= 22, "{:#}", first["keyed"]["index"]);
+        assert_eq!(first["keyed"]["index"]["passed"], 2_000);
+        let next = first["keyed"]["next"].as_str().expect("a cursor");
+        let (second, ts) = ask_ts(&dir, &format!("{query}&before={next}"));
+        assert_eq!(
+            ts,
+            (10..=19).rev().collect::<Vec<_>>(),
+            "{:#}",
+            second["keyed"]
+        );
+        assert_eq!(second["keyed"]["index"]["capped"], false);
+        assert!(second["keyed"]["next"].is_null());
+        assert!(
+            reads(&second) <= 20 + 10 + 1,
+            "{:#}",
+            second["keyed"]["index"]
+        );
+        assert_eq!(second["keyed"]["index"]["passed"], 581 + 8);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PROBE THAT WILL NOT READ STOPS THE SEARCH, NEVER THE ANSWER**
+    /// (R3-24): the file's lines are torn out from under the posting, so no
+    /// probe reads; the walk then meets each pointer itself and counts it
+    /// rolled off or unreadable, exactly as without a span.
+    #[test]
+    fn a_probe_that_will_not_read_leaves_the_walk_to_count_it() {
+        let dir = scratch("place-torn");
+        let times: Vec<i64> = (1..=40).collect();
+        hand_stream(&dir, &[&times]);
+        let file = telemetry::audit_path_for(&dir, 0, 0).expect("the file");
+        std::fs::write(&file, b"").expect("emptied");
+        let (got, ts) = ask_ts(&dir, "day=2020-01-02&from=5&to=9&limit=50");
+        assert!(ts.is_empty());
+        let index = &got["keyed"]["index"];
+        assert_eq!(
+            index["rolled_off"], 40,
+            "every pointer met and counted: {index:#}"
+        );
+        assert_eq!(index["capped"], false, "{index:#}");
+        assert_eq!(
+            index["passed"], 0,
+            "no probe read, so none was placed: {index:#}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STATE STREAM THAT IS THERE AND WILL NOT READ IS NAMED** in
+    /// `/audit.json`'s state changes; one that is not there is passed over.
+    #[test]
+    fn a_state_stream_that_will_not_read_is_named() {
+        let dir = scratch("state-unread");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("cli.lifecycle", "command started"));
+        }
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let read = |halves: &[Half]| -> serde_json::Value {
+            serde_json::from_str(&super::state_changes_json(halves, 5, None)).expect("JSON")
+        };
+        let got = read(&halves);
+        assert_eq!(got["rows"][0]["message"], "command started");
+        assert!(got["unread"].as_array().unwrap().is_empty());
+        let stream = telemetry::run_dirs::state_stream_of(&dir);
+        let file = telemetry::audit_current_path(&stream);
+        // ITS FILE A DIRECTORY: there, and no byte of it reads.
+        std::fs::rename(&file, dir.join("aside")).expect("aside");
+        std::fs::create_dir(&file).expect("a directory in its place");
+        let got = read(&halves);
+        assert!(got["rows"].as_array().unwrap().is_empty());
+        let why = got["unread"][0].as_str().expect("named");
+        assert!(why.contains(&file.display().to_string()), "{why}");
+        // ITS STREAM A FILE: the file cannot even be asked about.
+        std::fs::remove_dir_all(&stream).expect("removed");
+        std::fs::write(&stream, b"not a directory").expect("a file in its place");
+        let got = read(&halves);
+        let why = got["unread"][0].as_str().expect("named");
+        assert!(why.contains(&file.display().to_string()), "{why}");
+        // NO STREAM AT ALL is nothing to show, never an error.
+        std::fs::remove_file(&stream).expect("removed");
+        assert!(read(&halves)["unread"].as_array().unwrap().is_empty());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN AUDIT STREAM THAT IS THERE AND WILL NOT ANSWER IS NAMED UNREAD**
+    /// for the importer's evidence: a value the index cannot name, and a
+    /// pointer whose file is no file.
+    #[test]
+    fn an_audit_stream_that_will_not_answer_is_named_unread() {
+        let root = scratch("audited");
+        let cli = root.join(telemetry::run_dirs::LOGS).join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            let _ = sink.emit(
+                &telemetry::Event::error("gdfl.import", "refused")
+                    .with("kind", "options")
+                    .with("day", "2020-01-02"),
+            );
+        }
+        let found = super::audited_import_refusals(&root, "options", "2020-01-02");
+        assert_eq!(found.records.len(), 1, "{:?}", found.unread);
+        let long = "d".repeat(telemetry::AUDIT_MAX_POSTING_NAME + 1);
+        let unnamed = super::audited_import_refusals(&root, "options", &long);
+        assert!(
+            unnamed
+                .unread
+                .iter()
+                .any(|why| why.starts_with("logs/cli audit stream:")),
+            "{:?}",
+            unnamed.unread
+        );
+        let file = telemetry::audit_current_path(&cli);
+        std::fs::rename(&file, cli.join("aside")).expect("aside");
+        std::fs::create_dir(&file).expect("a directory in its place");
+        let unread = super::audited_import_refusals(&root, "options", "2020-01-02");
+        assert!(unread.records.is_empty());
+        assert!(
+            unread
+                .unread
+                .iter()
+                .any(|why| why.starts_with("logs/cli audit stream:")
+                    && why.contains(&file.display().to_string())),
+            "{:?}",
+            unread.unread
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A QUEUED RING FILE THAT WENT IS PASSED OVER, ONE THAT WILL NOT READ
+    /// IS NAMED, AND A SLICE ENDS AT ITS LAST NEWLINE** (R3-24).
+    #[test]
+    fn a_queued_file_is_passed_named_or_read_to_its_last_newline() {
+        let root = scratch("queued");
+        let gone = root.join("gone.ndjson");
+        let looped = root.join("looped.ndjson");
+        let lines = root.join("lines.ndjson");
+        std::fs::write(&gone, b"{}\n").expect("a file");
+        std::fs::write(&looped, b"{}\n").expect("a file");
+        let text = (0..2_000).fold(String::new(), |mut text, n| {
+            let _ = writeln!(text, "{{\"n\":{n}}}");
+            text
+        });
+        std::fs::write(&lines, &text).expect("a file");
+        let rolled = [
+            (&gone, Seen::of(&gone)),
+            (&looped, Seen::of(&looped)),
+            (&lines, Seen::of(&lines)),
+        ];
+        let mut tail = RefusalTail::queue_ring(&rolled, &root.join("current"), Seen::Absent);
+        std::fs::remove_file(&gone).expect("removed");
+        std::fs::remove_file(&looped).expect("removed");
+        std::os::unix::fs::symlink(&looped, &looped).expect("a link to itself");
+        let left = tail.read_queued(1_000);
+        assert_eq!(tail.built.errors.len(), 1, "{:?}", tail.built.errors);
+        assert!(tail.built.errors[0].contains(&looped.display().to_string()));
+        assert_eq!(tail.queue.len(), 1, "the lines file is still being read");
+        let read = tail.queue[0].at;
+        assert!(read > 0 && read <= 1_000, "{read}");
+        assert_eq!(text.as_bytes()[usize::try_from(read).unwrap() - 1], b'\n');
+        assert_eq!(tail.built.bytes, read);
+        assert_eq!(left, 1_000 - read);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RING FILE THAT CANNOT BE ASKED ABOUT LEAVES ITS DIRECTORY
+    /// UNREAD**, never "read" and so never "none".
+    #[test]
+    fn a_ring_file_that_cannot_be_asked_about_leaves_its_directory_unread() {
+        let root = scratch("ring-unread");
+        let cli = root.join(telemetry::run_dirs::LOGS).join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("x", "a line"));
+        }
+        let rolled = telemetry::rotated_path(&cli, 1);
+        std::os::unix::fs::symlink(&rolled, &rolled).expect("a link to itself");
+        let got = super::import_refusals(&root);
+        let dir = got
+            .dirs()
+            .iter()
+            .find(|dir| dir.half == "cli")
+            .expect("the cli directory");
+        assert!(
+            matches!(&dir.state, super::DirState::Unreadable(why)
+                if why.contains(&rolled.display().to_string())),
+            "{:?}",
+            dir.state
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_torn_tests {
+    //! R3-24 repair round 1 (the second check of 20 Oct): an undecodable
+    //! line (a torn fragment a later open closed with its newline) never
+    //! cuts a span short, a damage the search cannot step past is named, an
+    //! answer with an unread stream is never called complete, and a line an
+    //! earlier rule let into the never-rolling stream is not shown as a
+    //! state change.
+
+    use super::{Cut, Half, Indexed, end_of_span, read_words, span_page, state_changes_json};
+
+    /// A torn fragment as a kill mid-append leaves it, closed by the next
+    /// open's newline.
+    const TORN: &str = "{\"seq\":99999,\"ts\":\"2026-10-0\n";
+
+    /// [`end_of_span`] inside the edge tests' deadline: a search that spins
+    /// fails the test by name.
+    fn placed(path: &std::path::Path, end: u64, to: i64) -> Result<Cut, String> {
+        let path = path.to_path_buf();
+        super::r3_24_edge_tests::in_time(move || end_of_span(&path, end, to))
+    }
+
+    /// A fresh scratch directory.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = crate::scratch::path(&format!("logs-r324t-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// One audit line stamped `ms`, its `seq` as given.
+    fn line(seq: u64, ms: i64) -> String {
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"error\",\
+             \"target\":\"span.test\",\"msg\":\"at {ms}\",\"fields\":{{\"day\":\"2020-01-02\"}}}}\n"
+        )
+    }
+
+    /// **AN UNDECODABLE LINE NEVER CUTS A SPAN SHORT**: 40 lines (about 7
+    /// KiB, so a probe's 4 KiB first read and its two-line ceiling are both
+    /// exercised), one or three torn lines put before each line in turn and
+    /// after the last, and the cut asked for every end of span from before
+    /// the first line to after the last. Every line that decodes is before
+    /// the cut exactly when it is stamped at or before the span's end. On
+    /// the package's first head a probe that met a torn line narrowed the
+    /// search below it, so for some layouts every line after it was lost.
+    #[test]
+    fn an_undecodable_line_never_cuts_a_span_short() {
+        let dir = scratch("cut");
+        let times: Vec<i64> = (0..40).map(|n| 1000 + 2 * n).collect();
+        let mut searched = 0u32;
+        for torn in [1usize, 3] {
+            for before in 0..=times.len() {
+                let (mut text, mut starts) = (String::new(), Vec::new());
+                for (n, &ms) in times.iter().enumerate() {
+                    if n == before {
+                        text.push_str(&TORN.repeat(torn));
+                    }
+                    starts.push((text.len() as u64, ms));
+                    text.push_str(&line(n as u64 + 1, ms));
+                }
+                if before == times.len() {
+                    text.push_str(&TORN.repeat(torn));
+                }
+                let path = dir.join(format!("audit-{torn}-{before}.ndjson"));
+                std::fs::write(&path, &text).expect("a file");
+                let end = text.len() as u64;
+                for to in 990..1090 {
+                    let Cut { at: cut, damage } = placed(&path, end, to).expect("placed");
+                    assert_eq!(damage, None, "a torn line is stepped past, never damage");
+                    searched += 1;
+                    for &(start, ms) in &starts {
+                        assert_eq!(
+                            start < cut,
+                            ms <= to,
+                            "{torn} torn line(s) before line {before}, span to {to}: the line \
+                             at byte {start} stamped {ms} against the cut {cut}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(searched, 2 * 41 * 100, "premise: every layout searched");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One audit stream of one generation holding `text`, its span starting
+    /// at `first` and open at its end.
+    fn one_generation(name: &str, text: &[u8], first: i64) -> std::path::PathBuf {
+        let stream = scratch(name);
+        std::fs::create_dir_all(stream.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(&stream), 0u64.to_le_bytes()).expect("serial");
+        let file = telemetry::audit_path_for(&stream, 0, 0).expect("a kept file");
+        std::fs::write(&file, text).expect("the audit file");
+        let generation = telemetry::audit_generation_path(&stream, 0);
+        std::fs::create_dir_all(&generation).expect("a generation");
+        std::fs::write(
+            generation.join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+            [first.to_le_bytes(), i64::MAX.to_le_bytes()].concat(),
+        )
+        .expect("a span file");
+        stream
+    }
+
+    /// Every pointer of a span read alone, page after page through each
+    /// page's `resume`, `take` at a time, and the damage named on the way;
+    /// `None` when 500 pages did not reach the end (a cursor standing still).
+    fn every_span_page(
+        stream: &std::path::Path,
+        span: (i64, i64),
+        take: usize,
+    ) -> Option<(Vec<u64>, Vec<String>)> {
+        let (mut seqs, mut damage, mut before) = (Vec::new(), Vec::new(), None);
+        for _ in 0..500 {
+            let held = stream.to_path_buf();
+            let got =
+                super::r3_24_edge_tests::in_time(move || span_page(&held, span, take, before))
+                    .expect("a page");
+            seqs.extend(got.page.pointers.iter().map(|(_, pointer)| pointer.seq));
+            damage.extend(got.damage);
+            if !got.more {
+                return Some((seqs, damage));
+            }
+            // A SPAN PAGE THAT SAYS MORE names where it goes on from, and it
+            // is older than every pointer it handed out.
+            let resume = got.resume.expect("a page with more names where it goes on");
+            assert!(
+                got.page
+                    .pointers
+                    .iter()
+                    .all(|(at, _)| (at.serial, at.index) >= (resume.serial, resume.index)),
+                "{resume:?}"
+            );
+            before = Some(resume);
+        }
+        None
+    }
+
+    /// **DAMAGE THE SEARCH CANNOT STEP PAST IS SEARCHED AROUND AND NAMED,
+    /// NEVER A SHORT ANSWER AND NEVER A REFUSAL THAT STANDS STILL**: more
+    /// undecodable lines in a row than `MAX_UNDECODABLE_STEPS` between two
+    /// good lines. Exactly the bound in a row is stepped past and placed
+    /// exactly. Past it the search names the damage and answers the lowest
+    /// place it proved: no line at or before the span's end lies after it.
+    /// Through the span's page every line of the span is answered and the
+    /// damage named. On repair round 1's head this refused the span in the
+    /// file, and its cursor never moved, so a client following `next` asked
+    /// the same page for ever (the third check's follow-up).
+    #[test]
+    fn a_damage_the_search_cannot_step_past_is_named() {
+        let dir = scratch("damage");
+        let bound = super::MAX_UNDECODABLE_STEPS as usize;
+        let at_bound = format!("{}{}{}", line(1, 1000), TORN.repeat(bound), line(2, 3000));
+        let path = dir.join("at-bound.ndjson");
+        std::fs::write(&path, &at_bound).expect("a file");
+        let cut = placed(&path, at_bound.len() as u64, 2000).expect("placed");
+        assert_eq!(
+            cut,
+            Cut {
+                at: line(1, 1000).len() as u64,
+                damage: None
+            },
+            "after the first line alone"
+        );
+
+        let damaged = format!(
+            "{}{}{}",
+            line(1, 1000),
+            TORN.repeat(10 * bound),
+            line(2, 3000)
+        );
+        let path = dir.join("damaged.ndjson");
+        std::fs::write(&path, &damaged).expect("a file");
+        let cut = placed(&path, damaged.len() as u64, 2000).expect("placed");
+        let why = cut.damage.expect("the damage named");
+        assert!(
+            why.contains("damaged.ndjson") && why.contains("undecodable lines"),
+            "{why}"
+        );
+        assert_eq!(
+            cut.at,
+            damaged.len() as u64,
+            "no probe reached a line past the damage, so the end is the lowest place proved"
+        );
+
+        // THROUGH THE SPAN'S PAGE: one generation holding the damaged file.
+        let stream = one_generation("damage-stream", damaged.as_bytes(), 1000);
+        let (seqs, damage) = every_span_page(&stream, (0, 2000), 100).expect("an end");
+        assert_eq!(seqs, [1], "the span's one line, answered");
+        assert_eq!(damage.len(), 1, "{damage:?}");
+        assert!(damage[0].contains("undecodable lines"), "{damage:?}");
+        let (seqs, damage) = every_span_page(&stream, (0, i64::MAX), 100).expect("an end");
+        assert_eq!(seqs, [2, 1], "an open span searches nothing");
+        assert!(damage.is_empty(), "{damage:?}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&stream);
+    }
+
+    /// 40 lines, a run of `run` NUL bytes closed by a newline (a damaged
+    /// file's run, or a foreign one's), then 40 more: the text and each
+    /// line's `(start, ms)`.
+    fn around_a_run(run: usize) -> (Vec<u8>, Vec<(u64, i64)>) {
+        let (mut text, mut starts) = (Vec::new(), Vec::new());
+        for n in 0..80u64 {
+            if n == 40 {
+                text.resize(text.len() + run, 0);
+                text.push(b'\n');
+            }
+            let ms = 1000 + 2 * i64::try_from(n).unwrap();
+            starts.push((text.len() as u64, ms));
+            text.extend_from_slice(line(n + 1, ms).as_bytes());
+        }
+        (text, starts)
+    }
+
+    /// **A RUN LONGER THAN A PROBE'S WINDOW NEVER CUTS A SPAN SHORT** (the
+    /// third check of 20 Oct): 40 lines, a NUL run with no newline in it, its
+    /// newline, 40 lines; the cut asked for at every line's start and the
+    /// file's end as the search's end, and eight ends of span. The third
+    /// check's own layouts are here (runs of 100, 140, 200 and 512 KiB, the
+    /// same ends and its seven ends of span), and two past the probe's bound.
+    /// A probe read at most two lines' ceiling, 128 KiB, and answered "no
+    /// line" for a window holding no newline, so a run longer than that cut
+    /// every span over it short: the third check's probe found 160 wrong cuts
+    /// for a 512 KiB run on repair round 1's head, `bce65685a` (`nul 524288
+    /// end 529856 to 1080: line at 529720 stamped 1080 vs cut 5431`,
+    /// `state/fix/round2/verify-R3-24-r2c/probe/nul.log`). A run inside
+    /// `MAX_PROBE_BYTES` is read past and the cut is exact; a longer one is
+    /// searched around: named, and no line at or before the span's end lies
+    /// after the cut.
+    #[test]
+    fn a_run_longer_than_a_probe_window_never_cuts_a_span_short() {
+        let dir = scratch("long-run");
+        let bound = usize::try_from(super::MAX_PROBE_BYTES).unwrap();
+        let window = 2 * telemetry::MAX_LINE_BYTES;
+        let (mut exact, mut around) = (0u32, 0u32);
+        for run in [
+            100 * 1024,
+            window + 1,
+            140 * 1024,
+            200 * 1024,
+            512 * 1024,
+            bound + 4096,
+            3 * bound,
+        ] {
+            let (text, starts) = around_a_run(run);
+            let path = dir.join(format!("audit-{run}.ndjson"));
+            std::fs::write(&path, &text).expect("a file");
+            // FEWER ENDS PAST THE BOUND: each probe in the run reads it all.
+            let ends: Vec<u64> = starts
+                .iter()
+                .step_by(if run > bound { 20 } else { 1 })
+                .map(|&(start, _)| start)
+                .chain([starts[41].0, text.len() as u64])
+                .collect();
+            for &end in &ends {
+                for to in [990, 1050, 1079, 1080, 1081, 1100, 1158, 1200] {
+                    let cut = placed(&path, end, to).expect("placed");
+                    for &(start, ms) in starts.iter().filter(|&&(start, _)| start < end) {
+                        assert!(
+                            ms > to || start < cut.at,
+                            "run {run} end {end} to {to}: the line at {start} stamped {ms} is \
+                             after the cut {cut:?}"
+                        );
+                        if cut.damage.is_none() {
+                            assert_eq!(
+                                start < cut.at,
+                                ms <= to,
+                                "run {run} end {end} to {to}: the line at {start} stamped {ms} \
+                                 against the exact cut {}",
+                                cut.at
+                            );
+                        }
+                    }
+                    match cut.damage {
+                        None => exact += 1,
+                        Some(why) => {
+                            assert!(run > bound / 2, "run {run}: {why}");
+                            assert!(why.contains(&format!("audit-{run}.ndjson")), "{why}");
+                            around += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            exact > 0 && around > 0,
+            "premise: {exact} exact, {around} around"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN PAGE READS EVERY LINE AROUND A RUN OF DAMAGE, ONCE, AND ENDS**:
+    /// the layout above with a run inside the probe's bound and one three
+    /// times past it, read a page at a time at `take` = 7 and 1,000 through
+    /// each page's `resume`, for a span over the lines before the run, one
+    /// across it, one after it and an open one. Every line of the span is
+    /// answered once, and the run past the bound is named.
+    #[test]
+    fn a_span_page_reads_every_line_around_damage_once_and_ends() {
+        let bound = usize::try_from(super::MAX_PROBE_BYTES).unwrap();
+        for run in [200 * 1024, 3 * bound] {
+            let (text, starts) = around_a_run(run);
+            let stream = one_generation(&format!("run-pages-{run}"), &text, 1000);
+            for span in [(1000, 1050), (1060, 1100), (1090, 1158), (0, i64::MAX)] {
+                let mut wanted: Vec<u64> = (1u64..)
+                    .zip(&starts)
+                    .filter(|&(_, &(_, ms))| ms >= span.0 && ms <= span.1)
+                    .map(|(seq, _)| seq)
+                    .collect();
+                // NEWEST FIRST, as a span page answers.
+                wanted.reverse();
+                for take in [7, 1000] {
+                    let (seqs, damage) =
+                        every_span_page(&stream, span, take).expect("the pages end");
+                    assert_eq!(seqs, wanted, "run {run} span {span:?} take {take}");
+                    if run <= bound / 2 {
+                        assert!(damage.is_empty(), "{damage:?}");
+                    }
+                    assert!(
+                        damage.iter().all(|why| why.contains("audit")),
+                        "each named by its file: {damage:?}"
+                    );
+                }
+            }
+            let (_, damage) = every_span_page(&stream, (1060, 1100), 1000).expect("an end");
+            if run > bound {
+                assert!(!damage.is_empty(), "a run past the bound is named");
+            }
+            let _ignored = std::fs::remove_dir_all(&stream);
+        }
+    }
+
+    /// **AN ANSWER WITH A STREAM OR LINE IT COULD NOT READ IS NEVER CALLED
+    /// COMPLETE**: the words say how many could not be read and that the page
+    /// may not hold every match; with none, they say every match is there.
+    #[test]
+    fn an_answer_with_an_unread_stream_is_never_called_complete() {
+        let mut indexed = Indexed {
+            reads: 2,
+            of: 2,
+            ..Indexed::default()
+        };
+        assert!(
+            read_words(&indexed).contains("every match the streams hold"),
+            "premise: {}",
+            read_words(&indexed)
+        );
+        indexed
+            .errors
+            .push("audit.ndjson: more than 16 undecodable lines".to_owned());
+        let said = read_words(&indexed);
+        assert!(!said.contains("every match the streams hold"), "{said}");
+        assert!(
+            said.contains("1 stream(s) or line(s) could not be read"),
+            "{said}"
+        );
+        assert!(said.contains("may not hold every match"), "{said}");
+    }
+
+    /// **DAMAGE READ PAST OR AROUND IS SAID, AND COSTS THE PAGE NO MATCH**
+    /// (R324-26; the mutation run of 21 Oct found the sentence untested by the
+    /// library's own tests): with none, the words name no damage; with two
+    /// stretches they count them and still say every match is there, which
+    /// damage alone does not take away.
+    #[test]
+    fn damage_read_past_is_said_and_costs_the_page_no_match() {
+        let mut indexed = Indexed {
+            reads: 2,
+            of: 2,
+            ..Indexed::default()
+        };
+        let none = read_words(&indexed);
+        assert!(!none.contains("damaged"), "{none}");
+        indexed.damage = 1;
+        let one = read_words(&indexed);
+        assert!(
+            one.contains("; 1 damaged stretch(es) of the audit files"),
+            "{one}"
+        );
+        indexed.damage = 2;
+        let said = read_words(&indexed);
+        assert!(
+            said.contains("; 2 damaged stretch(es) of the audit files read past or around"),
+            "{said}"
+        );
+        assert!(said.contains("every match the streams hold"), "{said}");
+    }
+
+    /// **THE STATE SLICE KEEPS A LINE THAT STARTS ON ITS FIRST BYTE, AND
+    /// PASSES A LINE IT CUTS**: a state stream of 300 lines of 256 bytes each
+    /// (76,800 bytes), so the last `STATE_TAIL_BYTES` (64 KiB) begin exactly
+    /// on the first byte of line 45 and hold 256 whole lines; then the same
+    /// stream with an empty line after its last, so the slice begins one byte
+    /// into line 45. The first answer counts all 256 (on the first head it skipped
+    /// the first piece unread and counted 255); the second counts the 255
+    /// whole lines, the cut one being no record.
+    #[test]
+    fn the_state_slice_keeps_a_line_on_its_first_byte_and_passes_one_it_cuts() {
+        let served = scratch("state-slice");
+        let state = telemetry::audit_current_path(&telemetry::run_dirs::state_stream_of(&served));
+        std::fs::create_dir_all(state.parent().expect("a directory")).expect("a directory");
+        let line = |seq: u64| {
+            let head = format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-20T00:00:00.000Z\",\"ms\":{},\"level\":\"warn\",\
+                 \"target\":\"autopilot\",\"msg\":\"paused\",\"fields\":{{\"pad\":\"",
+                1_792_000_000_000 + i64::try_from(seq).unwrap()
+            );
+            let tail = "\"}}\n";
+            format!("{head}{}{tail}", "p".repeat(256 - head.len() - tail.len()))
+        };
+        let text: String = (1..=300).map(line).collect();
+        assert!((1..=300).all(|seq| line(seq).len() == 256), "premise");
+        let halves = [Half {
+            name: "served",
+            path: served.clone(),
+        }];
+        let count = || -> usize {
+            let got: serde_json::Value =
+                serde_json::from_str(&state_changes_json(&halves, 1_000, None)).expect("JSON");
+            got["rows"].as_array().expect("rows").len()
+        };
+        std::fs::write(&state, &text).expect("a state stream");
+        assert_eq!(
+            text.len() - 65_536,
+            44 * 256,
+            "premise: the slice starts line 45"
+        );
+        assert_eq!(count(), 256, "every whole line of the slice");
+        std::fs::write(&state, format!("{text}\n")).expect("a state stream");
+        assert_eq!(count(), 255, "the line the slice cuts is no record");
+        let _ignored = std::fs::remove_dir_all(&served);
+    }
+
+    /// **A STATE STREAM THE SINK REFUSED IS NAMED ON THE AUDIT ANSWER, NEVER
+    /// AN EMPTY ONE** (R3-24 repair round 2, the third check's follow-up):
+    /// a directory that is not empty holds the state stream's name, so the
+    /// sink refuses the stream by name (R324-17). `/audit.json`'s state
+    /// changes used to answer 0 rows with `unread: []`; now the absent stream
+    /// is in `no_stream` and the serving sink's refusal in
+    /// `served_state_error`. A directory whose stream is there lists neither.
+    #[test]
+    fn a_state_stream_the_sink_refused_is_named_on_the_audit_answer() {
+        let served = scratch("refused-state");
+        let taken = telemetry::run_dirs::state_stream_of(&served);
+        std::fs::create_dir_all(&taken).expect("a directory where the stream goes");
+        std::fs::write(taken.join("someone-elses"), b"x").expect("not empty");
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("opens");
+        let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+        let health = sink.state_health().expect("named, not absent");
+        let why = health.last_error.clone().expect("the refusal named");
+        drop(sink);
+        let halves = [Half {
+            name: "served",
+            path: served.clone(),
+        }];
+        let got: serde_json::Value =
+            serde_json::from_str(&state_changes_json(&halves, 20, Some(&health))).expect("JSON");
+        assert_eq!(got["rows"].as_array().unwrap().len(), 0, "{got:#}");
+        assert_eq!(got["unread"].as_array().unwrap().len(), 0, "{got:#}");
+        assert_eq!(got["no_stream"][0]["half"], "served", "{got:#}");
+        assert!(
+            got["no_stream"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with(&taken.display().to_string()),
+            "{got:#}"
+        );
+        assert_eq!(got["served_state_error"], why.as_str(), "{got:#}");
+
+        let held = scratch("held-state");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&held)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+        }
+        let halves = [Half {
+            name: "served",
+            path: held.clone(),
+        }];
+        let got: serde_json::Value =
+            serde_json::from_str(&state_changes_json(&halves, 20, None)).expect("JSON");
+        assert_eq!(got["rows"].as_array().unwrap().len(), 1, "{got:#}");
+        assert_eq!(got["no_stream"].as_array().unwrap().len(), 0, "{got:#}");
+        assert!(got["served_state_error"].is_null(), "{got:#}");
+        let _ignored = std::fs::remove_dir_all(&served);
+        let _ignored = std::fs::remove_dir_all(&held);
+    }
+
+    /// **A LINE AN EARLIER RULE LET INTO THE NEVER-ROLLING STREAM IS NOT SHOWN
+    /// AS A STATE CHANGE, AND IS COUNTED**: a served directory whose sink
+    /// wrote "listening" and then 30 abandoned and 5 short CSV exports (none
+    /// of which reaches the state stream now), and then an export line written
+    /// into the stream by hand as the first head's rule wrote it. The answer
+    /// shows "listening" alone and counts the hand-written line in
+    /// `passed_over`. On the first head the 35 exports filled the stream and
+    /// pushed "listening" out of the 20 rows.
+    #[test]
+    fn a_per_request_line_is_never_a_state_change_on_the_audit_answer() {
+        let served = scratch("per-request");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+            for rows in 0..30u64 {
+                let _ = sink.emit(
+                    &telemetry::Event::info("api.bars", "export abandoned; work stopped")
+                        .with("rows", rows),
+                );
+            }
+            for rows in 0..5u64 {
+                let _ = sink.emit(
+                    &telemetry::Event::warn("api.bars", "export stopped short").with("rows", rows),
+                );
+            }
+        }
+        let state = telemetry::audit_current_path(&telemetry::run_dirs::state_stream_of(&served));
+        let halves = [Half {
+            name: "served",
+            path: served.clone(),
+        }];
+        let answer = |halves: &[Half]| -> serde_json::Value {
+            serde_json::from_str(&state_changes_json(
+                halves,
+                super::STATE_CHANGES_SHOWN,
+                None,
+            ))
+            .expect("JSON")
+        };
+        let got = answer(&halves);
+        let rows = got["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "{got:#}");
+        assert_eq!(rows[0]["message"], "listening");
+        assert_eq!(got["passed_over"], 0, "the sink wrote none: {got:#}");
+        // AS THE FIRST HEAD'S RULE WROTE IT, by hand.
+        let earlier = format!(
+            "{{\"seq\":99998,\"ts\":\"2026-10-20T00:00:00.000Z\",\"ms\":{},\"level\":\"info\",\
+             \"target\":\"api.bars\",\"msg\":\"export abandoned; work stopped\",\"fields\":{{}}}}\n",
+            telemetry::now_millis() + 60_000
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&state)
+            .expect("the state stream");
+        std::io::Write::write_all(&mut file, earlier.as_bytes()).expect("appended");
+        drop(file);
+        let got = answer(&halves);
+        let rows = got["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "{got:#}");
+        assert_eq!(rows[0]["message"], "listening");
+        assert_eq!(got["passed_over"], 1, "{got:#}");
+        let _ignored = std::fs::remove_dir_all(&served);
+    }
+
+    /// The text of `times` as audit lines, `seq` from `first_seq`, behind a
+    /// first line of `damaged` NULs and its newline: a first line that does
+    /// not decode.
+    fn behind_a_damaged_head(damaged: usize, first_seq: u64, times: &[i64]) -> Vec<u8> {
+        let mut text = vec![0u8; damaged];
+        text.push(b'\n');
+        for (n, &ms) in (first_seq..).zip(times) {
+            text.extend_from_slice(line(n, ms).as_bytes());
+        }
+        text
+    }
+
+    /// **A KEPT FILE WHOSE FIRST TIME IS UNKNOWN IS READ AND NAMED, NEVER
+    /// PASSED OVER** (R3-24 repair round 3, B3). Two generations as a build
+    /// before R3-24 left them, no span file, each first line zeroed: the
+    /// closed one and the one being appended to. On repair round 2's head
+    /// `audit_span` answered neither a span and `span_page` passed both over
+    /// by its `let`-`else`, so a span inside either answered nothing, no
+    /// damage, every page complete. Now each is read, its lines answered once
+    /// and newest first, and each named in `damage`.
+    #[test]
+    fn a_kept_file_whose_first_time_is_unknown_is_read_and_named() {
+        let stream = scratch("unknown-first");
+        std::fs::create_dir_all(stream.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(&stream), 1u64.to_le_bytes()).expect("serial");
+        let older = [1000, 1002, 1004, 1006];
+        let newer = [2000, 2002, 2004];
+        std::fs::write(
+            telemetry::audit_path_for(&stream, 1, 0).expect("kept"),
+            behind_a_damaged_head(546, 1, &older),
+        )
+        .expect("the closed file");
+        std::fs::write(
+            telemetry::audit_path_for(&stream, 1, 1).expect("kept"),
+            behind_a_damaged_head(300, 5, &newer),
+        )
+        .expect("the current file");
+        for (serial, open) in [(0u64, false), (1, true)] {
+            let span = telemetry::run_dirs::audit_span(&stream, 1, serial).expect("a span");
+            assert_eq!(span.first_ms, None, "file {serial}");
+            assert!(
+                super::unknown_span_words(&span, open).is_some(),
+                "file {serial}"
+            );
+        }
+        for (span, wanted, named) in [
+            ((1002, 1004), vec![3u64, 2], 1usize),
+            ((2002, 2004), vec![7, 6], 1),
+            ((1000, 2004), vec![7, 6, 5, 4, 3, 2, 1], 2),
+        ] {
+            for take in [1, 1000] {
+                let (seqs, damage) = every_span_page(&stream, span, take).expect("the pages end");
+                assert_eq!(seqs, wanted, "span {span:?} take {take}");
+                let unknown = damage
+                    .iter()
+                    .filter(|why| why.contains("first line's time cannot be read"))
+                    .count();
+                assert!(unknown >= named, "span {span:?} take {take}: {damage:?}");
+            }
+        }
+        let _ignored = std::fs::remove_dir_all(&stream);
+    }
+
+    /// **WHAT A REAL SINK WRITES OVER A DAMAGED FIRST LINE IS FOUND** (R3-24
+    /// repair round 3, B3 end to end): lines written, the span file gone (as
+    /// an earlier build left the stream), the first line zeroed in place, a
+    /// reopen and one more line. On repair round 2's head the reopened sink
+    /// recorded that line's time as the generation's first, and a span over
+    /// the older lines answered none of them, complete.
+    #[test]
+    fn a_span_over_lines_before_a_reopen_over_a_damaged_head_finds_them() {
+        let stream = scratch("unknown-first-sink");
+        let emit = |sink: &telemetry::Sink, n: u32| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert!(
+                sink.emit(&telemetry::Event::error("span.test", &format!("line {n}")))
+                    .is_written()
+            );
+        };
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&stream)).expect("a sink");
+        for n in 0..3 {
+            emit(&sink, n);
+        }
+        drop(sink);
+        std::fs::remove_file(
+            telemetry::audit_generation_path(&stream, 0).join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+        )
+        .expect("as an earlier build left it");
+        let current = telemetry::audit_current_path(&stream);
+        let mut bytes = std::fs::read(&current).expect("the file");
+        let newline = bytes.iter().position(|&b| b == b'\n').expect("a line");
+        bytes[..newline].fill(0);
+        std::fs::write(&current, &bytes).expect("its first line zeroed");
+        let again = telemetry::Sink::open(&telemetry::Config::new(&stream)).expect("reopens");
+        emit(&again, 3);
+        drop(again);
+        let lines: Vec<telemetry::Record> = std::fs::read(&current)
+            .expect("the file")
+            .split(|&b| b == b'\n')
+            .filter_map(|line| telemetry::Record::decode(line).ok())
+            .collect();
+        assert_eq!(lines.len(), 3, "premise: the zeroed line does not decode");
+        let (second, last) = (&lines[0], &lines[2]);
+        assert!(second.at_unix_millis < last.at_unix_millis, "premise");
+        let (seqs, damage) = every_span_page(
+            &stream,
+            (second.at_unix_millis, last.at_unix_millis - 1),
+            1000,
+        )
+        .expect("the pages end");
+        assert_eq!(seqs, vec![lines[1].seq, second.seq], "{damage:?}");
+        assert!(
+            damage
+                .iter()
+                .any(|why| why.contains("first line's time cannot be read")),
+            "{damage:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&stream);
     }
 }
