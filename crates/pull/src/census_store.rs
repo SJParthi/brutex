@@ -176,12 +176,75 @@ pub fn locate(root: &Path, vendor: Vendor) -> Result<Location, String> {
 ///
 /// # Errors
 ///
-/// The directory and the host's words, for a directory that exists and cannot
-/// be listed; and an epoch's name that holds anything but a regular file — a
-/// symbolic link above all, which is never followed — by name (AG-05).
+/// [`current_epoch_in`]'s refusal, as its sentence.
 pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Option<u32>, String> {
-    let dir = segment_dir(root, vendor, segment);
-    let entries = match fs::read_dir(&dir) {
+    current_epoch_in(&segment_dir(root, vendor, segment)).map_err(|refused| refused.to_string())
+}
+
+/// Why a partition's directory gave no current epoch (R3-19, L-AG05-05): a
+/// name refused for what is at it, or the host's refusal of the look or the
+/// listing. Public so `api`'s census reads take the same listing rule and say
+/// a refused name as a refusal, never as an empty census.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListRefusal {
+    /// The segment directory, or an epoch's name in it, holds something the
+    /// census did not write there: the sentence names it.
+    Named(String),
+    /// The host refused to measure or list: the sentence and the host's kind.
+    Io {
+        /// The path and the host's words.
+        sentence: String,
+        /// The host's kind.
+        kind: ErrorKind,
+    },
+}
+
+impl ListRefusal {
+    /// The host's kind of an [`ListRefusal::Io`]; `InvalidData` for a name
+    /// refused for what is at it, which no host call failed on.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Named(_) => ErrorKind::InvalidData,
+            Self::Io { kind, .. } => *kind,
+        }
+    }
+}
+
+impl std::fmt::Display for ListRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Named(sentence) | Self::Io { sentence, .. } => f.write_str(sentence),
+        }
+    }
+}
+
+impl std::error::Error for ListRefusal {}
+
+/// [`current_epoch`] of the segment directory `dir` itself: the one listing
+/// rule, which `api::census` calls too (R3-19, L-AG05-05).
+///
+/// **The directory is looked at first, once, without following it** (R3-19,
+/// verify-AG-05-r3): a symbolic link, a file or anything else at a segment's
+/// name is refused by name ([`look_at_segment_dir`]), never listed through.
+/// One `lstat` before the listing.
+///
+/// # Errors
+///
+/// [`ListRefusal::Named`] for a segment directory that is not a directory and
+/// for an epoch's name that holds anything but a regular file — a symbolic
+/// link above all, which is never followed (AG-05); [`ListRefusal::Io`] for a
+/// directory that exists and cannot be measured or listed.
+pub fn current_epoch_in(dir: &Path) -> Result<Option<u32>, ListRefusal> {
+    let listed = |why: std::io::Error| ListRefusal::Io {
+        sentence: format!("{} could not be listed: {why}", dir.display()),
+        kind: why.kind(),
+    };
+    match look_at_segment_dir(dir)? {
+        SegmentDir::Absent => return Ok(None),
+        SegmentDir::Real => {}
+    }
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(absent)
             if matches!(
@@ -191,11 +254,11 @@ pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Op
         {
             return Ok(None);
         }
-        Err(why) => return Err(format!("{} could not be listed: {why}", dir.display())),
+        Err(why) => return Err(listed(why)),
     };
     let mut newest: Option<u32> = None;
     for entry in entries {
-        let entry = entry.map_err(|why| format!("{} could not be listed: {why}", dir.display()))?;
+        let entry = entry.map_err(listed)?;
         if let Some(epoch) = entry.file_name().to_str().and_then(parse_epoch_name) {
             // AN EPOCH IS A REGULAR FILE THE CENSUS WROTE ITSELF (AG-05,
             // store-1). A symbolic link at an epoch's name was the listing's
@@ -204,11 +267,12 @@ pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Op
             // is followed nowhere and is refused here, by name. The type
             // comes with the listing's own entry (no extra call where the
             // host reports it).
-            let kind = entry.file_type().map_err(|why| {
-                format!("{} could not be measured: {why}", entry.path().display())
+            let kind = entry.file_type().map_err(|why| ListRefusal::Io {
+                sentence: format!("{} could not be measured: {why}", entry.path().display()),
+                kind: why.kind(),
             })?;
             if let Some(found) = store::safe_open::Found::of(kind) {
-                return Err(not_an_epoch(&entry.path(), found));
+                return Err(ListRefusal::Named(not_an_epoch(&entry.path(), found)));
             }
             newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
         }
@@ -216,17 +280,94 @@ pub fn current_epoch(root: &Path, vendor: Vendor, segment: Segment) -> Result<Op
     Ok(newest)
 }
 
+/// What a partition's segment directory is, looked at once without
+/// following it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentDir {
+    /// A directory, not a link to one.
+    Real,
+    /// Nothing at the name, or no directory above it to hold one.
+    Absent,
+}
+
+/// The one look at a segment directory (R3-19, verify-AG-05-r3): one `lstat`,
+/// from `manifest/` down only — the store root and its ancestors are
+/// `store::safe_open::refuse_linked_store_root`'s, and on macOS `/var` and
+/// `/tmp` are themselves links.
+///
+/// An epoch install followed a symbolic link at
+/// `manifest/v4/<vendor>/<SEGMENT>`: `create_dir_all` accepted the link as
+/// the directory and `store::staging::create`, which refuses a link only at
+/// the FINAL name, staged the new epoch inside whatever the link named. A
+/// listing followed it the same way. Now anything at the name that is not a
+/// directory — a symbolic link (dangling or not), a regular file, a pipe, a
+/// socket or a device — is refused by name and nothing is followed, created,
+/// staged or removed.
+///
+/// What it cannot close: a directory swapped for a link between this look and
+/// the host calls after it (the lstat-to-create race), named in
+/// `docs/06-limits.md` L-R319-02.
+///
+/// # Errors
+///
+/// [`ListRefusal::Named`] for anything but a directory, and
+/// [`ListRefusal::Io`] for a name the host cannot measure.
+fn look_at_segment_dir(dir: &Path) -> Result<SegmentDir, ListRefusal> {
+    match fs::symlink_metadata(dir) {
+        Ok(found) if found.is_dir() => Ok(SegmentDir::Real),
+        Ok(found) => Err(ListRefusal::Named(not_a_segment_dir(
+            dir,
+            found.file_type(),
+        ))),
+        Err(absent)
+            if matches!(
+                absent.kind(),
+                ErrorKind::NotFound | ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(SegmentDir::Absent)
+        }
+        Err(why) => Err(ListRefusal::Io {
+            sentence: format!("{} could not be measured: {why}", dir.display()),
+            kind: why.kind(),
+        }),
+    }
+}
+
+/// The refusal of a segment directory's name that holds something other than
+/// a directory, in `store::safe_open::Found`'s word and sentence: its key and
+/// the found word once, then the path and the sentence once (as
+/// `store::safe_open::ReadRefusal` says one). A regular file, which `Found`
+/// has no kind for, is `file`, "a regular file".
+fn not_a_segment_dir(dir: &Path, kind: fs::FileType) -> String {
+    let (word, sentence) = store::safe_open::Found::of(kind)
+        .map_or(("file", "a regular file"), |found| {
+            (found.word(), found.sentence())
+        });
+    format!(
+        "segment_dir_not_directory ({word}): {} is {sentence}, not a directory: a \
+         partition's segment directory is one the census made itself, so this one is \
+         refused rather than followed, created over or removed; nothing was staged, \
+         read or written. Look at what put it there before moving it aside (R3-19, \
+         AG-05)",
+        dir.display()
+    )
+}
+
 /// The refusal of an epoch's name that holds something other than a regular
 /// file: a symbolic link (followed nowhere), a directory, a pipe, a socket or
-/// a device. AG-05 (store-1).
+/// a device. AG-05 (store-1). The key and the found word once, then the path
+/// and the sentence once (R3-19: it said `is a pipe (FIFO) (pipe)`, two
+/// parentheticals in a row).
 fn not_an_epoch(path: &Path, found: store::safe_open::Found) -> String {
     format!(
-        "{} is {} ({}), not a regular file: an epoch is a file the census wrote \
-         itself, so this one is refused rather than followed or read; nothing was \
-         read or written. Look at what put it there before moving it aside (AG-05)",
+        "epoch_not_regular ({}): {} is {}, not a regular file: an epoch is a file the \
+         census wrote itself, so this one is refused rather than followed or read; \
+         nothing was read or written. Look at what put it there before moving it aside \
+         (AG-05)",
+        found.word(),
         path.display(),
-        found.sentence(),
-        found.word()
+        found.sentence()
     )
 }
 
@@ -352,10 +493,29 @@ impl Target {
     ///
     /// The file and the refusal, in one sentence.
     pub fn load(&self) -> Result<Loaded, String> {
+        let loaded = self.load_whole()?;
+        #[cfg(test)]
+        if loaded.exists {
+            let header = loaded.census.header();
+            reads::note(
+                &loaded.path,
+                "whole",
+                HEADER_LEN.saturating_add(
+                    header
+                        .n_valid
+                        .saturating_mul(u64::from(header.entry_stride)),
+                ),
+            );
+        }
+        Ok(loaded)
+    }
+
+    /// [`Self::load`]'s read.
+    fn load_whole(&self) -> Result<Loaded, String> {
         match self.segment {
             None => {
                 let path = manifest_path(&self.root, self.vendor);
-                let census = read_census(&path, self.vendor)?;
+                let census = read_single(&path, self.vendor)?;
                 // AN EPOCH AT THE SINGLE FILE'S NAME is one segment's census
                 // where every segment's is read: refused, never appended to as
                 // if it held the vendor's whole census (D-3316).
@@ -508,6 +668,31 @@ pub fn read_epoch(path: &Path, vendor: Vendor, segment: Segment) -> Result<Manif
         return Err(named(&Unbounded::PastCap { cap, size }));
     }
     Manifest::open_partition(vendor, segment, &bytes).map_err(|why| named(&why))
+}
+
+/// The single-file census at `path`, read by the parent's `read_census`, with
+/// a symbolic link at its name NAMED AS ONE (R3-19, L-AG05-07).
+///
+/// The read opens with `O_NOFOLLOW`, so a link is never followed; the host
+/// refuses it with `ELOOP`, which the load used to pass on in the host's
+/// words ("too many levels of symbolic links"), saying nothing of the link.
+/// One `lstat`, on the refusal's path only, turns that into the census's own
+/// sentence, the way `read_epoch` names a link at an epoch's name.
+///
+/// # Errors
+///
+/// `read_census`'s refusal, or the link's, by name.
+fn read_single(path: &Path, vendor: Vendor) -> Result<Manifest, String> {
+    read_census(path, vendor).map_err(|why| match fs::symlink_metadata(path) {
+        Ok(found) if found.file_type().is_symlink() => format!(
+            "census_not_regular (symlink): {} is a symbolic link, not a regular file: a \
+                 single-file census is a file the census wrote itself, so this one is \
+                 refused rather than followed or read; nothing was read or written. Look at \
+                 what put it there before moving it aside (R3-19, L-AG05-07)",
+            path.display()
+        ),
+        _ => why,
+    })
 }
 
 /// The largest capacity any decodable version-4 slot in `region` declares.
@@ -689,6 +874,8 @@ pub struct Cycle {
     pub rows: u64,
     /// Capacity after the cycle.
     pub capacity: u64,
+    /// How the census was read: from this run's memory or whole (R3-19).
+    pub read: CensusRead,
 }
 
 /// One census cycle over one census: take the lock, read, probe, compact if a
@@ -715,9 +902,32 @@ pub struct Cycle {
 /// installed before a row was refused stays installed, and holds exactly the
 /// totals the replaced epoch held, so it changes no answer.
 pub fn cycle(target: &Target, held: &[Held], mode: Mode) -> Result<Cycle, String> {
+    cycle_with(target, held, mode, None)
+}
+
+/// [`cycle`], reading the census from `kept` when this run already holds it
+/// decoded and its file is still the one it holds (R3-19, [`Kept`]): then the
+/// read is one header region, not the whole list. Without `kept` it reads the
+/// census whole, as it always did.
+///
+/// # Errors
+///
+/// [`cycle`]'s. A cycle that fails keeps nothing: the census it held in memory
+/// may hold rows that were never published, so the next cycle reads it whole.
+fn cycle_with(
+    target: &Target,
+    held: &[Held],
+    mode: Mode,
+    mut kept: Option<&mut Kept>,
+) -> Result<Cycle, String> {
+    let started = std::time::Instant::now();
     let lock = target.lock()?;
     target.still_where_located()?;
-    let mut loaded = target.load()?;
+    let (mut loaded, read) = match kept.as_deref_mut() {
+        Some(kept) => kept.take(target)?,
+        None => (target.load()?, CensusRead::Whole("unkept")),
+    };
+    let load_micros = micros_since(started);
     let degraded = loaded.census.degraded_reason().map(|why| why.to_string());
     let fit = probe(&loaded.census, held);
     let whole = target.segment.is_some() && mode == Mode::PerKey;
@@ -770,7 +980,7 @@ pub fn cycle(target: &Target, held: &[Held], mode: Mode) -> Result<Cycle, String
     }
 
     let header = loaded.census.header();
-    Ok(Cycle {
+    let cycle = Cycle {
         path: loaded.path.clone(),
         segment: target.segment,
         epoch: target.segment.and(
@@ -789,7 +999,38 @@ pub fn cycle(target: &Target, held: &[Held], mode: Mode) -> Result<Cycle, String
         keys: header.n_keys,
         rows: header.total_rows,
         capacity: loaded.census.capacity(),
-    })
+        read,
+    };
+    if let Some(kept) = kept {
+        remember(kept, (target, loaded), &cycle, (load_micros, started));
+    }
+    Ok(cycle)
+}
+
+/// Keeps a published cycle's census in `kept` when the memory is the file,
+/// and says what the cycle cost ("census published").
+///
+/// KEPT ONLY WHEN THE MEMORY IS THE FILE: a census that loaded degraded, was
+/// upgraded, compacted or had no file before this cycle was published whole,
+/// and is read whole once more next time rather than trusted from memory.
+fn remember(
+    kept: &mut Kept,
+    (target, loaded): (&Target, Loaded),
+    cycle: &Cycle,
+    (load_micros, started): (u64, std::time::Instant),
+) {
+    let keep = cycle.degraded.is_none()
+        && cycle.compacted.is_none()
+        && loaded.exists
+        && !loaded.census.upgrading();
+    let pace = Pace {
+        read: cycle.read,
+        entries: cycle.entries,
+        load_micros,
+        total_micros: micros_since(started),
+    };
+    let kept_as = kept.put(target, loaded, keep, pace);
+    note_cycle(target, cycle, pace, kept_as);
 }
 
 /// What [`make_room`] did before a row was recorded.
@@ -1078,9 +1319,16 @@ fn install_epoch(
 /// [`install_epoch`], with `fail` asked before each step of
 /// [`write_whole_with`] a full disk or a kill can stop: the failpoint the
 /// tests use, `Ok` everywhere else. Returns the epoch's path and the host
-/// calls the staging door made (`store::staging::Staged::calls`: 1 on a
-/// free name, 4 over a leftover), which the bench asserts instead of a
+/// calls made before the image is written: the one look at the segment
+/// directory ([`look_at_segment_dir`], R3-19), one more when it was absent and
+/// had to be made, and the staging door's (`store::staging::Staged::calls`: 1
+/// on a free name, 4 over a leftover) -- so 2 on a free name in a directory
+/// that exists and 5 over a leftover, which the bench asserts instead of a
 /// wall-clock bound (AG-05 repair 1).
+///
+/// **The segment directory is looked at before any byte is staged** (R3-19,
+/// verify-AG-05-r3): anything at its name that is not a directory is refused
+/// by name and nothing is followed, created or removed.
 fn install_epoch_with(
     _lock: &CensusLock,
     root: &Path,
@@ -1091,6 +1339,10 @@ fn install_epoch_with(
     fail: &mut dyn FnMut(WholeStep) -> std::io::Result<()>,
 ) -> Result<(PathBuf, u8), String> {
     let dir = segment_dir(root, vendor, segment);
+    // THE SEGMENT DIRECTORY FIRST, ONCE, NOT FOLLOWED (R3-19): before the
+    // epoch's own name is looked at, and before anything is staged.
+    let absent =
+        look_at_segment_dir(&dir).map_err(|refused| refused.to_string())? == SegmentDir::Absent;
     // A range pattern: the epochs six digits can name, a compile-time bound.
     let (FIRST_EPOCH..=LAST_EPOCH) = epoch else {
         return Err(format!(
@@ -1111,13 +1363,14 @@ fn install_epoch_with(
         "{}{EPOCH_TMP_SUFFIX}",
         epoch_name(epoch).trim_end_matches(crate::manifest::MANIFEST_EXTENSION)
     ));
-    let (cleared, calls) = write_whole_with(&dir, &tmp, &path, image, fail).map_err(|why| {
-        format!(
-            "{} could not be installed through {}: {why}",
-            path.display(),
-            tmp.display()
-        )
-    })?;
+    let (cleared, calls) =
+        write_whole_with((&dir, absent), &tmp, &path, image, fail).map_err(|why| {
+            format!(
+                "{} could not be installed through {}: {why}",
+                path.display(),
+                tmp.display()
+            )
+        })?;
     if let Some(bytes) = cleared {
         let staged = tmp.display().to_string();
         let _dropped_when_filtered = telemetry::emit(
@@ -1143,19 +1396,35 @@ enum WholeStep {
 /// the directory, the staging file born through `store::staging::create`,
 /// the image written and flushed, the rename and the directory's flush.
 /// Returns the bytes of a dead writer's leftover whose name was cleared,
-/// and the calls the staging door made.
+/// and the calls made before the image is written: the segment directory's
+/// look (taken by the caller, `absent` its answer), its `mkdir` when it was
+/// absent, and the staging door's.
 ///
 /// A failure before the rename renames nothing: the epoch's name stays free,
 /// every older epoch is as it was, and the staging file is a regular file
 /// with one name that the next install clears.
 fn write_whole_with(
-    dir: &Path,
+    (dir, absent): (&Path, bool),
     tmp: &Path,
     path: &Path,
     image: &[u8],
     fail: &mut dyn FnMut(WholeStep) -> std::io::Result<()>,
 ) -> Result<(Option<u64>, u8), String> {
-    fs::create_dir_all(dir).map_err(|why| format!("{} could not be made: {why}", dir.display()))?;
+    // A SEGMENT DIRECTORY THE LOOK FOUND ABSENT IS MADE, AND ONLY THAT ONE
+    // NAME (R3-19): its parents as before, then `mkdir` of the segment itself,
+    // which refuses with `EEXIST` anything put at the name since the look --
+    // a link planted there is never accepted as the directory, as
+    // `create_dir_all` accepted it. A directory that exists was looked at
+    // already and is not touched.
+    let mut made = 1u8;
+    if absent {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|why| format!("{} could not be made: {why}", parent.display()))?;
+        }
+        fs::create_dir(dir).map_err(|why| format!("{} could not be made: {why}", dir.display()))?;
+        made += 1;
+    }
     let store::staging::Staged {
         file: mut staged,
         cleared,
@@ -1183,7 +1452,7 @@ fn write_whole_with(
     fs::File::open(dir)
         .and_then(|flushed| flushed.sync_all())
         .map_err(|why| format!("{} could not be flushed: {why}", dir.display()))?;
-    Ok((cleared, calls))
+    Ok((cleared, made.saturating_add(calls)))
 }
 
 // ═══ One batch, three flushes (WP-16, DB-N25) ═════════════════════════════
@@ -1397,11 +1666,39 @@ pub(super) fn write_batch_with(
 ///
 /// Every refused census's sentence, joined, naming the ones that did publish.
 pub fn record(root: &Path, vendor: Vendor, held: &[Held]) -> Result<Vec<Cycle>, String> {
+    record_with(root, vendor, held, None)
+}
+
+/// [`record`] for a run that publishes day after day: each census this run
+/// has read is kept decoded in `kept` between its days, so a day's publish
+/// reads one header region and probes only its own keys, whatever the census
+/// holds (R3-19, [`Kept`]). The bytes it leaves are the bytes [`record`]
+/// leaves (`census_store::kept_tests::the_census_after_n_days_is_the_same_bytes_as_before`).
+///
+/// # Errors
+///
+/// As [`record`].
+pub fn record_kept(
+    kept: &mut Kept,
+    root: &Path,
+    vendor: Vendor,
+    held: &[Held],
+) -> Result<Vec<Cycle>, String> {
+    record_with(root, vendor, held, Some(kept))
+}
+
+/// The one body of [`record`] and [`record_kept`].
+fn record_with(
+    root: &Path,
+    vendor: Vendor,
+    held: &[Held],
+    mut kept: Option<&mut Kept>,
+) -> Result<Vec<Cycle>, String> {
     let groups = grouped(root, vendor, held)?;
     let mut done = Vec::with_capacity(groups.len());
     let mut refused: Vec<String> = Vec::new();
     for (target, rows) in &groups {
-        match cycle(target, rows, Mode::AllOrNothing) {
+        match cycle_with(target, rows, Mode::AllOrNothing, kept.as_deref_mut()) {
             Ok(cycle) => done.push(cycle),
             Err(why) => {
                 super::note_census_unpublished(&target.named(), rows.len(), &why);
@@ -1444,6 +1741,305 @@ fn grouped(root: &Path, vendor: Vendor, held: &[Held]) -> Result<Vec<(Target, Ve
             })
             .collect(),
     })
+}
+
+// ═══ A census kept for the run (R3-19) ══════════════════════════════════════
+
+/// The censuses one run has read, kept decoded between its days (R3-19,
+/// D-6891).
+///
+/// # Why
+///
+/// Every day's publish took the census's lock and then read and decoded the
+/// WHOLE list — every entry the census held, a 128-byte entry and two CRCs
+/// each, into a fresh index — to probe the day's few thousand keys. So a day
+/// cost the census it landed in, not its own rows: at the 8.4 million entries
+/// a full options partition holds, about a gigabyte read and decoded for
+/// every day of the import.
+///
+/// # What it keeps, and why the memory may be trusted
+///
+/// After a cycle publishes, the census in memory is exactly what the file now
+/// holds: the cycle computed every entry and header commit it wrote. It is
+/// kept with the identity of the file — device, inode and length, from one
+/// `lstat` after the publish. The next cycle, under the same lock every
+/// writer takes, opens the file without following it, compares that identity
+/// and reads the header region, one 32 KiB read; when the identity and the
+/// newest committed header are the ones it holds, nothing was written since,
+/// and the kept census is the census. Anything else — another writer's
+/// append, an epoch installed by a compaction or a re-key, a repair, a file
+/// replaced, a header that does not decode — reads the census whole, once,
+/// and says why ([`CensusRead::Whole`]).
+///
+/// A census that loaded degraded, was upgraded, was compacted or had no file
+/// before the cycle is never kept: it was published whole, and the next cycle
+/// reads it whole once more. A cycle that fails keeps nothing.
+///
+/// # What it costs
+///
+/// Per cycle: the lock, the listing a partition always makes (one `lstat` and
+/// one directory listing, O(epochs)), one open, two `fstat`s and one 32 KiB
+/// read, then the probe and the appends of the day's own rows. The memory is
+/// the decoded census the cycle held anyway, now held for the run: about 400
+/// bytes per entry (`docs/06-limits.md` L-IA-11).
+#[derive(Debug, Default)]
+pub struct Kept {
+    /// By [`Target::named`]: the single file, or the partition's directory.
+    held: std::collections::HashMap<PathBuf, KeptCensus>,
+    /// What the last cycle through this run's memory cost.
+    last: Option<Pace>,
+}
+
+/// One kept census and the file it is.
+#[derive(Debug)]
+struct KeptCensus {
+    loaded: Loaded,
+    stamp: Stamp,
+}
+
+/// A census file's identity, as one `lstat` or `fstat` gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(meta: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+        }
+    }
+}
+
+/// How one cycle read its census (R3-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CensusRead {
+    /// From this run's memory: one header region read.
+    Kept,
+    /// Whole, and why: `unkept` (a door that keeps nothing, [`record`]),
+    /// `first` (this run had not read it), or what moved since it was kept.
+    Whole(&'static str),
+}
+
+impl CensusRead {
+    /// The word a log line says it in.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Kept => "kept",
+            Self::Whole(_) => "whole",
+        }
+    }
+
+    /// Why it was read whole, or `-` when it was kept.
+    #[must_use]
+    pub const fn why(self) -> &'static str {
+        match self {
+            Self::Kept => "-",
+            Self::Whole(why) => why,
+        }
+    }
+}
+
+/// What one cycle through a run's memory cost (R3-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pace {
+    /// How the census was read.
+    pub read: CensusRead,
+    /// Committed entries after the cycle: what a whole read would have read.
+    pub entries: u64,
+    /// The lock, the look and the read, in microseconds.
+    pub load_micros: u64,
+    /// The whole cycle, the publish's flushes included, in microseconds.
+    pub total_micros: u64,
+}
+
+impl Kept {
+    /// A run's empty memory.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What the last cycle through this memory cost, if one ran.
+    #[must_use]
+    pub const fn last(&self) -> Option<Pace> {
+        self.last
+    }
+
+    /// How many censuses are kept.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Whether nothing is kept.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// `target`'s census for a cycle under its lock: the kept one when its
+    /// file is still the one kept, or read whole, with why. Whatever is kept
+    /// for `target` is taken out, so a cycle that fails leaves nothing kept.
+    ///
+    /// # Errors
+    ///
+    /// A partition's listing's refusal (a link at an epoch's name or at the
+    /// segment's, by name), or the whole read's.
+    fn take(&mut self, target: &Target) -> Result<(Loaded, CensusRead), String> {
+        let why = match self.held.remove(&target.named()) {
+            None => "first",
+            Some(held) => match held.still_current(target)? {
+                Ok(()) => {
+                    #[cfg(test)]
+                    reads::note(&held.loaded.path, "header", HEADER_LEN);
+                    return Ok((held.loaded, CensusRead::Kept));
+                }
+                Err(why) => why,
+            },
+        };
+        Ok((target.load()?, CensusRead::Whole(why)))
+    }
+
+    /// Keeps `loaded` for `target` when `keep` and its file can be stamped;
+    /// says why not otherwise.
+    fn put(
+        &mut self,
+        target: &Target,
+        loaded: Loaded,
+        keep: bool,
+        pace: Pace,
+    ) -> Result<(), &'static str> {
+        self.last = Some(pace);
+        if !keep {
+            return Err("published_whole");
+        }
+        let stamp = match fs::symlink_metadata(&loaded.path) {
+            Ok(meta) if meta.is_file() => Stamp::of(&meta),
+            Ok(_) => return Err("not_regular"),
+            Err(_) => return Err("unmeasured"),
+        };
+        // The file now holds every entry the census in memory holds, so what a
+        // later compaction says it replaced is this count, not the count the
+        // first read found.
+        let loaded = Loaded {
+            on_disk: loaded.census.entries(),
+            ..loaded
+        };
+        let _replaced = self
+            .held
+            .insert(target.named(), KeptCensus { loaded, stamp });
+        Ok(())
+    }
+}
+
+impl KeptCensus {
+    /// `Ok(Ok)` when the file at the kept path is still the kept census:
+    /// the same epoch, the same inode and length, and the newest committed
+    /// header the one in memory. `Ok(Err(why))` when anything moved.
+    ///
+    /// # Errors
+    ///
+    /// A partition listing's refusal, by name.
+    fn still_current(&self, target: &Target) -> Result<Result<(), &'static str>, String> {
+        use std::os::unix::fs::FileExt as _;
+        if let Some(segment) = target.segment
+            && current_epoch(&target.root, target.vendor, segment)? != self.loaded.epoch
+        {
+            return Ok(Err("epoch_moved"));
+        }
+        let Ok(file) = store::safe_open::open_read(&self.loaded.path) else {
+            return Ok(Err("unopened"));
+        };
+        let Ok(meta) = file.metadata() else {
+            return Ok(Err("unmeasured"));
+        };
+        let now = Stamp::of(&meta);
+        if (now.dev, now.ino) != (self.stamp.dev, self.stamp.ino) {
+            return Ok(Err("file_replaced"));
+        }
+        if now.len != self.stamp.len {
+            return Ok(Err("length_moved"));
+        }
+        let mut region = vec![0_u8; HEADER_REGION_LEN];
+        if file.read_exact_at(&mut region, 0).is_err() {
+            return Ok(Err("header_unread"));
+        }
+        if newest_committed(&region) != Some(self.loaded.census.header()) {
+            return Ok(Err("header_moved"));
+        }
+        Ok(Ok(()))
+    }
+}
+
+/// The newest header a census's region commits: of the two slots, each that
+/// decodes in the slot its generation belongs in, the higher generation.
+/// The comparison [`KeptCensus::still_current`] makes against memory, not a
+/// load: a region that does not decode simply differs.
+fn newest_committed(region: &[u8]) -> Option<ManifestHeader> {
+    region
+        .chunks(SLOT_SPACING)
+        .take(2)
+        .zip(0_u64..)
+        .filter_map(|(slot, at)| {
+            ManifestHeader::decode(slot)
+                .ok()
+                .filter(|header| header.generation % 2 == at)
+        })
+        .max_by_key(|header| header.generation)
+}
+
+/// Microseconds since `started`, saturated.
+fn micros_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// "census published" (R3-19): one line per census a run's day published,
+/// saying how it was read, why when whole, and what it cost, so a day that
+/// read its census whole is named on `/logs` and never only slow.
+fn note_cycle(target: &Target, cycle: &Cycle, pace: Pace, kept: Result<(), &'static str>) {
+    let census = target.named().display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(TARGET, "census published")
+            .with("vendor", target.vendor.as_str())
+            .with("census", telemetry::Value::Str(&census))
+            .with("read", pace.read.word())
+            .with("why", pace.read.why())
+            .with("offered", cycle.offered)
+            .with("recorded", cycle.recorded)
+            .with("entries", pace.entries)
+            .with("load_us", pace.load_micros)
+            .with("total_us", pace.total_micros)
+            .with("kept", kept.err().unwrap_or("yes")),
+    );
+}
+
+/// Every census read a cycle made on this thread, for tests: the path, the
+/// kind (`whole` or `header`) and the bytes it decoded. A counting reader.
+#[cfg(test)]
+pub(crate) mod reads {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static READS: RefCell<Vec<(PathBuf, &'static str, u64)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Records one read.
+    pub(crate) fn note(path: &Path, kind: &'static str, bytes: u64) {
+        READS.with_borrow_mut(|reads| reads.push((path.to_path_buf(), kind, bytes)));
+    }
+
+    /// The reads since the last call, oldest first; the log is emptied.
+    pub(crate) fn taken() -> Vec<(PathBuf, &'static str, u64)> {
+        READS.with_borrow_mut(std::mem::take)
+    }
 }
 
 // ═══ The run-level door: `ingest::from_members` ═════════════════════════════
@@ -1574,7 +2170,7 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> Result<Vec<Read>, String> {
             if fs::symlink_metadata(&path).is_err() {
                 return Ok(Vec::new());
             }
-            let census = read_census(&path, vendor)?;
+            let census = read_single(&path, vendor)?;
             Ok(vec![Read {
                 segment: None,
                 epoch: None,
@@ -1737,7 +2333,7 @@ fn migrate_held(root: &Path, vendor: Vendor) -> Result<Migration, String> {
     }
     let lock = Target::single(root, vendor).lock()?;
     let legacy_meta = fs::symlink_metadata(&legacy).ok();
-    let census = read_census(&legacy, vendor)?;
+    let census = read_single(&legacy, vendor)?;
     if let Some(why) = census.degraded_reason() {
         return Err(format!(
             "{} loaded DEGRADED ({why}); migrating it would carry a recovered \
@@ -2410,26 +3006,66 @@ pub fn sealed_stub(vendor: Vendor) -> Vec<u8> {
 }
 
 /// Whether `path` holds a seal's stub: [`STUB_LEN`] bytes whose first slot
-/// carries the magic family and [`SEALED_VERSION`]. One `lstat` and one
-/// 16-byte read. A symbolic link at `path` is not a stub.
+/// carries the magic family and [`SEALED_VERSION`]. One open, one `fstat`
+/// of that open handle and one 16-byte read. A symbolic link, a pipe or
+/// anything else that is not a regular file at `path` is not a stub, and
+/// is answered at once.
 ///
 /// Public so `/disk.json` never takes a seal receipt's word for the stub
 /// (AG-05 repair 1): a whole receipt beside a single file that still holds
 /// the version-3 census is a seal the store does not have.
+///
+/// **It never waits and never follows** (R3-19, verify-AG-05-r3). It sits
+/// on `/disk.json`'s request path, and it used to `lstat` the name and then
+/// `File::open` it: a FIFO swapped in between the two blocked the request
+/// for a writer that never came, and a link swapped in was followed and its
+/// target read as the stub. The open is now `store::safe_open::open_read_len`
+/// (`O_NOFOLLOW | O_NONBLOCK`), whose `fstat` refuses any handle that is not
+/// a regular file and gives the length the stub must have, so the look and
+/// the read are one handle.
 #[must_use]
 pub fn holds_sealed_stub(path: &Path) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
+    #[cfg(test)]
+    stub_hook::before_open(path);
+    let Ok((mut file, len)) = store::safe_open::open_read_len(path) else {
         return false;
     };
-    if !meta.is_file() || meta.len() != STUB_LEN as u64 {
+    if len != STUB_LEN as u64 {
         return false;
     }
     let mut head = [0_u8; 16];
-    fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut head))
-        .is_ok()
+    file.read_exact(&mut head).is_ok()
         && head.starts_with(b"BRUTEXM")
         && head.get(STUB_VERSION_AT..STUB_VERSION_AT + 2) == Some(&SEALED_VERSION.to_le_bytes())
+}
+
+/// A test's hook between the moment [`holds_sealed_stub`] is asked and its
+/// open: where the check used to look at the name, so a test can swap a pipe
+/// or a link in exactly there. Per thread, so tests running at once never see
+/// each other's hook.
+#[cfg(test)]
+pub(crate) mod stub_hook {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `hook` once, at this thread's next stub check, before its open.
+    pub(crate) fn set(hook: impl FnMut(&Path) + 'static) {
+        HOOK.with_borrow_mut(|held| *held = Some(Box::new(hook)));
+    }
+
+    /// The hook's call site.
+    pub(super) fn before_open(path: &Path) {
+        let hook = HOOK.with_borrow_mut(Option::take);
+        if let Some(mut hook) = hook {
+            hook(path);
+        }
+    }
 }
 
 /// Whether `path` is the inode `kept` describes.
@@ -3871,3 +4507,9 @@ mod tests;
 #[cfg(test)]
 #[path = "census_store_link_tests.rs"]
 mod link_tests;
+
+/// A day's publish costs its own rows through a run's kept census, and the
+/// AG-05 follow-ups R3-19 owns (R3-19, D-6891).
+#[cfg(test)]
+#[path = "census_store_kept_tests.rs"]
+mod kept_tests;

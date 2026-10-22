@@ -55,15 +55,23 @@ pub fn option_underlyings(store: &Path) -> Result<Vec<String>, String> {
 ///
 /// # Errors
 ///
-/// What [`option_underlyings`] and `CmScope::stored` refuse.
+/// What [`option_underlyings`] and `CmScope::stored_from` refuse: the index
+/// and symbol-change rows come from the store's reference tables through
+/// THE ONE LOADER (R3-30), so a row added there is in the next run's scope,
+/// and a refused table refuses the run by name.
 pub fn of(kind: ImportKind, store: &Path) -> Result<(CmScope, usize), String> {
+    let reference = crate::reference_data::load(store);
     match kind {
         ImportKind::Stocks => {
             let underlyings = option_underlyings(store)?;
-            let scope = CmScope::stored(&underlyings)?.with_masters(store.join("session-masters"));
+            let scope = CmScope::stored_from(&reference, &underlyings)?
+                .with_masters(store.join("session-masters"));
             Ok((scope, underlyings.len()))
         }
-        _ => Ok((CmScope::stored(std::iter::empty::<&str>())?, 0)),
+        _ => Ok((
+            CmScope::stored_from(&reference, std::iter::empty::<&str>())?,
+            0,
+        )),
     }
 }
 

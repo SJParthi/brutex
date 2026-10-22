@@ -22,8 +22,10 @@ import { ownMonth } from './moneyness.js';
  *
  * THE MODEL'S LIMITS ARE CARRIED, NOT HIDDEN (D-3330, DB-038, DB-G64). A
  * priced cell keeps the server's flags — `below_band` (a tenor under the band
- * the greeks crate validates itself in) and `above_rate_tenor` (a contract
- * longer than the 91-day rate's own maturity) — and its tenor in years; a
+ * the greeks crate validates itself in), `above_rate_tenor` (a contract
+ * longer than the 91-day rate's own maturity) and `rate_carried` (DB-B44:
+ * the rate is the previous result's, carried over a documented RBI gap row
+ * the server names in `rate_gap`) — and its tenor in years; a
  * premium at or below the zero-carry discounted intrinsic is refused as
  * `below_zero_carry_bound`, a limit of the model's inputs, apart from
  * `iv_unsolved`.
@@ -40,7 +42,9 @@ export const GREEK_WHY = {
   rate_before_series:
     'the rate table has no T-bill result released before this bar’s day, so no rate applies and none earlier is invented.',
   rate_stale:
-    'the latest T-bill result before this bar’s day is more than 14 days old, so an auction is missing from the table and no rate is carried over the gap.',
+    'the latest T-bill result before this bar’s day is more than 14 days old and no documented gap row explains why, so an auction is missing from the table and no rate is carried over the gap.',
+  rate_carried_too_long:
+    'documented gap rows (RBI cancelled the auction, stated NA or held none) cover this bar’s day, but the result they would carry is more than 28 days old, so the rate is not carried that far and no rate is priced (DB-B44).',
   tenor_refused:
     'no time to expiry could be measured for this bar — it is at or past the expiry day’s session close, or that day’s hours are not verified.',
   iv_unsolved: 'no volatility reproduces this bar’s close; the model’s own reason is below.',
@@ -80,7 +84,9 @@ export const GREEK_FLAG = {
   below_band:
     'the time to expiry is below the band the greeks crate validates itself in: near expiry the solved volatility and theta run to extremes, so these figures are shown flagged, not as ordinary ones.',
   above_rate_tenor:
-    'the contract runs longer than 91 days, the risk-free rate’s own maturity (RBI 91-day T-bill, D-2810): the rate is shorter than the tenor it discounts over, and carry is zero because none is sourced (D-2830).'
+    'the contract runs longer than 91 days, the risk-free rate’s own maturity (RBI 91-day T-bill, D-2810): the rate is shorter than the tenor it discounts over, and carry is zero because none is sourced (D-2830).',
+  rate_carried:
+    'the rate is CARRIED: the latest scheduled RBI 91-day auction before this bar’s day set no cut-off (cancelled, NA or not held, documented by a gap row in the rate table), so the previous result’s rate is used and labelled, never shown as a fresh one (DB-B44).'
 };
 
 /**
@@ -101,7 +107,7 @@ export const greekKey = (row) => `${row.instrument}|${row.tf}|${ownMonth(row)}|$
  * @property {string|null} why    the server's reason word, or null when priced
  * @property {string|null} detail the server's own sentence, when it sent one
  * @property {Record<string, any>|null} row the server's row, for the title
- * @property {string[]} flags  `below_band`, `above_rate_tenor` where the server set them
+ * @property {string[]} flags  `below_band`, `above_rate_tenor`, `rate_carried` where the server set them
  * @property {number|null} tenorY 365-day years to the settled expiry's close
  * @property {number|null} age  seconds from the spot used to this bar, 0 for exact
  */
@@ -122,6 +128,7 @@ export function cellOf(s, faults) {
   const flags = [];
   if (s.below_band === true) flags.push('below_band');
   if (s.above_rate_tenor === true) flags.push('above_rate_tenor');
+  if (s.rate_state === 'rate_carried') flags.push('rate_carried');
   const said = { flags, tenorY: num(s.tenor_y), age: num(s.spot_age_s) };
   if (s.why === null && iv !== null) {
     return {

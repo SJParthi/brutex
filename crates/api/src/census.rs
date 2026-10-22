@@ -44,10 +44,10 @@ use std::sync::Arc;
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
+use pull::ingest::census_store::ListRefusal;
 use pull::manifest::{
     Closes, ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, Held, Layout, MAX_ENTRIES, Manifest,
-    ManifestError, ManifestHeader, SEGMENTS, epoch_path, manifest_path, parse_epoch_name,
-    segment_dir, vendor_dir,
+    ManifestError, ManifestHeader, SEGMENTS, epoch_path, manifest_path, segment_dir, vendor_dir,
 };
 use pull::session::Day;
 use store::path::{Timeframe, YearMonth};
@@ -1443,9 +1443,17 @@ fn read_partitioned(root: &Path, vendor: Vendor, previous: Option<&Manifests>) -
         let dir = segment_dir(root, vendor, segment);
         let epoch = match current_epoch(&dir) {
             Ok(epoch) => epoch,
+            // A NAME REFUSED FOR WHAT IS AT IT IS A REFUSAL, NAMED (R3-19,
+            // L-AG05-05): never an empty census, never followed.
+            Err(ListRefusal::Named(reason)) => {
+                return Census::Unreadable {
+                    reason,
+                    fault: Fault::Refused,
+                };
+            }
             Err(why) => {
                 return Census::Unreadable {
-                    reason: format!("{} could not be listed: {why}", dir.display()),
+                    reason: why.to_string(),
                     fault: Fault::Io(why.kind()),
                 };
             }
@@ -1524,53 +1532,46 @@ fn read_partitioned(root: &Path, vendor: Vendor, previous: Option<&Manifests>) -
 /// `<epoch>.man`, or `None` when it holds none or does not exist. D-3316
 /// item 2. A `.man.tmp` is never an answer. O(entries of the directory).
 ///
+/// **The writer's own listing rule** (R3-19, L-AG05-05):
+/// `pull::ingest::census_store::current_epoch_in`, so `/db`'s census reads
+/// and every census writer agree on one rule. This listed `<epoch>.man` names
+/// without their type, so a symbolic link at an epoch's name (or at the
+/// segment's) was this reader's answer and was then opened and followed,
+/// where the writer refuses it by name. Now it is refused here, by name.
+///
 /// # Errors
 ///
-/// A directory that exists and cannot be listed.
-pub(crate) fn current_epoch(dir: &Path) -> std::io::Result<Option<u32>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(absent)
-            if matches!(
-                absent.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(why) => return Err(why),
-    };
-    let mut newest: Option<u32> = None;
-    for entry in entries {
-        if let Some(epoch) = entry?.file_name().to_str().and_then(parse_epoch_name) {
-            newest = Some(newest.map_or(epoch, |seen| seen.max(epoch)));
-        }
-    }
-    Ok(newest)
+/// The listing's refusal: a name that is not what the census wrote there, by
+/// name ([`ListRefusal::Named`]), or a directory that exists and cannot be
+/// measured or listed.
+pub(crate) fn current_epoch(dir: &Path) -> Result<Option<u32>, ListRefusal> {
+    pull::ingest::census_store::current_epoch_in(dir)
 }
 
 /// One epoch's bytes, bounded by the capacity ITS OWN HEADER declares
 /// (D-3316 item 3, DB-G08), and the file's identity.
 ///
-/// The header region is read first, through the same non-blocking open
-/// [`sized`] uses; the largest capacity any partition slot in it declares is
+/// The header region is read first, through the no-follow, non-blocking open
+/// below; the largest capacity any partition slot in it declares is
 /// the bound (the largest, so the generation a load falls back to is
 /// admitted too); a file longer than that bound is refused unread, and the
 /// read is capped one byte past it. A region with no partition slot is
 /// bounded by [`MAX_ENTRIES`] and refused by name when it is decoded.
+///
+/// **Opened through the store's one reading door** (R3-19, L-AG05-05):
+/// `store::safe_open::open_read`, `O_NOFOLLOW | O_NONBLOCK`, whose `fstat`
+/// refuses any handle that is not a regular file. It was opened with
+/// `O_NONBLOCK` alone, so a symbolic link at an epoch's name was followed and
+/// its target read as the epoch. A link, a pipe or a device is now refused
+/// unread in the door's words; a directory stays the file system's
+/// `IsADirectory`, as it always was.
 fn sized_epoch(path: &Path) -> Sized {
     use std::io::Read as _;
-    let file = open_without_waiting(path)?;
+    let file = match open_unfollowed(path)? {
+        Ok(file) => file,
+        Err(refused) => return Ok(Err(refused)),
+    };
     let meta = file.metadata()?;
-    if meta.is_dir() {
-        return Err(std::io::ErrorKind::IsADirectory.into());
-    }
-    if !meta.is_file() {
-        return Ok(Err(format!(
-            "not a regular file (a {}); an epoch is one, and this reader neither waits on a FIFO nor reads a device",
-            kind_of(meta.file_type())
-        )));
-    }
     let mut bytes = Vec::with_capacity(HEADER_LEN_USIZE);
     let _ = (&file).take(HEADER_LEN).read_to_end(&mut bytes)?;
     let capacity = declared_capacity(&bytes).unwrap_or(MAX_ENTRIES);
@@ -1844,21 +1845,23 @@ fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
 
 /// [`sized`], and the identity of the file the bytes came from, taken from
 /// the same descriptor, which a later tail must match (see [`Part`]).
+///
+/// **Never through a link** (R3-19, closing L-AG05-05 for the single file as
+/// well as for the epochs): the open is [`open_unfollowed`], the store's one
+/// reading door, `O_NOFOLLOW | O_NONBLOCK` with the type taken from that
+/// handle's `fstat`. It opened with `O_NONBLOCK` alone, so a symbolic link at
+/// `manifest/<vendor>.man` was followed and a regular file behind it was read
+/// as the census, where every census writer refuses the link by name. A link,
+/// a pipe or a device is refused unread in the door's words; a directory stays
+/// the file system's `IsADirectory`, as the read it replaces gave and as the
+/// stamp check keeps it (D-0695).
 fn sized_with_id(path: &Path) -> Sized {
     use std::io::Read as _;
-    let file = open_without_waiting(path)?;
+    let file = match open_unfollowed(path)? {
+        Ok(file) => file,
+        Err(refused) => return Ok(Err(refused)),
+    };
     let meta = file.metadata()?;
-    // A directory stays the file system's answer, `IsADirectory`, as the
-    // read it replaces gave and as the stamp check keeps it (D-0695).
-    if meta.is_dir() {
-        return Err(std::io::ErrorKind::IsADirectory.into());
-    }
-    if !meta.is_file() {
-        return Ok(Err(format!(
-            "not a regular file (a {}); a manifest is one, and this reader neither waits on a FIFO nor reads a device",
-            kind_of(meta.file_type())
-        )));
-    }
     let size = meta.len();
     if size > MAX_MANIFEST_BYTES {
         return Ok(Err(format!(
@@ -1902,6 +1905,44 @@ const NONBLOCK: Option<i32> = Some(0x4);
     )
 )))]
 const NONBLOCK: Option<i32> = None;
+
+/// Opens a census file — an epoch or the single file — through the store's
+/// one reading door, `store::safe_open::open_read`: never through a final
+/// symbolic link, never waiting on a FIFO, never anything but a regular file
+/// (R3-19, L-AG05-05). The census writers open the same names the same way,
+/// so `/db` and the writer agree on what a census file is.
+///
+/// The three outcomes [`sized_with_id`] documents: `Err` is the file system
+/// speaking (an absent name, and a directory as `IsADirectory`, D-0695),
+/// `Ok(Err)` a name refused for what is at it, unread, in the door's words,
+/// and `Ok(Ok)` the open file. One open and its `fstat`.
+///
+/// **A socket stays the file system speaking** (D-0695): the host will not
+/// open one at all (`EOPNOTSUPP` on macOS, `ENXIO` on Linux), so it was an
+/// I/O fault of the host's kind before this door, and the census cache
+/// declines to keep such a fault
+/// (`server::census_request_tests::a_manifest_that_stats_but_will_not_open_is_not_cached`).
+/// It is still named, in the door's words, inside an `Unsupported` error; a
+/// link, a pipe and a device are refusals by name, as they were.
+fn open_unfollowed(path: &Path) -> std::io::Result<Result<std::fs::File, String>> {
+    match store::safe_open::open_read(path) {
+        Ok(file) => Ok(Ok(file)),
+        Err(refused) => match refused.found() {
+            Some(store::safe_open::Found::Directory) => {
+                Err(std::io::ErrorKind::IsADirectory.into())
+            }
+            Some(store::safe_open::Found::Socket) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                refused.to_string(),
+            )),
+            Some(_) => Ok(Err(refused.to_string())),
+            None => match refused {
+                store::safe_open::ReadRefusal::Io { source, .. } => Err(source),
+                other => Ok(Err(other.to_string())),
+            },
+        },
+    }
+}
 
 /// Opens `path` for reading without waiting for a FIFO's writer.
 pub(crate) fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
@@ -2775,13 +2816,24 @@ mod tests {
         }
         let dir = root("not-a-regular-file");
         for (vendor, device) in [(Vendor::Dhan, "/dev/null"), (Vendor::Zerodha, "/dev/zero")] {
+            // The device itself is refused by the kind its handle has.
+            let why = sized(Path::new(device))
+                .expect("the file system answers")
+                .expect_err("refused, not read");
+            assert!(
+                why.contains("(char_device)")
+                    && why.contains("a character device, not a regular file"),
+                "{why}"
+            );
+            // A link to it at a manifest's name is never followed (R3-19,
+            // L-AG05-05): refused as the link it is, nothing read through it.
             let path = manifest_path(&dir, vendor);
             std::os::unix::fs::symlink(device, &path).expect("a link to a character device");
             let why = sized(&path)
                 .expect("the file system answers")
                 .expect_err("refused, not read");
             assert!(
-                why.contains("not a regular file (a device or other special file)"),
+                why.contains("(symlink)") && why.contains("a symbolic link, not a regular file"),
                 "{why}"
             );
             let census = read_vendor(&dir, vendor);
@@ -2822,7 +2874,7 @@ mod tests {
             .expect("a FIFO with no writer is answered at once, not waited on")
             .expect("the file system answers")
             .expect_err("refused, not read");
-        assert!(why.contains("not a regular file (a FIFO)"), "{why}");
+        assert!(why.contains("a pipe (FIFO), not a regular file"), "{why}");
         let census = read_vendor(&dir, Vendor::Groww);
         assert_eq!(census.state.name(), "unreadable");
         assert!(census.note().contains("FIFO"), "{}", census.note());
@@ -3453,3 +3505,9 @@ pub(crate) mod manifest_reads {
 #[cfg(test)]
 #[path = "census_tail_tests.rs"]
 mod tail_tests;
+
+/// `/db`'s census reads take the writer's listing rule and a no-follow
+/// epoch open (R3-19, L-AG05-05).
+#[cfg(test)]
+#[path = "census_epoch_link_tests.rs"]
+mod epoch_link_tests;

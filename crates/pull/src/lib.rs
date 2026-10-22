@@ -220,6 +220,11 @@ pub mod nse;
 pub mod nseindex;
 pub mod pricing;
 pub mod rate;
+/// Reference tables as store data, through ONE loader (R3-30): the calendar
+/// of record, index identity rows, symbol changes, the F&O list, moved
+/// expiries, lot sizes and the risk-free rate, each with source, checksum
+/// and date, refused by name when it fails its checksum.
+pub mod reference_data;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
 /// which no retry decision in this workspace read before this module.
 ///

@@ -141,17 +141,26 @@ fn w1_api5_1_a_body_reads_the_whole_census_and_the_bullet_says_so() {
         item(INGEST, "fn record_all(").contains("census_store::record(store_root, vendor, held)"),
         "`fn record_all(` goes through the census cycle"
     );
+    // R3-19 (D-6891): `cycle` and `record` keep nothing, so every cycle
+    // reached from here reads the whole census as before; only
+    // `census_store::record_kept`, the GDFL import's run door, keeps a run's
+    // census between its days, and nothing on this body path calls it.
     assert!(
-        item(CENSUS_STORE, "pub fn cycle(").contains("target.load()"),
+        item(CENSUS_STORE, "pub fn cycle(").contains("cycle_with(target, held, mode, None)")
+            && item(CENSUS_STORE, "pub fn record(")
+                .contains("record_with(root, vendor, held, None)")
+            && item(CENSUS_STORE, "fn cycle_with(")
+                .contains("None => (target.load()?, CensusRead::Whole(\"unkept\"))"),
         "and every cycle reads the whole census"
     );
     let load = CENSUS_STORE
-        .split_once("pub fn load(&self)")
+        .split_once("fn load_whole(&self)")
         .and_then(|(_, rest)| rest.split_once("\n    }\n"))
         .map_or("", |(body, _)| body);
     assert!(
-        load.contains("read_census(&path, self.vendor)")
-            && load.contains("read_epoch(&path, self.vendor, segment)"),
+        load.contains("read_single(&path, self.vendor)")
+            && load.contains("read_epoch(&path, self.vendor, segment)")
+            && item(CENSUS_STORE, "fn read_single(").contains("read_census(path, vendor)"),
         "`Target::load` reads the single file or the partition whole: {load}"
     );
     assert!(
