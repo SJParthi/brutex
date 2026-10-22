@@ -665,3 +665,65 @@ fn a_linked_audit_directory_is_refused() {
         "nothing written through the link"
     );
 }
+
+/// **A FULL BUCKET IS REFUSED BY NAME, AND THE LEDGER LINE STANDS** (the
+/// index's maximum, L-R418-04): nine months whose keys share one home slot
+/// fill its bucket of eight; the ninth record is `quarantine_index_full`, its
+/// ledger line is written, and the eight indexed months still probe.
+#[test]
+fn a_ninth_key_on_one_home_slot_is_refused_by_name_and_the_ledger_line_stands() {
+    let store = Store::new("full");
+    let month = march();
+    let target = super::home_of(&super::hash_of("NSE/CASH/QHOME0/1min", month));
+    let mut same: Vec<String> = Vec::new();
+    for n in 0..2_000_000u32 {
+        let symbol = format!("QH{n}");
+        if super::home_of(&super::hash_of(&format!("NSE/CASH/{symbol}/1min"), month)) == target {
+            same.push(symbol);
+            if same.len() == usize::try_from(BUCKET).expect("small") + 1 {
+                break;
+            }
+        }
+    }
+    assert_eq!(same.len(), 9, "nine keys share one home slot");
+    let symbols: Vec<&'static str> = same
+        .into_iter()
+        .map(|s| &*Box::leak(s.into_boxed_str()))
+        .collect();
+    let act = |symbol: &'static str| {
+        record(
+            &store.root,
+            &Record {
+                path: minute(symbol, month),
+                scope: Scope::WholeMonth,
+                cause: Cause::BeforeListing,
+                stamps: &[],
+                bars: 1,
+                revision: 0,
+                source_digest: [3; 32],
+                who: "t",
+                reason: "a full bucket",
+            },
+        )
+    };
+    for symbol in &symbols[..8] {
+        act(symbol).expect("one of eight fits");
+    }
+    let refused = act(symbols[8]);
+    assert!(
+        matches!(refused, Err(QuarantineError::Full { .. })),
+        "{refused:?}"
+    );
+    let ledger = read_ledger(&store.root, Vendor::Zerodha).expect("ledger");
+    assert_eq!(ledger.lines.len(), 9, "the ninth line stands in the ledger");
+    for symbol in &symbols[..8] {
+        assert!(matches!(
+            probe(&store.root, minute(symbol, month)),
+            Ok(Probe::Quarantined(_))
+        ));
+    }
+    assert_eq!(
+        probe(&store.root, minute(symbols[8], month)),
+        Ok(Probe::Clear)
+    );
+}

@@ -79406,7 +79406,7 @@ by the verb: `cli census-recount` follows an apply. `/store.json`'s compact
 wire (`census-tuples-v1`) does not yet carry the field (R4-03 carries it
 over when it restructures the route).
 
-Proof: `store::quarantine::tests::*` (twelve tests), `store::repair::tests::{a_drop_naming_an_unheld_stamp_is_refused,
+Proof: `store::quarantine::tests::*` (thirteen tests), `store::repair::tests::{a_drop_naming_an_unheld_stamp_is_refused,
 a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source,
 a_drop_past_the_last_ordinal_is_the_revision_limit,
 the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation}`,

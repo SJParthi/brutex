@@ -8359,3 +8359,5 @@ directory.
 | R418-11 | **`/instruments.json` flags a quarantined series** | `api::server::quarantine_route::tests::instruments_json_flags_a_quarantined_series` | ✓ |
 | R418-12 | **A quarantine press sends one request with its reason** | `web/tests/quarantine.test.js` `a_quarantine_press_sends_one_request_with_its_reason` | ✓ |
 | R418-13 | **One writer at a time**: a second waits, then is refused naming the holder; a linked audit directory is refused | `store::quarantine::tests::a_second_writer_waits_then_names_the_holder`, `store::quarantine::tests::a_linked_audit_directory_is_refused` | ✓ |
+| R418-14 | **A full bucket is refused by name and its ledger line stands**; the months already indexed still probe | `store::quarantine::tests::a_ninth_key_on_one_home_slot_is_refused_by_name_and_the_ledger_line_stands` | ✓ |
+| R418-15 | **A plan read after an apply names the month already quarantined** and writes nothing | `cli::zerodha_quarantine::tests::plan_writes_nothing_and_apply_drops_the_named_minutes_and_their_buckets_once` | ✓ |
