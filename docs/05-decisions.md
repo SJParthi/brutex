@@ -74300,6 +74300,316 @@ is the silent scope change §3 rule 2 forbids; it is listed as open work.
 stack share `Totals` so that they can never disagree
 (`costs::ledger::a_ledger_closes_precise_to_exactly_what_a_client_security_day_settles`).
 
+### D-5150 — A backtest trades a day, and learns from it, only when the calendar of record calls it a regular weekday 09:15–15:29 session with no special session, no notice of one and no market-wide halt; the full-length Budget weekends and 2024-01-20 are excluded too — 2026-10-16
+
+**Context.** The operator (15 Oct 2026, NEXT-PROMPT.md "NO SPECIAL
+SESSIONS"): never trade a Muhurat, a half day or any other special or short
+session in any backtest; every day that is not a normal full session is
+excluded from trades AND from the own-past statistics that generate the
+values; the data stays stored and labelled; count and show the excluded days
+per year. The attack of the same evening (`state/charges-deep-check-20261015.json`,
+handover issue H5) showed that `pull::calendar::kind_of` cannot carry that
+rule: it answers `Open(Session::full())` for the three Budget weekends,
+2024-01-20 and both March 2020 halt days, and `OpenLengthUnmeasured` for five
+Muhurats. The design judge (16 Oct 2026) added that `kind_of` answers
+`Unmeasured` outside 2019-12-02..2026-09-04, so a rule written on it would
+silently drop every 2018 and 2019 day and the last weeks of 2026.
+
+**Decision.** `pull::calendar::tradable_day(day) -> Result<(), NotTradable>`
+is the one question. It is `Ok` only when `sourced_kind_of(day) ==
+DayKind::Open(Session::full())` (equal to `kind_of` inside the measured window
+and answered from the recorded NSE circulars from 2018-01-01 to 2026-12-31),
+the day is a weekday, and `special_session`, `session_circular` (D-5152) and
+`halt_on` are all `None`
+(`the_rule_is_the_specs_conditions_on_every_day_of_the_record` holds it on
+every day of the record and three past each edge). It never reads the store.
+
+The reason is named, one per day, the first that applies in this order:
+unmeasured, closed, special session or notice, unsized session, halt,
+anything else. `NotTradable`'s codes are explicit discriminants, append-only
+and never renumbered (`the_reason_codes_are_pinned_and_every_reason_has_its_own_name_and_label`):
+0 `Unmeasured`, 1 `Weekend`, 2 `Holiday`, 3 `Muhurat`, 4
+`DisasterRecoveryDrill`, 5 `SystemsOutage`, 6 `BudgetWeekend`, 7
+`WeekendFullSession`, 8 `OpenLengthUnmeasured`, 9 `MarketHalt`, 10 `Unknown`.
+A day outside the record is `Unmeasured`, its own reason and never `Unknown`:
+a year whose circular is owed is a known gap, not an unexplained day.
+
+**Excluding the full-length `BudgetWeekend` and `WeekendFullSession` days**
+(2020-02-01, 2025-02-01, 2026-02-01, 2024-01-20) is the operator's "any other
+special session": their hours were regular, and they are excluded because the
+rule excludes every special session, not because of anything measured about
+their trading. Whether a full-length special session behaves like a normal
+day is a question the data can answer later: each is excluded under its own
+code, so a run that re-admits exactly those two codes and compares is one
+argument away. The bars stay stored and labelled.
+
+**The measured short days stay tradable** (judge, 16 Oct 2026; operator, 16
+Oct 2026 17:15 IST item 5). `SHORT_DAYS` (2019-08-02, 2022-03-07) is evidence
+that minutes were absent in the vendors' answers, not a statement about the
+exchange's session: the exchange held its full session. A reader that needs
+those minutes asks the `verify/` day image, which says "not verified" at
+generation 0. `a_normal_day_stays_tradable_drills_do_not_and_short_days_do`.
+
+**What it does not change.** `kind_of`, `sourced_kind_of` and
+`exchange_kind_of` answer exactly what they did, so
+`cli::stored::calendar_policy_digest_v2` and every recorded run identity are
+unmoved. No consumer is rewired here: the backtest and own-past-statistic
+readers adopt `tradable_day` in their own packages (the Fib Flag priority run),
+each with its test (`docs/06-limits.md` L-CAL-4).
+
+### D-5151 — A session no row explains is refused as `Unknown`, one of unrecorded length as `OpenLengthUnmeasured`, and a year holding either is not counted — 2026-10-16
+
+**Decision.** An open day whose windows are not 09:15–15:29, or a full session
+on a weekend, with no special session, notice or halt to name it, is
+`NotTradable::Unknown`; a session of unrecorded length with no row is
+`OpenLengthUnmeasured`. Both are "unexplained" (`NotTradable::is_unexplained`).
+Neither occurs in today's tables
+(`the_yearly_counts_name_every_excluded_session_and_add_up` asserts zero
+unexplained days in every year 2018–2026); both are reachable through
+`classify` and tested there
+(`classify_names_every_shape_and_refuses_the_unknown_ones`), and `cli
+calendar-days` exits `FAILED` for a year that holds one, naming the count
+(`an_unexplained_day_is_marked_and_refuses_the_year`), so an unknown case
+becomes a sourced row and a test before it is counted. A closed day stays
+closed whatever a row claims about it, and a special kind wins over a halt.
+
+This replaces the first draft of this package, which excluded the short days
+as `ShortDay` and named the unknown case `IrregularSession`; neither name was
+ever merged.
+
+### D-5152 — The special sessions get their notices of record: `SESSION_CIRCULARS`, sixteen rows, each held equal to the measured window — 2026-10-16
+
+**Decision.** `pull::calendar::SESSION_CIRCULARS` records, for every special
+session 2018–2026, the NSE circular (or, for 2021-02-24, SEBI's order) that
+states it: number, date, address, and the normal-market windows it notifies
+(`None` for the untimed 2026-11-08 Muhurat). Read on 2026-10-16 from
+`nsearchives.nseindia.com`; recorded in `docs/00-charter.md` §3 ("The notices
+of record"). Append-only: a later notice (the 2026 Muhurat's timings) is a new
+row and an edit of no other. `SPECIAL_SESSIONS` and its evidence strings are
+untouched; the notice is a second lane beside the measurement, and
+`every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+fails the build if the two lanes disagree. They agree on all fifteen timed
+rows. 2024-01-20's notice (NSE/MSD/60340) sources the session's regular hours;
+WHY the exchange made it a full session stays UNVERIFIED. No NSE circular was
+found for either March 2020 halt, which stay `Suspected` (D-3320). No half-day
+session was found in any notice read.
+
+### D-5153 — `cli calendar-days YEAR`: the excluded days one line each and the year's totals, a pure function of the tables — 2026-10-16
+
+**Decision.** `pull::calendar::year_exclusions(year)` counts a year by the
+tradable-day rule through the running sums (D-5157): two indexed reads and a
+subtraction. It refuses a year not wholly inside the calendar of record
+(2018-01-01..2026-12-31) by name rather than counting it short
+(`a_year_outside_the_record_is_refused_by_name`). `cli calendar-days YEAR`
+prints the year's holiday record (circular, measured or owed), every
+non-tradable day except ordinary closed weekends (counted, not listed) with
+its weekday, its reason, its label and its source, then the totals by reason;
+it reads no store and writes nothing; one `cli.calendar_days` event records
+the year's counts. It is not a sweep verb. Per year, 2018–2026, the excluded
+sessions are 1, 1, 4, 2, 1, 1, 4, 2 and 2: eighteen in all (nine Muhurats,
+three Budget weekends, 2024-01-20, two drills, the outage and two suspected
+halts).
+
+**YEAR is four ASCII digits and nothing else** (CAL-1 self-check, 19 Oct
+2026). `u16::from_str` alone took `+2024` and printed 2024's page, and took
+`02024` and `7` as years; every word that is not four digits is now a misuse
+that names itself and prints the usage, and `0000` and `9999` are refused as
+years outside the record (`calendar_days_refuses_garbage_years_by_name`).
+
+### D-5154 — The measured window is versioned: each version is its own extent of the bitset, computed, with its own digest, and new runs take the newest — 2026-10-16 (the circular tables joined the version in D-5159)
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 4):
+the measured window `FIRST_DAY` 18,232 .. `LAST_DAY` 20,700 was typed beside
+the bits; it must be computed from the measured bitset's own extent, each
+newly stored day appended to a NEW calendar version with its own digest, each
+recorded run naming its version and re-verifying against it, so an extension
+re-keys nothing.
+
+**Decision.** `pull::calendar::MEASURED_VERSIONS` is an append-only table of
+`MeasuredVersion { version, days, source }`, numbered from 1, each answering
+more days of `TRADED` than the one before (a const assertion,
+`versions_ascend`). Version 1 is the original 2,455 days (2019-12-02 ..
+2026-08-21); version 2 adds 2026-08-22 .. 2026-09-04 (D-3346), 2,469 days.
+`FIRST_DAY`, `LAST_DAY` and `DAYS` are const fns of the newest row, pinned by
+const assertions to 18,232, 20,700 and 2,469, so a version appended without a
+decision fails the build; `padding_is_clear` holds that no bit is set past the
+newest extent. `CalendarVersion` answers `kind_of`, `sourced_kind_of` and
+`tradable_day` at any version, and `CalendarVersion::digest` is BLAKE3 of
+canonical bytes (a domain, the version, both spans, every holiday circular and
+session notice, and every day of the record with its kind and tradable code).
+`pull::calendar::calendar_digest()` is the newest version's, built once per
+process. `the_measured_versions_keep_their_extents_and_their_digests`.
+
+**Not wired.** No run identity hashes `calendar_digest` yet: adding it to a
+recorded run's identity is the run owner's change (`docs/06-limits.md`
+L-CAL-7). The measurement of a newly stored day is still the D-3346 method,
+run by hand and landed as a new row.
+
+### D-5155 — The sourced span is computed from an append-only table of NSE holiday circulars, and a missing year stops it — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" item 3):
+`SOURCED_FIRST_DAY` 17,532 .. `SOURCED_LAST_DAY` 20,818 was typed beside the
+rows.
+
+**Decision.** `pull::calendar::HOLIDAY_CIRCULARS` records each NSE
+capital-market holiday circular (year, number, issue date, address, and
+whether it is the year's whole list): NSE/CMTR/36475 (2018), NSE/CMTR/39612
+(2019) with the two additions NSE/CMTR/40536 and NSE/MSD/42319, and
+NSE/CMTR/71775 (2026), each already in `docs/00-charter.md` §9 (D-2805).
+`sourced_span` is a const fn: the first day is 1 January of the earliest year
+with a whole list; the last is 31 December of the latest year Y such that
+every year up to Y is recorded or wholly inside the measured window. A missing
+year stops the span, and a partial row does not make a year recorded. Today
+that gives 2018-01-01..2026-12-31, pinned by const assertions.
+`the_sourced_span_is_computed_from_the_circulars_and_a_gap_stops_it`: an
+appended synthetic 2027 moves the bound, a gap year stops it, and the day
+after the last day is `Unmeasured`. `year_record(year)` says, per year,
+whether its holidays are a recorded circular, measured, or owed.
+
+### D-5156 — The record's end is warned from 1 January of its last sourced year, not 30 typed days before — 2026-10-16
+
+**Decision.** `record_horizon(newest_day).ends_soon` is true from 1 January of
+`SOURCED_LAST_YEAR` (today 2026), because from then the next year's holiday
+circular is owed and nothing later will make the record longer on its own; the
+horizon names that year (`owed_year`, today 2027). It replaces
+`RECORD_ENDS_SOON_DAYS` = 30 (D-4964 point 6), which is removed from the code
+and from the figures `core/tests/decision_citations.rs` holds. The pull run's
+status document keeps its shape (`endsSoon` is true for any day of 2026).
+`the_record_horizon_warns_before_the_end_and_names_the_days_past_it`.
+
+### D-5157 — Per-reason excluded-day counts are running sums indexed by day, so any bucket costs O(1) — 2026-10-16
+
+**Decision.** `RunningSums::build(version)` makes one pass over the version's
+record (3,287 days today) and keeps, per day, the running count of every
+reason and of tradable days; `RunningSums::between(first, last)` is two
+indexed reads and a subtraction whatever the bucket's length, and refuses an
+inverted bucket or one not wholly inside the record by name (`SpanRefusal`).
+`excluded_between` uses the newest version's sums, built once per process.
+`the_running_sums_answer_every_bucket_exactly` compares every month of the
+record and odd buckets with a day-by-day count.
+
+### D-5158 — `cli calendar-days check`: the calendar held against every stored day of every feed, read-only — 2026-10-16
+
+**Context.** The operator (16 Oct 2026 17:15 IST, "NOTHING TYPED" items 1 and
+2): the years to complete are every year holding a stored NSE day of a swept
+or reference instrument in any feed, read from `pull::manifest`; the
+cross-check covers every stored day in every feed and prints (a) held days
+the rule refuses, (b) held weekend or holiday days no row names, as new
+candidates UNVERIFIED until their circular is found, and (c) weekdays called
+open that no feed holds.
+
+**Decision.** `cli calendar-days check` reads `BRUTEX_STORE` and writes
+nothing. Years: every census entry of an NSE month of NIFTY, BANKNIFTY,
+INDIAVIX or an F&O cash equity, any feed (BSE, MCX, contracts and stocks
+outside the F&O list never count), each printed with its holiday record and
+its notices. Days: every NIFTY and BANKNIFTY bar month of each feed (its
+`1day` months where it holds them, else its finest), read through the month's
+own time index, two `first_at_or_after` lookups a day, and each day one
+indexed write into a dense day map whose span the censuses fix before any
+month is read (it was an ordered tree map, O(log d) a day, until the
+self-check of 19 Oct 2026), so a day costs O(1) per feed and no month is
+scanned. A census or month that cannot be read is named `NOT READ`; an
+unexplained refusal, a candidate inside the record, a missing session or an
+unreadable source makes the run exit `FAILED` with the count, and so does a
+store holding no NIFTY or BANKNIFTY day at all: a check of nothing is not a
+pass.
+Candidates in an owed year are listed apart. One `cli.calendar_check` event
+per run and one per instrument-month read.
+
+**Departures, said plainly.** The per-day source is the index bar months
+themselves rather than the GDFL `.prv` landing records and the `verify/` year
+index the operator named: the bars are what those two describe, and the
+`verify/` index answers "not verified" at generation 0. Every run re-reads
+every index month; re-checking only the months whose census entry changed
+needs a memo the read-only check does not write (`docs/06-limits.md`
+L-CAL-9).
+
+**The store, 18 Oct 2026 (read-only, the shadow `shadow/CAL-1`, whose bars
+are the real store's through a link, under the kernel write lock).** Two
+feeds: Zerodha `1day` (282 NIFTY and BANKNIFTY months, 2,911 days, 2015-01
+to 2026-09) and GDFL `1s` (194 months, 1,989 days, 2018-09 to 2026-09), read
+in 981 ms. (a) 17 held sessions refused, every one a row of the tables (the
+eighteen excluded sessions less 2026-11-08, not yet traded); 743 held days
+of 2015-2017 are `Unmeasured`. (b) No candidate inside the record; two in
+the owed years, 2015-02-28 (Sat) and 2016-10-30 (Sun). (c) No weekday called
+open that no feed holds. The years 2015, 2016 and 2017 hold Zerodha months
+and no circular: they are owed (`docs/06-limits.md` L-CAL-8). The check found
+no GDFL `1s` NIFTY or BANKNIFTY bar on any of the eight Muhurats traded so
+far, the two drills or the outage; Zerodha holds a `1day` bar on every one.
+
+### D-5159 — Each calendar version reads its own prefix of the circular tables; a later notice for a day supersedes the earlier one; a recorded year brings its holidays — 2026-10-18
+
+**Context.** D-5154 versioned the measured window and said an extension
+re-keys nothing, but every version read the WHOLE of `HOLIDAY_CIRCULARS` and
+`SESSION_CIRCULARS`. Appending NSE's 2027 holiday circular (owed now:
+`record_horizon` warns from 2026-01-01) would have moved version 2's sourced
+span to 2027-12-31, changed its canonical bytes and so its digest, and every
+run recorded under version 2 would have failed re-verification: the
+re-keying item 4 forbids. Two smaller holes sat beside it: the table is
+append-only and "a later notice is a new row", yet the lookup returned the
+FIRST row naming a day, so the 2026 Muhurat's timing notice, appended, would
+never have been read; and `sourced_kind` calls every weekday open unless
+`SOURCED_HOLIDAYS` lists it, so a circular row appended without its days
+would have called each of that year's holidays a session.
+
+**Decision.** `MeasuredVersion` carries `holiday_circulars` and
+`session_circulars`: how many rows of each table it reads, from the first.
+`CalendarVersion` holds those prefixes and answers, spans and hashes only
+them. Both versions read 5 and 16. `versions_ascend` now requires each
+version to read no fewer days or rows than the one before and to add
+something; a version may add only a circular or only a notice.
+`versions_read_the_tables` (a const assertion) holds that no version reads
+past a table and that the newest reads every row, so a row appended without
+its version fails the build. A day's notice is the LAST row naming it
+(`notice_in`), and `year_record` counts a day once, by its newest notice.
+`recorded_years_list_their_holidays` (a const assertion) refuses a
+whole-year circular, for a year not wholly measured, with no day of that
+year in `SOURCED_HOLIDAYS` outside the window. Version 2's digest is pinned
+to the value first printed on 2026-10-18,
+`de177094a06002658c4ce9d9f79e423c635f63d2762756bfdbd215f27b333bf0`; the move
+changed no byte. Proofs: `an_appended_row_is_a_new_version_and_re_keys_none_before_it`,
+`version_two_keeps_its_recorded_digest`,
+`a_recorded_year_without_its_holidays_is_refused`,
+`a_bad_version_table_or_padding_is_refused`.
+
+**What it does not version.** `TRADED`'s bits up to each version's extent
+are versioned (D-5154); the older tables (`SPECIAL_SESSIONS`, `HALTS`,
+`IRREGULAR`, `SOURCED_HOLIDAYS`, `SOURCED_SPECIAL`) are not, because they are
+not this package's. A change to one of them that changes how a day of a
+version's record is answered changes that version's digest, and the pinned
+digest fails the build: that is a re-keying, and it is meant to be loud. A
+row that answers only days past every version's record changes nothing.
+
+**`cli calendar-days check` columns.** The year table's holiday text of an
+owed year (87 characters) ran into its notices column; each column is now
+held apart by two spaces (`the_check_reads_every_feed_and_prints_the_three_lists`).
+
+**Repair round 1 (2026-10-21, after `verify-CAL-1-r1.json`).** Four CI
+shell gates refused what the package added, and four follow-ups sat in its
+own files. (1) Gate 11 rule 7: the three new membership tests are gone —
+`calendar_days::is_day_source` destructures the two-entry `DAY_SOURCES`, and
+`calendar::in_span` (two comparisons) answers both of
+`CalendarVersion::sourced_kind_of`'s windows and `measured_kind`'s, so the
+file's allowance falls from 2 to 1. (2) Gate 12: each cost-claiming doc block
+(`DayMasks`, `findings`, `month_days`, `RunningSums`, `excluded_between`,
+`year_exclusions`, `year_record`) names its measuring test, and
+`tradable_day_and_every_bucket_are_bounded` now measures `year_record` too.
+(3) Gate 23: the two `#[cfg(test)]` files' `eprintln!` lines are declared with
+their counts. (4) Gate 1d: the five circular serials are declared in
+`.github/gates_tree.rs` (`CAL1_CIRCULAR_SERIAL`) as exchange circular
+numbers, never credential path segments. The follow-ups: version 1's digest
+is pinned as well (`3b695fd9cd936f511f7c1ac78de26e7f7e401e75bcda628c06f588124e0d03a4`,
+`version_one_keeps_its_recorded_digest`), so a row appended to a table that
+is not versioned (docs/06-limits.md L-CAL-11) fails the build for every
+version it moves; a version whose sourced span and measured window neither
+overlap nor touch fails the build (`records_are_unbroken`, a const
+assertion; `a_record_with_a_hole_between_its_spans_is_refused`), because
+`record()` would otherwise hold days neither answers; the notice-table test
+accepts a repeated day as a later notice, as this entry says the table grows,
+and is driven on the table with an invented later 2026-11-08 notice
+appended; a halt is named once on its line, and a holiday inside the measured
+window says it was measured closed with no recorded name.
+
 ### D-5831 — A snapshot name begins with a letter or a digit, `--snapshot` never takes a flag as its NAME, and a filter name is a store symbol before any lock; a refusal's report is sealed (IA-1 repair 1; amends D-4902) — 2026-10-18
 
 **Number** the ledger's head plus one at this head (A6); re-checked at
@@ -76472,6 +76782,81 @@ is unchanged, so before and after are the same.
 counted allocator, `a_month_decoded_into_one_buffer_reallocates_by_doubling`,
 and the unchanged refusal pins. Invariants SC1-02, SC1-09; limits L-SC-1,
 L-SC-12.
+
+### D-5904 — The write door of a sealed month: a batch it holds is `AlreadyPresent`, any other is `StoreError::Sealed` naming what its raw form would have done, the probe is made under the writer's lock, and the pull and the GDFL import file a batch the raw form would append as the month's successor generation — 2026-10-20
+
+The store-compression design (`state/design/store-compression-20261012.md`
+§3, §4.5, §6, §9 row SC-4; its proposed D-4929, whose read half is D-5899)
+gives a closed month a second form, the sealed `.sbar` of D-4965, written once
+and never opened for writing again. D-5899 opened it to every reader and said
+the write door was SC-4's. Until this entry the writer door did not know the
+form existed: `BarFile::open_or_create` opened (or created) the raw `.bin`
+beside a `.sbar` and appended there, so the bars were committed where no
+reader looks, because the read door opens the `.sbar` first; and a month held
+only sealed (after a retirement, SC-9) was re-created empty as a `.bin` and
+filled from its first bar.
+
+**The writer door opens the sealed form, under the lock.** `open_or_create`
+probes `.sbar` with the read door's own `open_sealed_at` after it holds the
+month's exclusive lock and after the generation pointer is asked again, and
+before the `.bin` is opened or created. The sealer holds the lock shared from
+its first step to its last (design §4.6), so a writer either excluded it or
+sees its finished file; a probe made before the lock could miss a seal that
+finished in between. A damaged or misfiled `.sbar` is refused here exactly as
+a reader refuses it (`SealedRefused`), never passed over for the `.bin`. The
+sealed handle keeps the lock and writes nothing.
+
+**What `append` answers.** The batch's own refusals first, in their own words
+(empty, out of order, impossible, outside the month, off the rung's grid).
+Then the questions the raw door asks, through the same functions over the same
+records: a batch the month holds bit for bit is `Appended::AlreadyPresent` at
+the index it sits at, so a resumed import stays idempotent; any other batch is
+`StoreError::Sealed { path, n_valid, last_ts_micros, at, ts_micros, offer }`,
+where `offer` is `SealedOffer::Follows` when the raw month would have
+committed it (from `at` on it follows the last held bar and every offered bar
+before `at` is held byte for byte) and `SealedOffer::Disagrees(conflict)`
+when the raw month would have refused it as `OverlapDisagrees` with that
+conflict, at the same index and stamp. A counter at its end is the raw door's
+`Format` refusal. Nothing is written in any case. The store emits no line for
+it, like every other refusal of that door; the caller logs and routes it.
+
+**The form is never the content: callers answer `Sealed` as they answer the
+raw month.** `pull::ingest`'s append door (`append_or_successor`), used by the
+Zerodha pull for the minute month and for every derived rung month, and the
+GDFL import's back-fill door, file a `Follows` batch as the month's successor
+generation through the one repair authority (`store::repair::repair_month`,
+D-3350), which reads the sealed month through the read door and publishes
+every held bar plus the new ones as a raw month under `bar-revisions-v1/<n>/`;
+it is sealed again later like any other. A `repairing` line naming
+`sealed-month successor` is journaled before the repair and its `repair` or
+`refused` line after it. `Disagrees` stands as the raw month's refusal would.
+The GDFL worker's own append door files nothing as a generation (D-3353): it
+commits nothing, and the coordinator files the day again through the back-fill
+door, which routes it. The basis witness (D-3323) is not asked of a `Follows`
+batch: it guards bars inserted among held ones, and the append door commits a
+`Follows` batch to a raw month with no witness, so asking one would refuse at a
+sealed month what the raw month takes.
+
+**A revision ordinal holding a `.sbar` is stepped over.** `write_revision`
+refused an ordinal that already held a `.bin`, `.crc`, `.lock` or `.tix`, but
+not a `.sbar`; a raw revision written beside one would publish bars no reader
+opens. Now `Incomplete`, stepped over and named like the others.
+
+**FM-283 at this door: committed bars are never rewritten.** The failure
+matrix feared an append into an open compressed block. The design never has
+one: a month is sealed whole once closed, and a bar it lacks lands only as a
+whole successor generation. A kill at any step before that generation is
+promoted leaves the sealed month served bit for bit: a torn ordinal is kept as
+found and stepped over, a whole unpromoted one is found again
+(`Published::Reused`) and promoted (invariant SC4-14). The kill points of the
+sealer itself are SC-6's.
+
+**Not decided here.** The failure kinds of IA-16's typed repair door are
+IA-16's: `Sealed` must be one of them (not merged when this landed). A repair
+or promotion over a month whose `.lock` a retirement removed would be refused
+for want of the lock (`repair::publish`, `generation::promote` take it shared);
+retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
+teach those two that a sealed source needs none. Sealing itself is SC-6's.
 
 ### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
 
@@ -78966,6 +79351,95 @@ of the pinned toolchain.
 `,` or `where`, one backward walk to the nearest `;`, `{` or `where`:
 test-time only, no shipped code.
 
+### D-6247 — A month served from a repair revision answers every batch as its raw form would, and a batch that follows it is filed as its next successor generation: the second late day of a sealed month lands with no human step (SC-4 repair round 1) — 2026-10-20
+
+**What was wrong.** D-5904 filed a sealed month's late day as its successor
+generation, so after the first late day every sealed month was served from a
+repair revision (D-3350). The pull's append door answered a revision-served
+month with `ingest::already_served`, which took only a batch it held bar for
+bar and refused every other one, naming `POST /pull/repair` or `cli
+zerodha-repair`. So a SECOND late day, in its own pull, met that refusal: the
+second agent's probe (`state/fix/round2/verify-SC-4-r1.json`) landed
+2024-04-01..03 into two stores, sealed one, then landed 04-04 and 04-05 in two
+pulls: the never-sealed store committed 375 bars each time, the sealed store
+committed 375 and then 0, and all eight months (1 min and the seven derived
+rungs) differed, the sealed store serving 1,500 April minute bars against
+1,875. Invariant SC4-12 and `append_or_successor`'s own doc ("the outcome of
+every batch is the one the month's raw form gives it") were false from the
+second late day on, and the automated chain stopped at a manual step.
+
+**Decided.** The writer door still never appends to a revision (D-3350
+unchanged). Instead the served generation is ASKED, through the read door,
+what its raw form would do with the batch: `store::file::BarFile::offer`, a
+read-only method that asks the raw door's own questions in its order
+(`may_append`, `survey`, the month's admission, `Header::advance`, then
+`already_stored`, `suffix_that_follows`, `diagnose_overlap`), the same code
+the sealed writer door asks (`sealed_offer` and `offer` now share
+`raw_answer`), and writes nothing. Its answer is `store::file::Offered`:
+`Held` exactly when the raw door says `AlreadyPresent`; `Unheld` with
+`SealedOffer::Follows` exactly when it would commit; `Unheld` with
+`SealedOffer::Disagrees(c)` exactly when it would refuse as
+`OverlapDisagrees`. The pull's `already_served` answers `Held` as before
+(nothing written, the served census row) and hands a `Follows` batch back as
+`Unwritten { follows: Some(Follows::Revision) }`, which `append_or_successor`
+(the Zerodha pull, every derived rung) and the GDFL back-fill door file as
+the month's NEXT successor generation through the same repair door a sealed
+month's late day takes (`successor_of_served`, `repair_after`,
+`store::repair::repair_month`), journaled `repairing` before and `repair`
+after, with the reason `revision successor, bars after its last (D-6247)`.
+Every other batch is refused in the raw form's words (`... batch record N
+restates the record held at T (offer=restated)`), nothing written. One door
+for every month the writer door never appends to, whatever its form or
+generation.
+
+**Rejected.** Narrowing SC4-12 to the first late day (the checker's option
+b): it keeps a manual step (`POST /pull/repair`) inside the daily chain the
+operator wants to run with no human or Claude step, and it keeps two answers
+for one batch depending on how many late days came before it. Appending to a
+revision in place: D-3350 forbids it (an append to the original would never
+be served, and a revision is immutable once promoted).
+
+**What it changes for a month never sealed.** A month a DB-N20 repair
+promoted is revision-served too, and its later late days are now each its
+next successor instead of a refusal naming `POST /pull/repair`. That is the
+raw form's answer (the raw month appends them) and the same door; each costs
+a whole-month rewrite, bounded by `store::repair::MAX_REVISIONS` (1,024)
+generations a month, after which the repair refuses by name
+(`docs/06-limits.md` L-SC4-01). The GDFL back-fill door's own judgement
+(`lack_of`) is unchanged for every batch the raw form would NOT commit: a
+held day read differently, or with a second inside the held range, is still
+refused and never merged (DB-N26).
+
+**Proved by** `crates/pull/tests/sealed_month.rs`
+`two_late_days_in_two_pulls_after_sealing_serve_what_a_never_sealed_store_serves`
+(three pulls after sealing, the third a window re-reading the second late
+day and adding a third: every month equal to a never-sealed store, served
+generation 1, 2, 3, the originals and every earlier revision byte-identical,
+three `repairing`/`repair` pairs per month, the second and third naming
+`revision successor` and `from_generation=1 to_generation=2`,
+`from_generation=2 to_generation=3`; the same window again writes nothing and
+spends no generation; a restated minute of a held late day refused as the
+raw month refuses it), which failed on the code before this (the checker's
+probe `probe_two_late_days_in_two_pulls` on 9f440a858: `months that differ: 8
+of 8`); and `crates/store/src/file_write_door_tests.rs`
+`an_offer_through_a_read_only_handle_is_the_raw_doors_answer` (nine batch
+shapes, raw and sealed, spot and option: `Held`, `Follows` and
+`Disagrees(c)` exactly where the raw writer answers `AlreadyPresent`,
+`Committed` and `OverlapDisagrees(c)`; garbage batches the raw door's own
+refusal; an empty month; nothing written); and, for the GDFL back-fill door
+(added in SC-4 repair round 2, after the second checker found this arm a
+surviving mutant), `crates/pull/src/gdfl_sealed_tests.rs`
+`a_resumed_late_day_at_a_revision_served_month_lands_as_its_next_successor`
+(NIFTY's 1 s April made revision-served by a back-filled hole and by a
+sealed month's first late day, then the first 30 s of a new day and the
+whole day with the held 30 s byte-equal: each the month's next successor,
+generation 2 then 3, equal to a never-sealed store at every step, the
+original and revision 1 byte-identical, `repairing` with reason
+`revision_successor_` and `repair` journaled for each, the whole day again
+writing nothing), which fails when a `Follows::Revision` batch is routed to
+`lack_of` as before this decision (the whole day commits 0, refused as an
+overlap). Invariants SC4-15, SC4-16, SC4-17; limit L-SC4-01.
+
 ### D-4814 — The `_v3` extraction ledger is evidence, never a source: read only, a manifest trusted by its ok marker, compared with the day's listing line for line (IA-3-OPT) — 2026-10-20
 
 The design's own id (`state/design/ingest-automation.md` §16, D-4814),
@@ -79300,3 +79774,157 @@ docs/04-invariants.md R319-01..R319-12), the updated
 and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
+
+### D-7120 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 in `Cargo.lock` only, clearing RUSTSEC-2026-0382 and RUSTSEC-2026-0381; and the C-HA-01 cost row R4-09a named and never landed (BASE-REDS-1021) — 2026-10-21
+
+**Context** (BASE-REDS-1021). The full gate on `feat/db-fix` at 8c67456ac
+(`state/fix/gate-8c67456a.sh`, one private target directory, log
+`state/fix/gate-8c67456a.log`, EXIT 1 on 21 Oct 2026 at 10:47 IST) found
+exactly two reds; fmt, clippy, the web tests and the web build were green.
+
+1. `cargo deny check` failed `advisories` (bans, licenses and sources ok) on
+   two advisories published after DENY-1 (D-5090) made it green on 17 Oct:
+   **RUSTSEC-2026-0382**, dated 2026-10-20, "Certificate verification may
+   accept distrusted intermediates", against `rustls-webpki` 0.103.15,
+   patched `>= 0.103.16, < 0.104.0-alpha.1` or `>= 0.104.0-alpha.8`; and
+   **RUSTSEC-2026-0381**, dated 2026-10-19, "Bundled root certificates allow
+   trust in distrusted emSign intermediates", against `webpki-roots` 1.0.9,
+   patched `>= 1.0.10`. Both carry the alias CVE-2026-111943 and concern
+   emSign (eMudhra) intermediates whose private keys the advisories say are
+   now well known. Read from the advisory database `cargo deny` fetched, at
+   its commit `e6f94f3760d5e6c54c1b05f204002263bc025524` (2026-10-20 21:24
+   +0200); `docs/00-charter.md` records both files' digests.
+2. `cargo test -p core --test cost_invariants` failed
+   `every_measured_cost_invariant_is_declared` on `["C-HA-01"]`: the store
+   bench prints `C-HA-01` (R4-09a, D-6240) and no row of
+   `docs/04-invariants.md` declares it. HA-03 names C-HA-01 in its proof
+   cell, but the test counts a line as declaring an id only when the id is
+   its FIRST cell, so a citation is not a declaration (the test's own
+   `declared_rows`). D-6240 ends "Invariants HA-01 to HA-04, C-HA-01": the
+   row was intended and missed.
+
+**Decision.**
+
+1. **A lock-only bump, and nothing else moved.** `cargo update -p
+   rustls-webpki -p webpki-roots` locked exactly two packages,
+   `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10, the
+   newest versions the resolver offers. `git diff Cargo.lock` is their
+   `version` and `checksum` lines, four out and four in: no other package and
+   no `dependencies` list moved. No `Cargo.toml` changes. Nothing in the
+   workspace names either crate; both arrive through `reqwest` 0.12.28's
+   `rustls-tls-webpki-roots-no-provider` feature, and both new versions are
+   patch releases inside the ranges their parents declare. `cargo tree -i`:
+   `rustls-webpki` ← `rustls` 0.23.46 ← `hyper-rustls` 0.27.9, `reqwest`
+   0.12.28, `rustls-graviola` 0.4.0 and `tokio-rustls` 0.26.4 ← `pull` ←
+   `api`, `cli`; `webpki-roots` ← `hyper-rustls` 0.27.9 and `reqwest` 0.12.28
+   ← `pull` ← `api`, `cli`.
+2. **Why a lock bump is enough, read from the registry sources.**
+   `rustls-webpki` 0.103.16 adds one fixed list, `DISTRUSTED_SPKIS`, of eight
+   emSign intermediate public keys (`src/data/distrusted/*.spki.der`, compiled
+   in with `include_bytes!` in `src/verify_cert.rs`), and refuses a path whose
+   certificate or trust anchor carries one with the new
+   `Error::CertDistrusted`. `webpki-roots` 1.0.10 removes exactly one trust
+   anchor, `emSign ECC Root CA - G3` (121 `TrustAnchor` entries in
+   `src/lib.rs` → 120). Neither touches an API this workspace calls: `pull`
+   hands `reqwest` its roots through the feature above and names neither
+   crate. Each manifest moves only `version` (and `rustls-webpki`'s
+   `rust-version`, 1.70 → 1.71, under the pinned 1.97.1): the same features,
+   so `ring` stays off by default and D-1435's skipped `rustls-webpki ->
+   ring` edge is still weak.
+3. **The scan the dependency fingerprint demands, then the re-pin.**
+   `crates/vocab/tests/workspace_is_rust.rs` hashes every package's version
+   (D-1611), so the bump moved its pin, 0x8070_52EA_72E5_1027 →
+   0x57F8_69FF_1E0D_4A5C. Over both registry sources before and after:
+   neither ships a `build.rs` or any `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.s`,
+   `.asm` or `.js` file; `webpki-roots` 1.0.10's file set equals 1.0.9's;
+   `rustls-webpki` 0.103.16's adds only the eight `.der` keys. The package
+   count stays 194 and `DECLARED` is unchanged. `docs/06-limits.md`'s D-1435
+   paragraph said the fingerprint hashed "never versions", which D-1611 made
+   untrue; it is corrected there, since this bump is the case it described.
+4. **What changes at run time, stated rather than hidden.** A TLS connection
+   `pull` makes through `reqwest` (the broker, the Dropbox fetch, AWS
+   Parameter Store) to a server whose chain passes through one of the eight
+   intermediates, or anchors only at the removed root, is now refused with a
+   certificate error by the call site's existing refusal: loudly, never
+   retried on weaker verification. Whether any host this repository contacts
+   chains through them is **UNVERIFIED**: this package made no connection to
+   any vendor host (`docs/06-limits.md` L-BREDS-1).
+5. **Green is a property of the advisory database, not only of the tree.**
+   The tree did not change between DENY-1's green and this red; the database
+   did. This decision's green was taken twice: at the database commit above,
+   and again on the final tree at `4b587f00996ebe5c05a73eaef105ef241e876414`
+   (2026-10-21 08:20 +0200). The two commits between them change
+   `RUSTSEC-2026-0381.md` only by marking `webpki-roots` 0.26.11, a
+   compatibility package this lock does not hold, unaffected, and add no
+   advisory against a package it holds (`docs/06-limits.md` L-BREDS-2).
+6. **The C-HA-01 row is landed** as the last row of R4-09a's table in
+   `docs/04-invariants.md`, after HA-01 to HA-06, in the form of every other
+   cost row: what it proves (auditing a header's slots costs the same at 1x,
+   10x and 100x the region, inside gate 8's 3.0x ceiling, p50, p99 and max
+   printed beside it), the bench and its three printed labels, the O(1)
+   shape test `slot_audit::it_reads_exactly_max_slots_positions_whatever_the_region_holds_beyond`
+   and `docs/06-limits.md` L-HA-01. The test is unchanged. **One row, not
+   two:** the branch `fix/db-BASE-GATE11`, not merged on 21 Oct, adds its own
+   C-HA-01 row at the same line (its D-6625). The two state one invariant and
+   are placed on the same line on purpose, so whichever merges second meets a
+   conflict there instead of landing a second row beside the first; the
+   resolution keeps one row, this one carrying the proofs the other names
+   only by the bench. A resolution that kept both is CI gate 10b's refusal:
+   `gates_tree gate-10b` (built from `.github/gates_tree.rs` as CI builds it)
+   prints "OK — every invariant identifier is unique." on this tree and
+   refuses a copy of it holding both rows with "INVARIANT IDENTIFIER DEFINED
+   MORE THAN ONCE: C-HA-01". `cost_invariants` alone would not see it: it
+   reads rows into a map, so a second row replaces the first.
+7. **Why the merges after 20 Oct 09:26 IST did not stop on red 2.** R4-09a's
+   gates and its second check ran `cargo test -p store -p pull -p cli -p api`;
+   `cost_invariants` lives in `core`, which R4-09a did not touch, and reads
+   files of other crates (every `benches/ratio.rs` and
+   `docs/04-invariants.md`). The merge step runs `cargo check --workspace
+   --all-targets` and, when `docs/04`, `docs/06` or `docs/07` changes, only
+   `store`'s `cited_commits`. Stale artefacts in a shared target pool were
+   not the cause: the later runs did build and run `cost_invariants`, and it
+   failed for them. At least thirteen package runs or second checks between
+   20 Oct 11:09 IST and 21 Oct 13:15 IST (AG-06, PREC-1's second check,
+   R3-13, R4-17, BASE-GATE11, CLOUD-RUST1, DATA-1, R3-15, R3-24, CLOUD-CHG1,
+   R3-30, CAL-1 and PIT-1, each in its `state/fix/round2/` report) saw it,
+   judged it pre-existing on `feat/db-fix`, and recorded it; BASE-GATE11 also
+   wrote the row on its own branch, not yet merged. No step routes a red
+   judged pre-existing to an owner or holds a merge on it, so it waited for
+   the next full gate. What would have caught it at R4-09a's merge: the merge
+   step running `cargo test -p core --test cost_invariants --locked` whenever
+   a merge touches `docs/04-invariants.md` or any `benches/ratio.rs`, beside
+   the `cited_commits` run it already makes for `docs/04`; or a package gate
+   that runs the `core` document tests whenever a package touches a document
+   they read. Either is a launcher change, outside this repository.
+8. **An offline floor, so the bump cannot be undone by a merge in silence.**
+   `cargo deny` needs the advisory database at run time; the launcher's
+   merge step does not run it and its full gate runs it "if installed",
+   while a `Cargo.lock` conflict settled by taking the older side would
+   quietly restore 0.103.15 and 1.0.9.
+   `crates/vocab/tests/workspace_is_rust.rs`, the test that already parses the
+   lock for the dependency pin, now holds `FLOORS`: each advisory's own
+   `patched` and `unaffected` lines, judged by semver precedence over every
+   locked copy, with a version or comparator it cannot read refused by name
+   and never cleared (invariants BREDS-01 to BREDS-04). Run against
+   `feat/db-fix`'s lock it fails naming both packages and both advisories,
+   and it passes on this one (`run2/floor-before-after.log`). It is a
+   floor for these two advisories, not a second `cargo deny`
+   (`docs/06-limits.md` L-BREDS-3).
+
+**Proof.** `cargo deny check` after the bump: advisories ok, bans ok,
+licenses ok, sources ok.
+`cost_invariants::every_measured_cost_invariant_is_declared` fails before
+(the gate log above) and passes after;
+`workspace_is_rust::the_dependency_set_has_not_moved_without_review` failed on
+the bumped lock with the old pin and passes with the new one. Logs:
+`state/fix/round2/logs-BASE-REDS-1021/` (the first run) and its `run2/`:
+every gate on the tree after merging `feat/db-fix` at 5ff4956cc
+(`gates-own-summary.log`: 10,034 tests passed, none failed), and the
+document tests, `cargo check` and `cargo deny` again after merging R3-19
+(`merge-summary.log`), whose only meeting with this change is the ledger
+ends.
+
+**Cost.** No repository operation changes: two lock versions and one
+document row. The added verification work is `rustls-webpki`'s comparison of
+a path's certificates against a fixed list of eight keys, once per TLS
+handshake, bounded by that constant and not measured here.

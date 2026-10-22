@@ -1857,7 +1857,10 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/costs/src/day.rs", 2),
     ("crates/engine/src/lib.rs", 1),
     ("crates/greeks/src/solver.rs", 1),
-    ("crates/pull/src/calendar.rs", 2), // 1 -> 2, GF-1 (docs/06-limits.md)
+    // 1 -> 2, GF-1 (docs/06-limits.md); 2 -> 1, CAL-1 repair round 1 (21 Oct
+    // 2026): `measured_kind`'s window test is now `in_span`, two comparisons,
+    // so the halt's second range is the one declared membership left.
+    ("crates/pull/src/calendar.rs", 1),
     ("crates/pull/src/fnowork.rs", 1),
     ("crates/pull/src/pricing.rs", 2),
     ("crates/runner/src/closed.rs", 1),

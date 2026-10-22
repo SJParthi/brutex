@@ -230,6 +230,59 @@ here.
 2026 has an announced Muhurat date (2026-11-08) with **no notified timings**.
 It is therefore absent rather than guessed.
 
+**The notices of record, read 16 Oct 2026 (CAL-1, D-5152).** Every special
+session from 2018 to 2026 above now has the exchange's own notice beside its
+measurement. Each PDF was fetched from `nsearchives.nseindia.com` on
+2026-10-16 and read as text (`pdftotext`); only its number, date and the
+normal-market times are recorded. `pull::calendar::SESSION_CIRCULARS` holds
+these rows, and
+`pull::calendar::tradable_tests::every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+fails the build if a notice's window and the measured window above ever
+disagree. Today they agree on every row. An end time is exclusive: "18:15 to
+19:15 hrs" is the sixty minute bars 18:15–19:14.
+
+| Date | Kind | Notice | Normal market as notified |
+|---|---|---|---|
+| 2018-11-07 (Wed) | Muhurat | [NSE/CMTR/39216](https://nsearchives.nseindia.com/content/circulars/CMTR39216.pdf), 23 Oct 2018 | 17:30 – 18:30 ("Normal Market/LPM") |
+| 2019-10-27 (Sun) | Muhurat | [NSE/CMTR/42483](https://nsearchives.nseindia.com/content/circulars/CMTR42483.pdf), 23 Oct 2019, revised timings, "in partial modification" of NSE/CMTR/42403 of 15 Oct 2019 | 18:15 – 19:15 |
+| 2020-02-01 (Sat) | Budget weekend | [NSE/CMTR/43290](https://nsearchives.nseindia.com/content/circulars/CMTR43290.pdf), 22 Jan 2020, live trading session for the Union Budget | 09:15 – 15:30 |
+| 2020-11-14 (Sat) | Muhurat | [NSE/CMTR/46230](https://nsearchives.nseindia.com/content/circulars/CMTR46230.pdf), 2 Nov 2020 | 18:15 – 19:15 |
+| 2021-11-04 (Thu) | Muhurat | [NSE/CMTR/50050](https://nsearchives.nseindia.com/content/circulars/CMTR50050.pdf), 21 Oct 2021 | 18:15 – 19:15 |
+| 2022-10-24 (Mon) | Muhurat | [NSE/CMTR/54023](https://nsearchives.nseindia.com/content/circulars/CMTR54023.pdf), 11 Oct 2022 | 18:15 – 19:15 |
+| 2023-11-12 (Sun) | Muhurat | [NSE/CMTR/59124](https://nsearchives.nseindia.com/content/circulars/CMTR59124.pdf), 27 Oct 2023 | 18:15 – 19:15 |
+| 2024-01-20 (Sat) | Weekend full session | [NSE/MSD/60340](https://nsearchives.nseindia.com/content/circulars/MSD60340.pdf), 19 Jan 2024: "regular trading sessions ... as per regular market timings" from the primary site; it withdrew NSE/MSD/59999 (28 Dec 2023), NSE/MSD/60300 and NSE/MSD/60318, which had planned a disaster-recovery switch-over session that Saturday | regular hours, 09:15 – 15:30. WHY the day became a full session it does not say: still UNVERIFIED |
+| 2024-03-02 (Sat) | DR drill | [NSE/MSD/60677](https://nsearchives.nseindia.com/content/circulars/MSD60677.pdf), 14 Feb 2024; reminder [NSE/MSD/60942](https://nsearchives.nseindia.com/content/circulars/MSD60942.pdf), 1 Mar 2024 | 09:15 – 10:00 (primary site) and 11:30 – 12:30 (DR site) |
+| 2024-05-18 (Sat) | DR drill | [NSE/MSD/61893](https://nsearchives.nseindia.com/content/circulars/MSD61893.pdf), 7 May 2024 | 09:15 – 10:00 and 11:30 – 12:30 |
+| 2024-11-01 (Fri) | Muhurat | [NSE/CMTR/64628](https://nsearchives.nseindia.com/content/circulars/CMTR64628.pdf), 19 Oct 2024 | 18:00 – 19:00 |
+| 2025-02-01 (Sat) | Budget weekend | [NSE/CMTR/65729](https://nsearchives.nseindia.com/content/circulars/CMTR65729.pdf), 23 Dec 2024 | 09:15 – 15:30 |
+| 2025-10-21 (Tue) | Muhurat | [NSE/CMTR/70319](https://nsearchives.nseindia.com/content/circulars/CMTR70319.pdf), 22 Sep 2025 | 13:45 – 14:45 |
+| 2026-02-01 (Sun) | Budget weekend | [NSE/CMTR/72349](https://nsearchives.nseindia.com/content/circulars/CMTR72349.pdf), 16 Jan 2026 | 09:15 – 15:30 |
+| 2026-11-08 (Sun) | Muhurat | [NSE/CMTR/71775](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf), 12 Dec 2025: the date only, "timings ... shall be notified subsequently" | **UNVERIFIED**: no timing circular found on 2026-10-16, nor again on 2026-10-18 or 2026-10-19 |
+
+2021-02-24 keeps SEBI's order (the outage row above) as its source: no NSE
+circular of that day's windows is recorded. Searched on 2026-10-16 and **not
+found**, so still UNVERIFIED: an NSE circular for either March 2020
+market-wide halt (2020-03-13, 2020-03-23; only press reports of the 10%
+breaker, a 45-minute halt and a 15-minute pre-open were found, and those are
+not primary); a cause for either measured short day (2019-08-02,
+2022-03-07); and any half-day session. No half-day or other shortened
+regular session was found in any notice read; the read-only data check of
+the stored days against these tables is `docs/06-limits.md` L-CAL-3. NSE's Saturday **mock**
+trading sessions (for example NSE/CMTR/46217 of 30 Oct 2020, a mock session on
+Saturday 7 Nov 2020: "Trades resulting from this session shall not attract any
+obligation") are not sessions here.
+
+**Which days a backtest may trade (D-5150).** `pull::calendar::tradable_day`:
+only a day the calendar of record (`sourced_kind_of`, these notices and the
+D-2805 holiday circulars) calls a regular weekday 09:15–15:29 session, with no
+special session, no notice of one and no market-wide halt. Every row of the
+table above and every halt day is excluded from trades and from the own-past
+statistics; its bars stay stored and labelled. The two measured short days
+(2019-08-02, 2022-03-07) are NOT excluded: the exchange held its full session
+and only the vendors' minutes were short. `cli calendar-days YEAR` lists the
+excluded days with their counts per year, and `cli calendar-days check` holds
+the tables against every stored day (D-5158).
+
 ---
 
 ## 4. Vendor facts
@@ -1625,3 +1678,31 @@ not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
 figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
 route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
 `docs/06-limits.md` L-RUST1-1).
+
+## RustSec advisories RUSTSEC-2026-0381 and RUSTSEC-2026-0382 — read 21 Oct 2026 (D-7120)
+
+Two advisories turned `cargo deny check` red on an unchanged tree. What they
+say, and what the patched releases do, rests on the files below: the
+advisory database `cargo deny` fetched (its own git checkout under
+`~/.cargo/advisory-dbs/`, at the commit D-7120 names, dated 2026-10-20) and
+the crates.io sources the build compiles. The digest is of the bytes read.
+
+| Source | sha256 of the bytes read | What it says, as far as the decision relies on it | Where it is applied |
+|---|---|---|---|
+| `crates/rustls-webpki/RUSTSEC-2026-0382.md` (RustSec advisory database) | `525ad607d24f67fd22a20e70b28b3962a9039962340e3ad1f351c9611772e671` | dated 2026-10-20, alias CVE-2026-111943: affected versions "may accept certificate paths containing distrusted emSign intermediate public keys"; patched `>= 0.103.16, < 0.104.0-alpha.1` and `>= 0.104.0-alpha.8` | `rustls-webpki` 0.103.16 in `Cargo.lock` (D-7120 point 1) |
+| `crates/webpki-roots/RUSTSEC-2026-0381.md` (RustSec advisory database) | `71e69321b86b520406ff2bb529bc3abfaed7493a12712b0eb38dc2c360878d81` | dated 2026-10-19, alias CVE-2026-111943: affected versions include `emSign ECC Root CA - G3`; "Version 1.0.10+ removes this root"; patched `>= 1.0.10` | `webpki-roots` 1.0.10 in `Cargo.lock` (D-7120 point 1) |
+| `rustls-webpki-0.103.16/src/verify_cert.rs` (crates.io) | `73e60395e81a8c2ac7c276ee49bd501208876855fd820d83c386ce29f376c4d8` | `DISTRUSTED_SPKIS`: eight `include_bytes!` keys under `data/distrusted/`; a path whose certificate or trust anchor carries one is refused with `Error::CertDistrusted` | what changes at run time (D-7120 point 4, `docs/06-limits.md` L-BREDS-1) |
+| `webpki-roots-1.0.10/src/lib.rs` (crates.io) | `3575e50b19f48e368b254e25abfacb300264d3728d12c89363306695c537e62a` | 120 `TrustAnchor` entries against 1.0.9's 121; the one removed is `emSign ECC Root CA - G3` (eMudhra Technologies Limited) | D-7120 point 2 |
+
+The digests are of both advisories at the database commit
+`e6f94f3760d5e6c54c1b05f204002263bc025524`. At the later commit
+`4b587f00996ebe5c05a73eaef105ef241e876414` (2026-10-21), which the final
+`cargo deny check` read, `RUSTSEC-2026-0381.md` hashes to
+`9be83b1a3b668d3b3ccb720faf514e1ac5f42754bd03cb2b7900f5f9157a9300`: six
+added lines mark the `webpki-roots` 0.26.11 compatibility package, which
+`Cargo.lock` does not hold, unaffected; the affected and patched ranges
+above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
+
+**What is NOT sourced here.** Which certificate chains the hosts `pull`
+contacts present was not read: no connection was made. It is UNVERIFIED
+(`docs/06-limits.md` L-BREDS-1).
