@@ -16125,10 +16125,7 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // RECORDED: nothing said any of it while one drive held everything
         // (DB-B73, DB-B59; WP-81).
         // A SHARE'S MEASURED BASIS RUNS AND ITS CORPORATE ACTIONS (R4-26).
-        .route(
-            basis_route::ROUTE,
-            axum::routing::get(basis_route::basis_json),
-        )
+        .route("/basis.json", axum::routing::get(basis_route::basis_json))
         .route("/disk.json", axum::routing::get(disk_route::disk_json))
         // WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES A PAGE SHOWS (DB-B74).
         .route("/scrub.json", axum::routing::get(scrub_route::scrub_json))
