@@ -772,15 +772,12 @@ impl CorporateActions {
     /// whatever the share holds.
     #[must_use]
     pub fn labels(&self, symbol: &str, after: Option<Day>, through: Day) -> &[Action] {
-        let Some(shelf) = self.by_symbol.get(symbol) else {
+        let Some(held) = self.by_symbol.get(symbol) else {
             return &[];
         };
-        let end = shelf.days.upto(through);
-        let start = after.map_or_else(
-            || shelf.days.before(through),
-            |after| shelf.days.upto(after),
-        );
-        shelf.rows.get(start..end).unwrap_or(&[])
+        let end = held.days.upto(through);
+        let start = after.map_or_else(|| held.days.before(through), |after| held.days.upto(after));
+        held.rows.get(start..end).unwrap_or(&[])
     }
 
     /// The first row in `(after, through]` that may suppress a refusal:
