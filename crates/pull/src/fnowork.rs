@@ -598,7 +598,7 @@ pub fn gaps<S: core::hash::BuildHasher>(
 // so it is never split into contracts. Nothing here is swept:
 // `Instrument::is_sweepable` refuses every contract and every FNO key.
 
-use crate::master_snapshots::{Book, Listed, Stamp, TokenOn};
+use crate::master_snapshots::{Book, Listed, Stamp, TokenOn, first_listed};
 use crate::session::Window;
 use crate::vendor::{ContinuousSpec, HttpSpec};
 
@@ -684,11 +684,15 @@ fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
 
 /// Plans one underlying's futures pull over `window`.
 ///
-/// Every receipted snapshot on or before the window's last day is read once,
-/// one at a time, for the futures of `underlying` it lists: each contract is
-/// asked from the first snapshot that lists it (a token is believed to name
-/// a contract only from a snapshot that says so) to its expiry, inside the
-/// window. Each token is then checked against the NEWEST snapshot: one that
+/// Each contract is asked from the first snapshot that lists it (a token is
+/// believed to name a contract only from a snapshot that says so) to its
+/// expiry, inside the window. That first day is read from the
+/// [`first_listed`](crate::master_snapshots::first_listed) index, which every
+/// snapshot write fills, so no older snapshot is opened here: the cost does not
+/// grow with the snapshots held (R4-28 repair 1; D-6894). A snapshot on or
+/// before the window's end that the index does not hold yet is taken in first,
+/// once; one that cannot be is refused by name. Each token is then checked
+/// against the NEWEST snapshot, the one snapshot a plan parses: one that
 /// now names another contract is refused `token_reused` and never asked for
 /// the older contract's history; one the newest snapshot no longer lists
 /// (flushed after expiry) is asked, and an answer of nothing ends that
@@ -698,7 +702,9 @@ fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
 /// # Errors
 ///
 /// No receipted snapshot at all (`no_snapshot`): nothing is planned from an
-/// undated master.
+/// undated master. A book built in memory, or an index that cannot be locked,
+/// read or appended to (`futures_index`): nothing is planned from a partial
+/// answer.
 pub fn futures_plan(
     book: &Book,
     route: ContinuousSpec,
@@ -715,30 +721,28 @@ pub fn futures_plan(
         ));
     };
     let through = window.to().min(last_settled);
-    let mut refused = Vec::new();
-    let mut first_seen: std::collections::BTreeMap<(Day, u64), Day> =
-        std::collections::BTreeMap::new();
-    for (at, stamp) in book.stamps().iter().enumerate() {
-        if stamp.day > through {
-            break;
-        }
-        let read = book.with_snapshot(at, |snapshot| {
-            for listed in snapshot.rows() {
-                if let (true, Some(expiry)) =
-                    (is_future_of(&listed, route, underlying), listed.expiry())
-                {
-                    first_seen
-                        .entry((expiry, listed.token()))
-                        .or_insert(stamp.day);
-                }
-            }
-        });
-        if let Err(why) = read {
-            refused.push(format!(
-                "snapshot_unreadable: {stamp}: {why}; its futures were not planned"
-            ));
-        }
+    let listing = book
+        .root()
+        .ok_or_else(|| "a book built in memory has no snapshots directory".to_owned())
+        .and_then(|root| {
+            first_listed::listing(root, book.stamps(), route, underlying, through)
+        })
+        .map_err(|why| {
+            format!("futures_index: {why}; no future of {underlying} was planned")
+        })?;
+    if listing.torn > 0 {
+        let torn = listing.torn.to_string();
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            FUTURES_EVENT,
+            "futures index lines that did not check were skipped (a kill mid-append, or a \
+             garbled line); the snapshots they came from were taken in again",
+            "underlying" => telemetry::Value::Str(underlying),
+            "torn" => telemetry::Value::Str(&torn),
+        );
     }
+    let mut refused = listing.unreadable;
+    let first_seen = listing.first;
     let mut asks = Vec::with_capacity(first_seen.len().saturating_add(1));
     for (&(expiry, token), &seen) in &first_seen {
         let (from, to) = (seen.max(window.from()), expiry.min(through));

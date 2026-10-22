@@ -58,8 +58,9 @@
 //! |---|---|
 //! | [`Book::token_on`] on loaded snapshots | one day-table index and at most two hash probes |
 //! | first probe into a snapshot not yet loaded | one read, one decompression and one parse of that snapshot, O(rows), once |
-//! | [`snapshot`] | one compression, one directory listing, at most one receipt check |
+//! | [`snapshot`] | one compression, one directory listing, at most one receipt check, and for a Kite snapshot one parse to take its futures into [`first_listed`] |
 //! | [`diff`] | O(rows of both snapshots), once per refresh |
+//! | [`first_listed::listing`] | no snapshot opened: the absorbed log and one underlying's index file |
 //!
 //! The day table makes the snapshot lookup an index rather than a search: it
 //! holds one entry per calendar day the snapshots span. Measured by
@@ -592,7 +593,9 @@ impl Wrote {
 /// Writes `body` as `day`'s snapshot of `kind`, or says the day already holds
 /// it. Never rewrites a file: a body equal to the day's newest receipted
 /// snapshot is [`Wrote::AlreadyHeld`], a different one takes the next free
-/// ordinal (past any incomplete entry), body first and receipt last.
+/// ordinal (past any incomplete entry), body first and receipt last. A Kite
+/// snapshot's futures, and those of any earlier one not yet taken in, then go
+/// into the [`first_listed`] index under the same lock.
 ///
 /// # Errors
 ///
@@ -628,6 +631,7 @@ pub fn snapshot(
         && receipt.body_sha256 == body_sha256
         && receipt.body_bytes == body.len() as u64
     {
+        index_futures(root, kind);
         held.release().map_err(|why| why.to_string())?;
         return Ok(Wrote::AlreadyHeld(newest));
     }
@@ -654,8 +658,22 @@ pub fn snapshot(
         render_receipt(kind, stamp, &receipt).as_bytes(),
     )?;
     sync_dir(root)?;
+    index_futures(root, kind);
     held.release().map_err(|why| why.to_string())?;
     Ok(Wrote::New(stamp))
+}
+
+/// A Kite snapshot's futures go into the first-listed index, under the lock
+/// the write already holds, so no futures plan has to open it again (R4-28
+/// repair 1; D-6894). Its outcome is a [`EVENT_TARGET`] event; a failure
+/// leaves the snapshot for the next plan to take in and name.
+fn index_futures(root: &Path, kind: Kind) {
+    if kind == Kind::Kite {
+        first_listed::note(&first_listed::absorb_held(
+            root,
+            crate::vendor::ZERODHA_CONTINUOUS,
+        ));
+    }
 }
 
 /// The newest receipted Kite snapshot's date, read from its receipt (which is
@@ -1200,6 +1218,13 @@ impl Book {
             table,
             loaded,
         })
+    }
+
+    /// The snapshots directory a book opened over; `None` for one built in
+    /// memory.
+    #[must_use]
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// The stamps, oldest first.
@@ -2164,6 +2189,9 @@ fn note(outcome: &Snapshotted) {
         }
     }
 }
+
+#[path = "master_snapshots_first_listed.rs"]
+pub mod first_listed;
 
 #[cfg(test)]
 #[path = "master_snapshots_tests.rs"]

@@ -705,3 +705,131 @@ fn a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_spli
     let contract_dir = store_root.join("bars/zerodha/NSE/FNO/ZQIDX/2026-01-27-FUT");
     assert!(!contract_dir.exists(), "{}", contract_dir.display());
 }
+
+/// R4-28 repair 1 (D-6894): a plan reads the first-listed index, never the
+/// older snapshots. Two older snapshots rotted on disk after they were written
+/// leave the plan untouched, and the contracts they first listed are still
+/// asked from their own days. Before the index, every plan opened, unpacked
+/// and parsed every snapshot on or before the window's end, and these two
+/// would have been refused and their contracts never asked.
+#[test]
+fn a_futures_plan_opens_no_snapshot_the_index_already_holds() {
+    let masters = scratch("index-only");
+    let jan = fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27");
+    let feb = fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24");
+    snapshot_on(&masters, day(2026, 1, 2), std::slice::from_ref(&jan));
+    snapshot_on(&masters, day(2026, 1, 5), &[jan.clone(), feb.clone()]);
+    snapshot_on(&masters, day(2026, 1, 12), &[jan, feb]);
+    // ROT ON DISK: neither older body matches its receipt any more.
+    for on in [day(2026, 1, 2), day(2026, 1, 5)] {
+        let stamp = master_snapshots::Stamp { day: on, ordinal: 1 };
+        std::fs::write(
+            masters.join(master_snapshots::file_name(Master::Kite, stamp)),
+            b"rotted",
+        )
+        .unwrap();
+    }
+    let book = Book::open(&masters).unwrap();
+    let plan = futures_plan(
+        &book,
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap();
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    let spans: Vec<(u64, Window)> = plan.asks.iter().map(|ask| (ask.token, ask.window)).collect();
+    assert_eq!(
+        spans,
+        vec![
+            (8_000_001, window(day(2026, 1, 2), day(2026, 1, 9))),
+            (8_000_002, window(day(2026, 1, 5), day(2026, 1, 9))),
+            (8_000_001, window(day(2026, 1, 1), day(2026, 1, 9))),
+        ],
+        "each contract from the day its first snapshot listed it, the continuous series last"
+    );
+}
+
+/// R4-28 repair 1: snapshots held before the index existed (or written by a
+/// process killed before it took them in) are taken in by the next plan, once,
+/// and the plan equals the one over an index filled as they were written.
+#[test]
+fn a_snapshot_held_before_its_index_existed_is_taken_in_by_the_next_plan_once() {
+    let indexed = scratch("held-indexed");
+    snapshot_on(
+        &indexed,
+        day(2026, 1, 2),
+        &[
+            fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24"),
+        ],
+    );
+    let bare = scratch("held-bare");
+    let stamp = master_snapshots::Stamp {
+        day: day(2026, 1, 2),
+        ordinal: 1,
+    };
+    for name in [
+        master_snapshots::file_name(Master::Kite, stamp),
+        master_snapshots::receipt_name(Master::Kite, stamp),
+    ] {
+        std::fs::copy(indexed.join(&name), bare.join(&name)).unwrap();
+    }
+    let index = bare.join(master_snapshots::first_listed::DIR);
+    assert!(!index.exists(), "no index yet");
+    let asked = window(day(2026, 1, 1), day(2026, 1, 9));
+    let plan_of = |root: &Path| {
+        futures_plan(
+            &Book::open(root).unwrap(),
+            route(),
+            "ZQIDX",
+            asked,
+            day(2026, 1, 12),
+            asked.to(),
+        )
+        .unwrap()
+    };
+    let first = plan_of(&bare);
+    assert_eq!(first.asks, january_asks());
+    assert_eq!(first, plan_of(&indexed));
+    let log_path = index.join(master_snapshots::first_listed::ABSORBED);
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert_eq!(plan_of(&bare), first);
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap(),
+        log,
+        "taken in once, never again"
+    );
+}
+
+/// A book built in memory has no snapshots directory, so no index: refused
+/// by name rather than planned from nothing.
+#[test]
+fn a_futures_plan_over_a_book_with_no_directory_is_refused_by_name() {
+    let csv = format!(
+        "{}\n{}\n",
+        crate::vendor::KITE_MASTER_HEADER,
+        fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")
+    );
+    let stamp = master_snapshots::Stamp {
+        day: day(2026, 1, 2),
+        ordinal: 1,
+    };
+    let book = Book::of(vec![master_snapshots::Snapshot::parse(stamp, &csv).unwrap()]).unwrap();
+    let why = futures_plan(
+        &book,
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap_err();
+    assert!(
+        why.starts_with("futures_index: a book built in memory has no snapshots directory"),
+        "{why}"
+    );
+}
