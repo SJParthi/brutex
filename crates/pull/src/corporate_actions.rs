@@ -770,6 +770,8 @@ impl CorporateActions {
     /// applies at the next session; `None` asks for `through` alone. One
     /// hash and two indexes into the share's day table: O(1), no search,
     /// whatever the share holds.
+    /// Measured flat at 1, 64 and 4,096 rows:
+    /// `pull::corporate_actions::tests::an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured`.
     #[must_use]
     pub fn labels(&self, symbol: &str, after: Option<Day>, through: Day) -> &[Action] {
         let Some(held) = self.by_symbol.get(symbol) else {
@@ -1084,6 +1086,8 @@ impl BasisRuns {
     /// The run of `symbol` that holds `day`, or where the day lies between
     /// runs. One hash and one index into the share's day table: O(1), no
     /// search.
+    /// Measured flat at 10, 100 and 1,000 shares:
+    /// `pull::corporate_actions::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured`.
     ///
     /// # Errors
     ///
@@ -1276,7 +1280,8 @@ impl Folder {
         }
     }
 
-    /// Folds one more day in: O(1).
+    /// Folds one more day in: a fixed number of exact fraction operations,
+    /// never a loop over the days already folded.
     ///
     /// # Errors
     ///

@@ -28,6 +28,8 @@
 //! served file changed in place is read again, once, O(rows), and told as
 //! the loader's event. Without `day` the answer lists the share's runs and
 //! actions, at most `MAX_RUNS_PER_SYMBOL` and `MAX_ACTIONS_PER_SYMBOL`.
+//! Measured: `api::server::basis_route::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_runs_measured`
+//! and `crates/api/benches/ratio/basis.rs`.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt as _;
@@ -96,6 +98,7 @@ fn key_of(root: &Path, tables: Option<&Tables>) -> [Stamp; 4] {
 
 /// The two tables of the store at `root`: kept, and read again only when a
 /// table's directory or served file changed. O(1) when kept: four `stat`s.
+/// Proved by `api::server::basis_route::tests::the_tables_are_read_again_only_when_a_generation_lands`.
 pub(crate) fn tables(root: &Path) -> Tables {
     let mut held = kept().lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(kept) = held.get(root)
@@ -266,7 +269,8 @@ pub(crate) fn asked(query: &str) -> Result<Asked, String> {
 }
 
 /// The answer for `asked` from `tables`. O(1) with `day`; O(the share's
-/// runs and actions) without.
+/// runs and actions) without. Measured by
+/// `api::server::basis_route::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_runs_measured`.
 pub(crate) fn answer(tables: &Tables, asked: &Asked) -> Value {
     let symbol = asked.symbol.as_str();
     let runs = tables.runs.table().ok();

@@ -3746,6 +3746,8 @@ struct DayContext<'a> {
 /// ride beside it, each with what it may do (a measured row labels only).
 /// O(1): one hash and one or two indexes into the share's day table on each
 /// table, no search.
+/// Measured by `pull::corporate_actions::tests::an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured`
+/// and `pull::corporate_actions::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured`.
 fn measured_run_json(context: &DayContext<'_>, day: Day) -> Value {
     let Some((tables, symbol)) = &context.measured else {
         return Value::Null;

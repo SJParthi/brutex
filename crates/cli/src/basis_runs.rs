@@ -46,9 +46,12 @@
 //! # Cost
 //!
 //! One load of each month's version file (DATA-1's, O(its rows)), then per
-//! share-day one O(1) lookup and one O(1) fold step: O(shares x days) for
-//! the whole history, one pass, memory O(shares) for the folders plus one
-//! month's index at a time. The write is one file of O(runs) rows.
+//! share-day one hash lookup (DATA-1's `FactorIndex::factor_of`) and one
+//! fold step of fixed work: O(shares x days) for the whole history, one
+//! pass, memory O(shares) for the folders plus one month's index at a time.
+//! The write is one file of O(runs) rows. Measured once, not gated: DATA-1's
+//! full run (105 months, 940,143 stock-days) folds in 2.2 s on the operator's
+//! machine (`docs/06-limits.md` L-R426-02).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
