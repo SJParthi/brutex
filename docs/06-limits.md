@@ -20562,10 +20562,12 @@ repeats it with `BRUTEX_KITE_DUMP=<a copy of a landed dump>` and
 - `token_on` the first time a book needs two snapshots (both read, checked
   and indexed): 331 ms. After that, n=200 tokens spread over the dump, one
   call each, sequential: p50 1.25 µs, p99 5.3 µs, max 230 µs (one outlier).
-- C-MS-01 (`crates/pull/benches/ratio/master_snapshots.rs`, gate 8): one
-  `token_on` between two snapshots at 1, 10 and 100 snapshots of 2,000
-  invented rows each, held to the 3.0x ceiling; the harness prints p50, p99
-  and max of single calls beside each ratio.
+- C-MS-01 (`crates/pull/benches/ratio/master_snapshots.rs`, gate 8, run 22 Oct
+  2026 by `cargo bench -p pull --bench ratio`, snapshots of 2,000 invented
+  rows): on a snapshot day (one probe) p50 41 ns, p99 42 ns at 1, 10 and 100
+  snapshots (max 125 ns, 23.3 µs and 2.3 µs; n=20,000 each), ratios 1.020x
+  and 1.023x; between two snapshots (two probes) p50 42 ns, p99 84 ns at 10
+  and 100 (max 209 ns and 167 ns), ratio 0.989x. Ceiling 3.0x.
 
 **Disk, projected from the measured snapshot (an extrapolation):** one
 attended refresh writes the Kite snapshot (about 1.45 MB), the NSE Total
