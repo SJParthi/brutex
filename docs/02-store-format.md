@@ -4884,11 +4884,11 @@ of one serves nothing from it and says `absent`, never an empty table.
 Zerodha/GDFL close ratio of a share, folded by `cli basis-runs` from DATA-1's
 per stock-day factor intervals (`cli::feed_reconcile::FactorPair::basis`).
 `first` and `last` are the run's first and last days with a basis; `low` and
-`high` the intersection of those days' allowance intervals and `ratio` the
-simplest fraction inside it, each `num/den` reduced (terms at most 10^18);
-`days` the days with a basis it holds; `end` is `step` (the next day's
-interval is disjoint from the last day's: DATA-1's ex-date), `drift` (the
-ratio walked) or `open` (the last run read). Two runs of one share never
+`high` the run's band (the intersection of those days' allowance intervals,
+each widened by D-3339's 0.2%) and `ratio` the simplest fraction inside it,
+each `num/den` reduced (terms at most 10^18); `days` the days with a basis it
+holds; `end` is `step` (the next day's interval lies more than 0.2% from the
+last day's: D-3339's `basis_step`), `drift` (the ratio walked out of the band) or `open` (the last run read). Two runs of one share never
 overlap; at most 4,096 runs a share. The receipt's `source` names the
 feed-reconcile directory and months read (and how many were missing), and
 `source_sha256` is the SHA-256 of the list `<month> <file> <blake3>\n` of

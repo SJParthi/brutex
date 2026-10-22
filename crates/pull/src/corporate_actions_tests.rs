@@ -162,7 +162,12 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
 fn a_ratio_that_walks_ends_its_run_as_drift_not_as_a_step() {
     // Each day's interval meets the day before's, and the run's intersection
     // still empties: the ratio walked. Not an action.
-    let walk = ["1000/1000", "1001/1000", "1002/1000", "1003/1000"];
+    // Eight days, each 0.1% above the last (under the 0.2% step), so no day
+    // steps; the band (each day widened by 0.2%) empties on the seventh.
+    let walk = [
+        "1000/1000", "1001/1000", "1002/1000", "1003/1000", "1004/1000", "1005/1000",
+        "1006/1000", "1007/1000",
+    ];
     let days = walk
         .iter()
         .enumerate()
@@ -173,8 +178,9 @@ fn a_ratio_that_walks_ends_its_run_as_drift_not_as_a_step() {
         })
         .collect::<Vec<_>>();
     let runs = fold_runs("DRIFTCO", days).unwrap();
-    assert!(runs.len() >= 2, "{runs:#?}");
-    assert_eq!(runs[0].end, RunEnd::Drift);
+    assert_eq!(runs.len(), 2, "{runs:#?}");
+    assert_eq!((runs[0].end, runs[0].days), (RunEnd::Drift, 6));
+    assert_eq!(runs[1].first, day(2024, 2, 11));
     assert!(steps_of(&runs).is_empty(), "a drift is never a step");
 }
 
@@ -292,11 +298,11 @@ fn every_measured_ratio_run_matches_a_table_factor_on_its_ex_date() {
         ]
     );
     // The rights factor is no integer: the measured row carries the
-    // simplest fraction its interval holds (1.0481 give or take 0.1%), and
+    // simplest fraction its interval holds (1.0481 give or take 0.5%), and
     // the exact NSE factor below lies in the same interval.
     let rights = ledger.of("RIGHTSCO");
     assert_eq!((rights.len(), rights[0].ex_date), (1, day(2021, 5, 31)));
-    assert!(r("1047/1000") < rights[0].ratio && rights[0].ratio < r("1049/1000"));
+    assert!(r("104/100") < rights[0].ratio && rights[0].ratio < r("106/100"), "{}", rights[0].ratio);
     assert!(rights[0].ratio.den() < 10_000, "{}", rights[0].ratio);
     // An NSE table with the same actions matches too: each factor lies in its
     // step's interval on its own ex-date.

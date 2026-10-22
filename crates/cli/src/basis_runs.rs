@@ -21,10 +21,11 @@
 //! # What it folds
 //!
 //! Per share, days ascending across the months read,
-//! `pull::corporate_actions::Folder`: a run grows while the intersection of
-//! its days' intervals is not empty; it ends `step` where the next day's
-//! interval is disjoint from the last day's (DATA-1's ex-date), `drift`
-//! where the ratio walked instead; a month missing from `DIR` is named and
+//! `pull::corporate_actions::Folder`: a run ends `step` where the next
+//! day's interval lies more than 0.2% from the last day's (D-3339's
+//! `basis_step`, the threshold `/sources` judges by), else grows while its
+//! band (its days' intervals, each widened by 0.2%, intersected) is not
+//! empty and ends `drift` where it empties; a month missing from `DIR` is named and
 //! leaves a gap, never a break nor a guess. A share with no basis day has no
 //! run and is named.
 //!
@@ -77,15 +78,15 @@ const MAX_MONTHS: usize = 1_200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ask {
     /// The directory holding DATA-1's feed-reconcile version files.
-    pub dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// The first month read, when bounded.
-    pub from: Option<YearMonth>,
+    pub(crate) from: Option<YearMonth>,
     /// The last month read, when bounded.
-    pub to: Option<YearMonth>,
+    pub(crate) to: Option<YearMonth>,
     /// Write the basis-run generation.
-    pub write: bool,
+    pub(crate) write: bool,
     /// Write the measured corporate-action generation too.
-    pub ledger: bool,
+    pub(crate) ledger: bool,
 }
 
 fn month(text: &str) -> Result<YearMonth, String> {
@@ -199,19 +200,19 @@ fn refusal_word(why: &FactorRefusal) -> &'static str {
 #[derive(Debug)]
 pub(crate) struct Folded {
     /// The months read, each with its file and that file's BLAKE3.
-    pub read: Vec<(YearMonth, PathBuf, [u8; 32])>,
+    pub(crate) read: Vec<(YearMonth, PathBuf, [u8; 32])>,
     /// The months in range `DIR` holds no full file of.
-    pub missing: Vec<YearMonth>,
+    pub(crate) missing: Vec<YearMonth>,
     /// Every run, by share then first day.
-    pub runs: Vec<Run>,
+    pub(crate) runs: Vec<Run>,
     /// Shares a file held with no basis day at all.
-    pub no_run: Vec<String>,
+    pub(crate) no_run: Vec<String>,
     /// Shares whose days could not be folded, with why.
-    pub refused: Vec<(String, String)>,
+    pub(crate) refused: Vec<(String, String)>,
     /// Stock-days not folded, by reason.
-    pub skipped: BTreeMap<&'static str, u64>,
+    pub(crate) skipped: BTreeMap<&'static str, u64>,
     /// Stock-days folded.
-    pub folded: u64,
+    pub(crate) folded: u64,
 }
 
 /// Folds every month of `ask` in `ask.dir`.

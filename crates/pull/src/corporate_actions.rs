@@ -42,12 +42,14 @@
 //! # Exact, never a float
 //!
 //! Every ratio is a reduced fraction of integers ([`Ratio`]), every
-//! comparison a cross-multiplication. A run's ratio is the SIMPLEST fraction
-//! inside the intersection of its days' allowance intervals (DATA-1's own
-//! intervals), so a 2:1 split reads `1/2` then `1/1`, and a step's factor is
-//! the simplest fraction inside `[new.low / old.high, new.high / old.low]`:
-//! the tolerance is the measurement's own interval, not a number chosen
-//! here.
+//! comparison a cross-multiplication. Each day's interval is DATA-1's own
+//! allowance interval; a run's band is the intersection of its days'
+//! intervals each widened by [`STEP_PERMILLE`] (D-3339's `basis_step`
+//! threshold), and its ratio the SIMPLEST fraction in that band, so a 2:1
+//! split reads `1/2` then `1/1`. A step's factor is the simplest fraction
+//! inside `[new.low / old.high, new.high / old.low]` of the two bands: the
+//! tolerance is the measurement's interval and D-3339's threshold, not a
+//! number chosen here.
 //!
 //! # Cost
 //!
@@ -81,6 +83,16 @@ pub const MAX_TERM: u128 = 1_000_000_000_000_000_000;
 
 /// The decision that owns both tables.
 pub const DECISION: &str = "D-6892";
+
+/// D-3339 item 3's threshold, the one `/sources` judges `basis_step` by
+/// (`api::sources::FACTOR_THRESHOLD_PERMILLE`, pinned equal by a test): a
+/// ratio that moves by more than this many permille between consecutive
+/// days with a basis STEPS, and a run's days lie within this many permille
+/// of one ratio. Chosen, not sourced: the threshold that reproduces D-3323's
+/// 101 of 208 shares. Without it every quantisation wobble of an adjusted
+/// series (measured: a move of 0.03% between two days whose intervals are
+/// disjoint) would be a "corporate action".
+pub const STEP_PERMILLE: u16 = 2;
 
 // ─────────────────────────────── the fraction ───────────────────────────────
 
@@ -604,11 +616,12 @@ impl CorporateActions {
 /// How a basis run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RunEnd {
-    /// The next basis day's interval is disjoint from this run's last day's:
-    /// DATA-1's ex-date rule, a ratio step.
+    /// The next basis day's interval lies more than [`STEP_PERMILLE`] from
+    /// the last day's: D-3339's `basis_step`, a ratio step.
     Step,
-    /// The next day's interval meets the last day's but not the run's whole
-    /// intersection: the ratio walked, it did not step. Not an action.
+    /// The next day lies within [`STEP_PERMILLE`] of the last day but
+    /// outside the run's band: the ratio walked, it did not step. Not an
+    /// action.
     Drift,
     /// The last run of the months read.
     Open,
@@ -645,9 +658,10 @@ pub struct Run {
     pub last: Day,
     /// The simplest fraction inside `[low, high]`.
     pub ratio: Ratio,
-    /// The intersection of the run's days' allowance intervals, low end.
+    /// The run's band, low end: the intersection of its days' allowance
+    /// intervals, each widened by [`STEP_PERMILLE`].
     pub low: Ratio,
-    /// The intersection's high end.
+    /// The band's high end.
     pub high: Ratio,
     /// How many days with a basis the run holds.
     pub days: u32,
@@ -903,6 +917,8 @@ pub enum FoldError {
     Backwards(Day),
     /// The share holds more runs than [`MAX_RUNS_PER_SYMBOL`].
     TooMany,
+    /// A day's interval has terms too large to widen exactly.
+    TooLarge(Day),
 }
 
 impl fmt::Display for FoldError {
@@ -913,6 +929,10 @@ impl fmt::Display for FoldError {
             }
             Self::Backwards(day) => write!(f, "day {day}: its interval runs backwards"),
             Self::TooMany => write!(f, "more than {MAX_RUNS_PER_SYMBOL} runs"),
+            Self::TooLarge(day) => write!(
+                f,
+                "day {day}: its interval's terms are too large to widen exactly"
+            ),
         }
     }
 }
@@ -930,17 +950,36 @@ struct Open {
     last_high: Ratio,
 }
 
+/// `ratio x (1000 + STEP_PERMILLE) / 1000`: one end of the tolerance band.
+fn widen_up(ratio: Ratio) -> Option<Ratio> {
+    ratio.times(Ratio::new(1_000 + u128::from(STEP_PERMILLE), 1_000)?)
+}
+
+/// `ratio x 1000 / (1000 + STEP_PERMILLE)`: the other end.
+fn widen_down(ratio: Ratio) -> Option<Ratio> {
+    ratio.times(Ratio::new(1_000, 1_000 + u128::from(STEP_PERMILLE))?)
+}
+
+/// A day's interval widened by [`STEP_PERMILLE`] on each side: the band a
+/// run's ratio may lie in and still be this day's.
+fn widened(day: &BasisDay) -> Result<(Ratio, Ratio), FoldError> {
+    widen_down(day.low)
+        .zip(widen_up(day.high))
+        .ok_or(FoldError::TooLarge(day.day))
+}
+
 impl Open {
-    const fn start(day: &BasisDay) -> Self {
-        Self {
+    fn start(day: &BasisDay) -> Result<Self, FoldError> {
+        let (low, high) = widened(day)?;
+        Ok(Self {
             first: day.day,
             last: day.day,
-            low: day.low,
-            high: day.high,
+            low,
+            high,
             days: 1,
             last_low: day.low,
             last_high: day.high,
-        }
+        })
     }
 
     fn close(self, symbol: &str, end: RunEnd) -> Run {
@@ -961,10 +1000,11 @@ impl Open {
 }
 
 /// The maximal runs of one Zerodha/GDFL ratio in `days` (ascending, once
-/// each): a run grows while the intersection of its days' intervals is not
-/// empty, and ends `step` where the next day's interval is disjoint from the
-/// last day's (DATA-1's ex-date rule), `drift` where it is not. O(days), one
-/// constant step a day. A share with no basis day has no run.
+/// each): a run ends `step` where the next day's interval lies more than
+/// [`STEP_PERMILLE`] from the last day's (D-3339's `basis_step`); else it
+/// grows while its band (the intersection of its days' intervals, each
+/// widened by [`STEP_PERMILLE`]) is not empty, and ends `drift` where it
+/// empties. O(days), one constant step a day. A share with no basis day has no run.
 ///
 /// # Errors
 ///
@@ -1010,7 +1050,7 @@ impl Folder {
             return Err(FoldError::Backwards(day.day));
         }
         let Some(mut run) = self.open else {
-            self.open = Some(Open::start(&day));
+            self.open = Some(Open::start(&day)?);
             return Ok(());
         };
         if day.day <= run.last {
@@ -1019,9 +1059,14 @@ impl Folder {
                 then: day.day,
             });
         }
-        let low = run.low.max(day.low);
-        let high = run.high.min(day.high);
-        if low <= high {
+        let (band_low, band_high) = widened(&day)?;
+        // A STEP FIRST: the day's interval lies more than STEP_PERMILLE from
+        // the last day's, D-3339's `basis_step`; then the band.
+        let stepped = day.low > widen_up(run.last_high).ok_or(FoldError::TooLarge(day.day))?
+            || widen_up(day.high).ok_or(FoldError::TooLarge(day.day))? < run.last_low;
+        let low = run.low.max(band_low);
+        let high = run.high.min(band_high);
+        if !stepped && low <= high {
             run.last = day.day;
             run.low = low;
             run.high = high;
@@ -1034,10 +1079,9 @@ impl Folder {
         if self.runs.len() >= MAX_RUNS_PER_SYMBOL.saturating_sub(1) {
             return Err(FoldError::TooMany);
         }
-        let disjoint = day.high < run.last_low || run.last_high < day.low;
-        let end = if disjoint { RunEnd::Step } else { RunEnd::Drift };
+        let end = if stepped { RunEnd::Step } else { RunEnd::Drift };
         self.runs.push(run.close(&self.symbol, end));
-        self.open = Some(Open::start(&day));
+        self.open = Some(Open::start(&day)?);
         Ok(())
     }
 

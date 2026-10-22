@@ -119,11 +119,11 @@ fn db_shows_the_action_on_its_day() {
     let store = root("db-day");
     install(&store, &[measured_split()]);
     for order in ["asc", "desc"] {
-        let ask = crate::dayflags::asked(&format!(
+        let ask = super::super::dayflags::asked(&format!(
             "feed=zerodha&instrument=NSE-CASH-SPLITCO&from=2025-03-03&to=2025-03-10&order={order}"
         ))
         .unwrap();
-        let body = crate::dayflags::answer(&store, &ask);
+        let body = super::super::dayflags::answer(&store, &ask);
         let days = body["days"].as_array().unwrap();
         let mut noted = Vec::new();
         for record in days {
@@ -148,11 +148,11 @@ fn db_shows_the_action_on_its_day() {
         assert_eq!(body["corporate_actions"]["receipt"]["status"], "measured");
     }
     // An index page carries no share action and no table.
-    let ask = crate::dayflags::asked(
+    let ask = super::super::dayflags::asked(
         "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2025-03-03&to=2025-03-10",
     )
     .unwrap();
-    let body = crate::dayflags::answer(&store, &ask);
+    let body = super::super::dayflags::answer(&store, &ask);
     assert!(body["corporate_actions"].is_null());
 }
 
@@ -165,11 +165,11 @@ fn a_holiday_ex_date_is_noted_on_its_day_as_applying_at_the_next_session() {
     saturday.after = None;
     saturday.tag = Tag::Measured;
     install(&store, &[saturday]);
-    let ask = crate::dayflags::asked(
+    let ask = super::super::dayflags::asked(
         "feed=zerodha&instrument=NSE-CASH-SPLITCO&from=2025-03-08&to=2025-03-08",
     )
     .unwrap();
-    let body = crate::dayflags::answer(&store, &ask);
+    let body = super::super::dayflags::answer(&store, &ask);
     let notes = notes_of(&body["days"][0]);
     let note = notes.iter().find(|n| n["note"] == "corporate_action").unwrap();
     assert!(note["applies"].as_str().unwrap().starts_with("at the next session"), "{note:#}");
@@ -178,11 +178,11 @@ fn a_holiday_ex_date_is_noted_on_its_day_as_applying_at_the_next_session() {
 #[test]
 fn an_absent_or_refused_table_is_named_on_the_page_never_an_empty_one() {
     let store = root("db-absent");
-    let ask = crate::dayflags::asked(
+    let ask = super::super::dayflags::asked(
         "feed=zerodha&instrument=NSE-CASH-SPLITCO&from=2025-03-03&to=2025-03-10",
     )
     .unwrap();
-    let body = crate::dayflags::answer(&store, &ask);
+    let body = super::super::dayflags::answer(&store, &ask);
     assert_eq!(body["corporate_actions"]["served"], false);
     assert_eq!(body["corporate_actions"]["refusal"]["kind"], "absent");
     // A table whose bytes are not the bytes written: refused by name.
@@ -190,7 +190,7 @@ fn an_absent_or_refused_table_is_named_on_the_page_never_an_empty_one() {
     let path = Table::CorporateActions.path(&store, 1);
     let text = std::fs::read_to_string(&path).unwrap().replace("|2|1|", "|3|1|");
     std::fs::write(&path, text).unwrap();
-    let body = crate::dayflags::answer(&store, &ask);
+    let body = super::super::dayflags::answer(&store, &ask);
     assert_eq!(body["corporate_actions"]["refusal"]["kind"], "checksum", "{:#}", body["corporate_actions"]);
     assert!(
         body["days"]
@@ -370,4 +370,14 @@ fn a_compare_inside_a_run_applies_its_factor() {
         }
         assert_eq!(body["measured_basis"]["served"], true);
     }
+}
+
+#[test]
+fn a_basis_step_is_one_threshold_on_sources_and_in_the_runs() {
+    // ONE RULE, TWO SPELLINGS, PINNED: `/sources` judges `basis_step` by
+    // D-3339's threshold, and `cli basis-runs` folds its steps by the same.
+    assert_eq!(
+        super::super::sources::FACTOR_THRESHOLD_PERMILLE,
+        i128::from(pull::corporate_actions::STEP_PERMILLE)
+    );
 }

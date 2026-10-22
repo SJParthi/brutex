@@ -77911,13 +77911,20 @@ unattended.
    absent is `absent`, never an empty table. They are not in `Reference`'s
    import-time slots; a consumer reads each with `reference_data::load_one`.
 2. **One owner of the factor.** `cli basis-runs` folds DATA-1's own day
-   intervals (`FactorPair::basis`, D-5179) and measures no price. A run
-   grows while the intersection of its days' intervals is not empty; it ends
-   `step` where the next day's interval is disjoint from the last day's
-   (DATA-1's ex-date rule) and `drift` where the ratio walked. A run's ratio
-   is the simplest fraction inside its intersection; a step's factor the
-   simplest inside `[new.low / old.high, new.high / old.low]`. The tolerance
-   is the measurement's own interval, exact, no float.
+   intervals (`FactorPair::basis`, D-5179) and measures no price. A run ends
+   `step` where the next day's interval lies more than 0.2% from the last
+   day's: D-3339 item 3's `basis_step` threshold, the one `/sources` already
+   judges by (`pull::corporate_actions::STEP_PERMILLE`, pinned equal to
+   `api::sources::FACTOR_THRESHOLD_PERMILLE` by a test). DATA-1's own
+   `ex_date` column (consecutive disjoint intervals, no threshold) fired on
+   4,504 stock-days of 102 shares in the full 2018-01..2026-09 run, most of
+   them a 0.03% wobble of an adjusted series on a grid finer than its own;
+   a ledger drawn from it would name thousands of actions that never were.
+   Otherwise a run grows while its band (its days' intervals, each widened
+   by 0.2%, intersected) is not empty, and ends `drift` where it empties. A
+   run's ratio is the simplest fraction in its band; a step's factor the
+   simplest inside `[new.low / old.high, new.high / old.low]`. Exact, no
+   float.
 3. **The law (`CLAUDE.md` §3 rule 1).** A `measured` row (one step between
    two runs, always `unclassed`) LABELS a day and never suppresses a refusal
    or decides a class; only an `nse` row in a `sourced` file does. The loader

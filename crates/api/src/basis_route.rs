@@ -67,9 +67,9 @@ fn stamp(path: &Path) -> Stamp {
 #[derive(Debug, Clone)]
 pub(crate) struct Tables {
     /// The corporate actions.
-    pub actions: Arc<Slot<CorporateActions>>,
+    pub(crate) actions: Arc<Slot<CorporateActions>>,
     /// The basis runs.
-    pub runs: Arc<Slot<BasisRuns>>,
+    pub(crate) runs: Arc<Slot<BasisRuns>>,
 }
 
 #[derive(Debug, Clone)]
