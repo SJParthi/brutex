@@ -97,10 +97,12 @@ pub(crate) fn arguments(raw: &str, apply: bool) -> Result<Vec<String>, String> {
             return Err(format!("name `{name}`"));
         }
     }
-    let mut reason = param(raw, "reason").trim().to_owned();
-    if reason.is_empty() && !apply {
-        reason = "plan".to_owned();
-    }
+    let asked = param(raw, "reason");
+    // A PLAN WRITES NOTHING, so it needs no reason of its own; a press does.
+    let reason = match asked.trim() {
+        "" if !apply => "plan".to_owned(),
+        given => given.to_owned(),
+    };
     store::quarantine::check_reason(&reason).map_err(|why| why.to_string())?;
     let mut out = vec![
         symbol,

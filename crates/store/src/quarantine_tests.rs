@@ -525,7 +525,7 @@ fn a_second_writer_waits_then_names_the_holder() {
     held.release().expect("released");
     match refused {
         Err(QuarantineError::Held { holder, .. }) => {
-            assert!(!holder.is_empty(), "the holder is named")
+            assert!(!holder.is_empty(), "the holder is named");
         }
         // A bound longer than the patience the test grants still names the hold.
         other => panic!("expected the hold named, got {other:?}"),

@@ -291,7 +291,9 @@ fn plan_path(root: &Path, ask: &Ask) -> Result<PathBuf, String> {
         let fits = scopes
             .iter()
             .any(|scope| name.starts_with(&format!("zerodha-{}-{scope}-", ask.segment)))
-            && name.ends_with(".plan");
+            && Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("plan"));
         if !fits {
             continue;
         }
@@ -556,6 +558,15 @@ fn act(
     }
 }
 
+/// The plan's path and its rows for `ask`, or why not.
+fn read_rows(root: &Path, ask: &Ask) -> Result<(PathBuf, Vec<Row>), String> {
+    let path = plan_path(root, ask)?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|why| format!("{}: {why}", path.display()))?;
+    let rows = rows_of(&text, ask).map_err(|why| format!("{}: {why}", path.display()))?;
+    Ok((path, rows))
+}
+
 /// Runs the verb against `store` (the writer's gate), writing to `out`.
 pub(crate) fn command_with(
     arguments: &[&str],
@@ -579,27 +590,12 @@ pub(crate) fn command_with(
             return FAILED;
         }
     };
-    let plan = match plan_path(&root, &ask).and_then(|path| {
-        std::fs::read_to_string(&path)
-            .map_err(|why| format!("{}: {why}", path.display()))
-            .map(|text| (path, text))
-    }) {
-        Ok(plan) => plan,
+    let (plan, rows) = match read_rows(&root, &ask) {
+        Ok(read) => read,
         Err(why) => {
             let _ = writeln!(
                 out,
                 "ZERODHA QUARANTINE REFUSED: {why}. Nothing was written."
-            );
-            return FAILED;
-        }
-    };
-    let rows = match rows_of(&plan.1, &ask) {
-        Ok(rows) => rows,
-        Err(why) => {
-            let _ = writeln!(
-                out,
-                "ZERODHA QUARANTINE REFUSED: {}: {why}. Nothing was written.",
-                plan.0.display()
             );
             return FAILED;
         }
@@ -617,7 +613,7 @@ pub(crate) fn command_with(
         } else {
             "plan only: nothing is written"
         },
-        plan.0.display()
+        plan.display()
     );
     if rows.is_empty() {
         let _ = writeln!(
@@ -665,46 +661,54 @@ pub(crate) fn command_with(
         if row.rung != Timeframe::MINUTE_1 || matches!(outcome, Outcome::Refused(_)) {
             continue;
         }
-        for rung in derived_rungs() {
-            let Ok(path) = path_of(ask.segment, &row.symbol, rung, row.month) else {
-                continue;
-            };
-            let held = match held_bars(&root, path, &row.symbol) {
-                Ok(Some(held)) => held,
-                // A DERIVED MONTH THAT IS NOT THERE has nothing to set aside.
-                Ok(None) => continue,
-                Err(why) => {
-                    let outcome = Outcome::Refused(why);
-                    let _ = writeln!(
-                        out,
-                        "    {} {}: {}",
-                        rung.as_str(),
-                        row.month,
-                        outcome_text(&outcome)
-                    );
-                    note(&ask, &row.symbol, rung, row.month, &outcome);
-                    failed = true;
-                    continue;
-                }
-            };
-            let buckets = covering(&held, rung.secs(), &stamps);
-            if buckets.is_empty() {
-                continue;
-            }
-            let outcome = act(&root, &ask, &row.symbol, rung, row.month, &buckets);
-            failed |= matches!(outcome, Outcome::Refused(_));
-            let _ = writeln!(
-                out,
-                "    {} {}: {} bucket(s) hold a named minute - {}",
-                rung.as_str(),
-                row.month,
-                buckets.len(),
-                outcome_text(&outcome)
-            );
-            note(&ask, &row.symbol, rung, row.month, &outcome);
-        }
+        failed |= derived(&root, &ask, row, &stamps, out);
     }
     if failed { FAILED } else { OK }
+}
+
+/// A minute month's derived rungs set aside after it: every bucket whose span
+/// holds a named minute, with the same cause. Answers whether one refused.
+fn derived(root: &Path, ask: &Ask, row: &Row, stamps: &[i64], out: &mut String) -> bool {
+    let mut failed = false;
+    for rung in derived_rungs() {
+        let Ok(path) = path_of(ask.segment, &row.symbol, rung, row.month) else {
+            continue;
+        };
+        let held = match held_bars(root, path, &row.symbol) {
+            Ok(Some(held)) => held,
+            // A DERIVED MONTH THAT IS NOT THERE has nothing to set aside.
+            Ok(None) => continue,
+            Err(why) => {
+                let outcome = Outcome::Refused(why);
+                let _ = writeln!(
+                    out,
+                    "    {} {}: {}",
+                    rung.as_str(),
+                    row.month,
+                    outcome_text(&outcome)
+                );
+                note(ask, &row.symbol, rung, row.month, &outcome);
+                failed = true;
+                continue;
+            }
+        };
+        let buckets = covering(&held, rung.secs(), stamps);
+        if buckets.is_empty() {
+            continue;
+        }
+        let outcome = act(root, ask, &row.symbol, rung, row.month, &buckets);
+        failed |= matches!(outcome, Outcome::Refused(_));
+        let _ = writeln!(
+            out,
+            "    {} {}: {} bucket(s) hold a named minute - {}",
+            rung.as_str(),
+            row.month,
+            buckets.len(),
+            outcome_text(&outcome)
+        );
+        note(ask, &row.symbol, rung, row.month, &outcome);
+    }
+    failed
 }
 
 /// The verb over a root the caller already holds (the API's

@@ -9,6 +9,7 @@
 //! generation and a second apply writing nothing. R4-18. Every price is
 //! invented.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,10 +107,11 @@ fn plan_text(rows: &[(&str, &str, &str, &str, &[i64])]) -> String {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        text.push_str(&format!(
-            "NSE-CASH-{SYMBOL}\t{rung}\t{month}\t{scope}\t{cause}\tquarantine\t{}\t{listed}\n",
+        let _ = writeln!(
+            text,
+            "NSE-CASH-{SYMBOL}\t{rung}\t{month}\t{scope}\t{cause}\tquarantine\t{}\t{listed}",
             stamps.len()
-        ));
+        );
     }
     text
 }
@@ -147,110 +149,44 @@ fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 #[test]
 fn the_arguments_are_read_strictly() {
-    let good = ask(&[
+    let words = |text: &'static str| text.split(' ').collect::<Vec<_>>();
+    let good = ask(&words(
+        "PIIND 2018-12-01 2020-01-31 --cause foreign_level --reason two",
+    ))
+    .expect("good");
+    assert_eq!(
+        (good.cause, good.apply, good.segment, good.reason.as_str()),
+        (Cause::ForeignLevel, false, "CASH", "two")
+    );
+    let apply = ask(&words(
+        "PIIND 2018-12-01 2020-01-31 --cause foreign_level --reason r --apply",
+    ));
+    assert!(apply.expect("apply").apply);
+    for bad in [
+        "--plan 2018-12-01 2020-01-31",
+        "PIIND 2018-12-01",
+        "PIIND 2020-01-31 2018-12-01 --cause foreign_level --reason r",
+        "PIIND 2018-13-01 2020-01-31 --cause foreign_level --reason r",
+        "PIIND 2018-12-01 2020-01-31 --cause foreign --reason r",
+        "PIIND 2018-12-01 2020-01-31 --reason r",
+        "PIIND 2018-12-01 2020-01-31 --cause zero_price",
+        "PIIND 2018-12-01 2020-01-31 --cause zero_price --reason r --plan --apply",
+        "PIIND 2018-12-01 2020-01-31 --cause zero_price --reason r --segment NFO",
+        "PIIND 2018-12-01 2020-01-31 --cause zero_price --reason r --bogus",
+        "PIIND 2018-12-01 2020-01-31 --cause zero_price --reason",
+    ] {
+        assert!(ask(&words(bad)).is_err(), "{bad:?} must be refused");
+    }
+    let empty = [
         "PIIND",
         "2018-12-01",
         "2020-01-31",
         "--cause",
-        "foreign_level",
+        "zero_price",
         "--reason",
-        "two bases",
-    ])
-    .expect("good");
-    assert_eq!(
-        (good.cause, good.apply, good.segment),
-        (Cause::ForeignLevel, false, "CASH")
-    );
-    assert!(
-        ask(&[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "foreign_level",
-            "--reason",
-            "r",
-            "--apply"
-        ])
-        .expect("apply")
-        .apply
-    );
-    for bad in [
-        &["--plan", "2018-12-01", "2020-01-31"][..],
-        &["PIIND", "2018-12-01"][..],
-        &[
-            "PIIND",
-            "2020-01-31",
-            "2018-12-01",
-            "--cause",
-            "foreign_level",
-            "--reason",
-            "r",
-        ][..],
-        &[
-            "PIIND",
-            "2018-13-01",
-            "2020-01-31",
-            "--cause",
-            "foreign_level",
-            "--reason",
-            "r",
-        ][..],
-        &[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "foreign",
-            "--reason",
-            "r",
-        ][..],
-        &["PIIND", "2018-12-01", "2020-01-31", "--reason", "r"][..],
-        &["PIIND", "2018-12-01", "2020-01-31", "--cause", "zero_price"][..],
-        &[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "zero_price",
-            "--reason",
-            "",
-        ][..],
-        &[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "zero_price",
-            "--reason",
-            "r",
-            "--plan",
-            "--apply",
-        ][..],
-        &[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "zero_price",
-            "--reason",
-            "r",
-            "--segment",
-            "NFO",
-        ][..],
-        &[
-            "PIIND",
-            "2018-12-01",
-            "2020-01-31",
-            "--cause",
-            "zero_price",
-            "--reason",
-            "r",
-            "--bogus",
-        ][..],
-    ] {
-        assert!(ask(bad).is_err(), "{bad:?} must be refused");
-    }
+        "",
+    ];
+    assert!(ask(&empty).is_err(), "an empty reason is refused");
     let root = Root::new("misuse");
     assert_eq!(run(&root.0, &["PIIND"]).0, MISUSED);
 }
@@ -426,54 +362,35 @@ fn a_whole_zero_price_month_is_recorded_not_published() {
     let day = YearMonth::new(2018, 12).expect("month");
     let id = pull::ingest::repair_plan::symbol_id(SYMBOL);
     let day_path = path(Timeframe::DAY_1, day);
-    match BarFile::open_or_create(&root.0, day_path, id)
+    let written = BarFile::open_or_create(&root.0, day_path, id)
         .and_then(|mut writer| writer.append(&[zero]).map(|_| ()))
-    {
+        .is_ok();
+    write_plan(
+        &root.0,
+        &plan_text(&[("1day", "2018-12", "whole_month", "zero_price", &[])]),
+    );
+    let (code, out) = run(
+        &root.0,
+        &[
+            SYMBOL,
+            "2018-12-01",
+            "2018-12-31",
+            "--cause",
+            "zero_price",
+            "--reason",
+            "zero row",
+            "--apply",
+        ],
+    );
+    if written {
+        assert_eq!(code, OK, "{out}");
+        assert!(out.contains("RECORDED WHOLE: 1 bar(s)"), "{out}");
+        assert!(!root.0.join("bar-revisions-v1").exists());
+    } else {
         // A WRITE DOOR THAT REFUSES A ZERO BAR (PREC-16) leaves nothing to
-        // quarantine: the run then answers that the plan names a month the
-        // store does not hold, by name.
-        Err(_) => {
-            write_plan(
-                &root.0,
-                &plan_text(&[("1day", "2018-12", "whole_month", "zero_price", &[])]),
-            );
-            let (code, out) = run(
-                &root.0,
-                &[
-                    SYMBOL,
-                    "2018-12-01",
-                    "2018-12-31",
-                    "--cause",
-                    "zero_price",
-                    "--reason",
-                    "zero row",
-                    "--apply",
-                ],
-            );
-            assert_eq!(code, FAILED, "{out}");
-        }
-        Ok(()) => {
-            write_plan(
-                &root.0,
-                &plan_text(&[("1day", "2018-12", "whole_month", "zero_price", &[])]),
-            );
-            let (code, out) = run(
-                &root.0,
-                &[
-                    SYMBOL,
-                    "2018-12-01",
-                    "2018-12-31",
-                    "--cause",
-                    "zero_price",
-                    "--reason",
-                    "zero row",
-                    "--apply",
-                ],
-            );
-            assert_eq!(code, OK, "{out}");
-            assert!(out.contains("RECORDED WHOLE: 1 bar(s)"), "{out}");
-            assert!(!root.0.join("bar-revisions-v1").exists());
-        }
+        // quarantine: the plan names a month the store does not hold, and
+        // the run refuses it by name.
+        assert_eq!(code, FAILED, "{out}");
     }
 }
 
