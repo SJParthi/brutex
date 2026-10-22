@@ -44,45 +44,66 @@ fn snapshot(offset: u32) -> Snapshot {
     parsed
 }
 
-/// C-MS-01: one `token_on` between two snapshots, at 1, 10 and 100 snapshots.
+/// One answer's cost, and its spread printed: `token_on(day)` for one token.
+fn measured(book: &Book, day: Day, label: &str) -> u128 {
+    if !matches!(
+        book.token_on(day, "NFO", 9_000_500),
+        TokenOn::Resolved { .. }
+    ) {
+        refuse("the probed token resolves");
+    }
+    spread(label, 20_000, || {
+        black_box(book.token_on(black_box(day), "NFO", black_box(9_000_500)));
+    });
+    cost_ps(200_000, || {
+        matches!(
+            black_box(book).token_on(black_box(day), "NFO", black_box(9_000_500)),
+            TokenOn::Resolved { .. }
+        )
+    })
+}
+
+/// C-MS-01: `token_on` at 1, 10 and 100 snapshots, in its two shapes. On a
+/// snapshot day one snapshot answers (one probe): measured at 1, 10 and 100.
+/// Between two snapshots the next one is probed too (two probes): measured at
+/// 10 and 100, the sizes that have a day between two snapshots. Each shape is
+/// held to the ceiling against its own smallest size.
 pub(crate) fn token_on_is_flat() -> bool {
-    let mut costs = Vec::new();
+    let mut on_day = Vec::new();
+    let mut between = Vec::new();
     for count in [1_u32, 10, 100] {
         let Ok(book) = Book::of((0..count).map(snapshot).collect()) else {
             refuse("the invented book builds")
         };
-        let stamps = book.stamps();
-        // A DAY BETWEEN THE LAST TWO SNAPSHOTS (or after the only one).
-        let Some(last) = stamps.last() else {
+        let Some(last) = book.stamps().last().copied() else {
             refuse("a book of snapshots")
         };
-        let Ok(day) = Day::from_days(last.day.days_from_epoch().saturating_sub(3)) else {
-            refuse("a real day")
-        };
-        let day = if count == 1 { last.day } else { day };
-        if !matches!(
-            book.token_on(day, "NFO", 9_000_500),
-            TokenOn::Resolved { .. }
-        ) {
-            refuse("the probed token resolves");
+        on_day.push(measured(
+            &book,
+            last.day,
+            &format!("C-MS-01 token_on, a snapshot day, {count} snapshots"),
+        ));
+        if count > 1 {
+            let Ok(day) = Day::from_days(last.day.days_from_epoch().saturating_sub(3)) else {
+                refuse("a real day")
+            };
+            between.push(measured(
+                &book,
+                day,
+                &format!("C-MS-01 token_on, between two snapshots, {count} snapshots"),
+            ));
         }
-        costs.push(cost_ps(200_000, || {
-            matches!(
-                black_box(&book).token_on(black_box(day), "NFO", black_box(9_000_500)),
-                TokenOn::Resolved { .. }
-            )
-        }));
-        spread(
-            &format!("C-MS-01 token_on, {count} snapshots"),
-            20_000,
-            || {
-                black_box(book.token_on(black_box(day), "NFO", black_box(9_000_500)));
-            },
-        );
     }
-    let [one, ten, hundred] = costs.as_slice() else {
-        refuse("three sizes measured")
+    let ([one, ten, hundred], [ten_between, hundred_between]) =
+        (on_day.as_slice(), between.as_slice())
+    else {
+        refuse("five sizes measured")
     };
-    ratio("C-MS-01 token_on, 10 snapshots", *one, *ten)
-        & ratio("C-MS-01 token_on, 100 snapshots", *one, *hundred)
+    ratio("C-MS-01 token_on, a snapshot day, 10x", *one, *ten)
+        & ratio("C-MS-01 token_on, a snapshot day, 100x", *one, *hundred)
+        & ratio(
+            "C-MS-01 token_on, between two, 100 vs 10",
+            *ten_between,
+            *hundred_between,
+        )
 }

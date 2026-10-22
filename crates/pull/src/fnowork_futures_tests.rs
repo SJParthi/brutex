@@ -189,6 +189,32 @@ fn rolling_reply(url: &str) -> Result<String, Refusal> {
     Ok(answer(&candles))
 }
 
+/// Plans `ZQIDX` over `asked` from the snapshots in `masters`, its last day
+/// settled, and pulls it into `store_root` from a vendor answering `reply`.
+fn plan_and_pull(
+    masters: &Path,
+    store_root: &Path,
+    asked: Window,
+    today: Day,
+    reply: fn(&str) -> Result<String, Refusal>,
+) -> (FuturesPlan, FuturesLanded) {
+    let book = Book::open(masters).unwrap();
+    let plan = futures_plan(&book, route(), "ZQIDX", asked, today, asked.to()).unwrap();
+    let vendor = Vendorish {
+        seen: RefCell::new(Vec::new()),
+        reply,
+    };
+    let landed = block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &plan,
+        store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ));
+    (plan, landed)
+}
+
 fn bars_of(
     root: &Path,
     symbol: &str,
@@ -350,27 +376,9 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
         &[fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27")],
     );
     // PULL 1, while the token names JANUARY.
-    let first = futures_plan(
-        &Book::open(&masters).unwrap(),
-        route(),
-        "ZQIDX",
-        window(day(2026, 1, 1), day(2026, 1, 9)),
-        day(2026, 1, 12),
-        day(2026, 1, 9),
-    )
-    .unwrap();
-    let vendor = Vendorish {
-        seen: RefCell::new(Vec::new()),
-        reply: january_reply,
-    };
-    block_on(pull_futures_day(
-        &vendor,
-        &spec(),
-        &first,
-        &store_root,
-        Vendor::Zerodha,
-        "test://futures",
-    ));
+    let jan = window(day(2026, 1, 1), day(2026, 1, 9));
+    let (_, first) = plan_and_pull(&masters, &store_root, jan, day(2026, 1, 12), january_reply);
+    assert!(first.failed.is_empty(), "{:?}", first.failed);
     let month = YearMonth::new(2026, 1).unwrap();
     let january_bars = bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month);
     assert_eq!(january_bars.len(), 5);
@@ -389,15 +397,14 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
         book.token_on(day(2026, 1, 20), "NFO", 8_000_001),
         master_snapshots::TokenOn::Ambiguous { .. }
     ));
-    let second = futures_plan(
-        &book,
-        route(),
-        "ZQIDX",
-        window(day(2026, 1, 20), day(2026, 2, 6)),
+    let asked = window(day(2026, 1, 20), day(2026, 2, 6));
+    let (second, landed) = plan_and_pull(
+        &masters,
+        &store_root,
+        asked,
         day(2026, 2, 10),
-        day(2026, 2, 6),
-    )
-    .unwrap();
+        february_reply,
+    );
     // JANUARY IS NOT ASKED THROUGH A TOKEN THAT NOW NAMES APRIL.
     assert_eq!(second.refused.len(), 1, "{:?}", second.refused);
     assert!(
@@ -434,18 +441,6 @@ fn two_contracts_reusing_a_token_on_different_dates_stay_separate() {
         second.asks[2].token, 8_000_002,
         "the near month on the day asked"
     );
-    let vendor = Vendorish {
-        seen: RefCell::new(Vec::new()),
-        reply: february_reply,
-    };
-    let landed = block_on(pull_futures_day(
-        &vendor,
-        &spec(),
-        &second,
-        &store_root,
-        Vendor::Zerodha,
-        "test://futures",
-    ));
     assert!(landed.failed.is_empty(), "{:?}", landed.failed);
     // JANUARY IS EXACTLY WHAT PULL 1 FILED; APRIL HOLDS ONLY ITS OWN DAYS.
     assert_eq!(

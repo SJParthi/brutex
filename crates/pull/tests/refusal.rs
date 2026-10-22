@@ -671,34 +671,42 @@ fn the_join_key_is_derived_from_the_vendors_own_master_columns() {
     assert!(!JoinKey::for_vendor(Vendor::Zerodha).is_identity());
 }
 
-/// **ZERODHA IS SPOT ONLY, AND TWO INDEPENDENT REFUSALS SAY SO.**
+/// **ZERODHA IS NEVER ASKED FOR AN EXPIRED OPTION; ITS FUTURES GO THROUGH A
+/// TOKEN AT THE DAY RUNG.**
 ///
-/// The operator's rule of 19 Aug 2026: for this feed an expired future or
-/// option must never be attempted, even if it is selected by mistake. That is
-/// not a UI concern — a page can be wrong — so it is enforced twice in the
-/// descriptor, and neither refusal relies on the other:
+/// The operator's rule of 19 Aug 2026 made Zerodha spot only. On 20 Oct 2026
+/// the operator put its FUTURES back (CON-12, FUT-C1: stored and never swept;
+/// R4-28, D-6893). Options stay refused, and nothing here weakens that half:
 ///
 /// | Refusal | Where | What it stops |
 /// |---|---|---|
-/// | `FnoAccess::None` | `HttpSpec::fno` | the expired-F&O route returns 503 **before any request is built** |
-/// | Declined segments | `Vendor::segment_of` | no derivative row of its master is ever stored, so there is nothing to ask about |
+/// | no `ByName` and no `ByStrikeOffset` | `HttpSpec::fno` | no option request builder exists for this feed |
+/// | `ByToken` names futures and the day rung only | `vendor::ZERODHA_CONTINUOUS` | `api::server::futures_refusal` refuses options and minutes before any request |
+/// | Declined segments | `Vendor::segment_of` | no derivative row of its master is ever stored in the universe |
 #[test]
-fn zerodha_can_never_be_asked_for_an_expired_contract() {
+fn zerodha_is_never_asked_for_an_expired_option_and_its_futures_go_through_a_token() {
     let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Zerodha.descriptor().transport
     else {
         panic!("Zerodha is an HTTP feed");
     };
 
-    // 1 — the route's own gate. `serves()` is what `crates/api/src/server.rs`
-    // now asks, so a change here changes that refusal.
-    assert!(
-        !spec.fno.serves(),
-        "the expired-F&O route refuses on this, so it must stay false"
-    );
+    // 1 — NO OPTION ROUTE: neither of the two option request builders exists.
     assert!(spec.fno.by_name().is_none());
     assert!(spec.fno.by_offset().is_none());
 
-    // 2 — and the swept surface is spot, so nothing downstream widens it.
+    // 2 — THE FUTURES ROUTE: a token, the day rung, NFO futures only.
+    let route = spec
+        .fno
+        .by_token()
+        .expect("Zerodha serves futures day candles through a token");
+    assert_eq!(route.granularity, pull::vendor::Granularity::Day1);
+    assert_eq!((route.exchange, route.future_type), ("NFO", "FUT"));
+    assert_eq!((route.param, route.value), ("continuous", "1"));
+    assert!(spec.fno.serves());
+
+    // 3 — the swept surface is still spot: the descriptor lists the index
+    // segment, and storing FNO rows widens nothing (`is_sweepable` refuses
+    // every contract).
     assert!(
         pull::vendor::Feed::Zerodha
             .descriptor()
@@ -707,19 +715,21 @@ fn zerodha_can_never_be_asked_for_an_expired_contract() {
         "the two swept indices are Index rows"
     );
 
-    // 3 — the OTHER feeds are untouched by this rule. A blanket refusal would
-    // have been easier and would have silently disabled Dhan's rolling walk
-    // and Groww's name walk, which are real capabilities this build uses.
+    // 4 — the OTHER feeds keep their own routes: Groww by name, Dhan by
+    // strike offset, and neither by token.
     let mut serving = 0;
     for feed in pull::vendor::Feed::ALL {
         if let pull::vendor::Transport::Http(other) = feed.descriptor().transport
             && other.fno.serves()
         {
             serving += 1;
+            if feed != pull::vendor::Feed::Zerodha {
+                assert!(other.fno.by_token().is_none(), "{feed:?}");
+            }
         }
     }
     assert!(
-        serving > 0,
-        "if no feed serves expired contracts, the gate above is proving nothing"
+        serving > 1,
+        "if no other feed serves expired contracts, the gate above is proving nothing"
     );
 }

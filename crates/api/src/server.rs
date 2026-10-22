@@ -13912,6 +13912,29 @@ fn futures_refusal(
     )
 }
 
+/// ONE NAMED EXPIRY ASKS FOR THAT CONTRACT ALONE: not the continuous series,
+/// which is no one contract. A named expiry no dated snapshot lists inside
+/// the window is refused by name rather than answered as an empty run.
+fn narrowed_to_expiry(
+    mut plan: pull::fnowork::FuturesPlan,
+    asked: &ingest::FnoRequest,
+) -> Result<pull::fnowork::FuturesPlan, String> {
+    let Some(expiry) = asked.expiry else {
+        return Ok(plan);
+    };
+    plan.asks.retain(|ask| {
+        matches!(ask.series, pull::fnowork::FuturesSeries::Contract { expiry: held, .. } if held == expiry)
+    });
+    if plan.asks.is_empty() && plan.refused.is_empty() {
+        return Err(format!(
+            "no dated master snapshot lists a future of {} expiring on {expiry} inside the \
+             window, so nothing was sent",
+            asked.underlying.as_str()
+        ));
+    }
+    Ok(plan)
+}
+
 /// `POST /pull/fno` on a feed that serves futures day candles through a token
 /// (R4-28, CON-12; D-6893): stored, never swept.
 ///
@@ -13959,22 +13982,10 @@ async fn fno_futures(
         Ok(plan) => plan,
         Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
     };
-    let mut plan = plan;
-    // ONE NAMED EXPIRY ASKS FOR THAT CONTRACT ALONE: not the continuous
-    // series, which is no one contract.
-    if let Some(expiry) = asked.expiry {
-        plan.asks.retain(|ask| {
-            matches!(ask.series, pull::fnowork::FuturesSeries::Contract { expiry: held, .. } if held == expiry)
-        });
-        if plan.asks.is_empty() && plan.refused.is_empty() {
-            let why = format!(
-                "no dated master snapshot lists a future of {} expiring on {expiry} inside \
-                 the window, so nothing was sent",
-                asked.underlying.as_str()
-            );
-            return page.say(facts, unavailable, audit::Outcome::NotStarted, &why);
-        }
-    }
+    let plan = match narrowed_to_expiry(plan, asked) {
+        Ok(plan) => plan,
+        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
+    };
     facts.push(("Dated master snapshot", plan.newest.to_string()));
     facts.push(("Series asked", plan.asks.len().to_string()));
     if !plan.refused.is_empty() {
@@ -30207,11 +30218,15 @@ mod tests {
     #[test]
     fn the_futures_route_refuses_options_and_minutes_by_name() {
         let day = |y, m, d| Day::new(y, m, d).expect("a real day");
-        let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Zerodha.descriptor().transport
+        let pull::vendor::Transport::Http(spec) =
+            pull::vendor::Feed::Zerodha.descriptor().transport
         else {
             panic!("Zerodha is an HTTP feed");
         };
-        let route = spec.fno.by_token().expect("Zerodha serves futures through a token");
+        let route = spec
+            .fno
+            .by_token()
+            .expect("Zerodha serves futures through a token");
         assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
         let asked = |series, granularity| ingest::FnoRequest {
             underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
@@ -30243,6 +30258,70 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// R4-28 (CON-12): a named expiry asks that one contract and not the
+    /// continuous series; an expiry no snapshot lists is refused by name.
+    #[test]
+    fn a_named_futures_expiry_asks_that_contract_alone_or_is_refused_by_name() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let window =
+            pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31)).expect("a window");
+        let contract = |y, m, d| {
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future {
+                expiry: brutex_core::instrument::Expiry::new(y, m, d).expect("an expiry"),
+            })
+            .expect("a future renders")
+        };
+        let ask = |token, series| pull::fnowork::FuturesAsk {
+            token,
+            series,
+            window,
+        };
+        let plan = pull::fnowork::FuturesPlan {
+            underlying: "NIFTY".to_owned(),
+            newest: pull::master_snapshots::Stamp {
+                day: day(2026, 1, 2),
+                ordinal: 1,
+            },
+            asks: vec![
+                ask(
+                    1,
+                    pull::fnowork::FuturesSeries::Contract {
+                        contract: contract(2026, 1, 27),
+                        expiry: day(2026, 1, 27),
+                    },
+                ),
+                ask(
+                    2,
+                    pull::fnowork::FuturesSeries::Contract {
+                        contract: contract(2026, 2, 24),
+                        expiry: day(2026, 2, 24),
+                    },
+                ),
+                ask(1, pull::fnowork::FuturesSeries::Continuous),
+            ],
+            refused: Vec::new(),
+        };
+        let asked = |expiry| ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Futures,
+            expiry,
+            window,
+            feed: pull::vendor::Feed::Zerodha,
+            granularity: pull::vendor::Granularity::Day1,
+            rate: None,
+            clamped_from: None,
+        };
+        let all = narrowed_to_expiry(plan.clone(), &asked(None)).expect("no expiry named");
+        assert_eq!(all.asks.len(), 3);
+        let one = narrowed_to_expiry(plan.clone(), &asked(Some(day(2026, 1, 27))))
+            .expect("a listed expiry");
+        assert_eq!(one.asks.len(), 1);
+        assert_eq!(one.asks[0].token, 1);
+        let why = narrowed_to_expiry(plan, &asked(Some(day(2026, 3, 31))))
+            .expect_err("an expiry no snapshot lists");
+        assert!(why.contains("expiring on 2026-03-31"), "{why}");
     }
 
     /// This is the operator's requirement stated plainly — *press Pull and the
