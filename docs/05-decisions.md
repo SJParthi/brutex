@@ -76137,7 +76137,10 @@ each now with a test that failed on that head:
   fix reads; `webpki-roots` 1.0.10 ships 3 test certificates, as 1.0.9
   did). The
   count stays 194. No `dependencies` list moved: the lock's diff against
-  `feat/db-fix` is the two versions and their checksums.
+  `feat/db-fix` is the two versions and their checksums. `feat/db-fix`
+  then took the same two bumps itself (D-7120) and pinned the same
+  fingerprint, `0x57F8_69FF_1E0D_4A5C`; the merge keeps its comment and adds
+  one line naming this round, and `Cargo.lock` equals `feat/db-fix`'s.
 - *Taken from the check's follow-ups, in this package's files:* a time span
   with an end that does not read names every end given (R324-31). A good
   end beside a bad one is named as not applied; before, it was dropped
