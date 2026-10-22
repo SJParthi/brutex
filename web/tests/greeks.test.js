@@ -183,3 +183,23 @@ test('the page draws the greeks from the server and computes no model', () => {
   assert.doesNotMatch(lib, /Math\.(exp|log|sqrt)\(/);
   for (const src of [page, lib]) assert.doesNotMatch(src, /\berf\(|normCdf|normalCdf/i);
 });
+
+test('a priced cell carried over a documented rate gap keeps the rate_carried flag; a fresh one does not (DB-B44, R3-30)', () => {
+  const carried = cellOf({ ...priced(1), rate_state: 'rate_carried', rate_gap: { kind: 'na', released: '2099-02-20' } }, null);
+  assert.equal(carried.why, null, 'a carried rate is still a figure');
+  assert.ok(carried.flags.includes('rate_carried'), JSON.stringify(carried.flags));
+  assert.equal(carried.row?.rate_gap?.kind, 'na');
+  for (const state of ['rate_fresh', undefined]) {
+    assert.ok(!cellOf({ ...priced(1), rate_state: state, rate_gap: null }, null).flags.includes('rate_carried'), String(state));
+  }
+  assert.equal(typeof GREEK_FLAG.rate_carried, 'string');
+  assert.match(GREEK_FLAG.rate_carried, /never shown as a fresh one/);
+  assert.equal(typeof GREEK_WHY.rate_carried_too_long, 'string');
+  // The sentence's two bounds are the series' own constants, read from the Rust source, not a second copy.
+  const rf = readFileSync(new URL('../../crates/pull/src/riskfree.rs', import.meta.url), 'utf8');
+  const age = Number(/pub const MAX_AGE_DAYS: i32 = (\d+);/.exec(rf)?.[1]);
+  assert.equal(age, 14, 'MAX_AGE_DAYS');
+  assert.match(rf, /pub const MAX_CARRIED_AGE_DAYS: i32 = 2 \* MAX_AGE_DAYS;/);
+  assert.match(GREEK_WHY.rate_stale, new RegExp(`more than ${age} days old`));
+  assert.match(GREEK_WHY.rate_carried_too_long, new RegExp(`more than ${2 * age} days old`));
+});

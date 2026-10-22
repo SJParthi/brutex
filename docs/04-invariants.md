@@ -8140,6 +8140,31 @@ directory.
 | R319-11 | **An epoch's refusal says its kind once**, starting with its key, for every `Found` kind; the listing and the read say the same | `pull::ingest::census_store::kept_tests::an_epoch_refusal_never_stacks_two_parentheticals`, `pull::ingest::census_store::kept_tests::a_link_at_an_epoch_name_is_said_once_by_the_listing_and_the_read` | ✓ |
 | R319-12 | **`/db`'s census refuses a symlinked epoch, segment directory or single file by name**: nothing behind the link is read (a counting reader), and the answer is a named `Refused` fault, never an empty census and never the link's target served as the census (L-AG05-05) | `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`, `api::census::epoch_link_tests::api_census_refuses_a_symlinked_single_file_by_name`, `api::census::tests::a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits` | ✓ |
 
+## Reference tables as store data (R3-30, D-6246)
+
+| ID | Invariant | Proof | |
+|---|---|---|---|
+| R330-01 | **A table that fails its checksum is refused by name**, never served from the compiled copy | `pull::reference_data::tests::a_table_with_a_wrong_checksum_is_refused_by_name` | ✓ |
+| R330-02 | **A row added to the store table changes the next lookup without a code change** | `pull::reference_data::tests::a_lot_row_added_to_the_store_table_changes_the_next_lookup_without_a_code_change` | ✓ |
+| R330-03 | **An underlying without a sourced lot is named absent**, never a guessed lot | `pull::reference_data::tests::an_underlying_without_a_sourced_lot_is_named_absent` | ✓ |
+| R330-04 | **A documented rate gap is carried and labelled; an unexplained one is refused** | `pull::riskfree::tests::a_documented_rate_cancellation_is_carried_and_labelled`, `pull::riskfree::tests::an_unexplained_rate_gap_is_still_refused` | ✓ |
+| R330-05 | **A run of documented gaps carries a result at most 28 days** | `pull::riskfree::tests::chained_documented_gaps_carry_a_rate_no_older_than_two_windows` | ✓ |
+| R330-06 | **`/greeks.json` labels a carried rate on every cell and counts the gap rows** | `api::optiongreeks_route_tests::a_rate_carried_over_a_documented_gap_is_labelled_on_every_cell`; `/db`: `web/tests/greeks.test.js`, `web/tests/option-notes.test.js` (DB-B44) | ✓ |
+| R330-07 | **The same rows never land as a second generation; the last generation refuses by name** | `pull::reference_data::tests::writing_the_same_rows_again_lands_no_new_generation`, `pull::reference_data::tests::the_last_generation_is_refused_by_name_not_reported_as_a_race` | ✓ |
+| R330-08 | **Writers of one generation never both land** | `pull::reference_data::tests::two_writers_of_one_generation_never_both_land` | ✓ |
+| R330-09 | **Names that are not generations are kept and told, never ignored** | `pull::reference_data::tests::stray_names_are_not_generations_and_an_empty_store_serves_the_compiled_tables_labelled` | ✓ |
+| R330-10 | **An absent table with no compiled copy is told at warn; a refused file at error** | `pull::reference_data::tests::an_absent_table_is_told_as_a_warning_and_a_refused_file_as_an_error` | ✓ |
+| R330-11 | **An absent or ended dated record is an alert** | `pull::reference_data::tests::a_store_with_no_rate_table_refuses_greeks_by_name`, `pull::reference_data::tests::the_horizon_alert_fires_seven_days_before_the_calendar_ends` | ✓ |
+| R330-12 | **A calendar extension lists every changed settlement against the calendar held now** | `pull::expiry_alias::tests::extending_the_calendar_lists_changed_settlements` | ✓ |
+| R330-13 | **A reused symbol is one action item, never a nightly incomplete** (option and cash) | `pull::reference_data::tests::a_reused_symbol_is_one_action_item_and_not_a_nightly_incomplete` | ✓ |
+| R330-14 | **A seeded row keeps every citation's checksum; every expiry row says what it rests on** | `pull::reference_data::tests::a_seeded_row_keeps_every_citations_checksum`, `pull::reference_data::tests::the_expiry_seed_says_what_each_row_rests_on` | ✓ |
+| R330-15 | **A row loaded from the store cites its own URL, read day and checksum**, the compiled row's, never the file's source in their place | `pull::reference_data::tests::a_loaded_row_cites_its_own_source_and_checksum` | ✓ |
+| R330-16 | **A rate lookup that carries over a documented gap stays O(1) at p99**: flat from 52 to 5,200 rows, n and method printed | `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table`; the load's p50 and p99: `pull::reference_data::tests::the_loader_reads_every_table_inside_its_budget` | ✓ |
+| R330-17 | **A gap row continues a running clock and never starts one**: a gap row after an unexplained hole carries nothing, its days are refused naming it, and a gap row after it carries nothing either; the dense table agrees with a scan of results and gaps on every day of 300 generated tables (D-6247) | `pull::riskfree::tests::a_gap_row_after_an_unexplained_hole_carries_nothing`, `pull::riskfree::tests::every_day_agrees_with_a_scan_of_results_and_gaps` | ✓ |
+| R330-18 | **`/greeks.json` prices no cell over a hole before a gap row** and the header counts such rows as `unlinked_gaps`; a stored table holding one is told at load | `api::optiongreeks_route_tests::a_gap_row_after_an_unexplained_hole_prices_no_cell`, `pull::reference_data::tests::a_stored_rate_gap_after_an_unexplained_hole_is_told_at_load` | ✓ |
+| R330-19 | **A refusal computed on a carried rate says so** (`below_zero_carry_bound`, `iv_unsolved`) | `api::optiongreeks_route_tests::a_refusal_computed_on_a_carried_rate_names_the_gap` | ✓ |
+| R330-20 | **A source part is a citation only with a real read day and a location** (an `http(s)` URL or a path), and the five NSE/FAOP/68747 expiry rows carry the charter's checksum | `pull::reference_data::tests::a_loaded_row_cites_its_own_source_and_checksum`, `pull::reference_data::tests::the_sourced_expiry_rows_carry_the_charters_checksum` | ✓ |
+
 ## The lock above the advisory floors (BASE-REDS-1021; D-7120)
 
 `cargo deny check` (CI gate 3) is the authority on advisories and needs the
