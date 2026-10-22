@@ -596,7 +596,7 @@ fn an_expired_token_the_vendor_no_longer_serves_ends_its_history_by_name() {
     // THE MARCH TOKEN IS REFUSED BY THE VENDOR; THE OTHER TWO SERIES LAND.
     assert_eq!(landed.failed.len(), 1, "{:?}", landed.failed);
     assert!(
-        landed.failed[0].contains("history_ends"),
+        landed.failed[0].contains("vendor_refused"),
         "{:?}",
         landed.failed
     );

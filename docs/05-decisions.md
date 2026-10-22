@@ -77988,8 +77988,9 @@ The number is the ledger head + 1 (amendment A6).
    `token_reused` and never asked for the older contract's history
    (`two_contracts_reusing_a_token_on_different_dates_stay_separate`). A
    token the newest snapshot no longer lists (flushed after expiry) is
-   asked, and a refusal or an answer of nothing ends that contract's history
-   by name (`history_ends`).
+   asked: an answer of nothing ends that contract's history by name
+   (`history_ends`), and a refusal stops that series by name
+   (`vendor_refused`, with the vendor's own words) while the pull goes on.
 4. **The continuous series** is asked with `continuous=1` through the newest
    snapshot's nearest future expiring on or after the day of the pull, and
    filed **as answered** under its own symbol `<UNDERLYING>-FUT-C1` (segment

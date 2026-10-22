@@ -993,7 +993,7 @@ async fn pull_one<D: crate::chain::Discovery>(
             Ok(body) => body,
             Err(refusal) => {
                 return out.stop(format!(
-                    "history_ends: the vendor refused {span}: {refusal}"
+                    "vendor_refused: the vendor refused {span}: {refusal}; nothing after it was asked for this series"
                 ));
             }
         };

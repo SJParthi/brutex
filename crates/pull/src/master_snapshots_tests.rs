@@ -1035,3 +1035,24 @@ fn a_real_size_dump_is_measured() {
     );
     assert_eq!(summary.counts[4], 3, "the three injected lot changes");
 }
+
+#[test]
+fn the_columns_read_are_the_vendors_own_and_none_is_an_isin() {
+    let header: Vec<&str> = crate::vendor::KITE_MASTER_HEADER.split(',').collect();
+    assert_eq!(header.len(), 12, "the vendor's twelve columns");
+    for column in KITE_COLUMNS {
+        assert!(header.contains(&column), "{column} is a Kite column");
+    }
+    // ONE HEADER, NOT TWO: every column the universe reader requires of this
+    // vendor is in the same header the snapshots read.
+    for column in crate::masters::required_columns(Vendor::Zerodha) {
+        assert!(header.contains(&column), "{column} is a Kite column");
+    }
+    assert!(
+        header
+            .iter()
+            .all(|column| !column.to_ascii_lowercase().contains("isin")),
+        "the dump carries no ISIN: an ISIN comes from a same-date NSE file"
+    );
+    assert!(crate::vendor::KITE_TOKENS_ARE_REUSED.contains("flushed"));
+}
