@@ -2499,6 +2499,18 @@ fn prior_session_bar(
         .map_err(|why| format!("{year}-{month:02} is not a month: {why}"))?;
     let path = StorePath::for_key(vendor, key, timeframe, ym, FileKind::Bars)
         .map_err(|why| format!("no store path for {year}-{month:02}: {why}"))?;
+    // A QUARANTINED MONTH NEVER ANCHORS "YESTERDAY" (R4-18): its last bar
+    // may be another security's, so the anchor is refused by name, one probe.
+    refuse_quarantined(
+        root,
+        path,
+        (key.underlying.as_str(), rung_name, year, month),
+    )
+    .map_err(|why| match why {
+        LoadFailure::Missing(why) | LoadFailure::Refused(why) => {
+            format!("the {rung_name} month {year}-{month:02} before it: {why}")
+        }
+    })?;
     let hash = brutex_core::universe::fnv1a(key.underlying.as_str()).to_le_bytes();
     let symbol_id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| match why {
@@ -3978,6 +3990,17 @@ mod tests {
             "{why}"
         );
         assert!(why.contains("zerodha.quarantine.ledger"), "{why}");
+        // NOR DOES IT ANCHOR "YESTERDAY": the month before September is read
+        // for its last regular bar, and a quarantined one is refused by name.
+        let september = 1_785_727_500_000_000_i64 + 29 * 86_400_000_000;
+        let anchor = prior_session_bar(&r, Vendor::Zerodha, &key, "1min", september);
+        assert!(
+            anchor
+                .as_ref()
+                .is_err_and(|why| why.contains("before it") && why.contains("QUARANTINED")),
+            "{:?}",
+            anchor.map(|candle| candle.ts_micros)
+        );
         // A torn index is not "clear": the month is refused, naming it.
         let index = store::quarantine::index_path(&r, Vendor::Zerodha);
         let bytes = std::fs::read(&index).expect("the index");
