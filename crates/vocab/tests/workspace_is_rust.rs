@@ -620,7 +620,7 @@ fn the_dependency_set_has_not_moved_without_review() {
     // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
     // The scan is recorded beside the count above, and no other package's
     // `dependencies` list moved.
-    // 0x8070_52EA_72E5_1027 -> 0x0000_0000_0000_0000 IS TWO VERSION BUMPS, NOT A
+    // 0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C IS TWO VERSION BUMPS, NOT A
     // NEW PACKAGE (D-5916), merged onto `rustix` above; on its own branch, from
     // 0xFFDD_76EA_1ADA_B2F7, the same two bumps pinned 0x79FE_A712_E0CC_24EC.
     // `rustls-webpki` 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and
@@ -633,7 +633,7 @@ fn the_dependency_set_has_not_moved_without_review() {
     // under `src/data/distrusted/` -- the public keys it now refuses, data
     // rather than code.
     assert_eq!(
-        h, 0x0000_0000_0000_0000,
+        h, 0x57F8_69FF_1E0D_4A5C,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

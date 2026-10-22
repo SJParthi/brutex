@@ -78074,10 +78074,16 @@ path `hyper-rustls -> reqwest -> pull -> api, cli`:
    `Cargo.lock` moves (`cargo update -p rustls-webpki --precise 0.103.16`,
    `cargo update -p webpki-roots --precise 1.0.10`): two version and two
    checksum lines. No manifest line, no dependency list and no feature moved;
-   the lock still holds 195 packages.
+   the lock still holds 195 `[[package]]` entries, and the count the
+   dependency-set test asserts stays 192. Merged onto `rustix` (D-5240, at
+   `feat/db-fix` `a5d0bea8a`, R3-15 repair 2) the lock holds 197 and the test
+   asserts 194, and the merged lock differs from that branch's by these two
+   version and two checksum lines alone.
 2. **The scan `the_dependency_set_has_not_moved_without_review` demands was
    run before its pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
-   re-pinned to `0x79FE_A712_E0CC_24EC`): neither crate ships a `build.rs` or
+   re-pinned to `0x79FE_A712_E0CC_24EC` on this branch alone, and to
+   `0x57F8_69FF_1E0D_4A5C` merged onto `rustix`, the same two bumps and no
+   package unscanned): neither crate ships a `build.rs` or
    any `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.s` or `.asm`. `webpki-roots`
    1.0.10's files outside `.rs`, `.md`, `.toml` and `.json` are the same set as
    1.0.9's; `rustls-webpki` 0.103.16 adds exactly eight `.spki.der` files
