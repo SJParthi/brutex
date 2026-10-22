@@ -446,7 +446,7 @@ fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
                     None => {}
                     Some(None) => ignored.push((name, word)),
                     Some(Some(_)) => {
-                        ignored.push((name, format!("{word} (not applied: {other}= did not read)")))
+                        ignored.push((name, format!("{word} (not applied: {other}= did not read)")));
                     }
                 }
             }
@@ -9974,6 +9974,16 @@ mod r3_24_tests {
         // BOTH bad ends are named (R3-24 repair round 3): `to=x` was dropped
         // without a word beside a bad `from`.
         assert_eq!(ignored(&bad), ["month", "reason", "kind", "from", "to"]);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A SPAN END THAT DOES NOT READ takes the span with it, and every end
+    /// given is named** (R3-24 repair round 3, the fourth check's follow-up):
+    /// a reversed span, a lone bad end, and a good end beside a bad one, which
+    /// is named as not applied rather than dropped in silence.
+    #[test]
+    fn every_span_end_given_is_named_when_one_does_not_read() {
         let reversed = asked("from=2026-10-17&to=2026-10-16");
         assert!(reversed.keys.span.is_none());
         assert_eq!(reversed.ignored[0].0, "from");
@@ -10005,8 +10015,6 @@ mod r3_24_tests {
                 got.ignored
             );
         }
-        drop(sink);
-        let _ignored = std::fs::remove_dir_all(&dir);
     }
 
     /// An instant is a number of milliseconds, an IST day or minute or second,
