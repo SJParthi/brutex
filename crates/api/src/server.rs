@@ -11504,6 +11504,12 @@ async fn fno_walk(
     if let Some(rolling) = spec.fno.by_offset() {
         return fno_roll(&page, facts, asked, site, &wire, rolling).await;
     }
+    // THE THIRD SHAPE: FUTURES DAY CANDLES THROUGH A TOKEN (R4-28, CON-12;
+    // D-6893). Each token is resolved by date through the dated master
+    // snapshots and never decides identity; options are refused here.
+    if let Some(route) = spec.fno.by_token() {
+        return fno_futures(&page, facts, asked, site, &wire, route).await;
+    }
     // ASKED AS THE QUESTION IT IS. This read `by_name().is_none()`, which is
     // the same verdict reached by a different question -- "has it a NAME walk"
     // rather than "does it serve expired contracts at all" -- and left
@@ -13884,6 +13890,131 @@ fn rolling_receipt(
         audit::Outcome::Failed,
         "some contracts did not land; the month is incomplete and must not be \
          read as held",
+        counted,
+    )
+}
+
+/// `POST /pull/fno` on a feed that serves futures day candles through a token
+/// (R4-28, CON-12; D-6893): stored, never swept.
+///
+/// Each future is filed under its own contract keyed (underlying, expiry), the
+/// vendor's continuous series under `<UNDERLYING>-FUT-C1`, open interest kept.
+/// The plan, the requests and every refusal are `pull.futures` events; the
+/// receipt names every series and every contract not asked for.
+async fn fno_futures(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    route: pull::vendor::ContinuousSpec,
+) -> (axum::http::StatusCode, String) {
+    let unavailable = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+    if matches!(asked.series, ingest::Series::Options) {
+        return page.say(
+            facts,
+            unavailable,
+            audit::Outcome::NotStarted,
+            "this feed serves expired FUTURES day candles only, through a token; nothing \
+             was sent rather than futures being filed under an options request",
+        );
+    }
+    if asked.granularity != route.granularity {
+        return page.say(
+            facts,
+            unavailable,
+            audit::Outcome::NotStarted,
+            "this feed serves expired futures as day candles only; minute candles of an \
+             expired future are UNVERIFIED (charter §4z), so nothing was sent",
+        );
+    }
+    let book = match masters_dir().and_then(|dir| {
+        pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))
+    }) {
+        Ok(book) => book,
+        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
+    };
+    let last_settled = match ingest::last_settled_day(page.today) {
+        Ok(day) => day,
+        Err(why) => {
+            return page.say(
+                facts,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                audit::Outcome::NotStarted,
+                &why.to_string(),
+            );
+        }
+    };
+    let plan = match pull::fnowork::futures_plan(
+        &book,
+        route,
+        asked.underlying.as_str(),
+        asked.window,
+        page.today,
+        last_settled,
+    ) {
+        Ok(plan) => plan,
+        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
+    };
+    let mut plan = plan;
+    // ONE NAMED EXPIRY ASKS FOR THAT CONTRACT ALONE: not the continuous
+    // series, which is no one contract.
+    if let Some(expiry) = asked.expiry {
+        plan.asks.retain(|ask| {
+            matches!(ask.series, pull::fnowork::FuturesSeries::Contract { expiry: held, .. } if held == expiry)
+        });
+    }
+    facts.push(("Dated master snapshot", plan.newest.to_string()));
+    facts.push(("Series asked", plan.asks.len().to_string()));
+    if !plan.refused.is_empty() {
+        facts.push(("Not asked", plan.refused.join(" · ")));
+    }
+    let governed = Governed {
+        inner: &wire.source,
+        feed: asked.feed,
+        site,
+    };
+    let origin = wire.source.endpoint(route.granularity);
+    let landed = pull::fnowork::pull_futures_day(
+        &governed,
+        &wire.spec,
+        &plan,
+        &site.store_root,
+        wire.store_vendor,
+        &origin,
+    )
+    .await;
+    facts.push(("Rows read", landed.rows_read.to_string()));
+    facts.push(("Bars stored", landed.bars_stored.to_string()));
+    for line in &landed.series {
+        facts.push(("Series", line.clone()));
+    }
+    let counted = FnoCounts {
+        contracts: plan.asks.len() as u64,
+        rows_read: landed.rows_read as u64,
+        bars_stored: landed.bars_stored as u64,
+        failures: landed.failed.len() as u64,
+    };
+    if landed.failed.is_empty() && plan.refused.is_empty() {
+        return page.say_counted(
+            facts,
+            axum::http::StatusCode::OK,
+            if landed.bars_stored == 0 {
+                audit::Outcome::Empty
+            } else {
+                audit::Outcome::Stored
+            },
+            "every planned futures series was asked and filed under its own contract or \
+             its continuous series",
+            counted,
+        );
+    }
+    page.say_counted(
+        facts,
+        axum::http::StatusCode::BAD_GATEWAY,
+        audit::Outcome::Failed,
+        "some futures series were not asked or did not land whole; each is named above \
+         and none may be read as held",
         counted,
     )
 }

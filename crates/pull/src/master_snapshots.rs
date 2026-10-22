@@ -1,0 +1,1983 @@
+//! Dated Kite instrument-master snapshots, the day's diff, and `token_on`.
+//! R4-28 (DLY-09); D-6892.
+//!
+//! # Why this exists
+//!
+//! [`crate::masters::land`] renames the fetched Kite dump over
+//! `zerodha_instruments.csv`, so the master an earlier day was read against is
+//! gone the moment today's lands. Kite's own historical page records why that
+//! loses identity: the exchanges flush a derivative's `instrument_token` at
+//! every expiry and reuse it, and the instruments API lists only what trades
+//! now (`docs/00-charter.md` §4z, the "Expired F&O" and instruments rows;
+//! `CLAUDE.md` §1). A token read against today's master names today's
+//! contract, whatever it named on the day a bar was printed.
+//!
+//! # The pattern is `cash_session_cache`'s
+//!
+//! After every landing of the Kite dump, and of NSE's NIFTY Total Market file
+//! (the only ISIN-bearing master the same refresh lands; the Kite dump has no
+//! ISIN column), the same bytes are written gzip-compressed as
+//! `<stem>_<yyyymmdd>.csv.gz` with a `.receipt` binding the date, the URL, the
+//! compressed length and SHA-256, and the body's own length and SHA-256. Both
+//! files are created `O_EXCL` and never opened for writing again.
+//!
+//! **The receipt is the commit marker.** The body is written and synced first
+//! and the receipt last, so a kill between the two leaves a body with no
+//! receipt: [`Catalog`] names it incomplete and nothing here reads it. A later
+//! refresh the same day takes the next ordinal (`_2`, `_3`, ...), and the
+//! newest receipted ordinal of a day is that day's snapshot. A refresh whose
+//! body equals the day's snapshot is "already held" and writes nothing.
+//!
+//! # `token_on`
+//!
+//! [`Book::token_on`] answers what `(exchange, token)` named on a day, from
+//! the newest receipted snapshot on or before it, through that snapshot's own
+//! hash index. Snapshots come only as often as attended refreshes, so between
+//! two of them the older one is believed only when the next later one maps the
+//! token to the same contract; otherwise the answer is
+//! [`TokenOn::Ambiguous`], naming both snapshot dates. A day that is itself a
+//! snapshot day is answered by that snapshot alone. Before the first snapshot
+//! the answer is [`TokenOn::BeforeFirst`], by name: never the earliest row and
+//! never today's.
+//!
+//! # The diff
+//!
+//! Each new Kite snapshot is compared with the receipted snapshot before it,
+//! keyed `(exchange, tradingsymbol, expiry, strike, type)`: listings,
+//! delistings, symbol changes (the same token under a new symbol, or the same
+//! ISIN under a new symbol), ISIN changes, lot-size, expiry and token changes,
+//! and the NSE shares whose ISIN the same-date NSE file does not list
+//! (`isin_unknown`, never inferred). It is written once, `O_EXCL`, as a
+//! fixed-record `<yyyymmdd>.diff` ([`RECORD_LEN`] bytes a line), and the
+//! refresh outcome and the [`EVENT_TARGET`] events carry its counts and name
+//! every symbol, ISIN, lot-size, expiry and token change.
+//!
+//! # Cost
+//!
+//! | operation | cost |
+//! |---|---|
+//! | [`Book::token_on`] on loaded snapshots | one day-table index and at most two hash probes |
+//! | first probe into a snapshot not yet loaded | one read, one decompression and one parse of that snapshot, O(rows), once |
+//! | [`snapshot`] | one compression, one directory listing, at most one receipt check |
+//! | [`diff`] | O(rows of both snapshots), once per refresh |
+//!
+//! The day table makes the snapshot lookup an index rather than a search: it
+//! holds one entry per calendar day the snapshots span. Measured by
+//! `crates/pull/benches/ratio/master_snapshots.rs` (C-MS-01) at 1, 10 and 100
+//! snapshots; `docs/06-limits.md` L-R428-01..03 record the bounds.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use brutex_core::vendor::Vendor;
+use flate2::bufread::GzDecoder;
+use flate2::{Compression, GzBuilder};
+use sha2::{Digest, Sha256};
+use store::flock::Flock;
+
+use crate::masters::{Landed, MAX_BODY_BYTES, NSE_TOTAL_MARKET_FILE, Source};
+use crate::session::{Day, IstMoment};
+
+/// The directory, inside the masters directory, the snapshots live in.
+pub const SNAPSHOT_DIR: &str = "master-snapshots";
+
+/// The `/logs` target of every snapshot, diff and change event.
+pub const EVENT_TARGET: &str = "pull.masters.snapshot";
+
+/// The first line of every receipt. A receipt of another format is refused.
+const RECEIPT_FORMAT: &str = "brutex-master-snapshot-v1";
+
+/// The first field of every `.diff` header line.
+const DIFF_FORMAT: &str = "brutex-master-diff-v1";
+
+/// The advisory lock every writer takes, beside the snapshots.
+const LOCK_FILE: &str = ".master-snapshots.lock";
+
+/// The most snapshots one kind may hold for one day. A refresh past it is
+/// refused by name rather than numbered without end.
+pub const MAX_ORDINAL: u32 = 99;
+
+/// The largest compressed snapshot read back, in bytes.
+const MAX_COMPRESSED: u64 = 128 * 1_024 * 1_024;
+
+/// The largest receipt read back, in bytes.
+const MAX_RECEIPT: u64 = 1_024;
+
+/// The widest span, in days, a catalog's day table may cover (forty years).
+/// A stamp further apart than this is a misnamed file, refused by name.
+const MAX_SPAN_DAYS: u32 = 40 * 366;
+
+/// Bytes in one `.diff` line, newline included.
+pub const RECORD_LEN: usize = 192;
+
+/// Which landed master a snapshot is of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    /// Kite's instrument dump, `zerodha_instruments.csv`.
+    Kite,
+    /// NSE's NIFTY Total Market constituents, the same-date ISIN witness.
+    NseTotalMarket,
+}
+
+impl Kind {
+    /// Both kinds, in file-name order.
+    pub const ALL: [Self; 2] = [Self::Kite, Self::NseTotalMarket];
+
+    /// The file-name stem.
+    #[must_use]
+    pub const fn stem(self) -> &'static str {
+        match self {
+            Self::Kite => "instruments",
+            Self::NseTotalMarket => "nse_total_market",
+        }
+    }
+
+    /// The kind a landed source is snapshotted as, or `None` for a source
+    /// that is not: the Kite dump identifies tokens, and the NSE file is the
+    /// only master the refresh lands that carries an ISIN beside a symbol.
+    #[must_use]
+    pub fn of(source: &Source) -> Option<Self> {
+        if source.vendor == Some(Vendor::Zerodha) {
+            Some(Self::Kite)
+        } else if source.file == NSE_TOTAL_MARKET_FILE {
+            Some(Self::NseTotalMarket)
+        } else {
+            None
+        }
+    }
+}
+
+/// One snapshot's place: its date and its ordinal within the date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Stamp {
+    /// The civil IST date the master was landed on.
+    pub day: Day,
+    /// 1 for the day's first snapshot, 2 for `_2`, and so on.
+    pub ordinal: u32,
+}
+
+impl core::fmt::Display for Stamp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.ordinal <= 1 {
+            write!(f, "{}", self.day)
+        } else {
+            write!(f, "{}_{}", self.day, self.ordinal)
+        }
+    }
+}
+
+/// `yyyymmdd`, the date as file names carry it.
+fn compact(day: Day) -> String {
+    format!("{:04}{:02}{:02}", day.year(), day.month(), day.day())
+}
+
+/// `yyyymmdd` or `yyyymmdd_<n>`.
+fn base(stamp: Stamp) -> String {
+    if stamp.ordinal <= 1 {
+        compact(stamp.day)
+    } else {
+        format!("{}_{}", compact(stamp.day), stamp.ordinal)
+    }
+}
+
+/// The snapshot file's name.
+#[must_use]
+pub fn file_name(kind: Kind, stamp: Stamp) -> String {
+    format!("{}_{}.csv.gz", kind.stem(), base(stamp))
+}
+
+/// The receipt's name.
+#[must_use]
+pub fn receipt_name(kind: Kind, stamp: Stamp) -> String {
+    format!("{}.receipt", file_name(kind, stamp))
+}
+
+/// The diff's name: `<yyyymmdd>.diff`, or `<yyyymmdd>_<n>.diff` for a later
+/// snapshot of the same day.
+#[must_use]
+pub fn diff_name(stamp: Stamp) -> String {
+    format!("{}.diff", base(stamp))
+}
+
+/// A `yyyymmdd` date, or `None`.
+fn parse_compact(text: &str) -> Option<Day> {
+    if text.len() != 8 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year = text.get(0..4)?.parse().ok()?;
+    let month = text.get(4..6)?.parse().ok()?;
+    let day = text.get(6..8)?.parse().ok()?;
+    Day::new(year, month, day).ok()
+}
+
+/// A `yyyy-mm-dd` date, or `None`.
+fn parse_dashed(text: &str) -> Option<Day> {
+    let mut parts = text.split('-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    Day::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?).ok()
+}
+
+/// What a directory entry's name says it is.
+fn parse_name(name: &str) -> Option<(Kind, Stamp, bool)> {
+    for kind in Kind::ALL {
+        let Some(rest) = name
+            .strip_prefix(kind.stem())
+            .and_then(|rest| rest.strip_prefix('_'))
+        else {
+            continue;
+        };
+        let (rest, receipt) = rest
+            .strip_suffix(".receipt")
+            .map_or((rest, false), |rest| (rest, true));
+        let rest = rest.strip_suffix(".csv.gz")?;
+        let (date, ordinal) = match rest.split_once('_') {
+            None => (rest, 1),
+            Some((date, n)) => {
+                // `_1` is never written and a leading zero is never written,
+                // so either is a name this module did not make.
+                if n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let n: u32 = n.parse().ok()?;
+                if n < 2 {
+                    return None;
+                }
+                (date, n)
+            }
+        };
+        let day = parse_compact(date)?;
+        return Some((kind, Stamp { day, ordinal }, receipt));
+    }
+    None
+}
+
+/// Every snapshot on disk, by name: one directory listing.
+#[derive(Debug, Clone, Default)]
+pub struct Catalog {
+    /// Receipted stamps per kind, ascending.
+    receipted: HashMap<Kind, Vec<Stamp>>,
+    /// The highest ordinal any entry of a (kind, day) carries, complete or not.
+    highest: HashMap<(Kind, Day), u32>,
+    /// Entries that are not snapshots: a body with no receipt, a receipt with
+    /// no body. Named, never read.
+    incomplete: Vec<String>,
+}
+
+impl Catalog {
+    /// Lists `root` once. A missing directory is an empty catalog.
+    ///
+    /// # Errors
+    ///
+    /// A directory that cannot be listed, named with the reason.
+    pub fn read(root: &Path) -> Result<Self, String> {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(why) if why.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(why) => return Err(format!("{} could not be listed: {why}", root.display())),
+        };
+        let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::new();
+        for entry in entries {
+            let entry =
+                entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some((kind, stamp, receipt)) = parse_name(name) else {
+                continue;
+            };
+            let slot = seen.entry((kind, stamp)).or_insert((false, false));
+            if receipt {
+                slot.1 = true;
+            } else {
+                slot.0 = true;
+            }
+        }
+        let mut catalog = Self::default();
+        for (&(kind, stamp), &(body, receipt)) in &seen {
+            let highest = catalog.highest.entry((kind, stamp.day)).or_insert(0);
+            *highest = (*highest).max(stamp.ordinal);
+            match (body, receipt) {
+                (true, true) => catalog.receipted.entry(kind).or_default().push(stamp),
+                (true, false) => catalog.incomplete.push(format!(
+                    "{}: incomplete — a body with no receipt (a write cut before its commit marker); never read",
+                    file_name(kind, stamp)
+                )),
+                _ => catalog.incomplete.push(format!(
+                    "{}: incomplete — a receipt with no body; never read",
+                    receipt_name(kind, stamp)
+                )),
+            }
+        }
+        for stamps in catalog.receipted.values_mut() {
+            stamps.sort_unstable();
+        }
+        catalog.incomplete.sort_unstable();
+        Ok(catalog)
+    }
+
+    /// The receipted stamps of `kind`, oldest first.
+    #[must_use]
+    pub fn receipted(&self, kind: Kind) -> &[Stamp] {
+        self.receipted.get(&kind).map_or(&[], Vec::as_slice)
+    }
+
+    /// The newest receipted stamp of `kind`.
+    #[must_use]
+    pub fn newest(&self, kind: Kind) -> Option<Stamp> {
+        self.receipted(kind).last().copied()
+    }
+
+    /// Every entry named incomplete, with why.
+    #[must_use]
+    pub fn incomplete(&self) -> &[String] {
+        &self.incomplete
+    }
+
+    /// The day's snapshot of `kind`: its newest receipted ordinal.
+    #[must_use]
+    pub fn of_day(&self, kind: Kind, day: Day) -> Option<Stamp> {
+        let stamps = self.receipted(kind);
+        let after = stamps.partition_point(|stamp| stamp.day <= day);
+        after
+            .checked_sub(1)
+            .and_then(|at| stamps.get(at))
+            .copied()
+            .filter(|stamp| stamp.day == day)
+    }
+
+    /// The receipted stamp of `kind` just before `stamp`.
+    #[must_use]
+    pub fn before(&self, kind: Kind, stamp: Stamp) -> Option<Stamp> {
+        let stamps = self.receipted(kind);
+        let at = stamps.partition_point(|held| *held < stamp);
+        at.checked_sub(1).and_then(|at| stamps.get(at)).copied()
+    }
+
+    /// The highest ordinal any entry of (kind, day) carries, 0 for none.
+    fn highest(&self, kind: Kind, day: Day) -> u32 {
+        self.highest.get(&(kind, day)).copied().unwrap_or(0)
+    }
+}
+
+/// What one receipt binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Receipt {
+    url: String,
+    compressed_bytes: u64,
+    sha256: String,
+    body_bytes: u64,
+    body_sha256: String,
+}
+
+/// Lower-case hex of a digest.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _infallible = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// The receipt's exact bytes. Read back by re-rendering, so any other
+/// spelling of the same fields is refused rather than reinterpreted.
+fn render_receipt(kind: Kind, stamp: Stamp, receipt: &Receipt) -> String {
+    format!(
+        "{RECEIPT_FORMAT}\nkind={}\ndate={}\nordinal={}\nsource={}\ncompressed_bytes={}\nsha256={}\nbody_bytes={}\nbody_sha256={}\n",
+        kind.stem(),
+        stamp.day,
+        stamp.ordinal,
+        receipt.url,
+        receipt.compressed_bytes,
+        receipt.sha256,
+        receipt.body_bytes,
+        receipt.body_sha256,
+    )
+}
+
+/// One field of a receipt line, `name=value`.
+fn field<'a>(line: Option<&'a str>, name: &str) -> Option<&'a str> {
+    line?.strip_prefix(name)?.strip_prefix('=')
+}
+
+/// Parses a receipt's text; the caller re-renders and compares.
+fn parse_receipt(text: &str) -> Option<Receipt> {
+    let mut lines = text.lines().skip(4);
+    let url = field(lines.next(), "source")?.to_owned();
+    let compressed_bytes = field(lines.next(), "compressed_bytes")?.parse().ok()?;
+    let sha256 = field(lines.next(), "sha256")?.to_owned();
+    let body_bytes = field(lines.next(), "body_bytes")?.parse().ok()?;
+    let body_sha256 = field(lines.next(), "body_sha256")?.to_owned();
+    Some(Receipt {
+        url,
+        compressed_bytes,
+        sha256,
+        body_bytes,
+        body_sha256,
+    })
+}
+
+/// Reads at most `limit` bytes of a regular file.
+fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let file = File::open(path).map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|why| format!("{} could not be inspected: {why}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(format!(
+            "{} is not a regular file within {limit} bytes",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
+    Ok(bytes)
+}
+
+/// A receipted snapshot's compressed bytes and receipt, both checked: the
+/// receipt re-renders byte for byte and binds this date, ordinal and kind,
+/// and the body's length and SHA-256 are the ones it states.
+fn read_checked(root: &Path, kind: Kind, stamp: Stamp) -> Result<(Receipt, Vec<u8>), String> {
+    let receipt_path = root.join(receipt_name(kind, stamp));
+    let text = read_limited(&receipt_path, MAX_RECEIPT)?;
+    let text = String::from_utf8(text)
+        .map_err(|_| format!("{} is not UTF-8; refused, never read", receipt_path.display()))?;
+    let receipt = parse_receipt(&text)
+        .filter(|receipt| render_receipt(kind, stamp, receipt) == text)
+        .ok_or_else(|| {
+            format!(
+                "{} is not a {RECEIPT_FORMAT} receipt for {} {stamp}; refused, never read",
+                receipt_path.display(),
+                kind.stem()
+            )
+        })?;
+    let body_path = root.join(file_name(kind, stamp));
+    let bytes = read_limited(&body_path, MAX_COMPRESSED)?;
+    if bytes.len() as u64 != receipt.compressed_bytes || hex(&Sha256::digest(&bytes)) != receipt.sha256
+    {
+        return Err(format!(
+            "{} does not match its receipt (length or SHA-256); refused, never read",
+            body_path.display()
+        ));
+    }
+    Ok((receipt, bytes))
+}
+
+/// The gzip of `body`, with a fixed header (no name, no time), so one body
+/// always compresses to one byte string on one build.
+fn compress(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .operating_system(255)
+        .write(Vec::with_capacity(body.len() / 4), Compression::new(6));
+    encoder
+        .write_all(body)
+        .map_err(|why| format!("the master could not be compressed: {why}"))?;
+    encoder
+        .finish()
+        .map_err(|why| format!("the master could not be compressed: {why}"))
+}
+
+/// The body of a checked snapshot, decompressed and held to its receipt.
+fn expand(compressed: &[u8], receipt: &Receipt) -> Result<String, String> {
+    let mut decoder = GzDecoder::new(compressed);
+    let mut body = Vec::new();
+    decoder
+        .by_ref()
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|why| format!("the snapshot is not one gzip member: {why}"))?;
+    if !decoder.into_inner().is_empty() {
+        return Err("the snapshot carries bytes after its gzip member; refused".to_owned());
+    }
+    if body.len() as u64 != receipt.body_bytes || hex(&Sha256::digest(&body)) != receipt.body_sha256 {
+        return Err("the snapshot's body does not match its receipt; refused".to_owned());
+    }
+    String::from_utf8(body).map_err(|_| "the snapshot's body is not UTF-8; refused".to_owned())
+}
+
+/// The body of the receipted snapshot `stamp` of `kind`.
+///
+/// # Errors
+///
+/// Every refusal of the receipt or the bytes, named.
+pub fn read_body(root: &Path, kind: Kind, stamp: Stamp) -> Result<String, String> {
+    let (receipt, bytes) = read_checked(root, kind, stamp)?;
+    expand(&bytes, &receipt)
+}
+
+/// Creates `path` with `bytes`, refusing any existing file, and syncs it.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|why| {
+            format!(
+                "{} could not be created; no existing file was touched: {why}",
+                path.display()
+            )
+        })?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|why| format!("{} is incomplete and retained: {why}", path.display()))
+}
+
+/// Syncs the directory entry of everything just created in `root`.
+fn sync_dir(root: &Path) -> Result<(), String> {
+    File::open(root).and_then(|dir| dir.sync_all()).map_err(|why| {
+        format!(
+            "{} could not be synced: {why}; the new files are visible, crash durability UNVERIFIED",
+            root.display()
+        )
+    })
+}
+
+/// Takes the writers' lock on `root`.
+fn lock(root: &Path) -> Result<Flock<File>, String> {
+    let path = root.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|why| format!("{} could not be opened for locking: {why}", path.display()))?;
+    Flock::lock(file, path.clone())
+        .map_err(|why| format!("{} could not be locked: {why}", path.display()))
+}
+
+/// What one snapshot write did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    /// A new snapshot, receipted.
+    New(Stamp),
+    /// The day's snapshot already holds these exact bytes; nothing written.
+    AlreadyHeld(Stamp),
+}
+
+impl Wrote {
+    /// The snapshot that now stands for the day.
+    #[must_use]
+    pub const fn stamp(self) -> Stamp {
+        match self {
+            Self::New(stamp) | Self::AlreadyHeld(stamp) => stamp,
+        }
+    }
+
+    /// `new` or `already_held`.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::New(_) => "new",
+            Self::AlreadyHeld(_) => "already_held",
+        }
+    }
+}
+
+/// Writes `body` as `day`'s snapshot of `kind`, or says the day already holds
+/// it. Never rewrites a file: a body equal to the day's newest receipted
+/// snapshot is [`Wrote::AlreadyHeld`], a different one takes the next free
+/// ordinal (past any incomplete entry), body first and receipt last.
+///
+/// # Errors
+///
+/// An empty or oversized body, a day past [`MAX_ORDINAL`] snapshots, and every
+/// filesystem refusal, each named. Nothing is overwritten on any path.
+pub fn snapshot(root: &Path, kind: Kind, day: Day, url: &str, body: &[u8]) -> Result<Wrote, String> {
+    if body.is_empty() {
+        return Err("an empty body is not a master; no snapshot was written".to_owned());
+    }
+    if body.len() > MAX_BODY_BYTES {
+        return Err(format!(
+            "a body of {} bytes is past the {MAX_BODY_BYTES}-byte bound; no snapshot was written",
+            body.len()
+        ));
+    }
+    if url.contains('\n') {
+        return Err("a source URL with a line break cannot be receipted".to_owned());
+    }
+    fs::create_dir_all(root)
+        .map_err(|why| format!("{} could not be created: {why}", root.display()))?;
+    let compressed = compress(body)?;
+    let body_sha256 = hex(&Sha256::digest(body));
+    let held = lock(root)?;
+    let catalog = Catalog::read(root)?;
+    if let Some(newest) = catalog.of_day(kind, day)
+        && let Ok((receipt, _)) = read_checked(root, kind, newest)
+        && receipt.body_sha256 == body_sha256
+        && receipt.body_bytes == body.len() as u64
+    {
+        held.release().map_err(|why| why.to_string())?;
+        return Ok(Wrote::AlreadyHeld(newest));
+    }
+    let ordinal = catalog.highest(kind, day).saturating_add(1);
+    if ordinal > MAX_ORDINAL {
+        return Err(format!(
+            "{day} already holds {MAX_ORDINAL} {} snapshots; refused rather than numbered without end",
+            kind.stem()
+        ));
+    }
+    let stamp = Stamp { day, ordinal };
+    let receipt = Receipt {
+        url: url.to_owned(),
+        compressed_bytes: compressed.len() as u64,
+        sha256: hex(&Sha256::digest(&compressed)),
+        body_bytes: body.len() as u64,
+        body_sha256,
+    };
+    // BODY FIRST, RECEIPT LAST: a kill between them leaves an incomplete entry
+    // that no reader opens, and the next refresh takes the next ordinal.
+    write_new(&root.join(file_name(kind, stamp)), &compressed)?;
+    write_new(
+        &root.join(receipt_name(kind, stamp)),
+        render_receipt(kind, stamp, &receipt).as_bytes(),
+    )?;
+    sync_dir(root)?;
+    held.release().map_err(|why| why.to_string())?;
+    Ok(Wrote::New(stamp))
+}
+
+/// The newest receipted Kite snapshot's date, read from its receipt (which is
+/// checked against its body). `Ok(None)` when no snapshot exists. For the pull
+/// door's `master_stale` refusal (R4-23, FM-267).
+///
+/// # Errors
+///
+/// A listing that fails, or a newest snapshot whose receipt or body does not
+/// check, named — never an older date in its place.
+pub fn newest_snapshot_day(root: &Path) -> Result<Option<Day>, String> {
+    let catalog = Catalog::read(root)?;
+    let Some(newest) = catalog.newest(Kind::Kite) else {
+        return Ok(None);
+    };
+    read_checked(root, Kind::Kite, newest)?;
+    Ok(Some(newest.day))
+}
+
+/// The civil IST date now, the date a landing is snapshotted under.
+///
+/// # Errors
+///
+/// A clock before the epoch or past what a [`Day`] names.
+pub fn today_ist() -> Result<Day, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|why| format!("the clock is before 1970: {why}"))?
+        .as_secs();
+    let secs = i64::try_from(secs).map_err(|_| "the clock is past i64 seconds".to_owned())?;
+    IstMoment::from_epoch_secs(secs)
+        .map(IstMoment::day)
+        .map_err(|why| format!("the clock does not name an IST day: {why}"))
+}
+
+// ─────────────────────────────── the Kite rows ───────────────────────────────
+
+/// The columns a Kite dump must carry, by name.
+const KITE_COLUMNS: [&str; 10] = [
+    "instrument_token",
+    "tradingsymbol",
+    "name",
+    "expiry",
+    "strike",
+    "tick_size",
+    "lot_size",
+    "instrument_type",
+    "segment",
+    "exchange",
+];
+
+/// One row of a snapshot. Words are interned per snapshot.
+#[derive(Debug, Clone)]
+struct Row {
+    token: u64,
+    exchange: u16,
+    segment: u16,
+    kind: u16,
+    symbol: Box<str>,
+    name: Box<str>,
+    expiry: Option<Day>,
+    strike: Box<str>,
+    tick: Box<str>,
+    lot: u32,
+}
+
+/// Splits one CSV line, honouring double quotes and doubled quotes.
+fn split_line(line: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    let mut at_start = true;
+    while let Some(c) = chars.next() {
+        if quoted {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    chars.next();
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(c);
+            }
+        } else if c == '"' && at_start {
+            quoted = true;
+            at_start = false;
+        } else if c == ',' {
+            out.push(core::mem::take(&mut field));
+            at_start = true;
+        } else {
+            field.push(c);
+            at_start = false;
+        }
+    }
+    if quoted {
+        return Err("a quoted field is not closed".to_owned());
+    }
+    out.push(field);
+    Ok(out)
+}
+
+/// A decimal as the dump spells it, normalised: trailing fractional zeros and
+/// a bare point dropped, so `25000.0` and `25000` are one strike. Anything
+/// that is not an unsigned decimal is refused.
+fn decimal(text: &str) -> Option<Box<str>> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let fraction = fraction.trim_end_matches('0');
+    let whole = whole.trim_start_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    Some(if fraction.is_empty() {
+        whole.into()
+    } else {
+        format!("{whole}.{fraction}").into()
+    })
+}
+
+/// One parsed Kite dump with its per-snapshot hash index.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    stamp: Stamp,
+    words: Vec<Box<str>>,
+    word_ids: HashMap<Box<str>, u16>,
+    rows: Vec<Row>,
+    by_token: HashMap<(u16, u64), u32>,
+    duplicated: HashSet<(u16, u64)>,
+}
+
+impl Snapshot {
+    /// Parses a Kite instrument dump taken on `stamp`.
+    ///
+    /// # Errors
+    ///
+    /// A header missing one of the required columns, and any row that does
+    /// not read (a token, an expiry, a strike, a tick or a lot that is not
+    /// the shape the dump publishes), named by line. A snapshot with a row
+    /// skipped would answer "not listed" for a token it holds, so nothing is
+    /// skipped.
+    pub fn parse(stamp: Stamp, csv: &str) -> Result<Self, String> {
+        let mut lines = csv.lines();
+        let header = lines
+            .next()
+            .ok_or_else(|| "the dump is empty".to_owned())?;
+        let header = split_line(header.trim_start_matches('\u{feff}'))?;
+        let mut at = [0_usize; KITE_COLUMNS.len()];
+        for (slot, column) in at.iter_mut().zip(KITE_COLUMNS) {
+            *slot = header
+                .iter()
+                .position(|name| name.trim() == column)
+                .ok_or_else(|| format!("the dump has no column {column:?}"))?;
+        }
+        let [token_at, symbol_at, name_at, expiry_at, strike_at, tick_at, lot_at, kind_at, segment_at, exchange_at] =
+            at;
+        let mut snapshot = Self {
+            stamp,
+            words: Vec::new(),
+            word_ids: HashMap::new(),
+            rows: Vec::new(),
+            by_token: HashMap::new(),
+            duplicated: HashSet::new(),
+        };
+        for (number, line) in lines.enumerate() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() {
+                continue;
+            }
+            let fields = split_line(line).map_err(|why| format!("line {}: {why}", number + 2))?;
+            let cell = |at: usize| fields.get(at).map_or("", String::as_str);
+            let refuse = |what: &str| format!("line {}: {what} {:?} does not read", number + 2, line);
+            let token: u64 = cell(token_at)
+                .trim()
+                .parse()
+                .map_err(|_| refuse("instrument_token"))?;
+            let expiry = match cell(expiry_at).trim() {
+                "" => None,
+                text => Some(parse_dashed(text).ok_or_else(|| refuse("expiry"))?),
+            };
+            let strike = decimal(cell(strike_at)).ok_or_else(|| refuse("strike"))?;
+            let tick = decimal(cell(tick_at)).ok_or_else(|| refuse("tick_size"))?;
+            let lot: u32 = cell(lot_at).trim().parse().map_err(|_| refuse("lot_size"))?;
+            let exchange = snapshot.intern(cell(exchange_at).trim())?;
+            let segment = snapshot.intern(cell(segment_at).trim())?;
+            let kind = snapshot.intern(cell(kind_at).trim())?;
+            let row = u32::try_from(snapshot.rows.len())
+                .map_err(|_| "the dump holds more rows than a u32 counts".to_owned())?;
+            if snapshot.by_token.insert((exchange, token), row).is_some() {
+                // TWO ROWS FOR ONE TOKEN: neither is believed. The first row
+                // keeps its slot, and the token answers `Duplicated`.
+                snapshot.duplicated.insert((exchange, token));
+            }
+            snapshot.rows.push(Row {
+                token,
+                exchange,
+                segment,
+                kind,
+                symbol: cell(symbol_at).trim().into(),
+                name: cell(name_at).trim().into(),
+                expiry,
+                strike,
+                tick,
+                lot,
+            });
+        }
+        Ok(snapshot)
+    }
+
+    /// Interns one word.
+    fn intern(&mut self, word: &str) -> Result<u16, String> {
+        if let Some(&id) = self.word_ids.get(word) {
+            return Ok(id);
+        }
+        let id = u16::try_from(self.words.len())
+            .map_err(|_| "the dump carries more distinct words than a u16 counts".to_owned())?;
+        self.words.push(word.into());
+        self.word_ids.insert(word.into(), id);
+        Ok(id)
+    }
+
+    /// When this snapshot was taken.
+    #[must_use]
+    pub const fn stamp(&self) -> Stamp {
+        self.stamp
+    }
+
+    /// How many rows it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether it holds no row.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Every row, in file order.
+    pub fn rows(&self) -> impl Iterator<Item = Listed<'_>> {
+        self.rows.iter().map(move |row| Listed {
+            snapshot: self,
+            row,
+        })
+    }
+
+    /// The row `(exchange, token)` names here: one probe for the word, one
+    /// for the token.
+    #[must_use]
+    pub fn lookup(&self, exchange: &str, token: u64) -> Lookup<'_> {
+        let Some(&exchange) = self.word_ids.get(exchange) else {
+            return Lookup::Absent;
+        };
+        if self.duplicated.contains(&(exchange, token)) {
+            return Lookup::Duplicated;
+        }
+        self.by_token
+            .get(&(exchange, token))
+            .and_then(|&row| self.rows.get(row as usize))
+            .map_or(Lookup::Absent, |row| {
+                Lookup::Listed(Listed {
+                    snapshot: self,
+                    row,
+                })
+            })
+    }
+
+    fn word(&self, id: u16) -> &str {
+        self.words.get(usize::from(id)).map_or("", |word| word)
+    }
+}
+
+/// What one snapshot says of one token.
+#[derive(Debug, Clone, Copy)]
+pub enum Lookup<'a> {
+    /// The row it names.
+    Listed(Listed<'a>),
+    /// Not in this snapshot.
+    Absent,
+    /// Two rows carry it; neither is believed.
+    Duplicated,
+}
+
+/// One row of a snapshot, borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct Listed<'a> {
+    snapshot: &'a Snapshot,
+    row: &'a Row,
+}
+
+impl<'a> Listed<'a> {
+    /// The exchange, as the dump spells it (`NSE`, `NFO`, ...).
+    #[must_use]
+    pub fn exchange(&self) -> &'a str {
+        self.snapshot.word(self.row.exchange)
+    }
+    /// The dump's segment (`NFO-FUT`, `INDICES`, ...).
+    #[must_use]
+    pub fn segment(&self) -> &'a str {
+        self.snapshot.word(self.row.segment)
+    }
+    /// The dump's instrument type (`FUT`, `CE`, `PE`, `EQ`).
+    #[must_use]
+    pub fn instrument_type(&self) -> &'a str {
+        self.snapshot.word(self.row.kind)
+    }
+    /// The vendor's token.
+    #[must_use]
+    pub const fn token(&self) -> u64 {
+        self.row.token
+    }
+    /// The trading symbol.
+    #[must_use]
+    pub fn tradingsymbol(&self) -> &'a str {
+        &self.row.symbol
+    }
+    /// The `name` column: an underlying for a derivative.
+    #[must_use]
+    pub fn name(&self) -> &'a str {
+        &self.row.name
+    }
+    /// The expiry, for a derivative.
+    #[must_use]
+    pub const fn expiry(&self) -> Option<Day> {
+        self.row.expiry
+    }
+    /// The strike, as a normalised decimal string of rupees.
+    #[must_use]
+    pub fn strike(&self) -> &'a str {
+        &self.row.strike
+    }
+    /// The tick, as a normalised decimal string of rupees.
+    #[must_use]
+    pub fn tick_size(&self) -> &'a str {
+        &self.row.tick
+    }
+    /// The lot size.
+    #[must_use]
+    pub const fn lot_size(&self) -> u32 {
+        self.row.lot
+    }
+    /// The snapshot it is read from.
+    #[must_use]
+    pub const fn stamp(&self) -> Stamp {
+        self.snapshot.stamp
+    }
+
+    /// Whether `other` is the same contract: the diff's key
+    /// `(exchange, tradingsymbol, expiry, strike, type)`.
+    #[must_use]
+    pub fn same_contract(&self, other: &Listed<'_>) -> bool {
+        self.exchange() == other.exchange()
+            && self.tradingsymbol() == other.tradingsymbol()
+            && self.expiry() == other.expiry()
+            && self.strike() == other.strike()
+            && self.instrument_type() == other.instrument_type()
+    }
+
+    /// Whether it is an NSE cash share, the rows an ISIN applies to.
+    #[must_use]
+    pub fn is_nse_share(&self) -> bool {
+        self.exchange() == "NSE" && self.instrument_type() == "EQ"
+    }
+}
+
+// ───────────────────────────────── token_on ─────────────────────────────────
+
+/// What `(exchange, token)` named on a day.
+#[derive(Debug, Clone)]
+pub enum TokenOn<'a> {
+    /// The snapshot that governs the day names this row, and the next later
+    /// snapshot (if any) names the same contract — or the day is a snapshot
+    /// day.
+    Resolved {
+        /// The snapshot answering.
+        snapshot: Stamp,
+        /// The row.
+        listed: Listed<'a>,
+    },
+    /// The governing snapshot and the next later one disagree (or the later
+    /// one does not list the token): the day lies between them and neither is
+    /// believed.
+    Ambiguous {
+        /// The newest snapshot on or before the day.
+        older: Stamp,
+        /// The next later snapshot.
+        newer: Stamp,
+    },
+    /// The governing snapshot does not list the token.
+    NotListed {
+        /// The snapshot that governs the day.
+        snapshot: Stamp,
+    },
+    /// The governing snapshot carries the token twice.
+    Duplicated {
+        /// The snapshot.
+        snapshot: Stamp,
+    },
+    /// The day is before the first snapshot: nothing is known, and nothing is
+    /// borrowed from a later snapshot.
+    BeforeFirst {
+        /// The first snapshot.
+        first: Stamp,
+    },
+    /// No receipted snapshot exists.
+    NoSnapshot,
+    /// A snapshot the answer needs did not check or parse.
+    Unreadable {
+        /// The snapshot.
+        snapshot: Stamp,
+        /// Why.
+        why: String,
+    },
+}
+
+impl TokenOn<'_> {
+    /// The answer's one-word name, as `/logs` and a refusal carry it.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match *self {
+            Self::Resolved { .. } => "resolved",
+            Self::Ambiguous { .. } => "token_ambiguous",
+            Self::NotListed { .. } => "token_not_listed",
+            Self::Duplicated { .. } => "token_duplicated",
+            Self::BeforeFirst { .. } => "before_first_snapshot",
+            Self::NoSnapshot => "no_snapshot",
+            Self::Unreadable { .. } => "snapshot_unreadable",
+        }
+    }
+}
+
+/// Every receipted Kite snapshot, with the day table that finds the one
+/// governing a day by index, loading each snapshot on its first use.
+#[derive(Debug)]
+pub struct Book {
+    root: Option<PathBuf>,
+    stamps: Vec<Stamp>,
+    first: u32,
+    table: Vec<u32>,
+    loaded: Vec<OnceLock<Result<Snapshot, String>>>,
+}
+
+impl Book {
+    /// The book over `root`'s receipted Kite snapshots. Nothing is read but
+    /// the directory listing; each snapshot is read, checked and indexed the
+    /// first time an answer needs it.
+    ///
+    /// # Errors
+    ///
+    /// A listing that fails, or stamps spanning more than forty years.
+    pub fn open(root: &Path) -> Result<Self, String> {
+        let catalog = Catalog::read(root)?;
+        let stamps = catalog.receipted(Kind::Kite).to_vec();
+        let loaded = stamps.iter().map(|_| OnceLock::new()).collect();
+        Self::build(Some(root.to_path_buf()), stamps, loaded)
+    }
+
+    /// A book over snapshots already parsed (tests and the bench).
+    ///
+    /// # Errors
+    ///
+    /// Stamps spanning more than forty years, or two snapshots with one stamp.
+    pub fn of(mut snapshots: Vec<Snapshot>) -> Result<Self, String> {
+        snapshots.sort_unstable_by_key(Snapshot::stamp);
+        let stamps: Vec<Stamp> = snapshots.iter().map(Snapshot::stamp).collect();
+        if stamps.windows(2).any(|pair| pair.first() == pair.get(1)) {
+            return Err("two snapshots carry one stamp".to_owned());
+        }
+        let loaded = snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let cell = OnceLock::new();
+                let _set = cell.set(Ok(snapshot));
+                cell
+            })
+            .collect();
+        Self::build(None, stamps, loaded)
+    }
+
+    fn build(
+        root: Option<PathBuf>,
+        stamps: Vec<Stamp>,
+        loaded: Vec<OnceLock<Result<Snapshot, String>>>,
+    ) -> Result<Self, String> {
+        let (Some(first), Some(last)) = (stamps.first(), stamps.last()) else {
+            return Ok(Self {
+                root,
+                stamps,
+                first: 0,
+                table: Vec::new(),
+                loaded,
+            });
+        };
+        let first = first.day.days_from_epoch();
+        let span = last.day.days_from_epoch().saturating_sub(first);
+        if span > MAX_SPAN_DAYS {
+            return Err(format!(
+                "the snapshots span {span} days, past the {MAX_SPAN_DAYS}-day bound; a misnamed file is refused"
+            ));
+        }
+        // ONE ENTRY PER CALENDAR DAY: the index of the newest stamp on or
+        // before that day. Built in one pass over days and stamps together.
+        let mut table = Vec::with_capacity(span as usize + 1);
+        let mut at = 0_usize;
+        for offset in 0..=span {
+            let day = first.saturating_add(offset);
+            while stamps
+                .get(at + 1)
+                .is_some_and(|next| next.day.days_from_epoch() <= day)
+            {
+                at += 1;
+            }
+            table.push(u32::try_from(at).map_err(|_| "more snapshots than a u32 counts".to_owned())?);
+        }
+        Ok(Self {
+            root,
+            stamps,
+            first,
+            table,
+            loaded,
+        })
+    }
+
+    /// The stamps, oldest first.
+    #[must_use]
+    pub fn stamps(&self) -> &[Stamp] {
+        &self.stamps
+    }
+
+    /// The newest stamp.
+    #[must_use]
+    pub fn newest(&self) -> Option<Stamp> {
+        self.stamps.last().copied()
+    }
+
+    /// The snapshot at `at`, read on first use.
+    ///
+    /// # Errors
+    ///
+    /// An index past the book, or the snapshot's own refusal.
+    pub fn snapshot(&self, at: usize) -> Result<&Snapshot, String> {
+        let (Some(cell), Some(&stamp)) = (self.loaded.get(at), self.stamps.get(at)) else {
+            return Err(format!("no snapshot {at} in this book"));
+        };
+        cell.get_or_init(|| {
+            let root = self
+                .root
+                .as_deref()
+                .ok_or_else(|| "an in-memory book has no root to read from".to_owned())?;
+            let body = read_body(root, Kind::Kite, stamp)?;
+            Snapshot::parse(stamp, &body)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+    }
+
+    /// Runs `f` over the snapshot at `at`: the cached one when it is loaded,
+    /// otherwise read, checked and parsed for this call only and dropped
+    /// after, so a walk over many snapshots holds one at a time.
+    ///
+    /// # Errors
+    ///
+    /// An index past the book, or the snapshot's own refusal.
+    pub fn with_snapshot<T>(&self, at: usize, f: impl FnOnce(&Snapshot) -> T) -> Result<T, String> {
+        let (Some(cell), Some(&stamp)) = (self.loaded.get(at), self.stamps.get(at)) else {
+            return Err(format!("no snapshot {at} in this book"));
+        };
+        if let Some(loaded) = cell.get() {
+            return loaded.as_ref().map(f).map_err(Clone::clone);
+        }
+        let root = self
+            .root
+            .as_deref()
+            .ok_or_else(|| "an in-memory book has no root to read from".to_owned())?;
+        let snapshot = Snapshot::parse(stamp, &read_body(root, Kind::Kite, stamp)?)?;
+        Ok(f(&snapshot))
+    }
+
+    /// The index of the snapshot governing `day`, or the first stamp when the
+    /// day is before it.
+    fn governing(&self, day: Day) -> Result<usize, Stamp> {
+        let Some(&first) = self.stamps.first() else {
+            return Ok(usize::MAX);
+        };
+        let number = day.days_from_epoch();
+        if number < self.first {
+            return Err(first);
+        }
+        let offset = number - self.first;
+        Ok(self
+            .table
+            .get(offset as usize)
+            .map_or(self.stamps.len().saturating_sub(1), |&at| at as usize))
+    }
+
+    /// What `(exchange, token)` named on `day`. See the module header for the
+    /// rule; one table index and at most two hash probes.
+    #[must_use]
+    pub fn token_on(&self, day: Day, exchange: &str, token: u64) -> TokenOn<'_> {
+        let at = match self.governing(day) {
+            Err(first) => return TokenOn::BeforeFirst { first },
+            Ok(usize::MAX) => return TokenOn::NoSnapshot,
+            Ok(at) => at,
+        };
+        let Some(&stamp) = self.stamps.get(at) else {
+            return TokenOn::NoSnapshot;
+        };
+        let governing = match self.snapshot(at) {
+            Ok(snapshot) => snapshot,
+            Err(why) => return TokenOn::Unreadable { snapshot: stamp, why },
+        };
+        let listed = match governing.lookup(exchange, token) {
+            Lookup::Listed(listed) => listed,
+            Lookup::Absent => return TokenOn::NotListed { snapshot: stamp },
+            Lookup::Duplicated => return TokenOn::Duplicated { snapshot: stamp },
+        };
+        if stamp.day == day {
+            return TokenOn::Resolved {
+                snapshot: stamp,
+                listed,
+            };
+        }
+        let Some(&newer) = self.stamps.get(at + 1) else {
+            return TokenOn::Resolved {
+                snapshot: stamp,
+                listed,
+            };
+        };
+        let later = match self.snapshot(at + 1) {
+            Ok(snapshot) => snapshot,
+            Err(why) => return TokenOn::Unreadable { snapshot: newer, why },
+        };
+        match later.lookup(exchange, token) {
+            Lookup::Listed(again) if again.same_contract(&listed) => TokenOn::Resolved {
+                snapshot: stamp,
+                listed,
+            },
+            _ => TokenOn::Ambiguous {
+                older: stamp,
+                newer,
+            },
+        }
+    }
+}
+
+// ─────────────────────────────────── ISINs ───────────────────────────────────
+
+/// NSE EQ symbol → ISIN, from one dated NSE Total Market snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct Isins {
+    by_symbol: HashMap<Box<str>, Box<str>>,
+}
+
+impl Isins {
+    /// Reads NSE's constituent file (`Company Name,Industry,Symbol,Series,ISIN
+    /// Code`), keeping the EQ series rows.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`crate::nse::constituents_strict`] refuses.
+    pub fn parse(csv: &str) -> Result<Self, String> {
+        let rows = crate::nse::constituents_strict(csv).map_err(|why| why.to_string())?;
+        let by_symbol = rows
+            .iter()
+            .filter(|row| row.series.trim() == "EQ")
+            .map(|row| (row.symbol.trim().into(), row.isin.trim().into()))
+            .collect();
+        Ok(Self { by_symbol })
+    }
+
+    /// The ISIN the file lists for `symbol`.
+    #[must_use]
+    pub fn of(&self, symbol: &str) -> Option<&str> {
+        self.by_symbol.get(symbol).map(|isin| &**isin)
+    }
+}
+
+/// The ISINs of the newest receipted NSE snapshot ON `day`, or `None` when
+/// that day has none (then every share's ISIN is unknown that day).
+fn isins_on(root: &Path, catalog: &Catalog, day: Day) -> Result<Option<Isins>, String> {
+    let Some(stamp) = catalog.of_day(Kind::NseTotalMarket, day) else {
+        return Ok(None);
+    };
+    let body = read_body(root, Kind::NseTotalMarket, stamp)?;
+    Isins::parse(&body).map(Some)
+}
+
+// ───────────────────────────────── the diff ─────────────────────────────────
+
+/// One kind of master change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Change {
+    /// A key the previous snapshot did not hold.
+    Listing,
+    /// A key the new snapshot no longer holds.
+    Delisting,
+    /// The same instrument under a new trading symbol: the same token, or an
+    /// NSE share with the same ISIN.
+    Symbol,
+    /// An NSE share whose same-date ISIN changed.
+    Isin,
+    /// A lot size changed.
+    LotSize,
+    /// An expiry changed under the same token.
+    Expiry,
+    /// The same key under a new token.
+    Token,
+    /// An NSE share the same-date NSE file does not list: its ISIN is
+    /// unknown that day and is never inferred.
+    IsinUnknown,
+}
+
+impl Change {
+    /// Every kind, in record order.
+    pub const ALL: [Self; 8] = [
+        Self::Listing,
+        Self::Delisting,
+        Self::Symbol,
+        Self::Isin,
+        Self::LotSize,
+        Self::Expiry,
+        Self::Token,
+        Self::IsinUnknown,
+    ];
+
+    /// The record's first field.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Listing => "listing",
+            Self::Delisting => "delisting",
+            Self::Symbol => "symbol",
+            Self::Isin => "isin",
+            Self::LotSize => "lot_size",
+            Self::Expiry => "expiry",
+            Self::Token => "token",
+            Self::IsinUnknown => "isin_unknown",
+        }
+    }
+
+    fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|change| change.word() == word)
+    }
+
+    /// Whether every change of this kind is named in the refresh outcome and
+    /// on `/logs` (listings, delistings and unknown ISINs are counted there
+    /// and named only in the `.diff`).
+    #[must_use]
+    pub const fn named(self) -> bool {
+        matches!(
+            self,
+            Self::Symbol | Self::Isin | Self::LotSize | Self::Expiry | Self::Token
+        )
+    }
+}
+
+/// One record of a diff.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Item {
+    /// What changed.
+    pub change: Change,
+    /// The exchange.
+    pub exchange: String,
+    /// The token the new snapshot carries (the old one's for a delisting).
+    pub token: u64,
+    /// The trading symbol the record is about.
+    pub key: String,
+    /// The value before (empty for a listing).
+    pub old: String,
+    /// The value after (empty for a delisting).
+    pub new: String,
+}
+
+/// The diff key of a row.
+type Key<'a> = (&'a str, &'a str, Option<Day>, &'a str, &'a str);
+
+fn key<'a>(listed: &Listed<'a>) -> Key<'a> {
+    (
+        listed.exchange(),
+        listed.tradingsymbol(),
+        listed.expiry(),
+        listed.strike(),
+        listed.instrument_type(),
+    )
+}
+
+fn day_text(day: Option<Day>) -> String {
+    day.map_or_else(String::new, |day| day.to_string())
+}
+
+fn item(change: Change, listed: &Listed<'_>, old: String, new: String) -> Item {
+    Item {
+        change,
+        exchange: listed.exchange().to_owned(),
+        token: listed.token(),
+        key: listed.tradingsymbol().to_owned(),
+        old,
+        new,
+    }
+}
+
+/// Every change from `old` to `new`, sorted. ISINs come from the NSE file of
+/// each snapshot's own date; `None` means that date has none.
+#[must_use]
+pub fn diff(old: &Snapshot, new: &Snapshot, old_isins: Option<&Isins>, new_isins: Option<&Isins>) -> Vec<Item> {
+    let old_rows: Vec<Listed<'_>> = old.rows().collect();
+    let new_rows: Vec<Listed<'_>> = new.rows().collect();
+    let old_keys: HashMap<Key<'_>, usize> = old_rows
+        .iter()
+        .enumerate()
+        .map(|(at, listed)| (key(listed), at))
+        .collect();
+    let new_keys: HashSet<Key<'_>> = new_rows.iter().map(key).collect();
+    let mut old_tokens: HashMap<(&str, u64), usize> = HashMap::new();
+    for (at, listed) in old_rows.iter().enumerate() {
+        old_tokens.entry((listed.exchange(), listed.token())).or_insert(at);
+    }
+    let isin_of = |isins: Option<&Isins>, listed: &Listed<'_>| {
+        isins.and_then(|isins| isins.of(listed.tradingsymbol())).map(str::to_owned)
+    };
+    // OLD SHARES THAT ARE GONE, BY THEIR OWN DATE'S ISIN: the other half of a
+    // rename that kept the ISIN and changed the token.
+    let mut gone_by_isin: HashMap<String, usize> = HashMap::new();
+    for (at, listed) in old_rows.iter().enumerate() {
+        if listed.is_nse_share()
+            && !new_keys.contains(&key(listed))
+            && let Some(isin) = isin_of(old_isins, listed)
+        {
+            gone_by_isin.entry(isin).or_insert(at);
+        }
+    }
+    let mut matched = vec![false; old_rows.len()];
+    let mut out = Vec::new();
+    for listed in &new_rows {
+        if let Some(&at) = old_keys.get(&key(listed)) {
+            let Some(before) = old_rows.get(at) else { continue };
+            if let Some(slot) = matched.get_mut(at) {
+                *slot = true;
+            }
+            if before.lot_size() != listed.lot_size() {
+                out.push(item(
+                    Change::LotSize,
+                    listed,
+                    before.lot_size().to_string(),
+                    listed.lot_size().to_string(),
+                ));
+            }
+            if before.token() != listed.token() {
+                out.push(item(
+                    Change::Token,
+                    listed,
+                    before.token().to_string(),
+                    listed.token().to_string(),
+                ));
+            }
+            if listed.is_nse_share()
+                && let (Some(was), Some(now)) = (isin_of(old_isins, before), isin_of(new_isins, listed))
+                && was != now
+            {
+                out.push(item(Change::Isin, listed, was, now));
+            }
+            continue;
+        }
+        // THE SAME TOKEN, A NEW SPELLING: one instrument re-named or re-dated,
+        // when its type, strike and name are unchanged and its old key is gone.
+        if let Some(&at) = old_tokens.get(&(listed.exchange(), listed.token()))
+            && let Some(before) = old_rows.get(at)
+            && !matched.get(at).copied().unwrap_or(true)
+            && !new_keys.contains(&key(before))
+            && before.instrument_type() == listed.instrument_type()
+            && before.strike() == listed.strike()
+            && before.name() == listed.name()
+        {
+            if let Some(slot) = matched.get_mut(at) {
+                *slot = true;
+            }
+            if before.tradingsymbol() != listed.tradingsymbol() {
+                out.push(item(
+                    Change::Symbol,
+                    listed,
+                    before.tradingsymbol().to_owned(),
+                    listed.tradingsymbol().to_owned(),
+                ));
+            }
+            if before.expiry() != listed.expiry() {
+                out.push(item(
+                    Change::Expiry,
+                    listed,
+                    day_text(before.expiry()),
+                    day_text(listed.expiry()),
+                ));
+            }
+            if before.lot_size() != listed.lot_size() {
+                out.push(item(
+                    Change::LotSize,
+                    listed,
+                    before.lot_size().to_string(),
+                    listed.lot_size().to_string(),
+                ));
+            }
+            continue;
+        }
+        // THE SAME ISIN UNDER A NEW SYMBOL, from each date's own NSE file.
+        if listed.is_nse_share()
+            && let Some(isin) = isin_of(new_isins, listed)
+            && let Some(&at) = gone_by_isin.get(&isin)
+            && let Some(before) = old_rows.get(at)
+            && !matched.get(at).copied().unwrap_or(true)
+        {
+            if let Some(slot) = matched.get_mut(at) {
+                *slot = true;
+            }
+            out.push(item(
+                Change::Symbol,
+                listed,
+                before.tradingsymbol().to_owned(),
+                listed.tradingsymbol().to_owned(),
+            ));
+            continue;
+        }
+        out.push(item(Change::Listing, listed, String::new(), listed.tradingsymbol().to_owned()));
+    }
+    for (at, before) in old_rows.iter().enumerate() {
+        if !matched.get(at).copied().unwrap_or(true) && !new_keys.contains(&key(before)) {
+            out.push(item(Change::Delisting, before, before.tradingsymbol().to_owned(), String::new()));
+        }
+    }
+    for listed in &new_rows {
+        if listed.is_nse_share() && isin_of(new_isins, listed).is_none() {
+            out.push(item(Change::IsinUnknown, listed, String::new(), String::new()));
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Field widths of one record: kind, exchange, token, key, old, new.
+const WIDTHS: [usize; 6] = [12, 8, 20, 48, 40, 40];
+
+/// One fixed-width line, or why a value does not fit.
+fn fixed(fields: [&str; 6]) -> Result<String, String> {
+    let mut line = String::with_capacity(RECORD_LEN);
+    for (value, width) in fields.into_iter().zip(WIDTHS) {
+        if value.len() > width || value.contains(['|', '\n', '\r']) {
+            return Err(format!(
+                "{value:?} does not fit a {width}-byte diff field; the diff was not written"
+            ));
+        }
+        let _infallible = write!(line, "{value:<width$}|");
+    }
+    if line.len() >= RECORD_LEN {
+        return Err("a record is wider than the record length".to_owned());
+    }
+    let pad = RECORD_LEN - 1 - line.len();
+    line.extend(core::iter::repeat_n(' ', pad));
+    line.push('\n');
+    Ok(line)
+}
+
+/// The header line: the format, the two snapshots and the record count.
+fn header_line(previous: Stamp, current: Stamp, records: usize) -> Result<String, String> {
+    let line = format!("{DIFF_FORMAT}|previous={previous}|current={current}|records={records}|");
+    if line.len() >= RECORD_LEN {
+        return Err("the diff header is wider than the record length".to_owned());
+    }
+    let mut line = line;
+    line.extend(core::iter::repeat_n(' ', RECORD_LEN - 1 - line.len()));
+    line.push('\n');
+    Ok(line)
+}
+
+/// The `.diff` bytes for `items`.
+///
+/// # Errors
+///
+/// A value wider than its field, or holding a separator: named, and nothing
+/// is written.
+pub fn render_diff(previous: Stamp, current: Stamp, items: &[Item]) -> Result<String, String> {
+    let mut out = header_line(previous, current, items.len())?;
+    for one in items {
+        let token = one.token.to_string();
+        out.push_str(&fixed([
+            one.change.word(),
+            &one.exchange,
+            &token,
+            &one.key,
+            &one.old,
+            &one.new,
+        ])?);
+    }
+    Ok(out)
+}
+
+/// A `.diff` read back: its two snapshots and its records.
+///
+/// # Errors
+///
+/// A file that is not whole fixed-length lines of this format, named.
+pub fn parse_diff(text: &str) -> Result<(String, String, Vec<Item>), String> {
+    if text.len() % RECORD_LEN != 0 {
+        return Err(format!("a diff is whole {RECORD_LEN}-byte lines; this one is torn"));
+    }
+    let mut lines = text.as_bytes().chunks(RECORD_LEN).map(|line| {
+        core::str::from_utf8(line)
+            .map_err(|_| "a diff line is not UTF-8".to_owned())
+            .map(|line| line.trim_end_matches('\n'))
+    });
+    let header = lines.next().ok_or_else(|| "an empty diff".to_owned())??;
+    let mut parts = header.split('|');
+    let (Some(DIFF_FORMAT), Some(previous), Some(current), Some(records)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!("not a {DIFF_FORMAT} header"));
+    };
+    let previous = previous.strip_prefix("previous=").unwrap_or_default().to_owned();
+    let current = current.strip_prefix("current=").unwrap_or_default().to_owned();
+    let records: usize = records
+        .strip_prefix("records=")
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| "the diff header carries no record count".to_owned())?;
+    let mut items = Vec::with_capacity(records);
+    for line in lines {
+        let line = line?;
+        let fields: Vec<&str> = line.split('|').map(str::trim_end).collect();
+        let (Some(word), Some(exchange), Some(token), Some(key), Some(old), Some(new)) = (
+            fields.first(),
+            fields.get(1),
+            fields.get(2),
+            fields.get(3),
+            fields.get(4),
+            fields.get(5),
+        ) else {
+            return Err("a diff record has fewer than six fields".to_owned());
+        };
+        items.push(Item {
+            change: Change::parse(word).ok_or_else(|| format!("{word:?} is not a change"))?,
+            exchange: (*exchange).to_owned(),
+            token: token.parse().map_err(|_| format!("{token:?} is not a token"))?,
+            key: (*key).to_owned(),
+            old: (*old).to_owned(),
+            new: (*new).to_owned(),
+        });
+    }
+    if items.len() != records {
+        return Err(format!(
+            "the header counts {records} records and the file holds {}",
+            items.len()
+        ));
+    }
+    Ok((previous, current, items))
+}
+
+/// One diff, as the refresh outcome reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffSummary {
+    /// The snapshot compared against.
+    pub previous: Stamp,
+    /// The snapshot compared.
+    pub current: Stamp,
+    /// The `.diff` file.
+    pub file: String,
+    /// How many records of each kind, in [`Change::ALL`] order.
+    pub counts: [u64; 8],
+    /// Every record of a [`Change::named`] kind.
+    pub named: Vec<Item>,
+}
+
+impl DiffSummary {
+    fn of(previous: Stamp, current: Stamp, file: String, items: &[Item]) -> Self {
+        let mut counts = [0_u64; 8];
+        for one in items {
+            if let Some(at) = Change::ALL.iter().position(|change| *change == one.change)
+                && let Some(count) = counts.get_mut(at)
+            {
+                *count = count.saturating_add(1);
+            }
+        }
+        Self {
+            previous,
+            current,
+            file,
+            counts,
+            named: items.iter().filter(|one| one.change.named()).cloned().collect(),
+        }
+    }
+
+    /// `listing=1 delisting=0 ...`, the counts as one line.
+    #[must_use]
+    pub fn counts_line(&self) -> String {
+        Change::ALL
+            .iter()
+            .zip(self.counts)
+            .map(|(change, count)| format!("{}={count}", change.word()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// The diff of the Kite snapshot `current` against the receipted one before
+/// it: written once, or read back when the day already holds it.
+///
+/// `Ok(None)` when `current` is the first Kite snapshot and there is nothing
+/// to compare.
+///
+/// # Errors
+///
+/// A snapshot or NSE file that does not check or parse, a value that does not
+/// fit a record, and a file that cannot be written or read, each named.
+pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, String> {
+    let catalog = Catalog::read(root)?;
+    let Some(previous) = catalog.before(Kind::Kite, current) else {
+        return Ok(None);
+    };
+    let path = root.join(diff_name(current));
+    let file = path.display().to_string();
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|_| format!("{file} is not UTF-8"))?;
+            let (_, _, items) = parse_diff(&text).map_err(|why| format!("{file}: {why}"))?;
+            return Ok(Some(DiffSummary::of(previous, current, file, &items)));
+        }
+        Err(why) if why.kind() == ErrorKind::NotFound => {}
+        Err(why) => return Err(format!("{file} could not be read: {why}")),
+    }
+    let old = Snapshot::parse(previous, &read_body(root, Kind::Kite, previous)?)?;
+    let new = Snapshot::parse(current, &read_body(root, Kind::Kite, current)?)?;
+    let old_isins = isins_on(root, &catalog, previous.day)?;
+    let new_isins = isins_on(root, &catalog, current.day)?;
+    let items = diff(&old, &new, old_isins.as_ref(), new_isins.as_ref());
+    let rendered = render_diff(previous, current, &items)?;
+    let held = lock(root)?;
+    match write_new(&path, rendered.as_bytes()) {
+        Ok(()) => sync_dir(root)?,
+        // ANOTHER WRITER FINISHED FIRST: its file is the diff, read it.
+        Err(_) if path.is_file() => {
+            held.release().map_err(|why| why.to_string())?;
+            return diff_for(root, current);
+        }
+        Err(why) => return Err(why),
+    }
+    held.release().map_err(|why| why.to_string())?;
+    Ok(Some(DiffSummary::of(previous, current, file, &items)))
+}
+
+// ──────────────────────────── the landing hook ────────────────────────────
+
+/// What the landing hook did for one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshotted {
+    /// Which master.
+    pub kind: Kind,
+    /// The day it was snapshotted under; `None` when the clock named none.
+    pub day: Option<Day>,
+    /// The snapshot written or already held, or why none was.
+    pub wrote: Result<Wrote, String>,
+    /// The diff against the previous Kite snapshot: `None` for the NSE file,
+    /// `Some(Ok(None))` for the first Kite snapshot.
+    pub diff: Option<Result<Option<DiffSummary>, String>>,
+}
+
+/// A JSON string literal.
+fn json_string(text: &str) -> String {
+    serde_json::Value::String(text.to_owned()).to_string()
+}
+
+impl Snapshotted {
+    /// The outcome as the `/masters/refresh` answer carries it.
+    #[must_use]
+    pub fn json(&self) -> String {
+        let wrote = match self.wrote {
+            Ok(wrote) => format!(
+                r#""wrote":{},"stamp":{},"file":{},"refusal":null"#,
+                json_string(wrote.word()),
+                json_string(&wrote.stamp().to_string()),
+                json_string(&file_name(self.kind, wrote.stamp())),
+            ),
+            Err(ref why) => format!(
+                r#""wrote":"refused","stamp":null,"file":null,"refusal":{}"#,
+                json_string(why)
+            ),
+        };
+        let diff = match self.diff {
+            None => "null".to_owned(),
+            Some(Ok(None)) => r#"{"previous":null,"note":"the first snapshot: nothing to compare"}"#.to_owned(),
+            Some(Err(ref why)) => format!(r#"{{"refusal":{}}}"#, json_string(why)),
+            Some(Ok(Some(ref summary))) => {
+                let counts: Vec<String> = Change::ALL
+                    .iter()
+                    .zip(summary.counts)
+                    .map(|(change, count)| format!("{}:{count}", json_string(change.word())))
+                    .collect();
+                let named: Vec<String> = summary
+                    .named
+                    .iter()
+                    .map(|one| {
+                        format!(
+                            r#"{{"change":{},"exchange":{},"token":{},"symbol":{},"old":{},"new":{}}}"#,
+                            json_string(one.change.word()),
+                            json_string(&one.exchange),
+                            one.token,
+                            json_string(&one.key),
+                            json_string(&one.old),
+                            json_string(&one.new),
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"previous":{},"current":{},"file":{},"counts":{{{}}},"named":[{}]}}"#,
+                    json_string(&summary.previous.to_string()),
+                    json_string(&summary.current.to_string()),
+                    json_string(&summary.file),
+                    counts.join(","),
+                    named.join(","),
+                )
+            }
+        };
+        format!(
+            r#"{{"kind":{},"day":{},{wrote},"diff":{diff}}}"#,
+            json_string(self.kind.stem()),
+            self.day
+                .map_or_else(|| "null".to_owned(), |day| json_string(&day.to_string())),
+        )
+    }
+}
+
+/// The landing hook: after `masters::land`, snapshot what landed and diff it.
+///
+/// `None` for a source that is not snapshotted. A master that did not land
+/// writes no snapshot (the newest one stands) and says so. Every outcome is
+/// one [`EVENT_TARGET`] event, and every named change one more.
+#[must_use]
+pub fn after_land(
+    dir: &Path,
+    source: &Source,
+    body: &str,
+    landed: &Landed,
+    day: Result<Day, String>,
+) -> Option<Snapshotted> {
+    let kind = Kind::of(source)?;
+    let root = dir.join(SNAPSHOT_DIR);
+    let wrote = match (landed, &day) {
+        (Landed::Written { .. } | Landed::Uncertain { .. }, Ok(day)) => {
+            snapshot(&root, kind, *day, source.url, body.as_bytes())
+        }
+        (Landed::Written { .. } | Landed::Uncertain { .. }, Err(why)) => Err(format!(
+            "the master landed and no snapshot was written: {why}"
+        )),| Landed::Uncertain { .. } => {
+            snapshot(&root, kind, day, source.url, body.as_bytes())
+        }
+        (Landed::Refused(why), _) => Err(format!(
+            "the master did not land, so no snapshot was written and the newest one stands: {why}"
+        )),
+    };
+    let diff = match (kind, &wrote) {
+        (Kind::Kite, Ok(wrote)) => Some(diff_for(&root, wrote.stamp())),
+        (Kind::Kite, Err(_)) | (Kind::NseTotalMarket, _) => None,
+    };
+    let outcome = Snapshotted {
+        kind,
+        day: day.ok(),
+        wrote,
+        diff,
+    };
+    note(&outcome);
+    Some(outcome)
+}
+
+/// The events of one hook call.
+fn note(outcome: &Snapshotted) {
+    let (level, message, detail) = match (&outcome.wrote, &outcome.diff) {
+        (Err(why), _) => (telemetry::Level::Error, "no master snapshot was written", why.clone()),
+        (Ok(_), Some(Err(why))) => (
+            telemetry::Level::Error,
+            "the master was snapshotted, and its diff could not be made",
+            why.clone(),
+        ),
+        (Ok(Wrote::New(_)), _) => (telemetry::Level::Info, "a dated master snapshot was written", String::new()),
+        (Ok(Wrote::AlreadyHeld(_)), _) => (
+            telemetry::Level::Info,
+            "the day already holds this master, byte for byte; nothing was written",
+            String::new(),
+        ),
+    };
+    let stamp = outcome
+        .wrote
+        .as_ref()
+        .map_or_else(|_| String::new(), |wrote| wrote.stamp().to_string());
+    let (previous, counts, file) = match outcome.diff {
+        Some(Ok(Some(ref summary))) => (
+            summary.previous.to_string(),
+            summary.counts_line(),
+            summary.file.clone(),
+        ),
+        Some(Ok(None)) => (String::new(), "first snapshot".to_owned(), String::new()),
+        _ => (String::new(), String::new(), String::new()),
+    };
+    let day = outcome.day.map_or_else(String::new, |day| day.to_string());
+    let _ = telemetry::emit_if!(
+        level,
+        EVENT_TARGET,
+        message,
+        "kind" => telemetry::Value::Str(outcome.kind.stem()),
+        "day" => telemetry::Value::Str(&day),
+        "stamp" => telemetry::Value::Str(&stamp),
+        "outcome" => telemetry::Value::Str(outcome.wrote.as_ref().map_or("refused", |wrote| wrote.word())),
+        "previous" => telemetry::Value::Str(&previous),
+        "counts" => telemetry::Value::Str(&counts),
+        "diff" => telemetry::Value::Str(&file),
+        "detail" => telemetry::Value::Str(&detail),
+    );
+    if let Some(Ok(Some(ref summary))) = outcome.diff {
+        for one in &summary.named {
+            let token = one.token.to_string();
+            let _ = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                EVENT_TARGET,
+                "a master change between two snapshots",
+                "change" => telemetry::Value::Str(one.change.word()),
+                "exchange" => telemetry::Value::Str(&one.exchange),
+                "token" => telemetry::Value::Str(&token),
+                "symbol" => telemetry::Value::Str(&one.key),
+                "old" => telemetry::Value::Str(&one.old),
+                "new" => telemetry::Value::Str(&one.new),
+                "day" => telemetry::Value::Str(&day),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "master_snapshots_tests.rs"]
+mod tests;

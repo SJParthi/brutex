@@ -302,6 +302,93 @@ fn resolve(value: ParamValue, ask: &Ask) -> Option<String> {
 
 use crate::vendor::Param;
 
+/// One futures day-candle request through a token (R4-28, CON-12): the
+/// feed's own bars path with `token` and the route's rung, the feed's own
+/// query (`from`, `to` and its fixed words, the open-interest flag among
+/// them), and the continuous flag when `continuous` is set.
+///
+/// The same path and query words the spot pull spells, read from the same
+/// descriptor; only the continuous flag is the route's own. A word this
+/// request cannot spell is refused rather than guessed.
+///
+/// # Errors
+///
+/// A feed with no token route, a rung the feed cannot spell, and any path or
+/// query word other than the token, the rung, the two dates and a fixed word,
+/// each named. Nothing is sent on any of them.
+pub fn day_candles_url(
+    spec: &HttpSpec,
+    token: u64,
+    window: crate::session::Window,
+    continuous: bool,
+) -> Result<String, String> {
+    let route = spec
+        .fno
+        .by_token()
+        .ok_or_else(|| "this feed has no futures token route, so no request was built".to_owned())?;
+    let rung = route.granularity;
+    let interval = spec
+        .granularity_token(rung)
+        .ok_or_else(|| format!("this feed cannot spell the {rung:?} rung"))?;
+    let from = crate::http::HttpSource::on_the_wire(window.from(), spec.date_format);
+    let to = crate::http::HttpSource::wire_end(window.to(), spec.range_end_for(rung), spec.date_format)
+        .map_err(|why| why.to_string())?;
+    let mut out = String::from(spec.base_url);
+    for segment in spec.path_for(rung) {
+        out.push('/');
+        match *segment {
+            PathSegment::Literal(word) => out.push_str(word),
+            PathSegment::Value {
+                value: ParamValue::InstrumentId,
+                ..
+            } => out.push_str(&token.to_string()),
+            PathSegment::Value {
+                value: ParamValue::Granularity,
+                ..
+            } => push_encoded(&mut out, interval),
+            PathSegment::Value { placeholder, .. } => {
+                return Err(format!(
+                    "the path word {placeholder:?} is not one a futures request can spell"
+                ));
+            }
+        }
+    }
+    let mut first = true;
+    let mut add = |out: &mut String, name: &str, value: &str| {
+        out.push(if first { '?' } else { '&' });
+        first = false;
+        out.push_str(name);
+        out.push('=');
+        push_encoded(out, value);
+    };
+    let routed = spec.route_for(rung).map_or(&[][..], |route| route.params);
+    for param in spec.params.iter().chain(routed) {
+        let value = match param.value {
+            ParamValue::From => from.as_str(),
+            ParamValue::To => to.as_str(),
+            ParamValue::Fixed(word) => word,
+            ParamValue::InstrumentId
+            | ParamValue::Underlying
+            | ParamValue::Year
+            | ParamValue::Month
+            | ParamValue::ExpiryDate
+            | ParamValue::Granularity
+            | ParamValue::Segment
+            | ParamValue::Kind => {
+                return Err(format!(
+                    "the query word {:?} is not one a futures request can spell",
+                    param.name
+                ));
+            }
+        };
+        add(&mut out, param.name, value);
+    }
+    if continuous {
+        add(&mut out, route.param, route.value);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

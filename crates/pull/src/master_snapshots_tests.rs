@@ -1,0 +1,657 @@
+//! R4-28 (DLY-09): dated master snapshots, the day's diff and `token_on`.
+//!
+//! Every row here is invented: `ZQ`-prefixed names, tokens in the nine
+//! millions and ISINs no exchange issued. The header is Kite's published
+//! column list, which is a schema and not a data row.
+
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use super::*;
+
+const URL: &str = "https://api.kite.trade/instruments";
+const HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange";
+const NSE_HEAD: &str = "Company Name,Industry,Symbol,Series,ISIN Code";
+
+/// A new, empty folder of this test's own. Left for the main session's
+/// clean-up: nothing in this suite deletes a file.
+fn scratch(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "brutex-r428-{name}-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("a scratch folder");
+    dir
+}
+
+fn day(y: u16, m: u8, d: u8) -> Day {
+    Day::new(y, m, d).expect("a real day")
+}
+
+fn stamp(day: Day, ordinal: u32) -> Stamp {
+    Stamp { day, ordinal }
+}
+
+/// One invented dump row.
+#[allow(clippy::too_many_arguments, reason = "one argument per Kite column")]
+fn row(token: u64, symbol: &str, name: &str, expiry: &str, strike: &str, lot: u32, kind: &str, segment: &str, exchange: &str) -> String {
+    format!(
+        "{token},{},{symbol},\"{name}\",0,{expiry},{strike},0.05,{lot},{kind},{segment},{exchange}",
+        token / 256
+    )
+}
+
+fn fut(token: u64, symbol: &str, expiry: &str, lot: u32) -> String {
+    row(token, symbol, "ZQIDX", expiry, "0", lot, "FUT", "NFO-FUT", "NFO")
+}
+
+fn share(token: u64, symbol: &str, name: &str) -> String {
+    row(token, symbol, name, "", "0", 1, "EQ", "NSE", "NSE")
+}
+
+fn dump(rows: &[String]) -> String {
+    let mut out = String::from(HEAD);
+    for one in rows {
+        out.push('\n');
+        out.push_str(one);
+    }
+    out.push('\n');
+    out
+}
+
+fn nse_file(rows: &[(&str, &str)]) -> String {
+    let mut out = String::from(NSE_HEAD);
+    for (symbol, isin) in rows {
+        out.push_str(&format!("\nZq {symbol} Ltd.,Testing,{symbol},EQ,{isin}"));
+    }
+    out.push('\n');
+    out
+}
+
+fn kite_source() -> &'static Source {
+    crate::masters::SOURCES
+        .iter()
+        .find(|source| source.vendor == Some(Vendor::Zerodha))
+        .expect("the Zerodha master is a source")
+}
+
+fn nse_source() -> &'static Source {
+    crate::masters::SOURCES
+        .iter()
+        .find(|source| source.file == NSE_TOTAL_MARKET_FILE)
+        .expect("the NSE total market file is a source")
+}
+
+fn written() -> Landed {
+    Landed::Written {
+        bytes: 1,
+        changed: true,
+    }
+}
+
+/// Two days on which token 9,000,001 names two different futures.
+fn two_days(root: &Path) -> (Day, Day) {
+    let (d1, d2) = (day(2026, 1, 5), day(2026, 2, 2));
+    let first = dump(&[
+        fut(9_000_001, "ZQIDX26JANFUT", "2026-01-29", 75),
+        fut(9_000_002, "ZQIDX26MARFUT", "2026-03-26", 75),
+    ]);
+    let second = dump(&[
+        fut(9_000_001, "ZQIDX26APRFUT", "2026-04-28", 75),
+        fut(9_000_002, "ZQIDX26MARFUT", "2026-03-26", 75),
+    ]);
+    assert_eq!(
+        snapshot(root, Kind::Kite, d1, URL, first.as_bytes()),
+        Ok(Wrote::New(stamp(d1, 1)))
+    );
+    assert_eq!(
+        snapshot(root, Kind::Kite, d2, URL, second.as_bytes()),
+        Ok(Wrote::New(stamp(d2, 1)))
+    );
+    (d1, d2)
+}
+
+#[test]
+fn one_token_two_dates_resolves_to_two_contracts() {
+    let root = scratch("two-dates");
+    let (d1, d2) = two_days(&root);
+    let book = Book::open(&root).expect("a book");
+    let TokenOn::Resolved { snapshot: s1, listed: on_first } = book.token_on(d1, "NFO", 9_000_001) else {
+        panic!("the first date resolves");
+    };
+    let TokenOn::Resolved { snapshot: s2, listed: on_second } = book.token_on(d2, "NFO", 9_000_001) else {
+        panic!("the second date resolves");
+    };
+    assert_eq!((s1, s2), (stamp(d1, 1), stamp(d2, 1)));
+    assert_eq!(on_first.tradingsymbol(), "ZQIDX26JANFUT");
+    assert_eq!(on_first.expiry(), Some(day(2026, 1, 29)));
+    assert_eq!(on_second.tradingsymbol(), "ZQIDX26APRFUT");
+    assert_eq!(on_second.expiry(), Some(day(2026, 4, 28)));
+    assert!(!on_first.same_contract(&on_second), "one token, two contracts");
+}
+
+#[test]
+fn a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contract() {
+    let root = scratch("sparse");
+    let (d1, d2) = two_days(&root);
+    let book = Book::open(&root).expect("a book");
+    let between = day(2026, 1, 20);
+    match book.token_on(between, "NFO", 9_000_001) {
+        TokenOn::Ambiguous { older, newer } => {
+            assert_eq!((older, newer), (stamp(d1, 1), stamp(d2, 1)));
+        }
+        other => panic!("a reused token between snapshots is ambiguous, got {other:?}"),
+    }
+    assert_eq!(book.token_on(between, "NFO", 9_000_001).word(), "token_ambiguous");
+    // A token both snapshots map to one contract is believed between them.
+    let TokenOn::Resolved { snapshot, listed } = book.token_on(between, "NFO", 9_000_002) else {
+        panic!("an agreeing token resolves");
+    };
+    assert_eq!(snapshot, stamp(d1, 1));
+    assert_eq!(listed.tradingsymbol(), "ZQIDX26MARFUT");
+    // After the newest snapshot there is no later one to disagree.
+    let TokenOn::Resolved { listed, .. } = book.token_on(day(2026, 2, 20), "NFO", 9_000_001) else {
+        panic!("after the newest snapshot the newest answers");
+    };
+    assert_eq!(listed.tradingsymbol(), "ZQIDX26APRFUT");
+}
+
+#[test]
+fn a_date_before_the_first_snapshot_resolves_nothing() {
+    let root = scratch("before-first");
+    let (d1, _) = two_days(&root);
+    let book = Book::open(&root).expect("a book");
+    for before in [day(2026, 1, 4), day(2018, 1, 1), day(1970, 1, 1)] {
+        match book.token_on(before, "NFO", 9_000_001) {
+            TokenOn::BeforeFirst { first } => assert_eq!(first, stamp(d1, 1)),
+            other => panic!("before the first snapshot nothing resolves, got {other:?}"),
+        }
+    }
+    let empty = Book::open(&scratch("no-snapshot")).expect("an empty book");
+    assert!(matches!(empty.token_on(d1, "NFO", 9_000_001), TokenOn::NoSnapshot));
+    assert_eq!(empty.newest(), None);
+}
+
+#[test]
+fn a_snapshot_is_never_rewritten() {
+    let root = scratch("never-rewritten");
+    let d1 = day(2026, 3, 2);
+    let first = dump(&[fut(9_000_011, "ZQIDX26MARFUT", "2026-03-26", 75)]);
+    let other = dump(&[fut(9_000_011, "ZQIDX26MARFUT", "2026-03-26", 65)]);
+    assert_eq!(
+        snapshot(&root, Kind::Kite, d1, URL, first.as_bytes()),
+        Ok(Wrote::New(stamp(d1, 1)))
+    );
+    let body = root.join(file_name(Kind::Kite, stamp(d1, 1)));
+    let receipt = root.join(receipt_name(Kind::Kite, stamp(d1, 1)));
+    let (body_bytes, receipt_bytes) = (fs::read(&body).unwrap(), fs::read(&receipt).unwrap());
+    let modified = fs::metadata(&body).unwrap().modified().unwrap();
+
+    // THE SAME BYTES AGAIN: already held, nothing touched.
+    assert_eq!(
+        snapshot(&root, Kind::Kite, d1, URL, first.as_bytes()),
+        Ok(Wrote::AlreadyHeld(stamp(d1, 1)))
+    );
+    // DIFFERENT BYTES THE SAME DAY: a second file, the first untouched.
+    assert_eq!(
+        snapshot(&root, Kind::Kite, d1, URL, other.as_bytes()),
+        Ok(Wrote::New(stamp(d1, 2)))
+    );
+    assert_eq!(fs::read(&body).unwrap(), body_bytes);
+    assert_eq!(fs::read(&receipt).unwrap(), receipt_bytes);
+    assert_eq!(fs::metadata(&body).unwrap().modified().unwrap(), modified);
+    // The first body is never the day's answer again: `_2` is the newest.
+    assert_eq!(
+        snapshot(&root, Kind::Kite, d1, URL, first.as_bytes()),
+        Ok(Wrote::New(stamp(d1, 3))),
+        "the old bytes back after a change are a new state, not the old file"
+    );
+    // AND THE WRITER ITSELF REFUSES AN EXISTING NAME.
+    let refused = write_new(&body, b"over").expect_err("O_EXCL refuses an existing file");
+    assert!(refused.contains("no existing file was touched"), "{refused}");
+    assert_eq!(fs::read(&body).unwrap(), body_bytes);
+    assert_eq!(read_body(&root, Kind::Kite, stamp(d1, 1)).unwrap(), first);
+}
+
+#[test]
+fn a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used() {
+    let root = scratch("cut");
+    let d1 = day(2026, 3, 4);
+    let cut = dump(&[fut(9_000_021, "ZQIDX26MARFUT", "2026-03-26", 75)]);
+    let next = dump(&[fut(9_000_021, "ZQIDX26APRFUT", "2026-04-28", 75)]);
+    // A KILL BETWEEN BODY AND RECEIPT: the body alone is on disk.
+    fs::write(
+        root.join(file_name(Kind::Kite, stamp(d1, 1))),
+        compress(cut.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert!(catalog.receipted(Kind::Kite).is_empty());
+    assert_eq!(catalog.incomplete().len(), 1);
+    assert!(catalog.incomplete()[0].contains("never read"), "{:?}", catalog.incomplete());
+    assert!(matches!(
+        Book::open(&root).unwrap().token_on(d1, "NFO", 9_000_021),
+        TokenOn::NoSnapshot
+    ));
+    assert_eq!(newest_snapshot_day(&root), Ok(None));
+
+    // THE NEXT REFRESH TAKES THE NEXT ORDINAL AND IS THE DAY'S SNAPSHOT.
+    assert_eq!(
+        snapshot(&root, Kind::Kite, d1, URL, next.as_bytes()),
+        Ok(Wrote::New(stamp(d1, 2)))
+    );
+    let book = Book::open(&root).unwrap();
+    assert_eq!(book.stamps(), &[stamp(d1, 2)]);
+    let TokenOn::Resolved { listed, .. } = book.token_on(d1, "NFO", 9_000_021) else {
+        panic!("the receipted refresh answers");
+    };
+    assert_eq!(listed.tradingsymbol(), "ZQIDX26APRFUT");
+    // The diff never compares against the incomplete body.
+    assert_eq!(diff_for(&root, stamp(d1, 2)), Ok(None));
+    assert_eq!(newest_snapshot_day(&root), Ok(Some(d1)));
+}
+
+/// The two days of the diff test, with every injected change.
+fn diff_days(root: &Path) -> (Stamp, Stamp) {
+    let (a, b) = (day(2026, 3, 2), day(2026, 3, 3));
+    let first = dump(&[
+        fut(9_100_001, "ZQIDX26MARFUT", "2026-03-26", 75),
+        fut(9_100_002, "ZQIDX26APRFUT", "2026-04-30", 75),
+        row(9_100_003, "ZQIDX26MAR1000CE", "ZQIDX", "2026-03-26", "1000", 75, "CE", "NFO-OPT", "NFO"),
+        fut(9_100_005, "ZQIDX26MAYFUT", "2026-05-28", 75),
+        share(9_200_001, "ZQALPHA", "ZQ ALPHA"),
+        share(9_200_002, "ZQBETA", "ZQ BETA"),
+        share(9_200_003, "ZQGAMMA", "ZQ GAMMA"),
+        share(9_200_009, "ZQOMEGA", "ZQ OMEGA"),
+    ]);
+    let second = dump(&[
+        fut(9_100_001, "ZQIDX26MARFUT", "2026-03-26", 65),
+        fut(9_100_002, "ZQIDX26APRFUT", "2026-04-29", 75),
+        fut(9_100_006, "ZQIDX26MAYFUT", "2026-05-28", 75),
+        row(9_100_007, "ZQIDX26MAR900PE", "ZQIDX", "2026-03-26", "900.0", 75, "PE", "NFO-OPT", "NFO"),
+        share(9_200_001, "ZQALPHA", "ZQ ALPHA"),
+        share(9_200_002, "ZQBETANEW", "ZQ BETA"),
+        share(9_200_004, "ZQDELTA", "ZQ DELTA"),
+        share(9_200_009, "ZQOMEGA", "ZQ OMEGA"),
+    ]);
+    let nse_a = nse_file(&[
+        ("ZQALPHA", "INE0ZQ000011"),
+        ("ZQBETA", "INE0ZQ000022"),
+        ("ZQGAMMA", "INE0ZQ000033"),
+    ]);
+    let nse_b = nse_file(&[
+        ("ZQALPHA", "INE0ZQ000012"),
+        ("ZQBETANEW", "INE0ZQ000022"),
+        ("ZQDELTA", "INE0ZQ000033"),
+    ]);
+    let nse_url = nse_source().url;
+    snapshot(root, Kind::NseTotalMarket, a, nse_url, nse_a.as_bytes()).unwrap();
+    snapshot(root, Kind::Kite, a, URL, first.as_bytes()).unwrap();
+    snapshot(root, Kind::NseTotalMarket, b, nse_url, nse_b.as_bytes()).unwrap();
+    snapshot(root, Kind::Kite, b, URL, second.as_bytes()).unwrap();
+    (stamp(a, 1), stamp(b, 1))
+}
+
+fn expected_items() -> Vec<Item> {
+    let one = |change, exchange: &str, token, key: &str, old: &str, new: &str| Item {
+        change,
+        exchange: exchange.to_owned(),
+        token,
+        key: key.to_owned(),
+        old: old.to_owned(),
+        new: new.to_owned(),
+    };
+    let mut items = vec![
+        one(Change::Listing, "NFO", 9_100_007, "ZQIDX26MAR900PE", "", "ZQIDX26MAR900PE"),
+        one(Change::Delisting, "NFO", 9_100_003, "ZQIDX26MAR1000CE", "ZQIDX26MAR1000CE", ""),
+        one(Change::Symbol, "NSE", 9_200_002, "ZQBETANEW", "ZQBETA", "ZQBETANEW"),
+        one(Change::Symbol, "NSE", 9_200_004, "ZQDELTA", "ZQGAMMA", "ZQDELTA"),
+        one(Change::Isin, "NSE", 9_200_001, "ZQALPHA", "INE0ZQ000011", "INE0ZQ000012"),
+        one(Change::LotSize, "NFO", 9_100_001, "ZQIDX26MARFUT", "75", "65"),
+        one(Change::Expiry, "NFO", 9_100_002, "ZQIDX26APRFUT", "2026-04-30", "2026-04-29"),
+        one(Change::Token, "NFO", 9_100_006, "ZQIDX26MAYFUT", "9100005", "9100006"),
+        one(Change::IsinUnknown, "NSE", 9_200_009, "ZQOMEGA", "", ""),
+    ];
+    items.sort_unstable();
+    items
+}
+
+#[test]
+fn the_diff_of_two_days_lists_exactly_the_injected_changes() {
+    let root = scratch("diff");
+    let (a, b) = diff_days(&root);
+    let summary = diff_for(&root, b).unwrap().expect("a previous snapshot exists");
+    assert_eq!(summary.previous, a);
+    assert_eq!(summary.current, b);
+    assert_eq!(summary.counts, [1, 1, 2, 1, 1, 1, 1, 1]);
+    assert_eq!(
+        summary.counts_line(),
+        "listing=1 delisting=1 symbol=2 isin=1 lot_size=1 expiry=1 token=1 isin_unknown=1"
+    );
+    let expected = expected_items();
+    let named: Vec<Item> = expected.iter().filter(|one| one.change.named()).cloned().collect();
+    assert_eq!(summary.named, named, "every symbol, ISIN, lot, expiry and token change is named");
+    // THE FILE HOLDS EXACTLY THE INJECTED CHANGES, in fixed records.
+    let text = fs::read_to_string(root.join(diff_name(b))).unwrap();
+    assert_eq!(text.len(), RECORD_LEN * (expected.len() + 1));
+    assert!(text.lines().all(|line| line.len() == RECORD_LEN - 1));
+    let (previous, current, items) = parse_diff(&text).unwrap();
+    assert_eq!((previous.as_str(), current.as_str()), ("2026-03-02", "2026-03-03"));
+    assert_eq!(items, expected);
+    // READ BACK, NOT RECOMPUTED, on the next call; and never rewritten.
+    let modified = fs::metadata(root.join(diff_name(b))).unwrap().modified().unwrap();
+    assert_eq!(diff_for(&root, b).unwrap().unwrap(), summary);
+    assert_eq!(
+        fs::metadata(root.join(diff_name(b))).unwrap().modified().unwrap(),
+        modified
+    );
+    // The first day has nothing to compare against.
+    assert_eq!(diff_for(&root, a), Ok(None));
+}
+
+#[test]
+fn an_isin_change_between_masters_is_named() {
+    let root = scratch("isin");
+    let (_, b) = diff_days(&root);
+    let summary = diff_for(&root, b).unwrap().unwrap();
+    let isin: Vec<&Item> = summary.named.iter().filter(|one| one.change == Change::Isin).collect();
+    assert_eq!(isin.len(), 1);
+    assert_eq!(
+        (isin[0].key.as_str(), isin[0].old.as_str(), isin[0].new.as_str()),
+        ("ZQALPHA", "INE0ZQ000011", "INE0ZQ000012")
+    );
+}
+
+#[test]
+fn a_day_without_its_own_nse_file_names_every_share_isin_unknown_and_infers_nothing() {
+    let (a, b) = (day(2026, 3, 9), day(2026, 3, 10));
+    let root = scratch("no-nse");
+    let rows = [share(9_300_001, "ZQONE", "ZQ ONE"), share(9_300_002, "ZQTWO", "ZQ TWO")];
+    snapshot(&root, Kind::Kite, a, URL, dump(&rows).as_bytes()).unwrap();
+    // An NSE file of ANOTHER day must not be borrowed.
+    snapshot(
+        &root,
+        Kind::NseTotalMarket,
+        a,
+        nse_source().url,
+        nse_file(&[("ZQONE", "INE0ZQ000099")]).as_bytes(),
+    )
+    .unwrap();
+    snapshot(&root, Kind::Kite, b, URL, dump(&rows).as_bytes()).unwrap();
+    let summary = diff_for(&root, stamp(b, 1)).unwrap().unwrap();
+    assert_eq!(summary.counts, [0, 0, 0, 0, 0, 0, 0, 2]);
+    assert!(summary.named.is_empty());
+}
+
+#[test]
+fn the_landing_hook_snapshots_both_masters_and_reports_the_diff() {
+    let dir = scratch("hook");
+    let root = dir.join(SNAPSHOT_DIR);
+    let (a, b) = (day(2026, 4, 6), day(2026, 4, 7));
+    let nse = nse_file(&[("ZQALPHA", "INE0ZQ000011")]);
+    let first = dump(&[share(9_400_001, "ZQALPHA", "ZQ ALPHA"), fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 75)]);
+    let second = dump(&[share(9_400_001, "ZQALPHA", "ZQ ALPHA"), fut(9_400_002, "ZQIDX26APRFUT", "2026-04-28", 30)]);
+
+    let n = after_land(&dir, nse_source(), &nse, &written(), Ok(a)).expect("the NSE file is snapshotted");
+    assert_eq!(n.kind, Kind::NseTotalMarket);
+    assert_eq!(n.wrote, Ok(Wrote::New(stamp(a, 1))));
+    assert_eq!(n.diff, None);
+    let k1 = after_land(&dir, kite_source(), &first, &written(), Ok(a)).expect("the Kite dump is snapshotted");
+    assert_eq!(k1.diff, Some(Ok(None)), "the first Kite snapshot has nothing to compare");
+    assert!(k1.json().contains(r#""note":"the first snapshot: nothing to compare""#), "{}", k1.json());
+    let k2 = after_land(&dir, kite_source(), &second, &written(), Ok(b)).unwrap();
+    let json = k2.json();
+    assert!(json.contains(r#""wrote":"new""#), "{json}");
+    assert!(json.contains(r#""lot_size":1"#), "{json}");
+    assert!(json.contains(r#""change":"lot_size","exchange":"NFO","token":9400002,"symbol":"ZQIDX26APRFUT","old":"75","new":"30""#), "{json}");
+    // The isin of the second day is unknown: no NSE file was landed that day.
+    assert!(json.contains(r#""isin_unknown":1"#), "{json}");
+    // A source that is not snapshotted is left alone.
+    let groww = crate::masters::SOURCES
+        .iter()
+        .find(|source| source.vendor == Some(Vendor::Groww))
+        .unwrap();
+    assert_eq!(after_land(&dir, groww, "x", &written(), Ok(a)), None);
+    assert_eq!(Catalog::read(&root).unwrap().receipted(Kind::Kite), &[stamp(a, 1), stamp(b, 1)]);
+}
+
+#[test]
+fn a_refused_landing_writes_no_snapshot_and_the_newest_stands() {
+    let dir = scratch("refused");
+    let root = dir.join(SNAPSHOT_DIR);
+    let a = day(2026, 4, 6);
+    let body = dump(&[fut(9_500_001, "ZQIDX26APRFUT", "2026-04-28", 75)]);
+    after_land(&dir, kite_source(), &body, &written(), Ok(a)).unwrap();
+    // A DOWNLOAD THAT FAILED MIDWAY: the landing refused, so no snapshot.
+    let cut = &body[..body.len() / 2];
+    let refused = after_land(
+        &dir,
+        kite_source(),
+        cut,
+        &Landed::Refused("a truncated body".to_owned()),
+        Ok(day(2026, 4, 7)),
+    )
+    .unwrap();
+    let why = refused.wrote.clone().expect_err("no snapshot for a refused landing");
+    assert!(why.contains("the newest one stands"), "{why}");
+    assert!(refused.json().contains(r#""wrote":"refused""#));
+    assert_eq!(Catalog::read(&root).unwrap().receipted(Kind::Kite), &[stamp(a, 1)]);
+    assert_eq!(newest_snapshot_day(&root), Ok(Some(a)));
+}
+
+#[test]
+fn newest_snapshot_day_is_read_from_the_receipt_and_a_torn_one_is_refused_not_replaced() {
+    let root = scratch("newest");
+    let (d1, d2) = two_days(&root);
+    assert_eq!(newest_snapshot_day(&root), Ok(Some(d2)));
+    // TEAR THE NEWEST RECEIPT: refused by name, never answered with d1.
+    let receipt = root.join(receipt_name(Kind::Kite, stamp(d2, 1)));
+    let text = fs::read_to_string(&receipt).unwrap();
+    fs::write(&receipt, text.replace("ordinal=1", "ordinal=7")).unwrap();
+    let why = newest_snapshot_day(&root).expect_err("a torn receipt is refused");
+    assert!(why.contains("refused, never read"), "{why}");
+    let book = Book::open(&root).unwrap();
+    match book.token_on(d2, "NFO", 9_000_001) {
+        TokenOn::Unreadable { snapshot, why } => {
+            assert_eq!(snapshot, stamp(d2, 1));
+            assert!(why.contains("refused"), "{why}");
+        }
+        other => panic!("a torn snapshot is unreadable, got {other:?}"),
+    }
+    // The older snapshot is still read for its own day.
+    assert!(matches!(book.token_on(d1, "NFO", 9_000_001), TokenOn::Resolved { .. }));
+}
+
+#[test]
+fn a_body_that_does_not_match_its_receipt_is_refused() {
+    let root = scratch("mismatch");
+    let d1 = day(2026, 5, 4);
+    let body = dump(&[fut(9_600_001, "ZQIDX26MAYFUT", "2026-05-26", 75)]);
+    snapshot(&root, Kind::Kite, d1, URL, body.as_bytes()).unwrap();
+    let path = root.join(file_name(Kind::Kite, stamp(d1, 1)));
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, &bytes).unwrap();
+    let why = read_body(&root, Kind::Kite, stamp(d1, 1)).expect_err("a changed body is refused");
+    assert!(why.contains("does not match its receipt"), "{why}");
+}
+
+#[test]
+fn every_refusal_of_a_dump_is_named() {
+    let s = stamp(day(2026, 5, 4), 1);
+    assert_eq!(snapshot(&scratch("empty"), Kind::Kite, s.day, URL, b"").unwrap_err(), "an empty body is not a master; no snapshot was written");
+    let missing = Snapshot::parse(s, "instrument_token,tradingsymbol\n1,ZQ\n").unwrap_err();
+    assert!(missing.contains("no column \"name\""), "{missing}");
+    let garbage = Snapshot::parse(s, &dump(&["abc,1,ZQ,\"ZQ\",0,,0,0.05,1,EQ,NSE,NSE".to_owned()])).unwrap_err();
+    assert!(garbage.contains("line 2") && garbage.contains("instrument_token"), "{garbage}");
+    let bad_expiry = Snapshot::parse(s, &dump(&[fut(9_700_001, "ZQIDX26MAYFUT", "26-05-2026", 75)])).unwrap_err();
+    assert!(bad_expiry.contains("expiry"), "{bad_expiry}");
+    let open_quote = Snapshot::parse(s, &format!("{HEAD}\n9700002,1,ZQ,\"ZQ,0,,0,0.05,1,EQ,NSE,NSE\n")).unwrap_err();
+    assert!(open_quote.contains("not closed"), "{open_quote}");
+    assert!(Snapshot::parse(s, "").unwrap_err().contains("empty"));
+}
+
+#[test]
+fn one_row_a_quoted_comma_and_a_respelled_strike_all_read() {
+    let s = stamp(day(2026, 5, 4), 1);
+    let one = Snapshot::parse(s, &dump(&[row(9_800_001, "ZQIDX26MAY1000CE", "ZQ, INDEX", "2026-05-26", "1000.0", 75, "CE", "NFO-OPT", "NFO")])).unwrap();
+    assert_eq!(one.len(), 1);
+    let Lookup::Listed(listed) = one.lookup("NFO", 9_800_001) else {
+        panic!("one row is found");
+    };
+    assert_eq!(listed.name(), "ZQ, INDEX");
+    assert_eq!(listed.strike(), "1000");
+    let other = Snapshot::parse(s, &dump(&[row(9_800_001, "ZQIDX26MAY1000CE", "ZQ, INDEX", "2026-05-26", "1000", 75, "CE", "NFO-OPT", "NFO")])).unwrap();
+    let Lookup::Listed(again) = other.lookup("NFO", 9_800_001) else {
+        panic!("found");
+    };
+    assert!(listed.same_contract(&again), "1000.0 and 1000 are one strike");
+    assert!(matches!(one.lookup("", 0), Lookup::Absent), "garbage parameters find nothing");
+    assert!(matches!(one.lookup("NSE", 9_800_001), Lookup::Absent), "the exchange is part of the key");
+}
+
+#[test]
+fn a_token_twice_in_one_snapshot_is_believed_for_neither_row() {
+    let root = scratch("duplicated");
+    let d1 = day(2026, 5, 4);
+    let body = dump(&[
+        fut(9_900_001, "ZQIDX26MAYFUT", "2026-05-26", 75),
+        fut(9_900_001, "ZQIDX26JUNFUT", "2026-06-30", 75),
+    ]);
+    snapshot(&root, Kind::Kite, d1, URL, body.as_bytes()).unwrap();
+    let book = Book::open(&root).unwrap();
+    assert!(matches!(book.token_on(d1, "NFO", 9_900_001), TokenOn::Duplicated { .. }));
+    assert_eq!(book.token_on(d1, "NFO", 9_900_001).word(), "token_duplicated");
+    assert!(matches!(book.token_on(d1, "NFO", 1), TokenOn::NotListed { .. }));
+}
+
+#[test]
+fn the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day() {
+    let (end, start) = (day(2025, 12, 31), day(2026, 1, 1));
+    let body = |symbol: &str| dump(&[fut(9_910_001, symbol, "2026-01-27", 75)]);
+    let snapshots = vec![
+        Snapshot::parse(stamp(end, 1), &body("ZQIDX25DECFUT")).unwrap(),
+        Snapshot::parse(stamp(start, 1), &body("ZQIDX26JANFUT")).unwrap(),
+        Snapshot::parse(stamp(start, 2), &body("ZQIDX26JANFUTB")).unwrap(),
+    ];
+    let book = Book::of(snapshots).unwrap();
+    let symbol = |d| match book.token_on(d, "NFO", 9_910_001) {
+        TokenOn::Resolved { listed, snapshot } => (listed.tradingsymbol().to_owned(), snapshot),
+        other => panic!("resolves, got {other:?}"),
+    };
+    assert_eq!(symbol(end), ("ZQIDX25DECFUT".to_owned(), stamp(end, 1)));
+    assert_eq!(symbol(start), ("ZQIDX26JANFUTB".to_owned(), stamp(start, 2)), "the day's newest ordinal");
+    assert_eq!(symbol(day(2026, 3, 1)).1, stamp(start, 2));
+    assert!(Book::of(vec![
+        Snapshot::parse(stamp(end, 1), &body("A")).unwrap(),
+        Snapshot::parse(stamp(end, 1), &body("B")).unwrap(),
+    ])
+    .is_err());
+}
+
+#[test]
+fn concurrent_refreshes_of_one_day_write_one_snapshot_or_one_each() {
+    let root = Arc::new(scratch("concurrent"));
+    let d1 = day(2026, 6, 1);
+    let same = Arc::new(dump(&[fut(9_920_001, "ZQIDX26JUNFUT", "2026-06-30", 75)]));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let (root, same) = (Arc::clone(&root), Arc::clone(&same));
+            std::thread::spawn(move || snapshot(&root, Kind::Kite, d1, URL, same.as_bytes()))
+        })
+        .collect();
+    let outcomes: Vec<Wrote> = handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
+    assert_eq!(outcomes.iter().filter(|w| matches!(w, Wrote::New(_))).count(), 1);
+    assert_eq!(outcomes.iter().filter(|w| matches!(w, Wrote::AlreadyHeld(_))).count(), 3);
+    let d2 = day(2026, 6, 2);
+    let handles: Vec<_> = (0..4_u32)
+        .map(|n| {
+            let root = Arc::clone(&root);
+            std::thread::spawn(move || {
+                let body = dump(&[fut(9_920_001, "ZQIDX26JUNFUT", "2026-06-30", 75 + n)]);
+                snapshot(&root, Kind::Kite, d2, URL, body.as_bytes())
+            })
+        })
+        .collect();
+    let mut ordinals: Vec<u32> = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().unwrap().stamp().ordinal)
+        .collect();
+    ordinals.sort_unstable();
+    assert_eq!(ordinals, [1, 2, 3, 4]);
+}
+
+#[test]
+fn a_day_past_its_last_ordinal_is_refused_by_name() {
+    let root = scratch("max-ordinal");
+    let d1 = day(2026, 6, 3);
+    fs::write(root.join(file_name(Kind::Kite, stamp(d1, MAX_ORDINAL))), b"cut").unwrap();
+    let why = snapshot(&root, Kind::Kite, d1, URL, dump(&[fut(9_930_001, "ZQIDX26JUNFUT", "2026-06-30", 75)]).as_bytes())
+        .unwrap_err();
+    assert!(why.contains("refused rather than numbered without end"), "{why}");
+}
+
+#[test]
+fn a_torn_diff_is_refused_by_name() {
+    let root = scratch("torn-diff");
+    let (_, b) = diff_days(&root);
+    fs::write(root.join(diff_name(b)), b"brutex-master-diff-v1|cut").unwrap();
+    let why = diff_for(&root, b).unwrap_err();
+    assert!(why.contains("torn"), "{why}");
+    assert!(parse_diff("").unwrap_err().contains("empty"));
+}
+
+#[test]
+fn a_value_wider_than_its_field_writes_no_diff() {
+    let s = (stamp(day(2026, 6, 4), 1), stamp(day(2026, 6, 5), 1));
+    let wide = Item {
+        change: Change::Listing,
+        exchange: "NFO".to_owned(),
+        token: 1,
+        key: "Z".repeat(49),
+        old: String::new(),
+        new: String::new(),
+    };
+    let why = render_diff(s.0, s.1, &[wide]).unwrap_err();
+    assert!(why.contains("does not fit"), "{why}");
+    let separator = Item {
+        key: "ZQ|X".to_owned(),
+        ..expected_items()[0].clone()
+    };
+    assert!(render_diff(s.0, s.1, &[separator]).is_err());
+}
+
+#[test]
+fn file_names_round_trip_and_strangers_are_ignored() {
+    let s = stamp(day(2026, 10, 22), 2);
+    for kind in Kind::ALL {
+        assert_eq!(parse_name(&file_name(kind, s)), Some((kind, s, false)));
+        assert_eq!(parse_name(&receipt_name(kind, s)), Some((kind, s, true)));
+    }
+    assert_eq!(diff_name(s), "20261022_2.diff");
+    assert_eq!(file_name(Kind::Kite, stamp(s.day, 1)), "instruments_20261022.csv.gz");
+    for stranger in [
+        "instruments_20261022_1.csv.gz",
+        "instruments_20261022_02.csv.gz",
+        "instruments_20261322.csv.gz",
+        "instruments_2026102.csv.gz",
+        "instruments_20261022.csv",
+        "zerodha_instruments.csv",
+        ".master-snapshots.lock",
+    ] {
+        assert_eq!(parse_name(stranger), None, "{stranger}");
+    }
+}

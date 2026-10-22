@@ -241,12 +241,18 @@ fn attempts_json(tried: &Fetched) -> String {
 /// One source's outcome, as the page reads it.
 fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetched) -> String {
     let head = format!(
-        r#"{{"file":{},"url":{},"needs_token":{},"attempts":{},"waited_ms":{}"#,
+        r#"{{"file":{},"url":{},"needs_token":{},"attempts":{},"waited_ms":{},"snapshot":{}"#,
         crate::render::json_string(source.file),
         crate::render::json_string(source.url),
         source.needs_token,
         attempts_json(tried),
         tried.waited_ms(),
+        // R4-28 (DLY-09): the dated snapshot and, for the Kite dump, the diff's
+        // counts and every named change. `null` for a source not snapshotted.
+        tried
+            .snapshot
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), pull::master_snapshots::Snapshotted::json),
     );
     match *landed {
         Ok(Landed::Written { bytes, changed }) => format!(
@@ -433,9 +439,22 @@ async fn obtain<D: Discovery, P: masters::Pause>(
             Ok(body)
         }
     }
-    let tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
+    let mut tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
     let landed = match tried.body {
-        Some(ref body) => masters::land(dir, source, body),
+        Some(ref body) => {
+            let landed = masters::land(dir, source, body);
+            // THE DATED SNAPSHOT AND THE DAY'S DIFF, after the landing and never
+            // over it: the one call R4-28 adds at the only `masters::land` call
+            // site (DLY-09, D-6892). A refused landing writes no snapshot.
+            tried.snapshot = pull::master_snapshots::after_land(
+                dir,
+                source,
+                body,
+                &landed,
+                pull::master_snapshots::today_ist(),
+            );
+            landed
+        }
         // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
         // ledger travels beside this in `attempts`, so the sentence is free to
         // be the single most useful line rather than a digest of every step.
@@ -1864,6 +1883,7 @@ mod tests {
                 step(4, refused(None, Verdict::Reprime)),
                 step(5, refused(Some(404), Verdict::Never)),
             ],
+            snapshot: None,
         };
         let from = crate::emitted::mark();
         super::record(

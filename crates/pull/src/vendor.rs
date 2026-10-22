@@ -2840,6 +2840,37 @@ pub enum FnoAccess {
     ByName(FnoDiscovery),
     /// Ask by distance from the money; the answer carries the realised strike.
     ByStrikeOffset(RollingSpec),
+    /// Ask a FUTURE through its own token, resolved by date through the dated
+    /// master snapshots, and the continuous series through a live future's
+    /// token with the vendor's continuous flag. Futures only, day candles
+    /// only (R4-28, CON-12): stored, never swept.
+    ByToken(ContinuousSpec),
+}
+
+/// The vendor's continuous-futures flag, and the one rung it is documented
+/// for.
+///
+/// Kite: `continuous=1` returns **day** candles for the expired contracts of a
+/// live future's underlying, NFO and MCX futures (`docs/00-charter.md` §4z,
+/// "Expired F&O"; the historical page, read 14 Aug 2026). Minute candles of
+/// an expired future are UNVERIFIED and never asked for. The vendor states no
+/// roll day: which contract a continuous candle came from is UNVERIFIED, so
+/// the continuous answer is filed as its own series and never split into
+/// contracts (D-6893).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContinuousSpec {
+    /// The query parameter that asks for the continuous series.
+    pub param: &'static str,
+    /// Its value.
+    pub value: &'static str,
+    /// The one rung the vendor documents it for.
+    pub granularity: Granularity,
+    /// The exchange word the vendor files futures under in its master.
+    pub exchange: &'static str,
+    /// The instrument type its master gives a future.
+    pub future_type: &'static str,
+    /// Where the claim rests.
+    pub source: &'static str,
 }
 
 impl RollingSpec {
@@ -2900,7 +2931,7 @@ impl FnoAccess {
     pub const fn by_name(self) -> Option<FnoDiscovery> {
         match self {
             Self::ByName(d) => Some(d),
-            Self::None | Self::ByStrikeOffset(_) => None,
+            Self::None | Self::ByStrikeOffset(_) | Self::ByToken(_) => None,
         }
     }
 
@@ -2909,7 +2940,17 @@ impl FnoAccess {
     pub const fn by_offset(self) -> Option<RollingSpec> {
         match self {
             Self::ByStrikeOffset(r) => Some(r),
-            Self::None | Self::ByName(_) => None,
+            Self::None | Self::ByName(_) | Self::ByToken(_) => None,
+        }
+    }
+
+    /// The token route for futures day candles, when this feed is addressed
+    /// that way (R4-28, CON-12).
+    #[must_use]
+    pub const fn by_token(self) -> Option<ContinuousSpec> {
+        match self {
+            Self::ByToken(c) => Some(c),
+            Self::None | Self::ByName(_) | Self::ByStrikeOffset(_) => None,
         }
     }
 }
@@ -5986,6 +6027,36 @@ const ZERODHA_FLOOR: GranularityFloor = GranularityFloor {
 /// broker is exercised by this single row: the path carries the instrument AND
 /// the rung (D-0133), the scheme carries a prefix and a SECOND secret
 /// (D-0134), and the timestamp carries its own zone (D-0135).
+/// Kite's futures route: a future's own token, and the continuous flag for
+/// the near-month series (R4-28, CON-12; D-6893).
+pub const ZERODHA_CONTINUOUS: ContinuousSpec = ContinuousSpec {
+    param: "continuous",
+    value: "1",
+    granularity: Granularity::Day1,
+    exchange: "NFO",
+    future_type: "FUT",
+    source: "docs/00-charter.md §4z, the Expired F&O row: continuous=1 returns day candles for \
+             the expired contracts of a live future's underlying, NFO and MCX futures; minute \
+             candles of an expired future are UNVERIFIED. Read 14 Aug 2026 and 22 Aug 2026.",
+};
+
+/// The columns of Kite's instrument dump, in the vendor's order. **No ISIN
+/// among them**: an ISIN beside a symbol comes from an NSE file of the same
+/// date (`crate::master_snapshots::Isins`), never from this dump (R4-28,
+/// DLY-09). Source: `docs/00-charter.md` §4z, the instruments API rows;
+/// `api::master` reads the same header.
+pub const KITE_MASTER_HEADER: &str = "instrument_token,exchange_token,tradingsymbol,name,\
+                                      last_price,expiry,strike,tick_size,lot_size,\
+                                      instrument_type,segment,exchange";
+
+/// Why a Kite token is resolved by date and never by today's master: the
+/// exchanges flush a derivative's token at every expiry and reuse it, and the
+/// instruments API lists only what trades now (R4-28, DLY-09; D-6892).
+pub const KITE_TOKENS_ARE_REUSED: &str = "docs/00-charter.md §4z, the Expired F&O row and the \
+     instruments API rows (read 14 Aug 2026): expired contracts' instrument_tokens are flushed \
+     by the exchange and not obtainable from the instrument master; CLAUDE.md section 1: NSE \
+     reuses instrument tokens across an expiry boundary.";
+
 const ZERODHA: Descriptor = Descriptor {
     // NOT MEASURED, AND THEREFORE NOT CLAIMED TO BE THE OTHER ONE.
     //
@@ -6015,24 +6086,25 @@ const ZERODHA: Descriptor = Descriptor {
         // FUTURES only. It does not cover option contracts, and it does not
         // give intraday history for an expired contract at all.
         //
-        // WHY IT IS STILL `None`, and each reason is sufficient alone:
+        // IT WAS `None` UNTIL 2026-10-22, FOR THREE REASONS, AND EACH IS NOW
+        // ANSWERED (R4-28, CON-12; D-6893 supersedes the 2026-08-21 refusal
+        // for FUTURES only):
         //
-        // 1. The operator's instruction of 2026-08-21 is that Zerodha carries
-        //    no expired F&O. `CLAUDE.md` §3 rule 2 makes that a scope decision,
-        //    and this comment is where it is visible from the code.
-        // 2. The same page says expired contracts' `instrument_token`s are
-        //    FLUSHED BY THE EXCHANGE and are not obtainable from the instrument
-        //    master. Intraday history is reachable only through a token cached
-        //    before expiry, which this build has never held -- so the route is
-        //    unusable for backfill even where it exists.
-        // 3. `day` candles cannot feed a one-minute store, and MCX is outside
-        //    the engine surface §1 names -- D-0017 narrowed it to NSE.
-        //
-        // `None` is therefore a recorded REFUSAL, not an unread vendor and not
-        // an unread route -- see D-0193 for why those must never be spelled the
-        // same way. Groww is the full expired chain (both classes, with OI,
-        // from 2020) and Dhan is options-only; neither gap is Zerodha-shaped.
-        fno: FnoAccess::None,
+        // 1. The operator's instruction of 2026-08-21 was that Zerodha carries
+        //    no expired F&O. On 2026-10-20 the operator put the futures legs
+        //    back (CON-12 and its continuous series FUT-C1, stored and never
+        //    swept, `CLAUDE.md` section 1). Options stay refused on this feed.
+        // 2. Expired contracts' tokens are flushed by the exchange and are not
+        //    in the instrument master, so history is reachable only through a
+        //    token cached before expiry. The dated master snapshots
+        //    (`crate::master_snapshots`, DLY-09) ARE that cache, and
+        //    `master_snapshots::Book::token_on` resolves each token by date,
+        //    so the token is an address and never an identity. History before
+        //    the first snapshot is reachable only through `continuous=1`.
+        // 3. `day` candles do not feed the one-minute store: they are filed
+        //    as their own `1day` series. MCX stays outside the surface
+        //    (D-0017): the route asks for NFO futures only.
+        fno: FnoAccess::ByToken(ZERODHA_CONTINUOUS),
         // NO OVERRIDE: this vendor puts the rung in `bars_path` itself as a
         // PathSegment — D-0133 — so the endpoint already varies with the rung
         // and there is nothing for a route table to add.
@@ -6169,6 +6241,13 @@ const ZERODHA: Descriptor = Descriptor {
                 segment: "",
                 kind: "",
             },
+            // A FUTURE, asked through its own token (R4-28, CON-12): the same
+            // empty words, because no `Segment` or `Kind` param reads them.
+            ListingWords {
+                listing: Listing::Derivative,
+                segment: "",
+                kind: "",
+            },
         ],
         params: &[
             Param {
@@ -6240,11 +6319,19 @@ const ZERODHA: Descriptor = Descriptor {
         .with(Granularity::Day1),
     history: ZERODHA_HISTORY,
     granularity_floor: ZERODHA_FLOOR,
-    // SPOT ONLY, and the reason is not the vendor's. `continuous=1` returns day
-    // candles for expired NFO and MCX futures, which is a real capability this
-    // build does not use: CLAUDE.md section 1 puts the swept surface on NSE
-    // spot, and an expired contract goes through a different route.
-    segments: SegmentSet::EMPTY.with(Segment::Index).with(Segment::Cash),
+    // SPOT AND FUTURES DAY CANDLES (R4-28, CON-12; D-6893). This read "SPOT
+    // ONLY": `continuous=1` returns day candles for expired NFO and MCX
+    // futures, a real capability the build did not use. Futures are now
+    // STORED and never swept (CLAUDE.md section 1): `FnoAccess::ByToken`
+    // above is the route, the dated master snapshots resolve each token by
+    // date, and `Instrument::is_sweepable` refuses every contract. The FNO
+    // segment carries no basis row below: Kite's futures prices and volumes
+    // were never measured against another feed, so `Basis::segment` answers
+    // `None` (unmeasured) for it rather than a borrowed share or index basis.
+    segments: SegmentSet::EMPTY
+        .with(Segment::Index)
+        .with(Segment::Cash)
+        .with(Segment::Fno),
     exchange: Exchange::Nse,
     offer: Offer::Offered,
     archive: None,
