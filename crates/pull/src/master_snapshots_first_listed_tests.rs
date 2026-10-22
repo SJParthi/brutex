@@ -91,7 +91,7 @@ fn a_name_a_file_cannot_carry_is_encoded_or_refused_never_trusted() {
     assert_eq!(encoded("a/b").as_deref(), Some("a%2Fb"), "never a path");
     assert_eq!(encoded(""), None, "an empty name has no file");
     assert_eq!(
-        encoded(&"Z".repeat(MAX_ENCODED)).map(|w| w.len()),
+        encoded(&"Z".repeat(MAX_ENCODED)).as_deref().map(str::len),
         Some(MAX_ENCODED)
     );
     assert_eq!(

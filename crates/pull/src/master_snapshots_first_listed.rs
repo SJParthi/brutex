@@ -198,13 +198,13 @@ fn append(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
         .metadata()
         .map_err(|why| format!("{} could not be inspected: {why}", path.display()))?
         .len();
-    let mut last = [b'\n'];
+    let mut last = *b"\n";
     if let Some(at) = len.checked_sub(1) {
         file.read_exact_at(&mut last, at)
             .map_err(|why| format!("{} could not be read: {why}", path.display()))?;
     }
     let mut bytes = Vec::with_capacity(text.len().saturating_add(1));
-    if last != [b'\n'] {
+    if last != *b"\n" {
         bytes.push(b'\n');
     }
     bytes.extend_from_slice(text.as_bytes());

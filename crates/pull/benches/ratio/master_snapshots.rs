@@ -201,7 +201,7 @@ pub(crate) fn futures_plan_is_flat() -> bool {
                 let _measured = black_box(plan());
             },
         );
-        costs.push(cost_ps(3, plan));
+        costs.push(cost_ps(3, &plan));
     }
     let [one, ten, hundred] = costs.as_slice() else {
         refuse("three sizes measured")
