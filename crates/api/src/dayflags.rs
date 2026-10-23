@@ -3707,7 +3707,7 @@ fn counts(
     // any is counted: a Zerodha index page then scans its months in parallel,
     // a thread a month on that month's own handle ([`scan_months`]).
     let months = open_months(root, (feed, inst, rung), days, reads);
-    let _scanned = scan_months(&months, inst.venue());
+    let _scanned = scan_months(&months, inst);
     for Month {
         first,
         days: month_days,
@@ -3847,7 +3847,7 @@ type ColdMonth<'a> = (&'a BarFile, (u64, u64), Vec<(Day, u64, u64)>);
 /// month's reads through one cached block behind one lock, so threads that
 /// shared one would evict each other's block on every read. A page the memo
 /// holds spawns nothing. Returns how many days were scanned here.
-fn scan_months(months: &[Month<'_>], venue: Venue) -> usize {
+fn scan_months(months: &[Month<'_>], inst: &Instrument) -> usize {
     let cold: Vec<ColdMonth<'_>> = months
         .iter()
         .filter_map(|month| {
@@ -3869,7 +3869,7 @@ fn scan_months(months: &[Month<'_>], venue: Venue) -> usize {
     std::thread::scope(|scope| {
         for (file, identity, days) in &cold {
             let _thread = scope
-                .spawn(move || rules::scan_days(file, *identity, days, |day| still_on(venue, day)));
+                .spawn(move || rules::scan_days(file, *identity, days, |day| minutes_on(inst, day)));
         }
     });
     cold.iter().map(|(_, _, days)| days.len()).sum()
@@ -3934,7 +3934,7 @@ fn day_reads(
     };
     let scan = (reads.scan && held > 0)
         .then(|| {
-            rules::scan_day(file, identity, (lo, hi), still_on(inst.venue(), day))
+            rules::scan_day(file, identity, (lo, hi), minutes_on(inst, day))
                 .map_err(|why| said("the day could not be scanned", &why))
                 .ok()
                 .flatten()
@@ -3951,16 +3951,22 @@ fn day_reads(
     (fills, scan, first)
 }
 
-/// Whether an unchanged index value at an epoch microsecond of IST day `day`
-/// is set aside rather than judged frozen (DB-B20): inside the recorded halt
-/// ([`in_recorded_halt`]), or inside the cash closing auction's window the
-/// index is computed through ([`rules::auction_window`], looked up once a day).
-fn still_on(venue: Venue, day: Day) -> impl Fn(i64) -> bool {
+/// What an index minute at an epoch microsecond of IST day `day` is to the
+/// frozen-run fold (DB-B20; [`rules::minute_of`]): set aside inside the
+/// recorded halt ([`in_recorded_halt`]); inside the cash closing auction's
+/// window, set aside where `inst`'s stillness there is sourced and not judged
+/// otherwise ([`rules::auction_of`], looked up once a day; verify-R3-13-r2
+/// X1); judged anywhere else.
+fn minutes_on(inst: &Instrument, day: Day) -> impl Fn(i64) -> rules::Minute + use<> {
+    let venue = inst.venue();
     let midnight = ist_midnight_micros(day);
-    let auction = rules::auction_window(venue, day);
+    let auction = rules::auction_of((inst.exchange, &inst.symbol), venue, day);
     move |ts| {
-        in_recorded_halt(venue, day, ts)
-            || rules::in_window(auction, ts.saturating_sub(midnight) / 1_000_000)
+        rules::minute_of(
+            in_recorded_halt(venue, day, ts),
+            auction,
+            ts.saturating_sub(midnight) / 1_000_000,
+        )
     }
 }
 
@@ -5234,7 +5240,7 @@ impl Context<'_> {
             day_bar,
             ledger,
             halt,
-            auction: rules::auction_window(inst.venue(), day),
+            auction: rules::auction_of((inst.exchange, &inst.symbol), inst.venue(), day),
         }
         .json();
         // A GDFL INDEX DAY THE LEDGER DID NOT MEASURE IS SAID (the check's

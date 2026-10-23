@@ -1639,7 +1639,7 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
         flat(10, 1_020), // minute 7 missing: a new run of 3
         flat(11, 1_030),
     ];
-    let scan = fold_minutes(bars.into_iter(), |_| false);
+    let scan = fold_minutes(bars.into_iter(), |_| Minute::Judged);
     assert_eq!(scan.bars, 11);
     assert_eq!(scan.frozen_runs, 2);
     assert_eq!(scan.longest.map(|(_, s)| s), Some(180));
@@ -1653,14 +1653,16 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
     // counted once, so the parts measured alone say why. A new value, a
     // moving minute or a set-aside one after the gap is not counted.
     assert_eq!(scan.broken, 1);
-    let not_broken = |next: store::format::Bar, still: bool| {
-        fold_minutes(vec![flat(1, 1_000), next].into_iter(), move |_| still).broken
+    let not_broken = |next: store::format::Bar, kind: Minute| {
+        fold_minutes(vec![flat(1, 1_000), next].into_iter(), move |_| kind).broken
     };
-    assert_eq!(not_broken(flat(3, 1_001), false), 0);
-    assert_eq!(not_broken(moving(3, 1_000), false), 0);
-    assert_eq!(not_broken(flat(3, 1_000), true), 0);
-    assert_eq!(not_broken(flat(2, 1_000), false), 0, "no minute absent");
-    assert_eq!(not_broken(flat(3, 1_000), false), 1);
+    assert_eq!(not_broken(flat(3, 1_001), Minute::Judged), 0);
+    assert_eq!(not_broken(moving(3, 1_000), Minute::Judged), 0);
+    assert_eq!(not_broken(flat(3, 1_000), Minute::Aside), 0);
+    assert_eq!(not_broken(flat(2, 1_000), Minute::Judged), 0, "no minute absent");
+    assert_eq!(not_broken(flat(3, 1_000), Minute::Judged), 1);
+    // A run through a window not judged is broken by an absent minute too.
+    assert_eq!(not_broken(flat(3, 1_000), Minute::Unjudged), 1);
     let (json, says) = IndexDay {
         feed: Vendor::Zerodha,
         midnight: 0,
@@ -1683,7 +1685,7 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
     // Inside a recorded halt, an unchanged value is the halt's.
     let halted = fold_minutes(
         vec![flat(1, 1_000), flat(2, 1_000), flat(3, 1_000)].into_iter(),
-        |_| true,
+        |_| Minute::Aside,
     );
     assert_eq!(halted.frozen_runs, 0);
     assert_eq!(halted.longest, None);
@@ -1692,7 +1694,7 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
         (1..=3)
             .map(|m| flat(m, 7))
             .chain((10..=14).map(|m| flat(m, 8))),
-        |_| false,
+        |_| Minute::Judged,
     );
     assert_eq!(longer.frozen_runs, 2);
     assert_eq!(longer.longest.map(|(_, s)| s), Some(300));
@@ -2688,19 +2690,19 @@ fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
         })
     };
     let kept = |lo: u64| kept_of(id, lo);
-    let closed = scan_day(&file, Some(id), (0, 4), |_| false)
+    let closed = scan_day(&file, Some(id), (0, 4), |_| Minute::Judged)
         .expect("a scan")
         .expect("in bound");
     assert_eq!(closed.frozen_runs, 1);
     assert_eq!(kept(0), vec![4], "a day is kept, with its end row");
-    let last = scan_day(&file, Some(id), (4, 6), |_| false)
+    let last = scan_day(&file, Some(id), (4, 6), |_| Minute::Judged)
         .expect("a scan")
         .expect("in bound");
     assert_eq!(last.bars, 2);
     assert_eq!(kept(4), vec![6], "the month's last day is kept too");
     // Past the bound, nothing is read and nothing is said.
     assert_eq!(
-        scan_day(&file, Some(id), (0, MAX_SCAN_BARS + 1), |_| false),
+        scan_day(&file, Some(id), (0, MAX_SCAN_BARS + 1), |_| Minute::Judged),
         Ok(None)
     );
     // The day grows (the writer needs the month: the reader lets it go):
@@ -2715,7 +2717,7 @@ fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
     );
     let reopened = open();
     let now = file_identity(&reopened).expect("the host says");
-    let grown = scan_day(&reopened, Some(now), (4, 7), |_| false)
+    let grown = scan_day(&reopened, Some(now), (4, 7), |_| Minute::Judged)
         .expect("a scan")
         .expect("in bound");
     assert_eq!((grown.bars, grown.frozen_runs), (3, 1));
@@ -2727,12 +2729,12 @@ fn a_days_scan_is_kept_once_and_a_grown_day_replaces_it() {
     // The kept day answers from the memo, unchanged; with no identity the
     // host would give, the day is read and nothing is kept.
     assert_eq!(
-        scan_day(&reopened, Some(now), (0, 4), |_| false).expect("a scan"),
+        scan_day(&reopened, Some(now), (0, 4), |_| Minute::Judged).expect("a scan"),
         Some(closed)
     );
     let before = SCANS.get().map_or(0, |memo| memo.lock().unwrap().len());
     assert_eq!(
-        scan_day(&reopened, None, (1, 4), |_| false)
+        scan_day(&reopened, None, (1, 4), |_| Minute::Judged)
             .expect("a scan")
             .map(|s| s.bars),
         Some(3)
@@ -3303,13 +3305,13 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
     let (on, lo, hi) = spans[0];
     let shorter = [(on, lo, hi - 1)];
     assert_eq!(cold_days(identity, &shorter), shorter.to_vec());
-    let quiet = |_: Day| |_: i64| false;
+    let quiet = |_: Day| |_: i64| Minute::Judged;
     assert_eq!(scan_days(&file, identity, &shorter, quiet), 1);
     assert!(cold_days(identity, &shorter).is_empty());
     assert_eq!(cold_days(identity, &spans[..1]), spans[..1].to_vec());
     assert_eq!(scan_days(&file, identity, &spans[..1], quiet), 1);
     for &(_, lo, hi) in &spans[..4] {
-        let kept = scan_day(&file, Some(identity), (lo, hi), |_| false).expect("from the memo");
+        let kept = scan_day(&file, Some(identity), (lo, hi), |_| Minute::Judged).expect("from the memo");
         assert_eq!(kept.map(|scan| scan.bars), Some(2));
     }
 }
@@ -3480,7 +3482,7 @@ fn the_scans_edges_are_where_they_are_named() {
             bar(on, at(2), [12, 12, 7, 7], 0),
         ]
         .into_iter(),
-        |_| false,
+        |_| Minute::Judged,
     );
     assert_eq!(scan.high, Some((12, ts(1))));
     assert_eq!(scan.low, Some((7, ts(1))));
@@ -3491,7 +3493,7 @@ fn the_scans_edges_are_where_they_are_named() {
             bar(on, at(1), [5, 5, 5, 5], 0),
         ]
         .into_iter(),
-        |_| false,
+        |_| Minute::Judged,
     );
     assert_eq!(falling.low, Some((5, ts(1))));
     // At the day bar's own high and low: inside the range, nothing flagged.
@@ -3531,10 +3533,10 @@ fn the_scans_edges_are_where_they_are_named() {
     else {
         panic!("the month opens");
     };
-    let whole = scan_day(&file, None, (0, MAX_SCAN_BARS), |_| false).expect("the day reads");
+    let whole = scan_day(&file, None, (0, MAX_SCAN_BARS), |_| Minute::Judged).expect("the day reads");
     assert_eq!(whole.map(|scan| scan.bars), Some(MAX_SCAN_BARS));
     assert_eq!(
-        scan_day(&file, None, (0, MAX_SCAN_BARS + 1), |_| false),
+        scan_day(&file, None, (0, MAX_SCAN_BARS + 1), |_| Minute::Judged),
         Ok(None)
     );
 }
@@ -3588,8 +3590,8 @@ fn a_month_files_identity_is_its_own_device_and_inode() {
         .expect("the month file");
         assert_eq!(file_identity(file), Some((meta.dev(), meta.ino())), "{key}");
     }
-    let frozen = scan_day(&nifty, file_identity(&nifty), (0, 3), |_| false).expect("reads");
-    let moving = scan_day(&bank, file_identity(&bank), (0, 3), |_| false).expect("reads");
+    let frozen = scan_day(&nifty, file_identity(&nifty), (0, 3), |_| Minute::Judged).expect("reads");
+    let moving = scan_day(&bank, file_identity(&bank), (0, 3), |_| Minute::Judged).expect("reads");
     assert_eq!(frozen.map(|scan| scan.frozen_runs), Some(1));
     assert_eq!(
         moving.map(|scan| scan.frozen_runs),
@@ -3860,6 +3862,10 @@ fn an_index_still_through_the_closing_auction_is_not_frozen() {
         quiet["index"]["frozen"]["auction_window"],
         "15:15:00-15:30:00"
     );
+    // NIFTY's stillness there is sourced, so the window is set aside
+    // (verify-R3-13-r2 X1): never a run not judged.
+    assert_eq!(quiet["index"]["frozen"]["auction_aside"], true);
+    assert_eq!(quiet["index"]["frozen"]["unjudged_s"], Value::Null);
     assert!(
         says(quiet).iter().all(|said| !said.contains("frozen")),
         "{:#?}",
@@ -3889,7 +3895,16 @@ fn an_index_still_through_the_closing_auction_is_not_frozen() {
 /// `null`; and a halt and the window that meet are counted once.
 #[test]
 fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
-    let window = auction_window(pull::vendor::Venue::NseIndex, day("2026-09-25"));
+    let window = auction_of(
+        (Exchange::Nse, "NIFTY"),
+        pull::vendor::Venue::NseIndex,
+        day("2026-09-25"),
+    );
+    assert_eq!(
+        window.map(|auction| auction.aside),
+        Some(true),
+        "NIFTY's stillness is sourced"
+    );
     let ledger = |seconds: u64, at: Option<u32>| IndexDay {
         feed: Vendor::Gdfl,
         midnight: 0,
@@ -4039,6 +4054,434 @@ fn a_gdfl_index_day_the_ledger_cannot_judge_reads_null_through_the_route() {
             .all(|said| !said.contains("frozen")),
         "{:#?}",
         super::super::tests::says(short)
+    );
+}
+
+// ══ Whose stillness through the auction is sourced (verify-R3-13-r2 X1) ═════
+
+/// **THE AUCTION'S STILLNESS IS SOURCED FOR THE CIRCULAR'S TWO INDICES ALONE**
+/// (verify-R3-13-r2 X1): NIFTY 50 and NIFTY BANK, as the index session row's
+/// own citation names them, and no other index, whatever its minutes do. A
+/// citation that comes to name another index fails here until the rule reads
+/// it.
+#[test]
+fn the_auction_stillness_is_sourced_for_the_circulars_two_indices_alone() {
+    use pull::vendor::Venue;
+    // THE SOURCE: the citation of the index session row from 2026-08-03 names
+    // exactly these two, and the row before it names neither.
+    let citation = Venue::NseIndex
+        .hours_on(day("2026-08-03"))
+        .expect("verified hours")
+        .source();
+    assert!(
+        citation.contains("every NIFTY 50 and NIFTY BANK constituent qualifies"),
+        "{citation}"
+    );
+    let before = Venue::NseIndex
+        .hours_on(day("2026-07-31"))
+        .expect("verified hours")
+        .source();
+    assert!(!before.contains("NIFTY BANK"), "{before}");
+    // Each name resolves through the sourced index table to the store's key.
+    for (name, key) in [("NIFTY 50", "NIFTY"), ("NIFTY BANK", "BANKNIFTY")] {
+        let row = brutex_core::alias::INDICES
+            .by_name(name)
+            .expect("a sourced row");
+        assert_eq!(row.store_key, key);
+        assert!(still_through_auction(Exchange::Nse, key), "{key}");
+    }
+    // Every other index is not sourced: those the check measured moving every
+    // minute through the window, those measured still on every session, a
+    // name the index table holds under another key, and one it does not hold.
+    for key in [
+        "INDIAVIX",
+        "NIFTYSMLCAP250",
+        "NIFTYMICROCAP250",
+        "NIFTYMIDCAP150",
+        "NIFTYIT",
+        "NIFTYFINSERVICE",
+        "NIFTYMIDSELECT",
+        "FINNIFTY",
+        "NIFTY50",
+    ] {
+        assert!(!still_through_auction(Exchange::Nse, key), "{key}");
+    }
+    // On another exchange the NSE circular says nothing.
+    assert!(!still_through_auction(Exchange::Bse, "NIFTY"));
+    assert!(!still_through_auction(Exchange::Bse, "BANKNIFTY"));
+    // The window and its reading, from the cash auction on.
+    let on = day("2026-09-25");
+    let window = Some((15 * 3_600 + 15 * 60, 15 * 3_600 + 30 * 60));
+    assert_eq!(
+        auction_of((Exchange::Nse, "NIFTY"), Venue::NseIndex, on),
+        window.map(|window| Auction {
+            window,
+            aside: true
+        })
+    );
+    assert_eq!(
+        auction_of((Exchange::Nse, "INDIAVIX"), Venue::NseIndex, on),
+        window.map(|window| Auction {
+            window,
+            aside: false
+        })
+    );
+    assert_eq!(
+        auction_of((Exchange::Nse, "INDIAVIX"), Venue::NseIndex, day("2026-07-31")),
+        None
+    );
+    assert_eq!(
+        auction_of((Exchange::Nse, "NIFTY"), Venue::NseCash, on),
+        None
+    );
+    // What a minute is: the halt first, then the window's reading, `[from, to)`.
+    let unsourced = auction_of((Exchange::Nse, "INDIAVIX"), Venue::NseIndex, on);
+    let sourced = auction_of((Exchange::Nse, "NIFTY"), Venue::NseIndex, on);
+    let from = 15 * 3_600 + 15 * 60;
+    let to = 15 * 3_600 + 30 * 60;
+    assert_eq!(minute_of(false, unsourced, from - 1), Minute::Judged);
+    assert_eq!(minute_of(false, unsourced, from), Minute::Unjudged);
+    assert_eq!(minute_of(false, unsourced, to - 1), Minute::Unjudged);
+    assert_eq!(minute_of(false, unsourced, to), Minute::Judged);
+    assert_eq!(minute_of(false, sourced, from), Minute::Aside);
+    assert_eq!(minute_of(false, sourced, from - 1), Minute::Judged);
+    assert_eq!(minute_of(true, unsourced, from), Minute::Aside);
+    assert_eq!(minute_of(true, None, 11 * 3_600), Minute::Aside);
+    assert_eq!(minute_of(false, None, from), Minute::Judged);
+}
+
+/// **A RUN THROUGH A WINDOW NOT JUDGED IS KEPT APART FROM THE JUDGED RUNS**
+/// (verify-R3-13-r2 X1): minutes not judged end a judged run; a run through
+/// them that reaches 180 s while no judged run inside it does is the day's
+/// unjudged run, with its first stamp, length and longest judged stretch;
+/// one whose judged stretch reaches 180 s is a frozen run and nothing more;
+/// a set-aside minute ends both; of two the longer is kept, of equals the
+/// first.
+#[test]
+fn a_run_through_a_window_not_judged_is_kept_apart_from_the_judged_runs() {
+    let on = "2026-09-25";
+    let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
+    let ts = |m: i64| bar(on, at(m), [1; 4], 0).ts_micros;
+    let flat = |m: i64, v: i64| bar(on, at(m), [v; 4], 0);
+    let moving = |m: i64, v: i64| bar(on, at(m), [v, v + 5, v - 5, v], 0);
+    let flats = |minutes: std::ops::RangeInclusive<i64>, v: i64| -> Vec<store::format::Bar> {
+        minutes.map(|m| flat(m, v)).collect()
+    };
+    // Minutes `[from, to)` are not judged, minute `aside` is set aside.
+    let fold = |bars: Vec<store::format::Bar>, (from, to): (i64, i64), aside: Option<i64>| {
+        let (from, to, aside) = (ts(from), ts(to), aside.map(ts));
+        fold_minutes(bars.into_iter(), move |stamp| {
+            if aside == Some(stamp) {
+                Minute::Aside
+            } else if stamp >= from && stamp < to {
+                Minute::Unjudged
+            } else {
+                Minute::Judged
+            }
+        })
+    };
+    // All of it not judged.
+    let all = fold(flats(10..=19, 7), (10, 100), None);
+    assert_eq!(all.frozen_runs, 0);
+    assert_eq!(all.longest, None);
+    assert_eq!(all.unjudged, Some((ts(10), 600, 0)));
+    // Two judged minutes before it: not enough to judge the run.
+    let short = fold(flats(8..=17, 7), (10, 100), None);
+    assert_eq!(short.frozen_runs, 0);
+    assert_eq!(short.unjudged, Some((ts(8), 600, 120)));
+    // Three judged minutes before it: a frozen run, and nothing not judged.
+    let judged = fold(flats(7..=14, 7), (10, 100), None);
+    assert_eq!(judged.frozen_runs, 1);
+    assert_eq!(judged.longest, Some((ts(7), 180)));
+    assert_eq!(judged.unjudged, None);
+    // At the threshold: three minutes not judged are kept, two are not.
+    assert_eq!(
+        fold(flats(10..=12, 7), (10, 100), None).unjudged,
+        Some((ts(10), 180, 0))
+    );
+    assert_eq!(fold(flats(10..=11, 7), (10, 100), None).unjudged, None);
+    // Two runs: the longer is kept. A moving minute that closes at the next
+    // run's value starts nothing.
+    let two = fold(
+        [flats(10..=13, 7), vec![moving(14, 8)], flats(15..=19, 8)].concat(),
+        (10, 100),
+        None,
+    );
+    assert_eq!(two.unjudged, Some((ts(15), 300, 0)));
+    // Of two equal runs the first is kept.
+    let equal = fold(
+        [flats(10..=12, 7), vec![moving(13, 9)], flats(14..=16, 8)].concat(),
+        (10, 100),
+        None,
+    );
+    assert_eq!(equal.unjudged, Some((ts(10), 180, 0)));
+    // A set-aside minute ends the run through as it ends a judged run.
+    let parted = fold(flats(10..=15, 7), (10, 100), Some(12));
+    assert_eq!(parted.unjudged, Some((ts(13), 180, 0)));
+    // Judged minutes after a window go on with the run through it: two do not
+    // judge it, four do.
+    assert_eq!(
+        fold(flats(10..=14, 7), (10, 13), None).unjudged,
+        Some((ts(10), 300, 120))
+    );
+    let after = fold(flats(10..=16, 7), (10, 13), None);
+    assert_eq!(after.frozen_runs, 1);
+    assert_eq!(after.longest, Some((ts(13), 240)));
+    assert_eq!(after.unjudged, None);
+    // One minute not judged at the start is enough to part it from a judged run.
+    assert_eq!(
+        fold(flats(10..=12, 7), (10, 11), None).unjudged,
+        Some((ts(10), 180, 120))
+    );
+    // No minute not judged: a frozen run, nothing not judged.
+    let none = fold(flats(0..=4, 7), (100, 100), None);
+    assert_eq!(none.frozen_runs, 1);
+    assert_eq!(none.unjudged, None);
+}
+
+/// **AN INDEX WHOSE STILLNESS THROUGH THE AUCTION IS NOT SOURCED IS NEVER SAID
+/// "NOT FROZEN" FOR A RUN THERE** (verify-R3-13-r2 X1, reproduced on the real
+/// store: INDIA VIX, NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP
+/// 150 change every minute through 15:15-15:30 on all 42 auction-era
+/// sessions, and the window was set aside on every index, so a run there
+/// answered `flagged: false`). INDIAVIX unchanged 15:16-15:25 on an
+/// auction-era day is not judged, `null`, and says so; the same shape before
+/// 2026-08-03 is frozen; five judged minutes before the window are a frozen
+/// run, two are not; a moving day is the one "not frozen"; and NIFTY, whose
+/// stillness there is sourced, sets the window aside.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture over six days and every assertion about it, read top to bottom"
+)]
+fn an_index_whose_auction_stillness_is_not_sourced_is_never_said_not_frozen() {
+    let at = |m: i64| 9 * 3_600 + 15 * 60 + m * 60;
+    // Every minute moves but the `flat` ones, which hold one value. Invented.
+    let shaped = |on: &str, flat: &[std::ops::RangeInclusive<i64>]| -> Vec<store::format::Bar> {
+        (0..375)
+            .map(|m| {
+                if flat.iter().any(|run| run.contains(&m)) {
+                    bar(on, at(m), [1_700_000; 4], 0)
+                } else {
+                    let v = 1_800_000 + (m % 4) * 100 + 100;
+                    bar(on, at(m), [v, v + 50, v - 50, v], 0)
+                }
+            })
+            .collect()
+    };
+    // 15:16 is minute 361 and 15:25 minute 370; 15:13 is 358, 15:10 is 355,
+    // 11:00 is 105.
+    let window_run = 361..=370;
+    let root = root_of("r3-13-auction-unsourced");
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-INDEX-INDIAVIX",
+        Timeframe::MINUTE_1,
+        [
+            shaped("2026-07-31", std::slice::from_ref(&window_run)),
+            shaped("2026-09-24", &[]),
+            shaped("2026-09-25", std::slice::from_ref(&window_run)),
+            shaped("2026-09-28", &[105..=109, window_run.clone()]),
+            shaped("2026-09-29", &[358..=370]),
+            shaped("2026-09-30", &[355..=370]),
+        ]
+        .concat(),
+    );
+    // Before the auction began, the run is judged like any other: frozen.
+    let before = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-INDIAVIX&from=2026-07-31&to=2026-07-31"),
+    );
+    let frozen = &record(&before, "2026-07-31")["index"]["frozen"];
+    assert_eq!(frozen["flagged"], true, "{frozen:#}");
+    assert_eq!(frozen["longest_from"], "15:16");
+    assert_eq!(frozen["longest_s"], 600);
+    assert_eq!(frozen["unjudged_s"], Value::Null);
+    assert_eq!(frozen["auction_window"], Value::Null);
+    assert_eq!(frozen["auction_aside"], Value::Null);
+    let got = answer(
+        &root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-INDIAVIX&from=2026-09-24&to=2026-09-30"),
+    );
+    // THE CHECK'S CASE: unchanged 15:16-15:25 inside the window, not judged.
+    let unjudged = record(&got, "2026-09-25");
+    let frozen = &unjudged["index"]["frozen"];
+    assert_eq!(frozen["flagged"], Value::Null, "{unjudged:#}");
+    assert_eq!(frozen["runs"], 0);
+    assert_eq!(frozen["unjudged_s"], 600);
+    assert_eq!(frozen["unjudged_from"], "15:16");
+    assert_eq!(frozen["auction_window"], "15:15:00-15:30:00");
+    assert_eq!(frozen["auction_aside"], false);
+    says_has(
+        unjudged,
+        "index frozen not judged: unchanged for 10 minute(s) from 15:16 to 15:25 (1min), all of \
+         it inside the cash closing auction's window, where an index holding still is sourced \
+         for NIFTY 50 and NIFTY BANK alone; whether this run is the auction's or a frozen \
+         feed's is not known (UNVERIFIED)",
+    );
+    // A day that moves is the one "not frozen".
+    let moving = record(&got, "2026-09-24");
+    assert_eq!(moving["index"]["frozen"]["flagged"], false, "{moving:#}");
+    assert_eq!(moving["index"]["frozen"]["unjudged_s"], Value::Null);
+    assert!(
+        says(moving).iter().all(|said| !said.contains("frozen")),
+        "{:#?}",
+        says(moving)
+    );
+    // A judged run elsewhere flags the day, and the window's run is said too.
+    let both = record(&got, "2026-09-28");
+    assert_eq!(both["index"]["frozen"]["flagged"], true, "{both:#}");
+    assert_eq!(both["index"]["frozen"]["runs"], 1);
+    assert_eq!(both["index"]["frozen"]["longest_from"], "11:00");
+    assert_eq!(both["index"]["frozen"]["unjudged_from"], "15:16");
+    assert_eq!(
+        says(both)
+            .iter()
+            .filter(|said| said.starts_with("index frozen not judged"))
+            .count(),
+        1,
+        "{:#?}",
+        says(both)
+    );
+    // Two judged minutes before the window do not judge the run.
+    let short = record(&got, "2026-09-29");
+    assert_eq!(short["index"]["frozen"]["flagged"], Value::Null, "{short:#}");
+    assert_eq!(short["index"]["frozen"]["unjudged_s"], 780);
+    says_has(
+        short,
+        "index frozen not judged: unchanged for 13 minute(s) from 15:13 to 15:25 (1min), only 2 \
+         minute(s) of it in one stretch outside the cash closing auction's window, where an \
+         index holding still is sourced for NIFTY 50 and NIFTY BANK alone; whether this run is \
+         the auction's or a frozen feed's is not known (UNVERIFIED)",
+    );
+    // Five judged minutes before it are a frozen run, judged as any other.
+    let long = record(&got, "2026-09-30");
+    assert_eq!(long["index"]["frozen"]["flagged"], true, "{long:#}");
+    assert_eq!(long["index"]["frozen"]["longest_s"], 300);
+    assert_eq!(long["index"]["frozen"]["unjudged_s"], Value::Null);
+    says_has(
+        long,
+        "index value frozen in session: 1 run(s) of 3 minutes or more with no change, the \
+         longest 5 minute(s) from 15:10 to 15:14 (1min), outside any recorded halt and the cash \
+         closing auction's window",
+    );
+    // NIFTY, whose stillness through the auction is sourced: the same run is
+    // the auction's, set aside, and nothing is said of it.
+    let sourced_root = root_of("r3-13-auction-sourced");
+    file_bars(
+        &sourced_root,
+        Vendor::Zerodha,
+        "NSE-INDEX-NIFTY",
+        Timeframe::MINUTE_1,
+        shaped("2026-09-25", &[window_run]),
+    );
+    let nifty = answer(
+        &sourced_root,
+        &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2026-09-25&to=2026-09-25"),
+    );
+    let aside = record(&nifty, "2026-09-25");
+    assert_eq!(aside["index"]["frozen"]["flagged"], false, "{aside:#}");
+    assert_eq!(aside["index"]["frozen"]["unjudged_s"], Value::Null);
+    assert_eq!(aside["index"]["frozen"]["auction_aside"], true);
+    assert!(
+        says(aside).iter().all(|said| !said.contains("frozen")),
+        "{:#?}",
+        says(aside)
+    );
+}
+
+/// **A GDFL LEDGER RUN IN THE WINDOW OF AN INDEX NOT SOURCED IS NOT JUDGED,
+/// AND SAYS WHY** (verify-R3-13-r2 X1): on INDIAVIX the window is not the
+/// auction's, so a ledger run inside it is `null` with a phrase that says the
+/// run itself is not judged; a run that reaches 180 s before the window is
+/// frozen; a longest run under 180 s (the real INDIAVIX 2026-09-25 line: 85 s
+/// from 15:27:09) is the one "not frozen"; through the route as on the real
+/// store.
+#[test]
+fn a_ledger_run_in_the_window_of_an_index_not_sourced_is_not_judged() {
+    let window = auction_of(
+        (Exchange::Nse, "INDIAVIX"),
+        pull::vendor::Venue::NseIndex,
+        day("2026-09-25"),
+    );
+    assert_eq!(window.map(|auction| auction.aside), Some(false));
+    let ledger = |seconds: u64, at: Option<u32>| IndexDay {
+        feed: Vendor::Gdfl,
+        midnight: 0,
+        scan: None,
+        day_bar: None,
+        ledger: Some((seconds, at, 108)),
+        halt: None,
+        auction: window,
+    };
+    let (json, says) = ledger(838, Some(15 * 3_600 + 15 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert_eq!(json["frozen"]["judged_s"], 0);
+    assert_eq!(json["frozen"]["auction_aside"], false);
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 838 s from 15:15:00, all of it inside the cash closing auction's window, where \
+             an index holding still is sourced for NIFTY 50 and NIFTY BANK alone; whether it is \
+             the auction's or a frozen feed's is not known, and a shorter run of 180 s or more \
+             elsewhere in the session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
+    let (json, says) = ledger(600, None).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert!(
+        says[0].contains(
+            "600 s, with no stamp, so it cannot be placed against the cash closing auction's \
+             window, where an index holding still is sourced for NIFTY 50 and NIFTY BANK alone; \
+             whether it is the auction's or a frozen feed's is not known"
+        ),
+        "{says:?}"
+    );
+    let (json, says) = ledger(600, Some(15 * 3_600 + 10 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(json["frozen"]["judged_s"], 300);
+    assert!(says[0].starts_with("index value frozen in session"), "{says:?}");
+    let (json, says) = ledger(85, Some(15 * 3_600 + 27 * 60 + 9)).json();
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert!(says.is_empty(), "{says:?}");
+    // NIFTY's own phrase is unchanged: its window is the auction's.
+    let sourced = IndexDay {
+        auction: auction_of(
+            (Exchange::Nse, "NIFTY"),
+            pull::vendor::Venue::NseIndex,
+            day("2026-09-25"),
+        ),
+        ..ledger(838, Some(15 * 3_600 + 15 * 60))
+    };
+    let (json, says) = sourced.json();
+    assert_eq!(json["frozen"]["auction_aside"], true);
+    assert!(!says[0].contains("NIFTY 50 and NIFTY BANK alone"), "{says:?}");
+    // THROUGH THE ROUTE: INDIAVIX's ledger line read as the real store's.
+    let root = root_of("r3-13-ledger-unsourced");
+    write(
+        &super::super::quality_path(&root),
+        &super::super::tests::index_flags("2026-09-25", "INDIAVIX", &[])
+            .replace('\n', " flat_max_s=838 flat_max_at=15:15:00\n"),
+    );
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-INDIAVIX&from=2026-09-25&to=2026-09-25"),
+    );
+    let day_of = record(&got, "2026-09-25");
+    assert_eq!(
+        day_of["index"]["frozen"]["flagged"],
+        Value::Null,
+        "{day_of:#}"
+    );
+    assert_eq!(day_of["index"]["frozen"]["auction_aside"], false);
+    let said = super::super::tests::says(day_of);
+    assert!(
+        said.iter()
+            .any(|said| said.contains("where an index holding still is sourced for NIFTY 50")),
+        "{said:#?}"
     );
 }
 

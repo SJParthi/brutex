@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use brutex_core::instrument::Contract;
+use brutex_core::instrument::{Contract, Exchange};
 use brutex_core::vendor::Vendor;
 use pull::calendar::CasEligibility;
 use pull::session::Day;
@@ -901,23 +901,26 @@ pub(super) fn definition_says(
 pub(super) const FROZEN_MIN_S: u64 = 180;
 
 /// THE CASH CLOSING AUCTION'S WINDOW ON AN INDEX DAY, `[from, to)` seconds
-/// since IST midnight (the Mac finish of DB-B20): from 2026-08-03 every share
-/// an NSE index is computed from leaves continuous trading at the CAS-eligible
-/// close (`pull::vendor::Venue::share_hours_on`, D-3320), while the index's
-/// own session runs on to its close (`Venue::hours_on`). An unchanged index
-/// value there is the auction's, never a frozen feed's.
+/// since IST midnight (the Mac finish of DB-B20): from 2026-08-03 a
+/// CAS-eligible share leaves continuous trading at its 15:15 close
+/// (`pull::vendor::Venue::share_hours_on`, D-3320), while an index's own
+/// session runs on to its close (`Venue::hours_on`). These are the window's
+/// BOUNDS ONLY. What an unchanged index value inside it is depends on the
+/// index, and is decided by [`auction_of`]: the auction's only where that is
+/// sourced ([`still_through_auction`]), never for every index.
 ///
-/// MEASURED, NOT ASSUMED (`docs/00-charter.md`): read through a shadow of the
-/// store on 2026-10-20, Zerodha's NIFTY and BANKNIFTY `1min` hold exactly one
-/// unchanged run a day from 15:15, of 780 or 840 s, on every one of the 42
-/// sessions 2026-08-03..2026-09-30 and on none of 2026-07-20..31; GDFL's day
-/// ledger measures NIFTY unchanged from 15:15:00 for 799 to 864 s on each of
-/// 2026-09-25..30. Without this window every index session since 2026-08-03
-/// read "frozen in session".
+/// THIS COMMENT SAID "every share an NSE index is computed from leaves
+/// continuous trading" there, and "an unchanged index value there is the
+/// auction's, never a frozen feed's", of every index (verify-R3-13-r2 X1).
+/// Its sources argue that for NIFTY 50 and NIFTY BANK alone, and it is
+/// measured false: INDIA VIX, NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and
+/// NIFTY MIDCAP 150 change every minute through the window on all 42
+/// auction-era sessions the store holds (`docs/00-charter.md`, "An NSE index
+/// through the cash closing auction").
 ///
 /// `None` before 2026-08-03, for any venue but the index, and where either
-/// session row carries no verified hours: then nothing is set aside, so a run
-/// there is judged and flagged, never hidden.
+/// session row carries no verified hours: then there is no window, so a run
+/// there is judged like any other minute's, never hidden.
 pub(super) fn auction_window(venue: pull::vendor::Venue, day: Day) -> Option<(u32, u32)> {
     use pull::vendor::Venue;
     if venue != Venue::NseIndex || !pull::vendor::cash_auction_eligibility_required(day) {
@@ -931,6 +934,108 @@ pub(super) fn auction_window(venue: pull::vendor::Venue, day: Day) -> Option<(u3
     // An empty or inverted window sets nothing aside: [`in_window`] and the
     // overlap of a run with it are then nothing, so no guard is needed here.
     Some((from.saturating_mul(60), to.saturating_mul(60)))
+}
+
+/// The cash closing auction's window of one index day, and what a run inside
+/// it is read as (verify-R3-13-r2 X1; D-7300 item 25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Auction {
+    /// `[from, to)` seconds since IST midnight ([`auction_window`]).
+    pub(super) window: (u32, u32),
+    /// Whether the index's stillness through the window is sourced
+    /// ([`still_through_auction`]): then the window is SET ASIDE, as a halt
+    /// is, and an unchanged value there is never a frozen run. Otherwise a
+    /// run that reaches [`FROZEN_MIN_S`] only with the window's minutes is
+    /// NOT JUDGED: never "frozen", never "not frozen".
+    pub(super) aside: bool,
+}
+
+/// The auction's window on `day` of the index `symbol` listed on `exchange`
+/// (its venue `venue`), and how a run inside it is read. `None` where
+/// [`auction_window`] is: before 2026-08-03, off the index venue, and where a
+/// session row has no verified hours. One date comparison, two session-table
+/// walks of a fixed length and one probe, once a day.
+pub(super) fn auction_of(
+    (exchange, symbol): (Exchange, &str),
+    venue: pull::vendor::Venue,
+    day: Day,
+) -> Option<Auction> {
+    auction_window(venue, day).map(|window| Auction {
+        window,
+        aside: still_through_auction(exchange, symbol),
+    })
+}
+
+/// WHETHER AN INDEX'S STILLNESS THROUGH THE CASH CLOSING AUCTION IS SOURCED:
+/// NSE's NIFTY 50 and NIFTY BANK, by the names the source gives them, and no
+/// other index (verify-R3-13-r2 X1).
+///
+/// THE SOURCE is the citation of the index session row in force from
+/// 2026-08-03, `pull::vendor`'s `CAS_INDEX_CIRCULAR`: NSE/CMTR/74466 §A makes
+/// closing-auction eligibility "stocks on which derivative contracts are
+/// available", "every NIFTY 50 and NIFTY BANK constituent qualifies, so at
+/// 15:15 every share the index is computed from stops trading continuously",
+/// and NSE's FAQ Q7 has the index then computed from the continuous session's
+/// last prices. It argues this for those two indices and for no other.
+/// Measured beside it (`docs/00-charter.md`, "An NSE index through the cash
+/// closing auction"): on all 42 auction-era sessions the store holds, Zerodha's
+/// NIFTY and BANKNIFTY hold one unchanged run from 15:15, and every share of
+/// `brutex_core::universe::NIFTY_50` carries the dated flag 1.
+///
+/// EVERY OTHER INDEX IS NOT SOURCED, whatever its minutes do. Of the 135
+/// Zerodha index series, 35 more hold still through the window on all 42
+/// sessions, and 70 change every minute through it (INDIA VIX, NIFTY SMALLCAP
+/// 250, NIFTY MICROCAP 250, NIFTY MIDCAP 150 among them). Which of the two an
+/// index is cannot be told from its own minutes on a day, and the store holds
+/// no constituent list that would tell it (`brutex_core::universe` holds
+/// undated snapshots of five broad indices and none of NIFTY BANK). So a run
+/// inside the window of any other index is not judged ([`Minute::Unjudged`]).
+/// Judging it like any other minute instead would read those 35 indices
+/// "frozen in session" on every auction-era session.
+///
+/// The names are read through the sourced index table
+/// (`brutex_core::alias::INDICES`, D-3332), one probe; the test
+/// `the_auction_stillness_is_sourced_for_the_circulars_two_indices_alone`
+/// pins them to the session row's own citation, so a citation that comes to
+/// name another index fails the build until this rule reads it.
+pub(super) fn still_through_auction(exchange: Exchange, symbol: &str) -> bool {
+    exchange == Exchange::Nse
+        && brutex_core::alias::INDICES
+            .by_store_key(symbol)
+            .is_some_and(|row| matches!(row.nse_name, "NIFTY 50" | "NIFTY BANK"))
+}
+
+/// What one index minute is to the frozen-run fold ([`fold_minutes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Minute {
+    /// A session minute, judged.
+    Judged,
+    /// Set aside: inside the recorded halt, or inside the auction's window of
+    /// an index whose stillness there is sourced. It never starts or extends
+    /// a run.
+    Aside,
+    /// Inside the auction's window of an index whose stillness there is not
+    /// sourced: it ends a judged run, and a run through it is measured, but
+    /// one that reaches [`FROZEN_MIN_S`] only with these minutes is not
+    /// judged ([`DayScan::unjudged`]).
+    Unjudged,
+}
+
+/// What a minute `since` seconds after IST midnight is: inside the recorded
+/// halt (`halted`) it is set aside; inside `auction`'s window it is the
+/// window's ([`Auction::aside`]); anywhere else it is judged.
+pub(super) fn minute_of(halted: bool, auction: Option<Auction>, since: i64) -> Minute {
+    match auction {
+        _ if halted => Minute::Aside,
+        Some(Auction { window, aside }) if in_window(Some(window), since) => {
+            if aside {
+                Minute::Aside
+            } else {
+                Minute::Unjudged
+            }
+        }
+        _ => Minute::Judged,
+    }
 }
 
 /// Whether `since` (seconds since IST midnight) is inside `window`.
@@ -986,14 +1091,41 @@ pub(super) struct DayScan {
     /// stamp (epoch microseconds) of the bar that printed each.
     pub(super) high: Option<(i64, i64)>,
     pub(super) low: Option<(i64, i64)>,
-    /// Runs of [`FROZEN_MIN_S`] or more with no change, outside any recorded
-    /// halt.
+    /// Runs of [`FROZEN_MIN_S`] or more with no change over judged minutes
+    /// ([`Minute::Judged`]): outside any recorded halt and any auction window.
     pub(super) frozen_runs: u32,
     /// The longest such run: its first bar's stamp and its length in seconds.
     pub(super) longest: Option<(i64, u64)>,
     /// Times an unchanged value went on past one or more absent minutes: the
     /// run before them ended there, so each part was measured alone.
     pub(super) broken: u32,
+    /// THE LONGEST RUN NOT JUDGED (verify-R3-13-r2 X1): an unchanged run of
+    /// [`FROZEN_MIN_S`] or more that holds [`Minute::Unjudged`] minutes and in
+    /// which no judged stretch reaches [`FROZEN_MIN_S`], so it reaches it only
+    /// with the window's minutes. Its first bar's stamp, its length, and its
+    /// longest judged stretch, in seconds.
+    pub(super) unjudged: Option<(i64, u64, u64)>,
+}
+
+/// An unchanged run over every minute not set aside, judged or not, as
+/// [`fold_minutes`] measures it beside the judged runs.
+///
+/// IT CARRIES NO "HOLDS AN UNJUDGED MINUTE" BIT, because the bit would decide
+/// nothing: judged runs inside it are parted only by unjudged minutes (a
+/// set-aside minute, an absent minute and a change end both runs), so a run
+/// through that holds none IS one judged run, its length is its judged
+/// length, and "longer than [`FROZEN_MIN_S`] with no judged run reaching it"
+/// cannot hold for it. A bit that cannot change an answer is a mutant no test
+/// can kill, so it is not written (D-0192).
+#[derive(Debug, Clone, Copy)]
+struct Through {
+    /// Its first and last bar's stamps, epoch microseconds.
+    first: i64,
+    last: i64,
+    /// Its one value, paisa.
+    value: i64,
+    /// The longest judged run inside it, in seconds.
+    judged: u64,
 }
 
 /// Each day's scan by month file, the file's inode and the day's first row,
@@ -1019,26 +1151,60 @@ type ScanMemo = HashMap<(u64, u64, u64), (u64, DayScan)>;
 /// Folds one day's one-minute bars, oldest first: the extremes, and the runs
 /// of consecutive minutes (no minute missing between them) each printing one
 /// unchanged value, `O = H = L = C`, the same as the minute before. A run is
-/// measured as its minutes times 60 s. `still` says whether a bar's stamp is
-/// set aside: inside the calendar's recorded halt, or inside the cash closing
-/// auction's window an index is computed through ([`auction_window`]), where
-/// an unchanged value is the halt's or the auction's and not a frozen feed.
+/// measured as its minutes times 60 s. `minute` says what a bar's stamp is
+/// ([`minute_of`]): judged; set aside, inside the calendar's recorded halt or
+/// the cash closing auction's window of an index whose stillness there is
+/// sourced, where an unchanged value is the halt's or the auction's and not a
+/// frozen feed; or not judged, inside that window on any other index.
+///
+/// TWO RUNS ARE FOLDED AT ONCE (verify-R3-13-r2 X1). The judged run, over
+/// judged minutes only, is what `frozen_runs` and `longest` count. The run
+/// through every minute not set aside holds each judged run and goes on into
+/// a window not judged; one that reaches [`FROZEN_MIN_S`] while no judged run
+/// inside it does is the day's `unjudged` run, neither frozen nor not frozen.
+/// Where no minute is [`Minute::Unjudged`] the two are one run, so such a day
+/// folds exactly as it did before.
 pub(super) fn fold_minutes(
     bars: impl Iterator<Item = store::format::Bar>,
-    still: impl Fn(i64) -> bool,
+    minute: impl Fn(i64) -> Minute,
 ) -> DayScan {
     const MINUTE: i64 = 60_000_000;
+    let length =
+        |first: i64, last: i64| u64::try_from((last - first) / 1_000_000 + 60).unwrap_or(0);
     let mut scan = DayScan::default();
-    // The run in progress: its first stamp, its last stamp, its value.
+    // The judged run in progress: its first stamp, its last stamp, its value.
     let mut run: Option<(i64, i64, i64)> = None;
-    let close_run = |run: Option<(i64, i64, i64)>, scan: &mut DayScan| {
+    // The run in progress through every minute not set aside.
+    let mut through: Option<Through> = None;
+    // A judged run closes: counted where it reaches FROZEN_MIN_S, and its
+    // length kept on the run through it.
+    let close_run = |run: Option<(i64, i64, i64)>,
+                     scan: &mut DayScan,
+                     through: &mut Option<Through>| {
         let Some((first, last, _)) = run else { return };
-        let seconds = u64::try_from((last - first) / 1_000_000 + 60).unwrap_or(0);
+        let seconds = length(first, last);
+        if let Some(through) = through {
+            through.judged = through.judged.max(seconds);
+        }
         if seconds >= FROZEN_MIN_S {
             scan.frozen_runs = scan.frozen_runs.saturating_add(1);
             if scan.longest.is_none_or(|(_, longest)| seconds > longest) {
                 scan.longest = Some((first, seconds));
             }
+        }
+    };
+    // A run through closes: it is the day's unjudged run where it reaches
+    // FROZEN_MIN_S, holds no judged run that does (so it reaches it only with
+    // minutes not judged, [`Through`]), and is longer than any kept before it
+    // (the first of equals stays).
+    let close_through = |through: Option<Through>, scan: &mut DayScan| {
+        let Some(through) = through else { return };
+        let seconds = length(through.first, through.last);
+        if through.judged < FROZEN_MIN_S
+            && seconds >= FROZEN_MIN_S
+            && scan.unjudged.is_none_or(|(_, longest, _)| seconds > longest)
+        {
+            scan.unjudged = Some((through.first, seconds, through.judged));
         }
     };
     for bar in bars {
@@ -1053,32 +1219,53 @@ pub(super) fn fold_minutes(
         // on every append, a bar whose open or close lies outside its high and
         // low (`store::file` `survey`, `Bar::ohlc_is_sane`).
         let flat = bar.high == bar.low;
-        let halted = still(bar.ts_micros);
+        let kind = minute(bar.ts_micros);
+        let open = kind != Minute::Aside;
+        let goes_on =
+            |value: i64, last: i64| flat && value == bar.close && bar.ts_micros - last == MINUTE;
         run = match run {
-            Some((first, last, value))
-                if flat && !halted && value == bar.close && bar.ts_micros - last == MINUTE =>
-            {
+            Some((first, last, value)) if kind == Minute::Judged && goes_on(value, last) => {
                 Some((first, bar.ts_micros, value))
             }
+            other => {
+                close_run(other, &mut scan, &mut through);
+                (flat && kind == Minute::Judged).then_some((
+                    bar.ts_micros,
+                    bar.ts_micros,
+                    bar.close,
+                ))
+            }
+        };
+        through = match through {
+            Some(going) if open && goes_on(going.value, going.last) => Some(Through {
+                last: bar.ts_micros,
+                ..going
+            }),
             other => {
                 // A RUN AN ABSENT MINUTE ENDED, where the next minute held
                 // prints the same value still, is counted (the check's
                 // follow-up: BANKNIFTY 2022-03-07 09:54-09:57), so a run
                 // measured as its parts says why.
-                if let Some((_, last, value)) = other
+                if let Some(ended) = other
+                    && open
                     && flat
-                    && !halted
-                    && value == bar.close
-                    && bar.ts_micros - last > MINUTE
+                    && ended.value == bar.close
+                    && bar.ts_micros - ended.last > MINUTE
                 {
                     scan.broken = scan.broken.saturating_add(1);
                 }
-                close_run(other, &mut scan);
-                (flat && !halted).then_some((bar.ts_micros, bar.ts_micros, bar.close))
+                close_through(other, &mut scan);
+                (flat && open).then_some(Through {
+                    first: bar.ts_micros,
+                    last: bar.ts_micros,
+                    value: bar.close,
+                    judged: 0,
+                })
             }
         };
     }
-    close_run(run, &mut scan);
+    close_run(run, &mut scan, &mut through);
+    close_through(through, &mut scan);
     scan
 }
 
@@ -1103,7 +1290,7 @@ pub(super) fn scan_day(
     file: &store::file::BarFile,
     identity: Option<(u64, u64)>,
     (lo, hi): (u64, u64),
-    still: impl Fn(i64) -> bool,
+    minute: impl Fn(i64) -> Minute,
 ) -> Result<Option<DayScan>, String> {
     if hi.saturating_sub(lo) > MAX_SCAN_BARS {
         return Ok(None);
@@ -1123,7 +1310,7 @@ pub(super) fn scan_day(
     let bars = (lo..hi)
         .map(|at| file.read_record(at).map_err(|why| why.to_string()))
         .collect::<Result<Vec<_>, String>>()?;
-    let scan = fold_minutes(bars.into_iter(), still);
+    let scan = fold_minutes(bars.into_iter(), minute);
     if let Some(key) = key {
         let _was = memo
             .lock()
@@ -1150,14 +1337,14 @@ pub(super) fn cold_days((dev, ino): (u64, u64), spans: &[(Day, u64, u64)]) -> Ve
 /// Scans `days` of `file` in order and keeps each ([`scan_day`]); a day that
 /// will not read is left for its own [`scan_day`] to read again and name.
 /// Returns how many days were read.
-pub(super) fn scan_days<Still: Fn(i64) -> bool>(
+pub(super) fn scan_days<Minutes: Fn(i64) -> Minute>(
     file: &store::file::BarFile,
     identity: (u64, u64),
     days: &[(Day, u64, u64)],
-    still: impl Fn(Day) -> Still,
+    minutes: impl Fn(Day) -> Minutes,
 ) -> usize {
     for &(day, lo, hi) in days {
-        let _scanned = scan_day(file, Some(identity), (lo, hi), still(day));
+        let _scanned = scan_day(file, Some(identity), (lo, hi), minutes(day));
     }
     days.len()
 }
@@ -1178,9 +1365,9 @@ pub(super) struct IndexDay {
     pub(super) ledger: Option<(u64, Option<u32>, u64)>,
     /// The recorded halt's `[from, resume)` seconds of the day, where one is.
     pub(super) halt: Option<(u32, u32)>,
-    /// The cash closing auction's `[from, to)` seconds of the day, where the
-    /// index is computed through one ([`auction_window`]).
-    pub(super) auction: Option<(u32, u32)>,
+    /// The cash closing auction's window of the day and how a run inside it
+    /// is read ([`auction_of`]), where the day has one.
+    pub(super) auction: Option<Auction>,
 }
 
 /// `HH:MM` of an epoch-microsecond stamp on the day opening at `midnight`.
@@ -1200,6 +1387,12 @@ impl IndexDay {
     /// high above the day bar's high, or its low below the day bar's low:
     /// 2022-03-07 10:07 is 229.85 points above. Both are flags; the bars are
     /// served unchanged.
+    ///
+    /// `frozen.flagged` is `true` where a judged run reaches [`FROZEN_MIN_S`],
+    /// `false` where no run of the day can, and `null` where the only such run
+    /// is not judged: on Zerodha a run that reaches it only inside the cash
+    /// closing auction's window of an index whose stillness there is not
+    /// sourced (verify-R3-13-r2 X1), on GDFL as [`Self::ledger_frozen`] says.
     pub(super) fn json(&self) -> (serde_json::Value, Vec<String>) {
         let mut says = Vec::new();
         let rung = finest_of(self.feed).as_str();
@@ -1229,15 +1422,33 @@ impl IndexDay {
                         scan.broken
                     ));
                 }
+                if let Some(unjudged) = scan.unjudged {
+                    says.push(self.unjudged_minutes(unjudged, rung));
+                }
+                // NEVER "NOT FROZEN" FOR A RUN NOT JUDGED (verify-R3-13-r2 X1):
+                // a judged run flags the day; else a run not judged leaves it
+                // null; else no run of the day reached FROZEN_MIN_S.
+                let flagged = if scan.frozen_runs > 0 {
+                    Some(true)
+                } else if scan.unjudged.is_some() {
+                    None
+                } else {
+                    Some(false)
+                };
                 serde_json::json!({
                     "basis": "minutes_scanned",
                     "rung": rung,
-                    "flagged": scan.frozen_runs > 0,
+                    "flagged": flagged,
                     "runs": scan.frozen_runs,
                     "broken_by_absent": scan.broken,
                     "longest_s": longest.map(|(_, s)| s),
                     "longest_from": longest.map(|(from, _)| clock_of(self.midnight, from)),
+                    "unjudged_s": scan.unjudged.map(|(_, seconds, _)| seconds),
+                    "unjudged_from": scan
+                        .unjudged
+                        .map(|(from, _, _)| clock_of(self.midnight, from)),
                     "auction_window": self.auction_json(),
+                    "auction_aside": self.auction.map(|auction| auction.aside),
                     "line": null,
                 })
             }
@@ -1309,7 +1520,11 @@ impl IndexDay {
     /// stamp to place it against them on a day that has one. A shorter run
     /// elsewhere in that session could be frozen and is not measured, and the
     /// phrase says so (UNVERIFIED). On every auction-era day the ledger has
-    /// measured (2026-09-25..30), the run is the auction's, from 15:15:00.
+    /// measured (2026-09-25..30), NIFTY's and BANKNIFTY's run lies in the
+    /// auction's window, from 15:15:00, and is the auction's; on an index
+    /// whose stillness there is not sourced ([`still_through_auction`]) a run
+    /// inside the window is not judged either, and the phrase says that too
+    /// (verify-R3-13-r2 X1).
     fn ledger_frozen(
         &self,
         (seconds, at, line): (u64, Option<u32>, u64),
@@ -1317,18 +1532,22 @@ impl IndexDay {
     ) -> serde_json::Value {
         let rung = finest_of(self.feed).as_str();
         // ONLY THE RUN'S SECONDS OUTSIDE THE RECORDED HALT AND THE CASH
-        // CLOSING AUCTION'S WINDOW COUNT (the R3-13 review; the Mac finish):
-        // 2020-03-13's run starts at 09:21:09, a second before the index
-        // halt's 09:21:10, and is the halt itself; from 2026-08-03 every
-        // session's run from 15:15:00 is the auction's ([`auction_window`]).
-        // The two windows are counted once where they meet, and the run is
-        // judged by its longest stretch outside them ([`outside_of`]).
+        // CLOSING AUCTION'S WINDOW ARE JUDGED (the R3-13 review; the Mac
+        // finish): 2020-03-13's run starts at 09:21:09, a second before the
+        // index halt's 09:21:10, and is the halt itself; from 2026-08-03 a run
+        // inside the window is the auction's on NIFTY and BANKNIFTY and not
+        // judged on any other index ([`auction_of`]). The two windows are
+        // counted once where they meet, and the run is judged by its longest
+        // stretch outside them ([`outside_of`]).
         let windowed = self.halt.is_some() || self.auction.is_some();
         let outside = match at {
             Some(at) => {
                 let start = u64::from(at);
                 let run = (start, start.saturating_add(seconds));
-                Some(outside_of(run, [self.halt, self.auction]))
+                Some(outside_of(
+                    run,
+                    [self.halt, self.auction.map(|auction| auction.window)],
+                ))
             }
             None if windowed => None,
             None => Some((seconds, seconds)),
@@ -1375,6 +1594,7 @@ impl IndexDay {
             "judged_s": judged_s,
             "longest_from": at.map(clock),
             "auction_window": self.auction_json(),
+            "auction_aside": self.auction.map(|auction| auction.aside),
             "line": line,
         })
     }
@@ -1382,7 +1602,9 @@ impl IndexDay {
     /// The phrase of a ledger run that cannot judge the day (`flagged` null):
     /// what the ledger measures, where its one run lies, and that a shorter
     /// run elsewhere is not measured. `from` is the run's stamp, `judged` its
-    /// longest stretch outside the windows where it could be placed.
+    /// longest stretch outside the windows where it could be placed. On an
+    /// index whose stillness through the auction is not sourced, the run
+    /// inside its window is not judged either, and the phrase says why.
     fn unjudged(&self, seconds: u64, from: Option<String>, judged: Option<u64>) -> String {
         let windows = match (self.halt.is_some(), self.auction.is_some()) {
             (true, false) => "the recorded halt",
@@ -1396,11 +1618,48 @@ impl IndexDay {
             ),
             _ => format!("{seconds} s, with no stamp, so it cannot be placed against {windows}"),
         };
+        let (unsourced, run) = if self.auction_unsourced() {
+            (
+                UNSOURCED,
+                "whether it is the auction's or a frozen feed's is not known, and ",
+            )
+        } else {
+            ("", "")
+        };
         format!(
             "index frozen not judged: the day ledger measures only the day's longest unchanged \
-             run, {placed}; a shorter run of {FROZEN_MIN_S} s or more elsewhere in the session \
-             is not measured (UNVERIFIED)"
+             run, {placed}{unsourced}; {run}a shorter run of {FROZEN_MIN_S} s or more elsewhere \
+             in the session is not measured (UNVERIFIED)"
         )
+    }
+
+    /// The phrase of a Zerodha run not judged ([`DayScan::unjudged`]): where
+    /// it lies, how much of it lies in one judged stretch, and why the rest is
+    /// not judged (verify-R3-13-r2 X1).
+    fn unjudged_minutes(&self, (from, seconds, judged): (i64, u64, u64), rung: &str) -> String {
+        let to = from.saturating_add(i64::try_from(seconds).unwrap_or(0) * 1_000_000 - 60_000_000);
+        let part = if judged == 0 {
+            "all of it inside the cash closing auction's window".to_owned()
+        } else {
+            format!(
+                "only {} minute(s) of it in one stretch outside the cash closing auction's window",
+                judged / 60
+            )
+        };
+        format!(
+            "index frozen not judged: unchanged for {} minute(s) from {} to {} ({rung}), \
+             {part}{UNSOURCED}; whether this run is the auction's or a frozen feed's is not known \
+             (UNVERIFIED)",
+            seconds / 60,
+            clock_of(self.midnight, from),
+            clock_of(self.midnight, to),
+        )
+    }
+
+    /// Whether the day has an auction window whose stillness is not sourced
+    /// for this index ([`Auction::aside`] false).
+    fn auction_unsourced(&self) -> bool {
+        self.auction.is_some_and(|auction| !auction.aside)
     }
 
     /// Whether the stamp `ts` (epoch microseconds) lies inside the day's
@@ -1425,11 +1684,18 @@ impl IndexDay {
     /// The auction's window on the wire, `HH:MM:SS-HH:MM:SS`, or `null`.
     fn auction_json(&self) -> serde_json::Value {
         let clock = |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
-        self.auction.map_or(serde_json::Value::Null, |(from, to)| {
+        self.auction.map_or(serde_json::Value::Null, |auction| {
+            let (from, to) = auction.window;
             serde_json::Value::from(format!("{}-{}", clock(from), clock(to)))
         })
     }
 }
+
+/// Why a run inside the cash closing auction's window of any index but NIFTY
+/// and BANKNIFTY is not judged ([`still_through_auction`]), as the phrases say
+/// it.
+const UNSOURCED: &str =
+    ", where an index holding still is sourced for NIFTY 50 and NIFTY BANK alone";
 
 /// Paisa as index points, two decimals: `22985` is `229.85`.
 pub(super) fn points(paisa: i64) -> String {
