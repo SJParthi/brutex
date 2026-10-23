@@ -75873,6 +75873,18 @@ folder. It found 33,937 share-days already answered and checked the other
 256 calendar days in 93.30 s. It wrote segments 110 to 249 and folded a `tick-to-second-2025.v001.csv`, `.idx` and
 `.summary.txt` whose SHA-256 equal the uninterrupted run's.
 
+**Amended by D-5188 (2026-10-23).** Item 4 above says CAL-1's
+`tradable_day` "has not merged". CAL-1 has since merged into `feat/db-fix`
+(`pull::calendar::tradable_day`, D-5150), and this branch took it in its
+repair-2 merge, so that sentence is false on this branch's head. The check
+still labels a day by `pull::calendar::special_session` and then
+`kind_of`, as item 4 describes. Labelling through `tradable_day` is NOT
+DONE. It would change which days a row calls `special_session`: a halt day,
+a day of unmeasured length and an unknown session become non-tradable
+reasons of their own. That is a change of the rows' meaning, and needs a
+re-run of the real years. No row and no summary of this check names CAL-1,
+so no stored file carries the stale sentence.
+
 ### D-5182 — The day band is not counted until a dated, charter-sourced per-share-day band exists, and the Zerodha minute comparison is on the raw basis until DATA-1's factor merges (DATA-2) — 2026-10-16
 
 The hand-over's worst-case list asks for "a bad print outside the day band"
@@ -81544,3 +81556,8 @@ is taken by the next run.
 `tick_second_check::tests::every_status_and_source_is_named_against_the_landing_the_store_recorded`
 now requires the summary's basis sentence and refuses "has not merged".
 T2S-21.
+
+**The same stale word in D-5181.** That entry's item 4 said CAL-1's
+`tradable_day` had not merged. It has, and the same merge brought it here.
+D-5181 carries a dated amendment that says so. Labelling through it is NOT
+DONE, and no file this check writes names CAL-1.
