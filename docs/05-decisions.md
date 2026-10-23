@@ -81309,6 +81309,11 @@ landing if it is taken.
    caught up. Refusing every out-of-order write was not chosen:
    `first_listed` deliberately takes a snapshot written out of order (its
    own test), and it would not catch a clock that ran ahead.
-6. **Proof.** `docs/04-invariants.md` R428-14..16 name the tests. The
-   outcome-and-log test failed first on the unfixed tree (R4-28 r3
-   `before.log`).
+6. **One contract, one token (the r3 check's follow-up).** A futures plan
+   that finds one (underlying, expiry) listed under more than one token asks
+   none of them and names each `contract_duplicated` with every token: asking
+   both would file two series as one contract's. The diff's half of the same
+   follow-up (a key listed twice in one dump reads as a token change) is NOT
+   DONE: it needs a new change kind in the fixed-record diff.
+7. **Proof.** `docs/04-invariants.md` R428-14..17 name the tests. FAILED-FIRST
+   STATUS: see the R4-28 repair 3 report (`state/fix/round2/fix-R4-28.json`).
