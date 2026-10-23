@@ -1696,6 +1696,7 @@ pub struct Report {
 /// How many of the oldest kept names [`Report::name`] drops before it keeps
 /// one more, when `kept` are kept now: `FAILURES_KEPT` once the list holds
 /// twice the bound, else none (D-4839; the event beside it, D-7147).
+#[must_use]
 pub(crate) const fn names_dropped(kept: usize) -> Option<usize> {
     if kept >= 2 * FAILURES_KEPT {
         Some(FAILURES_KEPT)
@@ -2419,7 +2420,7 @@ fn closeness(stem: &str, symbol: &str) -> usize {
     let mut counted: HashSet<&[u8]> = HashSet::with_capacity(symbol.len());
     symbol
         .windows(2)
-        .filter(|pair| held.contains(pair) && counted.insert(pair))
+        .filter(|pair| held.contains(pair) && counted.insert(*pair))
         .count()
 }
 
