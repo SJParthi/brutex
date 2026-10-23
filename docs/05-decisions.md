@@ -81637,3 +81637,69 @@ a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one}`
 (docs/04-invariants.md R418-16..R418-18). The index's effective capacity is
 restated in `docs/06-limits.md` L-R418-04 from a simulation, not the 8,192
 homes.
+
+### D-7291 — R4-18 repair 2: the quarantine index never lags its ledger unsaid; a damaged ledger line is named and never rebuilt away; no door re-serves a set-aside bar — 2026-10-23
+
+The second check of R4-18 (repair 1) found three blocking defects in the
+package's own code, each reproduced on a private store, and each now closed
+by a test that failed before the change (`docs/04-invariants.md`
+R418-19..R418-23):
+
+1. **A damaged ledger line was dropped without a word.** The index rebuild
+   and `Summary::load` read only the valid lines, so a month recorded whole
+   by a line whose checksum failed read as clear, the listings under-counted
+   and the apply that rebuilt the index answered success. NOW a complete line
+   that is not valid UTF-8, fails its checksum or does not parse is DAMAGE,
+   refused by name (`quarantine_ledger_damaged`, with every offset) by every
+   rebuild, catch-up, listing, door and apply, with nothing written, and one
+   `store.quarantine` error event; the verb prints it (a plan exits 1, an
+   apply refuses before its first write). A torn append is no longer ended by
+   a bare newline, which made it indistinguishable from damage: the next
+   writer ends it with `\ttorn` (in the same write as its own line), and such
+   a line is an ENDED torn append, never an act and never damage, because the
+   kill it records left none. No verb lifts damage: the ledger is
+   append-only, so it is restored from a copy (`docs/06-limits.md`
+   L-R418-12).
+2. **The index could lag its ledger with every reader trusting it.** A
+   publish refused (a full disk, a read-only directory) or killed after the
+   ledger line was synced left the line unindexed; a dropped month was then
+   never re-indexed (`already_dropped`), and a month recorded whole was
+   served while the listings called it quarantined. NOW the index header
+   (version 2) records the ledger bytes the image describes. A reader trusts
+   an image whose header checks and whose described length is the ledger's,
+   or less while a writer holds the feed's lock (an act in flight, whose
+   state before it is the image); otherwise it answers
+   `quarantine_index_stale` or `quarantine_index_torn` by name, never
+   "clear" (a zeroed image included). Every writer brings the image level
+   with the ledger (a rebuild) under the lock before its own act, and refuses
+   a damaged ledger and a full bucket BEFORE its ledger line, so a refusal
+   writes nothing and only a host refusal of the final publish can leave a
+   line unindexed — which the next writer of any month of the feed then
+   finishes. An intent (`dropping`) is indexed as a drop of no bars.
+   `apply_month` judges its plan read-only first (a refusal writes nothing,
+   not even the lock file), then holds the feed's writer lock for its whole
+   sequence, so two applies of one feed never interleave (the second check's
+   double count), and finishes every intent a killed run owes the month,
+   whatever subset it names, before its own act.
+3. **The restate door re-served quarantined bars, and so did the ingest's
+   repair door.** A vendor re-pull still holds the minutes a quarantine set
+   aside, and `restate_month` — and `repair_month`, which `pull::ingest`
+   calls on every month its append door refuses — added them as bars the
+   month lacked. NOW both take their offered bars through one rule,
+   `store::quarantine::set_aside`: one probe for a month no quarantine names;
+   for a month a drop names, every stamp a `dropped` or `dropping` line names
+   is held back (never served again, one `store.repair` event); a month
+   recorded whole is `RepairError::Quarantined` and a quarantine that cannot
+   be read `RepairError::QuarantineUnknown`, each with nothing written.
+   `pull`'s failure table files them as `repair_impossible` and
+   `store_damaged`. `restate_month` reports what it held back and emits one
+   `store.restate` event with its reason and what changed; the journal line
+   a run keeps is its caller's (R4-23), from those fields, as `pull::ingest`
+   keeps one for `repair_month`.
+
+**The formats change before their first landing.** Index version 1 and the
+ledger without the torn mark were never written to the real store (0
+quarantine files, measured) and never merged. An image of version 1 is not
+read as current (its version does not check) and is rebuilt from its
+ledger; index version 2 and the ledger as `docs/02-store-format.md` now
+states them are frozen from their first landing.

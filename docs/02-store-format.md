@@ -5281,18 +5281,33 @@ bars as held (each bar's seven `i64` fields, little-endian), who, the reason
 (1 to 200 bytes, no tab or line break), the stamps (comma-separated UTC
 micros, or `-` for a whole month), and the CRC-32C hex of everything before
 its tab. A last fragment with no newline is a torn append: never a line, and
-ended by a newline before the next line is written.
+ended by `\ttorn` and a newline (written with the next line, in one write)
+before the next line is written; a line ending `\ttorn` is that ENDED torn
+append, never an act and never damage (R4-18 repair 2, D-7291). Every other
+complete line that is not valid UTF-8, fails its checksum or does not parse
+(a month that is no month, stamps out of order) is DAMAGE: refused by name,
+`quarantine_ledger_damaged` with its byte offsets, by every rebuild, listing
+and apply, never skipped.
 
 **The index** (derived, rebuilt from the ledger): exactly 524,800 bytes — a
-64-byte header (`BRXQIX01`, version 1, slot length 64, capacity 8,192,
-bucket 8, entries, CRC-32C at 60) and 8,199 slots of 64 bytes, open-addressed
+64-byte header (`BRXQIX01`, version 2, slot length 64, capacity 8,192,
+bucket 8, entries at 32, the LEDGER BYTES THE IMAGE DESCRIBES at 40, CRC-32C
+at 60) and 8,199 slots of 64 bytes, open-addressed
 by the BLAKE3 of (series key, month); a key lives in the first free or
 matching slot of the 8 from its home, which never wrap. Slot: 16-byte hash,
 month `yyyy*100+mm`, scope (1 whole month, 2 dropped), cause (1, 2, 3), bars,
 ledger offset, revision, written at, CRC-32C of bytes 0..60 and the slot's
-index. Every write is a whole new image, staged, synced and renamed.
+index. Every write is a whole new image, staged, synced and renamed. A
+`dropping` intent is indexed as a drop of no bars. A reader trusts an image
+whose header checks and whose described length is the ledger's (or less
+while a writer holds `audit/<feed>.quarantine.lock`: an act in flight); any
+other is `quarantine_index_torn` or `quarantine_index_stale` by name, and the
+next writer rebuilds it from the ledger before its own act.
 
 **A dropped month** is a new generation under `bar-revisions-v1/<n>` through
 `store::repair::publish_without` and `generation::promote`; a month named
-whole publishes no generation. **Version 1 is frozen**: another layout is a
-new name beside this one.
+whole publishes no generation. **Index version 2 and the ledger as written
+here are frozen from their first landing**: another layout is a new name
+beside these. Version 1 of the index was never written to the real store (0
+quarantine files, measured 23 Oct 2026) and never merged; an image of it is
+not read as current (its version does not check) and is rebuilt (D-7291).
