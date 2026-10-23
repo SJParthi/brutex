@@ -74960,6 +74960,14 @@ every row says `zerodha_basis=raw_unadjusted`. On an adjusted share-day no
 minute can match, so every share D-5180 reports is a lower bound until the
 factor is applied; the summary's minute section says so in its title.
 
+**Amended by D-5188 (2026-10-23).** DATA-1 has merged into `feat/db-fix`
+and into this package's branch: its per-share-day factor is
+`feed_reconcile::FactorIndex::factor_of`. "Has not merged" above was true
+when this entry was written and is false now. The minute match is still on
+the RAW basis, because this check does not apply the factor (NOT DONE).
+Every summary written from D-5188 on says so in those words. The per-row
+`zerodha_basis=raw_unadjusted` cell was true throughout and is unchanged.
+
 ### D-5183 — A store day built under an earlier bar definition is named by its one difference, and a stored day an extra archive does not file says why (DATA-2) — 2026-10-16
 
 The first 2026 run answered several thousand share-days of the closing
@@ -78004,3 +78012,69 @@ and the tick store), `tick_second_check::tests::both_forms_of_a_path_name_where_
 `tick_second_check::tests::a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was`.
 T2S-18 to T2S-20. Amends D-5185 item 5 by stating how it is held; the rule
 itself is unchanged.
+
+### D-5188 — The run's lock name is opened through the importer's lock door: never through a symbolic link, a special file or a second name; and the summary's raw-basis sentence says DATA-1's factor is merged but not applied (DATA-2 repair 2, verify-DATA-2-r2) — 2026-10-23
+
+**What was wrong (1): the lock name.** D-5187 holds `--out` outside the
+store and the tick store. But the first thing a run made in `--out` was its
+lock file, and it was opened with `create(true)` and `write(true)` through
+whatever already stood at `tick-to-second.lock`. That open follows a symbolic
+link and opens a hard link. Nothing looked at the name first. So a run whose
+`--out` was rightly outside the store could still create a file INSIDE it, or
+lock a file inside it.
+
+Reproduced on synthetic copies under `scratch/data2-fix-r2/pre/`, with the
+verifier's release build of this branch's previous head:
+
+- A link at the lock name to a missing name in the store
+  (`store/bars/PLANTED_BY_LOCK`). The run completed ("3 stored share-days ...
+  5 rows made") and left that name in the store as a 0-byte file.
+- A hard link at the lock name to a store month's writer lock
+  (`ZZALPHA/1s/2025-03.lock`). The run held that month's lock for its whole
+  length, and its own read of the month became `read_failed:store`
+  (`store_Locked`). An ingest writer would have found the month held.
+
+**The decision.** The lock name is opened by
+`pull::gdfl_run::locks::open_lock_path`, the door the importer's own run
+locks use (RA-285). No second opener is written. That door:
+
+1. opens with `O_NOFOLLOW | O_NONBLOCK`. A symbolic link at the name, dangling
+   or not, is refused by the host, so nothing is made where it leads. A pipe
+   cannot hold the open.
+2. checks the opened file with `fstat`. It must be a regular file with exactly
+   one name. A directory, a special file and a hard link to another file are
+   refused, each by name, before any lock is tried on it.
+
+The refusal names the lock path and what stands there, and comes before
+anything is read. The run makes no segment, version or row, and leaves the
+store unchanged. A plain lock file left by an earlier run is taken as before.
+
+**What was wrong (2): the basis sentence.** Every `.summary.txt` this build
+writes said "the DATA-1 factor has not merged". That was false on this head,
+because DATA-1 (`feed_reconcile::FactorIndex::factor_of`) merged in before it.
+A summary is append-only and is never rewritten, so a false sentence there
+would stay stored for good. The sentence is now
+`DATA-1's per-share-day factor is merged but not applied by this check (NOT DONE, D-5188)`,
+held in one constant (`RAW_BASIS_WHY`). The module doc, D-5182 (amended
+above) and `docs/06-limits.md` L-T2S-05 now say the same. Converting the
+minute match by the factor is NOT DONE. It needs a factor-version input per
+month (a `feed-reconcile` output directory), that version's digest in each
+row's identity, and a re-run of the real years. Until then the per-row
+`zerodha_basis=raw_unadjusted` cell, the summary title and every share D-5180
+reports stay a lower bound on an adjusted share-day.
+
+**What it does not do** (`docs/06-limits.md` L-T2S-11). It does not check the
+name again after the lock is taken. A lock file that is removed or replaced
+under a live run is not seen, and no command of this repository deletes one.
+
+**Proof.**
+`tick_second_check::tests::a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothing_goes_through_it`
+covers four shapes: a link to a missing name in the store, a link to a
+month's writer lock, a directory, and a hard link to that writer lock. For
+each it checks the refusal by name, an unchanged store listing, nothing made
+where the link leads, no row, and no lock tried while the writer lock is
+held. It then checks that the month's lock is free and that a plain lock file
+is taken by the next run.
+`tick_second_check::tests::every_status_and_source_is_named_against_the_landing_the_store_recorded`
+now requires the summary's basis sentence and refuses "has not merged".
+T2S-21.

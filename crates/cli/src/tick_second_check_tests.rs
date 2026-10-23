@@ -561,6 +561,13 @@ fn every_status_and_source_is_named_against_the_landing_the_store_recorded() {
         summary.contains("outside_day_band          not counted: UNVERIFIED"),
         "{summary}"
     );
+    // verify-DATA-2-r2 (D-5188): the minute section's basis sentence is the
+    // true one; DATA-1's factor is merged, so "has not merged" is false.
+    assert!(
+        summary.contains(&format!("RAW basis: Zerodha is corporate-action adjusted, GDFL raw; {RAW_BASIS_WHY})")),
+        "{summary}"
+    );
+    assert!(!summary.contains("has not merged"), "{summary}");
     let timings = read(&dir, "tick-to-second-2025.v001.timings.txt");
     assert!(timings.contains("ns per status_of lookup"), "{timings}");
     // The index answers what the rows say.
@@ -1266,6 +1273,142 @@ fn an_out_directory_inside_the_store_and_a_held_lock_are_refused_before_anything
         }
     }
     assert!(!ticks.join("cm").exists(), "nothing inside the tick store");
+}
+
+/// Every name under `dir` with its kind, length and modification time, by
+/// path: what a run that writes nothing there leaves exactly as it was.
+fn listing(dir: &Path) -> Vec<(PathBuf, bool, u64, std::time::SystemTime)> {
+    let mut all = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(at) = todo.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                todo.push(path.clone());
+            }
+            all.push((
+                path.strip_prefix(dir).unwrap().to_path_buf(),
+                meta.is_dir(),
+                meta.len(),
+                meta.modified().unwrap(),
+            ));
+        }
+    }
+    all.sort();
+    all
+}
+
+/// verify-DATA-2-r2 (D-5188): the run's lock name is refused by name, before
+/// anything is read, when it is a symbolic link (to a missing name inside the
+/// store, or to a store month's writer lock), a directory, or a second name
+/// of another file (a hard link to that writer lock). The earlier build
+/// opened the name with `create` and followed it: the dangling link made
+/// `store/bars/PLANTED_BY_LOCK`, and the hard link took the month's writer
+/// lock for the whole run, so the run's own read of that month failed
+/// `store_Locked`. Now nothing is made or locked through the name, the store
+/// is unchanged, and no row is made. With the month's writer lock held (as
+/// an ingest writer holds it) the refusal is still the name's, never "held":
+/// no lock was ever tried through it.
+#[test]
+fn a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothing_goes_through_it()
+{
+    let (root, store, _) = imported_store("lock-name");
+    let month_lock = store.join("bars/gdfl/NSE/CASH/ZZALPHA/1s/2025-03.lock");
+    assert!(month_lock.is_file(), "the importer left the month's lock file");
+    let planted = store.join("bars").join("PLANTED_BY_LOCK");
+    let writer = std::fs::File::open(&month_lock).unwrap();
+    for (case, word) in [
+        ("link-to-missing", "a symbolic link (never followed)"),
+        ("link-to-month-lock", "a symbolic link (never followed)"),
+        ("directory", "a directory"),
+        ("hard-link", "has 2 names"),
+    ] {
+        let out_dir = root.join(format!("o-{case}"));
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let name = out_dir.join(LOCK_NAME);
+        match case {
+            "link-to-missing" => std::os::unix::fs::symlink(&planted, &name).unwrap(),
+            "link-to-month-lock" => std::os::unix::fs::symlink(&month_lock, &name).unwrap(),
+            "directory" => std::fs::create_dir(&name).unwrap(),
+            _ => std::fs::hard_link(&month_lock, &name).unwrap(),
+        }
+        let before = listing(&store);
+        let held = case != "link-to-missing";
+        if held {
+            writer.lock().unwrap();
+        }
+        let mut out = String::new();
+        let code = command_with(
+            &["2025", "--out", out_dir.to_str().unwrap()],
+            &none,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        if held {
+            writer.unlock().unwrap();
+        }
+        assert_eq!(code, FAILED, "{case}: {out}");
+        assert!(
+            out.contains(&format!("{} is refused", name.display())),
+            "{case}: the refusal names the lock: {out}"
+        );
+        assert!(out.contains(word), "{case}: {out}");
+        assert!(
+            out.contains("refused before anything is read"),
+            "{case}: {out}"
+        );
+        assert!(!out.contains("is held"), "{case}: no lock was tried: {out}");
+        assert_eq!(listing(&store), before, "{case}: the store is unchanged");
+        assert!(
+            std::fs::symlink_metadata(&planted).is_err(),
+            "{case}: nothing was made where the link leads"
+        );
+        let made: Vec<String> = std::fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(made, [LOCK_NAME], "{case}: no segment, version or row");
+    }
+    // The month's writer lock is free and its file is as the importer left it.
+    let probe = std::fs::File::open(&month_lock).unwrap();
+    probe.try_lock().unwrap();
+    // The lock file a run leaves (a plain file with one name) is taken again
+    // by the next run.
+    let (_, out, out_dir) = check(&root, &store, &none, &["2025"]);
+    assert!(out.contains(", 0 already answered, "), "{out}");
+    assert!(out_dir.join(LOCK_NAME).is_file(), "{out}");
+    let (_, out_again, _) = check(&root, &store, &none, &["2025"]);
+    assert!(
+        out_again.starts_with("tick-to-second-check: ")
+            && !out_again.contains(", 0 already answered, ")
+            && !out_again.contains("is refused"),
+        "the second run took the lock and read the first run's rows: {out_again}"
+    );
+}
+
+/// The measurement behind `docs/06-limits.md` L-T2S-11's lock line: the
+/// lock name opened by [`take_lock`] and taken, n = 1,000 calls on a name a
+/// run already left, each answer checked. Once per run, not per row; run
+/// with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: cargo test -p cli --lib -- --ignored --nocapture the_lock_name_is_timed"]
+fn the_lock_name_is_timed_once_per_run() {
+    let dir = scratch("lock-timed");
+    let path = dir.join(LOCK_NAME);
+    drop(take_lock(&path).unwrap());
+    let mut ns: Vec<u128> = Vec::with_capacity(1_000);
+    for _ in 0..1_000 {
+        let t = Instant::now();
+        let lock = take_lock(&path).unwrap();
+        ns.push(t.elapsed().as_nanos());
+        drop(lock);
+    }
+    ns.sort_unstable();
+    println!(
+        "take_lock: n=1000 p50 {} ns p99 {} ns max {} ns",
+        ns[499], ns[989], ns[999]
+    );
 }
 
 /// `path` written relative to the current directory: `..` up to the root, then

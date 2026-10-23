@@ -80,8 +80,10 @@
 //! second's extreme would be worse under rule A), and the share of Zerodha
 //! one-minute bars whose high and low the rebuilt seconds match exactly
 //! under T, A and R. Zerodha's history is corporate-action adjusted and GDFL
-//! raw; DATA-1's per-share-day factor has not merged, so the minute match is
-//! on the RAW basis and every row says so (`zerodha_basis`). A row outside
+//! raw. DATA-1's per-share-day factor is merged
+//! (`feed_reconcile::FactorIndex::factor_of`) but this check does not apply
+//! it (NOT DONE, D-5188), so the minute match is on the RAW basis and every
+//! row says so (`zerodha_basis`). A row outside
 //! the day band is NOT counted: no dated, charter-sourced per-share-day band
 //! exists (`outside_day_band` is `UNVERIFIED` on every row).
 //!
@@ -151,6 +153,14 @@ const AMORTISED_ROWS: u64 = 10_000;
 
 /// The one lock file of an output directory: two runs never fold at once.
 const LOCK_NAME: &str = "tick-to-second.lock";
+
+/// Why the minute match is on the raw basis, as every summary states it
+/// (D-5188, amending D-5182). DATA-1's per-share-day factor
+/// ([`crate::feed_reconcile::FactorIndex::factor_of`]) is merged; this check
+/// does not apply it. A summary is append-only, so this sentence must be true
+/// of every build that writes it.
+const RAW_BASIS_WHY: &str = "DATA-1's per-share-day factor is merged but not applied by this \
+                             check (NOT DONE, D-5188)";
 
 /// What the verb was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3104,7 +3114,7 @@ pub(crate) fn summary(
     let _ = writeln!(
         s,
         "\nminutes vs Zerodha 1min (RAW basis: Zerodha is corporate-action adjusted, GDFL raw; \
-         the DATA-1 factor has not merged)\n  zerodha minutes       {}",
+         {RAW_BASIS_WHY})\n  zerodha minutes       {}",
         get("zerodha_minutes")
     );
     for name in ["t", "a", "r"] {
@@ -3406,6 +3416,35 @@ fn exact(status: &str) -> bool {
     matches!(status, "exact_T" | "exact_A" | "special_session")
 }
 
+/// Opens and takes the run's lock at `path` (D-5188), before anything is
+/// read. The name is opened by the importer's own lock door,
+/// [`pull::gdfl_run::locks::open_lock_path`]: `O_NOFOLLOW | O_NONBLOCK`, so a
+/// symbolic link at the name is refused by the host and nothing is made
+/// where it leads, and a pipe cannot hold the open; then the opened file must
+/// be a regular file with exactly one name, so a hard link to another file (a
+/// store month's writer lock) is refused before any lock is taken on it.
+///
+/// # Errors
+///
+/// The refusal, naming `path` and what is at it; or `path` held by another
+/// run.
+fn take_lock(path: &Path) -> Result<std::fs::File, String> {
+    let lock = pull::gdfl_run::locks::open_lock_path(path, LOCK_NAME).map_err(|fault| {
+        format!(
+            "{} is refused ({fault}): the lock name is refused before anything is read, and \
+             nothing is made or locked through it (D-5188)",
+            path.display()
+        )
+    })?;
+    lock.try_lock().map_err(|w| {
+        format!(
+            "{} is held: another tick-to-second-check writes this directory ({w})",
+            path.display()
+        )
+    })?;
+    Ok(lock)
+}
+
 /// The run behind [`command_with`].
 #[expect(
     clippy::too_many_lines,
@@ -3437,19 +3476,7 @@ fn run(
         ));
     }
     std::fs::create_dir_all(&ask.out).map_err(|w| format!("{}: {w}", ask.out.display()))?;
-    let lock_path = ask.out.join(LOCK_NAME);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|w| format!("{}: {w}", lock_path.display()))?;
-    lock.try_lock().map_err(|w| {
-        format!(
-            "{} is held: another tick-to-second-check writes this directory ({w})",
-            lock_path.display()
-        )
-    })?;
+    let lock = take_lock(&ask.out.join(LOCK_NAME))?;
     let commit = crate::commit_stamp().unwrap_or("unstamped").to_owned();
     let started = Instant::now();
     crate::note(
