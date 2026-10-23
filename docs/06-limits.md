@@ -21516,8 +21516,8 @@ builds, and are stated rather than dropped.
 
 `state/fix/ci-shell-gates.sh --jobs language-purity --fast` on this branch after
 the BASE-GATE11 merge, compared step by step with the same run on feat/db-fix's
-head (`5413c5e3b`): gate 11 refused R3-13's files and nothing else that feat/db-fix
-does not already refuse. Five constructs were rewritten (D-7300 item 24) and the
+head at that merge: gate 11 refused R3-13's files and nothing else that
+feat/db-fix does not already refuse. Five constructs were rewritten (D-7300 item 24) and the
 rest are declared here, each read before it was counted:
 
 ~~~~text
@@ -21546,7 +21546,8 @@ RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags.rs 1 -> 4: beside AF-02's
   closers list (the 1 declared on 17 October), `QualityLine::SERVED` (three
   names) asked once per field of a day-ledger line; `FLAGS_VERSIONS` (two
   versions) asked once per line, IA-16's, merged onto feat/db-fix
-  undeclared (feat/db-fix refuses it at `5413c5e3b`); and `peer.per_day`,
+  undeclared (feat/db-fix refuses it at its BASE-GATE11 merge); and
+  `peer.per_day`,
   one page's peer days, at most PAGE_DAYS = 92, asked once per page whether
   any holds no file (DB-031's renamed-share lookup).
 ~~~~
