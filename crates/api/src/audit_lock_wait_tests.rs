@@ -331,26 +331,63 @@ fn a_zero_bound_refuses_at_once() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// EIGHT APPENDERS AT ONCE LOSE NO RECORD. A refusal is allowed only when
+/// this run's own appends show the wait was real (BASE-REDS-1023, D-7152):
+/// on a loaded drive one of 800 fsynced appends waited past
+/// `APPEND_LOCK_WAIT` and the old `refused == 0` failed with the code
+/// unchanged. So each refusal must name its bound, the appender asks again
+/// (what a refused caller does), every record lands exactly once, and a
+/// refusal counts as the bound's only if some SUCCESSFUL append of the same
+/// run took at least half the bound: queued behind the same slow holds. The
+/// `try_lock` build this test was written against refused at once while
+/// every success took milliseconds, and still fails here.
 #[test]
 fn eight_concurrent_appenders_lose_no_record() {
     let (root, journal) = journal_with_one_record("eight");
     let journal = Arc::new(journal);
     let barrier = Arc::new(Barrier::new(8));
-    let refused: usize = (0..8)
+    let answers: Vec<(usize, Duration, Vec<String>)> = (0..8)
         .map(|w| {
             let (journal, barrier) = (Arc::clone(&journal), Arc::clone(&barrier));
             std::thread::spawn(move || {
                 barrier.wait();
-                (0..100)
-                    .filter(|i| journal.append(&closed(&format!("w{w}-{i}"))).is_err())
-                    .count()
+                let (mut refused, mut slowest, mut why) = (0, Duration::ZERO, Vec::new());
+                for i in 0..100 {
+                    let record = closed(&format!("w{w}-{i}"));
+                    loop {
+                        let asked = Instant::now();
+                        match journal.append(&record) {
+                            Ok(()) => {
+                                slowest = slowest.max(asked.elapsed());
+                                break;
+                            }
+                            Err(e) => {
+                                refused += 1;
+                                why.push(e);
+                                assert!(refused <= 100, "an appender refused past reason");
+                            }
+                        }
+                    }
+                }
+                (refused, slowest, why)
             })
         })
         .collect::<Vec<_>>()
         .into_iter()
         .map(|h| h.join().expect("an appender"))
-        .sum();
-    assert_eq!(refused, 0, "no append refused");
+        .collect();
+    let refused: usize = answers.iter().map(|(n, _, _)| n).sum();
+    let slowest = answers.iter().map(|(_, s, _)| *s).max().unwrap_or_default();
+    for why in answers.iter().flat_map(|(_, _, why)| why) {
+        assert!(
+            why.contains("(APPEND_LOCK_WAIT)") && why.contains("refused rather than interleaved"),
+            "a refusal names its bound: {why}"
+        );
+    }
+    assert!(
+        refused == 0 || slowest >= APPEND_LOCK_WAIT / 2,
+        "{refused} refused while the slowest success took {slowest:?}: no wait explains them"
+    );
     let got = outcomes(&journal);
     assert_eq!(got.len(), 801, "the seed and 800 records");
     let mut sources: Vec<String> = got.into_iter().skip(1).map(|(_, s)| s).collect();

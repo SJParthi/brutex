@@ -2921,7 +2921,8 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 // None names an account, an environment, a vendor credential or a field of
 // a parameter path; none is one of gate 1c's ten environment words. The
 // last three are this package's own: the fields of `pull::gdfl_import`'s
-// "failures counted and no longer named" event (gate 19).
+// "failures counted and no longer named" event (gate 19); `census_lock` and
+// `row_refused` are two invented cause codes of its ranking test.
 const MERGED_17_23_OCT_LITERAL: &str = "\
      --retry-refused --snapshot --stored -x 000009 0123456789abcdef 0707070707070707 \
      0808080808080808 1000000 1050000 180000 2020-09 2024-04 2026-08auc 2026-09 2026-10 \
@@ -2984,7 +2985,7 @@ const MERGED_17_23_OCT_LITERAL: &str = "\
      v3-bin v3-differ v3-dirman v3-dirmark v3-empty v3-flip v3-gap v3-lone v3-map-back \
      v3-map-fwd v3-nomark v3-nothing v3-source v3-torn v3-utf8 verify via was_bytes windows \
      withdraw witness word writable write-costs write_all wrong_table zerodha-repair \
-     zerodha_first zerodha_last failures_total names_dropped names_kept";
+     zerodha_first zerodha_last failures_total names_dropped names_kept census_lock row_refused";
 
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
