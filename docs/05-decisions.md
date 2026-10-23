@@ -78593,7 +78593,9 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     30,000 ms, the settle cap and the step wait already used); two frames
     `FRAME_WAIT_MS` (2,000 ms, the paint wait of item 9) in the page and
     `FRAME_SLACK_MS` (1,000 ms) more here, because a hidden headless tab
-    answered a 1.5 s page-side wait after 6.7 s (measured 23 Oct). A page
+    answered a 1.5 s page-side wait after 6.7 s (measured 23 Oct); the paint
+    wait of item 9 the same way, so it stays "at most 2,000 ms" plus that
+    slack whatever the page's clock does. A page
     whose load did not end is not loaded n times more: n = 200 stalled loads
     would hold a run for 200 bounds per phase with one fact to say. A
     command not answered elsewhere ends the run, with its sheet: a browser
