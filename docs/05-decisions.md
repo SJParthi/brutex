@@ -75675,6 +75675,401 @@ this is a narrow or short desktop window.
 board control is reachable, before and after, at 375x812, 375x667, 375x568,
 320x568, 812x375 and 1280x800).
 
+### D-5180 — Fills read the stored rule-T one-second bars until a rule-A file version exists; rule A is a candidate for the worst-case fill bound, filed only as a NEW file version with its own identity term, never a rewrite (DATA-2, proposal) — 2026-10-16
+
+**The question** (hand-over (4a), FINDING 1): a GDFL row with LTQ = 0 carries
+a price, so should the seconds the fills use take every row's LTP into their
+high and low (rule A) or only the traded rows' (rule T, today's store)?
+
+**Measured** by `cli tick-to-second-check` (D-5181) over every stored share-day
+of three whole years, read-only. Minute shares are per mille of the Zerodha
+one-minute bars the rule also trades in, on the RAW basis (D-5182). The fill
+measure compares rule A with the STORED bar second by second: a second is
+worse when rule A's high is above the stored high or its low below the
+stored low.
+
+Measured 19 and 20 October 2026 by the build of commit `4465735a0` at four
+workers, read-only (`state/datacheck/rust-t2s-r6/out/` of the operator's
+work folder, `tick-to-second-<year>.v001.summary.txt`); per mille is rounded
+down:
+
+| Year | Zerodha minutes compared (T and A / R) | High equal T / A / R (per mille) | Low equal T / A / R (per mille) | Per share-day median high match T / A (per mille, share-days with Zerodha minutes) | Stored seconds compared | Rule A worse (high / low / either) | Per share-day either-worse p50 / p99 / max (per mille) |
+|---|---|---|---|---|---|---|---|
+| 2019 | 14,941,562 / 15,463,281 | 435 / 435 / 456 | 433 / 433 / 454 | 0 / 0 (42,800) | 423,343,662 | 2,931,804 / 2,887,269 / 5,804,450 (13 per mille) | 14 / 29 / 103 |
+| 2025 | 19,329,768 / 19,355,249 | 636 / 647 / 668 | 618 / 632 / 651 | 786 / 802 (51,792) | 441,720,723 | 1,237,513 / 1,391,171 / 2,588,708 (5 per mille) | 5 / 18 / 58 |
+| 2026 | 14,277,157 / 14,298,951 | 762 / 775 / 797 | 742 / 760 / 780 | 808 / 824 (38,480) | 305,549,965 | 854,463 / 981,081 / 1,808,534 (5 per mille) | 6 / 18 / 83 |
+
+What the table says: on the raw basis rule A moves the minute-high match up
+by 11 per mille in 2025 and 13 in 2026 (the per-share-day median by 16 in
+both), and moves 2019 by less than one per mille, where the adjusted
+Zerodha basis hides any difference. Rule A's extreme is worse than the
+stored second's on 5 to 13 seconds in a thousand: rare, but present on
+almost every share-day (the per-share-day p50 is 5 to 14 per mille).
+
+Rule R is every row, every second (the scratch checker's "rule A"). 2019's
+per-share-day medians are 0 because Zerodha's 2019 history is adjusted for
+later corporate actions on about half the shares (91 of 171 in March 2019 by
+the hand-over's feed check) and no minute of an adjusted day can match
+(hand-over FINDING 3); every share in the table is a lower bound under every
+rule alike until DATA-1's factor is applied.
+
+**Decision.**
+
+1. **The store stays rule T**, bit for bit. Volume, open, close and the
+   trade count are trades-only under every rule, and a second with no trade
+   has no bar. The check names every share-day that is not rule T
+   (D-5181, D-5183).
+2. **Fills read the stored rule-T one-second bars until a rule-A file
+   version exists.** A fill that wants to know whether to trust a day asks
+   `SecondChecks::status_of(symbol, day)` (D-5184): `trusted()` is true only
+   for a day equal to rule T against the source its landing recorded.
+3. **Rule A is never written into the one-second bars.** If it is adopted
+   for the worst-case fill bound (hand-over: the worse of the GDFL second and
+   the Zerodha minute high/low), it is filed as a NEW append-only file
+   version beside the month (its own name, its own generation), and a run
+   that reads it carries that version's digest as its own identity term, so
+   a run on rule-A seconds can never share an identity with one on rule-T
+   seconds. Nothing already stored is changed in place.
+4. **Adopting rule A waits on one measurement, not on the operator**: the
+   same minute shares on DATA-1's factor-converted basis. If rule A's
+   per-share-day median high match stays above rule T's there, the version
+   is built (a store step for the main session); if not, the bound stays
+   rule T plus the Zerodha minute. The fill-worsening measure above says
+   how much a fill priced at a second's extreme moves: rule A is worse in
+   2,588,708 of the 441,720,723 stored seconds of 2025 (5.86 per mille;
+   2019 13.71, 2026 5.92).
+5. Rule R is reported only as a minute match and is never a bar: it would
+   invent seconds no trade made.
+
+**Other years**: 2018 and 2020 to 2024 are read-only store steps for the
+main session (`docs/06-limits.md` L-T2S-04 gives the measured cost a year).
+
+### D-5181 — `cli tick-to-second-check`: every stored GDFL share-day rebuilt by the importer's own reader and fold and compared with the store by a constant-size signature, read-only (DATA-2) — 2026-10-16
+
+The tick-to-second conversion was checked on 15 October by an untracked
+scratch checker outside this repository, which carried its own row parser,
+its own fold and a fixed 09:15–15:30 window, and read the store through
+`/bars.json` on the operator's app. Its 2025 answer (76,886 share-days,
+75,608 exact under the trades-only rule) was right, but two of its three
+explanations were the checker's own: 983 share-days "differed" because it
+did not URL-encode `&` in `M&M`, `M&MFIN`, `ARE&M` and `GVT&D`, and 295
+because its window was not the 2025 Muhurat's. A check that can disagree
+with the store for reasons of its own is not evidence about the store. This
+verb replaces it; the scratch checker is evidence only.
+
+1. **One reader, one fold, one session authority: the importer's.** Rows
+   reach the rebuild only through `pull::gdfl_cm::read_listed` (length and
+   CRC-32 against the listing, the day's session, refused rows by name,
+   closing-auction prints diverted) under the scope `cli gdfl-import stocks`
+   files (`pull::gdfl_run::scope::of`: old names filed under the newest
+   symbol, trade-for-trade series files under their share). Seconds are
+   folded by `pull::gdfl_import::convert` (late-row placement included) and
+   kept or dropped by `pull::session::Window::verdict` with the import's
+   window, rung and venue. **No change to `crates/pull` was needed**: every
+   piece is already public. The census of what the decoder keeps no field
+   for (the quotes, a minus sign, a repeated line) is one pass over the
+   same bytes, kept by a wrapper source so they are the bytes `read_listed`
+   checked; it never makes a bar.
+2. **Rule T** is `convert(ImportKind::Stocks)`: what the store holds.
+   **Rule A** keeps rule T's seconds, opens, closes and volumes and widens
+   each second's high and low by every row placed in it, LTQ = 0 included,
+   from `convert(ImportKind::Indices)` (the importer's every-row rule, the
+   same placement). No bar is invented for an untraded second. **Rule R**
+   (every row, every second) is reported only as a minute match.
+3. **A signature per share-day**: second count, sums of O/H/L/C, volume,
+   first and last stamp, BLAKE3 over every record in order (stamp, OHLC,
+   volume, open interest). The store side is read through
+   `BarFile::open_existing` (shared lock, the served generation, nothing
+   created) with one indexed lookup to the day's first second.
+4. **Statuses**: `exact_T`, `exact_A`, `differs:<fields against T>`,
+   `differs:auction_prints_folded` (D-5183), `raw_only`, `store_only`,
+   `special_session` (a day `pull::calendar::special_session` records whose
+   comparison was exact; `compare` says which rule; CAL-1's `tradable_day`
+   has not merged, so the label is `special_session` plus `kind_of`),
+   `read_failed:<the refusal's own word>`.
+5. **Counts by reason**, every one a column: the decoder's `zero_ltp`,
+   `off_grid`, `malformed`, `refused_whole`; the census's `negative_ltp`,
+   `negative_qty`, `crossed_quote` (bid > ask, both positive),
+   `one_sided_quote`, `identical_consecutive`; `out_of_order`,
+   `late_traded`, `ltq0_rows`, `ltq0_new_price`, `auction_prints`,
+   `auction_volume`, `auction_in_sidecar`, `trades_in_session`, and the
+   rule-T seconds the session filter dropped before the open, at or after
+   the close, and for any other reason. `outside_day_band` is `UNVERIFIED`
+   on every row (D-5182).
+6. **The fill-worsening measure per share-day** (`fill_compared`,
+   `fill_high_worse`, `fill_low_worse`, `fill_either_worse`): one merge of
+   the stored seconds with rule A's.
+7. **The minute match per share-day** against Zerodha's stored one-minute
+   bars, under T, A and R: minutes compared and minutes whose high and low
+   are equal, `zerodha_basis` saying `raw_unadjusted` (or `none` when
+   Zerodha holds no minute that day).
+8. **Exit code**: 0 only when every row the run made is `exact_T`, `exact_A`
+   or `special_session`; 1 otherwise, the files written either way.
+
+**Measured, read-only**, at four workers, by the build of this entry's
+commit, over the operator's store, tick store and archive (each run under a
+kernel write lock on all three):
+
+Build of commit `4465735a0`, 19 and 20 October 2026, `--archive` naming
+the vendor archive, output `state/datacheck/rust-t2s-r6/out/` of the
+operator's work folder (run logs beside it):
+
+| Year | Stored share-days | Rows | `exact_T` | `special_session` (compare) | Other | Wall at 4 workers |
+|---|---|---|---|---|---|---|
+| 2019 | 70,990 | 71,202 | 70,697 | 293, 2019-10-27 Muhurat (`exact_T`) | 212 `raw_only` | 250.28 s |
+| 2025 | 77,405 | 78,056 | 76,783 | 622: 311 on 2025-02-01 (budget weekend), 311 on 2025-10-21 Muhurat (all `exact_T`) | 651 `raw_only` | 273.13 s |
+| 2026 (to 30 Sep) | 57,113 | 58,449 | 49,019 | 311, 2026-02-01 budget weekend (`exact_T`) | 7,456 `differs:auction_prints_folded`, 1,228 `store_only`, 383 `raw_only`, 52 `read_failed:AuctionEligibilityUnknown` | 114.87 s |
+
+**Every stored share-day of 2019 and 2025 is rule T, bit for bit** (every
+`compare` of a stored day is `exact_T`), and so is every 2026 day the store
+filed under bar definition 4. What is not exact, row by row:
+
+- **`raw_only`** (651, 212, 383): every one is a trade-for-trade series file
+  (`<SYM>.BE.NSE.csv`: 651, 142 and 377; `<SYM>.BZ.NSE.csv`: 70 in 2019; six
+  tick-store `.bts` days in 2026) of a day the store holds nothing for. The
+  importer's scope files those series under their share
+  (`pull::gdfl_run::scope::of`), so these are days a re-import would add;
+  the landings that made the store did not file them.
+- **`differs:auction_prints_folded`** (2026, 7,456: 7,450 equal to rule T
+  with every diverted closing-auction print folded back, 6 with only the
+  prints the `.auc` sidecar does not hold): days the store filed under bar
+  definition 2 or 3 (D-5183). Each is equal in every field and the digest
+  to that rebuild, and to nothing else.
+- **`store_only`** (2026, 1,228): the extra comparison of 25, 28, 29 and 30
+  September 2026, 307 share-days each. The archive ends on 24 September and
+  holds no day zip for them; their landing rows are the tick store's.
+- **`read_failed:AuctionEligibilityUnknown`** (2026, 52; DISHTV 8, RCOM 16,
+  RELINFRA 28): today's reader refuses those files because a
+  closing-auction candidate row belongs to a share `core::universe`
+  records no ISIN for. 45 of them are days the store does not hold (RCOM
+16, RELINFRA 28, DISHTV 1); the 7 DISHTV days it holds were filed by an
+earlier landing.
+
+**The scratch checker's 2025 result is reproduced and every difference is
+explained.** The scratch checker found 76,886 share-days. All 76,886 are
+among this check's 77,405. The other 519 are days stored under a renamed key
+(LTM 249 from `LTIM.NSE.csv`, TMPV 202 from `TATAMOTORS.NSE.csv`, ETERNAL 68
+from `ZOMATO.NSE.csv`). The scratch checker looked for a file under the
+store's current name; this check follows the landing record, and all 519
+are `exact_T`. On the shared 76,886 days the rule-T seconds and volume
+are equal on 76,591. The other 295 are 2025-10-21, where the scratch
+checker applied the regular 09:15 to 15:30 window to the Muhurat session.
+`Window::verdict` applies the session's own window, and those days are
+`exact_T`: 3,642 fewer seconds and 578,518 fewer shares than the scratch
+checker counted, all in the trades after 14:45 that the store rightly
+drops. The scratch checker's 983 names with `&` are `exact_T` with no
+encoding step: the store is read through `BarFile`, not a URL. Out-of-order
+rows are 0 in both. The scratch checker counted 2,334,183 LTQ = 0 rows with
+a new price; this check counts 2,333,404 on the same days, and all 779 of
+the difference is again 2025-10-21's window. This check counts 22,718 more
+on the 519 renamed days and 5,168 on the `raw_only` files, 2,361,290 in
+all. `raw_rows` counts every data line of a file (2,540,534 more than the
+scratch checker's rows, which kept only lines stamped 09:15 to 15:30).
+
+**Resumable on the real data, byte for byte**: a 2025 run of the same build
+cut off by a usage limit on 19 October after 109 day segments
+(`state/datacheck/rust-t2s-r5/out/`) was started again over the same
+folder. It found 33,937 share-days already answered and checked the other
+256 calendar days in 93.30 s. It wrote segments 110 to 249 and folded a `tick-to-second-2025.v001.csv`, `.idx` and
+`.summary.txt` whose SHA-256 equal the uninterrupted run's.
+
+**Amended by D-5188 (2026-10-23).** Item 4 above says CAL-1's
+`tradable_day` "has not merged". CAL-1 has since merged into `feat/db-fix`
+(`pull::calendar::tradable_day`, D-5150), and this branch took it in its
+repair-2 merge, so that sentence is false on this branch's head. The check
+still labels a day by `pull::calendar::special_session` and then
+`kind_of`, as item 4 describes. Labelling through `tradable_day` is NOT
+DONE. It would change which days a row calls `special_session`: a halt day,
+a day of unmeasured length and an unknown session become non-tradable
+reasons of their own. That is a change of the rows' meaning, and needs a
+re-run of the real years. No row and no summary of this check names CAL-1,
+so no stored file carries the stale sentence.
+
+### D-5182 — The day band is not counted until a dated, charter-sourced per-share-day band exists, and the Zerodha minute comparison is on the raw basis until DATA-1's factor merges (DATA-2) — 2026-10-16
+
+The hand-over's worst-case list asks for "a bad print outside the day band"
+to be counted. No exchange price band for a share is recorded in
+`docs/00-charter.md`, so a band here would be invention (`CLAUDE.md` §3 rule
+1). The operator's rule of 16 October 17:15 IST (5) settles it: **not
+counted until a dated, charter-sourced per-share-day band exists**. Every
+row's `outside_day_band` cell says `UNVERIFIED` and the summary says why; no
+count stands in for it. (A first draft of this entry counted rows outside
+the day's own traded range instead; it never merged and the operator's rule
+replaces it.)
+
+Zerodha's history is corporate-action adjusted and GDFL's is raw (hand-over
+FINDING 3). DATA-1 derives the per-share-day factor and has not merged into
+`feat/db-fix`, so the minute high/low match is computed on the RAW basis and
+every row says `zerodha_basis=raw_unadjusted`. On an adjusted share-day no
+minute can match, so every share D-5180 reports is a lower bound until the
+factor is applied; the summary's minute section says so in its title.
+
+**Amended by D-5188 (2026-10-23).** DATA-1 has merged into `feat/db-fix`
+and into this package's branch: its per-share-day factor is
+`feed_reconcile::FactorIndex::factor_of`. "Has not merged" above was true
+when this entry was written and is false now. The minute match is still on
+the RAW basis, because this check does not apply the factor (NOT DONE).
+Every summary written from D-5188 on says so in those words. The per-row
+`zerodha_basis=raw_unadjusted` cell was true throughout and is unchanged.
+
+### D-5183 — A store day built under an earlier bar definition is named by its one difference, and a stored day an extra archive does not file says why (DATA-2) — 2026-10-16
+
+The first 2026 run answered several thousand share-days of the closing
+auction's era `differs:seconds+open+high+low+close+volume+span+hash` with no
+word of why. They had one cause the store's own journal states, and a status
+that does not say it is a failure dressed as an answer (`CLAUDE.md` §4): a
+reader cannot tell a conversion fault from a store built under an earlier
+definition.
+
+1. **Folded** is rule T with the decoder's diverted closing-auction prints
+   (`CmFile::auction`, D-3320) put back into file order by line, each
+   identical row restored (`Print::rows`), and folded by the same
+   `pull::gdfl_import::convert` under the same session filter
+   (`tick_second_check::with_prints`): the bars bar definitions 2 and 3
+   built. A store day equal to it in every field and the digest, and to no
+   rule, is `differs:auction_prints_folded` with `compare`
+   `exact_T_with_auction_prints`.
+2. **Unfiled** is rule T with only the prints the store's own `.auc`
+   sidecar does NOT hold put back (`tick_second_check::unfiled_prints`,
+   one sidecar read per share-day with a print): the shape a definition
+   left that filed some of a day's prints in the sidecar and folded the
+   others. A store day equal to it alone is `differs:auction_prints_folded`
+   with `compare` `exact_T_with_unfiled_auction_prints`, and the row says
+   how many of the day's prints the sidecar holds (`auction_in_sidecar`).
+   A sidecar that cannot be read is said in the row's `detail`, and only the
+   every-print fold is compared.
+3. Either stays a difference (the run is not clean): the store is not what
+   this commit's importer makes of the file. A day equal to none stays
+   `differs:<fields>`, so the label is earned per share-day by equality,
+   never assumed for the era (`docs/06-limits.md` L-T2S-06). Restating
+   those days is the importer's (D-4878 item 10 refuses them at admission
+   until the months are made again as new generations, WP-80); this check
+   only names them.
+4. The rows file carries both signatures (`folded_*`, `unfiled_*`, empty
+   when not computed) and the prints' traded quantity (`auction_volume`,
+   every identical row counted).
+5. A stored share-day the `--archive` comparison finds no file for is
+   `store_only` and says which: `the archive holds no day zip for <day>` or
+   `the archive's day zip lists no file of this share`.
+
+### D-5184 — The check's fixed-stride index: `SecondChecks::status_of(symbol, day)` in O(1), `file_digest()` for run identities, and `trusted()` only for a day equal to rule T against its landing source (DATA-2) — 2026-10-16
+
+The judge's follow-up of 16 October: the Fib deep stage needs a trust status
+per share-day in O(1), and a version file with no reader is a write-only
+log.
+
+1. Each version is written with `tick-to-second-<year>.v<NNN>.idx`: a
+   128-byte header (magic `BRXT2SX1`, format 1, the year, its first day and
+   day count, the symbol count, the stride, the symbol table's length, the
+   highest segment the version folded, and the BLAKE3 of the version's CSV),
+   the sorted symbol table, then one 20-byte record per (symbol, day of the
+   year), symbol-major: status code, source code, two zero bytes, the
+   stored seconds, the seconds compared for the fill measure, the worse
+   ones, and the row's line in the CSV. The layout is in the module's own
+   header (`cli::tick_second_check::index`); the codes are this format's
+   and are never renumbered (`CLAUDE.md` §3 rule 8).
+2. `SecondChecks::open(dir)` reads the newest index of every year once
+   (every header field and every record checked, a file that is not this
+   format's refused by name); `status_of(symbol, day)` is one hash probe,
+   one subtraction and one 20-byte read; no answer is a reason, never a
+   default: `NoVersion`, `SymbolUnknown`, `NotChecked`.
+3. `file_digest()` is BLAKE3 over every held year's number, version and
+   index digest: the one value a run identity carries to name exactly the
+   files its trust answers came from.
+4. Per share-day the index keeps one answer: the landing row, unless it
+   says only that no source was recorded and an extra row exists.
+   `trusted()` is true only for `exact_T` or `special_session` against an
+   archive member or tick-store day the landing recorded. A special session
+   whose store equals rule A (not rule T) is filed `ExactA` in the index, so
+   `trusted()` never claims rule-T seconds for it.
+5. Load: `load_year` holds the newest CSV to the digest its index records
+   before a row of it is believed; a CSV that is not the one its index names
+   is refused.
+
+**Measured**: every run that writes a version times `status_of` over every
+(symbol, day) of the year on the index it just wrote and prints p50, p99 and
+max in the version's timings (`docs/06-limits.md` L-T2S-09).
+
+### D-5185 — Each stored share-day is compared with the exact source its landing recorded, held to its record before a byte is read (DATA-2) — 2026-10-16
+
+The operator's rule of 16 October 17:15 IST (3): compare each share-day
+against the exact source recorded in the month's `.prv` records (D-3334),
+check the member's size and CRC first, check a tick-store landing against
+that tick-store day, and label any extra archive as not the landing source.
+
+1. **An archive member** (`<archive>!<day zip>!<entry>`): the archive is
+   opened READ-ONLY at the recorded path (`pull::gdfl_archive`), the day zip
+   read in place and the member inflated in memory, never extracted. Before
+   a byte of it is read the member's whole name must hash (BLAKE3) to the
+   record's, and its size and CRC-32 from the day zip's directory must be
+   the record's: otherwise `read_failed:source_changed`, with both named.
+2. **A tick-store day** (`cm/STOCKS/<yyyy>/<MON_yyyy>/<day>.bts`): read
+   through `pull::gdfl_tickstore::TickStore` under the root
+   `BRUTEX_GDFL_TICKSTORE` names (the importer's variable); the day file's
+   name and length must be the record's, or `read_failed:source_changed`.
+   With the variable unset, `read_failed:tickstore_unset`.
+3. **No record** (a month landed before D-3334): `read_failed:
+   source_unrecorded`, unless `--archive` names an archive to compare with;
+   that row is then labelled `archive_not_the_landing_source`. Records of
+   one day naming different sources are `read_failed:source_ambiguous`. The
+   run prints how many stored share-days had no landing record, so a run
+   over such months never reads as a landing-source check.
+4. `--archive` adds one comparison (role `extra`) for every stored day whose
+   landing is not a member of that same archive file (resolved once per
+   recorded path), and finds the archive's shares the store holds nothing
+   of (`raw_only`). Each extra row says `archive_not_the_landing_source`.
+5. `--out` inside the store root, or inside the tick store
+   `BRUTEX_GDFL_TICKSTORE` names, is refused before anything is read: the
+   check never writes a source it compares with.
+
+### D-5186 — The unit is the stored day, resumable; day segments fold into the year's next version; workers by the doubling rule; the reused reader's bad-row limit, its counts printed either way (DATA-2) — 2026-10-16
+
+The operator's rule of 16 October 17:15 IST, items (1), (2) and (4),
+superseding the typed values of the first specification (a bounded worker
+count, one batch per year, one typed archive path).
+
+1. **Which days.** The store's own: every day a share's GDFL one-second
+   month holds a bar on, found by one indexed probe per calendar day of each
+   month (`BarFile::first_at_or_after`), for every month of YEAR, or of
+   every month the store lists when YEAR is not given. Days come from the
+   store's listing and the source's own listing, never from dates in a file
+   name. A share-day already answered by a row of an earlier run (its
+   newest version or a segment written since) is not read again, unless the
+   month's `.prv` now names another landing for it. A `read_failed` row
+   answers nothing: the day is read again on the next run, and a row that
+   comes out byte-identical is not filed again, so a run that learns nothing
+   makes no version. The importer's per-day hook that would run the check
+   for each newly landed day belongs to the ingest-automation package and
+   is not built here.
+2. **Append-only output.** Each day a run checks becomes a segment,
+   `tick-to-second-<year>.s<NNNNNN>.csv`; at the end of the run every
+   segment since the year's newest version is folded with it into the next
+   version: `.v<NNN>.csv` (every row, sorted by day, symbol and role, a
+   later row replacing an earlier one of its key), `.summary.txt`,
+   `.timings.txt` and `.idx` (D-5184), the index linked last. Every file is
+   staged through `store::staging::create`, made durable, linked to a name
+   that did not exist with `hard_link` (which never replaces), the staging
+   name removed and the directory made durable: a reader sees the whole
+   file or none. A lock file in the output directory keeps two runs from
+   writing it at once. A run killed mid-way leaves only whole segments,
+   which the next run folds.
+3. **Workers** (item 1): without `--workers`, the ceiling is the host's
+   cores and the day count, whichever is fewer; the run starts at one
+   worker and doubles while the work per second of the last full round
+   (raw rows read, one day per worker) still rises, then runs the rest at
+   the best count measured. `--workers N` fixes the count (1 to the host's
+   cores). The CSV, the summary and the index are byte-identical at any
+   count; the timings file is the one file a count changes. Read-only runs
+   over the real store use `--workers 4`, the operator's cap.
+4. **Bad rows** (item 4): the limit is the reused reader's own
+   (`pull::gdfl_cm::MAX_BAD_ROWS` 64 and `BAD_ROWS_PER` 1,000 today;
+   PREC-5's two-way rule when it lands there, unmerged at this commit). A
+   file it refuses whole is `read_failed:TooManyBadRows`, its census counts
+   are filled either way, and the row's `detail` says what PREC-5's two-way
+   rule would decide of the same counts.
+5. **Events**: one at the start and one at the end of a run, one per day
+   checked and one per instrument-month (gate 17: none in a loop over rows).
+
 ### D-5884 — IA-2 repair 1: a run's end line is folded into its run by every reader; stop askers write in turn under the journal lock; a busy store lock on v4 names its runs; a held lock is named before its sink; a census verb is never promised a stop — 2026-10-18
 
 **Number** free on every local branch on 2026-10-18 (the highest seen was
@@ -82718,3 +83113,288 @@ through it"). Under D-7135 no root A is ever built.
 4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
+
+### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
+
+**What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store
+root or inside the tick store is refused before anything is read. The check
+that held it (`tick_second_check::inside`) walked up to the first existing
+ancestor of `--out`, resolved that and compared. Two forms went past it:
+
+- a **relative** `--out` whose first component does not exist: the parent of
+  a bare name is the empty path, which neither exists nor resolves, so the raw
+  text `reports` was compared with the store's resolved path;
+- a **`..` after a missing component** (`<x>/nope/../store/dd`): the walk
+  stopped at a name ending in `..` (it has no file name), so the raw text was
+  compared again.
+
+Reproduced on this branch's previous build (state/datacheck/rust-t2s-r7/bin/cli,
+the tree of e236c75fb) on a synthetic store and tick store under
+`scratch/data2-fix-r1/pre/`: standing in the store, `--out reports` exited 0
+and made `store/reports/tick-to-second.lock`; `--out <x>/nope/../store/dotdot1`
+made `nope/` and `store/dotdot1/tick-to-second.lock`; standing in the tick
+store's `cm`, `--out relt` made `ticks/cm/relt/tick-to-second.lock`. On a
+store with days the same run writes its day segments and version files there
+(the verifier's reproduction).
+
+**The decision.**
+
+1. Every path the containment check compares is first made absolute against
+   the current directory (`std::path::absolute`), the base the host itself
+   resolves a relative `--out` against when the run makes it.
+2. It is then walked one component at a time in two forms (`Resolved`):
+   - **physical**: after each component that exists, the host's own answer
+     for where it is (`canonicalize`: links followed, the case held on disk).
+     A `..` after an existing component leaves the place that component
+     really is; a `..` after a missing one cancels it, exactly as
+     `create_dir_all` makes the missing component a real directory and steps
+     back out of it.
+   - **lexical**: `.` dropped and each `..` taking off the component before
+     it, as written.
+3. `--out` is inside a root when it is inside in EITHER form. The physical
+   form catches every relative, `..`, link and case spelling of the store's
+   own place; the lexical form also refuses an `--out` written through one
+   of the store's own links (`<store>/link/reports`), whose physical place is
+   wherever the link leads.
+4. A component the host can neither resolve nor report missing (a refused
+   permission, a component under a file) refuses the run: where `--out`
+   lies is then unknown, and guessing would be the fallback CLAUDE.md §4
+   bans. An empty `--out` cannot be made absolute and is refused the same
+   way.
+5. The refusal still comes before `create_dir_all` and before the lock file:
+   nothing is made anywhere when `--out` is refused.
+
+**Two follow-ups taken with it.** A staged write the host refuses takes its
+staging name back off (`stage_with`): the name carries the process id, so no
+later run's `store::staging::create` would ever clear it, and a refused run
+left a `.tmp` beside its versions for good. A month held ONLY as a sealed
+`.sbar` (its raw name gone) is now checked end to end, row for row as its raw
+form was, not only listed (T2S-17 covered the listing).
+
+**What it does not do** (`docs/06-limits.md` L-T2S-11): it does not follow
+the store's links outward, so an `--out` written as the physical target of a
+link inside the store (`/data/bars/r` where `<store>/bars -> /data/bars`) is
+not refused; the real store holds no such link at its top (measured `ls -la`,
+21 Oct 2026). And it is a check before a create, so a link swapped in between
+the two is not seen.
+
+**Proof.** `tick_second_check::tests::an_out_directory_inside_the_store_and_a_held_lock_are_refused_before_anything_is_read`
+(the `..` form, absolute and relative to the current directory, for the store
+and the tick store), `tick_second_check::tests::both_forms_of_a_path_name_where_the_run_would_really_write`,
+`crates/cli/tests/tick_second_out.rs::a_bare_relative_out_standing_in_the_store_or_the_tick_store_is_refused_before_anything_is_made`
+(the binary, standing in each root),
+`tick_second_check::tests::a_refused_staging_write_takes_its_staging_name_back_off`,
+`tick_second_check::tests::a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was`.
+T2S-18 to T2S-20. Amends D-5185 item 5 by stating how it is held; the rule
+itself is unchanged.
+
+### D-5188 — The run's lock name is opened through the importer's lock door: never through a symbolic link, a special file or a second name; and the summary's raw-basis sentence says DATA-1's factor is merged but not applied (DATA-2 repair 2, verify-DATA-2-r2) — 2026-10-23
+
+**What was wrong (1): the lock name.** D-5187 holds `--out` outside the
+store and the tick store. But the first thing a run made in `--out` was its
+lock file, and it was opened with `create(true)` and `write(true)` through
+whatever already stood at `tick-to-second.lock`. That open follows a symbolic
+link and opens a hard link. Nothing looked at the name first. So a run whose
+`--out` was rightly outside the store could still create a file INSIDE it, or
+lock a file inside it.
+
+Reproduced on synthetic copies under `scratch/data2-fix-r2/pre/`, with the
+verifier's release build of this branch's previous head:
+
+- A link at the lock name to a missing name in the store
+  (`store/bars/PLANTED_BY_LOCK`). The run completed ("3 stored share-days ...
+  5 rows made") and left that name in the store as a 0-byte file.
+- A hard link at the lock name to a store month's writer lock
+  (`ZZALPHA/1s/2025-03.lock`). The run held that month's lock for its whole
+  length, and its own read of the month became `read_failed:store`
+  (`store_Locked`). An ingest writer would have found the month held.
+
+**The decision.** The lock name is opened by
+`pull::gdfl_run::locks::open_lock_path`, the door the importer's own run
+locks use (RA-285). No second opener is written. That door:
+
+1. opens with `O_NOFOLLOW | O_NONBLOCK`. A symbolic link at the name, dangling
+   or not, is refused by the host, so nothing is made where it leads. A pipe
+   cannot hold the open.
+2. checks the opened file with `fstat`. It must be a regular file with exactly
+   one name. A directory, a special file and a hard link to another file are
+   refused, each by name, before any lock is tried on it.
+
+The refusal names the lock path and what stands there, and comes before
+anything is read. The run makes no segment, version or row, and leaves the
+store unchanged. A plain lock file left by an earlier run is taken as before.
+
+**What was wrong (2): the basis sentence.** Every `.summary.txt` this build
+writes said "the DATA-1 factor has not merged". That was false on this head,
+because DATA-1 (`feed_reconcile::FactorIndex::factor_of`) merged in before it.
+A summary is append-only and is never rewritten, so a false sentence there
+would stay stored for good. The sentence is now
+`DATA-1's per-share-day factor is merged but not applied by this check (NOT DONE, D-5188)`,
+held in one constant (`RAW_BASIS_WHY`). The module doc, D-5182 (amended
+above) and `docs/06-limits.md` L-T2S-05 now say the same. Converting the
+minute match by the factor is NOT DONE. It needs a factor-version input per
+month (a `feed-reconcile` output directory), that version's digest in each
+row's identity, and a re-run of the real years. Until then the per-row
+`zerodha_basis=raw_unadjusted` cell, the summary title and every share D-5180
+reports stay a lower bound on an adjusted share-day.
+
+**What it does not do** (`docs/06-limits.md` L-T2S-11). It does not check the
+name again after the lock is taken. A lock file that is removed or replaced
+under a live run is not seen, and no command of this repository deletes one.
+
+**Proof.**
+`tick_second_check::tests::a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothing_goes_through_it`
+covers four shapes: a link to a missing name in the store, a link to a
+month's writer lock, a directory, and a hard link to that writer lock. For
+each it checks the refusal by name, an unchanged store listing, nothing made
+where the link leads, no row, and no lock tried while the writer lock is
+held. It then checks that the month's lock is free and that a plain lock file
+is taken by the next run.
+`tick_second_check::tests::every_status_and_source_is_named_against_the_landing_the_store_recorded`
+now requires the summary's basis sentence and refuses "has not merged".
+T2S-21.
+
+**The same stale word in D-5181.** That entry's item 4 said CAL-1's
+`tradable_day` had not merged. It has, and the same merge brought it here.
+D-5181 carries a dated amendment that says so. Labelling through it is NOT
+DONE, and no file this check writes names CAL-1.
+
+**Two follow-ups taken with it** (verify-DATA-2-r2, in this package's file).
+`--out`, `--archive` and `--workers` given twice took the last value with no
+word; each is now refused as misuse that names the flag. `--symbols` names
+still add up, as they always did. A `--symbols` list in which no name is a
+share the store holds checked nothing and exited 0. It now names each name
+and exits `FAILED`. A list with at least one held share is judged by its rows
+as before, with the unknown names still printed. T2S-22.
+
+### D-5189 — A share directory the store's symbol rule refuses is filed under its percent-escaped name, one cell and one key; the check reads its own files and its archives only as regular files; and `--out` is held outside where a root's own top-level link leads (DATA-2 repair 3, verify-DATA-2-r3) — 2026-10-23
+
+**What was wrong.** A share directory whose name the store's symbol rule
+refuses (`core::symbol::Symbol::new` admits ASCII letters, digits, `-`, `_`
+and `&`) is filed as one `read_failed:store_symbol` row. Its `symbol` cell
+was the directory name as given, written with no escape. A name holding a
+comma made a row of 67 cells; one holding a line break made a row of 1 and
+a second line. The row went into an append-only day segment, and every later
+fold of that year read the segment back and refused the file as "not one of
+this layout's". A segment is never rewritten or removed, so every later run
+of that year on that `--out`, and every run with no YEAR, was refused for
+good, even after the stray directory was gone. Only a fresh `--out` ran, and
+it lost every answer already checked. T2S-16 claimed every free-text cell is
+one CSV cell; its test checked `file` and `source_name` only.
+
+Reproduced first with the previous release build on synthetic roots
+(`scratch/data2-fix-r3/comma.sh`, results in
+`scratch/data2-fix-r3/comma-pre/results.txt` of the operator's work folder):
+`ZZ,BAD` gave "a row of 67 cells, not 66", and a line break gave "a row of 1
+cells, not 66", on the first run, on a rerun, with no YEAR, and after the
+directory was renamed to a name the store admits.
+
+**The decision.**
+
+1. The `symbol` cell is the name percent-escaped (`symbol_cell`): `%`, the
+   comma and every byte outside printable ASCII are written `%XX`, every
+   other byte as it is. `clean`, which the other text cells use, is not
+   enough here, because the ledger is keyed by this cell and `clean` maps
+   two names onto one text (`ZZ,BAD` and `ZZ;BAD`). Two refused directories
+   would then share one key, and the rows of both, differing in nothing a
+   reader sees, would take turns being filed. The escape is decodable, so
+   two names never share a cell. It is the name itself for every name the
+   symbol rule admits, so no stored share's cell, row or index entry changes,
+   and an escaped name always holds a byte that rule refuses, so it can
+   never be a stored share's. Every other text cell (`status`, `compare`,
+   `session` and the build stamp among them) now goes through `clean`: a
+   no-op on every word this module writes today, and the guard for a word it
+   writes later.
+2. Every ledger probe builds its key with one function (`row_key`), the way
+   the line is read back: the plan's failed rows, the landing and extra
+   probes, and the instrument-month events. A refused directory still
+   standing therefore files nothing new on the next run, makes no segment and
+   no version, with a YEAR or without.
+3. An `--out` that an earlier build already poisoned stays refused. Its
+   segment is not a file of this layout, and a fold that read past it would
+   hide a failure (CLAUDE.md §4). The remedy is a fresh `--out`. No real run
+   wrote such a row. The real store's GDFL share tree holds 337 directories,
+   every one a name the rule admits (a read-only `ls`, 23 Oct 2026), and the
+   real-run folders `state/datacheck/rust-t2s-r3` to `-r7` of the operator's
+   work folder hold no `store_symbol` row.
+
+**Four follow-ups taken with it** (verify-DATA-2-r3, all in this package's
+files).
+
+- *A named pipe or a symbolic link at one of the check's own names.* Every
+  version CSV, index and day segment is read by `index::read_regular`:
+  `store::open_flags::open_read_no_follow` (`O_NOFOLLOW | O_NONBLOCK`), then
+  the handle's `fstat` must say a regular file. A pipe at a segment or
+  version name held `load_year` for good; it is now refused by name at once.
+  A dangling link read as a missing file; it is now refused as a link.
+  `SecondChecks::open` refuses the same way. This check's own files are
+  always regular files, made by a staged write and a hard link, so nothing
+  legitimate is refused.
+- *A named pipe given as `--archive`.* `Archive::open` opens with a plain
+  blocking open, which waits for good on a pipe with no writer. Every
+  archive, `--archive` and each one a landing recorded, is now opened here
+  with `O_NONBLOCK`; its own `fstat` must say a regular file before the
+  importer's reader indexes it through `Archive::from_source`. The name may
+  still be a link, since an archive is often named by one. The words of a
+  failed open are `Archive::open`'s own ("archive unavailable: ..."). No
+  change to `crates/pull`.
+- *An `--out` written as the physical target of a root's own link* (ATK-16,
+  `docs/06-limits.md` L-T2S-11). With `<store>/bars -> /data/bars`, an
+  `--out` of `/data/bars/r` lay inside neither form of the store that D-5187
+  compares, and a run there would write among the bars the store serves.
+  Every symbolic link at the top of the store root and of the tick store
+  root is now read once (`link_around`). A relative target is taken against
+  the root, and a dangling one is included, since `create_dir_all` would make
+  it real. An `--out` inside a target in either form of `inside` is refused
+  naming the link, before anything is made. A link deeper in a root is not
+  walked; the real store holds no link at its top (L-T2S-11), and a shadow
+  store holds its `bars` link there.
+- *A share whose months cannot be listed.* A stray FILE where a share's
+  directory belongs, or an unreadable directory, refused the whole run with
+  no YEAR, because the share's month listing failed; a YEAR run filed it
+  month by month (`read_failed:store_month`, one row on the first day of
+  each month). With no YEAR such a share is now planned by every month of
+  the years in play, exactly as a YEAR run of each of those years plans it,
+  and the run names it and the host's words out loud. The two kinds of run
+  therefore file the same rows and never take turns refiling them. A store
+  that holds nothing else has no year to file it under, and is refused by
+  name as before.
+
+**What it does not do.** Each item below stays named in `docs/06-limits.md`
+or in the package report.
+
+- A second, different `--archive` on the same `--out` is still answered from
+  the first one's extra rows. Those rows name the archive only by the text
+  given, so a refusal by name would misfire on a second name for the same
+  file; a key by archive identity is a layout change for its own decision.
+- A SIGKILLed run still leaves its `.tmp` staging name.
+
+**Proof.**
+
+- `tick_second_check::tests::a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice`
+  plants four directories: `ZZ,BAD`, a name with a line break, `ZZ;BAD`
+  (which `clean` would merge with the first), and `ZZ%2CBAD` (the first's
+  escape written out). It requires every line of every CSV to have 66 cells,
+  the fold to succeed, the four rows to be named under four keys, and the
+  stored shares to be answered as before. A second run with the directories
+  still there, and a run with no YEAR, must each leave the output folder
+  unchanged, file for file, size for size and time for time.
+- `words_and_fields_are_one_csv_cell_each` now covers the symbol cell, the
+  escape and `row_key`.
+- `a_pipe_or_a_link_at_one_of_the_checks_own_names_and_a_pipe_archive_are_refused_at_once`
+  covers a pipe at a segment name, a dangling link there, a link at a
+  version's index name (through `SecondChecks::open` too) and a pipe as
+  `--archive`. Each run must return within a minute.
+- `an_out_where_a_roots_own_top_link_leads_is_refused_before_anything_is_made`
+  covers an absolute, a relative and a dangling link at the store's top and
+  one at the tick store's. Each is refused naming the link, with nothing
+  made, and an `--out` beside them runs.
+- `a_share_whose_months_cannot_be_listed_is_filed_month_by_month_with_or_without_a_year`
+  plants a stray file as a share. A run with no YEAR names it and files its
+  twelve 2025 months; a YEAR run and a second run with no YEAR then leave
+  the output folder unchanged; a store holding nothing else is refused by
+  name.
+- The cost of each new step is measured in L-T2S-11 and L-T2S-12
+  (`the_d_5189_steps_are_timed`).
+
+T2S-16 (amended), T2S-23, T2S-24, T2S-25.
