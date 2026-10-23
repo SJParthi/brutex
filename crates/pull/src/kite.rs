@@ -22,7 +22,7 @@ use core::fmt;
 /// How many `error_type` names this module knows by name.
 ///
 /// Nine from the vendor's exceptions page, plus `PermissionException` from the
-/// vendor's own Python SDK.
+/// vendor's own SDK.
 pub const EXCEPTION_COUNT: usize = 10;
 
 /// Kite's body-level error contract, as [`crate::vendor::HttpSpec`] carries it.
@@ -99,7 +99,7 @@ pub enum KiteException {
     General = 8,
     /// **Not on the exceptions page.** *"Represents permission denied
     /// exceptions for certain calls. Default code is 403."* — the vendor's own
-    /// Python SDK. An entitlement failure, not a session failure.
+    /// SDK. An entitlement failure, not a session failure.
     Permission = 9,
 }
 
