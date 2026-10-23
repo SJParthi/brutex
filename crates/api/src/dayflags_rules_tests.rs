@@ -3909,6 +3909,13 @@ fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
         ..ledger(1_200, Some(15 * 3_600))
     };
     assert_eq!(met.json().0["frozen"]["judged_s"], 600);
+}
+
+/// **THROUGH THE ROUTE, AS THE CHECK REPRODUCED IT ON THE REAL STORE**
+/// (verify-R3-13-r1 blocking 1): a GDFL NIFTY auction-era day the day ledger
+/// cannot judge reads `null` and says why, never "not frozen".
+#[test]
+fn a_gdfl_index_day_the_ledger_cannot_judge_reads_null_through_the_route() {
     // THROUGH THE ROUTE, as the check reproduced it on the real store: a GDFL
     // NIFTY day whose ledger run is 838 s from 15:15:00, and one whose run of
     // 600 s carries no stamp, are both null and say why; a day whose longest
@@ -3947,18 +3954,20 @@ fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
     );
     assert_eq!(unstamped["index"]["frozen"]["judged_s"], Value::Null);
     assert!(
-        says(unstamped)
+        super::super::tests::says(unstamped)
             .iter()
             .any(|said| said.contains("600 s, with no stamp, so it cannot be placed")),
         "{:#?}",
-        says(unstamped)
+        super::super::tests::says(unstamped)
     );
     let short = record(&got, "2026-09-29");
     assert_eq!(short["index"]["frozen"]["flagged"], false, "{short:#}");
     assert!(
-        says(short).iter().all(|said| !said.contains("frozen")),
+        super::super::tests::says(short)
+            .iter()
+            .all(|said| !said.contains("frozen")),
         "{:#?}",
-        says(short)
+        super::super::tests::says(short)
     );
 }
 

@@ -315,7 +315,13 @@ fn flag_of(dir: &Path, day: Day, (symbol, isin): (&str, &str)) -> Result<Answer,
         }
         Arc::clone(flying.entry(at.clone()).or_default())
     };
-    let loaded = flight.get_or_init(|| load(dir, day)).clone();
+    let loaded = flight
+        .get_or_init(|| {
+            let master = load(dir, day)?;
+            keep_underlyings(dir, day, &master);
+            Ok(master)
+        })
+        .clone();
     let answer = loaded.map(|master| master.cas_eligibility(symbol, isin));
     if let Ok(kept) = &answer {
         flags().put(key, kept.clone());
@@ -328,6 +334,32 @@ fn flag_of(dir: &Path, day: Day, (symbol, isin): (&str, &str)) -> Result<Answer,
         let _ended = flying.remove(&at);
     }
     answer
+}
+
+/// FROM A MASTER JUST READ, EVERY F&O UNDERLYING'S FLAG ON ITS DAY IS KEPT
+/// (the repair's measurement: with only the asking share's flag kept, every
+/// further share's first auction-era page parsed the same 42 masters again,
+/// about 1 s each). The 213 shares of `brutex_core::universe::FNO_UNDERLYINGS`
+/// (CLAUDE.md §1's equity surface) are each the master's own answer for that
+/// symbol and its universe ISIN, the lookup [`CasFlags::on`] makes: 213 hash
+/// probes against a parse of the whole file, and about 213 x 200 bytes a day
+/// kept. A share outside the list keeps only its own flag, as it asks.
+fn keep_underlyings(dir: &Path, day: Day, master: &Master) {
+    let days = day.days_from_epoch();
+    let answers: Vec<(FlagKey, Answer)> = brutex_core::universe::FNO_UNDERLYINGS
+        .iter()
+        .filter_map(|symbol| {
+            let isin = brutex_core::universe::nse_isin(symbol)?;
+            Some((
+                (dir.to_path_buf(), days, (*symbol).to_owned()),
+                master.cas_eligibility(symbol, isin.as_str()),
+            ))
+        })
+        .collect();
+    let mut kept = flags();
+    for (key, answer) in answers {
+        kept.put(key, answer);
+    }
 }
 
 /// Masters read so far, by directory and IST day: the proof that a day's
