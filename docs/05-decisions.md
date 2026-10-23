@@ -83012,5 +83012,7 @@ landing if it is taken.
    both would file two series as one contract's. The diff's half of the same
    follow-up (a key listed twice in one dump reads as a token change) is NOT
    DONE: it needs a new change kind in the fixed-record diff.
-7. **Proof.** `docs/04-invariants.md` R428-14..17 name the tests. FAILED-FIRST
-   STATUS: see the R4-28 repair 3 report (`state/fix/round2/fix-R4-28.json`).
+7. **Proof.** `docs/04-invariants.md` R428-14..17 name the tests. Both
+   blocking-item tests failed first on the unfixed tree (5d009f454 with only
+   the new tests, `state/fix/round2/R4-28-r3-logs/before3.log` and
+   `before3-pull.log`): the outcome JSON named none of the cut entries.
