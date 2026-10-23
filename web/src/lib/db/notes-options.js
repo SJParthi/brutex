@@ -61,6 +61,7 @@ export const REFUSAL_WORD = {
   rate_unreadable: 'rate fault',
   rate_before_series: 'pre-rates',
   rate_stale: 'rate stale',
+  rate_carried_too_long: 'rate old',
   tenor_refused: 'no tenor',
   iv_unsolved: 'unsolved',
   below_zero_carry_bound: '≤ floor',
@@ -110,7 +111,8 @@ export function greekInputs(r) {
   const age = typeof r.spot_age_s === 'number' && r.spot_age_s > 0 ? ` (${fmt(r.spot_age_s)} s old: last spot at or before t)` : '';
   const flags = [
     r.below_band === true ? `FLAGGED below_band: ${GREEK_FLAG.below_band}` : '',
-    r.above_rate_tenor === true ? `FLAGGED above_rate_tenor: ${GREEK_FLAG.above_rate_tenor}` : ''
+    r.above_rate_tenor === true ? `FLAGGED above_rate_tenor: ${GREEK_FLAG.above_rate_tenor}` : '',
+    r.rate_state === 'rate_carried' ? `CARRIED rate_carried over the documented gap ${r.rate_gap?.kind ?? '?'} released ${r.rate_gap?.released ?? '?'}: ${GREEK_FLAG.rate_carried}` : ''
   ].filter(Boolean);
   return `solved on the server from close ${paisaText(r.premium)}, spot ${paisaText(r.spot)}${age}, tenor ${tenor} (${fmt(r.tenor_s)} s) to the settled expiry’s session close, rate ${(Number(r.rate) * 100).toFixed(4)}% continuous (RBI 91-day T-bill released ${r.auction}), zero carry${flags.length ? `. ${flags.join(' ')}` : ''}`;
 }

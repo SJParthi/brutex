@@ -46,7 +46,7 @@ use std::process::{Command, ExitCode, Stdio};
 /// it, which lowers its count here in the same change; the gate refuses a
 /// count that grows and a count that is higher than the file's. Named for
 /// `docs/06-limits.md` by R3-16.
-const LEGACY: [(&str, usize, &str); 5] = [
+const LEGACY: [(&str, usize, &str); 4] = [
     (
         "crates/cli/src/live.rs",
         1,
@@ -62,14 +62,6 @@ const LEGACY: [(&str, usize, &str); 5] = [
         1,
         "`alerts.<pid>.tmp` by its own `create_fresh`, which removes any name in its way \
          (R3-21, R4-05 own the file)",
-    ),
-    (
-        "crates/pull/src/ingest.rs",
-        1,
-        "`<vendor>.man.writing`, the single-file census's whole publish (repair, first \
-         write, upgrade), by `File::create`: create and truncate, the RA-290 open; read \
-         since AG-05 counts `.writing` (IA-16 owns the file next, or R3-19 after GF-1 \
-         and R3-18; docs/06-limits.md L-R316-04)",
     ),
     (
         "crates/pull/src/manifest.rs",
@@ -646,21 +638,15 @@ mod tests {
             assert_eq!(refused, refuses, "{lines:?}");
             assert!(lines.iter().any(|l| l.contains(says)), "{says}: {lines:?}");
         }
-        // THE TREE AS IT STANDS: census_store is struck from LEGACY, so every
-        // temporary it names is born through the door; ingest.rs's `.writing`
-        // publish is listed, so the remaining open is named.
-        assert!(
-            LEGACY
-                .iter()
-                .all(|(at, _, _)| *at != "crates/pull/src/census_store.rs")
-        );
-        assert!(
-            LEGACY
-                .iter()
-                .any(|(at, n, what)| *at == "crates/pull/src/ingest.rs"
-                    && *n == 1
-                    && what.contains(".writing"))
-        );
+        // THE TREE AS IT STANDS: census_store is struck from LEGACY (AG-05),
+        // and so is ingest.rs since R3-19 creates its `.writing` publish
+        // through the door (L-AG05-01): every census temporary is born there.
+        for struck in [
+            "crates/pull/src/census_store.rs",
+            "crates/pull/src/ingest.rs",
+        ] {
+            assert!(LEGACY.iter().all(|(at, _, _)| *at != struck), "{struck}");
+        }
     }
 
     #[test]

@@ -39,6 +39,39 @@
 //! carrying an old yield forward over it would be an invented value that no
 //! report could tell from a real one.
 //!
+//! # A DOCUMENTED gap is carried, and says so (DB-B44, R3-30)
+//!
+//! RBI does not set a 91-day cut-off at every scheduled auction: an auction
+//! can be cancelled, a result can state `NA` for the 91-day bill, and a
+//! monthly listing can hold no auction in a week. DB-B44 replayed the
+//! operator's table under the bare 14-day rule and found greeks refused on
+//! ten sessions, two of them expiry days, every one inside such a week. So
+//! the table may carry a GAP ROW for a scheduled auction that set no cut-off:
+//! the same eight columns, `cut_off_price` one of [`GapKind`]'s words
+//! (`CANCELLED`, `NA`, `NOT_HELD`), `implicit_yield_pct` empty, `released`
+//! the day the gap was published, and `source_url` the RBI page that says so
+//! — the row is the documentation, and a gap row without an RBI URL is
+//! refused like any other row. A gap row restarts the staleness clock
+//! (staleness is measured from the last SCHEDULED auction, not the last
+//! result) and a day it covers is answered with the previous result's rate,
+//! LABELLED: [`AsOf::carried`] names the gap and [`AsOf::state`] is
+//! `rate_carried`. A gap is known only from the day after its release, as a
+//! result is. A gap nobody documented has no row, and the 14-day refusal
+//! applies to it exactly as before
+//! (`a_documented_rate_cancellation_is_carried_and_labelled`,
+//! `an_unexplained_rate_gap_is_still_refused`).
+//!
+//! A gap row CONTINUES a clock; it never starts one (R3-30 repair 2,
+//! D-6247). It documents one scheduled auction, so it restarts the clock only
+//! when the row before it was itself live and at most [`MAX_AGE_DAYS`] older:
+//! the clock still running on the gap's release day. A gap row after an
+//! unexplained hole (a result whose clock had already run out, or another gap
+//! row that carries nothing) explains the auction it names and not the ones
+//! before it, so the days it owns are refused [`LookupError::HoleBeforeGap`],
+//! naming it, and [`Series::unlinked_gaps`] lists every such row
+//! (`a_gap_row_after_an_unexplained_hole_carries_nothing`,
+//! `every_day_agrees_with_a_scan_of_results_and_gaps`).
+//!
 //! # The conversion, and its source
 //!
 //! RBI publishes the *implicit yield at cut-off price*. It is a simple yield on
@@ -98,6 +131,20 @@ pub const SOURCE_PREFIX: &str = "https://www.rbi.org.in/";
 /// week to spare and refuses a whole missing week. D-2810.
 pub const MAX_AGE_DAYS: i32 = 14;
 
+/// The oldest a CARRIED result may be, in calendar days: two staleness
+/// windows.
+///
+/// A documented gap row restarts the staleness clock, so without this a run
+/// of documented gaps would carry one result's rate with no age bound at all
+/// (R3-30 repair 1): ten weekly `CANCELLED` rows would price on a rate ten
+/// weeks old. Twenty-eight days admits the longest documented runs the
+/// operator's table holds -- two consecutive weeks without a 91-day cut-off
+/// (2024-09-18 and 2024-09-25; 2026-03-25 and the week of 2026-03-30, DB-B44)
+/// -- with the holiday shift [`MAX_AGE_DAYS`] already allows, and refuses a
+/// third missing week by name ([`LookupError::CarriedTooLong`]) instead of
+/// pricing on it. A bound of the series, not of a vendor fact.
+pub const MAX_CARRIED_AGE_DAYS: i32 = 2 * MAX_AGE_DAYS;
+
 /// The largest file this will read. A weekly series for a century is under
 /// a megabyte; anything bigger is not this table.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -120,6 +167,57 @@ pub struct Auction {
     pub yield_e4: u32,
 }
 
+/// Why a scheduled auction set no 91-day cut-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GapKind {
+    /// The auction was cancelled (`CANCELLED`).
+    Cancelled,
+    /// The result states `NA` for the 91-day bill (`NA`).
+    NotAvailable,
+    /// The listing holds no auction that week (`NOT_HELD`).
+    NotHeld,
+}
+
+impl GapKind {
+    /// Every kind.
+    pub const ALL: [Self; 3] = [Self::Cancelled, Self::NotAvailable, Self::NotHeld];
+
+    /// The word the table's `cut_off_price` column carries.
+    #[must_use]
+    pub const fn column(self) -> &'static str {
+        match self {
+            Self::Cancelled => "CANCELLED",
+            Self::NotAvailable => "NA",
+            Self::NotHeld => "NOT_HELD",
+        }
+    }
+
+    /// The wire word.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::NotAvailable => "na",
+            Self::NotHeld => "not_held",
+        }
+    }
+
+    /// The kind a `cut_off_price` column names, or `None` for a price.
+    #[must_use]
+    pub fn of_column(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.column() == text)
+    }
+}
+
+/// A documented gap: a scheduled auction that set no 91-day cut-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gap {
+    /// The day the gap was published; it is known from the day after.
+    pub released: TradeDay,
+    /// Why there is no cut-off.
+    pub kind: GapKind,
+}
+
 /// The rate that applies on one day, and the auction it came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AsOf {
@@ -127,6 +225,23 @@ pub struct AsOf {
     pub rate: Rate,
     /// The auction whose release is the latest strictly before the day asked.
     pub auction: Auction,
+    /// The documented gap the day is carried over: the latest scheduled
+    /// auction before the day set no cut-off, so the rate is the previous
+    /// result's, LABELLED. `None` when the latest scheduled auction before
+    /// the day is the result itself.
+    pub carried: Option<Gap>,
+}
+
+impl AsOf {
+    /// `rate_fresh`, or `rate_carried` over a documented gap.
+    #[must_use]
+    pub const fn state(&self) -> &'static str {
+        if self.carried.is_some() {
+            "rate_carried"
+        } else {
+            "rate_fresh"
+        }
+    }
 }
 
 /// The loaded series, indexed by day.
@@ -135,9 +250,18 @@ pub struct Series {
     /// The first day a lookup can answer: the day after the first release.
     first: i32,
     /// One slot per day from `first`: the index of the applicable auction plus
-    /// one, or zero where the latest release is older than [`MAX_AGE_DAYS`].
+    /// one, or zero where the latest release is older than [`MAX_AGE_DAYS`]
+    /// or is a gap row that carries nothing (it follows an unexplained hole).
     by_day: Vec<u32>,
+    /// One slot per day from `first`, beside `by_day`: the index of the
+    /// documented gap that covers the day plus one, or zero. Where `by_day`
+    /// is zero and this is not, the gap carries nothing and the day is
+    /// refused naming it.
+    carried_by: Vec<u32>,
     auctions: Vec<(Auction, Rate)>,
+    gaps: Vec<Gap>,
+    /// The gap rows that carry nothing: each follows an unexplained hole.
+    unlinked: Vec<Gap>,
     first_release: TradeDay,
     last_release: TradeDay,
     sha256: [u8; 32],
@@ -180,6 +304,11 @@ pub enum RowFault {
     Source,
     /// The release date is not after the previous row's.
     NotAfterPrevious,
+    /// A gap row (`cut_off_price` `CANCELLED`, `NA` or `NOT_HELD`) whose
+    /// `implicit_yield_pct` is not empty: a gap states no yield.
+    GapWithYield,
+    /// A gap row before the table's first result: there is no rate to carry.
+    GapBeforeAnyResult,
     /// The continuous rate the row converts to was refused by
     /// [`Rate::measured`].
     Rate(PricingError),
@@ -229,6 +358,27 @@ pub enum LookupError {
         /// The day asked.
         day: TradeDay,
     },
+    /// Documented gaps cover the day, but the result they would carry is more
+    /// than [`MAX_CARRIED_AGE_DAYS`] old: a run of gaps carries a rate only so
+    /// far, and past it no rate is priced.
+    CarriedTooLong {
+        /// The day asked.
+        day: TradeDay,
+        /// The release of the result that would have been carried.
+        result: TradeDay,
+        /// The documented gap that covers the day.
+        gap: Gap,
+    },
+    /// A documented gap row covers the day, but the row before it was more
+    /// than [`MAX_AGE_DAYS`] older or itself carried nothing: the auctions
+    /// between were never documented, so the gap explains its own auction and
+    /// not the hole before it, and no rate is carried over that hole.
+    HoleBeforeGap {
+        /// The day asked.
+        day: TradeDay,
+        /// The gap row that covers the day and carries nothing.
+        gap: Gap,
+    },
 }
 
 impl std::fmt::Display for SeriesError {
@@ -266,8 +416,28 @@ impl std::fmt::Display for LookupError {
             Self::Stale { day } => write!(
                 f,
                 "the latest T-bill result before {day} is more than {MAX_AGE_DAYS} \
-                 days old or absent, so an auction is missing from the series; \
-                 no rate is carried forward over the gap"
+                 days old or absent, and no documented gap row explains why, so \
+                 an auction is missing from the series; no rate is carried \
+                 forward over an unexplained gap"
+            ),
+            Self::CarriedTooLong { day, result, gap } => write!(
+                f,
+                "documented gaps cover {day} (the latest, released {}, is {}), but the \
+                 result they would carry was released {result}, more than \
+                 {MAX_CARRIED_AGE_DAYS} days before; a rate is carried over documented \
+                 gaps only that far, and no older rate is priced",
+                gap.released,
+                gap.kind.word(),
+            ),
+            Self::HoleBeforeGap { day, gap } => write!(
+                f,
+                "a documented gap row (released {}, {}) covers {day}, but the row \
+                 before it is more than {MAX_AGE_DAYS} days older or itself carries \
+                 nothing, so the auctions between are unexplained; the gap explains \
+                 its own auction and not that hole, and no rate is carried forward \
+                 over an unexplained gap",
+                gap.released,
+                gap.kind.word(),
             ),
         }
     }
@@ -336,7 +506,48 @@ fn continuous(yield_e4: u32) -> f64 {
     (simple * tau).ln_1p() / tau
 }
 
-/// One data row, checked.
+/// One data row: a result, or a documented gap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Entry {
+    Result(Auction, Rate),
+    Gap(Gap),
+}
+
+impl Entry {
+    const fn released(&self) -> TradeDay {
+        match self {
+            Self::Result(auction, _) => auction.released,
+            Self::Gap(gap) => gap.released,
+        }
+    }
+}
+
+/// One data row, checked: a gap row when its `cut_off_price` is a
+/// [`GapKind`] word, a result row otherwise.
+fn entry(text: &str, previous: Option<TradeDay>) -> Result<Entry, RowFault> {
+    let fields: Vec<&str> = text.split('\t').collect();
+    let [_, _, released, price, yield_pct, source, _, _] = fields.as_slice() else {
+        return Err(RowFault::FieldCount {
+            found: fields.len(),
+        });
+    };
+    let Some(kind) = GapKind::of_column(price) else {
+        return row(text, previous).map(|(auction, rate)| Entry::Result(auction, rate));
+    };
+    let released = date(released).ok_or(RowFault::Date { field: "released" })?;
+    if !yield_pct.is_empty() {
+        return Err(RowFault::GapWithYield);
+    }
+    if !source.starts_with(SOURCE_PREFIX) {
+        return Err(RowFault::Source);
+    }
+    if previous.is_some_and(|before| !before.before(released)) {
+        return Err(RowFault::NotAfterPrevious);
+    }
+    Ok(Entry::Gap(Gap { released, kind }))
+}
+
+/// One result row, checked.
 fn row(text: &str, previous: Option<TradeDay>) -> Result<(Auction, Rate), RowFault> {
     let fields: Vec<&str> = text.split('\t').collect();
     let [
@@ -425,46 +636,89 @@ impl Series {
         if lines.next() != Some(HEADER) {
             return Err(SeriesError::Header);
         }
-        let mut auctions: Vec<(Auction, Rate)> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut seen_result = false;
         for (offset, line) in lines.enumerate() {
-            let previous = auctions.last().map(|(a, _)| a.released);
-            let parsed = row(line, previous).map_err(|fault| SeriesError::Row {
+            let previous = entries.last().map(Entry::released);
+            let parsed = entry(line, previous).map_err(|fault| SeriesError::Row {
                 line: offset + 2,
                 fault,
             })?;
-            auctions.push(parsed);
+            seen_result |= matches!(parsed, Entry::Result(..));
+            if !seen_result {
+                return Err(SeriesError::Row {
+                    line: offset + 2,
+                    fault: RowFault::GapBeforeAnyResult,
+                });
+            }
+            entries.push(parsed);
         }
-        let (Some((head, _)), Some((tail, _))) = (auctions.first(), auctions.last()) else {
+        let (Some(head), Some(tail)) = (entries.first(), entries.last()) else {
             return Err(SeriesError::Empty);
         };
-        let (first_release, last_release) = (head.released, tail.released);
-        // Each auction owns the days after its release up to and including
-        // the next release's day (a release is not known on its own day), or
-        // up to MAX_AGE_DAYS after it for the last one. Within that run a day
-        // is fresh while it is at most MAX_AGE_DAYS after the release, and a
-        // zero slot otherwise. Two bounded ranges, no search: the table is
-        // contiguous from the day after the first release.
+        let (first_release, last_release) = (head.released(), tail.released());
+        // Each row -- a result or a documented gap -- owns the days after its
+        // release up to and including the next row's release day (a release
+        // is not known on its own day), or up to MAX_AGE_DAYS after it for the
+        // last one. Within that run a day is fresh while it is at most
+        // MAX_AGE_DAYS after THAT ROW's release, so staleness is measured
+        // from the last SCHEDULED auction, and a zero slot otherwise. A day a
+        // gap row owns carries the latest result's rate and names the gap.
+        // Two bounded ranges, no search: the table is contiguous from the
+        // day after the first release.
+        //
+        // A gap row CONTINUES a clock and never starts one (R3-30 repair 2,
+        // D-6247): it is live only when the row before it was live and at
+        // most MAX_AGE_DAYS older, the clock still running on the gap's
+        // release day. An unlinked gap's days hold no auction slot, so they
+        // are refused, and keep the gap's own slot so the refusal names it.
+        let mut auctions: Vec<(Auction, Rate)> = Vec::new();
+        let mut gaps: Vec<Gap> = Vec::new();
+        let mut unlinked: Vec<Gap> = Vec::new();
         let mut by_day = Vec::new();
-        for (index, (auction, _)) in auctions.iter().enumerate() {
-            let released = auction.released.ordinal();
-            let owns_until = auctions
+        let mut carried_by = Vec::new();
+        // The release of the previous row while its clock runs, else `None`.
+        let mut live: Option<i32> = None;
+        for (index, row) in entries.iter().enumerate() {
+            let released = row.released().ordinal();
+            let (carried, linked) = match row {
+                Entry::Result(auction, rate) => {
+                    auctions.push((*auction, *rate));
+                    (0, true)
+                }
+                Entry::Gap(gap) => {
+                    gaps.push(*gap);
+                    let linked = live.is_some_and(|previous| released - previous <= MAX_AGE_DAYS);
+                    if !linked {
+                        unlinked.push(*gap);
+                    }
+                    // `len` fits: at most one row per day of a window of
+                    // about 40,560 days.
+                    (u32::try_from(gaps.len()).unwrap_or(u32::MAX), linked)
+                }
+            };
+            live = linked.then_some(released);
+            let slot = if linked {
+                u32::try_from(auctions.len()).unwrap_or(u32::MAX)
+            } else {
+                0
+            };
+            let owns_until = entries
                 .get(index + 1)
-                .map_or(released + MAX_AGE_DAYS, |(next, _)| next.released.ordinal());
-            // `index + 1` fits: there is at most one release per day of a
-            // window of about 40,560 days.
-            let slot = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                .map_or(released + MAX_AGE_DAYS, |next| next.released().ordinal());
             for day in released + 1..=owns_until {
-                by_day.push(if day - released <= MAX_AGE_DAYS {
-                    slot
-                } else {
-                    0
-                });
+                let fresh = day - released <= MAX_AGE_DAYS;
+                by_day.push(if fresh { slot } else { 0 });
+                carried_by.push(if fresh { carried } else { 0 });
             }
         }
         Ok(Self {
             first: first_release.ordinal() + 1,
             by_day,
+            carried_by,
             auctions,
+            gaps,
+            unlinked,
             first_release,
             last_release,
             sha256: Sha256::digest(text.as_bytes()).into(),
@@ -475,12 +729,14 @@ impl Series {
     ///
     /// # Errors
     ///
-    /// [`LookupError::BeforeSeries`] and [`LookupError::Stale`], by name.
+    /// [`LookupError::BeforeSeries`], [`LookupError::Stale`],
+    /// [`LookupError::HoleBeforeGap`] and [`LookupError::CarriedTooLong`], by
+    /// name.
     ///
     /// # Cost
     ///
-    /// O(1): one subtraction and one bounds-checked read of the dense day
-    /// table. Measured flat at 1×, 10× and 100× the table by
+    /// O(1): one subtraction and two bounds-checked reads of the dense day
+    /// tables. Measured flat at 1×, 10× and 100× the table by
     /// `pull::bench::rate_lookup_is_flat` (C-RF-01).
     pub fn on(&self, day: TradeDay) -> Result<AsOf, LookupError> {
         let offset = day.ordinal() - self.first;
@@ -490,17 +746,36 @@ impl Series {
                 first_release: self.first_release(),
             });
         }
-        let slot = usize::try_from(offset)
-            .ok()
-            .and_then(|at| self.by_day.get(at))
-            .copied()
-            .unwrap_or(0);
-        let (auction, rate) = slot
+        let at = usize::try_from(offset).ok();
+        let slot = at.and_then(|at| self.by_day.get(at)).copied().unwrap_or(0);
+        let carried = at
+            .and_then(|at| self.carried_by.get(at))
+            .and_then(|slot| slot.checked_sub(1))
+            .and_then(|index| self.gaps.get(usize::try_from(index).ok()?))
+            .copied();
+        let Some((auction, rate)) = slot
             .checked_sub(1)
             .and_then(|index| self.auctions.get(usize::try_from(index).ok()?))
             .copied()
-            .ok_or(LookupError::Stale { day })?;
-        Ok(AsOf { rate, auction })
+        else {
+            return Err(carried.map_or(LookupError::Stale { day }, |gap| {
+                LookupError::HoleBeforeGap { day, gap }
+            }));
+        };
+        if let Some(gap) = carried
+            && day.ordinal() - auction.released.ordinal() > MAX_CARRIED_AGE_DAYS
+        {
+            return Err(LookupError::CarriedTooLong {
+                day,
+                result: auction.released,
+                gap,
+            });
+        }
+        Ok(AsOf {
+            rate,
+            auction,
+            carried,
+        })
     }
 
     /// The first release in the table.
@@ -528,6 +803,21 @@ impl Series {
     #[must_use]
     pub fn auction_count(&self) -> usize {
         self.auctions.len()
+    }
+
+    /// How many documented gap rows the table holds.
+    #[must_use]
+    pub fn gap_count(&self) -> usize {
+        self.gaps.len()
+    }
+
+    /// The documented gap rows that carry nothing because each follows an
+    /// unexplained hole (R3-30 repair 2), in release order: the table is
+    /// served, those rows' days are refused [`LookupError::HoleBeforeGap`],
+    /// and this list says so for the whole table at once.
+    #[must_use]
+    pub fn unlinked_gaps(&self) -> &[Gap] {
+        &self.unlinked
     }
 
     /// SHA-256 of the table's text, so a priced row can name its table.
@@ -711,6 +1001,9 @@ mod tests {
                 .map_err(|e| match e {
                     LookupError::BeforeSeries { .. } => "before the series",
                     LookupError::Stale { .. } => "too old",
+                    // No gap row in this table, so nothing is carried.
+                    LookupError::CarriedTooLong { .. } => "carried too long",
+                    LookupError::HoleBeforeGap { .. } => "hole before a gap",
                 });
             assert_eq!(got, expected, "on {asked}");
             if let Ok(released) = got {
@@ -1025,5 +1318,525 @@ mod tests {
             .implied_volatility(priced.price, greeks::bsm::OptionKind::Call)
             .expect("solved");
         assert!((solved.volatility - 0.15).abs() < 1e-6);
+    }
+
+    // ─────────── DB-B44: documented gaps are carried, unexplained ones refused ───────────
+
+    /// A gap row: an invented RBI page, `kind`'s column word, no yield.
+    fn gap_line(released: &str, kind: GapKind) -> String {
+        format!("\t\t{released}\t{}\t\t{URL}\t\t", kind.column())
+    }
+
+    /// Three weekly results, then a three-week hole, then one result; the
+    /// hole is documented by `gaps` (released days, in order) when given.
+    fn holed(gaps: &[(&str, GapKind)]) -> String {
+        let mut text = String::from(HEADER);
+        for (released, price, yield_pct) in [
+            ("2020-01-01", "98.5000", "6.1081"),
+            ("2020-01-08", "98.4000", "6.5219"),
+        ] {
+            text.push('\n');
+            text.push_str(&line(released, price, yield_pct));
+        }
+        for (released, kind) in gaps {
+            text.push('\n');
+            text.push_str(&gap_line(released, *kind));
+        }
+        text.push('\n');
+        text.push_str(&line("2020-02-05", "98.6000", "5.6951"));
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn a_documented_rate_cancellation_is_carried_and_labelled() {
+        let documented = series(&holed(&[
+            ("2020-01-15", GapKind::Cancelled),
+            ("2020-01-22", GapKind::NotAvailable),
+            ("2020-01-29", GapKind::NotHeld),
+        ]));
+        assert_eq!(documented.gap_count(), 3);
+        assert_eq!(documented.auction_count(), 3);
+        // Before the first gap is known (its own release day), the result is
+        // fresh and unlabelled.
+        let fresh = documented.on(day(2020, 1, 15)).expect("fresh");
+        assert_eq!(fresh.carried, None);
+        assert_eq!(fresh.state(), "rate_fresh");
+        assert_eq!(fresh.auction.released, day(2020, 1, 8));
+        // From the day after each gap, the 8 Jan rate is carried, NAMING the
+        // gap, up to day 28 after it -- past MAX_AGE_DAYS, which the bare rule
+        // refused.
+        for (asked, gap_day, kind) in [
+            (day(2020, 1, 16), day(2020, 1, 15), GapKind::Cancelled),
+            (day(2020, 1, 23), day(2020, 1, 22), GapKind::NotAvailable),
+            (day(2020, 1, 29), day(2020, 1, 22), GapKind::NotAvailable),
+            (day(2020, 1, 31), day(2020, 1, 29), GapKind::NotHeld),
+            (day(2020, 2, 5), day(2020, 1, 29), GapKind::NotHeld),
+        ] {
+            let carried = documented.on(asked).expect("carried over a documented gap");
+            assert_eq!(carried.state(), "rate_carried", "{asked}");
+            assert_eq!(carried.auction.released, day(2020, 1, 8), "{asked}");
+            assert_eq!(
+                carried.carried,
+                Some(Gap {
+                    released: gap_day,
+                    kind
+                }),
+                "{asked}"
+            );
+            assert_eq!(
+                carried.rate,
+                documented.on(day(2020, 1, 10)).expect("fresh").rate,
+                "the carried rate is the last result's, not a new value"
+            );
+        }
+        // The next result ends the carry.
+        let after = documented.on(day(2020, 2, 6)).expect("fresh again");
+        assert_eq!(after.carried, None);
+        assert_eq!(after.auction.released, day(2020, 2, 5));
+    }
+
+    #[test]
+    fn an_unexplained_rate_gap_is_still_refused() {
+        // The same hole with NO gap row: day 15 after the 8 Jan result is
+        // refused exactly as before.
+        let bare = series(&holed(&[]));
+        assert_eq!(bare.gap_count(), 0);
+        assert!(bare.on(day(2020, 1, 22)).is_ok(), "day 14 is fresh");
+        assert_eq!(
+            bare.on(day(2020, 1, 23)),
+            Err(LookupError::Stale {
+                day: day(2020, 1, 23)
+            })
+        );
+        // A documented gap explains only its own fourteen days: one gap row
+        // on 15 Jan carries through 29 Jan and the rest of the hole is still
+        // refused, because nobody explained it.
+        let partly = series(&holed(&[("2020-01-15", GapKind::Cancelled)]));
+        assert_eq!(
+            partly.on(day(2020, 1, 29)).map(|as_of| as_of.state()),
+            Ok("rate_carried")
+        );
+        assert_eq!(
+            partly.on(day(2020, 1, 30)),
+            Err(LookupError::Stale {
+                day: day(2020, 1, 30)
+            })
+        );
+        assert!(
+            LookupError::Stale {
+                day: day(2020, 1, 30)
+            }
+            .to_string()
+            .contains("no documented gap row explains why")
+        );
+        // The last row a gap: its fourteen days are carried, the fifteenth is
+        // refused like the end of any table.
+        let mut tail = holed(&[]);
+        tail.push_str(&gap_line("2020-02-12", GapKind::Cancelled));
+        tail.push('\n');
+        let tail = series(&tail);
+        assert_eq!(tail.last_release(), day(2020, 2, 12));
+        assert_eq!(
+            tail.on(day(2020, 2, 26)).map(|as_of| as_of.state()),
+            Ok("rate_carried")
+        );
+        assert_eq!(
+            tail.on(day(2020, 2, 27)),
+            Err(LookupError::Stale {
+                day: day(2020, 2, 27)
+            })
+        );
+    }
+
+    /// A HOLE BEFORE A GAP ROW (verify-R3-30-r2, blocking): a gap row
+    /// documents ONE scheduled auction, so it continues a clock that was
+    /// still running on its release day and starts none. Before repair 2 a gap
+    /// row dated after an expired clock restarted it anyway, and the result
+    /// already refused `rate_stale` on 17 Jan was priced again on 21 Jan,
+    /// labelled `rate_carried` as if the gap were the only reason.
+    #[test]
+    fn a_gap_row_after_an_unexplained_hole_carries_nothing() {
+        // A result on 1 Jan; the 8 and 15 Jan auctions UNEXPLAINED; a
+        // documented gap released 20 Jan (19 days after the result); a
+        // result on 5 Feb.
+        let rows = |gaps: &[&str]| {
+            let mut text = String::from(HEADER);
+            text.push('\n');
+            text.push_str(&line("2020-01-01", "98.5000", "6.1081"));
+            for released in gaps {
+                text.push('\n');
+                text.push_str(&gap_line(released, GapKind::Cancelled));
+            }
+            text.push('\n');
+            text.push_str(&line("2020-02-05", "98.6000", "5.6951"));
+            text.push('\n');
+            series(&text)
+        };
+        let holed = rows(&["2020-01-20"]);
+        assert!(holed.on(day(2020, 1, 15)).is_ok(), "day 14 is fresh");
+        for asked in [
+            day(2020, 1, 16),
+            day(2020, 1, 17),
+            day(2020, 1, 20),
+            day(2020, 1, 21),
+            day(2020, 1, 29),
+            day(2020, 2, 3),
+            day(2020, 2, 4),
+            day(2020, 2, 5),
+        ] {
+            assert!(
+                holed.on(asked).is_err(),
+                "{asked}: no rate is carried over the unexplained hole before the gap: {:?}",
+                holed.on(asked)
+            );
+        }
+        assert_eq!(
+            holed
+                .on(day(2020, 2, 6))
+                .map(|as_of| as_of.auction.released),
+            Ok(day(2020, 2, 5)),
+            "the next result is fresh again"
+        );
+        // By name: up to the gap's release the hole is plain staleness; the
+        // gap's own fourteen days are refused NAMING the gap that carries
+        // nothing; past them, staleness again.
+        let gap = Gap {
+            released: day(2020, 1, 20),
+            kind: GapKind::Cancelled,
+        };
+        for asked in [day(2020, 1, 16), day(2020, 1, 20)] {
+            assert_eq!(holed.on(asked), Err(LookupError::Stale { day: asked }));
+        }
+        for asked in [day(2020, 1, 21), day(2020, 1, 29), day(2020, 2, 3)] {
+            assert_eq!(
+                holed.on(asked),
+                Err(LookupError::HoleBeforeGap { day: asked, gap }),
+                "{asked}"
+            );
+        }
+        assert_eq!(
+            holed.on(day(2020, 2, 4)),
+            Err(LookupError::Stale {
+                day: day(2020, 2, 4)
+            })
+        );
+        assert_eq!(holed.unlinked_gaps(), [gap]);
+        assert_eq!(holed.gap_count(), 1);
+        let said = holed.on(day(2020, 1, 21)).expect_err("refused").to_string();
+        assert!(
+            said.contains("2020-01-20") && said.contains("unexplained"),
+            "{said}"
+        );
+        // A gap row after an unlinked one is unlinked too, even a week on:
+        // the clock it would continue never restarted.
+        let chained = rows(&["2020-01-20", "2020-01-27"]);
+        let second = Gap {
+            released: day(2020, 1, 27),
+            kind: GapKind::Cancelled,
+        };
+        assert_eq!(chained.unlinked_gaps(), [gap, second]);
+        assert_eq!(
+            chained.on(day(2020, 1, 28)),
+            Err(LookupError::HoleBeforeGap {
+                day: day(2020, 1, 28),
+                gap: second
+            })
+        );
+        // The boundary: a gap exactly MAX_AGE_DAYS after the result links and
+        // carries; one a day later does not.
+        let edge = rows(&["2020-01-15"]);
+        assert!(edge.unlinked_gaps().is_empty());
+        assert_eq!(
+            edge.on(day(2020, 1, 16)).map(|as_of| as_of.state()),
+            Ok("rate_carried")
+        );
+        let past = rows(&["2020-01-16"]);
+        assert_eq!(past.unlinked_gaps().len(), 1);
+        assert!(matches!(
+            past.on(day(2020, 1, 17)),
+            Err(LookupError::HoleBeforeGap { .. })
+        ));
+    }
+
+    /// The scan model of the whole gap rule, over generated tables: the
+    /// latest row strictly before the day; a result older than
+    /// `MAX_AGE_DAYS` is stale; a gap is followed back through gap rows, each
+    /// at most `MAX_AGE_DAYS` after the row before it, to the result it
+    /// carries, which is refused past `MAX_CARRIED_AGE_DAYS`. The dense table
+    /// must agree on every day of every table.
+    #[test]
+    fn every_day_agrees_with_a_scan_of_results_and_gaps() {
+        fn scan(
+            rows: &[(TradeDay, bool)],
+            asked: TradeDay,
+        ) -> Result<(TradeDay, bool), &'static str> {
+            // Newest first: the rows released strictly before the day.
+            let mut before = rows
+                .iter()
+                .rev()
+                .filter(|(released, _)| released.before(asked));
+            let Some(&(released, is_gap)) = before.next() else {
+                return Err("before the series");
+            };
+            if asked.ordinal() - released.ordinal() > MAX_AGE_DAYS {
+                return Err("too old");
+            }
+            let (mut newer, mut newer_is_gap) = (released, is_gap);
+            while newer_is_gap {
+                let &(previous, previous_is_gap) = before.next().expect("a result leads");
+                if newer.ordinal() - previous.ordinal() > MAX_AGE_DAYS {
+                    return Err("hole before a gap");
+                }
+                (newer, newer_is_gap) = (previous, previous_is_gap);
+            }
+            if is_gap && asked.ordinal() - newer.ordinal() > MAX_CARRIED_AGE_DAYS {
+                return Err("carried too long");
+            }
+            Ok((newer, is_gap))
+        }
+        let steps = [1, 3, 6, 7, 8, 13, 14, 15, 16, 21];
+        let mut seed: u64 = 0x5EED_D624_7001;
+        let mut next = |bound: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap_or(0) % bound
+        };
+        let (mut checked, mut kinds) = (0_u32, std::collections::BTreeSet::new());
+        for _ in 0..300 {
+            let mut rows: Vec<(TradeDay, bool)> = vec![(day(2020, 1, 1), false)];
+            for _ in 0..next(9) {
+                let step = *steps.get(next(steps.len())).expect("in range");
+                let released = rows.last().expect("one").0.plus_days(step).expect("a day");
+                rows.push((released, next(2) == 0));
+            }
+            let mut text = String::from(HEADER);
+            for (released, is_gap) in &rows {
+                text.push('\n');
+                if *is_gap {
+                    text.push_str(&gap_line(&released.to_string(), GapKind::NotAvailable));
+                } else {
+                    text.push_str(&line(&released.to_string(), "98.5000", "6.1081"));
+                }
+            }
+            let table = series(&text);
+            let first = day(2020, 1, 1);
+            for offset in -2..(rows.last().expect("one").0.ordinal() - first.ordinal() + 20) {
+                let asked = first.plus_days(offset).expect("a day");
+                let got = table
+                    .on(asked)
+                    .map(|as_of| (as_of.auction.released, as_of.carried.is_some()))
+                    .map_err(|why| match why {
+                        LookupError::BeforeSeries { .. } => "before the series",
+                        LookupError::Stale { .. } => "too old",
+                        LookupError::CarriedTooLong { .. } => "carried too long",
+                        LookupError::HoleBeforeGap { .. } => "hole before a gap",
+                    });
+                let want = scan(&rows, asked);
+                assert_eq!(got, want, "on {asked} of {rows:?}");
+                kinds.insert(match want {
+                    Ok((_, carried)) => {
+                        if carried {
+                            "carried"
+                        } else {
+                            "fresh"
+                        }
+                    }
+                    Err(why) => why,
+                });
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            kinds.len(),
+            6,
+            "every answer was reached at least once over {checked} days: {kinds:?}"
+        );
+    }
+
+    /// A weekly table of `weeks` rows from 1990-01-03 where every third week
+    /// is a documented `CANCELLED` row instead of a result.
+    fn weekly_holed(weeks: i32) -> Series {
+        let start = day(1990, 1, 3);
+        let mut text = String::from(HEADER);
+        for week in 0..weeks {
+            let released = start.plus_days(week * 7).expect("before 2100").to_string();
+            text.push('\n');
+            if week % 3 == 2 {
+                text.push_str(&gap_line(&released, GapKind::Cancelled));
+            } else {
+                text.push_str(&line(&released, "98.5000", "6.1081"));
+            }
+        }
+        series(&text)
+    }
+
+    /// p50, p99 and max nanoseconds per lookup over 200 batches of `days`.
+    fn lookup_tail(table: &Series, days: &[TradeDay]) -> (u128, u128, u128) {
+        let mut per_call: Vec<u128> = (0..200)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                for asked in days {
+                    std::hint::black_box(table.on(*asked).ok());
+                }
+                start.elapsed().as_nanos() / u128::try_from(days.len().max(1)).unwrap_or(1)
+            })
+            .collect();
+        per_call.sort_unstable();
+        let at = |rank: usize| per_call.get(rank).copied().unwrap_or(u128::MAX);
+        (at(100), at(198), at(199))
+    }
+
+    /// O(1) AT p99 WITH THE GAP RULE (R3-30 repair 1): a lookup that carries
+    /// a rate over a documented gap reads one more bounded slot, never a walk,
+    /// so its tail is flat from 52 to 5,200 rows. Printed with n and method.
+    #[test]
+    fn a_carried_lookup_is_flat_in_the_table() {
+        let mut tails = Vec::new();
+        for weeks in [52, 5_200] {
+            let table = weekly_holed(weeks);
+            let first = table.first_release().ordinal() + 1;
+            let span = table.last_release().ordinal() - first + 1;
+            let days: Vec<TradeDay> = (0..1_024)
+                .filter_map(|i| TradeDay::from_ordinal(first + span * i / 1_024).ok())
+                .collect();
+            let carried = days
+                .iter()
+                .filter(|asked| {
+                    table
+                        .on(**asked)
+                        .is_ok_and(|as_of| as_of.state() == "rate_carried")
+                })
+                .count();
+            assert!(carried > 0, "the sample carries over gaps at {weeks} rows");
+            assert_eq!(table.gap_count(), usize::try_from(weeks / 3).unwrap());
+            let tail = lookup_tail(&table, &days);
+            eprintln!(
+                "riskfree::Series::on, {weeks} rows ({} gaps), {} days x 200 batches, \
+                 {carried} carried: p50 {} ns p99 {} ns max {} ns per lookup",
+                table.gap_count(),
+                days.len(),
+                tail.0,
+                tail.1,
+                tail.2
+            );
+            tails.push(tail);
+        }
+        assert!(
+            matches!(tails.as_slice(), [small, big] if big.1 <= small.1.saturating_mul(10).max(2_000)),
+            "a table 100 times larger stays within ten times the p99: {tails:?}"
+        );
+    }
+
+    #[test]
+    fn chained_documented_gaps_carry_a_rate_no_older_than_two_windows() {
+        // Four weekly gap rows after the 8 Jan result, then a result on
+        // 12 Feb. Each gap restarts the staleness clock, so without a bound on
+        // the CARRIED result the 8 Jan rate would price every day to 12 Feb.
+        let mut text = String::from(HEADER);
+        for (released, price, yield_pct) in [
+            ("2020-01-01", "98.5000", "6.1081"),
+            ("2020-01-08", "98.4000", "6.5219"),
+        ] {
+            text.push('\n');
+            text.push_str(&line(released, price, yield_pct));
+        }
+        for released in ["2020-01-15", "2020-01-22", "2020-01-29", "2020-02-05"] {
+            text.push('\n');
+            text.push_str(&gap_line(released, GapKind::Cancelled));
+        }
+        text.push('\n');
+        text.push_str(&line("2020-02-12", "98.6000", "5.6951"));
+        text.push('\n');
+        let chained = series(&text);
+        assert_eq!(chained.gap_count(), 4);
+        // Day 28 after the carried release: still carried, still labelled.
+        let edge = chained.on(day(2020, 2, 5)).expect("day 28 is carried");
+        assert_eq!(edge.state(), "rate_carried");
+        assert_eq!(edge.auction.released, day(2020, 1, 8));
+        // Day 29, inside the fourth gap's own fourteen days: refused by name,
+        // naming the gap and the result it would have carried.
+        let gap = Gap {
+            released: day(2020, 2, 5),
+            kind: GapKind::Cancelled,
+        };
+        for asked in [day(2020, 2, 6), day(2020, 2, 12)] {
+            assert_eq!(
+                chained.on(asked),
+                Err(LookupError::CarriedTooLong {
+                    day: asked,
+                    result: day(2020, 1, 8),
+                    gap,
+                }),
+                "{asked}"
+            );
+        }
+        let said = chained
+            .on(day(2020, 2, 6))
+            .expect_err("refused")
+            .to_string();
+        assert!(said.contains("2020-01-08"), "{said}");
+        assert!(said.contains("cancelled"), "{said}");
+        assert!(said.contains(&MAX_CARRIED_AGE_DAYS.to_string()), "{said}");
+        // The next result is fresh again from the day after its release.
+        assert_eq!(
+            chained.on(day(2020, 2, 13)).map(|as_of| as_of.state()),
+            Ok("rate_fresh")
+        );
+    }
+
+    #[test]
+    fn a_malformed_gap_row_is_refused_by_name() {
+        // A gap row stating a yield.
+        assert_eq!(
+            row_fault(&format!("\t\t2020-01-01\tCANCELLED\t6.1081\t{URL}\t\t")),
+            at2(RowFault::GapWithYield)
+        );
+        // A gap row with no RBI page.
+        assert_eq!(
+            row_fault("\t\t2020-01-01\tNA\t\thttps://example.invalid/\t\t"),
+            at2(RowFault::Source)
+        );
+        // A gap row with a broken date.
+        assert_eq!(
+            row_fault(&format!("\t\t2020-13-01\tNA\t\t{URL}\t\t")),
+            at2(RowFault::Date { field: "released" })
+        );
+        // A gap before any result: nothing to carry.
+        assert_eq!(
+            refusal(&format!(
+                "{HEADER}\n{}\n{}\n",
+                gap_line("2020-01-01", GapKind::Cancelled),
+                line("2020-01-08", "98.4000", "6.5219")
+            )),
+            at2(RowFault::GapBeforeAnyResult)
+        );
+        // A gap on the same day as the result before it, and out of order.
+        let mut same_day = String::from(HEADER);
+        same_day.push('\n');
+        same_day.push_str(&line("2020-01-08", "98.4000", "6.5219"));
+        same_day.push('\n');
+        same_day.push_str(&gap_line("2020-01-08", GapKind::NotHeld));
+        same_day.push('\n');
+        assert_eq!(
+            refusal(&same_day),
+            SeriesError::Row {
+                line: 3,
+                fault: RowFault::NotAfterPrevious
+            }
+        );
+        // A lower-case word is not a gap word: it is read as a price and
+        // refused as one.
+        assert_eq!(
+            row_fault(&format!("\t\t2020-01-01\tcancelled\t\t{URL}\t\t")),
+            at2(RowFault::Decimal {
+                field: "cut_off_price"
+            })
+        );
+        for kind in GapKind::ALL {
+            assert_eq!(GapKind::of_column(kind.column()), Some(kind));
+            assert!(!kind.word().is_empty());
+        }
     }
 }

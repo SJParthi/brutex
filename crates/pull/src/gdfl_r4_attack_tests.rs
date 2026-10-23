@@ -230,10 +230,18 @@ fn r4_03_a_day_done_under_another_definition_is_imported_again() {
 /// The D-2812 shape: a trade after an untraded row stamped later. A store
 /// built under the old definition holds that trade at its own earlier
 /// second; the current definition defers it. Rebuilding cannot write over
-/// what the month holds (append-only), so every run refuses the file by
-/// name, closes the day `incomplete`, names it, and leaves the bars byte for
-/// byte as they were. Before the fix the day was skipped unread and the
-/// look-ahead bar stood as a clean result.
+/// what the month holds (append-only), so the run that reads it again
+/// refuses the file by name, closes the day `incomplete` with the hole
+/// `bars_differ_held`, names it, and leaves the bars byte for byte as they
+/// were. Before the fix the day was skipped unread and the look-ahead bar
+/// stood as a clean result.
+///
+/// ADAPTED (IA-16 repair 1; D-7130, D-4912, FM-095): the hole is the day's
+/// LAST line, so the runs after the first pass it by name (counted
+/// `holes_unrepairable`, named in `holes_in_range`, never a day already
+/// done) and read nothing: until the repair every later run read the day
+/// again and wrote another `incomplete` line, the loop FM-095 forbids. Only
+/// IA-18's restate run may read it.
 #[test]
 fn r4_04_a_day_whose_old_bars_differ_is_refused_by_name_never_rewritten() {
     let root = scratch("r4-restated");
@@ -260,18 +268,14 @@ fn r4_04_a_day_whose_old_bars_differ_is_refused_by_name_never_rewritten() {
             tick(T + 20, 10_100, 1),
         ],
     );
+    let mut after_first = String::new();
     for attempt in 0..3 {
         let got = run_stocks(&root, d1(), d1(), std::slice::from_ref(&real));
-        assert_eq!(got.days_skipped, 0, "run {attempt}: not skipped");
-        assert_eq!(got.resumed, vec![d1()], "run {attempt}");
-        assert_eq!(got.seconds_committed, 0, "run {attempt}");
-        assert!(
-            got.failures
-                .iter()
-                .any(|f| f.instrument.contains("RELIANCE.invented")),
-            "run {attempt}: refused by name: {:?}",
-            got.failures
+        assert_eq!(
+            got.days_skipped, 0,
+            "run {attempt}: never a day already done"
         );
+        assert_eq!(got.seconds_committed, 0, "run {attempt}");
         assert_eq!(bars_tree(&root), held, "run {attempt}: never rewritten");
         let text = journal_text(&root);
         let last = text.lines().last().unwrap();
@@ -281,9 +285,31 @@ fn r4_04_a_day_whose_old_bars_differ_is_refused_by_name_never_rewritten() {
             last.starts_with(&format!(
                 "incomplete stocks 2024-04-01 * definition={BAR_DEFINITION} files=1 "
             )) && last.contains(" late=1 late_unresolved=0 max_back_s=7 ")
-                && last.contains(" stage=file reason="),
+                && last.contains(" stage=file reason=bars_differ_held"),
             "{text}"
         );
+        if attempt == 0 {
+            assert_eq!(got.resumed, vec![d1()], "run {attempt}");
+            assert!(
+                got.failures
+                    .iter()
+                    .any(|f| f.instrument.contains("RELIANCE.invented")),
+                "run {attempt}: refused by name: {:?}",
+                got.failures
+            );
+            after_first = text;
+        } else {
+            assert!(got.resumed.is_empty(), "run {attempt}: not read again");
+            assert!(got.failures.is_empty(), "run {attempt}: {:?}", got.failures);
+            assert_eq!(got.files, 0, "run {attempt}: nothing read");
+            assert_eq!(got.holes_unrepairable, 1, "run {attempt}");
+            assert_eq!(
+                got.holes_in_range,
+                vec![(d1(), "bars_differ_held".to_owned())],
+                "run {attempt}: named"
+            );
+            assert_eq!(text, after_first, "run {attempt}: no line written");
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }

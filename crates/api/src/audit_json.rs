@@ -310,6 +310,24 @@ pub fn body(
         out.push_str(r#","imports":"#);
         out.push_str(&crate::server::imports::summary(&site.store_root).to_string());
     }
+    // HOW FAR BACK THE STORE'S LOGS REACH, AND WHO DID WHAT (R3-24): the
+    // reach of every log directory with its one alert, and the newest state
+    // changes from the streams that never roll, each with its class. Read
+    // from the store's own directories, so the answer is the store's.
+    let halves = crate::logs::store_halves(&site.store_root);
+    let now_ms = ingest::epoch_secs(now).saturating_mul(1_000);
+    out.push_str(r#","log_reach":"#);
+    out.push_str(&crate::logs::reach_object(&halves, now_ms));
+    out.push_str(r#","state_changes":"#);
+    // THE SERVING SINK'S OWN STATE STREAM: a refusal of it is said beside
+    // the rows (R3-24 repair round 2), never an empty answer that reads as
+    // "nothing happened". `None` in a process with no sink.
+    let served = telemetry::global().and_then(telemetry::Sink::state_health);
+    out.push_str(&crate::logs::state_changes_json(
+        &halves,
+        crate::logs::STATE_CHANGES_SHOWN,
+        served.as_ref(),
+    ));
     out.push('}');
     out
 }
@@ -2200,5 +2218,80 @@ mod tests {
         let absent = body(&site, Vendor::Groww, 0, moment(), Ok(day()));
         let parsed: serde_json::Value = serde_json::from_str(&absent).unwrap();
         assert!(parsed["store"]["capacity"].is_null());
+    }
+
+    /// **`/audit.json` SAYS HOW FAR BACK THE STORE'S LOGS REACH, AND WHO DID
+    /// WHAT** (R3-24): the reach of every log directory under the store with
+    /// its one alert, and the newest state changes from the never-rolling
+    /// streams, newest first, each with its class from the state-change
+    /// table (a run's lifecycle by the rule is `run`).
+    #[test]
+    fn the_audit_answer_names_the_logs_reach_and_the_state_changes() {
+        let site = site("state-changes");
+        let cli = site.store_root.join("logs").join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("cli.lifecycle", "command started"));
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            let _ = sink.emit(&telemetry::Event::warn("autopilot", "paused"));
+            let _ = sink.emit(&telemetry::Event::error("pull.spot", "member did not land"));
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body(&site, Vendor::Zerodha, 0, moment(), Ok(day()))).unwrap();
+        let rows = parsed["state_changes"]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2, "no refusal is a state change: {rows:?}");
+        assert_eq!(rows[0]["message"], "paused");
+        assert_eq!(rows[0]["class"], "operator");
+        assert_eq!(rows[0]["half"], "cli");
+        assert_eq!(rows[1]["class"], "run");
+        assert!(
+            parsed["state_changes"]["unread"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let reach = &parsed["log_reach"];
+        let cli_reach = reach["halves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|half| half["half"] == "cli")
+            .expect("the cli directory");
+        assert_eq!(cli_reach["state_from"], rows[1]["ts"]);
+        assert_eq!(reach["audited_from"], rows[1]["ts"]);
+        // THE ANSWER IS STILL ITS OWN BYTES TWICE (idempotence).
+        assert_eq!(
+            body(&site, Vendor::Zerodha, 0, moment(), Ok(day())),
+            body(&site, Vendor::Zerodha, 0, moment(), Ok(day()))
+        );
+        let _ = std::fs::remove_dir_all(&site.store_root);
+    }
+
+    /// **`/audit.json` READS THE DIRECTORY A SERVER ON THE STORE LOGS TO**
+    /// (R3-24): `<store>/telemetry` ([`telemetry::dir_beneath_store`]), where
+    /// the operator's server writes "listening", "autopilot paused" and every
+    /// other server-side state change. The cloud's answer read `<store>/logs`
+    /// as that directory, which on the operator's store holds no log of its
+    /// own (only `cli/` and `cli-batch/` beneath it), so every server-side
+    /// state change was missing from it and its reach began at the `cli` log.
+    #[test]
+    fn the_audit_answer_reads_the_directory_a_server_on_the_store_logs_to() {
+        let site = site("served-state-changes");
+        let served = telemetry::dir_beneath_store(&site.store_root);
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&served)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("api.serve", "listening"));
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body(&site, Vendor::Zerodha, 0, moment(), Ok(day()))).unwrap();
+        let rows = parsed["state_changes"]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1, "{parsed:#}");
+        assert_eq!(rows[0]["message"], "listening");
+        assert_eq!(rows[0]["class"], "server");
+        assert_eq!(rows[0]["half"], "served");
+        let reach = &parsed["log_reach"]["halves"][0];
+        assert_eq!(reach["half"], "served");
+        assert_eq!(reach["state_from"], rows[0]["ts"], "{parsed:#}");
+        let _ = std::fs::remove_dir_all(&site.store_root);
     }
 }

@@ -227,8 +227,8 @@
   /** The spot's age, drawn on every cell it priced when it is not this bar's own second (D-3328). */
   const age = $derived(oc && typeof oc.age === 'number' && oc.age > 0 ? oc.age : null);
   const gAge = $derived(gc && typeof gc.age === 'number' && gc.age > 0 ? gc.age : null);
-  /** `T` and `B` on the IV cell, for the server's two flags (D-3330). */
-  const FLAG_TAG = /** @type {Record<string, string>} */ ({ above_rate_tenor: 'T', below_band: 'B' });
+  /** `T`, `B` and `C` on the IV cell, for the server's three flags (D-3330; `rate_carried`, DB-B44). */
+  const FLAG_TAG = /** @type {Record<string, string>} */ ({ above_rate_tenor: 'T', below_band: 'B', rate_carried: 'C' });
 </script>
 
 <td class="bt">

@@ -145,18 +145,203 @@
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
 
+/// The day bit 0 of [`TRADED`] stands for: **2019-12-02**, the first day of
+/// the Zerodha `1day` walk the module header describes. A property of the
+/// measurement itself, as the bits are: every version below counts from it.
+const MEASURED_ORIGIN: i64 = 18_232;
+
+/// One version of the calendar's tables (CAL-1, D-5154, D-5159): how many
+/// days of [`TRADED`], counted from [`MEASURED_ORIGIN`], it answers, how many
+/// rows of [`HOLIDAY_CIRCULARS`] and of [`SESSION_CIRCULARS`] it reads (each
+/// a prefix: the tables are append-only), and what the version added.
+///
+/// **Append-only.** An extension -- newly measured days, a new holiday
+/// circular, a new session notice -- is a NEW version with its own digest
+/// ([`CalendarVersion::digest`]); an older version keeps its extent AND its
+/// rows, so a run recorded under it re-verifies against exactly the calendar
+/// it was computed on and an extension re-keys nothing. New runs take
+/// [`CalendarVersion::newest`], and the newest version reads every row of
+/// both tables (a const assertion), so a row appended without a version
+/// fails the build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeasuredVersion {
+    /// The version's number, from 1, one more than the row before.
+    pub version: u16,
+    /// Days of [`TRADED`] it answers, from [`MEASURED_ORIGIN`].
+    pub days: u16,
+    /// Rows of [`HOLIDAY_CIRCULARS`] it reads, from the first.
+    pub holiday_circulars: u16,
+    /// Rows of [`SESSION_CIRCULARS`] it reads, from the first.
+    pub session_circulars: u16,
+    /// What the version added, in one sentence.
+    pub source: &'static str,
+}
+
+/// Every version, oldest first. Each one's extent is the bitset's:
+/// [`FIRST_DAY`], [`LAST_DAY`] and [`DAYS`] are computed from the newest row
+/// by const fns, never typed beside it (operator, 16 Oct 2026, "NOTHING
+/// TYPED" item 4). Both versions read the five holiday circulars and the
+/// sixteen session notices: the two tables were written with them (CAL-1)
+/// and have not grown since.
+pub const MEASURED_VERSIONS: [MeasuredVersion; 2] = [
+    MeasuredVersion {
+        version: 1,
+        days: 2_455, // 2019-12-02 ..= 2026-08-21: the original 307 bytes
+        holiday_circulars: 5,
+        session_circulars: 16,
+        source: "every day carrying a 1day bar in the Zerodha store for NIFTY, BANKNIFTY and \
+                 INDIAVIX over 2019-12-02..2026-08-21, the three agreeing on one 1,671-day set \
+                 (module header)",
+    },
+    MeasuredVersion {
+        version: 2,
+        days: 2_469, // ..= 2026-09-04: two appended bytes (D-3346)
+        holiday_circulars: 5,
+        session_circulars: 16,
+        source: "version 1 and 2026-08-22..2026-09-04 (D-3346): NSE/CMTR/71775 lists no trading \
+                 holiday in it, and NIFTY's and BANKNIFTY's minute files hold the 375 stamps \
+                 09:15-15:29 on each of its ten weekdays",
+    },
+];
+
+/// The version before the first: nothing measured, no row read.
+const NO_VERSION: MeasuredVersion = MeasuredVersion {
+    version: 0,
+    days: 0,
+    holiday_circulars: 0,
+    session_circulars: 0,
+    source: "",
+};
+
+/// The newest row of a version table, or [`NO_VERSION`] when there is none
+/// (which the assertions below make unreachable here).
+const fn newest_of(versions: &[MeasuredVersion]) -> MeasuredVersion {
+    match versions.last() {
+        Some(newest) => *newest,
+        None => NO_VERSION,
+    }
+}
+
+/// The last day a version of `days` answers, as days since the epoch.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to i64 is lossless, and `i64::from` cannot be called in a const fn"
+)]
+const fn last_measured_day(days: u16) -> i64 {
+    MEASURED_ORIGIN + days as i64 - 1
+}
+
+/// Whether a version table is a proper ledger: numbered 1, 2, …; no version
+/// answers fewer days or reads fewer rows of either table than the one
+/// before; and every version adds something (more days or more rows), so two
+/// versions never name one calendar.
+const fn versions_ascend(versions: &[MeasuredVersion]) -> bool {
+    let mut rest = versions;
+    let mut previous = NO_VERSION;
+    while let [row, tail @ ..] = rest {
+        let shrinks = row.days < previous.days
+            || row.holiday_circulars < previous.holiday_circulars
+            || row.session_circulars < previous.session_circulars;
+        let adds = row.days > previous.days
+            || row.holiday_circulars > previous.holiday_circulars
+            || row.session_circulars > previous.session_circulars;
+        if row.version != previous.version.saturating_add(1) || shrinks || !adds {
+            return false;
+        }
+        previous = *row;
+        rest = tail;
+    }
+    true
+}
+
+/// The first `count` rows of `rows` (all of them when `count` is larger).
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to usize is lossless, and `usize::from` cannot be called in a const fn"
+)]
+const fn prefix<T>(rows: &[T], count: u16) -> &[T] {
+    let count = count as usize;
+    if count <= rows.len() {
+        rows.split_at(count).0
+    } else {
+        rows
+    }
+}
+
+/// Whether every version reads no more rows than the tables hold and the
+/// newest reads every one of them.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to usize is lossless, and `usize::from` cannot be called in a const fn"
+)]
+const fn versions_read_the_tables(
+    versions: &[MeasuredVersion],
+    holiday_rows: usize,
+    session_rows: usize,
+) -> bool {
+    let mut rest = versions;
+    while let [row, tail @ ..] = rest {
+        if row.holiday_circulars as usize > holiday_rows
+            || row.session_circulars as usize > session_rows
+        {
+            return false;
+        }
+        rest = tail;
+    }
+    let newest = newest_of(versions);
+    newest.holiday_circulars as usize == holiday_rows
+        && newest.session_circulars as usize == session_rows
+}
+
+/// The newest measured version: the extent every reader of [`kind_of`] uses.
+pub const NEWEST_MEASURED: MeasuredVersion = newest_of(&MEASURED_VERSIONS);
+
 /// First day this calendar knows: **2019-12-02**, as days since the epoch.
-pub const FIRST_DAY: i64 = 18_232;
+pub const FIRST_DAY: i64 = MEASURED_ORIGIN;
 
 /// Last day this calendar knows: **2026-09-04**, as days since the epoch.
-pub const LAST_DAY: i64 = 20_700;
+/// Computed from [`NEWEST_MEASURED`]'s extent.
+pub const LAST_DAY: i64 = last_measured_day(NEWEST_MEASURED.days);
 
-/// How many days the bitset covers.
-pub const DAYS: usize = 2_469;
+/// How many days the bitset covers. Computed from [`NEWEST_MEASURED`].
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to usize is lossless, and `usize::from` cannot be called in a const item"
+)]
+pub const DAYS: usize = NEWEST_MEASURED.days as usize;
 
-// TWO ASSERTIONS AND NO CAST. One `DAYS as i64` would say the same thing and
-// would be the workspace's only sign-losing cast on a path that never needs
-// one; both sides are compared against the literal instead.
+// PINNED, NOT TYPED. The three are computed above; these assertions hold them
+// to the values every recorded run was keyed by (`cli::stored::
+// calendar_policy_digest_v2` hashes all three), so a version appended without
+// a decision fails the build here instead of silently re-keying the ledger.
+const _: () = assert!(versions_ascend(&MEASURED_VERSIONS));
+// EVERY ROW BELONGS TO A VERSION (D-5159): no version reads past a table's
+// end, and the newest reads every row, so a circular or notice appended
+// without its version fails the build instead of changing what an existing
+// version answers.
+const _: () = assert!(versions_read_the_tables(
+    &MEASURED_VERSIONS,
+    HOLIDAY_CIRCULARS.len(),
+    SESSION_CIRCULARS.len()
+));
+// NO VERSION'S RECORD HAS A HOLE (D-5155; verify-CAL-1 round 1): its sourced
+// span and its measured window overlap or touch, so a version whose circulars
+// stop a year before the window starts fails the build instead of counting
+// that year's days as `Unmeasured` inside its record.
+const _: () = assert!(records_are_unbroken(&MEASURED_VERSIONS));
+
+/// Whether every version's [`CalendarVersion::record_is_unbroken`].
+const fn records_are_unbroken(versions: &[MeasuredVersion]) -> bool {
+    let mut rest = versions;
+    while let [row, tail @ ..] = rest {
+        if !CalendarVersion::on(*row).record_is_unbroken() {
+            return false;
+        }
+        rest = tail;
+    }
+    true
+}
+const _: () = assert!(FIRST_DAY == 18_232 && LAST_DAY == 20_700);
 const _: () = assert!(LAST_DAY - FIRST_DAY + 1 == 2_469);
 const _: () = assert!(DAYS == 2_469);
 
@@ -428,6 +613,21 @@ static TRADED: [u8; 309] = [
 
 const _: () = assert!(TRADED.len() == DAYS.div_ceil(8));
 
+/// Whether every bit of `bits` past the first `days` is zero: the bitset's
+/// extent is its version's day count, and a padding bit set past it would be
+/// a day no version claims.
+const fn padding_is_clear(bits: &[u8], days: usize) -> bool {
+    let Some(last) = bits.last() else {
+        return days == 0;
+    };
+    let used = days % 8;
+    used == 0 || *last >> used == 0
+}
+
+// THE EXTENT IS THE BITSET'S OWN (D-5154): no bit is set past the newest
+// version's last day, so the day count and the bits cannot disagree.
+const _: () = assert!(padding_is_clear(&TRADED, DAYS));
+
 // THE TWO WALK LENGTHS `kind_of`'s cost note states. o1api-39, D-1203.
 const _: () = assert!(LENGTH_UNMEASURED.len() == 5 && IRREGULAR.len() == 4);
 
@@ -452,7 +652,23 @@ const _: () = assert!(LENGTH_UNMEASURED.len() == 5 && IRREGULAR.len() == 4);
 /// measurement, however sound it is.
 #[must_use]
 pub fn kind_of(epoch_day: i64) -> DayKind {
-    if !(FIRST_DAY..=LAST_DAY).contains(&epoch_day) {
+    measured_kind(LAST_DAY, epoch_day)
+}
+
+/// Whether `epoch_day` lies in the inclusive `span`, `(first, last)` days
+/// since the epoch: two comparisons. The calendar's spans are runtime pairs
+/// per version (a range pattern needs constants), and a range `contains` is
+/// the spelling gate 11 rule 7 cannot tell from a slice walk; this one is
+/// neither a walk nor ambiguous. An inverted span holds no day.
+const fn in_span(span: (i64, i64), epoch_day: i64) -> bool {
+    span.0 <= epoch_day && epoch_day <= span.1
+}
+
+/// [`kind_of`] for a measured version whose last day is `last_day`: the same
+/// bits, read only up to that version's own extent (D-5154). `kind_of` is
+/// this at the newest version, so it answers exactly what it always did.
+fn measured_kind(last_day: i64, epoch_day: i64) -> DayKind {
+    if !in_span((FIRST_DAY, last_day.min(LAST_DAY)), epoch_day) {
         return DayKind::Unmeasured;
     }
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a
@@ -540,49 +756,321 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 // `sourced_kind_of` instead, and so does the ingest calendar `Runtime`
 // (D-3346), which no run identity hashes; every other reader is unchanged.
 
-/// First day [`sourced_kind_of`] answers: **2018-01-01**.
-pub const SOURCED_FIRST_DAY: i64 = 17_532;
+/// One NSE holiday circular recorded in `docs/00-charter.md` (section "NSE
+/// trading holidays 2018-2019 and September-October 2026", D-2805): the
+/// calendar year it lists, its number, the day it was issued and its address
+/// (CAL-1, D-5155).
+///
+/// **The sourced span is computed from these rows, never typed beside them**
+/// (operator, 16 Oct 2026, "NOTHING TYPED" item 3): [`SOURCED_FIRST_DAY`] and
+/// [`SOURCED_LAST_DAY`] are [`sourced_span`] of this table and the measured
+/// window. Append-only: next year's circular is a new row, and the span moves
+/// by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HolidayCircular {
+    /// The calendar year whose trading holidays it lists.
+    pub year: u16,
+    /// The circular's number, as NSE prints it.
+    pub number: &'static str,
+    /// The day NSE issued it, `YYYY-MM-DD`.
+    pub issued: &'static str,
+    /// Where it is published.
+    pub url: &'static str,
+    /// `true` for the year's whole list, `false` for a circular that only adds
+    /// a day to a list already recorded. Only a whole list makes a year
+    /// recorded.
+    pub whole_year: bool,
+}
 
-/// Last day [`sourced_kind_of`] answers: **2026-12-31**, the last day
-/// NSE/CMTR/71775 (calendar year 2026) covers.
+/// Every NSE capital-market holiday circular recorded (charter section
+/// "NSE trading holidays 2018-2019 and September-October 2026", D-2805),
+/// oldest year first. The years 2020..=2025 have none: they lie wholly inside
+/// the measured window, whose closed days were measured from the store.
+pub const HOLIDAY_CIRCULARS: [HolidayCircular; 5] = [
+    HolidayCircular {
+        year: 2018,
+        number: "NSE/CMTR/36475",
+        issued: "2017-12-12",
+        url: "https://nsearchives.nseindia.com/content/circulars/CMTR36475.pdf",
+        whole_year: true,
+    },
+    HolidayCircular {
+        year: 2019,
+        number: "NSE/CMTR/39612",
+        issued: "2018-12-07",
+        url: "https://nsearchives.nseindia.com/content/circulars/CMTR39612.pdf",
+        whole_year: true,
+    },
+    HolidayCircular {
+        year: 2019,
+        number: "NSE/CMTR/40536",
+        issued: "2019-03-26",
+        url: "https://nsearchives.nseindia.com/content/circulars/CMTR40536.pdf",
+        whole_year: false,
+    },
+    HolidayCircular {
+        year: 2019,
+        number: "NSE/MSD/42319",
+        issued: "2019-10-07",
+        url: "https://nsearchives.nseindia.com/content/circulars/MSD42319.pdf",
+        whole_year: false,
+    },
+    HolidayCircular {
+        year: 2026,
+        number: "NSE/CMTR/71775",
+        issued: "2025-12-12",
+        url: "https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf",
+        whole_year: true,
+    },
+];
+
+/// Days since 1970-01-01 of a proleptic Gregorian date, in a const fn
+/// (H. Hinnant's `days_from_civil`). `month` 1..=12 and `day` 1..=31 are the
+/// caller's to hold; every caller here passes 1 January or 31 December.
+#[must_use]
+pub const fn civil_days(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Whether `circulars` hold the whole list of `year`'s holidays.
+const fn year_recorded(circulars: &[HolidayCircular], year: u16) -> bool {
+    let mut rest = circulars;
+    while let [row, tail @ ..] = rest {
+        if row.year == year && row.whole_year {
+            return true;
+        }
+        rest = tail;
+    }
+    false
+}
+
+/// The earliest year a whole list is recorded for, or `None`.
+const fn earliest_recorded(circulars: &[HolidayCircular]) -> Option<u16> {
+    let mut rest = circulars;
+    let mut earliest: Option<u16> = None;
+    while let [row, tail @ ..] = rest {
+        if row.whole_year {
+            earliest = match earliest {
+                Some(held) if held <= row.year => Some(held),
+                _ => Some(row.year),
+            };
+        }
+        rest = tail;
+    }
+    earliest
+}
+
+/// Whether every day of `year` lies inside `first..=last`.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to i64 is lossless, and `i64::from` cannot be called in a const fn"
+)]
+const fn year_inside(year: u16, first: i64, last: i64) -> bool {
+    let y = year as i64;
+    civil_days(y, 1, 1) >= first && civil_days(y, 12, 31) <= last
+}
+
+/// The sourced span: `(first, last)` days since the epoch, or `None` when no
+/// whole-year circular is recorded (CAL-1, D-5155).
+///
+/// The first day is 1 January of the earliest year a whole list is recorded
+/// for. The last is 31 December of the latest year `Y` such that every year
+/// from the first up to `Y` is either recorded or wholly inside the measured
+/// window `measured_first..=measured_last`: **a missing year stops the span**,
+/// so a gap is never bridged by a later year's circular. A walk over the
+/// table per year, bounded by the table's constant length and by the years it
+/// names; evaluated once, at compile time.
+#[must_use]
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to i64 is lossless, and `i64::from` cannot be called in a const fn"
+)]
+pub const fn sourced_span(
+    circulars: &[HolidayCircular],
+    measured_first: i64,
+    measured_last: i64,
+) -> Option<(i64, i64)> {
+    let Some(first_year) = earliest_recorded(circulars) else {
+        return None;
+    };
+    let mut year = first_year;
+    while year < u16::MAX
+        && (year_recorded(circulars, year) || year_inside(year, measured_first, measured_last))
+    {
+        year += 1;
+    }
+    // `year` is the first year that stops the span; `first_year` itself is
+    // recorded, so `year > first_year` and the span holds at least one year.
+    let last_year = year - 1;
+    Some((
+        civil_days(first_year as i64, 1, 1),
+        civil_days(last_year as i64, 12, 31),
+    ))
+}
+
+/// [`sourced_span`] of the newest version's holiday circulars (every row of
+/// [`HOLIDAY_CIRCULARS`], by the assertion on [`MEASURED_VERSIONS`]) and its
+/// measured window.
+const SOURCED_SPAN: (i64, i64) = match sourced_span(
+    prefix(&HOLIDAY_CIRCULARS, NEWEST_MEASURED.holiday_circulars),
+    FIRST_DAY,
+    LAST_DAY,
+) {
+    Some(span) => span,
+    None => (0, -1),
+};
+
+/// Whether every year a whole-list circular records, where the year is not
+/// wholly inside the measured window, has at least one of its holidays in
+/// `holidays` on a day outside that window (CAL-1, D-5159).
+///
+/// [`sourced_kind`] calls every weekday open unless [`SOURCED_HOLIDAYS`]
+/// lists it, so a circular row appended WITHOUT its days would widen the
+/// span and silently call each of that year's holidays a session. Every NSE
+/// list read so far names a weekday holiday in every year; a year that truly
+/// had none would be a decision and a change to this check, never a silent
+/// pass. A walk of both constant tables, at compile time.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to i64 is lossless, and `i64::from` cannot be called in a const fn"
+)]
+const fn recorded_years_list_their_holidays(
+    circulars: &[HolidayCircular],
+    holidays: &[i64],
+    measured_first: i64,
+    measured_last: i64,
+) -> bool {
+    let mut rest = circulars;
+    while let [row, tail @ ..] = rest {
+        if row.whole_year && !year_inside(row.year, measured_first, measured_last) {
+            let mut listed_one = false;
+            let mut days = holidays;
+            while let [day, more @ ..] = days {
+                let outside = *day < measured_first || *day > measured_last;
+                if outside && civil_year(*day) == row.year as i64 {
+                    listed_one = true;
+                }
+                days = more;
+            }
+            if !listed_one {
+                return false;
+            }
+        }
+        rest = tail;
+    }
+    true
+}
+
+// A RECORDED YEAR BRINGS ITS DAYS (D-5159).
+const _: () = assert!(recorded_years_list_their_holidays(
+    &HOLIDAY_CIRCULARS,
+    &SOURCED_HOLIDAYS,
+    FIRST_DAY,
+    LAST_DAY
+));
+
+/// First day [`sourced_kind_of`] answers: **2018-01-01**, computed by
+/// [`sourced_span`] from [`HOLIDAY_CIRCULARS`] (D-5155).
+pub const SOURCED_FIRST_DAY: i64 = SOURCED_SPAN.0;
+
+/// Last day [`sourced_kind_of`] answers: **2026-12-31**, the last day of the
+/// latest year every year up to which is recorded or measured — today
+/// NSE/CMTR/71775's 2026 — computed by [`sourced_span`] (D-5155).
 ///
 /// It was 2026-10-04 (`20_730`), the day the D-2805 spans were read, and from
 /// 2026-10-05 every minute pull of a newer day failed for every instrument
 /// (DB-B25, DB-B41): the record ended while the circular it cites ran on.
 /// [`record_horizon`] is the health check that says so BEFORE the next end.
-pub const SOURCED_LAST_DAY: i64 = 20_818;
+pub const SOURCED_LAST_DAY: i64 = SOURCED_SPAN.1;
 
-/// How many days before [`SOURCED_LAST_DAY`] the record is said to end soon:
-/// **30** (DB-B41's expected "warns when the record ends within 30 days").
-pub const RECORD_ENDS_SOON_DAYS: i64 = 30;
+// PINNED BY CONST ASSERTIONS, NOT TYPED (operator item 3). A circular appended
+// for 2027 moves the computed day and fails the pin, so the move is a
+// decision with its ledger row, never a silent widening.
+const _: () = assert!(SOURCED_FIRST_DAY == 17_532);
+const _: () = assert!(SOURCED_LAST_DAY == 20_818);
+const _: () = assert!(SOURCED_FIRST_DAY == civil_days(2018, 1, 1));
+const _: () = assert!(SOURCED_LAST_DAY == civil_days(2026, 12, 31));
 
-/// Where `today` stands against the end of the calendar of record.
+/// The latest year the record answers whole: the year of [`SOURCED_LAST_DAY`].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the const assertion below holds the value inside u16"
+)]
+pub const SOURCED_LAST_YEAR: u16 = civil_year(SOURCED_LAST_DAY) as u16;
+
+const _: () = assert!(SOURCED_LAST_YEAR == 2026);
+
+/// The civil year of a day since the epoch, in a const fn (H. Hinnant's
+/// `civil_from_days`, year only).
+#[must_use]
+pub const fn civil_year(epoch_day: i64) -> i64 {
+    let z = epoch_day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month_from_march = mp; // 0 = March .. 11 = February
+    let y = yoe + era * 400;
+    if month_from_march >= 10 { y + 1 } else { y }
+}
+
+/// Where a day stands against the end of the calendar of record.
+///
+/// **The warning is a year, not a typed lead time** (operator, 16 Oct 2026,
+/// "NOTHING TYPED" item 6, D-5156). It used to start
+/// `RECORD_ENDS_SOON_DAYS` = 30 days before [`SOURCED_LAST_DAY`]; it now
+/// starts the moment the day asked about falls in [`SOURCED_LAST_YEAR`],
+/// because from then the next year's holiday circular is owed and nothing
+/// later will make the record longer on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordHorizon {
     /// The last day the record answers, [`SOURCED_LAST_DAY`].
     pub last_day: i64,
-    /// Days from `today` to `last_day`: negative once the record has ended.
+    /// Days from the day asked about to `last_day`: negative once the record
+    /// has ended.
     pub days_left: i64,
-    /// `days_left` is at most [`RECORD_ENDS_SOON_DAYS`] (ended included).
+    /// The day asked about is in [`SOURCED_LAST_YEAR`] or later: the next
+    /// year's circular is owed ([`Self::owed_year`]).
     pub ends_soon: bool,
-    /// `today` is past the record: every day from here is `Unmeasured`.
+    /// The day is past the record: every day from here is `Unmeasured`.
     pub ended: bool,
+    /// The year whose holiday circular the record needs next: one past
+    /// [`SOURCED_LAST_YEAR`].
+    pub owed_year: u16,
 }
 
-/// The record's horizon seen from `today` (days since the epoch): one
-/// subtraction and two comparisons, no allocation. The status document of a
-/// pull run carries it, so a page can warn before the record ends rather than
-/// after every pull has failed (DB-B25, DB-B41).
+/// The record's horizon seen from `newest_day` (days since the epoch) — the
+/// newest stored day, or today, which is never earlier, so a caller passing
+/// today is warned no later. A few comparisons, no allocation. The status
+/// document of a pull run carries it, so a page can warn before the record
+/// ends rather than after every pull has failed (DB-B25, DB-B41).
 #[must_use]
-pub const fn record_horizon(today: i64) -> RecordHorizon {
-    let days_left = SOURCED_LAST_DAY.saturating_sub(today);
+pub const fn record_horizon(newest_day: i64) -> RecordHorizon {
+    let days_left = SOURCED_LAST_DAY.saturating_sub(newest_day);
     RecordHorizon {
         last_day: SOURCED_LAST_DAY,
         days_left,
-        ends_soon: days_left <= RECORD_ENDS_SOON_DAYS,
+        ends_soon: newest_day >= LAST_SOURCED_YEAR_STARTS,
         ended: days_left < 0,
+        owed_year: SOURCED_LAST_YEAR.saturating_add(1),
     }
 }
+
+/// 1 January of [`SOURCED_LAST_YEAR`]: the day [`record_horizon`]'s warning
+/// starts.
+#[allow(
+    clippy::cast_lossless,
+    reason = "u16 to i64 is lossless, and `i64::from` cannot be called in a const item"
+)]
+pub const LAST_SOURCED_YEAR_STARTS: i64 = civil_days(SOURCED_LAST_YEAR as i64, 1, 1);
 
 /// The days of `first..=last` that lie past the record, as `(first, last,
 /// count)`, or `None` when the whole window is inside it. A run reports them
@@ -1842,6 +2330,52 @@ pub fn holiday_note(epoch_day: i64) -> Option<HolidayNote> {
     None
 }
 
+/// The circular that names each [`SOURCED_SPECIAL`] day, day for day: the
+/// charter's §3 Muhurat table records 2018-11-07 as NSE/CMTR/36475's date and
+/// 2019-10-27 as NSE/CMTR/39612's, and [`SOURCED_SPECIAL`]'s own note records
+/// 2026-11-08 as NSE/CMTR/71775's, each with its timings "to be notified".
+/// What an operator action item names for a session of unrecorded length
+/// (FM-106): the day and the circular whose window is still needed.
+pub const SOURCED_SPECIAL_NOTES: [HolidayNote; 3] = [
+    note(
+        17_842,
+        "Muhurat trading, timings to be notified",
+        CMTR_36475,
+    ),
+    note(
+        18_196,
+        "Muhurat trading, timings to be notified",
+        CMTR_39612,
+    ),
+    note(
+        20_765,
+        "Muhurat trading, timings to be notified",
+        CMTR_71775,
+    ),
+];
+
+// Day for day the same days as `SOURCED_SPECIAL`, checked at compile time.
+const _: () = {
+    let (mut notes, mut days) = (SOURCED_SPECIAL_NOTES.as_slice(), SOURCED_SPECIAL.as_slice());
+    while let (Some((note, rest_notes)), Some((day, rest_days))) =
+        (notes.split_first(), days.split_first())
+    {
+        assert!(note.day == *day);
+        notes = rest_notes;
+        days = rest_days;
+    }
+    assert!(notes.is_empty() && days.is_empty());
+};
+
+/// The [`SOURCED_SPECIAL_NOTES`] entry of `epoch_day`. A walk of three.
+#[must_use]
+pub fn special_note(epoch_day: i64) -> Option<HolidayNote> {
+    SOURCED_SPECIAL_NOTES
+        .iter()
+        .find(|special| special.day == epoch_day)
+        .copied()
+}
+
 /// Why a day cannot be the day a contract expires and settles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoSettlement {
@@ -2121,10 +2655,1196 @@ pub fn record_of(epoch_day: i64) -> DayRecord {
     }
 }
 
+// ══ The tradable-day rule and the notices of record (D-5150..D-5157) ══
+//
+// NO SPECIAL SESSIONS (operator, 15 Oct 2026): never trade a Muhurat, a half
+// day or any other special or short session in any backtest; every day that
+// is not a normal full session is excluded from trades AND from the own-past
+// statistics that generate the values; the data stays stored and labelled;
+// the excluded days are counted and shown per year.
+//
+// `kind_of` alone cannot say that, and the attack of 15 Oct 2026 proved it
+// (`state/charges-deep-check-20261015.json`, issue H5): it answers
+// `Open(Session::full())` for every special day its four-entry `IRREGULAR`
+// table does not hold -- the three Budget weekends and 2024-01-20 -- and for
+// the two March 2020 halt days, and `OpenLengthUnmeasured` for five Muhurats.
+// A rule written as "kind_of says a full session" would trade a Budget
+// Saturday and feed a circuit-breaker day into every own-past statistic.
+//
+// `tradable_day` is the one question a backtest asks. It reads
+// `sourced_kind_of` (which IS `kind_of` inside the measured window and the
+// D-2805 circular spans outside it, so 2018, 2019 and the rest of 2026 are
+// answered and not refused; the design judge's fix of 16 Oct 2026), the
+// special sessions, the notices below and the halts. It never reads the
+// store. It adds no answer to `kind_of`, `sourced_kind_of` or
+// `exchange_kind_of`, so nothing hashed into run identity moves.
+//
+// THE MEASURED SHORT DAYS STAY TRADABLE (judge, 16 Oct 2026; operator item 5).
+// `SHORT_DAYS` is evidence that minutes were absent in the vendors' answers,
+// not a statement about the session: the exchange held its full session, so
+// the day is tradable, and a reader that needs its minutes asks the `verify/`
+// day image, which says "not verified" at generation 0.
+
+/// One special session as its primary notice states it (D-5152).
+///
+/// [`SPECIAL_SESSIONS`] holds each window as it was MEASURED (Zerodha's
+/// minutes, GDFL's ticks); this table holds what the exchange's own circular
+/// (or, for 2021-02-24, SEBI's order) SAYS, each read on 2026-10-16 from
+/// `nsearchives.nseindia.com` and recorded in `docs/00-charter.md` §3.
+/// `every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+/// holds the two lanes to each other: a disagreement fails the build rather
+/// than leaving one of them silently wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCircular {
+    /// Days since the epoch.
+    pub day: i64,
+    /// What the notice makes the day.
+    pub kind: SpecialKind,
+    /// The normal-market windows the notice states, as inclusive minute
+    /// opens: its end time is exclusive, so "18:15 to 19:15 hrs" is
+    /// `1_095..=1_154`. `None` where the notice names the date and says the
+    /// timings will follow.
+    pub notified: Option<Session>,
+    /// The notice's number, date and address, and what it states.
+    pub source: &'static str,
+}
+
+/// Every special session from 2018-01-01 to 2026-12-31 with its notice,
+/// sorted by day. Append-only: a later notice is a new row, never an edit.
+///
+/// Sixteen rows: the fifteen of [`SPECIAL_SESSIONS`] and the 2026-11-08
+/// Muhurat, which NSE/CMTR/71775 names with "timings to be notified
+/// subsequently" and for which no timing circular was found on 2026-10-16.
+pub const SESSION_CIRCULARS: [SessionCircular; 16] = [
+    SessionCircular {
+        day: 17_842, // 2018-11-07 Wed
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1730),
+        source: "NSE/CMTR/39216 of 23 Oct 2018, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR39216.pdf : Diwali Muhurat \
+                 Trading Session on Wednesday, November 07, 2018, Normal Market/LPM 17:30 to 18:30 \
+                 hrs",
+    },
+    SessionCircular {
+        day: 18_196, // 2019-10-27 Sun
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1815),
+        source: "NSE/CMTR/42483 of 23 Oct 2019 (revised timings, partially modifying \
+                 NSE/CMTR/42403 of 15 Oct 2019), \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR42483.pdf : Diwali Muhurat \
+                 Trading Session on Sunday, October 27, 2019, Normal Market 18:15 to 19:15 hrs",
+    },
+    SessionCircular {
+        day: 18_293, // 2020-02-01 Sat
+        kind: SpecialKind::BudgetWeekend,
+        notified: Some(Session::full()),
+        source: "NSE/CMTR/43290 of 22 Jan 2020, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR43290.pdf : live trading \
+                 session on Saturday, February 01, 2020 on account of the presentation of the \
+                 Union Budget, Normal Market 09:15 to 15:30 hrs",
+    },
+    SessionCircular {
+        day: 18_580, // 2020-11-14 Sat
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1815),
+        source: "NSE/CMTR/46230 of 2 Nov 2020, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR46230.pdf : Diwali Muhurat \
+                 Trading Session on Saturday, November 14, 2020, Normal Market 18:15 to 19:15 hrs",
+    },
+    SessionCircular {
+        day: SYSTEMS_OUTAGE_DAY, // 2021-02-24 Wed
+        kind: SpecialKind::SystemsOutage,
+        notified: Some(OUTAGE_SESSION),
+        source: "SEBI Settlement Order SO/AB/EFD2/2023-24/6580, \
+                 https://www.sebi.gov.in/sebi_data/attachdocs/jun-2023/1687270559560.pdf (charter \
+                 §3) : all segments halted from 11:40, normal trading 09:15 to 11:40 and 15:45 to \
+                 17:00; no NSE circular of the day's windows is recorded",
+    },
+    SessionCircular {
+        day: 18_935, // 2021-11-04 Thu
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1815),
+        source: "NSE/CMTR/50050 of 21 Oct 2021, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR50050.pdf : Diwali Muhurat \
+                 Trading Session on Thursday, November 04, 2021, Normal Market 18:15 to 19:15 hrs",
+    },
+    SessionCircular {
+        day: 19_289, // 2022-10-24 Mon
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1815),
+        source: "NSE/CMTR/54023 of 11 Oct 2022, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR54023.pdf : Diwali Muhurat \
+                 Trading Session on Monday, October 24, 2022, Normal Market 18:15 to 19:15 hrs",
+    },
+    SessionCircular {
+        day: 19_673, // 2023-11-12 Sun
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1815),
+        source: "NSE/CMTR/59124 of 27 Oct 2023, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR59124.pdf : Diwali Muhurat \
+                 Trading Session on Sunday, November 12, 2023, Normal Market 18:15 to 19:15 hrs",
+    },
+    SessionCircular {
+        day: 19_742, // 2024-01-20 Sat
+        kind: SpecialKind::WeekendFullSession,
+        notified: Some(Session::full()),
+        source: "NSE/MSD/60340 of 19 Jan 2024, \
+                 https://nsearchives.nseindia.com/content/circulars/MSD60340.pdf : regular trading \
+                 sessions on Saturday, January 20, 2024 from the primary site as per regular market \
+                 timings; it withdrew NSE/MSD/59999 of 28 Dec 2023, NSE/MSD/60300 and \
+                 NSE/MSD/60318, which had planned a disaster-recovery switch-over session that day. \
+                 Why the day became a full session it does not say: UNVERIFIED",
+    },
+    SessionCircular {
+        day: 19_784, // 2024-03-02 Sat
+        kind: SpecialKind::DisasterRecoveryDrill,
+        notified: Some(DR_DRILL_SESSION),
+        source: "NSE/MSD/60677 of 14 Feb 2024, \
+                 https://nsearchives.nseindia.com/content/circulars/MSD60677.pdf (reminded by \
+                 NSE/MSD/60942 of 1 Mar 2024) : special live trading session with intra-day switch \
+                 over to the DR site on Saturday, March 02, 2024, Normal Market 09:15 to 10:00 hrs \
+                 from the primary site and 11:30 to 12:30 hrs from the DR site",
+    },
+    SessionCircular {
+        day: 19_861, // 2024-05-18 Sat
+        kind: SpecialKind::DisasterRecoveryDrill,
+        notified: Some(DR_DRILL_SESSION),
+        source: "NSE/MSD/61893 of 7 May 2024, \
+                 https://nsearchives.nseindia.com/content/circulars/MSD61893.pdf : special live \
+                 trading session with intra-day switch over to the DR site on Saturday, May 18, \
+                 2024, Normal Market 09:15 to 10:00 hrs and 11:30 to 12:30 hrs",
+    },
+    SessionCircular {
+        day: 20_028, // 2024-11-01 Fri
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1800),
+        source: "NSE/CMTR/64628 of 19 Oct 2024, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR64628.pdf : Diwali Muhurat \
+                 Trading Session on Friday, November 01, 2024, Normal Market 18:00 to 19:00 hrs",
+    },
+    SessionCircular {
+        day: 20_120, // 2025-02-01 Sat
+        kind: SpecialKind::BudgetWeekend,
+        notified: Some(Session::full()),
+        source: "NSE/CMTR/65729 of 23 Dec 2024, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR65729.pdf : live trading \
+                 session on Saturday, February 01, 2025 for the presentation of the Union Budget, \
+                 Normal Market 09:15 to 15:30 hrs",
+    },
+    SessionCircular {
+        day: 20_382, // 2025-10-21 Tue
+        kind: SpecialKind::Muhurat,
+        notified: Some(MUHURAT_1345),
+        source: "NSE/CMTR/70319 of 22 Sep 2025, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR70319.pdf : Diwali Muhurat \
+                 Trading Session on Tuesday, October 21, 2025, Normal Market 13:45 to 14:45 hrs",
+    },
+    SessionCircular {
+        day: 20_485, // 2026-02-01 Sun
+        kind: SpecialKind::BudgetWeekend,
+        notified: Some(Session::full()),
+        source: "NSE/CMTR/72349 of 16 Jan 2026, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR72349.pdf : live trading \
+                 session on Sunday, February 01, 2026 for the presentation of the Union Budget, \
+                 Normal Market 09:15 to 15:30 hrs",
+    },
+    SessionCircular {
+        day: 20_765, // 2026-11-08 Sun
+        kind: SpecialKind::Muhurat,
+        notified: None,
+        source: "NSE/CMTR/71775 of 12 Dec 2025, \
+                 https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf : Muhurat \
+                 Trading will be conducted on Sunday, November 08, 2026, timings to be notified \
+                 subsequently; no timing circular was found on 2026-10-16, so the window is \
+                 UNVERIFIED and none is recorded",
+    },
+];
+
+/// The notice of the special session on `epoch_day`, if one is recorded.
+/// One walk of the sixteen-entry [`SESSION_CIRCULARS`], a compile-time
+/// constant: at most sixteen comparisons, no allocation.
+#[must_use]
+pub fn session_circular(epoch_day: i64) -> Option<SessionCircular> {
+    CalendarVersion::newest().session_circular(epoch_day)
+}
+
+/// The notice of `epoch_day` in `rows`: the LAST row naming it, because the
+/// table is append-only and a later notice for a day (the 2026 Muhurat's
+/// timings, when NSE issues them) supersedes the earlier one without editing
+/// it (D-5159). One walk of `rows`, at most their constant length.
+fn notice_in(rows: &[SessionCircular], epoch_day: i64) -> Option<SessionCircular> {
+    rows.iter()
+        .rev()
+        .find(|circular| circular.day == epoch_day)
+        .copied()
+}
+
+/// How many reasons [`NotTradable`] has: the width of a per-day count.
+pub const NOT_TRADABLE_REASONS: usize = 11;
+
+/// Why a day takes no trade and enters no own-past statistic (D-5150).
+///
+/// **Append-only, and never renumbered.** Each reason's [`Self::code`] is its
+/// explicit discriminant, written into [`CalendarVersion::digest`]'s bytes and
+/// into any count a caller keeps; a new reason is a new code at the end.
+///
+/// One reason per day: the first that applies, in the order [`classify`]
+/// tests them. A day that is several things at once (2021-02-24 is an outage
+/// AND a halt) is counted once, under the first; the day's other facts are in
+/// [`record_of`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum NotTradable {
+    /// Outside the calendar of record ([`SOURCED_FIRST_DAY`] ..=
+    /// [`SOURCED_LAST_DAY`]): a year whose holiday circular is owed, or no
+    /// civil day at all. Its own reason, never [`Self::Unknown`].
+    Unmeasured = 0,
+    /// The exchange was closed on a Saturday or a Sunday.
+    Weekend = 1,
+    /// The exchange was closed on a weekday: a trading holiday.
+    Holiday = 2,
+    /// A Muhurat session ([`SpecialKind::Muhurat`]).
+    Muhurat = 3,
+    /// A live disaster-recovery drill ([`SpecialKind::DisasterRecoveryDrill`]).
+    DisasterRecoveryDrill = 4,
+    /// The 2021-02-24 outage ([`SpecialKind::SystemsOutage`]).
+    SystemsOutage = 5,
+    /// A Union Budget session on a weekend, full hours
+    /// ([`SpecialKind::BudgetWeekend`]): excluded because it is a special
+    /// session, not because its hours were short (D-5150).
+    BudgetWeekend = 6,
+    /// 2024-01-20 ([`SpecialKind::WeekendFullSession`]), excluded on the
+    /// same ground (D-5150).
+    WeekendFullSession = 7,
+    /// The exchange traded, no record states the session's length, and no
+    /// special session or notice names the day: an unknown case.
+    OpenLengthUnmeasured = 8,
+    /// A market-wide halt ([`HALTS`]), sourced or suspected.
+    MarketHalt = 9,
+    /// Open with windows that are not the regular weekday 09:15-15:29, or a
+    /// full session on a weekend, and no row says why: an unknown case,
+    /// refused by name until it becomes a row and a test (D-5151).
+    Unknown = 10,
+}
+
+impl NotTradable {
+    /// Every reason, in [`Self::code`] order.
+    pub const ALL: [Self; NOT_TRADABLE_REASONS] = [
+        Self::Unmeasured,
+        Self::Weekend,
+        Self::Holiday,
+        Self::Muhurat,
+        Self::DisasterRecoveryDrill,
+        Self::SystemsOutage,
+        Self::BudgetWeekend,
+        Self::WeekendFullSession,
+        Self::OpenLengthUnmeasured,
+        Self::MarketHalt,
+        Self::Unknown,
+    ];
+
+    /// The reason's code: its discriminant, fixed forever.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The reason's slot in a count: its code, widened.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The reason a code names, or `None` for a code this build does not know.
+    #[must_use]
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Unmeasured),
+            1 => Some(Self::Weekend),
+            2 => Some(Self::Holiday),
+            3 => Some(Self::Muhurat),
+            4 => Some(Self::DisasterRecoveryDrill),
+            5 => Some(Self::SystemsOutage),
+            6 => Some(Self::BudgetWeekend),
+            7 => Some(Self::WeekendFullSession),
+            8 => Some(Self::OpenLengthUnmeasured),
+            9 => Some(Self::MarketHalt),
+            10 => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    /// The reason's name, as a report prints it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unmeasured => "Unmeasured",
+            Self::Weekend => "Weekend",
+            Self::Holiday => "Holiday",
+            Self::Muhurat => "Muhurat",
+            Self::DisasterRecoveryDrill => "DisasterRecoveryDrill",
+            Self::SystemsOutage => "SystemsOutage",
+            Self::BudgetWeekend => "BudgetWeekend",
+            Self::WeekendFullSession => "WeekendFullSession",
+            Self::OpenLengthUnmeasured => "OpenLengthUnmeasured",
+            Self::MarketHalt => "MarketHalt",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// A reader's label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unmeasured => "outside the calendar of record, its circular owed",
+            Self::Weekend => "weekend, exchange closed",
+            Self::Holiday => "trading holiday, exchange closed",
+            Self::Muhurat => "Muhurat session",
+            Self::DisasterRecoveryDrill => "disaster-recovery drill",
+            Self::SystemsOutage => "systems outage",
+            Self::BudgetWeekend => "Budget weekend session",
+            Self::WeekendFullSession => "weekend full session",
+            Self::OpenLengthUnmeasured => "session of unrecorded length no row names",
+            Self::MarketHalt => "market-wide halt",
+            Self::Unknown => "irregular session no row explains, refused",
+        }
+    }
+
+    /// Whether the exchange traded that day: an EXCLUDED SESSION, whose data
+    /// stays stored and labelled. `false` for the two closed answers and for
+    /// a day the record does not answer.
+    #[must_use]
+    pub const fn is_session(self) -> bool {
+        !matches!(self, Self::Unmeasured | Self::Weekend | Self::Holiday)
+    }
+
+    /// Whether this reason is an unknown case inside the record: a day the
+    /// tables cannot explain, which a report must refuse loudly rather than
+    /// count quietly. [`Self::Unmeasured`] is not one: it is a known gap, a
+    /// year whose circular is owed, named as such.
+    #[must_use]
+    pub const fn is_unexplained(self) -> bool {
+        matches!(self, Self::OpenLengthUnmeasured | Self::Unknown)
+    }
+
+    /// The reason a special session of `kind` is excluded for.
+    #[must_use]
+    pub const fn of_special(kind: SpecialKind) -> Self {
+        match kind {
+            SpecialKind::Muhurat => Self::Muhurat,
+            SpecialKind::DisasterRecoveryDrill => Self::DisasterRecoveryDrill,
+            SpecialKind::SystemsOutage => Self::SystemsOutage,
+            SpecialKind::BudgetWeekend => Self::BudgetWeekend,
+            SpecialKind::WeekendFullSession => Self::WeekendFullSession,
+        }
+    }
+}
+
+/// One version of the whole calendar a backtest reads (D-5154): a measured
+/// version ([`MEASURED_VERSIONS`]) and the sourced span [`sourced_span`]
+/// computes against its window. Every recorded run names the version it was
+/// computed on and re-verifies against that version's [`Self::digest`]; an
+/// extension is a new version, so it re-keys nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalendarVersion {
+    /// The measured version it is built on.
+    measured: MeasuredVersion,
+    /// Its sourced span, `(first, last)` days since the epoch.
+    sourced: (i64, i64),
+    /// The holiday circulars it reads: its prefix of the table (D-5159).
+    holidays: &'static [HolidayCircular],
+    /// The session notices it reads: its prefix of the table (D-5159).
+    notices: &'static [SessionCircular],
+}
+
+impl CalendarVersion {
+    /// The newest version: the one [`tradable_day`] answers and new runs take.
+    #[must_use]
+    pub const fn newest() -> Self {
+        Self::on(NEWEST_MEASURED)
+    }
+
+    /// The holiday circulars this version reads, oldest first.
+    #[must_use]
+    pub const fn holiday_circulars(self) -> &'static [HolidayCircular] {
+        self.holidays
+    }
+
+    /// The session notices this version reads, in table order.
+    #[must_use]
+    pub const fn session_circulars(self) -> &'static [SessionCircular] {
+        self.notices
+    }
+
+    /// The notice of the special session on `epoch_day` at this version: the
+    /// last of its rows naming the day. At most its constant row count of
+    /// comparisons, no allocation.
+    #[must_use]
+    pub fn session_circular(self, epoch_day: i64) -> Option<SessionCircular> {
+        notice_in(self.notices, epoch_day)
+    }
+
+    /// Version `number`, or `None` for a number [`MEASURED_VERSIONS`] does
+    /// not hold. A walk of the constant table.
+    #[must_use]
+    pub const fn of(number: u16) -> Option<Self> {
+        let mut rest: &[MeasuredVersion] = &MEASURED_VERSIONS;
+        while let [row, tail @ ..] = rest {
+            if row.version == number {
+                return Some(Self::on(*row));
+            }
+            rest = tail;
+        }
+        None
+    }
+
+    /// The version built on `measured`, over the tables of record.
+    const fn on(measured: MeasuredVersion) -> Self {
+        Self::on_tables(measured, &HOLIDAY_CIRCULARS, &SESSION_CIRCULARS)
+    }
+
+    /// The version built on `measured` over `holidays` and `notices`, of
+    /// which it reads only its own prefixes: so the same version over a table
+    /// with rows appended answers, and hashes, exactly the same (D-5159).
+    const fn on_tables(
+        measured: MeasuredVersion,
+        holidays: &'static [HolidayCircular],
+        notices: &'static [SessionCircular],
+    ) -> Self {
+        let holidays = prefix(holidays, measured.holiday_circulars);
+        let notices = prefix(notices, measured.session_circulars);
+        let last = last_measured_day(measured.days);
+        let sourced = match sourced_span(holidays, FIRST_DAY, last) {
+            Some(span) => span,
+            None => (FIRST_DAY, last),
+        };
+        Self {
+            measured,
+            sourced,
+            holidays,
+            notices,
+        }
+    }
+
+    /// The version's number.
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        self.measured.version
+    }
+
+    /// The measured window, `(first, last)` days since the epoch.
+    #[must_use]
+    pub const fn measured(self) -> (i64, i64) {
+        (FIRST_DAY, last_measured_day(self.measured.days))
+    }
+
+    /// The sourced span, `(first, last)` days since the epoch.
+    #[must_use]
+    pub const fn sourced(self) -> (i64, i64) {
+        self.sourced
+    }
+
+    /// The whole record this version answers, `(first, last)`: the sourced
+    /// span, widened to the measured window where the window runs past it (a
+    /// partly measured year whose circular is owed). Today both are the span.
+    #[must_use]
+    pub const fn record(self) -> (i64, i64) {
+        let (measured_first, measured_last) = self.measured();
+        let first = if measured_first < self.sourced.0 {
+            measured_first
+        } else {
+            self.sourced.0
+        };
+        let last = if measured_last > self.sourced.1 {
+            measured_last
+        } else {
+            self.sourced.1
+        };
+        (first, last)
+    }
+
+    /// Whether [`Self::record`] is one unbroken run of answered days: the
+    /// sourced span and the measured window overlap or touch. [`Self::record`]
+    /// widens one by the other, so two spans with a gap between them (a year
+    /// neither recorded nor wholly measured, D-5155's "a missing year stops
+    /// the span") would make a record holding days that neither answers, and
+    /// a bucket over them would count `Unmeasured` days as if inside the
+    /// record instead of being refused. Every version of the table is held
+    /// to this by a const assertion ([`MEASURED_VERSIONS`]).
+    #[must_use]
+    pub const fn record_is_unbroken(self) -> bool {
+        let (measured_first, measured_last) = self.measured();
+        self.sourced.0 <= measured_last.saturating_add(1)
+            && measured_first <= self.sourced.1.saturating_add(1)
+    }
+
+    /// [`kind_of`] at this version: the measured bits up to its extent.
+    #[must_use]
+    pub fn kind_of(self, epoch_day: i64) -> DayKind {
+        measured_kind(self.measured().1, epoch_day)
+    }
+
+    /// [`sourced_kind_of`] at this version.
+    #[must_use]
+    pub fn sourced_kind_of(self, epoch_day: i64) -> DayKind {
+        let measured = self.measured();
+        if in_span(measured, epoch_day) {
+            return measured_kind(measured.1, epoch_day);
+        }
+        if in_span(self.sourced, epoch_day) {
+            return sourced_kind(epoch_day);
+        }
+        DayKind::Unmeasured
+    }
+
+    /// [`tradable_day`] at this version.
+    ///
+    /// # Errors
+    ///
+    /// The [`NotTradable`] reason the day takes no trade.
+    pub fn tradable_day(self, epoch_day: i64) -> Result<(), NotTradable> {
+        classify(DayFacts::at(self, epoch_day))
+    }
+
+    /// The bytes a run hashes for this version, in a fixed order: a domain,
+    /// the version, both spans, every recorded holiday circular and session
+    /// notice, then every day of the sourced span with its kind and its
+    /// tradable code. One walk of the span: O(days in the span), built once
+    /// per version and never on a per-day path.
+    #[must_use]
+    pub fn canonical_bytes(self) -> Vec<u8> {
+        let (first, last) = self.record();
+        let days = usize::try_from(last.saturating_sub(first).saturating_add(1)).unwrap_or(0);
+        let mut out = Vec::with_capacity(64 + days * 16);
+        out.extend_from_slice(CALENDAR_DIGEST_DOMAIN);
+        out.extend_from_slice(&self.number().to_le_bytes());
+        let (measured_first, measured_last) = self.measured();
+        for edge in [
+            measured_first,
+            measured_last,
+            self.sourced.0,
+            self.sourced.1,
+            first,
+            last,
+        ] {
+            out.extend_from_slice(&edge.to_le_bytes());
+        }
+        for circular in self.holidays {
+            out.extend_from_slice(&circular.year.to_le_bytes());
+            out.push(u8::from(circular.whole_year));
+            for text in [circular.number, circular.issued, circular.url] {
+                push_text(&mut out, text);
+            }
+        }
+        for notice in self.notices {
+            out.extend_from_slice(&notice.day.to_le_bytes());
+            out.push(NotTradable::of_special(notice.kind).code());
+            push_text(&mut out, notice.source);
+        }
+        let mut day = first;
+        while day <= last {
+            out.extend_from_slice(&day.to_le_bytes());
+            match self.sourced_kind_of(day) {
+                DayKind::Open(session) => {
+                    out.push(1);
+                    out.push(session.count);
+                    for window in session
+                        .windows
+                        .iter()
+                        .take(usize::from(session.count).min(MAX_WINDOWS))
+                    {
+                        out.extend_from_slice(&window.from.to_le_bytes());
+                        out.extend_from_slice(&window.to.to_le_bytes());
+                    }
+                }
+                DayKind::OpenLengthUnmeasured => out.push(2),
+                DayKind::Closed => out.push(3),
+                DayKind::Unmeasured => out.push(4),
+            }
+            out.push(match self.tradable_day(day) {
+                Ok(()) => TRADABLE_CODE,
+                Err(reason) => reason.code(),
+            });
+            day += 1;
+        }
+        out
+    }
+
+    /// BLAKE3 of [`Self::canonical_bytes`]: the version's identity, which a
+    /// recorded run names and re-verifies against (D-5154).
+    #[must_use]
+    pub fn digest(self) -> [u8; 32] {
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        hasher.update(&self.canonical_bytes());
+        hasher.finalize()
+    }
+}
+
+/// The domain the calendar digest starts with, so its bytes can never be read
+/// as another digest's.
+pub const CALENDAR_DIGEST_DOMAIN: &[u8] = b"brutex.pull.calendar.tradable.v1\0";
+
+/// The byte [`CalendarVersion::canonical_bytes`] writes for a tradable day:
+/// past every [`NotTradable::code`], which are append-only from 0.
+pub const TRADABLE_CODE: u8 = 0xFF;
+
+/// A text, length-prefixed, so two adjacent texts cannot run together.
+fn push_text(out: &mut Vec<u8>, text: &str) {
+    out.extend_from_slice(&u64::try_from(text.len()).unwrap_or(u64::MAX).to_le_bytes());
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// **The newest calendar's digest** (D-5154): what a run identity names. Built
+/// once per process ([`CalendarVersion::digest`], one walk of the span) and a
+/// load after that.
+#[must_use]
+pub fn calendar_digest() -> [u8; 32] {
+    static NEWEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *NEWEST.get_or_init(|| CalendarVersion::newest().digest())
+}
+
+/// The facts the tradable-day rule reads for one day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayFacts {
+    /// [`sourced_kind_of`] at the version asked.
+    pub kind: DayKind,
+    /// Saturday or Sunday ([`weekday_of`]).
+    pub weekend: bool,
+    /// The day's special session ([`special_session`]) or, where none is
+    /// recorded, its notice ([`session_circular`]).
+    pub special: Option<SpecialKind>,
+    /// A market-wide halt is recorded ([`halt_on`]).
+    pub halt: bool,
+}
+
+impl DayFacts {
+    /// The facts of `epoch_day` at the newest version.
+    #[must_use]
+    pub fn of(epoch_day: i64) -> Self {
+        Self::at(CalendarVersion::newest(), epoch_day)
+    }
+
+    /// The facts of `epoch_day` at `version`: four bounded walks of
+    /// compile-time tables (at most 9 + 15 + 16 + 3 comparisons in the
+    /// measured window, the 3- and 38-entry walks in a sourced span) and one
+    /// remainder. O(1), no allocation. Timed by
+    /// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+    #[must_use]
+    pub fn at(version: CalendarVersion, epoch_day: i64) -> Self {
+        Self {
+            kind: version.sourced_kind_of(epoch_day),
+            weekend: weekday_of(epoch_day).is_weekend(),
+            special: special_session(epoch_day)
+                .map(|special| special.kind)
+                .or_else(|| {
+                    version
+                        .session_circular(epoch_day)
+                        .map(|circular| circular.kind)
+                }),
+            halt: halt_on(epoch_day).is_some(),
+        }
+    }
+}
+
+/// The tradable-day rule on one day's facts (D-5150, D-5151).
+///
+/// Tested in this order, and the first that applies is the reason:
+/// unmeasured; closed (weekend or holiday); a special session or notice;
+/// a session of unrecorded length; a halt; anything other than the regular
+/// weekday 09:15-15:29 session. Only a day that passes every test is `Ok`.
+///
+/// # Errors
+///
+/// The [`NotTradable`] reason the day takes no trade.
+pub fn classify(facts: DayFacts) -> Result<(), NotTradable> {
+    match facts.kind {
+        DayKind::Unmeasured => return Err(NotTradable::Unmeasured),
+        DayKind::Closed if facts.weekend => return Err(NotTradable::Weekend),
+        DayKind::Closed => return Err(NotTradable::Holiday),
+        DayKind::Open(_) | DayKind::OpenLengthUnmeasured => {}
+    }
+    if let Some(kind) = facts.special {
+        return Err(NotTradable::of_special(kind));
+    }
+    if facts.kind == DayKind::OpenLengthUnmeasured {
+        return Err(NotTradable::OpenLengthUnmeasured);
+    }
+    if facts.halt {
+        return Err(NotTradable::MarketHalt);
+    }
+    if facts.weekend || facts.kind != DayKind::Open(Session::full()) {
+        return Err(NotTradable::Unknown);
+    }
+    Ok(())
+}
+
+/// **Whether a backtest may trade `epoch_day` and learn from it** (D-5150).
+///
+/// `Ok` only when `sourced_kind_of(day) == DayKind::Open(Session::full())`
+/// on a weekday, `special_session(day)`, `session_circular(day)` and
+/// `halt_on(day)` are all `None` (`the_rule_is_the_specs_conditions_on_every_day_of_the_record`).
+/// `sourced_kind_of` is `kind_of` inside 2019-12-02..=2026-09-04 and the
+/// NSE circulars' answer from 2018-01-01 to 2026-12-31, so the own-past
+/// warm-up of 2018 and 2019 and the weeks after the measured window are
+/// judged, not refused. A day outside the record is
+/// [`NotTradable::Unmeasured`]. A measured short day ([`SHORT_DAYS`]) is
+/// tradable: its missing minutes are the readers' question, not the
+/// calendar's. Every excluded day keeps its data, stored and labelled; only
+/// the trade and the own-past statistic skip it. **It never reads the
+/// store.**
+///
+/// # Cost
+///
+/// [`DayFacts::at`] and [`classify`]: bounded walks of compile-time tables,
+/// O(1), no allocation. Timed by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+///
+/// # Errors
+///
+/// The [`NotTradable`] reason the day takes no trade.
+pub fn tradable_day(epoch_day: i64) -> Result<(), NotTradable> {
+    CalendarVersion::newest().tradable_day(epoch_day)
+}
+
+/// A bucket of days counted by the tradable-day rule (D-5157).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayCounts {
+    /// The bucket's first day, as days since the epoch.
+    pub first_day: i64,
+    /// Its last day, inclusive.
+    pub last_day: i64,
+    /// Days the rule admits.
+    pub tradable: u32,
+    /// Days per [`NotTradable`] reason, at [`NotTradable::index`].
+    pub by_reason: [u32; NOT_TRADABLE_REASONS],
+}
+
+impl DayCounts {
+    /// Days in the bucket.
+    #[must_use]
+    pub const fn days(&self) -> i64 {
+        self.last_day - self.first_day + 1
+    }
+
+    /// Days excluded for `reason`.
+    #[must_use]
+    pub fn count(&self, reason: NotTradable) -> u32 {
+        self.by_reason.get(reason.index()).copied().unwrap_or(0)
+    }
+
+    /// Sessions the exchange traded that the rule excludes.
+    #[must_use]
+    pub fn excluded_sessions(&self) -> u32 {
+        let mut total = 0_u32;
+        for reason in NotTradable::ALL {
+            if reason.is_session() {
+                total = total.saturating_add(self.count(reason));
+            }
+        }
+        total
+    }
+
+    /// Days no table explains ([`NotTradable::is_unexplained`]).
+    #[must_use]
+    pub fn unexplained(&self) -> u32 {
+        let mut total = 0_u32;
+        for reason in NotTradable::ALL {
+            if reason.is_unexplained() {
+                total = total.saturating_add(self.count(reason));
+            }
+        }
+        total
+    }
+}
+
+/// Why a bucket cannot be counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanRefusal {
+    /// The bucket ends before it starts.
+    Inverted {
+        /// Its first day.
+        first: i64,
+        /// Its last day.
+        last: i64,
+    },
+    /// Part of the bucket lies outside the calendar of record, so a count of
+    /// it would silently start or stop at the record's edge.
+    OutsideRecord {
+        /// Its first day.
+        first: i64,
+        /// Its last day.
+        last: i64,
+        /// The record's first day.
+        record_first: i64,
+        /// The record's last day.
+        record_last: i64,
+    },
+}
+
+impl std::fmt::Display for SpanRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inverted { first, last } => {
+                write!(f, "days {first} to {last} end before they start")
+            }
+            Self::OutsideRecord {
+                first,
+                last,
+                record_first,
+                record_last,
+            } => write!(
+                f,
+                "days {first} to {last} are not wholly inside the calendar of record (days \
+                 {record_first} to {record_last} since the epoch); a count would stop at the \
+                 record's edge and read as complete, so none is given"
+            ),
+        }
+    }
+}
+
+/// Running sums of the tradable-day rule over one version's sourced span,
+/// indexed by day (operator, 16 Oct 2026, "NOTHING TYPED" item 7, D-5157):
+/// slot `i` holds the counts of the span's first `i` days, so any bucket is
+/// two lookups and a subtraction, O(1), whatever its length. Exactness is
+/// `pull::calendar::tradable_tests::the_running_sums_answer_every_bucket_exactly`;
+/// the cost over buckets of every length is measured by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningSums {
+    /// The version counted.
+    version: CalendarVersion,
+    /// `sums[i]`: days `first .. first + i` counted; slot
+    /// [`NOT_TRADABLE_REASONS`] is the tradable count.
+    sums: Vec<[u32; NOT_TRADABLE_REASONS + 1]>,
+}
+
+impl RunningSums {
+    /// The sums of `version`: one [`CalendarVersion::tradable_day`] per day
+    /// of its span, O(days in the span), once.
+    #[must_use]
+    pub fn build(version: CalendarVersion) -> Self {
+        let (first, last) = version.record();
+        let days = usize::try_from(last.saturating_sub(first).saturating_add(1)).unwrap_or(0);
+        let mut sums = Vec::with_capacity(days + 1);
+        let mut running = [0_u32; NOT_TRADABLE_REASONS + 1];
+        sums.push(running);
+        let mut day = first;
+        while day <= last {
+            let slot = match version.tradable_day(day) {
+                Ok(()) => NOT_TRADABLE_REASONS,
+                Err(reason) => reason.index(),
+            };
+            if let Some(count) = running.get_mut(slot) {
+                *count = count.saturating_add(1);
+            }
+            sums.push(running);
+            day += 1;
+        }
+        Self { version, sums }
+    }
+
+    /// The newest version's sums, built on first use and shared after.
+    #[must_use]
+    pub fn newest() -> &'static Self {
+        static NEWEST: std::sync::OnceLock<RunningSums> = std::sync::OnceLock::new();
+        NEWEST.get_or_init(|| Self::build(CalendarVersion::newest()))
+    }
+
+    /// The version counted.
+    #[must_use]
+    pub const fn version(&self) -> CalendarVersion {
+        self.version
+    }
+
+    /// The counts of `first..=last`: two indexed reads and a subtraction.
+    ///
+    /// # Errors
+    ///
+    /// [`SpanRefusal`] for an inverted bucket or one not wholly inside the
+    /// version's sourced span.
+    pub fn between(&self, first: i64, last: i64) -> Result<DayCounts, SpanRefusal> {
+        if first > last {
+            return Err(SpanRefusal::Inverted { first, last });
+        }
+        let (record_first, record_last) = self.version.record();
+        let outside = SpanRefusal::OutsideRecord {
+            first,
+            last,
+            record_first,
+            record_last,
+        };
+        if first < record_first || last > record_last {
+            return Err(outside);
+        }
+        let low = usize::try_from(first - record_first).map_err(|_| outside)?;
+        let high = usize::try_from(last - record_first + 1).map_err(|_| outside)?;
+        let (Some(before), Some(through)) = (self.sums.get(low), self.sums.get(high)) else {
+            return Err(outside);
+        };
+        let mut counts = DayCounts {
+            first_day: first,
+            last_day: last,
+            tradable: 0,
+            by_reason: [0; NOT_TRADABLE_REASONS],
+        };
+        for (slot, count) in counts.by_reason.iter_mut().enumerate() {
+            *count = through
+                .get(slot)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(before.get(slot).copied().unwrap_or(0));
+        }
+        counts.tradable = through
+            .get(NOT_TRADABLE_REASONS)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before.get(NOT_TRADABLE_REASONS).copied().unwrap_or(0));
+        Ok(counts)
+    }
+}
+
+/// The counts of `first..=last` at the newest version: O(1) after the first
+/// call builds [`RunningSums::newest`] (D-5157), measured over buckets of
+/// every length by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+///
+/// # Errors
+///
+/// [`RunningSums::between`]'s.
+pub fn excluded_between(first: i64, last: i64) -> Result<DayCounts, SpanRefusal> {
+    RunningSums::newest().between(first, last)
+}
+
+/// One calendar year's days, counted by the tradable-day rule (D-5153).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YearExclusions {
+    /// The year.
+    pub year: u16,
+    /// Its counts.
+    pub counts: DayCounts,
+}
+
+/// Why a year cannot be counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YearRefusal {
+    /// Not a year the civil calendar here spells.
+    NotACivilYear(u16),
+    /// Part of the year lies outside the calendar of record: its holiday
+    /// circular is owed (or the year lies before the earliest one recorded),
+    /// so a count of it would silently stop at the record's edge.
+    OutsideRecord {
+        /// The year asked.
+        year: u16,
+    },
+}
+
+impl std::fmt::Display for YearRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotACivilYear(year) => write!(f, "{year} is not a year this calendar spells"),
+            Self::OutsideRecord { year } => {
+                let (first, last) = CalendarVersion::newest().record();
+                write!(
+                    f,
+                    "{year} is not wholly inside the calendar of record (days {first} to {last} \
+                     since the epoch, {} to {}): no NSE holiday circular for {year} is recorded \
+                     and the measured window does not hold all of it, so its days are \
+                     Unmeasured and a count would read as complete; none is given",
+                    civil_text(first),
+                    civil_text(last)
+                )
+            }
+        }
+    }
+}
+
+/// `YYYY-MM-DD` for a day the civil calendar spells; the number otherwise.
+fn civil_text(day: i64) -> String {
+    u32::try_from(day)
+        .ok()
+        .and_then(|days| crate::session::Day::from_days(days).ok())
+        .map_or_else(|| day.to_string(), |civil| civil.to_string())
+}
+
+/// The days of `year` counted by [`tradable_day`] (D-5153): one
+/// [`RunningSums::between`], O(1) after the sums are built, measured over
+/// every year of the record by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+///
+/// # Errors
+///
+/// [`YearRefusal`] for a year the civil calendar does not spell or that is
+/// not wholly inside the calendar of record.
+pub fn year_exclusions(year: u16) -> Result<YearExclusions, YearRefusal> {
+    let bounds = (
+        crate::session::Day::new(year, 1, 1),
+        crate::session::Day::new(year, 12, 31),
+    );
+    let (Ok(first), Ok(last)) = bounds else {
+        return Err(YearRefusal::NotACivilYear(year));
+    };
+    let first_day = i64::from(first.days_from_epoch());
+    let last_day = i64::from(last.days_from_epoch());
+    excluded_between(first_day, last_day)
+        .map(|counts| YearExclusions { year, counts })
+        .map_err(|_| YearRefusal::OutsideRecord { year })
+}
+
+/// How a year's holidays are on record (D-5155).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YearHolidays {
+    /// A whole-year NSE holiday circular is recorded: its number.
+    Recorded(&'static str),
+    /// No circular is recorded and none is needed: every day of the year lies
+    /// in the measured window, whose closed days were measured from the store.
+    Measured,
+    /// Neither: the circular is owed, and the year's days outside the
+    /// measured window are [`NotTradable::Unmeasured`].
+    Owed,
+}
+
+/// What the record holds for one calendar year.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YearRecord {
+    /// The year.
+    pub year: u16,
+    /// Its holidays' record.
+    pub holidays: YearHolidays,
+    /// Special-session notices recorded for it ([`SESSION_CIRCULARS`]).
+    pub notices: u16,
+    /// Of those, notices that name the day and no window yet.
+    pub untimed_notices: u16,
+}
+
+impl YearRecord {
+    /// Whether the year is wholly inside the calendar of record.
+    #[must_use]
+    pub const fn answered(&self) -> bool {
+        !matches!(self.holidays, YearHolidays::Owed)
+    }
+}
+
+/// The record of `year` at the newest version: one walk of the version's
+/// holiday circulars, and for each of its session notices one walk of the
+/// notices for the newest row naming that day, so at most the notice count
+/// squared plus the circular count of comparisons. Both lengths are the
+/// tables' array types, compile-time constants, so the bound does not grow
+/// with the store or the day: O(1), measured over every year of the record by
+/// `pull::calendar::tradable_tests::tradable_day_and_every_bucket_are_bounded`.
+/// A day with a later notice is counted once, by its newest notice (D-5159).
+#[must_use]
+pub fn year_record(year: u16) -> YearRecord {
+    let version = CalendarVersion::newest();
+    let (first, last) = version.measured();
+    let mut holidays = if year_inside(year, first, last) {
+        YearHolidays::Measured
+    } else {
+        YearHolidays::Owed
+    };
+    for circular in version.holiday_circulars() {
+        if circular.year == year && circular.whole_year {
+            holidays = YearHolidays::Recorded(circular.number);
+        }
+    }
+    let (mut notices, mut untimed_notices) = (0_u16, 0_u16);
+    for notice in version.session_circulars() {
+        let newest = version.session_circular(notice.day) == Some(*notice);
+        if newest && civil_year(notice.day) == i64::from(year) {
+            notices = notices.saturating_add(1);
+            if notice.notified.is_none() {
+                untimed_notices = untimed_notices.saturating_add(1);
+            }
+        }
+    }
+    YearRecord {
+        year,
+        holidays,
+        notices,
+        untimed_notices,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// SC-CLOSE-23. The derivative venue's close on both sides of the
+    /// 2026-08-03 change, at the SECOND (a GDFL one-second bar) and at the
+    /// minute (`session::Window::verdict`): on 2026-08-03 a 15:39:59 bar is
+    /// kept and a 15:40:00 one is past the close; on the last session before
+    /// the change, by the calendar of record, a 15:29:59 bar is kept and a
+    /// 15:30:00 one is past the close. The finding named 2026-08-02, which is
+    /// a Sunday: the day is found from the calendar, never typed.
+    #[test]
+    fn the_derivative_close_moves_from_15_30_to_15_40_on_2026_08_03() {
+        use crate::session::{Cadence, DropReason, Window as Span};
+        use crate::vendor::Venue;
+        let change = i64::from(
+            crate::session::Day::new(2026, 8, 3)
+                .expect("a real day")
+                .days_from_epoch(),
+        );
+        assert!(
+            matches!(kind_of(change), DayKind::Open(_)),
+            "2026-08-03 traded"
+        );
+        let before = (1..=10)
+            .map(|back| change - back)
+            .find(|day| matches!(kind_of(*day), DayKind::Open(_)))
+            .expect("a session in the ten days before the change");
+        let sunday = change - 1;
+        assert!(
+            weekday_of(sunday).is_weekend(),
+            "2026-08-02 is not a session"
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed);
+        let at = |h: u32, m: u32, s: u32| h * 3_600 + m * 60 + s;
+        let continuous = |day: i64, second: u32| {
+            phase_at_second(Venue::NseDerivatives, day, second, CasEligibility::Unknown)
+        };
+        // 2026-08-03: the extended close.
+        assert_eq!(continuous(change, at(15, 39, 59)), Phase::Continuous);
+        assert_eq!(continuous(change, at(15, 30, 0)), Phase::Continuous);
+        assert_eq!(continuous(change, at(15, 40, 0)), Phase::PostClose);
+        // The session before: the 15:30 close.
+        assert_eq!(continuous(before, at(15, 29, 59)), Phase::Continuous);
+        assert_eq!(continuous(before, at(15, 30, 0)), Phase::PostClose);
+        assert_eq!(continuous(before, at(15, 39, 59)), Phase::PostClose);
+        // The index did not extend on either side (D-3320).
+        for day in [before, change] {
+            assert_eq!(
+                phase_at_second(Venue::NseIndex, day, at(15, 30, 0), CasEligibility::Unknown),
+                Phase::PostClose
+            );
+        }
+        // At the minute, through the session filter every lander uses.
+        let epoch = |day: i64, h: i64, m: i64| day * 86_400 + h * 3_600 + m * 60 - 19_800;
+        let verdict = |day: i64, h: i64, m: i64| {
+            let civil = crate::session::Day::from_days(u32::try_from(day).expect("a day"))
+                .expect("a civil day");
+            Span::new(civil, civil)
+                .expect("a one-day window")
+                .verdict(epoch(day, h, m), Cadence::Minute, Venue::NseDerivatives)
+                .expect("a real timestamp")
+        };
+        assert_eq!(verdict(change, 15, 39), None, "15:39 kept on 2026-08-03");
+        assert_eq!(
+            verdict(change, 15, 40),
+            Some(DropReason::AtOrAfterSessionClose),
+            "15:40 dropped on 2026-08-03"
+        );
+        assert_eq!(
+            verdict(before, 15, 29),
+            None,
+            "15:29 kept before the change"
+        );
+        assert_eq!(
+            verdict(before, 15, 30),
+            Some(DropReason::AtOrAfterSessionClose),
+            "15:30 dropped before the change"
+        );
+    }
 
     /// **THE TWO MEASURED SHORT DAYS ARE IN THE CALENDAR OF RECORD** (WP-62,
     /// repair 3; DB-G47): 2019-08-02 and 2022-03-07 were plain sessions with
@@ -2292,18 +4012,34 @@ mod tests {
 
     /// **THE RECORD SAYS WHEN IT ENDS BEFORE IT HAS** (DB-B25, DB-B41). It
     /// expired on 2026-10-04 with no warning and every pull of a newer day
-    /// failed; the horizon is what a page reads to warn 30 days ahead, and
-    /// `past_record` is the part of a window nothing can judge.
+    /// failed; the horizon is what a page reads to warn ahead, and
+    /// `past_record` is the part of a window nothing can judge. The warning
+    /// starts the moment a day falls in the latest sourced year — no typed
+    /// lead time (operator item 6, D-5156): 2025-12-31 is quiet, 2026-01-01
+    /// warns that 2027's circular is owed.
     #[test]
     fn the_record_horizon_warns_before_the_end_and_names_the_days_past_it() {
+        let at = |y, m, d| {
+            i64::from(
+                crate::session::Day::new(y, m, d)
+                    .expect("a real day")
+                    .days_from_epoch(),
+            )
+        };
         let last = SOURCED_LAST_DAY;
-        let far = record_horizon(last - RECORD_ENDS_SOON_DAYS - 1);
+        let year_starts = at(2026, 1, 1);
+        assert_eq!(LAST_SOURCED_YEAR_STARTS, year_starts);
+        let far = record_horizon(year_starts - 1);
         assert_eq!(
             (far.last_day, far.days_left, far.ends_soon, far.ended),
-            (last, RECORD_ENDS_SOON_DAYS + 1, false, false)
+            (last, last - year_starts + 1, false, false)
         );
-        let soon = record_horizon(last - RECORD_ENDS_SOON_DAYS);
+        assert_eq!(far.owed_year, 2027);
+        let soon = record_horizon(year_starts);
         assert!(soon.ends_soon && !soon.ended, "{soon:?}");
+        assert_eq!(soon.owed_year, 2027);
+        // Today, 2026-10-17, the warning is on: the operator owes 2027's list.
+        assert!(record_horizon(at(2026, 10, 17)).ends_soon);
         let on = record_horizon(last);
         assert_eq!((on.days_left, on.ends_soon, on.ended), (0, true, false));
         let past = record_horizon(last + 1);
@@ -4869,3 +6605,11 @@ mod record_tests {
         assert!(p99 < 50_000, "{name}: p99 {p99} ns");
     }
 }
+
+/// The tradable-day rule (CAL-1, D-5150..D-5157): `tradable_day`, the
+/// computed spans, the measured versions and their digests, and the running
+/// sums. Every expected value is a calendar fact read from a table's own row
+/// or an NSE circular, never a value printed by the code under test.
+#[cfg(test)]
+#[path = "calendar_tradable_tests.rs"]
+mod tradable_tests;

@@ -21,7 +21,13 @@
 //! records it as imported (`done`, `recounted` or `incomplete` under any
 //! filter); every other day of the range is counted, never read.
 //!
-//! It writes `<store>/imports/gdfl.dayflags` and nothing else: no bar, no
+//! It takes the locks an import of `KIND` takes (the kind lock on a v4
+//! store, the store lock on v3; IA-16, D-6900), never waiting: while a run
+//! of the kind holds them it refuses `run_busy` naming the run and reads
+//! nothing. Its claim takes an id from the runs ledger (`audit/runs.ledger`,
+//! `mode=dayflags`) and is released when it ends.
+//!
+//! It writes `<store>/imports/gdfl.dayflags` and nothing else of the data: no bar, no
 //! census, no journal line, no auction sidecar (`pull::gdfl_import::rescan_cm`
 //! reads a share's closing-auction prints and files none). With `--lineage`,
 //! an options run also appends to `<store>/imports/gdfl.lineage` and
@@ -130,7 +136,8 @@ pub(crate) fn command_with(
 ///
 /// # Errors
 ///
-/// The outer `Err` names an archive or a scope that cannot be opened; the
+/// The outer `Err` names an archive or a scope that cannot be opened, or the
+/// import's locks held by a run of the kind (`run_busy` naming it); the
 /// inner one is the rescan's own run-level refusal.
 fn rescan(
     kind: ImportKind,
@@ -140,13 +147,50 @@ fn rescan(
     lineage: bool,
 ) -> Result<Result<Rescan, pull::gdfl_import::ImportRefusal>, String> {
     if kind == ImportKind::Options {
-        return Ok(rescan_nfo(&NfoZips::new(data), range, store, lineage));
+        let zips = NfoZips::new(data);
+        return held(store, kind, || rescan_nfo(&zips, range, store, lineage));
     }
+    // The archive is opened BEFORE the locks on purpose: an archive that is
+    // not there is refused with nothing written under the store, not even
+    // the locks' files (`the_zip_root_is_named_never_defaulted` asserts the
+    // store's tree empty); opening it reads the vendor's zip, writes nothing.
     let (scope, _) = scope_of(kind, store)?;
     let archive = Archive::open(data)
         .map_err(|why| format!("{}: {why}", data.display()))?
         .with_scope(Arc::new(scope));
-    Ok(rescan_cm(&archive, kind, range, store))
+    held(store, kind, || rescan_cm(&archive, kind, range, store))
+}
+
+/// `rescan` under the locks an import of `kind` takes (IA-16, D-6900 keep
+/// item 1; design §5.3; IA-GR-14): the kind lock on a v4 store, the store
+/// lock on v3, tried with the probe retry and never waited on, so the rescan
+/// never reads a day an import of that kind is writing. A run of the kind
+/// that holds them is named (`run_busy`) and nothing is read or written.
+/// The claim and its runs-ledger id are released when the rescan ends,
+/// whatever it answered.
+///
+/// # Errors
+///
+/// The lock's refusal by name, or a release that failed.
+fn held<T>(store: &Path, kind: ImportKind, rescan: impl FnOnce() -> T) -> Result<T, String> {
+    let hold = pull::gdfl_run::claim_dayflags(store, kind).map_err(|why| {
+        // The refusal's own words lead with its code; it is said once.
+        let said = why.to_string();
+        let code = why.code();
+        let said = if said.starts_with(code) {
+            said
+        } else {
+            format!("{code}: {said}")
+        };
+        format!(
+            "{said}; the rescan read and wrote nothing while a run of {} holds its locks (D-6900)",
+            kind.as_str()
+        )
+    })?;
+    let done = rescan();
+    hold.release()
+        .map_err(|why| format!("the rescan's claim was not released: {why}"))?;
+    Ok(done)
 }
 
 /// The rescan's receipt.

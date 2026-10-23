@@ -74,8 +74,12 @@ fn main() -> std::process::ExitCode {
     // both log; every other verb keeps `install_log`. A run whose sink was
     // refused then refuses before any lock (D-4903).
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let where_events_went =
-        cli::gdfl_import_command::install_run_log(&args).unwrap_or_else(cli::install_log);
+    // `verify-merge` and `zerodha-verify` log to `logs/verify/merge` and
+    // `logs/verify/zerodha`, the directories their locks make them alone in
+    // (IA-9, D-4897).
+    let where_events_went = cli::gdfl_import_command::install_run_log(&args)
+        .or_else(|| cli::verify_merge_command::install_run_log(&args))
+        .unwrap_or_else(cli::install_log);
     cli::announce_unlogged(&where_events_went, &mut stderr);
 
     // `args_os`, never `args`: the latter panics on an argument that is not

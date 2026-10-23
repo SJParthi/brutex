@@ -1272,8 +1272,12 @@ impl Journal {
         let refused = |why: std::io::Error| ImportRefusal::Journal {
             why: format!("{}: {why}", self.path.display()),
         };
-        // The journal always sits in `imports/` under the store root.
-        std::fs::create_dir_all(self.path.with_file_name("")).map_err(refused)?;
+        // The journal always sits in `imports/` under the store root, and
+        // only that one directory is ever made here: a root that went away
+        // is refused, never born again (FM-125, D-4852; IA-16 repair 1).
+        if let Some(dir) = self.path.parent() {
+            make_leaf_dir(dir).map_err(refused)?;
+        }
         // EVERY APPEND UNDER THE JOURNAL LOCK (IA-2; D-4803, D-4905, D-4906):
         // two kinds' runs, a recount and the day ledger append to one
         // directory, so the count of the lines another process appended, the
@@ -1372,16 +1376,54 @@ pub(super) fn newlines(bytes: &[u8]) -> u64 {
 /// every reader of these ledgers knows for torn (the re-key's own reader
 /// skips a line ending in the mark; the others count or step over a line
 /// they cannot read), never glued to the next, and the close is said at
-/// `warn`. Creates the file and its directory. Nothing to append opens
-/// nothing. Shared by the day, lineage, lot and scope ledgers and the
-/// re-key's lineage records (D-3335, D-3331, D-3343, D-4878; IA-2).
+/// `warn`. Creates the file and its own directory, never the store root or
+/// an ancestor of it ([`make_leaf_dir`]). Nothing to append opens nothing.
+/// Shared by the day, lineage, lot and scope ledgers and the re-key's
+/// lineage records (D-3335, D-3331, D-3343, D-4878; IA-2).
 ///
 /// # Errors
 ///
 /// The path and why; `lock_stalled` when the journal lock is held past
-/// [`crate::gdfl_run::locks::LOCK_WAIT`].
+/// [`crate::gdfl_run::locks::LOCK_WAIT`]; a store root that is not a
+/// directory.
 pub(crate) fn append_lines(path: &Path, lines: &[String]) -> Result<(), String> {
     append_lines_within(path, lines, crate::gdfl_run::locks::LOCK_WAIT)
+}
+
+/// Makes `dir`, a ledger's own directory directly below the store root
+/// (`imports/`), when it is missing, and NEVER ITS PARENT (IA-16 repair 1;
+/// FM-125, FM-086, D-4852): a root that went away (an unplugged volume, a
+/// folder moved aside) is refused by name, so no journal, ledger or progress
+/// writer makes a new root on whatever disk now holds the mount point and
+/// files the run's lines there, as `create_dir_all` did. One `metadata`
+/// call when `dir` is there; one more and one `mkdir` the first time.
+/// `audit_ledger::append` and the store's bar writer (D-1522) keep the same
+/// rule.
+///
+/// # Errors
+///
+/// `NotFound` naming the parent when it is not a directory; the host's
+/// refusal of the `mkdir`.
+pub(crate) fn make_leaf_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let parent = dir.parent().filter(|parent| !parent.as_os_str().is_empty());
+    if !parent.is_some_and(Path::is_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "the store root {} is not a directory, so {} is not made: a writer never \
+                 makes the root or an ancestor of it (the store's volume went away)",
+                parent.map_or_else(|| "(none)".to_owned(), |one| one.display().to_string()),
+                dir.display()
+            ),
+        ));
+    }
+    match std::fs::create_dir(dir) {
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        made => made,
+    }
 }
 
 /// [`append_lines`], the journal lock waited for at most `wait`.
@@ -1399,8 +1441,9 @@ pub(crate) fn append_lines_within(
         return Ok(());
     }
     let refused = |why: std::io::Error| format!("{}: {why}", path.display());
+    // Its own directory alone, below a root that is there (FM-125).
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(refused)?;
+        make_leaf_dir(dir).map_err(refused)?;
     }
     // Under the journal append lock, as every journal line is (IA-2, round
     // 3 SF-10; D-4803, D-4906): two runs of two kinds append the day ledger
