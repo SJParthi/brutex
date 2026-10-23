@@ -788,51 +788,19 @@ pub fn futures_plan(
         let Ok(span) = Window::new(from, to) else {
             continue;
         };
-        let label = format!("{underlying} {expiry} future (token {token}, first listed {seen})");
-        if let Some(tokens) = tokens_of.get(&expiry).filter(|tokens| tokens.len() > 1) {
-            let tokens: Vec<String> = tokens.iter().map(u64::to_string).collect();
-            refused.push(format!(
-                "contract_duplicated: {label}: the index lists this one contract under {} tokens \
-                 ({}), so none is asked and no two series are filed as one",
-                tokens.len(),
-                tokens.join(", ")
-            ));
-            continue;
+        let tokens = tokens_of.get(&expiry).map_or(&[][..], Vec::as_slice);
+        match contract_ask(
+            book,
+            route,
+            underlying,
+            newest,
+            tokens,
+            (expiry, token, seen),
+            span,
+        ) {
+            Ok(ask) => asks.push(ask),
+            Err(why) => refused.push(why),
         }
-        // IDENTITY, NOT TRADING: the newest snapshot may still list a contract
-        // past its expiry (`token_expired` on that day, R4-28 repair 3), and
-        // the same contract is still what the token names in its history.
-        match book.token_on(newest.day, route.exchange, token) {
-            TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. }
-                if is_future_of(&listed, route, underlying) && listed.expiry() == Some(expiry) => {}
-            TokenOn::NotListed { .. } => {}
-            TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. } => {
-                refused.push(format!(
-                    "token_reused: {label}: the newest snapshot {newest} maps the token to {}, so \
-                     its history is not asked through it",
-                    listed.tradingsymbol()
-                ));
-                continue;
-            }
-            other => {
-                refused.push(format!(
-                    "{}: {label}, checked against the newest snapshot {newest}",
-                    other.word()
-                ));
-                continue;
-            }
-        }
-        let Some(contract) = future_contract(expiry) else {
-            refused.push(format!(
-                "contract_unnamed: {label}: no contract segment renders"
-            ));
-            continue;
-        };
-        asks.push(FuturesAsk {
-            token,
-            series: FuturesSeries::Contract { contract, expiry },
-            window: span,
-        });
     }
     match continuous_ask(book, route, underlying, today, window.from(), through) {
         Ok(Some(ask)) => asks.push(ask),
@@ -855,6 +823,62 @@ pub fn futures_plan(
         refused,
         rebuilt: listing.rebuilt,
         incomplete: incomplete_lines(book),
+    })
+}
+
+/// One contract's request over `span`, or why it is not asked, by name.
+///
+/// `tokens` is every token the index lists for this contract's expiry: more
+/// than one is `contract_duplicated` (R4-28 repair 3, the r3 check's
+/// follow-up), since a dump that lists one (underlying, expiry) under two
+/// tokens would file two series as one contract's, so neither is asked and
+/// both are named. The token is then checked against the newest snapshot.
+fn contract_ask(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    newest: Stamp,
+    tokens: &[u64],
+    (expiry, token, seen): (Day, u64, Day),
+    span: Window,
+) -> Result<FuturesAsk, String> {
+    let label = format!("{underlying} {expiry} future (token {token}, first listed {seen})");
+    if tokens.len() > 1 {
+        let tokens: Vec<String> = tokens.iter().map(u64::to_string).collect();
+        return Err(format!(
+            "contract_duplicated: {label}: the index lists this one contract under {} tokens \
+             ({}), so none is asked and no two series are filed as one",
+            tokens.len(),
+            tokens.join(", ")
+        ));
+    }
+    // IDENTITY, NOT TRADING: the newest snapshot may still list a contract
+    // past its expiry (`token_expired` on that day, R4-28 repair 3), and the
+    // same contract is still what the token names in its history.
+    match book.token_on(newest.day, route.exchange, token) {
+        TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. }
+            if is_future_of(&listed, route, underlying) && listed.expiry() == Some(expiry) => {}
+        TokenOn::NotListed { .. } => {}
+        TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. } => {
+            return Err(format!(
+                "token_reused: {label}: the newest snapshot {newest} maps the token to {}, so its \
+                 history is not asked through it",
+                listed.tradingsymbol()
+            ));
+        }
+        other => {
+            return Err(format!(
+                "{}: {label}, checked against the newest snapshot {newest}",
+                other.word()
+            ));
+        }
+    }
+    let contract = future_contract(expiry)
+        .ok_or_else(|| format!("contract_unnamed: {label}: no contract segment renders"))?;
+    Ok(FuturesAsk {
+        token,
+        series: FuturesSeries::Contract { contract, expiry },
+        window: span,
     })
 }
 
