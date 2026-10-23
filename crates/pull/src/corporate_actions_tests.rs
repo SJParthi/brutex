@@ -1132,3 +1132,248 @@ fn an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured() {
         "an action lookup's median at 1, 64 and 4,096 rows: {medians:?} ns"
     );
 }
+
+// ─────────────────────────────── proven is not lasting (D-7139) ───────────────────────────────
+
+/// The runs of `days` for `symbol`, loaded back through the store as the
+/// ledger reads them.
+fn loaded(tag: &str, shares: &[(&str, Vec<BasisDay>)]) -> (BasisRuns, u64) {
+    let mut runs = Vec::new();
+    for (symbol, days) in shares {
+        runs.extend(fold_runs(symbol, days.clone()).unwrap());
+    }
+    let store = scratch(tag);
+    let landed = write(&store, &runs_draft(&runs)).unwrap();
+    (load_runs(&store).table().unwrap().clone(), landed.generation)
+}
+
+/// An empty measured table, for the checker.
+fn no_actions(tag: &str) -> CorporateActions {
+    let store = scratch(tag);
+    write(&store, &actions_draft(Standing::Measured, &[])).unwrap();
+    load_actions(&store).table().unwrap().clone()
+}
+
+#[test]
+fn a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row() {
+    // ALTCO: 0.80 / 0.81 / 0.80 a session at a time for sixty days; SEGCO:
+    // the same three ratios twenty sessions each. Every change is a PROVEN
+    // step (the bands separate by 1.25%), and none is a lasting change of
+    // basis: the ratio goes back.
+    let mut alt = Vec::new();
+    let mut at = day(2022, 1, 3);
+    while alt.len() < 60 {
+        if !matches!(at.days_from_epoch() % 7, 2 | 3) {
+            alt.push(around(at, if alt.len() % 2 == 0 { "4/5" } else { "81/100" }));
+        }
+        at = at.succ().unwrap();
+    }
+    let mut seg = weekdays(day(2022, 1, 3), day(2022, 1, 28), "4/5");
+    seg.extend(weekdays(day(2022, 1, 31), day(2022, 2, 25), "81/100"));
+    seg.extend(weekdays(day(2022, 2, 28), day(2022, 3, 25), "4/5"));
+    let (runs, generation) = loaded("cor-alternate", &[("ALTCO", alt), ("SEGCO", seg)]);
+    let alt_steps = judge(runs.of("ALTCO"));
+    assert_eq!(alt_steps.len(), 59, "a step a session");
+    assert!(alt_steps.iter().all(|j| j.step.proven()));
+    assert!(
+        alt_steps
+            .iter()
+            .all(|j| matches!(j.verdict, Verdict::Anomaly(Anomaly::Reversed { .. }))),
+        "{:#?}",
+        alt_steps.iter().map(|j| j.verdict).collect::<Vec<_>>()
+    );
+    let seg_steps = judge(runs.of("SEGCO"));
+    assert_eq!(seg_steps.len(), 2);
+    assert_eq!(
+        seg_steps.iter().map(|j| j.verdict).collect::<Vec<_>>(),
+        [
+            Verdict::Anomaly(Anomaly::Reversed {
+                by: day(2022, 2, 28)
+            }),
+            Verdict::Anomaly(Anomaly::Reversed {
+                by: day(2022, 1, 31)
+            }),
+        ]
+    );
+    // NO ROW: the ledger holds nothing of either share.
+    assert_eq!(measured_rows(&runs, generation), []);
+    // The checker names every one as a basis anomaly, never as a missing row.
+    let found = check(&runs, &no_actions("cor-alternate-ca"));
+    assert_eq!(found.len(), 61, "{found:#?}");
+    assert!(found.iter().all(|f| f.word() == "basis_anomaly"));
+    let said = found
+        .iter()
+        .find(|f| matches!(f, Finding::BasisAnomaly { step, .. } if step.symbol == "SEGCO"))
+        .unwrap()
+        .to_string();
+    assert!(
+        said.contains("basis_anomaly SEGCO (2022-01-28, 2022-01-31]")
+            && said.contains("basis_reversed: a proven step the other way on 2022-02-28"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_one_session_two_percent_excursion_ledgers_no_row() {
+    // EXCO: 0.80 for a month, 0.816 (two percent up) for ONE session, then
+    // 0.80 again for a month. Both steps are proven; neither lasts.
+    let mut days = weekdays(day(2023, 5, 1), day(2023, 5, 31), "4/5");
+    days.push(around(day(2023, 6, 1), "102/125"));
+    days.extend(weekdays(day(2023, 6, 2), day(2023, 6, 30), "4/5"));
+    let (runs, generation) = loaded("cor-excursion", &[("EXCO", days)]);
+    let judged = judge(runs.of("EXCO"));
+    assert_eq!(judged.len(), 2, "{judged:#?}");
+    assert!(judged.iter().all(|j| j.step.proven()));
+    assert!(
+        judged
+            .iter()
+            .all(|j| matches!(j.verdict, Verdict::Anomaly(Anomaly::Reversed { .. }))),
+        "{judged:#?}"
+    );
+    assert_eq!(measured_rows(&runs, generation), []);
+    // The same session at the very END of the data, never reversed, is
+    // still no row: one session is not a basis that holds.
+    let mut days = weekdays(day(2023, 5, 1), day(2023, 5, 31), "4/5");
+    days.push(around(day(2023, 6, 1), "102/125"));
+    let (runs, generation) = loaded("cor-excursion-end", &[("EXCO", days)]);
+    assert_eq!(
+        judge(runs.of("EXCO"))
+            .iter()
+            .map(|j| j.verdict)
+            .collect::<Vec<_>>(),
+        [Verdict::Anomaly(Anomaly::Short {
+            old_days: 23,
+            new_days: 1
+        })]
+    );
+    assert_eq!(measured_rows(&runs, generation), []);
+    let found = check(&runs, &no_actions("cor-excursion-end-ca"));
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].to_string().contains("basis_short: the runs hold 23 and 1 days"),
+        "{}",
+        found[0]
+    );
+}
+
+#[test]
+fn a_step_inside_the_shares_own_wobble_is_named_and_one_beyond_it_is_ledgered() {
+    // Both shares wobble 1.2% up and back in January (two reversed steps),
+    // hold 1/2 to the end of May, then step on 2021-06-01 and hold for three
+    // months. WOBCO's step is 0.8%, inside its own January wobble; LASTCO's
+    // is 5%, beyond it. The step back lies 134 days before June: not within
+    // REVERSAL_DAYS, so only the share's own wobble can name WOBCO's.
+    let history = |june: &str| {
+        let mut days = weekdays(day(2021, 1, 4), day(2021, 1, 8), "1/2");
+        days.extend(weekdays(day(2021, 1, 11), day(2021, 1, 15), "253/500"));
+        days.extend(weekdays(day(2021, 1, 18), day(2021, 5, 31), "1/2"));
+        days.extend(weekdays(day(2021, 6, 1), day(2021, 8, 31), june));
+        days
+    };
+    let (runs, generation) = loaded(
+        "cor-wobble",
+        &[("LASTCO", history("21/40")), ("WOBCO", history("63/125"))],
+    );
+    let wob = judge(runs.of("WOBCO"));
+    assert_eq!(wob.len(), 3, "{wob:#?}");
+    assert!(wob.iter().all(|j| j.step.proven()), "{wob:#?}");
+    assert!(matches!(
+        wob[2].verdict,
+        Verdict::Anomaly(Anomaly::WithinWobble { wobble }) if wobble > r("1012/1000")
+    ));
+    let last = judge(runs.of("LASTCO"));
+    assert_eq!(last[2].verdict, Verdict::Lasting, "{last:#?}");
+    // ONE ROW: LASTCO's June step. January's wobble and WOBCO's step make none.
+    let rows = measured_rows(&runs, generation);
+    assert_eq!(
+        rows.iter()
+            .map(|a| (a.symbol.as_str(), a.ex_date))
+            .collect::<Vec<_>>(),
+        [("LASTCO", day(2021, 6, 1))]
+    );
+    assert!(
+        rows[0].evidence.contains("lasting (") && rows[0].day_known(),
+        "{}",
+        rows[0].evidence
+    );
+    let found = check(&runs, &no_actions("cor-wobble-ca"));
+    assert!(found.iter().any(|f| matches!(
+        f,
+        Finding::BasisAnomaly { step, why: Anomaly::WithinWobble { .. } } if step.symbol == "WOBCO"
+    )));
+    assert!(
+        found
+            .iter()
+            .any(|f| matches!(f, Finding::NoRow(step) if step.symbol == "LASTCO"))
+    );
+}
+
+#[test]
+fn a_two_for_one_step_across_a_missing_month_does_not_know_its_day() {
+    // GAPSPLIT: 1/4 through August 2019, September missing from the input,
+    // 1/2 from October. The step is lasting and its row is drawn, but its
+    // window (2019-08-30, 2019-10-01] holds sessions the data never saw: the
+    // row does not know its day.
+    let mut days = weekdays(day(2019, 8, 1), day(2019, 8, 30), "1/4");
+    days.extend(weekdays(day(2019, 10, 1), day(2019, 10, 31), "1/2"));
+    let (runs, generation) = loaded("cor-gap-split", &[("GAPSPLIT", days)]);
+    let rows = measured_rows(&runs, generation);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    let row = &rows[0];
+    assert_eq!(
+        (row.after, row.ex_date, row.ratio),
+        (Some(day(2019, 8, 30)), day(2019, 10, 1), r("2"))
+    );
+    assert!(!row.day_known(), "a missing month is a window, not a day");
+    assert!(row.evidence.contains("UNKNOWN inside the window"), "{}", row.evidence);
+    // A split across a weekend knows its day.
+    let (split, generation) = loaded("cor-weekend-split", &[("SPLITCO", split_days())]);
+    let rows = measured_rows(&split, generation);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].day_known(), "{rows:#?}");
+    // An NSE row always knows its day.
+    assert!(nse("SPLITCO", day(2023, 7, 3), Kind::Split, "2").day_known());
+}
+
+#[test]
+fn a_session_between_two_days_is_found_within_a_bounded_walk() {
+    // Friday to Monday: the weekend is closed.
+    assert!(!session_between(day(2023, 6, 30), day(2023, 7, 3)));
+    // Consecutive days, and one day with itself: nothing lies between.
+    assert!(!session_between(day(2023, 7, 3), day(2023, 7, 4)));
+    assert!(!session_between(day(2023, 7, 3), day(2023, 7, 3)));
+    // A weekday between: a session may lie there.
+    assert!(session_between(day(2023, 7, 3), day(2023, 7, 5)));
+    // 2020-11-14 was a Saturday Muhurat session: the calendar does not call
+    // it closed, so a Friday-to-Monday window around it is not one session.
+    assert!(session_between(day(2020, 11, 13), day(2020, 11, 16)));
+    // Longer than the walk: a session may lie there, and no day is walked.
+    assert!(session_between(day(2023, 1, 1), day(2023, 12, 31)));
+    let fifteen = Day::from_days(day(2023, 7, 3).days_from_epoch() + MAX_WINDOW_WALK + 1).unwrap();
+    assert!(session_between(day(2023, 7, 3), fifteen));
+}
+
+#[test]
+fn a_step_with_a_short_side_is_named_short_and_ledgers_no_row() {
+    // SHORTCO: 1/2 through March 2022, then 1/1 for three sessions and the
+    // data ends. Proven, never reversed, and not shown to hold.
+    let mut days = weekdays(day(2022, 3, 1), day(2022, 3, 31), "1/2");
+    days.extend(weekdays(day(2022, 4, 1), day(2022, 4, 5), "1"));
+    let (runs, generation) = loaded("cor-short", &[("SHORTCO", days)]);
+    assert_eq!(
+        judge(runs.of("SHORTCO"))
+            .iter()
+            .map(|j| j.verdict)
+            .collect::<Vec<_>>(),
+        [Verdict::Anomaly(Anomaly::Short {
+            old_days: 23,
+            new_days: 3
+        })]
+    );
+    assert_eq!(measured_rows(&runs, generation), []);
+    // Five sessions hold: the same split is lasting.
+    let mut days = weekdays(day(2022, 3, 1), day(2022, 3, 31), "1/2");
+    days.extend(weekdays(day(2022, 4, 1), day(2022, 4, 7), "1"));
+    let (runs, generation) = loaded("cor-short-held", &[("SHORTCO", days)]);
+    assert_eq!(measured_rows(&runs, generation).len(), 1);
+}

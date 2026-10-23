@@ -644,12 +644,17 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
 
 /// Puts one `corporate_action` note per action row whose ex-date is the
 /// record's day into that record's `notes` array (created when absent, its
-/// other notes kept), and answers the table the rows came from: served with
-/// its receipt, or its refusal by name (absent, checksum, ...). A measured
+/// other notes kept; a `notes` value that is not an array is left as it was
+/// and the actions go in `corporate_action_notes` beside it). A measured row
+/// whose window holds a session with no basis says "on one session between",
+/// never "at this session" (`pull::corporate_actions::Action::day_known`,
+/// a walk of at most `MAX_WINDOW_WALK` calendar days). It answers the table
+/// the rows came from: served with its receipt, or its refusal by name
+/// (absent, checksum, ...). A measured
 /// row LABELS: its note says it excuses nothing (R4-26, `CLAUDE.md` §3
 /// rule 1). O(days in the page): one hash and two indexes into the share's
 /// day table a day, no search.
-fn corporate_action_notes(root: &Path, symbol: &str, days: &[Day], records: &mut [Value]) -> Value {
+pub(crate) fn corporate_action_notes(root: &Path, symbol: &str, days: &[Day], records: &mut [Value]) -> Value {
     let tables = super::basis_route::tables(root);
     let said = super::basis_route::slot_json(&tables.actions);
     let Ok(table) = tables.actions.table() else {
@@ -667,30 +672,42 @@ fn corporate_action_notes(root: &Path, symbol: &str, days: &[Day], records: &mut
         let Some(fields) = record.as_object_mut() else {
             continue;
         };
-        let notes = fields
-            .entry("notes")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if !notes.is_array() {
-            // KEPT, NEVER OVERWRITTEN: a reader that put something else here
-            // keeps it, and the actions go in an array beside it.
-            let other = notes.take();
-            *notes = Value::Array(vec![other]);
-        }
-        let Some(list) = notes.as_array_mut() else {
+        // KEPT, NEVER RESHAPED: a reader that put something other than an
+        // array in `notes` keeps it as it was, and the actions go in
+        // `corporate_action_notes` beside it.
+        let key = if fields.get("notes").is_none_or(Value::is_array) {
+            "notes"
+        } else {
+            "corporate_action_notes"
+        };
+        let Some(list) = fields
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+        else {
             continue;
         };
         for row in rows {
             let mut note = super::basis_route::action_json(row);
             if let Some(object) = note.as_object_mut() {
                 object.insert("note".to_owned(), json!("corporate_action"));
-                object.insert(
-                    "applies".to_owned(),
-                    json!(if closed {
+                // NEVER "at this session" ON A DAY THE DATA DID NOT SEE: a
+                // measured row whose window holds a session with no basis
+                // (a missing month, unmeasured days) names its window.
+                let applies = match (row.day_known(), row.after) {
+                    (false, Some(after)) => format!(
+                        "on one session between {after} (excluded) and {} (included); the day \
+                         is unknown: the data holds no basis between them, and this is the first \
+                         day it saw the new basis",
+                        row.ex_date
+                    ),
+                    _ if closed => {
                         "at the next session: the exchange held no session on the ex-date"
-                    } else {
-                        "at this session"
-                    }),
-                );
+                            .to_owned()
+                    }
+                    _ => "at this session".to_owned(),
+                };
+                object.insert("applies".to_owned(), json!(applies));
                 object.insert("label_only".to_owned(), json!(!row.excuses()));
             }
             list.push(note);

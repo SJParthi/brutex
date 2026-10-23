@@ -227,6 +227,75 @@ fn an_absent_or_refused_table_is_named_on_the_page_never_an_empty_one() {
     );
 }
 
+#[test]
+fn a_two_for_one_step_across_a_missing_month_is_never_at_this_session() {
+    // The last day seen on the old basis is 2025-01-31 and the first on the
+    // new 2025-03-06: February was missing from the input. The row sits on
+    // the first day the new basis was seen, and must not claim that day.
+    let store = root("db-gap");
+    let mut gap = measured_split();
+    gap.after = Some(day(2025, 1, 31));
+    install(&store, &[gap]);
+    let ask = super::super::dayflags::asked(
+        "feed=zerodha&instrument=NSE-CASH-SPLITCO&from=2025-03-03&to=2025-03-10",
+    )
+    .unwrap();
+    let body = super::super::dayflags::answer(&store, &ask);
+    let mut noted = Vec::new();
+    for record in body["days"].as_array().unwrap() {
+        for note in notes_of(record) {
+            if note["note"] == "corporate_action" {
+                noted.push((record["day"].as_str().unwrap().to_owned(), note));
+            }
+        }
+    }
+    assert_eq!(noted.len(), 1, "{noted:#?}");
+    let (on, note) = &noted[0];
+    assert_eq!(on, "2025-03-06");
+    assert_ne!(note["applies"], "at this session", "{note:#}");
+    assert!(
+        note["applies"]
+            .as_str()
+            .unwrap()
+            .starts_with("on one session between 2025-01-31 (excluded) and 2025-03-06 (included)"),
+        "{note:#}"
+    );
+    assert_eq!(note["day_known"], false);
+    // /basis.json says the same of the row.
+    let body = answer(&tables(&store), &asked("symbol=SPLITCO").unwrap());
+    assert_eq!(body["actions"][0]["day_known"], false, "{body:#}");
+    // The adjacent-day split of the other tests knows its day.
+    let known = root("db-gap-known");
+    install(&known, &[measured_split()]);
+    let body = answer(&tables(&known), &asked("symbol=SPLITCO").unwrap());
+    assert_eq!(body["actions"][0]["day_known"], true, "{body:#}");
+}
+
+#[test]
+fn a_notes_value_that_is_not_an_array_keeps_its_shape() {
+    let store = root("db-shape");
+    install(&store, &[measured_split()]);
+    let on = [day(2025, 3, 6)];
+    // Something other than an array: left exactly as it was, the action
+    // beside it.
+    let mut records = vec![serde_json::json!({ "day": "2025-03-06", "notes": "kept as text" })];
+    let said = super::super::dayflags::corporate_action_notes(&store, "SPLITCO", &on, &mut records);
+    assert_eq!(said["served"], true, "{said:#}");
+    assert_eq!(records[0]["notes"], "kept as text");
+    assert_eq!(
+        records[0]["corporate_action_notes"][0]["note"],
+        "corporate_action"
+    );
+    // An array: appended to, its own notes kept first.
+    let mut records = vec![serde_json::json!({ "notes": [{ "note": "other" }] })];
+    super::super::dayflags::corporate_action_notes(&store, "SPLITCO", &on, &mut records);
+    let notes = records[0]["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2, "{notes:#?}");
+    assert_eq!(notes[0]["note"], "other");
+    assert_eq!(notes[1]["note"], "corporate_action");
+    assert!(records[0].get("corporate_action_notes").is_none());
+}
+
 // ─────────────────────────────── /basis.json ───────────────────────────────
 
 #[test]

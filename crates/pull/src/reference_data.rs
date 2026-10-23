@@ -2,11 +2,13 @@
 //! DB-B21, DB-B44, SC-CLOSE-15, CMP-05, the store side of DB-G76;
 //! failure-matrix rows FM-106, FM-109, FM-263).
 //!
-//! Seven tables ([`Table::ALL`]): the calendar of record, the index identity
+//! Nine tables ([`Table::ALL`]): the calendar of record, the index identity
 //! rows, the symbol changes, the F&O list, the moved expiries, the dated lot
 //! sizes ([`costs::lot::LotTable`], handed its rows here because `costs`
-//! names `core` alone) and the risk-free rate series
-//! ([`crate::riskfree::Series`], with its documented gaps). Every one has
+//! names `core` alone), the risk-free rate series
+//! ([`crate::riskfree::Series`], with its documented gaps), and the share
+//! corporate actions and the measured basis runs
+//! ([`crate::corporate_actions`], R4-26). Every one has
 //! the same receipt, the same checksum rule and the same loader.
 //!
 //! # Why

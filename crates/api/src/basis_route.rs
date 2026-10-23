@@ -204,6 +204,9 @@ pub(crate) fn action_json(action: &Action) -> Value {
         "tag": action.tag.word(),
         "isin": action.isin,
         "after": action.after.map(|day| day.to_string()),
+        // FALSE when a session with no basis lies in (after, ex_date]: the
+        // row is on the first day the new basis was seen, not on its day.
+        "day_known": action.day_known(),
         "evidence": action.evidence,
         "excuses": action.excuses(),
         "decides_class": action.class().is_some(),

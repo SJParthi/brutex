@@ -178,15 +178,16 @@ fn basis_runs(store: &Path, arguments: &[&str]) -> (u8, String) {
     (code, text)
 }
 
-/// SPLITCO: a 2:1 split on 2025-03-06. Zerodha reads half of GDFL before
+/// SPLITCO: a 2:1 split on 2025-03-11, five sessions a side (D-7139: a side
+/// must hold to be lasting). Zerodha reads half of GDFL before
 /// it and equal from it; 2025-03-03 seeds the lag history DATA-1 aligns by.
 /// IDLECO: GDFL only, so no stock-day has a basis.
 fn split_store(store: &Path) {
     let mut fixture = Fixture::default();
-    for d in [3, 4, 5] {
+    for d in [3, 4, 5, 6, 7, 10] {
         fixture.day("SPLITCO", day(2025, 3, d), (1, 2), false);
     }
-    for d in [6, 7] {
+    for d in [11, 12, 13, 14, 17] {
         fixture.day("SPLITCO", day(2025, 3, d), (1, 1), false);
     }
     fixture.day("IDLECO", day(2025, 3, 4), (1, 1), true);
@@ -249,11 +250,11 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
     assert_eq!(code, OK, "{text}");
     // ONE STEP, factor 2, from the vendor ratio 1/2 to 1/1.
     assert!(
-        text.contains("steps 1, proven 1 (a ledger row each), within_noise 0\n"),
+        text.contains("steps 1, lasting 1 (a ledger row each), basis anomalies 0 (reversed 0, short 0, within_wobble 0) on 0 share(s), within_noise 0\n"),
         "{text}"
     );
     assert!(
-        text.contains("step SPLITCO (2025-03-05, 2025-03-06]: ratio 1/2 to 1/1, factor 2/1"),
+        text.contains("step SPLITCO (2025-03-10, 2025-03-11]: ratio 1/2 to 1/1, factor 2/1"),
         "{text}"
     );
     // The share with no common minutes has no run, and is named.
@@ -272,10 +273,10 @@ fn a_two_for_one_split_is_ledgered_from_the_vendor_ratio_step() {
         (rows[0].tag, rows[0].kind),
         (Tag::Measured, Kind::Unclassed)
     );
-    assert_eq!(rows[0].ex_date, day(2025, 3, 6));
+    assert_eq!(rows[0].ex_date, day(2025, 3, 11));
     assert!(!rows[0].excuses() && rows[0].class().is_none());
     assert_eq!(
-        table.excuse("SPLITCO", Some(day(2025, 3, 5)), day(2025, 3, 6)),
+        table.excuse("SPLITCO", Some(day(2025, 3, 10)), day(2025, 3, 11)),
         None
     );
     // Every measured step now has its row.
@@ -304,12 +305,12 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
     assert_eq!(share[0].end.word(), "step");
     assert_eq!(
         share[1].first,
-        day(2025, 3, 6),
+        day(2025, 3, 11),
         "the new run starts on the ex-date"
     );
     assert_eq!(
         share[0].last,
-        day(2025, 3, 5),
+        day(2025, 3, 10),
         "the old one ends the session before"
     );
     assert_eq!(share[1].ratio.to_string(), "1/1");
@@ -374,7 +375,7 @@ fn a_dry_run_writes_nothing_and_checks_against_the_stores_table() {
         "{text}"
     );
     assert!(
-        text.contains("no_row SPLITCO (2025-03-05, 2025-03-06]"),
+        text.contains("no_row SPLITCO (2025-03-10, 2025-03-11]"),
         "{text}"
     );
     assert!(text.contains("dry run: nothing written"), "{text}");
@@ -444,5 +445,97 @@ fn a_missing_month_is_named_and_a_damaged_file_refuses_the_run() {
     assert_eq!(
         basis_runs(&store.0, &["--dir", "/nonexistent/brutex-basis"]).0,
         FAILED
+    );
+}
+
+#[test]
+fn a_ratio_that_alternates_is_named_as_basis_anomalies_and_never_ledgered() {
+    // WOBBLECO: Zerodha reads 1/2 of GDFL on one session and 51/100 on the
+    // next, for two weeks. Every change is a proven step; none lasts.
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    let mut fixture = Fixture::default();
+    for (n, d) in [3, 4, 5, 6, 7, 10, 11, 12, 13, 14].into_iter().enumerate() {
+        let ratio = if n % 2 == 0 { (1, 2) } else { (51, 100) };
+        fixture.day("WOBBLECO", day(2025, 3, d), ratio, false);
+    }
+    fixture.write(&store.0);
+    reconcile(&store.0, &out.0, "2025-03");
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
+    assert_eq!(code, OK, "{text}");
+    assert!(
+        text.contains("basis_anomaly WOBBLECO (") && text.contains("basis_reversed"),
+        "{text}"
+    );
+    assert!(text.contains(", lasting 0 (a ledger row each)"), "{text}");
+    assert!(!text.contains("basis anomalies 0 "), "{text}");
+    assert!(text.contains("on 1 share(s)"), "{text}");
+    // NO ROW: the measured ledger holds nothing of the share.
+    let Slot::Store { table, .. } =
+        load_one(&store.0, Table::CorporateActions, CorporateActions::build)
+    else {
+        panic!("the ledger loads: {text}");
+    };
+    assert!(table.of("WOBBLECO").is_empty(), "{:#?}", table.of("WOBBLECO"));
+    assert_eq!(table.rows(), 0);
+    // The checker names each anomaly; none is a missing row.
+    assert!(text.contains("  basis_anomaly WOBBLECO"), "{text}");
+    assert!(!text.contains("no_row WOBBLECO"), "{text}");
+}
+
+#[test]
+fn a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothing() {
+    // GAPCO: 1/4 in March, April missing from DIR, 1/2 in May. The step is
+    // lasting and ledgered; its window spans April, so its day is unknown.
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    let mut fixture = Fixture::default();
+    for d in [3, 4, 5, 6, 7, 10] {
+        fixture.day("GAPCO", day(2025, 3, d), (1, 4), false);
+    }
+    for d in [5, 6, 7, 8, 9, 12] {
+        fixture.day("GAPCO", day(2025, 5, d), (1, 2), false);
+    }
+    fixture.write(&store.0);
+    reconcile(&store.0, &out.0, "2025-03");
+    reconcile(&store.0, &out.0, "2025-05");
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
+    assert_eq!(code, OK, "{text}");
+    assert!(text.contains("missing 1: 2025-04"), "{text}");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("step GAPCO ("))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains("factor 2/1")
+            && line.contains("ex-date UNKNOWN inside the window")
+            && line.contains("spans month(s) missing from DIR: 2025-04"),
+        "{line}"
+    );
+    let Slot::Store { table, .. } =
+        load_one(&store.0, Table::CorporateActions, CorporateActions::build)
+    else {
+        panic!("the ledger loads: {text}");
+    };
+    let rows = table.of("GAPCO");
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert!(!rows[0].day_known(), "{rows:#?}");
+    assert!(rows[0].after.is_some_and(|after| after < day(2025, 4, 1)));
+    // A RERUN ON ANOTHER DAY over the same files renders the same bytes and
+    // lands nothing: the receipt keeps the day its source was first read.
+    let root = store.0.clone();
+    let mut again = String::new();
+    let code = command_with(
+        &["--dir", &dir_text(&out), "--apply", "--ledger"],
+        &move || Ok(root.clone()),
+        Some(day(2026, 11, 5)),
+        &mut again,
+    );
+    assert_eq!(code, OK, "{again}");
+    assert!(
+        again.contains("basis_runs generation 1 already held these bytes"),
+        "{again}"
+    );
+    assert!(
+        again.contains("corporate_actions generation 1 already held these bytes"),
+        "{again}"
     );
 }

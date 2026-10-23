@@ -43,6 +43,19 @@
 //! is refused (it must be looked at first). Both are `measured`: a measured
 //! row labels and never excuses.
 //!
+//! # Only a LASTING step is a row (D-7139)
+//!
+//! Every step is printed with its verdict from `pull::corporate_actions::judge`,
+//! the one owner of the rule: `step` (lasting, a ledger row), `step_within_noise`
+//! (not proven) or `basis_anomaly` with its reason (`basis_reversed`,
+//! `basis_short`, `basis_within_wobble`). Anomalies are counted on the summary
+//! line and in one `warn` event on `/logs`, and never ledgered. A lasting step
+//! whose window holds a session with no basis says its ex-date is UNKNOWN
+//! inside the window and names the months of it missing from `DIR`.
+//!
+//! A receipt keeps the day its exact source bytes were first read: a rerun on
+//! another day over the same files renders the same bytes and lands nothing.
+//!
 //! # Cost
 //!
 //! One load of each month's version file (DATA-1's, O(its rows)), then per
@@ -58,7 +71,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use pull::corporate_actions::{
-    self, BasisDay, BasisRuns, CorporateActions, Finding, Folder, Ratio, Run, RunEnd,
+    self, Anomaly, BasisDay, BasisRuns, CorporateActions, Finding, Folder, Judged, Ratio, Run, RunEnd,
+    Step, Verdict,
 };
 use pull::reference_data::{self, Draft, Slot, Standing, Table};
 use pull::session::Day;
@@ -527,45 +541,33 @@ pub(crate) fn command_with(
     for (symbol, why) in &folded.refused {
         let _ = writeln!(out, "refused {symbol}: {why}");
     }
-    let (mut steps, mut proven) = (0_usize, 0_usize);
-    for runs in folded.runs.chunk_by(|a, b| a.symbol == b.symbol) {
-        for step in corporate_actions::steps_of(runs) {
-            steps += 1;
-            // PROVEN: the factor's interval excludes one, so the step makes a
-            // ledger row; otherwise it ends a run and makes none.
-            let word = if step.proven() {
-                proven += 1;
-                "step"
-            } else {
-                "step_within_noise"
-            };
-            let _ = writeln!(
-                out,
-                "{word} {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]",
-                step.symbol,
-                step.after,
-                step.ex_date,
-                step.from,
-                step.to,
-                step.factor,
-                step.low,
-                step.high
-            );
-        }
-    }
-    let _ = writeln!(
-        out,
-        "steps {steps}, proven {proven} (a ledger row each), within_noise {}",
-        steps - proven
-    );
-    let Some(fetched) = today else {
+    let tally = report_steps(out, &folded);
+    let Some(today) = today else {
         let _ = writeln!(
             out,
             "BASIS RUNS FAILED: the clock gives no IST day. Nothing was written."
         );
         return FAILED;
     };
-    let draft = runs_draft(&ask, &folded, fetched);
+    if tally.anomalies() > 0 {
+        // NAMED, COUNTED AND ON /logs: proven steps the data does not show
+        // to last are never ledgered, and never dropped without a word.
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        crate::note(
+            &telemetry::Event::warn(
+                "cli.basis_runs",
+                "basis anomalies: proven ratio steps that are not a lasting change of basis; \
+                 named, never ledgered",
+            )
+            .with("anomalies", count(tally.anomalies()))
+            .with("reversed", count(tally.reversed))
+            .with("short", count(tally.short))
+            .with("within_wobble", count(tally.within_wobble))
+            .with("shares", count(tally.shares_with_anomalies))
+            .with("steps", count(tally.steps))
+            .with("lasting", count(tally.lasting)),
+        );
+    }
     let root = match store() {
         Ok(root) => root,
         Err(why) => {
@@ -576,6 +578,17 @@ pub(crate) fn command_with(
             return if ask.write { FAILED } else { OK };
         }
     };
+    let mut draft = runs_draft(&ask, &folded, today);
+    // IDEMPOTENT ACROSS DAYS: the same source bytes (the same manifest of
+    // the same files) keep the day they were first read, so a rerun on
+    // another day renders the same bytes and lands nothing.
+    if let Some(held) = reference_data::load_one(&root, Table::BasisRuns, BasisRuns::build)
+        .receipt()
+        .filter(|held| held.source == draft.source && held.source_sha256 == draft.source_sha256)
+    {
+        draft.fetched = held.fetched;
+    }
+    let fetched = draft.fetched;
     let actions = reference_data::load_one(&root, Table::CorporateActions, CorporateActions::build);
     if !ask.write {
         report_check(out, &draft, &actions);
@@ -674,6 +687,126 @@ pub(crate) fn command_with(
         reference_data::load_one(&root, Table::CorporateActions, CorporateActions::build);
     report_check(out, &draft, &reloaded);
     OK
+}
+
+/// What the steps of one fold came to, by verdict (`pull`'s `judge`, the
+/// one owner of the lasting rule, D-7139).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tally {
+    /// Every step.
+    pub(crate) steps: usize,
+    /// Lasting: a ledger row each.
+    pub(crate) lasting: usize,
+    /// Not proven: within the measurement's noise.
+    pub(crate) unproven: usize,
+    /// Proven, with a proven step the other way near it.
+    pub(crate) reversed: usize,
+    /// Proven, with a side too short to hold.
+    pub(crate) short: usize,
+    /// Proven, inside the share's own wobble.
+    pub(crate) within_wobble: usize,
+    /// Shares with at least one anomaly.
+    pub(crate) shares_with_anomalies: usize,
+}
+
+impl Tally {
+    /// Every basis anomaly.
+    pub(crate) const fn anomalies(&self) -> usize {
+        self.reversed + self.short + self.within_wobble
+    }
+}
+
+/// The month `day` lies in.
+fn month_of(day: Day) -> Option<YearMonth> {
+    YearMonth::new(day.year(), day.month()).ok()
+}
+
+/// For a step whose window `(after, ex_date]` holds a session with no
+/// basis: says the day is unknown, and names every month of the window
+/// missing from `DIR`. Empty for a step that knows its day. O(log missing).
+fn window_note(folded: &Folded, step: &Step) -> String {
+    if step.day_known() {
+        return String::new();
+    }
+    let mut note =
+        String::from("; ex-date UNKNOWN inside the window: a session with no basis lies between");
+    if let (Some(from), Some(to)) = (month_of(step.after), month_of(step.ex_date)) {
+        let start = folded.missing.partition_point(|m| *m <= from);
+        let end = folded.missing.partition_point(|m| *m < to);
+        let gaps = folded.missing.get(start..end).unwrap_or(&[]);
+        if !gaps.is_empty() {
+            let _ = write!(
+                note,
+                ", and it spans month(s) missing from DIR: {}",
+                gaps.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+    }
+    note
+}
+
+/// Prints every step of `folded` with its verdict and the summary line, and
+/// answers the tally. O(steps).
+fn report_steps(out: &mut String, folded: &Folded) -> Tally {
+    let mut tally = Tally::default();
+    for runs in folded.runs.chunk_by(|a, b| a.symbol == b.symbol) {
+        let mut anomalous = false;
+        for Judged { step, verdict } in corporate_actions::judge(runs) {
+            tally.steps += 1;
+            let (word, why) = match verdict {
+                Verdict::Lasting => {
+                    tally.lasting += 1;
+                    ("step", String::new())
+                }
+                Verdict::Unproven => {
+                    tally.unproven += 1;
+                    ("step_within_noise", String::new())
+                }
+                Verdict::Anomaly(anomaly) => {
+                    anomalous = true;
+                    match anomaly {
+                        Anomaly::Reversed { .. } => tally.reversed += 1,
+                        Anomaly::Short { .. } => tally.short += 1,
+                        Anomaly::WithinWobble { .. } => tally.within_wobble += 1,
+                    }
+                    ("basis_anomaly", format!("; {anomaly}"))
+                }
+            };
+            let _ = writeln!(
+                out,
+                "{word} {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]{why}{}",
+                step.symbol,
+                step.after,
+                step.ex_date,
+                step.from,
+                step.to,
+                step.factor,
+                step.low,
+                step.high,
+                window_note(folded, &step)
+            );
+        }
+        if anomalous {
+            tally.shares_with_anomalies += 1;
+        }
+    }
+    let _ = writeln!(
+        out,
+        "steps {}, lasting {} (a ledger row each), basis anomalies {} (reversed {}, short {}, \
+         within_wobble {}) on {} share(s), within_noise {}",
+        tally.steps,
+        tally.lasting,
+        tally.anomalies(),
+        tally.reversed,
+        tally.short,
+        tally.within_wobble,
+        tally.shares_with_anomalies,
+        tally.unproven
+    );
+    tally
 }
 
 /// The checker's findings for the runs `draft` holds against `actions`.
