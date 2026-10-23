@@ -914,8 +914,8 @@ pub(super) const FROZEN_MIN_S: u64 = 180;
 /// auction's, never a frozen feed's", of every index (verify-R3-13-r2 X1).
 /// Its sources argue that for NIFTY 50 and NIFTY BANK alone, and it is
 /// measured false: INDIA VIX, NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and
-/// NIFTY MIDCAP 150 change every minute through the window on all 42
-/// auction-era sessions the store holds (`docs/00-charter.md`, "An NSE index
+/// NIFTY MIDCAP 150 never hold one value two minutes running in the window,
+/// on any of the 42 auction-era sessions the store holds (`docs/00-charter.md`, "An NSE index
 /// through the cash closing auction").
 ///
 /// `None` before 2026-08-03, for any venue but the index, and where either
@@ -984,12 +984,12 @@ pub(super) fn auction_of(
 ///
 /// EVERY OTHER INDEX IS NOT SOURCED, whatever its minutes do. Of the 135
 /// Zerodha index series, 35 more hold still through the window on all 42
-/// sessions, and 70 change every minute through it (INDIA VIX, NIFTY SMALLCAP
-/// 250, NIFTY MICROCAP 250, NIFTY MIDCAP 150 among them). Which of the two an
-/// index is cannot be told from its own minutes on a day, and the store holds
-/// no constituent list that would tell it (`brutex_core::universe` holds
-/// undated snapshots of five broad indices and none of NIFTY BANK). So a run
-/// inside the window of any other index is not judged ([`Minute::Unjudged`]).
+/// sessions, and 70 never hold one value there for 180 s (INDIA VIX, NIFTY
+/// SMALLCAP 250, NIFTY MICROCAP 250, NIFTY MIDCAP 150 among them). Which of
+/// the two an index is cannot be told from its own minutes on a day, and the
+/// store holds no constituent list that would tell it (`brutex_core::universe`
+/// holds undated snapshots of five broad indices and none of NIFTY BANK). So a
+/// run inside the window of any other index is not judged ([`Minute::Unjudged`]).
 /// Judging it like any other minute instead would read those 35 indices
 /// "frozen in session" on every auction-era session.
 ///

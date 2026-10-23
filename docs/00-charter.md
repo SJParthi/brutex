@@ -1799,7 +1799,7 @@ So NIFTY and BANKNIFTY **hold still from 15:15 until the auction's close is
 printed** on both feeds, every session of the auction era measured, as the
 circular's reasoning says, and the NIFTY 50's shares are all eligible on each
 of those sessions. Other indices differ: some hold still there every session,
-others change every minute through it. Which kind an index is cannot be told
+others never hold one value there for 180 s. Which kind an index is cannot be told
 from its own minutes on one day, and the store holds no constituent list that
 would tell it (`brutex_core::universe` holds undated snapshots of the NIFTY
 50, 100, 200, 500 and Total Market, none of NIFTY BANK). So R3-13 sets the

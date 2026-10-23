@@ -83656,9 +83656,10 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     `CAS_INDEX_CIRCULAR`, the index session row's citation, argues for NIFTY
     50 and NIFTY BANK and for no other index, and it is measured false for
     others (`docs/00-charter.md`, "An NSE index through the cash closing
-    auction"): of the 135 Zerodha index series, 70 change every minute
-    through 15:15-15:30 on all 42 auction-era sessions (INDIA VIX, NIFTY
-    SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150 among them), so a
+    auction"): of the 135 Zerodha index series, 70 never hold one value for
+    180 s in 15:15-15:30 on any of the 42 auction-era sessions (INDIA VIX,
+    NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150, whose
+    longest unchanged run there is 60 s or none, among them), so a
     frozen feed there went unjudged and the record read `flagged: false`
     with no phrase, the hidden verdict item 19 refused for GDFL. Now
     `dayflags_rules::auction_of` reads the window for each index. It is SET

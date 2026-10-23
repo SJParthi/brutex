@@ -4255,9 +4255,9 @@ fn a_run_through_a_window_not_judged_is_kept_apart_from_the_judged_runs() {
 /// **AN INDEX WHOSE STILLNESS THROUGH THE AUCTION IS NOT SOURCED IS NEVER SAID
 /// "NOT FROZEN" FOR A RUN THERE** (verify-R3-13-r2 X1, reproduced on the real
 /// store: INDIA VIX, NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP
-/// 150 change every minute through 15:15-15:30 on all 42 auction-era
-/// sessions, and the window was set aside on every index, so a run there
-/// answered `flagged: false`). INDIAVIX unchanged 15:16-15:25 on an
+/// 150 never hold one value two minutes running in 15:15-15:30 on the 42
+/// auction-era sessions, and the window was set aside on every index, so a
+/// run there answered `flagged: false`). INDIAVIX unchanged 15:16-15:25 on an
 /// auction-era day is not judged, `null`, and says so; the same shape before
 /// 2026-08-03 is frozen; five judged minutes before the window are a frozen
 /// run, two are not; a moving day is the one "not frozen"; and NIFTY, whose
