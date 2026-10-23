@@ -78586,9 +78586,70 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     exponent (`1e3`) stays allowed, as it is decimal. A page's path is
     folded (lower case, trailing slashes dropped) and its query never is,
     since a query value such as an instrument key is case sensitive.
+24. **Every wait on the browser has a bound, and a page that cannot finish
+    one load is not loaded again** (R315-24, repair 4; verify r4, 23 Oct). A
+    DevTools command waits at most `CDP_WAIT_MS` (30,000 ms) unless its
+    caller sets a bound; a load at most `--load-wait-ms` (`LOAD_WAIT_MS`,
+    30,000 ms, the settle cap and the step wait already used); two frames
+    `FRAME_WAIT_MS` (2,000 ms, the paint wait of item 9) in the page and
+    `FRAME_SLACK_MS` (1,000 ms) more here, because a hidden headless tab
+    answered a 1.5 s page-side wait after 6.7 s (measured 23 Oct). A page
+    whose load did not end is not loaded n times more: n = 200 stalled loads
+    would hold a run for 200 bounds per phase with one fact to say. A
+    command not answered elsewhere ends the run, with its sheet: a browser
+    that answers nothing more cannot be asked about the next page. The other
+    choice, a bound only on the whole run, was not taken: it names no page
+    and no command.
+25. **A page is the app's when the build that answered routes it**
+    (R315-25, repair 4; verify r4, 23 Oct). The api answers every path it
+    has no file for with the shell and 200 (`crates/api/src/assets.rs`, not
+    R3-15's file), so no status can tell. The route list is the served
+    build's own: the app entry its document names, whose `dictionary` the
+    kit's own start reads (SvelteKit 2.70.2, `node_modules/@sveltejs/kit`
+    `src/runtime/client/client.js` and `src/utils/routing.js`: a route
+    matches the decoded path case-sensitively, ending `/?$`, the root `^/$`),
+    imported again in the page, which fetches nothing. Not taken: the
+    harness's own `web/src/routes`, which can be another build than the one
+    served; the drawn not-found page's words, which are the kit's default
+    page and no contract; a 404 from the server, which is the assets
+    owner's change. A route with a parameter is not matched here (the app
+    has none on 23 Oct): a page that could be one is said, never passed.
+26. **Item 23's fold is withdrawn: a page's path is read as the app's router
+    reads it** (R315-22 as amended, repair 4; verify r4, 23 Oct). Folding
+    the case made `/SPEED` the Speed page's key though the router draws its
+    not-found page there, and folding every trailing slash made `//` the
+    root's. `pageKey` now resolves the address as the browser does (dot
+    segments, a fragment, an empty query) and reads the path by
+    `$lib/speed.js` `routePath` (escapes decoded as `decode_pathname`
+    decodes them, case kept, ONE trailing slash), the rule `selfWhose`
+    compares by too, so the Speed page's own line and the harness's pages
+    are one reading: a tab opened at `/speed/` is the page's own load.
+27. **The harness's sheet names its build, and an output is checked before
+    the run** (R315-26, repair 4; verify r4 follow-ups). The commit is each
+    document's `x-brutex-build`, as the speed sheet stamps each row; two
+    builds in one run fail it; an unstamped server is a note, not a failure,
+    because the harness also runs against stand-ins and a dev server that
+    stamp nothing (the speed sheet's `--allow-unstamped` default differs on
+    purpose: its rows are the deploy record). `--out` and `--capture` are
+    checked before the browser starts, so no run is thrown away at its end.
+28. **The speed sheet's field check asks a HEAD as a HEAD and says what a
+    status cannot tell** (R315-27, repair 4; verify r4 follow-ups). A whole
+    GET of a HEAD's route read 591,200,898 B per ask from the served app; a
+    body bound was the other choice and was not taken, since signal 3
+    compares whole answers and a cut one compares nothing. A capture page is
+    matched by `pagePathOf`; `--max-answer-bytes` stops at `MAX_TEXT_BYTES`;
+    `--clients` names each count once.
+29. **The spec's "speed tile of the health page" is drawn on `/speed`.**
+    The app has no health page (its routes on 23 Oct: `/`, `/audit`,
+    `/autopilot`, `/backtest`, `/db`, `/gaps`, `/ingest`, `/mapping`,
+    `/markets`, `/selection`, `/sources`, `/speed`, `/terminal`), so the tile
+    (`speedTile`: the slowest route and every failure, over the last hour or
+    since the start) heads the Speed page, which every page links from the
+    nav. A health page is not R3-15's to add; if one is made, the tile is
+    one import.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-23);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-20.
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-27);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-23.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 

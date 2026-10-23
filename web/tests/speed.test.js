@@ -1464,7 +1464,10 @@ test('the last edges: which browser, how an exception is named, odd captures, od
   const lost = await sheet.runSheet(base, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.deepEqual(lost.failures, ['discovering the selection: /feeds.json named no feed; pass --feed']);
   assert.equal(lost.ok, false);
-  assert.equal(harness.renderHarness({ ok: false, lines: ['| t |'], notes: ['n1'], failures: ['f1'] }, { n: 2, base: 'http://h:1' }), '# Browser harness — FAIL\n\nn = 2 cold and 2 warm loads a page against http://h:1.\n\n| t |\n\n- n1\n- FAILED: f1\n');
+  // The sheet names the build that answered (repair 4): none, one, or every one of several.
+  assert.equal(harness.renderHarness({ ok: false, lines: ['| t |'], notes: ['n1'], failures: ['f1'] }, { n: 2, base: 'http://h:1' }), '# Browser harness — FAIL\n\nn = 2 cold and 2 warm loads a page against http://h:1, answered by no named build.\n\n| t |\n\n- n1\n- FAILED: f1\n');
+  assert.match(harness.renderHarness({ ok: true, lines: [], notes: [], failures: [], builds: ['a'.repeat(40)] }, { n: 1, base: 'http://h:1' }), /^n = 1 cold and 1 warm loads a page against http:\/\/h:1, answered by build a{40}\.$/m);
+  assert.match(harness.renderHarness({ ok: false, lines: [], notes: [], failures: [], builds: ['a', 'b'] }, { n: 1, base: 'http://h:1' }), /, answered by 2 builds: a, b\.$/m);
   // A build whose app entry carries no text is refused like one with no preload list.
   assert.throws(() => builtPages(new Map([['_app/immutable/entry/app.A.js', { size: 9 }]])), /no __vite__mapDeps/);
 });

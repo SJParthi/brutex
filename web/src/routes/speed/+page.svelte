@@ -157,7 +157,7 @@
       {/if}
     </p>
     {#if tile}
-      <p class="tile {tile.state}" data-speed-tile title="The health page's speed tile, from this same report.">{tile.line}</p>
+      <p class="tile {tile.state}" data-speed-tile title="The speed tile: the slowest route and every failure, from this same report. The app has no health page, so the tile heads this one (D-5915 item 29).">{tile.line}</p>
     {/if}
     <p class="whence">{windowWhy}</p>
 
