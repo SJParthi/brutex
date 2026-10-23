@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use brutex_core::vendor::Vendor;
 
 use super::{
-    Applied, ApplyError, BUCKET, CAPACITY, Cause, INDEX_LEN, LEDGER_HEAD, MAX_REASON, Probe,
-    QuarantineError, Record, Scope, Snapshot, Why, apply_month, check_reason, digest_of,
-    index_path, ledger_path, ledger_stamps, probe, read_ledger, rebuild, record, series_key,
+    Applied, ApplyError, BUCKET, CAPACITY, Cause, Entry, INDEX_LEN, LEDGER_HEAD, MAX_REASON, Probe,
+    QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month, check_reason, digest_of,
+    index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record, series_key,
 };
 use crate::file::BarFile;
 use crate::format::{Bar, OI_NULL};
@@ -241,7 +241,7 @@ fn a_second_quarantine_apply_writes_nothing() {
 fn a_whole_foreign_month_is_a_record_not_an_empty_generation() {
     let store = Store::new("whole");
     let path = minute("QFIXD", march());
-    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 99_500)).collect();
+    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 77_713)).collect();
     store.month(path, &rows);
     let named: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
     let applied =
@@ -725,5 +725,223 @@ fn a_ninth_key_on_one_home_slot_is_refused_by_name_and_the_ledger_line_stands() 
     assert_eq!(
         probe(&store.root, minute(symbols[8], month)),
         Ok(Probe::Clear)
+    );
+}
+
+/// R4-18 repair 1, B1: a later plan naming only SOME bars of a month already
+/// quarantined whole (a second cause, or a derived bucket covering a minute
+/// of one) answers `already_whole` and writes nothing. Before the repair it
+/// published a generation without the named subset and its `dropped` line
+/// replaced the whole record, so the reader served the rest of the month.
+#[test]
+fn a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing() {
+    let store = Store::new("whole-then-part");
+    let path = minute("QFIXW", march());
+    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 4_127)).collect();
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    let whole = apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing))
+        .expect("recorded whole");
+    assert!(
+        matches!(whole, Applied::WholeMonth { bars: 4, .. }),
+        "{whole:?}"
+    );
+    let before = all_bytes_under(&store.root);
+    for subset in [
+        vec![rows[1].ts_micros],
+        vec![rows[0].ts_micros, rows[3].ts_micros],
+        vec![rows[2].ts_micros, rows[2].ts_micros],
+    ] {
+        let again = apply_month(&store.root, path, SYMBOL, &subset, why(Cause::ZeroPrice))
+            .expect("answered");
+        assert_eq!(
+            again,
+            Applied::Nothing {
+                why: "already_whole"
+            },
+            "{subset:?}"
+        );
+    }
+    assert_eq!(all_bytes_under(&store.root), before, "nothing was written");
+    assert!(matches!(
+        generation::served(&store.root, path),
+        Ok(Served::Original)
+    ));
+    assert_eq!(store.served_bars(path), rows, "no generation was published");
+    let Ok(Probe::Quarantined(entry)) = probe(&store.root, path) else {
+        panic!("the month is still answered by name");
+    };
+    assert_eq!(
+        (entry.scope, entry.cause, entry.bars),
+        (Scope::WholeMonth, Cause::BeforeListing, 4)
+    );
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("a summary");
+    assert_eq!(summary.month(path).map(|e| e.scope), Some(Scope::WholeMonth));
+    let row = summary
+        .instrument("NSE", "CASH", "QFIXW")
+        .expect("the share is flagged");
+    assert_eq!((row.months, row.whole_months, row.bars), (1, 1, 4));
+    // A stamp neither held nor ledgered is still refused on a whole month.
+    let between = rows[0].ts_micros + 30_000_000;
+    assert_eq!(
+        apply_month(&store.root, path, SYMBOL, &[between], why(Cause::ZeroPrice)),
+        Err(ApplyError::Repair(RepairError::UnheldStamp(between)))
+    );
+    assert_eq!(all_bytes_under(&store.root), before, "still nothing written");
+}
+
+/// The derived rung the verb applies next: a 2min month recorded whole is
+/// not reopened by a bucket of a second cause either.
+#[test]
+fn a_derived_month_recorded_whole_is_not_reopened_by_one_bucket() {
+    let store = Store::new("whole-derived");
+    let path = rung("QFIXV", march(), Timeframe::MINUTE_2);
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i * 2, 3_331)).collect();
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    let one = apply_month(
+        &store.root,
+        path,
+        SYMBOL,
+        &[rows[1].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("answered");
+    assert_eq!(
+        one,
+        Applied::Nothing {
+            why: "already_whole"
+        }
+    );
+    assert_eq!(store.served_bars(path), rows);
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth && e.bars == 3
+    ));
+}
+
+/// A `dropped` line the ledger holds after a `whole_month` line (an older
+/// build's, or a killed run's intent finished late) never downgrades the
+/// index, its rebuild or the summary: the month stays refused whole.
+#[test]
+fn a_dropped_line_after_a_whole_line_never_downgrades_index_rebuild_or_summary() {
+    let store = Store::new("whole-then-dropped-line");
+    let path = minute("QFIXU", march());
+    let rows: Vec<Bar> = (0..5).map(|i| bar(i, 2_903)).collect();
+    store.month(path, &rows);
+    let act = |scope, stamps: &'static [i64], bars, revision| Record {
+        path,
+        scope,
+        cause: if scope == Scope::WholeMonth {
+            Cause::BeforeListing
+        } else {
+            Cause::ZeroPrice
+        },
+        stamps,
+        bars,
+        revision,
+        source_digest: digest_of(&rows),
+        who: "test",
+        reason: "invented ledger order",
+    };
+    record(&store.root, &act(Scope::WholeMonth, &[], 5, 0)).expect("whole");
+    let one: &'static [i64] = Box::leak(vec![rows[2].ts_micros].into_boxed_slice());
+    record(&store.root, &act(Scope::Dropped, one, 1, 1)).expect("a later dropped line");
+    let whole = |why: &str| match probe(&store.root, path) {
+        Ok(Probe::Quarantined(e)) => assert_eq!(
+            (e.scope, e.cause, e.bars),
+            (Scope::WholeMonth, Cause::BeforeListing, 5),
+            "{why}"
+        ),
+        other => panic!("{why}: {other:?}"),
+    };
+    whole("the index after the line");
+    rebuild(&store.root, Vendor::Zerodha).expect("rebuilt");
+    whole("the index rebuilt from the ledger");
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("a summary");
+    assert_eq!(
+        summary.month(path).map(|e| (e.scope, e.bars)),
+        Some((Scope::WholeMonth, 5))
+    );
+    let row = summary.instrument("NSE", "CASH", "QFIXU").expect("flagged");
+    assert_eq!((row.months, row.whole_months, row.bars), (1, 1, 5));
+}
+
+/// The one merge rule, every arm: drop on drop adds, drop on whole keeps
+/// whole, whole on drop and whole on whole take the newer line.
+#[test]
+fn the_merge_rule_never_lets_a_drop_lift_a_whole_record() {
+    let entry = |scope, bars, ledger_at| Entry {
+        scope,
+        cause: Cause::ForeignLevel,
+        bars,
+        ledger_at,
+        revision: 1,
+        written_at: 7,
+    };
+    let dropped_a = entry(Scope::Dropped, 3, 10);
+    let dropped_b = entry(Scope::Dropped, 4, 20);
+    let whole_a = entry(Scope::WholeMonth, 9, 30);
+    let whole_b = entry(Scope::WholeMonth, 6, 40);
+    assert_eq!(
+        merged(dropped_a, dropped_b),
+        Entry {
+            bars: 7,
+            ..dropped_b
+        }
+    );
+    assert_eq!(merged(whole_a, dropped_b), whole_a);
+    assert_eq!(merged(dropped_a, whole_b), whole_b);
+    assert_eq!(merged(whole_a, whole_b), whole_b);
+}
+
+/// A killed run's intent owed on a month later recorded whole is finished
+/// (its `dropped` line written) and the month stays whole.
+#[test]
+fn an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole() {
+    let store = Store::new("whole-resume");
+    let path = minute("QFIXT", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 1_709)).collect();
+    store.month(path, &rows);
+    let named = [rows[2].ts_micros, rows[3].ts_micros];
+    record(
+        &store.root,
+        &Record {
+            path,
+            scope: Scope::Dropping,
+            cause: Cause::ForeignLevel,
+            stamps: &named,
+            bars: 2,
+            revision: 0,
+            source_digest: digest_of(&[rows[2], rows[3]]),
+            who: "killed",
+            reason: "the run that died",
+        },
+    )
+    .expect("the intent");
+    repair::drop_month(&store.root, path, SYMBOL, &named, "the run that died").expect("promoted");
+    let rest: Vec<i64> = [0, 1, 4, 5].iter().map(|i| rows[*i].ts_micros).collect();
+    let whole =
+        apply_month(&store.root, path, SYMBOL, &rest, why(Cause::BeforeListing)).expect("whole");
+    assert!(
+        matches!(whole, Applied::WholeMonth { bars: 4, .. }),
+        "{whole:?}"
+    );
+    let resumed =
+        apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("resumed");
+    assert!(
+        matches!(resumed, Applied::Resumed { bars: 2, .. }),
+        "{resumed:?}"
+    );
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth && e.bars == 4
+    ));
+    assert_eq!(
+        apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)),
+        Ok(Applied::Nothing {
+            why: "already_whole"
+        })
     );
 }

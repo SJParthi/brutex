@@ -1225,8 +1225,26 @@ fn image_trusted(image: &[u8]) -> bool {
             })
 }
 
+/// One month's entry after `newer` lands on `held`: the ONE rule the index
+/// ([`upsert`], so [`rebuild`] too) and [`Summary::load`] share. A drop onto
+/// a drop adds its bars; a drop onto a month recorded whole keeps the whole
+/// record, because a whole record means the reader serves none of the month
+/// and a later partial drop must never re-serve the rest; anything else is
+/// the newer line.
+fn merged(held: Entry, newer: Entry) -> Entry {
+    match (held.scope, newer.scope) {
+        (Scope::Dropped, Scope::Dropped) => Entry {
+            bars: held.bars.saturating_add(newer.bars),
+            ..newer
+        },
+        (Scope::WholeMonth, Scope::Dropped) => held,
+        _ => newer,
+    }
+}
+
 /// Puts `entry` in the key's slot: the matching one, or the first free one
-/// of its bucket. A drop onto a month already dropped adds its bars.
+/// of its bucket. A drop onto a month already dropped adds its bars; a drop
+/// onto a month recorded whole keeps the whole record (never a downgrade).
 fn upsert(
     image: &mut [u8],
     hash: &[u8; 16],
@@ -1244,9 +1262,7 @@ fn upsert(
                 month: was,
                 entry: Some(before),
             } if held == *hash && was == month => {
-                if before.scope == Scope::Dropped && entry.scope == Scope::Dropped {
-                    entry.bars = before.bars.saturating_add(entry.bars);
-                }
+                entry = merged(before, entry);
             }
             Slot::Free => {}
             Slot::Held { .. } => continue,
@@ -1442,14 +1458,7 @@ impl Summary {
             };
             months
                 .entry((line.key.clone(), line.month.clone()))
-                .and_modify(|held| {
-                    let bars = if held.scope == Scope::Dropped && entry.scope == Scope::Dropped {
-                        held.bars.saturating_add(entry.bars)
-                    } else {
-                        entry.bars
-                    };
-                    *held = Entry { bars, ..entry };
-                })
+                .and_modify(|held| *held = merged(*held, entry))
                 .or_insert(entry);
         }
         let mut instruments: HashMap<String, Instrument> = HashMap::new();
@@ -1721,19 +1730,27 @@ pub fn apply_month(
         other => other?,
     };
     let (held_named, unheld, n_valid) = split_named(root, path, symbol_id, &named)?;
-    if let Probe::Quarantined(entry) = probed
-        && entry.scope == Scope::WholeMonth
-        && held_named.len() as u64 == n_valid
-    {
-        return Ok(Applied::Nothing {
-            why: "already_whole",
-        });
-    }
     let resumable = if unheld.is_empty() {
         None
     } else {
         resumable_intent(root, path, &unheld)?
     };
+    // A MONTH QUARANTINED WHOLE STAYS WHOLE, whatever subset a later plan
+    // names: every bar it holds is already set aside, so publishing a
+    // generation without some of them would only re-serve the rest. A stamp
+    // neither held nor ledgered is still refused above; an intent a killed
+    // run owes is still finished (its `dropped` line never lifts the whole
+    // record: see `upsert` and `Summary::load`).
+    if let Probe::Quarantined(entry) = probed
+        && entry.scope == Scope::WholeMonth
+    {
+        return match resumable {
+            Some(intent) => finish_resume(root, path, &intent, why),
+            None => Ok(Applied::Nothing {
+                why: "already_whole",
+            }),
+        };
+    }
     if held_named.is_empty() {
         return match resumable {
             Some(intent) => finish_resume(root, path, &intent, why),

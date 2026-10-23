@@ -152,7 +152,7 @@ fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 #[tokio::test]
 async fn bars_json_answers_a_quarantined_month_by_name() {
     let fixture = Fixture::new("r418-bars-by-name");
-    fixture.month(ym(2018, 3), 99_500, 3);
+    fixture.month(ym(2018, 3), 77_713, 3);
     let uri =
         format!("/bars.json?feed=zerodha&exchange=NSE&segment=CASH&symbol={SYMBOL}&month=2018-03");
     let (status, before) = get(&fixture.site, &uri).await;
@@ -188,7 +188,7 @@ async fn bars_json_answers_a_quarantined_month_by_name() {
 async fn a_window_names_its_quarantined_month_and_serves_the_rest() {
     let fixture = Fixture::new("r418-window");
     let february = fixture.month(ym(2018, 2), 410, 2);
-    fixture.month(ym(2018, 3), 99_500, 3);
+    fixture.month(ym(2018, 3), 77_713, 3);
     fixture.month(ym(2018, 4), 420, 2);
     fixture.quarantine_whole(ym(2018, 3), 3);
     let uri = format!(
@@ -199,7 +199,7 @@ async fn a_window_names_its_quarantined_month_and_serves_the_rest() {
     let text = body.to_string();
     assert!(text.contains("2018-03: quarantined, not served"), "{text}");
     assert!(
-        !text.contains("99500"),
+        !text.contains("77713"),
         "no quarantined bar is served: {text}"
     );
     assert!(
@@ -211,7 +211,7 @@ async fn a_window_names_its_quarantined_month_and_serves_the_rest() {
 #[test]
 fn instruments_json_flags_a_quarantined_series() {
     let fixture = Fixture::new("r418-instruments");
-    fixture.month(ym(2018, 3), 99_500, 3);
+    fixture.month(ym(2018, 3), 77_713, 3);
     fixture.quarantine_whole(ym(2018, 3), 3);
     let key = brutex_core::instrument::InstrumentKey::cash(
         brutex_core::instrument::Exchange::Nse,
