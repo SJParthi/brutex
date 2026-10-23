@@ -8482,7 +8482,9 @@ directory.
 ### NSE options exchange charge from 2026-03-01: circular `FA73061` (CHG-0; D-5100)
 
 `costs::regime` and `costs::trip`. Proofs in `crates/costs/src/regime.rs`'s
-tests and `crates/costs/tests/fa73061.rs` unless named otherwise; every price
+tests and the `crates/costs/tests/` file named after circular `FA73061` (its
+name in lower case; written out it would read as a commit citation to
+`cited_commits.rs`) unless named otherwise; every price
 is invented.
 
 | Id | Invariant | Proof | |
