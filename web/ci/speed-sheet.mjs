@@ -78,8 +78,21 @@ import { calendarUrl } from '../src/lib/calendar-owed.js';
 import { facetsUrl } from '../src/lib/store-census.js';
 import { rungsUrl, dayUrl, barsUrl, rungSeconds } from '../src/lib/sources.js';
 import { UP_ROUTE, UP_METHOD } from '../src/lib/api-status.js';
-import { SPEED_ROUTE, summary, ignoredFields, garbledUrl } from '../src/lib/speed.js';
+import { SPEED_ROUTE, MEASURED_PAGES, summary, ignoredFields, garbledUrl, routePath } from '../src/lib/speed.js';
 import { BUILD_HEADER } from '../src/lib/runtime-inspection.js';
+
+/**
+ * A page's path as the app's router reads it (`routePath`), so `/db` and a
+ * capture's `/db/` or `/db?seg=options` are one page; anything that is not a
+ * path is kept as written.
+ *
+ * @param {string} page
+ */
+export function pagePathOf(page) {
+  if (!page.startsWith('/')) return page;
+  const u = new URL(`http://h${page}`);
+  return routePath(u.pathname) ?? u.pathname;
+}
 
 /**
  * @typedef {{feed: string, instrument: string, timeframe: string, month: string, day: string,
@@ -167,9 +180,27 @@ export function requestsFor(ctx, captured = []) {
 }
 
 /**
+ * Whether `path`, asked of `base`, stays on `base`'s own origin. A URL
+ * reader treats a backslash as a slash and drops a tab or a line break, so
+ * `/\evil.invalid/x.json` is `//evil.invalid/x.json`, another host (verify r4
+ * follow-up, 23 Oct): only the resolved origin can say.
+ *
+ * @param {string} path
+ * @param {string} base an origin
+ */
+export function onOrigin(path, base) {
+  try {
+    return new URL(path, base).origin === new URL(base).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A capture the browser harness wrote, read and checked: same-origin paths,
  * GET and HEAD only. A write in a capture is refused by name — the sheet
- * never replays one.
+ * never replays one — and so is a path that a URL reader would take to
+ * another host ({@link onOrigin}).
  *
  * @param {string} text
  * @returns {{page: string, method: string, url: string}[]}
@@ -181,7 +212,7 @@ export function readCapture(text) {
     const method = String(r?.method ?? '').toUpperCase();
     const url = String(r?.url ?? '');
     if (method !== 'GET' && method !== 'HEAD') throw new Error(`capture request ${i} is a ${method || 'method-less'} ${url}: the sheet replays reads only`);
-    if (!url.startsWith('/') || url.startsWith('//')) throw new Error(`capture request ${i} (${url}) is not a path of this server`);
+    if (!url.startsWith('/') || url.startsWith('//') || url.includes('\\') || !onOrigin(url, 'http://speed.sheet')) throw new Error(`capture request ${i} (${url}) is not a path of this server`);
     return { page: String(r?.page ?? '?'), method, url };
   });
 }
@@ -245,6 +276,9 @@ export function parseArgs(argv) {
   };
   const clients = String(o.clients ?? '1,10,60').split(',').map((c) => (DECIMAL.test(c) ? Number(c) : Number.NaN));
   if (clients.some((c) => !Number.isSafeInteger(c) || c < 1 || c > 512)) throw new Error('--clients is a comma list of whole numbers from 1 to 512');
+  // One count, one pass (verify r4 follow-up: `10,10` timed every request twice at 10).
+  const twice = clients.find((c, i) => clients.indexOf(c) !== i);
+  if (twice !== undefined) throw new Error(`--clients names ${twice} twice: each client count is measured once a run`);
   const day = o.day === undefined ? null : String(o.day);
   if (day !== null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--day is YYYY-MM-DD');
   const month = o.month === undefined ? null : String(o.month);
@@ -266,7 +300,10 @@ export function parseArgs(argv) {
     allowUnstamped: o['allow-unstamped'] === true,
     timeoutMs: whole('timeout-ms', 60_000, 1, MAX_WAIT_MS),
     upWaitMs: whole('up-wait-ms', 120_000, 1, MAX_WAIT_MS),
-    maxAnswerBytes: whole('max-answer-bytes', MAX_ANSWER_BYTES, 1)
+    // At most the largest answer kept as text: past it an answer is a digest,
+    // and no answer that large is timed by many clients at once (verify r4
+    // follow-up: 9,007,199,254,740,991 was taken).
+    maxAnswerBytes: whole('max-answer-bytes', MAX_ANSWER_BYTES, 1, MAX_TEXT_BYTES)
   };
 }
 
@@ -308,10 +345,13 @@ export function answerText(body, limit = MAX_TEXT_BYTES) {
  * @returns {Promise<Answer | NoAnswer>}
  */
 export function timed(base, path, o = {}) {
-  const url = new URL(path, base);
-  const lib = url.protocol === 'https:' ? https : http;
   const t0 = process.hrtime.bigint();
   const ms = () => Number(process.hrtime.bigint() - t0) / 1e6;
+  // ONLY THE SERVER UNDER TEST IS ASKED: a path that resolves to another
+  // origin is never sent (verify r4 follow-up, 23 Oct).
+  if (!onOrigin(path, base)) return Promise.resolve({ status: 0, error: `${path} is not a path of ${base}: never sent`, ms: ms(), build: null, body: '', bytes: 0, headers: {} });
+  const url = new URL(path, base);
+  const lib = url.protocol === 'https:' ? https : http;
   const limit = o.timeoutMs ?? 60_000;
   return new Promise((resolve) => {
     const req = lib.request(url, { method: o.method ?? 'GET', agent: o.agent ?? false, headers: { accept: 'application/json' } }, (res) => {
@@ -440,21 +480,38 @@ export async function discover(get, args) {
  * Every field of every request with a query, asked once garbled; the
  * fields the server's own answers show were ignored.
  *
+ * EACH REQUEST IS ASKED AS THE PAGE ASKS IT (verify r4 follow-up, 23 Oct): a
+ * HEAD request was checked with a whole GET, so the `/db` census watch's
+ * `HEAD /store.json?feed=gdfl` streamed 591,200,898 B per ask into the
+ * sheet's own memory (1.28 GB at its peak) against the served app. A HEAD
+ * answer has no body, so of the three signals only the status can show a
+ * field read: a garbled field that is refused (4xx) was read; one answered
+ * 2xx like the original cannot be told from an ignored one, and is said in
+ * `unchecked` (a NOT MEASURED line), never passed and never failed.
+ *
  * @param {(path: string, o?: object) => Promise<Answer | NoAnswer>} send
  * @param {SheetRequest[]} requests
+ * @returns {Promise<{request: SheetRequest, field: string, how: string, said: string}[] & {unchecked: string[]}>}
  */
 export async function fieldCheck(send, requests) {
-  /** @type {{request: SheetRequest, field: string, how: string, said: string}[]} */
-  const out = [];
+  /** @type {{request: SheetRequest, field: string, how: string, said: string}[] & {unchecked: string[]}} */
+  const out = Object.assign([], { unchecked: /** @type {string[]} */ ([]) });
   for (const r of requests) {
     if (!r.url.includes('?')) continue;
-    const first = await send(r.url, { method: 'GET' });
+    const method = r.method === 'HEAD' ? 'HEAD' : 'GET';
+    const first = await send(r.url, { method });
     if (first.status === 0) continue; // timed below, and failed there by name
     /** @type {Record<string, {status: number, body: string}>} */
     const garbled = {};
     for (const field of new Set(new URL(r.url, 'http://speed.sheet').searchParams.keys())) {
-      const probe = await send(garbledUrl(r.url, field), { method: 'GET' });
+      const probe = await send(garbledUrl(r.url, field), { method });
       garbled[field] = { status: probe.status, body: probe.body };
+    }
+    if (method === 'HEAD') {
+      const ok = (/** @type {number} */ s) => s >= 200 && s < 300;
+      const untold = Object.entries(garbled).filter(([, p]) => ok(first.status) && ok(p.status)).map(([field]) => field);
+      if (untold.length > 0) out.unchecked.push(`the fields ${untold.join(', ')} of HEAD ${r.url} (${r.page}): each garbled value was answered ${first.status} like the original, and a HEAD answer has no body to tell a field read from one ignored`);
+      continue;
     }
     for (const f of ignoredFields({ url: r.url, status: first.status, body: first.body, garbled })) {
       out.push({ request: r, ...f });
@@ -499,6 +556,18 @@ export async function runSheet(args, deps = {}) {
   const failures = [];
   /** @type {string[]} */
   const notMeasured = [];
+  // THE CAPTURE IS READ BEFORE THE SERVER IS ASKED ANYTHING (verify r4
+  // follow-up, 23 Oct): a missing `--from-pages` file was an uncaught ENOENT
+  // with a stack, after the server had been asked. It is refused by name.
+  /** @type {string | null} */
+  let captureText = deps.capture ?? null;
+  if (captureText === null && args.fromPages !== null) {
+    try {
+      captureText = readFileSync(args.fromPages, 'utf8');
+    } catch (why) {
+      return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: --from-pages ${args.fromPages}: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx: null, commit: null };
+    }
+  }
 
   const up = await send(UP_ROUTE, { method: UP_METHOD });
   if (up.status !== 200) {
@@ -517,7 +586,6 @@ export async function runSheet(args, deps = {}) {
   } catch (why) {
     return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit };
   }
-  const captureText = deps.capture ?? (args.fromPages ? readFileSync(args.fromPages, 'utf8') : null);
   /** @type {{page: string, method: string, url: string}[]} */
   let captured = [];
   try {
@@ -529,10 +597,20 @@ export async function runSheet(args, deps = {}) {
   }
   const { requests, skipped } = requestsFor(ctx, captured);
   if (captureText === null) notMeasured.push('the requests /gaps, /audit, /markets and the other pages build inline: no --from-pages capture was given');
+  else {
+    // A CAPTURE THAT HOLDS NO REQUEST OF A MEASURED PAGE times none of what
+    // that page builds inline, and says so page by page (verify r4
+    // follow-up, 23 Oct: an empty capture gave a PASS sheet with no word).
+    const held = new Set(captured.map((c) => pagePathOf(c.page)));
+    for (const page of MEASURED_PAGES) {
+      if (!held.has(pagePathOf(page))) notMeasured.push(`${page}: the capture holds no request of this page, so what it builds inline is not timed`);
+    }
+  }
   log(`speed sheet: ${requests.length} requests for ${ctx.feed} ${ctx.instrument} ${ctx.timeframe} ${ctx.month}, build ${commit ?? 'not named'}`);
 
   const ignored = await fieldCheck(send, requests);
   for (const i of ignored) failures.push(`${i.request.page} ${i.request.url}: field ${i.field} was ignored (${i.how}: ${i.said})`);
+  for (const u of ignored.unchecked) notMeasured.push(u);
 
   /** @type {SheetRow[]} */
   const rows = [];
@@ -702,7 +780,15 @@ async function main() {
   const result = await runSheet(args);
   const text = renderSheet(result, args);
   process.stdout.write(text);
-  if (args.out) writeWhole(args.out, text);
+  if (args.out) {
+    try {
+      writeWhole(args.out, text);
+    } catch (why) {
+      // The sheet is on stdout already; the file that could not be written is named, never a stack.
+      console.error(`speed-sheet: ${/** @type {Error} */ (why).message}`);
+      process.exit(2);
+    }
+  }
   process.exit(result.ok ? 0 : 1);
 }
 

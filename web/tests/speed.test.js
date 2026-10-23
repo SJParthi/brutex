@@ -1296,8 +1296,8 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
   const t2 = performance.now();
   await new Function('window', `return ${harness.AWAIT_PAINT}`)(win);
   assert.ok(performance.now() - t2 < 100);
-  // Every load waits for its paint before it reads.
-  assert.match(source('ci/browser-harness.mjs'), /await tab\.evaluate\(AWAIT_PAINT\);\s*const h = await tab\.evaluate\(READ_FIGURES\);/);
+  // Every load waits for its paint before it reads, and that wait's answer is bounded too (repair 4).
+  assert.match(source('ci/browser-harness.mjs'), /await tab\.evaluate\(AWAIT_PAINT, answerWithin\(PAINT_WAIT_MS\)\);\s*h = await tab\.evaluate\(READ_FIGURES\);/);
 });
 
 test('a read-only run sends no write: the page\'s own report is blocked in the browser, named, and never reaches the server', { timeout: 300_000 }, async () => {
@@ -1889,7 +1889,17 @@ test('a stop signals a group only while it is the browser\'s: a group that has g
  * `$lib/page-report.js`, a `/page-report` that keeps what it is sent, and a
  * `/logs.json` that serves it back.
  *
- * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean, bareDb?: boolean}} o
+ * AS THE APP'S BUILD DOES (repair 4): every page names its app entry
+ * (`<link rel="modulepreload">` to `/_app/immutable/entry/app.T1.js`), whose
+ * `dictionary` lists the stand-in's routes, so the harness can ask which
+ * page was drawn; every answer is stamped with `x-brutex-build` (`build`;
+ * `null` stamps none, a function is asked per answer). `fallback` answers
+ * every other path 200 with a shell, as the api does; `noEntry` drops the
+ * entry from every page; `/stall` answers its headers and part of its body
+ * and never ends, `/hang` never answers. `stop()` ends every connection.
+ *
+ * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean, bareDb?: boolean, fallback?: boolean,
+ *   noEntry?: boolean, build?: string | null | ((path: string) => string)}} o
  */
 async function browserStandIn(o) {
   const reporter = source('src/lib/page-report.js');
@@ -1899,8 +1909,10 @@ async function browserStandIn(o) {
   /** @type {string[]} every request the stand-in was sent, `METHOD /path` */
   const requests = [];
   const script = o.noReporter ? '' : `<script type="module">import '/lib/page-report.js';</script>`;
+  const entry = '/_app/immutable/entry/app.T1.js';
+  const preload = o.noEntry ? '' : `<link rel="modulepreload" href="${entry}">`;
   /** @param {string} title @param {string} [extra] */
-  const page = (title, extra = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title><body><h1>${title}</h1>${extra}${script}`;
+  const page = (title, extra = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title>${preload}<body><h1>${title}</h1>${extra}${script}`;
   // A ROUND TRIP INSIDE ONE DOCUMENT, as the app's router makes one: a link
   // is taken in place (`history.pushState`, nothing loaded), the page in view
   // is unmounted and the next one mounted, and the browser's back button
@@ -1928,26 +1940,44 @@ async function browserStandIn(o) {
       `document.querySelector('input').addEventListener('input', () => { document.querySelector('#db-search-list').innerHTML = '<div role="option" onclick="fetch(\\'/feeds.json\\')">NIFTY</div>'; }); setInterval(() => fetch('/inspection.json', { method: 'HEAD' }), 300);</script>`),
     '/gaps': page('gaps', `<script>fetch('/feeds.json'); fetch('/broken').catch(() => null); setInterval(() => fetch('/feeds.json'), 300); setTimeout(() => { throw new Error('boom'); }, 0); setTimeout(() => { throw 'plain'; }, 0);</script>`),
     '/speed': page('speed', `<script>new Worker('/lib/worker.js');</script>`),
-    '/blank': `<!doctype html><title>blank</title><body>${script}`,
+    '/blank': `<!doctype html><title>blank</title>${preload}<body>${script}`,
     // THE SPEED PAGE'S OWN LINE, drawn by the REAL `$lib/speed.js` as the
     // page draws it: client-rendered (nothing to paint until the module has
     // run), and a fetch of 450,000 bytes after the load, so a reading taken
-    // at mount has neither the paint nor the whole wire.
-    '/self': '<!doctype html><meta charset="utf-8"><title>self</title><body><p data-speed-self></p><script type="module">' +
-      "import { watchSelf, selfText } from '/lib/speed.js'; const line = document.querySelector('[data-speed-self]');" +
-      'watchSelf(window, (r) => { line.textContent = selfText(r, location.pathname); line.dataset.firstContentMs = r.firstContentMs ?? ""; line.dataset.wireBytes = String(r.wireBytes); line.dataset.fetches = String(r.fetches); });' +
+    // at mount has neither the paint nor the whole wire. Opened at `/self/`
+    // it does what the app's router does first: it drops the trailing slash
+    // from the address (`history.replaceState`), so the page's path is
+    // `/self` while the document is `/self/` (repair 4).
+    '/self': `<!doctype html><meta charset="utf-8"><title>self</title>${preload}<body><p data-speed-self></p><script type="module">` +
+      "import { watchSelf, selfText, selfWhose } from '/lib/speed.js'; const line = document.querySelector('[data-speed-self]');" +
+      "if (location.pathname.length > 1 && location.pathname.endsWith('/')) history.replaceState(history.state, '', location.pathname.slice(0, -1) + location.search);" +
+      'watchSelf(window, (r) => { line.textContent = selfText(r, location.pathname); line.dataset.figuresOf = selfWhose(r, location.pathname); line.dataset.firstContentMs = r.firstContentMs ?? ""; line.dataset.wireBytes = String(r.wireBytes); line.dataset.fetches = String(r.fetches); });' +
       "addEventListener('load', () => setTimeout(() => fetch('/big').then((a) => a.text()), 100));</script>",
     // A request failed AFTER the reporter is installed, as on every page of the app.
     '/reporting': page('reporting', `<script type="module">import '/lib/page-report.js'; fetch('/broken').catch(() => null);</script>`)
   };
+  // The routes the stand-in's build would list: its pages, `/self/` being `/self`.
+  const dictionary = Object.fromEntries(Object.keys(pages).map((p, i) => [p, [i + 2]]));
+  /** Every answer the stand-in holds open, ended by `stop()`. @type {import('node:http').ServerResponse[]} */
+  const held = [];
+  /** @param {string} path */
+  const stamp = (path) => (o.build === null ? {} : { 'x-brutex-build': typeof o.build === 'function' ? o.build(path) : (o.build ?? 'f'.repeat(40)) });
   const server = http.createServer((req, res) => {
     const u = new URL(String(req.url), 'http://x');
     requests.push(`${req.method} ${u.pathname}`);
     /** @param {number} status @param {string} type @param {string} body @param {Record<string, string>} [extra] */
     const send = (status, type, body, extra = {}) => {
-      res.writeHead(status, { 'content-type': type, ...extra });
+      res.writeHead(status, { 'content-type': type, ...stamp(u.pathname), ...extra });
       res.end(body);
     };
+    if (u.pathname === entry) return send(200, 'text/javascript', `export const dictionary = ${JSON.stringify(dictionary)};`);
+    if (u.pathname === '/stall') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...stamp(u.pathname) });
+      res.write(`<!doctype html><title>stall</title>${preload}<p>part of a page; the rest never comes`);
+      return void held.push(res);
+    }
+    if (u.pathname === '/hang') return void held.push(res);
+    if (u.pathname === '/self/') return send(200, 'text/html; charset=utf-8', pages['/self']);
     if (u.pathname === '/lib/page-report.js') return send(200, 'text/javascript', reporter);
     if (u.pathname === '/lib/speed.js') return send(200, 'text/javascript', speedLib);
     if (u.pathname === '/big') return send(200, 'text/plain', 'x'.repeat(450_000), { 'cache-control': 'no-store' });
@@ -1969,10 +1999,17 @@ async function browserStandIn(o) {
     if (u.pathname === '/bars/window.json' && !o.bareDb) return send(200, 'application/json', JSON.stringify({ total: edgeTotal(u.searchParams) }));
     if (u.pathname === '/broken') return void res.socket?.destroy();
     if (u.pathname in pages) return send(200, 'text/html; charset=utf-8', pages[u.pathname]);
+    // As the api answers a path it has no file for: the app's shell, 200 (which reads what the shell reads).
+    if (o.fallback && req.method === 'GET') return send(200, 'text/html; charset=utf-8', page('shell', "<script>fetch('/feeds.json');</script>"));
     send(404, 'text/plain', 'no');
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
-  return { server, log, requests, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
+  const stop = () => {
+    for (const r of held) r.destroy();
+    server.closeAllConnections();
+    server.close();
+  };
+  return { server, log, requests, stop, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
 }
 
 /** A `Response` as far as the code under test reads one.
@@ -2268,10 +2305,10 @@ test('a sheet and a capture are written whole: a new file renamed over the old, 
   assert.equal(readFileSync(join(dir, 'taken', 'inside'), 'utf8'), 'kept');
   // A directory that does not exist: refused before anything is made.
   assert.throws(() => sheet.writeWhole(join(dir, 'missing', 'sheet.md'), 'x'), /ENOENT/);
-  // Both commands write through it.
-  assert.match(source('ci/speed-sheet.mjs'), /if \(args\.out\) writeWhole\(args\.out, text\);/);
-  assert.match(source('ci/browser-harness.mjs'), /if \(args\.capture\) writeWhole\(args\.capture, /);
-  assert.match(source('ci/browser-harness.mjs'), /if \(args\.out\) writeWhole\(args\.out, text\);/);
+  // Both commands write through it, and a write that fails is named, never a stack (repair 4).
+  assert.match(source('ci/speed-sheet.mjs'), /if \(args\.out\) \{\s*try \{\s*writeWhole\(args\.out, text\);\s*\} catch \(why\) \{/);
+  assert.match(source('ci/browser-harness.mjs'), /if \(args\.capture\) \{\s*try \{\s*writeWhole\(args\.capture, /);
+  assert.match(source('ci/browser-harness.mjs'), /if \(args\.out\) \{\s*try \{\s*writeWhole\(args\.out, text\);\s*\} catch \(why\) \{/);
   assert.doesNotMatch(source('ci/browser-harness.mjs') + source('ci/speed-sheet.mjs'), /writeFileSync\((args|path)/);
 });
 
@@ -2559,19 +2596,28 @@ test('the sheet and the harness read a number in decimal digits only, bound ever
   }
   assert.throws(() => sheet.parseArgs([...base, '--restarts', '10001']), /^Error: --restarts must be at most 10000$/);
   assert.equal(sheet.parseArgs([...base, '--restarts', '10000']).restarts, 10_000);
-  // One page, one spelling.
+  // One page, one spelling — as the app's router reads it (repair 4, verify
+  // r4: the case and every trailing slash were folded, which the router
+  // does not do, and dot segments, escapes, a fragment and an empty query
+  // were not, which the browser and the router do).
   /** @type {[string, string][]} */
   const twice = [
     ['/speed,/speed/', '--pages names /speed twice (as /speed and /speed/): each page is measured once a run'],
-    ['/speed,/SPEED', '--pages names /speed twice (as /speed and /SPEED): each page is measured once a run'],
-    ['/Db/,/gaps,/db', '--pages names /Db/ twice (as /Db/ and /db): each page is measured once a run'],
     ['/db?a=1,/db/?a=1', '--pages names /db?a=1 twice (as /db?a=1 and /db/?a=1): each page is measured once a run'],
-    ['/,//', '--pages names / twice (as / and //): each page is measured once a run'],
-    ['/db,/speed,/db', '--pages names /db twice: each page is measured once a run']
+    ['/db,/speed,/db', '--pages names /db twice: each page is measured once a run'],
+    ['/speed,/speed/../speed', '--pages names /speed twice (as /speed and /speed/../speed): each page is measured once a run'],
+    ['/speed,/%73peed', '--pages names /speed twice (as /speed and /%73peed): each page is measured once a run'],
+    ['/speed,/speed#x', '--pages names /speed twice (as /speed and /speed#x): each page is measured once a run'],
+    ['/speed,/speed?', '--pages names /speed twice (as /speed and /speed?): each page is measured once a run'],
+    ['/speed,/speed/.', '--pages names /speed twice (as /speed and /speed/.): each page is measured once a run']
   ];
   for (const [pages, why] of twice) assert.throws(() => harness.parseArgs([...base, '--pages', pages]), (e) => /** @type {Error} */ (e).message === why, pages);
   assert.deepEqual(harness.parseArgs([...base, '--pages', '/,/db,/db?a=1,/db?a=A,/speed']).pages, ['/', '/db', '/db?a=1', '/db?a=A', '/speed'], 'a different query or page is another page');
-  assert.deepEqual(['/speed/', '/SPEED//', '/', '//', '/DB/?k=NSE-A', '/db?k=nse-a'].map(harness.pageKey), ['/speed', '/speed', '/', '/', '/db?k=NSE-A', '/db?k=nse-a'], 'the path folds, the query never');
+  assert.deepEqual(harness.parseArgs([...base, '--pages', '/speed,/SPEED,/Db/,/db,/,//']).pages, ['/speed', '/SPEED', '/Db/', '/db', '/', '//'], 'another case, or a second trailing slash, is another address: the run then finds it is no page of the app');
+  assert.deepEqual(['/speed/', '/SPEED//', '/', '//', '/DB/?k=NSE-A', '/db?k=nse-a', '/speed/../speed', '/%73peed', '/speed#x', '/speed?', '/speed/.', '/speed%2F'].map(harness.pageKey),
+    ['/speed', '/SPEED//', '/', '//', '/DB?k=NSE-A', '/db?k=nse-a', '/speed', '/speed', '/speed', '/speed', '/speed', '/speed%2F'], 'the router\'s reading: case kept, one trailing slash, escapes decoded but a reserved one, the query never');
+  assert.equal(harness.pageKey('/%E0%A4%A'), null, 'an escape that is not UTF-8 is no path a router reads');
+  assert.throws(() => harness.parseArgs([...base, '--pages', '/%E0%A4%A']), /^Error: --pages names \/%E0%A4%A, whose path no router can read: a percent escape that is not UTF-8$/);
   const long = `/${'/'.repeat(200_000)}x`;
   const t0 = performance.now();
   assert.equal(harness.pageKey(long), long);
@@ -2591,4 +2637,377 @@ test('a wire with entries the browser gave no size for, or dropped, is said as a
   assert.doesNotMatch(selfText(selfStart(['paint']), '/speed'), /at least/, 'no wire, no floor');
   const page = source('src/routes/speed/+page.svelte');
   assert.match(page, /data-fetches=\{self\.wire === 'observed' \? self\.fetches : undefined\}/);
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 4 (23 Oct): verify r4's three blocking findings and its
+// follow-ups in R3-15's files, each failing on the tree before it.
+// ---------------------------------------------------------------------------
+
+test('every DevTools command is bounded: one the browser does not answer is refused by name, a late answer is dropped, and a closed connection refuses what waits and what comes', async () => {
+  // Before (verify r4, 23 Oct): Cdp.send set a Promise per id with no
+  // bound, so a browser that never answered held the run for ever.
+  const { Cdp, CdpTimeout } = harness;
+  /** @type {any[]} */
+  const sent = [];
+  /** @type {any} */
+  const ws = new EventTarget();
+  ws.send = (/** @type {string} */ text) => sent.push(JSON.parse(text));
+  const cdp = new Cdp(ws, 50);
+  const answer = (/** @type {object} */ m) => ws.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(m) }));
+  const t0 = performance.now();
+  await assert.rejects(cdp.send('Page.navigate', { url: 'x' }), (e) => e instanceof CdpTimeout && /** @type {Error} */ (e).message === 'the browser did not answer Page.navigate within 50 ms');
+  assert.ok(performance.now() - t0 < 1_000, 'refused at its bound');
+  // A late answer is dropped: nothing throws, nothing is answered twice.
+  assert.doesNotThrow(() => answer({ id: sent[0].id, result: {} }));
+  // An answer in time resolves; a command's own bound is its own.
+  const inTime = cdp.send('Runtime.evaluate', { expression: '1' }, 's1', 5_000);
+  answer({ id: sent[1].id, result: { ok: 1 } });
+  assert.deepEqual(await inTime, { ok: 1 });
+  assert.equal(sent[1].sessionId, 's1');
+  const refused = cdp.send('Bogus.method');
+  answer({ id: sent[2].id, error: { message: "'Bogus.method' wasn't found", code: -32601 } });
+  await assert.rejects(refused, /^Error: 'Bogus\.method' wasn't found \(-32601\)$/);
+  // Events still reach their listeners.
+  /** @type {any[]} */
+  const events = [];
+  const off = cdp.on((m) => events.push(m.method));
+  answer({ method: 'Page.loadEventFired', params: {} });
+  off();
+  assert.deepEqual(events, ['Page.loadEventFired']);
+  // A closed connection refuses what waits, and every later command, at once.
+  const waiting = cdp.send('Target.createTarget', {}, undefined, 60_000);
+  ws.dispatchEvent(new Event('close'));
+  await assert.rejects(waiting, /^Error: Target\.createTarget: the browser's DevTools connection closed$/);
+  await assert.rejects(cdp.send('Target.closeTarget'), /^Error: Target\.closeTarget: the browser's DevTools connection closed$/);
+  assert.equal(sent.length, 4, 'nothing is sent on a closed connection');
+  // The bounds.
+  assert.equal(harness.CDP_WAIT_MS, 30_000);
+  assert.equal(harness.LOAD_WAIT_MS, 30_000);
+  assert.equal(harness.FRAME_WAIT_MS, 2_000);
+  assert.equal(harness.answerWithin(2_000), 32_000, 'a page-side wait, and the time its answer travels');
+  assert.equal(harness.answerWithin(harness.MAX_WAIT_MS), harness.MAX_WAIT_MS, 'never more than a timer holds');
+  assert.equal(harness.parseArgs(['--base', 'http://h:1']).loadWaitMs, 30_000);
+  assert.equal(harness.parseArgs(['--base', 'http://h:1', '--load-wait-ms', '100']).loadWaitMs, 100);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--load-wait-ms', '99']), /^Error: --load-wait-ms must be a whole number of at least 100, in decimal digits$/);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--load-wait-ms', '2147483648']), /^Error: --load-wait-ms must be at most 2147483647$/);
+});
+
+test('a load that does not end within its bound fails its page by name, and the run goes on to its sheet and a non-zero exit', { timeout: 240_000 }, async () => {
+  // Before (verify r4, 23 Oct): loadOnce waited for Page.loadEventFired with
+  // no bound, so /stall (its headers and part of its body, never the end)
+  // printed nothing and wrote no sheet in 9 min 49 s, and a server paused
+  // with SIGSTOP held a cold load for the whole pause.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+  const site = await browserStandIn({});
+  const dir = mkdtempSync(join(tmpdir(), 'r315-stall-'));
+  try {
+    const t0 = performance.now();
+    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/stall,/hang,/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
+    const took = performance.now() - t0;
+    const text = r.lines.join('\n');
+    const stalled = 'the load did not end within 1500 ms (its document was answered HTTP 200 and did not finish)';
+    const unanswered = 'the load did not end within 1500 ms (no answer to its document)';
+    assert.match(text, new RegExp(`^\\| /stall \\| cold \\| 0 \\| NOT MEASURED: ${stalled.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
+    assert.match(text, new RegExp(`^\\| /hang \\| cold \\| 0 \\| NOT MEASURED: ${unanswered.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
+    assert.match(text, /^\| \/speed \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m, 'the run goes on to the next page');
+    assert.match(text, /^\| \/speed \| warm \| 2 \|/m);
+    assert.deepEqual(r.failures.filter((f) => /^\/(stall|hang) /.test(f)), [`/stall cold: ${stalled}`, `/hang cold: ${unanswered}`]);
+    assert.equal(r.ok, false);
+    assert.ok(took < 60_000, `bounded: the run took ${took.toFixed(0)} ms`);
+    assert.equal(r.lines.filter((l) => l.startsWith('| /stall ')).length, 1, 'a page whose load did not end is not loaded again');
+    // As a command: the sheet is written and the exit is 1.
+    const { execFile } = await import('node:child_process');
+    const script = new URL('ci/browser-harness.mjs', web).pathname;
+    const out = join(dir, 'sheet.md');
+    const ran = /** @type {{code: number, stdout: string}} */ (await new Promise((resolve) => execFile(process.execPath, [script, '--base', site.base, '--n', '1', '--pages', '/stall', '--no-interactions', '--no-idle', '--no-report-check', '--load-wait-ms', '1000', '--out', out, ...root], (error, stdout) => resolve({ code: error ? Number(error.code) : 0, stdout }))));
+    assert.equal(ran.code, 1, ran.stdout);
+    assert.match(readFileSync(out, 'utf8'), /^# Browser harness — FAIL[\s\S]*- FAILED: \/stall cold: the load did not end within 1000 ms \(its document was answered HTTP 200 and did not finish\)/);
+  } finally {
+    site.stop();
+  }
+});
+
+test('the two frames a settle waits for are bounded: a hidden tab draws none, is said so, and is never waited on', { timeout: 120_000 }, async () => {
+  // Before (verify r4, 23 Oct): settle's last step waited for two animation
+  // frames with no bound, and a hidden tab draws no frame (3 of 3 hidden
+  // tabs gave none in 10 s), so a load in a hidden tab never settled.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const b = await harness.launch(chrome, process.getuid?.() === 0);
+  try {
+    const { browserContextId } = await b.cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+    const page = 'data:text/html,<!doctype html><title>t</title><p>t</p>';
+    const tabs = [];
+    for (let i = 0; i < 3; i += 1) {
+      const t = await harness.openTab(b.cdp, browserContextId);
+      await harness.loadOnce(t, b.cdp, page, 50);
+      tabs.push(t);
+    }
+    /** @type {unknown[]} */
+    const states = [];
+    for (const t of tabs) states.push(await t.evaluate('document.visibilityState'));
+    assert.ok(states.includes('hidden') && states.at(-1) === 'visible', `a window draws its newest tab: ${states.join(', ')}`);
+    for (const [i, t] of tabs.entries()) {
+      const t0 = performance.now();
+      assert.equal(await t.settle(50, 1_000, 500), true);
+      const took = performance.now() - t0;
+      assert.equal(t.frames.drew, states[i] === 'visible', `tab ${i} (${states[i]}): drew ${t.frames.drew}`);
+      assert.ok(took < 1_000 + 500 + harness.FRAME_SLACK_MS + 1_000, `tab ${i} (${states[i]}) settled in ${took.toFixed(0)} ms`);
+    }
+    // A load in a hidden tab says it drew no frame, and is judged so by name.
+    const hiddenTab = tabs[states.indexOf('hidden')];
+    const t1 = performance.now();
+    const hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
+    assert.ok(performance.now() - t1 < 15_000, 'a load in a hidden tab ends');
+    assert.equal(hidden.ended, true);
+    assert.equal(hidden.drew, false);
+    assert.ok(harness.judge('/x', 'cold', [hidden]).failures.includes('/x cold: 1 of 1 loads drew no frame within 2000 ms of settling (a hidden tab draws none), so they are not settled loads'));
+    const visible = await harness.loadOnce(tabs[2], b.cdp, page, 50);
+    assert.equal(visible.drew, true);
+    assert.deepEqual(harness.judge('/x', 'cold', [visible]).failures.filter((f) => f.includes('frame')), []);
+    for (const t of tabs) await t.close();
+    await b.cdp.send('Target.disposeBrowserContext', { browserContextId });
+  } finally {
+    await b.close();
+  }
+  // The page-side wait: true once two frames are drawn, false when its time passed first.
+  assert.match(harness.twoFrames(500), /setTimeout\(\(\) => r\(false\), 500\)/);
+  assert.match(harness.twoFrames(500), /requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \{ clearTimeout\(t\); r\(true\); \}\)\)/);
+});
+
+test('a page the app does not route fails by name and is never passed: the build that answered names its routes, case kept, one trailing slash the same page', { timeout: 240_000 }, async () => {
+  // Before (verify r4, 23 Oct): the server answers every path with the
+  // app's shell and 200, and judge failed a load only on its status, so
+  // `--pages /nope,/SPEED` wrote "# Browser harness — PASS", every row
+  // holding, for two pages the app does not have.
+  const { routeOf, notTheApps, READ_ROUTES } = harness;
+  const routes = ['/', '/audit', '/db', '/speed', '/(group)/inside'];
+  assert.deepEqual(routeOf('/speed', routes), { route: '/speed', unmatched: [] });
+  assert.deepEqual(routeOf('/speed/', routes), { route: '/speed', unmatched: [] }, 'one trailing slash is the same page');
+  assert.deepEqual(routeOf('/%73peed', routes), { route: '/speed', unmatched: [] }, 'an escape is decoded, as the router decodes it');
+  assert.deepEqual(routeOf('/db?seg=options', routes), { route: '/db', unmatched: [] }, 'a query is not the path');
+  assert.deepEqual(routeOf('/inside', routes), { route: '/(group)/inside', unmatched: [] }, 'a group is no part of the path');
+  assert.deepEqual(routeOf('/', routes), { route: '/', unmatched: [] });
+  for (const p of ['/SPEED', '/nope', '//', '/speed//', '/speed%2F']) assert.equal(routeOf(p, routes).route, null, p);
+  assert.equal(notTheApps('/speed', { routes }), '');
+  assert.equal(notTheApps('/SPEED', { routes }), 'the app has no such page: no route of the build that answered matches /SPEED (its routes: /, /audit, /db, /speed, /(group)/inside), so it drew its not-found page');
+  assert.equal(notTheApps('/a/1', { routes: ['/', '/a/[id]'] }), 'the harness cannot tell whether the app has this page: no plain route of the build that answered is /a/1, and it does not match the routes with a parameter (/a/[id])');
+  assert.equal(notTheApps('/a', { routes: null, why: 'the document names no app entry' }), "the document is not the app's: the document names no app entry");
+  assert.equal(notTheApps('/a', undefined), "the harness could not read the app's routes in the page");
+  assert.match(READ_ROUTES, /await import\(at\)\)\.dictionary/);
+  // In a real browser, against a stand-in that answers every path with the shell and 200, as the api does.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+  const dir = mkdtempSync(join(tmpdir(), 'r315-routes-'));
+  const capture = join(dir, 'capture.json');
+  const site = await browserStandIn({ fallback: true });
+  try {
+    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/nope,/SPEED,/speed/', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--capture', capture, ...root]));
+    const listed = '/trip, /trip-db, /db, /gaps, /speed, /blank, /self, /reporting';
+    const no = (/** @type {string} */ p) => `the app has no such page: no route of the build that answered matches ${p} (its routes: ${listed}), so it drew its not-found page`;
+    const text = r.lines.join('\n');
+    for (const p of ['/nope', '/SPEED']) {
+      assert.ok(text.includes(`| ${p} | cold | 1 | NOT MEASURED: ${no(p)} | — | — | — | FAILS |`), text);
+      assert.ok(r.failures.includes(`${p} cold: ${no(p)}`), r.failures.join('\n'));
+    }
+    assert.match(text, /^\| \/speed\/ \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m, 'a page under a spelling the router takes is measured');
+    assert.match(text, /^\| \/speed\/ \| warm \| 2 \|.*\| holds \|$/m);
+    assert.equal(r.ok, false);
+    assert.match(harness.renderHarness(r, { n: 2, base: site.base }), /^# Browser harness — FAIL/, 'never a PASS sheet for a page the app does not have');
+    const saved = JSON.parse(readFileSync(capture, 'utf8'));
+    assert.ok(saved.requests.some((/** @type {any} */ q) => q.page === '/speed/' && q.url === '/feeds.json'), 'the page measured is captured');
+    assert.deepEqual(saved.requests.filter((/** @type {any} */ q) => q.page !== '/speed/'), [], 'a page not measured is not captured');
+  } finally {
+    site.stop();
+  }
+  // A document that is not the app's: refused by name.
+  const bare = await browserStandIn({ noEntry: true });
+  try {
+    const r = await harness.runHarness(harness.parseArgs(['--base', bare.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', ...root]));
+    assert.ok(r.failures.includes("/speed cold: the document is not the app's: the document names no app entry (/_app/immutable/entry/app.*.js)"), r.failures.join('\n'));
+  } finally {
+    bare.stop();
+  }
+});
+
+test('a tab opened straight at a page under a spelling the router takes is that page\'s own load: /speed/ is /speed', { timeout: 120_000 }, async () => {
+  // Before (verify r4, 23 Oct): opened at /speed/, the router made the
+  // address /speed while the document stayed /speed/, and the exact
+  // comparison drew "This tab opened on /speed/ and came here by a link
+  // inside the app" over the document's own 414,363 B load.
+  const { routePath, samePage, selfWhose } = speedModule;
+  assert.deepEqual(['/speed/', '/speed', '/%73peed', '/SPEED', '/speed//', '//', '/', '/a%2Fb', '/%25', '/%E0%A4%A'].map(routePath), ['/speed', '/speed', '/speed', '/SPEED', '/speed//', '//', '/', '/a%2Fb', '/%25', null]);
+  assert.equal(samePage('/speed/', '/speed'), true);
+  assert.equal(samePage('/%E0%A4%A', '/%E0%A4%A'), true, 'a path no router reads is compared as written');
+  assert.equal(samePage('/SPEED', '/speed'), false, 'the router matches case-sensitively');
+  const all = ['paint', 'navigation', 'resource'];
+  const doc = (/** @type {string} */ path) => selfAdd(selfStart(all), [{ entryType: 'navigation', name: `http://h:1${path}`, transferSize: 6_000 }]);
+  for (const path of ['/speed/', '/%73peed', '/speed?feed=a']) {
+    assert.equal(selfWhose(doc(path), '/speed'), 'page', path);
+    assert.doesNotMatch(selfText(doc(path), '/speed'), /tab's figures|came here|came back/, path);
+  }
+  assert.equal(selfWhose(doc('/db'), '/speed'), 'tab');
+  assert.ok(selfText(doc('/db'), '/speed').endsWith(" This tab opened on /db and came here by a link inside the app, so these are the tab's figures since it opened, not this page's alone."));
+  assert.equal(selfWhose(selfAdd(selfStart(all, true), [{ entryType: 'navigation', name: 'http://h:1/speed/', transferSize: 1 }]), '/speed'), 'tab', 'a second watch of one document is the tab\'s, under any spelling');
+  // In a real browser: a fresh tab opened straight at /self/, whose page drops the slash as the router does.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const site = await browserStandIn({});
+  const b = await harness.launch(chrome, process.getuid?.() === 0);
+  try {
+    const { browserContextId } = await b.cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+    const tab = await harness.openTab(b.cdp, browserContextId, { readOnly: true, base: site.base });
+    const opened = await harness.loadOnce(tab, b.cdp, `${site.base}/self/`, 300);
+    assert.equal(opened.ended, true);
+    const v = await tab.evaluate(`(async () => {
+      const total = () => [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')].reduce((a, e) => a + e.transferSize, 0);
+      const end = Date.now() + 10000;
+      let l = document.querySelector('[data-speed-self]');
+      while (Date.now() < end && !(l && Number(l.dataset.wireBytes) === total() && total() > 450000)) { await new Promise((r) => setTimeout(r, 20)); l = document.querySelector('[data-speed-self]'); }
+      return { path: location.pathname, doc: new URL(performance.getEntriesByType('navigation')[0].name).pathname, figuresOf: l.dataset.figuresOf, text: l.textContent, bytes: Number(l.dataset.wireBytes), browserBytes: total() };
+    })()`, 20_000);
+    assert.deepEqual([v.path, v.doc], ['/self', '/self/'], 'the address lost its slash; the document kept it');
+    assert.equal(v.figuresOf, 'page', v.text);
+    assert.doesNotMatch(v.text, /tab's figures|came here|came back/, v.text);
+    assert.equal(v.bytes, v.browserBytes, 'the drawn wire is the document\'s own whole load');
+    await tab.close();
+    await b.cdp.send('Target.disposeBrowserContext', { browserContextId });
+  } finally {
+    await b.close();
+    site.stop();
+  }
+});
+
+test('the harness refuses an output it cannot write before it starts a browser, keeps its sheet when the capture fails at the end, says a run it could not finish, and names the build that answered', { timeout: 240_000 }, async () => {
+  // Before (verify r4 follow-ups, 23 Oct): a --capture that could not be
+  // written threw away the whole run at its end (exit 2, no sheet), and the
+  // sheet never named the build that answered.
+  const { unwritable } = harness;
+  const dir = mkdtempSync(join(tmpdir(), 'r315-out-'));
+  assert.equal(unwritable('--out', join(dir, 'sheet.md')), '');
+  assert.match(unwritable('--capture', join(dir, 'missing', 'c.json')), /^--capture .*\/missing\/c\.json: .*\/missing cannot take a new file: ENOENT/);
+  assert.equal(unwritable('--out', dir), `--out ${dir} is a directory`);
+  writeFileSync(join(dir, 'file'), 'x');
+  assert.equal(unwritable('--out', join(dir, 'file', 'x.md')), `--out ${join(dir, 'file', 'x.md')}: ${join(dir, 'file')} is not a directory`);
+  // As a command: refused before any browser is started (the browser named does not exist, and is never reached).
+  const { spawnSync } = await import('node:child_process');
+  const script = new URL('ci/browser-harness.mjs', web).pathname;
+  const early = spawnSync(process.execPath, [script, '--base', 'http://127.0.0.1:1', '--chrome', '/nonexistent/chrome', '--capture', join(dir, 'missing', 'c.json')], { encoding: 'utf8' });
+  assert.equal(early.status, 2);
+  assert.match(early.stderr, /^browser-harness: --capture .*c\.json: .*cannot take a new file: ENOENT/);
+  // A capture that cannot be written at the end: the sheet still comes back, with the failure.
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+  const hook = join(dir, 'gives-up.mjs');
+  writeFileSync(hook, "export default async () => { throw new Error('the hook gave up'); };\n");
+  const site = await browserStandIn({});
+  try {
+    const args = { ...harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--hook', hook, ...root]), capture: join(dir, 'missing', 'c.json') };
+    const r = await harness.runHarness(args);
+    assert.match(r.lines.join('\n'), /^\| \/speed \| cold \| 1 \|/m, 'what was measured stands');
+    assert.ok(r.failures.some((f) => /^the capture could not be written: could not write .*c\.json whole: ENOENT/.test(f)), r.failures.join('\n'));
+    // A run that could not finish says so, and keeps its sheet.
+    assert.ok(r.failures.includes('the run stopped before it finished: the hook gave up'), r.failures.join('\n'));
+    assert.ok(r.lines.includes('The run stopped here: the hook gave up.'));
+    // The build that answered.
+    assert.deepEqual(r.builds, ['f'.repeat(40)]);
+    assert.match(harness.renderHarness(r, { n: 1, base: site.base }), new RegExp(`^n = 1 cold and 1 warm loads a page against ${site.base.replace(/[.]/g, '\\.')}, answered by build f{40}\\.$`, 'm'));
+  } finally {
+    site.stop();
+  }
+  // Two builds in one run fail it by name; an unstamped server is said.
+  let flip = 0;
+  const mixed = await browserStandIn({ build: (/** @type {string} */ path) => (path === '/speed' && (flip += 1) % 2 === 0 ? 'd'.repeat(40) : 'c'.repeat(40)) });
+  try {
+    const r = await harness.runHarness(harness.parseArgs(['--base', mixed.base, '--n', '2', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', ...root]));
+    assert.ok(r.failures.some((f) => /^the pages were answered by 2 builds \((c{40}, d{40}|d{40}, c{40})\): a deploy during the run, so its figures are not one build's$/.test(f)), r.failures.join('\n'));
+    assert.match(harness.renderHarness(r, { n: 2, base: mixed.base }), /, answered by 2 builds: /);
+  } finally {
+    mixed.stop();
+  }
+  const plain = await browserStandIn({ build: null });
+  try {
+    const r = await harness.runHarness(harness.parseArgs(['--base', plain.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', ...root]));
+    assert.ok(r.notes.includes('page loads answered with no x-brutex-build header, so no build is named for them: 3'), r.notes.join('\n'));
+    assert.match(harness.renderHarness(r, { n: 1, base: plain.base }), /, answered by no named build\.$/m);
+  } finally {
+    plain.stop();
+  }
+  assert.equal(harness.headerOf({ 'X-Brutex-Build': 'abc' }, 'x-brutex-build'), 'abc', 'a header in any case');
+  assert.equal(harness.headerOf(undefined, 'x-brutex-build'), null);
+});
+
+test('the sheet asks only its own server, asks a HEAD as a HEAD, says each page a capture lacks, reads the capture before the server, and measures one client count once', async () => {
+  // Before (verify r4 follow-ups, 23 Oct): a capture URL with a backslash
+  // was sent to another host; a HEAD request was field-checked with a whole
+  // GET (591,200,898 B of /store.json per ask); an empty capture passed with
+  // no word; a missing --from-pages file was an uncaught ENOENT after the
+  // server was asked; and --clients 10,10 timed one count twice.
+  for (const url of ['/\\evil.invalid/x.json', '/\t/evil.invalid/x.json', '/\\\\evil.invalid/x.json', '/a\\b']) {
+    assert.throws(() => sheet.readCapture(JSON.stringify({ requests: [{ page: '/x', method: 'GET', url }] })), /is not a path of this server/, JSON.stringify(url));
+  }
+  assert.equal(sheet.onOrigin('/a?b=1', 'http://h:1'), true);
+  assert.equal(sheet.onOrigin('/\\evil.invalid/x', 'http://h:1'), false);
+  assert.equal(sheet.onOrigin('/\n/evil.invalid/x', 'http://h:1'), false);
+  let connections = 0;
+  const server = http.createServer((_req, res) => res.end('{}'));
+  server.on('connection', () => (connections += 1));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  try {
+    const off = await sheet.timed(base, '/\\evil.invalid/x.json');
+    assert.equal(off.status, 0);
+    assert.equal(/** @type {any} */ (off).error, `/\\evil.invalid/x.json is not a path of ${base}: never sent`);
+    assert.equal(connections, 0, 'nothing was sent anywhere');
+    assert.equal((await sheet.timed(base, '/x')).status, 200, 'its own paths still are');
+  } finally {
+    server.close();
+  }
+  // A HEAD is asked as a HEAD; what its status cannot tell is said, never passed and never failed.
+  /** @type {string[]} */
+  const asked = [];
+  /** @param {string} path @param {{method?: string}} [o] */
+  const garbledFeed = new URLSearchParams({ feed: GARBLED }).toString();
+  const send = async (path, o = {}) => {
+    asked.push(`${o.method} ${path}`);
+    if (path.includes(garbledFeed)) return answer(400, '{"error":"no such feed"}');
+    return answer(200, o.method === 'HEAD' ? '' : '{"same":true}');
+  };
+  const head = { page: '/db', route: '/store.json', label: '', method: 'HEAD', url: '/store.json?feed=gdfl&watch=1', builder: '(the page, captured)' };
+  const get = { page: '/db', route: '/x.json', label: '', method: 'GET', url: '/x.json?feed=gdfl&limit=2', builder: 'b' };
+  const checked = await sheet.fieldCheck(send, [head, get]);
+  assert.deepEqual(asked.filter((a) => a.includes('/store.json')), ['HEAD /store.json?feed=gdfl&watch=1', `HEAD ${garbledUrl(head.url, 'feed')}`, `HEAD ${garbledUrl(head.url, 'watch')}`], 'never a GET for a HEAD request');
+  assert.deepEqual(checked.unchecked, ['the fields watch of HEAD /store.json?feed=gdfl&watch=1 (/db): each garbled value was answered 200 like the original, and a HEAD answer has no body to tell a field read from one ignored']);
+  assert.deepEqual(checked.map((i) => [i.request.url, i.field, i.how]), [['/x.json?feed=gdfl&limit=2', 'limit', 'garbled']], 'a GET is still judged by its bytes');
+  // Each measured page a capture holds no request of is said.
+  const lacking = await sheet.runSheet(argsFor(), { send: standIn({ ignore: new Set() }).send, log: () => {}, capture: JSON.stringify({ requests: [{ page: '/db/', method: 'GET', url: '/aliases.json' }, { page: '/gaps?x=1', method: 'GET', url: '/gaps.json?feed=zerodha' }] }) });
+  for (const page of MEASURED_PAGES) {
+    const line = `${page}: the capture holds no request of this page, so what it builds inline is not timed`;
+    assert.equal(lacking.notMeasured.includes(line), !['/db', '/gaps'].includes(page), page);
+  }
+  const empty = await sheet.runSheet(argsFor(), { send: standIn({ ignore: new Set() }).send, log: () => {}, capture: JSON.stringify({ requests: [] }) });
+  assert.equal(empty.notMeasured.filter((l) => l.includes('the capture holds no request of this page')).length, MEASURED_PAGES.length);
+  assert.match(sheet.renderSheet(empty, argsFor()), /- NOT MEASURED: \/gaps: the capture holds no request of this page, so what it builds inline is not timed/);
+  // A capture file that cannot be read is refused before the server is asked anything.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-from-'));
+  let calls = 0;
+  const missing = await sheet.runSheet({ ...argsFor(), fromPages: join(dir, 'absent.json') }, { send: async () => ((calls += 1), answer(200)), log: () => {} });
+  assert.equal(calls, 0, 'the server was asked nothing');
+  assert.equal(missing.ok, false);
+  assert.match(missing.failures[0], /^the capture of the pages' own requests could not be read: --from-pages .*absent\.json: ENOENT/);
+  const { spawnSync } = await import('node:child_process');
+  const cli = spawnSync(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', 'http://127.0.0.1:1', '--from-pages', join(dir, 'absent.json')], { encoding: 'utf8' });
+  assert.equal(cli.status, 1);
+  assert.match(cli.stdout, /- FAILED: the capture of the pages' own requests could not be read: --from-pages .*absent\.json: ENOENT/);
+  assert.doesNotMatch(cli.stderr, /at .*speed-sheet\.mjs/, 'no stack');
+  // One client count, one pass; the answer bound has a ceiling.
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--clients', '10,10']), /^Error: --clients names 10 twice: each client count is measured once a run$/);
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--clients', '1,1e1,10']), /^Error: --clients names 10 twice/);
+  assert.equal(sheet.parseArgs(['--base', 'http://h:1', '--max-answer-bytes', String(sheet.MAX_TEXT_BYTES)]).maxAnswerBytes, 64_000_000);
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--max-answer-bytes', '9007199254740991']), /^Error: --max-answer-bytes must be at most 64000000$/);
 });

@@ -538,6 +538,9 @@ export const LOAD_WAIT_MS = 30_000;
  */
 export const FRAME_WAIT_MS = 2_000;
 
+/** How much longer than a frame wait this process waits for the page's answer to it, ms. */
+export const FRAME_SLACK_MS = 1_000;
+
 /** A DevTools command the browser did not answer within its bound. */
 export class CdpTimeout extends Error {}
 
@@ -1117,6 +1120,28 @@ export async function openTab(cdp, context, options = {}) {
       for (const r of inflight.values()) if (r.url === p.targetInfo.url) r.answered = true;
     }
   });
+  /**
+   * Whether two frames were drawn within `ms`, by the page's own clock and
+   * by this one: a hidden page's timers and answers can lag (measured 23 Oct:
+   * a hidden headless tab answered a 1.5 s page-side wait after 6.7 s), so
+   * the wait also ends {@link FRAME_SLACK_MS} past `ms` here, and an answer
+   * after that is dropped.
+   *
+   * @param {number} ms
+   * @returns {Promise<boolean>}
+   */
+  const drawn = async (ms) => {
+    const asked = cdp.send('Runtime.evaluate', { expression: twoFrames(ms), awaitPromise: true, returnByValue: true }, sessionId, answerWithin(ms));
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let t;
+    const late = new Promise((resolve) => (t = setTimeout(() => resolve(false), ms + FRAME_SLACK_MS)));
+    try {
+      return /** @type {boolean} */ (await Promise.race([asked.then((a) => a?.result?.value === true), late]));
+    } finally {
+      clearTimeout(t);
+      asked.catch(() => undefined);
+    }
+  };
   for (const domain of ['Page', 'Network', 'Runtime']) await cdp.send(`${domain}.enable`, {}, sessionId);
   if (reportOrigin !== null) await cdp.send('Fetch.enable', { patterns: [{ urlPattern: reportPausePattern(), requestStage: 'Request' }] }, sessionId);
   await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
@@ -1159,9 +1184,10 @@ export async function openTab(cdp, context, options = {}) {
       const end = Date.now() + capMs;
       const waiting = () => [...inflight.values()].some((r) => !r.answered);
       while (Date.now() < end && (waiting() || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
-      frames.drew = (await cdp.send('Runtime.evaluate', { expression: twoFrames(frameMs), awaitPromise: true, returnByValue: true }, sessionId, answerWithin(frameMs))).result?.value === true;
+      frames.drew = await drawn(frameMs);
       return !waiting();
     },
+    drawn,
     close: async () => {
       off();
       await cdp.send('Target.closeTarget', { targetId });
@@ -1562,7 +1588,7 @@ export async function runHarness(args) {
                 t0 = Date.now();
                 await tab.evaluate(`[...document.querySelectorAll(${JSON.stringify(step.click)})].at(${step.last ? -1 : 0}).click()`);
                 // Two frames after the click, bounded: a tab that draws none is not timed.
-                drew = (await tab.evaluate(twoFrames(FRAME_WAIT_MS), answerWithin(FRAME_WAIT_MS))) === true;
+                drew = await tab.drawn(FRAME_WAIT_MS);
                 drawnAt = Date.now();
               }
             }
