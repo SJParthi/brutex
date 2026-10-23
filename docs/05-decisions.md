@@ -76861,6 +76861,300 @@ for want of the lock (`repair::publish`, `generation::promote` take it shared);
 retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
 teach those two that a sealed source needs none. Sealing itself is SC-6's.
 
+### D-4811 — Zerodha verification: an independent landing oracle, every stored rung, spooled and merged (IA-9) — 2026-10-20
+
+**Number** the design's own (§15). **Decision.** A Zerodha day is verified
+minute by minute against its kept answer through an independent landing
+oracle, verifier-only (as D-4807): `http::decode_body`'s rows, D-3351's row
+rules applied by the oracle itself, the scale only, the asked window and the
+calendar. Every stored rung gets a record: 1min, the seven derived rungs
+refolded under D-3321 (D-4858), and 1day against its own kept answer and by
+`daycheck`. A day no window landed is still verified (the calendar sweep), and so is
+every calendar-open day of a month missing in the middle of a series' life;
+the sweep checks series side by side on up to 8 workers (RA-145), its
+records and report the same whatever their count.
+A pull from before IA-8, a landing killed before its keep and a window
+landed from another store are `no_response_kept`, never `match`; a stored
+minute no kept answer asked for is never vouched for. A run's records go to
+its spool (D-4881) and are merged into one generation per (segment,
+timeframe, day). Re-fetch is a pull run, never automatic (D-4859). **Implemented by**
+IA-9: `pull::zerodha_verify` (`oracle`, `verify_day`, `verify_window`, `cold`,
+`merge_all`, `merge_observed`, `cold_observed`), `cli zerodha-verify`, `cli verify-merge`; each
+run keeps its design §5.7 progress file (`verify/zerodha.progress`,
+`verify/merge.progress`) in the GDFL run's §37 v1 record, written only while
+it holds its lock (`docs/02-store-format.md` §35.10). **Not wired here:**
+the keep-and-spool hook on both landing doors and `POST /verify/run
+feed=zerodha` are IA-10c's (critic IA-10b-1, D-4919), so no pull of this
+build spools a window yet; `cli zerodha-verify` (cold) is the path that runs
+today. **The checker's own eyes on a kept body (RA-318).** The oracle decodes
+with the pull's decoder, so a vendor change that still decodes (a new field)
+is dropped by both alike. Each kept body that decoded is therefore read once
+more against the shape `docs/00-charter.md` §4z records (`{status,
+data:{candles:[…]}}`): a root key other than `status` and `data`, a `data`
+key other than `candles`, and a `status` absent or not text are counted
+(`answer_shape`), the record carries detail kind 20 `vendor_shape` (the count,
+then the first field's path), its code is unchanged, and one alert of the new
+kind 21 `vendor_shape_changed` (appended to `pull::alerts::KINDS`, never
+renumbering 1..20) is put per (rung, first field), so one change seen in every
+instrument's answers is one alert until acknowledged. The status WORD is not
+compared: no recorded source names the word a successful answer carries
+(UNVERIFIED). **A month a writer holds (design §6.3; round 4 SF-4, F67).**
+A pull appending a month holds its writer's lock, so the verifier's shared
+open meets `StoreError::Locked`. It is tried again every 100 ms for up to
+`MONTH_BUSY_RETRY` (2 s, the importer's bound); past it that rung's records
+are `not_compared (month_busy)`. A month that would not open for any other
+reason is `store_unreadable (month_refused)`. Neither is ever read as a month
+not held: before this, a busy or refused DERIVED month read as absent and
+every day of it was `missing_in_store (rung_day_absent)`, a store defect
+that was not there. The cold run lists such months apart (`BUSY`, not a
+fault; the run is not OK, its span not wholly compared, and the next run
+reads them again); the window path writes the same records and one event
+per month instead of failing the whole window, and opens each month a
+window touches once, not once per day. **Proof:** IA-ZV-01..12,
+IA-ZV-X12..X25, IA-VD-08, IA-VD-15 (`docs/04-invariants.md`).
+
+### D-4822 — No cross-process Zerodha pull lock; the verifier's two locks are its own (IA-9) — 2026-10-20
+
+**Number** the design's own (§15, round 2). **Decision.** No
+cross-process Zerodha pull lock is added: `serve.lock` refuses a second api
+on one store, and no other process pulls. The verifier adds only its own
+two run locks, each a `try_lock` whose loser exits `run_busy` at once:
+`verify/zerodha.lock` for a cold run and `verify/merge.lock` for a merge
+(`telemetry::run_dirs::VERIFY_ZERODHA`, `VERIFY_MERGE`, D-4897). **Proof:**
+IA-VD-08 (`run_busy`), IA-ZV-X5.
+
+### D-4857 — Zerodha owed minutes, the gap ledger's reasons, and D-3351 mirrored (IA-9) — 2026-10-20
+
+**Number** the design's own (§15; amended by rounds 3 and 5). **Decision.**
+(1) The minutes a day owes come from `ingest::repair_plan::owed`, the one
+function the repair plan and the stored-month gap ledger share (calendar of
+record, venue hours under every closing-auction eligibility, recorded halts
+owed by no one), never `expected_bars`. (2) Owed minutes inside a kept
+answer's asked window that the answer lacks are the vendor's hole, said by
+the answer: `vendor_hole (vendor_empty)`, or `answer_short` when the answer
+stopped before the end it was asked for (RA-300). (3) The rest are
+classified by the gap ledger's last line for the key and day: `vendor_empty`
+→ `vendor_hole`; `withheld_unmeasured_session` → `withheld_by_rule`;
+`calendar_unverified`, `calendar_past_record`, `unordered_stamps`, and
+`pull_halted` (RA-301: a pull that halted before it asked for the day; its
+writer is the pull runtime's, WP-62) →
+`not_compared`; `refused_day`, `refused_front` (D-4879) and R3-18's
+`stored_short` → `owed` (DB-G46: a month stored before the ledger takes its
+reason from the stored-month ledger, never `no_ledger`); `repaired` still
+short, or no line in a month the ledger covers (any `gap` or `derive` line
+of the key in that month) → `missing_in_store (unexplained)`, the one
+Zerodha store defect; a month the ledger does not cover → `no_ledger`. (4)
+Where GDFL's one-second bars of the same instrument hold no second of those
+minutes either, they are `vendor_hole (neither_vendor_has_it)` (DB-A12,
+"neither vendor has it"); a minute GDFL traded sets `peer_minute_absent`
+and detail `peer`. A GDFL month that holds no second of the WHOLE day did
+not import that day, so it says nothing of the day's minutes: the day reads
+`peer_unavailable` and keeps its ledger class, never "neither vendor has
+it" (measured on the operator's store 22 Oct 2026: GDFL's NIFTY 1s month is
+held but holds no second of 2021-02-24, 2022-03-07 or the 2024-11-01 Muhurat
+session, and a first build read 590 NIFTY minutes as neither vendor's on
+that); a peer read that fails is named among the run's refusals, never read
+as no peer in silence. (5) The oracle applies D-3351 itself (identical candles
+once, `dup_minutes`; both candles of a conflicting stamp refused; an
+off-grid candle refused; every other row lands) and takes the words it
+cannot judge from the answer alone (`cash_eligibility_unknown`,
+`price_off_grid`, WP-13d's `before_first_day_bar` and `foreign_level`) from
+the landing's own refused-row records (`.rsx`, DB-G46); a count of the
+words it judges that differs from the landing's, or a total that differs
+from the receipt's "rows the landing refused", sets `quality_differs`
+(sub-kind 1); a kept answer whose oracle decode gives a row count other than
+the receipt's "rows decoded" sets it with sub-kind 2, so a candle the shared
+decoder skips as impossible (DB-G46, §8 Z6) is skipped and counted alike on
+both sides. (6) A
+stored minute before the series' first served day bar is
+`store_without_source (before_first_day_bar)` (WP-13d mirrored, CMP-18). (7)
+A renamed share whose two names the store both holds owes, under each
+name, only the days of that name (the alias table's lineage, D-3332): an
+empty day the other held name owes gets no record (RA-302). A share held
+under one name only (Zerodha files the whole history under the newest
+name: ETERNAL, TMPV) owes every day under it, so a rename never hides a
+hole.
+**R4-17's three landing words.** R4-17 (series identity, D-4991 to D-4995)
+merged three per-row refusal causes after the reason table was minted:
+`non_positive_price`, `before_listing`, `in_session_jump`. The oracle takes
+the landing's refused rows by their cause, so each read as reason 0, a
+refusal with no word; they are reasons 35, 36 and 37, appended, and the
+test that every landing cause has a number is now an exhaustive match, so
+the next cause fails to compile until it is numbered.
+**Proof:** IA-ZV-01, -04, -05, -06, IA-ZV-X3, IA-ZV-X10, IA-ZV-X13, IA-ZV-X26, Z15
+(`a_foreign_minute_is_refused_as_the_landing_refuses_it`).
+
+### D-4858 — Derived rungs refolded under D-3321; 1day by its answer and `daycheck` (IA-9) — 2026-10-20
+
+**Number** the design's own (§15). **Decision.** The verifier refolds stored
+1min into each derived rung with its own fold, anchored at 09:15 IST (the
+store's grid, D-1447): an INDEX or futures bucket that lacks an owed minute,
+or holds one the day does not owe, is withheld (`withheld_by_rule
+(index_bucket_incomplete)`); a CASH bucket folds as partial over the minutes
+that traded. Options are never derived and have no derived record. The rule
+set is read from the month's D-3335 `derive` ledger line: `v=1` is rule set
+1 ("D-3321 as of WP-13b"), compared by value; no line means the month was
+derived before the ledger, `built_under_earlier_rule (pre_ledger)` with its
+counts recorded and detail 14, never judged by value. **Departure from the
+design, named:** the design has IA-9's build write `rules=` at `v=2` on the
+`derive` line; `/dayflags.json`'s reader (`api/src/dayflags.rs`,
+`parse_derive`) refuses any `v` but 1, so a `v=2` line would make every new
+derive line a fault there. The line stays at `v=1` until that reader takes
+`v=2` (IA-10b); rule set 1 is read from `v=1`. 1day is compared with its
+kept answer, and `daycheck::compare` is re-run over the day's minutes: a day
+that differs or contradicts sets `daycheck_differs` with detail `daycheck`
+(D-3347). A day whose 1min folds to at least one standing bucket while the
+rung holds no bar of it (its month held or not) is `missing_in_store
+(rung_day_absent)` under every rule set, a month derived before the ledger
+included: the rung holds fewer days than its source (RA-267), which no
+bucket rule explains. **Proof:** IA-ZV-03, IA-ZV-07, IA-ZV-11, IA-ZV-X11.
+
+**Repair 1 (22 Oct 2026, the second check's blocking 2).** The cold sweep
+listed only series holding a 1min directory and walked only the months
+between a series' first and last 1min month, so the eleven NSE indices the
+operator's store holds at 1day only, and NIFTY's 1day months of 2015 to
+2017, were never verified and never named, and the run said OK. Now every
+Zerodha series holding 1min, a derived rung or 1day is listed, and every
+month held at any rung in the span is walked beside the 1min span. Outside
+a series' 1min months the 1min rung is not the store's to owe: no 1min
+record, and a derived rung only where its month is held; the 1day bar is
+compared with its kept answer (`no_response_kept` with none), and a day bar
+`daycheck` could not read carries detail 21 `daycheck_not_run` with its
+why (1 beyond the 1min months, 2 no minute of the day, 3 the 1min month
+unread), inside the 1min months too. Outside the calendar of record
+(before 2018), a day of such a month holding no bar at any rung and no kept
+answer is not judged and is counted (`unattested_days`, said in the
+report): no calendar says it traded, and a record would claim an answer was
+owed (measured on the clones: NIFTY 2016 gave 366 records, weekends
+included, before this rule). A name the request asks for that no
+held series answers to is said (`NO SERIES`) and the run is not OK.
+**Proof:** IA-ZV-X29.
+
+### D-4881 — The Zerodha spool: format, tail rule, merge log and merge (IA-9) — 2026-10-20
+
+**Number** the design's own (§15, round 3; round 5's length-based tail).
+**Decision.** As `docs/02-store-format.md` §35.10: a 64-byte header
+(`BRUTEXVS`, version 1, stride 160, feed, segment, timeframe code, mode,
+month, run, created, the timeframe's seconds, CRC-32C over 0..60), then
+160-byte records each with its own CRC: kind 1 a verdict record (§35.3's
+layout with the day and exchange in its reserved bytes and the receipt at
+offset 120), kind 2 one detail of up to 128 bytes of the record before it.
+One writer per run holds each file's handle and offset behind one mutex
+(critic IA-9-2); an append is one `write_all` at that offset and one
+`sync_data`, and a failed write is written over by the next. The merge, the
+one reader, takes the whole records, ignores and names a torn tail and an
+unsynced last record, and refuses a spool with an earlier bad record by name
+once, with an alert (kind 10) and a `refused` line in its merge log, until
+`cli verify-merge --retry` names it. The merge log's 16-byte records
+(`intent`, `committed`, `refused`) follow the same tail rule (RA-319).
+**Departures from the design, named:** (a) the intent records the
+generation the year index named BEFORE the merge, not the one about to be
+linked: `store::verdict::commit` takes the day's commit lock itself, so no
+caller can append between the lock and the link; a re-merge reads the year
+index and walks back from its generation by `previous` (at most 64) looking
+for an image of this run, which under `verify/merge.lock` is at most one
+commit. (b) The mode (`zerodha_merge`, `zerodha_cold`) is written in the
+header byte the design left reserved. (c) A merged spool and its log are
+removed, as the design says, and then each directory left empty up to the
+run's (`remove_dir`, which refuses a directory holding anything: a stray
+name keeps it). (d) **The merge runs on workers** (the rules audit's
+RA-050: the design's one thread was hours for a backfill's orphan spools,
+an extrapolation from C-ZV-02): the spools of a listing are put in (run,
+segment, timeframe, month) order once, O(s log s), and grouped by
+(segment, timeframe, month); one worker merges a group whole and in that
+order, groups run side by side on up to `MAX_MERGE_WORKERS` = 8
+(`merge_workers()`, the host's parallelism by default;
+`merge_observed_on` names a width). Two groups never write one day image,
+and one year's commits are serialised by the verdict store's own commit
+lock (D-4865), so a day's generations, and which run's record is committed
+last, are the same at any width and whatever the drive's directory order;
+the one-commit-per-day bound of (a)'s walk-back holds per day. A worker
+that panicked leaves its spools waiting, each named in the outcome's
+faults. **Proof:** IA-VD-08, IA-VD-15, IA-ZV-X1, IA-ZV-X2, IA-ZV-X23;
+C-ZV-02, C-ZV-03.
+
+**Repair 1 (22 Oct 2026, the second check's blocking 1).** Nothing marked a
+spool live or closed: a `verify-merge` started while a cold run spooled
+committed 38,096 of the run's 39,024 records and lost 928, every exit 0 (the
+merger committed what the file held, logged the day and removed the spool;
+the live writer then wrote into the removed file, or, had the spool stayed,
+its later records of a logged day were skipped as merged). Three rules close
+it, each at its cause. (e) **A run is live while its writer lives**: the
+writer takes `verify/live/<run>.lock` (`flock`, with its holder's note) at
+its first append and holds it until it is dropped; a merger tries each
+run's lock once per listing, leaves a live run's spools unread and names the
+run (`MergeOutcome::live`), and holds every free run's lock for the pass, so
+a writer of that run resuming meanwhile waits for it (`LIVE_WAIT`, 30 s,
+then `run_live_busy` by name). A live run's spools waiting are not a failed
+merge; any other spool left waiting is. The lock files are never removed.
+The alternative, a writer that re-checks and re-births a removed spool,
+was refused: it cannot cover a record appended between the merger's read
+and its removal, and it would give a run that a merge met mid-way a second
+generation of the same day, against IA-VD-08. (f) **A committed day answers
+only for what its merge read**: a merge logs `seen(n)` (state 4) before any
+day, and a day is `already` only when its commit covered every record of
+the day the spool now holds; otherwise the whole day merges again into a new
+generation. (g) **The log goes before the spool**, and a log that will not
+go keeps its spool, so no log outlives its spool to answer for the next one
+born at that name. Beside them: an append past the 256 MiB the merge reads
+is refused `spool_full` before a byte is written; a log whose spool is gone
+is stray; `cli verify-merge` takes `verify/merge.lock` before its runs-ledger
+id, so a `run_busy` loser takes none. A verdict record counts the details after it
+(bytes 150..152, at most 32), so a last record whose detail an append never
+finished is ignored whole and named, never merged without it. **Proof:** IA-ZV-X27, IA-ZV-X28,
+IA-ZV-X30, IA-ZV-X31.
+
+**Amended by IA-9 repair 2 (2026-10-23), after the third check found the
+resume rule above leaving a spool no merge could read.** A writer resuming
+over an ignored last group (a verdict record and up to 32 details) wrote its
+new bytes from the group's start but never cut the file, so an append
+shorter than the group left the group's rest after it; the next merge read
+that leftover detail as damage and refused the whole spool, losing every
+intact record in it. (h) **A resume cuts before it appends**: when the
+resume point is below the file's length, the writer cuts the spool there
+(`set_len`, then `sync_all`) under the run's live lock, at its first append
+that is taken and before that append's first byte, so a crash between the
+cut and the append leaves only whole records, and an append refused
+`spool_full` still writes nothing. The same cut follows a write of the
+writer's own that failed part-way.
+The alternative, cutting to the append's end after it, was refused: a crash
+mid-append would then leave the new torn bytes followed by the old group.
+(i) **A merge holds at most 64 runs' live locks at once**
+(`LIVE_LOCKS_AT_ONCE`): it merges the runs waiting in run order a bounded
+slice at a time and lets each slice's locks go before the next, which
+replaces "holds every free run's lock for the pass" in (e); 300 runs under
+`ulimit -n 256` used to fail every open past the limit. A run's lock held
+only while its own spools merge is enough: a writer resuming after the
+slice appends after what the merge read, which (f) already answers. (j)
+**A refused open keeps the host's words**: only a name that is not a
+regular file is `not_regular`; `EMFILE` or `EACCES` at a regular spool or
+log is `io` with the host's error. The lock files' growth, one empty name
+per run, is named in `docs/06-limits.md` L-IA-65 with the tidy rule a later
+package may build. **Proof:** IA-ZV-X32, IA-ZV-X33, IA-ZV-X34.
+
+### D-4921 — A merge is started at the end of any landing request that spooled (IA-9; wired by IA-10c) — 2026-10-20
+
+**Number** the critic's (round 7, IA-9-1). **Decision.** Every landing
+request has its own runs-ledger id and so its own spool directory, so the
+trigger is the end of any landing request that spooled, run or single: the
+api keeps one flag, "merge wanted", and at most one `verify-merge` child
+(the merge lock already makes that so); when the child exits with the flag
+set it starts one more, so a spool waits at most one merge run. A merge run
+lists `verify/spool/` at its start and once more before it releases, so a
+spool that arrived meanwhile is merged by it or the next. L-IA-17 gains the
+bound: spools waiting ≤ the landing requests that ended during one merge
+run. **Implemented by** IA-9 (`merge_all`'s two listings and its one-merger
+lock; `cli verify-merge`, the child's verb); the api's flag and the child it
+starts are IA-10c's, with the keep-and-spool hook. **Proof:** IA-VD-08 (100
+single-request spools leave none once the merge that followed them ends).
+
+**Repair 1 (22 Oct 2026).** The landing request drops its spool writer
+before it starts the child, so its run is no longer live when the child
+lists the spools (D-4881 (e)); a child that meets another request still
+spooling names that run and leaves its spools for the merge that request
+starts at its own end. `cli zerodha-verify` drops its writer before its
+in-process merge for the same reason.
+
 ### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
 
 **What was observed.** `Header::read_region` decodes each of the `MAX_SLOTS`

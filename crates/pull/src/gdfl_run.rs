@@ -2637,6 +2637,45 @@ impl ProgressFile {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The progress file of a run that is not a GDFL import (IA-9's
+    /// `verify/zerodha.progress` and `verify/merge.progress`, design §5.7):
+    /// `record` as its first state, with this process's pid and `started`
+    /// stamped here. The same record, writer and cadence as an import's, so
+    /// one reader reads every run; nothing is written until the first
+    /// [`ProgressFile::update`].
+    #[must_use]
+    pub fn of_record(path: PathBuf, record: Progress) -> Self {
+        let record = Progress {
+            pid: std::process::id(),
+            started: now_unix_s(),
+            ..record
+        };
+        Self {
+            path,
+            clock: now_unix_s,
+            state: Mutex::new(Kept {
+                record,
+                began: Instant::now(),
+                last_write: None,
+                last_days: (0, 0, 0, 0, 0),
+                writes: 0,
+                fault: None,
+                file: None,
+            }),
+        }
+    }
+
+    /// Applies `change` to the kept record, then writes it when `force` is
+    /// set or a second has passed since the last write (§5.7's cadence: a
+    /// begin, a run's end and a state change are forced; counters are not).
+    pub fn update(&self, force: bool, change: impl FnOnce(&mut Progress)) {
+        let mut kept = self.kept();
+        change(&mut kept.record);
+        if force || Self::due(&kept) {
+            self.write(&mut kept);
+        }
+    }
+
     /// Ends the record for a run refused before or outside the importer
     /// (its source unopened): state `refused`, the refusal in a slot.
     pub fn refused(&self, refusal: &RunRefusal) {

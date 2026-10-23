@@ -1568,6 +1568,15 @@ const ALLOW_SORT: Allow = &[
     // order; O(n log n) per image written (L-IA-4), never on a lookup. Its
     // reason is in docs/06-limits.md, gate 11 rule 4 (D-4861).
     ("crates/store/src/verdict.rs", 1),
+    // D-4881 (IA-9): a Zerodha spool merge sorts the spool's records once by
+    // (exchange, day, key, receipt), so each day is one bucket and one key's
+    // records follow its receipts; O(n log n) per spool merged, in a
+    // `verify-merge` process, never on a request path (L-IA-17). And the
+    // spools waiting once per listing by (run, segment, timeframe, month),
+    // O(s log s), s bounded by D-4921 (RA-050), so a later run commits after
+    // an earlier one at any width. Its reason is in docs/06-limits.md, gate
+    // 11 rule 4 (D-4861).
+    ("crates/pull/src/zerodha_verify.rs", 2),
     // R3-05 repair 4: `store::settings::list_numbers` sorts the generation
     // numbers of one settings directory, O(g log g) for g generations on
     // disk, once per reader start and once per save; never on a refresh or
@@ -1811,6 +1820,12 @@ const ALLOW_SCAN: Allow = &[
     // decoder finds the end of one zero-padded name inside its fixed
     // `NAME_LEN` bytes, a compile-time width; never a search over the data.
     ("crates/pull/src/fno_membership.rs", 1),
+    // IA-9 (D-4858, D-4904; docs/06-limits.md, "Gate 11 — IA-9"): the first
+    // complete bucket of ONE day's refold, at most the session's minutes
+    // (375 on a regular day), inside a verification already O(minutes); and
+    // a word's position in the runs ledger's compiled `MODES` (15) and
+    // `KINDS` (6), once per run.
+    ("crates/pull/src/zerodha_verify.rs", 2),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1933,7 +1948,9 @@ const ALLOW_MEMBER: Allow = &[
     // `fno-membership` arm `arguments.contains(&"build")` is one of the three
     // arm shapes gate 30's `form_of` reads, over the verb's own command line
     // (a handful of words), never the data.
-    ("crates/cli/src/store_write.rs", 6),
+    // 6 -> 7, IA-9 (D-4881): `verify-merge` writes unless `--list`, the same
+    // probe of its own argument slice, bounded by its argument count.
+    ("crates/cli/src/store_write.rs", 7),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),
