@@ -654,7 +654,12 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
 /// row LABELS: its note says it excuses nothing (R4-26, `CLAUDE.md` §3
 /// rule 1). O(days in the page): one hash and two indexes into the share's
 /// day table a day, no search.
-pub(crate) fn corporate_action_notes(root: &Path, symbol: &str, days: &[Day], records: &mut [Value]) -> Value {
+pub(crate) fn corporate_action_notes(
+    root: &Path,
+    symbol: &str,
+    days: &[Day],
+    records: &mut [Value],
+) -> Value {
     let tables = super::basis_route::tables(root);
     let said = super::basis_route::slot_json(&tables.actions);
     let Ok(table) = tables.actions.table() else {

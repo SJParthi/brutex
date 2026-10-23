@@ -71,8 +71,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use pull::corporate_actions::{
-    self, Anomaly, BasisDay, BasisRuns, CorporateActions, Finding, Folder, Judged, Ratio, Run, RunEnd,
-    Step, Verdict,
+    self, Anomaly, BasisDay, BasisRuns, CorporateActions, Finding, Folder, Judged, Ratio, Run,
+    RunEnd, Step, Verdict,
 };
 use pull::reference_data::{self, Draft, Slot, Standing, Table};
 use pull::session::Day;

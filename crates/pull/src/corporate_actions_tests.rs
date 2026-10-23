@@ -1144,7 +1144,10 @@ fn loaded(tag: &str, shares: &[(&str, Vec<BasisDay>)]) -> (BasisRuns, u64) {
     }
     let store = scratch(tag);
     let landed = write(&store, &runs_draft(&runs)).unwrap();
-    (load_runs(&store).table().unwrap().clone(), landed.generation)
+    (
+        load_runs(&store).table().unwrap().clone(),
+        landed.generation,
+    )
 }
 
 /// An empty measured table, for the checker.
@@ -1164,7 +1167,10 @@ fn a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row() {
     let mut at = day(2022, 1, 3);
     while alt.len() < 60 {
         if !matches!(at.days_from_epoch() % 7, 2 | 3) {
-            alt.push(around(at, if alt.len() % 2 == 0 { "4/5" } else { "81/100" }));
+            alt.push(around(
+                at,
+                if alt.len() % 2 == 0 { "4/5" } else { "81/100" },
+            ));
         }
         at = at.succ().unwrap();
     }
@@ -1250,7 +1256,9 @@ fn a_one_session_two_percent_excursion_ledgers_no_row() {
     let found = check(&runs, &no_actions("cor-excursion-end-ca"));
     assert_eq!(found.len(), 1);
     assert!(
-        found[0].to_string().contains("basis_short: the runs hold 23 and 1 days"),
+        found[0]
+            .to_string()
+            .contains("basis_short: the runs hold 23 and 1 days"),
         "{}",
         found[0]
     );
@@ -1325,7 +1333,11 @@ fn a_two_for_one_step_across_a_missing_month_does_not_know_its_day() {
         (Some(day(2019, 8, 30)), day(2019, 10, 1), r("2"))
     );
     assert!(!row.day_known(), "a missing month is a window, not a day");
-    assert!(row.evidence.contains("UNKNOWN inside the window"), "{}", row.evidence);
+    assert!(
+        row.evidence.contains("UNKNOWN inside the window"),
+        "{}",
+        row.evidence
+    );
     // A split across a weekend knows its day.
     let (split, generation) = loaded("cor-weekend-split", &[("SPLITCO", split_days())]);
     let rows = measured_rows(&split, generation);

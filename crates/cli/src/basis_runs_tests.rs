@@ -475,7 +475,11 @@ fn a_ratio_that_alternates_is_named_as_basis_anomalies_and_never_ledgered() {
     else {
         panic!("the ledger loads: {text}");
     };
-    assert!(table.of("WOBBLECO").is_empty(), "{:#?}", table.of("WOBBLECO"));
+    assert!(
+        table.of("WOBBLECO").is_empty(),
+        "{:#?}",
+        table.of("WOBBLECO")
+    );
     assert_eq!(table.rows(), 0);
     // The checker names each anomaly; none is a missing row.
     assert!(text.contains("  basis_anomaly WOBBLECO"), "{text}");
