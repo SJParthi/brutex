@@ -208,13 +208,32 @@ impl RunLine {
     /// Folds the run's end line (number `number`, fields `fields`) into it:
     /// each field it does not carry is added; one it carries with another
     /// value is kept beside it as `end_<name>`, so neither value is lost.
+    ///
+    /// ONE INDEX OF THE NAMES HELD, built once for the end line and pre-sized
+    /// for every name it can hold: each end field is one hash probe, so the
+    /// fold is O(start fields + end fields), the two lines' own length, and
+    /// never a walk of the run's fields for each end field (gate 11 rule 6;
+    /// BASE-GATE11, D-6622). A name held twice is found at its FIRST place,
+    /// as the walk found it.
     fn end(&mut self, number: u64, fields: Vec<(String, String)>) {
         self.end_line = Some(number);
+        let mut at: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(self.fields.len() + fields.len());
+        for (index, (name, _)) in self.fields.iter().enumerate() {
+            let _first_kept = at.entry(name.clone()).or_insert(index);
+        }
         for (name, value) in fields {
-            match self.fields.iter().find(|(held, _)| *held == name) {
+            match at.get(&name).and_then(|&index| self.fields.get(index)) {
                 Some((_, held)) if *held == value => {}
-                Some(_) => self.fields.push((format!("end_{name}"), value)),
-                None => self.fields.push((name, value)),
+                Some(_) => {
+                    let beside = format!("end_{name}");
+                    let _first_kept = at.entry(beside.clone()).or_insert(self.fields.len());
+                    self.fields.push((beside, value));
+                }
+                None => {
+                    let _new = at.insert(name.clone(), self.fields.len());
+                    self.fields.push((name, value));
+                }
             }
         }
     }
@@ -379,6 +398,11 @@ impl Parsed {
                 // id and is folded into it, so `runs_total` counts runs and
                 // `runs[]` lists each once. An end whose start the journal
                 // does not hold is still listed, as itself, never dropped.
+                // A RUN LINE TAKES ONE END (BASE-GATE11, D-6622): an end whose
+                // newest start already holds an end is listed as itself too,
+                // so the first end's line is never overwritten and no run's
+                // fields grow with each repeated end; the fold is then paid at
+                // most once a run line.
                 if decoded.first().is_some_and(|(name, _)| name == "ended")
                     && let Some(start) = self
                         .runs_by_id
@@ -386,6 +410,8 @@ impl Parsed {
                         .and_then(|lines| lines.last())
                         .and_then(|at| usize::try_from(*at).ok())
                     && let Some(run) = self.runs.get_mut(start)
+                    && run.end_line.is_none()
+                    && run.fields.first().is_none_or(|(name, _)| name != "ended")
                 {
                     run.end(number, decoded);
                     return Some(());
@@ -932,6 +958,150 @@ pub(crate) mod tests {
             .expect("open to append");
         std::io::Write::write_all(&mut file, TAIL.as_bytes()).expect("append");
         check(&snapshot(&halves).expect("reads").parsed);
+    }
+
+    /// **A RUN LINE TAKES ONE END** (BASE-GATE11, D-6622). Two starts of one
+    /// id and then two ends: the first end is folded into the newest start,
+    /// the second is listed as itself and never overwrites the first end's
+    /// line. One start and 1,000 ends of another id: the start keeps its own
+    /// fields and the first end's, and every later end is a line of its own,
+    /// so no run's fields grow with the ends a journal repeats. Before this
+    /// rule the second end overwrote `end_line` and every repeated end added
+    /// an `end_ended` field to the one run, each fold walking all of them.
+    /// The numbers are invented.
+    #[test]
+    fn a_run_line_takes_one_end_and_a_repeated_end_is_listed_as_itself() {
+        let mut text = String::from(
+            "run 1793000001 source=tickstore started=1793000001 definition=2\n\
+             run 1793000001 source=tickstore started=1793000001 definition=2\n\
+             run 1793000001 ended=1793000005 outcome=finished definition=2\n\
+             run 1793000001 ended=1793000006 outcome=stopped definition=2\n\
+             run 1793000009 source=tickstore started=1793000009 definition=2\n",
+        );
+        for n in 0..1_000_u64 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut text,
+                format_args!(
+                    "run 1793000009 ended={} outcome=finished definition=2\n",
+                    1_793_000_010 + n
+                ),
+            );
+        }
+        // AN END WRITTEN BEFORE ITS START (a late start line): the early end
+        // has no start to fold into and is listed as itself; the start that
+        // follows it takes the next end, since it holds none and is no end.
+        text.push_str(
+            "run 1793000020 ended=1793000021 outcome=stopped definition=2\n\
+             run 1793000020 source=tickstore started=1793000020 definition=2\n\
+             run 1793000020 ended=1793000022 outcome=finished definition=2\n",
+        );
+        let path = journal("run-end-once", &text);
+        let parsed = snapshot(&path).expect("reads").parsed;
+        assert_eq!(parsed.foreign_count, 0, "{:?}", parsed.foreign);
+        let late: Vec<&RunLine> = parsed.runs_of(1_793_000_020).collect();
+        assert_eq!(late.len(), 2, "the early end and the start: {late:?}");
+        assert_eq!((late[0].line, late[0].end_line), (1_006, None));
+        assert_eq!(
+            late[0]
+                .fields
+                .first()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            Some(("ended", "1793000021")),
+            "the early end is its own line"
+        );
+        assert_eq!(
+            (late[1].line, late[1].end_line),
+            (1_007, Some(1_008)),
+            "the late start takes the end after it"
+        );
+        let twice: Vec<&RunLine> = parsed.runs_of(1_793_000_001).collect();
+        assert_eq!(twice.len(), 3, "two starts and the second end: {twice:?}");
+        assert_eq!((twice[0].line, twice[0].end_line), (1, None));
+        assert_eq!(
+            (twice[1].line, twice[1].end_line),
+            (2, Some(3)),
+            "the first end's line is kept"
+        );
+        assert_eq!(
+            (twice[2].line, twice[2].end_line),
+            (4, None),
+            "the second end is listed as itself"
+        );
+        assert_eq!(
+            twice[2].fields.first().map(|(name, _)| name.as_str()),
+            Some("ended")
+        );
+        let many: Vec<&RunLine> = parsed.runs_of(1_793_000_009).collect();
+        assert_eq!(many.len(), 1_000, "the start, and 999 ends as themselves");
+        let start = many[0];
+        assert_eq!((start.line, start.end_line), (5, Some(6)));
+        let names: Vec<&str> = start.fields.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["source", "started", "definition", "ended", "outcome"],
+            "the start's fields and the first end's, and no others"
+        );
+        assert!(
+            many.iter()
+                .skip(1)
+                .all(|end| end.end_line.is_none() && end.fields.len() == 3),
+            "every later end is its own line of its own three fields"
+        );
+        // The same journal read through the tail in two halves answers the
+        // same: the rule is the fold's, not the whole read's.
+        let cut = text.find("run 1793000009 ended=").expect("an end");
+        let halves = journal("run-end-once-halves", text.get(..cut).expect("head"));
+        assert_eq!(snapshot(&halves).expect("reads").parsed.runs.len(), 4);
+        let tail = pull::gdfl_import::journal_path(&halves);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&tail)
+            .expect("open to append");
+        std::io::Write::write_all(&mut file, text.get(cut..).expect("tail").as_bytes())
+            .expect("append");
+        let again = snapshot(&halves).expect("reads").parsed;
+        assert_eq!(again.runs, parsed.runs);
+    }
+
+    /// **AN END LINE'S FOLD COSTS ITS OWN FIELDS, NOT THEIR PRODUCT**
+    /// (BASE-GATE11, D-6622): runs of 8, 64 and 512 start fields, each ended
+    /// by a line of as many fields that all differ, every fold timed. Printed
+    /// for `docs/06-limits.md`, never asserted: a timing on a shared machine
+    /// is evidence, not a gate.
+    #[test]
+    #[ignore = "a timing, printed"]
+    fn end_line_fold_cost_by_field_count() {
+        const RUNS: u64 = 2_000;
+        for width in [8_usize, 64, 512] {
+            let mut parsed = Parsed::default();
+            let mut number = 0_u64;
+            let (mut start_fields, mut end_fields) = (String::new(), String::new());
+            for f in 0..width {
+                let _ = std::fmt::Write::write_fmt(&mut start_fields, format_args!(" f{f}=s"));
+                let _ = std::fmt::Write::write_fmt(&mut end_fields, format_args!(" f{f}=e"));
+            }
+            for id in 1..=RUNS {
+                number += 1;
+                parsed.line(number, &format!("run {id}{start_fields}"));
+            }
+            let mut took = Vec::with_capacity(2_000);
+            for id in 1..=RUNS {
+                number += 1;
+                let text = format!("run {id} ended={id}{end_fields}");
+                let began = std::time::Instant::now();
+                parsed.line(number, &text);
+                took.push(began.elapsed());
+            }
+            assert_eq!(parsed.runs.len(), 2_000);
+            took.sort_unstable();
+            let n = took.len();
+            println!(
+                "end fold at {width} fields: n={n} p50={:?} p99={:?} max={:?}",
+                took[n / 2],
+                took[n * 99 / 100],
+                took[n - 1]
+            );
+        }
     }
 
     /// **EVERY LINE SHAPE D-3317 FIXES, AND THE OLDER ONES, READ BY NAME.**

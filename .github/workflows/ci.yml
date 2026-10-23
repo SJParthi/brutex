@@ -1897,7 +1897,18 @@ jobs:
           # when one is named (L-IA-2), the progress write (C-GR-02)
           # and naming a failure at 1x, 10x and 100x (C-GR-06). Inside a
           # `#[cfg(test)]`-mounted module; no production path reaches them.
-          declared="$declared pull/src/gdfl_run_tests.rs:println!:4"
+          # 4 -> 5 (BASE-GATE11, D-6621): the n=6,000 p50, p99 and max of a
+          # cached GDFL source's hit (`source_cache_hit_timing`, L-BG11-03).
+          declared="$declared pull/src/gdfl_run_tests.rs:println!:5"
+          # TWO MORE FILES, the same kind, declared by BASE-GATE11 (D-6622,
+          # D-6623, 20 Oct 2026), each an `#[ignore]` timing inside a
+          # `#[cfg(test)]` module: `api/src/import_journal.rs`'s
+          # `end_line_fold_timing` (IA-2 repair 1, merged undeclared) and
+          # `end_line_fold_cost_by_field_count` (L-BG11-02), and
+          # `store/src/file_sealed_tests.rs`'s `read_rows_at_timing`
+          # (L-BG11-01).
+          declared="$declared api/src/import_journal.rs:println!:2
+          store/src/file_sealed_tests.rs:println!:1"
           # TWO MORE FILES, the same kind, from IA-3 (20 Oct 2026): both prints
           # are in `#[ignore]`d tests run by hand over the operator's real
           # sources, read only, and no production path reaches either.
@@ -1909,6 +1920,12 @@ jobs:
           #     day's two close lines read from two sources (NIFTY first).
           declared="$declared pull/src/gdfl_archive.rs:println!:4
           pull/src/gdfl_ia3_tests.rs:println!:17"
+          # ONE MORE FILE, the same kind, declared by BASE-GATE11 (D-6624, 20
+          # Oct 2026): `pull/src/gdfl_dayzips_tests.rs`'s
+          # `day_table_sizing_timing`, an `#[ignore]` timing inside a
+          # `#[cfg(test)]`-mounted module printing the n, p50, p99 and max of
+          # the day table's one sizing and of a root's walk (L-BG11-05).
+          declared="$declared pull/src/gdfl_dayzips_tests.rs:println!:1"
           # TWO MORE FILES, the same kind, from CAL-1 (declared at its repair
           # round 1, 21 Oct 2026). Both are mounted only under `#[cfg(test)]`
           # (`#[path]` test modules of `pull::calendar` and
