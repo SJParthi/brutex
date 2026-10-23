@@ -488,10 +488,7 @@ fn a_flag_is_kept_without_its_master_and_a_day_asked_at_once_is_read_once() {
     // measurement: a second share's first auction-era page parsed the same
     // masters again, about 1 s each): INFY that day is one probe, never a
     // second parse.
-    assert!(
-        kept_flag(&dir, on, "INFY").0,
-        "kept from RELIANCE's read"
-    );
+    assert!(kept_flag(&dir, on, "INFY").0, "kept from RELIANCE's read");
     let other = CasFlags::of(&root, "INFY", true).on(on);
     assert_eq!(other.eligibility, CasEligibility::NotEligible);
     assert_eq!(other.basis, CasBasis::DatedMaster);
