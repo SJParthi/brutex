@@ -2641,6 +2641,29 @@ const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 
      stock_options stop store_not_writable text throttle ticks tok-dead tok-one \
      tolerance two_files_for_one_day unplug value verdict verified wait waited_ms \
      waiting wanted zip_holds_no_member zip_unreadable";
+// IA-9 (D-4811, D-4857, D-4858, D-4881): `pull::zerodha_verify`, its spool
+// and `pull::verdict_words`. The verdict store's reason and detail words
+// (`answer_short`, `body_unreadable`, `rung_day_absent`, `pull_halted`,
+// `vendor_shape`, ...), alert kind 21's word `vendor_shape_changed`, the
+// runs-ledger modes `zerodha-verify` and `verify-merge`, the spool tree's own
+// words (`spool`, `spools`, `vsp`, `log`, `merge`), the telemetry and progress
+// fields its events carry (`torn_at`, `unsynced_at`, `stray`, `faults`, ...),
+// the scratch-directory tags of its tests (`badbody`, `walk-stray`,
+// `window-shape`, `w0`..`w99`, `width-0`..`width-stop`, `log-index`, ...), the worker
+// thread names `zerodha-cold` and `zerodha-merge`, the invented answer
+// field `meta` a test adds to a body, the word `no_such_word` a test looks
+// up and fails, the repair round's words (22 Oct 2026: the refusals
+// `run_live_busy` and `spool_full`, detail kind 21's word
+// `daycheck_not_run`, the merge event's `holder` and `live_runs` fields,
+// the live lock's folder `live` and the io actions `lock` and `open`, and
+// the scratch tags `cover`, `dayonly`, `live-many`, `orphan-log`,
+// `torn-detail` and `torn-detail-extra`; 23 Oct 2026, repair 2: the merge
+// event's `live_locks_peak` field and the scratch tags `cut-partial`,
+// `live-locks` and `refused-open`),
+// and the digit `21` (the kind number and a bench label). None names an
+// account, an environment, a vendor credential or a field of a parameter
+// path.
+const IA9_LITERAL: &str = "21 answer_short badbody body_unreadable damaged daycheck dup_minutes extreme faults fromstore generations impossible-kept impossible-same index_bucket_incomplete intent kept-diff landed_from_store landing_refused log log-index lost merge merge_log_damaged meta midhole month_busy month_refused neither_vendor_has_it no_such_word noledger not_regular observed origin out_of_order peer peer-absent peer-day-absent peer-day-held peer-minute-traded peer-torn placement pre_ledger progress-cold progress-link progress-merge pull_halted quality_differs receipts record_refused refusal repaired-differs repaired-match repull resumed root rung_day_absent spool spool_header_refused spools stop-between stray sweep sync threads torn_at torn_bytes underlying_files unkept unknown_stems unsynced_at vendor_hole vendor_shape vendor_shape_changed verify-merge vsp w0 w1 w4 w99 walk-stray width-0 width-1 width-4 width-99 width-stop window-shape zerodha-cold zerodha-merge zerodha-verify cover daycheck_not_run dayonly holder live live-many live_runs lock open orphan-log run_live_busy spool_full torn-detail torn-detail-extra cut-partial live-locks live_locks_peak refused-open";
 
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
@@ -2861,7 +2884,7 @@ const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known n
 const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 73] = [
+const DECLARED: [&str; 75] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2936,6 +2959,7 @@ const DECLARED: [&str; 73] = [
     CLOUD_MUT_PULL_LITERAL,
     R4_17_LITERAL,
     CAL1_CIRCULAR_SERIAL,
+    IA9_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

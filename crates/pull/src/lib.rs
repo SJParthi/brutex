@@ -281,7 +281,14 @@ pub mod universe;
 pub mod upkeep;
 
 pub mod vendor;
+/// The words a verdict record's opaque reason and detail numbers stand for, one
+/// append-only table for every feed (IA-9; D-4809).
+pub mod verdict_words;
 pub mod work;
+/// Zerodha verification: the landing oracle, every stored rung, completeness by
+/// the gap ledger's reason, the cold sweep, the spool and its merge (IA-9;
+/// D-4811, D-4857, D-4858, D-4881, D-4921).
+pub mod zerodha_verify;
 
 /// Every `telemetry::emit` in this crate, proved to reach a file.
 ///

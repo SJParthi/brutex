@@ -609,6 +609,7 @@ fn the_alert_queue_format_is_v1_byte_for_byte() {
             (18, "file_shrank"),
             (19, "month_damaged"),
             (20, "index_refused"),
+            (21, "vendor_shape_changed"),
         ]
     );
     for (kind, word) in KINDS {
@@ -616,7 +617,7 @@ fn the_alert_queue_format_is_v1_byte_for_byte() {
         assert_eq!(kind_of(word), Some(kind));
     }
     assert_eq!(
-        (kind_word(0), kind_word(21), kind_of("nothing")),
+        (kind_word(0), kind_word(22), kind_of("nothing")),
         (None, None, None)
     );
 
@@ -915,7 +916,7 @@ fn a_first_put_creates_the_queue_and_its_directory() {
 fn garbage_alert_parameters_are_refused_by_name() {
     let scratch = Scratch::new("garbage");
     // (b) A kind outside the table; an empty key. Nothing is created.
-    for kind in [0_u8, 21, 255] {
+    for kind in [0_u8, 22, 255] {
         let refused = put_at(scratch.root(), &alert(kind, "k", "t"), NOW);
         assert_eq!(refused, Err(AlertError::KindUnknown { kind }));
         assert_eq!(refused.unwrap_err().code(), "alert_kind_unknown");
