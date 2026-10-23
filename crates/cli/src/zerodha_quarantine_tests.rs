@@ -20,7 +20,7 @@ use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::quarantine::{Cause, Probe};
 
-use super::{PLAN_HEAD, Row, ask, command_with, covering, rows_of};
+use super::{PLAN_HEAD, Row, ask, command_at, command_with, covering, rows_of};
 use crate::{FAILED, MISUSED, OK};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -419,4 +419,107 @@ fn no_plan_on_disk_is_refused_by_name() {
     );
     assert_eq!(code, FAILED);
     assert!(out.contains("no quarantine plan"), "{out}");
+}
+
+/// R4-18 repair 1: the route's entry takes the writer's gate from the PARSED
+/// mode. A plan whose reason is the word `--apply` is a plan: it reads a
+/// linked (shadow) store and writes nothing. Before the repair a token
+/// search found `--apply` and the gate refused the plan; a real `--apply`
+/// on that root is still refused by the gate.
+#[test]
+fn a_plan_whose_reason_is_the_apply_flag_is_a_plan_not_a_writer() {
+    let real = Root::new("linked-real");
+    let minutes: Vec<Bar> = (0..4).map(|i| minute(i, 1_237)).collect();
+    write(&real.0, Timeframe::MINUTE_1, &minutes);
+    let shadow = Root::new("linked-shadow");
+    std::os::unix::fs::symlink(real.0.join("bars"), shadow.0.join("bars")).expect("a link");
+    write_plan(
+        &shadow.0,
+        &plan_text(&[(
+            "1min",
+            "2018-12",
+            "timestamps",
+            "foreign_level",
+            &[minutes[1].ts_micros],
+        )]),
+    );
+    let planned = [
+        SYMBOL,
+        "2018-12-01",
+        "2018-12-31",
+        "--cause",
+        "foreign_level",
+        "--reason",
+        "--apply",
+        "--plan",
+    ];
+    let before = files_under(&real.0);
+    let mut out = String::new();
+    let code = command_at(&planned, &shadow.0, &mut out);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("plan: 1 bar(s) would be set aside"), "{out}");
+    assert_eq!(files_under(&real.0), before, "the plan wrote nothing");
+    let applied = [
+        SYMBOL,
+        "2018-12-01",
+        "2018-12-31",
+        "--cause",
+        "foreign_level",
+        "--reason",
+        "a real press",
+        "--apply",
+    ];
+    let mut out = String::new();
+    let code = command_at(&applied, &shadow.0, &mut out);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("ZERODHA QUARANTINE REFUSED"), "{out}");
+    assert_eq!(files_under(&real.0), before, "the refused press wrote nothing");
+}
+
+/// R4-18 repair 1: a plan row listing one stamp twice is refused by name,
+/// never silently folded; a symbol typed in lower case is the core's
+/// canonical symbol (`brutex_core::symbol::Symbol`), never a silent
+/// "nothing to do".
+#[test]
+fn a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one() {
+    let asked = ask(&[
+        SYMBOL,
+        "2018-12-01",
+        "2018-12-31",
+        "--cause",
+        "foreign_level",
+        "--reason",
+        "r",
+    ])
+    .expect("asked");
+    let at = minute(1, 410).ts_micros;
+    let twice = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[at, at])]);
+    let refused = rows_of(&twice, &asked).expect_err("a stamp listed twice");
+    assert!(refused.contains(&format!("lists stamp {at} twice")), "{refused}");
+    let once = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[at])]);
+    assert_eq!(rows_of(&once, &asked).map(|rows| rows.len()), Ok(1));
+    let root = Root::new("lower");
+    write(&root.0, Timeframe::MINUTE_1, &[minute(1, 410)]);
+    write_plan(&root.0, &once);
+    let lower = SYMBOL.to_ascii_lowercase();
+    let (code, out) = run(
+        &root.0,
+        &[
+            &lower,
+            "2018-12-01",
+            "2018-12-31",
+            "--cause",
+            "foreign_level",
+            "--reason",
+            "r",
+        ],
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains(&format!("CASH {SYMBOL} 2018-12-01")), "{out}");
+    assert!(out.contains("plan: 1 bar(s) would be set aside"), "{out}");
+    assert_eq!(
+        ask(&[&lower, "2018-12-01", "2018-12-31", "--cause", "zero_price", "--reason", "r"])
+            .map(|asked| asked.symbol),
+        Ok(Some(SYMBOL.to_owned()))
+    );
 }

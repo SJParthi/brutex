@@ -28,7 +28,15 @@
 //! Month by month, oldest first, through `store::quarantine::apply_month`:
 //! a month whose every bar is named is RECORDED (no empty generation); any
 //! other gets a new generation without the named bars through
-//! `store::repair::drop_month`, the old one byte-identical. Each act is
+//! `store::re                let twice = sorted.windows(2).find_map(|pair| match pair {
+                    [one, two] if one == two => Some(*one),
+                    _ => None,
+                });
+                if let Some(twice) = twice {
+                    return Err(format!(
+                        "a plan row lists stamp {twice} twice: `{key} {month}`"
+                    ));
+                }::drop_month`, the old one byte-identical. Each act is
 //! ledgered in `<store>/audit/zerodha.quarantine.ledger` before the door
 //! publishes, and indexed after. A minute month's derived rungs (2 to 60
 //! minutes) are then set aside the same way: every derived bar whose span
@@ -114,8 +122,11 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let symbol = if *first == "ALL" {
         None
     } else {
-        brutex_core::symbol::Symbol::new(first).map_err(|why| format!("`{first}`: {why}"))?;
-        Some((*first).to_owned())
+        // THE CORE'S CANONICAL SPELLING, the one the store and the plan key
+        // a series by: `irfc` is `IRFC`, never a silent "nothing to do".
+        let symbol = brutex_core::symbol::Symbol::new(first)
+            .map_err(|why| format!("`{first}`: {why}"))?;
+        Some(symbol.as_str().to_owned())
     };
     let (from, to) = (parse_day(from)?, parse_day(to)?);
     if from > to {
@@ -244,6 +255,19 @@ pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
                     return Err(format!(
                         "a plan row counts {bars} bars and lists {}: `{key} {month}`",
                         listed.len()
+                    ));
+                }
+                // A STAMP LISTED TWICE is a malformed row, named; it is never
+                // silently folded into one.
+                let mut sorted = listed.clone();
+                sorted.sort_unstable();
+                let twice = sorted.windows(2).find_map(|pair| match pair {
+                    [one, two] if one == two => Some(*one),
+                    _ => None,
+                });
+                if let Some(twice) = twice {
+                    return Err(format!(
+                        "a plan row lists stamp {twice} twice: `{key} {month}`"
                     ));
                 }
                 Some(listed)
@@ -731,7 +755,9 @@ fn derived(root: &Path, ask: &Ask, row: &Row, stamps: &[i64], out: &mut String) 
 /// whose `bars` is a link, as every writer's is (`store_write::writable`).
 pub(crate) fn command_at(arguments: &[&str], root: &Path, out: &mut String) -> u8 {
     let root = root.to_path_buf();
-    let apply = arguments.contains(&"--apply");
+    // THE PARSED MODE, not a token search: `--reason --apply` names a
+    // reason, and a plan carrying it must not take the writer's gate.
+    let apply = ask(arguments).is_ok_and(|ask| ask.apply);
     command_with(
         arguments,
         &move || {

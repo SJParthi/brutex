@@ -1,4 +1,8 @@
-//! `GET /pull/quarantine.json` and `POST /pull/quarantine`: the Zerodha
+    let pressing = Pressing;
+    let root = site.store_root.clone();
+    let run = crate::detail::run_ops_read(move || {
+        let _pressing = pressing;
+        let borrowed//! `GET /pull/quarantine.json` and `POST /pull/quarantine`: the Zerodha
 //! quarantine's plan and its press. R4-18; findings ING-01, RT-DATA-02, Z5,
 //! Z6.
 //!
@@ -38,8 +42,12 @@ use crate::render;
 /// Whether a press is running in this process.
 static PRESSING: AtomicBool = AtomicBool::new(false);
 
-/// The press, held: dropped when the request ends, whether it answered, was
-/// refused or its reader left, so a press is never held for ever.
+/// The press, held: OWNED BY THE BLOCKING WORK, so it is released when that
+/// work ends (answered or refused) or when the work is never admitted, and
+/// NOT when the reader leaves: a client that drops its request does not
+/// stop `spawn_blocking`, and releasing the press then would let a second
+/// press run beside the first. Never held for ever: the work is bounded by
+/// the store's own patience.
 struct Pressing;
 
 impl Drop for Pressing {
@@ -200,9 +208,10 @@ pub(super) async fn quarantine_apply(
             "a quarantine press is running in this server; wait for it and press again",
         );
     }
-    let _pressing = Pressing;
+    let pressing = Pressing;
     let root = site.store_root.clone();
     let run = crate::detail::run_ops_read(move || {
+        let _pressing = pressing;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut out = String::new();
         let code = cli::zerodha_quarantine_at(&borrowed, &root, &mut out);

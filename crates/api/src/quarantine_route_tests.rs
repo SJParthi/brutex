@@ -24,6 +24,10 @@ use super::{arguments, quarantine_apply, quarantine_plan_json};
 
 const SYMBOL: &str = "QFIXQ";
 
+/// The press is one per PROCESS, and every test of this binary shares the
+/// process: the tests that press take turns.
+static PRESS_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Fixture {
     root: PathBuf,
     site: Loaded,
@@ -300,6 +304,7 @@ fn plan(root: &Path, stamps: &[i64]) {
 
 #[tokio::test]
 async fn the_plan_writes_nothing_and_the_press_applies_once() {
+    let _serial = PRESS_TESTS.lock().await;
     let fixture = Fixture::new("r418-press");
     let held = fixture.month(ym(2018, 3), 520, 5);
     plan(&fixture.root, &[held[1].ts_micros]);
@@ -344,4 +349,67 @@ async fn the_plan_writes_nothing_and_the_press_applies_once() {
     super::PRESSING.store(false, std::sync::atomic::Ordering::Release);
     assert_eq!(status, StatusCode::CONFLICT, "{busy}");
     assert!(busy.contains("quarantine_running"));
+}
+
+/// R4-18 repair 1: a press whose client LEAVES keeps the press until its
+/// blocking work ends. The client's future is dropped while the work waits
+/// on the store's quarantine lock; a second press then is refused by name.
+/// Before the repair the guard lived in the request's future, so dropping it
+/// released the press while `spawn_blocking` kept applying, and the second
+/// press ran beside the first.
+#[tokio::test]
+async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
+    let _serial = PRESS_TESTS.lock().await;
+    let fixture = Fixture::new("r418-press-left");
+    let held = fixture.month(ym(2018, 3), 640, 4);
+    plan(&fixture.root, &[held[2].ts_micros]);
+    let audit = fixture.root.join("audit");
+    fs::create_dir_all(&audit).expect("audit");
+    let lock_at = audit.join("zerodha.quarantine.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_at)
+        .expect("the lock file");
+    let lock = store::flock::Flock::lock(file, lock_at).expect("the test holds the lock");
+    let form =
+        format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=left");
+    let first = quarantine_apply(
+        axum::extract::State(Loaded::clone(&fixture.site)),
+        form.clone(),
+    );
+    // THE CLIENT LEAVES while the work waits on the lock.
+    let left = tokio::time::timeout(std::time::Duration::from_millis(1_500), first).await;
+    assert!(left.is_err(), "the first press could not finish: {left:?}");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        quarantine_apply(
+            axum::extract::State(Loaded::clone(&fixture.site)),
+            form.clone(),
+        ),
+    )
+    .await;
+    let released = lock.release();
+    let (status, _, busy) = second.expect("the second press answers at once, by name");
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+    assert!(busy.contains("quarantine_running"), "{busy}");
+    assert!(released.is_ok(), "the test's lock released");
+    // The first press's work finishes on its own and only then frees it.
+    let mut free = false;
+    for _ in 0..300 {
+        if !super::PRESSING.load(std::sync::atomic::Ordering::Acquire) {
+            free = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(free, "the press is freed when its work ends");
+    let ledger = fs::read_to_string(audit.join("zerodha.quarantine.ledger")).expect("ledger");
+    assert_eq!(
+        ledger.matches("\tdropped\t").count(),
+        1,
+        "the left press's work applied once: {ledger}"
+    );
 }
