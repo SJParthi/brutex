@@ -620,20 +620,42 @@ fn the_dependency_set_has_not_moved_without_review() {
     // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
     // The scan is recorded beside the count above, and no other package's
     // `dependencies` list moved.
+    // 0x8070_52EA_72E5_1027 -> 0xEF62_60E1_BE35_175C IS ONE NEW ARROW, NOT A NEW
+    // PACKAGE (IA-16, CONC-031): `pull` names `rustix` 1.1.4 for the GDFL
+    // import's free-space floor (one `statfs(2)`, the call `/disk.json` makes),
+    // in place of the `/bin/df` child the no-runtime-spawn gate refuses. The
+    // package was already in the lock under `api` with the same features
+    // (`std`, `fs`), the count is unchanged, and its scan is the one D-5240
+    // recorded: no .c/.cc/.h/.S/.asm, and a `build.rs` that runs only `rustc`
+    // feature probes. Only `pull`'s `dependencies` list moved.
     // 0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C IS TWO VERSION BUMPS, NOT A
-    // NEW PACKAGE (D-5916), merged onto `rustix` above; on its own branch, from
-    // 0xFFDD_76EA_1ADA_B2F7, the same two bumps pinned 0x79FE_A712_E0CC_24EC.
-    // `rustls-webpki` 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and
-    // `webpki-roots` 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381), in `Cargo.lock`
-    // only. The count does not move (it is the 194 asserted above; on its own
-    // branch it was the 192 asserted there) and neither dependency list moved.
-    // The scan: neither ships a `build.rs` or any .c/.cc/.cpp/.h/.S/.s/.asm;
-    // `webpki-roots` 1.0.10's file set outside .rs/.md/.toml/.json equals
-    // 1.0.9's, and `rustls-webpki` 0.103.16 adds exactly eight `.spki.der` files
-    // under `src/data/distrusted/` -- the public keys it now refuses, data
-    // rather than code.
+    // NEW PACKAGE (D-7120): `rustls-webpki` 0.103.15 -> 0.103.16
+    // (RUSTSEC-2026-0382) and `webpki-roots` 1.0.9 -> 1.0.10
+    // (RUSTSEC-2026-0381), in `Cargo.lock` only. The count is still 194 and
+    // neither `dependencies` list moved. The scan, over both registry sources
+    // before and after: neither ships a `build.rs` or any
+    // .c/.cc/.cpp/.h/.S/.s/.asm/.js file; `webpki-roots` 1.0.10's file set
+    // equals 1.0.9's; `rustls-webpki` 0.103.16 adds only eight `.der` public
+    // keys under `src/data/distrusted/`, data it compiles in with
+    // `include_bytes!`. Each manifest moves only `version` (and
+    // `rustls-webpki`'s `rust-version`, 1.70 -> 1.71): same features, so
+    // `ring` stays off by default and the skipped `rustls-webpki -> ring` edge
+    // above is still a weak one. DECLARED is unchanged.
+    // R3-17 (D-6271) made the same two bumps on its own branch, to the same
+    // `Cargo.lock` bytes and the same pin, with the same scan result.
+    // R3-24 repair round 3 (D-5890) made the same two bumps and its own scan
+    // of both registry sources independently, and reached this same pin: its
+    // repair round 2 had bumped the lock without the re-pin (B10).
+    // R3-15 repair 2 (D-5916) made the same two bumps on its own branch, merged
+    // onto `rustix` (0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C, the pin
+    // above), with the same scan result; merging feat/db-fix at repair 3 gave
+    // feat/db-fix's `Cargo.lock` byte for byte, so the pin asserted below stands.
+    // 0x57F8_69FF_1E0D_4A5C -> 0xADFB_F4EE_30AF_1851 IS THE TWO CHANGES ABOVE,
+    // TOGETHER, NOT A THIRD (IA-16 repair 2, merging feat/db-fix): the two bumps
+    // (D-7120) and IA-16's one arrow `pull -> rustix`. No package was added,
+    // no version moved beyond D-7120's, and both scans stand as recorded.
     assert_eq!(
-        h, 0x57F8_69FF_1E0D_4A5C,
+        h, 0xADFB_F4EE_30AF_1851,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \
@@ -837,4 +859,491 @@ fn a_version_only_bump_changes_the_fingerprint() {
         fingerprint(&parse_lock(&before)),
         "a version-only change must move the fingerprint"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Advisory floors (D-7120, BASE-REDS-1021).
+// ---------------------------------------------------------------------------
+
+/// A package a `RustSec` advisory names, and the versions that advisory clears.
+///
+/// `cargo deny check` (CI gate 3) reads the advisory database when it runs and
+/// is the authority on what is vulnerable. This table is the offline half of
+/// the two bumps D-7120 made: it holds the lock above their floors, so a merge
+/// that settles a `Cargo.lock` conflict by taking the older side, or a
+/// `cargo update --precise` downgrade, fails `cargo test` on a machine where
+/// `cargo deny` is not installed or cannot fetch. The ranges are the advisory
+/// files' own `patched` and `unaffected` lines, recorded with their digests in
+/// `docs/00-charter.md`. A row is added by the decision that bumps for a new
+/// advisory and is never edited to fit a lock.
+struct Floor {
+    package: &'static str,
+    advisory: &'static str,
+    /// Cleared when every comparator of any one set holds.
+    patched: &'static [&'static [&'static str]],
+    /// Never affected: cleared on the same rule.
+    unaffected: &'static [&'static [&'static str]],
+}
+
+const FLOORS: &[Floor] = &[
+    Floor {
+        package: "rustls-webpki",
+        advisory: "RUSTSEC-2026-0382",
+        patched: &[
+            &[">= 0.103.16", "< 0.104.0-alpha.1"],
+            &[">= 0.104.0-alpha.8"],
+        ],
+        unaffected: &[],
+    },
+    Floor {
+        package: "webpki-roots",
+        advisory: "RUSTSEC-2026-0381",
+        patched: &[&[">= 1.0.10"]],
+        unaffected: &[&["= 0.26.11"]],
+    },
+];
+
+/// One pre-release identifier. The derived order is the one semver 2.0.0 §11
+/// gives: a numeric identifier sorts below an alphanumeric one, numbers by
+/// value, the rest byte by byte in ASCII.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PreIdent {
+    Num(u64),
+    Alpha(String),
+}
+
+/// A version as precedence sees it: build metadata is read and dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Semver {
+    core: (u64, u64, u64),
+    pre: Vec<PreIdent>,
+}
+
+impl Ord for Semver {
+    /// A release sorts above every pre-release of its own `MAJOR.MINOR.PATCH`;
+    /// two pre-releases compare identifier by identifier, and a shorter list
+    /// that is a prefix of a longer one sorts first (`Vec`'s own order).
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        self.core
+            .cmp(&other.core)
+            .then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => self.pre.cmp(&other.pre),
+            })
+    }
+}
+
+impl PartialOrd for Semver {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A numeric part: digits only, no leading zero, fits `u64`.
+fn semver_number(part: &str, whole: &str) -> Result<u64, String> {
+    if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("`{whole}`: `{part}` is not a number"));
+    }
+    if part.len() > 1 && part.starts_with('0') {
+        return Err(format!("`{whole}`: `{part}` has a leading zero"));
+    }
+    part.parse()
+        .map_err(|_| format!("`{whole}`: `{part}` does not fit in 64 bits"))
+}
+
+/// A dot-separated identifier list: none empty, each `[0-9A-Za-z-]+`.
+fn semver_idents(list: &str) -> bool {
+    list.split('.')
+        .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
+/// Parses `MAJOR.MINOR.PATCH[-PRE][+BUILD]`. Anything else is an `Err` naming
+/// the text: a version this test cannot read is never taken as cleared.
+fn parse_semver(text: &str) -> Result<Semver, String> {
+    let body = match text.split_once('+') {
+        Some((body, build)) if semver_idents(build) => body,
+        Some(_) => return Err(format!("`{text}`: the build tag is empty or malformed")),
+        None => text,
+    };
+    let (core, pre) = match body.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (body, None),
+    };
+    let mut parts = core.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!("`{text}` is not MAJOR.MINOR.PATCH"));
+    };
+    let core = (
+        semver_number(major, text)?,
+        semver_number(minor, text)?,
+        semver_number(patch, text)?,
+    );
+    let mut idents = Vec::new();
+    if let Some(pre) = pre {
+        if !semver_idents(pre) {
+            return Err(format!("`{text}`: the pre-release is empty or malformed"));
+        }
+        for g in pre.split('.') {
+            idents.push(if g.bytes().all(|b| b.is_ascii_digit()) {
+                PreIdent::Num(semver_number(g, text)?)
+            } else {
+                PreIdent::Alpha(g.to_owned())
+            });
+        }
+    }
+    Ok(Semver { core, pre: idents })
+}
+
+/// One comparator as the advisory files write them: `>= v`, `< v` or `= v`.
+/// Any other operator is refused by name rather than guessed at.
+fn comparator_holds(comparator: &str, version: &Semver) -> Result<bool, String> {
+    if let Some(bound) = comparator.strip_prefix(">= ") {
+        Ok(*version >= parse_semver(bound)?)
+    } else if let Some(bound) = comparator.strip_prefix("< ") {
+        Ok(*version < parse_semver(bound)?)
+    } else if let Some(bound) = comparator.strip_prefix("= ") {
+        Ok(*version == parse_semver(bound)?)
+    } else {
+        Err(format!(
+            "comparator `{comparator}` is not one this test reads (`>= `, `< `, `= `)"
+        ))
+    }
+}
+
+/// Does any one set hold whole? Every comparator is evaluated, so a malformed
+/// one is refused even when an earlier set already cleared the version.
+fn any_set_holds(sets: &[&[&str]], version: &Semver) -> Result<bool, String> {
+    let mut cleared = false;
+    for set in sets {
+        let mut all = true;
+        for comparator in *set {
+            all &= comparator_holds(comparator, version)?;
+        }
+        cleared |= all;
+    }
+    Ok(cleared)
+}
+
+/// Whether `floor`'s advisory clears `version`. A pre-release is refused, not
+/// judged: cargo matches a pre-release only against a comparator on its own
+/// `MAJOR.MINOR.PATCH`, which plain precedence does not model.
+fn clears(floor: &Floor, version: &str) -> Result<bool, String> {
+    let parsed = parse_semver(version)?;
+    if !parsed.pre.is_empty() {
+        return Err(format!(
+            "`{version}` is a pre-release, which this test does not judge: read {} \
+             for it and extend the test",
+            floor.advisory
+        ));
+    }
+    Ok(any_set_holds(floor.patched, &parsed)? || any_set_holds(floor.unaffected, &parsed)?)
+}
+
+/// Every locked copy of a floored package its advisory does not clear, and
+/// every copy whose version cannot be read, each named. Every copy is judged,
+/// not only the first: a lock may hold one package at two versions.
+fn below_floor(pkgs: &[LockPackage], floors: &[Floor]) -> Vec<String> {
+    let mut out = Vec::new();
+    for floor in floors {
+        for pkg in pkgs.iter().filter(|p| p.name == floor.package) {
+            match clears(floor, &pkg.version) {
+                Ok(true) => {}
+                Ok(false) => out.push(format!(
+                    "{} {} is inside {}: patched {:?}, unaffected {:?}",
+                    pkg.name, pkg.version, floor.advisory, floor.patched, floor.unaffected
+                )),
+                Err(why) => out.push(format!(
+                    "{} {:?} cannot be judged against {}, so it is refused: {why}",
+                    pkg.name, pkg.version, floor.advisory
+                )),
+            }
+        }
+    }
+    out
+}
+
+/// Floored packages the lock holds no copy of. A floor over a package that is
+/// gone checks nothing, so its absence is named rather than passed.
+fn floors_not_held<'a>(pkgs: &[LockPackage], floors: &'a [Floor]) -> Vec<&'a str> {
+    floors
+        .iter()
+        .filter(|f| !pkgs.iter().any(|p| p.name == f.package))
+        .map(|f| f.package)
+        .collect()
+}
+
+/// **The real lock is above both floors**, and holds both packages. It fails
+/// on `feat/db-fix` at 8c67456ac (`rustls-webpki` 0.103.15, `webpki-roots`
+/// 1.0.9) and passes after D-7120's bump.
+#[test]
+fn the_lock_is_above_every_advisory_floor() {
+    let pkgs = parse_lock(&lock_text());
+    let below = below_floor(&pkgs, FLOORS);
+    assert!(
+        below.is_empty(),
+        "Cargo.lock holds versions a RustSec advisory names (D-7120). Bump them \
+         with `cargo update -p <name>`, never by editing this table: {below:#?}"
+    );
+    let gone = floors_not_held(&pkgs, FLOORS);
+    assert!(
+        gone.is_empty(),
+        "the lock no longer holds {gone:?}, so its floor checks nothing. Remove the \
+         row in the change that dropped the package, with a decision"
+    );
+}
+
+/// The versions D-7120 bumped from are refused, each naming its advisory, and
+/// the versions it bumped to are cleared. Fields in either order are read.
+#[test]
+fn the_floors_refuse_the_versions_d7120_bumped_from() {
+    let before = synthetic(
+        "name = \"rustls-webpki\"\nversion = \"0.103.15\"\nSRC\n\n\
+         version = \"1.0.9\"\nname = \"webpki-roots\"\nSRC",
+    );
+    let below = below_floor(&parse_lock(&before), FLOORS);
+    assert_eq!(below.len(), 2, "{below:#?}");
+    assert!(
+        below
+            .iter()
+            .any(|b| b.starts_with("rustls-webpki 0.103.15 is inside RUSTSEC-2026-0382"))
+    );
+    assert!(
+        below
+            .iter()
+            .any(|b| b.starts_with("webpki-roots 1.0.9 is inside RUSTSEC-2026-0381"))
+    );
+
+    let after = before
+        .replace("0.103.15", "0.103.16")
+        .replace("1.0.9", "1.0.10");
+    assert!(below_floor(&parse_lock(&after), FLOORS).is_empty());
+    assert!(floors_not_held(&parse_lock(&after), FLOORS).is_empty());
+}
+
+/// Each range is cut exactly at its published bounds, the older lines below
+/// them are refused, and the one unaffected compatibility version is cleared.
+#[test]
+fn each_range_is_cut_at_its_published_bounds() {
+    let judge = |package: &str, version: &str| -> Result<bool, String> {
+        let floor = FLOORS.iter().find(|f| f.package == package);
+        floor.map_or_else(
+            || Err(format!("no floor for {package}")),
+            |f| clears(f, version),
+        )
+    };
+    for (version, cleared) in [
+        ("0.0.0", false),
+        ("0.102.8", false),
+        ("0.103.0", false),
+        ("0.103.15", false),
+        ("0.103.16", true),
+        ("0.103.999", true),
+        ("0.104.0", true),
+        ("0.104.1", true),
+        ("1.0.0", true),
+    ] {
+        assert_eq!(
+            judge("rustls-webpki", version),
+            Ok(cleared),
+            "rustls-webpki {version}"
+        );
+    }
+    for (version, cleared) in [
+        ("0.26.10", false),
+        ("0.26.11", true),
+        ("0.26.11+compat", true),
+        ("0.26.12", false),
+        ("1.0.0", false),
+        ("1.0.9", false),
+        ("1.0.10", true),
+        ("1.1.0", true),
+        ("2.0.0", true),
+    ] {
+        assert_eq!(
+            judge("webpki-roots", version),
+            Ok(cleared),
+            "webpki-roots {version}"
+        );
+    }
+    assert!(
+        judge("webpki", "0.22.4").is_err(),
+        "an unfloored name is not judged"
+    );
+}
+
+/// Precedence is semver 2.0.0 §11's: its own example chain, the bounds this
+/// table uses in order, and build metadata dropped.
+#[test]
+fn semver_precedence_is_the_specs() {
+    let chain = [
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+        "1.0.1",
+        "1.1.0",
+        "2.0.0",
+    ];
+    let parsed: Result<Vec<Semver>, String> = chain.iter().map(|v| parse_semver(v)).collect();
+    assert!(parsed.is_ok(), "{parsed:?}");
+    let parsed = parsed.unwrap_or_default();
+    assert_eq!(parsed.len(), chain.len());
+    for pair in parsed.windows(2) {
+        if let [a, b] = pair {
+            assert!(a < b, "{a:?} must sort below {b:?}");
+        }
+    }
+    let bounds: Result<Vec<Semver>, String> =
+        ["0.103.16", "0.104.0-alpha.1", "0.104.0-alpha.8", "0.104.0"]
+            .iter()
+            .map(|v| parse_semver(v))
+            .collect();
+    let bounds = bounds.unwrap_or_default();
+    assert_eq!(bounds.len(), 4);
+    for pair in bounds.windows(2) {
+        if let [a, b] = pair {
+            assert!(a < b, "{a:?} must sort below {b:?}");
+        }
+    }
+    assert_eq!(
+        parse_semver("0.11.1+wasi-snapshot-preview1"),
+        parse_semver("0.11.1"),
+        "build metadata has no precedence"
+    );
+}
+
+/// A version this test cannot read is refused by name and never cleared:
+/// empty, short, long, non-numeric, a leading zero, an overflow, an empty
+/// pre-release or build tag, a stray dot, a pre-release, and a stanza with no
+/// version line at all.
+#[test]
+fn a_version_it_cannot_read_is_refused_by_name_never_cleared() {
+    for garbage in [
+        "",
+        "1.0",
+        "1.0.10.1",
+        "1.0.x",
+        "01.0.10",
+        "1.00.10",
+        "1..10",
+        "-1.0.10",
+        "1.0.10-",
+        "1.0.10+",
+        "1.0.10-alpha..1",
+        "1.0.99999999999999999999",
+        " 1.0.10",
+    ] {
+        let parsed = parse_semver(garbage);
+        assert!(parsed.is_err(), "`{garbage}` must not parse: {parsed:?}");
+        let lock = synthetic(&format!(
+            "name = \"webpki-roots\"\nversion = \"{garbage}\"\nSRC"
+        ));
+        let below = below_floor(&parse_lock(&lock), FLOORS);
+        assert_eq!(below.len(), 1, "`{garbage}`: {below:?}");
+        assert!(
+            below
+                .iter()
+                .all(|b| b.contains("cannot be judged against RUSTSEC-2026-0381")),
+            "{below:?}"
+        );
+    }
+    let pre = synthetic("name = \"rustls-webpki\"\nversion = \"0.104.0-alpha.9\"\nSRC");
+    let below = below_floor(&parse_lock(&pre), FLOORS);
+    assert_eq!(below.len(), 1, "{below:?}");
+    assert!(
+        below.iter().all(|b| b.contains("is a pre-release")),
+        "{below:?}"
+    );
+
+    let no_version = synthetic("name = \"rustls-webpki\"\nSRC");
+    let below = below_floor(&parse_lock(&no_version), FLOORS);
+    assert_eq!(below.len(), 1, "{below:?}");
+    assert!(
+        below
+            .iter()
+            .all(|b| b.contains("rustls-webpki \"\" cannot be judged")),
+        "{below:?}"
+    );
+}
+
+/// Every copy is judged, in either order, and a name that merely starts with a
+/// floored one is not the floored package.
+#[test]
+fn every_locked_copy_is_judged_not_only_the_first() {
+    for stanzas in [
+        "name = \"webpki-roots\"\nversion = \"1.0.10\"\nSRC\n\n\
+         name = \"webpki-roots\"\nversion = \"0.26.10\"\nSRC",
+        "name = \"webpki-roots\"\nversion = \"0.26.10\"\nSRC\n\n\
+         name = \"webpki-roots\"\nversion = \"1.0.10\"\nSRC",
+    ] {
+        let below = below_floor(&parse_lock(&synthetic(stanzas)), FLOORS);
+        assert_eq!(below.len(), 1, "{below:?}");
+        assert!(
+            below
+                .iter()
+                .all(|b| b.starts_with("webpki-roots 0.26.10 is inside")),
+            "{below:?}"
+        );
+    }
+    let relatives = synthetic(
+        "name = \"rustls-webpki-extra\"\nversion = \"0.1.0\"\nSRC\n\n\
+         name = \"webpki\"\nversion = \"0.22.4\"\nSRC",
+    );
+    let pkgs = parse_lock(&relatives);
+    assert!(below_floor(&pkgs, FLOORS).is_empty());
+    assert_eq!(
+        floors_not_held(&pkgs, FLOORS),
+        ["rustls-webpki", "webpki-roots"]
+    );
+}
+
+/// An empty lock holds nothing below a floor, and that is named as both floors
+/// checking nothing rather than passed in silence.
+#[test]
+fn an_empty_lock_is_named_as_checking_nothing() {
+    let pkgs = parse_lock("");
+    assert!(pkgs.is_empty());
+    assert!(below_floor(&pkgs, FLOORS).is_empty());
+    assert_eq!(
+        floors_not_held(&pkgs, FLOORS),
+        ["rustls-webpki", "webpki-roots"]
+    );
+}
+
+/// Every comparator in the table is one this test reads, so a typo in a row
+/// is refused here rather than read as a set that never holds; an operator it
+/// does not read is refused by name.
+#[test]
+fn every_comparator_in_the_table_is_read_and_others_are_refused() {
+    let probe = parse_semver("1.0.0");
+    assert!(probe.is_ok(), "{probe:?}");
+    let Ok(probe) = probe else { return };
+    let mut read = 0;
+    for floor in FLOORS {
+        for set in floor.patched.iter().chain(floor.unaffected) {
+            for comparator in *set {
+                let held = comparator_holds(comparator, &probe);
+                assert!(held.is_ok(), "{}: {comparator}: {held:?}", floor.advisory);
+                read += 1;
+            }
+        }
+    }
+    assert_eq!(read, 5, "the table holds five comparators");
+    for foreign in [
+        "> 1.0.0", "<= 1.0.0", "~1.0", "^1", "1.0.0", ">=1.0.0", "= 1.0",
+    ] {
+        assert!(
+            comparator_holds(foreign, &probe).is_err(),
+            "`{foreign}` must be refused"
+        );
+    }
 }

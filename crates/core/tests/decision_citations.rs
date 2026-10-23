@@ -458,7 +458,7 @@ const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// Each figure the WP-62 entry states, as (file, constant). The value is read
 /// from the constant's own declaration, never written here, so this list
 /// names WHERE a figure lives and the code says what it is.
-const PULL_RUNTIME_FIGURES: [(&str, &str); 10] = [
+const PULL_RUNTIME_FIGURES: [(&str, &str); 9] = [
     ("crates/api/src/server.rs", "STORE_BREAKER"),
     ("crates/api/src/server.rs", "STORE_REFUSED_BREAKER"),
     ("crates/api/src/server.rs", "SETTLE_MARGIN_MINUTES"),
@@ -468,7 +468,6 @@ const PULL_RUNTIME_FIGURES: [(&str, &str); 10] = [
     ("crates/api/src/audit.rs", "MAX_PAGE_RECORDS"),
     ("crates/api/src/pullrun.rs", "INTERRUPTED_RUNS"),
     ("crates/pull/src/calendar.rs", "SOURCED_LAST_DAY"),
-    ("crates/pull/src/calendar.rs", "RECORD_ENDS_SOON_DAYS"),
 ];
 
 /// The right-hand side of `name`'s one declaration in `text`
@@ -492,12 +491,38 @@ fn declared<'a>(text: &'a str, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("`{line}` is not `const {name}: T = <value>;`"))
 }
 
+/// The literal a computed constant is pinned to by its one compile-time
+/// assertion, `const _: () = assert!(NAME == <literal>);`, or `None`.
+///
+/// A figure the code COMPUTES (CAL-1, D-5155: `SOURCED_LAST_DAY` is a const
+/// fn of the recorded circulars, no longer typed) has no literal on its
+/// declaration; its pin is where the build states the value, so that is what
+/// the ledger is held to.
+fn pinned(text: &str, name: &str) -> Option<i64> {
+    let head = format!("const _: () = assert!({name} == ");
+    let found: Vec<i64> = text
+        .lines()
+        .map(str::trim_start)
+        .filter_map(|line| line.strip_prefix(&head))
+        .filter_map(|rest| rest.strip_suffix(");"))
+        .filter_map(|literal| literal.replace('_', "").parse::<i64>().ok())
+        .collect();
+    match found.as_slice() {
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
 /// The value of `name` as `file` declares it: integer literals (with `_`)
 /// and `crate::<module>::<NAME>` paths, joined by ` * `. A path is read from
-/// the same crate's `src/<module>.rs`. Anything else fails, naming it.
+/// the same crate's `src/<module>.rs`. A computed constant is read from its
+/// one pin ([`pinned`]). Anything else fails, naming it.
 fn code_figure(root: &Path, file: &str, name: &str) -> i64 {
     let text = std::fs::read_to_string(root.join(file))
         .unwrap_or_else(|why| panic!("{file} must be readable: {why}"));
+    if let Some(value) = pinned(&text, name) {
+        return value;
+    }
     let rhs = declared(&text, name).unwrap_or_else(|why| panic!("{file}: {why}"));
     rhs.split(" * ")
         .map(|term| {
@@ -655,4 +680,12 @@ fn the_figure_readers_read_whole_numbers_and_one_declaration() {
         Err("`E` is declared 0 times, not once".to_owned())
     );
     assert!(declared(source, "D").is_err());
+
+    // A computed constant is read from its one literal pin (CAL-1, D-5155).
+    let computed = "pub const L: i64 = SPAN.1;\nconst _: () = assert!(L == 20_818);\n\
+                    const _: () = assert!(L == days(2026, 12, 31));\n\
+                    const _: () = assert!(M == 1);\nconst _: () = assert!(M == 2);";
+    assert_eq!(pinned(computed, "L"), Some(20_818));
+    assert_eq!(pinned(computed, "M"), None, "two pins name no one value");
+    assert_eq!(pinned(computed, "N"), None);
 }

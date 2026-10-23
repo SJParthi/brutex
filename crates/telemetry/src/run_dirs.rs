@@ -30,6 +30,57 @@
 
 use std::path::{Path, PathBuf};
 
+/// The state-change table (R3-24): every event that records a change of the
+/// system's own state, with its class. Beside this table for the reason this
+/// module's header gives for its own: `telemetry` is the one crate every
+/// writer and every reader already names, and it depends on nothing.
+///
+/// Its file is `src/state_events.rs`, reached from here rather than from the
+/// crate root only because R3-24 owns this file and not `lib.rs`; a one-line
+/// `pub use` at the root would give it a shorter name and change nothing else.
+#[path = "state_events.rs"]
+pub mod state_events;
+
+/// The directory, beside an audit stream, that holds its never-rolling state
+/// stream (R3-24): `<dir>/audit.state/`, laid out exactly as an audit stream
+/// is (`audit.ndjson` and `audit.idx/`), so every audit reader reads it by
+/// being handed this directory. Named with the audit stream's own dotted
+/// prefix, never a bare word, so no reader of `<store>/logs` mistakes it for
+/// a run directory of [`ALL`].
+pub const STATE_STREAM_DIR: &str = "audit.state";
+
+/// Where the state stream of the log directory `dir` lives.
+#[must_use]
+pub fn state_stream_of(dir: &Path) -> PathBuf {
+    dir.join(STATE_STREAM_DIR)
+}
+
+/// The directory a NEW state stream is seeded in before it is given
+/// [`STATE_STREAM_DIR`] by one rename (R3-24): a start stopped part-way
+/// through the seed leaves its lines here, under a name no reader reads,
+/// never a half-seeded stream that the next start would take for a whole
+/// one and never seed again. A seed found here at a start is an unfinished
+/// one: it is moved aside to `audit.state.seeding.<ms>`, kept, named, and
+/// the seed is run again whole. Dotted, as [`STATE_STREAM_DIR`] is, so no
+/// reader of `<store>/logs` takes it for a run directory.
+pub const STATE_SEEDING_DIR: &str = "audit.state.seeding";
+
+/// Where a new state stream of the log directory `dir` is seeded.
+#[must_use]
+pub fn state_seeding_of(dir: &Path) -> PathBuf {
+    dir.join(STATE_SEEDING_DIR)
+}
+
+// HOW FAR BACK A LOG DIRECTORY REACHES, AND WHAT ITS SINK COUNTED (R3-24).
+//
+// Named here, beside the directories they describe, because the crate root's
+// re-export list is in `lib.rs`, which R3-24 does not own; a `pub use` there
+// would give each a shorter name and change nothing else.
+pub use crate::sink::{
+    AUDIT_SPAN_FILE, AuditSpan, PICTURE_CODES, PICTURE_MINUTES, Picture, RECENT_LINES, Reach,
+    STATE_LOUD_BYTES, audit_span, reach_of,
+};
+
 /// The directory, beneath a store root, that every log directory is under.
 pub const LOGS: &str = "logs";
 

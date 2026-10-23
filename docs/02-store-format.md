@@ -1,4 +1,4 @@
-# 02 — Store format, versions 2 and 3
+| 8 | 1 | state: 1 intent, 2 committed, 3 refused, 4 seen (IA-9 repair 1: `day` holds the verdict records the merge read, generation and exchange 0) |# 02 — Store format, versions 2 and 3
 
 Bytes on disk. This document is the authority; the code follows it.
 
@@ -1131,6 +1131,20 @@ The audited door (`open_existing_audited`) decodes the sealed form whole, then
 audits the raw form, and refuses unless the two have one header and one
 records BLAKE3; a sealed month with no raw form beside it has no strict
 receipt and says so.
+
+**Writing: a sealed month is never appended to (D-5904, SC-4).** The writer
+door `BarFile::open_or_create` asks for the `.sbar` after it holds the month's
+exclusive lock (the sealer holds it shared from its first step to its last)
+and before it opens or creates the `.bin`, through the read door's own open;
+a month held sealed is opened in that form, a damaged or misfiled one is
+`SealedRefused`, and no `.bin` is ever made beside a `.sbar`. `append` then
+answers a batch the month holds bit for bit `AlreadyPresent` and any other
+`StoreError::Sealed`, naming the first offered bar it does not hold and what
+the raw form would have done (`SealedOffer::Follows` or `Disagrees`); nothing
+is written. A bar a sealed month lacks lands only as its successor generation
+through `repair::repair_month` (D-3350), which reads the sealed month through
+the read door and writes the successor raw; a revision ordinal already
+holding a `.sbar` is stepped over.
 
 ### 8.6 `.sum` — month summary, version 1 (D-4980)
 
@@ -3524,6 +3538,201 @@ largest table, a record for each of its 2^20 slots, the 4 MiB detail section
 and the trailer) is refused `image_corrupt` by its length alone, before a
 byte is read or allocated for (D-4927).
 
+### 35.10 The Zerodha spool and its merge log (IA-9; D-4881, D-4921)
+
+A Zerodha verification never writes a day image per window: a run appends
+its records to its **spool**, and one `verify-merge` process merges each
+spool into one generation per (segment, timeframe, day) it touches.
+`pull::zerodha_verify::spool` writes and reads every byte below;
+`pull::zerodha_verify::merge_all` is the one merger.
+
+```text
+<store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp           records
+<store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp.merged    merge log
+<store>/verify/merge.lock                                     one merger at a time
+<store>/verify/live/<run>.lock                                the run is still spooling (IA-9 repair 1)
+<store>/verify/merge.stop                                     a merge's stop file
+<store>/verify/zerodha.lock, zerodha.stop                     the cold run's
+<store>/verify/merge.progress, zerodha.progress               their progress records (§37 v1)
+```
+
+`<run>` is the run's id from the store-wide runs ledger (§37, D-4880): never
+given twice, so an orphan spool and a new run never share a directory.
+
+**Header, 64 bytes at 0** (CRC-32C over 0..60 at 60):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXVS` |
+| 8 | 2 | version, 1 |
+| 10 | 2 | record stride, 160 |
+| 12 | 1 | feed (§35.6's feed byte; zerodha) |
+| 13 | 1 | segment (§35.6's byte) |
+| 14 | 1 | timeframe code: its place in `Timeframe::KNOWN`, plus one |
+| 15 | 1 | mode: 6 `zerodha_merge` (a pull's records), 7 `zerodha_cold` |
+| 16 | 2 | year |
+| 18 | 1 | month |
+| 19 | 1 | reserved, zero |
+| 20 | 8 | run id |
+| 28 | 8 | created (unix seconds) |
+| 36 | 4 | the timeframe's seconds; must agree with offset 14 |
+| 40 | 20 | reserved, zero |
+| 60 | 4 | CRC-32C over 0..60 |
+
+Written, synced and its directory synced before any record. A file shorter
+than 64 bytes, or whose header is all zero, is **unborn**: it holds nothing,
+and the next append writes the header again.
+
+**Records, 160 bytes from offset 64**, each with its own CRC-32C over 0..156
+at 156. Byte 149 is the record's kind:
+
+* **Kind 1, a verdict record**: §35.3's record layout byte for byte at
+  0..144 (key hash, key, code, rule set, reason, run, flags and the counts),
+  except that offset 120 holds the **receipt** the record was compared with
+  (as the run numbers its receipts, 1 for the first; 0 for none) instead of
+  a detail offset; then 144 the day (days since 1970-01-01, u32), 148 the
+  exchange (§35.6's byte), 149 = 1, 150 the number of detail records that
+  follow it (u16, at most 32, `MAX_DETAILS`; IA-9 repair 1), 152..156
+  reserved zero.
+* **Kind 2, a detail of the verdict record before it**: 0 the owner's key
+  hash, 8 the detail kind (u16), 10 its payload length (u16, at most 128),
+  12..140 the payload, 140..144 zero, then the same day, exchange, kind = 2
+  and reserved bytes. A detail record with no verdict record of its key
+  before it is damage.
+
+**One appender, at its own offset** (round 5, B2; critic IA-9-2). Only the
+run whose id names the spool appends to it, through one writer per run that
+keeps each file's handle and the offset after its last synced record behind
+one mutex, so two tasks of one run never interleave. A window's records for
+one file are one `write_all` at that offset and one `sync_data`. A failed
+write leaves the offset unchanged, and the next append writes over the torn
+bytes (the `store/src/provenance.rs` rule). The same run resumed in a new
+process starts after the last whole record, unless that record fails its CRC
+(an append that never finished its sync): then it starts AT it and writes
+over it, so it never becomes an earlier bad record. A writer of another run
+that finds a born header naming a different run refuses
+`spool_header_refused`. An append that would take the file past the 256 MiB
+the merge reads is refused `spool_full` before a byte is written (IA-9
+repair 1), so a spool never grows past what can be merged whole.
+
+**A run that is still spooling is never merged** (IA-9 repair 1). The writer
+takes `verify/live/<run>.lock` exclusively (`flock`, with its holder's note)
+at its first append and holds it until it is dropped: the run's end, or its
+process's death, which the kernel turns into a release. The merger tries each
+run's lock once before it reads one of the run's spools: a held lock is a
+LIVE run, whose spools are not read, committed or removed, and which the
+merge names (`LIVE run <id> is still spooling`, its spools still waiting, the
+holder); a free lock is taken and held for the pass, so a writer of that run
+resuming meanwhile waits for it (at most 30 s, then `run_live_busy` by name).
+A caller drops its writer when the run ends and before it merges or starts a
+`verify-merge` child (D-4921). The lock files are empty and never removed,
+one per run, so a lock is never unlinked under its holder. Measured before
+the lock (the second check of 22 Oct 2026): a `verify-merge` started during
+a cold run committed 38,096 of 39,024 records and lost 928, every exit 0.
+
+**One reader, the merge, length-based** (D-4881): it takes the
+⌊(len − 64) ÷ 160⌋ whole records. Bytes past them are a torn append; a
+**last** whole record that fails its CRC is an append that never finished
+its sync; a **last** verdict record followed by fewer details than it counts
+is an append that never finished either, and is ignored from its start
+(IA-9 repair 1: before the count, a torn detail was merged away in
+silence). All are ignored and named (offset, bytes) in the merge's audited
+error event, and a writer resuming writes over them. A detail its record
+does not count, and a record after one lacking a detail it counts, are
+damage. **Any earlier record that fails its CRC**, names a day outside
+the spool's month, or is a detail with no owner, was damaged in place: the
+spool is refused `spool_damaged{path, record}` by name, nothing of it is
+merged, an error event and an alert (kind 10 `spool_damaged`, D-4883, keyed
+`spool_damaged:<run>`, so every spool file of one run a merge refuses is one
+alert, never one per path; a refused commit is kind 11 keyed
+`verdict_refused:<run>`) are put, and the refusal is written to its merge
+log so a later merge does not try again until `cli verify-merge --retry <path>` names it.
+
+**Merge log, 16-byte records** (`.vsp.merged`), CRC-32C over 0..12 at 12:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | day (days since 1970-01-01; 0 for a refusal) |
+| 4 | 4 | generation: for an intent, the one the year index named before the merge; for a commit, the one published |
+| 8 | 1 | state: 1 intent, 2 committed, 3 refused |
+| 9 | 1 | exchange (§35.6's byte; 0 for a refusal) |
+| 10 | 2 | reserved, zero |
+| 12 | 4 | CRC-32C |
+
+Its own tail follows the same rule (RA-319): a torn tail and a last record
+that fails its CRC are written over by the next append; a bad earlier record
+refuses the spool by name (`merge_log_damaged`). A log longer than 64 MiB
+(4,194,304 records; a month's whole merge writes at most two a day and one
+`seen` per merge of the spool) is
+refused by name the same way before a byte is read, never read in part. The
+reader keeps the last record of each (exchange, day) and whether a refusal
+is on record as it reads, so a day's step is one probe of that index (C-ZV-03).
+
+**The merge, per (exchange, day) of a spool**: it sorts the spool's records
+once by (exchange, day, key, receipt), O(n log n) (L-IA-17); a key's later
+receipts that differ from its first set `vendor_revised` on the one record
+kept and add detail 9 `receipts{a, b}`. Before any day it appends
+`seen(n)` when the spool holds more verdict records than the last `seen`
+said (IA-9 repair 1). A day whose log says committed is skipped only when
+that commit covered every record of the day the spool now holds (the
+records' places are below the `seen` before it); a record past it (a run
+resumed under its id after a stopped or refused merge) merges the whole day
+again into a new generation, never a record skipped as merged. Otherwise it appends `intent(day, g0)` with g0 the generation the
+year index names now, synced; commits one generation (`Carry::Others`: the
+day's keys this run did not verify are carried with their own run); and
+appends `committed(day, g)`. **A re-merge after a crash** (one 16-byte read
+per day and one year-index slot read): for a day with only an intent, a
+committed generation other than g0 whose image (or one between it and g0,
+walked back by `previous`, at most 64) carries this spool's run was this
+merge's commit, and only `committed` is appended; otherwise the day is
+merged again, its linked but uncommitted image stepped past by §35.8's
+protocol. The design wrote the intent "under the day's commit lock"; the
+merge cannot hold that lock across `store::verdict::commit`, which takes it
+itself, and needs not: every Zerodha commit is made under
+`verify/merge.lock`, so between an intent and its re-merge no other Zerodha
+merger commits. When every day of a spool is committed, the spool and its
+log are removed, the LOG FIRST and the spool only after it (a log never
+outlives its spool to answer for a new one born at that name; a spool left
+without its log merges again whole, a duplicate generation, never a loss),
+then any directory left empty up to the run's.
+
+**Names by exact pattern** (RA-315): a run is all digits, a segment and a
+timeframe are the store's own words, a spool is `<yyyy-mm>.vsp`, a log
+`<yyyy-mm>.vsp.merged` beside its spool (a log whose spool is gone is
+stray); anything else (`.DS_Store`, `._name`,
+`.Spotlight-V100`, `.fseventsd`, an editor's file) is counted stray, never
+read, never an error and never removed.
+
+**Progress** (design §5.7, D-4904's record): `verify/zerodha.progress` (a
+cold run) and `verify/merge.progress` (a merge, in `cli verify-merge` or at
+the end of `cli zerodha-verify`) are the GDFL run's 4,096-byte record of
+§37, format v1, unchanged in shape, written by the same writer
+(`pull::gdfl_run::ProgressFile::of_record`) and only by the process holding
+the run's lock (`verify/zerodha.lock`, `verify/merge.lock`); a merger that
+finds the lock held writes none, and the end is written before the lock is
+let go. Its bytes mean, for these two modes:
+
+| Field | A cold run (`zerodha-verify`) | A merge (`verify-merge`) |
+|---|---|---|
+| mode (11) | 13, the position of `zerodha-verify` in the runs ledger's `MODES` (`import` is 1 there, as §37 numbers it) | 14, the position of `verify-merge` |
+| kind (12) | 5, the position of `zerodha` in the runs ledger's `KINDS` plus one (indices 1, stocks 2, options 3, as §37) | 5 |
+| source (13) | 0 | 0 |
+| from, to (32, 36) | the asked span | 0 |
+| day now's index (44), range's calendar days (48) | series checked, series to check | spools tried, spools waiting (the second listing adds what arrived) |
+| files read, files refused | months read, months refused | spools merged, spools refused (now or earlier) |
+| rows | records spooled | records committed |
+| days imported | days verified | generations committed |
+| days already done | 0 | days the merge log had committed, or the year index proved |
+| refusals total, slots | a series that failed; the run's refusal in a slot | the run's refusal in a slot |
+
+State is `running` from the begin, then `finished`, `stopped` (a stop was
+asked) or `refused` (with its words). A write that fails (a full disk, a
+link or a pipe at the name, RA-317) is named in the run's output and its
+log; the run goes on, since the record is a view of the run, never its
+record. Proof: `a_cold_run_keeps_its_progress_file`,
+`a_merge_keeps_its_progress_file_only_while_it_holds_the_lock`,
+`a_link_at_the_progress_name_is_never_written_through`.
+
 ## Dated NSE cash-session cache (D-0519)
 
 Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact
@@ -4217,6 +4426,7 @@ number it cannot name as `kind_<n>` and a record type it cannot name as
 | 8 | `runs_ledger_damaged` | | 18 | `file_shrank` |
 | 9 | `mismatch` | | 19 | `month_damaged` |
 | 10 | `spool_damaged` | | 20 | `index_refused` |
+| | | | 21 | `vendor_shape_changed` (IA-9, RA-318: a kept Zerodha answer carries a field its documented shape does not name) |
 
 **Sibling names in `<store>/audit/`.**
 
@@ -4696,8 +4906,8 @@ All integers little-endian. The offsets are the definition.
 | 0 | 8 | magic `BRUTEXPG` |
 | 8 | 2 | version, u16 = 1 |
 | 10 | 1 | state: 1 running, 2 stopping, 3 finished, 4 stopped, 5 shutdown, 6 source_lost, 7 disk_full, 8 refused, 9 census, 10 durability; 0 never written. Numbers are never reused |
-| 11 | 1 | mode: 1 import |
-| 12 | 1 | kind: 1 indices, 2 stocks, 3 options |
+| 11 | 1 | mode: 1 import; 13 `zerodha-verify`, 14 `verify-merge` (the runs ledger's `MODES` positions, §35.10) |
+| 12 | 1 | kind: 1 indices, 2 stocks, 3 options; 5 zerodha (§35.10) |
 | 13 | 1 | source: 1 `cm_zip`, 2 `nfo_zips`, 3 tickstore |
 | 14 | 1 | by: 1 cli, 2 api |
 | 15 | 1 | census layout: 3 or 4; 0 not known |
@@ -4870,3 +5080,187 @@ gap rows included (D-6246 item 3). A file that fails any line of this is
 refused by name with its kind (`read`, `too_large`, `not_text`, `magic`,
 `version`, `wrong_table`, `generation`, `header`, `columns`, `row`,
 `duplicate`, `row_count`, `checksum`, `too_many`, `absent`).
+
+## F&O membership month files, version 1 (PIT-1; D-5163)
+
+`pull::fno_membership` writes and reads them; `cli fno-membership build`,
+`show` and `bench` are the doors. One file per month and generation:
+`<dir>/<YYYY-MM>-g<GGGGGG>.fnm` (six-digit generation from 1). The real build
+writes `<store>/reference/fno-membership-v1/`. A file holds the SEALED DAY
+RECORDS of its month from its first record to its last: for every day in that
+range whether the day has a membership answer and why, and for a known day
+which series had a live stock-option contract (its members, in series order)
+and which of them listed at least one option file. It is derived from the GDFL
+tick store's options day-file indexes (`docs/00-charter.md`, "F&O membership
+source"), labelled `inferred_gdfl_options`, never an NSE circular.
+
+**The span.** The first record of the first month is the first known day
+(`known_from`, written into every month header) and the last KNOWN record is
+the last known day (`known_to`): both measured by the build, never typed
+(D-5162). Days before, after or between with no answer are refused as
+"membership unknown"; sessions inside without an answer are sealed with their
+status, except a day whose day file the source REFUSED, which is never sealed:
+the build installs every record before it and stops, and the next build
+resumes at it (D-5168). A month is installed with the closed days that end it
+when the next month's first known day is folded, so the last month of a
+directory a kill or a failed write interrupted between two installs may end on
+records after `known_to` (D-5167): they are sealed, held for the resume, and
+answered as after the span until a later known record seals past them.
+
+**Append-only.** A sealed record is never rewritten. A build resumes after the
+last sealed record; a month that gains records is written as its next
+generation, which must hold the current generation's records unchanged and
+more (refused otherwise, `WouldRewrite`); a month that gains none is not
+written. A generation is the whole month so far and the superseded one is kept,
+so a build run once per day writes about 12.7 times the bytes of one pass
+(measured over 2025: 3.38 MiB against 272 KiB, docs/06-limits.md L-PIT-2).
+Each generation is written to a hidden temporary
+(`.<name>.tmp.<pid>.<n>`, `n` a per-process count, created by `store::staging::create`, gate 28's one door,
+which never opens through a file already there: a dead writer's leftover under
+the same name is unlinked first and its size returned in `Installed::Written`'s
+`cleared`, which the build prints), flushed with `sync_all`, hard-linked to its
+final name (which refuses if the name exists, so two writers can never
+overwrite each other), the temporary is unlinked whether the link succeeded or
+not and the directory flushed: a reader never sees a half-written file, and a
+refused install leaves no temporary (only a kill can, which is counted, named
+by every later build and by `show`, never read and left in place: PIT-33). Any prefix of a build's installs is a servable, resumable
+directory (D-5167). The reader serves
+the HIGHEST generation of each month and refuses the month when that file
+fails any check below; it never falls back to an older generation. A hidden
+name (leading `.`) is never read and is counted; any other name that is not a
+month file is refused by name.
+
+Little-endian. No time, host, commit or generation is written: the same
+records give the same bytes, so one pass and a day-by-day build agree byte for
+byte.
+
+**Header, 72 bytes.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRXFNM01` |
+| 8 | 2 | version, `1` |
+| 10 | 2 | header length, `72` |
+| 12 | 2 | year |
+| 14 | 1 | month, 1..=12 |
+| 15 | 1 | first held day of the month |
+| 16 | 1 | last held day of the month (`R` = last − first + 1 rows) |
+| 17 | 1 | reserved, zero |
+| 18 | 2 | `max_pool`: the largest pool of a known day this month |
+| 20 | 4 | `known_from`: the span's first known day (epoch day) |
+| 24 | 4 | spellings registered before this month |
+| 28 | 4 | spellings added this month (`A`) |
+| 32 | 4 | series registered before this month |
+| 36 | 4 | member entries (`E`) |
+| 40 | 4 | carry-in live series (`Li`) |
+| 44 | 4 | carry-in expiry starts (`Xi`) |
+| 48 | 4 | carry-out live series (`Lo`) |
+| 52 | 4 | carry-out expiry starts (`Xo`) |
+| 56 | 4 | handovers (`H`) |
+| 60 | 2 | carry-in year |
+| 62 | 2 | carry-in refused sessions of that year |
+| 64 | 2 | carry-out year |
+| 66 | 2 | carry-out refused sessions of that year |
+| 68 | 4 | reserved, zero |
+
+**Body**, in this order, then a 32-byte BLAKE3 of every byte before it.
+
+| Part | Size | Content |
+|---|---|---|
+| spellings | `A` × 40 | name (24 bytes, zero padded), series id `u32`, first stored day (epoch `u32`), its earliest settled expiry that day (epoch `u32`), the first day any share's contract of that expiry was stored (epoch `u32`); registry ids continue from the month before |
+| day rows | `R` × 52 | status `u8` (1 known, 2 not a session, 3 no source, 4 source refused: a code never sealed, refused by the checks, D-5168, 5 no calendar, 6 no share options, 7 a file on a closed day), a zero byte, pool `u16`, filed `u16`, refused sessions of the year through this day `u16`, option names listed `u32`, names the decoder refused `u32`, names of index underlyings `u32`, BLAKE3 of the evidence the fold consumed (32 bytes; zero for a day with no listing) |
+| member entries | `E` × 4 | day-major in row order, `pool` entries per row, ascending by series: spelling id `u16`, flags `u16` (bit 0: listed a file that day; no other bit) |
+| carry in | `Li` × 8 + `Xi` × 8 | each live SERIES (its id; a live series is filed under its newest spelling, D-5166) and the epoch day its life runs to, then each live expiry and the first epoch day any contract of it was stored, both strictly ascending: the fold's state before the first record |
+| carry out | `Lo` × 8 + `Xo` × 8 | the same after the last record |
+| handovers | `H` × 20 | old spelling `u32`, new spelling `u32`, the session the new one was first listed (epoch `u32`), keys shared `u32`, keys the old one listed the session before `u32`; labelled `measured` |
+
+**Checks** (each refused by name, `MembershipError::Corrupt`): the digest;
+the magic; the version (an unknown one is refused, never guessed); the header
+length; the first and last held days are days of the month, in order; both
+reserved fields zero; `known_from` not after the first record; the exact body
+length the header implies; every name a valid symbol with nothing after its
+padding; every status code known, none of them 4 (a refused source day is never
+sealed), and every reserved byte zero; no unknown
+entry flag; carry runs strictly ascending; each row's running sum equal to the
+fold's from the carry in; members only on known days, and every known day at
+least one; each row's filed count equal to its entries'; entries exactly
+consumed by the rows; the carry out's running sum equal to the last row's; the
+header's `max_pool` equal to its rows'; the file name's month equal to the
+header's.
+
+**The chain** (`Membership::open`, `MembershipError::Stale`): months follow
+each other with no gap; each month's carry in, spellings before and series
+before equal what the month before ends with; the first month starts the span
+from no carry on a known record (the last month may end on records that are not
+known, D-5167); a spelling either opens the next series or, named by a
+handover, joins an earlier one; every handover joins two spellings of one
+series on a known record of its month; each day's members are strictly ascending by series and all present (a
+day whose pool runs past the month's entries is refused, for a table served
+without a file as well as by the decoder); every month names one span start;
+a spelling is registered once. Each check is hit by its own damage in
+`every_chain_check_refuses_its_own_damage` (PIT-32).
+
+**Lookups.** `Membership::members(day)`, `pool_size(day)`,
+`refused_through(day)`: one subtraction into a fixed-stride index of day slots
+and one slice. `is_member(name, day)`: the dated symbol changes walked from
+`name`, one hash probe, the slot, one bit. A day outside the span (a sealed
+record after `known_to` included), or one whose status is not 1, is refused as
+"membership unknown" with its reason. Flat at 1x, 10x and 100x the held days,
+known, refused and outside: C-PIT-01, `crates/pull/benches/ratio.rs`.
+Invariants PIT-01 to PIT-33 and C-PIT-01 in `docs/04-invariants.md`; limits
+L-PIT-1 to L-PIT-11 in `docs/06-limits.md`.
+
+**Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
+line above is a `fno-membership-v2` directory beside this one, never a rewrite
+of `v1`.
+
+## §43 — The upkeep journal and its stop request, format v1 (R3-17, D-6270)
+
+Two files per vendor and kind under `<store>/audit/`, where `<kind>` is `tix`,
+`srt`, `msum`, `recount` or `rekey`. Written by `pull::upkeep` alone; read by
+`pull::upkeep::status` and by a resume. (The section number is the next free
+one on 17 October 2026; the merge renumbers it if another lands first.)
+
+### `audit/upkeep.<vendor>.<kind>.log`
+
+Append-only text, one line per event, each written by one `write` with its
+newline, flushed after the `run` line, every 64 `item` lines (`SYNC_EVERY`)
+and after the `end` line. A regular file of one name, opened with
+`O_NOFOLLOW | O_NONBLOCK`; a link, a directory, a pipe or a second name at the
+name is refused and nothing is written. The run holds an exclusive `flock` on
+it for its whole life (one run of a vendor's kind at a time). Fields are
+separated by one space; a key holds no space or control character and is at
+most 512 bytes; `why=` runs to the end of the line, one line, at most 1,024
+bytes with a cut said `...(+<n> bytes)`.
+
+```text
+run <id> v1 vendor=<v> kind=<k> commit=<sha|unstamped> workers=<n> asked=<n> items=<n> skipped=<n> plan=<16 hex> resume=<id|-> at=<unix s>
+item <id> n=<done> ok=<clean> of=<items> t=<s> clean=<0|1> word=<word> key=<key> why=<sentence>
+end <id> how=<done|stopped|failed> n=<done> ok=<clean> of=<items> t=<s> why=<sentence>
+```
+
+| Field | Meaning |
+|---|---|
+| `<id>` | the run's id: UNIX seconds at its start, or one more than the newest id among the tail's whole lines when that is not earlier |
+| `workers`, `asked` | the workers started; the workers asked for |
+| `items`, `skipped` | items given to this run; items of the plan skipped because a run of the resumed chain closed them clean |
+| `plan` | FNV-1a of the plan's keys, each followed by a newline, in hex |
+| `resume` | the run this one resumes, or `-` |
+| `n`, `ok`, `of` | items built so far by the run (this one included), of those the clean ones, and `items` |
+| `t` | whole seconds since the run's items began |
+| `clean`, `word`, `key` | whether this item ended clean; its builder's word (`built`, `kept`, `small`, `REFUSED`, `recounted`, `applied`, ...); the item: a month's `.bin` relative to the store root, `<from>..<to>` days of a recount, or an underlying of a re-key |
+
+A line counts once its newline is written. A tail no newline ends — a run
+killed, or out of disk, mid-write — is ended by the next run before it appends
+anything, as the fragment followed by ` #void` and a newline, and no reader
+reads a line that ends ` #void` (a written line whose reason ends so gains a
+`.`). Readers read the three shapes strictly, word by word in this order; any
+other line is no entry. A run with no `end` line whose lock is free DIED.
+
+### `audit/upkeep.<vendor>.<kind>.stop`
+
+`stop <id>` and a newline, at most 64 bytes read: a request that run `<id>`
+take no further item. Written whole to `<name>.new` (`store::staging::create`,
+`O_CREAT | O_EXCL`), flushed and renamed over the name. A run reads it between
+items; a request naming another id stops nothing, so the file is never
+removed.

@@ -777,11 +777,16 @@ fn write_revision(
         false,
     )?;
     io_at(reserved.sync_all(), &reservation, "sync reservation", false)?;
+    // A SEALED FORM IN THE NEW ORDINAL TOO (SC-4, D-5904): the read door
+    // opens a `.sbar` before the `.bin` (D-5899), so a raw revision written
+    // beside one would publish bars no reader opens. An ordinal holding any
+    // of these was written by someone else and is stepped over, never mixed.
     for kind in [
         FileKind::Bars,
         FileKind::Checksums,
         FileKind::Lock,
         FileKind::TimeIndex,
+        FileKind::SealedBars,
     ] {
         let sibling = path.with_file(kind).to_path_buf(&revision_root);
         if exists(&sibling)? {

@@ -631,3 +631,86 @@ fn a_sixty_day_answer_with_one_muhurat_minute_lands_every_other_row() {
         "all of December 2020"
     );
 }
+
+/// **THE ZERODHA DOOR REPAIRS ONLY WHAT AN APPEND CANNOT TAKE (IA-GR-39's
+/// round-6 Zerodha case; IA-16, D-4890, SF-5).** A repair-mode landing whose
+/// minute month another process holds is refused with the append's own words
+/// and is never offered to `repair_month`: no revision, no `repair` or
+/// `refused` line in the repair journal, no "versioned repair" in its words.
+/// An offered bar that reads a held minute differently, inside the held span,
+/// is the same: the append's refusal, typed, never a repair. Once the holder
+/// is gone, the `NotHeld` window is repaired exactly as before.
+#[test]
+fn the_zerodha_door_repairs_only_what_an_append_cannot_take() {
+    let scratch = Scratch::new("DOOR");
+    let held = answer(day(2020, 12, 16), day(2020, 12, 31));
+    land(
+        &scratch.0,
+        day(2020, 12, 16),
+        day(2020, 12, 31),
+        held.clone(),
+    );
+    let (from, to) = (day(2020, 12, 1), day(2020, 12, 31));
+    let whole = answer(from, to);
+    let minute_month = |failures: &[pull::ingest::Failure]| {
+        failures
+            .iter()
+            .find(|f| f.why.contains("2020-12"))
+            .map(|f| f.why.clone())
+    };
+
+    // A BUSY MONTH: a reader holds the minute month for the whole landing.
+    let reader = store::file::BarFile::open_existing(
+        &scratch.0,
+        month_path(Timeframe::MINUTE_1, (2020, 12)),
+        symbol_id(),
+    )
+    .unwrap();
+    let busy = repair(&scratch.0, from, to, whole.clone());
+    drop(reader);
+    let words = minute_month(&busy.failures).unwrap_or_else(|| panic!("{:#?}", busy.failures));
+    assert!(
+        !words.contains("versioned repair"),
+        "the append's own words: {words}"
+    );
+    assert!(
+        !scratch.0.join("bar-revisions-v1").exists(),
+        "a busy month is never offered to the repair"
+    );
+    assert!(
+        !read(&scratch.0, "zerodha.repairs")
+            .lines()
+            .any(|l| l.contains(" 1min 2020-12 ")),
+        "no repair and no refusal journaled for the minute month"
+    );
+    assert_eq!(
+        month_bars(&scratch.0, Timeframe::MINUTE_1, (2020, 12)).len(),
+        held.len()
+    );
+
+    // A HELD BAR READ DIFFERENTLY, inside the held span: the append's
+    // refusal, never a repair.
+    let mut differs = held.clone();
+    differs[7].close += 3;
+    let restated = repair(&scratch.0, day(2020, 12, 16), day(2020, 12, 31), differs);
+    let words =
+        minute_month(&restated.failures).unwrap_or_else(|| panic!("{:#?}", restated.failures));
+    assert!(!words.contains("versioned repair"), "{words}");
+    assert!(!scratch.0.join("bar-revisions-v1").exists());
+    assert_eq!(restated.bars_committed, 0);
+
+    // NOT HELD, with nothing holding the month: repaired exactly as before.
+    let done = repair(&scratch.0, from, to, whole.clone());
+    assert!(done.failures.is_empty(), "{:#?}", done.failures);
+    assert_eq!(done.bars_committed, whole.len() - held.len());
+    assert_eq!(
+        month_bars(&scratch.0, Timeframe::MINUTE_1, (2020, 12)).len(),
+        whole.len()
+    );
+    assert!(
+        read(&scratch.0, "zerodha.repairs")
+            .lines()
+            .any(|l| l.starts_with("repair NSE-INDEX-NIFTY 1min 2020-12 ")),
+        "journaled as every repair is"
+    );
+}
