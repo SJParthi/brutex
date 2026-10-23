@@ -103,19 +103,20 @@ impl Close {
 /// amortised per failure named, never a search of the store; the order is
 /// proved by `pull::gdfl_import::tests::ia16::the_decisive_failure_is_ranked_census_run_open_then_hole`.
 pub(super) fn decisive(failures: &[Staged]) -> Option<&Staged> {
-    // Ranks 0..=3: census, run, open and not a hole, open. Rank 4 is the first.
-    let mut ranked: [Option<&Staged>; 4] = [None; 4];
+    // Slots 0..=2: run, open and not a hole, open. A census failure returns at
+    // once; with no slot filled the day's first failure decides.
+    let mut ranked: [Option<&Staged>; 3] = [None; 3];
     for one in failures {
         let cause = &one.cause;
         if cause.stage == Stage::Census {
             return Some(one);
         }
         let rank = if cause.stage == Stage::Run {
-            Some(1)
+            Some(0)
         } else if !cause.closes && !cause.is_hole() {
-            Some(2)
+            Some(1)
         } else if !cause.closes {
-            Some(3)
+            Some(2)
         } else {
             None
         };
