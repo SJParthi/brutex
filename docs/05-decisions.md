@@ -78561,9 +78561,33 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     is sent to the group only while it is known to be the browser's: the
     browser not yet reaped, or signal 0 having just found the group's
     processes there.
+21. **A page mounted again in one document says its figures are the tab's**
+    (R315-19, amended at repair 3; verify r3, 22 Oct). A buffered observer
+    hands a page mounted after a link inside the app every entry since the
+    tab opened, so a tab that opened on /speed, went to /db and came back
+    drew the tab's 1.2 MB over 63 fetches as this page's own. Whether this
+    document already watched once is the document's own fact, held in a
+    `WeakSet` of watched windows; SvelteKit's `afterNavigate` was the other
+    choice and was not taken: it adds its callback in the page's `onMount`,
+    so whether a page hears the load's `'enter'` turns on the router's
+    timing, which this page does not own. A sum missing entries is said as a
+    floor ("at least").
+22. **Every wait an argument sets stops at `MAX_WAIT_MS`, and the idle row
+    prints the clock's reading** (R315-22 and R315-23, repair 3). Past
+    2,147,483,647 ms Node fires a timer after 1 ms, so a longer wait is
+    refused by name, not chained into several timers: no run needs a wait of
+    24.8 days, and a refusal states the bound where a chain would hide it.
+    The idle row is `performance.now()` across the wait, and a wait more than
+    1 ms short of the time asked is NOT MEASURED and fails the run.
+23. **A number on the command line is decimal digits, a page is one page
+    however it is spelled, and `--restarts` stops at `MAX_N`** (R315-22,
+    repair 3). `Number` alone read `0x10` as 16 and `' 12'` as 12; an
+    exponent (`1e3`) stays allowed, as it is decimal. A page's path is
+    folded (lower case, trailing slashes dropped) and its query never is,
+    since a query value such as an instrument key is case sensitive.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-22);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-19.
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-23);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-20.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
@@ -80920,6 +80944,11 @@ path `hyper-rustls -> reqwest -> pull -> api, cli`:
    failure of the pull, never a silent one. Whether any host `crates/pull`
    reaches chains to emSign is **UNVERIFIED**: no vendor host was contacted
    for this entry.
+4. **Merged into `feat/db-fix`'s own copy of the same bumps** (repair 3,
+   23 Oct). `feat/db-fix` made the same two bumps as D-7120, with IA-16's
+   arrow `pull -> rustix`; merging it at `0dc8361c3` gave its `Cargo.lock`
+   byte for byte, so the pin asserted is its `0xADFB_F4EE_30AF_1851` and this
+   entry moves nothing more.
 
 **Proof.** `cargo deny check`: advisories, bans, licences and sources ok on
 the bumped lock; `the_dependency_set_has_not_moved_without_review` fails on the

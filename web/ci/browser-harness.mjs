@@ -330,6 +330,22 @@ export function chromeOf(given, env, exists) {
   return given ?? env ?? CHROME_PATHS.find((p) => exists(p)) ?? '';
 }
 
+/**
+ * A page as one page, however it is spelled: its path in lower case (the
+ * app's routes are), its trailing slashes dropped (the root `/` kept), and a
+ * query kept exactly as given (a value such as an instrument key is case
+ * sensitive). Linear in the length, with no pattern that can backtrack.
+ *
+ * @param {string} page
+ */
+export function pageKey(page) {
+  const q = page.indexOf('?');
+  const path = q === -1 ? page : page.slice(0, q);
+  let end = path.length;
+  while (end > 1 && path[end - 1] === '/') end -= 1;
+  return path.slice(0, end).toLowerCase() + (q === -1 ? '' : page.slice(q));
+}
+
 /** @param {string[]} argv */
 export function parseArgs(argv) {
   /** @type {Record<string, string | boolean | string[]>} */
@@ -362,12 +378,14 @@ export function parseArgs(argv) {
   // ONE PAGE, ONE SPELLING: the app's routes are lower case and a trailing
   // slash names the same page, so /speed, /speed/ and /SPEED are one page
   // (verify r3, 22 Oct: they were measured as three).
-  const pageKey = (/** @type {string} */ p) => p.toLowerCase().replace(/(?<=.)\/+(?=$|\?)/, '');
-  const keys = pages.map(pageKey);
-  const at = keys.findIndex((k, i) => keys.indexOf(k) !== i);
-  if (at !== -1) {
-    const first = pages[keys.indexOf(keys[at])];
-    throw new Error(`--pages names ${first} twice${first === pages[at] ? '' : ` (as ${first} and ${pages[at]})`}: each page is measured once a run`);
+  // One pass, one map lookup a page.
+  /** @type {Map<string, string>} each page's key, to the spelling that named it first */
+  const named = new Map();
+  for (const p of pages) {
+    const key = pageKey(p);
+    const first = named.get(key);
+    if (first !== undefined) throw new Error(`--pages names ${first} twice${first === p ? '' : ` (as ${first} and ${p})`}: each page is measured once a run`);
+    named.set(key, p);
   }
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');

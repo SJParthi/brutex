@@ -2557,7 +2557,12 @@ test('the sheet and the harness read a number in decimal digits only, bound ever
     ['/db,/speed,/db', '--pages names /db twice: each page is measured once a run']
   ];
   for (const [pages, why] of twice) assert.throws(() => harness.parseArgs([...base, '--pages', pages]), (e) => /** @type {Error} */ (e).message === why, pages);
-  assert.deepEqual(harness.parseArgs([...base, '--pages', '/,/db,/db?a=1,/speed']).pages, ['/', '/db', '/db?a=1', '/speed'], 'a different query or page is another page');
+  assert.deepEqual(harness.parseArgs([...base, '--pages', '/,/db,/db?a=1,/db?a=A,/speed']).pages, ['/', '/db', '/db?a=1', '/db?a=A', '/speed'], 'a different query or page is another page');
+  assert.deepEqual(['/speed/', '/SPEED//', '/', '//', '/DB/?k=NSE-A', '/db?k=nse-a'].map(harness.pageKey), ['/speed', '/speed', '/', '/', '/db?k=NSE-A', '/db?k=nse-a'], 'the path folds, the query never');
+  const long = `/${'/'.repeat(200_000)}x`;
+  const t0 = performance.now();
+  assert.equal(harness.pageKey(long), long);
+  assert.ok(performance.now() - t0 < 1_000, 'a path of slashes is read once, never backtracked');
 });
 
 test('a wire with entries the browser gave no size for, or dropped, is said as a floor, and a fetch count is drawn only with a wire', () => {
