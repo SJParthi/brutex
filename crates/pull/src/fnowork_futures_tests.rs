@@ -801,7 +801,9 @@ fn a_snapshot_held_before_its_index_existed_is_taken_in_by_the_next_plan_once() 
     let first = plan_of(&bare);
     assert_eq!(first.asks, january_asks());
     assert_eq!(first, plan_of(&indexed));
-    let log_path = index.join(master_snapshots::first_listed::ABSORBED);
+    let log_path = master_snapshots::first_listed::generation_dir(&bare)
+        .unwrap()
+        .join(master_snapshots::first_listed::ABSORBED);
     let log = std::fs::read_to_string(&log_path).unwrap();
     assert_eq!(log.lines().count(), 1, "{log}");
     assert_eq!(plan_of(&bare), first);
@@ -907,4 +909,170 @@ fn a_real_size_plan_does_not_grow_with_the_snapshots_held() {
         p50s[2],
         p50s[0]
     );
+}
+
+// ───────────── R4-28 repair 2: an index that does not match its commit log ─────────────
+
+/// The one index file of `name` under the futures index, wherever the index
+/// keeps it.
+fn index_file_of(root: &Path, name: &str) -> PathBuf {
+    let wanted = format!("{name}.idx");
+    let mut todo = vec![root.join(master_snapshots::first_listed::DIR)];
+    let mut found = Vec::new();
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                todo.push(path);
+            } else if path.file_name().and_then(|file| file.to_str()) == Some(wanted.as_str()) {
+                found.push(path);
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "one index file of {name}: {found:?}");
+    found.pop().unwrap()
+}
+
+/// What a plan over a damaged index found: the plan, and the damaged file's
+/// bytes before and after it (`None` for no file).
+struct AfterDamage {
+    plan: FuturesPlan,
+    damaged: Option<String>,
+    left: Option<String>,
+}
+
+/// JAN listed from 2026-01-02 and FEB from 2026-01-05, with `damage` done to
+/// the index file of ZQIDX after both snapshots were taken in; then `more`
+/// snapshots are written, and the plan over 2026-01-01..09 is made.
+fn plan_after_damage(name: &str, damage: impl FnOnce(&Path), more: &[Day]) -> AfterDamage {
+    let masters = scratch(name);
+    let jan = fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27");
+    let feb = fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24");
+    snapshot_on(&masters, day(2026, 1, 2), std::slice::from_ref(&jan));
+    snapshot_on(&masters, day(2026, 1, 5), &[jan.clone(), feb.clone()]);
+    let file = index_file_of(&masters, "ZQIDX");
+    damage(&file);
+    let damaged = std::fs::read_to_string(&file).ok();
+    for &on in more {
+        snapshot_on(&masters, on, &[jan.clone(), feb.clone()]);
+    }
+    let plan = futures_plan(
+        &Book::open(&masters).unwrap(),
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap();
+    AfterDamage {
+        plan,
+        damaged,
+        left: std::fs::read_to_string(&file).ok(),
+    }
+}
+
+/// Every contract from the day its first snapshot listed it, as an intact
+/// index plans it, the continuous series last; and the damaged file left
+/// exactly as it was found.
+fn assert_planned_whole(after: &AfterDamage) {
+    let plan = &after.plan;
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    let spans: Vec<(u64, Window)> = plan
+        .asks
+        .iter()
+        .map(|ask| (ask.token, ask.window))
+        .collect();
+    assert_eq!(
+        spans,
+        vec![
+            (8_000_001, window(day(2026, 1, 2), day(2026, 1, 9))),
+            (8_000_002, window(day(2026, 1, 5), day(2026, 1, 9))),
+            (8_000_001, window(day(2026, 1, 1), day(2026, 1, 9))),
+        ],
+        "no contract dropped, none re-dated: {plan:?}"
+    );
+    assert_eq!(after.left, after.damaged, "never rewritten in place");
+}
+
+/// The plan says the index was rebuilt, and why, in words that are true.
+fn assert_rebuilt_because(plan: &FuturesPlan, why: &str) {
+    let said = plan.rebuilt.as_deref().unwrap_or_default();
+    assert!(
+        said.starts_with("generation g1 of the futures index did not match its commit log")
+            && said.contains(why)
+            && said.contains("generation g2 was started"),
+        "{said}"
+    );
+}
+
+/// MISSING: the underlying's file is gone while its commit log stands.
+#[test]
+fn a_futures_index_file_gone_while_its_commit_log_stands_never_plans_short() {
+    let after = plan_after_damage(
+        "damage-missing",
+        |file| std::fs::remove_file(file).unwrap(),
+        &[],
+    );
+    assert_planned_whole(&after);
+    assert_rebuilt_because(
+        &after.plan,
+        "is missing, so holds 0 checked line(s) of ZQIDX",
+    );
+}
+
+/// TRUNCATED: the file cut at a line boundary, FEB's line lost.
+#[test]
+fn a_futures_index_file_cut_at_a_line_boundary_never_plans_short() {
+    let after = plan_after_damage(
+        "damage-cut",
+        |file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            let first = text.split_inclusive('\n').next().unwrap().to_owned();
+            assert!(first.contains("|8000001|"), "{text}");
+            std::fs::write(file, first).unwrap();
+        },
+        &[],
+    );
+    assert_planned_whole(&after);
+    assert_rebuilt_because(
+        &after.plan,
+        "holds 1 checked line(s) of ZQIDX where the commit log records 2",
+    );
+}
+
+/// GARBLED: one committed line changed in place, its length kept.
+#[test]
+fn a_garbled_committed_futures_index_line_never_plans_short() {
+    let after = plan_after_damage(
+        "damage-garbled",
+        |file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            let garbled = text.replacen("|2026-01-02|", "|2026-01-03|", 1);
+            assert_ne!(garbled, text);
+            assert_eq!(garbled.len(), text.len());
+            std::fs::write(file, garbled).unwrap();
+        },
+        &[],
+    );
+    assert_planned_whole(&after);
+    assert_rebuilt_because(&after.plan, "has 1 line(s) that do not check");
+}
+
+/// TRUNCATED, THEN AN ORDINARY WRITE: the next snapshot must not re-file the
+/// lost contract under its own, later day. The write finds the damage and
+/// rebuilds, so the plan reads a generation that matches its log.
+#[test]
+fn a_snapshot_written_over_a_cut_futures_index_never_re_dates_a_contract() {
+    let after = plan_after_damage(
+        "damage-cut-then-write",
+        |file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            let first = text.split_inclusive('\n').next().unwrap().to_owned();
+            std::fs::write(file, first).unwrap();
+        },
+        &[day(2026, 1, 7)],
+    );
+    assert_planned_whole(&after);
+    assert_eq!(after.plan.rebuilt, None, "the write rebuilt it already");
 }

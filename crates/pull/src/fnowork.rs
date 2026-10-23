@@ -665,6 +665,10 @@ pub struct FuturesPlan {
     pub asks: Vec<FuturesAsk>,
     /// Every contract or series not asked for, and why.
     pub refused: Vec<String>,
+    /// Why the futures first-listed index was rebuilt as a new generation
+    /// before this plan was read from it, when it did not match its commit log
+    /// (R4-28 repair 2).
+    pub rebuilt: Option<String>,
 }
 
 /// Whether `listed` is a future of `underlying` on the route's exchange.
@@ -691,7 +695,11 @@ fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
 /// snapshot write fills, so no older snapshot is opened here: the cost does not
 /// grow with the snapshots held (R4-28 repair 1; D-6894). A snapshot on or
 /// before the window's end that the index does not hold yet is taken in first,
-/// once; one that cannot be is refused by name. Each token is then checked
+/// once; one that cannot be is refused by name. An index that does not match
+/// its commit log (a file missing, cut or garbled) is never planned from: a
+/// new generation is built from the receipted snapshots first and named in
+/// [`FuturesPlan::rebuilt`], and one that still does not match is refused
+/// `futures_index_damaged` (R4-28 repair 2). Each token is then checked
 /// against the NEWEST snapshot, the one snapshot a plan parses: one that
 /// now names another contract is refused `token_reused` and never asked for
 /// the older contract's history; one the newest snapshot no longer lists
@@ -726,18 +734,18 @@ pub fn futures_plan(
         .ok_or_else(|| "a book built in memory has no snapshots directory".to_owned())
         .and_then(|root| first_listed::listing(root, book.stamps(), route, underlying, through))
         .map_err(|why| format!("futures_index: {why}; no future of {underlying} was planned"))?;
-    if listing.torn > 0 {
-        let torn = listing.torn.to_string();
+    if let Some(ref why) = listing.rebuilt {
         let _ = telemetry::emit_if!(
-            telemetry::Level::Warn,
+            telemetry::Level::Error,
             FUTURES_EVENT,
-            "futures index lines that did not check were skipped (a kill mid-append, or a \
-             garbled line); the snapshots they came from were taken in again",
+            "the futures first-listed index did not match its commit log, so this plan was read \
+             from a new generation built again from the receipted snapshots; the old one is left \
+             as it was",
             "underlying" => telemetry::Value::Str(underlying),
-            "torn" => telemetry::Value::Str(&torn),
+            "why" => telemetry::Value::Str(why),
         );
     }
-    let mut refused = listing.unreadable;
+    let mut refused = listing.refused;
     let first_seen = listing.first;
     let mut asks = Vec::with_capacity(first_seen.len().saturating_add(1));
     for (&(expiry, token), &seen) in &first_seen {
@@ -797,6 +805,7 @@ pub fn futures_plan(
         newest,
         asks,
         refused,
+        rebuilt: listing.rebuilt,
     })
 }
 

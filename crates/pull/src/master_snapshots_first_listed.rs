@@ -1,5 +1,7 @@
 //! The futures first-listed index: for each future a dated Kite snapshot
 //! lists, the first snapshot day that listed it. R4-28 repair 1; D-6894.
+//! Checked against its own commit log and rebuilt as a new generation when it
+//! does not match: R4-28 repair 2.
 //!
 //! # Why it exists
 //!
@@ -15,7 +17,8 @@
 //!
 //! # Layout
 //!
-//! Under the snapshots directory, in [`DIR`]:
+//! Under the snapshots directory, in [`DIR`], one directory per generation,
+//! `g1`, `g2`, ...; the highest-numbered one is the index. In it:
 //!
 //! - `<EXCHANGE>/<NAME>.idx`, one file per (exchange, underlying name), both
 //!   percent-encoded: one line per `(type, expiry, token)` the first time a
@@ -23,37 +26,56 @@
 //!   lists it earlier. The reader takes the earliest day per key.
 //! - [`ABSORBED`]: one line per Kite snapshot taken in, for one (exchange,
 //!   type), written after every line it added is synced. **It is the commit
-//!   marker**, as a receipt is a snapshot's.
+//!   marker**, as a receipt is a snapshot's, and it records, for each name
+//!   whose file grew, how many checked lines of that name the file then held.
 //!
-//! Both are append-only: no line is ever rewritten. Every line ends in a check
-//! over its own bytes, so a line cut by a kill mid-append never reads as a
-//! record: it is skipped and counted, and the next append starts a new line.
+//! Beside the generations, [`GENERATIONS`] records each generation started
+//! after the first, with why, before its directory is made.
+//!
+//! Every file is append-only: no line is ever rewritten. Every line ends in a
+//! check over its own bytes.
+//!
+//! # A generation is trusted only while it matches its commit log
+//!
+//! Every read of an underlying's file, by a plan or by a snapshot write, is
+//! checked against the commit log: a line anywhere in the log or in that file
+//! that does not check (cut by a kill mid-append, or garbled since), or fewer
+//! checked lines of the name than the log records (the file cut at a line
+//! boundary, or gone), means the generation can no longer say which contracts
+//! exist from which day. It is never planned from and never appended to: the
+//! next generation is started and every receipted snapshot the call needs is
+//! taken into it again. The damaged generation is left exactly as it was. If
+//! the new generation does not match its own log either, the call refuses by
+//! name (`futures_index_damaged`) rather than plan from it.
 //!
 //! # Crash
 //!
 //! A kill after a snapshot's receipt and before its [`ABSORBED`] line leaves
 //! the snapshot not taken in: the next writer or plan, under the writers' lock,
-//! takes it in again. The lines it had already added are true (the snapshot is
-//! receipted and listed them), so the repeat adds duplicates the reader folds,
-//! never a wrong day.
+//! takes it in again. Whole lines it had already added are true (the snapshot
+//! is receipted and listed them), so the repeat adds no duplicate and its
+//! commit line records them. A line the kill cut short does not check, so the
+//! generation is rebuilt as above.
 //!
 //! # What is not taken in, and how it is named
 //!
 //! A snapshot whose receipt or body does not check is not recorded: every plan
 //! that needs it names it and retries it, since a read can fail for a reason
 //! that passes. A snapshot whose checked body does not parse is recorded as
-//! unparseable, with why, once: its bytes are fixed by their receipt, so the
-//! parse could only refuse them again. A future row with a field a line cannot
-//! carry (a separator or line break, an empty name, a name too long for a file
-//! name, no expiry) is counted on its [`ABSORBED`] line and in the event,
-//! never dropped silently.
+//! unparseable, with why and the parse rules' version [`PARSE_RULES`]: its
+//! bytes are fixed by their receipt, so the same rules could only refuse them
+//! again, and a later version takes the day in again. A future row with a
+//! field a line cannot carry (a separator or line break, an empty name, a name
+//! too long for a file name, no expiry) is counted on its [`ABSORBED`] line and
+//! in the event, never dropped silently.
 //!
 //! # Cost
 //!
 //! | operation | cost |
 //! |---|---|
-//! | [`listing`], every snapshot taken in | the absorbed log (one 60-byte line per snapshot) and one underlying's file (one line per contract it ever listed); no snapshot is opened |
-//! | taking one snapshot in | one read and parse of that snapshot, and one read and append per underlying with a new contract — once per snapshot, when it is written |
+//! | [`listing`], every snapshot taken in | one directory listing of [`DIR`] (one entry per generation), the absorbed log (one line per snapshot, plus one `name=count` per name whose file grew) and one underlying's file (one line per contract it ever listed); no snapshot is opened |
+//! | taking one snapshot in | one read and parse of that snapshot, and one read, check and append per underlying with a new contract — once per snapshot, when it is written |
+//! | a generation that does not match its log | every receipted snapshot read and parsed once more, into the next generation: linear in the snapshots held, once per damage found |
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -74,11 +96,21 @@ use crate::vendor::ContinuousSpec;
 /// The index's directory, inside the snapshots directory.
 pub const DIR: &str = "futures-first-listed";
 
-/// The commit log: one line per snapshot taken in.
+/// The commit log of a generation: one line per snapshot taken in.
 pub const ABSORBED: &str = "absorbed.idx";
 
+/// The generations' record, in [`DIR`]: one line per generation started after
+/// the first, with why.
+pub const GENERATIONS: &str = "generations.idx";
+
+/// The version of the rules [`Snapshot::parse`] applies, recorded with every
+/// snapshot it refused. Raise it when the parser accepts a dump it refused
+/// before: every snapshot recorded unparseable under an older version is then
+/// taken in again.
+pub const PARSE_RULES: u32 = 1;
+
 /// The first field of every line. A line of another format is not a record.
-const TAG: &str = "fl1";
+const TAG: &str = "fl2";
 
 /// The largest index file read back, in bytes.
 const MAX_FILE: u64 = 64 * 1_024 * 1_024;
@@ -229,6 +261,154 @@ fn append(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────── generations ───────────────────────────────
+
+/// Why a call into one generation did not finish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Fault {
+    /// A file could not be listed, read or written: the call fails, named.
+    Io(String),
+    /// The generation does not match its own commit log: it is never planned
+    /// from or appended to again.
+    Damaged(String),
+}
+
+impl From<String> for Fault {
+    fn from(why: String) -> Self {
+        Self::Io(why)
+    }
+}
+
+/// One generation of the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Generation {
+    number: u32,
+    dir: PathBuf,
+}
+
+/// A generation's directory name.
+fn generation_name(number: u32) -> String {
+    format!("g{number}")
+}
+
+/// The number a generation directory's name gives, or `None` for a name this
+/// module did not make.
+fn generation_number(name: &str) -> Option<u32> {
+    let number: u32 = name.strip_prefix('g')?.parse().ok()?;
+    (number >= 1 && generation_name(number) == name).then_some(number)
+}
+
+/// The generation every reader and writer uses: the highest-numbered
+/// generation directory, or the first when none exists yet.
+fn current(root: &Path) -> Result<Generation, String> {
+    let top = root.join(DIR);
+    let listed = |why: std::io::Error| format!("{} could not be listed: {why}", top.display());
+    let entries = match fs::read_dir(&top) {
+        Err(why) if why.kind() == ErrorKind::NotFound => {
+            return Ok(Generation {
+                number: 1,
+                dir: top.join(generation_name(1)),
+            });
+        }
+        Err(why) => return Err(listed(why)),
+        Ok(entries) => entries,
+    };
+    let mut number = 1;
+    for entry in entries {
+        let entry = entry.map_err(listed)?;
+        let is_dir = entry.file_type().map_err(listed)?.is_dir();
+        if let (true, Some(found)) = (
+            is_dir,
+            entry.file_name().to_str().and_then(generation_number),
+        ) {
+            number = number.max(found);
+        }
+    }
+    Ok(Generation {
+        number,
+        dir: top.join(generation_name(number)),
+    })
+}
+
+/// The directory of the generation the index reads and writes now. Nothing is
+/// created.
+///
+/// # Errors
+///
+/// The index's directory that cannot be listed, named.
+pub fn generation_dir(root: &Path) -> Result<PathBuf, String> {
+    current(root).map(|generation| generation.dir)
+}
+
+/// Starts the generation after `old`: why is recorded first, then its
+/// directory is made. `old` is left exactly as it is.
+fn start_next(
+    root: &Path,
+    route: ContinuousSpec,
+    old: &Generation,
+    why: &str,
+) -> Result<Generation, String> {
+    let top = root.join(DIR);
+    let number = old
+        .number
+        .checked_add(1)
+        .ok_or_else(|| "the futures index has no generation number left".to_owned())?;
+    append(
+        &top,
+        &top.join(GENERATIONS),
+        &sealed(&format!(
+            "{TAG}|generation|{number}|{}|{}|{}",
+            route.exchange,
+            route.future_type,
+            flat(why)
+        )),
+    )?;
+    let dir = top.join(generation_name(number));
+    fs::create_dir(&dir).map_err(|why| format!("{} could not be created: {why}", dir.display()))?;
+    sync_dir(&top)?;
+    Ok(Generation { number, dir })
+}
+
+/// What a call did across generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Rebuilt<T> {
+    /// It finished; with why, when the generation it found did not match its
+    /// log and the next one was built.
+    Done(T, Option<String>),
+    /// The next generation did not match its own log either: why.
+    StillDamaged(String),
+}
+
+/// Runs `work` on the current generation and, when that generation does not
+/// match its own log, once more on the next one. Called under the writers'
+/// lock.
+fn with_rebuild<T>(
+    root: &Path,
+    route: ContinuousSpec,
+    mut work: impl FnMut(&Generation) -> Result<T, Fault>,
+) -> Result<Rebuilt<T>, String> {
+    let found = current(root)?;
+    let why = match work(&found) {
+        Ok(done) => return Ok(Rebuilt::Done(done, None)),
+        Err(Fault::Io(why)) => return Err(why),
+        Err(Fault::Damaged(why)) => why,
+    };
+    let next = start_next(root, route, &found, &why)?;
+    let said = format!(
+        "generation g{} of the futures index did not match its commit log ({why}), so it was \
+         left as it is and generation g{} was started, and every receipted snapshot this call \
+         needed was taken into it again",
+        found.number, next.number
+    );
+    match work(&next) {
+        Ok(done) => Ok(Rebuilt::Done(done, Some(said))),
+        Err(Fault::Io(why)) => Err(format!("{said}; then {why}")),
+        Err(Fault::Damaged(again)) => Ok(Rebuilt::StillDamaged(format!(
+            "{said}; it does not match its own commit log either: {again}"
+        ))),
+    }
+}
+
 // ─────────────────────────────── the absorbed log ───────────────────────────────
 
 /// How a snapshot was taken in.
@@ -236,7 +416,7 @@ fn append(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
 enum Taken {
     /// Its futures are in the index.
     Indexed,
-    /// Its checked body did not parse; why.
+    /// Its checked body did not parse under [`PARSE_RULES`]; why.
     Unparseable(String),
 }
 
@@ -244,31 +424,67 @@ enum Taken {
 #[derive(Debug, Default)]
 struct Log {
     taken: HashMap<Stamp, Taken>,
-    torn: u64,
+    /// Encoded name → the most checked lines of it any commit line recorded.
+    committed: HashMap<String, u64>,
+}
+
+/// The `name=count` field of a commit line.
+fn counts_field(grown: &BTreeMap<String, u64>) -> String {
+    grown
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A commit line's `name=count` field, or `None` when it does not parse.
+fn parse_counts(field: &str) -> Option<Vec<(String, u64)>> {
+    if field.is_empty() {
+        return Some(Vec::new());
+    }
+    field
+        .split(',')
+        .map(|one| {
+            let (name, count) = one.split_once('=')?;
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_owned(), count.parse().ok()?))
+        })
+        .collect()
 }
 
 /// One absorbed line.
-fn absorbed_line(stamp: Stamp, route: ContinuousSpec, taken: &Taken, counts: (u64, u64)) -> String {
+fn absorbed_line(
+    stamp: Stamp,
+    route: ContinuousSpec,
+    taken: &Taken,
+    counts: (u64, u64),
+    grown: &BTreeMap<String, u64>,
+) -> String {
     let (status, detail) = match *taken {
-        Taken::Indexed => ("indexed", String::new()),
-        Taken::Unparseable(ref why) => ("unparseable", flat(why)),
+        Taken::Indexed => ("indexed".to_owned(), String::new()),
+        Taken::Unparseable(ref why) => (format!("unparseable@{PARSE_RULES}"), flat(why)),
     };
     sealed(&format!(
-        "{TAG}|absorbed|{}|{}|{}|{status}|{}|{}|{detail}",
+        "{TAG}|absorbed|{}|{}|{}|{status}|{}|{}|{}|{detail}",
         base(stamp),
         route.exchange,
         route.future_type,
         counts.0,
-        counts.1
+        counts.1,
+        counts_field(grown)
     ))
 }
 
-/// The absorbed log's records for `route`'s exchange and type.
-fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, String> {
-    let (lines, torn) = read_lines(&dir.join(ABSORBED))?;
+/// The absorbed log's records for `route`'s exchange and type. A line that
+/// does not check, for any route, means the generation is damaged.
+fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, Fault> {
+    let path = dir.join(ABSORBED);
+    let (lines, mut torn) = read_lines(&path)?;
     let mut log = Log {
         taken: HashMap::with_capacity(lines.len()),
-        torn,
+        committed: HashMap::new(),
     };
     for line in &lines {
         let fields: Vec<&str> = line.split('|').collect();
@@ -281,28 +497,51 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, String> {
             status,
             _lines,
             _skipped,
+            counts,
             detail,
         ] = fields.as_slice()
         else {
-            log.torn = log.torn.saturating_add(1);
+            torn = torn.saturating_add(1);
             continue;
         };
-        let (Some(stamp), true) = (parse_base(stamp), *tag == TAG) else {
-            log.torn = log.torn.saturating_add(1);
+        let (Some(stamp), true, Some(counts)) =
+            (parse_base(stamp), *tag == TAG, parse_counts(counts))
+        else {
+            torn = torn.saturating_add(1);
             continue;
         };
         if *exchange != route.exchange || *kind != route.future_type {
             continue;
         }
-        let taken = match *status {
-            "indexed" => Taken::Indexed,
-            "unparseable" => Taken::Unparseable((*detail).to_owned()),
+        let taken = match (*status, status.strip_prefix("unparseable@")) {
+            ("indexed", _) => Some(Taken::Indexed),
+            (_, Some(rules)) => match rules.parse::<u32>() {
+                Ok(PARSE_RULES) => Some(Taken::Unparseable((*detail).to_owned())),
+                // AN OLDER PARSER'S REFUSAL: the day is taken in again.
+                Ok(_) => None,
+                Err(_) => {
+                    torn = torn.saturating_add(1);
+                    continue;
+                }
+            },
             _ => {
-                log.torn = log.torn.saturating_add(1);
+                torn = torn.saturating_add(1);
                 continue;
             }
         };
-        log.taken.insert(stamp, taken);
+        for (name, count) in counts {
+            let held = log.committed.entry(name).or_insert(count);
+            *held = (*held).max(count);
+        }
+        if let Some(taken) = taken {
+            log.taken.insert(stamp, taken);
+        }
+    }
+    if torn > 0 {
+        return Err(Fault::Damaged(format!(
+            "{} has {torn} line(s) that do not check",
+            path.display()
+        )));
     }
     Ok(log)
 }
@@ -311,6 +550,16 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, String> {
 
 /// `(expiry, token)` → the earliest day a snapshot listed it.
 type Firsts = BTreeMap<(Day, u64), Day>;
+
+/// One underlying's futures as its checked file holds them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Held {
+    /// The name, encoded as its file and its commit counts carry it.
+    key: String,
+    firsts: Firsts,
+    /// Checked lines of this exact name in the file.
+    count: u64,
+}
 
 /// One future's line.
 fn future_line(
@@ -330,15 +579,21 @@ fn future_line(
     ))
 }
 
-/// One underlying's futures as its file holds them, and how many lines did not
-/// check.
+/// One underlying's futures as its file holds them, checked against the
+/// commit log: a line in the file that does not check, or fewer checked lines
+/// of `name` than the log records, means the generation is damaged.
 fn read_underlying(
     path: &Path,
     route: ContinuousSpec,
     name: &str,
-) -> Result<(Firsts, u64), String> {
+    log: &Log,
+) -> Result<Held, Fault> {
+    let key = encoded(name).ok_or_else(|| format!("no file can carry the name {name:?}"))?;
     let (lines, mut torn) = read_lines(path)?;
-    let mut firsts = Firsts::new();
+    let mut held = Held {
+        key,
+        ..Held::default()
+    };
     for line in &lines {
         let fields: Vec<&str> = line.split('|').collect();
         let [
@@ -346,7 +601,7 @@ fn read_underlying(
             "future",
             exchange,
             kind,
-            held,
+            named,
             expiry,
             token,
             first,
@@ -368,15 +623,35 @@ fn read_underlying(
         };
         // A FILE MAY HOLD ANOTHER NAME: two names that differ only in case
         // share a file on a case-insensitive volume. Only exact rows count.
-        if *exchange != route.exchange || *kind != route.future_type || *held != name {
+        if *exchange != route.exchange || *kind != route.future_type || *named != name {
             continue;
         }
-        firsts
+        held.count = held.count.saturating_add(1);
+        held.firsts
             .entry((expiry, token))
             .and_modify(|day| *day = (*day).min(first))
             .or_insert(first);
     }
-    Ok((firsts, torn))
+    if torn > 0 {
+        return Err(Fault::Damaged(format!(
+            "{} has {torn} line(s) that do not check",
+            path.display()
+        )));
+    }
+    let committed = log.committed.get(&held.key).copied().unwrap_or(0);
+    if held.count < committed {
+        let state = if path.exists() {
+            "holds"
+        } else {
+            "is missing, so holds"
+        };
+        return Err(Fault::Damaged(format!(
+            "{} {state} {} checked line(s) of {name} where the commit log records {committed}",
+            path.display(),
+            held.count
+        )));
+    }
+    Ok(held)
 }
 
 /// Takes one parsed snapshot's futures into the underlying files: each
@@ -386,8 +661,9 @@ fn take_in(
     dir: &Path,
     snapshot: &Snapshot,
     route: ContinuousSpec,
-    cache: &mut HashMap<String, Firsts>,
-) -> Result<(u64, u64), String> {
+    log: &Log,
+    cache: &mut HashMap<String, Held>,
+) -> Result<(u64, u64), Fault> {
     let stamp = snapshot.stamp();
     let (mut lines, mut skipped) = (0_u64, 0_u64);
     let mut new: BTreeMap<String, String> = BTreeMap::new();
@@ -408,14 +684,19 @@ fn take_in(
         let held = match cache.entry(name.to_owned()) {
             std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
             std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(read_underlying(&path, route, name)?.0)
+                slot.insert(read_underlying(&path, route, name, log)?)
             }
         };
         let contract = (expiry, listed.token());
-        if held.get(&contract).is_some_and(|&first| first <= stamp.day) {
+        if held
+            .firsts
+            .get(&contract)
+            .is_some_and(|&first| first <= stamp.day)
+        {
             continue;
         }
-        held.insert(contract, stamp.day);
+        held.firsts.insert(contract, stamp.day);
+        held.count = held.count.saturating_add(1);
         new.entry(name.to_owned())
             .or_default()
             .push_str(&future_line(route, name, contract, stamp.day, stamp));
@@ -445,6 +726,9 @@ pub struct Absorbed {
     pub lines: u64,
     /// Future rows a line could not carry, counted.
     pub skipped: u64,
+    /// Why a new generation was started, when the one found did not match its
+    /// commit log.
+    pub rebuilt: Option<String>,
 }
 
 /// Takes every receipted Kite snapshot the index does not yet hold for
@@ -452,8 +736,10 @@ pub struct Absorbed {
 ///
 /// # Errors
 ///
-/// A listing, a lock or an index file that fails, named. A snapshot that does
-/// not read is not an error: it is in [`Absorbed::unreadable`].
+/// A listing, a lock or an index file that fails, named; and
+/// `futures_index_damaged` when a newly started generation does not match its
+/// own commit log either. A snapshot that does not read is not an error: it is
+/// in [`Absorbed::unreadable`].
 pub fn absorb_pending(root: &Path, route: ContinuousSpec) -> Result<Absorbed, String> {
     let held = lock(root)?;
     let absorbed = absorb_held(root, route)?;
@@ -469,11 +755,26 @@ pub(super) fn absorb_held(root: &Path, route: ContinuousSpec) -> Result<Absorbed
             route.exchange, route.future_type
         ));
     }
+    match with_rebuild(root, route, |generation| absorb_in(root, generation, route))? {
+        Rebuilt::Done(mut absorbed, rebuilt) => {
+            absorbed.rebuilt = rebuilt;
+            Ok(absorbed)
+        }
+        Rebuilt::StillDamaged(why) => Err(format!("futures_index_damaged: {why}")),
+    }
+}
+
+/// Takes every receipted Kite snapshot `generation` does not hold into it.
+fn absorb_in(
+    root: &Path,
+    generation: &Generation,
+    route: ContinuousSpec,
+) -> Result<Absorbed, Fault> {
     let catalog = Catalog::read(root)?;
-    let dir = root.join(DIR);
-    let log = read_log(&dir, route)?;
+    let dir = &generation.dir;
+    let mut log = read_log(dir, route)?;
     let mut out = Absorbed::default();
-    let mut cache = HashMap::new();
+    let mut cache: HashMap<String, Held> = HashMap::new();
     for &stamp in catalog.receipted(Kind::Kite) {
         if log.taken.contains_key(&stamp) {
             continue;
@@ -486,14 +787,25 @@ pub(super) fn absorb_held(root: &Path, route: ContinuousSpec) -> Result<Absorbed
             }
         };
         let (taken, counts) = match Snapshot::parse(stamp, &body) {
-            Ok(snapshot) => (Taken::Indexed, take_in(&dir, &snapshot, route, &mut cache)?),
+            Ok(snapshot) => (
+                Taken::Indexed,
+                take_in(dir, &snapshot, route, &log, &mut cache)?,
+            ),
             Err(why) => (Taken::Unparseable(why), (0, 0)),
         };
+        // EVERY NAME WHOSE FILE NOW HOLDS MORE THAN THE LOG RECORDS: the lines
+        // this snapshot added, and whole lines a killed earlier attempt added.
+        let grown: BTreeMap<String, u64> = cache
+            .values()
+            .filter(|held| held.count > log.committed.get(&held.key).copied().unwrap_or(0))
+            .map(|held| (held.key.clone(), held.count))
+            .collect();
         append(
-            &dir,
+            dir,
             &dir.join(ABSORBED),
-            &absorbed_line(stamp, route, &taken, counts),
+            &absorbed_line(stamp, route, &taken, counts, &grown),
         )?;
+        log.committed.extend(grown);
         match taken {
             Taken::Indexed => out.indexed.push(stamp),
             Taken::Unparseable(why) => out.unparseable.push((stamp, why)),
@@ -505,7 +817,8 @@ pub(super) fn absorb_held(root: &Path, route: ContinuousSpec) -> Result<Absorbed
 }
 
 /// One event for what a snapshot write took into the index: an error when it
-/// failed or left a snapshot out, nothing when there was nothing to take.
+/// failed, left a snapshot out or found the index damaged, nothing when there
+/// was nothing to take.
 pub(super) fn note(absorbed: &Result<Absorbed, String>) {
     let (level, message, detail) = match *absorbed {
         Err(ref why) => (
@@ -513,6 +826,12 @@ pub(super) fn note(absorbed: &Result<Absorbed, String>) {
             "the futures first-listed index could not take the snapshots in; each futures plan \
              retries them and names any it cannot read",
             why.clone(),
+        ),
+        Ok(ref out) if out.rebuilt.is_some() => (
+            telemetry::Level::Error,
+            "the futures first-listed index did not match its commit log; a new generation was \
+             started and the snapshots were taken into it again",
+            out.rebuilt.clone().unwrap_or_default(),
         ),
         Ok(ref out) if !out.unreadable.is_empty() || !out.unparseable.is_empty() => (
             telemetry::Level::Error,
@@ -554,18 +873,22 @@ pub struct Listing {
     /// `(expiry, token)` → the first snapshot day that listed it, for every
     /// one first listed on or before the day asked.
     pub first: BTreeMap<(Day, u64), Day>,
-    /// Every snapshot on or before the day that is not in the index, named as
-    /// a plan refuses it.
-    pub unreadable: Vec<String>,
-    /// Lines that did not check (cut by a kill, or garbled), skipped.
-    pub torn: u64,
+    /// Every snapshot on or before the day that is not in the index, and an
+    /// index that could not be trusted, named as a plan refuses them.
+    pub refused: Vec<String>,
+    /// Why a new generation was started, when the one found did not match its
+    /// commit log; the listing is read from the new one.
+    pub rebuilt: Option<String>,
 }
 
 /// What the index holds for `underlying`'s futures on `route`'s exchange,
 /// first listed on or before `through`, checked against `stamps` (the
 /// receipted snapshots a book was opened over). Any of them on or before
 /// `through` not yet taken in is taken in first, once, under the writers'
-/// lock; one that cannot be is named in [`Listing::unreadable`].
+/// lock; one that cannot be is named in [`Listing::refused`]. An index that
+/// does not match its commit log is rebuilt as a new generation first
+/// ([`Listing::rebuilt`]); one that does not match after that is refused by
+/// name (`futures_index_damaged`) with nothing listed.
 ///
 /// # Errors
 ///
@@ -577,30 +900,54 @@ pub fn listing(
     underlying: &str,
     through: Day,
 ) -> Result<Listing, String> {
-    let dir = root.join(DIR);
+    let held = lock(root)?;
+    let outcome = with_rebuild(root, route, |generation| {
+        list_in(root, generation, stamps, route, underlying, through)
+    })?;
+    held.release().map_err(|why| why.to_string())?;
+    Ok(match outcome {
+        Rebuilt::Done(mut listing, rebuilt) => {
+            listing.rebuilt = rebuilt;
+            listing
+        }
+        Rebuilt::StillDamaged(why) => Listing {
+            refused: vec![format!(
+                "futures_index_damaged: {why}; no contract of {underlying} was planned from it"
+            )],
+            ..Listing::default()
+        },
+    })
+}
+
+/// [`listing`] in one generation.
+fn list_in(
+    root: &Path,
+    generation: &Generation,
+    stamps: &[Stamp],
+    route: ContinuousSpec,
+    underlying: &str,
+    through: Day,
+) -> Result<Listing, Fault> {
+    let dir = &generation.dir;
     let upto = stamps.partition_point(|stamp| stamp.day <= through);
     let needed = stamps.get(..upto).unwrap_or_default();
-    let held = lock(root)?;
-    let mut log = read_log(&dir, route)?;
+    let mut log = read_log(dir, route)?;
     let mut why_not: HashMap<Stamp, String> = HashMap::new();
     if needed.iter().any(|stamp| !log.taken.contains_key(stamp)) {
-        let absorbed = absorb_held(root, route)?;
+        let absorbed = absorb_in(root, generation, route)?;
         note(&Ok(absorbed.clone()));
         why_not.extend(absorbed.unreadable);
-        log = read_log(&dir, route)?;
+        log = read_log(dir, route)?;
     }
-    let mut out = Listing {
-        torn: log.torn,
-        ..Listing::default()
-    };
+    let mut out = Listing::default();
     for stamp in needed {
         match log.taken.get(stamp) {
             Some(Taken::Indexed) => {}
-            Some(Taken::Unparseable(why)) => out.unreadable.push(format!(
+            Some(Taken::Unparseable(why)) => out.refused.push(format!(
                 "snapshot_unreadable: {stamp}: {why} (recorded when the futures index took it \
                  in); its futures were not planned"
             )),
-            None => out.unreadable.push(format!(
+            None => out.refused.push(format!(
                 "snapshot_unreadable: {stamp}: {}; its futures were not planned",
                 why_not
                     .get(stamp)
@@ -608,15 +955,13 @@ pub fn listing(
             )),
         }
     }
-    if let Some(path) = path_of(&dir, route.exchange, underlying) {
-        let (firsts, torn) = read_underlying(&path, route, underlying)?;
-        out.torn = out.torn.saturating_add(torn);
-        out.first = firsts
+    if let Some(path) = path_of(dir, route.exchange, underlying) {
+        out.first = read_underlying(&path, route, underlying, &log)?
+            .firsts
             .into_iter()
             .filter(|&(_, first)| first <= through)
             .collect();
     }
-    held.release().map_err(|why| why.to_string())?;
     Ok(out)
 }
 

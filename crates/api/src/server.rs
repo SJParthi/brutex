@@ -5812,7 +5812,7 @@ async fn land_broker_member(
 /// `'static` copies of a whole fetched window; this borrows it. On a
 /// current-thread runtime (a test's) there is no other worker to starve and
 /// `block_in_place` is not allowed, so the work runs where it is.
-fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
+pub(crate) fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
         _ => work(),
@@ -13954,12 +13954,6 @@ async fn fno_futures(
     if let Some(why) = futures_refusal(asked, route) {
         return page.say(facts, unavailable, audit::Outcome::NotStarted, why);
     }
-    let book = match masters_dir().and_then(|dir| {
-        pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))
-    }) {
-        Ok(book) => book,
-        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
-    };
     let last_settled = match ingest::last_settled_day(page.today) {
         Ok(day) => day,
         Err(why) => {
@@ -13971,14 +13965,23 @@ async fn fno_futures(
             );
         }
     };
-    let plan = match pull::fnowork::futures_plan(
-        &book,
-        route,
-        asked.underlying.as_str(),
-        asked.window,
-        page.today,
-        last_settled,
-    ) {
+    // OFF THE ASYNC WORKERS (R4-28 repair 2): opening the book parses the
+    // newest snapshot, and the plan takes the writers' lock (a blocking flock)
+    // and may take snapshots into the futures index.
+    let planned = off_the_workers(|| {
+        let book = masters_dir().and_then(|dir| {
+            pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))
+        })?;
+        pull::fnowork::futures_plan(
+            &book,
+            route,
+            asked.underlying.as_str(),
+            asked.window,
+            page.today,
+            last_settled,
+        )
+    });
+    let plan = match planned {
         Ok(plan) => plan,
         Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
     };
@@ -13988,6 +13991,9 @@ async fn fno_futures(
     };
     facts.push(("Dated master snapshot", plan.newest.to_string()));
     facts.push(("Series asked", plan.asks.len().to_string()));
+    if let Some(ref why) = plan.rebuilt {
+        facts.push(("Futures index rebuilt", why.clone()));
+    }
     if !plan.refused.is_empty() {
         facts.push(("Not asked", plan.refused.join(" · ")));
     }
@@ -30302,6 +30308,7 @@ mod tests {
                 ask(1, pull::fnowork::FuturesSeries::Continuous),
             ],
             refused: Vec::new(),
+            rebuilt: None,
         };
         let asked = |expiry| ingest::FnoRequest {
             underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),

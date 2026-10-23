@@ -442,17 +442,24 @@ async fn obtain<D: Discovery, P: masters::Pause>(
     let mut tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
     let landed = match tried.body {
         Some(ref body) => {
-            let landed = masters::land(dir, source, body);
-            // THE DATED SNAPSHOT AND THE DAY'S DIFF, after the landing and never
-            // over it: the one call R4-28 adds at the only `masters::land` call
-            // site (DLY-09, D-6892). A refused landing writes no snapshot.
-            tried.snapshot = pull::master_snapshots::after_land(
-                dir,
-                source,
-                body,
-                &landed,
-                pull::master_snapshots::today_ist(),
-            );
+            // OFF THE ASYNC WORKERS (R4-28 repair 2): the landing and the
+            // snapshot write fsync, take the snapshots' flock and parse the dump.
+            let (landed, snapshot) = crate::server::off_the_workers(|| {
+                let landed = masters::land(dir, source, body);
+                // THE DATED SNAPSHOT AND THE DAY'S DIFF, after the landing and
+                // never over it: the one call R4-28 adds at the only
+                // `masters::land` call site (DLY-09, D-6892). A refused landing
+                // writes no snapshot.
+                let snapshot = pull::master_snapshots::after_land(
+                    dir,
+                    source,
+                    body,
+                    &landed,
+                    pull::master_snapshots::today_ist(),
+                );
+                (landed, snapshot)
+            });
+            tried.snapshot = snapshot;
             landed
         }
         // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
