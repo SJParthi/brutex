@@ -397,6 +397,48 @@ fn a_refresh_after_a_cut_body_names_every_incomplete_entry() {
     assert!(!nse.json().contains(&cut_today));
 }
 
+/// R4-28 repair 3, a measurement printed on demand: the landing hook (write,
+/// diff, outcome JSON) with 0, [`INCOMPLETE_NAMED`] and 1,000 incomplete
+/// entries held. One listing either way; at most [`INCOMPLETE_NAMED`] named.
+/// Run with `--ignored --nocapture --exact
+/// master_snapshots::tests::measure_the_hook_with_incomplete_entries_held`.
+#[test]
+#[ignore = "a measurement, printed: run on demand"]
+fn measure_the_hook_with_incomplete_entries_held() {
+    const N: usize = 200;
+    let body = dump(&[fut(9_000_051, "ZQIDX26JUNFUT", "2026-06-30", 75)]);
+    for held in [0_usize, INCOMPLETE_NAMED, 1_000] {
+        let dir = scratch(&format!("measure-{held}"));
+        let root = dir.join(SNAPSHOT_DIR);
+        fs::create_dir_all(&root).unwrap();
+        let first = day(2020, 1, 1).days_from_epoch();
+        for n in 0..held {
+            let on = Day::from_days(first + u32::try_from(n).unwrap()).unwrap();
+            fs::write(root.join(file_name(Kind::Kite, stamp(on, 1))), b"cut").unwrap();
+        }
+        let start = day(2026, 1, 1).days_from_epoch();
+        let mut costs: Vec<u128> = (0..N)
+            .map(|n| {
+                let on = Day::from_days(start + u32::try_from(n).unwrap()).unwrap();
+                let began = std::time::Instant::now();
+                let outcome = after_land(&dir, kite_source(), &body, &written(), Ok(on)).unwrap();
+                let json = outcome.json();
+                let cost = began.elapsed().as_micros();
+                assert_eq!(outcome.incomplete.as_ref().map(Vec::len), Ok(held));
+                assert!(json.contains(&format!(r#""held":{held},"#)), "{json}");
+                cost
+            })
+            .collect();
+        costs.sort_unstable();
+        println!(
+            "R4-28 r3 landing hook, {held} incomplete entries held, n={N}: p50 {} us, p99 {} us, max {} us",
+            costs[N / 2],
+            costs[N * 99 / 100 - 1],
+            costs[N - 1]
+        );
+    }
+}
+
 /// R4-28 repair 3: past [`INCOMPLETE_NAMED`] entries the newest are named and
 /// the rest counted, never dropped unseen.
 #[test]
