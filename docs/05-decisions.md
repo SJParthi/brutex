@@ -81054,8 +81054,9 @@ keeps every held bar and refuses a held bar that would change
    sync and rename. An index of the wrong length or a slot that fails its CRC
    answers `quarantine_index_torn` / `quarantine_slot_damaged`, never "clear",
    and is rebuilt from the ledger by the next record or `rebuild`. One writer
-   at a time under `<feed>.quarantine.lock`; a second waits 10 s, then is
-   refused naming the holder.
+   at a time under `<feed>.quarantine.lock`; a second waits up to
+   `store::flock::MAX_PATIENCE` (1 s; written as 10 s until repair 1, a wait
+   the clamp never allowed), then is refused naming the holder.
 3. **`apply_month`** ledgers first, then publishes, then indexes; a second
    apply writes nothing; a run killed between the promotion and its
    `dropped` line is finished from its intent (`Resumed`).
@@ -81128,6 +81129,10 @@ the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation}`,
 4. **Renumbered.** This entry was written as D-7121, an id inside
    BASE-REDS-1021's block (D-7120..D-7129); it is D-7290, from the block
    registered for R4-18.
+5. **The writer's patience is the clamp's.** `WRITER_PATIENCE` read 10 s,
+   but `store::flock::Flock::try_lock_patiently` clamps every wait to
+   `MAX_PATIENCE` (1 s); the constant is now that bound, so neither the code
+   nor this entry claims a wait that never happens.
 
 Repair 1's proof: `store::quarantine::tests::{a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing,
 a_derived_month_recorded_whole_is_not_reopened_by_one_bucket,

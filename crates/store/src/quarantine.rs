@@ -116,8 +116,11 @@ pub const SLOTS: u64 = CAPACITY + BUCKET - 1;
 pub const INDEX_LEN: u64 = HEADER_LEN + SLOTS * SLOT_LEN;
 /// The longest reason a record carries, in bytes.
 pub const MAX_REASON: usize = 200;
-/// How long a second writer waits for the first before it is refused.
-pub const WRITER_PATIENCE: Duration = Duration::from_secs(10);
+/// How long a second writer waits for the first before it is refused: the
+/// store's one bound on a patient lock, [`crate::flock::MAX_PATIENCE`]
+/// (1 s), which `Flock::try_lock_patiently` clamps every wait to. It was
+/// written as 10 s, a wait the clamp never allowed (R4-18 repair 1).
+pub const WRITER_PATIENCE: Duration = crate::flock::MAX_PATIENCE;
 /// The index header's magic.
 pub const MAGIC: [u8; 8] = *b"BRXQIX01";
 /// The ledger's first line.
