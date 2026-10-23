@@ -39,6 +39,24 @@
 //! endpoint is cookie-gated); until one is recorded in `docs/00-charter.md`
 //! every row a store holds is measured.
 //!
+//! # Proven is not lasting (D-7139)
+//!
+//! A step whose factor interval excludes one is PROVEN: the two runs' bands
+//! separate. That alone made a ledger row until the first check of this
+//! package found 770 rows on DATA-1's full input, 289 of them below one and
+//! 648 on the 17 shares whose ratio steps both ways (one share 121 rows
+//! alternating 170/171, 128/129, 66/65 ...). A row is drawn only from a
+//! LASTING step ([`judge`]): no proven step the other way within
+//! [`REVERSAL_DAYS`], each side holding [`HOLD_DAYS`] days with a basis, and
+//! a factor beyond the share's own wobble within [`WOBBLE_DAYS`]. Every
+//! other proven step is a named basis anomaly ([`Anomaly`]): counted,
+//! reported by the checker ([`Finding::BasisAnomaly`]) and never a row.
+//!
+//! A row whose window `(after, ex_date]` holds a session with no basis (a
+//! month missing from the input, days the factor could not be measured)
+//! does not know its ex-date's day ([`Action::day_known`]): a page says
+//! "between", never "at this session".
+//!
 //! # Exact, never a float
 //!
 //! Every ratio is a reduced fraction of integers ([`Ratio`]), every
@@ -110,6 +128,56 @@ pub const DECISION: &str = "D-6892";
 /// disjoint) would be a "corporate action".
 pub const STEP_PERMILLE: u16 = 2;
 
+/// A proven step is LASTING only when each of its two runs holds at least
+/// this many days with a basis ([`Anomaly::Short`] otherwise): a one-session
+/// excursion is not a change of basis. Chosen, not sourced (D-7139): on
+/// DATA-1's full input (105 months, 2018-01..2026-09) no step the other two
+/// rules keep has a side shorter than this, and 498 of the 770 proven steps
+/// have one.
+pub const HOLD_DAYS: u32 = 5;
+
+/// A proven step with a proven step the OTHER way within this many calendar
+/// days of its ex-date, on either side, is [`Anomaly::Reversed`]: the ratio
+/// went back, so neither step is a lasting change of basis. Chosen, not
+/// sourced (D-7139): every share whose ledger the verifier found
+/// alternating (121 rows of one share around 1) steps both ways inside it.
+pub const REVERSAL_DAYS: u32 = 90;
+
+/// The span, in calendar days either side of a step, over which a share's
+/// own reversed steps set its WOBBLE ([`Anomaly::WithinWobble`]): a step is
+/// lasting only when the near end of its factor interval lies farther from
+/// one than the far end of every reversed step's there. The number is the
+/// share's own, generated from its own steps; only the span is chosen
+/// (D-7139).
+pub const WOBBLE_DAYS: u32 = 365;
+
+/// The most days [`session_between`] walks between two days before it
+/// answers that a session may lie there: no stretch of the exchange's
+/// calendar is closed this long, so the walk stops at the first day that is
+/// not closed well before it (one constant bound, never a scan of a range).
+pub const MAX_WINDOW_WALK: u32 = 14;
+
+/// Whether a session MAY lie strictly between `after` and `through`: some
+/// day between them that the canonical calendar
+/// ([`crate::calendar::kind_of`]) does not call closed, or more than
+/// [`MAX_WINDOW_WALK`] days between them. A measured row whose window holds
+/// one does not know its ex-date's day (`Action::day_known`). At most
+/// [`MAX_WINDOW_WALK`] calendar lookups: O(1).
+#[must_use]
+pub fn session_between(after: Day, through: Day) -> bool {
+    let (from, to) = (after.days_from_epoch(), through.days_from_epoch());
+    let between = to.saturating_sub(from).saturating_sub(1);
+    if between > MAX_WINDOW_WALK {
+        return true;
+    }
+    (1..=between).any(|offset| {
+        !matches!(
+            crate::calendar::kind_of(i64::from(from) + i64::from(offset)),
+            crate::calendar::DayKind::Closed
+        )
+    })
+}
+
 // ─────────────────────────────── the fraction ───────────────────────────────
 
 /// An exact positive fraction, reduced, each term at most [`MAX_TERM`].
@@ -158,6 +226,15 @@ impl Ratio {
             ),
         };
         Self::new(num, den)
+    }
+
+    /// `den / num`: reduced already, each term within [`MAX_TERM`].
+    #[must_use]
+    pub const fn inverse(self) -> Self {
+        Self {
+            num: self.den,
+            den: self.num,
+        }
     }
 
     /// The numerator.
@@ -391,6 +468,19 @@ impl Action {
             Tag::Nse => Some(self.kind),
             Tag::Measured => None,
         }
+    }
+
+    /// Whether the row knows its ex-date's DAY: an `nse` row does; a
+    /// measured row does only when no session may lie between the last day
+    /// seen on the old basis and the first day seen on the new
+    /// ([`session_between`]). A row that does not is placed on the first day
+    /// the new basis was seen and must say "between", never "at this
+    /// session": a month missing from the input, or days with no basis,
+    /// leave a window the data never saw. O(1).
+    #[must_use]
+    pub fn day_known(&self) -> bool {
+        self.after
+            .is_none_or(|after| !session_between(after, self.ex_date))
     }
 
     /// The row as the table's fields, in column order.
@@ -1358,6 +1448,10 @@ pub struct Step {
     pub high: Ratio,
     /// The simplest fraction inside `[low, high]`.
     pub factor: Ratio,
+    /// How many days with a basis the old run holds.
+    pub old_days: u32,
+    /// How many days with a basis the new run holds.
+    pub new_days: u32,
 }
 
 impl Step {
@@ -1366,11 +1460,127 @@ impl Step {
     /// a run boundary the measurement cannot tell from no action (a day's
     /// interval moved by more than [`STEP_PERMILLE`], the two runs' bands
     /// did not separate): it ends a run, it makes no ledger row, and the
-    /// checker asks no row of it.
+    /// checker asks no row of it. Proven is NOT lasting: see [`judge`].
     #[must_use]
     pub fn proven(&self) -> bool {
         self.low > Ratio::ONE || self.high < Ratio::ONE
     }
+
+    /// Whether the ratio went up across the step (its whole interval above
+    /// one); a proven step that is not up went down.
+    #[must_use]
+    pub fn up(&self) -> bool {
+        self.low > Ratio::ONE
+    }
+
+    /// The interval's end nearest one, as a factor of at least one: how far
+    /// the step moved AT LEAST, whichever way it went.
+    #[must_use]
+    pub fn near(&self) -> Ratio {
+        if self.up() {
+            self.low
+        } else {
+            self.high.inverse()
+        }
+    }
+
+    /// The interval's end farthest from one, as a factor of at least one:
+    /// how far the step moved AT MOST.
+    #[must_use]
+    pub fn far(&self) -> Ratio {
+        if self.up() {
+            self.high
+        } else {
+            self.low.inverse()
+        }
+    }
+
+    /// Whether a session may lie inside `(after, ex_date]` before the
+    /// ex-date: the data then never saw the day the basis changed.
+    #[must_use]
+    pub fn day_known(&self) -> bool {
+        !session_between(self.after, self.ex_date)
+    }
+}
+
+/// Why a proven step is not a lasting change of basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anomaly {
+    /// A proven step the other way lies within [`REVERSAL_DAYS`]: the ratio
+    /// went back (an excursion, an alternation, a wander).
+    Reversed {
+        /// The nearest such step's first day on its new basis.
+        by: Day,
+    },
+    /// A side holds fewer than [`HOLD_DAYS`] days with a basis.
+    Short {
+        /// The old run's days.
+        old_days: u32,
+        /// The new run's days.
+        new_days: u32,
+    },
+    /// The factor does not clear the share's own wobble within
+    /// [`WOBBLE_DAYS`]: the farthest end of a reversed step there.
+    WithinWobble {
+        /// That far end, as a factor of at least one.
+        wobble: Ratio,
+    },
+}
+
+impl Anomaly {
+    /// The wire word.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Reversed { .. } => "basis_reversed",
+            Self::Short { .. } => "basis_short",
+            Self::WithinWobble { .. } => "basis_within_wobble",
+        }
+    }
+}
+
+impl fmt::Display for Anomaly {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reversed { by } => write!(
+                f,
+                "basis_reversed: a proven step the other way on {by}, within {REVERSAL_DAYS} days"
+            ),
+            Self::Short { old_days, new_days } => write!(
+                f,
+                "basis_short: the runs hold {old_days} and {new_days} days with a basis, fewer \
+                 than {HOLD_DAYS} on a side"
+            ),
+            Self::WithinWobble { wobble } => write!(
+                f,
+                "basis_within_wobble: the share's own reversed steps within {WOBBLE_DAYS} days \
+                 reach a factor of {wobble}"
+            ),
+        }
+    }
+}
+
+/// What the data says a step is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Not proven ([`Step::proven`]): within the measurement's noise.
+    Unproven,
+    /// A LASTING change of basis: proven, each side holds [`HOLD_DAYS`],
+    /// no step back within [`REVERSAL_DAYS`], and beyond the share's own
+    /// wobble. The only verdict that makes a ledger row.
+    Lasting,
+    /// Proven, and still not a lasting change of basis: a named basis
+    /// anomaly, counted and reported, never a row.
+    Anomaly(Anomaly),
+}
+
+/// One step and its verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Judged {
+    /// The step.
+    pub step: Step,
+    /// What the data says it is.
+    pub verdict: Verdict,
 }
 
 /// Every step of `runs` (one share's, by first day). O(runs).
@@ -1393,23 +1603,151 @@ pub fn steps_of(runs: &[Run]) -> Vec<Step> {
                 low,
                 high,
                 factor: Ratio::simplest_between(low, high)?,
+                old_days: old.days,
+                new_days: new.days,
             })
         })
         .collect()
 }
 
-/// The measured rows the steps of `runs` make: one per PROVEN step
-/// ([`Step::proven`]), tagged `measured`, kind `unclassed`, its window and
-/// its evidence named. A
-/// measured row LABELS; it never excuses and never classes.
+/// Calendar days from `a` to `b`, whichever is first.
+fn apart(a: Day, b: Day) -> u32 {
+    a.days_from_epoch().abs_diff(b.days_from_epoch())
+}
+
+/// Every step of `runs` (one share's, by first day) with its verdict
+/// (D-7139): a proven step is LASTING only when
+///
+/// 1. no proven step the other way lies within [`REVERSAL_DAYS`] of it
+///    ([`Anomaly::Reversed`]: an alternation 0.80/0.81/0.80, a one-session
+///    excursion and back, or a ratio that wanders both ways);
+/// 2. each of its runs holds at least [`HOLD_DAYS`] days with a basis
+///    ([`Anomaly::Short`]); and
+/// 3. the near end of its factor interval lies farther from one than the
+///    far end of every reversed step of the same share within
+///    [`WOBBLE_DAYS`] ([`Anomaly::WithinWobble`]): the share's own noise
+///    there, generated from its own steps.
+///
+/// O(steps): one pass each way for the nearest step the other way, and one
+/// monotone window maximum each way for the wobble; no step is compared
+/// with every other.
+#[must_use]
+pub fn judge(runs: &[Run]) -> Vec<Judged> {
+    let steps = steps_of(runs);
+    let n = steps.len();
+    // The nearest proven step the other way, before and after: one pass each.
+    let mut nearest: Vec<Option<Day>> = vec![None; n];
+    let mut last: [Option<Day>; 2] = [None, None];
+    for (at, step) in steps.iter().enumerate() {
+        if !step.proven() {
+            continue;
+        }
+        let side = usize::from(step.up());
+        nearest[at] = last[1 - side];
+        last[side] = Some(step.ex_date);
+    }
+    let mut next: [Option<Day>; 2] = [None, None];
+    for (at, step) in steps.iter().enumerate().rev() {
+        if !step.proven() {
+            continue;
+        }
+        let side = usize::from(step.up());
+        if let Some(after) = next[1 - side] {
+            let closer = nearest[at]
+                .is_none_or(|before| apart(after, step.ex_date) < apart(before, step.ex_date));
+            if closer {
+                nearest[at] = Some(after);
+            }
+        }
+        next[side] = Some(step.ex_date);
+    }
+    let reversed: Vec<Option<Day>> = steps
+        .iter()
+        .zip(&nearest)
+        .map(|(step, by)| by.filter(|by| apart(*by, step.ex_date) <= REVERSAL_DAYS))
+        .collect();
+    // The wobble: the largest far end of a REVERSED step within WOBBLE_DAYS,
+    // a monotone window maximum each way (each step enters and leaves once).
+    let mut wobble: Vec<Ratio> = vec![Ratio::ONE; n];
+    let mut window: std::collections::VecDeque<(Day, Ratio)> = std::collections::VecDeque::new();
+    for (at, step) in steps.iter().enumerate() {
+        while window
+            .front()
+            .is_some_and(|(day, _)| apart(*day, step.ex_date) > WOBBLE_DAYS)
+        {
+            window.pop_front();
+        }
+        if let Some((_, far)) = window.front() {
+            wobble[at] = wobble[at].max(*far);
+        }
+        if step.proven() && reversed[at].is_some() {
+            let far = step.far();
+            while window.back().is_some_and(|(_, held)| *held <= far) {
+                window.pop_back();
+            }
+            window.push_back((step.ex_date, far));
+        }
+    }
+    window.clear();
+    for (at, step) in steps.iter().enumerate().rev() {
+        while window
+            .front()
+            .is_some_and(|(day, _)| apart(*day, step.ex_date) > WOBBLE_DAYS)
+        {
+            window.pop_front();
+        }
+        if let Some((_, far)) = window.front() {
+            wobble[at] = wobble[at].max(*far);
+        }
+        if step.proven() && reversed[at].is_some() {
+            let far = step.far();
+            while window.back().is_some_and(|(_, held)| *held <= far) {
+                window.pop_back();
+            }
+            window.push_back((step.ex_date, far));
+        }
+    }
+    steps
+        .into_iter()
+        .zip(reversed.into_iter().zip(wobble))
+        .map(|(step, (reversed, wobble))| {
+            let verdict = if !step.proven() {
+                Verdict::Unproven
+            } else if let Some(by) = reversed {
+                Verdict::Anomaly(Anomaly::Reversed { by })
+            } else if step.old_days < HOLD_DAYS || step.new_days < HOLD_DAYS {
+                Verdict::Anomaly(Anomaly::Short {
+                    old_days: step.old_days,
+                    new_days: step.new_days,
+                })
+            } else if step.near() <= wobble {
+                Verdict::Anomaly(Anomaly::WithinWobble { wobble })
+            } else {
+                Verdict::Lasting
+            };
+            Judged { step, verdict }
+        })
+        .collect()
+}
+
+/// The measured rows the steps of `runs` make: one per LASTING step
+/// ([`judge`]), tagged `measured`, kind `unclassed`, its window and its
+/// evidence named. A proven step that is not lasting is a basis anomaly and
+/// makes no row. A measured row LABELS; it never excuses and never classes.
 #[must_use]
 pub fn measured_rows(runs: &BasisRuns, generation: u64) -> Vec<Action> {
     let mut rows = Vec::new();
     for symbol in runs.symbols() {
-        for step in steps_of(runs.of(symbol)) {
-            if !step.proven() {
+        for judged in judge(runs.of(symbol)) {
+            if judged.verdict != Verdict::Lasting {
                 continue;
             }
+            let step = judged.step;
+            let window = if step.day_known() {
+                "the ex-date is the first session on the new basis"
+            } else {
+                "the ex-date is UNKNOWN inside the window: a session with no basis lies between"
+            };
             rows.push(Action {
                 symbol: step.symbol.clone(),
                 isin: None,
@@ -1419,8 +1757,9 @@ pub fn measured_rows(runs: &BasisRuns, generation: u64) -> Vec<Action> {
                 tag: Tag::Measured,
                 after: Some(step.after),
                 evidence: format!(
-                    "basis_runs generation {generation}: ratio {} to {}, factor in [{}, {}]",
-                    step.from, step.to, step.low, step.high
+                    "basis_runs generation {generation}: ratio {} to {}, factor in [{}, {}], lasting \
+                     ({} and {} days a side); {window}",
+                    step.from, step.to, step.low, step.high, step.old_days, step.new_days
                 ),
             });
         }
@@ -1435,8 +1774,8 @@ pub fn measured_draft(runs: &BasisRuns, generation: u64, sha256: &str, fetched: 
     Draft {
         table: Table::CorporateActions,
         source: format!(
-            "measured: the ratio steps of basis_runs generation {generation} (cli basis-runs over \
-             DATA-1's per stock-day factor); not an NSE file"
+            "measured: the lasting ratio steps of basis_runs generation {generation} (cli \
+             basis-runs over DATA-1's per stock-day factor, D-7139); not an NSE file"
         ),
         source_sha256: Some(sha256.to_owned()),
         fetched,
@@ -1452,7 +1791,7 @@ pub fn measured_draft(runs: &BasisRuns, generation: u64, sha256: &str, fetched: 
 /// What the checker found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
-    /// A share's ratio stepped and no row lies in the step's window.
+    /// A share's ratio stepped LASTINGLY and no row lies in the step's window.
     NoRow(Step),
     /// Rows lie in the window and their factors' product is outside the
     /// step's interval.
@@ -1465,6 +1804,14 @@ pub enum Finding {
     /// A row that moves the price lies inside one run: the basis never moved
     /// across it.
     RowWithoutStep(Action),
+    /// A proven step that is not a lasting change of basis, with no row in
+    /// its window: named, counted, never a row.
+    BasisAnomaly {
+        /// The step.
+        step: Step,
+        /// Why it is not lasting.
+        why: Anomaly,
+    },
 }
 
 impl Finding {
@@ -1475,6 +1822,7 @@ impl Finding {
             Self::NoRow(_) => "no_row",
             Self::FactorDiffers { .. } => "factor_differs",
             Self::RowWithoutStep(_) => "row_without_step",
+            Self::BasisAnomaly { .. } => "basis_anomaly",
         }
     }
 }
@@ -1510,22 +1858,37 @@ impl fmt::Display for Finding {
                 row.ratio,
                 row.tag.word()
             ),
+            Self::BasisAnomaly { step, why } => write!(
+                f,
+                "basis_anomaly {} ({}, {}]: ratio {} to {}, factor {} in [{}, {}]; {why}",
+                step.symbol,
+                step.after,
+                step.ex_date,
+                step.from,
+                step.to,
+                step.factor,
+                step.low,
+                step.high
+            ),
         }
     }
 }
 
-/// Every ratio step with no row (or with rows of another factor), and every
-/// price-moving row inside one run, in symbol then day order. O(runs + rows).
+/// Every lasting ratio step with no row (or with rows of another factor),
+/// every basis anomaly with no row, and every price-moving row inside one
+/// run, in symbol then day order. O(runs + rows).
 #[must_use]
 pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
     let mut found = Vec::new();
     for symbol in runs.symbols() {
-        for step in steps_of(runs.of(symbol)) {
+        for Judged { step, verdict } in judge(runs.of(symbol)) {
             let rows = actions.labels(symbol, Some(step.after), step.ex_date);
             if rows.is_empty() {
-                // A STEP THE DATA CANNOT TELL FROM NONE asks no row.
-                if step.proven() {
-                    found.push(Finding::NoRow(step));
+                match verdict {
+                    // A STEP THE DATA CANNOT TELL FROM NONE asks no row.
+                    Verdict::Unproven => {}
+                    Verdict::Lasting => found.push(Finding::NoRow(step)),
+                    Verdict::Anomaly(why) => found.push(Finding::BasisAnomaly { step, why }),
                 }
                 continue;
             }
