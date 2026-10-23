@@ -26,9 +26,13 @@
 //! master read is NOT O(1) and is bounded and measured in `docs/06-limits.md`
 //! L-R3-13-4); [`expiry_of`] parses
 //! ten bytes; [`held_month_before`] makes at most [`MONTHS_BACK`] `metadata`
-//! calls, once per page, never per day.
+//! calls, once per page, never per day. Proven by
+//! `api::server::dayflags::rules::tests::the_day_band_is_timed_cold_warm_concurrent_and_growing`
+//! (the page at 1x, 10x and 100x history, the ratio gate) and
+//! `api::server::dayflags::rules::tests::the_cold_auction_era_share_page_is_timed`
+//! (the cold master reads, L-R3-13-4).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -244,8 +248,10 @@ static FLIGHTS: OnceLock<Mutex<HashMap<(PathBuf, u32), Flight>>> = OnceLock::new
 
 /// The process's loads in flight.
 fn flights() -> std::sync::MutexGuard<'static, HashMap<(PathBuf, u32), Flight>> {
+    // Sized once for the parses that can run at once; more flights waiting
+    // than that is a rare rehash, never a scan (gate 11 rule 3).
     FLIGHTS
-        .get_or_init(|| Mutex::new(HashMap::new()))
+        .get_or_init(|| Mutex::new(HashMap::with_capacity(LOADS_AT_ONCE)))
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
 }
@@ -370,7 +376,7 @@ static READS: OnceLock<Mutex<HashMap<(PathBuf, u32), usize>>> = OnceLock::new();
 /// Counts one read of `day`'s master in `dir`.
 #[cfg(test)]
 fn read_counted(dir: &Path, day: Day) {
-    let reads = READS.get_or_init(|| Mutex::new(HashMap::new()));
+    let reads = READS.get_or_init(|| Mutex::new(HashMap::with_capacity(PAGE_DAY_ENTRIES)));
     *reads
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -501,7 +507,7 @@ impl CasFlags {
             identity,
             share,
             dir: root.join("session-masters"),
-            refused: HashMap::new(),
+            refused: HashMap::with_capacity(PAGE_DAY_ENTRIES),
         }
     }
 
@@ -650,8 +656,20 @@ impl SidecarDay {
 }
 
 /// One month's sidecar as a request read it: `None` for no file, else the
-/// IST days its records are stamped on (at most 31 distinct, sorted).
-type SidecarMonth = Option<Vec<u32>>;
+/// IST days its records are stamped on (at most 31 distinct), as a set sized
+/// once by the file's records, so a day is one hash probe, never a sort and a
+/// search (gate 11 rules 1 and 4; R3-13 repair 1).
+type SidecarMonth = Option<HashSet<u32>>;
+
+/// The most months one page of [`super::PAGE_DAYS`] = 92 days can touch: a
+/// page that starts on a month's last day reaches into the fifth month, and
+/// six would need four whole months between its ends, at least 119 days.
+const PAGE_MONTHS: usize = 5;
+
+/// A page's days as a count of map entries: a request asks at most
+/// [`super::PAGE_DAYS`] days, so a map it keys by day holds at most this
+/// many, and is sized for them once (gate 11 rule 3).
+const PAGE_DAY_ENTRIES: usize = super::PAGE_DAYS as usize;
 
 /// Whether a GDFL share's month keeps each day's closing-auction print
 /// apart, read from the `.auc` sidecar beside the one-second month: one
@@ -686,7 +704,7 @@ impl AuctionSidecars {
         Self {
             key,
             root: root.to_path_buf(),
-            seen: HashMap::new(),
+            seen: HashMap::with_capacity(PAGE_MONTHS),
             refused: Vec::new(),
         }
     }
@@ -711,7 +729,7 @@ impl AuctionSidecars {
             .saturating_add(u32::from(day.month()));
         // A MONTH ALREADY READ IS ONE PROBE, AND NOTHING IS COPIED per day.
         if let Some(held) = self.seen.get(&month) {
-            return held.as_ref().map(|held| said_of(held.as_deref(), day));
+            return held.as_ref().map(|held| said_of(held.as_ref(), day));
         }
         let held = match read_month(&self.root, key, day) {
             Ok(held) => Some(held),
@@ -726,18 +744,18 @@ impl AuctionSidecars {
                 None
             }
         };
-        let said = held.as_ref().map(|held| said_of(held.as_deref(), day));
+        let said = held.as_ref().map(|held| said_of(held.as_ref(), day));
         let _was = self.seen.insert(month, held);
         said
     }
 }
 
 /// What a month's sidecar, as read (`None`: no file; else the IST days its
-/// records are stamped on, sorted), says of `day`: one binary search.
-fn said_of(month: Option<&[u32]>, day: Day) -> SidecarDay {
+/// records are stamped on), says of `day`: one hash probe.
+fn said_of(month: Option<&HashSet<u32>>, day: Day) -> SidecarDay {
     match month {
         None => SidecarDay::NoFile,
-        Some(days) if days.binary_search(&day.days_from_epoch()).is_ok() => SidecarDay::Filed,
+        Some(days) if days.contains(&day.days_from_epoch()) => SidecarDay::Filed,
         Some(_) => SidecarDay::NoneThatDay,
     }
 }
@@ -754,19 +772,14 @@ fn read_month(
     let Some(sidecar) = pull::gdfl_cm::auction::read(&path).map_err(|refused| refused.why)? else {
         return Ok(None);
     };
-    let mut days: Vec<u32> = sidecar
-        .records
-        .iter()
-        .filter_map(|record| {
-            let seconds = record
-                .t_micros
-                .div_euclid(1_000_000)
-                .saturating_add(pull::session::IST_OFFSET_SECS);
-            u32::try_from(seconds.div_euclid(86_400)).ok()
-        })
-        .collect();
-    days.sort_unstable();
-    days.dedup();
+    let mut days = HashSet::with_capacity(sidecar.records.len());
+    days.extend(sidecar.records.iter().filter_map(|record| {
+        let seconds = record
+            .t_micros
+            .div_euclid(1_000_000)
+            .saturating_add(pull::session::IST_OFFSET_SECS);
+        u32::try_from(seconds.div_euclid(86_400)).ok()
+    }));
     Ok(Some(days))
 }
 
@@ -909,15 +922,20 @@ pub(super) fn in_window(window: Option<(u32, u32)>, since: i64) -> bool {
 /// 100 s before a halt and 100 s after it are two runs of 100 s, never one of
 /// 200 s.
 fn outside_of((start, end): (u64, u64), windows: [Option<(u32, u32)>; 2]) -> (u64, u64) {
-    let mut cuts: Vec<(u64, u64)> = windows
-        .iter()
-        .flatten()
-        .map(|&(from, to)| (u64::from(from), u64::from(to)))
-        .filter(|(from, to)| from < to)
-        .collect();
-    cuts.sort_unstable();
+    let cut = |window: Option<(u32, u32)>| {
+        window
+            .map(|(from, to)| (u64::from(from), u64::from(to)))
+            .filter(|(from, to)| from < to)
+    };
+    let [first, second] = windows.map(cut);
+    // TWO WINDOWS ARE PUT IN ORDER BY ONE COMPARISON, never a sort (gate 11
+    // rule 4; R3-13 repair 1).
+    let cuts = match (first, second) {
+        (Some(first), Some(second)) if second < first => [Some(second), Some(first)],
+        (first, second) => [first, second],
+    };
     let (mut cursor, mut longest, mut total) = (start, 0_u64, 0_u64);
-    for (from, to) in cuts {
+    for (from, to) in cuts.into_iter().flatten() {
         let stretch = from.min(end).saturating_sub(cursor);
         longest = longest.max(stretch);
         total = total.saturating_add(stretch);
@@ -961,7 +979,9 @@ static SCANS: OnceLock<Mutex<ScanMemo>> = OnceLock::new();
 
 /// The process's kept scans.
 fn scans() -> &'static Mutex<ScanMemo> {
-    SCANS.get_or_init(|| Mutex::new(HashMap::new()))
+    // Sized once for one page of days; the memo then grows by the days the
+    // process shows, one entry each (gate 11 rule 3; L-R3-13-3).
+    SCANS.get_or_init(|| Mutex::new(HashMap::with_capacity(PAGE_DAY_ENTRIES)))
 }
 
 /// Scans by the month file's device and inode and the day's first row:

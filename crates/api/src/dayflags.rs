@@ -1026,7 +1026,10 @@ struct LateClose {
 }
 
 impl LateLedger {
-    /// The last counting close of one kind, day and filter. O(1).
+    /// The last counting close of one kind, day and filter. O(1): one hash
+    /// probe however many journal lines the ledger read, proven by
+    /// `api::server::dayflags::rules::tests::the_day_band_is_timed_cold_warm_concurrent_and_growing`
+    /// (1x, 10x and 100x journals, the warm p50 held by its ratio gate).
     fn get(&self, day: Day, kind: ImportKind, filter: &str) -> Option<LateClose> {
         self.rows
             .get(&(day.days_from_epoch(), kind_slot(kind), filter.to_owned()))

@@ -21511,3 +21511,50 @@ builds, and are stated rather than dropped.
 | L-R3-13-2 | The frozen-index and day-range flags judge only what each feed's measure can see | Zerodha's flag is read from minutes and GDFL's from the import's day ledger; neither reads seconds at request time | **Zerodha:** each index day's one-minute bars once per process, at most 1,440 record reads a day (`MAX_SCAN_BARS`; a day holding more is not scanned and its `frozen` is `null`), a page's first scans on one scoped thread a month on the month's own handle. **GDFL:** `flat_max_s` and `flat_max_at` of the day ledger only, which keep the day's LONGEST unchanged run and nothing shorter: so `flagged` is `false` only where that run is under 180 s, and `null`, never "not frozen", where it lies in the recorded halt or the auction window (every auction-era day the ledger has measured, 2026-09-25..30, from 15:15:00) or has no stamp on such a day — a shorter frozen run elsewhere in that session is NOT MEASURED (D-7135 item 19); a day the ledger does not measure (every import before the field existed, e.g. 2020-03-13 and 2022-03-07) is `null` and says so; a value outside the day range is not judged on GDFL at read time (up to 22,500 seconds a day). **Set aside, never judged:** a recorded halt, and from 2026-08-03 the cash closing auction's window an index is computed through, `[15:15:00, 15:30:00)` from the session tables (D-7135 item 15; the stillness there is measured, `docs/00-charter.md`, its cause UNVERIFIED). The 180 s threshold is chosen, not sourced. On the real store, 2018-2026, Zerodha flags exactly one frozen day for NIFTY and one for BANKNIFTY, 2022-03-07 (before the window was set aside it also flagged all 42 sessions of each from 2026-08-03), and a value outside the day bar's range on 9 NIFTY and 4 BANKNIFTY days | R3-13 |
 | L-R3-13-3 | What the band keeps for the process, and what it reads per page | each is read once and kept so a request does not repeat it; each is bounded by the store, not by the requests | (a) the scan memo holds one entry per (month file, index day) a page has shown, about 130 bytes each: at most the store's Zerodha index days (135 series here; an extrapolation, not a measurement, puts every day of every series at under 100 MB), keyed by the file's (device, inode) and the day's first row, so a new generation of a month is read afresh — on APFS, the store's file system, `store`'s inode-reuse test passes with its files on the store's volume; (b) the previous `1day` bar: 12 opens back, then at most 144 `stat`s and one open, once a page; (c) a share's dated closing-auction flag: that day's NSE master read once a day for every F&O underlying together (one read keeps the 213 flags) and once for each (share, day) outside that list, and the answers kept, never the master (D-7135 item 20; the cold read is L-R3-13-4; a refusal once per request); a GDFL share's `.auc` sidecar: one read of the small file a month a request, each day answered from it by one binary search (closes L-AH03-2 for the band; `sources.rs` stays AG-04's); (d) the late-row ledger: the whole import journal once per process (14.0 MB, the cold cost in L-R3-13-1), then only the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | R3-13 |
 | L-R3-13-4 | A share's dated closing-auction flag read cold: the first auction-era share page of a process | each auction-era day's flag needs that day's NSE master expanded (11 MB, 37,237 records, `docs/00-charter.md`) and parsed by `pull` (`DailyEligibility::parse`, not R3-13's); nothing smaller on disk holds the flag, so a day's first read is a whole-file parse, bounded by `MAX_EXPANDED` and run at most `LOADS_AT_ONCE` = 4 at a time in the process (D-7135 item 20) | **In process, release, n = 200 each, p50 / p99 / max ms** (`the_cold_auction_era_share_page_is_timed` over a read-only shadow of the store, 23 Oct 2026; cold = every kept flag dropped before each ask, the route's other memos warm): Zerodha DALBHARAT 2026-08-10..09-30 (37 auction-era sessions) cold 817 / 963 / 986, its flags alone 752 / 927 / 1,051, ten concurrent cold asks 756 / 765 / 765, warm 1.28 / 1.57 / 1.60; Zerodha RELIANCE 2026-08-03..09-30 (42 sessions) cold 845 / 888 / 889, flags alone 882 / 1,466 / 1,963, ten concurrent 846 / 869 / 869, warm 1.52 / 2.11 / 2.42. **Through the server, ten restarts:** the first auction-era share page of a process (DALBHARAT 08-10..09-30, after 08-03..07 at 154-165 ms) 0.78-0.87 s, against 2.57-3.15 s before this repair and 0.005-0.011 s on the base, which read no master; a second F&O share right after (RELIANCE 08-03..09-30) 2.4-16 ms, every F&O underlying's flag being kept from the first page's reads; a share outside the F&O list (AAVAS) 0.87-0.97 s, its own reads. Ten concurrent cold asks of the DALBHARAT page: 8 answered in 0.76-0.88 s and 2 refused 429 by the server's admission limit, against 4.47-4.53 s before. **Memory:** no master is held — the malloc zone's live bytes stay 6.7 GB across the first auction-era pages (`vmmap -summary`), and the flags add about 17,500 live allocations for 47 days of 213 shares; the process's physical footprint rises 0.6-0.7 GB once (`footprint`), which is libmalloc's cache of the parses' freed large buffers ("Malloc Large (empty)" 386 MB → 1.1 GB), reused by later parses (two more shares over the same 42 days: −0.10 GB and +0.005 GB), against +744 MB for 42 days and +1.39 GB at ten concurrent asks before; that cache's own cap is the allocator's, UNVERIFIED here. Measured after the server's startup census warm settles (about 0.5 GB in its first 10 s, which confounds an earlier reading). **Not met:** the spec's cold target "no slower than today" for this page — about 0.8 s against 5-11 ms — until `pull`'s parse is cheaper (its map reserved for every record, not the 4,428 EQ rows it keeps) or one bounded master memo is shared with `bars_change` and `sources`; both are named for their owners | R3-13 |
+
+### Gate 11 — R3-13, the day band's constructs, read and declared (repair 1, 23 October 2026)
+
+`state/fix/ci-shell-gates.sh --jobs language-purity --fast` on this branch after
+the BASE-GATE11 merge, compared step by step with the same run on feat/db-fix's
+head (`5413c5e3b`): gate 11 refused R3-13's files and nothing else that feat/db-fix
+does not already refuse. Five constructs were rewritten (D-7135 item 24) and the
+rest are declared here, each read before it was counted:
+
+~~~~text
+REWRITTEN -- api/src/dayflags_rules.rs
+  rule 1 + rule 4: a month's auction sidecar was a sorted, deduplicated Vec
+    searched by `binary_search`; it is now a HashSet sized once by the
+    file's records, and a day is one probe (`said_of`).
+  rule 4: the frozen run's two set-aside windows (the recorded halt and the
+    cash closing auction) were sorted; two windows are put in order by one
+    comparison (`outside_of`).
+  rule 3: FLIGHTS (sized for LOADS_AT_ONCE = 4 parses), READS (test only),
+    CasFlags::refused and SCANS (one page, PAGE_DAYS = 92) and
+    AuctionSidecars::seen (PAGE_MONTHS = 5, the most months 92 days touch)
+    are sized once, before they are filled.
+RULE 4 (`ALLOW_SORT`) -- api/src/dayflags_rules.rs 0 -> 1: `CasFlags::refusals`
+  puts one request's refused days in day order: at most one a day of a page
+  of PAGE_DAYS = 92 days, once per request, so the band's refusals read in
+  day order whatever order the page's threads finished in.
+RULE 6 (`ALLOW_SCAN`) -- api/src/dayflags_rules.rs 0 -> 1: `asked_rung` finds
+  the `timeframe=` word in `store::path::Timeframe::KNOWN`, a compile-time
+  table of ten rungs, once per request (`Timeframe::from_secs` searches the
+  same table the same way).
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags_rules.rs 0 -> 1: `said_of`'s
+  `days.contains(..)` is a probe of that HashSet, a hash probe.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags.rs 1 -> 4: beside AF-02's
+  closers list (the 1 declared on 17 October), `QualityLine::SERVED` (three
+  names) asked once per field of a day-ledger line; `FLAGS_VERSIONS` (two
+  versions) asked once per line, IA-16's, merged onto feat/db-fix
+  undeclared (feat/db-fix refuses it at `5413c5e3b`); and `peer.per_day`,
+  one page's peer days, at most PAGE_DAYS = 92, asked once per page whether
+  any holds no file (DB-031's renamed-share lookup).
+~~~~
+
+Gate 23 (`api/src/dayflags_rules_tests.rs`: `eprintln!` 6, `println!` 1, every
+one in an `#[ignore]` timing of a `#[cfg(test)]`-mounted file), gate 12 (two doc
+blocks that claimed a cost and named no test now name
+`the_day_band_is_timed_cold_warm_concurrent_and_growing` and
+`the_cold_auction_era_share_page_is_timed`) and gate 10 (five `✓` rows whose
+proof was a front-end test or a measurement now name the test file or the
+timing tests) were R3-13's on the same run and are fixed in the same change.

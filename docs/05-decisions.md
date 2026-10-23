@@ -82238,5 +82238,26 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     page reaches rather than "2019-06-07 → 2019-06-07", and an open edge reads
     "the run may go on both ways past the days read".
 
+24. **The CI shell gates are run on R3-13's files, and what they refuse is
+    rewritten or declared** (repair 1, after BASE-GATE11 put those gates in
+    the Mac run, D-6620). On this branch, compared step by step with
+    feat/db-fix's head, gates 10, 11, 12 and 23 refused R3-13's files and
+    nothing new besides. Rewritten: a month's auction sidecar is a set sized
+    once by its records, so a day is one hash probe, never a sort and a
+    binary search; the frozen run's two set-aside windows are ordered by one
+    comparison, never a sort; every map is sized once (`PAGE_DAYS`,
+    `PAGE_MONTHS` = 5, `LOADS_AT_ONCE`). Declared, each with its bound in
+    `docs/06-limits.md` ("Gate 11 — R3-13"): one request's refused days put
+    in day order (at most 92), the `timeframe=` word found in the ten-rung
+    `Timeframe::KNOWN`, the sidecar set's probe, and in `dayflags.rs` two
+    compile-time tables (IA-16's `FLAGS_VERSIONS` among them, merged
+    undeclared) and one page's peer days. The ignored timings' seven prints
+    are declared for gate 23; two cost claims name their timing tests (gate
+    12); five rows name their test file or timing tests (gate 10). The
+    bounds are unchanged: these are the same reads in O(1) shapes or with
+    their bound stated, and the band's answers are byte-identical before and
+    after on the shadow's 50 checks.
+
 **Proof:** R313-01 to R313-37 (`docs/04-invariants.md`); the limits are
-L-R3-13-1 to L-R3-13-4 (`docs/06-limits.md`).
+L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
+10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.

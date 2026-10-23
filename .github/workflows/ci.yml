@@ -1954,6 +1954,20 @@ jobs:
           #     parent gave it.
           declared="$declared api/src/bars_sort.rs:println!:1
           api/src/render.rs:println!:2"
+          # ONE MORE FILE, from R3-13 (declared at its repair round 1, 23 Oct
+          # 2026, D-7135 item 24). It is mounted only under `#[cfg(test)]`
+          # (the `#[path]` test module of `api::server::dayflags::rules`), and
+          # every print is in an `#[ignore]` timing, so no production path
+          # reaches any of them:
+          #   api/src/dayflags_rules_tests.rs eprintln! 6: the p50, p99, max
+          #     and n of the day band's warm pages, one client, cold, 60
+          #     clients with an import writing, and the 1x/10x/100x growth of
+          #     `the_day_band_is_timed_cold_warm_concurrent_and_growing`
+          #     (L-R3-13-1); println! 1: the cold, flags-only, ten-concurrent
+          #     and warm p50, p99, max and n of
+          #     `the_cold_auction_era_share_page_is_timed` (L-R3-13-4).
+          declared="$declared api/src/dayflags_rules_tests.rs:eprintln!:6
+          api/src/dayflags_rules_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
