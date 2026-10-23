@@ -373,7 +373,14 @@ fn keep_underlyings(dir: &Path, day: Day, master: &Master) {
 #[cfg(test)]
 static READS: OnceLock<Mutex<HashMap<(PathBuf, u32), usize>>> = OnceLock::new();
 
-/// Counts one read of `day`'s master in `dir`.
+/// The thread that last read each master, by directory and IST day: the proof
+/// that a page's cold days are read on the page's own threads and a lone cold
+/// day on the asking one ([`CasFlags::on_sessions`]; repair 1, the missed
+/// mutants that read every cold day one after another on the asker).
+#[cfg(test)]
+static READ_ON: OnceLock<Mutex<HashMap<(PathBuf, u32), std::thread::ThreadId>>> = OnceLock::new();
+
+/// Counts one read of `day`'s master in `dir`, and the thread that made it.
 #[cfg(test)]
 fn read_counted(dir: &Path, day: Day) {
     let reads = READS.get_or_init(|| Mutex::new(HashMap::with_capacity(PAGE_DAY_ENTRIES)));
@@ -382,6 +389,25 @@ fn read_counted(dir: &Path, day: Day) {
         .unwrap_or_else(PoisonError::into_inner)
         .entry((dir.to_path_buf(), day.days_from_epoch()))
         .or_default() += 1;
+    let _was = READ_ON
+        .get_or_init(|| Mutex::new(HashMap::with_capacity(PAGE_DAY_ENTRIES)))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            (dir.to_path_buf(), day.days_from_epoch()),
+            std::thread::current().id(),
+        );
+}
+
+/// The thread that last read `day`'s master in `dir`, if any did.
+#[cfg(test)]
+pub(super) fn read_on(dir: &Path, day: Day) -> Option<std::thread::ThreadId> {
+    READ_ON.get().and_then(|on| {
+        on.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(dir.to_path_buf(), day.days_from_epoch()))
+            .copied()
+    })
 }
 
 /// How many times `day`'s master in `dir` has been read.

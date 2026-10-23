@@ -579,8 +579,14 @@ fn a_pages_cold_days_are_read_together_each_once() {
     assert_eq!(got[7].basis, CasBasis::NotRequired);
     assert_eq!(got[8].basis, CasBasis::NotYet);
     assert_eq!(flags.refusals().len(), 1, "{:?}", flags.refusals());
+    // READ ON THE PAGE'S THREADS, never one after another on the asker
+    // (repair 1: two missed mutants read every cold day on this thread).
+    let asker = std::thread::current().id();
     for on in held {
         assert_eq!(reads_of(&dir, day(on)), 1, "{on}");
+        let reader = read_on(&dir, day(on));
+        assert!(reader.is_some(), "{on}");
+        assert_ne!(reader, Some(asker), "{on}: read on the page's threads");
     }
     assert_eq!(reads_of(&dir, day("2026-08-25")), 1, "the refused day once");
     assert_eq!(
@@ -615,6 +621,11 @@ fn a_pages_cold_days_are_read_together_each_once() {
         CasFlags::of(&root, "RELIANCE", true).on_sessions(&[(day("2026-08-27"), true, false)]);
     assert_eq!(one[0].eligibility, CasEligibility::Eligible);
     assert_eq!(reads_of(&dir, day("2026-08-27")), 1);
+    assert_eq!(
+        read_on(&dir, day("2026-08-27")),
+        Some(asker),
+        "a lone cold day is read on the asking thread"
+    );
     // A share the universe does not name reads nothing at all.
     let unnamed = CasFlags::of(&root, "NOTASHARE", true).on_sessions(&asks);
     assert!(
