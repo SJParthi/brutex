@@ -616,6 +616,171 @@ fn muhurat_2026_unmeasured_is_one_action_item() {
     );
 }
 
+/// BASE-GATE11 (gate 11 rule 4, D-6629's addendum): the sessions of
+/// unrecorded length are read off the calendar's own day kinds rather than
+/// sorted, so rows handed in out of day order still list ascending, and the
+/// list names exactly the days `kind_of` calls unmeasured, each with its row.
+#[test]
+fn the_unsized_days_are_the_calendars_own_in_day_order() {
+    // The Muhurat test's tag: `scratch` makes each directory unique by
+    // process, serial and clock, and a new tag would be one more
+    // segment-shaped literal for gate 1d to declare.
+    let store = seeded("ref-muhurat");
+    let before = load(&store);
+    let calendar = before.calendar.table().unwrap();
+    // Two weekend days with no row of their own, found, never typed.
+    let quiet: Vec<i64> = (epoch(2026, 3, 1)..epoch(2026, 6, 1))
+        .filter(|d| calendar.kind_of(*d) == DayKind::Closed && calendar.note(*d).is_none())
+        .take(2)
+        .collect();
+    assert_eq!(quiet.len(), 2, "two quiet weekend days: {quiet:?}");
+    let mut draft = seed_draft(Table::Calendar).unwrap();
+    let template = draft
+        .rows
+        .iter()
+        .find(|row| row[1] == "2026-11-08")
+        .cloned()
+        .expect("the Muhurat row, a session of unrecorded length");
+    assert_eq!(template[2], "unmeasured", "{template:?}");
+    // The later day first, both after every other row: out of day order.
+    for (at, d) in quiet.iter().enumerate().rev() {
+        let mut row = template.clone();
+        row[1] = day_of(*d).unwrap().to_string();
+        row[3] = format!("invented unmeasured session {at}");
+        draft.rows.push(row);
+    }
+    write(&store, &draft).unwrap();
+    let after = load(&store);
+    let calendar = after.calendar.table().unwrap();
+    let listed = calendar.unsized_from(calendar.first_day());
+    let days: Vec<i64> = listed.iter().map(|(d, _, _)| *d).collect();
+    let own: Vec<i64> = (calendar.first_day()..=calendar.last_day())
+        .filter(|d| calendar.kind_of(*d) == DayKind::OpenLengthUnmeasured)
+        .collect();
+    assert_eq!(days, own, "the list is the calendar's own unmeasured days");
+    assert!(days.windows(2).all(|w| w[0] < w[1]), "ascending: {days:?}");
+    assert!(days.contains(&epoch(2026, 11, 8)), "{days:?}");
+    for (at, d) in quiet.iter().enumerate() {
+        let item = listed.iter().find(|(day, _, _)| day == d);
+        assert_eq!(
+            item.map(|(_, name, _)| *name),
+            Some(format!("invented unmeasured session {at}").as_str()),
+            "day {d} keeps its own row's name"
+        );
+    }
+    // From a day on, only the days from it.
+    let later = calendar.unsized_from(quiet[1]);
+    assert!(later.iter().all(|(d, _, _)| *d >= quiet[1]), "{later:?}");
+    assert_eq!(later.first().map(|(d, _, _)| *d), Some(quiet[1]));
+}
+
+/// BG11-07's extreme cases: no unmeasured session, a one-day record, the
+/// span's two edge days, asking before, after and at the extremes of `i64`,
+/// the longest span the grammar admits (`MAX_ROWS` days, unmeasured on its
+/// first and last), and one day past it, refused by name before any kind is
+/// built. Every calendar here is invented.
+#[test]
+fn the_unsized_days_hold_at_the_span_edges_and_extremes() {
+    let template = seed_draft(Table::Calendar).unwrap();
+    let source = template
+        .rows
+        .iter()
+        .find(|row| row[1] == "2026-11-08")
+        .map(|row| row[4].clone())
+        .expect("the Muhurat row's citation");
+    let text = |d: i64| day_of(d).unwrap().to_string();
+    let row = |kind: &str, d: i64, windows: &str| -> Vec<String> {
+        vec![
+            kind.to_owned(),
+            text(d),
+            windows.to_owned(),
+            format!("invented {kind}"),
+            source.clone(),
+        ]
+    };
+    let load_rows = |rows: Vec<Vec<String>>| {
+        let store = scratch("ref-muhurat");
+        let mut draft = seed_draft(Table::Calendar).unwrap();
+        draft.rows = rows;
+        write(&store, &draft).unwrap();
+        load(&store)
+    };
+    let listed = |loaded: &Reference, from: i64| -> Vec<i64> {
+        loaded
+            .calendar
+            .table()
+            .unwrap()
+            .unsized_from(from)
+            .iter()
+            .map(|(d, _, _)| *d)
+            .collect()
+    };
+    let first = epoch(2018, 1, 1);
+
+    // No session of unrecorded length: nothing to list, from any day.
+    let none = load_rows(vec![row("first", first, "-"), row("last", first + 30, "-")]);
+    for from in [i64::MIN, first, first + 30, i64::MAX] {
+        assert!(listed(&none, from).is_empty(), "from {from}");
+    }
+
+    // A one-day record whose one day is unmeasured.
+    let one = load_rows(vec![
+        row("first", first, "-"),
+        row("last", first, "-"),
+        row("session", first, "unmeasured"),
+    ]);
+    assert_eq!(listed(&one, i64::MIN), vec![first]);
+    assert_eq!(listed(&one, first), vec![first]);
+    assert!(listed(&one, first + 1).is_empty());
+
+    // Both edge days, the last one's row first.
+    let last = first + 400;
+    let edges = load_rows(vec![
+        row("session", last, "unmeasured"),
+        row("first", first, "-"),
+        row("session", first, "unmeasured"),
+        row("last", last, "-"),
+    ]);
+    assert_eq!(listed(&edges, i64::MIN), vec![first, last]);
+    assert_eq!(listed(&edges, first + 1), vec![last]);
+    assert_eq!(listed(&edges, last), vec![last]);
+    assert!(listed(&edges, last + 1).is_empty());
+    assert!(listed(&edges, i64::MAX).is_empty());
+    let calendar = edges.calendar.table().unwrap();
+    assert_eq!(calendar.kind_of(first - 1), DayKind::Unmeasured);
+    assert_eq!(calendar.kind_of(last + 1), DayKind::Unmeasured);
+
+    // The longest span the grammar admits: one pass over MAX_ROWS days.
+    let far = first + i64::try_from(MAX_ROWS).unwrap() - 1;
+    let longest = load_rows(vec![
+        row("first", first, "-"),
+        row("last", far, "-"),
+        row("session", far, "unmeasured"),
+        row("session", first, "unmeasured"),
+    ]);
+    assert_eq!(listed(&longest, i64::MIN), vec![first, far]);
+    assert_eq!(listed(&longest, first + 1), vec![far]);
+
+    // One day longer is refused by name before it lands: the writer builds
+    // the table it is about to publish, so no generation is written.
+    let store = scratch("ref-muhurat");
+    let mut draft = seed_draft(Table::Calendar).unwrap();
+    draft.rows = vec![row("first", first, "-"), row("last", far + 1, "-")];
+    match write(&store, &draft) {
+        Err(WriteError::Refused(why)) => {
+            assert_eq!(why.kind, RefusalKind::Row, "{why:?}");
+            assert!(why.detail.contains("longer than"), "{}", why.detail);
+        }
+        other => panic!("a span past MAX_ROWS days must be refused: {other:?}"),
+    }
+    assert!(!Table::Calendar.path(&store, 1).exists(), "nothing landed");
+    assert_ne!(
+        load(&store).calendar.origin(),
+        "store",
+        "nothing is served from the store"
+    );
+}
+
 #[test]
 fn a_calendar_change_that_closes_a_held_day_is_named_before_it_is_applied() {
     let store = seeded("ref-retract");
