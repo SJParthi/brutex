@@ -2641,6 +2641,29 @@ const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 
      stock_options stop store_not_writable text throttle ticks tok-dead tok-one \
      tolerance two_files_for_one_day unplug value verdict verified wait waited_ms \
      waiting wanted zip_holds_no_member zip_unreadable";
+// IA-9 (D-4811, D-4857, D-4858, D-4881): `pull::zerodha_verify`, its spool
+// and `pull::verdict_words`. The verdict store's reason and detail words
+// (`answer_short`, `body_unreadable`, `rung_day_absent`, `pull_halted`,
+// `vendor_shape`, ...), alert kind 21's word `vendor_shape_changed`, the
+// runs-ledger modes `zerodha-verify` and `verify-merge`, the spool tree's own
+// words (`spool`, `spools`, `vsp`, `log`, `merge`), the telemetry and progress
+// fields its events carry (`torn_at`, `unsynced_at`, `stray`, `faults`, ...),
+// the scratch-directory tags of its tests (`badbody`, `walk-stray`,
+// `window-shape`, `w0`..`w99`, `width-0`..`width-stop`, `log-index`, ...), the worker
+// thread names `zerodha-cold` and `zerodha-merge`, the invented answer
+// field `meta` a test adds to a body, the word `no_such_word` a test looks
+// up and fails, the repair round's words (22 Oct 2026: the refusals
+// `run_live_busy` and `spool_full`, detail kind 21's word
+// `daycheck_not_run`, the merge event's `holder` and `live_runs` fields,
+// the live lock's folder `live` and the io actions `lock` and `open`, and
+// the scratch tags `cover`, `dayonly`, `live-many`, `orphan-log`,
+// `torn-detail` and `torn-detail-extra`; 23 Oct 2026, repair 2: the merge
+// event's `live_locks_peak` field and the scratch tags `cut-partial`,
+// `live-locks` and `refused-open`),
+// and the digit `21` (the kind number and a bench label). None names an
+// account, an environment, a vendor credential or a field of a parameter
+// path.
+const IA9_LITERAL: &str = "21 answer_short badbody body_unreadable damaged daycheck dup_minutes extreme faults fromstore generations impossible-kept impossible-same index_bucket_incomplete intent kept-diff landed_from_store landing_refused log log-index lost merge merge_log_damaged meta midhole month_busy month_refused neither_vendor_has_it no_such_word noledger not_regular observed origin out_of_order peer peer-absent peer-day-absent peer-day-held peer-minute-traded peer-torn placement pre_ledger progress-cold progress-link progress-merge pull_halted quality_differs receipts record_refused refusal repaired-differs repaired-match repull resumed root rung_day_absent spool spool_header_refused spools stop-between stray sweep sync threads torn_at torn_bytes underlying_files unkept unknown_stems unsynced_at vendor_hole vendor_shape vendor_shape_changed verify-merge vsp w0 w1 w4 w99 walk-stray width-0 width-1 width-4 width-99 width-stop window-shape zerodha-cold zerodha-merge zerodha-verify cover daycheck_not_run dayonly holder live live-many live_runs lock open orphan-log run_live_busy spool_full torn-detail torn-detail-extra cut-partial live-locks live_locks_peak refused-open";
 
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
@@ -2680,6 +2703,17 @@ const R4_17_LITERAL: &str = "before_listing columns day-before-listing day-range
      passed-over-master passed_over removal rs security_id server session-masters struct target \
      torn-one-month \
      type undated undated_master_name unknowns unread-day zero-minute zero-unread-day";
+
+// CAL-1 (repair round 1, 21 Oct 2026): the serial numbers of the five NSE
+// holiday circulars `pull::calendar::HOLIDAY_CIRCULARS` records, which gate 1d
+// splits out of each row's `number` (`NSE/CMTR/36475` and so on, the spelling
+// NSE prints and `docs/00-charter.md` records with its address): 2018's list
+// NSE/CMTR/36475, 2019's NSE/CMTR/39612 and its two additions NSE/CMTR/40536
+// and NSE/MSD/42319, and 2026's NSE/CMTR/71775. Each is a public exchange
+// circular's number, never an account, an environment, a vendor credential or
+// a field of a parameter path. A circular appended to the table brings its
+// serial here in the same change.
+const CAL1_CIRCULAR_SERIAL: &str = "36475 39612 40536 42319 71775";
 
 // THE PACKAGES MERGED ON 14 AND 15 OCTOBER 2026, AFTER GF-1'S LAST RUN
 // (GF-1, 16 Oct 2026). AF-03 (the cash-session masters' day lock), R3-16
@@ -2810,8 +2844,47 @@ const MERGED_17_OCT_C_LITERAL: &str = "-rf abc1234 approv approval check checks 
      step step_closed tick-day-import token-refresh truncate unlink unlinkat withdrawn \
      writer_changed yes";
 
+// PIT-1 (D-5160 to D-5169): the point-in-time F&O membership's module
+// `pull::fno_membership`, its tests and its ratio bench
+// (`benches/ratio/fno_membership.rs`). Each was read before it was listed, in
+// three kinds. (1) The format's own words: `fnm`, the month file's extension;
+// `-g`, the separator before a month file's generation (`2024-03-g000001.fnm`);
+// `fno-membership-v1`, its directory name under a store's `reference/` (and
+// the domain tag of the file digest); `inferred_gdfl_options`, the source
+// label every row carries; `measured`, the label of a measured handover.
+// (2) The words of `DayStatus::word` and the
+// reasons a day or a handover candidate is refused (`known`, `not_a_session`,
+// `no_source`, `no_calendar`, `no_share_options`, `source_on_closed_day`,
+// `handover`, `minority`, `pool`, `running`, `span`). (3) Test labels: the
+// scratch folder names the tests make under the system temp directory
+// (`both-sides`, `day-by-day`, `decoder`, `digest-a`, `digest-b`, `digest-c`,
+// `fail-cut`, `fail-once`, `generations`, `kill-cut`, `kill-once`,
+// `no-calendar`, `one-pass`, `overlap`, `refused-once`, `sourced-rename`,
+// `stray-daily`, `untraded`, `carry`, `changed`, `damaged`, `expired`, `spans`,
+// `stray`, `two-once`). None names an account, an environment, a vendor
+// credential or a field of a parameter path.
+const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known not_a_session \
+     no_source no_calendar no_share_options source_on_closed_day handover minority pool \
+     running span both-sides day-by-day decoder digest-a digest-b digest-c fail-cut fail-once \
+     generations kill-cut kill-once no-calendar one-pass overlap refused-once sourced-rename \
+     stray-daily untraded -g measured carry changed damaged expired spans stray two-once";
+
+// The cloud mutation pass over `crates/pull` (reports/cloud-mut-pull-20261017.md):
+// `proc` and `self` are the two directories of the Linux path
+// `/proc/self/status`, which `cash_session_cache`'s `read_limited` test reads
+// because procfs states a length of 0 for a file that yields more, the one
+// regular file that reaches the read's own length recheck. `08` is the month
+// field of the invented GDFL row date `04/08/2026` the closing-auction tests
+// of `pull/tests/cloud_mutants_import.rs` write, a `DD/MM/YYYY` the slash
+// splits; `msg` is the key of the telemetry JSON line one of them reads back.
+// `linux` is the `target_os` value of the `cfg` that compiles that procfs test
+// on Linux alone: macOS, the store's host, has no `/proc` (CLOUD-MUTPULL).
+// None names an account, an environment, a vendor credential or a field of a
+// parameter path.
+const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 71] = [
+const DECLARED: [&str; 75] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2882,7 +2955,11 @@ const DECLARED: [&str; 71] = [
     MERGED_17_OCT_C_LITERAL,
     R3_35_LITERAL,
     R4_07_LITERAL,
+    PIT_1_LITERAL,
+    CLOUD_MUT_PULL_LITERAL,
     R4_17_LITERAL,
+    CAL1_CIRCULAR_SERIAL,
+    IA9_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

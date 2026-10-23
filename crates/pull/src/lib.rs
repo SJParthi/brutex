@@ -141,6 +141,10 @@ pub mod disk_projection;
 pub mod expiry_alias;
 pub mod fetch;
 pub mod fno;
+/// Point-in-time F&O membership: which shares had a listed stock derivative on
+/// each day, from our own GDFL options listings, as dated append-only month
+/// files. D-5160..D-5165.
+pub mod fno_membership;
 /// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
 /// contracts, so the expired-derivative backfill can drive itself the way the
 /// spot one already does.
@@ -186,6 +190,10 @@ pub mod gdfl_run;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
+/// The `_v3` extraction ledger, read only, as evidence never a source: the
+/// manifest of an options day, trusted by its ok marker, against the day's
+/// listing. D-4814, D-4867.
+pub mod gdfl_v3;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an
@@ -194,6 +202,8 @@ pub mod gdfl_tickstore;
 pub mod groww;
 pub mod http;
 pub mod ingest;
+/// The one append of every `audit/<vendor>.<name>` ledger (IA-16, D-4888).
+pub use ingest::audit_ledger;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
 /// A CASH security's listing day and end of history, from the receipted NSE
@@ -216,6 +226,11 @@ pub mod nse;
 pub mod nseindex;
 pub mod pricing;
 pub mod rate;
+/// Reference tables as store data, through ONE loader (R3-30): the calendar
+/// of record, index identity rows, symbol changes, the F&O list, moved
+/// expiries, lot sizes and the risk-free rate, each with source, checksum
+/// and date, refused by name when it fails its checksum.
+pub mod reference_data;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
 /// which no retry decision in this workspace read before this module.
 ///
@@ -261,9 +276,19 @@ pub mod totp;
 /// The step that makes a download a verification: every published name lands in
 /// exactly one bucket and the buckets sum, so a join defect is findable.
 pub mod universe;
+/// One upkeep run: a store builder over many items as a tracked run, with a
+/// run id, a journal, workers, Stop and resume (R3-17).
+pub mod upkeep;
 
 pub mod vendor;
+/// The words a verdict record's opaque reason and detail numbers stand for, one
+/// append-only table for every feed (IA-9; D-4809).
+pub mod verdict_words;
 pub mod work;
+/// Zerodha verification: the landing oracle, every stored rung, completeness by
+/// the gap ledger's reason, the cold sweep, the spool and its merge (IA-9;
+/// D-4811, D-4857, D-4858, D-4881, D-4921).
+pub mod zerodha_verify;
 
 /// Every `telemetry::emit` in this crate, proved to reach a file.
 ///

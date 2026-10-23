@@ -1086,6 +1086,23 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
                 .or_default()
                 .extend(expect.bars.into_iter().filter(|b| in_session(*on, b)));
         }
+        // ADAPTED (IA-16; D-4872, D-4833): an unfiltered day whose every
+        // entry lies outside the day folder is refused `no_wanted_file`; an
+        // unfiltered indices day with a file that lacks a swept index names
+        // it `absent_from_listing`. Both are the day's failures, no entry's.
+        if only.is_empty() {
+            if seen.is_empty() {
+                if !entries.is_empty() && entries.iter().all(|e| matches!(e, Cm::Stray)) {
+                    late.push((format!("{on} listing"), "held no wanted file"));
+                }
+            } else if kind == CmKind::Indices {
+                for (_, swept) in INDEX_NAMES {
+                    if !seen.iter().any(|name| symbol_static(kind, name) == swept) {
+                        late.push((format!("{on} {swept}"), "absent from the day's listing"));
+                    }
+                }
+            }
+        }
         want.failures.extend(late);
         // ADAPTED (D-3317): a day closes `done` with no failure, or with
         // refusals when at least one file read clean and every refusal is the

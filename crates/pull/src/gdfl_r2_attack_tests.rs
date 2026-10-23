@@ -830,6 +830,15 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                 .or_default()
                 .extend(kept);
         }
+        // ADAPTED (IA-16, D-4872, FM-038): an unfiltered day whose every
+        // entry lies outside the day's Options folder is refused
+        // `no_wanted_file`, a failure of the day and of no entry.
+        if only.is_empty()
+            && !entries.is_empty()
+            && entries.iter().all(|e| matches!(e, Entry::Other))
+        {
+            late_failures.push((format!("{on} listing"), "held no wanted file"));
+        }
         want.failures.extend(late_failures);
         if closes(want.failures.get(before..).unwrap_or_default(), read_clean) {
             want.clean_days += 1;

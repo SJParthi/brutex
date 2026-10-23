@@ -93,6 +93,10 @@ use crate::{FAILED, MISUSED, OK};
 /// The door around the importer (AF-01).
 #[path = "gdfl_import_guard.rs"]
 mod guard;
+/// The import's run lock, which `cli upkeep`'s tests take to stand for a
+/// live import (R3-17, D-6270 amendment 1: the upkeep itself takes none).
+#[cfg(test)]
+pub(crate) use guard::{Holder, RunLock};
 
 pub(crate) use pull::gdfl_run::{CM_ARCHIVE_VAR, NFO_ARCHIVES_VAR, TICKSTORE_VAR};
 /// The flag that reads again the days closed done with refusals (D-3317).
@@ -101,6 +105,12 @@ pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
 pub(crate) const STORED: &str = "--stored";
 /// The flag that names the run's snapshot (D-4902): `--snapshot NAME`.
 pub(crate) const SNAPSHOT: &str = "--snapshot";
+/// The flag that carries the operator's repair reason (IA-16, D-4889):
+/// `--repair-reason TEXT`, 1 to 200 bytes on one line.
+pub(crate) const REPAIR_REASON: &str = "--repair-reason";
+/// The flag that accepts a repair in a month still being traded (IA-16,
+/// D-4876 (2), D-6900 keep item 3).
+pub(crate) const ACCEPT_OPEN_MONTH: &str = "--accept-open-month";
 /// How many workers read and file one day's files (WP-16): optional, 1 to
 /// `pull::gdfl_import::Workers::MAX`; absent is the import's default for
 /// this host's cores (`Workers::for_host`). The bytes a run leaves do not
@@ -110,6 +120,11 @@ pub(crate) const WORKERS_VAR: &str = "BRUTEX_GDFL_WORKERS";
 /// (the measured default), `day-each-file` or `each-write`. The bytes a run
 /// leaves do not depend on it.
 pub(crate) const DURABILITY_VAR: &str = "BRUTEX_GDFL_DURABILITY";
+/// The free-space floor in bytes the run checks before its first day and
+/// before each day it reads (IA-16, CONC-031, D-6900 keep item 5): optional,
+/// a count of bytes; absent is `pull::gdfl_import::DEFAULT_FREE_FLOOR`, and
+/// `0` checks nothing. Read here and carried in the request (D-4901).
+pub(crate) const FREE_FLOOR_VAR: &str = "BRUTEX_GDFL_FREE_FLOOR";
 
 /// The words after `TO`: whether `--retry-refused` and `--stored` were
 /// given (each a flag anywhere among them, never a symbol), the snapshot
@@ -121,42 +136,77 @@ pub(crate) const DURABILITY_VAR: &str = "BRUTEX_GDFL_DURABILITY";
 /// (`--snapshot --stored` once dropped `--stored` without a word), a second
 /// `--snapshot`, and a word beginning with `-` that is not one of the
 /// verb's flags (never filed as a symbol) (D-5831).
-fn flags_of(words: &[&str]) -> Result<(bool, bool, Option<String>, Vec<String>), String> {
-    let mut symbols = Vec::with_capacity(words.len());
-    let (mut retry, mut stored, mut snapshot) = (false, false, None);
+fn flags_of(words: &[&str]) -> Result<Flags, String> {
+    let mut flags = Flags {
+        symbols: Vec::with_capacity(words.len()),
+        ..Flags::default()
+    };
     let mut rest = words.iter();
     while let Some(word) = rest.next() {
         match *word {
-            RETRY_REFUSED => retry = true,
-            STORED => stored = true,
+            RETRY_REFUSED => flags.retry = true,
+            STORED => flags.stored = true,
+            ACCEPT_OPEN_MONTH => flags.accept_open_month = true,
             SNAPSHOT => {
-                if snapshot.is_some() {
-                    return Err(format!(
-                        "{SNAPSHOT} is given twice; a run has one snapshot name"
-                    ));
-                }
-                match rest.next() {
-                    Some(name) if !name.starts_with('-') => snapshot = Some((*name).to_owned()),
-                    Some(flag) => {
-                        return Err(format!(
-                            "{SNAPSHOT} takes a NAME after it; {} is a flag, not a name",
-                            shown_word(flag)
-                        ));
-                    }
-                    None => return Err(format!("{SNAPSHOT} takes a NAME after it")),
-                }
+                flags.snapshot = Some(value_of(
+                    SNAPSHOT,
+                    "NAME",
+                    flags.snapshot.is_some(),
+                    rest.next(),
+                )?);
+            }
+            REPAIR_REASON => {
+                flags.repair_reason = Some(value_of(
+                    REPAIR_REASON,
+                    "TEXT",
+                    flags.repair_reason.is_some(),
+                    rest.next(),
+                )?);
             }
             flag if flag.starts_with('-') => {
                 return Err(format!(
-                    "{} is not a flag of gdfl-import; its flags are {RETRY_REFUSED}, {STORED} \
-                     and {SNAPSHOT} NAME",
+                    "{} is not a flag of gdfl-import; its flags are {RETRY_REFUSED}, {STORED}, \
+                     {SNAPSHOT} NAME, {REPAIR_REASON} TEXT and {ACCEPT_OPEN_MONTH}",
                     shown_word(flag)
                 ));
             }
-            symbol => symbols.push(symbol.to_owned()),
+            symbol => flags.symbols.push(symbol.to_owned()),
         }
     }
-    Ok((retry, stored, snapshot, symbols))
+    Ok(flags)
+}
+
+/// The word after a flag that takes one (`--snapshot NAME`,
+/// `--repair-reason TEXT`): refused when the flag is given twice, when
+/// nothing follows, or when a flag stands where the value goes.
+fn value_of(flag: &str, what: &str, again: bool, next: Option<&&str>) -> Result<String, String> {
+    if again {
+        return Err(format!("{flag} is given twice; a run has one {what}"));
+    }
+    match next {
+        Some(value) if !value.starts_with('-') => Ok((*value).to_owned()),
+        Some(other) => Err(format!(
+            "{flag} takes a {what} after it; {} is a flag, not a {what}",
+            shown_word(other)
+        )),
+        None => Err(format!("{flag} takes a {what} after it")),
+    }
+}
+
+/// What the words after `TO` ask ([`flags_of`]).
+#[derive(Debug, Default)]
+struct Flags {
+    retry: bool,
+    stored: bool,
+    snapshot: Option<String>,
+    /// `--repair-reason TEXT` (IA-16, D-4889, critic X-1 (b)): the one run
+    /// that reads the repairable hole days of its range and hands a month
+    /// the store refused to the back-fill door. Judged by
+    /// `pull::ingest::repair_reason_ok`, the rule both feeds use.
+    repair_reason: Option<String>,
+    /// `--accept-open-month` (IA-16, D-4876 (2), D-6900 keep item 3).
+    accept_open_month: bool,
+    symbols: Vec<String>,
 }
 
 /// A word of the command line as a refusal shows it: debug-quoted, so a
@@ -220,6 +270,25 @@ pub(crate) fn durability_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Du
         .map_err(|why| format!("{DURABILITY_VAR}: {why}"))
 }
 
+/// The floor `BRUTEX_GDFL_FREE_FLOOR` asks for, or the import's default
+/// when it is not set; a value that is not a count of bytes is refused by
+/// name, never read as the default.
+pub(crate) fn free_floor_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<u64, String> {
+    let Some(value) = env(FREE_FLOOR_VAR) else {
+        return Ok(pull::gdfl_import::DEFAULT_FREE_FLOOR);
+    };
+    value
+        .to_str()
+        .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| {
+            format!(
+                "{FREE_FLOOR_VAR}={} is not a count of bytes",
+                value.display()
+            )
+        })
+}
+
 /// The root a variable names, or the refusal naming the variable
 /// (`pull::gdfl_run::source_root`'s words, one authority).
 pub(crate) fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
@@ -256,14 +325,18 @@ fn asked(
         )
     })?;
     let (workers, durability) = (workers_of(env)?, durability_of(env)?);
-    let (retry_refused, stored, snapshot, only) = flags_of(rest)?;
+    let free_floor = free_floor_of(env)?;
+    let flags = flags_of(rest)?;
     Ok(Request {
-        only,
-        stored,
-        retry_refused,
+        only: flags.symbols,
+        stored: flags.stored,
+        retry_refused: flags.retry,
         workers,
         durability,
-        snapshot,
+        snapshot: flags.snapshot,
+        repair_reason: flags.repair_reason,
+        accept_open_month: flags.accept_open_month,
+        free_floor,
         ..Request::new(Kinds::one(kind), source, (from, to))
     })
 }
@@ -679,6 +752,84 @@ fn cli_store() -> Result<PathBuf, String> {
     crate::store_root()
 }
 
+/// How many hole days a receipt names per reason before it says how many
+/// more there are.
+const HOLE_DAYS_NAMED: usize = 5;
+
+/// A receipt's hole days by reason (IA-16, D-6900 keep item 2): `0`, or the
+/// count, then each reason in first-seen order with its count, whether a
+/// repair-reason run reads it, and its first [`HOLE_DAYS_NAMED`] days.
+/// O(holes in the run's range).
+fn holes(days: &[(Day, String)]) -> String {
+    if days.is_empty() {
+        return "0".to_owned();
+    }
+    let mut reasons: Vec<(&str, Vec<Day>)> = Vec::new();
+    for (day, reason) in days {
+        match reasons.iter_mut().find(|(one, _)| *one == reason.as_str()) {
+            Some((_, list)) => list.push(*day),
+            None => reasons.push((reason.as_str(), vec![*day])),
+        }
+    }
+    let mut text = days.len().to_string();
+    for (reason, list) in &reasons {
+        let named: Vec<String> = list
+            .iter()
+            .take(HOLE_DAYS_NAMED)
+            .map(ToString::to_string)
+            .collect();
+        let more = list.len().saturating_sub(HOLE_DAYS_NAMED);
+        let _ = write!(
+            text,
+            "; {reason} {} ({}): {}{}",
+            list.len(),
+            if pull::gdfl_import::hole_is_repairable(reason) {
+                "a run with a repair reason reads it"
+            } else {
+                "no repair fills it"
+            },
+            named.join(" "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        );
+    }
+    text
+}
+
+/// The store's standing holes by kind and reason (IA-16, D-6900 keep item
+/// 2), from the journal the run loaded: `0`, or the count, then each
+/// `kind reason=n`.
+fn standing(holes: &[(String, String, usize)]) -> String {
+    if holes.is_empty() {
+        return "0 in the whole store".to_owned();
+    }
+    let total: usize = holes.iter().map(|(_, _, n)| n).sum();
+    let each: Vec<String> = holes
+        .iter()
+        .map(|(kind, reason, n)| format!("{kind} {reason}={n}"))
+        .collect();
+    format!("{total} in the whole store: {}", each.join(", "))
+}
+
+/// THE HOLES, ON THE ONE PER-RUN SURFACE THERE IS (IA-16, D-6900 keep item
+/// 2): a hole `admit` passed over is never a day already done.
+fn render_holes(out: &mut String, report: &Report) {
+    let _ = writeln!(
+        out,
+        "  holes passed        {}",
+        holes(&report.holes_in_range)
+    );
+    let _ = writeln!(out, "  holes made          {}", holes(&report.holes_made));
+    let _ = writeln!(
+        out,
+        "  standing holes      {}",
+        standing(&report.standing_holes)
+    );
+}
+
 /// The run's receipt.
 fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report: &Report) {
     let _ = writeln!(
@@ -693,6 +844,7 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     );
     let _ = writeln!(out, "  days imported       {}", report.days_imported);
     let _ = writeln!(out, "  days already done   {}", report.days_skipped);
+    render_holes(out, report);
     let _ = writeln!(out, "  days closed         {}", report.days_closed);
     let _ = writeln!(out, "  days refused        {}", report.days_refused);
     let days = |list: &[Day]| {

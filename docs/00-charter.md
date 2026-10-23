@@ -230,6 +230,59 @@ here.
 2026 has an announced Muhurat date (2026-11-08) with **no notified timings**.
 It is therefore absent rather than guessed.
 
+**The notices of record, read 16 Oct 2026 (CAL-1, D-5152).** Every special
+session from 2018 to 2026 above now has the exchange's own notice beside its
+measurement. Each PDF was fetched from `nsearchives.nseindia.com` on
+2026-10-16 and read as text (`pdftotext`); only its number, date and the
+normal-market times are recorded. `pull::calendar::SESSION_CIRCULARS` holds
+these rows, and
+`pull::calendar::tradable_tests::every_special_day_has_its_notice_and_the_notice_window_is_the_measured_one`
+fails the build if a notice's window and the measured window above ever
+disagree. Today they agree on every row. An end time is exclusive: "18:15 to
+19:15 hrs" is the sixty minute bars 18:15–19:14.
+
+| Date | Kind | Notice | Normal market as notified |
+|---|---|---|---|
+| 2018-11-07 (Wed) | Muhurat | [NSE/CMTR/39216](https://nsearchives.nseindia.com/content/circulars/CMTR39216.pdf), 23 Oct 2018 | 17:30 – 18:30 ("Normal Market/LPM") |
+| 2019-10-27 (Sun) | Muhurat | [NSE/CMTR/42483](https://nsearchives.nseindia.com/content/circulars/CMTR42483.pdf), 23 Oct 2019, revised timings, "in partial modification" of NSE/CMTR/42403 of 15 Oct 2019 | 18:15 – 19:15 |
+| 2020-02-01 (Sat) | Budget weekend | [NSE/CMTR/43290](https://nsearchives.nseindia.com/content/circulars/CMTR43290.pdf), 22 Jan 2020, live trading session for the Union Budget | 09:15 – 15:30 |
+| 2020-11-14 (Sat) | Muhurat | [NSE/CMTR/46230](https://nsearchives.nseindia.com/content/circulars/CMTR46230.pdf), 2 Nov 2020 | 18:15 – 19:15 |
+| 2021-11-04 (Thu) | Muhurat | [NSE/CMTR/50050](https://nsearchives.nseindia.com/content/circulars/CMTR50050.pdf), 21 Oct 2021 | 18:15 – 19:15 |
+| 2022-10-24 (Mon) | Muhurat | [NSE/CMTR/54023](https://nsearchives.nseindia.com/content/circulars/CMTR54023.pdf), 11 Oct 2022 | 18:15 – 19:15 |
+| 2023-11-12 (Sun) | Muhurat | [NSE/CMTR/59124](https://nsearchives.nseindia.com/content/circulars/CMTR59124.pdf), 27 Oct 2023 | 18:15 – 19:15 |
+| 2024-01-20 (Sat) | Weekend full session | [NSE/MSD/60340](https://nsearchives.nseindia.com/content/circulars/MSD60340.pdf), 19 Jan 2024: "regular trading sessions ... as per regular market timings" from the primary site; it withdrew NSE/MSD/59999 (28 Dec 2023), NSE/MSD/60300 and NSE/MSD/60318, which had planned a disaster-recovery switch-over session that Saturday | regular hours, 09:15 – 15:30. WHY the day became a full session it does not say: still UNVERIFIED |
+| 2024-03-02 (Sat) | DR drill | [NSE/MSD/60677](https://nsearchives.nseindia.com/content/circulars/MSD60677.pdf), 14 Feb 2024; reminder [NSE/MSD/60942](https://nsearchives.nseindia.com/content/circulars/MSD60942.pdf), 1 Mar 2024 | 09:15 – 10:00 (primary site) and 11:30 – 12:30 (DR site) |
+| 2024-05-18 (Sat) | DR drill | [NSE/MSD/61893](https://nsearchives.nseindia.com/content/circulars/MSD61893.pdf), 7 May 2024 | 09:15 – 10:00 and 11:30 – 12:30 |
+| 2024-11-01 (Fri) | Muhurat | [NSE/CMTR/64628](https://nsearchives.nseindia.com/content/circulars/CMTR64628.pdf), 19 Oct 2024 | 18:00 – 19:00 |
+| 2025-02-01 (Sat) | Budget weekend | [NSE/CMTR/65729](https://nsearchives.nseindia.com/content/circulars/CMTR65729.pdf), 23 Dec 2024 | 09:15 – 15:30 |
+| 2025-10-21 (Tue) | Muhurat | [NSE/CMTR/70319](https://nsearchives.nseindia.com/content/circulars/CMTR70319.pdf), 22 Sep 2025 | 13:45 – 14:45 |
+| 2026-02-01 (Sun) | Budget weekend | [NSE/CMTR/72349](https://nsearchives.nseindia.com/content/circulars/CMTR72349.pdf), 16 Jan 2026 | 09:15 – 15:30 |
+| 2026-11-08 (Sun) | Muhurat | [NSE/CMTR/71775](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf), 12 Dec 2025: the date only, "timings ... shall be notified subsequently" | **UNVERIFIED**: no timing circular found on 2026-10-16, nor again on 2026-10-18 or 2026-10-19 |
+
+2021-02-24 keeps SEBI's order (the outage row above) as its source: no NSE
+circular of that day's windows is recorded. Searched on 2026-10-16 and **not
+found**, so still UNVERIFIED: an NSE circular for either March 2020
+market-wide halt (2020-03-13, 2020-03-23; only press reports of the 10%
+breaker, a 45-minute halt and a 15-minute pre-open were found, and those are
+not primary); a cause for either measured short day (2019-08-02,
+2022-03-07); and any half-day session. No half-day or other shortened
+regular session was found in any notice read; the read-only data check of
+the stored days against these tables is `docs/06-limits.md` L-CAL-3. NSE's Saturday **mock**
+trading sessions (for example NSE/CMTR/46217 of 30 Oct 2020, a mock session on
+Saturday 7 Nov 2020: "Trades resulting from this session shall not attract any
+obligation") are not sessions here.
+
+**Which days a backtest may trade (D-5150).** `pull::calendar::tradable_day`:
+only a day the calendar of record (`sourced_kind_of`, these notices and the
+D-2805 holiday circulars) calls a regular weekday 09:15–15:29 session, with no
+special session, no notice of one and no market-wide halt. Every row of the
+table above and every halt day is excluded from trades and from the own-past
+statistics; its bars stay stored and labelled. The two measured short days
+(2019-08-02, 2022-03-07) are NOT excluded: the exchange held its full session
+and only the vendors' minutes were short. `cli calendar-days YEAR` lists the
+excluded days with their counts per year, and `cli calendar-days check` holds
+the tables against every stored day (D-5158).
+
 ---
 
 ## 4. Vendor facts
@@ -1288,6 +1341,210 @@ record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
 
+## CHG-1 charge-stack rate sources — read 13, 15 and 16 Oct 2026 (D-5110 to D-5129)
+
+`CLAUDE.md` §3 rule 1: every rate `crates/costs/src/schedule.rs` and
+`crates/costs/src/dhan_calc.rs` apply traces to a row here. **How these were
+obtained, stated first because it bounds every row below.** Two agent runs of
+this project read the primary pages themselves and recorded what they read, row
+by row, with the URL, the date on the document and the date it was read: the
+13 Oct 2026 sources run (`state/fno-winners-20261013/sources-charges.json`, 45
+rows, ids such as `E-01` and `S-05` below) and the 15 Oct 2026 attack run
+(`state/charges-deep-check-20261015.json`, keys `rates` and `rateVerdicts`: 13
+of 15 rows confirmed on the primary source). The cloud session that first wrote
+the code (16 Oct) could fetch none of them — `nsearchives.nseindia.com` and
+`dhan.co` were refused by its network policy — and wrote "no circular body was
+read"; that was true of that session only, and the local merge (D-5123) cites
+the two runs instead. **No digest of any circular body is recorded in this
+repository**: a row below says what an agent read on a date, not a hash. A row
+whose figure a read source states is `Cited`; a row with no read source, or
+with an unverified zero in it, is `UNVERIFIED`, is still priced (the operator
+orders it), and every output that uses it lists it
+(`stack::DayCharges::unverified_sources`).
+
+| Rate | Figure, exactly | Source (as read) | Status | Where applied |
+|---|---|---|---|---|
+| NSE cash transaction charge + IPFT | Rs 306.99 + Rs 0.01 per crore each side = 30,700 / 10^9 | NSE circular `NSE/FA/73061` dated 2026-02-27, effective 2026-03-01, `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf` (rows `E-01`, `E-04`, read 13 Oct; confirmed 15 Oct). The same circular shows the old outflow as Rs 297 + Rs 10 IPFT = Rs 307, so the combined rate did not change on 2026-03-01 | Cited (the figure); **combining the two parts into one rounded line is UNVERIFIED** (D-5122) | `schedule::NSE_EQUITY_EXCHANGE` |
+| NSE futures transaction charge + IPFT | Rs 182.99 + Rs 0.01 per crore = 18,300 / 10^9 | `NSE/FA/73061` (row `E-02`) | Cited | `schedule::NSE_FUTURES_EXCHANGE` |
+| NSE options transaction charge + IPFT | Rs 3,552.99 + Rs 0.01 per crore of premium = 355,300 / 10^9 (0.03553%) | `NSE/FA/73061` (row `E-03`) | Cited — in today's table as one figure; the dated path charges the same total as `crate::regime`'s FA64232 row plus `rate::NSE_IPFT`, read as `trip` reads them (D-5131), until package CHG-0 adds the dated FA73061 row | `schedule::NSE_OPTIONS_EXCHANGE` |
+| BSE cash, all-in | Rs 375 per crore = 375 / 10^7 | none read; Dhan's calculator uses 0.000038 | **UNVERIFIED** | `schedule::BSE_EQUITY_EXCHANGE` |
+| BSE SENSEX/Bankex options | Rs 3,250 per crore of premium + BSE IPFT taken as 0 | BSE notice of 27-Sep-2024 (`regime::BSE_EXCHANGE_CHARGE`); the IPFT zero is `rate::BSE_IPFT`'s, UNVERIFIED | **UNVERIFIED** (the zero) | `schedule::BSE_OPTIONS_EXCHANGE` |
+| SEBI turnover fee | Rs 10 per crore each side = 10 / 10^7 | SEBI notification of 2019-03-22 in force 2019-04-01, annexed to NSE `FA40632`, `https://nsearchives.nseindia.com/content/circulars/FA40632.pdf` (rows `F-01`, `F-02`) | Cited. `F-02` also levies it on the notional value of an exercised or assigned option: **not priced** (`docs/06-limits.md` §CHG-1) | `schedule::SEBI_FEE` |
+| STT, equity intraday | 0.025% of the non-delivery value, seller: min(day buy qty, day sell qty) x the day's VWAP, VWAP = (BVAL + SVAL) / (BQTY + SQTY) rounded to two decimals; each security's STT to two decimals; the client's day total to the nearest rupee (50 paise up) | rate: `NSE/FATAX/73524` dated 2026-03-31 (row `S-01`); method: NSE circular `NSE/CMTR/5588` dated 2004-11-10, `https://nsearchives.nseindia.com/content/circulars/cmtr5588.htm` (15 Oct verdict) | Cited (rate and method); the direction of an exact half of a paisa in the VWAP is UNVERIFIED | `schedule::STT_EQUITY_NON_DELIVERY`, `stack::ClientSecurityDay`, `stack::ClientDay` |
+| STT, equity delivery and MTF | 0.1% each side = 1 / 10^3 | `NSE/FATAX/73524` (row `S-05`, "settled by the actual delivery or transfer of such share or unit"), `https://nsearchives.nseindia.com/content/circulars/FATAX73524.pdf` | Cited | `schedule::STT_EQUITY_DELIVERY` |
+| STT, futures | 0.05% of the sell value = 5 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-02`, "Sale of a futures in securities has been revised to 0.05%") | Cited | `schedule::STT_FUTURES` |
+| STT, options | 0.15% of the sell premium = 15 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-03`); the `regime::STT_OPTIONS` row (DEC-COST-003) | Cited | `schedule::STT_OPTIONS` |
+| STT, options exercise | 0.15% of intrinsic value = 15 / 10^4, from 2026-04-01 | `NSE/FATAX/73524` (row `S-04`); the `regime::STT_EXERCISE` row (DEC-COST-004) | Cited | `schedule::STT_EXERCISE` |
+| Stamp duty, equity intraday | 0.003% of the FIFO buy value of the non-deliverable quantity, buyer; each security's duty to two decimals; the client's day total to the nearest rupee | NSE Clearing `NCL/CMPT/43115` dated 2020-01-03, from trade date 2020-07-01 per `NCL/CMPT/44032` (rows `T-01`, `R-02`; 15 Oct verdict) | Cited | `schedule::STAMP_EQUITY_NON_DELIVERY` |
+| Stamp duty, equity delivery and MTF | 0.015% of the buy value = 15 / 10^5 | NSE's levies page `https://www.nseindia.com/static/invest/first-time-investor-sebi-turnover-fees-stt-other-levies` (row `T-04`) | Cited | `schedule::STAMP_EQUITY_DELIVERY` |
+| Stamp duty, futures | 0.002% of the buy value = 2 / 10^5 | NSE Clearing `NCL/CMPT/43116`, `https://nsearchives.nseindia.com/content/circulars/CMPT43116.zip` (row `T-02`, "Equity Futures 0.002% Buyer") | Cited | `schedule::STAMP_FUTURES` |
+| Stamp duty, options | 0.003% of the buy premium = 3 / 10^5 | `NCL/CMPT/43116` (row `T-03`, "option trade shall be valued at premium"); `rate::STAMP_DUTY_BUY_SIDE` (`COSTS_VERIFIED` §6) | Cited | `schedule::STAMP_OPTIONS` |
+| GST | 18% of brokerage + exchange charge (IPFT included) + SEBI fee = 18 / 100 | Dhan pricing page (row `G-02`); GST on the SEBI fee from 2022-07-18 per `NSE/FATAX/52993` (row `G-03`); `rate::GST_ON_FEE_BASE` | Cited; the legal basis for GST on the exchange charge (row `G-04`) and the rounding of a CGST + SGST split are **UNVERIFIED** | `schedule::GST` |
+| Dhan brokerage, equity intraday and MTF | the lower of Rs 20 and 0.03% of the order value, per executed order | Dhan pricing page `https://dhan.co/pricing/`, read 13 and 15 Oct 2026 (rows `B-01`; 15 Oct verdict). MTF taken as intraday is the 16 Oct capture's assumption | Cited (intraday); MTF **as stated by the capture**, not by the page | `schedule::dhan_brokerage` |
+| Dhan brokerage, equity delivery | Rs 0 | Dhan pricing page (row `B-02`) | Cited | `schedule::dhan_brokerage` |
+| Dhan brokerage, F&O | Rs 20 per executed order (rows `B-03`, `B-04`), and Rs 20 on each option exercise (row `B-05`, D-5132); row `B-05` also names an option that expires or is assigned, which the stack cannot record and does **not price** (`docs/06-limits.md` §CHG-1) | Dhan pricing page (rows `B-03`, `B-04`, `B-05`). The regulatory cap, the higher of 2.5% of premium and Rs 100 per lot (NSE circular `https://nsearchives.nseindia.com/content/circulars/INSP53297.pdf`, effective 2014-07-16, restated 2022-08-12, row `B-14`), is never below Rs 100 for one lot, so it cannot bind a Rs 20 order (a compile-time check in `schedule.rs`) | Cited | `schedule::DHAN_FNO_BROKERAGE` |
+| Dhan DP charge | Rs 12.50 per instruction per ISIN + GST on a delivery or MTF sell | Dhan pricing page (row `B-10`) | Cited | `schedule::DHAN_DP_CHARGE` |
+| Dhan auto square-off | Rs 20 per order + 18% GST, applied only when the caller says the exit was the broker's | Dhan pricing page (row `B-07`; 15 Oct verdict) | Cited (the amount); whether it replaces or comes **on top of** the normal brokerage, and its F&O applicability, are **UNVERIFIED** (D-5116, D-5122) | `schedule::DHAN_SQUARE_OFF_FEE` |
+| Dhan brokerage on a part-filled order | one executed order, whatever the number of fills: brokerage charged once on the whole order (`ledger::ExecutedOrder::with_part`) | none read — Dhan's pricing page (row `B-01`) says "per executed order" and does not say how a part-filled order counts | **UNVERIFIED** until a Dhan contract note shows a part-filled order (D-5127) | `ledger::DayLedger::add` |
+| Dhan calculator constants (comparison only) | brokerage 0.0003 capped at Rs 20; exchange 0.0000307 NSE equity, 0.000038 BSE equity, 0.0000183 futures, 0.0003553 options; SEBI 0.000001; STT 0.00025 / 0.001 / 0.0005 / 0.0015; stamp 0.00003 / 0.00015 / 0.00002 / 0.00003; DP 14.75; GST 0.18 x (brokerage + exchange rounded to 4 decimals) | Dhan calculator `https://dhan.co/calculators/brokerage-calculator/`: 16 readings on 15 Oct 2026 (`state/charges/dhan-golden-20261015.json`, nine through the page's own endpoint, seven through the UI) and 33 through the UI on 16 Oct 2026 (`state/charges/dhan-golden-20261016.json`, 33 screenshots); all 49 pinned in `crates/costs/tests/dhan_calculator.rs` | Cited as **the page's own arithmetic**, never as a statutory rate | `dhan_calc` |
+
+**Rounding directions and aggregation levels are not rates and have no row
+above:** no source read states which way an exact half goes; the NSE and NSE
+Clearing methods above state the per-security and per-client-day roundings of
+STT and stamp duty for the cash market, and nothing read states them for F&O or
+states the level at which the exchange charge, the SEBI fee and the GST are
+rounded on a note. Each is recorded as UNVERIFIED in `docs/06-limits.md`
+§CHG-1 (D-5113, D-5121, D-5122).
+
+## Zerodha and GDFL cash feeds per stock-day — measured 2026-10-18 (D-5170 to D-5177)
+
+`CLAUDE.md` §3 rule 1 requires every vendor claim the code applies to trace to
+a source recorded here. D-5170 applies four: Zerodha's history is
+corporate-action adjusted and GDFL's is raw, Zerodha's minute volume is not its
+own day bar's, Zerodha's minutes of the closing-auction era stop at 15:14, and
+some Zerodha minute volume disagrees with its day bar beyond any rounding.
+**No row of this section is a vendor statement, and no vendor row is quoted**:
+each figure is an aggregate `cli feed-reconcile` (format 2,
+`crates/cli/src/feed_reconcile.rs`, commit `dedcb99a`) computed on 18 Oct 2026
+(IST), read-only, from the operator's store as it stood that day
+(`--workers 4`; the bars were opened through the read door and the version
+files, summary log and events went to a scratch directory outside the store;
+each month was run after the month before it, so every applied lag came from
+earlier days). Anyone with that store can repeat each figure with the command
+in D-5172. Where the store is mounted is machine layout and is not recorded.
+
+| Month | Shares listed (both feeds / GDFL only / Zerodha only / no day) | Stock-days: matched / gdfl_only / zerodha_only / no_overlap / not_aligned / read_failed | Adjusted shares (days) | `ex_date` days (close / range basis) | `factor_not_constant` days | `range_not_constant` days | Minute sum above the day bar beyond the allowance | Matched days of 360 Zerodha minutes |
+|---|---|---|---|---|---|---|---|---|
+| 2019-03 | 337 (172 / 115 / 5 / 45) | 3,268 / 2,185 / 84 / 0 / 0 / 0 | 91 (1,720) | 103 (3 / 100) | 3,135 | 267 | 35 | 7 |
+| 2025-03 | 337 (208 / 104 / 0 / 25) | 3,952 / 1,976 / 0 / 0 / 0 / 0 | 49 (931) | 1 (0 / 1) | 3,948 | 27 | 8 | 0 |
+| 2026-08 | 337 (208 / 100 / 0 / 29) | 4,368 / 2,094 / 0 / 0 / 0 / 0 | 2 (14) | 2 (0 / 2) | 4,366 | 1 | 0 | 4,366 |
+
+**Which run the table is, and what format 3 changed** (19 Oct 2026,
+D-5178, D-5179). The table above is the format-2 runs of two months each
+(2019-02..03, 2025-02..03, 2026-07..08, each first month with no previous
+file, `state/fix/round2/data1-real-r5-20261018/`). The whole-span run, where
+every month carries its lags and intervals from the month before since
+2018-01, gives the same figures except three: `factor_not_constant` 3,136 and
+`range_not_constant` 266 in 2019-03, and `range_not_constant` 14 in 2025-03
+(a different applied lag on a few days; format 2 and format 3 agree on all
+three). **Format 3** (D-5179: an ex-date is judged only on an interval that
+holds the day's own median pair) changes three columns and no other: `ex_date`,
+the `ex_date` flag in `flags`, and `grid_z`. Measured READ-ONLY on 19 Oct
+2026 over the same 105 months, oldest
+first, `--workers 4`, by a stamped release build of `abce27790`
+(`scratch/verify-DATA-1-r1e-runs/full/`, D-5179 item 3): 635,381 rows, 0
+`read_failed`; `ex_date` is set on **63 / 1 / 2** days in the three months
+(all on the range basis; 63 on 15 shares in 2019-03, against 103 on 21 in
+format 2), and on **4,504 days of 102 shares** over the span (11 on the
+close basis, 4,493 on the range basis), against 6,839 days of 118 shares in
+format 2. **None of the 4,504 sits between days whose median ratios are
+equal** (format 2: 136, 27 of them both exactly `n/n`). 5,687 rows are
+`unchecked:interval_excludes_median` (judged against nothing, handing nothing
+on) and 17,018 `unchecked:no_interval`, as in format 2. 17 ex-date days
+follow an unchecked day whose median ratio equals their own: the move came on
+or before that unchecked day, and the flag lands on the first day after it
+that has a basis. The single-day candidates of 2019-03 named below (BSE
+03-18 and 03-19, MCX 03-08) are no longer flagged in format 3; NMDC
+2025-03-21, INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 still are. Every
+other column of every row is byte for byte the format-2 value; `ex_date`
+differs on 6,972 rows, `flags` on 2,831 (the `ex_date` flag) and `grid_z`, now
+the grid as of the row's own day, on 289 (joined on share and day, every row
+of both runs joined).
+
+What the code relies on, and what is not known:
+
+- **Zerodha adjusted, GDFL raw — prices and volumes.** On an unadjusted
+  matched day the median pair is exactly `n/n`. On an adjusted day Zerodha's
+  volumes are adjusted too, and not always by the price factor: TATASTEEL on
+  2019-03-01 has the median pair 4583/50485 (a price ratio of 1 to 11.02) and
+  day volumes of 6,670,866 (GDFL) and 66,725,690 (Zerodha), a volume ratio of
+  10.00. So `gdfl_vs_day_pct` compares two bases on an adjusted day
+  (|difference| p50 0.12 / 0.022 / 0.031%, p99 91.1 / 80.0 / 4.96% over the
+  three months' matched days), the short is printed on both bases, and the
+  conversion by `g/z` is only as good as Zerodha's own rule, which is
+  UNVERIFIED (D-5171 item 8).
+- **The two feeds' minute closes are often different trades of one minute.**
+  The share of a day's Zerodha minutes whose close equals the factor-converted
+  GDFL close at lag 0 is p50 0.928 / 0.816 / 0.872 (p1 0.17 / 0.59 / 0.74). The
+  operator's close intersection empties on 3,135, 3,948 and 4,366 matched days
+  (96%, 99.9%, 99.95%); the range intersection on 267, 27 and 1 (D-5176).
+- **The clock.** The best lag is 0 s on 2,881 / 2,749 / 3,395 matched days and
+  +1 s on 222 / 999 / 777, and lies in −5..+4 s in 2025-03 and −2..+4 s in
+  2026-08; 72 days of 2019-03 reach beyond ±4 s, often as a near tie
+  (ADANIPOWER 2019-03-20: +16 s at 371/375 against 367/375 at lag 0). The lag applied
+  (from earlier days only, D-5175) is +1 s on 22 / 1,698 / 147 days, +2 or +3 s
+  on 114 days of 2025-03, 0 otherwise.
+- **A level-dependent ratio on some adjusted shares, cause UNVERIFIED.** TECHM
+  in 2019-03: median pair 77250/83515 (0.92498) on 03-01 and 72650/78700
+  (0.92313) on 03-19 as the price fell. An adjustment with a subtractive term
+  (a dividend taken off before scaling) would do this; that is a hypothesis,
+  not a measurement. 2019-03's 103 `ex_date` days fall on 21 adjusted shares,
+  most of them repeatedly (TECHM 11, ASHOKLEY 10, UNIONBANK, LICHSGFIN and
+  BANKBARODA 9 each; in format 3, 63 days on 15 shares, LICHSGFIN and
+  BANKBARODA 9, UNIONBANK and TECHM 7): a level-dependent ratio moves a day's interval as the
+  price moves, so `ex_date` marks two days no single factor explains, a
+  corporate action or a level move, and which is which is R4-26's to confirm
+  (WIPRO, NTPC and IDEA have one such day each in the month). A
+  consumer converting a level far from the median minute's price on such a
+  day has the day's min and max pairs to bound its error (D-5174).
+- **Factor jumps at a single day, cause UNVERIFIED**: NMDC 2025-03-21 (median
+  6514/6712), INDUSTOWER 2026-08-10 and HINDPETRO 2026-08-14 (36770/38665 and
+  37165/39080 on 08-12 and 08-13, then 37270/37270: Zerodha's adjustment ends
+  at that day), BSE 2019-03-18 and 03-19 and MCX 2019-03-08 (close basis). No
+  circular was read.
+- **Zerodha's minute volume is not its day bar's.** The minute sum is below
+  the day bar on most matched days (p50 −0.21 / −0.35 / −2.17%, p1 −3.1 /
+  −16.1 / −39.0%). Above it beyond the rounding allowance on 35, 8 and 0 days:
+  PIIND on 9 days of 2019-03 (up to +324.6%), and RELIANCE on 39 consecutive
+  matched days from 2019-02-01, where the minute sum agrees with GDFL's day
+  converted by the day's factor (2019-03-01: 16,766,764 against 7,919,821 ×
+  122690/57925 = 16,774,844) and the day bar (16,622,986) is the short one.
+  The flag names the disagreement, not which series is wrong.
+- **The 15:14 stop.** In 2026-08, 4,366 of 4,368 matched days hold exactly 360
+  Zerodha minutes, none in `[15:15, 15:30)`, and GDFL holds volume in those
+  minutes on 4,309 of them (`gdfl_unverified_phase_volume`); 2026-07 holds 375
+  on every matched day. The auction rule itself is §9's (NSE/CMTR/73845).
+  `zerodha_session_cut` does not fire on these days because per-share
+  eligibility is not joined, so 15:15-15:29 is `Unverified`, never a gap
+  (D-5171 item 10).
+- **One-feed shares are renames or other instruments, cause UNVERIFIED.** The
+  2019-03 Zerodha-only shares are TATACONSUM, UNOMINDA, NAM-INDIA and GVT&D
+  (19 days each; their GDFL months of then are under other keys) and IRFC (8
+  days of minutes with no day bar). Joining keys across a rename is the dated
+  rename table's work (R4-21), not this verb's.
+- **Over the whole span** (2018-01 to 2026-09, 105 months, the same verb and
+  store, `state/fix/round2/data1-full-r5-20261018/`): no `read_failed` row.
+  PIIND carries `zerodha_minute_sum_exceeds_day_bar` in every month of
+  2018-09 to 2019-08, on 114 days (p50 +92.9%, max +11,409% over the day bar;
+  57 days above twice it), and on 156 days in all; RELIANCE on 543 days (on
+  2019-03-01, above, the day bar is the short series). `zerodha_session_cut`
+  is set on 182 days: 181 shares on 2021-02-24 at 15:45, the calendar's
+  220-bar day, where Zerodha's minutes stop before the resumed session GDFL
+  traded in, and KPITTECH on 2019-09-23, a day the calendar has not
+  measured. Causes UNVERIFIED. `ex_date` is set on 6,839 days of 118 shares:
+  6,399 of them on 20 shares that repeat it as their level moves (UNIONBANK
+  632, TECHM 629, BPCL 510), while 82 shares have at most three, the
+  single-day candidates R4-26 is to confirm (format 2; in format 3, D-5179,
+  4,504 days of 102 shares: 4,374 on 20 repeating shares, UNIONBANK 488,
+  TECHM 477 and LICHSGFIN 393, while 76 shares have at most three, on 97
+  days).
+- **The untracked scratch check of 15 Oct, joined on (share, day)**
+  (`state/fix/round2/data1-real-r5-20261018/compare-vs-scratch.txt`): it wrote
+  3,249, 3,914 and 4,326 rows for the three months and the verb holds every
+  one of them (none missing). On every joined row the GDFL day volume, the
+  Zerodha day volume and the Zerodha minute sum are equal. Every other
+  difference is explained: matched minutes, factor and high-match share differ
+  only on rows whose applied lag is not 0 (the scratch matched at lag 0
+  always), except five factors of 2019-03 at lag 0 — four days with an even
+  count of matched minutes, where the scratch averaged the two middle ratios
+  and the verb keeps the lower median's exact pair (D-5171 item 4), and MCX
+  2019-03-01, whose first minutes of the month have no grid yet and admit no
+  factor (D-5171 item 1). What the verb adds (handover H7): M&M (19, 19 and 21
+  matched days) and GVT&D (19 Zerodha-only days in 2019-03, 19 and 21 matched
+  days later), every one-feed day (2,269, 1,976 and 2,094 rows), and no
+  invented factor (the scratch wrote 1.0 on a day with no matched minute; none
+  of its rows in these three months had one).
+
 ## Dropbox API v2: what the GDFL Dropbox fetch relies on (R4-07, E2E-01; D-4986)
 
 Read 16 Oct 2026 from Dropbox's own published API specification, the Stone
@@ -1320,6 +1577,47 @@ The fetch is proved against a loopback fixture server only
 (`pull::gdfl_dropbox` tests); the first real request is the operator's press
 after the link is in `~/.brutex/gdfl-dropbox.toml`.
 
+## F&O membership source — measured 2026-10-16 (D-5160 to D-5164)
+
+`pull::fno_membership` (PIT-1) derives, for each trading day, which shares had
+a listed NSE stock-option contract. Its one source is our own GDFL options
+archive, recorded above ("GDFL NSE options tick files"); no new vendor and no
+new exchange file is read.
+
+- **What is read.** The index of each day file
+  `options/<yyyy>/<MON_yyyy>/GFDLNFO_TICK_<ddmmyyyy>.bts` of the verified tick
+  store (every entry of every vendor day zip, byte for byte: its RESUME.md and
+  `verify-options-<year>.txt`), READ-ONLY. Only the entry names are decoded
+  (`pull::gdfl_nfo::decode_ticker`); no tick row is opened.
+- **Span, measured 16 Oct 2026** (`ls` of the tick store): the first day file
+  is `options/2018/SEP_2018/GFDLNFO_TICK_03092018.bts`, the last
+  `options/2026/SEP_2026/GFDLNFO_TICK_30092026.bts`. Every session before
+  2018-09-03 has no source and is refused as "membership unknown".
+- **What the source can establish.** That a file of a contract exists on a
+  day, and, from its name, the contract's underlying, settled expiry, strike
+  and side. A contract's life is taken to run from its first file to its
+  settled expiry (D-5161); the first file is an UPPER bound on the day NSE
+  listed it.
+- **What is NOT sourced, and so is labelled.** NSE's own historical list of
+  securities eligible for stock derivatives (no NSE file or circular naming
+  entries and exits was read): UNVERIFIED, which is why the membership is
+  labelled `inferred_gdfl_options` and never presented as NSE's list. NSE's
+  listing day of each contract: UNVERIFIED (upper bound only). The rule that a
+  security leaving F&O keeps its existing contracts to their expiry: no
+  circular was read, so nothing depends on it — a share is a member while a
+  contract our files saw is alive, whatever the cause. Early terminations
+  other than the one sourced row of `expiry_alias::EARLY_SETTLEMENTS`
+  (NSE/FAOP/73857, above): not sourced, so a cancelled contract keeps its
+  share a member to its printed expiry (`docs/06-limits.md` L-PIT-4). No
+  margin source is chartered, today's or historical, so no leverage figure is
+  shown: `pull::fno_membership::LEVERAGE` reads "leverage unknown", UNVERIFIED
+  (D-5160 item 2, which replaced a typed 5x).
+- **Renames.** The 18 sourced rows of `brutex_core::alias::SYMBOL_CHANGES`
+  (§ "Index aliases and symbol changes" above) make one series of each pair.
+  `TATAGLOBAL -> TATACONSUM` and `KPIT -> BSOFT` have no row (above), so no
+  alias is invented: a change is caught only as a MEASURED handover of
+  contract keys between two names, labelled `measured` (D-5161 item 4).
+
 ## NSE Masters Data v1.6 — read 17 Oct 2026 (R4-17: the listing rule)
 
 `CLAUDE.md` §3 rule 1 requires the listing rule `pull::listing` applies to
@@ -1348,7 +1646,67 @@ expulsion date is the last day traded or the first day not traded is
 UNVERIFIED: `pull::listing` treats only days strictly AFTER it as past the
 end of history, so the expulsion day itself is never refused.
 
-## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-5904)
+## Filesystem counts for `/disk.json` — read 16 Oct 2026 (D-5240, D-5241)
+
+`/disk.json` reports the store's filesystem from one system call made in the
+server process (it started `/bin/df -Pk` until D-5240). Which call, and in
+which units, rests on the operating system's own declarations, read from the
+macOS SDK on the operator's machine (Command Line Tools
+`MacOSX27.0.sdk`, macOS 27.0.1, build 26A434) and from the `rustix` 1.1.4
+registry source the build compiles. The digest is of the bytes read; another
+SDK may declare otherwise.
+
+| Source | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|
+| `usr/include/sys/_types.h` | `863c4f07045775002b63b7e616742d9f746e4a02da4441442d8fe1138bbd0ff9` | line 70: `typedef unsigned int __darwin_fsblkcnt_t; /* Used by statvfs and fstatvfs */` — 32 bits | macOS reads `statfs(2)`, not `statvfs(2)` (D-5241) |
+| `usr/include/sys/statvfs.h` | `658ae523adc689c84eef80fd16a9dbd7d4f00fbc7eba0499f96c1afba6033ace` | `struct statvfs`: `f_blocks`, `f_bfree`, `f_bavail` are `fsblkcnt_t`, "in units of `f_frsize`" | the counts off macOS (`statvfs`, D-5240); why not on macOS (D-5241) |
+| `usr/include/sys/mount.h` | `45872741bb916b92bddd2e562d2047b552af1f68269081a0aeb58a3e5a2b8a51` | `__DARWIN_STRUCT_STATFS64`: `uint32_t f_bsize` "fundamental file system block size"; `uint64_t f_blocks`, `f_bfree`, `f_bavail` ("free blocks avail to non-superuser"); `char f_mntonname[MAXPATHLEN]` "directory on which mounted" | the counts and the mount point on macOS (D-5241) |
+| `rustix-1.1.4/src/backend/libc/fs/types.rs` (crates.io) | not recorded: the lock's own checksum pins the package | line 1069: `pub type StatFs = c::statfs;` on the libc backend, so `rustix::fs::statfs` hands back the SDK's struct unchanged; `StatVfs` widens every count to `u64` | the fields `disk_route::counts_and_mount` reads |
+
+**What is NOT sourced here.** How Darwin's `statvfs` folds a volume of 2^32
+fragments or more into its 32-bit counts — truncation, or a larger `f_frsize`
+— was not read: Apple's libc source was not consulted, and no such volume was
+measured. It is UNVERIFIED, and it is why macOS does not use that call. The
+`df` behaviour the route matches (total = every fragment, free = what an
+unprivileged writer may take, the mount point `df` prints) is checked by
+measurement, not by source: `on_macos_total_free_and_mount_are_what_bin_df_printed`
+compares the route with `/bin/df -Pk` on this machine, and the Linux branch was
+compared with GNU `df -Pk` by hand in the cloud container (D-5240). **What it
+does not match, measured 17 Oct 2026**: on APFS macOS `df`'s Used column is
+not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
+425,294,667,776), and no field of the `statfs` structure above carries the
+figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
+route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
+`docs/06-limits.md` L-RUST1-1).
+
+## RustSec advisories RUSTSEC-2026-0381 and RUSTSEC-2026-0382 — read 21 Oct 2026 (D-7120)
+
+Two advisories turned `cargo deny check` red on an unchanged tree. What they
+say, and what the patched releases do, rests on the files below: the
+advisory database `cargo deny` fetched (its own git checkout under
+`~/.cargo/advisory-dbs/`, at the commit D-7120 names, dated 2026-10-20) and
+the crates.io sources the build compiles. The digest is of the bytes read.
+
+| Source | sha256 of the bytes read | What it says, as far as the decision relies on it | Where it is applied |
+|---|---|---|---|
+| `crates/rustls-webpki/RUSTSEC-2026-0382.md` (RustSec advisory database) | `525ad607d24f67fd22a20e70b28b3962a9039962340e3ad1f351c9611772e671` | dated 2026-10-20, alias CVE-2026-111943: affected versions "may accept certificate paths containing distrusted emSign intermediate public keys"; patched `>= 0.103.16, < 0.104.0-alpha.1` and `>= 0.104.0-alpha.8` | `rustls-webpki` 0.103.16 in `Cargo.lock` (D-7120 point 1) |
+| `crates/webpki-roots/RUSTSEC-2026-0381.md` (RustSec advisory database) | `71e69321b86b520406ff2bb529bc3abfaed7493a12712b0eb38dc2c360878d81` | dated 2026-10-19, alias CVE-2026-111943: affected versions include `emSign ECC Root CA - G3`; "Version 1.0.10+ removes this root"; patched `>= 1.0.10` | `webpki-roots` 1.0.10 in `Cargo.lock` (D-7120 point 1) |
+| `rustls-webpki-0.103.16/src/verify_cert.rs` (crates.io) | `73e60395e81a8c2ac7c276ee49bd501208876855fd820d83c386ce29f376c4d8` | `DISTRUSTED_SPKIS`: eight `include_bytes!` keys under `data/distrusted/`; a path whose certificate or trust anchor carries one is refused with `Error::CertDistrusted` | what changes at run time (D-7120 point 4, `docs/06-limits.md` L-BREDS-1) |
+| `webpki-roots-1.0.10/src/lib.rs` (crates.io) | `3575e50b19f48e368b254e25abfacb300264d3728d12c89363306695c537e62a` | 120 `TrustAnchor` entries against 1.0.9's 121; the one removed is `emSign ECC Root CA - G3` (eMudhra Technologies Limited) | D-7120 point 2 |
+
+The digests are of both advisories at the database commit
+`e6f94f3760d5e6c54c1b05f204002263bc025524`. At the later commit
+`4b587f00996ebe5c05a73eaef105ef241e876414` (2026-10-21), which the final
+`cargo deny check` read, `RUSTSEC-2026-0381.md` hashes to
+`9be83b1a3b668d3b3ccb720faf514e1ac5f42754bd03cb2b7900f5f9157a9300`: six
+added lines mark the `webpki-roots` 0.26.11 compatibility package, which
+`Cargo.lock` does not hold, unaffected; the affected and patched ranges
+above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
+
+**What is NOT sourced here.** Which certificate chains the hosts `pull`
+contacts present was not read: no connection was made. It is UNVERIFIED
+(`docs/06-limits.md` L-BREDS-1).
+## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-7135)
 
 §9 and D-0151 record that from 2026-08-03 every share an NSE index is
 computed from leaves continuous trading at 15:15 for the cash closing auction,
@@ -1365,12 +1723,12 @@ there, measured, not what NSE publishes about it.
 So the index **holds still from 15:15 until the auction's close is printed**
 on both feeds, every session of the auction era measured. R3-13 sets that
 window aside from the frozen-index flag as it sets a recorded halt aside
-(D-5904 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
+(D-7135 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
 recomputing the index, or computes it from constituents that no longer
 trade), and whether a session outside the measured span differs; no NSE page
 read here says either.
 
-## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-5904 item 20)
+## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-7135 item 20)
 
 What one dated master the store holds is, measured, not what NSE publishes
 about it. It sizes the cost of reading a share's dated closing-auction flag

@@ -1070,3 +1070,147 @@ fn a_snapshot_name_is_never_a_flag_and_an_unknown_flag_is_never_a_symbol() {
     assert_eq!(request.only, ["NIFTY", "BANKNIFTY"]);
     std::fs::remove_dir_all(ts).unwrap();
 }
+
+/// IA-16 (D-6900 keep item 2; FM-067, FM-095): the receipt names the holes,
+/// the one per-run surface they have. A hole `admit` passed over is never a
+/// day already done; each reason says whether a repair-reason run reads it,
+/// with its first days; the store's standing holes are counted by kind and
+/// reason. A run with none says `0` on each line.
+#[test]
+fn the_receipt_names_the_holes_passed_made_and_standing() {
+    let day = |d: u8| Day::new(2020, 9, d).unwrap();
+    let mut out = String::new();
+    let none = Report::default();
+    render(
+        &mut out,
+        ImportKind::Options,
+        "tickstore",
+        Path::new("/s"),
+        &none,
+    );
+    assert!(out.contains("  holes passed        0\n"), "{out}");
+    assert!(out.contains("  holes made          0\n"), "{out}");
+    assert!(
+        out.contains("  standing holes      0 in the whole store\n"),
+        "{out}"
+    );
+    let report = Report {
+        days_skipped: 1,
+        holes_skipped: 7,
+        holes_unrepairable: 1,
+        holes_in_range: (14..=20)
+            .map(|d| (day(d), "needs_month_generation".to_owned()))
+            .chain([(day(21), "bars_differ_held".to_owned())])
+            .collect(),
+        holes_made: vec![(day(22), "month_superseded".to_owned())],
+        standing_holes: vec![
+            ("options".to_owned(), "bars_differ_held".to_owned(), 2),
+            ("options".to_owned(), "needs_month_generation".to_owned(), 9),
+            ("stocks".to_owned(), "repair_impossible".to_owned(), 1),
+        ],
+        ..Report::default()
+    };
+    let mut out = String::new();
+    render(
+        &mut out,
+        ImportKind::Options,
+        "tickstore",
+        Path::new("/s"),
+        &report,
+    );
+    assert!(out.contains("  days already done   1\n"), "{out}");
+    assert!(
+        out.contains(
+            "  holes passed        8; needs_month_generation 7 (a run with a repair reason \
+             reads it): 2020-09-14 2020-09-15 2020-09-16 2020-09-17 2020-09-18 and 2 more; \
+             bars_differ_held 1 (no repair fills it): 2020-09-21\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "  holes made          1; month_superseded 1 (a run with a repair reason reads \
+             it): 2020-09-22\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "  standing holes      12 in the whole store: options bars_differ_held=2, options \
+             needs_month_generation=9, stocks repair_impossible=1\n"
+        ),
+        "{out}"
+    );
+}
+
+/// IA-16 (D-4889, D-4876 (2)): `--repair-reason TEXT` and
+/// `--accept-open-month` reach the request; a reason missing its TEXT, given
+/// twice, or with a flag where its TEXT goes is refused by name.
+#[test]
+fn the_repair_reason_and_the_open_month_flags_reach_the_request() {
+    let env = env_of(&[]);
+    let words = [
+        "--repair-reason",
+        "land 2020-09-16",
+        "--accept-open-month",
+        "NIFTY",
+    ];
+    let request = asked(
+        ("options", "tickstore", "2020-09-16", "2020-09-16", &words),
+        &env,
+    )
+    .unwrap();
+    assert_eq!(request.repair_reason.as_deref(), Some("land 2020-09-16"));
+    assert!(request.accept_open_month);
+    assert_eq!(request.only, ["NIFTY"]);
+    for (bad, says) in [
+        (
+            &["--repair-reason"][..],
+            "--repair-reason takes a TEXT after it",
+        ),
+        (
+            &["--repair-reason", "--stored"][..],
+            "--repair-reason takes a TEXT after it; \"--stored\" is a flag",
+        ),
+        (
+            &["--repair-reason", "a", "--repair-reason", "b"][..],
+            "--repair-reason is given twice",
+        ),
+    ] {
+        let why = asked(
+            ("options", "tickstore", "2020-09-16", "2020-09-16", bad),
+            &env,
+        )
+        .unwrap_err();
+        assert!(why.contains(says), "{bad:?}: {why}");
+    }
+}
+
+/// IA-16 (CONC-031, D-4901): the free-space floor is read from
+/// `BRUTEX_GDFL_FREE_FLOOR` by the cli alone and carried in the request; its
+/// absence is the import's default, `0` checks nothing, and anything that is
+/// not a count of bytes is refused by name, never read as the default.
+#[test]
+fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
+    let with = |value: &str| {
+        let value = OsString::from(value);
+        move |var: &str| (var == FREE_FLOOR_VAR).then(|| value.clone())
+    };
+    assert_eq!(
+        free_floor_of(&|_: &str| None).unwrap(),
+        pull::gdfl_import::DEFAULT_FREE_FLOOR
+    );
+    assert_eq!(free_floor_of(&with("0")).unwrap(), 0);
+    assert_eq!(free_floor_of(&with("21474836480")).unwrap(), 21_474_836_480);
+    for bad in ["", "-1", "+5", "1e9", "10 GiB", "18446744073709551616"] {
+        let why = free_floor_of(&with(bad)).unwrap_err();
+        assert!(why.contains("is not a count of bytes"), "{bad:?}: {why}");
+    }
+    let env = env_of(&[]);
+    let request = asked(
+        ("indices", "tickstore", "2024-04-01", "2024-04-01", &[]),
+        &env,
+    )
+    .unwrap();
+    assert_eq!(request.free_floor, pull::gdfl_import::DEFAULT_FREE_FLOOR);
+}

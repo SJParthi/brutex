@@ -168,7 +168,7 @@ type Answer = Result<CasEligibility, String>;
 type FlagKey = (PathBuf, u32, String);
 
 /// THE FLAGS ARE KEPT, NEVER THE MASTERS (verify-R3-13-r1, blocking 2;
-/// D-5904 item 20). A parsed master held for the process cost 18-25 MB of
+/// D-7135 item 20). A parsed master held for the process cost 18-25 MB of
 /// resident memory per auction-era day, never freed (+744 MB for 42 days),
 /// because `pull::cash_auction::DailyEligibility::parse` reserves its map for
 /// every CSV line (37,237 on 2026-09-01) to keep the 4,428 EQ rows. A page
@@ -1252,7 +1252,7 @@ impl IndexDay {
     /// ledger's `flat_max_s` and its stamp, and the phrase it says.
     ///
     /// THE LEDGER HOLDS ONE RUN A DAY, THE LONGEST (verify-R3-13-r1, blocking
-    /// 1; D-5904 item 19): `flatagg` keeps the day's longest unchanged run and
+    /// 1; D-7135 item 19): `flatagg` keeps the day's longest unchanged run and
     /// nothing shorter. So `flagged` is `false` only where that run is under
     /// [`FROZEN_MIN_S`], when no run of the day can be frozen; `true` where its
     /// longest stretch outside the recorded halt and the cash closing

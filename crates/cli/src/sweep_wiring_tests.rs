@@ -171,14 +171,26 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "zerodha-repair"
                 // The stored-month gap ledger (R3-18): a store verb.
                 | "zerodha-gaps"
+                // The Zerodha verifier and its spool merge (IA-9): store verbs.
+                | "verify-merge"
+                | "zerodha-verify"
                 // The stored-series identity scan (WP-13d): a store verb.
                 | "series-identity"
+                // The per-stock-day feed reconcile (DATA-1): a store verb.
+                | "feed-reconcile"
                 // The app's watchdog and its launchd agents (R3-32, D-4996):
                 // operations verbs that read no bar.
                 | "launch-agent"
                 | "watchdog"
                 // The tick-store writer (R4-08, D-4967): a store verb.
                 | "tickstore-write"
+                // The point-in-time F&O membership (PIT-1, D-5163): a reference
+                // table built from the tick store's listings, never a sweep.
+                | "fno-membership"
+                // The tradable-day page (D-5153): reads tables, never a sweep.
+                | "calendar-days"
+                // The upkeep runner (R3-17, D-6270): a store verb.
+                | "upkeep"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

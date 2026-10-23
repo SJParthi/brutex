@@ -28,6 +28,13 @@
 //!   table. A tenor longer than the rate's own 91 days is flagged
 //!   `above_rate_tenor` (D-3330, DB-G64): the rate is still the dated 91-day
 //!   yield, and the flag says it is applied beyond its maturity.
+//!   **A rate carried over a documented gap says so on every cell** (DB-B44,
+//!   R3-30): `rate_state` is `rate_carried` (else `rate_fresh`) and `rate_gap`
+//!   names the gap row's kind and release day, and the `rate` header counts
+//!   the table's gap rows (`gaps`) beside its results (`auctions`). A carried
+//!   rate is never served looking like a fresh one; past
+//!   [`pull::riskfree::MAX_CARRIED_AGE_DAYS`] it is refused
+//!   (`rate_carried_too_long`).
 //! * **Carry** — zero. `docs/00-charter.md` records no dividend yield, so for a
 //!   stock option the zero is "none sourced", said on the wire (`carry_source`)
 //!   and in D-2830, not a measurement.
@@ -41,9 +48,10 @@
 //! asked month (`t_outside_month`, D-3328), the option's or the spot's absence
 //! (`no_option_bar`, `no_spot_bar`, `no_spot_in_session`, …), `tenor_refused`
 //! (expired, unsettled or unverified hours), `rate_before_series` /
-//! `rate_stale`, `below_zero_carry_bound` (a premium at or below the zero-carry
-//! discounted intrinsic: a limit of the model's inputs, not a verdict on the
-//! print, D-3330), or `iv_unsolved` with the model's own sentence.
+//! `rate_stale` / `rate_carried_too_long`, `below_zero_carry_bound` (a premium
+//! at or below the zero-carry discounted intrinsic: a limit of the model's
+//! inputs, not a verdict on the print, D-3330), or `iv_unsolved` with the
+//! model's own sentence.
 //!
 //! # Cost, stated rather than claimed
 //!
@@ -257,6 +265,9 @@ pub enum Cell {
         rate: f64,
         /// The T-bill release that rate came from.
         released: pull::pricing::TradeDay,
+        /// The documented gap the rate is carried over (`rate_carried`), or
+        /// `None` for a fresh result (DB-B44).
+        carried: Option<pull::riskfree::Gap>,
         /// The volatility and the greeks.
         greeks: BarGreeks,
     },
@@ -609,8 +620,17 @@ impl GreeksAsk {
             Err(why @ pull::riskfree::LookupError::BeforeSeries { .. }) => {
                 return refused("rate_before_series", why.to_string());
             }
-            Err(why @ pull::riskfree::LookupError::Stale { .. }) => {
+            // A gap row after an unexplained hole carries nothing (R3-30
+            // repair 2): the same word as any unexplained gap, and the
+            // detail names the gap row that does not explain it.
+            Err(
+                why @ (pull::riskfree::LookupError::Stale { .. }
+                | pull::riskfree::LookupError::HoleBeforeGap { .. }),
+            ) => {
                 return refused("rate_stale", why.to_string());
+            }
+            Err(why @ pull::riskfree::LookupError::CarriedTooLong { .. }) => {
+                return refused("rate_carried_too_long", why.to_string());
             }
         };
         let bar = BarQuote {
@@ -620,6 +640,18 @@ impl GreeksAsk {
             tenor,
             side: self.side,
         };
+        // A refusal reached AFTER the rate is applied says when that rate was
+        // carried over a documented gap, as a priced cell's `rate_state` does
+        // (verify-R3-30-r2 followup).
+        let on_rate = as_of.carried.map_or_else(String::new, |gap| {
+            format!(
+                "; computed on a rate_carried rate: the result released {} carried over \
+                 the documented {} gap row of {} (DB-B44)",
+                as_of.auction.released,
+                gap.kind.word(),
+                gap.released,
+            )
+        });
         match pull::pricing::bar_greeks(bar, as_of.rate, YearBasis::Calendar365) {
             Ok(greeks) => Cell::Priced {
                 premium,
@@ -627,6 +659,7 @@ impl GreeksAsk {
                 tenor,
                 rate: as_of.rate.annual(),
                 released: as_of.auction.released,
+                carried: as_of.carried,
                 greeks,
             },
             // THE ZERO-CARRY FLOOR, NAMED APART (D-3330, DB-G64): the page
@@ -640,10 +673,10 @@ impl GreeksAsk {
                         "the premium {price} paisa is at or below {floor} paisa, the intrinsic value \
                          discounted at the rate with ZERO carry (D-2830: no dividend or carry is \
                          sourced), so no volatility reproduces it under this model's inputs; a limit \
-                         of the model's inputs, not a verdict on the print (D-3330)"
+                         of the model's inputs, not a verdict on the print (D-3330){on_rate}"
                     ),
                 ),
-                None => refused("iv_unsolved", why.to_string()),
+                None => refused("iv_unsolved", format!("{why}{on_rate}")),
             },
         }
     }
@@ -656,7 +689,7 @@ impl GreeksAsk {
                   table, the settlement, then the header fields"
     )]
     pub fn render(&self, cells: &[Cell], faults: &[String], rate: &RateTable) -> String {
-        let mut rows = String::with_capacity(cells.len() * 320 + 2);
+        let mut rows = String::with_capacity(cells.len() * 384 + 2);
         rows.push('[');
         for (n, (&ts, cell)) in self.times.iter().zip(cells).enumerate() {
             if n > 0 {
@@ -670,11 +703,27 @@ impl GreeksAsk {
                     tenor,
                     rate,
                     released,
+                    carried,
                     greeks,
                 } => {
+                    // DB-B44: a carried rate says so on its own cell, with the
+                    // gap that carries it, so it is never read as fresh.
+                    let (rate_state, rate_gap) = carried.map_or_else(
+                        || ("rate_fresh", "null".to_owned()),
+                        |gap| {
+                            (
+                                "rate_carried",
+                                format!(
+                                    r#"{{"kind":{},"released":{}}}"#,
+                                    render::json_string(gap.kind.word()),
+                                    render::json_string(&gap.released.to_string()),
+                                ),
+                            )
+                        },
+                    );
                     let _ = write!(
                         rows,
-                        r#"{{"t":{},"premium":{premium},{},{},"rate":{rate},"auction":{},"iv":{},"delta":{},"gamma":{},"theta":{},"vega":{},"rho":{},"iterations":{},"below_band":{},"why":null,"detail":null}}"#,
+                        r#"{{"t":{},"premium":{premium},{},{},"rate":{rate},"auction":{},"rate_state":"{rate_state}","rate_gap":{rate_gap},"iv":{},"delta":{},"gamma":{},"theta":{},"vega":{},"rho":{},"iterations":{},"below_band":{},"why":null,"detail":null}}"#,
                         ts.div_euclid(MICROS),
                         spot_fields("spot", Some(*spot), ts),
                         tenor_fields(Some(*tenor)),
@@ -714,10 +763,14 @@ impl GreeksAsk {
         rows.push(']');
         let table = match rate {
             RateTable::Loaded(series) => format!(
-                r#"{{"variable":{},"state":"loaded","error":null,"sha256":{},"auctions":{},"first_release":{},"last_release":{},"cite":{}}}"#,
+                r#"{{"variable":{},"state":"loaded","error":null,"sha256":{},"auctions":{},"gaps":{},"unlinked_gaps":{},"max_age_days":{},"max_carried_age_days":{},"first_release":{},"last_release":{},"cite":{}}}"#,
                 render::json_string(RATE_ENV),
                 render::json_string(&crate::server::hex32(series.sha256())),
                 series.auction_count(),
+                series.gap_count(),
+                series.unlinked_gaps().len(),
+                pull::riskfree::MAX_AGE_DAYS,
+                pull::riskfree::MAX_CARRIED_AGE_DAYS,
                 render::json_string(&series.first_release().to_string()),
                 render::json_string(&series.last_release().to_string()),
                 render::json_string(pull::riskfree::CHARTER_CITE),

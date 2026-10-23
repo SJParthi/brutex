@@ -400,7 +400,7 @@ pub use self::journal::{
     BAR_DEFINITION, ClosedBy, JOURNAL_LOAD_WARN_BYTES, KeyHistory, VERB_WORDS,
     definition_is_current, done_whole_days, journal_lock_path, journal_path,
 };
-pub(crate) use self::journal::{append_lines, append_lines_within};
+pub(crate) use self::journal::{append_lines, append_lines_within, make_leaf_dir};
 #[cfg(test)]
 use self::journal::{closing_line, count_of, torn_fragment};
 
@@ -911,7 +911,119 @@ pub struct RunOptions<'a> {
     /// The run's stop (IA-2, D-4827, D-4853): asked before each file is
     /// taken and before each day, never inside a file. `None` runs to the end.
     pub stop: Option<&'a crate::gdfl_run::stop::StopControl>,
+    /// The operator's repair reason (D-4874, D-4889; IA-16): `Some` is the
+    /// ONLY run whose filing hands a month the append-only store refuses as
+    /// `NotHeld` or `Superseded` to the back-fill door (WP-12d's filing
+    /// path, WP-13c's repair), and the only one `admit` reads a repairable
+    /// hole day for (design §5.5 row 4a). `None` leaves every hole a hole:
+    /// named, counted and never repaired unasked. Judged by
+    /// [`crate::ingest::repair_reason_ok`], the one rule both feeds use.
+    pub repair_reason: Option<&'a str>,
+    /// `admit`'s row 3 (D-4885): skip, counted in
+    /// [`Report::restated_skipped`], a day `done` under a definition no
+    /// longer current for its kind. `false` reads it again, D-2822's rule as
+    /// every build before IA-16 applied it: the design's `restate` flag with
+    /// its sense kept, so no caller that sets nothing stops restating.
+    pub skip_restated: bool,
+    /// THE FREE-SPACE FLOOR in bytes (IA-16; FM-085, CONC-031, D-6900 keep
+    /// item 5): checked before the run's first day and before each day it
+    /// reads; a store volume with less free is refused `disk_full` before
+    /// the day's first write, so a full disk is named before anything is
+    /// begun. `0` checks nothing (a test's run); `crate::gdfl_run` passes the
+    /// request's floor, [`DEFAULT_FREE_FLOOR`] unless the operator set one.
+    pub free_floor: u64,
+    /// How the floor's free space is measured: `None` is the host's
+    /// `statfs(2)` ([`volume_space`]); a test passes its own meter.
+    pub free_space: Option<SpaceMeter>,
 }
+
+/// How a run measures its store volume's free space ([`volume_space`] by
+/// default; a test passes its own).
+pub type SpaceMeter = fn(&Path) -> Result<crate::disk_projection::Space, String>;
+
+/// The free-space floor a run asks for unless the operator sets another
+/// (IA-16, CONC-031): 10 GiB. Chosen, not sourced: above the largest day
+/// the failure matrix names, an options day of about 9 GB written into an
+/// empty test store (FM-085's cited measurement, UNVERIFIED here). A day
+/// that would cross it is not begun; a disk that fills mid-day anyway ends
+/// the run `disk_full` after the current file (D-4851).
+pub const DEFAULT_FREE_FLOOR: u64 = 10 * 1024 * 1024 * 1024;
+
+/// The free space of the volume holding `path`, from ONE `statfs(2)` on
+/// macOS (`f_bsize`, `f_blocks`, `f_bavail`) and one `statvfs(2)` elsewhere
+/// (`f_frsize`, `f_blocks`, `f_bavail`), through `rustix`'s safe wrappers:
+/// the call `/disk.json` makes (D-5240, D-5241), so this meter and the disk
+/// page read one figure. No child process: `/bin/df -Pk` was this meter's
+/// first form and the no-runtime-spawn gate (`vocab/tests/no_runtime_spawn.rs`)
+/// refuses any. Not `statvfs(2)` on macOS: Darwin's `fsblkcnt_t` is 32 bits
+/// wide (D-5241), `statfs(2)`'s counts are 64-bit. `free` is the bytes
+/// available to this process (`f_bavail`), what `df`'s "Available" column
+/// printed. One system call per call: once per day, never per file or row.
+///
+/// # Errors
+///
+/// The sentence naming the path and the call's refusal (a missing
+/// directory, a lost volume, a permission refused).
+pub fn volume_space(path: &Path) -> Result<crate::disk_projection::Space, String> {
+    let refused =
+        |call: &str, why: rustix::io::Errno| format!("{call}({}) refused: {why}", path.display());
+    #[cfg(target_vendor = "apple")]
+    let (fragment, blocks, available) = {
+        let fs = rustix::fs::statfs(path).map_err(|why| refused("statfs", why))?;
+        (u64::from(fs.f_bsize), fs.f_blocks, fs.f_bavail)
+    };
+    #[cfg(not(target_vendor = "apple"))]
+    let (fragment, blocks, available) = {
+        let vfs = rustix::fs::statvfs(path).map_err(|why| refused("statvfs", why))?;
+        (vfs.f_frsize, vfs.f_blocks, vfs.f_bavail)
+    };
+    let bytes = |count: u64, what: &str| {
+        count.checked_mul(fragment).ok_or_else(|| {
+            format!(
+                "{}: {count} {what} blocks of {fragment} bytes overflow a u64",
+                path.display()
+            )
+        })
+    };
+    Ok(crate::disk_projection::Space {
+        total: bytes(blocks, "total")?,
+        free: bytes(available, "available")?,
+    })
+}
+
+/// At most this many (instrument, month) pairs one run holds back
+/// (D-4851, RA-209): past it the run ends `held_back_cap`, by name, after
+/// the day in hand, and a resume continues past them.
+pub const HELD_BACK_CAP: usize = 4_096;
+
+/// One instrument-month of a run's held-back set (D-4851): the symbol a
+/// file is filed under, its option contract (`None` for spot), and the
+/// month of the day it files into.
+pub(super) type HeldKey = (String, Option<Contract>, store::path::YearMonth);
+
+/// A month another process holds is asked again this many times, this long
+/// apart, at the import's call site (D-4851, F30): at most 2 s per file,
+/// bounded, never inside `BarFile::open_or_create`, whose "refused rather
+/// than waited for" contract other callers rely on. Past it the file fails
+/// `month_busy` and its month is held back.
+pub const MONTH_BUSY_RETRY: (usize, std::time::Duration) =
+    (20, std::time::Duration::from_millis(100));
+
+/// Whether a day closed `incomplete` with `reason` is a store hole a run
+/// with a repair reason reads (`admit` row 4a: `needs_month_generation`,
+/// `month_superseded`, `repair_refused`), as the receipt says it (D-6900
+/// keep item 2). `bars_differ_held` and `repair_impossible` are holes no
+/// repair fills (row 4b); any other reason is no hole.
+#[must_use]
+pub fn hole_is_repairable(reason: &str) -> bool {
+    causes::REPAIRABLE_HOLES.contains(&reason)
+}
+
+/// Whether the charter records the listing spans of the stored alias
+/// indices (D-4833): `stored_index_absent` is raised only inside such a
+/// span, and no span is recorded in this tree (IA-0b records them), so no
+/// build of this tree raises it. Named, never assumed.
+pub const STORED_INDEX_SPANS_RECORDED: bool = false;
 
 /// What a run tells whoever started it, as it goes (IA-1, design §5.1:
 /// "the observer is the progress file").
@@ -1532,6 +1644,42 @@ pub struct Report {
     /// bars are in [`Report::seconds_committed`], and it writes no `.prv`
     /// record (a revision carries none).
     pub months_repaired: usize,
+    /// Days `admit` skipped as a store hole a repair can fill (rows 4a of
+    /// design §5.5, IA-16, D-4885): the key's last line is `incomplete` with
+    /// `needs_month_generation`, `month_superseded` or `repair_refused`, and
+    /// the run carries no repair reason. Never read, never written.
+    pub holes_skipped: usize,
+    /// Days `admit` skipped as a store hole no repair fills (row 4b):
+    /// `bars_differ_held` or `repair_impossible`. Skipped by every run, a
+    /// repair-reason run included (D-4912: only a restate run reads them).
+    pub holes_unrepairable: usize,
+    /// Days `admit` skipped as `done` under a definition no longer current
+    /// for their kind, in a run that asked not to restate them
+    /// ([`RunOptions::skip_restated`], row 3).
+    pub restated_skipped: usize,
+    /// The hole days of the range `admit` passed over, in day order (rows 4a
+    /// and 4b), each with its reason: what Resume names and never reads.
+    pub holes_in_range: Vec<(Day, String)>,
+    /// The days this run CLOSED as a store hole (`incomplete` with one of the
+    /// five hole reasons, D-4851), in day order, each with its reason: a hole
+    /// the run made. Its refused file is a named failure, so such a run
+    /// exits FAILED (D-6900 keep item 2).
+    pub holes_made: Vec<(Day, String)>,
+    /// THE STORE'S STANDING HOLES (IA-16, D-6900 keep item 2): every key of
+    /// the journal, of any kind and any day, inside or outside this run's
+    /// range, whose last line is `incomplete` with one of the five hole
+    /// reasons, counted as `(kind, reason, keys)` in kind and reason order
+    /// as the journal stood when the run loaded it. The receipt is a run's
+    /// only per-run surface, so a hole outside today's range is named on
+    /// every receipt. Counted once per run over the keys the load kept
+    /// (`docs/06-limits.md` L-IA16-09).
+    pub standing_holes: Vec<(String, String, usize)>,
+    /// Files not filed because an earlier file of the same instrument-month
+    /// failed in this run (D-4851, IA-GR-18): each named `held_back`.
+    pub files_held_back: usize,
+    /// Busy-month retries the filing step made ([`MONTH_BUSY_RETRY`]): every
+    /// attempt after a file's first, counted, so a slow run says why.
+    pub month_busy_retries: usize,
     /// Every failure the run named, kept by name in `failures` or not: the
     /// count a caller decides `FAILED` by (D-4839). `failures` holds at most
     /// [`FAILURES_KEPT`] of them, the newest.
@@ -1796,6 +1944,9 @@ struct Handed {
 #[derive(Debug, Default)]
 struct DayExtras {
     member_bytes: Option<u64>,
+    /// Whether the day zip named any file of its folder with `\` (D-4828):
+    /// D-4841's `separator_backslash`, a capital-market day's (IA-16).
+    backslash: bool,
     /// What the day's listing was (DB-A49): its entry count and digest,
     /// written on the close.
     listing: Option<ListingSum>,
@@ -1999,7 +2150,9 @@ where
     // Its sum (DB-A49) is kept with it, taken once per day.
     let mut cached: Option<CachedDay<S::Locator>> = None;
     let scoped = Some((&record, &swept));
-    drive_core(run, options, (&mut StoreCensus, scoped), |day, filer| {
+    // The run's census memory, kept across its days (R3-19).
+    let mut census = StoreCensus::default();
+    drive_core(run, options, (&mut census, scoped), |day, filer| {
         if cached.as_ref().is_none_or(|(held, _, _)| *held != day) {
             cached = None;
             let (listed, listing) = cm_list(source, (tree, day));
@@ -2014,6 +2167,7 @@ where
         let mut listed = Listed {
             held: true,
             member_bytes: listing.member_bytes(),
+            backslash: listing.backslash() > 0,
             listing: *sum,
             ..Listed::default()
         };
@@ -2027,12 +2181,32 @@ where
             }
         };
         let jobs = cm_jobs(run, listing, &mut listed, member.as_deref());
-        let reads = filer.file_all(&jobs, &|job| {
+        let day_close = if member.is_none() {
+            let filed: Vec<&str> = jobs.iter().map(|job| job.symbol.as_str()).collect();
+            let entries = listing.entries();
+            let foreign = entries
+                .iter()
+                .all(|file| listing.entry_stem(file).is_none());
+            day_close_refusals(
+                (run, day),
+                (entries.len(), foreign, jobs.len()),
+                Some(&filed),
+                &listed,
+            )
+        } else {
+            Vec::new()
+        };
+        let month = day.year_month().ok();
+        let key_of =
+            |job: &CmJob<'_, S::Locator>| month.map(|month| (job.symbol.clone(), None, month));
+        let reads = filer.file_all(&jobs, &key_of, &|job| {
             cm_read(source, run, (listing, day), job, Mode::Import).map(|one| (one, None))
         });
-        listed
+        let (read, mut extras) = listed
             .close(jobs.iter().map(|job| job.index).zip(reads).collect())
-            .0
+            .0;
+        extras.failures.extend(day_close);
+        (read, extras)
     })
 }
 
@@ -2049,10 +2223,25 @@ struct Listed {
     held: bool,
     /// Entries of the day that are not wanted files.
     skipped: usize,
+    /// For each swept index, in [`InstrumentKey::SWEPT`]'s order, the
+    /// [`UNKNOWN_SHOWN`] stems of the day's folder that no scope files
+    /// (`filing` answered none: a re-spelt or renamed stem, or one off the
+    /// scope) CLOSEST to its symbol ([`closeness`]), closest first, ties in
+    /// listing order (IA-16 repair 2, design §5.8, D21; repair 1 kept the
+    /// first four in listing order, which on a real day of about seventy
+    /// such stems named a renamed index only by luck): what
+    /// `absent_from_listing` names beside the swept index it misses.
+    ///
+    /// [`InstrumentKey::SWEPT`]: brutex_core::instrument::InstrumentKey::SWEPT
+    unknown: [Vec<(usize, String)>; brutex_core::instrument::InstrumentKey::SWEPT.len()],
+    /// How many such stems the day held, shown or not.
+    unknown_total: usize,
     /// The refusals the listing decided, in listing order, each at its place.
     refused: Vec<(usize, Refused)>,
     /// The day zip's size, where the source read one.
     member_bytes: Option<u64>,
+    /// Whether the listing named a file with `\` (D-4828, D-4841).
+    backslash: bool,
     /// What the listing was, kept with the day's close (DB-A49).
     listing: Option<ListingSum>,
 }
@@ -2088,6 +2277,7 @@ impl Listed {
         };
         let extras = DayExtras {
             member_bytes: self.member_bytes,
+            backslash: self.backslash,
             listing: self.listing,
             ..DayExtras::default()
         };
@@ -2104,6 +2294,121 @@ struct CmJob<'a, L> {
     symbol: String,
 }
 
+/// THE DAY-CLOSE REFUSALS (IA-16; F10, D-4872, D-4833, FM-038, FM-073): the
+/// day's own failures, never a file's (no entry is counted for them), for a
+/// day the source holds, read whole (never a member key's pass), whose
+/// listing refused nothing by name, in an UNFILTERED run:
+///
+/// * `no_wanted_file`: the listing held `entries` and NOT ONE of them is a
+///   file of the day's own folder (`foreign`: another day's folder, a
+///   renamed folder, an extra level of nesting, a Mac's `__MACOSX/`), so no
+///   job was made. Never `done files=0`; an open cause, so the day is read
+///   again after a corrected delivery. A listing of files off the scope (a
+///   day of other indices, D-4872's FM-119 case) and an empty listing still
+///   close as before (L-IA16-08).
+/// * `absent_from_listing`: on an indices day with at least one job, each
+///   swept index ([`InstrumentKey::SWEPT`], the one table of them) no wanted
+///   file is filed under. The vendor's own listing, so it closes the day,
+///   named (D-4833), with the first [`UNKNOWN_SHOWN`] stems of the day that
+///   no scope files and their count (design §5.8, D21): a re-spelt or
+///   renamed swept stem is among them, so the refusal says where the index
+///   may have gone.
+/// * `stored_index_absent` is not raised: no listing span is recorded
+///   ([`STORED_INDEX_SPANS_RECORDED`]).
+///
+/// O(swept × filed): two names against the day's few index files.
+fn day_close_refusals(
+    (run, day): (&Run<'_>, Day),
+    (entries, foreign, jobs): (usize, bool, usize),
+    filed: Option<&[&str]>,
+    listed: &Listed,
+) -> Vec<Staged> {
+    let mut out = Vec::new();
+    if !run.only.is_empty() || !listed.refused.is_empty() {
+        return out;
+    }
+    let mut refuse = |about: &str, why: &ImportRefusal| {
+        let cause = import_cause(why);
+        out.push(Staged {
+            cause,
+            failure: note_failure(run.kind, day, about, &why.to_string(), cause),
+        });
+    };
+    if jobs == 0 {
+        if entries > 0 && foreign {
+            refuse(
+                "listing",
+                &ImportRefusal::NoWantedFile {
+                    skipped: listed.skipped,
+                },
+            );
+        }
+        return out;
+    }
+    let Some(filed) = filed.filter(|_| run.kind == ImportKind::Indices) else {
+        return out;
+    };
+    for ((_, swept), nearest) in brutex_core::instrument::InstrumentKey::SWEPT
+        .into_iter()
+        .zip(&listed.unknown)
+    {
+        if !filed.contains(&swept) {
+            refuse(
+                swept,
+                &ImportRefusal::AbsentFromListing {
+                    instrument: swept.to_owned(),
+                    unknown: nearest.iter().map(|(_, stem)| stem.clone()).collect(),
+                    unknown_total: listed.unknown_total,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// How many unfiled stems `absent_from_listing` names (design §5.8: ≤ 4).
+/// The rest are counted, never listed, so the refusal stays one short line
+/// on a day whose listing holds a hundred indices no scope files.
+const UNKNOWN_SHOWN: usize = 4;
+
+/// How close an unfiled `stem` is to a swept `symbol` (IA-16 repair 2,
+/// FM-073): how many of the symbol's distinct letter pairs the stem holds,
+/// both read as upper-case ASCII letters and digits only, so `NIFTY BANK`
+/// is as close to `BANKNIFTY` as its spelling allows and `NIFTY IT` is
+/// not. A ranking for the operator to read, never a filing rule: no stem is
+/// filed by it. O(symbol × stem), both bounded by a file name.
+fn closeness(stem: &str, symbol: &str) -> usize {
+    let letters = |text: &str| -> Vec<u8> {
+        text.bytes()
+            .filter(u8::is_ascii_alphanumeric)
+            .map(|b| b.to_ascii_uppercase())
+            .collect()
+    };
+    let (stem, symbol) = (letters(stem), letters(symbol));
+    let mut pairs: Vec<&[u8]> = symbol.windows(2).collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+        .into_iter()
+        .filter(|pair| stem.windows(2).any(|held| held == *pair))
+        .count()
+}
+
+/// Keeps `stem` among `nearest` when it is closer to the swept symbol than
+/// the farthest kept, at most [`UNKNOWN_SHOWN`], closest first and, on a
+/// tie, the earlier in listing order first (a later stem never displaces an
+/// equal one). O([`UNKNOWN_SHOWN`]).
+fn keep_nearest(nearest: &mut Vec<(usize, String)>, score: usize, stem: &str) {
+    let at = nearest
+        .iter()
+        .position(|(kept, _)| *kept < score)
+        .unwrap_or(nearest.len());
+    if at < UNKNOWN_SHOWN {
+        nearest.insert(at, (score, stem.to_owned()));
+        nearest.truncate(UNKNOWN_SHOWN);
+    }
+}
+
 /// The listing of tree `tree` on `day`: none when the source does not hold
 /// the day, and the listing refused by name when it cannot be read.
 fn cm_list<S: CmSource>(
@@ -2115,6 +2420,7 @@ fn cm_list<S: CmSource>(
         Ok(Some(listing)) => {
             listed.held = true;
             listed.member_bytes = listing.member_bytes();
+            listed.backslash = listing.backslash() > 0;
             listed.listing = Some(ListingSum::of(listing.entries()));
             (listed, Some(listing))
         }
@@ -2163,7 +2469,23 @@ fn cm_jobs<'a, L>(
                 listed.refused.push((index, Refused::cm(file.name(), &why)));
                 continue;
             }
-            Some(Ok(None) | Err(_)) | None => {
+            Some(Ok(None)) => {
+                // A stem of the day's own folder no scope files: kept, the
+                // few closest to each swept symbol by name, for
+                // `absent_from_listing` (D21; IA-16 repair 2).
+                if let Some(stem) = stem {
+                    listed.unknown_total += 1;
+                    for ((_, swept), nearest) in brutex_core::instrument::InstrumentKey::SWEPT
+                        .into_iter()
+                        .zip(listed.unknown.iter_mut())
+                    {
+                        keep_nearest(nearest, closeness(stem, swept), stem);
+                    }
+                }
+                listed.skipped += 1;
+                continue;
+            }
+            Some(Err(_)) | None => {
                 listed.skipped += 1;
                 continue;
             }
@@ -2474,7 +2796,9 @@ where
     }
     let mut lineage = lineage::LineageRun::load(run.store_root, run.from)
         .map_err(|why| ImportRefusal::Lineage { why })?;
-    drive_core(run, options, (&mut StoreCensus, None), |day, filer| {
+    // The run's census memory, kept across its days (R3-19).
+    let mut census = StoreCensus::default();
+    drive_core(run, options, (&mut census, None), |day, filer| {
         let mut early = DayExtras::default();
         let workers = options.workers.get();
         warm_up(
@@ -2491,18 +2815,49 @@ where
             return with_early(listed.close(Vec::new()).0, early);
         };
         let jobs = nfo_jobs(run, day, &listing, &mut listed);
-        let reads = filer.file_all(&jobs, &|job| nfo_read(source, &listing, job, true));
+        let foreign = listing
+            .entries()
+            .iter()
+            .all(|file| listing.ticker_of(file).is_none());
+        let day_close = day_close_refusals(
+            (run, day),
+            (listing.entries().len(), foreign, jobs.len()),
+            None,
+            &listed,
+        );
+        let month = day.year_month().ok();
+        let key_of = |job: &NfoJob<'_, S::Locator>| {
+            month.map(|month| match decode_ticker(job.ticker, day) {
+                Ok(decoded) => (
+                    decoded.underlying.as_str().to_owned(),
+                    Some(decoded.contract),
+                    month,
+                ),
+                Err(_) => (job.ticker.to_owned(), None, month),
+            })
+        };
+        let reads = filer.file_all(&jobs, &key_of, &|job| nfo_read(source, &listing, job, true));
         let ((read, mut extras), contracts) =
             listed.close(jobs.iter().map(|job| job.index).zip(reads).collect());
         extras.absorb(early);
-        fold_lineage(
-            source,
-            run,
-            (day, &listing),
-            &mut lineage,
-            &contracts,
-            &mut extras,
-        );
+        extras.failures.extend(day_close);
+        // A STORE THAT WENT AWAY TAKES NO LINEAGE LINE (IA-16 repair 1;
+        // FM-125, RA-284): the lineage and lot ledgers sit under the root, so
+        // a root a file's probe found gone or replaced, or that the probe
+        // here finds so, is not written; the day pass then ends the run
+        // `store_lost` with the day begun, and a resume folds it.
+        let lost = filer.store_lost.is_some()
+            || filing::store_root_lost(run.store_root, filer.ctx.store_id.get()).is_some();
+        if !lost {
+            fold_lineage(
+                source,
+                run,
+                (day, &listing),
+                &mut lineage,
+                &contracts,
+                &mut extras,
+            );
+        }
         (read, extras)
     })
 }
@@ -2590,14 +2945,30 @@ fn contract_day_of(day_file: &crate::gdfl_nfo::NfoDayFile, file: usize) -> linea
 
 /// One read option file as the runtime receives it: its rows, its member
 /// and its quote count (D-3334, D-3335).
+/// An option file's reader counts (D-3335): its quoted rows, and the rows
+/// its reader refused one by one while keeping the rest (CMP-13; `0` until
+/// IA-4's decoder refuses rows singly). A row refusal is a count of the day
+/// ledger and NEVER a failure of the file or its day: an option file and a
+/// CASH file are judged by one rule.
+pub(super) fn option_reader_counts(quoted_rows: u32, rows_refused: u64) -> quality::ReaderCounts {
+    quality::ReaderCounts {
+        rows_refused,
+        quoted_rows: Some(u64::from(quoted_rows)),
+        ..quality::ReaderCounts::default()
+    }
+}
+
 fn option_handed<L>(
     day_file: crate::gdfl_nfo::NfoDayFile,
     file: &crate::gdfl_cm::ListedFile<L>,
 ) -> Handed {
-    let reader = quality::ReaderCounts {
-        quoted_rows: Some(u64::from(day_file.file.quoted_rows)),
-        ..quality::ReaderCounts::default()
-    };
+    // THE SEAM IA-4'S PER-ROW OPTIONS DECODER FILLS (CMP-13): today the
+    // options reader refuses a file whole, so it hands on no row refusal;
+    // once it keeps a file's good rows and refuses others one by one, it
+    // passes their count here, and the file is filed and its day closes
+    // exactly as a CASH day with D-3318 row refusals does (IA-16's share,
+    // `an_option_file_with_rows_refused_one_by_one_is_admitted_not_failed_whole`).
+    let reader = option_reader_counts(day_file.file.quoted_rows, 0);
     let ticks = day_file
         .file
         .rows
@@ -3129,6 +3500,7 @@ where
         }
         done.days_read += 1;
         ledger.set_member_bytes(extras.member_bytes);
+        ledger.set_separator_backslash(extras.backslash);
         let written = rescan_flags(&mut flags, ledger, &mut done, &mut failures);
         let day_text = day.to_string();
         let _dropped_when_filtered = telemetry::emit(

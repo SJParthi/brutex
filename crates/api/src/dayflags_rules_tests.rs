@@ -432,7 +432,7 @@ fn a_flag_refused_by_one_request_is_read_by_the_next() {
 }
 
 /// **A FLAG IS KEPT, ITS MASTER IS NOT, AND A DAY ASKED AT ONCE IS READ ONCE**
-/// (verify-R3-13-r1 blocking 2, D-5904 item 20). Before, every auction-era
+/// (verify-R3-13-r1 blocking 2, D-7135 item 20). Before, every auction-era
 /// day's whole parsed master stayed for the life of the process (18-25 MB a
 /// day on the real store) beside `bars_change`'s own copy, and ten cold pages
 /// asking one day each parsed it. Now: twelve threads asking one share's day

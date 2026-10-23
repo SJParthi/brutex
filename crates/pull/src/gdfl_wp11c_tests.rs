@@ -120,7 +120,7 @@ fn a_halt_day_is_imported_as_printed_and_its_line_counts_the_halt() {
     let line = |scope: &str| {
         lines
             .iter()
-            .find(|l| l.starts_with(&format!("flags indices 2020-03-13 {scope} v=1 ")))
+            .find(|l| l.starts_with(&format!("flags indices 2020-03-13 {scope} v=2 ")))
             .unwrap_or_else(|| panic!("{scope} in {lines:#?}"))
     };
     let nifty = line("NIFTY");
