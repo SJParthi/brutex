@@ -100,10 +100,9 @@ use crate::fill::{Bar, Direction, Fills, worst_case_fills};
 use crate::lot::{contract_quantity, lot_size_of, lot_size_on};
 use crate::money::{levy_ceiling, narrow, statutory_levy};
 use crate::rate::{
-    BpsX100, Broker, GST_ON_FEE_BASE, OrderSide, SEBI_TURNOVER_FEE, brokerage_per_order, ipft,
-    stamp_duty,
+    BpsX100, Broker, GST_ON_FEE_BASE, OrderSide, SEBI_TURNOVER_FEE, brokerage_per_order, stamp_duty,
 };
-use crate::regime::{exchange_charge_rate, stt_options_rate};
+use crate::regime::{exchange_charge_rate, ipft_rate, stt_options_rate};
 use crate::scope::{Segment, is_cost_free};
 use crate::venue::SweptSlot;
 
@@ -290,14 +289,13 @@ impl Rates {
     /// # Examples
     ///
     /// ```
-    /// use brutex_core::instrument::Exchange;
-    /// use costs::rate::{Broker, ipft};
+    /// use costs::rate::{BSE_IPFT, Broker};
     /// use costs::regime::BSE_EXCHANGE_CHARGE;
     /// use costs::day::TradeDay;
     /// use costs::trip::Rates;
     ///
     /// let stt = costs::regime::stt_options_rate(TradeDay::new(2026, 5, 15)?)?;
-    /// let rates = Rates::new(Broker::Groww, stt, BSE_EXCHANGE_CHARGE, ipft(Exchange::Bse));
+    /// let rates = Rates::new(Broker::Groww, stt, BSE_EXCHANGE_CHARGE, BSE_IPFT);
     /// assert_eq!(rates.brokerage_round_trip().raw(), 4_000);
     /// assert_eq!(rates.ipft().get(), 0);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -390,12 +388,18 @@ impl Rates {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn resolve(broker: Broker, exchange: Exchange, day: TradeDay) -> Result<Self, CostError> {
-        // Both lookups are taken and whichever refused is carried out whole.
-        // The refusal names which charge it is about, so one path serves both
-        // without losing the reason.
-        let (stt, exchange_rate) =
-            dated_pair(stt_options_rate(day), exchange_charge_rate(exchange, day))?;
-        Ok(Self::new(broker, stt, exchange_rate, ipft(exchange)))
+        // All three lookups are taken and the first that refused is carried
+        // out whole. The refusal names which charge it is about, so one path
+        // serves all three without losing the reason. The IPFT is dated since
+        // D-5100 (NSE `FA73061`, 2026-03-01) and is checked last: its only
+        // refusal window lies inside the exchange charge's, so a date that
+        // refuses names the exchange charge, as it always has.
+        let (stt, exchange_rate, ipft) = dated_rates(
+            stt_options_rate(day),
+            exchange_charge_rate(exchange, day),
+            ipft_rate(exchange, day),
+        )?;
+        Ok(Self::new(broker, stt, exchange_rate, ipft))
     }
 
     /// The brokerage for the whole round trip — both orders, flat.
@@ -447,17 +451,20 @@ impl Rates {
     }
 }
 
-/// The two dated rates, or the first refusal of the two.
+/// The three dated rates, or the first refusal of the three.
 ///
-/// A function taking two `Result`s rather than two `?`s written inline, so that
-/// **both** refusal paths are reachable from a test. The transaction-tax table
-/// has no unverified row today; its guard is still exercised, against a refusal
-/// built for the purpose, so the day it gains one nothing here is untried.
-fn dated_pair(
+/// A function taking three `Result`s rather than three `?`s written inline, so
+/// that **every** refusal path is reachable from a test. The transaction-tax
+/// table has no unverified row today, and the IPFT's one refusal window lies
+/// inside the exchange charge's, so neither guard can be reached through a
+/// date; both are exercised against refusals built for the purpose, so the
+/// day either changes nothing here is untried.
+fn dated_rates(
     stt: Result<BpsX100, Refusal>,
     exchange: Result<BpsX100, Refusal>,
-) -> Result<(BpsX100, BpsX100), Refusal> {
-    Ok((stt?, exchange?))
+    ipft: Result<BpsX100, Refusal>,
+) -> Result<(BpsX100, BpsX100, BpsX100), Refusal> {
+    Ok((stt?, exchange?, ipft?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1240,11 +1247,14 @@ fn signal_only(fills: Fills, quantity: i64) -> Result<Charges, CostError> {
 ///     1,
 /// )?;
 ///
-/// // `COSTS_VERIFIED` §5 Example 1, to the paisa.
+/// // `COSTS_VERIFIED` §5 Example 1, to the paisa in total. 2026-05-15 is in
+/// // the `FA73061` regime (D-5100): the exchange line carries the folded IPFT,
+/// // 510 where §5 wrote 502 + an IPFT of 8.
 /// let charges = price(&trip)?;
 /// assert_eq!(charges.brokerage().raw(), 4_000);
 /// assert_eq!(charges.stt().raw(), 1_200);
-/// assert_eq!(charges.exchange().raw(), 502);
+/// assert_eq!(charges.exchange().raw(), 510);
+/// assert_eq!(charges.ipft().raw(), 0);
 /// assert_eq!(charges.total_charges().raw(), 6_712);
 /// assert_eq!(charges.net_pnl().raw(), 122_638);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -1290,7 +1300,7 @@ mod tests {
     use brutex_core::symbol::Symbol;
 
     use crate::error::Refusal;
-    use crate::regime::{BSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE};
+    use crate::regime::{BSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE_FA73061};
     use crate::scope::ALL_SEGMENTS;
 
     /// The day every worked example in `COSTS_VERIFIED` §5 is dated.
@@ -1397,13 +1407,19 @@ mod tests {
 
         assert_eq!(charges.brokerage().raw(), 40_00);
         assert_eq!(charges.stt().raw(), 12_00);
-        // 228 + 274 per leg. Ceiling the combined notional once gives 501.
-        assert_eq!(charges.exchange().raw(), 5_02);
+        // 232 + 278 per leg, at the FA73061 row: ₹3,553 per crore, the
+        // ₹3,552.99 charge and the ₹0.01 IPFT folded (D-5100). The predecessor's
+        // `COSTS_VERIFIED` §5 predates FA73061 and priced this day at the
+        // 2024-10-01 split, 228 + 274 = 502 plus an IPFT of 4 + 4 = 8: the same
+        // 510 paisa, split differently. Ceiling the combined notional once
+        // would give 509.
+        assert_eq!(charges.exchange().raw(), 5_10);
         assert_eq!(charges.sebi().raw(), 2);
-        assert_eq!(charges.ipft().raw(), 8);
+        assert_eq!(charges.ipft().raw(), 0, "folded into the exchange line");
         assert_eq!(charges.stamp().raw(), 1_00);
         assert_eq!(charges.gst().raw(), 9_00);
 
+        // The total is §5's to the paisa: the fold moved the IPFT, not money.
         assert_eq!(charges.total_charges().raw(), 67_12);
         assert_eq!(charges.gross_pnl().raw(), 1_293_50);
         assert_eq!(charges.net_pnl().raw(), 1_226_38);
@@ -1423,14 +1439,18 @@ mod tests {
         assert_eq!(charges.sell_notional().raw(), 38_983_75);
         assert_eq!(charges.brokerage().raw(), 40_00, "flat, whatever the size");
         assert_eq!(charges.stt().raw(), 59_00);
-        assert_eq!(charges.exchange().raw(), 25_06);
+        // 1,156 + 1,386 at the folded FA73061 row (D-5100). §5 has 25_06 plus
+        // an IPFT of 37 = 2,543: the two separate IPFT ceilings cost one paisa
+        // more than the one ceiling of the folded row, so the total is one
+        // paisa under §5's ₹137.51.
+        assert_eq!(charges.exchange().raw(), 25_42);
         assert_eq!(charges.sebi().raw(), 8);
-        assert_eq!(charges.ipft().raw(), 37);
+        assert_eq!(charges.ipft().raw(), 0, "folded into the exchange line");
         assert_eq!(charges.stamp().raw(), 1_00);
         assert_eq!(charges.gst().raw(), 12_00);
-        assert_eq!(charges.total_charges().raw(), 137_51);
+        assert_eq!(charges.total_charges().raw(), 137_50);
         assert_eq!(charges.gross_pnl().raw(), 6_467_50);
-        assert_eq!(charges.net_pnl().raw(), 6_329_99);
+        assert_eq!(charges.net_pnl().raw(), 6_330_00);
 
         // Per lot: ₹27.50 against ₹67.12 at one lot. The brokerage amortises
         // and nothing else does.
@@ -1448,14 +1468,16 @@ mod tests {
         assert_eq!(charges.buy_notional().raw(), 1_501_50);
         assert_eq!(charges.sell_notional().raw(), 1_798_50);
         assert_eq!(charges.stt().raw(), 3_00);
-        assert_eq!(charges.exchange().raw(), 1_17);
+        // 54 + 64 at the folded FA73061 row (D-5100); §5 has 1_17 plus an IPFT
+        // of 2 = 119, one paisa more, for the same reason as Ex.2.
+        assert_eq!(charges.exchange().raw(), 1_18);
         assert_eq!(charges.sebi().raw(), 2);
-        assert_eq!(charges.ipft().raw(), 2);
+        assert_eq!(charges.ipft().raw(), 0, "folded into the exchange line");
         assert_eq!(charges.stamp().raw(), 1_00);
         assert_eq!(charges.gst().raw(), 8_00);
-        assert_eq!(charges.total_charges().raw(), 53_21);
+        assert_eq!(charges.total_charges().raw(), 53_20);
         assert_eq!(charges.gross_pnl().raw(), 297_00);
-        assert_eq!(charges.net_pnl().raw(), 243_79);
+        assert_eq!(charges.net_pnl().raw(), 243_80);
     }
 
     #[test]
@@ -1609,7 +1631,7 @@ mod tests {
             Broker::Groww,
             BpsX100::new(15_000),
             NSE_EXCHANGE_CHARGE,
-            ipft(Exchange::Nse),
+            crate::rate::NSE_IPFT,
             BpsX100::new(100_000),
             stamp_duty(OrderSide::Buy),
             GST_ON_FEE_BASE,
@@ -1944,8 +1966,14 @@ mod tests {
             nse.stt(),
             stt_options_rate(example_day()).expect("verified")
         );
-        assert_eq!(nse.exchange(), NSE_EXCHANGE_CHARGE);
-        assert_eq!(nse.ipft(), ipft(Exchange::Nse));
+        // 2026-05-15 is in the FA73061 regime: the folded ₹3,553 row and a
+        // zero IPFT line (D-5100).
+        assert_eq!(nse.exchange(), NSE_EXCHANGE_CHARGE_FA73061);
+        assert_eq!(
+            nse.ipft(),
+            ipft_rate(Exchange::Nse, example_day()).expect("verified")
+        );
+        assert_eq!(nse.ipft(), BpsX100::ZERO);
         assert_eq!(nse.sebi(), SEBI_TURNOVER_FEE);
         assert_eq!(nse.stamp(), stamp_duty(OrderSide::Buy));
         assert_eq!(nse.gst(), GST_ON_FEE_BASE);
@@ -1956,8 +1984,8 @@ mod tests {
         let assembled = Rates::new(
             Broker::Groww,
             stt_options_rate(example_day()).expect("verified"),
-            NSE_EXCHANGE_CHARGE,
-            ipft(Exchange::Nse),
+            NSE_EXCHANGE_CHARGE_FA73061,
+            BpsX100::ZERO,
         );
         assert_eq!(assembled, nse);
         assert_ne!(assembled, rates_on(Exchange::Bse, example_day()));
@@ -1987,8 +2015,15 @@ mod tests {
             charges.gross_pnl().raw() - charges.total_charges().raw()
         );
         // Every charge is strictly positive on a loss, and the tax is levied on
-        // the (smaller) sell notional rather than waived.
+        // the (smaller) sell notional rather than waived. The one exception is
+        // the IPFT line, which is zero from 2026-03-01 by the folding rule and
+        // not because it is waived: its ₹0.01 per crore rides in the exchange
+        // line (FA73061, D-5100).
         for (name, amount) in charges.itemised() {
+            if name == "investor protection fund" {
+                assert_eq!(amount.raw(), 0, "folded into the exchange line");
+                continue;
+            }
             assert!(amount.raw() > 0, "{name} was not charged on a losing trade");
         }
         assert_eq!(charges.stt().raw(), 5_00);
@@ -2671,7 +2706,7 @@ mod tests {
             Broker::Groww,
             BpsX100::new(15_000),
             NSE_EXCHANGE_CHARGE,
-            ipft(Exchange::Nse),
+            crate::rate::NSE_IPFT,
             SEBI_TURNOVER_FEE,
             stamp_duty(OrderSide::Buy),
             GST_ON_FEE_BASE,
@@ -2682,7 +2717,7 @@ mod tests {
                 Broker::Groww,
                 BpsX100::new(15_000),
                 NSE_EXCHANGE_CHARGE,
-                ipft(Exchange::Nse)
+                crate::rate::NSE_IPFT
             )
         );
     }
@@ -2747,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dated_pair_carries_whichever_of_the_two_lookups_refused() {
+    fn the_dated_rates_carry_whichever_of_the_three_lookups_refused_first() {
         // The transaction-tax table has no unverified row today, so its guard
         // cannot be reached through a date. It is reached here directly,
         // against a refusal built for the purpose, so that the day the table
@@ -2762,24 +2797,48 @@ mod tests {
         );
         let charge_refusal = exchange_charge_rate(Exchange::Nse, day(2024, 9, 30))
             .expect_err("the pre-boundary window refuses");
+        let ipft_refusal =
+            ipft_rate(Exchange::Nse, day(2023, 3, 31)).expect_err("before FA56129 refuses");
         let rate = stt_options_rate(example_day()).expect("verified");
 
         assert_eq!(
-            dated_pair(Err(tax_refusal), Ok(rate)),
+            dated_rates(Err(tax_refusal), Ok(rate), Ok(rate)),
             Err(tax_refusal),
             "the tax's refusal must be the one carried"
         );
         assert_eq!(
-            dated_pair(Ok(rate), Err(charge_refusal)),
+            dated_rates(Ok(rate), Err(charge_refusal), Ok(rate)),
             Err(charge_refusal),
             "the exchange charge's refusal must be the one carried"
         );
-        // The tax is checked FIRST, so it wins when both refuse.
         assert_eq!(
-            dated_pair(Err(tax_refusal), Err(charge_refusal)),
+            dated_rates(Ok(rate), Ok(rate), Err(ipft_refusal)),
+            Err(ipft_refusal),
+            "the IPFT's refusal must be the one carried"
+        );
+        // The tax is checked FIRST, so it wins when both refuse; the exchange
+        // charge is checked before the IPFT, which is why a date before
+        // 2023-04-01 still names the exchange charge (D-5100).
+        assert_eq!(
+            dated_rates(Err(tax_refusal), Err(charge_refusal), Ok(rate)),
             Err(tax_refusal)
         );
-        assert_eq!(dated_pair(Ok(rate), Ok(rate)), Ok((rate, rate)));
+        assert_eq!(
+            dated_rates(Ok(rate), Err(charge_refusal), Err(ipft_refusal)),
+            Err(charge_refusal)
+        );
+        assert_eq!(
+            dated_rates(Ok(rate), Ok(rate), Ok(rate)),
+            Ok((rate, rate, rate))
+        );
+        // Through a date, too: 2023-03-31 refuses on both tables, and the
+        // round trip is told about the exchange charge.
+        let both = Rates::resolve(Broker::Groww, Exchange::Nse, day(2023, 3, 31))
+            .expect_err("both refuse");
+        assert_eq!(
+            refusal_of(both).map(|refusal| refusal.charge()),
+            Some("exchange transaction charge (options premium)")
+        );
     }
 
     /// One tick, as a `Paisa`. Written once so the overflow table above reads.
@@ -2914,7 +2973,7 @@ mod tests {
         assert_eq!(
             charges.to_string(),
             "65 units, buy 10005 sell 11995 (notionals 650325 / 779675); \
-             brokerage 4000 + STT 1200 + exchange 502 + SEBI 2 + IPFT 8 + stamp 100 + GST 900 \
+             brokerage 4000 + STT 1200 + exchange 510 + SEBI 2 + IPFT 0 + stamp 100 + GST 900 \
              = 6712 charges; gross 129350, net 122638 (slippage 650 at 10 per unit)"
         );
     }
