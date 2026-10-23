@@ -2490,7 +2490,7 @@ test('the harness refuses an idle wait its timer cannot hold, and the idle row p
   // As a command: refused before any browser is started, exit 2, by name.
   const { execFile } = await import('node:child_process');
   const script = new URL('ci/browser-harness.mjs', web).pathname;
-  const ran = /** @type {{code: number, stderr: string}} */ (await new Promise((resolve) => execFile(process.execPath, [script, '--base', 'http://127.0.0.1:9', '--n', '1', '--pages', '/speed', '--no-interactions', '--read-only', '--idle-tabs', '1', '--idle-ms', '2147483648'], (error, _stdout, stderr) => resolve({ code: error ? error.code : 0, stderr }))));
+  const ran = /** @type {{code: number, stderr: string}} */ (await new Promise((resolve) => execFile(process.execPath, [script, '--base', 'http://127.0.0.1:9', '--n', '1', '--pages', '/speed', '--no-interactions', '--read-only', '--idle-tabs', '1', '--idle-ms', '2147483648'], (error, _stdout, stderr) => resolve({ code: error ? Number(error.code) : 0, stderr }))));
   assert.deepEqual([ran.code, ran.stderr], [2, 'browser-harness: --idle-ms must be at most 2147483647\n']);
   // The wait is measured by the clock.
   let clock = 1_000;
