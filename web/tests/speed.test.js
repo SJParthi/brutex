@@ -2503,21 +2503,26 @@ test('the harness refuses an idle wait its timer cannot hold, and the idle row p
   const real = await idleFor(30);
   assert.ok(real + IDLE_EARLY_MS >= 30 && real < 30_000, `a real 30 ms wait read ${real} ms`);
   // The row prints the measured time; a wait short of the asked one is NOT MEASURED and fails by name.
-  assert.deepEqual(idleRow({ count: 1, visible: 1, askedMs: 3_600_000, idledMs: 3_600_012.4, requests: 0, other: [] }), { row: '| 1 | 1 | 3600 s | 0 | none |', failures: [] });
+  assert.deepEqual(idleRow({ count: 1, visible: 1, askedMs: 3_600_000, idledMs: 3_600_012.4, requests: 0, other: [] }), { row: '| 1 | 1 | 3600 s | 0 | none |', failures: [], notes: [] });
   assert.deepEqual(idleRow({ count: 1, visible: 1, askedMs: MAX_WAIT_MS, idledMs: 2.6, requests: 0, other: [] }), {
     row: '| 1 | 1 | NOT MEASURED: 2.6 ms of 2147483647 ms asked | 0 | none |',
-    failures: ['1 idle tabs: NOT MEASURED — the wait ended after 2.6 ms of the 2147483647 ms asked']
+    failures: ['1 idle tabs: NOT MEASURED — the wait ended after 2.6 ms of the 2147483647 ms asked'],
+    notes: []
   });
   assert.deepEqual(idleRow({ count: 2, visible: 2, askedMs: 1_000, idledMs: 999, requests: 3, other: ['GET /feeds.json'] }), {
     row: '| 2 | 2 | 1 s | 3 | GET /feeds.json |',
-    failures: ['2 idle tabs asked for more than the header-only up check: GET /feeds.json']
+    failures: ['2 idle tabs asked for more than the header-only up check: GET /feeds.json'],
+    notes: []
   }, 'a wait that ended at most IDLE_EARLY_MS early is the timer\'s own rounding');
+  // A tab the browser hid is said, short or not (the idle hour of 23 Oct: 2 of 20 visible).
+  assert.deepEqual(idleRow({ count: 20, visible: 2, askedMs: 3_600_000, idledMs: 3_600_000, requests: 9, other: [] }).notes, ['20 idle tabs: 18 of them were hidden, and a hidden page may poll less than a visible one']);
+  assert.equal(idleRow({ count: 20, visible: 0, askedMs: 1_000, idledMs: 5, requests: 0, other: [] }).notes.length, 1);
   assert.equal(idleRow({ count: 2, visible: 2, askedMs: 1_000, idledMs: 998.9, requests: 0, other: [] }).failures.length, 1, 'past it, not');
   // The run waits through idleFor and prints through idleRow.
   const src = source('ci/browser-harness.mjs');
   const run = src.slice(src.indexOf('export async function runHarness'), src.indexOf('export function readOnlyVerdict'));
   assert.match(run, /const idledMs = await idleFor\(args\.idleMs\);/);
-  assert.match(run, /const idle = idleRow\(\{ count, visible, askedMs: args\.idleMs, idledMs, requests: requests\.length, other: v\.other \}\);\s*lines\.push\(idle\.row\);\s*failures\.push\(\.\.\.idle\.failures\);/);
+  assert.match(run, /const idle = idleRow\(\{ count, visible, askedMs: args\.idleMs, idledMs, requests: requests\.length, other: v\.other \}\);\s*lines\.push\(idle\.row\);\s*failures\.push\(\.\.\.idle\.failures\);\s*notes\.push\(\.\.\.idle\.notes\);/);
   assert.doesNotMatch(run, /args\.idleMs \/ 1_000|setTimeout\(r, args\.idleMs\)/, 'the asked time is never printed as the measured one');
 });
 

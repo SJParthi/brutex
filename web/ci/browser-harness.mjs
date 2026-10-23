@@ -498,20 +498,27 @@ export async function idleFor(ms, io = {}) {
  * {@link IDLE_EARLY_MS} early is NOT MEASURED and fails the run by name: the
  * tabs were not idle for the time the row would otherwise claim.
  *
+ * A TAB THE BROWSER HID IS SAID: a hidden page may poll less than a visible
+ * one, so an idle check over hidden tabs claims less than it seems to (the
+ * idle hour of 23 Oct: 2 of 20 headless windows read `visible`). It is a
+ * note, not a failure: what the hidden tabs did ask is still listed.
+ *
  * @param {{count: number, visible: number, askedMs: number, idledMs: number, requests: number, other: string[]}} o
- * @returns {{row: string, failures: string[]}}
+ * @returns {{row: string, failures: string[], notes: string[]}}
  */
 export function idleRow(o) {
   const secs = (/** @type {number} */ v) => `${(v / 1_000).toFixed(0)} s`;
   const said = o.other.length === 0 ? 'none' : o.other.join('; ');
   /** @type {string[]} */
   const failures = [];
+  const hidden = o.count - o.visible;
+  const notes = hidden > 0 ? [`${o.count} idle tabs: ${hidden} of them were hidden, and a hidden page may poll less than a visible one`] : [];
   if (o.idledMs + IDLE_EARLY_MS < o.askedMs) {
     failures.push(`${o.count} idle tabs: NOT MEASURED — the wait ended after ${o.idledMs.toFixed(1)} ms of the ${o.askedMs} ms asked`);
-    return { row: `| ${o.count} | ${o.visible} | NOT MEASURED: ${o.idledMs.toFixed(1)} ms of ${o.askedMs} ms asked | ${o.requests} | ${said} |`, failures };
+    return { row: `| ${o.count} | ${o.visible} | NOT MEASURED: ${o.idledMs.toFixed(1)} ms of ${o.askedMs} ms asked | ${o.requests} | ${said} |`, failures, notes };
   }
   if (o.other.length > 0) failures.push(`${o.count} idle tabs asked for more than the header-only up check: ${said}`);
-  return { row: `| ${o.count} | ${o.visible} | ${secs(o.idledMs)} | ${o.requests} | ${said} |`, failures };
+  return { row: `| ${o.count} | ${o.visible} | ${secs(o.idledMs)} | ${o.requests} | ${said} |`, failures, notes };
 }
 
 /**
@@ -1281,6 +1288,7 @@ export async function runHarness(args) {
         const idle = idleRow({ count, visible, askedMs: args.idleMs, idledMs, requests: requests.length, other: v.other });
         lines.push(idle.row);
         failures.push(...idle.failures);
+        notes.push(...idle.notes);
         for (const t of tabs) await t.close();
         for (const c of contexts) await cdp.send('Target.disposeBrowserContext', { browserContextId: c });
       }
