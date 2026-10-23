@@ -23,7 +23,10 @@
 //!
 //! **The receipt is the commit marker.** The body is written and synced first
 //! and the receipt last, so a kill between the two leaves a body with no
-//! receipt: [`Catalog`] names it incomplete and nothing here reads it. The
+//! receipt: [`Catalog`] names it incomplete and nothing here reads it. Every
+//! later refresh names every such entry, in the refresh outcome
+//! ([`Snapshotted::incomplete`]) and in one Warn [`EVENT_TARGET`] event each
+//! (R4-28 repair 3), since the code deletes nothing and the residue stays. The
 //! receipt itself is written whole under a `.partial` name and renamed into
 //! place (R4-28 repair 1), so a kill mid-receipt leaves a partial file
 //! [`Catalog`] names, never a torn receipt listed as receipted. A later
@@ -41,7 +44,9 @@
 //! [`TokenOn::Ambiguous`], naming both snapshot dates. A day that is itself a
 //! snapshot day is answered by that snapshot alone. Before the first snapshot
 //! the answer is [`TokenOn::BeforeFirst`], by name: never the earliest row and
-//! never today's.
+//! never today's. A row whose contract expired before the day is
+//! [`TokenOn::Expired`] (`token_expired`), never resolved: the token is
+//! flushed at expiry and reused (R4-28 repair 3, PREC-10).
 //!
 //! # The diff
 //!
@@ -262,6 +267,43 @@ fn parse_name(name: &str) -> Option<(Kind, Stamp, bool)> {
     None
 }
 
+/// Why a body with no receipt is not a snapshot.
+const CUT_BODY: &str = "a body with no receipt (a write cut before its commit marker)";
+
+/// Why a `.partial` receipt is not a snapshot's receipt.
+const CUT_RECEIPT: &str = "a receipt cut before its rename committed it";
+
+/// Why a receipt with no body is not a snapshot.
+const LONE_RECEIPT: &str = "a receipt with no body";
+
+/// The most incomplete entries one refresh outcome names, and the most Warn
+/// events one refresh emits for them, newest first. The rest are counted,
+/// never dropped silently (R4-28 repair 3; `docs/06-limits.md` L-R428-10).
+pub const INCOMPLETE_NAMED: usize = 64;
+
+/// One directory entry that is not a snapshot: named, never read.
+///
+/// A kill between a body and its receipt, or inside the receipt's rename,
+/// leaves one. No reader opens it, and the code deletes nothing, so it stays
+/// until someone moves it aside. Every refresh names it (R4-28 repair 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Incomplete {
+    /// The master it would have been a snapshot of.
+    pub kind: Kind,
+    /// The stamp its name carries.
+    pub stamp: Stamp,
+    /// Its file name in the snapshots directory.
+    pub file: String,
+    /// Why it is not a snapshot.
+    pub why: &'static str,
+}
+
+impl core::fmt::Display for Incomplete {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: incomplete — {}; never read", self.file, self.why)
+    }
+}
+
 /// Every snapshot on disk, by name: one directory listing.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
@@ -270,8 +312,9 @@ pub struct Catalog {
     /// The highest ordinal any entry of a (kind, day) carries, complete or not.
     highest: HashMap<(Kind, Day), u32>,
     /// Entries that are not snapshots: a body with no receipt, a receipt with
-    /// no body. Named, never read.
-    incomplete: Vec<String>,
+    /// no body, a receipt cut before its rename. Named, never read. By kind,
+    /// then stamp, then name.
+    incomplete: Vec<Incomplete>,
 }
 
 impl Catalog {
@@ -293,13 +336,13 @@ impl Catalog {
                 entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name
-                .strip_suffix(PARTIAL)
-                .is_some_and(|cut| matches!(parse_name(cut), Some((_, _, true))))
-            {
-                partials.push(format!(
-                    "{name}: incomplete — a receipt cut before its rename committed it; never read"
-                ));
+            if let Some((kind, stamp, true)) = name.strip_suffix(PARTIAL).and_then(parse_name) {
+                partials.push(Incomplete {
+                    kind,
+                    stamp,
+                    file: name.to_owned(),
+                    why: CUT_RECEIPT,
+                });
                 continue;
             }
             let Some((kind, stamp, receipt)) = parse_name(name) else {
@@ -318,21 +361,27 @@ impl Catalog {
             *highest = (*highest).max(stamp.ordinal);
             match (body, receipt) {
                 (true, true) => catalog.receipted.entry(kind).or_default().push(stamp),
-                (true, false) => catalog.incomplete.push(format!(
-                    "{}: incomplete — a body with no receipt (a write cut before its commit marker); never read",
-                    file_name(kind, stamp)
-                )),
-                _ => catalog.incomplete.push(format!(
-                    "{}: incomplete — a receipt with no body; never read",
-                    receipt_name(kind, stamp)
-                )),
+                (true, false) => catalog.incomplete.push(Incomplete {
+                    kind,
+                    stamp,
+                    file: file_name(kind, stamp),
+                    why: CUT_BODY,
+                }),
+                _ => catalog.incomplete.push(Incomplete {
+                    kind,
+                    stamp,
+                    file: receipt_name(kind, stamp),
+                    why: LONE_RECEIPT,
+                }),
             }
         }
         for stamps in catalog.receipted.values_mut() {
             stamps.sort_unstable();
         }
         catalog.incomplete.extend(partials);
-        catalog.incomplete.sort_unstable();
+        catalog
+            .incomplete
+            .sort_unstable_by(|a, b| (a.kind, a.stamp, &a.file).cmp(&(b.kind, b.stamp, &b.file)));
         Ok(catalog)
     }
 
@@ -348,10 +397,20 @@ impl Catalog {
         self.receipted(kind).last().copied()
     }
 
-    /// Every entry named incomplete, with why.
+    /// Every entry named incomplete, with why: by kind, then stamp, then name.
     #[must_use]
-    pub fn incomplete(&self) -> &[String] {
+    pub fn incomplete(&self) -> &[Incomplete] {
         &self.incomplete
+    }
+
+    /// The entries of `kind` named incomplete, oldest first.
+    #[must_use]
+    pub fn incomplete_of(&self, kind: Kind) -> Vec<Incomplete> {
+        self.incomplete
+            .iter()
+            .filter(|one| one.kind == kind)
+            .cloned()
+            .collect()
     }
 
     /// The day's snapshot of `kind`: its newest receipted ordinal.
@@ -377,6 +436,22 @@ impl Catalog {
     /// The highest ordinal any entry of (kind, day) carries, 0 for none.
     fn highest(&self, kind: Kind, day: Day) -> u32 {
         self.highest.get(&(kind, day)).copied().unwrap_or(0)
+    }
+
+    /// How many receipted snapshots, and how many incomplete entries, carry
+    /// (kind, day): what a refusal past [`MAX_ORDINAL`] counts.
+    fn held_on(&self, kind: Kind, day: Day) -> (usize, usize) {
+        let receipted = self
+            .receipted(kind)
+            .iter()
+            .filter(|stamp| stamp.day == day)
+            .count();
+        let incomplete = self
+            .incomplete
+            .iter()
+            .filter(|one| one.kind == kind && one.stamp.day == day)
+            .count();
+        (receipted, incomplete)
     }
 }
 
@@ -631,17 +706,29 @@ impl Wrote {
     }
 }
 
+/// What one snapshot write did, and every entry of its kind that is not a
+/// snapshot (R4-28 repair 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Written {
+    /// The snapshot written or already held, or why none was.
+    pub wrote: Result<Wrote, String>,
+    /// Every entry of the kind the catalog named incomplete, oldest first:
+    /// the listing the write read under the writers' lock, or for a write
+    /// refused before it took the lock, one listing read then. `Err` names a
+    /// listing that could not be read.
+    pub incomplete: Result<Vec<Incomplete>, String>,
+}
+
 /// Writes `body` as `day`'s snapshot of `kind`, or says the day already holds
-/// it. Never rewrites a file: a body equal to the day's newest receipted
-/// snapshot is [`Wrote::AlreadyHeld`], a different one takes the next free
-/// ordinal (past any incomplete entry), body first and receipt last. A Kite
-/// snapshot's futures, and those of any earlier one not yet taken in, then go
-/// into the [`first_listed`] index under the same lock.
+/// it, and names every incomplete entry of the kind in `/logs`.
+///
+/// It is [`write_snapshot`] with each incomplete entry named in its own Warn
+/// [`EVENT_TARGET`] event, so no caller can drop the list unseen. The landing
+/// hook calls [`write_snapshot`] and names them in the refresh outcome too.
 ///
 /// # Errors
 ///
-/// An empty or oversized body, a day past [`MAX_ORDINAL`] snapshots, and every
-/// filesystem refusal, each named. Nothing is overwritten on any path.
+/// Every refusal of [`write_snapshot`], named.
 pub fn snapshot(
     root: &Path,
     kind: Kind,
@@ -649,37 +736,99 @@ pub fn snapshot(
     url: &str,
     body: &[u8],
 ) -> Result<Wrote, String> {
+    let written = write_snapshot(root, kind, day, url, body);
+    note_incomplete(kind, &written.incomplete);
+    written.wrote
+}
+
+/// Writes `body` as `day`'s snapshot of `kind`, or says the day already holds
+/// it. Never rewrites a file: a body equal to the day's newest receipted
+/// snapshot is [`Wrote::AlreadyHeld`], a different one takes the next free
+/// ordinal (past any incomplete entry), body first and receipt last. A Kite
+/// snapshot's futures, and those of any earlier one not yet taken in, then go
+/// into the [`first_listed`] index under the same lock.
+///
+/// The entries of the kind that are not snapshots come back beside the
+/// outcome, from the one listing the write already reads (R4-28 repair 3).
+/// Refusals: an empty or oversized body, a day past [`MAX_ORDINAL`] entries,
+/// and every filesystem refusal, each named in [`Written::wrote`]. Nothing is
+/// overwritten on any path.
+#[must_use]
+pub fn write_snapshot(root: &Path, kind: Kind, day: Day, url: &str, body: &[u8]) -> Written {
+    let refused = |why: String| Written {
+        wrote: Err(why),
+        incomplete: Catalog::read(root).map(|catalog| catalog.incomplete_of(kind)),
+    };
     if body.is_empty() {
-        return Err("an empty body is not a master; no snapshot was written".to_owned());
+        return refused("an empty body is not a master; no snapshot was written".to_owned());
     }
     if body.len() > MAX_BODY_BYTES {
-        return Err(format!(
+        return refused(format!(
             "a body of {} bytes is past the {MAX_BODY_BYTES}-byte bound; no snapshot was written",
             body.len()
         ));
     }
     if url.contains('\n') {
-        return Err("a source URL with a line break cannot be receipted".to_owned());
+        return refused("a source URL with a line break cannot be receipted".to_owned());
     }
-    fs::create_dir_all(root)
-        .map_err(|why| format!("{} could not be created: {why}", root.display()))?;
-    let compressed = compress(body)?;
+    if let Err(why) = fs::create_dir_all(root) {
+        return refused(format!("{} could not be created: {why}", root.display()));
+    }
+    let compressed = match compress(body) {
+        Ok(compressed) => compressed,
+        Err(why) => return refused(why),
+    };
+    let held = match lock(root) {
+        Ok(held) => held,
+        Err(why) => return refused(why),
+    };
+    // ONE LISTING, UNDER THE LOCK: it numbers the write and names the
+    // incomplete entries, so the two can never disagree.
+    let catalog = match Catalog::read(root) {
+        Ok(catalog) => catalog,
+        Err(why) => {
+            return Written {
+                wrote: Err(why.clone()),
+                incomplete: Err(why),
+            };
+        }
+    };
+    let wrote = write_held(root, kind, day, url, body, &compressed, &catalog)
+        .and_then(|wrote| held.release().map(|()| wrote).map_err(|why| why.to_string()));
+    Written {
+        wrote,
+        incomplete: Ok(catalog.incomplete_of(kind)),
+    }
+}
+
+/// The write itself, under the writers' lock, over the listing read under it.
+fn write_held(
+    root: &Path,
+    kind: Kind,
+    day: Day,
+    url: &str,
+    body: &[u8],
+    compressed: &[u8],
+    catalog: &Catalog,
+) -> Result<Wrote, String> {
     let body_sha256 = hex(&Sha256::digest(body));
-    let held = lock(root)?;
-    let catalog = Catalog::read(root)?;
     if let Some(newest) = catalog.of_day(kind, day)
         && let Ok((receipt, _)) = read_checked(root, kind, newest)
         && receipt.body_sha256 == body_sha256
         && receipt.body_bytes == body.len() as u64
     {
         index_futures(root, kind);
-        held.release().map_err(|why| why.to_string())?;
         return Ok(Wrote::AlreadyHeld(newest));
     }
     let ordinal = catalog.highest(kind, day).saturating_add(1);
     if ordinal > MAX_ORDINAL {
+        // COUNTED AS WHAT THEY ARE: an incomplete entry takes an ordinal and
+        // is never a snapshot (R4-28 repair 3).
+        let (receipted, incomplete) = catalog.held_on(kind, day);
         return Err(format!(
-            "{day} already holds {MAX_ORDINAL} {} snapshots; refused rather than numbered without end",
+            "{day} already holds {} entries up to ordinal {MAX_ORDINAL} ({receipted} receipted \
+             snapshots, {incomplete} incomplete entries never read); refused rather than \
+             numbered without end",
             kind.stem()
         ));
     }
@@ -687,13 +836,14 @@ pub fn snapshot(
     let receipt = Receipt {
         url: url.to_owned(),
         compressed_bytes: compressed.len() as u64,
-        sha256: hex(&Sha256::digest(&compressed)),
+        sha256: hex(&Sha256::digest(compressed)),
         body_bytes: body.len() as u64,
         body_sha256,
     };
     // BODY FIRST, RECEIPT LAST: a kill between them leaves an incomplete entry
-    // that no reader opens, and the next refresh takes the next ordinal.
-    write_new(&root.join(file_name(kind, stamp)), &compressed)?;
+    // that no reader opens, and the next refresh takes the next ordinal and
+    // names it.
+    write_new(&root.join(file_name(kind, stamp)), compressed)?;
     commit_receipt(
         root,
         kind,
@@ -702,9 +852,65 @@ pub fn snapshot(
     )?;
     sync_dir(root)?;
     index_futures(root, kind);
-    held.release().map_err(|why| why.to_string())?;
     Ok(Wrote::New(stamp))
 }
+
+/// The incomplete entries of one write, newest first, at most
+/// [`INCOMPLETE_NAMED`] of them, and how many more are held unnamed.
+fn newest_named(incomplete: &[Incomplete]) -> (impl Iterator<Item = &Incomplete>, usize) {
+    (
+        incomplete.iter().rev().take(INCOMPLETE_NAMED),
+        incomplete.len().saturating_sub(INCOMPLETE_NAMED),
+    )
+}
+
+/// One Warn [`EVENT_TARGET`] event per incomplete entry of `kind`, newest
+/// first, at most [`INCOMPLETE_NAMED`], one more counting any past the bound,
+/// and an Error event when the directory could not be listed to name them.
+fn note_incomplete(kind: Kind, incomplete: &Result<Vec<Incomplete>, String>) {
+    let entries = match incomplete {
+        Ok(entries) => entries,
+        Err(why) => {
+            let _ = telemetry::emit_if!(
+                telemetry::Level::Error,
+                EVENT_TARGET,
+                "the snapshots directory could not be listed, so its incomplete entries are not named",
+                "kind" => telemetry::Value::Str(kind.stem()),
+                "why" => telemetry::Value::Str(why),
+            );
+            return;
+        }
+    };
+    let held = entries.len() as u64;
+    let (named, more) = newest_named(entries);
+    for one in named {
+        let (stamp, day) = (one.stamp.to_string(), one.stamp.day.to_string());
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            EVENT_TARGET,
+            INCOMPLETE_MESSAGE,
+            "kind" => telemetry::Value::Str(kind.stem()),
+            "entry" => telemetry::Value::Str(&one.file),
+            "stamp" => telemetry::Value::Str(&stamp),
+            "day" => telemetry::Value::Str(&day),
+            "why" => telemetry::Value::Str(one.why),
+            "held" => telemetry::Value::Uint(held),
+        );
+    }
+    if more > 0 {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            EVENT_TARGET,
+            "more incomplete master snapshot entries are held than one refresh names",
+            "kind" => telemetry::Value::Str(kind.stem()),
+            "unnamed" => telemetry::Value::Uint(more as u64),
+            "held" => telemetry::Value::Uint(held),
+        );
+    }
+}
+
+/// The message of each incomplete entry's event.
+pub const INCOMPLETE_MESSAGE: &str = "an incomplete master snapshot entry is held and never read";
 
 /// A Kite snapshot's futures go into the first-listed index, under the lock
 /// the write already holds, so no futures plan has to open it again (R4-28
@@ -721,18 +927,32 @@ fn index_futures(root: &Path, kind: Kind) {
 
 /// The newest receipted Kite snapshot's date, read from its receipt (which is
 /// checked against its body). `Ok(None)` when no snapshot exists. For the pull
-/// door's `master_stale` refusal (R4-23, FM-267).
+/// door's `master_stale` refusal (R4-23, FM-267), which passes its own
+/// `today`.
 ///
 /// # Errors
 ///
 /// A listing that fails, or a newest snapshot whose receipt or body does not
-/// check, named — never an older date in its place.
-pub fn newest_snapshot_day(root: &Path) -> Result<Option<Day>, String> {
+/// check, named — never an older date in its place. A newest snapshot dated
+/// after `today` is refused by name (R4-28 repair 3, verify r3 A13): every
+/// snapshot is dated by the clock that writes it, so one from the future means
+/// that clock jumped, and believing it would call the master fresh until the
+/// calendar caught up.
+pub fn newest_snapshot_day(root: &Path, today: Day) -> Result<Option<Day>, String> {
     let catalog = Catalog::read(root)?;
     let Some(newest) = catalog.newest(Kind::Kite) else {
         return Ok(None);
     };
     read_checked(root, Kind::Kite, newest)?;
+    if newest.day > today {
+        return Err(format!(
+            "the newest Kite snapshot, {}, is dated {}, after today {today}: the clock that \
+             wrote it ran ahead or this one runs behind; refused rather than believed fresh. \
+             Move the future-dated snapshot and its receipt aside by hand to resume",
+            file_name(Kind::Kite, newest),
+            newest.day
+        ));
+    }
     Ok(Some(newest.day))
 }
 
@@ -1126,6 +1346,17 @@ pub enum TokenOn<'a> {
         /// The next later snapshot.
         newer: Stamp,
     },
+    /// The snapshot that would resolve the token names a contract that expired
+    /// before the day: the exchange flushes a token at expiry and reuses it,
+    /// so the row cannot name what traded under it that day (R4-28 repair 3,
+    /// PREC-10). Never answered as resolved.
+    Expired {
+        /// The snapshot answering.
+        snapshot: Stamp,
+        /// The expired row, for a caller that asks what it named, not what
+        /// traded that day.
+        listed: Listed<'a>,
+    },
     /// The governing snapshot does not list the token.
     NotListed {
         /// The snapshot that governs the day.
@@ -1160,6 +1391,7 @@ impl TokenOn<'_> {
         match *self {
             Self::Resolved { .. } => "resolved",
             Self::Ambiguous { .. } => "token_ambiguous",
+            Self::Expired { .. } => "token_expired",
             Self::NotListed { .. } => "token_not_listed",
             Self::Duplicated { .. } => "token_duplicated",
             Self::BeforeFirst { .. } => "before_first_snapshot",
@@ -1178,6 +1410,9 @@ pub struct Book {
     first: u32,
     table: Vec<u32>,
     loaded: Vec<OnceLock<Result<Snapshot, String>>>,
+    /// The Kite entries the listing named incomplete, oldest first (R4-28
+    /// repair 3): never read, and named by every plan over the book.
+    incomplete: Vec<Incomplete>,
 }
 
 impl Book {
@@ -1192,7 +1427,9 @@ impl Book {
         let catalog = Catalog::read(root)?;
         let stamps = catalog.receipted(Kind::Kite).to_vec();
         let loaded = stamps.iter().map(|_| OnceLock::new()).collect();
-        Self::build(Some(root.to_path_buf()), stamps, loaded)
+        let mut book = Self::build(Some(root.to_path_buf()), stamps, loaded)?;
+        book.incomplete = catalog.incomplete_of(Kind::Kite);
+        Ok(book)
     }
 
     /// A book over snapshots already parsed (tests and the bench).
@@ -1229,6 +1466,7 @@ impl Book {
                 first: 0,
                 table: Vec::new(),
                 loaded,
+                incomplete: Vec::new(),
             });
         };
         let first = first.day.days_from_epoch();
@@ -1260,6 +1498,7 @@ impl Book {
             first,
             table,
             loaded,
+            incomplete: Vec::new(),
         })
     }
 
@@ -1280,6 +1519,13 @@ impl Book {
     #[must_use]
     pub fn newest(&self) -> Option<Stamp> {
         self.stamps.last().copied()
+    }
+
+    /// The Kite entries the listing named incomplete, oldest first: never
+    /// read by this book (R4-28 repair 3).
+    #[must_use]
+    pub fn incomplete(&self) -> &[Incomplete] {
+        &self.incomplete
     }
 
     /// The snapshot at `at`, read on first use.
@@ -1369,16 +1615,10 @@ impl Book {
             Lookup::Duplicated => return TokenOn::Duplicated { snapshot: stamp },
         };
         if stamp.day == day {
-            return TokenOn::Resolved {
-                snapshot: stamp,
-                listed,
-            };
+            return resolved(stamp, listed, day);
         }
         let Some(next_day) = self.stamps.get(at + 1).map(|next| next.day) else {
-            return TokenOn::Resolved {
-                snapshot: stamp,
-                listed,
-            };
+            return resolved(stamp, listed, day);
         };
         // THE NEXT LATER DAY'S SNAPSHOT IS ITS NEWEST ORDINAL, as on every
         // other day, never its first: one day-table index (R4-28 repair 1).
@@ -1394,15 +1634,24 @@ impl Book {
             }
         };
         match later.lookup(exchange, token) {
-            Lookup::Listed(again) if again.same_contract(&listed) => TokenOn::Resolved {
-                snapshot: stamp,
-                listed,
-            },
+            Lookup::Listed(again) if again.same_contract(&listed) => resolved(stamp, listed, day),
             _ => TokenOn::Ambiguous {
                 older: stamp,
                 newer,
             },
         }
+    }
+}
+
+/// A resolving row, unless its contract expired before `day`: then
+/// [`TokenOn::Expired`], since a token is flushed at expiry and reused, and a
+/// row past its own expiry cannot name what traded under the token that day
+/// (R4-28 repair 3, PREC-10). The expiry day itself still resolves.
+fn resolved(snapshot: Stamp, listed: Listed<'_>, day: Day) -> TokenOn<'_> {
+    if listed.expiry().is_some_and(|expiry| expiry < day) {
+        TokenOn::Expired { snapshot, listed }
+    } else {
+        TokenOn::Resolved { snapshot, listed }
     }
 }
 
@@ -2057,6 +2306,10 @@ pub struct Snapshotted {
     /// The diff against the previous Kite snapshot: `None` for the NSE file,
     /// `Some(Ok(None))` for the first Kite snapshot.
     pub diff: Option<Result<Option<DiffSummary>, String>>,
+    /// Every entry of this kind that is not a snapshot (a write cut by a kill
+    /// before its receipt, a receipt cut before its rename), oldest first, or
+    /// why the directory could not be listed to name them (R4-28 repair 3).
+    pub incomplete: Result<Vec<Incomplete>, String>,
 }
 
 /// A JSON string literal.
@@ -2119,10 +2372,42 @@ impl Snapshotted {
             }
         };
         format!(
-            r#"{{"kind":{},"day":{},{wrote},"diff":{diff}}}"#,
+            r#"{{"kind":{},"day":{},{wrote},"diff":{diff},"incomplete":{}}}"#,
             json_string(self.kind.stem()),
             self.day
                 .map_or_else(|| "null".to_owned(), |day| json_string(&day.to_string())),
+            self.incomplete_json(),
+        )
+    }
+
+    /// `{"held":N,"named":[...],"unnamed":M,"refusal":null}`: every entry that
+    /// is not a snapshot, newest first, at most [`INCOMPLETE_NAMED`] named and
+    /// the rest counted.
+    fn incomplete_json(&self) -> String {
+        let entries = match self.incomplete {
+            Ok(ref entries) => entries,
+            Err(ref why) => {
+                return format!(
+                    r#"{{"held":null,"named":[],"unnamed":null,"refusal":{}}}"#,
+                    json_string(why)
+                );
+            }
+        };
+        let (named, unnamed) = newest_named(entries);
+        let named: Vec<String> = named
+            .map(|one| {
+                format!(
+                    r#"{{"file":{},"stamp":{},"why":{}}}"#,
+                    json_string(&one.file),
+                    json_string(&one.stamp.to_string()),
+                    json_string(one.why),
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"held":{},"named":[{}],"unnamed":{unnamed},"refusal":null}}"#,
+            entries.len(),
+            named.join(","),
         )
     }
 }
@@ -2131,7 +2416,10 @@ impl Snapshotted {
 ///
 /// `None` for a source that is not snapshotted. A master that did not land
 /// writes no snapshot (the newest one stands) and says so. Every outcome is
-/// one [`EVENT_TARGET`] event, and every named change one more.
+/// one [`EVENT_TARGET`] event, every named change one more, and every entry
+/// of the kind that is not a snapshot one Warn event more (R4-28 repair 3).
+/// Those entries are named on every path, a refused one included: a refresh
+/// that writes nothing still lists the directory once to name them.
 #[must_use]
 pub fn after_land(
     dir: &Path,
@@ -2142,33 +2430,72 @@ pub fn after_land(
 ) -> Option<Snapshotted> {
     let kind = Kind::of(source)?;
     let root = dir.join(SNAPSHOT_DIR);
-    let wrote = match (landed, &day) {
+    let written = match (landed, &day) {
         (Landed::Written { .. } | Landed::Uncertain { .. }, Ok(day)) => {
-            snapshot(&root, kind, *day, source.url, body.as_bytes())
+            write_snapshot(&root, kind, *day, source.url, body.as_bytes())
         }
-        (Landed::Written { .. } | Landed::Uncertain { .. }, Err(why)) => Err(format!(
-            "the master landed and no snapshot was written: {why}"
-        )),
-        (Landed::Refused(why), _) => Err(format!(
-            "the master did not land, so no snapshot was written and the newest one stands: {why}"
-        )),
+        (Landed::Written { .. } | Landed::Uncertain { .. }, Err(why)) => unwritten(
+            &root,
+            kind,
+            format!("the master landed and no snapshot was written: {why}"),
+        ),
+        (Landed::Refused(why), _) => unwritten(
+            &root,
+            kind,
+            format!(
+                "the master did not land, so no snapshot was written and the newest one stands: {why}"
+            ),
+        ),
     };
-    let diff = match (kind, &wrote) {
+    let diff = match (kind, &written.wrote) {
         (Kind::Kite, Ok(wrote)) => Some(diff_for(&root, wrote.stamp())),
         (Kind::Kite, Err(_)) | (Kind::NseTotalMarket, _) => None,
     };
     let outcome = Snapshotted {
         kind,
         day: day.ok(),
-        wrote,
+        wrote: written.wrote,
         diff,
+        incomplete: written.incomplete,
     };
     note(&outcome);
     Some(outcome)
 }
 
+/// A refusal that wrote nothing, with the kind's incomplete entries named
+/// from one listing.
+fn unwritten(root: &Path, kind: Kind, why: String) -> Written {
+    Written {
+        wrote: Err(why),
+        incomplete: Catalog::read(root).map(|catalog| catalog.incomplete_of(kind)),
+    }
+}
+
+/// Why a new snapshot took the ordinal it did, when the day's earlier
+/// ordinals hold incomplete entries: empty otherwise.
+fn stepped_past(outcome: &Snapshotted) -> String {
+    let (Ok(Wrote::New(stamp)), Ok(entries)) = (&outcome.wrote, &outcome.incomplete) else {
+        return String::new();
+    };
+    let cut: Vec<&str> = entries
+        .iter()
+        .filter(|one| one.stamp.day == stamp.day && one.stamp.ordinal < stamp.ordinal)
+        .map(|one| one.file.as_str())
+        .collect();
+    if cut.is_empty() {
+        return String::new();
+    }
+    format!(
+        "ordinal {}: {} entries of the day's earlier ordinals are incomplete and never read: {}",
+        stamp.ordinal,
+        cut.len(),
+        cut.join(", ")
+    )
+}
+
 /// The events of one hook call.
 fn note(outcome: &Snapshotted) {
+    note_incomplete(outcome.kind, &outcome.incomplete);
     let (level, message, detail) = match (&outcome.wrote, &outcome.diff) {
         (Err(why), _) => (
             telemetry::Level::Error,
@@ -2183,7 +2510,7 @@ fn note(outcome: &Snapshotted) {
         (Ok(Wrote::New(_)), _) => (
             telemetry::Level::Info,
             "a dated master snapshot was written",
-            String::new(),
+            stepped_past(outcome),
         ),
         (Ok(Wrote::AlreadyHeld(_)), _) => (
             telemetry::Level::Info,
@@ -2205,6 +2532,7 @@ fn note(outcome: &Snapshotted) {
         _ => (String::new(), String::new(), String::new()),
     };
     let day = outcome.day.map_or_else(String::new, |day| day.to_string());
+    let incomplete = outcome.incomplete.as_ref().map_or(0, |entries| entries.len() as u64);
     let _ = telemetry::emit_if!(
         level,
         EVENT_TARGET,
@@ -2217,6 +2545,7 @@ fn note(outcome: &Snapshotted) {
         "counts" => telemetry::Value::Str(&counts),
         "diff" => telemetry::Value::Str(&file),
         "detail" => telemetry::Value::Str(&detail),
+        "incomplete" => telemetry::Value::Uint(incomplete),
     );
     if let Some(Ok(Some(ref summary))) = outcome.diff {
         for one in &summary.named {

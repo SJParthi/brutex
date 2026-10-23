@@ -13994,6 +13994,12 @@ async fn fno_futures(
     if let Some(ref why) = plan.rebuilt {
         facts.push(("Futures index rebuilt", why.clone()));
     }
+    // NAMED WHERE THE PULL IS READ (R4-28 repair 3): a Kite snapshot cut
+    // before its receipt is never read, so a day it would have dated resolves
+    // from its neighbours.
+    if !plan.incomplete.is_empty() {
+        facts.push(("Incomplete master snapshots", plan.incomplete.join(" · ")));
+    }
     if !plan.refused.is_empty() {
         facts.push(("Not asked", plan.refused.join(" · ")));
     }
@@ -30309,6 +30315,7 @@ mod tests {
             ],
             refused: Vec::new(),
             rebuilt: None,
+            incomplete: Vec::new(),
         };
         let asked = |expiry| ingest::FnoRequest {
             underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),

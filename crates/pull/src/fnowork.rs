@@ -669,6 +669,28 @@ pub struct FuturesPlan {
     /// before this plan was read from it, when it did not match its commit log
     /// (R4-28 repair 2).
     pub rebuilt: Option<String>,
+    /// Every Kite snapshot entry the book's listing named incomplete (a write
+    /// cut before its receipt), newest first: never read by this plan, so a
+    /// day it would have dated resolves from its neighbours (R4-28 repair 3).
+    /// At most [`INCOMPLETE_NAMED`](crate::master_snapshots::INCOMPLETE_NAMED)
+    /// are named, and one line more counts the rest.
+    pub incomplete: Vec<String>,
+}
+
+/// The book's incomplete Kite entries as a plan names them: newest first, at
+/// most [`INCOMPLETE_NAMED`](crate::master_snapshots::INCOMPLETE_NAMED), and
+/// one line counting the rest.
+fn incomplete_lines(book: &Book) -> Vec<String> {
+    let held = book.incomplete();
+    let bound = crate::master_snapshots::INCOMPLETE_NAMED;
+    let mut lines: Vec<String> = held.iter().rev().take(bound).map(ToString::to_string).collect();
+    if held.len() > bound {
+        lines.push(format!(
+            "{} older incomplete entries are held and not named here",
+            held.len().saturating_sub(bound)
+        ));
+    }
+    lines
 }
 
 /// Whether `listed` is a future of `underlying` on the route's exchange.
@@ -754,11 +776,14 @@ pub fn futures_plan(
             continue;
         };
         let label = format!("{underlying} {expiry} future (token {token}, first listed {seen})");
+        // IDENTITY, NOT TRADING: the newest snapshot may still list a contract
+        // past its expiry (`token_expired` on that day, R4-28 repair 3), and
+        // the same contract is still what the token names in its history.
         match book.token_on(newest.day, route.exchange, token) {
-            TokenOn::Resolved { listed, .. }
+            TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. }
                 if is_future_of(&listed, route, underlying) && listed.expiry() == Some(expiry) => {}
             TokenOn::NotListed { .. } => {}
-            TokenOn::Resolved { listed, .. } => {
+            TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. } => {
                 refused.push(format!(
                     "token_reused: {label}: the newest snapshot {newest} maps the token to {}, so \
                      its history is not asked through it",
@@ -806,6 +831,7 @@ pub fn futures_plan(
         asks,
         refused,
         rebuilt: listing.rebuilt,
+        incomplete: incomplete_lines(book),
     })
 }
 

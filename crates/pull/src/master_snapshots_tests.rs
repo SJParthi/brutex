@@ -23,6 +23,13 @@ const URL: &str = "https://api.kite.trade/instruments";
 const HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange";
 const NSE_HEAD: &str = "Company Name,Industry,Symbol,Series,ISIN Code";
 
+/// The `today` a staleness check is asked under: a fixed day, so no test here
+/// reads the wall clock.
+const TODAY: Day = match Day::new(2026, 10, 23) {
+    Ok(today) => today,
+    Err(_) => panic!("a real day"),
+};
+
 /// A new, empty folder of this test's own. Left for the main session's
 /// clean-up: nothing in this suite deletes a file.
 fn scratch(name: &str) -> PathBuf {
@@ -272,15 +279,20 @@ fn a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used(
     assert!(catalog.receipted(Kind::Kite).is_empty());
     assert_eq!(catalog.incomplete().len(), 1);
     assert!(
-        catalog.incomplete()[0].contains("never read"),
+        catalog.incomplete()[0].to_string().contains("never read"),
         "{:?}",
         catalog.incomplete()
     );
+    assert_eq!(
+        catalog.incomplete()[0].file,
+        file_name(Kind::Kite, stamp(d1, 1))
+    );
+    assert_eq!(catalog.incomplete()[0].why, CUT_BODY);
     assert!(matches!(
         Book::open(&root).unwrap().token_on(d1, "NFO", 9_000_021),
         TokenOn::NoSnapshot
     ));
-    assert_eq!(newest_snapshot_day(&root), Ok(None));
+    assert_eq!(newest_snapshot_day(&root, TODAY), Ok(None));
 
     // THE NEXT REFRESH TAKES THE NEXT ORDINAL AND IS THE DAY'S SNAPSHOT.
     assert_eq!(
@@ -295,7 +307,126 @@ fn a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used(
     assert_eq!(listed.tradingsymbol(), "ZQIDX26APRFUT");
     // The diff never compares against the incomplete body.
     assert_eq!(diff_for(&root, stamp(d1, 2)), Ok(None));
-    assert_eq!(newest_snapshot_day(&root), Ok(Some(d1)));
+    assert_eq!(newest_snapshot_day(&root, TODAY), Ok(Some(d1)));
+}
+
+/// R4-28 repair 3 (verify r3 blocking): the residue a kill leaves is named by
+/// the refresh that steps past it. The verifier's case: the refreshed day
+/// holds a body with no receipt, and the day before holds a body with a
+/// partial receipt. The `/masters/refresh` outcome names all three entries.
+#[test]
+fn a_refresh_after_a_cut_body_names_every_incomplete_entry() {
+    let dir = scratch("cut-named");
+    let root = dir.join(SNAPSHOT_DIR);
+    fs::create_dir_all(&root).unwrap();
+    let (d0, d1) = (day(2026, 3, 3), day(2026, 3, 4));
+    let cut = dump(&[fut(9_000_031, "ZQIDX26MARFUT", "2026-03-26", 75)]);
+    let cut_today = file_name(Kind::Kite, stamp(d1, 1));
+    let cut_before = file_name(Kind::Kite, stamp(d0, 1));
+    let partial = format!("{}{PARTIAL}", receipt_name(Kind::Kite, stamp(d0, 1)));
+    for name in [&cut_today, &cut_before] {
+        fs::write(root.join(name), compress(cut.as_bytes()).unwrap()).unwrap();
+    }
+    fs::write(root.join(&partial), b"brutex-master-snapshot-v1\nkind=instr").unwrap();
+    // AN NSE ENTRY BELONGS TO THE NSE HOOK, never to the Kite one.
+    let nse_cut = file_name(Kind::NseTotalMarket, stamp(d1, 1));
+    fs::write(root.join(&nse_cut), b"cut").unwrap();
+    let next = dump(&[fut(9_000_031, "ZQIDX26APRFUT", "2026-04-28", 75)]);
+    let outcome = after_land(&dir, kite_source(), &next, &written(), Ok(d1)).unwrap();
+    assert_eq!(outcome.wrote, Ok(Wrote::New(stamp(d1, 2))));
+    let json = outcome.json();
+    for name in [&cut_today, &cut_before, &partial] {
+        assert!(
+            json.contains(&format!("\"{name}\"")),
+            "the refresh outcome names {name}: {json}"
+        );
+    }
+    // STRUCTURED, OLDEST FIRST, THIS KIND'S ONLY; THE JSON NEWEST FIRST.
+    let named: Vec<&str> = outcome
+        .incomplete
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|one| one.file.as_str())
+        .collect();
+    assert_eq!(
+        named,
+        [cut_before.as_str(), partial.as_str(), cut_today.as_str()]
+    );
+    assert!(!json.contains(&nse_cut), "{json}");
+    assert!(
+        json.contains(r#""incomplete":{"held":3,"named":[{"file":"instruments_20260304.csv.gz","stamp":"2026-03-04","why":"a body with no receipt (a write cut before its commit marker)"}"#)
+            && json.contains(r#""unnamed":0,"refusal":null}"#),
+        "{json}"
+    );
+    // WHY THE DAY'S SNAPSHOT IS `_2`, in the event's own words.
+    let why = stepped_past(&outcome);
+    assert!(
+        why.starts_with("ordinal 2: 1 entries") && why.contains(&cut_today),
+        "{why}"
+    );
+    assert!(!why.contains(&cut_before), "only the day's own: {why}");
+    // A REFRESH THAT WRITES NOTHING STILL NAMES THEM, from one listing.
+    let refused = after_land(
+        &dir,
+        kite_source(),
+        &next,
+        &Landed::Refused("an invented refusal".to_owned()),
+        Ok(d1),
+    )
+    .unwrap();
+    assert!(refused.wrote.is_err());
+    assert_eq!(refused.incomplete.as_ref().map(Vec::len), Ok(3));
+    assert!(refused.json().contains(&format!("\"{cut_today}\"")));
+    assert_eq!(stepped_past(&refused), "");
+    // THE NSE HOOK NAMES ITS OWN.
+    let nse = after_land(
+        &dir,
+        nse_source(),
+        &nse_file(&[("ZQAAA", "INE9ZQ000001")]),
+        &written(),
+        Ok(d1),
+    )
+    .unwrap();
+    assert_eq!(nse.wrote, Ok(Wrote::New(stamp(d1, 2))));
+    assert!(nse.json().contains(&format!("\"{nse_cut}\"")));
+    assert!(!nse.json().contains(&cut_today));
+}
+
+/// R4-28 repair 3: past [`INCOMPLETE_NAMED`] entries the newest are named and
+/// the rest counted, never dropped unseen.
+#[test]
+fn incomplete_entries_past_the_bound_are_counted_not_dropped() {
+    let dir = scratch("cut-many");
+    let root = dir.join(SNAPSHOT_DIR);
+    fs::create_dir_all(&root).unwrap();
+    let first = day(2026, 1, 1).days_from_epoch();
+    let held = INCOMPLETE_NAMED + 2;
+    let names: Vec<String> = (0..held)
+        .map(|n| {
+            let on = Day::from_days(first + u32::try_from(n).unwrap()).unwrap();
+            let name = file_name(Kind::Kite, stamp(on, 1));
+            fs::write(root.join(&name), b"cut").unwrap();
+            name
+        })
+        .collect();
+    let on = day(2026, 6, 1);
+    let body = dump(&[fut(9_000_041, "ZQIDX26JUNFUT", "2026-06-30", 75)]);
+    let outcome = after_land(&dir, kite_source(), &body, &written(), Ok(on)).unwrap();
+    assert_eq!(outcome.wrote, Ok(Wrote::New(stamp(on, 1))));
+    assert_eq!(outcome.incomplete.as_ref().map(Vec::len), Ok(held));
+    let json = outcome.json();
+    assert!(
+        json.contains(&format!(r#""held":{held},"#)) && json.contains(r#""unnamed":2,"#),
+        "{json}"
+    );
+    for (n, name) in names.iter().enumerate() {
+        assert_eq!(
+            json.contains(&format!("\"{name}\"")),
+            n >= 2,
+            "the newest {INCOMPLETE_NAMED} are named, the oldest two counted: {name}"
+        );
+    }
 }
 
 /// The two days of the diff test, with every injected change.
@@ -629,19 +760,37 @@ fn a_refused_landing_writes_no_snapshot_and_the_newest_stands() {
         Catalog::read(&root).unwrap().receipted(Kind::Kite),
         &[stamp(a, 1)]
     );
-    assert_eq!(newest_snapshot_day(&root), Ok(Some(a)));
+    assert_eq!(newest_snapshot_day(&root, TODAY), Ok(Some(a)));
+}
+
+/// R4-28 repair 3 (verify r3 A13): a clock that jumped ahead dates a snapshot
+/// in the future, and that snapshot stays the newest. `master_stale` must not
+/// read it as fresh, so a newest snapshot after the caller's today is refused
+/// by name. A snapshot dated today is not in the future.
+#[test]
+fn a_future_dated_newest_snapshot_is_refused_never_believed_fresh() {
+    let root = scratch("future-dated");
+    let (_, d2) = two_days(&root);
+    assert_eq!(newest_snapshot_day(&root, d2), Ok(Some(d2)));
+    let why = newest_snapshot_day(&root, day(2026, 2, 1)).unwrap_err();
+    assert!(
+        why.contains("after today 2026-02-01")
+            && why.contains(&file_name(Kind::Kite, stamp(d2, 1)))
+            && why.contains("refused rather than believed fresh"),
+        "{why}"
+    );
 }
 
 #[test]
 fn newest_snapshot_day_is_read_from_the_receipt_and_a_torn_one_is_refused_not_replaced() {
     let root = scratch("newest");
     let (d1, d2) = two_days(&root);
-    assert_eq!(newest_snapshot_day(&root), Ok(Some(d2)));
+    assert_eq!(newest_snapshot_day(&root, TODAY), Ok(Some(d2)));
     // TEAR THE NEWEST RECEIPT: refused by name, never answered with d1.
     let receipt = root.join(receipt_name(Kind::Kite, stamp(d2, 1)));
     let text = fs::read_to_string(&receipt).unwrap();
     fs::write(&receipt, text.replace("ordinal=1", "ordinal=7")).unwrap();
-    let why = newest_snapshot_day(&root).expect_err("a torn receipt is refused");
+    let why = newest_snapshot_day(&root, TODAY).expect_err("a torn receipt is refused");
     assert!(why.contains("refused, never read"), "{why}");
     let book = Book::open(&root).unwrap();
     match book.token_on(d2, "NFO", 9_000_001) {
@@ -806,13 +955,72 @@ fn the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day() {
         ("ZQIDX26JANFUTB".to_owned(), stamp(start, 2)),
         "the day's newest ordinal"
     );
-    assert_eq!(symbol(day(2026, 3, 1)).1, stamp(start, 2));
+    // A DAY PAST THE NEWEST SNAPSHOT is governed by its newest ordinal, and a
+    // row whose contract expired before the day is `token_expired`, never
+    // resolved (R4-28 repair 3, PREC-10): the governing stamp is asserted on
+    // the refusal itself.
+    match book.token_on(day(2026, 3, 1), "NFO", 9_910_001) {
+        TokenOn::Expired { snapshot, listed } => {
+            assert_eq!(snapshot, stamp(start, 2));
+            assert_eq!(listed.tradingsymbol(), "ZQIDX26JANFUTB");
+        }
+        other => panic!("expired, got {other:?}"),
+    }
+    assert_eq!(
+        symbol(day(2026, 1, 27)),
+        ("ZQIDX26JANFUTB".to_owned(), stamp(start, 2)),
+        "the expiry day itself still resolves"
+    );
     assert!(
         Book::of(vec![
             Snapshot::parse(stamp(end, 1), &body("A")).unwrap(),
             Snapshot::parse(stamp(end, 1), &body("B")).unwrap(),
         ])
         .is_err()
+    );
+}
+
+/// R4-28 repair 3 (verify r3 followup PREC-10, reproduced on real data: a
+/// NIFTY October future resolved on 2026-11-02, after its 2026-10-27 expiry).
+/// A row past its own expiry is `token_expired` on every path: between two
+/// snapshots that both list it, on a snapshot day that still lists it, and
+/// after the newest snapshot. Invented rows.
+#[test]
+fn a_token_past_its_contract_expiry_is_expired_never_resolved() {
+    let (s1, s2) = (day(2026, 10, 20), day(2026, 10, 30));
+    let row = fut(9_940_001, "ZQIDX26OCTFUT", "2026-10-27", 75);
+    let next = fut(9_940_002, "ZQIDX26NOVFUT", "2026-11-24", 75);
+    let book = Book::of(vec![
+        Snapshot::parse(stamp(s1, 1), &dump(&[row.clone(), next.clone()])).unwrap(),
+        // A LATE FLUSH: the later snapshot still lists the expired contract.
+        Snapshot::parse(stamp(s2, 1), &dump(&[row, next])).unwrap(),
+    ])
+    .unwrap();
+    for (on, governing) in [(day(2026, 10, 28), s1), (s2, s2), (day(2026, 11, 2), s2)] {
+        match book.token_on(on, "NFO", 9_940_001) {
+            TokenOn::Expired { snapshot, listed } => {
+                assert_eq!(snapshot, stamp(governing, 1), "{on}");
+                assert_eq!(listed.expiry(), Some(day(2026, 10, 27)), "{on}");
+            }
+            other => panic!("{on}: expired, got {other:?}"),
+        }
+        assert_eq!(book.token_on(on, "NFO", 9_940_001).word(), "token_expired");
+    }
+    for on in [s1, day(2026, 10, 27)] {
+        assert!(
+            matches!(
+                book.token_on(on, "NFO", 9_940_001),
+                TokenOn::Resolved { .. }
+            ),
+            "{on}: on or before its expiry it resolves"
+        );
+    }
+    assert!(
+        matches!(
+            book.token_on(day(2026, 11, 2), "NFO", 9_940_002),
+            TokenOn::Resolved { .. }
+        ),
+        "a live contract is untouched by the rule"
     );
 }
 
@@ -882,6 +1090,12 @@ fn a_day_past_its_last_ordinal_is_refused_by_name() {
     .unwrap_err();
     assert!(
         why.contains("refused rather than numbered without end"),
+        "{why}"
+    );
+    // R4-28 repair 3: the cut entry is counted as what it is, never as a
+    // snapshot.
+    assert!(
+        why.contains("(0 receipted snapshots, 1 incomplete entries never read)"),
         "{why}"
     );
 }
@@ -1126,7 +1340,9 @@ fn a_receipt_cut_before_its_rename_is_named_and_its_body_never_read() {
         catalog
             .incomplete()
             .iter()
-            .any(|one| one.starts_with(&partial) && one.contains("before its rename")),
+            .any(|one| one.file == partial
+                && one.to_string().starts_with(&partial)
+                && one.why.contains("before its rename")),
         "{:?}",
         catalog.incomplete()
     );
@@ -1144,7 +1360,7 @@ fn a_receipt_cut_before_its_rename_is_named_and_its_body_never_read() {
             .exists(),
         "a committed receipt leaves no partial name"
     );
-    assert_eq!(newest_snapshot_day(&root), Ok(Some(on)));
+    assert_eq!(newest_snapshot_day(&root, TODAY), Ok(Some(on)));
 }
 
 /// A receipt already at the name is refused, never overwritten.

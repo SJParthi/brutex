@@ -759,6 +759,62 @@ fn a_futures_plan_opens_no_snapshot_the_index_already_holds() {
     );
 }
 
+/// R4-28 repair 3: identity, not trading. The newest snapshot may still list
+/// a contract past its expiry, which `token_on` answers `token_expired` on
+/// that day (PREC-10), and the plan still asks that contract's history. A
+/// Kite write cut before its receipt is named by the plan, never read.
+#[test]
+fn a_plan_asks_a_contract_still_listed_past_its_expiry_and_names_a_cut_snapshot() {
+    let masters = scratch("late-flush");
+    let jan = fut(8_000_011, "ZQIDX26JANFUT", "2026-01-27");
+    let feb = fut(8_000_012, "ZQIDX26FEBFUT", "2026-02-24");
+    snapshot_on(&masters, day(2026, 1, 5), &[jan.clone(), feb.clone()]);
+    // A LATE FLUSH: the newest snapshot, after JAN's expiry, still lists it.
+    snapshot_on(&masters, day(2026, 1, 30), &[jan, feb]);
+    let cut = master_snapshots::file_name(
+        Master::Kite,
+        master_snapshots::Stamp {
+            day: day(2026, 1, 31),
+            ordinal: 1,
+        },
+    );
+    std::fs::write(masters.join(&cut), b"a body cut before its receipt").unwrap();
+    let book = Book::open(&masters).unwrap();
+    assert_eq!(
+        book.token_on(day(2026, 1, 30), "NFO", 8_000_011).word(),
+        "token_expired"
+    );
+    let plan = futures_plan(
+        &book,
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 29)),
+        day(2026, 1, 30),
+        day(2026, 1, 29),
+    )
+    .unwrap();
+    assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    let contracts: Vec<(u64, Window)> = plan
+        .asks
+        .iter()
+        .filter(|ask| matches!(ask.series, FuturesSeries::Contract { .. }))
+        .map(|ask| (ask.token, ask.window))
+        .collect();
+    assert_eq!(
+        contracts,
+        vec![
+            (8_000_011, window(day(2026, 1, 5), day(2026, 1, 27))),
+            (8_000_012, window(day(2026, 1, 5), day(2026, 1, 29))),
+        ]
+    );
+    assert_eq!(plan.incomplete.len(), 1, "{:?}", plan.incomplete);
+    assert!(
+        plan.incomplete[0].starts_with(&cut) && plan.incomplete[0].contains("never read"),
+        "{:?}",
+        plan.incomplete
+    );
+}
+
 /// R4-28 repair 1: snapshots held before the index existed (or written by a
 /// process killed before it took them in) are taken in by the next plan, once,
 /// and the plan equals the one over an index filled as they were written.

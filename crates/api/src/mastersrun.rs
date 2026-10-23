@@ -1101,6 +1101,62 @@ mod tests {
         assert!(named.contains(&kept.display().to_string()), "{named}");
     }
 
+    /// R4-28 repair 3 (verify r3 blocking): a snapshot write cut by a kill
+    /// leaves a body with no receipt. The next refresh names it in the
+    /// `/masters/refresh` outcome, and in a Warn `pull.masters.snapshot`
+    /// record in the file `/logs` reads. Every row is invented.
+    #[test]
+    fn a_refresh_after_a_cut_snapshot_names_it_in_the_outcome_and_the_log() {
+        struct Kite;
+        impl Discovery for Kite {
+            async fn get(&self, _url: &str) -> Result<String, Refusal> {
+                let mut body = String::from(pull::vendor::KITE_MASTER_HEADER);
+                for token in 0..24_u64 {
+                    let token = 9_700_001 + token;
+                    body.push_str(&format!(
+                        "\n{token},{},ZQRS{token}26MARFUT,\"ZQRS{token}\",0,2026-03-26,0,0.05,75,FUT,NFO-FUT,NFO",
+                        token / 256
+                    ));
+                }
+                body.push('\n');
+                Ok(body)
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = crate::scratch::path(&format!("masters-cut-snapshot-{nanos}"));
+        let snapshots = dir.join(pull::master_snapshots::SNAPSHOT_DIR);
+        std::fs::create_dir_all(&snapshots).expect("a new snapshots directory");
+        let cut = "instruments_20260304.csv.gz";
+        std::fs::write(snapshots.join(cut), b"a body cut before its receipt")
+            .expect("the residue of a cut write");
+        let source = masters::SOURCES
+            .iter()
+            .find(|source| source.vendor == Some(brutex_core::vendor::Vendor::Zerodha))
+            .expect("the Zerodha master is a source");
+        let from = crate::emitted::mark();
+        let (landed, tried) = block_on(obtain(&Kite, &NoWait, &dir, source));
+        assert!(landed.is_written(), "{landed:?}");
+        let json = outcome_json(source, &Ok(landed), &tried);
+        assert!(
+            json.contains(&format!("\"{cut}\"")),
+            "the refresh outcome names the cut body: {json}"
+        );
+        let named = crate::emitted::landed(
+            from,
+            pull::master_snapshots::EVENT_TARGET,
+            "an incomplete master snapshot entry is held and never read",
+        );
+        assert!(
+            named
+                .iter()
+                .any(|record| record.level == telemetry::Level::Warn
+                    && crate::emitted::says(record, "entry", cut)),
+            "one Warn record names the cut body: {named:?}"
+        );
+    }
+
     /// A clock that does not wait.
     ///
     /// The retry ladder's own schedule is asserted where the ladder lives —
