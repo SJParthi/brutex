@@ -993,8 +993,8 @@ pub struct Recorded {
     pub ledger_at: u64,
     /// A torn last line was ended before this one.
     pub ended_torn: bool,
-    /// The index was rebuilt from the ledger first (it was missing a valid
-    /// image: torn, damaged).
+    /// The index was rebuilt from the ledger first (it was missing, torn,
+    /// damaged, of another version, or behind or ahead of its ledger).
     pub rebuilt: bool,
 }
 

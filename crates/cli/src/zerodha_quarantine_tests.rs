@@ -597,3 +597,37 @@ fn the_verb_names_a_damaged_ledger_line_and_a_rebuilt_index() {
     assert!(out.contains("Nothing was written"), "{out}");
     assert_eq!(files_under(&root.0), before, "nothing was written");
 }
+
+/// The second check's follow-up: the newest plan whose name merely STARTED
+/// `zerodha-<SEG>-<SYM>-` was read, so a symbol that is a dash-prefix of
+/// another (`X` and `X-Y`) read the other's plan. Only R4-17's whole name,
+/// `zerodha-<SEG>-<SCOPE>-<16 hex>.plan`, is read now.
+#[test]
+fn another_symbols_plan_is_never_read_for_a_dash_prefix_of_it() {
+    let root = Root::new("dash-prefix");
+    let dir = root.0.join("audit").join("series-identity");
+    fs::create_dir_all(&dir).expect("plan dir");
+    let other = plan_text(&[("1min", "2018-12", "timestamps", "zero_price", &[7])]).replace(
+        &format!("NSE-CASH-{SYMBOL}\t"),
+        &format!("NSE-CASH-{SYMBOL}-ZZ\t"),
+    );
+    fs::write(
+        dir.join(format!("zerodha-CASH-{SYMBOL}-ZZ-0011223344556677.plan")),
+        other,
+    )
+    .expect("another symbol's plan");
+    let (code, out) = run(
+        &root.0,
+        &[
+            SYMBOL,
+            "2018-12-01",
+            "2018-12-31",
+            "--cause",
+            "zero_price",
+            "--reason",
+            "r",
+        ],
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("no quarantine plan"), "{out}");
+}

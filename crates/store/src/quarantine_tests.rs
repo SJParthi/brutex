@@ -1496,3 +1496,69 @@ fn a_repair_never_re_adds_a_quarantined_bar() {
     );
     assert_eq!(store.served_bars(whole).len(), 6, "nothing was written");
 }
+
+/// BLOCKING 2 at the second check's own point: the door promoted and the
+/// `dropped` line was synced, and the index publish never happened (refused
+/// or killed). The readers name it stale; the next writer of any month of
+/// the feed indexes the drop once, and a rerun of the plan writes nothing.
+#[test]
+fn a_dropped_line_synced_and_never_indexed_is_caught_up_by_the_next_writer() {
+    let store = Store::new("dropped-never-indexed");
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 5_633)).collect();
+    let path = minute("QFIXK1", march());
+    store.month(path, &rows);
+    let named = [rows[2].ts_micros, rows[3].ts_micros];
+    let digest = digest_of(&[rows[2], rows[3]]);
+    let act = |scope, revision| Record {
+        path,
+        scope,
+        cause: Cause::ForeignLevel,
+        stamps: &named,
+        bars: 2,
+        revision,
+        source_digest: digest,
+        who: "refused publish",
+        reason: "invented: its index publish never happened",
+    };
+    record(&store.root, &act(Scope::Dropping, 0)).expect("the intent, indexed");
+    let drop = repair::drop_month(&store.root, path, SYMBOL, &named, "refused").expect("promoted");
+    let line = super::ledger_line(
+        &series_key(path),
+        &act(Scope::Dropped, drop.to.ordinal()),
+        1_792_000_000_000_000,
+    );
+    super::append_line(&ledger_path(&store.root, Vendor::Zerodha), &line).expect("synced");
+    let between = probe(&store.root, path);
+    assert_eq!(
+        between.map_err(|why| why.code()),
+        Err("quarantine_index_stale"),
+        "the readers name the lag"
+    );
+    let other = minute("QFIXL1", march());
+    store.month(other, &rows);
+    apply_month(
+        &store.root,
+        other,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("the next writer");
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::Dropped && e.bars == 2 && e.revision == 1
+    ));
+    assert_eq!(
+        apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)),
+        Ok(Applied::Nothing {
+            why: "already_dropped"
+        })
+    );
+    let dropped = read_ledger(&store.root, Vendor::Zerodha)
+        .expect("ledger")
+        .lines
+        .iter()
+        .filter(|line| line.scope == Scope::Dropped && line.key == series_key(path))
+        .count();
+    assert_eq!(dropped, 1, "indexed once, never a second line");
+}

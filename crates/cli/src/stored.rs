@@ -2635,12 +2635,19 @@ fn refuse_quarantined(
         Ok(store::quarantine::Probe::Clear) => Ok(()),
         Ok(store::quarantine::Probe::Quarantined(entry)) => Err(LoadFailure::Refused(format!(
             "{underlying} {rung_name} {year}-{month:02} is QUARANTINED ({} {}, {} bar(s) \
-             named; ledger audit/{}.quarantine.ledger at byte {}): its named bars are not \
+             named{}; ledger audit/{}.quarantine.ledger at byte {}): its named bars are not \
              this instrument's own, so a sweep refuses the month rather than read around \
              them. Nothing was read.",
             entry.scope.code(),
             entry.cause.code(),
             entry.bars,
+            // AN INTENT ONLY (R4-18 repair 2): a drop ledgered and not yet
+            // finished is indexed as a drop of no bars.
+            if entry.bars == 0 {
+                ", a drop ledgered and not yet finished"
+            } else {
+                ""
+            },
             path.vendor().as_str(),
             entry.ledger_at
         ))),

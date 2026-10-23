@@ -304,12 +304,13 @@ fn plan_path(root: &Path, ask: &Ask) -> Result<PathBuf, String> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let scopes = [ask.symbol.as_deref().unwrap_or("ALL"), "ALL"];
-        let fits = scopes
-            .iter()
-            .any(|scope| name.starts_with(&format!("zerodha-{}-{scope}-", ask.segment)))
-            && Path::new(&name)
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("plan"));
+        // THE NAME R4-17 WRITES, WHOLE: `zerodha-<SEG>-<SCOPE>-<16 hex>.plan`.
+        // A prefix test alone read `X-Y`'s plan for `X` (R4-18 repair 2).
+        let fits = scopes.iter().any(|scope| {
+            name.strip_prefix(&format!("zerodha-{}-{scope}-", ask.segment))
+                .and_then(|rest| rest.strip_suffix(".plan"))
+                .is_some_and(|hex| hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        });
         if !fits {
             continue;
         }
@@ -575,6 +576,30 @@ fn quarantine_state(root: &Path, apply: bool) -> Result<Vec<String>, String> {
     Ok(said)
 }
 
+/// THE QUARANTINE'S OWN STATE FIRST (R4-18 repair 2), printed to `out`: a
+/// damaged ledger line by offset, never skipped (a plan goes on and fails,
+/// `Ok(true)`; an apply refuses before anything is written, `Err(FAILED)`),
+/// and the rebuild an apply made to bring the index level with its ledger.
+fn state_said(root: &Path, ask: &Ask, out: &mut String) -> Result<bool, u8> {
+    match quarantine_state(root, ask.apply) {
+        Ok(said) => {
+            for line in &said {
+                let _ = writeln!(out, "  {line}");
+            }
+            Ok(false)
+        }
+        Err(why) => {
+            let _ = writeln!(out, "  QUARANTINE {why}");
+            note_state(ask, &why);
+            if ask.apply {
+                let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED. Nothing was written.");
+                return Err(FAILED);
+            }
+            Ok(true)
+        }
+    }
+}
+
 /// One `/logs` event for a quarantine state that refused or failed a run.
 fn note_state(ask: &Ask, why: &str) {
     crate::note(
@@ -701,26 +726,9 @@ pub(crate) fn command_with(
         },
         plan.display()
     );
-    // THE QUARANTINE'S OWN STATE FIRST (R4-18 repair 2): a damaged ledger
-    // line is printed by offset, never skipped, and an apply refuses before
-    // anything is written; an apply brings the index level with its ledger
-    // before its first act and says when it had to rebuild it.
-    let mut failed = match quarantine_state(&root, ask.apply) {
-        Ok(said) => {
-            for line in &said {
-                let _ = writeln!(out, "  {line}");
-            }
-            false
-        }
-        Err(why) => {
-            let _ = writeln!(out, "  QUARANTINE {why}");
-            note_state(&ask, &why);
-            if ask.apply {
-                let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED. Nothing was written.");
-                return FAILED;
-            }
-            true
-        }
+    let mut failed = match state_said(&root, &ask, out) {
+        Ok(failed) => failed,
+        Err(code) => return code,
     };
     if rows.is_empty() {
         let _ = writeln!(
