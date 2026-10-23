@@ -1377,10 +1377,21 @@ mod tests {
         // four parallel mutation runs. Interference only adds time, so each
         // size's minimum is its least disturbed estimate; alternating spreads
         // a slow stretch over both. The 4x ceiling is unchanged.
+        //
+        // UP TO 31 PAIRS, STOPPING AT THE FIRST THAT HOLDS (BASE-REDS-1023,
+        // D-7152): seven pairs still failed on unchanged code with the Mac's
+        // fourteen cores busy (a run of samples that all land on a throttled
+        // or shared core). A lookup that scans the universe is about 40x
+        // slower at every pair, so no pair of minima ever brings it under 4x;
+        // interference only adds time, so more pairs can only remove a false
+        // failure, never pass a regression.
         let (mut fast, mut slow) = (u128::MAX, u128::MAX);
-        for _ in 0..7 {
+        for pair in 0..31 {
             fast = fast.min(sample(&a));
             slow = slow.min(sample(&b));
+            if pair >= 6 && slow <= fast.saturating_mul(4).max(4) {
+                break;
+            }
         }
         let grew =
             format!("the lookup grew with the universe: {fast} ns against {slow} ns, {sizes}");

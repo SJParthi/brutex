@@ -2305,6 +2305,13 @@ mod tests {
     #[test]
     fn a_fifo_a_directory_or_a_symlink_at_a_scrub_file_is_refused_at_once() {
         let root = root_of("scrub-route-odd");
+        let plain = root_of("scrub-route-odd-plain");
+        write(
+            &plain,
+            Vendor::Zerodha,
+            &format!("done run=1 pass=1 {T1}\n"),
+            "run 1 vendor=zerodha commit=unstamped pass=1 resume=-\n",
+        );
         let elsewhere = root.join("elsewhere");
         std::fs::write(&elsewhere, format!("done run=1 pass=1 {T1}\n")).unwrap();
         for name in [
@@ -2332,12 +2339,30 @@ mod tests {
                     "symlink" => std::os::unix::fs::symlink(&elsewhere, &at).unwrap(),
                     _ => std::fs::create_dir(&at).unwrap(),
                 }
-                let asked = std::time::Instant::now();
-                let body = answer(&root, "feed=zerodha&timeframe=1min&key=NSE-INDEX-NIFTY")
-                    .expect("answered");
+                // "AT ONCE" IS A RATIO AGAINST THIS RUN'S OWN BASELINE
+                // (BASE-REDS-1023, D-7152): a fixed 5 s bound failed on a
+                // loaded machine with the code unchanged, and on an idle one
+                // it was 1,000 times looser than the answer. Five answers of
+                // the odd file are taken in turn with five of a regular one
+                // on a root of its own; each side's fastest is its least
+                // disturbed estimate, and the odd file's may cost at most 20
+                // regular answers and 50 ms. A refusal that waited on the
+                // FIFO would be seconds against a millisecond.
+                let query = "feed=zerodha&timeframe=1min&key=NSE-INDEX-NIFTY";
+                let (mut odd, mut base) = (std::time::Duration::MAX, std::time::Duration::MAX);
+                let mut body = String::new();
+                for _ in 0..5 {
+                    let asked = std::time::Instant::now();
+                    body = answer(&root, query).expect("answered");
+                    odd = odd.min(asked.elapsed());
+                    let asked = std::time::Instant::now();
+                    let _plain = answer(&plain, query).expect("the regular root answers");
+                    base = base.min(asked.elapsed());
+                }
                 assert!(
-                    asked.elapsed() < std::time::Duration::from_secs(5),
-                    "{kind} at {name}: answered without waiting"
+                    odd <= base.saturating_mul(20) + std::time::Duration::from_millis(50),
+                    "{kind} at {name}: answered in {odd:?} against a regular file's {base:?}, \
+                     so it waited"
                 );
                 let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
                 assert_eq!(parsed["recorded"], false, "{kind} at {name}: {body}");
@@ -2356,6 +2381,7 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&plain);
     }
 
     /// **THE ORDERED INDEX ANSWERS WHAT A WALK AND A SORT OF EVERY FINDING
