@@ -4088,7 +4088,7 @@ fn note_months(rows: &[Row]) {
         let ym = format!("{year:04}-{month:02}");
         crate::note(
             &telemetry::Event::info(TARGET, "tick-to-second instrument-month")
-                .with("symbol", symbol.as_ref())
+                .with("symbol", &*symbol)
                 .with("month", ym.as_str())
                 .with("rows", days)
                 .with("exact", exact_rows),
