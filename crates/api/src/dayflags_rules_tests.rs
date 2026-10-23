@@ -2030,6 +2030,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
             frozen_runs: 0,
             longest: None,
             broken: 0,
+            unjudged: None,
         }),
         day_bar: Some((10, 5)),
         ledger: None,
@@ -2060,6 +2061,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
             frozen_runs: 0,
             longest: None,
             broken: 0,
+            unjudged: None,
         }),
         ..low
     };
@@ -2097,6 +2099,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
             frozen_runs: 0,
             longest: None,
             broken: 0,
+            unjudged: None,
         }),
         ..in_halt
     };
@@ -3236,7 +3239,6 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
         scan: true,
         ..super::super::Reads::default()
     };
-    let venue = pull::vendor::Venue::NseIndex;
     let page = |reads| {
         super::super::open_months(
             &root,
@@ -3248,12 +3250,12 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
     let months = page(scan);
     assert_eq!(months.len(), 2);
     assert_eq!(
-        super::super::scan_months(&months, venue),
+        super::super::scan_months(&months, &inst),
         14,
         "every held day, on two months' threads"
     );
     assert_eq!(
-        super::super::scan_months(&page(scan), venue),
+        super::super::scan_months(&page(scan), &inst),
         0,
         "every day is kept"
     );
@@ -3264,7 +3266,7 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
             .all(|month| month.identity.is_none())
     );
     assert_eq!(
-        super::super::scan_months(&page(super::super::Reads::default()), venue),
+        super::super::scan_months(&page(super::super::Reads::default()), &inst),
         0
     );
     // The whole count then reads each day's scan from the memo.
@@ -3721,7 +3723,7 @@ fn concurrent_asks_of_one_cold_page_agree() {
         scan,
     );
     assert_eq!(
-        super::super::scan_months(&months, pull::vendor::Venue::NseIndex),
+        super::super::scan_months(&months, &inst),
         0,
         "nothing is cold after the race"
     );

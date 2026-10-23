@@ -82761,7 +82761,8 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
    claims the print's book.
 5. FROZEN: an index value unchanged for **180 s or more** in session, outside
    any recorded halt and, from 2026-08-03, outside the cash closing auction's
-   window the index is computed through (item 15). Chosen, not sourced
+   window (item 15), which is set aside on NIFTY and BANKNIFTY and not judged
+   on any other index (item 25). Chosen, not sourced
    (DB-B20's detector); the cause of a frozen dissemination is UNVERIFIED. Zerodha: from the day's one-minute bars
    (`O = H = L = C`, equal minute to minute, no minute missing), scanned once
    per (month file's device and inode, day's first row) and kept with the end
@@ -82825,7 +82826,9 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     aside, so a run there is flagged, never hidden. The stillness itself is a
     MEASURED fact (`docs/00-charter.md`, "An NSE index through the cash
     closing auction"), not the cause: why the index holds still there is
-    UNVERIFIED.
+    UNVERIFIED. **Narrowed by item 25:** "on the index venue only" set the
+    window aside on every NSE index; it is set aside on NIFTY and BANKNIFTY
+    alone, and a run inside it on any other index is not judged.
 16. **A day after expiry names no bar definition** (the Mac finish of
     SC-CLOSE-12 and goal 3, found on the real store: the family narrowed to
     2019-03-28 read "bar definition 3 built this day" beside "expired" over
@@ -82963,6 +82966,53 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     their bound stated, and the band's answers are byte-identical before and
     after on the shadow's 50 checks.
 
-**Proof:** R313-01 to R313-37 (`docs/04-invariants.md`); the limits are
+25. **The cash closing auction's window is set aside on NIFTY and BANKNIFTY
+    alone; a run inside it on any other index is not judged, never "not
+    frozen"** (the check of 23 October, verify-R3-13-r2 X1; amends items 5,
+    15 and 19). Item 15 set the window aside on the index venue, so on every
+    NSE index, on the reason that every share an index is computed from
+    leaves continuous trading at 15:15. That is what `pull::vendor`'s
+    `CAS_INDEX_CIRCULAR`, the index session row's citation, argues for NIFTY
+    50 and NIFTY BANK and for no other index, and it is measured false for
+    others (`docs/00-charter.md`, "An NSE index through the cash closing
+    auction"): of the 135 Zerodha index series, 70 change every minute
+    through 15:15-15:30 on all 42 auction-era sessions (INDIA VIX, NIFTY
+    SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150 among them), so a
+    frozen feed there went unjudged and the record read `flagged: false`
+    with no phrase, the hidden verdict item 19 refused for GDFL. Now
+    `dayflags_rules::auction_of` reads the window for each index. It is SET
+    ASIDE, as before, where `still_through_auction` holds: the exchange is
+    NSE and the sourced index table's row for the symbol
+    (`brutex_core::alias::INDICES`, D-3332) is named "NIFTY 50" or "NIFTY
+    BANK", the citation's own words, which a test pins to the session row's
+    citation. On every other index its minutes are `Minute::Unjudged`: they
+    end a judged run, and a run through them that reaches 180 s while no
+    judged run inside it does is the day's unjudged run (`DayScan::unjudged`,
+    folded beside the judged run in one pass): `index.frozen.flagged` is
+    `null`, `unjudged_s` and `unjudged_from` name it, and the phrase is
+    "index frozen not judged: unchanged for N minute(s) from HH:MM to HH:MM
+    (1min), all of it inside the cash closing auction's window, where an
+    index holding still is sourced for NIFTY 50 and NIFTY BANK alone;
+    whether this run is the auction's or a frozen feed's is not known
+    (UNVERIFIED)" (or "only N minute(s) of it in one stretch outside" the
+    window). A judged run anywhere else still flags the day `true`, the
+    window's run said beside it; a day with neither is `false`. GDFL's
+    ledger answers as item 19 had it (a run inside the window is `null`) and
+    its phrase now says that on such an index the run itself is not judged.
+    Both feeds serve `auction_aside`: `true`, `false`, or `null` on a day
+    with no window. Where no minute is not judged the fold is the one it
+    was, so a day before 2026-08-03, a NIFTY or BANKNIFTY day and a day of
+    a series with no window answer exactly as before. **Rejected:** judging
+    the window like any other minute on every other index, because 35 more
+    indices hold still there on every auction-era session (measured) and
+    would read "frozen in session" every day, a claim no source supports
+    either; and deciding per index and day from its constituents' dated
+    flags, because the store holds no constituent list (only undated
+    snapshots of five broad indices, none of NIFTY BANK) and it would add a
+    master read to every index day (L-R3-13-4). Chosen, not tuned: the two
+    indices are the source's, not a measurement's, and a third is added only
+    by a cited source and a new row here.
+
+**Proof:** R313-01 to R313-39 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
 10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.

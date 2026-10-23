@@ -418,6 +418,12 @@ test('DB-B20, DB-A15, goal 3: a frozen index, a value outside the day range, a c
   assert.deepEqual(unjudged.kinds, ['frozen_unjudged']);
   assert.equal(unjudged.word, 'frozen run not judged');
   assert.equal(unjudged.tone, 'info');
+  // verify-R3-13-r2 X1: a Zerodha run inside the closing auction's window of
+  // an index whose stillness there is not sourced is the same kind, never
+  // "not frozen"; a judged run beside it is frozen.
+  const minutes = { basis: 'minutes_scanned', flagged: null, runs: 0, unjudged_s: 600, auction_aside: false };
+  assert.deepEqual(cellOf(rec({ index: { frozen: minutes, outside_day_range: null } })).kinds, ['frozen_unjudged']);
+  assert.deepEqual(kindsOf(rec({ index: { frozen: { ...minutes, flagged: true, runs: 1 }, outside_day_range: null } })), ['frozen']);
   assert.deepEqual(kindsOf(rec({ index: { frozen: null, outside_day_range: null } })), ['session']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 21594 } })), ['peer_on_closed', 'closed']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 0 } })), ['closed']);

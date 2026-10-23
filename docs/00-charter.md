@@ -1740,27 +1740,50 @@ above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
 **What is NOT sourced here.** Which certificate chains the hosts `pull`
 contacts present was not read: no connection was made. It is UNVERIFIED
 (`docs/06-limits.md` L-BREDS-1).
-## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-7300)
+## An NSE index through the cash closing auction — measured 2026-10-20 and 2026-10-23 (R3-13; D-7300)
 
-§9 and D-0151 record that from 2026-08-03 every share an NSE index is
-computed from leaves continuous trading at 15:15 for the cash closing auction,
-while the index's own session keeps its 15:30 close (`pull::vendor`'s
-`NSE_INDEX_SESSIONS`, `CAS_INDEX_CIRCULAR`), and §9 left "whether an index
-level freezes during the auction" UNVERIFIED. This is what both feeds hold
-there, measured, not what NSE publishes about it.
+What the sources say, and no more. §9 records the cash market's dated
+closing-auction eligibility and leaves "whether an index level freezes during
+the auction" UNVERIFIED. The index session row in force from 2026-08-03
+(`pull::vendor`'s `NSE_INDEX_SESSIONS`) keeps the index's 15:30 close and
+cites `CAS_INDEX_CIRCULAR`, which reasons from NSE/CMTR/74466 §A (closing
+auction eligibility is "stocks on which derivative contracts are available")
+that "every NIFTY 50 and NIFTY BANK constituent qualifies", so that at 15:15
+every share those two indices are computed from leaves continuous trading,
+and cites NSE's FAQ v1.0 Q7 for the index then using the continuous session's
+last prices. D-0151 says it of "the swept index", the same two. None of them
+says it of any other index.
+
+**This section said** "§9 and D-0151 record that from 2026-08-03 every share
+an NSE index is computed from leaves continuous trading at 15:15". Neither
+says that, and the third table row below measures it false (verify-R3-13-r2
+X1, 2026-10-23). R3-13 had set the window aside on every index on its
+strength, so a frozen feed inside 15:15-15:30 on any index went unjudged and
+read "not frozen".
 
 | What | Measured | How |
 |---|---|---|
 | Zerodha NIFTY and BANKNIFTY `1min`, 15:15 onward | On **every** session 2026-08-03..2026-09-30 (42 each), exactly one run of minutes with `O = H = L = C`, each equal to the one before, starting **15:15** and lasting **780 or 840 s** (to 15:27 or 15:28); on **none** of the sessions 2026-07-20..2026-07-31 | `GET /dayflags.json?feed=zerodha&instrument=NSE-INDEX-{NIFTY,BANKNIFTY}&from=2026-07-20&to=2026-09-30` on a read-only shadow of the operator's store (bars linked, `state/fix/shadow.sh`), R3-13's build before the auction window was set aside: `index.frozen.longest_from` and `longest_s` per day |
 | GDFL NIFTY seconds, 15:15 onward | The import's day ledger measures the index unchanged from **15:15:00** for **838, 860, 864 and 799 s** on 2026-09-25, -28, -29 and -30 (`flat_max_s`, `flat_max_at`; BANKNIFTY 839 s from 15:14:59 on 2026-09-25) | `<store>/imports/gdfl.dayflags` lines 107-136, read 2026-10-20 through the same shadow |
+| Zerodha, every index series the store holds, `[15:15, 15:30)` (2026-10-23) | Of **135** series: **37** hold a run of 180 s or more (the rule above) inside the window on **all 42** sessions 2026-08-03..2026-09-30: NIFTY, BANKNIFTY, 34 more equity indices (NIFTYIT, NIFTYFINSERVICE, NIFTYMIDSELECT, NIFTYPVTBANK and NIFTYMIDCAP50 among them) and NIFTYGS48YR, a government-bond index. **70** hold all 42 sessions and **never** such a run: INDIAVIX (its longest run there 60 s), NIFTYSMLCAP250, NIFTYMICROCAP250, NIFTYMIDCAP150, NIFTYNEXT50, NIFTY100 and NIFTY500 among them (longest 0, 60 or 120 s). **13** hold one on some sessions: five more NIFTYGS* bond indices on 14 to 39, NIFTY100ESG on 40, NIFTYCOMMODITIES on 6, NIFTYMSFINSERV and NIFTYPSE on 2, NIFTYAUTO, NIFTYHOUSING, NIFTYLOWVOL50 and NIFTYNONCYCCONS on 1. **15** hold no minute there in those months. In 2026-07 (23 sessions, before the auction) only the six NIFTYGS* bond indices with bars (8 to 23 sessions) and NIFTY50TR1XINV (one session, 180 s) hold such a run | `GET /bars/window.json?feed=zerodha&key=NSE-INDEX-<k>&timeframe=1min&from=<m>&to=<m>&tod_from=15:15:00&tod_to=15:29:59&limit=1000&sort=ts&dir=asc` for every `<k>` under `<store>/bars/zerodha/NSE/INDEX` and `<m>` in 2026-07, 2026-08 and 2026-09, on a fresh read-only shadow, R3-13's repair-1 release build; each IST day's longest run taken by a `jq` fold of `fold_minutes`'s rule (`work-20260925/scratch/repair2-R3-13`, outside the repository) |
+| GDFL's day ledger, the nine indices it measures, 2026-09-25..30 | NIFTY, BANKNIFTY, NIFTYFINSERVICE, NIFTYFPI150, NIFTYIT and NIFTYMIDSELECT unchanged from 15:14:59-15:15:01 for 799 to 864 s (NIFTYFPI150 433 s on 2026-09-30); INDIAVIX, NIFTYCPSE and NIFTYNEXT50 under 180 s every day (their longest 138 s) | `<store>/imports/gdfl.dayflags` lines 107-142 (`flat_max_s`, `flat_max_at`), read 2026-10-23 through the same shadow |
+| The NIFTY 50's shares' dated flag | Every one of `brutex_core::universe::NIFTY_50`'s 50 shares (the snapshot fetched 2026-08-11) carries `ElgbltyClsgAuctnSsn` 1 on all 42 dated masters 2026-08-03..2026-09-30 | `GET /dayflags.json?feed=zerodha&instrument=NSE-CASH-<share>&from=2026-08-03&to=2026-09-30`, each day's `calendar.cas` (`basis: dated_master`), the same shadow |
 
-So the index **holds still from 15:15 until the auction's close is printed**
-on both feeds, every session of the auction era measured. R3-13 sets that
-window aside from the frozen-index flag as it sets a recorded halt aside
-(D-7300 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
-recomputing the index, or computes it from constituents that no longer
-trade), and whether a session outside the measured span differs; no NSE page
-read here says either.
+So NIFTY and BANKNIFTY **hold still from 15:15 until the auction's close is
+printed** on both feeds, every session of the auction era measured, as the
+circular's reasoning says, and the NIFTY 50's shares are all eligible on each
+of those sessions. Other indices differ: some hold still there every session,
+others change every minute through it. Which kind an index is cannot be told
+from its own minutes on one day, and the store holds no constituent list that
+would tell it (`brutex_core::universe` holds undated snapshots of the NIFTY
+50, 100, 200, 500 and Total Market, none of NIFTY BANK). So R3-13 sets the
+window aside for NIFTY and BANKNIFTY alone, as it sets a recorded halt aside,
+and leaves a run inside it on any other index NOT JUDGED, never "not frozen"
+(D-7300 items 15 and 25). **UNVERIFIED:** why an index holds still there
+(whether NSE stops recomputing it, or computes it from constituents that no
+longer trade), why some indices hold still there and others do not, and
+whether a session outside the measured span differs; no NSE page read here
+says any of it.
 
 ## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-7300 item 20)
 

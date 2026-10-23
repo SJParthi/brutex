@@ -150,7 +150,10 @@ export const DAY_KINDS = [
   // A GDFL INDEX DAY ITS LEDGER CANNOT JUDGE (verify-R3-13-r1): the ledger
   // keeps only the day's longest unchanged run, and where that run is the
   // halt's or the closing auction's, or has no stamp, `frozen.flagged` is
-  // `null` — not judged, never "not frozen". The phrase says why.
+  // `null` — not judged, never "not frozen". The phrase says why. A ZERODHA
+  // INDEX DAY reads the same where its only run of 3 minutes or more lies in
+  // the closing auction's window of an index whose stillness there is not
+  // sourced (any index but NIFTY and BANKNIFTY; verify-R3-13-r2 X1).
   { kind: 'frozen_unjudged', word: 'frozen run not judged', tone: 'info' },
   { kind: 'cas', word: 'closing auction from 15:15', tone: 'info' },
   // A DAY AFTER A CONTRACT'S EXPIRY OWES NOTHING (SC-CLOSE-12): never a hole.
