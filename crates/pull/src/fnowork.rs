@@ -683,7 +683,12 @@ pub struct FuturesPlan {
 fn incomplete_lines(book: &Book) -> Vec<String> {
     let held = book.incomplete();
     let bound = crate::master_snapshots::INCOMPLETE_NAMED;
-    let mut lines: Vec<String> = held.iter().rev().take(bound).map(ToString::to_string).collect();
+    let mut lines: Vec<String> = held
+        .iter()
+        .rev()
+        .take(bound)
+        .map(ToString::to_string)
+        .collect();
     if held.len() > bound {
         lines.push(format!(
             "{} older incomplete entries are held and not named here",

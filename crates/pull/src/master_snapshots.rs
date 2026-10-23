@@ -793,8 +793,11 @@ pub fn write_snapshot(root: &Path, kind: Kind, day: Day, url: &str, body: &[u8])
             };
         }
     };
-    let wrote = write_held(root, kind, day, url, body, &compressed, &catalog)
-        .and_then(|wrote| held.release().map(|()| wrote).map_err(|why| why.to_string()));
+    let wrote = write_held(root, kind, day, url, body, &compressed, &catalog).and_then(|wrote| {
+        held.release()
+            .map(|()| wrote)
+            .map_err(|why| why.to_string())
+    });
     Written {
         wrote,
         incomplete: Ok(catalog.incomplete_of(kind)),
@@ -2532,7 +2535,10 @@ fn note(outcome: &Snapshotted) {
         _ => (String::new(), String::new(), String::new()),
     };
     let day = outcome.day.map_or_else(String::new, |day| day.to_string());
-    let incomplete = outcome.incomplete.as_ref().map_or(0, |entries| entries.len() as u64);
+    let incomplete = outcome
+        .incomplete
+        .as_ref()
+        .map_or(0, |entries| entries.len() as u64);
     let _ = telemetry::emit_if!(
         level,
         EVENT_TARGET,

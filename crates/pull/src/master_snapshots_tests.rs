@@ -327,7 +327,11 @@ fn a_refresh_after_a_cut_body_names_every_incomplete_entry() {
     for name in [&cut_today, &cut_before] {
         fs::write(root.join(name), compress(cut.as_bytes()).unwrap()).unwrap();
     }
-    fs::write(root.join(&partial), b"brutex-master-snapshot-v1\nkind=instr").unwrap();
+    fs::write(
+        root.join(&partial),
+        b"brutex-master-snapshot-v1\nkind=instr",
+    )
+    .unwrap();
     // AN NSE ENTRY BELONGS TO THE NSE HOOK, never to the Kite one.
     let nse_cut = file_name(Kind::NseTotalMarket, stamp(d1, 1));
     fs::write(root.join(&nse_cut), b"cut").unwrap();
@@ -1337,12 +1341,9 @@ fn a_receipt_cut_before_its_rename_is_named_and_its_body_never_read() {
     assert!(catalog.receipted(Kind::Kite).is_empty());
     assert_eq!(catalog.incomplete().len(), 2, "{:?}", catalog.incomplete());
     assert!(
-        catalog
-            .incomplete()
-            .iter()
-            .any(|one| one.file == partial
-                && one.to_string().starts_with(&partial)
-                && one.why.contains("before its rename")),
+        catalog.incomplete().iter().any(|one| one.file == partial
+            && one.to_string().starts_with(&partial)
+            && one.why.contains("before its rename")),
         "{:?}",
         catalog.incomplete()
     );
