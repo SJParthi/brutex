@@ -21526,8 +21526,8 @@ REWRITTEN -- api/src/dayflags_rules.rs
     searched by `binary_search`; it is now a HashSet sized once by the
     file's records, and a day is one probe (`said_of`).
   rule 4: the frozen run's two set-aside windows (the recorded halt and the
-    cash closing auction) were sorted; two windows are put in order by one
-    comparison (`outside_of`).
+    cash closing auction) were sorted; two windows are put in order as
+    their min and max (`outside_of`), one comparison each.
   rule 3: FLIGHTS (sized for LOADS_AT_ONCE = 4 parses), READS (test only),
     CasFlags::refused and SCANS (one page, PAGE_DAYS = 92) and
     AuctionSidecars::seen (PAGE_MONTHS = 5, the most months 92 days touch)

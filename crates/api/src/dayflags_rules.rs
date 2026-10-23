@@ -954,10 +954,12 @@ fn outside_of((start, end): (u64, u64), windows: [Option<(u32, u32)>; 2]) -> (u6
             .filter(|(from, to)| from < to)
     };
     let [first, second] = windows.map(cut);
-    // TWO WINDOWS ARE PUT IN ORDER BY ONE COMPARISON, never a sort (gate 11
-    // rule 4; R3-13 repair 1).
+    // TWO WINDOWS ARE PUT IN ORDER AS THEIR MIN AND MAX, never a sort (gate 11
+    // rule 4; R3-13 repair 1). Not a `second < first` swap either: its `<=`
+    // mutant was equivalent (two equal windows swap to the same pair), and an
+    // equivalent mutant is restructured away, never excluded (D-0192).
     let cuts = match (first, second) {
-        (Some(first), Some(second)) if second < first => [Some(second), Some(first)],
+        (Some(first), Some(second)) => [Some(first.min(second)), Some(first.max(second))],
         (first, second) => [first, second],
     };
     let (mut cursor, mut longest, mut total) = (start, 0_u64, 0_u64);

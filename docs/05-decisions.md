@@ -82947,8 +82947,10 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     feat/db-fix's head, gates 10, 11, 12 and 23 refused R3-13's files and
     nothing new besides. Rewritten: a month's auction sidecar is a set sized
     once by its records, so a day is one hash probe, never a sort and a
-    binary search; the frozen run's two set-aside windows are ordered by one
-    comparison, never a sort; every map is sized once (`PAGE_DAYS`,
+    binary search; the frozen run's two set-aside windows are ordered as
+    their min and max, never a sort (a `second < first` swap was tried first
+    and its `<=` mutant was equivalent, so it was restructured away, as
+    D-0192 directs); every map is sized once (`PAGE_DAYS`,
     `PAGE_MONTHS` = 5, `LOADS_AT_ONCE`). Declared, each with its bound in
     `docs/06-limits.md` ("Gate 11 — R3-13"): one request's refused days put
     in day order (at most 92), the `timeframe=` word found in the ten-rung
