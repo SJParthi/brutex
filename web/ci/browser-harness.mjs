@@ -387,7 +387,7 @@ export function parseArgs(argv) {
     if (first !== undefined) throw new Error(`--pages names ${first} twice${first === p ? '' : ` (as ${first} and ${p})`}: each page is measured once a run`);
     named.set(key, p);
   }
-  const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
+  const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map((t) => (DECIMAL.test(t) ? Number(t) : Number.NaN));
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
   const instrument = String(o.instrument ?? EDGE_INSTRUMENT);

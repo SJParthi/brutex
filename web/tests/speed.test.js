@@ -2523,9 +2523,10 @@ test('the harness refuses an idle wait its timer cannot hold, and the idle row p
 
 test('the sheet and the harness read a number in decimal digits only, bound every wait by what a timer holds and the restarts by MAX_N, and a page under two spellings is one page', () => {
   // Before (verify r3 follow-ups, 22 Oct): `--n 0x10` was read as 16;
-  // `--timeout-ms` and `--up-wait-ms` past 2^31 - 1 overflowed Node's timers
-  // and every request then failed as "no answer within N ms"; `--restarts`
-  // had no ceiling; and /speed, /speed/ and /SPEED were three pages.
+  // `--timeout-ms` and `--up-wait-ms` had no ceiling, so a timeout past
+  // 2^31 - 1 ran as another than the one asked (Node 24.1 cuts a socket's
+  // timeout to 2^31 - 1, measured 23 Oct); `--restarts` had no ceiling; and
+  // /speed, /speed/ and /SPEED were three pages.
   assert.equal(harness.MAX_WAIT_MS, sheet.MAX_WAIT_MS, 'one ceiling for both commands');
   assert.equal(sheet.MAX_N, harness.MAX_N);
   const base = ['--base', 'http://h:1'];
@@ -2535,6 +2536,13 @@ test('the sheet and the harness read a number in decimal digits only, bound ever
     assert.throws(() => sheet.parseArgs([...base, `--${name}`, odd]), why, `the sheet read ${JSON.stringify(odd)}`);
   }
   assert.equal(harness.parseArgs([...base, '--n', '1e3']).n, 1_000, 'an exponent is still decimal');
+  // A list of numbers is read by the same rule, each member.
+  assert.throws(() => harness.parseArgs([...base, '--idle-tabs', '1,0x10']), /^Error: --idle-tabs is a comma list of whole numbers from 1 to 64$/);
+  assert.throws(() => harness.parseArgs([...base, '--idle-tabs', '1, 2']), /^Error: --idle-tabs is a comma list of whole numbers from 1 to 64$/);
+  assert.deepEqual(harness.parseArgs([...base, '--idle-tabs', '1,1e1,064']).idleTabs, [1, 10, 64]);
+  assert.throws(() => sheet.parseArgs([...base, '--clients', '0x10']), /^Error: --clients is a comma list of whole numbers from 1 to 512$/);
+  assert.throws(() => sheet.parseArgs([...base, '--clients', '1,2 ']), /^Error: --clients is a comma list of whole numbers from 1 to 512$/);
+  assert.deepEqual(sheet.parseArgs([...base, '--clients', '1,1e1,512']).clients, [1, 10, 512]);
   assert.equal(sheet.parseArgs([...base, '--n', '0016']).n, 16, 'leading zeros are decimal');
   for (const name of ['settle-ms', 'step-wait-ms', 'idle-ms']) {
     assert.throws(() => harness.parseArgs([...base, `--${name}`, '2147483648']), new RegExp(`^Error: --${name} must be at most 2147483647$`));

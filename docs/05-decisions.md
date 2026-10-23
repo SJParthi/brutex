@@ -78574,7 +78574,8 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     floor ("at least").
 22. **Every wait an argument sets stops at `MAX_WAIT_MS`, and the idle row
     prints the clock's reading** (R315-22 and R315-23, repair 3). Past
-    2,147,483,647 ms Node fires a timer after 1 ms, so a longer wait is
+    2,147,483,647 ms Node fires a `setTimeout` after 1 ms and cuts a socket's
+    timeout to 2,147,483,647 ms, so a longer wait is
     refused by name, not chained into several timers: no run needs a wait of
     24.8 days, and a refusal states the bound where a chain would hide it.
     The idle row is `performance.now()` across the wait, and a wait more than

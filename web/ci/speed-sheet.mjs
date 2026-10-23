@@ -188,12 +188,13 @@ export function readCapture(text) {
 
 /**
  * The longest wait a Node timer holds: 2,147,483,647 ms (2^31 - 1, about
- * 24.8 days). Node fires a longer `setTimeout` (or a socket's `setTimeout`)
- * after 1 ms, with only a `TimeoutOverflowWarning` on stderr, so a wait
- * option past it is refused by name rather than run: `--timeout-ms` past it
- * failed every request as "no answer within N ms" a millisecond in, and the
- * harness's `--idle-ms` past it printed an idle never measured (verify r3,
- * 22 Oct). The harness reads its ceiling from here.
+ * 24.8 days). Past it Node fires a `setTimeout` after 1 ms and cuts a
+ * socket's timeout to it, each with only a `TimeoutOverflowWarning` on
+ * stderr (measured 23 Oct, Node 24.1: a request timed with a `--timeout-ms`
+ * of 2,147,483,648 ran under 2,147,483,647). Either way the wait run is not
+ * the one asked, so a wait option past it is refused by name: the harness's
+ * `--idle-ms` past it printed an idle never measured (verify r3, 22 Oct).
+ * The harness reads its ceiling from here.
  */
 export const MAX_WAIT_MS = 2_147_483_647;
 
@@ -242,7 +243,7 @@ export function parseArgs(argv) {
     if (v > max) throw new Error(`--${name} must be at most ${max}`);
     return v;
   };
-  const clients = String(o.clients ?? '1,10,60').split(',').map(Number);
+  const clients = String(o.clients ?? '1,10,60').split(',').map((c) => (DECIMAL.test(c) ? Number(c) : Number.NaN));
   if (clients.some((c) => !Number.isSafeInteger(c) || c < 1 || c > 512)) throw new Error('--clients is a comma list of whole numbers from 1 to 512');
   const day = o.day === undefined ? null : String(o.day);
   if (day !== null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--day is YYYY-MM-DD');
