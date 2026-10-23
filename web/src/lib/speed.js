@@ -285,10 +285,15 @@ export const SELF_TYPES = Object.freeze(['paint', 'navigation', 'resource']);
  * The longest pause is not here: a page cannot observe its own long tasks
  * after the fact in every browser, so the harness measures it.
  *
+ * `revisit` is whether this document had already watched a page's own load
+ * before this watch began: the tab left the page it opened on and came back
+ * by a link inside the app, so every figure is the tab's since it opened
+ * (see {@link watchSelf}).
+ *
  * @typedef {{firstContentMs: number | null, paint: 'reported' | 'waiting' | 'unsupported',
  *   wire: 'observed' | 'unsupported', wireBytes: number, fetches: number, unsized: number,
  *   dropped: number, documentSeen: boolean, documentBytes: number | null, documentPath: string | null,
- *   loaded: boolean, heapBytes: number | null, atMs: number | null}} SelfReading
+ *   loaded: boolean, heapBytes: number | null, atMs: number | null, revisit: boolean}} SelfReading
  */
 
 /** A finite number, or `null`. @param {unknown} v */
@@ -319,9 +324,11 @@ function pathOf(url) {
  * 409.3 KB over 35: a load over the 400 KB target read as under it.
  *
  * @param {unknown} supported
+ * @param {boolean} [revisit] whether this document already watched a page's
+ *   own load before this watch (only `true` counts)
  * @returns {SelfReading}
  */
-export function selfStart(supported) {
+export function selfStart(supported, revisit = false) {
   const has = (/** @type {string} */ t) => Array.isArray(supported) && supported.includes(t);
   return Object.freeze({
     firstContentMs: null,
@@ -336,7 +343,8 @@ export function selfStart(supported) {
     documentPath: null,
     loaded: false,
     heapBytes: null,
-    atMs: null
+    atMs: null,
+    revisit: revisit === true
   });
 }
 
@@ -406,12 +414,30 @@ export function selfAdd(reading, entries, at = {}) {
 }
 
 /**
+ * Whose figures a reading holds: `'page'` when they are this page's own
+ * load, `'tab'` when the tab came here by a link inside the app and every
+ * figure is the tab's since it opened — either the document the tab opened
+ * on is another page, or this document already showed this page, left it
+ * and came back (verify r3, 22 Oct: /speed -> /db -> /speed read the tab's
+ * 1.2 MB over 63 fetches as this page's own, against the page's 408.6 KB
+ * over 35, because only the first case was checked).
+ *
+ * @param {SelfReading} r
+ * @param {string} here this page's own path, `/speed`
+ * @returns {'page' | 'tab'}
+ */
+export function selfWhose(r, here) {
+  return r.revisit || (r.documentPath !== null && r.documentPath !== here) ? 'tab' : 'page';
+}
+
+/**
  * The sentence the Speed page draws for its own load, each figure against
  * its target where one load can be: the wire and the heap are per load,
  * and first content is said against the p99 target it feeds. Stamped with
- * when it was read and whether the load had ended; it says so when the tab
- * opened on another page and came here by a link inside the app, because
- * the browser then has no load of this page alone.
+ * when it was read and whether the load had ended; it says so whenever the
+ * figures are the tab's ({@link selfWhose}), because the browser then has no
+ * load of this page alone: the tab opened on another page, or it opened
+ * here, left and came back by a link inside the app.
  *
  * @param {SelfReading} r
  * @param {string} here this page's own path, `/speed`
@@ -440,12 +466,27 @@ export function selfText(r, here) {
       ? ''
       : ` Read ${microsText(Math.round(r.atMs * 1_000))} after the tab opened, ` +
         (r.loaded ? 'after the load; a later fetch is added when it ends.' : 'with the load still going; redrawn as each entry arrives.');
+  const tabs = "so these are the tab's figures since it opened, not this page's alone.";
   const whose =
-    r.documentPath !== null && r.documentPath !== here
-      ? ` This tab opened on ${r.documentPath} and came here by a link inside the app, so these are the tab's figures since it opened, not this page's alone.`
-      : '';
+    selfWhose(r, here) === 'page'
+      ? ''
+      : r.documentPath !== null && r.documentPath !== here
+        ? ` This tab opened on ${r.documentPath} and came here by a link inside the app, ${tabs}`
+        : r.documentPath === null
+          ? ` This tab left this page and came back by a link inside the app, ${tabs}`
+          : ` This tab opened on ${r.documentPath}, left it and came back by a link inside the app, ${tabs}`;
   return `This page's own load, from this browser: ${first} · ${wire} · ${heap}.${when}${whose}`;
 }
+
+/**
+ * Every document (its `window`) that has watched a page's own load: a second
+ * watch in one document is a page mounted again after a link inside the app,
+ * and a buffered observer then delivers everything since the tab opened.
+ * Held weakly, so a closed document is not kept; one lookup a watch.
+ *
+ * @type {WeakSet<object>}
+ */
+const WATCHED = new WeakSet();
 
 /**
  * Watches this page's own load: one `PerformanceObserver` over each of
@@ -454,6 +495,16 @@ export function selfText(r, here) {
  * event; and a reading handed to `onReading` at once and again after each
  * delivery. Returns the stop. A browser with no observer gets one reading
  * that says so, and nothing is watched.
+ *
+ * THE FIRST WATCH OF A DOCUMENT IS ITS OWN LOAD; ANY LATER ONE IS THE TAB'S.
+ * A buffered observer cannot tell a mount at the document's load from one
+ * after a link inside the app: both are handed every entry since the tab
+ * opened. So the reading carries `revisit` — whether `win` already watched
+ * once — and the page says the figures are the tab's (verify r3, 22 Oct). It
+ * is the document's own fact, not the router's: SvelteKit's `afterNavigate`
+ * (2.70.2) adds its callback in the page's `onMount`, so whether a page hears
+ * the load's `'enter'` turns on the router's timing, which this page does not
+ * own.
  *
  * @param {any} win a `window`, or a test's stand-in with `PerformanceObserver`,
  *   `performance`, `document`, `addEventListener` and `removeEventListener`
@@ -464,7 +515,10 @@ export function watchSelf(win, onReading) {
   const Observer = win?.PerformanceObserver;
   const perf = win?.performance;
   const observable = typeof Observer === 'function';
-  let reading = selfStart(observable ? Observer.supportedEntryTypes : null);
+  const held = win !== null && typeof win === 'object';
+  const revisit = held && WATCHED.has(win);
+  if (held) WATCHED.add(win);
+  let reading = selfStart(observable ? Observer.supportedEntryTypes : null, revisit);
   /** @param {Iterable<any>} entries @param {unknown} dropped */
   const emit = (entries, dropped) => {
     reading = selfAdd(reading, entries, {

@@ -25,6 +25,9 @@ import {
   reportBody, outcomeOf, createPageReporter, installPageReport, reportFallback, REPLACEMENT
 } from '../src/lib/page-report.js';
 import { upCheck, apiTitle, UP_ROUTE, UP_METHOD, UP_CHECKING } from '../src/lib/api-status.js';
+// The exports a repair added are read through the module, so a test of one
+// fails on the tree before it by name and not the whole file at its import.
+import * as speedModule from '../src/lib/speed.js';
 import * as sheet from '../ci/speed-sheet.mjs';
 import * as harness from '../ci/browser-harness.mjs';
 import { windowQuery, LOCAL_SORT_BUDGET } from '../src/lib/db/bars-plan.js';
@@ -401,7 +404,11 @@ test('a page reads its own load as the browser delivers it: a late paint and a l
   assert.equal(linked.documentPath, '/db');
   assert.match(selfText(linked, '/speed'), / This tab opened on \/db and came here by a link inside the app, so these are the tab's figures since it opened, not this page's alone\.$/);
   assert.equal(selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'not a url', transferSize: 1 }]).documentPath, null);
-  assert.doesNotMatch(selfText(selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 1 }]), '/speed'), /came here by a link/);
+  // A /speed document's FIRST watch is this page's own load; a later watch of
+  // the same document is a revisit and says the tab's figures (repair 3, the
+  // round-3 tests at the end of this file).
+  assert.doesNotMatch(selfText(selfAdd(selfStart(all), [{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 1 }]), '/speed'), /came here by a link|came back|tab's figures/);
+  assert.match(selfText(selfAdd(selfStart(all, true), [{ entryType: 'navigation', name: 'http://h:1/speed', transferSize: 1 }]), '/speed'), / This tab opened on \/speed, left it and came back by a link inside the app, so these are the tab's figures since it opened, not this page's alone\.$/);
   // Chrome hands a buffered observer the document's entry twice (measured 21 Oct): it is one fetch, the later size standing.
   const doc = (/** @type {number | undefined} */ transferSize) => ({ entryType: 'navigation', name: 'http://h:1/speed', transferSize });
   const twice = selfAdd(selfAdd(selfStart(all), [doc(877), doc(877), { entryType: 'resource', transferSize: 50_300 }]), [doc(900)]);
@@ -1894,8 +1901,24 @@ async function browserStandIn(o) {
   const script = o.noReporter ? '' : `<script type="module">import '/lib/page-report.js';</script>`;
   /** @param {string} title @param {string} [extra] */
   const page = (title, extra = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title><body><h1>${title}</h1>${extra}${script}`;
+  // A ROUND TRIP INSIDE ONE DOCUMENT, as the app's router makes one: a link
+  // is taken in place (`history.pushState`, nothing loaded), the page in view
+  // is unmounted and the next one mounted, and the browser's back button
+  // mounts again by `popstate`. `/trip` draws the Speed page's own line with
+  // the REAL `$lib/speed.js`, mounted as the page mounts it; `/trip-db`
+  // fetches 450,000 bytes, as `/db` fetches its own.
+  const trip = '<!doctype html><meta charset="utf-8"><title>trip</title><body><nav><a id="to-db" href="/trip-db">db</a> <a id="to-speed" href="/trip">speed</a></nav><main></main><script type="module">' +
+    "import { watchSelf, selfText } from '/lib/speed.js'; const main = document.querySelector('main'); let stop = null;" +
+    "const mount = () => { stop?.(); stop = null; main.textContent = ''; delete main.dataset.done;" +
+    " if (location.pathname === '/trip') { const line = document.createElement('p'); line.setAttribute('data-speed-self', ''); main.append(line);" +
+    "  stop = watchSelf(window, (r) => { line.textContent = selfText(r, '/trip'); line.dataset.wireBytes = String(r.wireBytes); line.dataset.fetches = String(r.fetches); }); }" +
+    " else { main.textContent = 'db'; fetch('/big').then((a) => a.text()).then(() => (main.dataset.done = 'yes')); } };" +
+    "document.addEventListener('click', (e) => { const a = e.target.closest('a'); if (!a) return; e.preventDefault(); history.pushState({}, '', a.getAttribute('href')); mount(); });" +
+    "addEventListener('popstate', mount); mount();</script>";
   /** @type {Record<string, string>} */
   const pages = {
+    '/trip': trip,
+    '/trip-db': trip,
     '/db': o.bareDb ? page('db') : page('db', `<input aria-controls="db-search-list"><div id="db-search-list"></div>` +
       // The feed picker and the expiry picker, each the shared Picker as /db draws it: a menu of radios.
       `<div class="field"><span class="lab">Broker feed</span><div class="picker"><button class="pbtn" title="Feed A. THE PAGE'S WHOLE SCOPE: …" onclick="menu(this, ['Feed A', 'Feed B'], 0, () => fetch('/feeds.json'))">Feed A</button></div></div>` +
@@ -2343,4 +2366,157 @@ test('the browser is started before any page is timed, on a page that asks the s
   assert.ok(run.indexOf('await warmUp(cdp, open, args.settleMs);') < run.indexOf('for (const page of args.pages)'), 'before the first page is timed');
   const warm = src.slice(src.indexOf('async function warmUp'), src.indexOf('export async function runHarness'));
   assert.match(warm, /Target\.createBrowserContext[\s\S]*loadOnce\(tab, cdp, WARM_UP_PAGE, settleMs\)[\s\S]*Target\.disposeBrowserContext/, 'in a context of its own, thrown away after');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 3 (23 Oct): verify r3's two blocking findings, each failing
+// on a6915b19e by name.
+// ---------------------------------------------------------------------------
+
+test('a page mounted again in the same tab says its figures are the tab\'s: the second watch of one document is a revisit, and a new document is its own load again', () => {
+  // Before (verify r3, 22 Oct): /speed -> /db -> /speed drew the tab's 1.2 MB
+  // over 63 fetches as "This page's own load" with no word that they were
+  // the tab's, against the page's own 408.6 KB over 35: the caveat was said
+  // only for a document opened on another page.
+  const { selfWhose } = speedModule;
+  const all = ['paint', 'navigation', 'resource'];
+  const tabs = "so these are the tab's figures since it opened, not this page's alone.";
+  const doc = (/** @type {string} */ path) => ({ entryType: 'navigation', name: `http://h:1${path}?feed=a`, transferSize: 9_000 });
+  const own = selfAdd(selfStart(all), [doc('/speed')]);
+  assert.equal(own.revisit, false, 'a first watch is no revisit');
+  assert.equal(selfWhose(own, '/speed'), 'page');
+  assert.doesNotMatch(selfText(own, '/speed'), /tab's figures/, 'the document\'s own load, first watched, is this page\'s');
+  const back = selfAdd(selfAdd(selfStart(all, true), [doc('/speed')]), [{ entryType: 'resource', transferSize: 1 }], { loaded: true });
+  assert.equal(back.revisit, true, 'a revisit is carried through every later reading');
+  assert.equal(selfWhose(back, '/speed'), 'tab');
+  assert.ok(selfText(back, '/speed').endsWith(` This tab opened on /speed, left it and came back by a link inside the app, ${tabs}`), selfText(back, '/speed'));
+  // The document's path not delivered (a browser with no wire, or not yet): the tab left this page and came back.
+  const blind = selfStart(['paint'], true);
+  assert.equal(selfWhose(blind, '/speed'), 'tab');
+  assert.ok(selfText(blind, '/speed').endsWith(` This tab left this page and came back by a link inside the app, ${tabs}`));
+  // Opened on another page: said as before, whether or not this page was shown already.
+  for (const again of [false, true]) {
+    const linked = selfAdd(selfStart(all, again), [doc('/db')]);
+    assert.equal(selfWhose(linked, '/speed'), 'tab');
+    assert.ok(selfText(linked, '/speed').endsWith(` This tab opened on /db and came here by a link inside the app, ${tabs}`));
+  }
+  assert.equal(selfWhose(selfStart(['paint']), '/speed'), 'page', 'a first watch whose document is not known yet claims nothing');
+  assert.equal(selfStart(all, /** @type {any} */ ('yes')).revisit, false, 'only true is a revisit');
+  // watchSelf: the second watch of one window is a revisit; a new window (a new document) is not.
+  class Observer {
+    static supportedEntryTypes = all;
+    observe() {}
+    disconnect() {}
+  }
+  const win = { PerformanceObserver: Observer, performance: { now: () => 1 }, document: { readyState: 'complete' } };
+  /** @type {any[][]} */
+  const seen = [[], [], [], [], [], [], []];
+  watchSelf(win, (r) => seen[0].push(r))();
+  watchSelf(win, (r) => seen[1].push(r))();
+  watchSelf(win, (r) => seen[2].push(r))();
+  watchSelf({ ...win }, (r) => seen[3].push(r))();
+  assert.deepEqual(seen.slice(0, 4).map((s) => s[0].revisit), [false, true, true, false]);
+  // A document with no observer is still one document; no window at all is never remembered.
+  const bare = {};
+  watchSelf(bare, (r) => seen[4].push(r))();
+  watchSelf(bare, (r) => seen[5].push(r))();
+  watchSelf(null, () => {})();
+  watchSelf(null, (r) => seen[6].push(r))();
+  assert.deepEqual([seen[4][0].revisit, seen[5][0].revisit, seen[6][0].revisit], [false, true, false]);
+  // The page draws whose figures they are, from the library's one rule.
+  const page = source('src/routes/speed/+page.svelte');
+  assert.match(page, /data-figures-of=\{selfWhose\(self, here\)\}/);
+  assert.match(page, /const stopSelf = watchSelf\(typeof window === 'undefined' \? null : window, \(reading\) => \(self = reading\)\);/, 'one watch a mount, so a remount is the document\'s second');
+});
+
+test('the Speed page\'s own line after a round trip inside the app, in a real browser: a page mounted again says the tab\'s figures, and a new document is its own load again', { timeout: 120_000 }, async () => {
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const site = await browserStandIn({});
+  const b = await harness.launch(chrome, process.getuid?.() === 0);
+  try {
+    const { browserContextId } = await b.cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
+    const tab = await harness.openTab(b.cdp, browserContextId, { readOnly: true, base: site.base });
+    const total = "[...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')].reduce((a, e) => a + e.transferSize, 0)";
+    /** Until the line has drawn the tab's whole timeline, at most 10 s. @param {string} path */
+    const drawn = (path) => tab.evaluate(`(async () => { const end = Date.now() + 10000; while (Date.now() < end) { const l = document.querySelector('[data-speed-self]'); if (location.pathname === ${JSON.stringify(path)} && l && Number(l.dataset.wireBytes) === ${total} && ${total} > 0) return true; await new Promise((r) => setTimeout(r, 20)); } return false; })()`);
+    /** Until the other page's fetch has ended, at most 10 s. */
+    const fetched = () => tab.evaluate(`(async () => { const end = Date.now() + 10000; while (Date.now() < end) { if (location.pathname === '/trip-db' && document.querySelector('main').dataset.done === 'yes') return true; await new Promise((r) => setTimeout(r, 20)); } return false; })()`);
+    const read = `(() => { const l = document.querySelector('[data-speed-self]'); return { text: l.textContent, bytes: Number(l.dataset.wireBytes), fetches: Number(l.dataset.fetches), browserBytes: ${total} }; })()`;
+    await harness.loadOnce(tab, b.cdp, `${site.base}/trip`, 300);
+    assert.ok(await drawn('/trip'), 'the first mount drew the document\'s load');
+    const first = await tab.evaluate(read);
+    assert.doesNotMatch(first.text, /tab's figures|came back|came here/, `the document's own load, first watched, is this page's: ${first.text}`);
+    // Leave by a link inside the app; the other page fetches 450,000 bytes.
+    await tab.evaluate("document.querySelector('#to-db').click()");
+    assert.ok(await fetched(), 'the other page fetched');
+    // Back by a link inside the app: the same document, mounted again.
+    await tab.evaluate("document.querySelector('#to-speed').click()");
+    assert.ok(await drawn('/trip'), 'the second mount drew the tab\'s whole timeline');
+    const back = await tab.evaluate(read);
+    assert.ok(back.bytes >= first.bytes + 450_000, `the drawn wire carries the other page's fetch: ${back.bytes} against ${first.bytes}`);
+    assert.match(back.text, / This tab opened on \/trip, left it and came back by a link inside the app, so these are the tab's figures since it opened, not this page's alone\.$/, `after a round trip the figures are said to be the tab's: ${back.text}`);
+    // Back and back again by the browser's own button (popstate): the third mount is the tab's too.
+    await tab.evaluate('history.back()');
+    assert.ok(await fetched(), 'the other page, by popstate, fetched again');
+    await tab.evaluate('history.back()');
+    assert.ok(await drawn('/trip'), 'the third mount drew the tab\'s whole timeline');
+    const third = await tab.evaluate(read);
+    assert.ok(third.bytes >= back.bytes + 450_000);
+    assert.match(third.text, / left it and came back by a link inside the app, so these are the tab's figures since it opened, not this page's alone\.$/);
+    // A new document in the same tab is its own load again.
+    await harness.loadOnce(tab, b.cdp, `${site.base}/trip`, 300);
+    assert.ok(await drawn('/trip'));
+    const fresh = await tab.evaluate(read);
+    assert.doesNotMatch(fresh.text, /tab's figures|came back|came here/, `a new document is its own load: ${fresh.text}`);
+    assert.ok(fresh.bytes < back.bytes, 'and its wire starts again');
+    await tab.close();
+    await b.cdp.send('Target.disposeBrowserContext', { browserContextId });
+  } finally {
+    await b.close();
+    site.server.close();
+  }
+});
+
+test('the harness refuses an idle wait its timer cannot hold, and the idle row prints the time the clock read, never the time asked', { timeout: 60_000 }, async () => {
+  // Before (verify r3, 22 Oct): --idle-ms had no ceiling; Node fired a
+  // setTimeout of 2,147,483,648 ms after 1 ms, and the sheet printed
+  // "| 1 | 1 | 2147484 s | 0 | none |", a pass row for an idle never measured.
+  const { MAX_WAIT_MS, IDLE_EARLY_MS, idleFor, idleRow } = harness;
+  assert.equal(MAX_WAIT_MS, 2 ** 31 - 1, 'the largest delay a Node timer holds');
+  assert.equal(IDLE_EARLY_MS, 1);
+  assert.equal(harness.parseArgs(['--base', 'http://h:1', '--idle-ms', String(MAX_WAIT_MS)]).idleMs, MAX_WAIT_MS);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--idle-ms', '2147483648']), /^Error: --idle-ms must be at most 2147483647$/);
+  // As a command: refused before any browser is started, exit 2, by name.
+  const { execFile } = await import('node:child_process');
+  const script = new URL('ci/browser-harness.mjs', web).pathname;
+  const ran = /** @type {{code: number, stderr: string}} */ (await new Promise((resolve) => execFile(process.execPath, [script, '--base', 'http://127.0.0.1:9', '--n', '1', '--pages', '/speed', '--no-interactions', '--read-only', '--idle-tabs', '1', '--idle-ms', '2147483648'], (error, _stdout, stderr) => resolve({ code: error ? error.code : 0, stderr }))));
+  assert.deepEqual([ran.code, ran.stderr], [2, 'browser-harness: --idle-ms must be at most 2147483647\n']);
+  // The wait is measured by the clock.
+  let clock = 1_000;
+  assert.equal(await idleFor(5_000, { wait: async (ms) => void (clock += ms + 3), now: () => clock }), 5_003);
+  clock = 0;
+  assert.equal(await idleFor(MAX_WAIT_MS, { wait: async () => void (clock += 1), now: () => clock }), 1, 'a wait that ended early is measured as early');
+  for (const bad of [MAX_WAIT_MS + 1, -1, 1.5, Number.NaN]) {
+    await assert.rejects(idleFor(bad), new RegExp(`^Error: an idle wait of ${bad} ms is not one a timer holds \\(a whole number from 0 to 2147483647\\)$`));
+  }
+  const real = await idleFor(30);
+  assert.ok(real + IDLE_EARLY_MS >= 30 && real < 30_000, `a real 30 ms wait read ${real} ms`);
+  // The row prints the measured time; a wait short of the asked one is NOT MEASURED and fails by name.
+  assert.deepEqual(idleRow({ count: 1, visible: 1, askedMs: 3_600_000, idledMs: 3_600_012.4, requests: 0, other: [] }), { row: '| 1 | 1 | 3600 s | 0 | none |', failures: [] });
+  assert.deepEqual(idleRow({ count: 1, visible: 1, askedMs: MAX_WAIT_MS, idledMs: 2.6, requests: 0, other: [] }), {
+    row: '| 1 | 1 | NOT MEASURED: 2.6 ms of 2147483647 ms asked | 0 | none |',
+    failures: ['1 idle tabs: NOT MEASURED — the wait ended after 2.6 ms of the 2147483647 ms asked']
+  });
+  assert.deepEqual(idleRow({ count: 2, visible: 2, askedMs: 1_000, idledMs: 999, requests: 3, other: ['GET /feeds.json'] }), {
+    row: '| 2 | 2 | 1 s | 3 | GET /feeds.json |',
+    failures: ['2 idle tabs asked for more than the header-only up check: GET /feeds.json']
+  }, 'a wait that ended at most IDLE_EARLY_MS early is the timer\'s own rounding');
+  assert.equal(idleRow({ count: 2, visible: 2, askedMs: 1_000, idledMs: 998.9, requests: 0, other: [] }).failures.length, 1, 'past it, not');
+  // The run waits through idleFor and prints through idleRow.
+  const src = source('ci/browser-harness.mjs');
+  const run = src.slice(src.indexOf('export async function runHarness'), src.indexOf('export function readOnlyVerdict'));
+  assert.match(run, /const idledMs = await idleFor\(args\.idleMs\);/);
+  assert.match(run, /const idle = idleRow\(\{ count, visible, askedMs: args\.idleMs, idledMs, requests: requests\.length, other: v\.other \}\);\s*lines\.push\(idle\.row\);\s*failures\.push\(\.\.\.idle\.failures\);/);
+  assert.doesNotMatch(run, /args\.idleMs \/ 1_000|setTimeout\(r, args\.idleMs\)/, 'the asked time is never printed as the measured one');
 });

@@ -31,7 +31,7 @@
   import { stampLabel } from '$lib/dates.js';
   import {
     SPEED_ROUTE, WINDOWS, SORTS, PAGE_TARGETS, MEASURED_PAGES,
-    readSpeedReport, speedRows, sortRows, microsText, earlierReading, speedTile, watchSelf, selfText
+    readSpeedReport, speedRows, sortRows, microsText, earlierReading, speedTile, watchSelf, selfText, selfWhose
   } from '$lib/speed.js';
 
   /** @type {{phase: 'reading' | 'ready' | 'failed', report: import('$lib/speed.js').SpeedReport | null,
@@ -78,7 +78,10 @@
     // resource entries (buffered, so nothing the browser reported before this
     // mount is missed) and the load event, redrawn as each entry arrives and
     // stamped with when it was read. One read on a timer at mount ran before
-    // the page had painted and before its last fetches ended (R315-19).
+    // the page had painted and before its last fetches ended (R315-19). A
+    // mount after a link inside the app is handed the tab's entries since it
+    // opened, and the reading says so: the document's second watch is a
+    // revisit (verify r3, 22 Oct: /speed -> /db -> /speed).
     const stopSelf = watchSelf(typeof window === 'undefined' ? null : window, (reading) => (self = reading));
     return () => {
       stopSelf();
@@ -227,6 +230,7 @@
         data-wire-bytes={self.wire === 'observed' ? self.wireBytes : undefined}
         data-fetches={self.fetches}
         data-loaded={self.loaded}
+        data-figures-of={selfWhose(self, here)}
       >{selfText(self, here)}</p>
     {/if}
   </section>

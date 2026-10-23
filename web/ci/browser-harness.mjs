@@ -43,8 +43,10 @@
  * header, which the browser orders itself.
  *
  * Then idle tabs (`--idle-tabs 1,10,20`, each for `--idle-ms`, an hour by
- * default): every request an idle tab makes is listed; any but the
- * header-only up check (`HEAD /inspection.json`) fails the run.
+ * default, at most `MAX_WAIT_MS`, the longest wait a Node timer holds):
+ * every request an idle tab makes is listed; any but the header-only up
+ * check (`HEAD /inspection.json`) fails the run. The row prints the time the
+ * clock read, and a wait that ended early is NOT MEASURED and fails the run.
  *
  * Then the shared reporter end to end: one request of a page is made to fail
  * at the network (`Fetch.failRequest`), and the report must be found in the
@@ -367,7 +369,7 @@ export function parseArgs(argv) {
     n: whole('n', 200, 1, MAX_N),
     pages,
     idleTabs,
-    idleMs: whole('idle-ms', 3_600_000, 1_000),
+    idleMs: whole('idle-ms', 3_600_000, 1_000, MAX_WAIT_MS),
     settleMs: whole('settle-ms', 500, 50),
     stepWaitMs: whole('step-wait-ms', STEP_WAIT_MS, 100),
     interactions: o['no-interactions'] !== true,
@@ -430,6 +432,64 @@ export const PROFILE_PREFIX = 'brutex-harness-';
  * 21 Oct: `--n` had no ceiling).
  */
 export const MAX_N = 10_000;
+
+/**
+ * The longest wait a Node timer holds: 2,147,483,647 ms (2^31 - 1, about
+ * 24.8 days). Node fires a longer `setTimeout` after 1 ms, with only a
+ * `TimeoutOverflowWarning` on stderr, so `--idle-ms` past it is refused by
+ * name rather than run (verify r3, 22 Oct: `--idle-ms 2147483648` finished
+ * in 8 s and its sheet printed a pass row for 2147484 s of idle).
+ */
+export const MAX_WAIT_MS = 2_147_483_647;
+
+/**
+ * How early a Node timer can end, by the clock: it counts whole milliseconds
+ * of a loop clock read before the wait, so up to 1 ms (measured 23 Oct on
+ * this Mac, Node 24.1: 0.633 ms early at the most over 800 timers). An idle
+ * wait that ended earlier than this before the time asked was not a wait of
+ * that time, and {@link idleRow} says so.
+ */
+export const IDLE_EARLY_MS = 1;
+
+/**
+ * Waits `ms` and returns how long it waited, by the clock — the idle row
+ * prints this, never the time asked. A wait no timer can hold (past
+ * {@link MAX_WAIT_MS}, below zero, or not a whole number) is refused by name.
+ *
+ * @param {number} ms
+ * @param {{wait?: (ms: number) => Promise<unknown>, now?: () => number}} [io] a test's timer and clock
+ * @returns {Promise<number>} the milliseconds waited
+ */
+export async function idleFor(ms, io = {}) {
+  if (!Number.isSafeInteger(ms) || ms < 0 || ms > MAX_WAIT_MS) throw new Error(`an idle wait of ${ms} ms is not one a timer holds (a whole number from 0 to ${MAX_WAIT_MS})`);
+  const wait = io.wait ?? ((/** @type {number} */ d) => new Promise((resolve) => setTimeout(resolve, d)));
+  const now = io.now ?? (() => performance.now());
+  const t0 = now();
+  await wait(ms);
+  return now() - t0;
+}
+
+/**
+ * The sheet's row for one idle check: the time the tabs were measured idle
+ * as the clock read it, never the time asked. A wait that ended more than
+ * {@link IDLE_EARLY_MS} early is NOT MEASURED and fails the run by name: the
+ * tabs were not idle for the time the row would otherwise claim.
+ *
+ * @param {{count: number, visible: number, askedMs: number, idledMs: number, requests: number, other: string[]}} o
+ * @returns {{row: string, failures: string[]}}
+ */
+export function idleRow(o) {
+  const secs = (/** @type {number} */ v) => `${(v / 1_000).toFixed(0)} s`;
+  const said = o.other.length === 0 ? 'none' : o.other.join('; ');
+  /** @type {string[]} */
+  const failures = [];
+  if (o.idledMs + IDLE_EARLY_MS < o.askedMs) {
+    failures.push(`${o.count} idle tabs: NOT MEASURED — the wait ended after ${o.idledMs.toFixed(1)} ms of the ${o.askedMs} ms asked`);
+    return { row: `| ${o.count} | ${o.visible} | NOT MEASURED: ${o.idledMs.toFixed(1)} ms of ${o.askedMs} ms asked | ${o.requests} | ${said} |`, failures };
+  }
+  if (o.other.length > 0) failures.push(`${o.count} idle tabs asked for more than the header-only up check: ${said}`);
+  return { row: `| ${o.count} | ${o.visible} | ${secs(o.idledMs)} | ${o.requests} | ${said} |`, failures };
+}
 
 /**
  * Every profile directory this process made and has not removed yet.
@@ -1191,11 +1251,13 @@ export async function runHarness(args) {
         const states = [];
         for (const t of tabs) states.push(await t.evaluate('document.visibilityState'));
         const visible = states.filter((s) => s === 'visible').length;
-        await new Promise((r) => setTimeout(r, args.idleMs));
+        // MEASURED, NOT ASKED: the row prints the time the clock read (verify r3).
+        const idledMs = await idleFor(args.idleMs);
         const requests = tabs.flatMap((t) => t.seen());
         const v = idleVerdict(requests, args.base);
-        lines.push(`| ${count} | ${visible} | ${(args.idleMs / 1_000).toFixed(0)} s | ${requests.length} | ${v.other.length === 0 ? 'none' : v.other.join('; ')} |`);
-        if (v.other.length > 0) failures.push(`${count} idle tabs asked for more than the header-only up check: ${v.other.join('; ')}`);
+        const idle = idleRow({ count, visible, askedMs: args.idleMs, idledMs, requests: requests.length, other: v.other });
+        lines.push(idle.row);
+        failures.push(...idle.failures);
         for (const t of tabs) await t.close();
         for (const c of contexts) await cdp.send('Target.disposeBrowserContext', { browserContextId: c });
       }
