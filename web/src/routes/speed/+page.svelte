@@ -228,7 +228,7 @@
         data-speed-self
         data-first-content-ms={self.firstContentMs ?? undefined}
         data-wire-bytes={self.wire === 'observed' ? self.wireBytes : undefined}
-        data-fetches={self.fetches}
+        data-fetches={self.wire === 'observed' ? self.fetches : undefined}
         data-loaded={self.loaded}
         data-figures-of={selfWhose(self, here)}
       >{selfText(self, here)}</p>

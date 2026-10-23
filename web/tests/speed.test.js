@@ -2520,3 +2520,57 @@ test('the harness refuses an idle wait its timer cannot hold, and the idle row p
   assert.match(run, /const idle = idleRow\(\{ count, visible, askedMs: args\.idleMs, idledMs, requests: requests\.length, other: v\.other \}\);\s*lines\.push\(idle\.row\);\s*failures\.push\(\.\.\.idle\.failures\);/);
   assert.doesNotMatch(run, /args\.idleMs \/ 1_000|setTimeout\(r, args\.idleMs\)/, 'the asked time is never printed as the measured one');
 });
+
+test('the sheet and the harness read a number in decimal digits only, bound every wait by what a timer holds and the restarts by MAX_N, and a page under two spellings is one page', () => {
+  // Before (verify r3 follow-ups, 22 Oct): `--n 0x10` was read as 16;
+  // `--timeout-ms` and `--up-wait-ms` past 2^31 - 1 overflowed Node's timers
+  // and every request then failed as "no answer within N ms"; `--restarts`
+  // had no ceiling; and /speed, /speed/ and /SPEED were three pages.
+  assert.equal(harness.MAX_WAIT_MS, sheet.MAX_WAIT_MS, 'one ceiling for both commands');
+  assert.equal(sheet.MAX_N, harness.MAX_N);
+  const base = ['--base', 'http://h:1'];
+  for (const [name, odd] of [['n', '0x10'], ['n', '0b11'], ['n', '0o7'], ['n', ' 12'], ['n', '12 '], ['n', '1.5'], ['n', ''], ['n', '+3'], ['n', 'Infinity']]) {
+    const why = new RegExp(`^Error: --${name} must be a whole number of at least 1, in decimal digits$`);
+    assert.throws(() => harness.parseArgs([...base, `--${name}`, odd]), why, `the harness read ${JSON.stringify(odd)}`);
+    assert.throws(() => sheet.parseArgs([...base, `--${name}`, odd]), why, `the sheet read ${JSON.stringify(odd)}`);
+  }
+  assert.equal(harness.parseArgs([...base, '--n', '1e3']).n, 1_000, 'an exponent is still decimal');
+  assert.equal(sheet.parseArgs([...base, '--n', '0016']).n, 16, 'leading zeros are decimal');
+  for (const name of ['settle-ms', 'step-wait-ms', 'idle-ms']) {
+    assert.throws(() => harness.parseArgs([...base, `--${name}`, '2147483648']), new RegExp(`^Error: --${name} must be at most 2147483647$`));
+    assert.equal(harness.parseArgs([...base, `--${name}`, '2147483647'])[name === 'settle-ms' ? 'settleMs' : name === 'step-wait-ms' ? 'stepWaitMs' : 'idleMs'], 2_147_483_647);
+  }
+  for (const name of ['timeout-ms', 'up-wait-ms']) {
+    assert.throws(() => sheet.parseArgs([...base, `--${name}`, '2147483648']), new RegExp(`^Error: --${name} must be at most 2147483647$`));
+    assert.equal(sheet.parseArgs([...base, `--${name}`, '2147483647'])[name === 'timeout-ms' ? 'timeoutMs' : 'upWaitMs'], 2_147_483_647);
+  }
+  assert.throws(() => sheet.parseArgs([...base, '--restarts', '10001']), /^Error: --restarts must be at most 10000$/);
+  assert.equal(sheet.parseArgs([...base, '--restarts', '10000']).restarts, 10_000);
+  // One page, one spelling.
+  /** @type {[string, string][]} */
+  const twice = [
+    ['/speed,/speed/', '--pages names /speed twice (as /speed and /speed/): each page is measured once a run'],
+    ['/speed,/SPEED', '--pages names /speed twice (as /speed and /SPEED): each page is measured once a run'],
+    ['/Db/,/gaps,/db', '--pages names /Db/ twice (as /Db/ and /db): each page is measured once a run'],
+    ['/db?a=1,/db/?a=1', '--pages names /db?a=1 twice (as /db?a=1 and /db/?a=1): each page is measured once a run'],
+    ['/,//', '--pages names / twice (as / and //): each page is measured once a run'],
+    ['/db,/speed,/db', '--pages names /db twice: each page is measured once a run']
+  ];
+  for (const [pages, why] of twice) assert.throws(() => harness.parseArgs([...base, '--pages', pages]), (e) => /** @type {Error} */ (e).message === why, pages);
+  assert.deepEqual(harness.parseArgs([...base, '--pages', '/,/db,/db?a=1,/speed']).pages, ['/', '/db', '/db?a=1', '/speed'], 'a different query or page is another page');
+});
+
+test('a wire with entries the browser gave no size for, or dropped, is said as a floor, and a fetch count is drawn only with a wire', () => {
+  // Before (verify r3 follow-ups, 22 Oct): a sum missing entries was printed
+  // as the whole wire, and data-fetches read 0 where the browser gives no wire.
+  const all = ['paint', 'navigation', 'resource'];
+  const sized = selfAdd(selfStart(all), [{ entryType: 'resource', transferSize: 1_000 }]);
+  assert.match(selfText(sized, '/speed'), / · 1\.0 KB on the wire over 1 fetches · /, 'every entry sized: the whole');
+  const unsized = selfAdd(sized, [{ entryType: 'resource' }]);
+  assert.match(selfText(unsized, '/speed'), / · at least 1\.0 KB on the wire over 2 fetches, 1 of them with no size from this browser · /);
+  const dropped = selfAdd(sized, [], { dropped: 4 });
+  assert.match(selfText(dropped, '/speed'), / · at least 1\.0 KB on the wire over 1 fetches, and 4 more the browser dropped before this page could read them · /);
+  assert.doesNotMatch(selfText(selfStart(['paint']), '/speed'), /at least/, 'no wire, no floor');
+  const page = source('src/routes/speed/+page.svelte');
+  assert.match(page, /data-fetches=\{self\.wire === 'observed' \? self\.fetches : undefined\}/);
+});

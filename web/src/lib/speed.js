@@ -450,10 +450,13 @@ export function selfText(r, here) {
       : r.firstContentMs === null
         ? 'first content not reported yet'
         : `first content ${r.firstContentMs} ms${r.firstContentMs >= t.firstContentP99Ms ? ` (not under the ${t.firstContentP99Ms} ms p99 target)` : ''}`;
+  // A sum with entries that carry no size, or entries the browser dropped, is
+  // a floor, and says so (verify r3, 22 Oct: it was printed as the whole).
+  const floor = r.unsized > 0 || r.dropped > 0 ? 'at least ' : '';
   const wire =
     r.wire === 'unsupported'
       ? 'bytes on the wire not reported by this browser'
-      : `${bytesText(r.wireBytes)} on the wire over ${r.fetches} fetches` +
+      : `${floor}${bytesText(r.wireBytes)} on the wire over ${r.fetches} fetches` +
         (r.wireBytes >= t.wireBytes ? ` (not under the ${t.wireBytes / 1_000} KB target)` : '') +
         (r.unsized > 0 ? `, ${r.unsized} of them with no size from this browser` : '') +
         (r.dropped > 0 ? `, and ${r.dropped} more the browser dropped before this page could read them` : '');

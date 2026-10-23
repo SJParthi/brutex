@@ -92,7 +92,11 @@ import { REPORT_ROUTE } from '../src/lib/page-report.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
 import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
 import { linkOfKey } from '../src/lib/db/selection-model.js';
-import { writeWhole } from './speed-sheet.mjs';
+import { writeWhole, MAX_WAIT_MS, DECIMAL } from './speed-sheet.mjs';
+
+// The longest wait a Node timer holds, and the sheet's own reading of a whole
+// number: one rule for both commands (`speed-sheet.mjs` says why).
+export { MAX_WAIT_MS };
 
 /** Where a browser is looked for when `--chrome` and `BRUTEX_CHROME` say nothing. */
 export const CHROME_PATHS = Object.freeze([
@@ -348,15 +352,23 @@ export function parseArgs(argv) {
   const base = String(o.base ?? '');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('--base must be an origin such as http://127.0.0.1:8080 (no path)');
   const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min, max = Number.MAX_SAFE_INTEGER) => {
-    const v = o[name] === undefined ? dflt : Number(o[name]);
-    if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}`);
+    const v = o[name] === undefined ? dflt : DECIMAL.test(String(o[name])) ? Number(o[name]) : Number.NaN;
+    if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}, in decimal digits`);
     if (v > max) throw new Error(`--${name} must be at most ${max}`);
     return v;
   };
   const pages = String(o.pages ?? MEASURED_PAGES.join(',')).split(',');
   if (pages.some((p) => !p.startsWith('/'))) throw new Error('--pages is a comma list of paths, each starting /');
-  const twice = pages.find((p, i) => pages.indexOf(p) !== i);
-  if (twice !== undefined) throw new Error(`--pages names ${twice} twice: each page is measured once a run`);
+  // ONE PAGE, ONE SPELLING: the app's routes are lower case and a trailing
+  // slash names the same page, so /speed, /speed/ and /SPEED are one page
+  // (verify r3, 22 Oct: they were measured as three).
+  const pageKey = (/** @type {string} */ p) => p.toLowerCase().replace(/(?<=.)\/+(?=$|\?)/, '');
+  const keys = pages.map(pageKey);
+  const at = keys.findIndex((k, i) => keys.indexOf(k) !== i);
+  if (at !== -1) {
+    const first = pages[keys.indexOf(keys[at])];
+    throw new Error(`--pages names ${first} twice${first === pages[at] ? '' : ` (as ${first} and ${pages[at]})`}: each page is measured once a run`);
+  }
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
@@ -370,8 +382,10 @@ export function parseArgs(argv) {
     pages,
     idleTabs,
     idleMs: whole('idle-ms', 3_600_000, 1_000, MAX_WAIT_MS),
-    settleMs: whole('settle-ms', 500, 50),
-    stepWaitMs: whole('step-wait-ms', STEP_WAIT_MS, 100),
+    // The settle and step waits are clock loops, not one timer, but no wait
+    // option takes a value no timer could hold.
+    settleMs: whole('settle-ms', 500, 50, MAX_WAIT_MS),
+    stepWaitMs: whole('step-wait-ms', STEP_WAIT_MS, 100, MAX_WAIT_MS),
     interactions: o['no-interactions'] !== true,
     idle: o['no-idle'] !== true,
     // --read-only sends no write, so it never runs the reporter check (one POST).
@@ -432,15 +446,6 @@ export const PROFILE_PREFIX = 'brutex-harness-';
  * 21 Oct: `--n` had no ceiling).
  */
 export const MAX_N = 10_000;
-
-/**
- * The longest wait a Node timer holds: 2,147,483,647 ms (2^31 - 1, about
- * 24.8 days). Node fires a longer `setTimeout` after 1 ms, with only a
- * `TimeoutOverflowWarning` on stderr, so `--idle-ms` past it is refused by
- * name rather than run (verify r3, 22 Oct: `--idle-ms 2147483648` finished
- * in 8 s and its sheet printed a pass row for 2147484 s of idle).
- */
-export const MAX_WAIT_MS = 2_147_483_647;
 
 /**
  * How early a Node timer can end, by the clock: it counts whole milliseconds

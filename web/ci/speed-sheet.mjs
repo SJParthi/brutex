@@ -187,6 +187,32 @@ export function readCapture(text) {
 }
 
 /**
+ * The longest wait a Node timer holds: 2,147,483,647 ms (2^31 - 1, about
+ * 24.8 days). Node fires a longer `setTimeout` (or a socket's `setTimeout`)
+ * after 1 ms, with only a `TimeoutOverflowWarning` on stderr, so a wait
+ * option past it is refused by name rather than run: `--timeout-ms` past it
+ * failed every request as "no answer within N ms" a millisecond in, and the
+ * harness's `--idle-ms` past it printed an idle never measured (verify r3,
+ * 22 Oct). The harness reads its ceiling from here.
+ */
+export const MAX_WAIT_MS = 2_147_483_647;
+
+/**
+ * The most timed requests of a row (`--n`) or restarts (`--restarts`) one
+ * run takes: fifty times the n = 200 the targets are measured at, the same
+ * ceiling as the harness's `MAX_N`. It bounds an argument and chooses no
+ * sample size (verify r3, 22 Oct: `--restarts` had no ceiling).
+ */
+export const MAX_N = 10_000;
+
+/**
+ * A whole number as the command line may write one: decimal digits, an
+ * exponent allowed (`1e3`). `Number` alone also reads `0x10` as 16, `0b11`
+ * as 3 and `' 12 '` as 12 (verify r3, 22 Oct), so those are refused.
+ */
+export const DECIMAL = /^[0-9]+(?:[eE][0-9]+)?$/;
+
+/**
  * The command line, read: every value checked, a misuse named.
  *
  * @param {string[]} argv
@@ -211,8 +237,8 @@ export function parseArgs(argv) {
   const base = String(o.base ?? '');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('--base must be an origin such as http://127.0.0.1:8080 (no path)');
   const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min, max = Number.MAX_SAFE_INTEGER) => {
-    const v = o[name] === undefined ? dflt : Number(o[name]);
-    if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}`);
+    const v = o[name] === undefined ? dflt : DECIMAL.test(String(o[name])) ? Number(o[name]) : Number.NaN;
+    if (!Number.isSafeInteger(v) || v < min) throw new Error(`--${name} must be a whole number of at least ${min}, in decimal digits`);
     if (v > max) throw new Error(`--${name} must be at most ${max}`);
     return v;
   };
@@ -224,12 +250,11 @@ export function parseArgs(argv) {
   if (month !== null && !/^\d{4}-\d{2}$/.test(month)) throw new Error('--month is YYYY-MM');
   return {
     base,
-    // The same ceiling as the harness's (MAX_N there): fifty times n = 200.
-    n: whole('n', 200, 1, 10_000),
+    n: whole('n', 200, 1, MAX_N),
     clients,
     writer: o.writer === undefined ? null : String(o.writer),
     restart: o.restart === undefined ? null : String(o.restart),
-    restarts: whole('restarts', 20, 1),
+    restarts: whole('restarts', 20, 1, MAX_N),
     fromPages: o['from-pages'] === undefined ? null : String(o['from-pages']),
     feed: o.feed === undefined ? null : String(o.feed),
     instrument: String(o.instrument ?? 'NSE-INDEX-NIFTY'),
@@ -238,8 +263,8 @@ export function parseArgs(argv) {
     day,
     out: o.out === undefined ? null : String(o.out),
     allowUnstamped: o['allow-unstamped'] === true,
-    timeoutMs: whole('timeout-ms', 60_000, 1),
-    upWaitMs: whole('up-wait-ms', 120_000, 1),
+    timeoutMs: whole('timeout-ms', 60_000, 1, MAX_WAIT_MS),
+    upWaitMs: whole('up-wait-ms', 120_000, 1, MAX_WAIT_MS),
     maxAnswerBytes: whole('max-answer-bytes', MAX_ANSWER_BYTES, 1)
   };
 }
