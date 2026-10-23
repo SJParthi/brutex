@@ -2352,6 +2352,59 @@ fn a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice() {
     assert_eq!(listing(&dir), before, "no YEAR: unchanged too");
 }
 
+/// verify-DATA-2-r3 follow-up (D-5189): a share whose months cannot be listed
+/// (here a stray FILE where its directory belongs) refused the whole run with
+/// no YEAR, while a YEAR run filed it month by month. With no YEAR it is now
+/// planned by every month of the years in play, exactly as a YEAR run plans
+/// it, and said out loud; a YEAR run after it files nothing new, so the two
+/// kinds of run never take turns refiling it. A store holding nothing else
+/// has no year to file it under, and is refused by name as before.
+#[test]
+fn a_share_whose_months_cannot_be_listed_is_filed_month_by_month_with_or_without_a_year() {
+    let (root, store, _) = imported_store("unlisted");
+    let cash = store.join("bars/gdfl/NSE/CASH");
+    std::fs::write(cash.join("ZZSTRAY"), b"x").unwrap();
+    let (code, out, dir) = check(&root, &store, &none, &[]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(!out.contains("REFUSED"), "{out}");
+    assert!(
+        out.contains("share ZZSTRAY: ") && out.contains("its months could not be listed"),
+        "{out}"
+    );
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let stray: Vec<_> = rows
+        .iter()
+        .filter(|((s, _, _), _)| s == "ZZSTRAY")
+        .collect();
+    assert_eq!(stray.len(), 12, "one row per month of 2025: {stray:?}");
+    for ((_, day, _), row) in &stray {
+        assert!(day.ends_with("-01"), "{day}");
+        assert_eq!(row["status"], "read_failed:store_month", "{row:?}");
+    }
+    let before = listing(&dir);
+    let (_, out, _) = check(&root, &store, &none, &["2025"]);
+    assert!(out.contains("2025 nothing new to fold"), "{out}");
+    assert_eq!(listing(&dir), before, "a YEAR run files the same rows");
+    let (_, out, _) = check(&root, &store, &none, &[]);
+    assert!(out.contains("2025 nothing new to fold"), "{out}");
+    assert_eq!(
+        listing(&dir),
+        before,
+        "and so does the next run with no YEAR"
+    );
+    // Nothing else stored: no year to file it under, refused by name.
+    let bare = scratch("unlisted-bare");
+    let bare_store = bare.join("store");
+    std::fs::create_dir_all(bare_store.join("bars/gdfl/NSE/CASH")).unwrap();
+    std::fs::write(bare_store.join("bars/gdfl/NSE/CASH/ZZSTRAY"), b"x").unwrap();
+    let (code, out, _) = check(&bare, &bare_store, &none, &[]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("REFUSED") && out.contains("ZZSTRAY/1s"),
+        "{out}"
+    );
+}
+
 /// Runs `f` on a thread and waits at most 60 s: a run that waits for good on
 /// a pipe fails the test instead of holding it.
 fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

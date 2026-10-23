@@ -3496,6 +3496,10 @@ pub(crate) struct Report {
     /// may still be one of the archive's files, compared as `raw_only`. When
     /// every name asked is one of these, the run exits `FAILED` (D-5188).
     pub(crate) unknown_symbols: Vec<String>,
+    /// The shares whose month listing failed in a run with no YEAR, each
+    /// with the host's words: planned by every month of the years in play,
+    /// as a YEAR run plans them, and said out loud (D-5189).
+    pub(crate) unlisted: Vec<String>,
     /// Years with nothing new to fold.
     pub(crate) unchanged: Vec<u16>,
 }
@@ -3539,6 +3543,13 @@ pub(crate) fn command_with(
                 let _ = writeln!(
                     out,
                     "  --symbols {name}: the store's GDFL share tree holds no such share"
+                );
+            }
+            for said in &report.unlisted {
+                let _ = writeln!(
+                    out,
+                    "  share {said}: its months could not be listed, so every month of the years \
+                     in play was read as a YEAR run reads it"
                 );
             }
             for year in &report.unchanged {
@@ -3690,21 +3701,49 @@ fn run(
     })?;
     let mut items: Vec<Item> = Vec::new();
     let mut plan_failed: Vec<Row> = Vec::new();
-    for answer in planned {
-        let (i, f) = answer?;
-        items.extend(i);
-        plan_failed.extend(f);
+    // A share whose month listing fails (a stray file where its directory
+    // belongs, an unreadable directory) refused the whole run with no YEAR,
+    // while a YEAR run files it month by month. It is planned below by every
+    // month of the years in play, exactly as a YEAR run of each of those years
+    // plans it, so the two kinds of run file the same rows (D-5189). Only a
+    // run with no YEAR lists months, so only it can land here.
+    let mut unlisted: Vec<(String, String)> = Vec::new();
+    for (name, answer) in names.iter().zip(planned) {
+        match answer {
+            Ok((i, f)) => {
+                items.extend(i);
+                plan_failed.extend(f);
+            }
+            Err(why) => unlisted.push((name.clone(), why)),
+        }
     }
-    let mut measured = Measured {
-        plan_ns: elapsed(started),
-        ..Measured::default()
-    };
     // What earlier runs answered.
     let mut years: BTreeSet<u16> = items.iter().map(|i| i.day.year()).collect();
     years.extend(plan_failed.iter().map(|r| r.day.year()));
     if let Some(year) = ask.year {
         years.insert(year);
     }
+    let mut unlisted_said: Vec<String> = Vec::new();
+    if let Some((_, why)) = unlisted.first()
+        && years.is_empty()
+    {
+        // No year to file the failure under: refused, as before, by name.
+        return Err(why.clone());
+    }
+    let every_month: Vec<YearMonth> = years
+        .iter()
+        .flat_map(|&y| (1..=12_u8).filter_map(move |m| YearMonth::new(y, m).ok()))
+        .collect();
+    for (name, why) in &unlisted {
+        let (i, f) = plan_symbol(&store, name, &every_month);
+        items.extend(i);
+        plan_failed.extend(f);
+        unlisted_said.push(format!("{}: {}", symbol_cell(name), clean(why)));
+    }
+    let mut measured = Measured {
+        plan_ns: elapsed(started),
+        ..Measured::default()
+    };
     let mut ledgers: BTreeMap<u16, YearLedger> = BTreeMap::new();
     for &year in &years {
         ledgers.insert(year, load_year(&ask.out, year)?);
@@ -3771,6 +3810,7 @@ fn run(
             .filter(|i| i.source == DaySource::Unrecorded)
             .count(),
         unknown_symbols,
+        unlisted: unlisted_said,
         ..Report::default()
     };
     for item in items {

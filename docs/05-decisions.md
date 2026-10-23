@@ -83318,7 +83318,7 @@ directory was renamed to a name the store admits.
    real-run folders `state/datacheck/rust-t2s-r3` to `-r7` of the operator's
    work folder hold no `store_symbol` row.
 
-**Three follow-ups taken with it** (verify-DATA-2-r3, all in this package's
+**Four follow-ups taken with it** (verify-DATA-2-r3, all in this package's
 files).
 
 - *A named pipe or a symbolic link at one of the check's own names.* Every
@@ -83349,14 +83349,20 @@ files).
   naming the link, before anything is made. A link deeper in a root is not
   walked; the real store holds no link at its top (L-T2S-11), and a shadow
   store holds its `bars` link there.
+- *A share whose months cannot be listed.* A stray FILE where a share's
+  directory belongs, or an unreadable directory, refused the whole run with
+  no YEAR, because the share's month listing failed; a YEAR run filed it
+  month by month (`read_failed:store_month`, one row on the first day of
+  each month). With no YEAR such a share is now planned by every month of
+  the years in play, exactly as a YEAR run of each of those years plans it,
+  and the run names it and the host's words out loud. The two kinds of run
+  therefore file the same rows and never take turns refiling them. A store
+  that holds nothing else has no year to file it under, and is refused by
+  name as before.
 
 **What it does not do.** Each item below stays named in `docs/06-limits.md`
 or in the package report.
 
-- A share directory that is a stray FILE, or an unreadable directory, still
-  refuses the whole no-YEAR run, because the share's month listing fails
-  before any day is known to file a row under. A YEAR run files it per
-  month.
 - A second, different `--archive` on the same `--out` is still answered from
   the first one's extra rows. Those rows name the archive only by the text
   given, so a refusal by name would misfire on a second name for the same
@@ -83383,7 +83389,12 @@ or in the package report.
   covers an absolute, a relative and a dangling link at the store's top and
   one at the tick store's. Each is refused naming the link, with nothing
   made, and an `--out` beside them runs.
+- `a_share_whose_months_cannot_be_listed_is_filed_month_by_month_with_or_without_a_year`
+  plants a stray file as a share. A run with no YEAR names it and files its
+  twelve 2025 months; a YEAR run and a second run with no YEAR then leave
+  the output folder unchanged; a store holding nothing else is refused by
+  name.
 - The cost of each new step is measured in L-T2S-11 and L-T2S-12
   (`the_d_5189_steps_are_timed`).
 
-T2S-16 (amended), T2S-23, T2S-24.
+T2S-16 (amended), T2S-23, T2S-24, T2S-25.
