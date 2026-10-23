@@ -395,15 +395,33 @@ fn the_decisive_failure_is_ranked_census_run_open_then_hole() {
             if reverse {
                 order.reverse();
             }
-            assert_eq!(decisive(&order).map(|one| one.cause.code), Some("census_lock"));
-            let no_census: Vec<Staged> =
-                order.iter().filter(|one| one.cause.stage != Stage::Census).cloned().collect();
-            assert_eq!(decisive(&no_census).map(|one| one.cause.code), Some("disk_full"));
-            let no_run: Vec<Staged> =
-                no_census.iter().filter(|one| one.cause.stage != Stage::Run).cloned().collect();
-            assert_eq!(decisive(&no_run).map(|one| one.cause.code), Some("month_busy"));
-            let no_busy: Vec<Staged> =
-                no_run.iter().filter(|one| one.cause.code != "month_busy").cloned().collect();
+            assert_eq!(
+                decisive(&order).map(|one| one.cause.code),
+                Some("census_lock")
+            );
+            let no_census: Vec<Staged> = order
+                .iter()
+                .filter(|one| one.cause.stage != Stage::Census)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisive(&no_census).map(|one| one.cause.code),
+                Some("disk_full")
+            );
+            let no_run: Vec<Staged> = no_census
+                .iter()
+                .filter(|one| one.cause.stage != Stage::Run)
+                .cloned()
+                .collect();
+            assert_eq!(
+                decisive(&no_run).map(|one| one.cause.code),
+                Some("month_busy")
+            );
+            let no_busy: Vec<Staged> = no_run
+                .iter()
+                .filter(|one| one.cause.code != "month_busy")
+                .cloned()
+                .collect();
             assert_eq!(
                 decisive(&no_busy).map(|one| one.cause.code),
                 Some("needs_month_generation")
@@ -421,8 +439,14 @@ fn the_decisive_failure_is_ranked_census_run_open_then_hole() {
         Some(other_busy.failure.instrument.as_str())
     );
     // Closing causes alone: the first. None: nothing.
-    let closing = [vendor.clone(), staged_at(Cause::vendor("row_refused"), "TCS")];
-    assert_eq!(decisive(&closing).map(|one| one.cause.code), Some("price_refused"));
+    let closing = [
+        vendor.clone(),
+        staged_at(Cause::vendor("row_refused"), "TCS"),
+    ];
+    assert_eq!(
+        decisive(&closing).map(|one| one.cause.code),
+        Some("price_refused")
+    );
     assert!(decisive(&[]).is_none());
 }
 

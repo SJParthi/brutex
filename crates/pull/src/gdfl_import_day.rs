@@ -11,9 +11,7 @@ use crate::ingest::Failure;
 use crate::session::{Day, Window};
 use crate::vendor::Granularity;
 
-use super::causes::{
-    Cause, HOLE_REASONS, ImportRefusal, Outcome, Stage, cm_cause, import_cause,
-};
+use super::causes::{Cause, HOLE_REASONS, ImportRefusal, Outcome, Stage, cm_cause, import_cause};
 use super::census::{Census, StoreCensus, stop_at_census};
 use super::filing::{DayFiler, make_durable, stop_at_durability};
 use super::journal::{BAR_DEFINITION, Journal, ScopeHeld, closing_line, journal_path, run_line};

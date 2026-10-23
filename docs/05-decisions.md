@@ -82718,3 +82718,153 @@ through it"). Under D-7135 no root A is ever built.
 4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
+
+### D-7145 — Gate 27b: the R3-30 repair 2 entry that also headed D-6247 is D-7146 now; SC-4 keeps D-6247 (BASE-REDS-1023) — 2026-10-23
+
+Gate 27b was red on `feat/db-fix` at e0668a4bd: `### D-6247` headed two
+entries, SC-4 repair round 1's (docs/05-decisions.md line 80799, 2026-10-20)
+and R3-30 repair 2's (line 81043, 2026-10-21). D-0684's rule: never delete an
+entry, give the NEWER one the next free number. The merged tree's highest was
+D-7138, and D-7139..D-7144 are reserved to the no-fresh-root cut
+(state/decision-blocks.json), so the next free number this package may give
+is the first of its own block after this entry: **D-7146**. The R3-30 entry's
+own text said "the landing renumbers it if another package lands D-6247
+first"; its heading and the four places that cite it for the gap-row rule
+(`pull::riskfree`'s module doc and `Series` comment,
+`pull::reference_data::unlinked_gaps_said`, invariant R330-17) now say D-7146.
+Every other D-6247 in the tree cites SC-4's entry and is unchanged. Gate 27b
+passes (state/fix/ci-gates-logs/bred1023-lp2).
+
+### D-7147 — The CI shell gates 1d, 10, 19, 23 and 30 green on feat/db-fix: each red read at its cause (BASE-REDS-1023) — 2026-10-23
+
+The Mac gate run never ran the shell gates of `.github/workflows/ci.yml`
+before 23 Oct, so packages merged 17..23 Oct each left one red that no merge
+saw. `state/fix/ci-shell-gates.sh <worktree> --jobs language-purity --fast`
+at e0668a4bd printed `RED 1c 1d 23 27b 30 19 10 11 12`
+(state/fix/ci-gates-logs/bred1023-lp1). Each was read before it was changed:
+
+1. **Gate 30** (config/store-steps.toml): IA-1 (304a2320c) and R3-17
+   (3772e3988) are merged and the list said `merged = false`. Set true; rule
+   R-01 (`until = "IA-1"`) retired with its reason (IA-1's run folders,
+   `crates/cli/tests/gdfl_run_logs.rs`); step S-50's rehearsal figures moved
+   from its note into `rehearsed_*` (the note already held them, taken on
+   R3-17's branch build on a private copy, 18 and 19 Oct). Every other
+   package flag agrees with the merge history (the gate checks it).
+2. **Gate 23**: 27 test files' measurement prints (each inside a
+   `#[cfg(test)]` module, listed with what they print in ci.yml) and one
+   protocol write, `pull::gdfl_run_start::StdioGate::claimed`'s
+   `claimed run=<id>` line to the api controller, were undeclared;
+   `pull::gdfl_import_scope`'s test path `temp_dir()/Store` did not name its
+   process (now `brutex-scopes-<pid>`).
+3. **Gate 10**: invariants HA-02 and AG05-13 named a test MODULE; they now
+   name its tests (`store::header::audit_tests::*`,
+   `api::server::disk_route::tests::census_files_roles_kept_bytes_and_the_backup_receipt`).
+4. **Gate 19**: `pull::gdfl_import::Report::name`, the one door a failure
+   enters a report by (IA-1), pushed with no event beside it. Every failure
+   it takes was already logged by `note_failure`; what only the door knows is
+   when the receipt stops naming failures it still counts. It now emits
+   `failures counted and no longer named` (Warn; `failures_total`,
+   `names_dropped`, `names_kept`) at that cut, once per 1,024 dropped
+   (`pull::gdfl_run::tests::the_report_drops_names_only_at_twice_the_bound`).
+5. **Gate 1d**: 455 segment-shaped literals under crates/pull, from the
+   packages merged 17..23 Oct, were undeclared, plus the three field names of
+   item 4. Each word's first site was read; they are declared in
+   `.github/gates_tree.rs` `MERGED_17_23_OCT_LITERAL` in six kinds (refusal
+   codes and fields, test labels, command words, invented values, prose
+   words, platform names); none is an account, an environment, a vendor
+   credential or a parameter-path field, and none is one of gate 1c's ten
+   environment words.
+
+### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
+
+Gate 1c refused `pull::zerodha_spool`'s documented lock path
+lock path, the store root then `verify`, `live` and `<run>.lock` joined by slashes (zerodha_spool.rs lines 21 and 146,
+docs/02-store-format.md line 3553): the pattern reads that `verify` and `live` as
+org `verify`, environment `live`, exactly the shape of a Parameter Store
+path. The pattern was NOT narrowed: a store path and a parameter path are
+both slash-joined segments, and a rule that excused a path after a
+`<placeholder>` would pass a real path written after one (the gate test
+`gate_1c_reads_a_store_path_by_its_segments_and_not_its_root` refuses
+exactly that). The directory was renamed instead: `LIVE_DIR =
+"verify/running"`. No store holds a `verify/` directory (the real store was
+listed read-only on 23 Oct: none), the locks are transient (held while a run
+spools, by a merger while it merges), and no format version names the
+directory, so no migration is owed. A deploy is made with no Zerodha verify
+run in flight, because a writer of the old build and a merger of the new one
+would not see each other's lock. The refusal code `run_live_busy` keeps its
+name. CLAUDE.md §8 is unchanged: no literal parameter path anywhere.
+
+### D-7149 — Gate 12: 46 cost claims name their proof or say UNVERIFIED (BASE-REDS-1023) — 2026-10-23
+
+46 doc blocks under crates/ made a cost claim with no proof gate 12 can
+resolve. Ten are tests, benches or files that ARE the proof and now
+name themselves (or the harness `crates/pull/benches/ratio.rs`); seven
+production claims had a test that times them and now name it
+(`pull::audit_ledger::tests::appends_cost_the_same_at_any_ledger_length`,
+`pull::gdfl_run::tests::progress_and_failure_costs`,
+`pull::gdfl_rekey::tests::plan_cost_per_key_is_flat_in_the_number_of_keys`,
+`pull::reference_data::tests::the_loader_reads_every_table_inside_its_budget`,
+`cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month`,
+`crates/pull/tests/allocation.rs`); the other 29 are structural arguments
+no test times, and now say UNVERIFIED with docs/06-limits.md L-BRED23-01.
+None was re-measured by this package.
+
+### D-7150 — Gate 11: the IA-16, IA-9 and IA-2 sites fixed at their cause or declared with their bound (BASE-REDS-1023) — 2026-10-23
+
+Gate 11 was red after the IA-16 merge on five files. Fixed in code: the
+held-back map is pre-sized to `HELD_BACK_CAP` (rule 3); `closeness` counts
+distinct letter pairs through a pre-sized hash set with no sort (rule 4;
+`pull::gdfl_import::tests::ia16::closeness_counts_each_distinct_pair_once`
+gives the sorted count's values); `day::decisive` ranks a day's failures in
+ONE pass instead of up to five searches (rule 6;
+`pull::gdfl_import::tests::ia16::the_decisive_failure_is_ranked_census_run_open_then_hole`
+checks every rotation of five causes); `quality::sampled_among` probes a
+pre-sized set instead of a list, O(news + sampled) where it was their
+product (rule 7); the day file's copy of `hole_is_repairable` is gone.
+Declared with the bound the gate's rule names (docs/06-limits.md, "Gate 11 —
+BASE-REDS-1023"): the compile-time tables `REPAIRABLE_HOLES` (3),
+`HOLE_REASONS` (5), `SOURCE_UNREACHED` (2), `FLAGS_VERSIONS` (2); a day's
+index files against `SWEPT`; the rescan's `HashSet<Day>` probe;
+`keep_nearest`'s walk of at most `UNKNOWN_SHOWN` = 4.
+
+### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
+
+Two gaps verify-BASE-GATE11-r1 named in `.github/gates_ledger.rs`:
+1. **Rule 5c** read only outer `#[allow(`/`#[expect(`; a file-level inner
+   allow of `clippy::unwrap_used` disarmed a whole production file unseen.
+   `opens_disarm` reads the inner forms too.
+2. **Rule 6** read only `.iter().find/position/rposition(`. It now reads
+   `.iter()`, `.into_iter()`, `.iter_mut()`, `.iter().rev()` and
+   `.into_iter().rev()` followed by `find`, `find_map`, `position` or
+   `rposition`. Both are proved by the gate test
+   gate11_reads_an_inner_allow_and_every_spelling_of_a_linear_search.
+   `.any(`/`.all(` and hand-written loops stay unread (L-BRED23-02).
+
+The widened rule 6 surfaced 108 sites in 63 production files. They were not
+read one by one in this package: each file's measured excess is pinned in
+`ALLOW_SCAN_UNREAD`, the list D-1121 kept empty for exactly this ("a future
+change to rule 6 that surfaces sites it cannot classify at once"). No bound
+is claimed for them. A new site in any file is refused, because the per-file
+sum is exact; the shipped test now asserts the list holds at most 108 in 63
+files (it asserted empty) and may only shrink. Reading each into
+`ALLOW_SCAN` with its bound, or removing the search, is the follow-up
+L-BRED23-02 names.
+
+### D-7152 — Three timing tests hold under load by an order or a same-run baseline, never a looser bound (BASE-REDS-1023) — 2026-10-23
+
+1. `api::server::scrub_route` FIFO/symlink/directory refusal ("answered
+   without waiting"): a fixed 5 s bound failed on a loaded Mac. Now five
+   answers of the odd file alternate with five of a regular file on a root
+   of its own, and the odd file's fastest may cost at most 20 times the
+   regular file's fastest plus 50 ms: tighter than 5 s on an idle machine,
+   and it moves with the load.
+2. `api::coverage` lookup flat in the universe: up to 31 alternating pairs of
+   minima, stopping at the first pair that holds the unchanged 4x ceiling (at
+   least seven). Interference only adds time; a lookup that scans a 40x
+   larger universe fails every pair.
+3. web `tests/calendar-loader.test.js`: the two tests wait for the event
+   that must come (`until`, at most 10,000 event-loop turns, no clock)
+   where a 10 ms timer raced the answer's body read.
+None of the three was made to fail before its change on demand: the
+failures were load races seen by BASE-GATE11's and LEDGER-1023's runs
+(NOT PROVED failing first here).

@@ -21460,3 +21460,38 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-NOPY-2 | The gate does not see the name split across lines, written with a zero-width character or another script inside it, or encoded; nor, when `git` runs, any untracked file | A text rule over bytes, and its input is `git ls-files` | The module header says so. A name split by a space passes and is pinned as the limit (NOPY-03). CI gate 15 is a second reading of the same tracked bytes |
 | L-NOPY-3 | The extension written as text is not refused | The extension is not the name: the charter cites the vendor SDK's own file by its path, which is provenance | 55 lines in 17 tracked files hold the extension as text on 21 Oct 2026, and the same 55 in 17 on 22 Oct after the third, the fourth and the fifth merge of `feat/db-fix` (`git grep -iE`, the extension followed by a non-word character). A file OF the language is refused by its own extension (NOPY-05) |
 | L-NOPY-4 | CI gate 15's allowlist names four files that hold no occurrence | Emptying it is an edit of `.github/workflows/ci.yml`, which this merge does not make | Gate 15 passes with four loose-entry warnings on the merged tree (`state/fix/ci-gates-logs/P-CLOUD-NOPY1-fast-1/logs/language-purity/016-15.log`). CI gate 13's log prints crate names that hold the name, unmasked; a CI log is not a tracked file, and masking it is that gate's owner's edit |
+
+## The CI shell gates green on feat/db-fix (BASE-REDS-1023, D-7145..D-7152)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-BRED23-01 | 29 cost claims say UNVERIFIED: no test or bench times them | gate 12 refused them with no proof named; each is a structural argument (a fixed number of probes, reads or compares), and timing each is a package of its own | The sites, at the commit of D-7149: api/src/autopilot.rs `refuse_drifted`, api/src/bars.rs `note_absent`, cli/src/minute_gaps.rs `first_interior_holes` and `first_expected_after`, cli/src/operation_audit.rs `RunClaim`, cli/src/stored.rs `PRIOR_WALK_CAP`, pull/src/gdfl_archive.rs (two zip64 reads), pull/src/gdfl_cm.rs `entry_stem`, pull/src/gdfl_import_day.rs `KeyState` and `admit_rule`, pull/src/gdfl_import_journal.rs `KeyHistory` and `derive_days`, pull/src/gdfl_rekey.rs (four probes), pull/src/reference_data.rs (five lookups), pull/src/zerodha_spool.rs (four), pull/src/zerodha_verify.rs (two), store/src/flock.rs `HOLDERS`. Each block says UNVERIFIED beside its claim. | a timing package per crate (owner: the crate's next package) |
+| L-BRED23-02 | Gate 11 rule 6 holds 108 sites in 63 files UNREAD, and still cannot see `.any(`/`.all(` or a hand-written loop | the widened spellings (D-7151) surfaced them all at once; reading each with its bound is more than this package's change. `.any(`/`.all(` are hundreds of predicates, most over compile-time tables, and a loop has no spelling | `ALLOW_SCAN_UNREAD` in .github/gates_ledger.rs pins each file's exact count, so any NEW site is refused; its test asserts at most 108 in 63 files and the list may only shrink | a gate-11 reading package: open each site, move it into `allow_scan` with its bound or remove the search |
+| L-BRED23-03 | `Report::name` warns once per 1,024 names dropped, not per failure | every failure it takes was logged by `note_failure` already; a second event per failure would double the log of a systematic refusal | One `Warn` per 1,024 failures past 2,048 named in a run: O(1) amortised per failure (`pull::gdfl_run::tests::progress_and_failure_costs` times `name`, C-GR-06) | IA-1's line |
+| L-BRED23-04 | `day::decisive` is one pass over the day's failures | the rank needs the earliest of each kind; the failures are the ones the day already named | O(failures of the day), O(1) amortised per failure named; it stops at the first census failure. NOT re-timed by this package | IA-16's line |
+| L-BRED23-05 | The three load-robust timing tests see a ratio, not an absolute | an absolute bound in the default suite measures the machine's load (D-7152) | Scrub refusal: at most 20 regular answers + 50 ms, fastest of five each, alternating; coverage lookup: 4x over a 40x universe, fastest of at least 7 and up to 31 alternating pairs; the web calendar tests: at most 10,000 event-loop turns, no clock. A refusal path 20x slower than a regular answer but still fast passes the first | — |
+| L-BRED23-06 | A Zerodha verify run in flight across a deploy that renames its lock directory | the old build's writer holds `verify/live/<run>` and the new merger probes `verify/running/<run>` (D-7148) | Deploy with no verify run spooling; the store held no `verify/` directory on 23 Oct (listed read-only) | the main session's deploy |
+
+### Gate 11 — BASE-REDS-1023: IA-16, IA-9 and IA-2, fixed or declared (23 October 2026)
+
+~~~~text
+After the BASE-GATE11 merge (5413c5e3b) gate 11 refused five files that IA-16
+and IA-9 brought (state/fix/ci-gates-logs/bred1023-lp1). Fixed in code
+(D-7150): gdfl_import_day.rs rule 3 (the held-back map, pre-sized to
+HELD_BACK_CAP = 4,096), gdfl_import.rs rule 4 (closeness: a hash set, no
+sort), gdfl_import_day.rs rule 6 (decisive: one pass), gdfl_import_quality.rs
+rule 7 (sampled_among: a set probe), and one of the two copies of the
+repairable-hole test. Declared, with the bound rule 7 or rule 6 names:
+  gdfl_import.rs rule 7, 1 -> 3: REPAIRABLE_HOLES (3 entries, compile time);
+    the day's filed index names against SWEPT (the INDEX directory's few
+    files of one day, a compile-time swept list); the rescan's
+    imported.contains(&day), a HashSet<Day> probe.
+  gdfl_import_causes.rs rule 7, 0 -> 1: Cause::is_hole over HOLE_REASONS (5).
+  gdfl_import_day.rs rule 7, 0 -> 1: source_lost over SOURCE_UNREACHED (2).
+  api/src/dayflags.rs rule 7, 1 -> 2: the version gate over FLAGS_VERSIONS
+    (2), which IA-16 moved in from IA-10b, beside the closers list of one day.
+  gdfl_import.rs rule 6, 0 -> 1: keep_nearest's position over at most
+    UNKNOWN_SHOWN = 4 kept stems; gdfl_import_day.rs's rule-6 entry is gone.
+Then rule 6 was widened (D-7151) and 108 sites in 63 files were pinned
+unread in ALLOW_SCAN_UNREAD (L-BRED23-02).
+~~~~

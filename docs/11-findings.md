@@ -980,3 +980,31 @@ confirmed by two skeptics; their corrections are applied.
 - **corp-8: the overnight line could not see the move into a slice's first
   session**, and corp-2's line half (a zero-volume open printed as a move). FIXED
   by the AH-01 change. D-4984, AH1-10, AH1-11.
+
+### The CI shell gates on feat/db-fix (BASE-REDS-1023, state/fix/ci-gates-logs/bred1023-*) — dispositions — 2026-10-23
+
+- **BRED23-F1: gate 27b, D-6247 headed SC-4's and R3-30 repair 2's entries.**
+  FIXED: the newer is D-7146 (D-7145).
+- **BRED23-F2: gate 30, IA-1 and R3-17 merged with `merged = false`.** FIXED:
+  flags set, R-01 retired, S-50's rehearsal moved into its fields (D-7147).
+- **BRED23-F3: gate 23, 27 test prints, one protocol stdout write and one
+  fixed temporary path undeclared or unnamed.** FIXED (D-7147).
+- **BRED23-F4: gate 10, HA-02 and AG05-13 named a module, not a test.**
+  FIXED: the rows name the tests (D-7147).
+- **BRED23-F5: gate 19, `Report::name` recorded with no event.** FIXED: the
+  door warns when names roll off the receipt; every failure it takes is
+  already logged (D-7147, BRED-01).
+- **BRED23-F6: gate 1d, 455 undeclared literals in crates/pull.** FIXED:
+  read and declared in six kinds (D-7147).
+- **BRED23-F7: gate 1c read the verify live-lock path as a credential path.**
+  FIXED at the cause: the directory is `verify/running` (D-7148, BRED-05).
+- **BRED23-F8: gate 12, 46 cost claims with no proof.** FIXED: 17 name their
+  proof, 29 say UNVERIFIED (D-7149, L-BRED23-01).
+- **BRED23-F9: gate 11, five files of IA-16 and IA-9.** FIXED: four sites
+  rewritten, the rest declared with their bound (D-7150, BRED-02..04).
+- **BRED23-F10: gate 11's rule 5c missed an inner allow and rule 6 spelled
+  three searches.** FIXED in the gate (D-7151); 108 surfaced sites pinned
+  UNREAD, OPEN as L-BRED23-02.
+- **BRED23-F11: two api timing tests and one web test failed under load.**
+  FIXED by a same-run baseline or an event order (D-7152, BRED-06, BRED-07);
+  NOT PROVED failing first on demand.
