@@ -81561,3 +81561,11 @@ T2S-21.
 `tradable_day` had not merged. It has, and the same merge brought it here.
 D-5181 carries a dated amendment that says so. Labelling through it is NOT
 DONE, and no file this check writes names CAL-1.
+
+**Two follow-ups taken with it** (verify-DATA-2-r2, in this package's file).
+`--out`, `--archive` and `--workers` given twice took the last value with no
+word; each is now refused as misuse that names the flag. `--symbols` names
+still add up, as they always did. A `--symbols` list in which no name is a
+share the store holds checked nothing and exited 0. It now names each name
+and exits `FAILED`. A list with at least one held share is judged by its rows
+as before, with the unknown names still printed. T2S-22.

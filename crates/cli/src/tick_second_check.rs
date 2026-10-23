@@ -184,13 +184,30 @@ pub(crate) fn host_cores() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
+/// Fills `slot` with `value` the first time `flag` is given.
+///
+/// # Errors
+///
+/// `flag` given a second time (D-5188): refused by name, never the last
+/// value silently taken.
+fn once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(format!(
+            "{flag} is given twice: a repeated flag is refused, never the last value taken"
+        ));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
 /// Reads the verb's words.
 ///
 /// # Errors
 ///
 /// The words a refusal shows: a year that is not one, a flag without its
-/// value, an unknown flag, a worker count outside `1..=` the host's cores,
-/// or no `--out`.
+/// value, a flag given twice (`--symbols` excepted: its names add up), an
+/// unknown flag, a worker count outside `1..=` the host's cores, or no
+/// `--out`.
 pub(crate) fn ask(args: &[&str]) -> Result<Ask, String> {
     let (year, rest) = match args.split_first() {
         Some((first, rest)) if !first.starts_with("--") => {
@@ -212,11 +229,11 @@ pub(crate) fn ask(args: &[&str]) -> Result<Ask, String> {
         match *word {
             "--out" => {
                 let dir = words.next().ok_or("--out takes a directory")?;
-                out = Some(PathBuf::from(dir));
+                once(&mut out, "--out", PathBuf::from(dir))?;
             }
             "--archive" => {
                 let zip = words.next().ok_or("--archive takes a zip")?;
-                archive = Some(PathBuf::from(zip));
+                once(&mut archive, "--archive", PathBuf::from(zip))?;
             }
             "--workers" => {
                 let n = words.next().ok_or("--workers takes a count")?;
@@ -226,7 +243,7 @@ pub(crate) fn ask(args: &[&str]) -> Result<Ask, String> {
                     .ok()
                     .filter(|n| (1..=cores).contains(n))
                     .ok_or_else(|| format!("{n:?} is not a worker count (1 to {cores})"))?;
-                workers = Some(n);
+                once(&mut workers, "--workers", n)?;
             }
             "--symbols" => {
                 let set = symbols.get_or_insert_with(|| HashSet::with_capacity(16));
@@ -3337,8 +3354,9 @@ pub(crate) struct Report {
     pub(crate) versions: Vec<(u16, PathBuf, PathBuf)>,
     /// The `--symbols` names the store's GDFL share tree holds no share of,
     /// sorted: said out loud, never a silent empty run (a typo checks
-    /// nothing). Not refused: with `--archive` such a name may still be one
-    /// of the archive's files, compared as `raw_only`.
+    /// nothing). Not refused before the run: with `--archive` such a name
+    /// may still be one of the archive's files, compared as `raw_only`. When
+    /// every name asked is one of these, the run exits `FAILED` (D-5188).
     pub(crate) unknown_symbols: Vec<String>,
     /// Years with nothing new to fold.
     pub(crate) unchanged: Vec<u16>,
@@ -3388,7 +3406,20 @@ pub(crate) fn command_with(
             for year in &report.unchanged {
                 let _ = writeln!(out, "  {year} nothing new to fold");
             }
-            if report.not_exact == 0 {
+            let none_held = ask
+                .symbols
+                .as_ref()
+                .is_some_and(|asked| asked.len() == report.unknown_symbols.len());
+            if none_held {
+                // verify-DATA-2-r2 follow-up (D-5188): every share asked for
+                // is one the store does not hold, so nothing asked was
+                // checked; exit 0 would say it was.
+                let _ = writeln!(
+                    out,
+                    "  NOTHING ASKED IS HELD: no --symbols name is a share the store holds"
+                );
+                FAILED
+            } else if report.not_exact == 0 {
                 OK
             } else {
                 let _ = writeln!(

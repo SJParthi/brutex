@@ -1390,6 +1390,19 @@ fn a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothin
             && !out_again.contains("is refused"),
         "the second run took the lock and read the first run's rows: {out_again}"
     );
+    // A --symbols list with one held share and one unknown name names the
+    // unknown one and is not "nothing asked is held" (D-5188).
+    let (_, out_some, _) = check(
+        &root,
+        &store,
+        &none,
+        &["2025", "--symbols", "ZZALPHA,ZZNOPE"],
+    );
+    assert!(
+        out_some.contains("--symbols ZZNOPE: the store's GDFL share tree holds no such share"),
+        "{out_some}"
+    );
+    assert!(!out_some.contains("NOTHING ASKED IS HELD"), "{out_some}");
 }
 
 /// The measurement behind `docs/06-limits.md` L-T2S-11's lock line: the
@@ -1954,6 +1967,20 @@ fn every_misuse_is_refused_before_anything_is_read() {
             "at least one symbol",
         ),
         (vec!["2025", "--out", "o", "--frobnicate"], "is not a flag"),
+        // verify-DATA-2-r2 follow-up (D-5188): a repeated flag took its last
+        // value silently.
+        (
+            vec!["2025", "--out", "o", "--out", "p"],
+            "--out is given twice",
+        ),
+        (
+            vec!["--out", "o", "--archive", "a.zip", "--archive", "b.zip"],
+            "--archive is given twice",
+        ),
+        (
+            vec!["2025", "--out", "o", "--workers", "1", "--workers", "1"],
+            "--workers is given twice",
+        ),
     ] {
         let mut out = String::new();
         let code = command_with(&args, &none, &|| Err("unread".into()), &mut out);
@@ -2181,14 +2208,17 @@ fn a_store_that_holds_nothing_makes_no_version_and_says_so() {
     assert!(out.contains("0 stored share-days"), "{out}");
     assert!(out.contains("2019 nothing new to fold"), "{out}");
     assert!(!dir.join("tick-to-second-2019.v001.csv").exists());
-    // A share the store does not hold is named, never a silent empty run.
+    // A share the store does not hold is named, never a silent empty run;
+    // when no name asked is held, nothing asked was checked, and the run
+    // fails (verify-DATA-2-r2 follow-up, D-5188: it exited 0).
     let (code, out, _) = check(
         &root,
         &store,
         &none,
         &["2019", "--symbols", "ZZNOPE,ZZNADA"],
     );
-    assert_eq!(code, OK, "{out}");
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOTHING ASKED IS HELD"), "{out}");
     assert!(
         out.contains(
             "  --symbols ZZNADA: the store's GDFL share tree holds no such share\n  --symbols \
