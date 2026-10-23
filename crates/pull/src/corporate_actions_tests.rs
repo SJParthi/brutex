@@ -1137,7 +1137,7 @@ fn an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured() {
 
 /// The runs of `days` for `symbol`, loaded back through the store as the
 /// ledger reads them.
-fn loaded(tag: &str, shares: &[(&str, Vec<BasisDay>)]) -> (BasisRuns, u64) {
+fn loaded(tag: &str, shares: &[(&str, Vec<BasisDay>)]) -> (std::sync::Arc<BasisRuns>, u64) {
     let mut runs = Vec::new();
     for (symbol, days) in shares {
         runs.extend(fold_runs(symbol, days.clone()).unwrap());
@@ -1151,7 +1151,7 @@ fn loaded(tag: &str, shares: &[(&str, Vec<BasisDay>)]) -> (BasisRuns, u64) {
 }
 
 /// An empty measured table, for the checker.
-fn no_actions(tag: &str) -> CorporateActions {
+fn no_actions(tag: &str) -> std::sync::Arc<CorporateActions> {
     let store = scratch(tag);
     write(&store, &actions_draft(Standing::Measured, &[])).unwrap();
     load_actions(&store).table().unwrap().clone()
