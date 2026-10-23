@@ -2883,13 +2883,115 @@ const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known n
 // parameter path.
 const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 
+// THE PACKAGES MERGED 17 TO 23 OCTOBER 2026 THAT DID NOT RUN GATE 1D
+// (BASE-REDS-1023, D-7147). IA-1, IA-2, IA-3, IA-9, IA-16 (the GDFL run, its
+// ledger, locks, stop, start gate, causes and repair door), R3-17 (the upkeep
+// runner), R3-19 and AG-05 (the census epochs and seal), R3-24 (the audit
+// ledger), R3-30 (the reference data and risk-free rates), SC-4 (the sealed
+// month), the GDFL v3 index, the day-zip and Dropbox sources, the rekey plan,
+// CAL-1's Muhurat rows and the ratio benches added these literals under
+// crates/pull and ran no gate 1d; it was red on feat/db-fix with all 455 of
+// them. Each was read before it was listed (the first site of every word was
+// opened; the list and its sites are the gate's own output at e0668a4bd), in
+// six kinds. (1) Refusal codes, event and record field names, each the
+// `snake_case` word a `Display`, a log line, an event or a stored record
+// prints: `absent_from_listing` .. `wrong_table`, `run_lock_refused`,
+// `runs_ledger_unwritten`, `stop_by_unknown`, `rate_carried`, `rate_fresh`,
+// `risk_free_rate`, `key_gdfl`, `key_zerodha`, `gdfl_first` .. `zerodha_last`,
+// `nse_name`, `reference_only`, `load_us`, `total_us`, `now_bytes`,
+// `was_bytes`. (2) Test labels and scratch folder tags a test passes as a
+// run id, a folder or a fixture name: the `ia3-*`, `ia16-*`, `ref-*`, `v3-*`,
+// `stop-*`, `held-*`, `late*`, `nfo-*`, `rekey-*` families, `f1976` and
+// `f2999` (two invented failure names), `someone`, `handmade`, `witness`,
+// `not-a-store`.
+// (3) Command words and flags a run hint or a step prints: `census-migrate`,
+// `census-recount`, `census-seal`, `census-verbs`, `pull-fno`, `pull-repair`,
+// `pull-spot`, `zerodha-repair`, `re-plan`, `--retry-refused`, `--snapshot`,
+// `--stored`, `-x`. (4) Invented field values and numbers a fixture decodes
+// or a test asserts: hex patterns (`0123456789abcdef`, `0707070707070707`,
+// `deadbee`, `deadbeeg`), counts (`1000000`, `2500000`, `4097`, `75`),
+// months and days of invented data (`2020-09` .. `2026-11`, `25092026`,
+// `28092026`, `2026-08auc`), durations (`2s`, `7m`). (5) Words a sentence of
+// a refusal or a doc string holds once split on its quotes and slashes:
+// `windows`, `word`, `withdraw`, `writable`, `every`, `between`, `under`,
+// `seventh`, `third`, `e`, `na`. (6) Platform names a `cfg` or a syscall
+// names: `apple` (`target_vendor`), `statfs`, `statvfs`, `flock`,
+// `set_permissions`, `symlink`, `hard_link`, `create_dir`, `try_lock`,
+// `write_all`, `exe`, `ftp` (a source word the parser must refuse).
+// None names an account, an environment, a vendor credential or a field of
+// a parameter path; none is one of gate 1c's ten environment words.
+const MERGED_17_23_OCT_LITERAL: &str = "\
+     --retry-refused --snapshot --stored -x 000009 0123456789abcdef 0707070707070707 \
+     0808080808080808 1000000 1050000 180000 2020-09 2024-04 2026-08auc 2026-09 2026-10 \
+     2026-11 2500000 25092026 28092026 2s 4097 4321 75 7m _v3 _x a_b absent_from_listing \
+     accept_open_month announcement_url apple archive_member_encrypted archive_prefixed \
+     archives aside-census at-bare auction_date auction_torn_tail auto_resume available \
+     banknifty bars_differ_held batch_refused before_first_row bench-long bench-short \
+     between bound broken brutex-reference built cancelled cap carried cd census-migrate \
+     census-recount census-seal census-v4-holder census-verbs census_layout_changed \
+     census_ms census_unreadable claim claim_being_written claim_unwritten clock \
+     clock_implausible cm_zip code10 code3 colour compaction compiled completeness copy \
+     copy-extra-day corrupt costs create_dir cut1 cut3 cuts day_file_misfiled day_hex \
+     day_zip_misfiled dayflags dayzips dayzips_too_many_entries deadbee deadbeeg deferred \
+     digest disjoint dup_echo_rows dup_traded_rows e edges effective elsewhere-vendor \
+     encrypted epoch_moved escape every exclude exe exit expiry_moves extension_missing \
+     extra-day f1976 f2999 far feeds fetched file_replaced filter filter_too_long \
+     first_other flag-snapshot flock fno fno_list found free_floor ftp full_result_url gap \
+     garbage-census garbage-short gate gdfl-start-gate gdfl_first gdfl_last gdfl_stem go \
+     gone_target grewbar grewmonth guardcost guessed handmade hard_link header_moved \
+     header_unread heard held-before-sink held-check held-earlier held-raw held-sealed \
+     held_back held_back_cap history holds hole_skipped holiday ia16-absent ia16-absent-none \
+     ia16-absent-renamed ia16-auc-bent ia16-auc-garbage ia16-auc-header ia16-auc-held-back \
+     ia16-auc-torn ia16-auc-zeros ia16-busy-moment ia16-cap ia16-cmp13 ia16-disk-full \
+     ia16-floor ia16-fm095-restated ia16-fm118 ia16-fm129 ia16-fm252 ia16-held-back \
+     ia16-keystate ia16-lost-at-barrier ia16-mixed-day ia16-no-volume ia16-open-month \
+     ia16-store-fresh ia16-store-lost ia16-store-swapped-between ia16-store-swapped-within \
+     ia3-backslash ia3-bare ia3-close-listing ia3-fm023 ia3-fm026 ia3-fm040 ia3-fm044 \
+     ia3-fm119 ia3-human010 ia3-leap ia3-no-listing ia3-opt-gr27 ia3-real ia3-ts-misfiled \
+     ia3-ts-writer ids import-budget-saturday import-two-at-once index_identity inline item \
+     journal_run key_gdfl key_zerodha killed-between-months kinds last late-sealed \
+     late-whole late2-sealed late2-whole layout layout-file ledger-saturated ledger-torn \
+     legacy legacy_ack length_moved load_us lock_replaced lockheld lockrace log_unavailable \
+     loose-nifty loose-nifty-ts lot_sizes manifest_sha256 misfiled mode month_sealed \
+     month_superseded msum muhurat na name_hex name_hex_gone needs_month_generation \
+     never-sealed nfo nfo-fm043 nfo-fm043-extremes nfo_years nfo_zips nifty-options-ts \
+     nifty-options-zip nifty-spot no-ledger no-such-store-root-c-gr-11 no_row no_wanted_file \
+     noretire not-a-store not_built not_held not_text nothing-here now now_bytes nse_name \
+     nul-tail nul_tail off old old_claim order other-oi packed pid placeholder pre-1 probe \
+     published_whole pull-fno pull-repair pull-spot r2-append rate_carried rate_fresh \
+     re-plan read-write real-stub recorded-before recorded_moves recorded_retired ref-budget \
+     ref-budget-10x ref-calendar-span ref-checksum ref-exhausted ref-expiry-basis \
+     ref-expiry-sha ref-horizon ref-idem ref-index-row ref-lots-absent ref-lots-added \
+     ref-lots-bad ref-lots-seed ref-muhurat ref-no-strays ref-own-cite ref-race ref-rates \
+     ref-rates-absent ref-rates-hole ref-real-rates ref-retract ref-reuse ref-strays \
+     ref-told reference_only refresh rekey-lock rekey-torn-after rekey-torn-closed release \
+     remove_ renamed repair-timings repair_impossible repair_in_open_month repair_reason \
+     repair_reason_invalid repair_refused repairable request_line_invalid requested restate \
+     restored resume_day resumes retarget retire-grew retiredgrew revised revision \
+     risk_free_rate rotted row row_count rules run_lock_refused run_not_live \
+     run_not_stoppable runs_ledger_entry runs_ledger_io runs_ledger_unwritten sbar-staged \
+     scope_unreadable scratch sealed-month sealed_crc seals seed separator_backslash session \
+     set_permissions settlement_date seventh shutdown silent skip_restated snapped_rows \
+     snapshot_invalid someone sort source-gone source_lost source_sha256 source_unopened \
+     source_unset source_url srt stall standing statfs statvfs stop-after stop-before \
+     stop-census stop-file stop-mid stop-race stop-ts stop_by stop_by_unknown stop_unwritten \
+     stopping store_io stored-options stored_index_absent stored_with_options symbol_changes \
+     symbol_empty symbol_id symbol_invalid symlink targets third tight timings told \
+     too_large too_many total total_us trailing_empty_files try_lock under units unlinked \
+     unlogged unopened unstamped_write unverified upper v3 v3-big v3-bigman v3-bigmark \
+     v3-bin v3-differ v3-dirman v3-dirmark v3-empty v3-flip v3-gap v3-lone v3-map-back \
+     v3-map-fwd v3-nomark v3-nothing v3-source v3-torn v3-utf8 verify via was_bytes windows \
+     withdraw witness word writable write-costs write_all wrong_table zerodha-repair \
+     zerodha_first zerodha_last";
+
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
 /// raised 72 -> 73 for its own group, and both groups landed, so the joined
 /// list holds 74 and the length below said 73, which failed gate 0's build.
 /// 74 -> 75 with IA-9's group, which feat/db-fix already counted; the
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
-const DECLARED: [&str; 75] = [
+/// 75 -> 76 with BASE-REDS-1023's group of the 17..23 Oct merges (D-7147).
+const DECLARED: [&str; 76] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2965,6 +3067,7 @@ const DECLARED: [&str; 75] = [
     R4_17_LITERAL,
     CAL1_CIRCULAR_SERIAL,
     IA9_LITERAL,
+    MERGED_17_23_OCT_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4532,6 +4635,33 @@ mod tests {
         ] {
             let r = gate_1c_of(&[("docs/x.md", &p)]);
             assert!(!r.refused, "refused: {p}");
+        }
+    }
+
+    /// BOTH DIRECTIONS OF A STORE PATH (BASE-REDS-1023, D-7148). The pattern
+    /// cannot tell a store directory from a parameter path, and must not
+    /// learn to: `pull::zerodha_spool::LIVE_DIR` was `verify` then `live`, so
+    /// its documented lock path read as org `verify`, env
+    /// `live`, and the directory was renamed `verify/running` instead of the
+    /// pattern being narrowed. The old spelling stays refused, a real path
+    /// written after a placeholder is refused, and the new one passes.
+    #[test]
+    fn gate_1c_reads_a_store_path_by_its_segments_and_not_its_root() {
+        for p in [
+            joined(&["<store>", "verify", "live", "<run>.lock"]),
+            joined(&["<root>", "acme", "prod", "groww", "key"]),
+            joined(&["x", "verify", "LIVE", ""]),
+        ] {
+            let r = gate_1c_of(&[("crates/pull/src/zerodha_spool.rs", &p)]);
+            assert!(r.refused, "passed: {p}");
+        }
+        for p in [
+            "<store>/verify/running/<run>.lock",
+            "<store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp",
+            "<store>/verify/merge.lock",
+        ] {
+            let r = gate_1c_of(&[("docs/02-store-format.md", p)]);
+            assert!(!r.refused, "refused: {p}: {}", r.text());
         }
     }
 

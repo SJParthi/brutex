@@ -1693,6 +1693,17 @@ pub struct Report {
     pub recent: Vec<(Cause, Failure)>,
 }
 
+/// How many of the oldest kept names [`Report::name`] drops before it keeps
+/// one more, when `kept` are kept now: `FAILURES_KEPT` once the list holds
+/// twice the bound, else none (D-4839; the event beside it, D-7147).
+pub(crate) const fn names_dropped(kept: usize) -> Option<usize> {
+    if kept >= 2 * FAILURES_KEPT {
+        Some(FAILURES_KEPT)
+    } else {
+        None
+    }
+}
+
 impl Report {
     /// Names one failure of the run (D-4839): counted in
     /// [`Report::failures_total`] and [`Report::failures_by_cause`], kept by
@@ -1712,8 +1723,21 @@ impl Report {
             self.recent.remove(0);
         }
         self.recent.push((cause, failure.clone()));
-        if self.failures.len() >= 2 * FAILURES_KEPT {
-            self.failures.drain(..FAILURES_KEPT);
+        // EVERY FAILURE THIS DOOR TAKES IS ALREADY LOGGED: each caller builds
+        // it with `note_failure`, whose `Error` event names its day, stage and
+        // code (gate 19 reads that call beside each producer). What only this
+        // door knows is when the receipt stops NAMING failures it still
+        // counts, and that is said here, once per `FAILURES_KEPT` dropped, so
+        // /logs shows the receipt's "and N more" as it happens (gate 19,
+        // BASE-REDS-1023, D-7147).
+        if let Some(dropped) = names_dropped(self.failures.len()) {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::warn(TARGET, "failures counted and no longer named")
+                    .with("failures_total", self.failures_total)
+                    .with("names_dropped", dropped)
+                    .with("names_kept", FAILURES_KEPT),
+            );
+            self.failures.drain(..dropped);
         }
         self.failures.push(failure);
     }

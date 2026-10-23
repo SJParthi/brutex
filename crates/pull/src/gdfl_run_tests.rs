@@ -1270,6 +1270,27 @@ fn a_failure_past_the_kept_bound_is_counted_and_never_listed() {
     assert_eq!((few.failures.len(), few.failures_unlisted()), (1, 0));
 }
 
+/// **THE DOOR SAYS WHEN THE RECEIPT STOPS NAMING** (gate 19, BASE-REDS-1023,
+/// D-7147): `Report::name` drops the oldest 1,024 names exactly when it holds
+/// twice the bound, never one failure earlier, and its warning is emitted at
+/// that cut alone. Empty, one under, at, and far past the bound.
+#[test]
+fn the_report_drops_names_only_at_twice_the_bound() {
+    assert_eq!(crate::gdfl_import::names_dropped(0), None);
+    assert_eq!(crate::gdfl_import::names_dropped(2 * FAILURES_KEPT - 1), None);
+    assert_eq!(crate::gdfl_import::names_dropped(2 * FAILURES_KEPT), Some(FAILURES_KEPT));
+    assert_eq!(crate::gdfl_import::names_dropped(usize::MAX), Some(FAILURES_KEPT));
+    let mut report = Report::default();
+    let vendor = Cause::open(Stage::Vendor, "malformed_row");
+    for i in 0..2 * FAILURES_KEPT {
+        report.name(vendor, failure(i));
+    }
+    assert_eq!(report.failures.len(), 2 * FAILURES_KEPT, "kept until the cut");
+    report.name(vendor, failure(2 * FAILURES_KEPT));
+    assert_eq!(report.failures.len(), FAILURES_KEPT + 1, "one cut, then kept");
+    assert_eq!(report.failures[0].instrument, format!("f{FAILURES_KEPT}"));
+}
+
 /// **A REFUSAL'S REPORT IS SEALED AS A FINISHED RUN'S IS** (IA-1 repair 1,
 /// the verifier's follow-up): a run a census or durability refusal stopped
 /// carries what it did in the refusal, and `drive_core` cuts that report to

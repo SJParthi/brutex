@@ -3550,7 +3550,7 @@ spool into one generation per (segment, timeframe, day) it touches.
 <store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp           records
 <store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp.merged    merge log
 <store>/verify/merge.lock                                     one merger at a time
-<store>/verify/live/<run>.lock                                the run is still spooling (IA-9 repair 1)
+<store>/verify/running/<run>.lock                             the run is still spooling (IA-9 repair 1; named `live` until D-7148)
 <store>/verify/merge.stop                                     a merge's stop file
 <store>/verify/zerodha.lock, zerodha.stop                     the cold run's
 <store>/verify/merge.progress, zerodha.progress               their progress records (§37 v1)
@@ -3616,7 +3616,7 @@ the merge reads is refused `spool_full` before a byte is written (IA-9
 repair 1), so a spool never grows past what can be merged whole.
 
 **A run that is still spooling is never merged** (IA-9 repair 1). The writer
-takes `verify/live/<run>.lock` exclusively (`flock`, with its holder's note)
+takes `verify/running/<run>.lock` exclusively (`flock`, with its holder's note)
 at its first append and holds it until it is dropped: the run's end, or its
 process's death, which the kernel turns into a release. The merger tries each
 run's lock once before it reads one of the run's spools: a held lock is a

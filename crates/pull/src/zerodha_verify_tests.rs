@@ -4781,7 +4781,7 @@ fn an_orphan_log_is_stray_and_a_full_spool_refuses_the_append() {
         holder: "a test holder".to_owned(),
     };
     assert_eq!(busy.code(), "run_live_busy");
-    assert!(busy.to_string().contains("verify/live/41.lock"));
+    assert!(busy.to_string().contains("verify/running/41.lock"));
 }
 
 /// A verdict record counts the details that follow it (IA-9 repair 1, the

@@ -18,7 +18,7 @@
 //! <store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp          the records
 //! <store>/verify/spool/<run>/<SEG>/<tf>/<yyyy-mm>.vsp.merged   the merge log
 //! <store>/verify/merge.lock                                    one merger at a time
-//! <store>/verify/live/<run>.lock                               the run is still spooling
+//! <store>/verify/running/<run>.lock                            the run is still spooling
 //! ```
 //!
 //! `<run>` is the run's id from the store-wide runs ledger (D-4880): never
@@ -52,7 +52,7 @@
 //!   that fails its CRC was damaged in place: the spool is refused by name
 //!   ([`SpoolError::Damaged`]), never skipped silently.
 //! * **A run that is still spooling is never merged** (IA-9 repair 1). The
-//!   writer takes `verify/live/<run>.lock` exclusively at its first append
+//!   writer takes `verify/running/<run>.lock` exclusively at its first append
 //!   and holds it until it is dropped (the run's end, or its process's
 //!   death, which the kernel turns into a release). A merger try-locks each
 //!   run's lock before it reads one of the run's spools: a run whose lock is
@@ -135,7 +135,7 @@ pub const SPOOL_EXT: &str = "vsp";
 /// A merge log's suffix after the spool's name.
 pub const LOG_SUFFIX: &str = ".merged";
 /// The directory, under the store root, of every run's live lock.
-pub const LIVE_DIR: &str = "verify/live";
+pub const LIVE_DIR: &str = "verify/running";
 /// How long a writer waits for a run's live lock that a merger holds (it is
 /// merging this run's spools of an earlier process) before it refuses by
 /// name: a run that resumes under its old id while its orphan spools merge.
@@ -143,7 +143,7 @@ pub const LIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// The pause between two tries of a live lock.
 const LIVE_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// `<root>/verify/live/<run>.lock`: held by run `run`'s writer while it
+/// `<root>/verify/running/<run>.lock`: held by run `run`'s writer while it
 /// spools, by a merger while it merges the run's spools.
 #[must_use]
 pub fn live_lock_path(root: &Path, run: u64) -> PathBuf {
@@ -778,7 +778,7 @@ struct Held {
 /// # The run is live while its writer lives (IA-9 repair 1)
 ///
 /// From its first append until it is dropped, the writer holds the run's
-/// live lock (`verify/live/<run>.lock`), and no merger reads, commits or
+/// live lock (`verify/running/<run>.lock`), and no merger reads, commits or
 /// removes a spool of a run whose lock is held: the run is named live and
 /// its spools wait. So a caller DROPS the writer when its run ends, before
 /// it merges in the same process or starts a `verify-merge` child (D-4921),
