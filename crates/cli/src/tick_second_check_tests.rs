@@ -564,7 +564,9 @@ fn every_status_and_source_is_named_against_the_landing_the_store_recorded() {
     // verify-DATA-2-r2 (D-5188): the minute section's basis sentence is the
     // true one; DATA-1's factor is merged, so "has not merged" is false.
     assert!(
-        summary.contains(&format!("RAW basis: Zerodha is corporate-action adjusted, GDFL raw; {RAW_BASIS_WHY})")),
+        summary.contains(&format!(
+            "RAW basis: Zerodha is corporate-action adjusted, GDFL raw; {RAW_BASIS_WHY})"
+        )),
         "{summary}"
     );
     assert!(!summary.contains("has not merged"), "{summary}");
@@ -1315,7 +1317,10 @@ fn a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothin
 {
     let (root, store, _) = imported_store("lock-name");
     let month_lock = store.join("bars/gdfl/NSE/CASH/ZZALPHA/1s/2025-03.lock");
-    assert!(month_lock.is_file(), "the importer left the month's lock file");
+    assert!(
+        month_lock.is_file(),
+        "the importer left the month's lock file"
+    );
     let planted = store.join("bars").join("PLANTED_BY_LOCK");
     let writer = std::fs::File::open(&month_lock).unwrap();
     for (case, word) in [
