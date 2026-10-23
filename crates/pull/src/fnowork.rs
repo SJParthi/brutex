@@ -769,6 +769,14 @@ pub fn futures_plan(
     }
     let mut refused = listing.refused;
     let first_seen = listing.first;
+    // ONE CONTRACT, ONE TOKEN (R4-28 repair 3, the r3 check's follow-up): a
+    // dump that lists one (underlying, expiry) under two tokens would file two
+    // series as one contract's, so neither is asked and both are named.
+    let mut tokens_of: std::collections::BTreeMap<Day, Vec<u64>> =
+        std::collections::BTreeMap::new();
+    for &(expiry, token) in first_seen.keys() {
+        tokens_of.entry(expiry).or_default().push(token);
+    }
     let mut asks = Vec::with_capacity(first_seen.len().saturating_add(1));
     for (&(expiry, token), &seen) in &first_seen {
         let (from, to) = (seen.max(window.from()), expiry.min(through));
@@ -776,6 +784,16 @@ pub fn futures_plan(
             continue;
         };
         let label = format!("{underlying} {expiry} future (token {token}, first listed {seen})");
+        if let Some(tokens) = tokens_of.get(&expiry).filter(|tokens| tokens.len() > 1) {
+            let tokens: Vec<String> = tokens.iter().map(u64::to_string).collect();
+            refused.push(format!(
+                "contract_duplicated: {label}: the index lists this one contract under {} tokens \
+                 ({}), so none is asked and no two series are filed as one",
+                tokens.len(),
+                tokens.join(", ")
+            ));
+            continue;
+        }
         // IDENTITY, NOT TRADING: the newest snapshot may still list a contract
         // past its expiry (`token_expired` on that day, R4-28 repair 3), and
         // the same contract is still what the token names in its history.

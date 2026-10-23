@@ -815,6 +815,50 @@ fn a_plan_asks_a_contract_still_listed_past_its_expiry_and_names_a_cut_snapshot(
     );
 }
 
+/// R4-28 repair 3 (the r3 check's follow-up): a dump that lists one contract
+/// under two tokens would file two series as one contract's. Neither is
+/// asked, both are named, and the other contract is asked as before.
+#[test]
+fn one_contract_listed_under_two_tokens_is_refused_by_name_never_merged() {
+    let masters = scratch("two-tokens");
+    snapshot_on(
+        &masters,
+        day(2026, 1, 5),
+        &[
+            fut(8_000_021, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_022, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_023, "ZQIDX26FEBFUT", "2026-02-24"),
+        ],
+    );
+    let book = Book::open(&masters).unwrap();
+    let plan = futures_plan(
+        &book,
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap();
+    let contracts: Vec<u64> = plan
+        .asks
+        .iter()
+        .filter(|ask| matches!(ask.series, FuturesSeries::Contract { .. }))
+        .map(|ask| ask.token)
+        .collect();
+    assert_eq!(contracts, [8_000_023]);
+    assert_eq!(
+        plan.refused
+            .iter()
+            .filter(|why| why.starts_with("contract_duplicated")
+                && why.contains("under 2 tokens (8000021, 8000022)"))
+            .count(),
+        2,
+        "{:?}",
+        plan.refused
+    );
+}
+
 /// R4-28 repair 1: snapshots held before the index existed (or written by a
 /// process killed before it took them in) are taken in by the next plan, once,
 /// and the plan equals the one over an index filled as they were written.

@@ -1110,16 +1110,19 @@ mod tests {
         struct Kite;
         impl Discovery for Kite {
             async fn get(&self, _url: &str) -> Result<String, Refusal> {
-                let mut body = String::from(pull::vendor::KITE_MASTER_HEADER);
-                for token in 0..24_u64 {
-                    let token = 9_700_001 + token;
-                    body.push_str(&format!(
-                        "\n{token},{},ZQRS{token}26MARFUT,\"ZQRS{token}\",0,2026-03-26,0,0.05,75,FUT,NFO-FUT,NFO",
-                        token / 256
-                    ));
-                }
-                body.push('\n');
-                Ok(body)
+                let rows: Vec<String> = (9_700_001..9_700_025_u64)
+                    .map(|token| {
+                        format!(
+                            "{token},{},ZQRS{token}26MARFUT,\"ZQRS{token}\",0,2026-03-26,0,0.05,75,FUT,NFO-FUT,NFO",
+                            token / 256
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "{}\n{}\n",
+                    pull::vendor::KITE_MASTER_HEADER,
+                    rows.join("\n")
+                ))
             }
         }
         let nanos = std::time::SystemTime::now()
@@ -1154,6 +1157,19 @@ mod tests {
                 .any(|record| record.level == telemetry::Level::Warn
                     && crate::emitted::says(record, "entry", cut)),
             "one Warn record names the cut body: {named:?}"
+        );
+        // AND THE SNAPSHOT'S OWN LINE COUNTS IT.
+        let written = crate::emitted::landed(
+            from,
+            pull::master_snapshots::EVENT_TARGET,
+            "a dated master snapshot was written",
+        );
+        assert!(
+            written
+                .iter()
+                .any(|record| crate::emitted::says(record, "kind", "instruments")
+                    && crate::emitted::counts(record, "incomplete", 1)),
+            "{written:?}"
         );
     }
 

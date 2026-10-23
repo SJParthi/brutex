@@ -81187,10 +81187,12 @@ ranking for a reader, never a filing rule.
 SC-4 already bounds (L-SC4-01, `docs/06-limits.md`); the kind is one match
 arm.
 
-### D-7135 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+### D-7139 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
 
 The number is the next one after the block D-7130..D-7134 that IA-16
-recorded (amendment A6); renumber at landing if it is taken.
+recorded (amendment A6); renumber at landing if it is taken. It was taken:
+LEDGER-1023 recorded D-7135..D-7138 on `feat/db-fix` first, so this entry,
+written as D-7135, is D-7139 from R4-28 repair 3 on.
 
 1. **The defect.** D-6894 made the first-listed index the only place
    `fnowork::futures_plan` learns which contracts exist and from which day,
@@ -81245,3 +81247,68 @@ recorded (amendment A6); renumber at landing if it is taken.
    workers (`off_the_workers`), since they take a blocking flock, fsync and
    parse the dump.
 8. **Proof.** `docs/04-invariants.md` R428-12 and R428-13 name the tests.
+
+### D-7140 — R4-28 repair 3: every incomplete snapshot entry is named by every refresh that finds it; a token is never resolved past its own expiry; a future-dated newest snapshot is refused — 2026-10-23
+
+The number follows D-7139 (renumbered from D-7135 above); renumber at
+landing if it is taken.
+
+1. **The defect.** A snapshot write cut by a kill leaves a body with no
+   receipt (or a receipt cut before its rename). `Catalog::read` listed it
+   as incomplete and nothing read it, which kept the data path safe, but
+   `Catalog::incomplete()` had no caller outside the tests: `snapshot()`
+   read the catalog under the writers' lock and dropped the list, and
+   neither `Snapshotted`, its `/masters/refresh` JSON nor the
+   `pull.masters.snapshot` event had a field for it. The next refresh
+   stepped past the cut ordinal to `_2` and named nothing, so no log, event,
+   outcome or page could show that a day's snapshot was cut, or why it was
+   `_2` (`state/fix/round2/verify-R4-28-r3.json`; the second agent's probe
+   also SIGKILLed a real-size writer 19 times and the next refresh named
+   none of the 12 entries left). That is `CLAUDE.md` §4's banned fallback
+   that hides a failure, and operator rule 3.
+2. **The rule.** The catalog lists each entry as kind, stamp, file and why.
+   `write_snapshot` returns the outcome with its kind's entries, from the
+   one listing it already reads under the lock, so the ordinal and the names
+   can never disagree. The landing hook carries them into `Snapshotted` and
+   the refresh outcome (`snapshot.incomplete`: `held`, `named` newest first,
+   `unnamed`, `refusal`), and emits one Warn `pull.masters.snapshot` event
+   per entry (`an incomplete master snapshot entry is held and never read`,
+   with `entry`, `stamp`, `day`, `why` and `held`). A refused landing, which
+   writes nothing, lists the directory once and names them all the same. The
+   event of a new snapshot says which of the day's earlier ordinals it
+   stepped past. `snapshot()`, the convenience the tests and the bench call,
+   names them in `/logs` itself, so no caller can drop the list unseen. A
+   refusal past `MAX_ORDINAL` counts receipted snapshots and incomplete
+   entries apart. Every futures pull names the book's incomplete Kite
+   entries (`FuturesPlan::incomplete`, the "Incomplete master snapshots"
+   fact).
+3. **Bounded, never silent.** The code deletes nothing, so the residue stays
+   until someone moves it aside, and every refresh names it again. At most
+   `INCOMPLETE_NAMED` (64) entries are named per outcome, per refresh's
+   events and per plan, newest first; the rest are counted (`unnamed`, one
+   more Warn event, one more plan line). The listing is the one every write
+   already read (`docs/06-limits.md` L-R428-10).
+4. **`token_expired` (PREC-10, the r3 check's follow-up, reproduced on the
+   real dump: an October index future resolved on 2026-11-02, after its
+   2026-10-27 expiry).** `Book::token_on` answers `TokenOn::Expired` for a
+   row whose contract expired before the day, on every path that used to
+   resolve it, because the exchange flushes a token at expiry and reuses it.
+   The expiry day itself still resolves. `fnowork::futures_plan` checks
+   identity, not trading, so a contract the newest snapshot still lists
+   past its expiry is still asked. One existing assertion changed its
+   expected answer and became stronger:
+   `the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day`
+   asserted that a day past a January future's expiry resolved it; it now
+   asserts `token_expired` from the same governing stamp, and that the
+   expiry day itself resolves.
+5. **A future-dated newest snapshot is refused (the r3 check's A13).**
+   `newest_snapshot_day` takes the caller's `today` and refuses, by name, a
+   newest Kite snapshot dated after it. A snapshot is dated by the clock that
+   writes it, so one from the future means that clock jumped. Believing it
+   would make R4-23's `master_stale` call the master fresh until the calendar
+   caught up. Refusing every out-of-order write was not chosen:
+   `first_listed` deliberately takes a snapshot written out of order (its
+   own test), and it would not catch a clock that ran ahead.
+6. **Proof.** `docs/04-invariants.md` R428-14..16 name the tests. The
+   outcome-and-log test failed first on the unfixed tree (R4-28 r3
+   `before.log`).
