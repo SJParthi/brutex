@@ -10,6 +10,13 @@
 //! and passes with the bounded wait, except the ones that pin a bound's
 //! refusal, which pin what the wait must still refuse.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+
 use super::*;
 use pull::session::Day;
 use std::sync::{Arc, Barrier};

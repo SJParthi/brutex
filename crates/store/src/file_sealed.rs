@@ -39,6 +39,7 @@
 //! ([`BarFile::read_range`]): one read of the adjacent directory entries and
 //! one of the adjacent frames. None of these grows with the month.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -289,43 +290,95 @@ impl BarFile {
     /// L-SC-2: at most one frame a row); a raw month reads each through the
     /// verified cache.
     ///
+    /// GROUPED WITHOUT A SORT (BASE-GATE11, D-6623): one pass over the rows
+    /// refuses an uncommitted one and gives each row its frame's group, by one
+    /// probe of a map pre-sized for the rows; a count of each group and one
+    /// placement pass lay the rows out frame by frame. Every step is O(1) a
+    /// row, expected, where the sort it replaces was O(log r) a row; frames
+    /// are decoded in the order the page first meets them, which changes no
+    /// answer, since every bar goes to the place it was asked at. Measured by
+    /// `store::file::sealed_door_tests::read_rows_at_timing` (L-SC-2); the
+    /// order and the refusals by
+    /// `store::file::sealed_door_tests::a_scattered_page_is_answered_in_the_asked_order_by_both_forms`.
+    ///
     /// # Errors
     ///
-    /// [`StoreError::NotCommitted`] for a row at or past the commit counter,
-    /// before anything is read; a frame or record read's own refusal.
+    /// [`StoreError::NotCommitted`] for the first row, in the order asked, at
+    /// or past the commit counter, before anything is read; a frame or record
+    /// read's own refusal.
     pub fn read_rows_at(&self, rows: &[u64]) -> Result<Vec<Bar>, StoreError> {
         let n_valid = self.header.n_valid;
-        if let Some(&index) = rows.iter().find(|&&row| row >= n_valid) {
-            return Err(StoreError::NotCommitted { index, n_valid });
-        }
+        let uncommitted = |index: u64| StoreError::NotCommitted { index, n_valid };
         let Some(sealed) = self.sealed.as_ref() else {
+            for &row in rows {
+                if row >= n_valid {
+                    return Err(uncommitted(row));
+                }
+            }
             return rows.iter().map(|&row| self.read_record(row)).collect();
         };
         let per = u64::from(sealed.head().block_rows).max(1);
-        let mut order: Vec<(u64, usize)> = rows.iter().copied().zip(0..).collect();
-        order.sort_unstable();
+        // THE GROUPS, in the order the rows first meet their frames.
+        let mut group_of: HashMap<u64, usize> = HashMap::with_capacity(rows.len());
+        let mut blocks: Vec<u64> = Vec::with_capacity(rows.len());
+        let mut group: Vec<usize> = Vec::with_capacity(rows.len());
+        for &row in rows {
+            if row >= n_valid {
+                return Err(uncommitted(row));
+            }
+            let block = row / per;
+            let next = blocks.len();
+            let at = *group_of.entry(block).or_insert(next);
+            if at == next {
+                blocks.push(block);
+            }
+            group.push(at);
+        }
+        // THE PLACEMENT: `first[g]..first[g + 1]` of `placed` are the asked
+        // positions of group `g`'s rows.
+        let mut first = vec![0_usize; blocks.len() + 1];
+        for &at in &group {
+            if let Some(count) = first.get_mut(at + 1) {
+                *count += 1;
+            }
+        }
+        for at in 1..first.len() {
+            let before = first.get(at - 1).copied().unwrap_or(0);
+            if let Some(start) = first.get_mut(at) {
+                *start += before;
+            }
+        }
+        let mut next_slot = first.clone();
+        let mut placed = vec![0_usize; rows.len()];
+        for (asked, &at) in group.iter().enumerate() {
+            if let Some(slot) = next_slot.get_mut(at) {
+                if let Some(place) = placed.get_mut(*slot) {
+                    *place = asked;
+                }
+                *slot += 1;
+            }
+        }
         let mut out = vec![Bar::default(); rows.len()];
         let mut held = Vec::with_capacity(usize::from(sealed.head().block_rows));
-        let mut held_block = None;
-        for (row, at) in order {
-            let block = row / per;
-            if held_block != Some(block) {
-                held.clear();
-                sealed
-                    .read_block(block, &mut held)
-                    .map_err(|why| refusal(&self.bars_path, &why))?;
-                held_block = Some(block);
-            }
-            let found = usize::try_from(row - block * per)
-                .ok()
-                .and_then(|offset| held.get(offset))
-                .copied()
-                .ok_or(StoreError::NotCommitted {
-                    index: row,
-                    n_valid,
-                })?;
-            if let Some(slot) = out.get_mut(at) {
-                *slot = found;
+        for (at, &block) in blocks.iter().enumerate() {
+            held.clear();
+            sealed
+                .read_block(block, &mut held)
+                .map_err(|why| refusal(&self.bars_path, &why))?;
+            let from = first.get(at).copied().unwrap_or(0);
+            let to = first.get(at + 1).copied().unwrap_or(from);
+            for &asked in placed.get(from..to).unwrap_or_default() {
+                let Some(&row) = rows.get(asked) else {
+                    continue;
+                };
+                let found = usize::try_from(row - block * per)
+                    .ok()
+                    .and_then(|offset| held.get(offset))
+                    .copied()
+                    .ok_or_else(|| uncommitted(row))?;
+                if let Some(slot) = out.get_mut(asked) {
+                    *slot = found;
+                }
             }
         }
         Ok(out)

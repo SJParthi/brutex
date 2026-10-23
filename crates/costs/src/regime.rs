@@ -1,18 +1,33 @@
 //! The dated rate tables, the lookup, and the refusal rows.
 //!
-//! Four tables ship: securities transaction tax on options premium, the same
-//! tax on exercise, and the exchange transaction charge on each of the two
-//! venues. They share one lookup, because they are one shape.
+//! Five tables ship: securities transaction tax on options premium, the same
+//! tax on exercise, the exchange transaction charge on each of the two
+//! venues, and the NSE IPFT contribution. They share one lookup, because they
+//! are one shape.
+//!
+//! The IPFT table is the fifth since D-5100. It was a flat constant until NSE
+//! circular `FA73061` moved it on 2026-03-01: the transaction charge became
+//! ₹3,552.99 and the IPFT ₹0.01 per crore of premium, ₹3,553 in all, the same
+//! total as before. A [`BpsX100`] is one rupee per crore, so ₹3,552.99 cannot
+//! be written down. The 2026-03-01 rows therefore **fold** the two: the
+//! exchange-charge row carries ₹3,553 (₹3,552.99 + ₹0.01) and the IPFT row of
+//! the same date carries zero. The total is exact; the split between the two
+//! lines is the encoding's, not the circular's, and every source string and
+//! `docs/06-limits.md` §25 say so.
 //!
 //! # The refusal row
 //!
-//! Two of the four tables have a row that carries **no rate**. Before
+//! Three of the five tables have a row that carries **no rate**. Before
 //! 2024-10-01 the exchange transaction charge was a member
 //! monthly-turnover **slab ladder**; the circulars that fixed those slabs were
 //! identified by number and never officially retrieved, and a slab ladder has
 //! no honest flat per-trade equivalent anyway. So that window prices nothing.
 //! A date landing on it yields a [`Refusal`], and there is no argument, flag,
-//! environment variable or default that changes that.
+//! environment variable or default that changes that. The IPFT table's
+//! refusal row is the window before 2023-04-01, whose rate is known (₹0.01 per
+//! crore) but whose first day was never read; it is never reached by a priced
+//! round trip, because the exchange charge refuses every one of those days
+//! first.
 //!
 //! The predecessor made this state unrepresentable by convention — its row's
 //! rate field was `int | None` and its comment said *"the
@@ -325,6 +340,15 @@ const OCT_2024: TradeDay = boundary!(2024 - 10 - 1);
 /// The day the Finance Act 2026 rates take effect.
 const APR_2026: TradeDay = boundary!(2026 - 4 - 1);
 
+/// The day NSE circular `FA73061` takes effect: "The above revision will be
+/// applicable with effect from March 1, 2026." A Sunday; the first session
+/// it prices is 2026-03-02. D-5100.
+const MAR_2026: TradeDay = boundary!(2026 - 3 - 1);
+
+/// The day NSE circular `FA56129` set the options IPFT at ₹50 per crore of
+/// premium, the figure in force until `FA73061`. D-5100.
+const APR_2023: TradeDay = boundary!(2023 - 4 - 1);
+
 /// STT on options premium, sell side. Three regimes, all verified.
 const STT_OPTIONS: RegimeTable = RegimeTable {
     charge: "securities transaction tax (options sell premium)",
@@ -381,18 +405,39 @@ const STT_EXERCISE: RegimeTable = RegimeTable {
 // Exchange transaction charge — premium, both sides
 // ---------------------------------------------------------------------------
 
-/// The NSE exchange transaction charge on options premium, from 2024-10-01.
+/// The NSE exchange transaction charge on options premium, from 2024-10-01
+/// **to 2026-02-28**.
 ///
 /// 0.03503%, ₹3,503 per crore, both sides. NSE circular `FA64232`, issued
 /// under the SEBI true-to-label circular `SEBI/HO/MRD/TPD-1/P/CIR/2024/92`;
-/// `COSTS_VERIFIED` §2 row 3 — VERIFIED.
+/// `COSTS_VERIFIED` §2 row 3 — VERIFIED. With the ₹50 IPFT of the same window
+/// ([`crate::rate::NSE_IPFT`]) the NSE outflow was ₹3,553 per crore.
 ///
-/// **UNVERIFIED and deliberately not encoded:** `FA73061` (dated 2026-02-27,
-/// effective 2026-03-01) reportedly re-splits this charge and the IPFT as
-/// ₹3,552 + ₹1 per crore, leaving the total unchanged at 0.03553%. That would
-/// bound this row's window. Until the circular body lands officially, the
-/// 3,503 + 50 split stands. `MIGRATION.md` #1524 follow-up (i).
+/// The window ends on 2026-02-28. This note used to call `FA73061` UNVERIFIED
+/// and quote a split of ₹3,552 + ₹1; the circular was read on 2026-10-13 and
+/// again on 2026-10-15, and its split is ₹3,552.99 + ₹0.01 with the total
+/// unchanged. It is the next row of the table, and
+/// [`NSE_EXCHANGE_CHARGE_FA73061`] (D-5100).
 pub const NSE_EXCHANGE_CHARGE: BpsX100 = BpsX100::new(3_503);
+
+/// The NSE exchange transaction charge on options premium **from
+/// 2026-03-01**, with the IPFT folded in.
+///
+/// 0.03553%, ₹3,553 per crore of premium, both sides. NSE circular `FA73061`
+/// (`NSE/FA/73061`, dated 2026-02-27, effective 2026-03-01) sets the
+/// transaction charge at ₹3,552.99 and the IPFT contribution at ₹0.01 per
+/// crore — ₹3,553 in all, the same outflow as [`NSE_EXCHANGE_CHARGE`] plus its
+/// ₹50 IPFT. `docs/00-charter.md`, "NSE charge circulars", D-5100.
+///
+/// **Why ₹3,553 and not ₹3,552.99.** A [`BpsX100`] is one rupee per crore, so
+/// ₹3,552.99 and ₹0.01 cannot be written down. This figure is the two added,
+/// and the NSE IPFT row of the same date ([`ipft_rate`]) is zero: a fold
+/// forced by the encoding, never a claim that the IPFT is zero. Dhan's public
+/// calculator shows the same fold — `Exchange 5.08` and `IPFT 0.00` on a
+/// ₹14,300 premium turnover, 15 Oct 2026 (`dhan-golden-20261015.json`). The
+/// bound the fold puts on a separately-rounded IPFT line is in
+/// `docs/06-limits.md` §25.
+pub const NSE_EXCHANGE_CHARGE_FA73061: BpsX100 = BpsX100::new(3_553);
 
 /// The BSE exchange transaction charge on options premium, from 2024-10-01.
 ///
@@ -401,7 +446,14 @@ pub const NSE_EXCHANGE_CHARGE: BpsX100 = BpsX100::new(3_503);
 /// `COSTS_VERIFIED` §2 row 4 — VERIFIED.
 pub const BSE_EXCHANGE_CHARGE: BpsX100 = BpsX100::new(3_250);
 
-/// The exchange transaction charge on NSE. One verified row, and one refusal.
+/// The exchange transaction charge on NSE. One refusal, then two verified
+/// rows: `FA64232` from 2024-10-01 and `FA73061` from 2026-03-01.
+///
+/// Append-only (`CLAUDE.md` §3 rule 8, D-5100): the 2026-03-01 row was added
+/// in a slot that was empty, and the two rows before it are byte for byte what
+/// they were. That includes the 2024-10-01 row's note on `FA73061`, written
+/// before the circular was read; the row after it and D-5100 supersede the
+/// note, and nothing rewrites it.
 const NSE_EXCHANGE_CHARGE_TABLE: RegimeTable = RegimeTable {
     charge: "exchange transaction charge (options premium)",
     exchange: Some(Exchange::Nse),
@@ -425,7 +477,19 @@ const NSE_EXCHANGE_CHARGE_TABLE: RegimeTable = RegimeTable {
              charge and the IPFT as ₹3,552 + ₹1 per crore with the total unchanged) — UNVERIFIED, \
              NOT encoded, `MIGRATION.md` #1524 follow-up (i).",
         )),
-        None,
+        Some(RegimeRow::verified(
+            MAR_2026,
+            3_553,
+            "0.03553% — NSE circular `FA73061` (`NSE/FA/73061`, dated 2026-02-27): \"The above \
+             revision will be applicable with effect from March 1, 2026.\" Read 2026-10-13 and \
+             2026-10-15 (`docs/00-charter.md`, NSE charge circulars; D-5100). It sets the equity \
+             options transaction charge at ₹3,552.99 and the IPFT contribution at ₹0.01 per \
+             crore of premium each side, ₹3,553 in all, the same total as the 2024-10-01 row \
+             plus its ₹50 IPFT. ₹3,552.99 is below this encoding's one-rupee-per-crore \
+             resolution, so this row carries the two together and the NSE IPFT row of the same \
+             date is zero: a fold, never a claim that the IPFT is zero. Supersedes the FA73061 \
+             note in the row before, which predates the circular being read.",
+        )),
     ],
 };
 
@@ -458,6 +522,49 @@ const BSE_EXCHANGE_CHARGE_TABLE: RegimeTable = RegimeTable {
 };
 
 // ---------------------------------------------------------------------------
+// IPFT — Investor Protection Fund Trust contribution, premium, both sides
+// ---------------------------------------------------------------------------
+
+/// The NSE IPFT contribution on options premium. One refusal, then two
+/// verified rows: `FA56129` from 2023-04-01 and `FA73061` from 2026-03-01.
+///
+/// A flat constant ([`crate::rate::NSE_IPFT`], ₹50) until D-5100, which was
+/// right only for the window `FA56129` opened and `FA73061` closed. The table
+/// is the dated form of the same figure, and the rate a round trip is priced
+/// at ([`crate::trip::Rates::resolve`]).
+const NSE_IPFT_TABLE: RegimeTable = RegimeTable {
+    charge: "investor protection fund trust contribution (options premium)",
+    exchange: Some(Exchange::Nse),
+    anchor: RegimeRow::unverified(
+        TradeDay::MIN,
+        "UNVERIFIED — the NSE IPFT contribution on options premium before 2023-04-01. NSE \
+         circular `FA56129` (effective 2023-04-01, read 2026-10-13) gives ₹0.01 per crore as \
+         the figure it replaced, but the day that figure began was never read, so no rate is \
+         written for any part of this window (D-5100). No priced round trip reaches it: the \
+         exchange transaction charge refuses every day before 2024-10-01 first.",
+    ),
+    later: [
+        Some(RegimeRow::verified(
+            APR_2023,
+            50,
+            "0.00050% — ₹50 per crore of premium each side, NSE circular `FA56129` (effective \
+             2023-04-01), read 2026-10-13; `FA73061` states the same ₹50 as the IPFT it \
+             replaced on 2026-03-01 (`docs/00-charter.md`, NSE charge circulars; D-5100). The \
+             figure `costs::rate::NSE_IPFT` carried flat before D-5100.",
+        )),
+        Some(RegimeRow::verified(
+            MAR_2026,
+            0,
+            "ZERO BY THE FOLDING RULE, not because the contribution is zero. NSE circular \
+             `FA73061` (effective 2026-03-01) sets the IPFT at ₹0.01 per crore of premium each \
+             side. That is below this encoding's one-rupee-per-crore resolution, so it is carried \
+             inside the NSE exchange transaction charge row of the same date (₹3,552.99 + ₹0.01 \
+             = ₹3,553) and this line is zero. D-5100; `docs/06-limits.md` §25.",
+        )),
+    ],
+};
+
+// ---------------------------------------------------------------------------
 // COMPILE-TIME structural proof for every shipped table.
 //
 // These are not tests. A table that anchors later than TradeDay::MIN, whose
@@ -469,11 +576,22 @@ const _: () = assert!(STT_OPTIONS.is_shipping_shape());
 const _: () = assert!(STT_EXERCISE.is_shipping_shape());
 const _: () = assert!(NSE_EXCHANGE_CHARGE_TABLE.is_shipping_shape());
 const _: () = assert!(BSE_EXCHANGE_CHARGE_TABLE.is_shipping_shape());
+const _: () = assert!(NSE_IPFT_TABLE.is_shipping_shape());
 
 // The two exchange-charge tables must agree with the public constants a caller
 // reads directly. Same numbers, one source, checked by the compiler.
 const _: () = assert!(NSE_EXCHANGE_CHARGE.get() == 3_503);
 const _: () = assert!(BSE_EXCHANGE_CHARGE.get() == 3_250);
+const _: () = assert!(NSE_EXCHANGE_CHARGE_FA73061.get() == 3_553);
+const _: () = assert!(crate::rate::NSE_IPFT.get() == 50);
+
+// FA73061's own claim, checked by the compiler: the NSE outflow on options
+// premium is ₹3,553 per crore on both sides of 2026-03-01. Before it, the
+// transaction charge plus the ₹50 IPFT; from it, the folded row plus a zero
+// IPFT line. A row that broke the total would not compile. D-5100.
+const _: () = assert!(
+    NSE_EXCHANGE_CHARGE.get() + crate::rate::NSE_IPFT.get() == NSE_EXCHANGE_CHARGE_FA73061.get()
+);
 
 // ---------------------------------------------------------------------------
 // The public lookups
@@ -541,6 +659,10 @@ pub fn stt_exercise_rate(day: TradeDay) -> Result<BpsX100, Refusal> {
 /// let on = TradeDay::new(2024, 10, 1)?;
 /// assert_eq!(exchange_charge_rate(Exchange::Nse, on).map(|r| r.get()), Ok(3_503));
 ///
+/// // FA73061, from 2026-03-01: ₹3,552.99 + the ₹0.01 IPFT, folded (D-5100).
+/// let fa73061 = TradeDay::new(2026, 3, 1)?;
+/// assert_eq!(exchange_charge_rate(Exchange::Nse, fa73061).map(|r| r.get()), Ok(3_553));
+///
 /// let before = TradeDay::new(2024, 9, 30)?;
 /// let refused = exchange_charge_rate(Exchange::Nse, before)
 ///     .expect_err("the pre-boundary window has no verified rate");
@@ -561,6 +683,50 @@ pub fn exchange_charge_refusal_windows(
     exchange: Exchange,
 ) -> [Option<RefusalWindow>; MAX_REGIME_ROWS] {
     table_for(exchange).refusal_windows()
+}
+
+/// The IPFT contribution rate in force on `day` at `exchange`, on premium,
+/// both sides.
+///
+/// NSE is dated (D-5100): ₹50 per crore from 2023-04-01, and from 2026-03-01
+/// zero **by the folding rule** — `FA73061`'s ₹0.01 rides inside
+/// [`NSE_EXCHANGE_CHARGE_FA73061`]. Add this to [`exchange_charge_rate`] on the
+/// same day and the NSE total is ₹3,553 per crore on every day from
+/// 2024-10-01, which is the figure `FA73061` gives on both sides of its date.
+///
+/// BSE is the flat UNVERIFIED zero, [`crate::rate::BSE_IPFT`], on every day: no
+/// BSE circular moving it is recorded, so nothing about it changed.
+///
+/// # Errors
+///
+/// [`Refusal`] for an NSE day before 2023-04-01, whose figure is known but
+/// whose first day was never read. A priced round trip never reaches it: its
+/// exchange transaction charge refuses first.
+///
+/// # Examples
+///
+/// ```
+/// use brutex_core::instrument::Exchange;
+/// use costs::day::TradeDay;
+/// use costs::regime::{exchange_charge_rate, ipft_rate};
+///
+/// let before = TradeDay::new(2026, 2, 27)?;
+/// let after = TradeDay::new(2026, 3, 2)?;
+/// assert_eq!(ipft_rate(Exchange::Nse, before).map(|r| r.get()), Ok(50));
+/// assert_eq!(ipft_rate(Exchange::Nse, after).map(|r| r.get()), Ok(0));
+/// // The outflow FA73061 states, unchanged across its own date.
+/// let total = |on| -> Result<i64, costs::error::Refusal> {
+///     Ok(exchange_charge_rate(Exchange::Nse, on)?.get() + ipft_rate(Exchange::Nse, on)?.get())
+/// };
+/// assert_eq!(total(before), Ok(3_553));
+/// assert_eq!(total(after), Ok(3_553));
+/// # Ok::<(), costs::error::CostError>(())
+/// ```
+pub fn ipft_rate(exchange: Exchange, day: TradeDay) -> Result<BpsX100, Refusal> {
+    match exchange {
+        Exchange::Nse => NSE_IPFT_TABLE.rate_on(day),
+        Exchange::Bse => Ok(crate::rate::BSE_IPFT),
+    }
 }
 
 /// The exchange-charge table for a venue.
@@ -600,8 +766,12 @@ mod tests {
         // something the const constructor rejected and silently anchored.
         assert_eq!(OCT_2024, day(2024, 10, 1));
         assert_eq!(APR_2026, day(2026, 4, 1));
+        assert_eq!(MAR_2026, day(2026, 3, 1));
+        assert_eq!(APR_2023, day(2023, 4, 1));
         assert_ne!(OCT_2024, TradeDay::MIN);
         assert_ne!(APR_2026, TradeDay::MIN);
+        assert_ne!(MAR_2026, TradeDay::MIN);
+        assert_ne!(APR_2023, TradeDay::MIN);
     }
 
     /// p6num-2, D-2666: with two unverified rows abutting, a refusal and its
@@ -674,7 +844,10 @@ mod tests {
 
     #[test]
     fn the_exchange_charge_prices_the_boundary_and_refuses_the_day_before_it() {
-        for (exchange, want) in [(Exchange::Nse, 3_503), (Exchange::Bse, 3_250)] {
+        // NSE moves once more, on 2026-03-01 (FA73061, D-5100); BSE does not.
+        for (exchange, want, latest) in
+            [(Exchange::Nse, 3_503, 3_553), (Exchange::Bse, 3_250, 3_250)]
+        {
             assert_eq!(
                 rate_of(exchange_charge_rate(exchange, day(2024, 10, 1))),
                 want,
@@ -682,7 +855,7 @@ mod tests {
             );
             assert_eq!(
                 rate_of(exchange_charge_rate(exchange, TradeDay::MAX)),
-                want,
+                latest,
                 "{exchange:?} still, decades later"
             );
             for refused in [day(2024, 9, 30), day(2020, 6, 1), TradeDay::MIN] {
@@ -749,7 +922,11 @@ mod tests {
         // The observable form of "unrepresentable": the anchor row of both
         // exchange tables matches a variant with no payload, and there is no
         // accessor, no unwrap and no default that yields a BpsX100 from it.
-        for table in [&NSE_EXCHANGE_CHARGE_TABLE, &BSE_EXCHANGE_CHARGE_TABLE] {
+        for table in [
+            &NSE_EXCHANGE_CHARGE_TABLE,
+            &BSE_EXCHANGE_CHARGE_TABLE,
+            &NSE_IPFT_TABLE,
+        ] {
             assert_eq!(table.anchor.rate, Rate::Unverified);
             assert!(table.rate_on(TradeDay::MIN).is_err());
         }
@@ -771,6 +948,7 @@ mod tests {
             &STT_EXERCISE,
             &NSE_EXCHANGE_CHARGE_TABLE,
             &BSE_EXCHANGE_CHARGE_TABLE,
+            &NSE_IPFT_TABLE,
         ] {
             assert!(table.is_shipping_shape(), "{} is malformed", table.charge);
             assert!(table.anchor_covers_all_days());
@@ -783,8 +961,9 @@ mod tests {
         assert_eq!(MAX_REGIME_ROWS, 3);
         assert_eq!(STT_OPTIONS.rows().count(), 3);
         assert_eq!(STT_EXERCISE.rows().count(), 2);
-        assert_eq!(NSE_EXCHANGE_CHARGE_TABLE.rows().count(), 2);
+        assert_eq!(NSE_EXCHANGE_CHARGE_TABLE.rows().count(), 3);
         assert_eq!(BSE_EXCHANGE_CHARGE_TABLE.rows().count(), 2);
+        assert_eq!(NSE_IPFT_TABLE.rows().count(), 3);
     }
 
     #[test]
@@ -948,6 +1127,7 @@ mod tests {
             &STT_EXERCISE,
             &NSE_EXCHANGE_CHARGE_TABLE,
             &BSE_EXCHANGE_CHARGE_TABLE,
+            &NSE_IPFT_TABLE,
         ];
         let mut checked = 0u32;
         for today in every_representable_day() {
@@ -972,7 +1152,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 40_542 * 4, "the whole domain, four tables");
+        assert_eq!(checked, 40_542 * 5, "the whole domain, five tables");
     }
 
     #[test]
@@ -1013,6 +1193,181 @@ mod tests {
             assert_eq!(refused, 12_692);
             assert_eq!(priced, 47_846 - 19_997 + 1, "{exchange:?} prices the rest");
             assert_eq!(refused + priced, 40_542);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // NSE circular FA73061, effective 2026-03-01 (CHG-0, D-5100)
+    // -----------------------------------------------------------------------
+
+    /// The 2024-10-01 row's citation, byte for byte as it stood before D-5100.
+    /// Pinned in full because "never edit the old row" is only a claim until
+    /// something fails when the row is edited.
+    const FA64232_ROW_SOURCE: &str = "0.03503% — NSE circular `FA64232`, under SEBI \
+        true-to-label circular `SEBI/HO/MRD/TPD-1/P/CIR/2024/92`; `COSTS_VERIFIED` §2 row 3 \
+        — VERIFIED. NOTE: this window's end may be bounded by `FA73061` (effective \
+        2026-03-01, re-splitting the charge and the IPFT as ₹3,552 + ₹1 per crore with the \
+        total unchanged) — UNVERIFIED, NOT encoded, `MIGRATION.md` #1524 follow-up (i).";
+
+    #[test]
+    fn fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one()
+    {
+        // The four days the change turns on: the last Friday and the last day
+        // of the old window, the boundary (a Sunday, inclusive like every
+        // boundary here), and the first session after it.
+        for (on, exchange, ipft) in [
+            (day(2026, 2, 27), 3_503, 50),
+            (day(2026, 2, 28), 3_503, 50),
+            (day(2026, 3, 1), 3_553, 0),
+            (day(2026, 3, 2), 3_553, 0),
+        ] {
+            assert_eq!(
+                rate_of(exchange_charge_rate(Exchange::Nse, on)),
+                exchange,
+                "NSE exchange charge on {on}"
+            );
+            assert_eq!(
+                rate_of(ipft_rate(Exchange::Nse, on)),
+                ipft,
+                "NSE IPFT on {on}"
+            );
+            // The outflow FA73061 states on both sides of its own date.
+            assert_eq!(exchange + ipft, 3_553, "NSE outflow on {on}");
+            // No BSE circular is recorded, so BSE does not move.
+            assert_eq!(rate_of(exchange_charge_rate(Exchange::Bse, on)), 3_250);
+            assert_eq!(rate_of(ipft_rate(Exchange::Bse, on)), 0);
+        }
+        // The public constants are the rows, not a second copy of them.
+        assert_eq!(
+            exchange_charge_rate(Exchange::Nse, day(2026, 2, 28)),
+            Ok(NSE_EXCHANGE_CHARGE)
+        );
+        assert_eq!(
+            exchange_charge_rate(Exchange::Nse, MAR_2026),
+            Ok(NSE_EXCHANGE_CHARGE_FA73061)
+        );
+        assert_eq!(
+            ipft_rate(Exchange::Nse, day(2026, 2, 28)),
+            Ok(crate::rate::NSE_IPFT)
+        );
+        assert_eq!(
+            ipft_rate(Exchange::Bse, TradeDay::MAX),
+            Ok(crate::rate::BSE_IPFT)
+        );
+        assert_eq!(NSE_EXCHANGE_CHARGE_FA73061.to_string(), "0.03553%");
+        assert_eq!(NSE_EXCHANGE_CHARGE.to_string(), "0.03503%");
+    }
+
+    #[test]
+    fn the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it() {
+        let rows: Vec<&RegimeRow> = NSE_EXCHANGE_CHARGE_TABLE.rows().collect();
+        assert_eq!(rows.len(), 3, "a refusal, FA64232, FA73061");
+
+        // The refusal anchor and the FA64232 row are what they were.
+        assert_eq!(rows[0].start, TradeDay::MIN);
+        assert_eq!(rows[0].rate, Rate::Unverified);
+        assert!(rows[0].source.contains("NSE/FA/46730"));
+        assert_eq!(
+            *rows[1],
+            RegimeRow::verified(OCT_2024, 3_503, FA64232_ROW_SOURCE),
+            "the 2024-10-01 row must not be edited: append-only, CLAUDE.md section 3 rule 8"
+        );
+        assert_eq!(rows[1].source.len(), 378);
+
+        // The FA73061 row is appended, starts on its circular's date, and
+        // carries the citation and the folding rule it rests on.
+        assert_eq!(rows[2].start, MAR_2026);
+        assert_eq!(rows[2].rate, Rate::Verified(BpsX100::new(3_553)));
+        for token in [
+            "FA73061",
+            "NSE/FA/73061",
+            "dated 2026-02-27",
+            "March 1, 2026",
+            "₹3,552.99",
+            "₹0.01",
+            "₹3,553",
+            "fold",
+            "D-5100",
+        ] {
+            assert!(
+                rows[2].source.contains(token),
+                "the FA73061 row must name {token}"
+            );
+        }
+        assert!(rows[1].start.before(rows[2].start));
+    }
+
+    #[test]
+    fn the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061() {
+        // The whole domain, both tables, as histograms: an unshipped rate on
+        // any day is a failed comparison rather than a value folded into a
+        // neighbouring bucket. Ordinals are days since 1970-01-01:
+        // 1990-01-01 = 7,305, 2023-04-01 = 19,448, 2024-10-01 = 19,997,
+        // 2026-03-01 = 20,513, 2100-12-31 = 47,846.
+        let mut exchange_days: BTreeMap<Option<i64>, u32> = BTreeMap::new();
+        let mut ipft_days: BTreeMap<Option<i64>, u32> = BTreeMap::new();
+        let mut priced = 0u32;
+        for today in every_representable_day() {
+            let exchange = exchange_charge_rate(Exchange::Nse, today)
+                .ok()
+                .map(BpsX100::get);
+            let ipft = ipft_rate(Exchange::Nse, today).ok().map(BpsX100::get);
+            *exchange_days.entry(exchange).or_default() += 1;
+            *ipft_days.entry(ipft).or_default() += 1;
+            if let (Some(exchange), Some(ipft)) = (exchange, ipft) {
+                assert_eq!(exchange + ipft, 3_553, "NSE outflow on {today}");
+                priced += 1;
+            }
+        }
+        assert_eq!(
+            exchange_days,
+            BTreeMap::from([
+                (None, 19_997 - 7_305),
+                (Some(3_503), 20_513 - 19_997),
+                (Some(3_553), 47_846 - 20_513 + 1),
+            ])
+        );
+        assert_eq!(
+            ipft_days,
+            BTreeMap::from([
+                (None, 19_448 - 7_305),
+                (Some(50), 20_513 - 19_448),
+                (Some(0), 47_846 - 20_513 + 1),
+            ])
+        );
+        // Every day the exchange charge prices, the IPFT prices too.
+        assert_eq!(priced, 47_846 - 19_997 + 1);
+    }
+
+    #[test]
+    fn the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first() {
+        let refusal = ipft_rate(Exchange::Nse, day(2023, 3, 31)).expect_err("before FA56129");
+        assert_eq!(refusal.on(), day(2023, 3, 31));
+        assert_eq!(refusal.exchange(), Some(Exchange::Nse));
+        assert_eq!(refusal.window_start(), TradeDay::MIN);
+        assert_eq!(refusal.verified_from(), Some(APR_2023));
+        assert_eq!(
+            refusal.charge(),
+            "investor protection fund trust contribution (options premium)"
+        );
+        for token in ["UNVERIFIED", "FA56129", "₹0.01", "never read"] {
+            assert!(
+                refusal.source().contains(token),
+                "the refusal must name {token}"
+            );
+        }
+        assert_eq!(rate_of(ipft_rate(Exchange::Nse, APR_2023)), 50);
+        // The window it refuses lies wholly inside the exchange charge's own
+        // refusal window, which `trip::Rates::resolve` checks first: no priced
+        // round trip can be the one that meets this refusal.
+        assert!(APR_2023.before(OCT_2024));
+        for asked in [TradeDay::MIN, day(2020, 6, 1), day(2023, 3, 31)] {
+            assert!(ipft_rate(Exchange::Nse, asked).is_err());
+            assert!(exchange_charge_rate(Exchange::Nse, asked).is_err());
+        }
+        // BSE carries its flat UNVERIFIED zero on every day, refusing none.
+        for asked in [TradeDay::MIN, day(2023, 3, 31), MAR_2026, TradeDay::MAX] {
+            assert_eq!(rate_of(ipft_rate(Exchange::Bse, asked)), 0);
         }
     }
 }

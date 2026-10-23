@@ -52,6 +52,26 @@ use crate::session::Day;
 /// adds three zips a day, so 100,000 is decades of them.
 pub const DAYZIPS_WALK_CAP: usize = 100_000;
 
+/// The days a filed name can carry: [`named`] files a day only inside the
+/// calendar's sourced span, `SOURCED_FIRST_DAY..=SOURCED_LAST_DAY` (any other
+/// day is `DayKind::Unmeasured` there, so `day_zip_name_invalid`), and that
+/// span is 3,287 days (2018-01-01 to 2026-12-31). The assertion below fails
+/// the build the day the span moves, so this bound is never stale.
+const SOURCED_SPAN_DAYS: usize = 3_287;
+
+// THE LITERAL AND AN ASSERTION, NO CAST (the calendar's own `DAYS` pattern):
+// an `as usize` of the span would be a sign-losing cast on a path that never
+// needs one.
+const _: () =
+    assert!(crate::calendar::SOURCED_LAST_DAY - crate::calendar::SOURCED_FIRST_DAY + 1 == 3_287);
+
+/// The most keys a walk can file in its day table: one a kind a day of the
+/// sourced span, 3 x 3,287 = 9,861 (BASE-GATE11, D-6624). The walk sizes the
+/// table ONCE, before its first entry, for the smaller of this and its
+/// entry cap (a key is at least one entry), so no insert rehashes (docs/07
+/// law 2) and the table's room never depends on what the root holds.
+pub const DAYZIPS_KEYS_MAX: usize = LooseKind::ALL.len() * SOURCED_SPAN_DAYS;
+
 /// How many misfiled or invalid names the census names before it only
 /// counts (D-4817: ≤ 16 named per reason).
 pub const DAYZIPS_NAMED: usize = 16;
@@ -239,7 +259,10 @@ impl DayZips {
     /// than [`DAYZIPS_WALK_CAP`], so a test can reach the cap.
     pub(crate) fn open_capped(root: &Path, cap: usize) -> Result<Self, CmRefusal> {
         let unavailable = |why: std::io::Error| CmRefusal::ArchiveUnavailable { kind: why.kind() };
-        let mut days: HashMap<(LooseKind, Day), Copies> = HashMap::new();
+        // SIZED ONCE (D-6624): every key a walk of at most `cap` entries can
+        // file, so the table never grows inside the walk.
+        let mut days: HashMap<(LooseKind, Day), Copies> =
+            HashMap::with_capacity(cap.min(DAYZIPS_KEYS_MAX));
         let mut census = DayZipsCensus::default();
         let mut stack = vec![(root.to_path_buf(), String::new())];
         let mut visited = 0_usize;

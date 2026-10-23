@@ -1416,7 +1416,15 @@ fn copied_months(
     out: &Plan,
     held: &HashMap<(Symbol, Contract), &Stored>,
 ) -> HashSet<(Symbol, Contract, YearMonth)> {
-    let mut copied: HashSet<(Symbol, Contract, YearMonth)> = HashSet::new();
+    // At most one entry a moving key's month: sized once by those months, so
+    // an insert never rehashes (docs/07 law 2; BASE-GATE11, D-6621).
+    let bound: usize = out
+        .moves
+        .iter()
+        .filter_map(|one| held.get(&(one.underlying, one.from)))
+        .map(|source| source.months.len())
+        .fold(0, usize::saturating_add);
+    let mut copied: HashSet<(Symbol, Contract, YearMonth)> = HashSet::with_capacity(bound);
     for one in &out.moves {
         let (Some(source), Some(target)) = (
             held.get(&(one.underlying, one.from)),

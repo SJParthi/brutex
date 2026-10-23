@@ -2,7 +2,9 @@
 //!
 //! A rate that does not change with the trade date lives here. A rate that
 //! does lives in [`crate::regime`], because a dated rate needs a table and a
-//! refusal row and a flat one does not.
+//! refusal row and a flat one does not. The NSE IPFT moved there in D-5100,
+//! when NSE circular `FA73061` changed it on 2026-03-01; [`NSE_IPFT`] stays
+//! here as the figure of one of that table's rows.
 //!
 //! Every figure in this module was carried across from the predecessor
 //! repository's `brutex/costs/constants.py`, which annotates each with its
@@ -18,7 +20,6 @@
 
 use std::fmt;
 
-use brutex_core::instrument::Exchange;
 use brutex_core::price::Paisa;
 
 /// The divisor that turns a [`BpsX100`] and a notional into a charge.
@@ -36,6 +37,7 @@ use brutex_core::price::Paisa;
 /// |---|---|---|
 /// | `10` | 0.0001% | ₹10 |
 /// | `3_503` | 0.03503% | ₹3,503 |
+/// | `3_553` | 0.03553% | ₹3,553 |
 /// | `10_000` | 0.10% | ₹10,000 |
 /// | `1_800_000` | 18% | ₹18,00,000 |
 ///
@@ -152,18 +154,23 @@ pub const SEBI_TURNOVER_FEE: BpsX100 = BpsX100::new(10);
 // IPFT — Investor Protection Fund Trust
 // ---------------------------------------------------------------------------
 
-/// NSE IPFT: 0.0005%, ₹50 per crore, on premium both sides.
+/// NSE IPFT: 0.0005%, ₹50 per crore, on premium both sides — **from
+/// 2023-04-01 to 2026-02-28 only**.
 ///
-/// Source: `COSTS_VERIFIED` §5. **The circular citation is `UNVERIFIED`.**
-/// This line used to cite `NSE/FA/56129`, but that circular covers 2023-04 to
-/// 2024-03 and was never retrieved (`docs/06-limits.md`, "The whole
-/// pre-2024-10-01 exchange transaction charge is unknown"), so it cannot be
-/// the source of a figure in force from 2024-10-01. D-1779.
+/// This was a flat figure applied to every day. Since D-5100 it is the figure
+/// of one row of the dated NSE IPFT table, and the rate a round trip is
+/// priced at is that table's, through [`crate::regime::ipft_rate`]:
 ///
-/// See the note on [`crate::regime::NSE_EXCHANGE_CHARGE`] about `FA73061`,
-/// which reportedly re-splits the transaction charge and this figure while
-/// leaving their total unchanged. It is UNVERIFIED and deliberately not
-/// encoded.
+/// | Window | IPFT per crore of premium | Source |
+/// |---|---|---|
+/// | before 2023-04-01 | refused: ₹0.01, first day never read | `FA56129` |
+/// | 2023-04-01 to 2026-02-28 | ₹50 (this constant) | `FA56129`, `FA73061` |
+/// | from 2026-03-01 | zero line; `FA73061`'s ₹0.01 is folded into the exchange charge | `FA73061` |
+///
+/// Both circulars were read on 2026-10-13 (`docs/00-charter.md`, NSE charge
+/// circulars). Before that this line called the citation `UNVERIFIED`
+/// (D-1779), because `FA56129` had never been retrieved; it has now, and it
+/// states ₹50 from 2023-04-01.
 pub const NSE_IPFT: BpsX100 = BpsX100::new(50);
 
 /// BSE IPFT: taken as zero — and **the zero is `UNVERIFIED`**.
@@ -180,14 +187,10 @@ pub const NSE_IPFT: BpsX100 = BpsX100::new(50);
 /// and flags the figure, and so does this. Recorded in `docs/06-limits.md`.
 pub const BSE_IPFT: BpsX100 = BpsX100::ZERO;
 
-/// The IPFT rate for a venue.
-#[must_use]
-pub const fn ipft(exchange: Exchange) -> BpsX100 {
-    match exchange {
-        Exchange::Nse => NSE_IPFT,
-        Exchange::Bse => BSE_IPFT,
-    }
-}
+// There is no undated `ipft(exchange)` any more (D-5100). It returned ₹50 for
+// NSE on every day, which beside the 2026-03-01 exchange-charge row would have
+// charged ₹3,603 per crore where `FA73061` says ₹3,553. The dated lookup is
+// `crate::regime::ipft_rate`.
 
 // ---------------------------------------------------------------------------
 // Stamp duty — buy side only
@@ -265,6 +268,8 @@ pub const TICK: Paisa = Paisa::from_raw(5);
 mod tests {
     use super::*;
 
+    use brutex_core::instrument::Exchange;
+
     /// One crore rupees, in paisa. The unit every circular quotes in.
     const ONE_CRORE_PAISA: i64 = 10_000_000 * 100;
 
@@ -300,6 +305,9 @@ mod tests {
             (BSE_IPFT, 0),
             (STAMP_DUTY_BUY_SIDE, 300),
             (GST_ON_FEE_BASE, 1_800_000),
+            // The two NSE exchange-charge rows the scale table above quotes.
+            (crate::regime::NSE_EXCHANGE_CHARGE, 3_503),
+            (crate::regime::NSE_EXCHANGE_CHARGE_FA73061, 3_553),
         ] {
             assert_eq!(
                 charge_paisa(ONE_CRORE_PAISA, rate),
@@ -350,16 +358,24 @@ mod tests {
 
     #[test]
     fn ipft_is_the_nse_figure_and_the_bse_zero_is_the_unverified_one() {
-        assert_eq!(ipft(Exchange::Nse), NSE_IPFT);
-        assert_eq!(ipft(Exchange::Nse).get(), 50);
-        assert_eq!(ipft(Exchange::Bse), BSE_IPFT);
-        assert_eq!(ipft(Exchange::Bse).get(), 0);
+        // The figures of the two constants. Which day each applies to is the
+        // dated table's business (`crate::regime::ipft_rate`, D-5100).
+        assert_eq!(NSE_IPFT.get(), 50);
+        assert_eq!(BSE_IPFT.get(), 0);
         // A measured zero and a refusal are different things and this is the
         // first: BSE IPFT returns a number, and the number's provenance is
         // marked UNVERIFIED in the constant's own documentation and in
         // docs/06-limits.md. It does not refuse, because the source does not.
-        assert_eq!(charge_paisa(ONE_CRORE_PAISA, ipft(Exchange::Bse)), 0);
-        assert_eq!(charge_paisa(ONE_CRORE_PAISA, ipft(Exchange::Nse)), 5_000);
+        assert_eq!(charge_paisa(ONE_CRORE_PAISA, BSE_IPFT), 0);
+        assert_eq!(charge_paisa(ONE_CRORE_PAISA, NSE_IPFT), 5_000);
+        for exchange in [Exchange::Nse, Exchange::Bse] {
+            let on = crate::day::TradeDay::new(2026, 2, 28).expect("a real date");
+            let want = match exchange {
+                Exchange::Nse => NSE_IPFT,
+                Exchange::Bse => BSE_IPFT,
+            };
+            assert_eq!(crate::regime::ipft_rate(exchange, on), Ok(want));
+        }
     }
 
     #[test]
