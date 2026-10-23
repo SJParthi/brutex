@@ -80625,6 +80625,159 @@ Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
 (IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
 L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
 
+### D-5100 — NSE options exchange charge: a new dated row from 2026-03-01 for circular `FA73061`, the IPFT dated beside it, and the 2024-10-01 row kept as it was (CHG-0) — 2026-10-16
+
+**What was wrong.** `costs::regime` priced the NSE options exchange
+transaction charge at ₹3,503 per crore of premium (0.03503%, `FA64232`) on
+every day from 2024-10-01, with a flat ₹50 IPFT (`costs::rate::NSE_IPFT`)
+beside it on every day. NSE circular `FA73061` (`NSE/FA/73061`, dated
+2026-02-27, "applicable with effect from March 1, 2026") sets the equity
+options transaction charge at ₹3,552.99 and the IPFT contribution at ₹0.01
+per crore of premium each side. Read on 2026-10-13
+(`state/fno-winners-20261013/sources-charges.json` rows E-03, E-04) and again
+on 2026-10-15 (`state/charges-deep-check-20261015.json`); Dhan's public
+calculator showed `Exchange 5.08` and `IPFT 0.00` for a ₹14,300 NIFTY call
+premium turnover on 2026-10-15 (`state/charges/dhan-golden-20261015.json`),
+where the old row's exchange line reads 5.01. The repository had called
+`FA73061` UNVERIFIED and quoted a split of ₹3,552 + ₹1 (`docs/06-limits.md`
+§25); that split was never the circular's.
+
+**What the circular did and did not change.** The total is the same on both
+sides of the date: ₹3,503 + ₹50 = ₹3,553 before, ₹3,552.99 + ₹0.01 = ₹3,553
+after. So a consumer that adds the two lines was already right and one that
+reads the lines separately was not. This is a correction to the split, not to
+the money.
+
+1. **A new dated row, appended.** `NSE_EXCHANGE_CHARGE_TABLE` gains a third
+   row, from 2026-03-01, at ₹3,553 (`NSE_EXCHANGE_CHARGE_FA73061`). It went
+   into the table's empty second slot (`MAX_LATER_ROWS` is unchanged at 2), so
+   the lookup is still a fixed two-iteration loop. The refusal anchor and the
+   `FA64232` row are byte for byte what they were — including the 2024-10-01
+   row's note calling `FA73061` UNVERIFIED, which the new row supersedes and
+   nothing rewrites (`CLAUDE.md` §3 rule 8). The row before 2026-03-01 keeps
+   0.03503%, and `NSE_EXCHANGE_CHARGE` keeps its name and its 3,503.
+2. **The fold, and why.** One `BpsX100` unit is one rupee per crore, so
+   ₹3,552.99 and ₹0.01 cannot be written down. Keeping the circular's split
+   exactly would mean a hundred-times finer rate scale: every rate literal,
+   `RATE_SCALE`, `money.rs` and the overflow tests would move, and the
+   `FA64232` row's literal with them. This change does not do that. The
+   2026-03-01 exchange row carries the two added (₹3,553) and the IPFT row of
+   the same date carries zero, which is the IPFT's ₹0.01 **folded into the
+   exchange line**, never a claim that the IPFT is zero. The existing rows
+   modelled the IPFT separately and still do; only the 2026-03-01 rows fold,
+   and both their source strings say so. Dhan's calculator presents the same
+   fold. A compile-time assertion holds the circular's own claim: the NSE
+   outflow is ₹3,553 per crore on both sides of the date.
+3. **The NSE IPFT becomes a dated table** (`regime::ipft_rate`), because a
+   flat ₹50 beside the ₹3,553 row would charge ₹3,603 where the circular says
+   ₹3,553. Rows: a refusal before 2023-04-01 (`FA56129` gives ₹0.01 as the
+   figure it replaced, but its first day was never read), ₹50 from 2023-04-01
+   (`FA56129`; `NSE_IPFT` keeps that figure), zero by the folding rule from
+   2026-03-01. The refusal is never met by a priced round trip:
+   `trip::Rates::resolve` checks the exchange charge first and it refuses
+   every day before 2024-10-01. The undated `rate::ipft(exchange)` is
+   removed: it returned ₹50 for NSE on every day, and nothing outside
+   `crates/costs` called it. BSE is unchanged — no BSE circular is recorded
+   for 2026, so ₹3,250 and the UNVERIFIED zero IPFT stand.
+4. **What the round trip now prices.** On the predecessor's four worked
+   examples, all dated 2026-05-15: Ex.1's lines are exchange 510 and IPFT 0
+   (were 502 and 8) and its total is ₹67.12 as before; Ex.2 and Ex.3 are one
+   paisa cheaper (₹137.50, ₹53.20), because one ceiling of the folded row
+   replaces two separate IPFT ceilings. A trip straddling 2026-03-01 prices
+   each leg at its own day's row (D-1535).
+5. **The live case.** The rate for 2026-10-15 reproduces Dhan's
+   `Exchange 5.08` when applied to the ₹14,300 turnover and rounded half-up
+   once; the circular's own split, each line rounded alone, gives the same
+   5.08 + 0.00. The round-trip calculator's own figure for that trade is
+   5.09, by design: it ceils each leg to the paisa (`docs/06-limits.md` §27),
+   ₹2.309 → 2.31 and ₹2.771 → 2.78. That is the deliberate adverse rounding,
+   not a rate error. The same rate reproduces the exchange line of every
+   option case captured from that calculator on 15 and 16 Oct 2026 (eleven,
+   `state/charges/dhan-golden-20261015.json` and `-20261016.json`, IPFT 0.00
+   on each); the 2024-10-01 row misses eight of them, reading 1.3% to 1.4% low.
+
+**Proof.** `costs::regime::tests::fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one`,
+`…::the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it`,
+`…::the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061`,
+`…::the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first`;
+`crates/costs/tests/fa73061.rs` (2026-02-27, 2026-03-01, 2026-03-02, a
+straddling trip, the live Dhan case, the eleven captured option cases,
+BSE unmoved, and an ignored timing measurement); the four worked examples in
+`costs::trip::tests`, updated with the old figures beside the new. Invariants CHG0-01 to CHG0-05; the fold's
+one-paisa bound is stated in `docs/06-limits.md` §25.
+
+**Not decided here.** A finer rate scale that would carry ₹3,552.99 and ₹0.01
+exactly is CHG-1's question (it needs ₹306.99 and ₹182.99 for cash and futures
+too). When it lands, the 2026-03-01 regime can be re-expressed exactly in a
+new table generation, and these rows stay as history.
+
+### D-5101 — CHG-0 completed on 22 Oct 2026: the extremes of the `FA73061` row proved, the undated `rate::ipft` stays removed, and the charge stack merged before it reads the one dated IPFT (CHG-0) — 2026-10-22
+
+**Why a second entry.** D-5100 was written on 16 Oct 2026 and its tests were
+never run before a usage limit cut the package off. Run on 21 Oct against
+`feat/db-fix` at `5ff4956cc`, one of them failed: `tests/adversarial.rs` had
+gained the `FA73061` constant as an eighth rate while still asserting
+`9 notionals x 7 rates = 63 cells`. The count now says 72 and the "every
+notional up to a crore is priced" floor 56. On 22 Oct the cloud charge stack
+(CLOUD-CHG1, `Merge CLOUD-CHG1:` at `7fe3b6cc8`) landed on `feat/db-fix`
+before this package, which is what items 2 and 3 are about. Nothing in
+D-5100's rates or rows changed.
+
+1. **The extremes, each a test** (`crates/costs/tests/fa73061.rs`,
+   invariants CHG0-06 to CHG0-08): every month and year boundary from
+   2023-03-31 to 2026-04-01 and the last representable day; the 2026-04-01
+   STT change, across which the exchange charge and IPFT hold while the STT
+   moves; dates that do not exist (2026-02-29 and the rest), refused before
+   any rate is looked up; the fold's bound from one paisa to `i64::MAX`, with
+   its one real under-run of the half-up split found at exactly ₹50 lakh a
+   leg (177,650 paisa folded against 177,651 split); and 14 threads asking
+   about the same 563 days at once, getting the single-threaded answers.
+2. **`rate::ipft(exchange)` stays removed, and the one caller the merge
+   brought reads the dated IPFT instead.** Nothing outside `crates/costs`
+   called it. CLOUD-CHG1's dated option card (`costs::schedule`,
+   `dated_option_card`) called it once, and beside the ₹3,553 row that line
+   would have charged 0.03603% from 2026-03-01; with the function gone it no
+   longer compiles, which is the point. It now reads
+   `crate::regime::ipft_rate(exchange, day)?`, the one dated IPFT authority
+   `trip::Rates::resolve` reads too, and the card's NSE and BSE source lines
+   name that function. The card is ₹3,503 + ₹50 to 2026-02-28 and ₹3,553 + a
+   folded zero from 2026-03-01: the same 0.03553% on every day from
+   2024-10-01, so every figure the card carries is unchanged and
+   `dated-regime/r2` keeps its pinned fingerprint
+   (`costs::schedule::tests::the_rate_set_versions_are_pinned_to_the_tables_they_name`
+   passes without a re-pin). The card's test now pins the rows it adds —
+   (3,503, 50) on 2026-02-28 and (3,553, 0) on 2026-03-01, 2026-10-15 and
+   today — where it had pinned 3,503 after 2026-03-01 with a message naming
+   this package as the one that moves it. Re-adding an undated `ipft` is
+   refused by this entry.
+3. **The CLOUD-CHG1 golden test runs unchanged.**
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+   was un-ignored by D-5131 on CLOUD-CHG1's own branch, so there is no
+   `#[ignore]` left to lift and `crates/costs/tests/dhan_calculator.rs` is not
+   edited. It prices the eleven live October option readings under the dated
+   selector and under today's table on 2026-10-15, 2026-10-16 and 2026-03-01.
+   With this change it passes on all three, as written: on the two October
+   dates every line and the total agree; on 2026-03-01 every line but STT
+   agrees and STT differs exactly by the 0.10% against 0.15% rate the test
+   asserts (the dated STT row of 2026-04-01 is a month later). Nothing was
+   forced green; the result is in the CHG-0 report
+   (`state/fix/round2/fix-CHG-0.json`).
+4. **Timing**, measured (not a gate) by the ignored
+   `the_dated_lookups_cost_the_same_on_every_row_measured`, in release,
+   2,000 timed batches of 1,000 calls each per figure, on 22 Oct 2026 on the
+   M4 Pro while other builds shared the machine. Each sample is a batch's
+   mean per call (one lookup is shorter than the clock's tick), so p99 and max
+   are of batch means, not of single calls. Across the five days measured
+   (a 2020 refusal, 2024-10-01, 2026-02-27, 2026-03-01, 2100-12-31):
+   `exchange_charge_rate` p50 2 ns, p99 2 to 8 ns, max 16 to 52 ns;
+   `ipft_rate` p50 2 to 3 ns, p99 2 to 4 ns, max 18 to 28 ns;
+   `Rates::resolve` p50 6 to 8 ns, p99 6 to 21 ns, max 17 to 54 ns; the dated
+   `RateCard::resolve` p50 9 to 15 ns, p99 14 to 19 ns, max 23 to 68 ns; one
+   `price` of a 2026-03-02 NIFTY round trip p50 54 ns, p99 63 ns, max 167 ns.
+   The same on the refused, the first and the last row: each lookup is the
+   fixed two-slot table walk it was, and the new IPFT table is one more of
+   the same shape, so nothing here scans.
+
 ### D-6891 — R3-19: a day's census publish reads one header region, not the whole list; a segment directory is never followed; the AG-05 follow-ups closed — 2026-10-21
 
 The number is the ledger head + 1 (amendment A6): this entry was written as

@@ -1232,11 +1232,27 @@ table.
    its own. The row's `source` string says so in full. (This said every such
    trade "is currently priced 25% too high", which the refusal above
    contradicts. D-1779.)
-2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) reportedly re-splits
-   the transaction charge and the IPFT as ₹3,552 + ₹1 per crore, leaving the
-   total unchanged at 0.03553%.** If true, the 3,503 + 50 split is wrong from
-   2026-03-01 onward while their **sum** stays right — so any consumer that adds
-   the two is unaffected and any consumer that reports them separately is not.
+2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) — no longer one of
+   the two: read on 13 and 15 Oct 2026 and encoded by D-5100.** Its split is
+   ₹3,552.99 + ₹0.01 per crore of premium (not the ₹3,552 + ₹1 this line
+   quoted), and the total is unchanged at 0.03553%. One `BpsX100` unit is one
+   rupee per crore, so the 2026-03-01 rows **fold** the two: the exchange-charge
+   row is ₹3,553 and the IPFT row of the same date is zero. Before 2026-03-01
+   the 3,503 + 50 split stands as it was. What the fold costs, stated as a
+   bound: the totals are exact, and a consumer that reports the two lines
+   separately sees the IPFT inside the exchange line (as Dhan's calculator
+   shows it). Against the per-leg ceiling of the two lines apart, the folded
+   line is at most one paisa per leg cheaper; against a half-up rounding of
+   each line apart it is never lower while a leg's premium is under ₹50 lakh
+   (the ₹0.01 per crore is then under half a paisa), and at or above ₹50 lakh
+   on one leg it can be **one paisa per leg below** it — the one place the
+   fold can under-run "never below the real charge" (§27). It does at exactly
+   ₹50 lakh a leg (both of the circular's lines land on a half paisa: 177,651
+   paisa against the folded 177,650), and both bounds are checked from one
+   paisa to `i64::MAX` by
+   `the_fold_costs_at_most_one_paisa_a_leg_and_under_50_lakh_is_never_below_the_split`
+   (D-5101). Whether the exchange rounds per leg at all is UNVERIFIED. A finer
+   rate scale that would hold ₹3,552.99 exactly is CHG-1's question.
 
 ### The name `bps_x100` is arithmetically wrong by a factor of ten
 
@@ -1962,7 +1978,9 @@ window — that part holds. But `costs::trip::charge_stack` is `pub` and takes
 either**. `BpsX100::new` is crate-private, but `regime::NSE_EXCHANGE_CHARGE` and
 `regime::BSE_EXCHANGE_CHARGE` are `pub const BpsX100`, `regime::stt_options_rate`
 is `pub` and returns `Ok` for every representable day, and `rate::ipft` is a
-`pub const fn`. So an external caller can assemble a `Rates` and price a trade
+`pub const fn` (removed by D-5100: the IPFT is dated now, `regime::ipft_rate`,
+and `rate::NSE_IPFT` and `rate::BSE_IPFT` are the `pub const` figures in its
+place). So an external caller can assemble a `Rates` and price a trade
 dated inside the refusal window at the 2024-verified exchange rate, with nothing
 refusing. That is the runtime escape hatch the predecessor's
 `DEC-ETC-REGIME-HISTORY-001` §9 forbids. **The public signatures above were read
@@ -20102,6 +20120,14 @@ citation is UNVERIFIED (D-1779); the dated card labels the NSE exchange line
 cited, as it did before this repair, on the strength of FA64232's row and that
 figure. CHG-0's branch reads `FA56129` for it; until that merges, the
 pre-2026-03-01 IPFT part is the predecessor's figure, not a circular read here.
+
+**Done by CHG-0 (D-5100, D-5101).** Both paragraphs above are history from
+the merge of `fix/db-CHG-0` on: the dated card reads
+`regime::ipft_rate(exchange, day)`, the regime holds `FA73061`'s ₹3,553 row and
+the folded zero IPFT from 2026-03-01, and the ₹50 before it is the 2023-04-01
+row of the dated IPFT table, cited to `FA56129` in `docs/00-charter.md`. The
+card's figures and the `dated-regime/r2` fingerprint did not change, and the
+October golden test and the trip-agreement test pass unchanged (CHG0-09).
 
 ### Dhan's calculator total: the page's last paisa is not reproduced
 
