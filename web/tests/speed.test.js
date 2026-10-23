@@ -1901,8 +1901,11 @@ test('a stop signals a group only while it is the browser\'s: a group that has g
  * entry from every page; `/stall` answers its headers and part of its body
  * and never ends, `/hang` never answers. `stop()` ends every connection.
  *
+ * `hangSources` never answers `/sources.json`; `onFirstPage` is called once,
+ * when the first page is asked for.
+ *
  * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean, bareDb?: boolean, fallback?: boolean,
- *   noEntry?: boolean, build?: string | null | ((path: string) => string)}} o
+ *   noEntry?: boolean, build?: string | null | ((path: string) => string), hangSources?: boolean, onFirstPage?: () => void}} o
  */
 async function browserStandIn(o) {
   const reporter = source('src/lib/page-report.js');
@@ -1963,6 +1966,7 @@ async function browserStandIn(o) {
   const dictionary = Object.fromEntries(Object.keys(pages).map((p, i) => [p, [i + 2]]));
   /** Every answer the stand-in holds open, ended by `stop()`. @type {import('node:http').ServerResponse[]} */
   const held = [];
+  const firstPage = { seen: false };
   /** @param {string} path */
   const stamp = (path) => (o.build === null ? {} : { 'x-brutex-build': typeof o.build === 'function' ? o.build(path) : (o.build ?? 'f'.repeat(40)) });
   const server = http.createServer((req, res) => {
@@ -1980,6 +1984,11 @@ async function browserStandIn(o) {
       return void held.push(res);
     }
     if (u.pathname === '/hang') return void held.push(res);
+    if (o.hangSources && u.pathname === '/sources.json') return void held.push(res);
+    if (o.onFirstPage && u.pathname in pages && !firstPage.seen) {
+      firstPage.seen = true;
+      o.onFirstPage();
+    }
     if (u.pathname === '/self/') return send(200, 'text/html; charset=utf-8', pages['/self']);
     if (u.pathname === '/lib/page-report.js') return send(200, 'text/javascript', reporter);
     if (u.pathname === '/lib/speed.js') return send(200, 'text/javascript', speedLib);
@@ -3013,4 +3022,125 @@ test('the sheet asks only its own server, asks a HEAD as a HEAD, says each page 
   assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--clients', '1,1e1,10']), /^Error: --clients names 10 twice/);
   assert.equal(sheet.parseArgs(['--base', 'http://h:1', '--max-answer-bytes', String(sheet.MAX_TEXT_BYTES)]).maxAnswerBytes, 64_000_000);
   assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--max-answer-bytes', '9007199254740991']), /^Error: --max-answer-bytes must be at most 64000000$/);
+});
+
+test('a load whose navigation the browser does not answer, or whose page stops answering once loaded, is not a load of the page: each said by name, and any other refusal thrown', async () => {
+  // The two ways loadOnce's bound can end a load besides its own timer,
+  // driven through a stand-in protocol and tab (repair 4).
+  const { CdpTimeout } = harness;
+  /** @param {Record<string, (params: any) => Promise<any>>} answers @param {{settle?: () => Promise<boolean>}} [o] */
+  const rig = (answers, o = {}) => {
+    /** @type {Set<(m: any) => void>} */
+    const listeners = new Set();
+    /** @type {string[]} */
+    const sent = [];
+    const cdp = /** @type {any} */ ({
+      on: (/** @type {(m: any) => void} */ f) => (listeners.add(f), () => listeners.delete(f)),
+      send: async (/** @type {string} */ method, /** @type {any} */ params) => {
+        sent.push(method);
+        const a = answers[method];
+        if (a === undefined) return {};
+        return a(params);
+      },
+      fire: (/** @type {any} */ m) => { for (const f of listeners) f(m); },
+      listeners,
+      sent
+    });
+    const tab = /** @type {any} */ ({
+      sessionId: 's',
+      doc: { status: 0, build: null },
+      frames: { drew: null },
+      reset() { this.doc.status = 0; },
+      seen: () => [{ method: 'GET', url: 'http://h:1/x', bytes: 7, status: 200, failed: null }],
+      settle: o.settle ?? (async () => true),
+      evaluate: async () => ({ fcp: 1, longest: 0 })
+    });
+    return { cdp, tab };
+  };
+  // The navigation itself is not answered within its bound.
+  const silent = rig({ 'Page.navigate': async () => { throw new CdpTimeout('the browser did not answer Page.navigate within 100 ms'); } });
+  const a = await harness.loadOnce(silent.tab, silent.cdp, 'http://h:1/x', 10, 100);
+  assert.deepEqual([a.ended, a.why, a.wire, a.fcp, a.drew], [false, 'the load did not end within 100 ms (no answer to its document)', 7, null, false]);
+  assert.ok(silent.cdp.sent.includes('Page.stopLoading'), 'what the tab is still loading is stopped');
+  assert.equal(silent.cdp.listeners.size, 0, 'the load-event listener is removed');
+  // Any other refusal of the navigation is the protocol's own, and is thrown.
+  const refused = rig({ 'Page.navigate': async () => { throw new Error('Cannot navigate to invalid URL (-32000)'); } });
+  await assert.rejects(harness.loadOnce(refused.tab, refused.cdp, 'nonsense', 10, 100), /^Error: Cannot navigate to invalid URL \(-32000\)$/);
+  // Loaded, then the page stops answering: its settle is not answered.
+  /** @param {() => Promise<boolean>} settle */
+  const loadedThen = (settle) => {
+    const r = rig({ 'Page.navigate': async () => { setTimeout(() => r.cdp.fire({ sessionId: 's', method: 'Page.loadEventFired' }), 5); return {}; } }, { settle });
+    return r;
+  };
+  const stuck = loadedThen(async () => { throw new CdpTimeout('the browser did not answer Runtime.evaluate within 3000 ms'); });
+  stuck.tab.doc.status = 200;
+  const b = await harness.loadOnce(stuck.tab, stuck.cdp, 'http://h:1/x', 10, 5_000);
+  assert.equal(b.ended, false);
+  assert.match(b.why, /^the page stopped answering \d+ ms after its load began: the browser did not answer Runtime\.evaluate within 3000 ms$/);
+  const broken = loadedThen(async () => { throw new TypeError('not a timeout'); });
+  await assert.rejects(harness.loadOnce(broken.tab, broken.cdp, 'http://h:1/x', 10, 5_000), /^TypeError: not a timeout$/);
+  // A load that ends is a load: its figures, ended and drawn as the tab said.
+  const fine = loadedThen(async () => true);
+  fine.tab.frames.drew = true;
+  const c = await harness.loadOnce(fine.tab, fine.cdp, 'http://h:1/x', 10, 5_000);
+  assert.deepEqual([c.ended, c.why, c.fcp, c.drew, c.wire], [true, '', 1, true, 7]);
+});
+
+test('a sort edge the server does not answer is NOT MEASURED by name, within the load bound', { timeout: 120_000 }, async () => {
+  const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
+  assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
+  const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+  const site = await browserStandIn({ hangSources: true });
+  try {
+    const t0 = performance.now();
+    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/speed', '--no-idle', '--no-report-check', '--settle-ms', '100', '--step-wait-ms', '200', '--load-wait-ms', '800', ...root]));
+    assert.ok(r.notes.some((n) => /^sort at the 20,000-row browser sort edge: NOT MEASURED — finding the sort edge: \/sources\.json\?exchange=NSE&segment=INDEX&symbol=NIFTY had no whole answer within 800 ms: /.test(n)), r.notes.join('\n'));
+    assert.ok(performance.now() - t0 < 90_000);
+  } finally {
+    site.stop();
+  }
+});
+
+test('a sheet that cannot be written at the end of a run is named on stderr, after the sheet is on stdout, with exit 2: the harness and the speed sheet', { timeout: 120_000 }, async () => {
+  if (process.getuid?.() === 0) return void assert.ok(true, 'permissions do not bind root: not run as root');
+  const { execFile } = await import('node:child_process');
+  const { chmodSync } = await import('node:fs');
+  /** @param {string} script @param {string[]} argv */
+  const run = (script, argv) => /** @type {Promise<{code: number, stdout: string, stderr: string}>} */ (new Promise((resolve) => execFile(process.execPath, [new URL(script, web).pathname, ...argv], (error, stdout, stderr) => resolve({ code: error ? Number(error.code) : 0, stdout, stderr }))));
+  // The harness: its output directory is made read-only once the browser asks for the page, after the start's check.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-late-'));
+  const site = await browserStandIn({ onFirstPage: () => chmodSync(dir, 0o500) });
+  try {
+    const ran = await run('ci/browser-harness.mjs', ['--base', site.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--out', join(dir, 'sheet.md')]);
+    assert.equal(ran.code, 2, ran.stderr);
+    assert.match(ran.stdout, /^# Browser harness — PASS/, 'the sheet is on stdout');
+    assert.match(ran.stderr, /^browser-harness: could not write .*sheet\.md whole: EACCES/);
+  } finally {
+    chmodSync(dir, 0o700);
+    site.stop();
+  }
+  // The speed sheet: the stand-in server makes the directory read-only when it is first asked.
+  const sheetDir = mkdtempSync(join(tmpdir(), 'r315-late-sheet-'));
+  let first = true;
+  const server = http.createServer((req, res) => {
+    if (first) {
+      first = false;
+      chmodSync(sheetDir, 0o500);
+    }
+    res.writeHead(503, { 'content-type': 'text/plain' });
+    res.end('down');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  try {
+    const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+    const ran = await run('ci/speed-sheet.mjs', ['--base', base, '--out', join(sheetDir, 'sheet.md')]);
+    assert.equal(ran.code, 2, ran.stderr);
+    assert.match(ran.stdout, /^# Speed sheet — FAIL[\s\S]*is not up/, 'the sheet is on stdout');
+    assert.match(ran.stderr, /^speed-sheet: could not write .*sheet\.md whole: EACCES/);
+    assert.doesNotMatch(ran.stderr, /at .*speed-sheet\.mjs/, 'no stack');
+  } finally {
+    chmodSync(sheetDir, 0o700);
+    server.close();
+  }
+  assert.equal(sheet.onOrigin('/x', 'not a base'), false, 'a base no URL reader reads holds no path');
 });
