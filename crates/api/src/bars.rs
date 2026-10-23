@@ -85,9 +85,15 @@ impl Cancel {
     /// Whether the client went away.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        self.0.as_ref().is_some_and(|flag| {
+            // A CANCELLATION THAT LANDS MID-LOOP, made deterministic: a test
+            // trips the flag at a look it chose, on its own thread.
+            #[cfg(test)]
+            if cancel_trip::tripped() {
+                return true;
+            }
+            flag.load(std::sync::atomic::Ordering::Acquire)
+        })
     }
 
     /// `Err("cancelled: …")` once the client went away.
@@ -2530,7 +2536,11 @@ fn scan(
                         changes.of_row(series_rules, row, bar).unwrap_or_else(|| {
                             let null = matches!(query.sort, SortKey::OpenInterest)
                                 && (oi_absent || bar.open_interest == OI_NULL);
-                            (query.sort.of(bar), null)
+                            // A NULL IS NEVER ORDERED AS A REAL NUMBER
+                            // (`SortKey::of`, D-5423): an index's or a share's
+                            // open interest is null whatever the vendor
+                            // stamped, and nulls go by time, then series.
+                            (if null { OI_NULL } else { query.sort.of(bar) }, null)
                         });
                     let candidate = Candidate {
                         value,
@@ -4356,3 +4366,718 @@ mod unknown_series_tests;
 #[cfg(test)]
 #[path = "bars_sealed_tests.rs"]
 mod sealed_tests;
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+mod cloud_mutant_tests {
+    use super::*;
+
+    /// **A PAGE THAT IS EVERY ROW, FROM THE FIRST, IS ONLY ORDERED.** At
+    /// offset zero there is nothing before the page to partition away, and
+    /// when the page is every row there is nothing after it: one ordering of
+    /// 100 already-ordered rows is 99 comparisons. A partition at either end
+    /// costs at least 99 more. Kills `page_of`'s `> with >=` on the offset
+    /// and `< with <=` on the limit, which each add that partition.
+    #[test]
+    fn a_page_of_every_row_from_the_first_is_only_ordered() {
+        let rows: Vec<u32> = (0..100).collect();
+        let mut comparisons = 0_usize;
+        let page = page_of(rows.clone(), 0, rows.len(), |a, b| {
+            comparisons += 1;
+            a.cmp(b)
+        });
+        assert_eq!(page, rows);
+        assert!(
+            comparisons < 2 * (rows.len() - 1),
+            "{comparisons} comparisons: the page was partitioned as well as ordered"
+        );
+    }
+
+    fn bar(ts_micros: i64, low: i64, high: i64, close: i64, volume: i64) -> Bar {
+        Bar {
+            ts_micros,
+            open: close,
+            high,
+            low,
+            close,
+            volume,
+            open_interest: OI_NULL,
+        }
+    }
+
+    /// **A FOLD MERGED UNDER A SERIES IS RENAMED TO THAT SERIES**: a month's
+    /// memoised extremes are folded once and merged into every request that
+    /// reads the month, each under its own place in the request. Kills
+    /// `delete field series` in `Extremes::merge`, which kept the memo's own
+    /// series index in every extreme.
+    #[test]
+    fn a_merged_fold_names_the_series_it_was_merged_under() {
+        let mut month = Extremes::default();
+        month.fold(&bar(1_000, 90, 110, 100, 7), 0, true);
+        let mut answer = Extremes::default();
+        answer.merge(&month, Some(3));
+        for extreme in [
+            answer.close_max,
+            answer.close_min,
+            answer.high_max,
+            answer.low_min,
+            answer.range_max,
+            answer.volume_max,
+        ] {
+            assert_eq!(extreme.map(|e| (e.series, e.t)), Some((3, 1_000)));
+        }
+        // Merged with no name, the fold keeps its own.
+        let mut kept = Extremes::default();
+        kept.merge(&month, None);
+        assert_eq!(kept.close_max.map(|e| e.series), Some(0));
+    }
+
+    /// **EVERY ORDER READS ITS OWN FIELD OF A BAR**, and the time of day is
+    /// the IST second. `SortKey::of` is read only by the time-of-day scan, so
+    /// no test asked the other arms.
+    #[test]
+    fn every_order_reads_its_own_field() {
+        let one = Bar {
+            ts_micros: 1_746_157_500_000_000,
+            open: 1,
+            high: 2,
+            low: 3,
+            close: 4,
+            volume: 5,
+            open_interest: 6,
+        };
+        assert_eq!(SortKey::Ts.of(&one), one.ts_micros);
+        assert_eq!(SortKey::Open.of(&one), 1);
+        assert_eq!(SortKey::High.of(&one), 2);
+        assert_eq!(SortKey::Low.of(&one), 3);
+        assert_eq!(SortKey::Close.of(&one), 4);
+        assert_eq!(SortKey::Volume.of(&one), 5);
+        assert_eq!(SortKey::OpenInterest.of(&one), 6);
+        // 2025-05-02 03:45 UTC is 09:15 IST, second 33,300 of the IST day.
+        assert_eq!(SortKey::TimeOfDay.of(&one), 33_300);
+    }
+
+    /// **A WINDOW THAT MET AN UNREADABLE RECORD SAYS SO ON THE RECORD, ONCE**,
+    /// naming the file. Kills `delete !` on the window's fault test, which
+    /// wrote the line only for a window that met none (and so never).
+    #[allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "a fixture that cannot be planted is a test that cannot run"
+    )]
+    #[test]
+    fn a_window_that_met_an_unreadable_record_says_so_once() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-cloud-window-fault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "TESTSEG",
+            symbol: "CLOUDWIN",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("CLOUDWIN") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let start = month.ist_bounds_micros().0 + 33_300 * 1_000_000;
+        let rows: Vec<Bar> = (0..5)
+            .map(|i| bar(start + i * 60_000_000, 90, 110, 100 + i, 1))
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&rows).expect("generated records");
+        drop(file);
+        let on_disk = path.to_path_buf(&root);
+        let mut bytes = std::fs::read(&on_disk).expect("the month");
+        let stamp = rows[2].ts_micros.to_le_bytes();
+        let at = bytes
+            .windows(8)
+            .rposition(|w| w == stamp)
+            .expect("the record's stamp is in the file");
+        bytes[at] ^= 0x01;
+        std::fs::write(&on_disk, &bytes).expect("damage the generated month");
+
+        let from = crate::emitted::mark();
+        let got = window(
+            &root,
+            &WindowQuery::single(
+                Vendor::Dhan,
+                SeriesKey::new("NSE", "TESTSEG", "CLOUDWIN", None),
+                Timeframe::MINUTE_1,
+                month,
+                month,
+                SortKey::Ts,
+                false,
+                0,
+                50,
+                false,
+            ),
+        )
+        .expect("the window answers");
+        assert!(got.faulted_records > 0, "{:?}", got.faults);
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "file", "cloud-window-fault"))
+                .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(mine.len(), 1, "one line for the request: {mine:?}");
+        assert!(crate::emitted::counts(
+            &mine[0],
+            "faults",
+            got.faulted_records
+        ));
+    }
+
+    /// One-minute bars of the 2025-05 NIFTY index on Dhan, in a scratch store
+    /// of this test's own: `rows` of them, a minute apart from the month's
+    /// first IST instant, every close its own number.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    fn index_month(tag: &str, rows: i64) -> (std::path::PathBuf, WindowQuery) {
+        let root = crate::scratch::path(&format!("cloud-bars-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let bars: Vec<Bar> = (0..rows)
+            .map(|i| bar(start + i * 60_000_000, 90 + i, 110 + i, 100 + i, 0))
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&bars).expect("generated records");
+        drop(file);
+        // NO SORT INDEX: the writer indexes a month of 1,024 bars or more,
+        // and an index run's summary answers the extremes with no row read.
+        let srt = path.to_path_buf(&root).with_extension("srt");
+        let _ = std::fs::remove_file(&srt);
+        assert!(!srt.exists(), "the month is left with no index");
+        let query = WindowQuery::single(
+            Vendor::Dhan,
+            SeriesKey::new("NSE", "INDEX", "NIFTY", None),
+            Timeframe::MINUTE_1,
+            month,
+            month,
+            SortKey::Ts,
+            false,
+            0,
+            10,
+            true,
+        );
+        (root, query)
+    }
+
+    /// Asks `query` again and again with a flag that reads "cancelled" from
+    /// one look later each time, until a request is answered. Every request
+    /// cut short must be the cancellation by name, and the first one answered
+    /// must be a page whose extremes were not cut short. Returns the looks
+    /// one whole request takes: the first count the flag outlasted.
+    #[allow(clippy::panic, reason = "a request that never ends must fail the test")]
+    fn looks_of(root: &std::path::Path, query: &WindowQuery) -> u64 {
+        let (cancel, guard) = Cancel::pair();
+        for looks in 0..256_u64 {
+            cancel_trip::arm(looks);
+            let got = window_cancellable(root, query, &cancel);
+            let left = cancel_trip::disarm();
+            match got {
+                Err(why) => assert!(why.starts_with("cancelled"), "look {looks}: {why}"),
+                Ok(window) => {
+                    assert!(
+                        window
+                            .extremes_why
+                            .as_deref()
+                            .is_none_or(|why| !why.contains("cancelled")),
+                        "look {looks}: a request whose client went away was answered as a \
+                         page with its extremes withheld: {:?}",
+                        window.extremes_why
+                    );
+                    assert_eq!(left, Some(0), "look {looks}: answered with looks to spare");
+                    guard.disarm();
+                    return looks;
+                }
+            }
+        }
+        panic!("one request took more than 256 looks at its flag");
+    }
+
+    /// **A CLIENT THAT GOES AWAY WHILE THE EXTREMES ARE FOLDED ENDS THE
+    /// REQUEST AS CANCELLED, NEVER AS A PAGE WITH ITS EXTREMES WITHHELD**
+    /// (DB-N15). The fold over 5,000 kept rows looks at the flag at row 4,096,
+    /// so a request that asks for extremes takes one look more than the same
+    /// request without them; a flag that turns at that look must end the
+    /// request, by name, on both paths that fold (a time-ordered page, and an
+    /// open-interest page over an index, which is time-ordered too). Kills
+    /// the guard `why.starts_with("cancelled") -> false` at both folds in
+    /// `window_cancellable`, which served the page with
+    /// `extremes_why = "cancelled: …"` as if a month had been damaged.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled() {
+        for (tag, sort) in [("fold-ts", SortKey::Ts), ("fold-oi", SortKey::OpenInterest)] {
+            let (root, query) = index_month(tag, 5_000);
+            let query = WindowQuery { sort, ..query };
+            // WITHOUT EXTREMES FIRST: a whole request memoises the month's
+            // extremes, and a held fold reads no row and takes no look.
+            let bare = looks_of(
+                &root,
+                &WindowQuery {
+                    want_extremes: false,
+                    ..query.clone()
+                },
+            );
+            let folded = looks_of(&root, &query);
+            assert_eq!(
+                folded,
+                bare + 1,
+                "{tag}: the fold over 5,000 rows looks at the flag once"
+            );
+            let whole = window(&root, &query).expect("an answered window");
+            assert!(whole.extremes.is_some(), "{tag}: {:?}", whole.extremes_why);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// **A STRETCH READ LOOKS AT ITS CLIENT EVERY `CANCEL_STRIDE` ROWS,
+    /// COUNTED ACROSS THE STRETCHES OF ONE REQUEST** (DB-N15). The count is
+    /// the caller's, so a stretch that begins one row short of the stride
+    /// looks at its first row, and one that begins at zero does not look
+    /// before the stride's end. The flag here was set before the read. Kills
+    /// `+= with *=` (the count never moves, so no look is ever taken) and
+    /// `>= with <` (a look at every row before the stride) in
+    /// `SeriesPlan::read_stretch`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_stretch_read_looks_at_its_client_once_a_stride() {
+        let (root, query) = index_month("stride", 3);
+        let mut plan = series::SeriesPlan::build(
+            &root,
+            query.vendor,
+            query.timeframe,
+            query.series.first().cloned().expect("one series"),
+            &[query.from],
+            Filter::default(),
+            &Cancel::never(),
+        )
+        .expect("a plan of one held month");
+        let (gone, guard) = Cancel::pair();
+        drop(guard);
+
+        // FROM ZERO: three rows are read, and no look is taken.
+        let mut since = 0;
+        let mut read = Vec::new();
+        let missed = plan
+            .read_stretch(&root, 0, (0, 3), &gone, &mut since, |row, _| read.push(row))
+            .expect("no look before the stride ends");
+        assert_eq!((missed, read, since), (0, vec![0, 1, 2], 3));
+
+        // ONE ROW SHORT OF THE STRIDE: the first row's look sees the flag.
+        let mut since = series::CANCEL_STRIDE - 1;
+        let refused = plan
+            .read_stretch(&root, 0, (0, 3), &gone, &mut since, |_, _| {})
+            .expect_err("the look at the stride sees the client gone");
+        assert!(refused.starts_with("cancelled"), "{refused}");
+        assert_eq!(since, 0, "a look starts the count again");
+
+        // AND WITH THE CLIENT STILL THERE, the count starts again at the
+        // look and goes on.
+        let mut since = series::CANCEL_STRIDE - 1;
+        plan.read_stretch(&root, 0, (0, 3), &Cancel::never(), &mut since, |_, _| {})
+            .expect("a client that stayed is answered");
+        assert_eq!(since, 2, "the look at row 0, then rows 1 and 2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A CLIENT GONE AT ANY LOOK OF A TIME-OF-DAY SCAN ENDS THE REQUEST AS
+    /// CANCELLED** (DB-N15). Over one month of 5,000 rows with no time-of-day
+    /// bound the request looks four times: once per asked key, once between
+    /// the plan and the read, once before the month's run, and once at row
+    /// 4,096 of the stride. A flag that turns at any of them ends the request
+    /// by name. Runs the scan's own cancellation exits and
+    /// `window_cancellable`'s `?` on the scan, which no test reached.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_client_gone_at_any_look_of_a_scan_ends_the_request() {
+        let (root, query) = index_month("scan-cancel", 5_000);
+        let query = WindowQuery {
+            sort: SortKey::TimeOfDay,
+            want_extremes: false,
+            ..query
+        };
+        assert_eq!(looks_of(&root, &query), 4);
+        let whole = window(&root, &query).expect("an answered window");
+        assert_eq!(whole.scan_rows, 5_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One month of 2025-05 of an NSE option on Dhan, one minute a bar from
+    /// the month's first instant: each bar's open interest given, `None` a
+    /// null. Returns the scratch root and the plan and rules a window builds.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    fn option_month(
+        tag: &str,
+        segment: &str,
+        open_interest: &[Option<i64>],
+    ) -> (
+        std::path::PathBuf,
+        WindowQuery,
+        Vec<SeriesPlan>,
+        Vec<change::Rules>,
+    ) {
+        let root = crate::scratch::path(&format!("cloud-bars-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let contract = (segment == "FNO")
+            .then(|| brutex_core::instrument::Contract::parse("2025-05-29-2500000-CE"))
+            .flatten();
+        let key = SeriesKey::new("NSE", segment, "NIFTY", contract);
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment,
+            symbol: "NIFTY",
+            contract,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let bars: Vec<Bar> = (0_i64..)
+            .zip(open_interest)
+            .map(|(i, oi)| Bar {
+                open_interest: oi.unwrap_or(OI_NULL),
+                ..bar(start + i * 60_000_000, 90, 110, 100, 1)
+            })
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&bars).expect("generated records");
+        drop(file);
+        let query = WindowQuery::single(
+            Vendor::Dhan,
+            key.clone(),
+            Timeframe::MINUTE_1,
+            month,
+            month,
+            SortKey::OpenInterest,
+            false,
+            0,
+            10,
+            false,
+        );
+        let lineage = change::Lineage::read(&root, Vendor::Dhan);
+        let rules = vec![change::Rules::of(
+            &root,
+            Timeframe::MINUTE_1,
+            &key,
+            &lineage,
+        )];
+        let plans = vec![
+            series::SeriesPlan::build(
+                &root,
+                Vendor::Dhan,
+                Timeframe::MINUTE_1,
+                key,
+                &[month],
+                Filter::default(),
+                &Cancel::never(),
+            )
+            .expect("a plan"),
+        ];
+        (root, query, plans, rules)
+    }
+
+    /// **THE SCAN ORDERS OPEN INTEREST WITH ITS NULLS LAST, AND AN INDEX'S
+    /// OPEN INTEREST IS NULL EVERY ROW**, as `SortKey` documents. The router
+    /// sends open interest to the sort indexes or a seek, never to the scan,
+    /// so the scan's null rule is asked here directly: an option's nulls
+    /// follow its values in both directions, and an index's rows, all null,
+    /// stay in time order. Takes both branches of `oi_absent ||
+    /// open_interest == OI_NULL` in `scan`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn the_scan_orders_open_interest_with_its_nulls_last() {
+        let ois = [Some(30), None, Some(10), None, Some(20)];
+        let oi_of = |page: &[WindowBar]| -> Vec<i64> {
+            page.iter().map(|row| row.bar.open_interest).collect()
+        };
+        for desc in [false, true] {
+            let (root, query, mut plans, rules) = option_month("scan-oi", "FNO", &ois);
+            let query = WindowQuery { desc, ..query };
+            let mut faults = FaultLog::default();
+            let scanned = scan(
+                &root,
+                &mut plans,
+                &rules,
+                &query,
+                (0, 10),
+                &mut faults,
+                &Cancel::never(),
+            )
+            .expect("a scan");
+            let valued = if desc { [30, 20, 10] } else { [10, 20, 30] };
+            assert_eq!(
+                oi_of(&scanned.page),
+                [&valued[..], &[OI_NULL, OI_NULL]].concat(),
+                "desc {desc}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        // AN INDEX WHOSE ROWS CARRY STAMPED NUMBERS: its open interest does
+        // not apply, so every row is a null and none is ordered by the number
+        // the vendor stamped. Before the fix the nulls were ordered by it
+        // (30, 20, 10 descending), a null ordered as a real number.
+        for desc in [false, true] {
+            let (root, query, mut plans, rules) = option_month("scan-oi-index", "INDEX", &ois);
+            let mut faults = FaultLog::default();
+            let scanned = scan(
+                &root,
+                &mut plans,
+                &rules,
+                &WindowQuery { desc, ..query },
+                (0, 10),
+                &mut faults,
+                &Cancel::never(),
+            )
+            .expect("a scan");
+            let stamps: Vec<i64> = scanned.page.iter().map(|row| row.bar.ts_micros).collect();
+            let mut ascending = stamps.clone();
+            ascending.sort_unstable();
+            assert_eq!(stamps, ascending, "every row null: time order, desc {desc}");
+            assert_eq!(stamps.len(), ois.len());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// **A POSITION PAST THE PLAN'S RUNS HAS NOTHING BEHIND IT.** The edge of
+    /// `behind_of` no caller asks: every page position comes from a run.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_position_past_the_runs_has_nothing_behind_it() {
+        let (root, _, mut plans, _) = option_month("behind-past", "FNO", &[Some(1), Some(2)]);
+        let plan = plans.first_mut().expect("one plan");
+        let past = series::Position {
+            count: 2,
+            run: plan.runs.len(),
+            row: 0,
+        };
+        assert!(matches!(
+            behind_of(&root, plan, past, None, true),
+            Behind::Nothing
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A GDFL F&O KEY WITH NO CONTRACT IS OPENED AS ASKED**: only an option
+    /// or a future WITH a contract is held against the re-key ledger (D-3331),
+    /// so an F&O key with none is simply absent where no month is held.
+    /// Takes the false branch of `let Some(contract) = contract` in
+    /// `open_classified`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_gdfl_fno_key_with_no_contract_is_opened_as_asked() {
+        let root = crate::scratch::path("cloud-bars-fno-no-contract");
+        let _ = std::fs::remove_dir_all(&root);
+        let refused = open_classified(
+            &root,
+            PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: "FNO",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month: YearMonth::new(2025, 5).expect("a month"),
+                file: FileKind::Bars,
+            },
+        )
+        .map(|_| ())
+        .expect_err("no month is held");
+        assert!(
+            matches!(refused.kind, OpenRefusalKind::Absent),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// **A REPAIRED MONTH WHOSE SERVED REVISION IS GONE IS UNREADABLE, NEVER
+    /// ABSENT** (D-3350). The month is repaired and its revision promoted;
+    /// then the revision's bar file goes. The store names the revision's path
+    /// as missing, which is not the asked month's path, so the month is a
+    /// file the store cannot read — not "no month here", which a gap audit
+    /// would count as a backfill never made. Takes the false branch of the
+    /// missing-path comparison in `open_classified`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_repaired_month_whose_revision_is_gone_is_unreadable() {
+        let root = crate::scratch::path("cloud-bars-revision-gone");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let parts = PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        };
+        let path = StorePath::new(parts).expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let first = bar(start, 90, 110, 100, 1);
+        let later = bar(start + 60_000_000, 90, 110, 101, 1);
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&[first]).expect("one record");
+        let header = file.header();
+        drop(file);
+        let revision = store::repair::Revision::new(1).expect("revision 1");
+        store::repair::publish(&root, path, id, revision, header, &[first, later])
+            .expect("a revision");
+        store::generation::promote(&root, path, id, revision).expect("promoted");
+        assert!(
+            open_classified(&root, parts).is_ok(),
+            "the revision is served"
+        );
+
+        std::fs::remove_file(path.to_path_buf(&store::repair::revision_root(&root, revision)))
+            .expect("the revision's bars go");
+        let refused = open_classified(&root, parts)
+            .map(|_| ())
+            .expect_err("the served file is gone");
+        assert!(
+            matches!(refused.kind, OpenRefusalKind::Unreadable),
+            "{}",
+            refused.message
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A KEY THAT IS ITS OWN FILING NAMES NO SUCCESSOR.** `NSE-INDEX-NIFTY`
+    /// on a keyed feed is the key the alias table files NIFTY under; asked
+    /// where nothing is held, its refusal names it alone, with no "now" or
+    /// "filed as". Takes the true branch of `filed == key.text()` in
+    /// `successor_of`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_key_that_is_its_own_filing_names_no_successor() {
+        let root = crate::scratch::path("cloud-bars-own-filing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let refused = window(
+            &root,
+            &WindowQuery::single(
+                Vendor::Gdfl,
+                SeriesKey::new("NSE", "INDEX", "NIFTY", None),
+                Timeframe::MINUTE_1,
+                month,
+                month,
+                SortKey::Ts,
+                false,
+                0,
+                10,
+                false,
+            ),
+        )
+        .map(|_| ())
+        .expect_err("nothing is held");
+        assert_eq!(
+            refused,
+            "unknown_series: NSE-INDEX-NIFTY names no series gdfl holds at 1min"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A cancellation that lands in the middle of a loop, made deterministic. A
+/// client goes away whenever it likes, so the looks a loop takes at its flag
+/// between rows are tested by a flag that answers "not cancelled" for a
+/// number of looks a test chose and "cancelled" from then on, on the test's
+/// own thread. Only a flag from [`Cancel::pair`] reads it: [`Cancel::never`]
+/// is a flag nothing ever sets, and stays one.
+#[cfg(test)]
+pub(crate) mod cancel_trip {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Looks left before the flag reads as set; `None` when unarmed.
+        static LEFT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// The flag reads as set from the look after the next `looks`.
+    pub(crate) fn arm(looks: u64) {
+        LEFT.with(|left| left.set(Some(looks)));
+    }
+
+    /// Unarms the flag, and answers the looks it had left: `Some(0)` once
+    /// it tripped (or was about to), more when the work took fewer looks
+    /// than it was armed for.
+    pub(crate) fn disarm() -> Option<u64> {
+        LEFT.with(|left| left.replace(None))
+    }
+
+    /// One look at an armed flag: whether it has run out.
+    pub(super) fn tripped() -> bool {
+        LEFT.with(|left| match left.get() {
+            Some(0) => true,
+            Some(more) => {
+                left.set(Some(more.saturating_sub(1)));
+                false
+            }
+            None => false,
+        })
+    }
+}

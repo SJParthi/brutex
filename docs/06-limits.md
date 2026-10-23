@@ -1232,11 +1232,27 @@ table.
    its own. The row's `source` string says so in full. (This said every such
    trade "is currently priced 25% too high", which the refusal above
    contradicts. D-1779.)
-2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) reportedly re-splits
-   the transaction charge and the IPFT as ₹3,552 + ₹1 per crore, leaving the
-   total unchanged at 0.03553%.** If true, the 3,503 + 50 split is wrong from
-   2026-03-01 onward while their **sum** stays right — so any consumer that adds
-   the two is unaffected and any consumer that reports them separately is not.
+2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) — no longer one of
+   the two: read on 13 and 15 Oct 2026 and encoded by D-5100.** Its split is
+   ₹3,552.99 + ₹0.01 per crore of premium (not the ₹3,552 + ₹1 this line
+   quoted), and the total is unchanged at 0.03553%. One `BpsX100` unit is one
+   rupee per crore, so the 2026-03-01 rows **fold** the two: the exchange-charge
+   row is ₹3,553 and the IPFT row of the same date is zero. Before 2026-03-01
+   the 3,503 + 50 split stands as it was. What the fold costs, stated as a
+   bound: the totals are exact, and a consumer that reports the two lines
+   separately sees the IPFT inside the exchange line (as Dhan's calculator
+   shows it). Against the per-leg ceiling of the two lines apart, the folded
+   line is at most one paisa per leg cheaper; against a half-up rounding of
+   each line apart it is never lower while a leg's premium is under ₹50 lakh
+   (the ₹0.01 per crore is then under half a paisa), and at or above ₹50 lakh
+   on one leg it can be **one paisa per leg below** it — the one place the
+   fold can under-run "never below the real charge" (§27). It does at exactly
+   ₹50 lakh a leg (both of the circular's lines land on a half paisa: 177,651
+   paisa against the folded 177,650), and both bounds are checked from one
+   paisa to `i64::MAX` by
+   `the_fold_costs_at_most_one_paisa_a_leg_and_under_50_lakh_is_never_below_the_split`
+   (D-5101). Whether the exchange rounds per leg at all is UNVERIFIED. A finer
+   rate scale that would hold ₹3,552.99 exactly is CHG-1's question.
 
 ### The name `bps_x100` is arithmetically wrong by a factor of ten
 
@@ -1962,7 +1978,9 @@ window — that part holds. But `costs::trip::charge_stack` is `pub` and takes
 either**. `BpsX100::new` is crate-private, but `regime::NSE_EXCHANGE_CHARGE` and
 `regime::BSE_EXCHANGE_CHARGE` are `pub const BpsX100`, `regime::stt_options_rate`
 is `pub` and returns `Ok` for every representable day, and `rate::ipft` is a
-`pub const fn`. So an external caller can assemble a `Rates` and price a trade
+`pub const fn` (removed by D-5100: the IPFT is dated now, `regime::ipft_rate`,
+and `rate::NSE_IPFT` and `rate::BSE_IPFT` are the `pub const` figures in its
+place). So an external caller can assemble a `Rates` and price a trade
 dated inside the refusal window at the 2024-verified exchange rate, with nothing
 refusing. That is the runtime escape hatch the predecessor's
 `DEC-ETC-REGIME-HISTORY-001` §9 forbids. **The public signatures above were read
@@ -20103,6 +20121,14 @@ cited, as it did before this repair, on the strength of FA64232's row and that
 figure. CHG-0's branch reads `FA56129` for it; until that merges, the
 pre-2026-03-01 IPFT part is the predecessor's figure, not a circular read here.
 
+**Done by CHG-0 (D-5100, D-5101).** Both paragraphs above are history from
+the merge of `fix/db-CHG-0` on: the dated card reads
+`regime::ipft_rate(exchange, day)`, the regime holds `FA73061`'s ₹3,553 row and
+the folded zero IPFT from 2026-03-01, and the ₹50 before it is the 2023-04-01
+row of the dated IPFT table, cited to `FA56129` in `docs/00-charter.md`. The
+card's figures and the `dated-regime/r2` fingerprint did not change, and the
+October golden test and the trip-agreement test pass unchanged (CHG0-09).
+
 ### Dhan's calculator total: the page's last paisa is not reproduced
 
 Every **line** of all 49 readings is reproduced exactly (343 lines). The
@@ -20883,6 +20909,191 @@ RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 5 -> 6: `verify-merge`
 | L-IA16-12 | The free-space floor's default is chosen, not sourced, and its figure is the volume's `f_bavail` | the floor reads the call the app's disk page reads (one `statfs(2)` on macOS, one `statvfs(2)` elsewhere, through `rustix`, D-5240, D-5241; no child process, which the no-runtime-spawn gate refuses); on APFS `f_bavail` is the container's free space shared by every volume in it (L-RUST1-1), so another volume's writes move it; 10 GiB is above the about 9 GB one options day wrote into an empty test store (FM-085's cited measurement, UNVERIFIED here). A test volume with less free than the default fails a cli import test that sets no floor | one system call before the run's first day and one before each day read (never per file); a day that crosses the floor mid-day still ends the run `disk_full` after the current file (IA16-08) | IA-16 |
 | L-IA16-13 | The store root's identity is asked before each calendar day, before every file's first write, after the day's files (before its ledger, census and close), and after every refused store write (IA-16 repair 1; the durability barrier's refusal included); it is a check, not a handle | one `metadata` call per file and one per day (bench C-GR-11 prints its p50, p99 and max: about 2.4 µs at p99 on WD_BLACK), O(1) each; the writers below the root make only their own `imports/` under a root that is there (`make_leaf_dir`), so a root that is GONE is never made again. What remains is a race, not a gap: a root swapped for another directory in the microseconds between one file's probe and the store writer's open can take that one file's bars (the store's writer refuses only a missing root, D-1522, and opens by path, not under a held directory handle), and the day's next probe ends the run `store_lost` before any line, ledger or census lands there; a root that goes away inside the census publish itself (`census_store::write_whole_with`'s `create_dir_all`, not this part's file) could make `manifest/` again. Closing both needs the store and census writers to open under a directory handle held from the run's start (`openat`), which is the store owner's change; a re-mounted volume whose device number changed is lost even when it is the same drive, and a resume once it is back reads the day again | at most the bars of the files already past their probe when the root changed; one `metadata` call per file and per day | IA-16 |
 
+## Gate 11 on the Mac, and what it found on feat/db-fix (BASE-GATE11; D-6620 to D-6629)
+
+### Gate 11 — BASE-GATE11: the packages merged on 16 to 19 October, fixed or declared (20 October 2026)
+
+~~~~text
+Gate 11 refused feat/db-fix at the AH-05 merge with 21 occurrences past their files' allowances, in 10 files,
+and at the IA-3 merge with 22 in 11 (IA-3 brought pull/src/gdfl_dayzips.rs rule 3), and after the PREC-1 merge
+with 2 more in runner/src/outcome.rs (rule 2, declared, D-6626), and after the AG-06 and AG-05
+merges with 4 more in api/src/disk_route.rs and api/src/audit.rs (D-6627);
+D-6620's tables name each with the merge that brought it. The Mac gate run
+had never run a CI shell gate, so none of them was seen at its merge.
+BASE-GATE11 read each before deciding it. SEVEN were rewritten, because a
+request, a page or a per-row step reaches them (D-6621 to D-6624):
+pull/src/gdfl_import_journal.rs rule 3, pull/src/gdfl_rekey.rs rule 3 (one
+of its five), api/src/import_journal.rs rule 6 (its fourth; the three
+declared before stay), pull/src/gdfl_run.rs rule 6 (one of two),
+store/src/file_sealed.rs rules 4 and 6, pull/src/gdfl_dayzips.rs rule 3 (the
+day table, sized once for the calendar's span). The rest are declared below,
+`file old -> new`, with the bound that holds them.
+
+RULE 1 (`ALLOW_SEARCH`) -- pull/src/gdfl_rekey.rs 0 -> 1: `month_of`, the
+  re-key planner's bisection of one key's month headers (oldest first, one
+  a month the key holds a bar in, a few dozen). The planner runs in `cli
+  gdfl-rekey` only (`pull::gdfl_rekey::plan`, called from
+  `crates/cli/src/gdfl_rekey.rs`); no route and no import reaches it.
+RULE 2 (`ALLOW_FLOAT`) -- runner/src/outcome.rs 26 -> 28 (D-6626): PREC-1's
+  `exact_mean(net: i128, n: u64) -> f64`, its return type and its one
+  `n as f64`, brought by the PREC-1 merge after this package first
+  reproduced the gate. It is the MEAN of the forward moves, the statistic
+  `Edge::mean_paisa` already is (this file's entry, "only the mean, the
+  t-statistic and the ratios derived from them are floating"): the sum stays
+  the exact `i128` of paisa moves until the one divide, which is CLAUDE.md
+  section 7's second half, "statistics keep full precision". No price, cost
+  or stored value is a float; nothing is rounded for storage.
+RULE 3 (`ALLOW_UNSIZED`) -- api/src/bars_series.rs 1 -> 2: R3-07's `Weighed`
+  memo repeats `Memo`'s two generations, and its `old` half is the same
+  shape WP-52 declared for `Memo`: `HashMap::new()` allocates nothing, is
+  never inserted into (only `remove`, `remove_entry` and a whole swap with
+  the previous `young`, which is pre-sized), so it never grows.
+RULE 4 (`ALLOW_SORT`) -- pull/src/gdfl_rekey.rs 0 -> 1: `held_months` orders
+  the (first, last) spans of the keys moving into one target month, to find
+  two that interleave; the keys moving into one target are a handful, in
+  `cli gdfl-rekey` only.
+  pull/src/gdfl_run_locks.rs 0 -> 1: `filter_field` orders one run's filter
+  names before digesting them, so a claim names the same filter whatever
+  order it was given in; the names are at most `ONLY_MAX` = 256 (refused
+  past it by `Request::misuse`, `RunRefusal::FilterTooLong`, which `plan`
+  asks before a claim is made), once per run
+  start. The digest is held in claims already written, so its input order
+  is part of the record and is not replaced by an order-free hash here.
+RULE 6 (`ALLOW_SCAN`) -- cli/src/minute_gaps.rs 0 -> 1: `tighten` finds a
+  cut day's place among the span's cut days (ascending), once per retry of
+  a stored sweep; each retry already refolds the whole column, O(bars), and
+  the retries are bounded by the span's distinct cut days. AH-01 replaced
+  the rule-7 membership this file was declared for, so that entry (1) is
+  removed in the same change.
+  pull/src/gdfl_run.rs 0 -> 1: `Request::misuse` names the first filter
+  name that is not a symbol; `only.len() > ONLY_MAX` (256) is refused
+  FIRST, before this walk and before the empty-name walk (`.any`, which the
+  rule's spelling does not count) read a name, so each walk is at most 256
+  names, once per run asked. At the AH-05 merge the empty-name walk ran before
+  the count was refused and read a filter of any length; BASE-GATE11 moved
+  the count ahead of both (D-6621 item 4, BG11-05,
+  `a_filter_past_its_bound_is_refused_before_any_name_is_read`).
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/gdfl_rekey.rs 0 -> 1: `copied`, a
+  `HashSet` of (underlying, contract, month): one hash probe a day.
+  pull/src/gdfl_run_ledger.rs 0 -> 3: a runs-ledger record's mode, kind and
+  asker against `MODES` (15), `KINDS` (6) and `BY` (3), `pub const` arrays:
+  FIXED `const` ARRAYS, at most 24 comparisons of short words a record.
+  pull/src/gdfl_run_locks.rs 0 -> 4: a claim field's value against `MODES`
+  (7), `KINDS` (4, twice: `kind` and each piece of a `batch` of at most 120
+  bytes) and a literal list of 5 sources.
+  pull/src/gdfl_run_stop.rs 0 -> 1: a stop's asker against `BY` (4).
+  The same files compare the same tables WITHOUT a borrow in other places
+  (`gdfl_run_ledger.rs`'s `Entry::of`, `gdfl_run_stop.rs`'s asker filter),
+  which rule 7's spelling does not see; they are the same bound.
+  api/src/disk_route.rs 2 -> 3 (D-6627, after the AG-05 merge): AG-05
+  repair 2's `kept_bytes` probes `in_use`, a `HashSet` of (st_dev, st_ino)
+  built once a `/disk.json` answer: one hash probe a census name. Its
+  `counted` set, refused by rule 3 at the same merge, is sized once for
+  every name instead (rewritten, not declared).
+RULE 5c, after the AG-06 merge (D-6627): api/src/audit.rs's two `#[allow]`
+  lists on its `#[cfg(test)]` `mod` lines moved, unchanged, into the two
+  test files as inner attributes; nothing is declared and the count stays at
+  the two entries it had.
+RULE 6 (`ALLOW_SCAN`), after the CLOUD-RUST1 merge (D-6628): api/src/disk_route.rs
+  1 -> 0, TIGHTENED. RUST-1 measures the disk in-process, so `parse_df`, which
+  scanned the words of one df line for the capacity column, is gone and the
+  gate called GF-1's entry loose. An allowance nothing uses would admit the
+  next scan in that file unseen, so it is removed. The R4-17 merge brought no
+  occurrence past an allowance (its own block, "Gate 11 — R4-17, declared at
+  its merge", matches its files).
+RULE 6 (`ALLOW_SCAN`), after the IA-3-OPT merge (21 Oct 2026, D-6629's
+  addendum): pull/src/gdfl_v3.rs 0 -> 1, DECLARED. IA-3-OPT's `verify_marker`
+  finds the slot of one ok-marker line's key with `MARKER_KEYS.iter()
+  .position(..)`; `MARKER_KEYS` is a `const [&str; 8]`, so the search is
+  bounded by a compile-time table, which is what rule 6 asks, and the
+  allowance only says so. The marker is read capped at `MARKER_MAX_BYTES`
+  = 4 KiB (a larger one is `V3::Unverified`, never read whole), and a key
+  not in the table, or a key stated twice, is refused at its own line
+  (`pull::gdfl_v3::tests::an_unverified_v3_manifest_is_not_trusted`, its
+  "line 10 names an unknown key" and "states files twice" cases, each a
+  marker of the eight keys and one line more), so the walk reads at most 9
+  lines after the head,
+  at most 72 comparisons of short words a marker, once per options day
+  checked. No route, import or per-row step reaches it at this merge:
+  `pull::gdfl_v3::V3Ledger` has no caller outside its own module and tests.
+  A `match` over the eight literals would avoid the spelling, but it would be
+  a second copy of the table; the table stays the one authority.
+AFTER THE R3-19 AND R3-30 MERGES (22 Oct 2026, repair 5, D-6629's
+  addendum): gate 11 refused 13 occurrences in three files, every one
+  brought by R3-30 (reference tables as store data); R3-19 brought none.
+  THREE were rewritten: costs/src/lot.rs rule 3 (`LotTable::from_rows`'s
+  map of underlying to rows is sized for `rows.len()`, at most
+  `MAX_LOT_ROWS` = 100,000, refused past it before the map is built, so
+  its room is never more than the rows it indexes and no insert rehashes);
+  pull/src/reference_data.rs rule 3 (`FnoTable::build`'s spans map, sized
+  for the file's rows, one symbol a row at most) and rule 4
+  (`CalendarTable::build` reads its sessions of unrecorded length off its
+  own day kinds in one pass over the span it has already built, so no sort
+  and no second record that could disagree with `kind_of`; BG11-07,
+  `the_unsized_days_are_the_calendars_own_in_day_order`). The rest are
+  declared, each with its bound:
+  RULE 1 (`ALLOW_SEARCH`) costs/src/lot.rs 0 -> 1: `LotTable::lot_on`
+  bisects ONE underlying's rows after one hash probe; those rows are at
+  most `MAX_LOT_ROWS_PER_UNDERLYING` = 64, a compile-time cap the build
+  refuses past (`TooManyForUnderlying`), so at most 7 comparisons a lookup
+  whatever the table holds (`costs::lot::table_tests::a_lookup_is_flat_in_the_table`;
+  release build, 22 Oct 2026, the machine at 1-minute load 15 to 23 on 14
+  cores, n = 100,000 lookups a table: 2 underlyings x 64 rows p50 41 ns, p99
+  42 ns, max 10.8 us; 1,500 underlyings x 64 rows p50 42 ns, p99 375 ns, max
+  25.8 us). No production caller reaches it at this merge.
+  RULE 3 (`ALLOW_UNSIZED`) pull/src/reference_data.rs 0 -> 2: the
+  process's table interner (`interned`), two maps keyed by the SHA-256 of
+  a reference file, one entry a distinct generation the process loads,
+  inserted only by a load (`intern_index_rows`, `build_lineage`) under its
+  mutex beside the O(rows) leak of that generation's rows; how many
+  generations a process will meet is not known when the `OnceLock` builds
+  it, and a guessed capacity would be a fixed number.
+  RULE 4 (`ALLOW_SORT`) costs/src/lot.rs 0 -> 1: `LotTable::from_rows`
+  orders the row indices by underlying (stable, so each underlying's rows
+  keep the order handed in, which must ascend) once per load of the table,
+  at most `MAX_LOT_ROWS` rows; a lookup never sorts. The whole load is
+  bounded by `pull::reference_data::tests::the_loader_reads_every_table_inside_its_budget`
+  (p99 under 250 ms at ten times the shipped lot rows). On this branch,
+  with the rewrites above (release build, 22 Oct 2026, same load, n = 100
+  whole loads of every table): the shipped tables p50 541 us, p99 986 us,
+  max 986 us; with the lot table at ten times its rows p50 543 us, p99
+  835 us, max 835 us. The same test on feat/db-fix before them was not
+  run in release (UNVERIFIED as a before/after difference): the sort
+  removed ordered a handful of days and the pass added reads the span once
+  more, both small beside a load that already builds the span.
+  RULE 6 (`ALLOW_SCAN`) costs/src/lot.rs 0 -> 1: `compiled_rows` finds a
+  compiled lot row's contract rule among its slot's `CONTRACT_RULES`
+  (`RULES_PER_SLOT` = 2), once per compiled row when the store's table is
+  seeded. pull/src/reference_data.rs 0 -> 2: `render` and `rate_draft` find
+  the first field of one row the grammar cannot carry, after the row's
+  width is held to the table's compile-time `columns()` (render) or to the
+  8 columns of `riskfree::HEADER`, which `Series::parse` refuses any other
+  count of first (rate_draft): one pass over a row it then writes.
+  pull/src/calendar.rs 1 -> 2: `special_note` walks the three
+  `SOURCED_SPECIAL_NOTES`, a compile-time `[HolidayNote; 3]`, once per day
+  of the calendar seed; the entry beside it, `short_day_on` over the two
+  `SHORT_DAYS`, is the one already declared. CAL-1, in flight, edits
+  calendar.rs, so the allowance is raised in the ledger and the file is
+  not touched.
+  RULE 7 (`ALLOW_MEMBER`) pull/src/reference_data.rs 0 -> 1:
+  `CalendarTable::kind_of`'s `(self.first..=self.last).contains(&day)`, a
+  RangeInclusive, two comparisons: the shape rule 7 permits.
+
+None of the declared occurrences is on a request's per-bar or per-row path,
+except R3-30's `CalendarTable::kind_of` range test (two comparisons) and
+`LotTable::lot_on`'s bisection (at most 7 comparisons, no production caller
+at the R3-30 merge), each bounded by a constant.
+~~~~
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-BG11-01 | `BarFile::read_rows_at` costs a map, three vectors and one frame decode a frame met | grouping a scattered page by frame without a sort needs a map of frame to group (pre-sized for the rows), the group of each row, a count of each group and the placement; a frame is decoded once whatever order its rows were asked in | O(1) a row, expected (one hash probe and three writes), plus one decode of at most `block_rows` = 256 rows a distinct frame (L-SC-1). **Measured** by `store::file::sealed_door_tests::read_rows_at_timing`: release build, 2,000 calls a case after one untimed, 20 Oct 2026, the machine at 1-minute load 20 to 29 on 14 cores: pages of 100 / 1,000 rows over 2,250 bars p50 56.4 / 68.9 µs, p99 73.0 / 77.8 µs, max 263.0 / 325.6 µs; over 22,500 bars p50 0.52 / 0.57 ms, p99 0.59 / 0.65 ms, max 1.05 / 1.37 ms; over 225,000 bars p50 0.68 / 4.80 ms, p99 0.81 / 5.26 ms, max 1.85 / 6.79 ms. A row costs what the frames its page meets cost: 68 ns a row when 1,000 rows fall in the 9 frames of 2,250 bars, 4.8 µs a row when they fall in hundreds of the 879 frames of 225,000, which is one frame decode (L-SC-1) a row at most. The sort it replaces, the same test on the base tree (`scratch/BASE-GATE11-before`, the AH-05 merge): p50 55.2 / 69.5 µs, 0.49 / 0.56 ms, 0.62 / 4.60 ms; p99 105.7 / 101.3 µs, 0.57 / 0.63 ms, 0.75 / 4.86 ms. The same within the machine's noise: a sort of at most 1,000 pairs was never the cost, the frame decodes are, so this removes a log factor and buys no time at these sizes | BASE-GATE11 (D-6623) |
+| L-BG11-02 | An import-journal end line's fold builds one map of the run's names | the fold must find each end field among the start's; one map a fold, pre-sized, is built from the start's fields | O(start fields + end fields) once a run line, since a run line takes one end (BG11-01); the journal's whole read stays O(its bytes). **Measured** by `api::server::import_journal::tests::end_line_fold_cost_by_field_count`: release build, 2,000 folds a width, 20 Oct 2026, load 20 to 29: 8 / 64 / 512 fields p50 1.38 / 9.71 / 72.0 µs, p99 2.92 / 20.3 / 97.6 µs, max 68.3 / 49.5 / 114.2 µs. The walk it replaces, the same test on the base tree: p50 0.92 / 11.5 / 222.1 µs, p99 2.04 / 17.0 / 290.5 µs, max 32.5 / 43.8 / 322.2 µs. From 64 to 512 fields (8 times) the indexed fold grows 7.4 times at p50 and the walk 19.3 times: linear against quadratic. At 8 fields, the size of a real end line, the map costs about 0.5 µs more at p50 than the walk did, once a run | BASE-GATE11 (D-6622) |
+| L-BG11-03 | A cached GDFL source is one `stat` and one index | `SourceCache::origin` reads the root's identity on every call (a changed root must be measured again), then one slot | one `stat` of the root and one array index a call; three slots. **Measured** by `pull::gdfl_run::tests::source_cache_hit_timing`: release build, 20 Oct 2026, load 20 to 29: n = 6,000 hits (2,000 of each source) p50 1.13 µs, p99 3.17 µs, max 25.6 µs, the root's `stat` included. The walk of at most three entries it replaces was not timed | BASE-GATE11 (D-6621) |
+| L-BG11-04 | NOT CLOSED: the CI shell gates other than 11 that are red on feat/db-fix | each belongs to the package that brought its refusal, and fixing another package's files in flight is that package's work (D-6620) | Run by `state/fix/ci-shell-gates.sh` (jobs language-purity, build, web, macos), each red step's log read. **At the PREC-1 merge** (20 Oct 2026, `--fast`: 45 steps run): red 1d, 10, 11, 12, 14, 19, 23, 30, W1, W3 and W5, every other step run green. Gate 1d: 213 undeclared segment-shaped literals in `crates/pull`, most in AG-02's `gdfl_rekey_tests.rs` (29), IA-1's and IA-2's `gdfl_run.rs` (27), IA-3's `gdfl_ia3_tests.rs` (21), IA-2's `gdfl_run_ia2_tests.rs` (19) and `gdfl_run_tests.rs` (14); PREC-1 added five (`gap`, `holds`, `import-budget-saturday`, `import-two-at-once`, `scratch`). Gate 10: HA-02 names `store::header::audit_tests`, which does not exist (R4-09a). Gate 11: this package (D-6620 to D-6627). Gate 12: 28 cost claims naming no proof: AH-01 `minute_gaps.rs` 4, `minute_gaps_causal_tests.rs` 2, `stored.rs` 1; AG-02 `gdfl_rekey.rs` 4, `gdfl_rekey_tests.rs` 1, `operation_audit.rs` 1; IA-1 `gdfl_import.rs` 1, `gdfl_import_journal.rs` 1, `gdfl_run_tests.rs` 1; IA-2 `gdfl_import_journal.rs` 1, `gdfl_import_ia2_tests.rs` 1, `gdfl_rekey.rs` 1; IA-3 `benches/ratio/day_table.rs` 2, `gdfl_archive.rs` 2, `gdfl_cm.rs` 1; R3-07 `bars.rs` 1; the sealed codec's `sealed_codec.rs` 1 and SC-3's `tests/sealed_door.rs` 1; PREC-1 `api/src/autopilot.rs` (`refuse_drifted`) 1. Gate 14: `C-HA-01`, printed by `crates/store/benches/ratio.rs` and declared in no invariant row (R4-09a; closed by D-6625). Gate 19: `pull/src/gdfl_import.rs:1570` records a failure and logs nothing (IA-1). Gate 23: a print surface not declared (R3-07 `bars_window_route_tests.rs`, AH-01 `minute_gaps_measure_tests.rs` and `results_line_tests.rs`, R4-07 `disk_projection_tests.rs` and `gdfl_dropbox_tests.rs`, IA-2 `gdfl_import_ia2_tests.rs` and `gdfl_run_ia2_tests.rs`, AG-02 `gdfl_rekey_tests.rs`, the sealed codec's `sealed_codec_tests.rs`, PREC-1's `eprintln!` in `api/src/audit.rs`, `pull/src/census_store_tests.rs` and `store/src/file.rs`, and IA-2 repair 1's `api/src/import_journal.rs`, declared by this package) and an undeclared stream handle in IA-2's `pull/src/gdfl_run_start.rs`. Gate 30: `config/store-steps.toml` still says IA-1 is not merged (R3-36's check; set by whoever lands IA-1's steps). W1: the committed `web/build` is not what `web/src` builds, since R3-04 changed `web/src` and no build was committed (the deploy's rebuild, owned by the main session). W3: 32 svelte-check errors against a ceiling of 0 (R3-08 `read-pools.js`, `ReadPools.svelte`, `gap-verdict.js`, `database-pages.test.js`, `read-pools.test.js`; R3-05 `ingest-months.js`, `ingest-months.test.js`, `settings-ceilings.test.js`, the ingest page). W5 fails here only because macOS `xargs` has no `-d` (the platform, not the tree). **Again at the AG-05 merge** (feat/db-fix's head when this package was committed, 20 Oct 2026, `--fast`, 45 steps run; D-6620 names the merges by subject): the same eleven red and every other step run green; the AG-06 and AG-05 merges added to five of them. Gate 1d: 222, nine more, every one in AG-05's `pull/src/census_store_link_tests.rs` (`compaction`, `legacy`, `measured`, `nothing-here`, `renamed`, `restored`, `withdraw`, `witness`, `writable`). Gate 10: also `AG05-13` names `api::server::disk_route::tests`, which does not exist (AG-05). Gate 11: three files (D-6627). Gate 12: 31, AG-05 `disk_route_seal_tests.rs` 1 and `census_store_link_tests.rs` 1, AG-06 `store/src/flock.rs` (`HOLDERS`) 1. Gate 23: four more print surfaces, AG-06 `api/src/audit_lock_wait_measure.rs` (`println!` 3) and `store/src/flock_patient_tests.rs` (1), AG-05 `api/src/disk_route_seal_tests.rs` and `pull/src/census_store_link_tests.rs` (`eprintln!` 1 each). W3 is still 32. Of the five steps `--fast` skips, 4, 13c and 6d were run there too and are green; 1e and 31 were not, each compiling and testing the workspace again for about an hour. **At the AH-05 merge** 1e was red (2 tests of `api::server::bars_export`, R3-10, read `../../web/...` and panic when it is absent, CLAUDE.md section 2; `crates/api/src/bars_export.rs` still joins `../../web` at the AG-05 merge and at the R4-17 merge, read, not run) and 31 green. **Again at the R4-17 merge** (feat/db-fix's head on 21 Oct 2026, `--fast`, 45 steps run): the same eleven red and every other step run green, and the R4-17 merge brought no refusal to any of them. Gate 1d: 221, one fewer (`session-masters` no longer refused); gates 10, 12, 14, 19, 23 and 30 refuse what they refused at the AG-05 merge, line numbers aside; gate 11 refuses the same files, the ones this package fixes or declares; W3 is still 32. **On BASE-GATE11's head** (after merging the R4-17 merge) gates 11 and 14 are green, and 1d, 10, 12, 19, 23 and 30 refuse exactly what feat/db-fix refuses less what this package closed (none added; gate 23 less IA-2 repair 1's `api/src/import_journal.rs` print, which this package declares); W1, W3 and W5 as on feat/db-fix. **Again at the CLOUD-MUTPULL merge** (feat/db-fix's head on 21 Oct 2026, after the DATA-1 merge; `--fast`, 45 steps run; D-6629): the same eleven red and every other step run green. The two merges brought no refusal to gate 11 and two elsewhere, both CLOUD-MUTPULL's: gate 1d one more undeclared literal, a format string in `crates/pull/tests/cloud_mutants_import.rs`; gate 23 clause C one fixed temporary path, `crates/pull/src/gdfl_import_scope.rs`. DATA-1 (`cli/src/feed_reconcile.rs` and its tests) added to no red step. Gates 10, 12 (31), 14, 19 and 30 refuse what they refused at the R4-17 merge, line numbers aside; W1 as before, W3 still 32, W5 the platform's `xargs`. Of the five steps `--fast` skips, 4, 13c and 6d were run on the same head too (`--jobs build --only "4 13c 6d"`) and are green; 1e and 31 were not run, and `crates/api/src/bars_export.rs` still joins `../../web` there (read, not run: R3-10's gate-1e refusal of the AH-05 merge is not known closed). **On BASE-GATE11's head** after merging it: gates 11 and 14 green; 1d, 10, 12, 19 and 30 refuse exactly what feat/db-fix refuses; gate 23 the same less IA-2 repair 1's `api/src/import_journal.rs` print, which this package declares; W1, W3 and W5 as on feat/db-fix. **Again at the IA-3-OPT merge** (feat/db-fix's head on 21 Oct 2026; `--fast`; D-6629's addendum): red 1d, 10, 11, 12, 14, 19, 23, 30, W1, W3 and W5, and 4a, which was not measured: its `cargo fetch --locked` waited 96 minutes in the machine's build queue behind long mutant runs and was stopped by this package (rc 143); `Cargo.lock` and every manifest are unchanged since the CLOUD-MUTPULL merge, where it was green. Every other step run is green. The merge brought two refusals, both IA-3-OPT's: gate 11 one rule-6 search, `pull/src/gdfl_v3.rs` (`MARKER_KEYS`), declared by this package; gate 1d 43 more undeclared segment-shaped literals (264), all arriving with the IA-3-OPT merge, the only merge since: the gate lists 35 of them first at IA-3-OPT's files (27 `pull/src/gdfl_v3_tests.rs`, 4 `gdfl_v3.rs`, 2 each `gdfl_nfo_tests.rs` and `gdfl_ia3_tests.rs`: `v3-big`, `v3-torn`, `nfo-fm043`, `day_hex`, `manifest_sha256`, `name_hex` and the rest) and 8 first at older files (`archives`, `broken`, `colour`, `e`, `encrypted`, `flock`, `symlink`, `upper`), which this package did not trace further. Gates 10, 12 (31), 14, 19, 23 and 30 refuse what they refused at the CLOUD-MUTPULL merge; W1 as before, W3 still 32, W5 the platform's `xargs`; `web/` and the manifests are unchanged by the merge. **On BASE-GATE11's head** after merging it: gates 11 and 14 green; 1d, 10, 12, 19, 23 and 30 refuse exactly what feat/db-fix refuses (gate 23 less the print this package declares); W1, W3 and W5 as on feat/db-fix. **Again at the R3-30 merge** (feat/db-fix's head on 22 Oct 2026, after the R3-19 merge; `--fast`; D-6629's repair-5 addendum; 4a not run, because `Cargo.lock` and every manifest are unchanged since the CLOUD-MUTPULL merge, where it was green): red 1d, 10, 11, 12, 14, 19, 23, 30, W1, W3 and W5, every other step run green. Gate 11: thirteen occurrences in three files, every one R3-30's (`costs/src/lot.rs` rules 1, 3, 4 and 6; `pull/src/reference_data.rs` rules 3, 4, 6 and 7; `pull/src/calendar.rs` rule 6), which this package rewrites or declares. Gate 1d: 364, one hundred more, all arriving with the two merges and none gone: the gate lists 60 of them first at R3-30's `pull/src/reference_data.rs` (31) and `reference_data_tests.rs` (29) (`lot_sizes`, `risk_free_rate`, `index_identity`, `ref-muhurat` and the rest), 14 at R3-19's `census_store.rs` (11) and `census_store_kept_tests.rs` (3), and 26 first at older files. Gate 12: 37, R3-30 adding seven (`reference_data.rs` 6: the module doc, `CalendarTable`, `kind_of`, `Lineage`, `horizons`, `horizon_alerts`; `riskfree.rs` 1, `a_carried_lookup_is_flat_in_the_table`) and R3-19 closing AG-05's `census_store_link_tests.rs` one. Gate 23: five more undeclared print surfaces, R3-19's `api/src/census_epoch_link_tests.rs` (`eprintln!` 1) and `pull/src/census_store_kept_tests.rs` (5), R3-30's `costs/src/lot_table_tests.rs` (`println!` 1), `pull/src/reference_data_tests.rs` (2) and `pull/src/riskfree.rs` (1); CLOUD-MUTPULL's temporary path still refused. Gates 10, 14, 19 and 30 refuse what they refused at the IA-3-OPT merge; W1 as before (R3-30 also changed `web/src`), W3 still 32, W5 the platform's `xargs`. **On BASE-GATE11's head** after merging it: gates 11 and 14 green; 1d (364), 10, 12 (37), 19 and 30 refuse exactly what feat/db-fix refuses, this package's own new test reusing an existing scratch tag so gate 1d gains no literal; gate 23 the same less the print this package declares; W1, W3 and W5 as on feat/db-fix. **Again at the PIT-1 merge** (feat/db-fix's head on 22 Oct 2026; `--fast`, 44 steps run; D-6629's repair-6 addendum; 4a not run, because the merge changed no manifest, `Cargo.lock` or `ci.yml`): red 1d, 10, 11, 12, 14, 19, 23, 30, W1, W3 and W5, every other step run green, and the PIT-1 merge brought no refusal to any of them. Gate 11 refuses exactly the R3-30 occurrences it refused at the R3-30 merge; PIT-1's `cli/src/fno_membership_command.rs` (4 sorts), `pull/src/fno_membership.rs` (1 search) and its sixth `cli/src/store_write.rs` occurrence are inside its own allowlist rows. Gate 1d: 361, three fewer, because PIT-1 declares `known`, `measured` and `running` among its own literals, and none added. Gates 10, 12 (37), 14, 19, 23 and 30 refuse what they refused at the R3-30 merge (each refusal list compared, line numbers aside); W1 as before, W3 still 32, W5 the platform's `xargs`. **Again at the CLOUD-CHG1 merge** (feat/db-fix's head a minute after the PIT-1 merge, 22 Oct 2026; `--fast`, 44 steps run; 4a not run, `Cargo.lock` unchanged): the same eleven red, every other step run green, and every red step's refusals identical to the PIT-1 merge's (1d 361, 12 37, W3 32; 10, 14, 19, 23, 30 and gate 11's list compared line for line): the charge stack brought no refusal. **Again at the CAL-1 merge** (feat/db-fix's head on 22 Oct 2026, after the SC-4 merge; `--fast`, 44 steps run; 4a not run, `Cargo.lock` and every manifest unchanged; D-6629's repair-6 addendum): gate 0 red, because `.github/gates_tree.rs` types `DECLARED` as `[&str; 73]` and lists 74 groups (PIT-1 and CAL-1 each raised 72 to 73), so the source scanner does not build, every step that runs it is red with it, and so is 6c (the gate tools' own clippy): 32 red steps in all (0, 1, 1b, 1g, 1f, 1c, 1d, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 23, 21, 22, 24, 25, 27b, 30, 19, 10, 11, 12, 14, 6c, W1, W3, W5; 27b, W1, W3 and W5 also for their own reasons below). With only that length corrected, in a scratch checkout of the same head: red 1d, 10, 11, 12, 14, 19, 23, 27b, 30, W1, W3 and W5, every other step run green. New since the CLOUD-CHG1 merge: gate 27b, D-6247 heading two entries, SC-4's repair-round-1 entry (a month served from a repair revision) and R3-30 repair 2's (a documented rate gap row), the newer on feat/db-fix being SC-4's, which takes the next free number (D-0684); gate 1d 370, SC-4 adding nine (`held-raw`, `held-sealed`, `late-sealed`, `late-whole`, `late2-sealed`, `late2-whole` in `pull/tests/sealed_month.rs`; `never-sealed`, `sbar-staged`, `sealed-month` in `pull/src/gdfl_sealed_tests.rs`) and CAL-1 one (`revised`, `pull/src/calendar.rs`) while declaring `71775`; gate 23 one more undeclared print surface, SC-4's `store/src/file_write_door_tests.rs` (`println!`). Gate 11 refuses exactly the R3-30 occurrences it refused before, CAL-1's `calendar.rs` inside its allowances; gates 10, 12 (37), 14, 19 and 30 refuse what they refused at the CLOUD-CHG1 merge; W1 as before, W3 still 32, W5 the platform's `xargs`. **On BASE-GATE11's head** after merging all four: gates 0, 6c, 11 and 14 green (the length corrected on this branch); 1d (370), 10, 12 (37), 19, 27b and 30 refuse exactly what feat/db-fix with the length corrected refuses; gate 23 the same less the print this package declares; W1, W3 and W5 as on feat/db-fix **Again at the BASE-REDS-1021 merge** (feat/db-fix's head on 22 Oct 2026, after the CAL-1 merge fix of `cli`'s command list; `--fast`, 43 steps run there with 4a skipped and 44 here; D-6629's repair-7 addendum): gate 0 still red as is (`.github/gates_tree.rs` unchanged by the merge); with only its length corrected, in a scratch checkout of the same head, red 1d, 10, 11, 12, 19, 23, 27b, 30, W1, W3 and W5, every other step run green. Gate 14 is green on feat/db-fix from this merge on: BASE-REDS-1021 lands C-HA-01's row (D-7120 point 6). Every other red step's refusals are identical to the CAL-1 merge's (1d 370, 12 37, W3 32; 10, 19, 23, 27b, 30 and gate 11's list compared line for line, counts of files read aside). 4a was run too, because the merge changed `Cargo.lock`: `cargo fetch --locked` green on this branch's head (run directly; inside the script it sat in the machine's build queue, which queues `fetch` though it compiles nothing, and was stopped by this package, rc 143). **On BASE-GATE11's head** after merging it: gates 0, 6c, 11 and 14 green; 1d (370), 10, 12 (37), 19, 27b and 30 refuse exactly what feat/db-fix with the length corrected refuses (gate 1d lists other sites of two literals it already refused, `edges` and `muhurat`, because this package's tests use them too; the count of undeclared literals is the same); gate 23 the same less the print this package declares; W1, W3 and W5 as on feat/db-fix
+ | owners named in this row and in the BASE-GATE11 report |
+| L-BG11-05 | Opening a root of loose day zips allocates its day table for the whole sourced span first | the table is sized once for every key a walk can file (`DAYZIPS_KEYS_MAX` = 3 x 3,287 = 9,861, or the walk's entry cap when that is smaller) so no insert rehashes (D-6624); an empty root pays the allocation too | one allocation an open of a root (a source open, never a request or a per-row step), then O(1) a filed entry with no rehash; the walk stays O(entries), refused past `DAYZIPS_WALK_CAP` = 100,000. **Measured** by `pull::gdfl_dayzips::tests::day_table_sizing_timing`: release build, 20 Oct 2026, the machine at 1-minute load 17 to 25 on 14 cores: n = 2,000 allocations of the empty table the walk used to start from p50 0 ns, p99 42 ns, max 3.4 µs (`HashMap::new()` allocates nothing until its first insert), and of the table sized for 9,861 keys p50 208 ns, p99 250 ns, max 7.5 µs; n = 200 opens of an empty root p50 14.5 µs, p99 32.3 µs, max 81.2 µs, and of a root of 6 day zips in 9 folders (3 kinds, 2 months each) p50 143 µs, p99 289 µs, max 326 µs (the walk's own directory reads). The table's bytes were not measured; it is held only for the life of one `DayZips` | BASE-GATE11 (D-6624) |
+
 ## R4-17: Zerodha series identity (D-5839 and D-4991 to D-4995)
 
 **`JUMP_BPS` = 3,000 was chosen first and MEASURED on the Mac, 17 Oct
@@ -21285,3 +21496,14 @@ nothing.
 | L-BREDS-1 | Which hosts `pull` contacts chain through the distrusted emSign keys is not known | RUSTSEC-2026-0382 and RUSTSEC-2026-0381 are cleared by refusing, during certificate verification, a path through any of the eight emSign intermediate keys `rustls-webpki` 0.103.16 lists, or one that anchors only at `emSign ECC Root CA - G3`, which `webpki-roots` 1.0.10 removed. A host `pull` reaches through `reqwest` (the broker, the Dropbox fetch, AWS Parameter Store) that presents such a chain is now refused. No handshake was made from this package: no gate contacts a vendor host, and none was contacted to find out. **UNVERIFIED** | the refusal is the call site's existing TLS error, named and never retried on weaker verification; nothing falls back to the old roots. The added work is a comparison against a fixed list of eight keys per certificate in a path, once per handshake, never per bar or per request served; not measured | BASE-REDS-1021 |
 | L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
 | L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
+
+## The Py-language gate (NOPY-1, merged back by CLOUD-NOPY1; D-5250, D-5251, D-5258)
+
+`crates/vocab/tests/no_py_language.rs` is a test, never on a request path. Measured on the operator's machine on 21 Oct 2026 under a load average of 13 to 15 on 14 cores: the gate test alone, its debug binary run 200 times in sequence, one process per run (start, `git ls-files`, every tracked file read and scanned, 1,453 files and 68,144,292 bytes): p50 0.136 s, p99 0.170 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200.txt`). Re-measured on 22 Oct 2026 by the same method on the tree after the third merge of `feat/db-fix` (1,464 files, 69,134,919 bytes) under a load average of 19 to 26: p50 0.142 s, p99 0.187 s, max 0.222 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r3.txt`). Re-measured again on 22 Oct 2026 by the same method on the tree after the fourth merge of `feat/db-fix` (1,469 files, 69,452,277 bytes) under a load average of 13 to 18: p50 0.120 s, p99 0.142 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r4.txt`).
+
+| Id | What is not held | Why | Measured, and what is done instead |
+|---|---|---|---|
+| L-NOPY-1 | The gate is not O(1): it reads every tracked byte on every `cargo test -p vocab` | Its input is the whole tree; a rule that every file obeys cannot be checked by reading fewer | Linear in tracked bytes, test-time only, figures above. A tree ten times this size extrapolates to under 2 s a run (an extrapolation, not a measurement) |
+| L-NOPY-2 | The gate does not see the name split across lines, written with a zero-width character or another script inside it, or encoded; nor, when `git` runs, any untracked file | A text rule over bytes, and its input is `git ls-files` | The module header says so. A name split by a space passes and is pinned as the limit (NOPY-03). CI gate 15 is a second reading of the same tracked bytes |
+| L-NOPY-3 | The extension written as text is not refused | The extension is not the name: the charter cites the vendor SDK's own file by its path, which is provenance | 55 lines in 17 tracked files hold the extension as text on 21 Oct 2026, and the same 55 in 17 on 22 Oct after the third, the fourth and the fifth merge of `feat/db-fix` (`git grep -iE`, the extension followed by a non-word character). A file OF the language is refused by its own extension (NOPY-05) |
+| L-NOPY-4 | CI gate 15's allowlist names four files that hold no occurrence | Emptying it is an edit of `.github/workflows/ci.yml`, which this merge does not make | Gate 15 passes with four loose-entry warnings on the merged tree (`state/fix/ci-gates-logs/P-CLOUD-NOPY1-fast-1/logs/language-purity/016-15.log`). CI gate 13's log prints crate names that hold the name, unmasked; a CI log is not a tracked file, and masking it is that gate's owner's edit |

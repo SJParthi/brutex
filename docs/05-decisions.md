@@ -16335,7 +16335,7 @@ switch on the returned exception name."* A grep for `error_type` across
 
 **The pair that forced it.** `TokenException` and `PermissionException` are both
 answered under HTTP 403 — the first documented on the exceptions page, the
-second in the vendor's own Python SDK. On the status axis they are one event.
+second in the vendor's own SDK. On the status axis they are one event.
 They are not one event to an operator: the first is fixed by the credential
 somebody refreshes tonight, and the second is an API key with no
 historical-data subscription, which fails identically forever. The unentitled
@@ -78786,6 +78786,511 @@ index's line and no other. The rule was already the code's
 (`write_flags` is asked `whole` only for an unfiltered base key); IA16-30
 pins it.
 
+### D-6620 — Gate 11 is reproduced on the Mac exactly as CI runs it, every refusal on feat/db-fix is fixed at its cause or declared with its bound, and the Mac gate run gains the CI shell gates (BASE-GATE11) — 2026-10-20
+
+**Problem.** CI gate 11 ("banned constructs on the O(1) paths") refused
+feat/db-fix at `aab82424b` in files the reporting package (AH-05) never
+touched. The Mac gate run (`state/fix/gate-*.sh`) runs fmt, clippy, test, deny
+and the web tests only, so no merge ever ran a CI shell gate and every package
+merged since the last declaration (GF-1, 18 October) brought its constructs in
+unseen.
+
+**Reproduced** with the step's own commands: `rustc` builds
+`.github/source_scan.rs` and `.github/gates_ledger.rs`, `source-scan
+prod-files` lists the production closure (482 files) and `gates-ledger
+banned-constructs` refuses: 21 occurrences past their files' allowances in 10 files (the step names 25 lines, the allowed ones of those files counted), each traced by `git
+blame` to the merge that brought it:
+
+| Rule | File:line at `aab82424b` | Construct | Brought by |
+|---|---|---|---|
+| 1 | `pull/src/gdfl_rekey.rs:1570` | `binary_search_by` (`month_of`) | AG-02 |
+| 3 | `api/src/bars_series.rs:418` | `old: HashMap::new()` (`Weighed`) | R3-07 |
+| 3 | `pull/src/gdfl_import_journal.rs:865` | `HashSet::new()` (`days`) | IA-1 |
+| 3 | `pull/src/gdfl_rekey.rs:1419` | `HashSet::new()` (`copied`) | AG-02 repair r1e |
+| 4 | `pull/src/gdfl_rekey.rs:1617` | `sort_unstable` (`held_months` spans) | AG-02 |
+| 4 | `pull/src/gdfl_run_locks.rs:928` | `sort_unstable` (`filter_field`) | IA-2 |
+| 4 | `store/src/file_sealed.rs:302` | `sort_unstable` (`read_rows_at`) | SC-3 |
+| 6 | `api/src/import_journal.rs:214` | `fields.iter().find` (`RunLine::end`) | IA-2 repair 1 |
+| 6 | `cli/src/minute_gaps.rs:719` | `cuts.iter().position` (`tighten`) | AH-01 |
+| 6 | `pull/src/gdfl_run.rs:435` | `only.iter().find` (filter names) | IA-1 repair 1 |
+| 6 | `pull/src/gdfl_run.rs:1263` | `held.iter().find` (`SourceCache`) | IA-1 |
+| 6 | `store/src/file_sealed.rs:294` | `rows.iter().find` (`read_rows_at`) | SC-3 |
+| 7 | `pull/src/gdfl_rekey.rs:1748` | `copied.contains(&..)`, a `HashSet` | AG-02 repair r1e |
+| 7 | `pull/src/gdfl_run_ledger.rs:125-127` | `MODES`/`KINDS`/`BY.contains(&..)` | IA-2 |
+| 7 | `pull/src/gdfl_run_locks.rs:974,975,980,983` | `MODES`/`KINDS`/literal `.contains(&..)` | IA-2 |
+| 7 | `pull/src/gdfl_run_stop.rs:410` | `BY.contains(&..)` | IA-2 |
+
+**Reproduced again at `c76f9178c`** (feat/db-fix after R4-09a and IA-3 merged):
+22 occurrences past their allowances in 11 files, the 21 above (their lines
+moved, `store/src/file_sealed.rs` to 298 and 306) and ONE more, brought by the
+IA-3 merge (`65b3fc017`, merged as `c76f9178c`):
+
+| Rule | File:line at `c76f9178c` | Construct | Brought by |
+|---|---|---|---|
+| 3 | `pull/src/gdfl_dayzips.rs:242` | `HashMap::new()` (`days`, the loose day zips' day table) | IA-3 |
+
+It is rewritten (D-6624), not declared: the table is filed by a walk of a
+root, so its growth was the root's.
+
+**Decision.** A construct a request, a page or a per-row step reaches is
+rewritten so the step is O(1) (D-6621, D-6622, D-6623; D-6624 at `c76f9178c`):
+seven occurrences in six files. The rest are each one of the shapes the gate's own reasons already
+admit, and are declared in `.github/gates_ledger.rs` with the bound written in
+`docs/06-limits.md`, "Gate 11 — BASE-GATE11", in the same change: a `const`
+table of at most 15 words (rule 7's FIXED `const` ARRAY), a `HashSet` probe, a
+map that is only ever swapped in whole (the same reason WP-52 gave for its
+twin), a filter of at most `ONLY_MAX` = 256 names refused past it before any
+name is read (D-6621 item 4), the cut days of one span once per retry that refolds the whole column,
+and the `cli gdfl-rekey` planner, which no request reaches. No allow comment is
+written, no rule is narrowed and no pattern is changed. AH-01 moved
+`minute_gaps.rs`'s one construct from rule 7 to rule 6, so its rule-7 entry
+goes with the new rule-6 entry.
+
+**The Mac gate run gains the CI shell gates.**
+`state/fix/ci-shell-gates.sh <worktree>` (operator tooling outside the
+repository, shell only) reads the worktree's own `ci.yml`, extracts every step
+of the jobs `language-purity`, `build`, `web` and `macos`, and runs each `run:`
+block as GitHub does (`bash -e`, one `RUNNER_TEMP` and `GITHUB_ENV` a job, the
+workflow's `env:`), printing `GATE <id> rc=<rc>` per step and a last `EXIT`
+line. It never runs `npm ci` (the worktree's `node_modules` is a link to
+another tree) nor Gate 3's `cargo install`, and names fmt, clippy, the tests
+and W2 as the Mac gate run's own steps; `--fast` skips the five steps that
+compile the workspace again.
+
+**Proof.** Gate 11 on this branch: "OK — no banned construct outside the
+allowlist", the four loose entries it warns of being older than this change
+(`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+`indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7).
+`.github/gates_ledger.rs`'s own 46 tests pass with the new lists. Invariants
+BG11-01 to BG11-06; limits L-BG11-01 to L-BG11-05; the rule-2 declaration after the PREC-1 merge is D-6626, and the AG-06 and AG-05 merges' refusals D-6627.
+
+### D-6621 — Two sets are sized once by what they can hold, and the GDFL source cache is one slot a source, never a walk (BASE-GATE11) — 2026-10-20
+
+Gate 11 rules 3 and 6 (D-6620's table).
+
+1. **`pull::gdfl_import_journal`'s refresh** sized its set of the day keys the
+   new lines name by growth (`HashSet::new()`). A line names one day at most,
+   so the set is now made with the new lines' count, which the refresh already
+   counted for its `lines` figure (moved before the set, not counted twice):
+   no insert of the refresh rehashes. The set lives for one refresh and holds
+   at most one short key a new line, less than the lines' own bytes.
+2. **`pull::gdfl_rekey::copied_months`** sized its set of exactly-copied source
+   months by growth; it is now made with the moving keys' months (one fold of
+   `moves`, each a hash probe of `held`), the most it can hold. On a store
+   whose re-key was never cut short the set stays empty, so the capacity is
+   memory taken for one plan and given back with it; the plan already holds
+   the survey of every moving key's days, which is larger. The planner runs in
+   `cli gdfl-rekey` only.
+3. **`pull::gdfl_run::SourceCache`** held its measured origins in a `Vec` and
+   found one with `iter().find`, a walk the comment bounded at three by the
+   invariant that `retain` kept one entry a source. The bound is now the type:
+   `[Option<Measured>; SOURCE_SLOTS]`, indexed by `SourceId::slot` (an
+   exhaustive `const` match), so a lookup is one index and a re-measure
+   replaces that slot only. Behaviour is unchanged, pinned by the existing
+   `the_source_cache_measures_again_only_when_the_root_changed` and the new
+   `every_source_has_its_own_cache_slot` (a new id does not compile until the
+   test lists it) and `the_source_cache_holds_each_source_in_its_own_slot`.
+4. **`pull::gdfl_run::Request::misuse` refuses the filter's count before it
+   reads a name.** Its rule-6 walk (`only.iter().find`, a name that is no
+   symbol) is declared at `ONLY_MAX` = 256 names, but the empty-name walk
+   (`only.iter().any`) ran on the statement BEFORE the count was refused, so
+   a request of 100,000 names with an empty first one was read past the bound
+   and answered `symbol_empty`. The count is now the first check on the
+   filter: both walks read at most `ONLY_MAX` names whatever the request
+   carried, and a filter past it is `filter_too_long` before any name is
+   read. A filter inside the bound answers exactly as before. Pinned by
+   `a_filter_past_its_bound_is_refused_before_any_name_is_read`, which fails
+   on `aab82424b` (`symbol_empty` where `filter_too_long` is due).
+
+**Cost.** (1) and (2) change no answer and are not timed apart: each removes
+the rehashes of one set's growth. (3) is timed by
+`pull::gdfl_run::tests::source_cache_hit_timing`: release build, 20 Oct 2026, load 20 to 29: n = 6,000 hits (2,000 of each source) p50 1.13 µs, p99 3.17 µs, max 25.6 µs, the root's `stat` included. The walk of at most three entries it replaces was not timed. Invariants
+BG11-02, BG11-03 and (4) BG11-05; limits L-BG11-03.
+
+### D-6622 — A run line of the import journal takes one end, folded through one index of its names (BASE-GATE11) — 2026-10-20
+
+Gate 11 rule 6 refused `RunLine::end` (IA-2 repair 1), which walked the run's
+fields once for every field of its end line.
+
+1. **The fold is indexed.** `end` builds one map of the names the run holds,
+   pre-sized for every name it can hold, and each end field is one probe: the
+   fold costs the two lines' own fields, not their product. A name held twice
+   is found at its first place, as the walk found it, so every answer of
+   `a_run_end_line_is_folded_into_its_run_and_never_counted_twice` is
+   unchanged.
+2. **A run line takes one end.** The walk's cost was not the only defect: a
+   second `run <id> ended=..` line for the same newest start overwrote the
+   first end's `end_line` (losing which line ended the run, against IA-2's own
+   "neither value is lost") and appended an `end_*` field to the run, so a
+   journal repeating an end grew one run's fields and made each later fold
+   walk all of them. Now an end is folded only into a newest start of its id
+   that holds no end and is not itself an end; any other end is listed as
+   itself, exactly as an end whose start the journal does not hold already was
+   (IA-2: "never dropped"). The fold is therefore paid at most once a run
+   line, and the whole read stays O(its bytes). Two runs of one id ended
+   twice now show the first end on the newest start and the second as its own
+   line; before, the second end replaced the first.
+
+**Cost.** Timed by
+`api::server::import_journal::tests::end_line_fold_cost_by_field_count`
+(2,000 folds a width, release): release build, 2,000 folds a width, 20 Oct 2026, load 20 to 29: 8 / 64 / 512 fields p50 1.38 / 9.71 / 72.0 µs, p99 2.92 / 20.3 / 97.6 µs, max 68.3 / 49.5 / 114.2 µs. The walk it replaces, the same test on the base tree: p50 0.92 / 11.5 / 222.1 µs, p99 2.04 / 17.0 / 290.5 µs, max 32.5 / 43.8 / 322.2 µs. From 64 to 512 fields (8 times) the indexed fold grows 7.4 times at p50 and the walk 19.3 times: linear against quadratic. At 8 fields, the size of a real end line, the map costs about 0.5 µs more at p50 than the walk did, once a run. Invariant BG11-01; limits
+L-BG11-02.
+
+### D-6623 — `BarFile::read_rows_at` groups a scattered page by frame without a sort (BASE-GATE11) — 2026-10-20
+
+Gate 11 rules 4 and 6 refused SC-3's sorted page path: a `rows.iter().find`
+for the first uncommitted row, then `order.sort_unstable()` of (row, place)
+pairs so each frame decodes once, O(log r) a row for a page of r rows.
+
+1. **One pass** refuses the first uncommitted row in the order asked, before
+   anything is read (the same row the walk named), and gives each row its
+   frame's group by one probe of a map pre-sized for the rows; groups are
+   numbered in the order the page first meets their frames.
+2. **A count and one placement pass** lay the asked positions out group by
+   group; each frame is decoded once and each bar is written to the place it
+   was asked at. O(1) a row, expected; frames are decoded in first-met order
+   instead of block order, which changes no answer.
+3. The raw form keeps its own refusal pass before any read, and then reads
+   each row through the verified cache, as before.
+
+`read_rows_at` has no production caller yet (SC-5's sorted page is its
+consumer); it is fixed here because gate 11 reads the production closure, not
+the call graph, and because the consumer would inherit the sort.
+
+**Cost.** Timed by `store::file::sealed_door_tests::read_rows_at_timing`
+(sealed months of 2,250, 22,500 and 225,000 bars, pages of 100 and 1,000 rows,
+2,000 calls each, release): release build, 2,000 calls a case after one untimed, 20 Oct 2026, the machine at 1-minute load 20 to 29 on 14 cores: pages of 100 / 1,000 rows over 2,250 bars p50 56.4 / 68.9 µs, p99 73.0 / 77.8 µs, max 263.0 / 325.6 µs; over 22,500 bars p50 0.52 / 0.57 ms, p99 0.59 / 0.65 ms, max 1.05 / 1.37 ms; over 225,000 bars p50 0.68 / 4.80 ms, p99 0.81 / 5.26 ms, max 1.85 / 6.79 ms. A row costs what the frames its page meets cost: 68 ns a row when 1,000 rows fall in the 9 frames of 2,250 bars, 4.8 µs a row when they fall in hundreds of the 879 frames of 225,000, which is one frame decode (L-SC-1) a row at most. The sort it replaces, the same test on the base tree (`scratch/BASE-GATE11-before`, `aab82424b`): p50 55.2 / 69.5 µs, 0.49 / 0.56 ms, 0.62 / 4.60 ms; p99 105.7 / 101.3 µs, 0.57 / 0.63 ms, 0.75 / 4.86 ms. The same within the machine's noise: a sort of at most 1,000 pairs was never the cost, the frame decodes are, so this removes a log factor and buys no time at these sizes. Invariant BG11-04; limits L-BG11-01.
+
+### D-6624 — The loose day zips' day table is sized once, before the walk, for every key a walk can file (BASE-GATE11) — 2026-10-20
+
+Gate 11 rule 3 ("pre-size every map", docs/07 law 2) refused
+`pull/src/gdfl_dayzips.rs:242` on feat/db-fix at `c76f9178c`, brought by the
+IA-3 merge: `DayZips::open_capped` started its day table empty
+(`HashMap::new()`) and grew it with every day zip the walk of a root filed, so
+the table's rehashes were the root's: one each time the filed keys outgrew
+it.
+
+1. **The bound is the calendar's, not the root's.** `named` files a day only
+   inside the calendar's sourced span (any other day is `Unmeasured` there and
+   the name is counted `invalid`), and a key is (kind, day): at most
+   `LooseKind::ALL.len()` x the span's days, 3 x 3,287 = 9,861
+   (`DAYZIPS_KEYS_MAX`). The span is a literal beside a `const` assertion
+   against `SOURCED_LAST_DAY - SOURCED_FIRST_DAY + 1`, so the build fails the
+   day the calendar's record grows and the bound can never be stale; no
+   sign-losing cast is written.
+2. **Sized once, for the smaller of that bound and the walk's entry cap**
+   (each filed key is at least one entry). No insert of a walk rehashes, and
+   an empty root's table already has its room. The table lives for one open
+   of a root, which is a source open, not a request or a per-row step.
+3. **No answer changes.** The walk, its census and its refusals are as
+   before; only the table's capacity is set first.
+
+**Proof.** `the_day_table_is_sized_once_for_every_key_a_walk_can_file`: the
+bound is 9,861; an empty root's table has the room of a table made with it;
+every kind on the span's first and last days is filed and the days just
+outside it are invalid, never filed; the walk leaves the capacity as it found
+it; a walk capped at 64 entries reserves for 64 keys, not for the span. On
+`c76f9178c` it fails at its first capacity comparison, since a
+`HashMap::new()` has no room until its first insert. Invariant BG11-06;
+limits L-BG11-05; gate 23's `println!` of the timing is declared beside the
+other `#[ignore]` timings (ci.yml clause A).
+
+**Cost.** Timed by `pull::gdfl_dayzips::tests::day_table_sizing_timing`:
+release build, 20 Oct 2026, load 17 to 25 on 14 cores: n = 2,000 allocations
+of the table sized for 9,861 keys p50 208 ns, p99 250 ns, max 7.5 µs (the
+empty table it replaces allocates nothing: p50 0 ns, p99 42 ns); n = 200 opens
+of an empty root p50 14.5 µs, p99 32.3 µs, max 81.2 µs, and of a root of 6 day
+zips in 9 folders p50 143 µs, p99 289 µs, max 326 µs. The one allocation is
+paid once an open of a root, never an entry. Limits L-BG11-05.
+
+### D-6625 — The bench id C-HA-01 is declared as an invariant row (BASE-GATE11) — 2026-10-20
+
+R4-09a (`4df8b324f`, merged as `72c53d191`) added `slot_audit_is_flat` to
+`crates/store/benches/ratio.rs`, printing `C-HA-01`, and no row of
+`docs/04-invariants.md` declared that id. So `core` test
+`cost_invariants::every_measured_cost_invariant_is_declared` failed on
+feat/db-fix and `cargo test --workspace --locked` was red there, and CI gate
+14 refused `crates/store/benches/ratio.rs` (`C-HA-01: in-invariants=0
+in-bench=1`). BASE-GATE11's definition of done includes a green workspace
+test, so the row is added, in R4-09a's own section, worded from the bench's
+own doc and naming it (`store::bench::slot_audit_is_flat`); the bench and
+`slot_audit` are untouched. A row is added, none is removed or renumbered.
+
+### D-6626 — PREC-1's exact mean is declared on gate 11 rule 2 as the statistic it is (BASE-GATE11) — 2026-10-20
+
+Gate 11 was green on this branch at the IA-3 merge, and the next merges into
+feat/db-fix (R3-04 and PREC-1) made it refuse again: rule 2 counted 28 float
+spellings in `runner/src/outcome.rs` against an allowance of 26. Both are
+PREC-1's (`24a4a4300`, merged as `c152231ad`): `exact_mean(net: i128, n: u64)
+-> f64`, the reported mean of an itemset's forward moves as one divide of the
+exact `i128` sum by the count, so that a zero sum is a zero mean and the
+traded side is the sum's own sign (Welford's running mean left -2.22e-16 for a
+zero sum and traded it Short). Its return type and its `n as f64` are the two.
+
+**Decision.** Declared, 26 -> 28, with the reason in `docs/06-limits.md`,
+"Gate 11 — BASE-GATE11", rule 2. The value is `Edge::mean_paisa`, a statistic
+that was already a float and that this file's entry already admits ("only the
+mean, the t-statistic and the ratios derived from them are floating"); the
+paisa moves stay integers until the one divide, which is CLAUDE.md section 7's
+"statistics keep full precision". Rewriting it to dodge the count would change
+the spelling and not the arithmetic, which is the widening this package
+refuses. No other rule's count moved with those merges.
+
+**Proof.** Gate 11 on this branch after the merge of `c152231ad`: "OK — no
+banned construct outside the allowlist". PREC-1's own tests pin the
+arithmetic (`an_exactly_zero_sum_sample_has_a_zero_mean_and_is_read_long` and its
+neighbours in `crates/runner/src/outcome.rs`).
+
+### D-6627 — What the AG-05 and AG-06 merges brought to gate 11: a set sized once, a hash probe declared, and two test-module lint allows moved inside their own files (BASE-GATE11) — 2026-10-20
+
+The next two merges into feat/db-fix (AG-06, then AG-05) made gate 11 refuse
+again on three files:
+
+| Rule | File:line after the AG-05 merge | Construct | Brought by |
+|---|---|---|---|
+| 3 | `api/src/disk_route.rs:197` | `HashSet::new()` (`kept_bytes`'s `counted`) | AG-05 repair 2 |
+| 7 | `api/src/disk_route.rs:204` | `in_use.contains(&file.id)`, a `HashSet` | AG-05 repair 2 |
+| 5c | `api/src/audit.rs:3333, 3343` | `#[allow(clippy::expect_used, ..)]` on the `#[cfg(test)]` `mod` lines of `audit_lock_wait_tests.rs` and `audit_lock_wait_measure.rs` | AG-06 |
+
+1. **`kept_bytes`'s set of counted file identities is sized once** for every
+   census name it is handed (one identity a name at most), so no insert
+   rehashes (docs/07 law 2). One sum over the feeds' lengths, which the
+   function walks anyway; no answer changes, and AG-05's own tests of it
+   (`census_kept_bytes`, `disk_route_seal_tests.rs`) pin them.
+2. **The `in_use` probe is declared**, `ALLOW_MEMBER` 2 -> 3: a probe of a
+   `HashSet` of `(st_dev, st_ino)` built once a request, one probe a census
+   name, which is rule 7's own "a hash probe".
+3. **The two lint allows move inside the files they are for**, as inner
+   attributes at the head of `audit_lock_wait_tests.rs` and
+   `audit_lock_wait_measure.rs`, each the same four lints as before. Both
+   files are mounted under `#[cfg(test)]` only, so neither is in the
+   production closure gate 11 walks, and `audit.rs` itself carries no local
+   allow again (rule 5c's count stays at the two declared, `api/src/server.rs`
+   and `pull/src/ssm.rs`). No lint changes for any line of either test file.
+
+**Proof.** Gate 11 on this branch after merging the AG-05 merge: "OK — no
+banned construct outside the allowlist"; clippy with `-D warnings` over
+`api` and `--all-targets` green; `cargo test -p api` green with both test
+modules compiled.
+
+**For CLOUD-RUST1** (in flight on `crates/api/src/disk_route.rs`, based before
+AG-05): item 1 changes one statement inside AG-05's `kept_bytes`, which that
+branch never had; when it merges feat/db-fix it keeps the sized set and the
+`ALLOW_MEMBER` count of 3 unless its own change removes the probe.
+
+### D-6628 — What the R4-17 and CLOUD-RUST1 merges brought to gate 11: no refusal, one allowance left loose and tightened, and a limits row that cited a commit `main` cannot hold (BASE-GATE11) — 2026-10-21
+
+This branch merged feat/db-fix twice more before its gates: at the R4-17
+merge and at the CLOUD-RUST1 merge.
+
+1. **Neither merge brought a construct past an allowance.** Gate 11 on this
+   branch after each: "OK — no banned construct outside the allowlist". R4-17
+   declared its own (`docs/06-limits.md`, "Gate 11 — R4-17, declared at its
+   merge"). CLOUD-RUST1 kept AG-05's `kept_bytes` as this package left it: the
+   `counted` set sized once for every census name and the `in_use` probe that
+   `ALLOW_MEMBER`'s count of 3 declares (D-6627), so its in-flight note is
+   closed.
+2. **The rule-6 allowance of `api/src/disk_route.rs` is removed, 1 -> 0.**
+   RUST-1 measures the disk in-process, so `parse_df`, whose
+   `rposition` scanned the words of one `df` line for the capacity column, is
+   gone, and gate 11 warned that GF-1's entry no longer matched. An allowance
+   nothing uses admits the next scan in that file with no reason of its own,
+   so it is tightened, as the gate's warning asks, rather than left. This only
+   narrows the list; the four older loose entries the gate names
+   (`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+   `indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7) are
+   left as D-6620 found them, because in-flight packages edit at least one of
+   those files and may rely on the allowance; each owner tightens its own.
+3. **L-BG11-04 cited the AG-05 merge by a commit hash** that is no ancestor of
+   `origin/main` and is not in `crates/store/tests/cited_commits.rs`'s
+   `NOT_ON_MAIN`, so
+   `store::cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+   failed on this branch (`cargo test --workspace --locked`, 21 Oct 2026).
+   The row now names the merge by its subject, as the rest of it does, and
+   records the CI shell gates at the R4-17 merge. The test passes.
+
+**Proof.** Gate 11 green on this branch after the CLOUD-RUST1 merge with the
+entry removed (`state/fix/ci-shell-gates.sh --jobs language-purity`); the
+cited-commits test green; the CI shell gates at the R4-17 merge in
+L-BG11-04. D-6629 records the next merge.
+
+### D-6629 — What the DATA-1 and CLOUD-MUTPULL merges brought to gate 11: nothing; the CI shell gates restated at the CLOUD-MUTPULL merge (BASE-GATE11) — 2026-10-21
+
+This branch merged feat/db-fix once more, at the CLOUD-MUTPULL merge (after
+the DATA-1 merge), with no conflict and no change to any file this package
+owns.
+
+1. **Neither merge brought a construct past an allowance.** Gate 11 on this
+   branch after the merge, run with the step's own commands
+   (`state/fix/ci-shell-gates.sh --jobs language-purity`): "OK — no banned
+   construct outside the allowlist". DATA-1's `cli/src/feed_reconcile.rs`
+   and CLOUD-MUTPULL's ten `crates/pull` files are inside it. feat/db-fix's
+   own head still refuses the files this package fixes or declares (D-6620
+   to D-6628), and nothing more.
+2. **The four loose allowances D-6628 item 2 left stand as they were**
+   (`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+   `indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7):
+   neither merge touched those files, so the reason to leave them to their
+   owners is unchanged.
+3. **The other CI shell gates on feat/db-fix's head are restated in
+   L-BG11-04**: the same eleven steps red as at the R4-17 merge, the two
+   merges adding one gate-1d literal and one gate-23 temporary path, both
+   CLOUD-MUTPULL's, and gates 4, 13c and 6d run and green. This package
+   fixes none of them: each is its owner's (D-6620).
+
+**Proof.** Gate 11 green on this branch after the merge; the fast CI shell
+gate runs on feat/db-fix's head and on this branch, each step's log under
+`state/fix/ci-gates-logs/` (operator tooling, untracked), compared step by
+step; `cargo test --workspace --locked` on this branch after the merge.
+
+**Addendum, repair 4 (2026-10-21): the IA-3-OPT merge brought one rule-6
+occurrence, declared.** This package's block (D-6620 to D-6629) has no number
+left, so the next merge is recorded here, below the entry that recorded the
+last one, rather than under a number outside the block. This branch merged
+feat/db-fix at the IA-3-OPT merge with no conflict. Gate 11 then refused one
+occurrence: `crates/pull/src/gdfl_v3.rs:411`, rule 6, brought by IA-3-OPT's
+new file (`MARKER_KEYS.iter().position(..)` in `verify_marker`). It is
+declared, `ALLOW_SCAN` `crates/pull/src/gdfl_v3.rs` 0 -> 1, because the search
+is the shape rule 6 permits: its bound is `MARKER_KEYS`, a compile-time
+`[&str; 8]`, over a marker read capped at `MARKER_MAX_BYTES` = 4 KiB, whose
+unknown or repeated key is refused at its own line, so at most 9 lines and
+72 comparisons a marker. Rewriting it as a `match` over the eight literals
+was refused: that is a second copy of the table, which drifts the day a key
+is added. The reason is in `docs/06-limits.md`, "Gate 11 — BASE-GATE11";
+the CI shell gates at the IA-3-OPT merge are restated in L-BG11-04.
+**Proof.** Gate 11 refused the merged branch ("REFUSED
+crates/pull/src/gdfl_v3.rs — 1 occurrence(s), 0 allowed") and is green with
+the entry; the refusal arms that bound the walk are
+`pull::gdfl_v3::tests::an_unverified_v3_manifest_is_not_trusted`.
+
+**Addendum, repair 5 (2026-10-22): the R3-19 and R3-30 merges; R3-30 brought
+13 occurrences, three rewritten and ten declared.** Recorded here for the
+reason the repair-4 addendum gives: the block has no number left. This branch
+merged feat/db-fix at the R3-30 merge (after the R3-19 merge) with no
+conflict. Gate 11 then refused three files, every occurrence R3-30's
+(reference tables as store data); R3-19's census publish brought none.
+
+1. **Rewritten, because a load of every consumer reaches them and the law's
+   own remedy is cheap.** `costs::lot::LotTable::from_rows`'s map of
+   underlying to rows and `pull::reference_data::FnoTable::build`'s spans
+   map are sized for what they can hold, the rows handed in (rule 3).
+   `CalendarTable::build` no longer sorts its sessions of unrecorded length
+   (rule 4): it reads them off its own day kinds in one pass over the span
+   it has already built, so the list is ascending whatever order the rows
+   came in and cannot disagree with `kind_of` (BG11-07).
+2. **Declared, each with a constant or a once-per-load bound** (reasons in
+   `docs/06-limits.md`, "Gate 11 — BASE-GATE11", after the IA-3-OPT entry):
+   rule 1 `costs/src/lot.rs` 0 -> 1, `lot_on`'s bisection of one
+   underlying's at most 64 rows (`MAX_LOT_ROWS_PER_UNDERLYING`, refused past
+   it); rule 3 `pull/src/reference_data.rs` 0 -> 2, the process interner's
+   two maps, one entry a generation loaded; rule 4 `costs/src/lot.rs`
+   0 -> 1, `from_rows`' stable order by underlying, once per load, at most
+   `MAX_LOT_ROWS`; rule 6 `costs/src/lot.rs` 0 -> 1 (a slot's two
+   `CONTRACT_RULES`), `pull/src/reference_data.rs` 0 -> 2 (one row's fields,
+   its width held to a compile-time column list first) and
+   `pull/src/calendar.rs` 1 -> 2 (the three `SOURCED_SPECIAL_NOTES`); rule 7
+   `pull/src/reference_data.rs` 0 -> 1, `kind_of`'s RangeInclusive.
+   `calendar.rs` is edited by CAL-1 in flight, so only its allowance is
+   raised; the file is not touched.
+3. **Refused alternatives.** Rewriting a compile-time-bounded walk as a
+   `for` loop or an `.any` would change the spelling the gate reads and not
+   the cost, which is the evasion D-6620 refused; a pre-size of the
+   interner by a guessed number of generations would be a fixed number the
+   data never gave.
+4. **The four loose allowances D-6628 item 2 left stand**, for D-6629 item
+   2's reason; neither merge touched their files.
+5. **The other CI shell gates on feat/db-fix's head are restated in
+   L-BG11-04** at the R3-30 merge.
+
+**Proof.** Gate 11 refused the merged branch (`crates/costs/src/lot.rs` rules
+1, 3, 4 and 6; `crates/pull/src/reference_data.rs` rules 3 (3), 4, 6 (2) and
+7; `crates/pull/src/calendar.rs` rule 6, 2 of 1) and is green after this
+change ("OK — no banned construct outside the allowlist");
+`pull::reference_data::tests::the_unsized_days_are_the_calendars_own_in_day_order`;
+`cargo test --workspace --locked` on this branch after the merge.
+
+**Addendum, repair 6 (2026-10-22): the PIT-1, CLOUD-CHG1, SC-4 and CAL-1
+merges brought nothing to gate 11.** Recorded here for the reason the repair-4 addendum gives. This branch
+merged feat/db-fix at the PIT-1 merge (the point-in-time F&O membership).
+Git refused one hunk pair, both in `.github/gates_ledger.rs`: the tails of
+`ALLOW_SORT` and `ALLOW_SCAN`, where this package's rows and PIT-1's rows
+(`crates/cli/src/fno_membership_command.rs` 4 sorts of its own report and
+bench samples, `crates/pull/src/fno_membership.rs` 1 search inside the
+compile-time `NAME_LEN`, PIT-1's D-5163 and D-5164) were appended at the same
+place. Both sides are kept, every row unchanged, because each declares a
+different file; no allowance was raised or lowered by the resolution. PIT-1's
+declared occurrences are its own and are not restated here. Nothing else
+conflicted, and no manifest, `Cargo.lock` or `ci.yml` changed. The
+CLOUD-CHG1 merge (the charge stack and the Dhan calculator mode in `costs`)
+landed on feat/db-fix a minute later and was merged here with no conflict; it
+brought no occurrence to gate 11, and its `costs/Cargo.toml` change adds a
+bench and moves `[lints]` without a new dependency (`Cargo.lock` unchanged).
+The other CI shell gates at both merges are restated in L-BG11-04.
+**Proof.** Gate 11 green on the branch after each merge ("GATE 11 rc=0",
+`state/fix/ci-gates-logs/P-BASE-GATE11-r29-g11` and `P-BASE-GATE11-r30-g11`,
+operator tooling, untracked), and on feat/db-fix's own head, at each merge, it
+refuses exactly the R3-30 occurrences it refused before them, PIT-1's rows
+being in its allowlist; `cargo test --workspace --locked` on this branch after
+both merges.
+
+**The SC-4 and CAL-1 merges (same day), and gate 0 found red on feat/db-fix.**
+SC-4 (the write door of a sealed month) and CAL-1 (the tradable-day rule and
+the special-session list) landed next and were merged here. Git refused one
+hunk, in `.github/workflows/ci.yml`, gate 23 clause A's declared print
+surfaces, where this package's `pull/src/gdfl_dayzips_tests.rs` line and
+CAL-1's two test files were appended at the same place; both are kept, each
+declaring a different file. Neither merge brought an occurrence to gate 11:
+CAL-1's `crates/pull/src/calendar.rs` stays inside its rule-6 allowance (2 of
+2, the second being R3-30's `special_note`, raised by this package), and CAL-1
+lowered that file's own membership allowance itself.
+
+At the CAL-1 merge feat/db-fix's gate 0 does not build its own source
+scanner: `.github/gates_tree.rs` types `DECLARED` as `[&str; 73]` and lists 74
+groups, because PIT-1 and CAL-1 each raised 72 to 73 for its own group and the
+merge kept both groups. Every step that runs the scanner fails with it, gate
+11 among them, so gate 11 could not be green on any branch holding that merge.
+The length is corrected here, 73 to 74, with a comment; no group is added,
+removed or widened, so this declares nothing the two packages did not each
+declare and review. It is the one file this addendum touches outside the
+package (named in the report for the main session, which may land the same
+one-character change on feat/db-fix itself). The other red steps at the CAL-1
+merge, including gate 27b's two entries headed D-6247 (SC-4's and R3-30 repair
+2's), are restated in L-BG11-04 and left to their owners (D-6620).
+**Proof.** Gate 0's build error on feat/db-fix's head ("expected an array
+with a size of 73, found one with a size of 74"), and gates 0, 11, 13, 14 and
+25 green on this branch after the correction (`state/fix/ci-gates-logs/
+P-BASE-GATE11-r31-g11b`); `cargo test --workspace --locked` on this branch
+after the merge.
+
+**Addendum, repair 7 (2026-10-22): the BASE-REDS-1021 merge; D-6625's row
+gives way to D-7120's.** BASE-REDS-1021 (`cargo deny`'s two advisories, and
+the C-HA-01 cost row R4-09a named and never landed) was merged here. Git
+refused one hunk, in `docs/04-invariants.md`, where this branch's C-HA-01 row
+(D-6625) and BASE-REDS-1021's (D-7120 point 6) stand on the same line of
+R4-09a's table, placed there on purpose so the second to merge meets this
+conflict instead of landing a second row. The resolution keeps one row,
+BASE-REDS-1021's, which carries the gate-8 ceiling, the bench's three printed
+labels, the O(1) shape test and L-HA-01 where this branch's named only the
+bench; this branch's row is dropped. D-6625 therefore lands no row of its
+own: what it decided (C-HA-01 is declared, nothing in the bench or in
+`slot_audit` changes, no row is removed or renumbered) is what D-7120's row
+does, and the invariant is declared once. Keeping both would have been CI
+gate 10b's refusal (`INVARIANT IDENTIFIER DEFINED MORE THAN ONCE: C-HA-01`,
+D-7120 point 6). Nothing else conflicted. The merge brought no occurrence to
+gate 11: its only code is `Cargo.lock` (`rustls-webpki` 0.103.16,
+`webpki-roots` 1.0.10) and a test of `vocab`'s, and gate 11 refuses on
+feat/db-fix's head exactly the R3-30 occurrences it refused at the CAL-1
+merge. Gate 14 is now green on feat/db-fix too. Gate 0 is still red there,
+`.github/gates_tree.rs` being unchanged by the merge, so the 73 to 74
+correction above stays on this branch. The other CI shell gates at this merge
+are restated in L-BG11-04.
+**Proof.** Gates 0, 11 and 14 green on this branch after the merge, and the
+other red steps' refusals identical to feat/db-fix's head with gate 0's length
+corrected (`state/fix/ci-gates-logs/P-BASE-GATE11-r32-fast` and
+`dbfix-66fe38a38-g0fix-r32-fast`, operator tooling, untracked); one C-HA-01
+row in `docs/04-invariants.md` (`grep -c '^| C-HA-01 '` is 1); `cargo test
+--workspace --locked` on this branch after the merge.
+
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's
@@ -80625,6 +81130,159 @@ Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
 (IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
 L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
 
+### D-5100 — NSE options exchange charge: a new dated row from 2026-03-01 for circular `FA73061`, the IPFT dated beside it, and the 2024-10-01 row kept as it was (CHG-0) — 2026-10-16
+
+**What was wrong.** `costs::regime` priced the NSE options exchange
+transaction charge at ₹3,503 per crore of premium (0.03503%, `FA64232`) on
+every day from 2024-10-01, with a flat ₹50 IPFT (`costs::rate::NSE_IPFT`)
+beside it on every day. NSE circular `FA73061` (`NSE/FA/73061`, dated
+2026-02-27, "applicable with effect from March 1, 2026") sets the equity
+options transaction charge at ₹3,552.99 and the IPFT contribution at ₹0.01
+per crore of premium each side. Read on 2026-10-13
+(`state/fno-winners-20261013/sources-charges.json` rows E-03, E-04) and again
+on 2026-10-15 (`state/charges-deep-check-20261015.json`); Dhan's public
+calculator showed `Exchange 5.08` and `IPFT 0.00` for a ₹14,300 NIFTY call
+premium turnover on 2026-10-15 (`state/charges/dhan-golden-20261015.json`),
+where the old row's exchange line reads 5.01. The repository had called
+`FA73061` UNVERIFIED and quoted a split of ₹3,552 + ₹1 (`docs/06-limits.md`
+§25); that split was never the circular's.
+
+**What the circular did and did not change.** The total is the same on both
+sides of the date: ₹3,503 + ₹50 = ₹3,553 before, ₹3,552.99 + ₹0.01 = ₹3,553
+after. So a consumer that adds the two lines was already right and one that
+reads the lines separately was not. This is a correction to the split, not to
+the money.
+
+1. **A new dated row, appended.** `NSE_EXCHANGE_CHARGE_TABLE` gains a third
+   row, from 2026-03-01, at ₹3,553 (`NSE_EXCHANGE_CHARGE_FA73061`). It went
+   into the table's empty second slot (`MAX_LATER_ROWS` is unchanged at 2), so
+   the lookup is still a fixed two-iteration loop. The refusal anchor and the
+   `FA64232` row are byte for byte what they were — including the 2024-10-01
+   row's note calling `FA73061` UNVERIFIED, which the new row supersedes and
+   nothing rewrites (`CLAUDE.md` §3 rule 8). The row before 2026-03-01 keeps
+   0.03503%, and `NSE_EXCHANGE_CHARGE` keeps its name and its 3,503.
+2. **The fold, and why.** One `BpsX100` unit is one rupee per crore, so
+   ₹3,552.99 and ₹0.01 cannot be written down. Keeping the circular's split
+   exactly would mean a hundred-times finer rate scale: every rate literal,
+   `RATE_SCALE`, `money.rs` and the overflow tests would move, and the
+   `FA64232` row's literal with them. This change does not do that. The
+   2026-03-01 exchange row carries the two added (₹3,553) and the IPFT row of
+   the same date carries zero, which is the IPFT's ₹0.01 **folded into the
+   exchange line**, never a claim that the IPFT is zero. The existing rows
+   modelled the IPFT separately and still do; only the 2026-03-01 rows fold,
+   and both their source strings say so. Dhan's calculator presents the same
+   fold. A compile-time assertion holds the circular's own claim: the NSE
+   outflow is ₹3,553 per crore on both sides of the date.
+3. **The NSE IPFT becomes a dated table** (`regime::ipft_rate`), because a
+   flat ₹50 beside the ₹3,553 row would charge ₹3,603 where the circular says
+   ₹3,553. Rows: a refusal before 2023-04-01 (`FA56129` gives ₹0.01 as the
+   figure it replaced, but its first day was never read), ₹50 from 2023-04-01
+   (`FA56129`; `NSE_IPFT` keeps that figure), zero by the folding rule from
+   2026-03-01. The refusal is never met by a priced round trip:
+   `trip::Rates::resolve` checks the exchange charge first and it refuses
+   every day before 2024-10-01. The undated `rate::ipft(exchange)` is
+   removed: it returned ₹50 for NSE on every day, and nothing outside
+   `crates/costs` called it. BSE is unchanged — no BSE circular is recorded
+   for 2026, so ₹3,250 and the UNVERIFIED zero IPFT stand.
+4. **What the round trip now prices.** On the predecessor's four worked
+   examples, all dated 2026-05-15: Ex.1's lines are exchange 510 and IPFT 0
+   (were 502 and 8) and its total is ₹67.12 as before; Ex.2 and Ex.3 are one
+   paisa cheaper (₹137.50, ₹53.20), because one ceiling of the folded row
+   replaces two separate IPFT ceilings. A trip straddling 2026-03-01 prices
+   each leg at its own day's row (D-1535).
+5. **The live case.** The rate for 2026-10-15 reproduces Dhan's
+   `Exchange 5.08` when applied to the ₹14,300 turnover and rounded half-up
+   once; the circular's own split, each line rounded alone, gives the same
+   5.08 + 0.00. The round-trip calculator's own figure for that trade is
+   5.09, by design: it ceils each leg to the paisa (`docs/06-limits.md` §27),
+   ₹2.309 → 2.31 and ₹2.771 → 2.78. That is the deliberate adverse rounding,
+   not a rate error. The same rate reproduces the exchange line of every
+   option case captured from that calculator on 15 and 16 Oct 2026 (eleven,
+   `state/charges/dhan-golden-20261015.json` and `-20261016.json`, IPFT 0.00
+   on each); the 2024-10-01 row misses eight of them, reading 1.3% to 1.4% low.
+
+**Proof.** `costs::regime::tests::fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one`,
+`…::the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it`,
+`…::the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061`,
+`…::the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first`;
+`crates/costs/tests/fa73061.rs` (2026-02-27, 2026-03-01, 2026-03-02, a
+straddling trip, the live Dhan case, the eleven captured option cases,
+BSE unmoved, and an ignored timing measurement); the four worked examples in
+`costs::trip::tests`, updated with the old figures beside the new. Invariants CHG0-01 to CHG0-05; the fold's
+one-paisa bound is stated in `docs/06-limits.md` §25.
+
+**Not decided here.** A finer rate scale that would carry ₹3,552.99 and ₹0.01
+exactly is CHG-1's question (it needs ₹306.99 and ₹182.99 for cash and futures
+too). When it lands, the 2026-03-01 regime can be re-expressed exactly in a
+new table generation, and these rows stay as history.
+
+### D-5101 — CHG-0 completed on 22 Oct 2026: the extremes of the `FA73061` row proved, the undated `rate::ipft` stays removed, and the charge stack merged before it reads the one dated IPFT (CHG-0) — 2026-10-22
+
+**Why a second entry.** D-5100 was written on 16 Oct 2026 and its tests were
+never run before a usage limit cut the package off. Run on 21 Oct against
+`feat/db-fix` at `5ff4956cc`, one of them failed: `tests/adversarial.rs` had
+gained the `FA73061` constant as an eighth rate while still asserting
+`9 notionals x 7 rates = 63 cells`. The count now says 72 and the "every
+notional up to a crore is priced" floor 56. On 22 Oct the cloud charge stack
+(CLOUD-CHG1, `Merge CLOUD-CHG1:` at `7fe3b6cc8`) landed on `feat/db-fix`
+before this package, which is what items 2 and 3 are about. Nothing in
+D-5100's rates or rows changed.
+
+1. **The extremes, each a test** (`crates/costs/tests/fa73061.rs`,
+   invariants CHG0-06 to CHG0-08): every month and year boundary from
+   2023-03-31 to 2026-04-01 and the last representable day; the 2026-04-01
+   STT change, across which the exchange charge and IPFT hold while the STT
+   moves; dates that do not exist (2026-02-29 and the rest), refused before
+   any rate is looked up; the fold's bound from one paisa to `i64::MAX`, with
+   its one real under-run of the half-up split found at exactly ₹50 lakh a
+   leg (177,650 paisa folded against 177,651 split); and 14 threads asking
+   about the same 563 days at once, getting the single-threaded answers.
+2. **`rate::ipft(exchange)` stays removed, and the one caller the merge
+   brought reads the dated IPFT instead.** Nothing outside `crates/costs`
+   called it. CLOUD-CHG1's dated option card (`costs::schedule`,
+   `dated_option_card`) called it once, and beside the ₹3,553 row that line
+   would have charged 0.03603% from 2026-03-01; with the function gone it no
+   longer compiles, which is the point. It now reads
+   `crate::regime::ipft_rate(exchange, day)?`, the one dated IPFT authority
+   `trip::Rates::resolve` reads too, and the card's NSE and BSE source lines
+   name that function. The card is ₹3,503 + ₹50 to 2026-02-28 and ₹3,553 + a
+   folded zero from 2026-03-01: the same 0.03553% on every day from
+   2024-10-01, so every figure the card carries is unchanged and
+   `dated-regime/r2` keeps its pinned fingerprint
+   (`costs::schedule::tests::the_rate_set_versions_are_pinned_to_the_tables_they_name`
+   passes without a re-pin). The card's test now pins the rows it adds —
+   (3,503, 50) on 2026-02-28 and (3,553, 0) on 2026-03-01, 2026-10-15 and
+   today — where it had pinned 3,503 after 2026-03-01 with a message naming
+   this package as the one that moves it. Re-adding an undated `ipft` is
+   refused by this entry.
+3. **The CLOUD-CHG1 golden test runs unchanged.**
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+   was un-ignored by D-5131 on CLOUD-CHG1's own branch, so there is no
+   `#[ignore]` left to lift and `crates/costs/tests/dhan_calculator.rs` is not
+   edited. It prices the eleven live October option readings under the dated
+   selector and under today's table on 2026-10-15, 2026-10-16 and 2026-03-01.
+   With this change it passes on all three, as written: on the two October
+   dates every line and the total agree; on 2026-03-01 every line but STT
+   agrees and STT differs exactly by the 0.10% against 0.15% rate the test
+   asserts (the dated STT row of 2026-04-01 is a month later). Nothing was
+   forced green; the result is in the CHG-0 report
+   (`state/fix/round2/fix-CHG-0.json`).
+4. **Timing**, measured (not a gate) by the ignored
+   `the_dated_lookups_cost_the_same_on_every_row_measured`, in release,
+   2,000 timed batches of 1,000 calls each per figure, on 22 Oct 2026 on the
+   M4 Pro while other builds shared the machine. Each sample is a batch's
+   mean per call (one lookup is shorter than the clock's tick), so p99 and max
+   are of batch means, not of single calls. Across the five days measured
+   (a 2020 refusal, 2024-10-01, 2026-02-27, 2026-03-01, 2100-12-31):
+   `exchange_charge_rate` p50 2 ns, p99 2 to 8 ns, max 16 to 52 ns;
+   `ipft_rate` p50 2 to 3 ns, p99 2 to 4 ns, max 18 to 28 ns;
+   `Rates::resolve` p50 6 to 8 ns, p99 6 to 21 ns, max 17 to 54 ns; the dated
+   `RateCard::resolve` p50 9 to 15 ns, p99 14 to 19 ns, max 23 to 68 ns; one
+   `price` of a 2026-03-02 NIFTY round trip p50 54 ns, p99 63 ns, max 167 ns.
+   The same on the refused, the first and the last row: each lookup is the
+   fixed two-slot table walk it was, and the new IPFT table is one more of
+   the same shape, so nothing here scans.
+
 ### D-6891 — R3-19: a day's census publish reads one header region, not the whole list; a segment directory is never followed; the AG-05 follow-ups closed — 2026-10-21
 
 The number is the ledger head + 1 (amendment A6): this entry was written as
@@ -81186,6 +81844,1045 @@ ranking for a reader, never a filing rule.
 **Cost.** No new operation: a `Sealed` refusal costs the successor door
 SC-4 already bounds (L-SC4-01, `docs/06-limits.md`); the kind is one match
 arm.
+
+### D-5420 — An `at=` instant past the calendar's last year ranks after every row of a window, not before it — 2026-10-17
+
+**Number** taken above every ledger head on every remote branch on 17 Oct
+(the highest was D-5301). Amendment A6: the landing renumbers it from the
+head it lands on.
+
+**What was observed.** The cloud mutation pass on `crates/api` (half A,
+`reports/cloud-mut-api-a-20261016.md`) found the mutant `delete -` in
+`SeriesPlan::bucket_of` alive: turning its `-1` into `1` changed no test.
+`bucket_of` answered `-1`, "before the first month", for every day it could
+not name. That covered a day before the epoch, and also a day past
+`pull::session::MAX_YEAR` (9999), which `Day::from_days` refuses.
+`/bars/window.json` takes `at=` as any whole number of unix seconds that fits
+in microseconds, so `at=253402300800` (10000-01-01) reaches it, and that
+instant was ranked before every row: ascending its index was 0 instead of the
+total, and the page served for it was the wrong end of the window.
+
+**Decision.** A day before the epoch is `-1`, before every month, and a day
+past the calendar is `i64::MAX`, after every month. `rank` already answers
+any bucket at or past the last as past every row, so nothing else moves.
+
+**Rejected.** Refusing an `at=` past 9999 at the route: it changes the wire
+contract of `bars_route.rs`, and the instant is a well-formed question with a
+well-defined answer (after everything held). Clamping `at` to 9999-12-31: the
+same answer, by a second rule for one fact.
+
+**Proof.** `bars_series_rs::bars_series_an_instant_past_the_calendar_is_after_every_row`
+(`crates/api/tests/cloud_mutants_bars.rs`) failed before the fix with
+`left: Some(0), right: Some(2)`. Invariant MUT-A-01.
+
+### D-5421 — The universe-lookup timing test is the fastest of seven interleaved samples a size, as D-0800's is — 2026-10-17
+
+**Number** as D-5420.
+
+**What happened.** `coverage::tests::the_lookup_does_not_grow_with_the_universe`
+took ONE sample of 20,000 lookups a universe and failed on unchanged code
+while four mutation runs shared the machine (16 Oct pass, NOT DONE item 5).
+
+**Decision.** Both sizes are warmed, then sampled seven times in turn, and
+each keeps its minimum, exactly D-0800's method. The 4x ceiling and
+`Coverage::of` are unchanged: an index that went back to folding the merged
+map grows its minimum as surely as its single sample.
+
+**Rejected.** Skipping the test under load: a gate that steps aside when the
+machine is busy is the hidden fallback `CLAUDE.md` §4 bans. Raising the
+ceiling: it weakens the regression it exists to catch.
+
+**Limit.** It reduces the chance of a false failure and does not remove it;
+the ratio is a wall-clock measurement on a shared machine (§3 rule 6).
+
+### D-5422 — A mid-loop cancellation and the 24 M and 64 M row budgets are driven by test-only seams, on the `READ_HELD` precedent — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** Eighteen mutants in `crates/api` were left alive by
+the 16 Oct pass because no deterministic test could reach them: five differ
+only when a client goes away WHILE a loop runs (a flag set before the call
+is caught by the first look), and thirteen only past `MAX_SCAN_BARS`
+(24,000,000 rows read) or `MAX_EXTREMES_SCAN_BARS` (64,000,000 rows owed) in
+one request, about 0.9 GB and 2.4 GB of fixture.
+
+**Decision.** Three `#[cfg(test)]` seams, each compiled out of every non-test
+build:
+
+1. `bars::cancel_trip`: a flag from `Cancel::pair` reads "cancelled" from a
+   look a test chose, on the test's own thread. `Cancel::never` is untouched.
+2. `bars::sort::SCAN_BUDGET` and `EXTREMES_BUDGET`: thread-local lowerings of
+   the two budgets, read through `scan_budget()` and `extremes_budget()`,
+   exactly as `READ_HELD` lowers `MAX_READ_HELD` (D-3349). The production
+   values, the `pub const`s and the refusal sentences are unchanged.
+
+**Rejected.** Planting 24 M and 64 M rows: gigabytes of fixture a test. A
+second thread that sets the flag mid-loop: not deterministic, so a test that
+can pass on a broken stride. Making the budgets runtime parameters: it widens
+the production signature for a test. Leaving the eighteen as NOT DONE:
+`CLAUDE.md` §9 asks for no surviving mutant.
+
+**Proof.** `server::spot::cloud_mutant_tests::a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride`,
+`bars::cloud_mutant_tests::a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled`,
+`bars::cloud_mutant_tests::a_stretch_read_looks_at_its_client_once_a_stride`,
+`bars::sort::cloud_mutant_tests::a_value_page_is_served_to_the_scan_budget_and_refused_past_it`,
+`bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`,
+`bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget`.
+Invariants MUT-A-02 to MUT-A-05.
+
+### D-5423 — The bars scan orders a null open interest by time alone, never by the number a vendor stamped — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** A branch-coverage run of `crates/api/src/bars.rs`
+found the open-interest operand of the scan's candidate never read: the
+router sends a time-of-day order to `scan` and open interest elsewhere (the
+sort indexes for a derivative, a seek for an index or a share). Asked
+directly, `scan` broke `SortKey`'s contract. An index's or a share's open
+interest is not applicable (D-3322) and every one of its rows is a null, but
+the candidate still carried the number the vendor stamped, and the
+comparator ordered nulls by it before time: `[30, null, 10, null, 20]` came
+back `30, 20, 10, null, null` descending, a null ordered as a real number.
+
+**Decision.** A null candidate's value is `OI_NULL`, so nulls compare equal
+and fall to time, then series, in both directions, as `SortKey::of` and
+`window_cancellable` state.
+
+**Rejected.** Leaving it because no route reaches it: the scan is the
+documented brute force a future route may use, and a latent wrong order is
+the silent wrong answer `CLAUDE.md` §4 bans. Ordering in the comparator
+instead (ignore `value` when both are null): the same answer, read on every
+comparison instead of set once a row.
+
+**Limit.** Unreachable from any route today; no served page changes.
+
+**Proof.** `bars::cloud_mutant_tests::the_scan_orders_open_interest_with_its_nulls_last`
+failed before the fix (`desc false`: the five nulls in stamped-value order)
+and passes after it. Invariant MUT-A-06.
+
+### D-5250 — The Py-language is used nowhere in this repository and its name appears in no tracked file; one line of D-0207 is the only recorded exception, and a `cargo test` gate refuses everything else — 2026-10-16
+
+**Status: locked.** The operator's rule, given on 16 October 2026 at 08:35 IST.
+Throughout this entry the language is called "the Py-language": the language
+whose source files end in `.py`. Its name is not written here, because this
+entry is a tracked file and the rule it records applies to it.
+
+**Decision.**
+
+1. **The rule.** The Py-language is never used anywhere in this repository —
+   not as a dependency, a tool, a build step, a script, a notebook or a file —
+   and its name appears in no tracked file, in any case, `web/` included. This
+   is stricter than `CLAUDE.md` §2 twice over: §2 refuses the language by
+   extension only outside `web/` (D-0053 made `web/` unrestricted), and §2 says
+   nothing about the name.
+2. **Five lines named it on `feat/db-fix` at `4756cce0`, in four files.** Four
+   are rewritten so the meaning stays and the name goes. Each now says "the
+   vendor's own SDK", which is the charter's own wording: `docs/00-charter.md`,
+   the `PermissionException` row, *"Live in the vendor's own SDK"*, which
+   already cites the SDK's repository and file. Nothing the sentences claimed
+   about the vendor changed; only the language's name went.
+
+   | File | Line | Was | Now |
+   |---|---|---|---|
+   | `crates/pull/src/kite.rs` | 25 | `vendor's own` + the name + ` SDK.` | `vendor's own SDK.` |
+   | `crates/pull/src/kite.rs` | 102 | the name + ` SDK. An entitlement failure, not a session failure.` | `SDK. An entitlement failure, not a session failure.` |
+   | `crates/pull/src/refusal.rs` | 29 | `in its own` + the name + ` SDK rather than on the` | `in its own SDK rather than on the` |
+   | `crates/pull/src/vendor.rs` | 6227 | `in the vendor's own` + the name + ` SDK -- so on the status axis they are one` | `in the vendor's own SDK -- so on the status axis they are one` |
+
+3. **The fifth is inside D-0207, and it stays.** This ledger's header says
+   *"Append only. Entries are never edited"*, and no decision allows an
+   editorial redaction of an old entry. Two entries bent the rule, each for one
+   named defect and neither as a general licence: D-0212 left a false claim
+   standing with *"an additive bracket, because this file is append-only and a
+   bracket is not a rewrite"*, and D-0215 repointed two citations in place
+   *"because leaving them would be worse than the append-only rule they
+   bend"*. Neither covers removing a word. So the line stays exactly as
+   written: `docs/05-decisions.md` line 16338, D-0207's paragraph headed **The
+   pair that forced it.**, the words "the vendor's own" + the name + " SDK".
+   **This entry supersedes that wording**: read D-0207's sentence as *"the
+   second in the vendor's own SDK"*. It is the only occurrence of the name in
+   the tree, and the only exception the gate below admits. Whether to redact it
+   in place is the operator's decision; doing so means removing the exception
+   from the gate and from `NOPY-04` in the same change.
+4. **The gate.** `crates/vocab/tests/no_py_language.rs`, beside
+   `workspace_is_rust.rs`, the other workspace-wide Rust-only scan that runs
+   under `cargo test`. It reads every file `git ls-files` lists, from the
+   working tree, every byte of each, and fails on: the name in any case, in a
+   file's bytes or in its path; a file whose extension is `py`, `pyi`, `pyc`,
+   `pyo`, `pyw`, `pyd`, `pyz` or `ipynb`; and a shebang line, on any line, that
+   runs the interpreter by its name or as `py`, `pypy`, `jython` or `graalpy`
+   (a `#![` Rust inner attribute is not a shebang). The needle is
+   two `concat!` halves that mean nothing apart, with a length tripwire, so the
+   test file never holds the word. The exception is matched by EXACT PATH AND EXACT LINE
+   CONTENT and must match exactly once: a copied line fails, and so does the
+   line's disappearance. A tree with no `.git` (a `cargo-mutants` copy) or a
+   host where `git` cannot run is walked as a directory instead, skipping
+   `.git`, the root `target` and every `node_modules`, and the run says so; a
+   `.git` that `git` cannot list is a failure. Invariants `NOPY-01` to
+   `NOPY-06` in `docs/04-invariants.md`.
+
+**What this does not change.**
+
+* **CI gate 15 and its allowlist in `.github/workflows/ci.yml` are untouched**:
+  this change edits no workflow. Its allowlist still names all four files; after
+  this change three of them hold no occurrence, which gate 15 reports as a loose
+  entry and does not fail on (*"THE COUNTS ARE CEILINGS, NOT EXACT"*). Pruning
+  it to `docs/05-decisions.md 1` is a workflow edit left to whoever may make one.
+* **`CLAUDE.md` §2 is not edited here.** It still says that under `web/` the
+  front end may use *"Any language"*. This entry narrows that for one language,
+  which is a scope change under §3 rule 2, and §2's sentence should say so; that
+  edit is the operator's. Until it lands, this entry and the gate are the
+  record, and `CLAUDE.md` §10's precedence rule reads the two as a
+  contradiction for `web/` alone.
+
+**Rejected.**
+
+* *Deleting the four sentences.* Gate 15's own comment refuses that trade: it
+  would delete true provenance about the vendor (§3 rule 1). The rewrite keeps
+  the provenance — the SDK is still the vendor's own, and the charter row still
+  names its repository — and drops only the name, which the provenance never
+  needed.
+* *Editing D-0207 in place.* See item 3: nothing allows it, and doing it
+  anyway is the move the ledger's header forbids.
+* *A per-file or pattern exception.* Gate 15's escape hatch is a count per
+  file, so any line of an allowed file may carry the name up to its ceiling.
+  This gate's is one path and one exact line, matched exactly once.
+* *Folding the extension and shebang checks into gate 15.* It lives in a
+  workflow, which this change does not edit, and it does not run under
+  `cargo test`, which §9 makes the definition of done.
+
+**Why.** A rule that lives in a document is negotiated in every pull request; a
+rule that fails the build is not (D-0001). Gate 15's own comment lists what it
+cannot see — the interpreter's binary name and a shebang line — and a `.py`
+under `web/` passes gate 1, because `web/` is exempt from the extension
+allowlist. This gate closes all three under `cargo test`.
+
+### D-5251 — D-0207's one line naming the Py-language is redacted in place, on the operator's word; no exception remains, and `CLAUDE.md` §2 states the rule — 2026-10-16
+
+**Status: locked.** The permission is the operator's, written in session
+e1d04fcd on 16 October 2026, just before 16:00 IST, in these words: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* That is permission for exactly one in-place edit, and this entry is
+the new decision entry it asks for. It supersedes D-5250 item 3 and its "What
+this does not change" bullet on `CLAUDE.md` §2.
+
+**Decision.**
+
+1. **One in-place edit of an old entry, and only this one.** D-0207's paragraph
+   headed **The pair that forced it.** (line 16338 at `4756cce0`) read "the
+   vendor's own" + the language's name + " SDK". It now reads *"the second in
+   the vendor's own SDK. On the status axis they are one event."* Nothing else
+   in D-0207, or in any other entry, is touched. The ledger's header rule —
+   *"Entries are never edited"* — stands for every other case; this is a named
+   exception granted by the operator for one word, in the same spirit as
+   D-0212's bracket and D-0215's repointing, and it grants nothing further.
+2. **The gate excuses nothing.** `crates/vocab/tests/no_py_language.rs` loses
+   its exception: no path, no line, no pattern. The line D-0207 used to hold is
+   kept in the test only as data, to prove it is now refused at any path
+   (`no_line_is_excused_not_even_the_one_d0207_held`, which also pins D-0207's
+   line as this entry left it). `NOPY-04` is restated to match.
+3. **`CLAUDE.md` §2 states the rule.** One paragraph under the `web/`
+   exception: the Py-language is never used anywhere, `web/` included, and its
+   name appears in no tracked file; it cites D-5250 and the gate. `CLAUDE.md`
+   and D-5250 no longer contradict each other for `web/`.
+
+**What it does not change.** CI gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files; all four now hold no
+occurrence, so gate 15 reports four loose entries and passes. Emptying it is a
+workflow edit this change does not make.
+
+**Rejected.** *Keeping the exception after the operator allowed the edit.* An
+exception is a place the rule does not hold; with the reason for it gone, it is
+only a place a future occurrence could hide.
+
+### D-5258 — NOPY-1 merged back onto `feat/db-fix`: D-5250 and D-5251 land, D-5252 to D-5257 stay off this ledger because each of their changes was already here, and the charter names the rule (CLOUD-NOPY1) — 2026-10-21
+
+**Status: locked.**
+
+**What was merged, one commit at a time.** `origin/cloud/nopy1-20261016` was
+cut from `4756cce0` and carries eleven commits. Each was taken onto
+`fix/db-CLOUD-NOPY1`, cut from `feat/db-fix` at `8c67456ac` (after CLOUD-RUST1,
+its dependency), with `git cherry-pick -x`, and a commit was left only when its
+change was already on `feat/db-fix`:
+
+| Cloud commit | What it carried | Taken or left, and why |
+|---|---|---|
+| `fb02605ad` | D-5250: four comment rewrites in `crates/pull`, the gate, `NOPY-01` to `NOPY-06`, the report | **taken**. The ledgers conflicted only where both sides appended at the end: both kept, `feat/db-fix`'s first. `crates/vocab/tests/no_float.rs` lists both new test files, this one and RUST-1's `no_runtime_spawn.rs` (eleven) |
+| `db622a8e6` | D-5251: D-0207's line, the gate with no exception, `CLAUDE.md` §2 | **taken**, and D-5251's status paragraph now quotes the operator's permission word for word (below) |
+| `c4327de34` | `web/build` regenerated from `web/src` at `4756cce0` | **left**: generated output of a tree that is not this one; `feat/db-fix` regenerates `web/build` from its own merged tree (`2a7ba92a6`) |
+| `dcc70714d` | D-5252 (gate 0 lists `/bin/df`), D-5253 (gate 1d's fifteen `crates/pull` literals) | **left**: GF-1 (`b2acb33ba`) put both here first: `SPAWN_PROGRAMS` in `.github/source_scan.rs` holds `/bin/df`, and all fifteen words are declared in `WP62_LITERAL` and `MERGED_AFTER_GF1_LITERAL` of `.github/gates_tree.rs` |
+| `9288716a8` | D-5254: invariant rows naming deleted or renamed tests | **left**: every row it restates (AF-23, AF-28j, AFA-13, AFG-71, APIC-05, C4-CLI-03-03, GI-01, GI-07, GI-10, MR-34, PIF-02, SS-06, ZMC-01, ZR-04, ZX-20) was already restated here, each by R3-14 (`7628699c6`) and three also by PREC-1 or another package; gate 10's two reds on `8c67456ac` are HA-02 and AG05-13, neither of them |
+| `4d9680881` | D-5255: gates 12, 19 and gate 11 rule 5c | **left**: each site is already resolved here (`bars_change`'s and `bars_series`'s proofs, `cash_session_cache`'s bound, `safe_files`' bench, `NotHeld::note_month`, `request_minutes`' event, the two test modules' allows), and `gdfl_import`'s `provenance` and `stop_at_census` moved since: they are in `gdfl_import_filing.rs` and `gdfl_import_census.rs`, where `provenance` hands its refusal back un-noted for the caller to note and `stop_at_census` emits its one event before the push, the same repair; the reds gates 12 and 19 show on `8c67456ac` are other sites, owned by the base-gate packages |
+| `a986ba9ef`, `f9ccaa52c` | the report's sections 6.1 to 6.5 | **taken**: the cloud branch's own record, as it ran on `4756cce0` |
+| `47dbd2c74` | D-5256: the staging test holds the leftover open | **left**: PREC-1 (`24a4a4300`) made the same repair to the same test |
+| `926b1106c` | D-5257: `521066e6` listed as squashed | **left**: BASE-CITED (`441da9fa7`, D-5820) listed it and reworded both limits sentences |
+| `bba8ec7c3` | the gate's walk guard: four anchor files read, not a read count | **taken** |
+
+**D-5252 to D-5257 head no entry here, and are never reused.** The cloud
+branch and `reports/cloud-nopy1-20261016.md` §6 name them; a reader following
+one from the report lands here, where the change it named is attributed to the
+entry or commit that made it on this branch.
+
+**The one in-place edit of an old entry.** D-0207's paragraph headed **The pair
+that forced it.** reads *"the second in the vendor's own SDK"*, and nothing else
+in D-0207 or in any other entry was edited. The operator gave that permission
+in session e1d04fcd on 16 October 2026, just before 16:00 IST: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* D-5251 is that entry; its status paragraph had paraphrased the
+permission and now quotes it. D-5251 was on no branch this ledger had merged,
+so correcting its text edits no landed entry.
+
+**The charter names the rule.** `docs/00-charter.md` holds the prohibitions
+(`CLAUDE.md` §10), and it gains prohibition 11, citing D-5250, D-5251 and the
+gate.
+
+**The gate's refusal line no longer leaks the name through a path.** The
+self-check of this merge-back planted, under `git`, a clean file inside a
+directory named for the language: the gate refused it, and its refusal line
+printed the path whole, the name in it, although the gate's own message says
+the name is masked so the message is not the leak. The line now masks the
+path as it masks the evidence, and the walk's own words (a root path, an
+absent file) are masked where they are printed. The test that found it failed
+before the change and passes after
+(`extreme_inputs_are_read_whole_through_the_gates_own_walk`, NOPY-08). The
+gate's three guards are now one function, `verdict`, so each is handed the walk
+it must refuse at its boundary (NOPY-07): before, the 1,000-file floor and the
+anchor count had no test that could fail them.
+
+**The merged tree, measured on 21 Oct 2026.** A case-insensitive `git grep`
+for the name over every tracked file finds nothing; no tracked path holds the
+name or ends in any of the gate's eight extensions; and
+`no_tracked_file_is_runs_or_names_the_py_language` passes over every tracked
+file with no exception in it. Nothing merged into `feat/db-fix` after
+`4756cce0` named the language: before the rewrites, the five lines the search
+found on `8c67456ac` were exactly the five D-5250 lists, at the same lines.
+`feat/db-fix` was merged in again at `5ff4956cc` (CLOUD-MUTPULL, DATA-1's fix
+and IA-3-OPT after `8c67456ac`); the same search over that merged tree, and
+over the messages of every commit between `4756cce0` and it, finds nothing, so
+nothing it brought needed rewording. It was merged in a third time on 22 Oct
+2026 at `a5d0bea8a` (R3-19 and R3-30 after `5ff4956cc`): only the three
+ledgers conflicted, each where both sides appended at the end, and both sides
+were kept, `feat/db-fix`'s rows first. The same two searches over that merged
+tree and over every commit message from `4756cce0` to `a5d0bea8a` find nothing.
+It was merged in a fourth time on 22 Oct 2026 at `58660b1d7` (PIT-1 after
+`a5d0bea8a`) and a fifth at `667db8e2a` (CLOUD-CHG1 and SC-4 after
+`58660b1d7`): no file conflicted either time, and the same two searches over
+each merged tree and over every commit message from `4756cce0` to `667db8e2a`
+find nothing.
+
+**One sentence of D-5250 corrected before it lands.** D-5250 is on no branch
+this ledger had merged, so its item 4 is corrected in place rather than
+superseded: it spelled the needle's two halves out in prose, which writes the
+name for a reader although no search finds it. It now says *"two `concat!`
+halves that mean nothing apart"*, and the report's same sentence says the same.
+The gate's own file keeps the halves; it cannot hold the needle any other way.
+
+**Left to their owners, said plainly.** Gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files that hold no occurrence, so
+it passes with four loose-entry warnings; and `.github/source_scan.rs` still
+says `/disk.json` runs `/bin/df` every 30 s, which D-5240 ended (the entry is
+still needed by `disk_route`'s test that compares with `df`). Both are edits
+under `.github/` that this merge does not make.
+
+### D-6900 — Ingest is always driven by Claude Code or the operator: the unattended one-click layer is dropped, one `cli ingest-run` command carries the chain, and everything that protects the data stays (one-command cut) — 2026-10-20
+
+**Status: locked.** Decided by the operator on 20 October 2026 at about 12:53
+IST, over Remote Control, in these words: *"anyhow always claude code ... just
+go ahead"*. **Recorded here on 23 October 2026** by the main session
+(LEDGER-1023) from the cut's draft, `state/oneclick-cut-20261020/decision.md`
+in the operator's work folder, outside this repository; the 21 Oct hand-over
+listed it as owed at landing. Block D-6900..D-6909: D-6901 is reserved for
+R4-10's import-journal decision and D-6902..D-6909 stay unused. The text below
+is the decision as made on 20 Oct. Where D-7135 (23 Oct, below) binds over a
+part of it, that part is named in **Read with D-7135** at the end, and is not
+reworded in place.
+
+**Where its earlier citations resolve.** IA-16's entries cited this number
+before it was written. D-4876 and D-4841 cite "D-6900 keep item 3", "keep item
+5" and "keep item 6": those are the numbered items of IA-16's KEEP text in the
+cut's `verdicts.json`, not the items below. The "Cited, never written" note
+under D-4841 named D-6900 pending "until D-6900's own entry is written"; this
+is that entry.
+
+**Context.**
+
+The 13 Oct aim was a one-click ingest that runs with nobody watching: the
+Ingest button was to run Dropbox, compress, seconds, store and checks every day
+"with zero Claude". Proof 2 on the deep-list page said the same: "by the app's
+Ingest button alone ... with no human or Claude step".
+
+The 18 Oct backtest-first cut marked the daily-automation halves as automation
+and DEFERRED them, without dropping them.
+
+On 20 Oct at about 12:50 IST the operator was shown the recommendation and
+decided that ingest is always driven by Claude Code. The operator can also run
+it from a terminal. So everything that exists only to run unwatched has no one
+to serve: the drop-folder watcher, the daily scheduler, the api child mode with
+its routes and alert queue, the network-down pause, the coverage board and
+daily report, the log archive and the gap worker.
+
+The protections stay, whoever presses the button:
+
+- crash-safe resume of an import cut at any point (a restart, a power cut, a
+  usage cutoff);
+- an idempotent rerun that writes nothing twice;
+- locks against two imports at once;
+- the disk floor;
+- verification of every file against the vendor;
+- loud named refusals of bad data;
+- the store format and compression;
+- /db correctness;
+- one reliable command for the whole chain, so Claude does not rebuild the
+  steps by hand.
+
+Sixteen candidate parts were judged, each removal was attacked by a skeptic,
+and after a failed first assembly check the attack was run a second time
+(workflow `wf_5e601f33-82f`). The verdicts, with evidence at file:line, are in
+the cut's `verdicts.json`.
+
+**Decision.**
+
+1. **Dropped, never built:**
+   - **IA-7**: inline verification during import. The command's verify stage
+     runs IA-6's cold verification instead (item 4).
+   - **R4-12**: the daily Zerodha scheduler, DLY-10's re-read control, AUT-08's
+     keep-awake and the /autopilot page. The merged autopilot (env-armed) and
+     credential law stay exactly as merged.
+   - **R4-14**: the gap queue, its worker and panel, GAP-16's record and
+     GAP-18's series checks.
+   - **R4-15**: the coverage board, the freshness light and the daily report.
+   - **IA-12a**, as a consequence of IA-10a's verdict: its /ingest panel calls
+     only the dropped `/gdfl/*` routes. It owns no failure case.
+
+   They leave `.only`, `.priority` and `.criticalPath`, and every edge to them
+   is cut.
+
+2. **Split.** The unattended half is dropped and the data half is built. Each
+   part's exact KEEP and "DROP, DO NOT BUILD" text is appended to its spec.
+   - **R4-11.** Kept: `cli ingest-run` and `pull::chain_journal`. Dropped: the
+     drop-folder watcher (DLY-02), `POST /ingest/run`, the panels (E2E-06) and
+     the route door (E2E-08).
+   - **IA-10a.** Kept: the read side. Every api reader of the GDFL journal's
+     filter understands member keys and holes (`/imports.json`,
+     `/audit.json?feed=gdfl`, `/dayflags.json`, `/provenance.json`, the
+     open-day scan), the day band finds a refusal's run from the event itself
+     (D-4896, O(1)), and the cli receipt prints the source census names
+     (D-4817) and the calendar horizon. Dropped: the api child mode, every
+     `/gdfl/*` route, the alerts routes, the restart scan and auto-resume.
+   - **IA-16.** Dropped: only its `alerts::put` calls for holes,
+     store_damaged and disk_full. Each stays a named stop or refusal on the
+     journal close and the receipt.
+   - **R4-13.** Kept: the Kite shape-change halt (`vendor_format_changed`,
+     Zerodha leg only), SEC-05's leak scan with a canary parameter path really
+     built in the process, and an honest limit for network drops. Dropped:
+     ERR-04's network-down pause and probe, its alerts and the autopilot halt.
+   - **R4-10.** Kept: `/logs.json` names a limit it ignored or clamped, the
+     import-journal measurement and its decision (D-6901), and a docs/06 row
+     for the bounded event stream. Dropped: the log archive and the segment
+     codec for logs.
+   - **IA-10b.** Kept: `GET /verify/days.json`, `GET /verify/day.json`, the
+     serve-path sample and the verdict key. Dropped: `POST /verify/run` and its
+     children.
+   - **R4-23.** Dropped: ERR-04's paused status. Kept, and no longer waiting on
+     R4-13: PERF-13's floor before any request.
+   - **R4-26.** Dropped: the schedule.rs registration and the board's expected
+     sets. The DayUniverse union is kept as a pure function.
+   - **R4-28.** Dropped: the scheduler line and the MasterChanges panel. The
+     diff keeps a reader in the refresh outcome.
+
+3. **Kept, with amended scope:**
+   - **R4-02**: FM-155's Zerodha half (the clock against a response Date),
+     FM-165's UNVERIFIED margin label, FM-160, FM-210's /instruments half,
+     every write route refusing an excluded feed even when named, and the one
+     `gaps_route.rs` alias call.
+   - **R4-19**: its data core only. Its display wiring goes to named builders:
+     R4-03, R4-02 and a proposed R4-19d.
+   - **PREC-10**: ZD-69's re-verify becomes the last leg of each Zerodha
+     `/pull/run` (also runnable alone) through api's credentialed door, with
+     crash-safe stamps, and it asks again for a same-evening day (FM-165).
+
+4. **The one command.** `cli ingest-run` runs one journalled plan.
+   - **Stages, in order:**
+     1. S0 reference files (security masters, dated session files);
+     2. fetch through `pull::gdfl_dropbox::run` (size, central directory and
+        every CRC before the rename, then R4-08's `write_day`: verify, read
+        back, rename);
+     3. day zips from a configured root through `write_day` too, so a zip
+        still being copied in is refused for that day in that run only and
+        imported by the next run;
+     4. import: one child `cli gdfl-import KIND tickstore FROM TO` per kind,
+        spawned from `current_exe()` with an argument vector, one kind at a
+        time (indices, stocks, options, oldest owed day first), each through
+        the verb's own door (`gdfl_import_guard`: the kind lock and IA-2's
+        claim) and each logging to its own `logs/gdfl/<kind>`. Never
+        `pull::gdfl_run::execute` or `execute_kind`, which take no lock and no
+        claim;
+     5. verification against the vendor: IA-6's cold `cli gdfl-verify` with
+        completeness for every kind, then `--deferred` over every pending day.
+        A day closes done only on verdict match;
+     6. stocks --stored through SURV-1's scope;
+     7. gdfl-rekey `--plan`, and `--apply` only when the plan read every file
+        and left 0 unresolved;
+     8. census recount;
+     9. a read-only fold-audit of the months touched;
+     10. the gap ledger;
+     11. a Zerodha check over the months Zerodha landings touched since the
+         last check: `cli zerodha-gaps --apply`, the `cli zerodha-repair` plan
+         and IA-9's `cli zerodha-verify`, stopping FAILED only on store-side
+         holes.
+   - **Consent.** `cli ingest-run --plan` lists and picks exactly as the fetch
+     would, downloads nothing, and shows every file's name and size and the
+     link print. That is what Claude shows the operator for the per-download
+     yes. The run refuses `plan_changed` if the listing no longer matches the
+     approved plan.
+   - **Lock.** One chain lock (`imports/ingest.lock`) is held from preflight to
+     the receipt; every stage keeps its own lock inside it.
+   - **Preflight, before any write:**
+     - the store identity marker. `--init-store role=<production|scratch>`
+       writes it with create_new, only into an empty root, and never
+       overwrites. The existing production root gets its marker only as a
+       recorded store step with the operator's yes;
+     - the mount check (the root's device id differs from the boot volume's,
+       never compared with its parent's);
+     - the writer gate (`unstamped_write_refusal` and `BRUTEX_READ_ONLY`, the
+       constant moved into `cli::store_write`);
+     - the wall clock against the Dropbox listing's Date;
+     - `started_inside_sandbox`;
+     - the calendar horizon.
+   - **Rehearsal.** On a production root R4-06's gate is asked per kind; a run
+     started by Claude is not a person's press, so not_rehearsed, stale and
+     operator_pending refuse by name. On a scratch root the run is the
+     rehearsal.
+   - **Floor.** R4-07's `floor_check` runs on the projected bytes before every
+     child and every stage. Kinds run one at a time under the chain lock, so
+     two kinds never pass the floor on one free-space reading (FIB-15 RQ-18).
+   - **Journal and receipt.** One CRC-checked chain-journal line per
+     transition; a rerun resumes at the journal boundary and writes no store
+     byte. The receipt (IST, vendor text escaped, every "done" citing its
+     journal line) is also a file in the run's own log directory, a new
+     `telemetry::run_dirs` row. Claude starts the command detached, so a
+     session that dies leaves the journal and the receipt for the next
+     session.
+
+   Claude runs the command outside its sandbox only where the operator's
+   permission settings allow it, and never changes those settings.
+
+5. **Rules decided here:**
+   - **(a) repair_in_open_month.** A repair-reason GDFL run whose range touches
+     a month whose last trading day has not passed is refused by name in
+     `gdfl_run::plan`, before any lock, unless the request explicitly accepts
+     it. This amends D-4876 (2). IA-GR-31's second test now reads "refused
+     unless accepted, and converges after the month ends".
+   - **(b) Holes on the receipt.** `cli gdfl-import`'s receipt prints the holes
+     in its range by reason, repairable or not, and the store-wide count of
+     standing holes by reason per kind. A hole that admit skips is never
+     counted in "days already done".
+   - **(c) The mid-month window rule, stated as the code applies it.** A
+     Zerodha window that starts mid-month opens the month at that day and
+     writes no gap line for the days before it. The read-only `cli
+     zerodha-repair` plan names those days `front`; `cli zerodha-gaps ...
+     --apply` records them as `why=stored_short fill=front`; only when a later
+     window that offers them is refused do they become `why=refused_front`
+     (D-3351 item 3). `pull/tests/zerodha_repair.rs` pins it: the first landing
+     writes 0 lines. IA-9 reads each of these as owed or missing_in_store,
+     never as match; PROVEN-GATE refuses the day; only the repair door fills
+     it, run by Claude Code or the operator, never by itself.
+   - **(d) master_stale.** A Zerodha `/pull/run` plan refuses `master_stale
+     age=<sessions>` before any request when the newest receipted master
+     snapshot is older than one session of the calendar of record, or when
+     there is none (R4-23, on R4-28's snapshot date).
+   - **(e) Dated tokens.** `token_on(date)` answers from the newest receipted
+     snapshot on or before the date only when the next later snapshot maps
+     that token to the same contract; otherwise `token_ambiguous`, naming both
+     dates. Before the first snapshot it answers nothing, by name. A snapshot
+     body without its receipt is never read (R4-28).
+   - **(f) clock_disagrees on both feeds.** GDFL: R4-11's preflight against the
+     Dropbox listing's Date. Zerodha: R4-02, against a response Date the press
+     already reads, before the first Kite request. The 5-minute settle margin
+     is labelled UNVERIFIED on a `/pull` receipt for a window that reaches
+     today, until a source is recorded in `docs/00-charter.md`. Making the
+     operator window a clamp would be a separate law change; it is not made
+     here.
+   - **(g) Store identity.** A root with no identity marker is refused
+     `store_identity_missing`; a copy is caught by `store_identity_mismatch`
+     when an api answers on the configured address while this root's
+     serve.lock is free. Tests, benches, rehearsals and agent scripts never
+     write a role=production root (FM-130, FM-282).
+   - **(h) What the verify stage verifies.** Every day closed by any GDFL
+     import since the previous verify stage closed, found from the import
+     journal's recorded length (`journal_replaced` if it shrank or changed
+     identity), each against the source its closing run recorded
+     (`source_not_held` otherwise). A day with no new close is never verified
+     again, so a second command writes no verdict generation.
+   - **(i) Excluded feeds.** Every write route (`/pull/spot`, `/pull/fno`,
+     `/pull/repair`, `/pull/run`, `/masters/refresh`) refuses dhan, groww and
+     truedata even when named, with feed_refusal's sentence (D-3338), and an
+     empty feed word is refused on every form instead of answering Dhan.
+   - **(j) Alert kinds.** KINDS stays append-only, so network_down,
+     feed_behind, gdfl_day_late and ingest_chain_failed are not appended:
+     their only producers are dropped. vendor_format_changed and
+     vendor_restated stay.
+
+6. **Design decisions this cut retires, moves or amends:**
+   - **Retired** (never landed; nothing to build): D-4821 (the plan ETA);
+     D-4840 (the route classes); D-4846 (every run a child of the api); D-4884
+     (the build-skew and calendar-horizon alerts); D-4806 and D-4886 (inline
+     verification); D-4856's round-5 end-of-run rules, including "No day waits
+     for a person while its input exists". A pending day now waits at most
+     until the next command, and it is named on every command until then.
+   - **Moved:**
+     - D-4805 to R3-23 (an interrupted run is a claim in a free lock);
+     - D-4848's surviving clauses (mode= on every claim, auto_resume=0 for
+       every cli claim, an interrupted verification re-run as a verification
+       and never resumed as an import) to IA-6;
+     - D-4837 and D-4863's code-6 sentence to IA-6, reworded to the cold mode;
+       D-4863's audit-cap sentence to IA-16;
+     - the verdict store's caller duties of D-4925 (near_ceiling) and D-4924
+       (lock_stalled) to IA-6's cold run, printed on its receipt with no
+       alert.
+   - **Landed by a kept half:** D-4896 (the day band's O(1) run lookup) by
+     IA-10a, with L-IA-39 rewritten.
+   - **Amended merged entries:**
+     - D-4883's caller list loses IA-16's three puts (disk_full, hole,
+       store_damaged), IA-7's two (mismatch, verdict_refused), IA-10a's alert
+       kinds and routes, and bench C-AL-03. `cli alerts` (IA-11a, merged) stays
+       the queue's reader.
+     - D-4925's "The alert is IA-7's": near_ceiling is printed by IA-6's cold
+       run, with no alert.
+     - The ownership line "IA-7: the deferred pass's driver" now reads: the
+       deferred pass is `cli gdfl-verify <kind> - --deferred` (IA-6), run by
+       R4-11's command or by hand.
+     - docs/04 IA1-01 ("The api half waits for POST /gdfl/import (IA-10a)"):
+       that api half will never exist; the cli door is the one import door.
+     - L-IA-12 is WP-16's alone, with no inline gather term (merged L-IA-60
+       cites it); L-IA-3 and L-IA-35 are never measured.
+     - D-4968 stays as written; "R4-10's rolled non-bar segments" are not
+       built.
+   - **Withdrawn, never fixed:** GAP-16, GAP-17 and GAP-18 (R4-14; no tracked
+     doc has a row for them). RT-DATA-01 closes only when its acceptance on the
+     new root passes (IA-10c's store step S4).
+   - **Store steps.** `config/store-steps.toml` S-14 (prerequisite R4-14,
+     commands `planned: POST /ingest/queue ...`) is re-planned in the same
+     commit as this entry: prerequisite IA-10c, attended per-month repairs, a
+     `[[package]] IA-10c` declared and `[[package]] R4-14` removed, gate 30
+     green. **Done in this entry's commit** (LEDGER-1023, 23 Oct): S-14's two
+     command lines are `POST /pull/repair` per month in S-13's and S-15's
+     shape, one for the index series and one for the shares, with a note on
+     why the keep hook decides the door.
+
+7. **Proof 2 is reworded**, the other five proofs unchanged; proof 3's
+   "identical bytes" is read as the store's data (bars, census, tick store),
+   because two fresh rebuilds write two different identity markers, run
+   ledgers and journals. The 20 Oct wording of proof 2:
+
+   > **One command from the Dropbox link.** A fresh, empty store is filled
+   > from your Dropbox link by one `cli ingest-run --init-store
+   > role=production`, started by Claude Code or by you from a terminal after
+   > `cli ingest-run --plan` has shown every file and its size and you said
+   > yes. Every file, for indices, stocks and options, is checked against the
+   > vendor: size, central directory and every CRC before it is kept, then a
+   > per-day verdict match from the vendor verification, with days waiting on
+   > another input cleared by the next run. No step is done by hand between
+   > the stages. A run cut at any stage resumes to the same bytes, and a
+   > second run writes no store byte.
+
+   It replaced: "**One click from the Dropbox link.** A fresh, empty store is
+   filled from your Dropbox link by the app's Ingest button alone, every file
+   checked against the vendor, with no human or Claude step."
+
+**Consequences.**
+
+- **Size.** About 6.8 part-equivalents are not built: the sum of the 16
+  verdicts' own estimates. IA-12a comes on top and is not costed by a verdict.
+  The optional R4-19d is not costed either.
+- **Critical path.** Unchanged in depth and parts on 20 Oct: D=6 with the
+  options filter, and the zero-slack set still equals `.criticalPath`. Path
+  parts gain scope: IA-16 (the dayflags kind lock, the holes and disk-full
+  receipt lines, the open-month refusal, the v=2 flags reader), IA-10c
+  (FM-163, the cost pin, the S4 store-step acceptance), R4-19 (call sites),
+  R4-23 (the restate-resume rule and four moved rows: FM-168, FM-169, FM-265,
+  FM-267), R4-28 (the token rules, the ISIN source, the receipt-last rule)
+  and PREC-10 (the re-verify leg and its stamps, FM-158, FM-165).
+- **Failure cases.** 184 owned or received cases plus 2 record-only rows (the
+  cut's `cases.json`): 125 stay with their judged owner; 26 move to a kept part
+  that holds that rule; 33 are not_applicable: 23 close as refused on purpose
+  under this decision, each with its reason shown (proof 1), and 10 (FM-176,
+  -177, -178, -179, -180, -182, -184, -185, -187, -188) are handled at head and
+  are recorded as handled with their tests, never as refused on purpose. No row
+  is closed by the cut itself: each closes only by its test.
+- **Honest limits** (`CLAUDE.md` §3 rule 6), as of 20 Oct at `453de6989`:
+  1. No file in crates/cli or crates/api called `pull::gdfl_dropbox`, so
+     R4-07's merged fetch cannot run until `cli ingest-run` lands. Until then a
+     GDFL re-delivery can be fetched only by hand, outside R4-07's size,
+     central directory, CRC, Range and never-overwrite checks.
+  2. Each door checks the disk floor alone, with no shared reservation: a GDFL
+     import and a Zerodha run started together can each pass it. The one-leg
+     doors (`POST /pull/spot`, `/pull/fno`, `/pull/repair`, `/pull/recovery`)
+     and `cli zerodha-repair --from-store` carry neither the floor nor
+     master_stale; Claude and the operator pull Zerodha through `/pull/run`.
+     On every door a full disk is still `StoreError::DiskFull`, a loud refusal.
+  3. The info events of an import older than the bounded event ring (8 MiB x
+     8) cannot be recovered; LOG-RETENTION (FM-091) is refused on purpose.
+  4. A network drop during a pull is not paused: each instrument it hits is
+     refused by name after 6 transport retries and left owed, and the rerun is
+     idempotent from the store's resume point.
+  5. The cold verification reads the vendor source once more for each day
+     verified (O(bytes), duration unmeasured): one large pass for the backlog
+     imported by hand before the command lands, then per new day.
+  6. Kinds run one at a time, which costs speed only.
+  7. R4-11's command and R4-13's shape-change halt still wait, through R4-05,
+     on R3-21 and R3-31, which were not judged here and carry stop-and-report
+     notes.
+- **Out of reach of this cut.** Parts that were not judged still read what it
+  removed: R3-21, R3-25 and R3-31 read the dropped alerts routes, and R3-26 and
+  R4-24 read the dropped child mode or pages. Each carries a NOTE to leave such
+  an item out by name, never to build a substitute.
+
+**Read with D-7135** (23 Oct 2026, recorded below; it binds over these parts
+of this entry, which stand as written above):
+
+- Item 4's preflight, "`--init-store role=<production|scratch>` writes it ...
+  only into an empty root": under D-7135 `--init-store role=production` runs
+  only on the EXISTING, non-empty production root, through its recorded store
+  step (`config/store-steps.toml` S-51) with the operator's yes, and into an
+  empty root it is refused `production_root_must_exist`;
+  `--init-store role=scratch` runs only into an empty root; neither form runs
+  the chain.
+- Item 4's rehearsal, "On a scratch root the run is the rehearsal": on a
+  role=scratch root the chain runs only over an explicit FROM..TO window the
+  caller names, and without one it is refused before any write.
+- Item 6's "RT-DATA-01 closes only when its acceptance on the new root passes":
+  its acceptance runs against the existing production store (IA-10c's text).
+- Item 7's proof 2, "A fresh, empty store is filled ... by one `cli ingest-run
+  --init-store role=production`": proof 2 is now the patch on the existing
+  store, in three recorded steps (D-7135 item 6). Proof 3 is the one-month
+  build-twice test in two role=scratch roots (D-7135 item 3), not two fresh
+  rebuilds.
+
+### D-7094 — Parts deferred, not dropped, at the 20 Oct follow-ups — 2026-10-20
+
+**Status: locked.** Decided by the main session on 20 October 2026, in the
+follow-ups run the operator released at about 13:40 IST with *"whatever is
+your recommendation go ahead"*. **Recorded here on 23 October 2026** by the
+main session (LEDGER-1023), from `state/followups-20261020/main-session.md`
+(section 3 and section 9, item 29) in the operator's work folder, outside this
+repository, where it was owed at landing. Block D-7090..D-7099 ("D-7094 the
+deferral record, landed by the main session"). The draft's number D-6993 is
+void: D-6920..D-6999 stays unused.
+
+**Decision.** Four parts stay in their launchers' priority lists and out of
+`.only`. None is dropped, and none is silently out of scope (`CLAUDE.md` §3
+rule 2):
+
+- **SC-12**, patched-alias sort columns. Only if the disk gets tight. It needs
+  only an index rebuild later, not a re-seal (the store-compression design,
+  section 9).
+- **CHG-2**, net P&L after charges in every report. Backtest side, after
+  CLOUD-CHG1 and CLOUD-CHG1-OPT.
+- **SC-9**, retirement of raw months beside sealed ones. It waits for the
+  operator's D-4931, because unlinking a stored file touches `CLAUDE.md` §1
+  ("append-only history applies to the store as well") and §3 rule 8. If the
+  operator says no or not yet, SC-9 stays deferred under this entry.
+- **CC-11**, sealing closed pull-journal pieces. It needs a segment codec and a
+  compactor, which the one-command cut (D-6900) dropped from R4-10. About
+  1.08 GB, 29x compressible, on 13 Oct. Revisit when R4-29 lands a codec. Its
+  failure case FM-618 is deferred with it, not dropped.
+
+**As recorded on 23 Oct.** The draft says each part "is named as deferred in
+`docs/07-plan.md`". At this entry's commit `docs/07-plan.md` names none of the
+four, so until the plan is edited this entry is the only tracked record of the
+deferral. No `Merge` subject on `feat/db-fix` names SC-12, CHG-2, SC-9 or
+CC-11, and D-4931 heads no entry here, so all four are still deferred.
+CLOUD-CHG1 has merged; CLOUD-CHG1-OPT has not.
+
+### D-7135 — No fresh-from-scratch rebuild of the store: a new vendor link, or any re-delivery, is a patch into the existing store, append-only (no-fresh-root cut) — 2026-10-23
+
+**Status: locked.** The operator's rule, 23 October 2026 at about 07:45 IST:
+*"forget about GDFL re-delivery and re-import everything freshly from scratch
+... even if I provide a fresh new GDFL link, just consider it as re-import or
+patching"*. Recorded by the main session (LEDGER-1023) from the cut's folder,
+`state/nofresh-20261023/` in the operator's work folder, outside this
+repository: `README.md` (the cut and its draft of this entry), `cases.json`
+(the failure cases) and `proofs.md` (the six proofs). Block D-7135..D-7144:
+D-7136 to D-7138 follow, and D-7139..D-7144 stay reserved for this cut.
+
+**Decision.**
+
+1. **The patch path.** A new GDFL link, or any vendor's re-delivery, is an
+   incremental re-import into the existing store, append-only. It goes through
+   CC-3's intake, which classes every day the store already holds as same,
+   new, changed or gone by its BYTES: its member sizes and CRCs against the
+   source member its own provenance names. Being held never makes a day
+   "same". Then PREC-5 rebuilds each changed day once, through R3-22's restate
+   door and R4-21's moves, and PREC-19 re-derives order flow. A changed day
+   becomes a new generation and the old generation stays byte for byte; an
+   unchanged day writes nothing, and so does a second press. A held day
+   missing from the new download is classed gone: it stays held, stops the
+   command by name, and goes on only after a one-use, journalled acceptance.
+   Only dependents are re-derived: order flow (PREC-19) and derived rows
+   (PREC-13 CR-08) bound to the old generation read as stale until they are
+   rebuilt. Every file is checked against the vendor, the re-delivered files
+   included.
+2. **Refused under this entry, and never built:** the full rebuild (R4-16's
+   second store of about 2 TB beside production, its own estimate and an
+   extrapolation), the fresh-clone harness, `cli fresh-check`, the digest
+   manifest, CC-3's `--against <old root>`, R4-11's chain run on an empty
+   root, the backtest-first plan's "root A", a whole-store old-versus-new
+   compare, and the delete list.
+3. **Proof 3 is a test, not a re-import.** One month of every kind (GDFL
+   indices, stocks, options and tick store, and that month's Zerodha pull) is
+   built twice, through the per-kind verbs, each time into a new, empty root
+   marked `role=scratch`. Then `cli store-compare <SCRATCH_A> <SCRATCH_B>
+   --month <YYYY-MM>` must report 0 bar differences and name every structural
+   difference (run ids, `landed_at`, layout); served bars decide (FM-157). It
+   tests `CLAUDE.md` §3 rule 5. It never touches production, never makes a
+   delete list, never runs `cli ingest-run` on an empty root (whose chain
+   would catch up every owed day there, which is the full rebuild of item 2),
+   and waits for R4-16 and SURV-1 to merge. `config/store-steps.toml` S-42 is
+   re-planned as proof 3 in this entry's commit, and OWED-22 reworded.
+4. **The store's disaster path is a backup, not a rebuild:** the backup verb
+   and its restore drill (OWED-21), split out of R4-09 as R4-09b by D-7137.
+   The 21 Oct sentence "the full fresh-clone rebuild (R4-16) stays built and
+   proved on a sample as the disaster path" is struck.
+5. **What stays law:** `CLAUDE.md` §3 rule 5 (idempotence) and rule 8
+   (append-only history); vendor verification of every file; crash-safe
+   resume; and the patch path itself (CC-3's intake, PREC-5's one rebuild per
+   changed day, PREC-19's re-deliveries bound to their source), now
+   strengthened. Data rigour is never traded for speed.
+6. **Proof 2 is the one command, as a patch on the store we keep,** in three
+   recorded steps: `cli ingest-run` (R4-11) imports the new days and stops at
+   CC-3's intake, before any tick-store write, on every day the new download
+   changes or drops; PREC-5's `--apply`, a listed store step, runs after the
+   operator's yes and rebuilds each changed day once; then `cli ingest-run`
+   again, whose verify stage proves the days that step applied against their
+   new source. Claude Code or the operator runs it from a terminal; there is
+   no unattended timer or button (D-6900).
+7. **R4-11's store identity marker.** `cli ingest-run --init-store
+   role=production` runs only on the existing, non-empty production root its
+   recorded store step names (`config/store-steps.toml` S-51, closing
+   OWED-32, both added in this entry's commit), by canonical path and
+   (dev, ino) given explicitly, never resolved from an inherited
+   `BRUTEX_STORE`, writes with create_new, never overwrites, and only with
+   that step's operator yes recorded; into an empty root it is refused
+   `production_root_must_exist`. `--init-store role=scratch` runs only into an
+   empty root, and on a role=scratch root the chain runs only over an explicit
+   FROM..TO window. Neither form runs the chain.
+8. **Constant time.** Every route and every store step stays O(1) at the 99th
+   percentile, measured. The one-time passes this decision makes necessary on
+   the kept store are O(bytes) by nature and are each listed in docs/06 as a
+   one-time pass with its measured time and a disk projection, never as a
+   per-operation cost: R4-11's one scope_widened read of held CASH days,
+   CC-1's deep pass over the tick store, CC-18's provenance back-fill, PREC-6's
+   closing-OI back-fill, PREC-17's special-session recount, and PREC-5 and
+   R3-22's restates.
+
+**What it supersedes.** The operator's plans of 14 Oct ("everything from
+fresh"), 17 Oct (a fresh run into a NEW empty root, rebuilt twice, compared
+item by item with a delete list) and 20 Oct (a fresh download, rebuilt twice,
+then the proofs), and the 21 Oct disaster-path sentence. Those plans lived in
+the operator's state folder and headed no entry here. Of this ledger it binds
+over the parts of D-6900 that D-6900's **Read with D-7135** names, and, by
+D-7138, over PROVEN-GATE's "proven root A".
+
+**The parts (24 judged, each judged and then attacked).** None dropped.
+Narrowed (10): R4-16, CC-3, PREC-5, R3-22, R4-21, R4-11, IA-10c, PREC-17,
+AH-06, IA-4. Kept with an amendment (7): CC-18, PREC-19, VKI-1, CC-1, PREC-6,
+PREC-13, WP-99. Unchanged (7): SURV-1, R4-29, CC-5, R3-26, R3-27, OF-1,
+PREC-18. Each part's binding text is in the cut's `texts.json`. Three
+judgement calls, each the conservative choice: FM-268 stays open with R4-16;
+proof 3 never runs `cli ingest-run` on an empty root; the edge R4-16 -> SURV-1
+stays. IA-10c's whole-history Zerodha re-pull stays REQUIRED (PROVEN-GATE (b))
+and lands into the existing store through the existing doors, never a root A.
+
+**The failure cases** (`cases.json`): 252 rows, 248 judged and 4 record-only
+(FM-014, FM-249, FM-266, FM-622). Keep 241: 20 already handled at head, FM-183
+among them (recorded as handled, never as refused); FM-268 open; FM-277 and
+FM-329 narrowed. Move 5: FM-254 and FM-290 to PREC-5, FM-215 to R4-11, FM-606
+to CC-1, FM-120 to PREC-17. Refuse 2, on purpose under this entry with the
+reason shown: FM-235 (a second store of about 2 TB beside production no longer
+exists) and FM-226 (days held from elsewhere stay held; a delivery that lacks
+them classes them gone, never deleted). No row is closed by this entry: each
+closes only by its test.
+
+**Honest limits.** The net build change is about zero, possibly more work: an
+estimate, not a measurement. The judges' gross cut was about 0.74
+part-equivalents, and the attacks added unestimated work back. The machine
+time saved (the rebuild twice of the 20 Oct plan, 2 to 5 days; a new tick
+store, about 49 h serial) was never timed, so it is an extrapolation; the
+whole-history Zerodha re-pull (about 12 h, stated in `sink.rs`, not measured)
+is not saved. On 17 Oct the drive had 1.6 TB free, so a second store of about
+2 TB would not have fit. Whether R4-09b's backup covers the untracked local
+configuration, the link file, unpushed commits and the work folder's `state/`
+is UNVERIFIED; D-7137 item 3 has docs/36 §4 list each with its second copy or
+"none", and the operator decides.
+
+**Rejected.** *A full fresh rebuild kept as the disaster path* (the 21 Oct
+sentence). It needs a second store of about 2 TB, which the drive could not
+hold on 17 Oct, and it is the fresh-from-scratch rebuild the operator's rule
+refuses; a verified second copy with a restore drill is the disaster path.
+*Deleting what a re-delivery lacks.* The store is append-only (§3 rule 8); a held day a delivery lacks is gone from the delivery,
+not from the store.
+
+### D-7136 — PREC-5 owns the append-only new tick-store version of a changed re-delivered day (no-fresh-root cut) — 2026-10-23
+
+**Status: locked, as an ownership decision.** The operator, 23 October 2026 at
+about 08:40 IST: *"add the changed-day tick-store writer to PREC-5"*, and *"we
+need maximum precision, accuracy and a working solution"*. **This entry records
+who builds the writer and what it may never do. It makes no design claim.**
+The binding clause PREC-5 builds from is
+`state/nofresh-20261023/src/writer-final.txt` in the operator's work folder,
+outside this repository, and it is **still under verification**: the
+independent check of 23 Oct at about 12:00 IST (`src/writer-verify.md` there)
+found the assembly correct and every mechanical check passing, and its verdict
+is "not ok yet", with one finding unresolved, three items only partly
+resolved, and six statements wrong against the code or against the clause
+itself. Every line the clause cites is at `feat/db-fix` `0dc8361c`; PREC-5
+re-checks each before it edits, and the clause's corrections bind over its
+first text where they differ. PREC-5's own locked choices take its block
+D-5480..D-5499.
+
+**Why it needed an owner.** Under D-7135 there is no fresh root to absorb a
+changed re-delivered day, and the tick store had no writer for one: R4-08's
+writer refuses `held_day_differs` (`crates/pull/src/tickstore_write.rs`), and
+R4-07's pick refuses `redelivered` (`crates/pull/src/gdfl_dropbox.rs`). It was
+the largest open gap the cut found.
+
+**Decision.**
+
+1. PREC-5's `--apply` writes an append-only new tick-store version of every
+   held day that CC-3's intake classes changed (and of a day CC-1 names
+   `day_file_damaged`), as one sequenced step of that day: after its bars,
+   before its receipt.
+2. The held day file is never rewritten, renamed or removed (`CLAUDE.md` §3
+   rule 8). The shape the clause proposes, under verification: a version file
+   `<stem>.r<N>.bts` beside the held file; the version served named by a
+   `store::generation`-style append-only pointer under `tick-versions-v1/`; at
+   most 1,024 versions a day; and one O(1) resolver through which every
+   tick-store path goes, with two answers: the served version for current
+   readers, and the named version for a verifier of a stored generation. The
+   store format gains it in `docs/02-store-format.md` only when PREC-5 lands
+   it, with its own tests; this entry fixes none of those bytes.
+3. The order of one day: the bars first, from the re-delivered zip by its
+   intake record; then version N from the same open zip, verified entry for
+   entry, and the pointer appended, in one call under one lock hold; order
+   flow is owed to PREC-19; the receipt comes last.
+4. The build graph gains exactly two edges for it: PREC-5 waits for CC-1, and
+   merges after R3-27 (files only). Never PREC-5 -> CC-3: CC-3 depends on
+   PREC-5, so that edge would be a cycle. CC-3 fills PREC-5's input from its
+   intake ledger after PREC-5 merges, as its own sequenced edit.
+5. The tick-store half of failure case FM-290 is PREC-5's (FM-290's rebuild
+   half moved to PREC-5 under D-7135 too).
+6. The draft said PREC-5 writes this entry first if it is missing when PREC-5
+   starts. It is present now, so PREC-5 writes no second D-7136.
+
+**Rejected.** *Leaving the tick-store half unowned.* A changed day's bars would
+be rebuilt while its tick-store day stayed refused `held_day_differs`, with no
+part to close it. *Rewriting the held day file in place.* §3 rule 8, and a
+verifier of an older generation would lose the bytes it was built from. *A new
+tick store built from scratch.* D-7135.
+
+### D-7137 — R4-09b: the store's backup verb and its restore drill (AUT-06) split out of R4-09 and placed right behind the critical path (no-fresh-root cut) — 2026-10-23
+
+**Status: locked.** The operator, 23 October 2026 at about 08:50 IST: *"move
+R4-09's backup and restore drill up, right behind the critical path"*. The
+part's spec is `state/nofresh-20261023/r409b-spec.txt` in the operator's work
+folder, outside this repository; its source item is AUT-06 of the ingest and
+/db checklist of 13 Oct.
+
+**Why now.** Under D-7135 there is never a fresh-from-scratch rebuild, so a
+verified second copy with a restore drill is the store's only disaster path,
+and /db says today that no copy of the store is recorded. R4-09's own text
+deferred its backup behind the backtest.
+
+**Decision.**
+
+1. **A part of its own.** R4-09b builds `cli backup --to <dir> [--plan]
+   [--mib-per-s N]` and `cli backup-drill --from <dir> [--months N]` (N
+   defaults to 3), and /disk.json and the /db band show the last backup date,
+   the manifest's file count and bytes, the last drill date and its result.
+   R4-09 keeps the rest of its scope (its scrub schedule and /verify work).
+   R4-09b touches neither, nor `crates/pull/src/scrub.rs` (SC-9) nor
+   `crates/store/src/file.rs`.
+2. **Placed right behind the critical path** in the build's priority order.
+   The launcher placement is the main session's.
+3. **What the spec binds**, among its rules: the verb copies what the store
+   already lists and the GDFL source archives by name and size, never a glob of
+   the whole drive; each new or changed file goes to the target as temporary,
+   fsync, rename and folder fsync with a blake3 digest, and it never deletes or
+   overwrites a file there (a changed source is a new name, the old copy kept);
+   one record per file in an append-only manifest on the target, looked up in
+   O(1) per file, never by a rescan; a month is copied under its reader lock,
+   and a writer-held month is a named `busy` line, retried, never copied half
+   written; it refuses by name a target on the store's device, a target inside
+   the store, a target with less free space than the plan needs, and a target
+   that is not a directory; it is idempotent (a second run copies nothing and
+   says so) and resumable (a kill leaves no file the manifest calls done); its
+   receipt is the line `ops/backups.log` already carries, read by the existing
+   parser, with no second one; the drill restores into a private role=scratch
+   root, compares byte for byte with the store and with the manifest digests,
+   and never writes the store; staleness is computed when the page is read and
+   shown by name, and no alert kind is added (D-6900: attended only). docs/36
+   §4 lists each item that lives only on the operator's Mac with its second
+   copy or "none" (FM-277): the untracked local configuration (copied to the
+   target as a file only, never into git, never printed; `CLAUDE.md` §8),
+   unpushed commits and the work folder's `state/`. The operator decides what
+   is covered, and no credential value is ever copied.
+4. **Store steps.** `config/store-steps.toml` S-17 (closing DB-B73 and
+   OWED-21) waits for R4-09b, its two planned commands use the two verbs, and
+   its dry runs gain `cli backup --to <SECOND_DRIVE> --plan`. The
+   `[[package]] R4-09` row, which no other step named, is now `R4-09b`, and
+   OWED-21's source names both.
+5. **The store write is the operator's.** The operator names the second
+   drive's path; then a `--plan`, a measured sample, the first full copy, and
+   one drill on 3 months. Its size is the store (about 913 GiB on 7 Oct) plus
+   the source archives (about 0.6 TB), so the second drive needs about 1.6 TB
+   or more: an extrapolation, measured by `--plan` first.
+6. **Numbers.** The spec's file list names "docs/05 entry D-7137": this is
+   that entry, so R4-09b writes no second D-7137. A locked choice of R4-09b's
+   own takes a number the main session assigns it.
+
+**Rejected.** *Leaving the backup behind the backtest*, as R4-09's text had it.
+Under D-7135 the backup and its drill are the store's only disaster path, and
+no copy of the store is recorded today.
+
+### D-7138 — FIB reads the existing store's admitted days, never a "proven root A": PROVEN-GATE item (5), and the D-6230 entry it writes, amended under D-7135 — 2026-10-23
+
+**Status: locked.** A consequence of D-7135, recorded by the main session
+(LEDGER-1023) from `state/nofresh-20261023/README.md` item 7 in the operator's
+work folder, outside this repository. It amends text; it edits no entry.
+
+**What it amends.** PROVEN-GATE (backtest-first, 18 Oct; block D-6230..D-6239)
+has an item (5), the FIB amendment, "recorded as the first docs/05 entry of
+this block (D-6230)": FIB-8's loader and FIB-12's `fib plan` read only ADMIT
+days (and WARMUP_ONLY days for warm-up) from the admission file, and "FIB-12's
+--store points at the proven root A built in store steps S3-S5", never the
+operator's store at `runtime/store`. The backtest-first README items 3 and 4
+say the same, and so does PROVEN-GATE's title ("FIB reads the proven root A
+through it"). Under D-7135 no root A is ever built.
+
+**Decision.**
+
+1. FIB-8's loader and FIB-12's `fib plan` still read only ADMIT days (and
+   WARMUP_ONLY days for warm-up) from PROVEN-GATE's admission file, and every
+   report still counts the refused stock-months by reason. FIB-12's `--store`
+   points at **the existing store**, so a FIB run reads the existing store's
+   admitted days. The words "never `runtime/store`" go with root A: the
+   existing store is the one store, and what keeps FIB on proven data is the
+   admission file, not a second root.
+2. **D-6230 heads no entry in this ledger at this commit**: PROVEN-GATE has not
+   merged. When it writes D-6230, the entry says "the existing store's
+   admitted days". If D-6230 lands with the root-A wording, this entry
+   supersedes that sentence, and D-6230 is never edited.
+3. The backtest-first plan's own store steps change with it (they are that
+   plan's names, S0 to S6, not `config/store-steps.toml` ids): S1's NEW tick
+   store becomes CC-2, then CC-1's deep read-only pass over the existing tick
+   store; S0(b) and S4 (Zerodha mode (i) into root A) become IA-10c's
+   whole-history re-pull into the existing store; S5 runs NEW-34q over the
+   existing store's touched months; and S6 (a second Kite pull into a root B)
+   is at most a one-month scratch compare, a report only.
+4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
+   months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
+   Placing that step is an ordering decision left to the main session.
 
 ### D-7139 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
 

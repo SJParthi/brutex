@@ -984,14 +984,17 @@ const REGIME_ROW: &str = "crate::regime — the dated regime row in force on the
      citation is on the row (crates/costs/src/regime.rs).";
 
 /// The source line a dated NSE options exchange charge carries.
-const REGIME_EXCHANGE_NSE: &str = "crate::regime::exchange_charge_rate on the trade day plus \
-     crate::rate::NSE_IPFT, exactly as crate::trip::Rates::resolve adds them; on and after \
-     2026-03-01 FA73061 states the same total, Rs 3,552.99 + Rs 0.01 = Rs 3,553 per crore \
-     (sources row E-03), as FA64232's Rs 3,503 plus the Rs 50 IPFT (D-5131).";
+const REGIME_EXCHANGE_NSE: &str = "crate::regime::exchange_charge_rate plus \
+     crate::regime::ipft_rate on the trade day, exactly as crate::trip::Rates::resolve adds them \
+     (D-5131, D-5100): to 2026-02-28 FA64232's Rs 3,503 plus the Rs 50 IPFT (FA56129); from \
+     2026-03-01 FA73061's Rs 3,552.99 + Rs 0.01, carried as one Rs 3,553 row plus a zero IPFT \
+     line because the regime's unit is one rupee per crore (sources row E-03) - Rs 3,553 per \
+     crore of premium on both sides of the date.";
 
 /// The source line a dated BSE options exchange charge carries.
 const REGIME_EXCHANGE_BSE: &str = "crate::regime::exchange_charge_rate on the trade day, plus \
-     crate::rate::BSE_IPFT, a zero that is UNVERIFIED.";
+     crate::regime::ipft_rate, which for BSE is crate::rate::BSE_IPFT on every day, a zero that \
+     is UNVERIFIED.";
 
 /// What a dated equity or futures refusal says.
 const NO_DATED_HISTORY: &str = "UNVERIFIED — this repository records no dated history of the \
@@ -1033,19 +1036,27 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
 /// The IPFT is never dropped by date. Until D-5131 it was dropped from
 /// FA73061's effective date (2026-03-01) on, on the expectation that package
 /// CHG-0's FA73061 row (₹3,552.99 + ₹0.01 per crore, carried together as
-/// 0.03553%) would be the row in force; that row is not in `crate::regime`,
-/// so the row in force is still FA64232's 0.03503% and the card charged
-/// 0.03503% — the IPFT's 0.0005% short — on every NSE options day from
-/// 2026-03-01, labelled as cited. One figure, read where `trip` reads it,
-/// cannot fold twice or not at all: whichever split the regime carries, the
-/// card is the regime's row plus the regime's IPFT, and
+/// 0.03553%) would be the row in force; that row was not yet in
+/// `crate::regime`, so the row in force was still FA64232's 0.03503% and the
+/// card charged 0.03503% — the IPFT's 0.0005% short — on every NSE options
+/// day from 2026-03-01, labelled as cited. One figure, read where `trip` reads
+/// it, cannot fold twice or not at all: whichever split the regime carries,
+/// the card is the regime's row plus the regime's IPFT, and
 /// `the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day`
 /// holds it to `trip` on every day from 2018 to 2027 at both venues.
+///
+/// Since D-5100 (CHG-0) the regime carries the FA73061 row and dates the IPFT
+/// beside it, and the IPFT is read from [`crate::regime::ipft_rate`], the one
+/// dated IPFT authority `trip` reads too: ₹3,503 + ₹50 to 2026-02-28, ₹3,553 +
+/// a folded zero from 2026-03-01 — the same 0.03553% on every day, so every
+/// figure of this card and the `dated-regime/r2` fingerprint are unchanged.
+/// The undated `crate::rate::ipft` it read before is gone: kept beside the
+/// ₹3,553 row it would have charged 0.03603% (D-5101).
 fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
     let base = exchange_charge_rate(exchange, day)?;
     let stt_sell = stt_options_rate(day)?;
     let stt_exercise = stt_exercise_rate(day)?;
-    let ipft_bps = crate::rate::ipft(exchange).get();
+    let ipft_bps = crate::regime::ipft_rate(exchange, day)?.get();
     // The BSE IPFT is a zero no source states (crate::rate::BSE_IPFT).
     let exchange_charge = match exchange {
         Exchange::Nse => Status::Cited,
@@ -1526,6 +1537,17 @@ mod tests {
             before.exchange_charge().rate(),
             Ratio::new(3_553, RATE_SCALE)
         );
+        // The same total from the other split: FA64232's row and the ₹50 IPFT
+        // (D-5100's dated IPFT, read where crate::trip reads it).
+        assert_eq!(
+            (
+                exchange_charge_rate(Exchange::Nse, day(2026, 2, 28))
+                    .map(crate::rate::BpsX100::get),
+                crate::regime::ipft_rate(Exchange::Nse, day(2026, 2, 28))
+                    .map(crate::rate::BpsX100::get),
+            ),
+            (Ok(3_503), Ok(50))
+        );
         assert_eq!(before.exchange_charge().status(), Status::Cited);
         assert_eq!(before.exchange_charge().source(), REGIME_EXCHANGE_NSE);
         assert_eq!(
@@ -1540,19 +1562,20 @@ mod tests {
         assert_eq!(before.gst().rate(), Ratio::new(1_800_000, RATE_SCALE));
         assert_eq!(before.kind(), TradeKind::Options);
         // From FA73061 on: still the regime row plus the IPFT. The row in
-        // force is FA64232's 0.03503% (package CHG-0's FA73061 row is not in
-        // crate::regime), so the IPFT is not dropped: 0.03553%, the total
-        // FA73061 states (sources row E-03). Dropping it by date charged
-        // 0.03503% here, labelled as cited (D-5131).
+        // force is FA73061's folded 0.03553% and the dated IPFT beside it is
+        // zero (CHG-0, D-5100), so the card is 0.03553%, the total FA73061
+        // states (sources row E-03). Dropping the IPFT by date charged
+        // 0.03503% here while the regime still held FA64232's row, labelled
+        // as cited (D-5131); keeping the undated ₹50 beside the new row would
+        // charge 0.03603% (D-5101).
         for on in [FA73061_EFFECTIVE, day(2026, 10, 15), CURRENT_AS_OF] {
             let from = dated(Exchange::Nse, on);
             let regime_now = exchange_charge_rate(Exchange::Nse, on).expect("verified");
+            let ipft_now = crate::regime::ipft_rate(Exchange::Nse, on).expect("verified");
             assert_eq!(
-                regime_now.get(),
-                3_503,
-                "the row in force on {on}: package CHG-0's FA73061 row moves it to 3,553 and \
-                 the NSE IPFT to zero from 2026-03-01; read the IPFT where crate::trip reads it \
-                 then, and this card follows"
+                (regime_now.get(), ipft_now.get()),
+                (3_553, 0),
+                "the rows in force on {on}: CHG-0's FA73061 row and the folded zero IPFT"
             );
             assert_eq!(
                 from.exchange_charge().rate(),
