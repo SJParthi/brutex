@@ -1740,7 +1740,7 @@ above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
 **What is NOT sourced here.** Which certificate chains the hosts `pull`
 contacts present was not read: no connection was made. It is UNVERIFIED
 (`docs/06-limits.md` L-BREDS-1).
-## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-7135)
+## An NSE index through the cash closing auction — measured 2026-10-20 (R3-13; D-7300)
 
 §9 and D-0151 record that from 2026-08-03 every share an NSE index is
 computed from leaves continuous trading at 15:15 for the cash closing auction,
@@ -1757,12 +1757,12 @@ there, measured, not what NSE publishes about it.
 So the index **holds still from 15:15 until the auction's close is printed**
 on both feeds, every session of the auction era measured. R3-13 sets that
 window aside from the frozen-index flag as it sets a recorded halt aside
-(D-7135 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
+(D-7300 item 15). **UNVERIFIED:** why it holds still (whether NSE stops
 recomputing the index, or computes it from constituents that no longer
 trade), and whether a session outside the measured span differs; no NSE page
 read here says either.
 
-## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-7135 item 20)
+## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-7300 item 20)
 
 What one dated master the store holds is, measured, not what NSE publishes
 about it. It sizes the cost of reading a share's dated closing-auction flag

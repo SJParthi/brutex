@@ -1703,7 +1703,7 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
     // its unmeasured days was rewritten instead.
     ("crates/costs/src/lot.rs", 1),
-    // R3-13 repair 1, 23 Oct 2026 (D-7135 item 24): `CasFlags::refusals`
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `CasFlags::refusals`
     // puts ONE request's refused days in day order, at most one a day of a
     // page of `PAGE_DAYS` = 92, once per request. Reason in
     // docs/06-limits.md, "Gate 11 — R3-13". The sidecar month's sort and the
@@ -1895,7 +1895,7 @@ const ALLOW_SCAN: Allow = &[
     // a word's position in the runs ledger's compiled `MODES` (15) and
     // `KINDS` (6), once per run.
     ("crates/pull/src/zerodha_verify.rs", 2),
-    // R3-13 repair 1, 23 Oct 2026 (D-7135 item 24): `asked_rung` finds the
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `asked_rung` finds the
     // `timeframe=` word in `store::path::Timeframe::KNOWN`, a compile-time
     // table of ten rungs, once per request. Reason in docs/06-limits.md,
     // "Gate 11 — R3-13".
@@ -2045,7 +2045,7 @@ const ALLOW_MEMBER: Allow = &[
     // list of one day, a tree probe and the restart walk's closed list, a
     // verb's compile-time flag and environment tables, and R3-35's move of
     // three `gdfl_import.rs` sites into the journal file (4 -> 1 above).
-    // 1 -> 4, R3-13 repair 1 (D-7135 item 24; docs/06-limits.md, "Gate 11 —
+    // 1 -> 4, R3-13 repair 1 (D-7300 item 24; docs/06-limits.md, "Gate 11 —
     // R3-13"): `QualityLine::SERVED` (three names) and `FLAGS_VERSIONS` (two
     // versions, IA-16's, merged undeclared) are compile-time tables asked
     // once per ledger field or line; `peer.per_day` is one page's peer days,
@@ -2081,7 +2081,7 @@ const ALLOW_MEMBER: Allow = &[
     // two comparisons, the shape rule 7 permits. Reason in
     // docs/06-limits.md, "Gate 11 — BASE-GATE11".
     ("crates/pull/src/reference_data.rs", 1),
-    // R3-13 repair 1, 23 Oct 2026 (D-7135 item 24): `said_of` asks a
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `said_of` asks a
     // `HashSet` sized once by the month's sidecar records whether a day is
     // filed: one hash probe (it replaced a sort and a binary search). Reason
     // in docs/06-limits.md, "Gate 11 — R3-13".

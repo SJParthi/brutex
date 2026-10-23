@@ -82018,12 +82018,15 @@ it passes with four loose-entry warnings; and `.github/source_scan.rs` still
 says `/disk.json` runs `/bin/df` every 30 s, which D-5240 ended (the entry is
 still needed by `disk_route`'s test that compares with `df`). Both are edits
 under `.github/` that this merge does not make.
-### D-7135 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
+### D-7300 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
 
 **Number** taken at landing from the ledger's head (amendment A6): first
-D-5903, then D-5904 when IA-3 landed D-5903 first, and D-7135 on 2026-10-23
-when SC-4 landed D-5904 first; D-7135 is the first id above every block
-recorded for another package (IA-16's D-7130..D-7134 the highest). Built in
+D-5903, then D-5904 when IA-3 landed D-5903 first, then D-7135 on 2026-10-23
+when SC-4 landed D-5904 first, and D-7300 the same day when LEDGER-1023
+landed D-7135 first (the no-fresh-root cut's block D-7135..D-7144, recorded
+after R3-13 had taken D-7135 without recording it). D-7300..D-7304 is R3-13's
+block in the decision-block registry, clear of every block recorded for
+another package (R4-18's D-7290..D-7294 the highest). Built in
 the cloud (branch `cloud/db-R3-13-20261017`, 17 Oct) and finished on the Mac
 (20 Oct; repair round 1, 21-23 Oct).
 **Findings:** DB-029, DB-031, DB-053, DB-A15, DB-B20, DB-G38, DB-G40,
@@ -82175,7 +82178,7 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     (no indices line, or a line written before the measure). The band draws
     `flagged: null` as its own kind, `frozen_unjudged`, "frozen run not
     judged" (info), never as "frozen" and never as an ordinary session.
-    Chosen, not sourced: the ledger's measure is the import's (D-7135
+    Chosen, not sourced: the ledger's measure is the import's (D-7300
     item 15); what it does not measure is said, not guessed.
 
 20. **A share's flag is kept for the process, never its master; a day asked

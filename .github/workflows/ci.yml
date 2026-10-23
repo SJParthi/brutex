@@ -1955,7 +1955,7 @@ jobs:
           declared="$declared api/src/bars_sort.rs:println!:1
           api/src/render.rs:println!:2"
           # ONE MORE FILE, from R3-13 (declared at its repair round 1, 23 Oct
-          # 2026, D-7135 item 24). It is mounted only under `#[cfg(test)]`
+          # 2026, D-7300 item 24). It is mounted only under `#[cfg(test)]`
           # (the `#[path]` test module of `api::server::dayflags::rules`), and
           # every print is in an `#[ignore]` timing, so no production path
           # reaches any of them:
