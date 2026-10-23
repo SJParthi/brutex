@@ -1968,7 +1968,8 @@ async function browserStandIn(o) {
   const dictionary = Object.fromEntries(Object.keys(pages).map((p, i) => [p, [i + 2]]));
   /** Every answer the stand-in holds open, ended by `stop()`. @type {import('node:http').ServerResponse[]} */
   const held = [];
-  const firstPage = { seen: false, later: 0 };
+  /** @type {{seen: boolean, later: Map<string, number>}} */
+  const firstPage = { seen: false, later: new Map() };
   /** @param {string} path */
   const stamp = (path) => (o.build === null ? {} : { 'x-brutex-build': typeof o.build === 'function' ? o.build(path) : (o.build ?? 'f'.repeat(40)) });
   const server = http.createServer((req, res) => {
@@ -1986,12 +1987,17 @@ async function browserStandIn(o) {
       return void held.push(res);
     }
     if (u.pathname === '/hang') return void held.push(res);
-    // `/later` is a page the first time it is asked, and stalls as `/stall` does every time after.
-    if (u.pathname === '/later' && (firstPage.later += 1) > 1) {
+    // `/later` is a page the first `after` times it is asked (1 unless `?after=` says), and stalls as `/stall` does every time after.
+    const asks = (firstPage.later.get(u.pathname + u.search) ?? 0) + 1;
+    firstPage.later.set(u.pathname + u.search, asks);
+    if (u.pathname === '/later' && asks > Number(u.searchParams.get('after') ?? 1)) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...stamp(u.pathname) });
       res.write(`<!doctype html><title>later</title>${preload}<p>part of a page; the rest never comes`);
       return void held.push(res);
     }
+    // A page whose app entry, named in a script it does not run, is never answered.
+    if (u.pathname === '/hang-entry') return send(200, 'text/html; charset=utf-8', '<!doctype html><title>hang-entry</title><body><h1>hang-entry</h1><script type="text/plain">import("/_app/immutable/entry/app.HANG.js")</script>');
+    if (u.pathname === '/_app/immutable/entry/app.HANG.js') return void held.push(res);
     if (o.hangSources && u.pathname === '/sources.json') return void held.push(res);
     if (o.onFirstPage && u.pathname in pages && !firstPage.seen) {
       firstPage.seen = true;
@@ -2744,6 +2750,10 @@ test('a load that does not end within its bound fails its page by name, and the 
     assert.match(laterText, /^\| \/later \| cold \| 1 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|.*\| holds \|$/m, laterText);
     assert.ok(laterText.includes(`| /later | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), laterText);
     assert.deepEqual(later.failures, [`/later warm: ${stalled}`]);
+    // A timed warm load that does not end, after the first warm load did: said the same way.
+    const second = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/later?after=2', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
+    assert.deepEqual(second.failures, [`/later?after=2 warm: ${stalled}`]);
+    assert.ok(second.lines.includes(`| /later?after=2 | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), second.lines.join('\n'));
     // As a command: the sheet is written and the exit is 1.
     const { execFile } = await import('node:child_process');
     const script = new URL('ci/browser-harness.mjs', web).pathname;
@@ -2829,7 +2839,10 @@ test('a page the app does not route fails by name and is never passed: the build
   assert.equal(notTheApps('/a/1', { routes: ['/', '/a/[id]'] }), 'the harness cannot tell whether the app has this page: no plain route of the build that answered is /a/1, and it does not match the routes with a parameter (/a/[id])');
   assert.equal(notTheApps('/a', { routes: null, why: 'the document names no app entry' }), "the document is not the app's: the document names no app entry");
   assert.equal(notTheApps('/a', undefined), "the harness could not read the app's routes in the page");
-  assert.match(READ_ROUTES, /await import\(at\)\)\.dictionary/);
+  assert.match(READ_ROUTES, /Promise\.race\(\[import\(at\)\.then\(\(m\) => \(\{ m \}\)\), new Promise\(\(r\) => setTimeout\(\(\) => r\(null\), 5000\)\)\]\)/, 'the import is bounded in the page');
+  assert.match(READ_ROUTES, /const d = imported\.m\.dictionary;/);
+  assert.equal(harness.ROUTES_WAIT_MS, 5_000);
+  assert.match(source('ci/browser-harness.mjs'), /const read = await tab\.within\(READ_ROUTES, ROUTES_WAIT_MS\);/, 'and here');
   // In a real browser, against a stand-in that answers every path with the shell and 200, as the api does.
   const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
   assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
@@ -2838,7 +2851,9 @@ test('a page the app does not route fails by name and is never passed: the build
   const capture = join(dir, 'capture.json');
   const site = await browserStandIn({ fallback: true });
   try {
-    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/nope,/SPEED,/speed/', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--capture', capture, ...root]));
+    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/nope,/SPEED,/speed/,/hang-entry', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--capture', capture, ...root]));
+    // An app entry that never loads is said once its bound has passed, never waited on.
+    assert.ok(r.failures.includes(`/hang-entry cold: the document is not the app's: its app entry /_app/immutable/entry/app.HANG.js did not load within ${harness.ROUTES_WAIT_MS} ms`), r.failures.join('\n'));
     const listed = '/trip, /trip-db, /db, /gaps, /speed, /blank, /self, /reporting, /later';
     const no = (/** @type {string} */ p) => `the app has no such page: no route of the build that answered matches ${p} (its routes: ${listed}), so it drew its not-found page`;
     const text = r.lines.join('\n');

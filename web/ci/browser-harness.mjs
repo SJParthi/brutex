@@ -396,6 +396,14 @@ export function routeOf(page, routes) {
 }
 
 /**
+ * How long the route read waits for the app entry's module, ms, in the page
+ * ({@link READ_ROUTES}) and, with {@link FRAME_SLACK_MS}, here: the module
+ * is one the page already holds, read in under 4 ms on the shadow (n = 200),
+ * so one that has not loaded by then is said, never waited on.
+ */
+export const ROUTES_WAIT_MS = 5_000;
+
+/**
  * The route ids of the build that drew the page in a tab: the app entry the
  * document names (`/_app/immutable/entry/app.<hash>.js`, the module
  * SvelteKit's start script ran) imported again in the page — the module the
@@ -419,7 +427,9 @@ export const READ_ROUTES = `(async () => {
   if (at === undefined) return { routes: null, why: 'the document names no app entry (/_app/immutable/entry/app.*.js)' };
   const where = new URL(at).pathname;
   try {
-    const d = (await import(at)).dictionary;
+    const imported = await Promise.race([import(at).then((m) => ({ m })), new Promise((r) => setTimeout(() => r(null), ${ROUTES_WAIT_MS}))]);
+    if (imported === null) return { routes: null, why: 'its app entry ' + where + ' did not load within ${ROUTES_WAIT_MS} ms' };
+    const d = imported.m.dictionary;
     if (d === null || typeof d !== 'object' || Array.isArray(d)) return { routes: null, why: 'its app entry ' + where + ' holds no route dictionary' };
     return { routes: Object.keys(d), entry: where };
   } catch (e) {
@@ -1499,13 +1509,9 @@ export async function runHarness(args) {
             // The first load that the server answered with a page is asked
             // which page the app drew: the build's own routes (READ_ROUTES).
             if (i === 0 && l.status >= 200 && l.status < 300) {
-              try {
-                stop = notTheApps(page, await tab.evaluate(READ_ROUTES));
-              } catch (why) {
-                // A page that stopped answering is this page's failure, by name.
-                if (!(why instanceof CdpTimeout)) throw why;
-                stop = `the page stopped answering when asked for the app's routes: ${why.message}`;
-              }
+              // Bounded in the page and here: a page that does not answer is this page's failure, by name.
+              const read = await tab.within(READ_ROUTES, ROUTES_WAIT_MS);
+              stop = read.late ? `the page did not answer within ${ROUTES_WAIT_MS + FRAME_SLACK_MS} ms when asked for the app's routes` : notTheApps(page, /** @type {any} */ (read.value));
             }
             cold.push(l);
           }
