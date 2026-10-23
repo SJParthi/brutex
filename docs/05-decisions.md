@@ -79652,3 +79652,62 @@ ends.
 document row. The added verification work is `rustls-webpki`'s comparison of
 a path's certificates against a fixed list of eight keys, once per TLS
 handshake, bounded by that constant and not measured here.
+
+### D-7132 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+
+The number is the ledger head + 1 (amendment A6); renumber at landing if it
+is taken.
+
+1. **The defect.** D-6894 made the first-listed index the only place
+   `fnowork::futures_plan` learns which contracts exist and from which day,
+   and nothing checked an underlying's file against `absorbed.idx`. A second
+   agent showed it (`state/fix/round2/verify-R4-28-r2.json`): the file gone,
+   cut at a line boundary or one committed line garbled, and the plan
+   silently dropped contracts with nothing refused, so `POST /pull/fno`
+   would have answered 200 "every planned futures series was asked". The
+   only sign was a Warn event claiming the snapshots "were taken in again",
+   which was false. This repair found a fourth case the same gap allows: a
+   snapshot written over a cut file re-filed the lost contract under its own,
+   later day. All four failed first (R4-28 r2 `before.log`).
+2. **The rule.** Each commit line records, for every name whose file grew,
+   how many checked lines of that name the file then held (`name=count`,
+   names percent-encoded as their files are). Every read of an underlying's
+   file — by a plan, and by a snapshot write before it appends — is checked
+   against the most the log records and against every line checking; so is
+   every line of the commit log. A mismatch means the generation can no
+   longer say which contracts exist from which day.
+3. **Append-only repair, never a hidden fallback.** The index lives in
+   generation directories `futures-first-listed/g<N>`; the highest is the
+   index. A damaged generation is left exactly as found: `generations.idx`
+   records the next generation and why, then its directory is made, and the
+   receipted snapshots the call needs are taken into it again (the snapshot
+   bodies are the source of truth, fixed by their receipts). The plan says
+   so — `FuturesPlan::rebuilt`, an Error `pull.futures` event, the receipt's
+   "Futures index rebuilt" fact — in words that are true. If the new
+   generation does not match its own log either, the call refuses
+   `futures_index_damaged` by name (502) and never rebuilds in a loop; an
+   I/O failure is a named error, never taken for damage. Option 2 alone
+   (refuse every time) was not chosen: it would leave an underlying's
+   futures unplannable until someone moved files by hand, and the snapshots
+   that can rebuild the index are already on disk.
+4. **A kill mid-append.** A line a kill cut short no longer reads as
+   harmless: it does not check, so the generation is rebuilt once. Whole
+   lines that landed without their commit line are still taken in again and
+   committed by the next commit line, with no duplicate. The format tag moves
+   to `fl2`; the repair-1 layout (`absorbed.idx` directly in
+   `futures-first-listed/`) was never written outside test folders and is
+   not read.
+5. **Parse rules are recorded.** An unparseable record carries
+   `PARSE_RULES` (`unparseable@1`); one recorded under other rules is taken
+   in again, so a later, relaxed parser can take the day in (the r2 check's
+   follow-up).
+6. **Cost.** No change on the healthy path but one directory listing of
+   the index's top (one entry per generation) and the counts on commit
+   lines that grew. A rebuild is linear in the snapshots held, once per
+   damage found (`docs/06-limits.md` L-R428-09); L-R428-07 now states the
+   small linear term the r2 check measured instead of "flat".
+7. **Also.** `POST /pull/fno series=futures` opens the book and plans, and
+   `masters::land` with the snapshot write after it run off the async
+   workers (`off_the_workers`), since they take a blocking flock, fsync and
+   parse the dump.
+8. **Proof.** `docs/04-invariants.md` R428-12 and R428-13 name the tests.
