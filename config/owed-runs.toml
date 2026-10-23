@@ -124,12 +124,14 @@ source = ["R4-21", "R3-22"]
 [[owed]]
 id = "OWED-21"
 what = "The first full copy of the store and the raw archives on a second drive by the backup verb, and its restore drill."
-source = ["R4-09"]
+source = ["R4-09", "R4-09b"]
+note = "23 Oct 2026: the backup verb and the restore drill are R4-09b's, split out of R4-09 by D-7137; under D-7135 they are the store's only disaster path."
 
 [[owed]]
 id = "OWED-22"
-what = "The one-month slice of every kind built into a NEW separate store root by the chain and compared month by month with the production store; the full rebuild only on the operator's yes."
+what = "Proof 3: one month of every kind built twice, through the per-kind verbs, into two NEW empty role=scratch roots, and cli store-compare <A> <B> --month reporting 0 bar differences."
 source = ["R4-16", "E2E-07"]
+note = "Re-planned on 23 Oct 2026 (D-7135). It writes nothing to the operator's store, and stays listed because S-42 closes it and an owed id is never removed or reused. Struck: 'built into a NEW separate store root by the chain and compared month by month with the production store' and 'the full rebuild only on the operator's yes'; no full rebuild exists under D-7135."
 
 [[owed]]
 id = "OWED-23"
@@ -177,10 +179,18 @@ what = "The GDFL share days beyond the zip's end, 2026-09-25 to 2026-09-30 (832 
 source = ["census g_beyond"]
 note = "Run on 14 Oct by S-09, after the census was taken."
 
+[[owed]]
+id = "OWED-32"
+what = "The existing production root's store identity marker (role=production), written once by cli ingest-run --init-store role=production through its recorded step with the operator's yes: a prerequisite of the first real cli ingest-run."
+source = ["R4-11", "D-6900", "D-7135"]
+note = "Added on 23 Oct 2026 from R4-11's text under D-7135; closed by S-51. Before it, R4-11 was listed below as owing nothing; its marker on the existing root is a store write, so it is owed."
+
 # NOT OWED HERE, and why (each writes nothing to the operator's store):
 #   R4-07, R4-11, R4-12  none by code; their first real runs are the
 #                        operator's press, and an automatic kind adds its own
 #                        step with `kind` when its starter lands (AUT-05).
+#                        R4-11's marker on the existing root is the one
+#                        exception, owed as OWED-32 (23 Oct, D-7135).
 #   R4-08, R4-10         read-only measurements on copies.
 #   R4-14 shares, R4-17  read-only plans (zerodha-repair without
 #                        --from-store, series-identity).
