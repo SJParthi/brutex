@@ -1960,13 +1960,15 @@ async function browserStandIn(o) {
       'watchSelf(window, (r) => { line.textContent = selfText(r, location.pathname); line.dataset.figuresOf = selfWhose(r, location.pathname); line.dataset.firstContentMs = r.firstContentMs ?? ""; line.dataset.wireBytes = String(r.wireBytes); line.dataset.fetches = String(r.fetches); });' +
       "addEventListener('load', () => setTimeout(() => fetch('/big').then((a) => a.text()), 100));</script>",
     // A request failed AFTER the reporter is installed, as on every page of the app.
-    '/reporting': page('reporting', `<script type="module">import '/lib/page-report.js'; fetch('/broken').catch(() => null);</script>`)
+    '/reporting': page('reporting', `<script type="module">import '/lib/page-report.js'; fetch('/broken').catch(() => null);</script>`),
+    // A page the first time it is asked; every later ask stalls (see the server below).
+    '/later': page('later')
   };
   // The routes the stand-in's build would list: its pages, `/self/` being `/self`.
   const dictionary = Object.fromEntries(Object.keys(pages).map((p, i) => [p, [i + 2]]));
   /** Every answer the stand-in holds open, ended by `stop()`. @type {import('node:http').ServerResponse[]} */
   const held = [];
-  const firstPage = { seen: false };
+  const firstPage = { seen: false, later: 0 };
   /** @param {string} path */
   const stamp = (path) => (o.build === null ? {} : { 'x-brutex-build': typeof o.build === 'function' ? o.build(path) : (o.build ?? 'f'.repeat(40)) });
   const server = http.createServer((req, res) => {
@@ -1984,6 +1986,12 @@ async function browserStandIn(o) {
       return void held.push(res);
     }
     if (u.pathname === '/hang') return void held.push(res);
+    // `/later` is a page the first time it is asked, and stalls as `/stall` does every time after.
+    if (u.pathname === '/later' && (firstPage.later += 1) > 1) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...stamp(u.pathname) });
+      res.write(`<!doctype html><title>later</title>${preload}<p>part of a page; the rest never comes`);
+      return void held.push(res);
+    }
     if (o.hangSources && u.pathname === '/sources.json') return void held.push(res);
     if (o.onFirstPage && u.pathname in pages && !firstPage.seen) {
       firstPage.seen = true;
@@ -2730,6 +2738,12 @@ test('a load that does not end within its bound fails its page by name, and the 
     assert.equal(r.ok, false);
     assert.ok(took < 60_000, `bounded: the run took ${took.toFixed(0)} ms`);
     assert.equal(r.lines.filter((l) => l.startsWith('| /stall ')).length, 1, 'a page whose load did not end is not loaded again');
+    // A page whose cold loads end and whose warm load does not: the cold row stands, the warm row says why.
+    const later = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/later', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
+    const laterText = later.lines.join('\n');
+    assert.match(laterText, /^\| \/later \| cold \| 1 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|.*\| holds \|$/m, laterText);
+    assert.ok(laterText.includes(`| /later | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), laterText);
+    assert.deepEqual(later.failures, [`/later warm: ${stalled}`]);
     // As a command: the sheet is written and the exit is 1.
     const { execFile } = await import('node:child_process');
     const script = new URL('ci/browser-harness.mjs', web).pathname;
@@ -2819,7 +2833,7 @@ test('a page the app does not route fails by name and is never passed: the build
   const site = await browserStandIn({ fallback: true });
   try {
     const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/nope,/SPEED,/speed/', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--capture', capture, ...root]));
-    const listed = '/trip, /trip-db, /db, /gaps, /speed, /blank, /self, /reporting';
+    const listed = '/trip, /trip-db, /db, /gaps, /speed, /blank, /self, /reporting, /later';
     const no = (/** @type {string} */ p) => `the app has no such page: no route of the build that answered matches ${p} (its routes: ${listed}), so it drew its not-found page`;
     const text = r.lines.join('\n');
     for (const p of ['/nope', '/SPEED']) {

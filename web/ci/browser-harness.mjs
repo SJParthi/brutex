@@ -1512,18 +1512,28 @@ export async function runHarness(args) {
           await tab.close();
         }
       }
-      if (stop !== '') {
-        // Not measured, so not captured either: the sheet replays only a measured page's own requests.
-        lines.push(`| ${page} | ${stoppedIn} | ${stoppedIn === 'cold' ? cold.length : warm.length} | NOT MEASURED: ${stop} | — | — | — | FAILS |`);
-        failures.push(`${page} ${stoppedIn}: ${stop}`);
+      /** The row of a phase that could not be measured, and its failure by name. @param {string} phase @param {number} n */
+      const unmeasured = (phase, n) => {
+        lines.push(`| ${page} | ${phase} | ${n} | NOT MEASURED: ${stop} | — | — | — | FAILS |`);
+        failures.push(`${page} ${phase}: ${stop}`);
+      };
+      // Not measured cold, so not captured either: the sheet replays only a measured page's own requests.
+      if (stop !== '' && stoppedIn === 'cold') {
+        unmeasured('cold', cold.length);
         continue;
       }
       capture.push(...captured(page, cold[0].requests, args.base));
-      for (const [phase, loads] of /** @type {const} */ ([['cold', cold], ['warm', warm]])) {
-        const j = judge(page, phase, loads);
-        lines.push(j.row);
-        failures.push(...j.failures);
+      const coldRow = judge(page, 'cold', cold);
+      lines.push(coldRow.row);
+      failures.push(...coldRow.failures);
+      // Its cold loads stand when a warm load is the one that did not end.
+      if (stop !== '') {
+        unmeasured('warm', warm.length);
+        continue;
       }
+      const warmRow = judge(page, 'warm', warm);
+      lines.push(warmRow.row);
+      failures.push(...warmRow.failures);
     }
     if (args.interactions) {
       lines.push('', '| interaction | n | click to its last answer or frame p50 / p99 / max ms | longest pause max ms |', '|---|---:|---|---:|');
