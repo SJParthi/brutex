@@ -677,7 +677,7 @@ fn a_load_past_the_bound_waits_until_a_slot_is_given_back() {
         "a load ran while all {LOADS_AT_ONCE} slots were held"
     );
     drop(held.pop());
-    goes.recv_timeout(std::time::Duration::from_secs(60))
+    goes.recv_timeout(std::time::Duration::from_mins(1))
         .expect("one slot given back lets the waiting load go");
     waiter.join().expect("the waiter ends");
     drop(held);
