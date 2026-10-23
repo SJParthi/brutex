@@ -284,22 +284,26 @@ fn the_question_is_refused_by_name_before_the_verb_runs() {
     assert_eq!(args.last().map(String::as_str), Some("--apply"));
 }
 
-fn plan(root: &Path, stamps: &[i64]) {
+fn plan_file(root: &Path) -> PathBuf {
     let dir = root.join("audit").join("series-identity");
     fs::create_dir_all(&dir).expect("dir");
+    dir.join(format!("zerodha-CASH-{SYMBOL}-00aa00aa00aa00aa.plan"))
+}
+
+fn plan_body(stamps: &[i64]) -> String {
     let listed = stamps
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    fs::write(
-        dir.join(format!("zerodha-CASH-{SYMBOL}-00aa00aa00aa00aa.plan")),
-        format!(
-            "brutex series-identity quarantine plan v2\nkey\trung\tmonth\tscope\tcause\taction\tbars\ttimestamps_utc_micros\nNSE-CASH-{SYMBOL}\t1min\t2018-03\ttimestamps\tforeign_level\tquarantine\t{}\t{listed}\n",
-            stamps.len()
-        ),
+    format!(
+        "brutex series-identity quarantine plan v2\nkey\trung\tmonth\tscope\tcause\taction\tbars\ttimestamps_utc_micros\nNSE-CASH-{SYMBOL}\t1min\t2018-03\ttimestamps\tforeign_level\tquarantine\t{}\t{listed}\n",
+        stamps.len()
     )
-    .expect("plan");
+}
+
+fn plan(root: &Path, stamps: &[i64]) {
+    fs::write(plan_file(root), plan_body(stamps)).expect("plan");
 }
 
 #[tokio::test]
@@ -352,37 +356,62 @@ async fn the_plan_writes_nothing_and_the_press_applies_once() {
 }
 
 /// R4-18 repair 1: a press whose client LEAVES keeps the press until its
-/// blocking work ends. The client's future is dropped while the work waits
-/// on the store's quarantine lock; a second press then is refused by name.
-/// Before the repair the guard lived in the request's future, so dropping it
-/// released the press while `spawn_blocking` kept applying, and the second
-/// press ran beside the first.
+/// blocking work ends. The plan is a named pipe, so the work blocks reading
+/// it: the test knows the work is running (its writer's open returns only
+/// once the work has opened the pipe), aborts the client's task, and a
+/// second press is then refused by name. Only after that does the test feed
+/// the pipe, and the first press's work applies once and frees the press.
+/// Before the repair the guard lived in the request's future, so aborting it
+/// freed the press while `spawn_blocking` kept running, and the second press
+/// ran beside the first.
 #[tokio::test]
 async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
     let _serial = PRESS_TESTS.lock().await;
     let fixture = Fixture::new("r418-press-left");
     let held = fixture.month(ym(2018, 3), 640, 4);
-    plan(&fixture.root, &[held[2].ts_micros]);
-    let audit = fixture.root.join("audit");
-    fs::create_dir_all(&audit).expect("audit");
-    let lock_at = audit.join("zerodha.quarantine.lock");
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_at)
-        .expect("the lock file");
-    let lock = store::flock::Flock::lock(file, lock_at).expect("the test holds the lock");
+    let pipe = plan_file(&fixture.root);
+    let made = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo made {}", pipe.display());
+    let body = plan_body(&[held[2].ts_micros]);
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let feeder = std::thread::spawn(move || {
+        // Blocks until the press's work opens the pipe to read the plan.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&pipe)
+            .expect("the pipe opens for writing");
+        let _told = opened_tx.send(());
+        if go_rx.recv().is_ok() {
+            std::io::Write::write_all(&mut file, body.as_bytes()).expect("the plan is fed");
+        }
+    });
     let form =
         format!("symbol={SYMBOL}&from=2018-03-01&to=2018-03-31&cause=foreign_level&reason=left");
-    let first = quarantine_apply(
+    let first = tokio::spawn(quarantine_apply(
         axum::extract::State(Loaded::clone(&fixture.site)),
         form.clone(),
+    ));
+    let mut running = false;
+    for _ in 0..600 {
+        if opened_rx.try_recv().is_ok() {
+            running = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(running, "the first press's work opened its plan");
+    // THE CLIENT LEAVES while the work is blocked reading the plan.
+    first.abort();
+    let left = first.await;
+    assert!(
+        left.as_ref()
+            .is_err_and(tokio::task::JoinError::is_cancelled),
+        "the client's task was cancelled: {left:?}"
     );
-    // THE CLIENT LEAVES while the work waits on the lock.
-    let left = tokio::time::timeout(std::time::Duration::from_millis(1_500), first).await;
-    assert!(left.is_err(), "the first press could not finish: {left:?}");
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         quarantine_apply(
@@ -391,22 +420,24 @@ async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
         ),
     )
     .await;
-    let released = lock.release();
+    // Feed the pipe whatever the second press answered, so no thread waits.
+    let _fed = go_tx.send(());
     let (status, _, busy) = second.expect("the second press answers at once, by name");
     assert_eq!(status, StatusCode::CONFLICT, "{busy}");
     assert!(busy.contains("quarantine_running"), "{busy}");
-    assert!(released.is_ok(), "the test's lock released");
+    assert!(feeder.join().is_ok(), "the feeder wrote the plan");
     // The first press's work finishes on its own and only then frees it.
     let mut free = false;
-    for _ in 0..300 {
+    for _ in 0..600 {
         if !super::PRESSING.load(std::sync::atomic::Ordering::Acquire) {
             free = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(free, "the press is freed when its work ends");
-    let ledger = fs::read_to_string(audit.join("zerodha.quarantine.ledger")).expect("ledger");
+    let ledger = fs::read_to_string(fixture.root.join("audit").join("zerodha.quarantine.ledger"))
+        .expect("the ledger");
     assert_eq!(
         ledger.matches("\tdropped\t").count(),
         1,
