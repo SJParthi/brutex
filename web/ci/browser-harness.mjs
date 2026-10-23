@@ -538,7 +538,12 @@ export const LOAD_WAIT_MS = 30_000;
  */
 export const FRAME_WAIT_MS = 2_000;
 
-/** How much longer than a frame wait this process waits for the page's answer to it, ms. */
+/**
+ * How much longer than a page-side wait (the two frames, the paint) this
+ * process waits for the page's answer to it, ms: a hidden page's timers lag
+ * (measured 23 Oct: a hidden headless tab answered a 1.5 s page-side wait
+ * after 6.7 s), so the page's own bound alone does not bound the wait.
+ */
 export const FRAME_SLACK_MS = 1_000;
 
 /** A DevTools command the browser did not answer within its bound. */
@@ -1130,13 +1135,26 @@ export async function openTab(cdp, context, options = {}) {
    * @param {number} ms
    * @returns {Promise<boolean>}
    */
-  const drawn = async (ms) => {
-    const asked = cdp.send('Runtime.evaluate', { expression: twoFrames(ms), awaitPromise: true, returnByValue: true }, sessionId, answerWithin(ms));
+  const drawn = async (ms) => (await within(twoFrames(ms), ms)).value === true;
+  /**
+   * A page-side wait (`expression`, bounded in the page by `ms`), waited on
+   * here at most {@link FRAME_SLACK_MS} past `ms` as well: `{late: true}`
+   * when the answer had not come by then, and that answer is dropped. The
+   * page's own clock is not enough: a hidden page's timers lag.
+   *
+   * @param {string} expression
+   * @param {number} ms
+   * @returns {Promise<{value: unknown, late: boolean}>}
+   */
+  const within = async (expression, ms) => {
+    const asked = cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId, answerWithin(ms));
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let t;
-    const late = new Promise((resolve) => (t = setTimeout(() => resolve(false), ms + FRAME_SLACK_MS)));
+    const LATE = Symbol('late');
+    const late = new Promise((resolve) => (t = setTimeout(() => resolve(LATE), ms + FRAME_SLACK_MS)));
     try {
-      return /** @type {boolean} */ (await Promise.race([asked.then((a) => a?.result?.value === true), late]));
+      const got = await Promise.race([asked.then((a) => a?.result?.value), late]);
+      return got === LATE ? { value: undefined, late: true } : { value: got, late: false };
     } finally {
       clearTimeout(t);
       asked.catch(() => undefined);
@@ -1188,6 +1206,7 @@ export async function openTab(cdp, context, options = {}) {
       return !waiting();
     },
     drawn,
+    within,
     close: async () => {
       off();
       await cdp.send('Target.closeTarget', { targetId });
@@ -1250,7 +1269,8 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   let heap;
   try {
     settled = await tab.settle(settleMs);
-    await tab.evaluate(AWAIT_PAINT, answerWithin(PAINT_WAIT_MS));
+    // At most PAINT_WAIT_MS by the page's clock, and FRAME_SLACK_MS more by this one (D-5915 item 9).
+    await tab.within(AWAIT_PAINT, PAINT_WAIT_MS);
     h = await tab.evaluate(READ_FIGURES);
     heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
   } catch (why) {

@@ -1296,8 +1296,8 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
   const t2 = performance.now();
   await new Function('window', `return ${harness.AWAIT_PAINT}`)(win);
   assert.ok(performance.now() - t2 < 100);
-  // Every load waits for its paint before it reads, and that wait's answer is bounded too (repair 4).
-  assert.match(source('ci/browser-harness.mjs'), /await tab\.evaluate\(AWAIT_PAINT, answerWithin\(PAINT_WAIT_MS\)\);\s*h = await tab\.evaluate\(READ_FIGURES\);/);
+  // Every load waits for its paint before it reads, and that wait is bounded here too, not by the page's clock alone (repair 4).
+  assert.match(source('ci/browser-harness.mjs'), /await tab\.within\(AWAIT_PAINT, PAINT_WAIT_MS\);\s*h = await tab\.evaluate\(READ_FIGURES\);/);
 });
 
 test('a read-only run sends no write: the page\'s own report is blocked in the browser, named, and never reaches the server', { timeout: 300_000 }, async () => {
@@ -2783,11 +2783,17 @@ test('the two frames a settle waits for are bounded: a hidden tab draws none, is
       assert.equal(t.frames.drew, states[i] === 'visible', `tab ${i} (${states[i]}): drew ${t.frames.drew}`);
       assert.ok(took < 1_000 + 500 + harness.FRAME_SLACK_MS + 1_000, `tab ${i} (${states[i]}) settled in ${took.toFixed(0)} ms`);
     }
-    // A load in a hidden tab says it drew no frame, and is judged so by name.
+    // A page-side wait is bounded here too: one the page never answers is late after its time and the slack.
     const hiddenTab = tabs[states.indexOf('hidden')];
+    const t2 = performance.now();
+    assert.deepEqual(await hiddenTab.within('new Promise(() => {})', 100), { value: undefined, late: true });
+    assert.ok(performance.now() - t2 < 100 + harness.FRAME_SLACK_MS + 1_000, 'never answered: late after the bound');
+    assert.deepEqual(await tabs[2].within('Promise.resolve(1 + 1)', 100), { value: 2, late: false });
+    // A load in a hidden tab says it drew no frame, and is judged so by name; its paint and frame waits are each bounded.
     const t1 = performance.now();
     const hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
-    assert.ok(performance.now() - t1 < 15_000, 'a load in a hidden tab ends');
+    const bound = 2 * (harness.FRAME_WAIT_MS + harness.FRAME_SLACK_MS) + 14_000;
+    assert.ok(performance.now() - t1 < bound, `a load in a hidden tab ends within ${bound} ms: ${(performance.now() - t1).toFixed(0)} ms`);
     assert.equal(hidden.ended, true);
     assert.equal(hidden.drew, false);
     assert.ok(harness.judge('/x', 'cold', [hidden]).failures.includes('/x cold: 1 of 1 loads drew no frame within 2000 ms of settling (a hidden tab draws none), so they are not settled loads'));
@@ -3067,6 +3073,7 @@ test('a load whose navigation the browser does not answer, or whose page stops a
       reset() { this.doc.status = 0; },
       seen: () => [{ method: 'GET', url: 'http://h:1/x', bytes: 7, status: 200, failed: null }],
       settle: o.settle ?? (async () => true),
+      within: async () => ({ value: { fcp: 1 }, late: false }),
       evaluate: async () => ({ fcp: 1, longest: 0 })
     });
     return { cdp, tab };
