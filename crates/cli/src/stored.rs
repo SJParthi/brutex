@@ -2474,6 +2474,7 @@ pub(crate) fn overnight_note(
 /// for one outside the charter's non-regular days: a whole regular session of
 /// one-minute bars and some, so a month ending on a special session is walked
 /// past and a month of nothing else is refused, never scanned whole.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 const PRIOR_WALK_CAP: u64 = 1_440;
 
 /// The last regular-session bar stored before `first_ts`'s month on the same

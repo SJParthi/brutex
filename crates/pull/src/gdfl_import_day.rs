@@ -651,6 +651,7 @@ pub(super) enum Skip {
 
 /// What [`admit_rule`] reads of one key: a probe of each journal set its
 /// rows need, so a key costs O(1) in the journal's size.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct KeyState {
     /// Closed `done` under a current definition.
@@ -764,6 +765,7 @@ impl Asks {
 /// key restated whose last close is not a `done` either, so the two rows
 /// cannot both match a key a journal describes; the order is kept for the
 /// state a caller builds by hand (`admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
     if state.done {
         return if asks.retry_refused && state.with_refusals {

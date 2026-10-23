@@ -204,6 +204,7 @@ const ZIP64_RECORD_SIZE_FIELD: u64 = 44;
 /// `end_at`, and states the size of a record with no extensible data;
 /// `None` otherwise, when the locator's stated offset is the only word on
 /// it. Two reads, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn zip64_record_at<B: ReadAt>(span: &Span<'_, B>, end_at: u64) -> Result<Option<u64>, CmRefusal> {
     let Some(at) = end_at.checked_sub(20 + ZIP64_RECORD_LEN) else {
         return Ok(None);
@@ -223,6 +224,7 @@ fn zip64_record_at<B: ReadAt>(span: &Span<'_, B>, end_at: u64) -> Result<Option<
 /// where the prefix would put it is not a prefix: the walk that follows
 /// refuses it by what it finds (a record cut short, a size that does not
 /// match), as does one stated to run past `actual`. One 4-byte read, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn unprefixed<B: ReadAt>(
     span: &Span<'_, B>,
     actual: u64,

@@ -106,6 +106,7 @@
 //! generation again reuses it, and memory grows only when a new generation of
 //! one of those two tables is loaded — a few kilobytes per edit. Named for
 //! `docs/06-limits.md`.
+//! The load is timed by `pull::reference_data::tests::the_loader_reads_every_table_inside_its_budget`; the per-day lookups below it say UNVERIFIED where no test times them (gate 12, D-7149).
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
@@ -839,6 +840,7 @@ pub fn parse(
 /// closed, unless a `holiday` row closes a weekday or a `session` row records
 /// another session (a Muhurat, a drill, a weekend session, an outage day) or
 /// a session whose length is not recorded (`unmeasured`).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarTable {
     first: i64,
@@ -1091,6 +1093,7 @@ impl CalendarTable {
     }
 
     /// What `day` was. One compare, one subtract, one index: O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     #[must_use]
     pub fn kind_of(&self, day: i64) -> DayKind {
         if !(self.first..=self.last).contains(&day) {
@@ -1480,6 +1483,7 @@ fn intern_index_rows(receipt: &Receipt, rows: &[IndexIdentity]) -> &'static [Ind
 /// The dated symbol changes, loaded, with O(1) probes by the old and by the
 /// new symbol. The same answers as `brutex_core::alias::Lineage` over the
 /// same rows (`the_seeded_lineage_answers_exactly_what_the_compiled_one_does`).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Lineage {
     rows: &'static [SymbolChange],
@@ -2282,6 +2286,7 @@ impl Reference {
     /// [`crate::riskfree::MAX_AGE_DAYS`]). A table that is not served
     /// answers its own [`Refusal`], never a quiet `None` (R3-30 repair 1).
     /// O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     pub fn horizons(&self, today: i64) -> [(Table, Result<Horizon, &Refusal>); 2] {
         let calendar = self.calendar.table().map(|table| table.horizon(today));
         let rates = self.rates.table().map(|series| {
@@ -2296,6 +2301,7 @@ impl Reference {
     /// whose horizon alert fires ([`HORIZON_ALERT_DAYS`]) or has ended, and
     /// one that is not served at all, each with its sentence. An absent or
     /// refused record is an alert, not a silence. O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     #[must_use]
     pub fn horizon_alerts(&self, today: i64) -> Vec<(Table, String)> {
         self.horizons(today)

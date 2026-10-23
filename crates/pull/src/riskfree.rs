@@ -1691,6 +1691,7 @@ mod tests {
     /// O(1) AT p99 WITH THE GAP RULE (R3-30 repair 1): a lookup that carries
     /// a rate over a documented gap reads one more bounded slot, never a walk,
     /// so its tail is flat from 52 to 5,200 rows. Printed with n and method.
+    /// The proof is this test, `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table` (gate 12, D-7149).
     #[test]
     fn a_carried_lookup_is_flat_in_the_table() {
         let mut tails = Vec::new();

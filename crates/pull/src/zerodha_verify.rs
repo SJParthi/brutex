@@ -2277,6 +2277,7 @@ fn peer_month(
 /// Whether the peer's one-second month holds any second of IST day
 /// `number`: two `first_at_or_after` lookups, O(1) a day. A month held with
 /// none of the day is a GDFL day not imported, not a day nobody traded.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn peer_holds_day(peer: &Month, number: u32) -> Result<bool, String> {
     let at = |ts: i64| {
         peer.file
@@ -3895,6 +3896,7 @@ fn runs_end(spools: &[SpoolId], runs: usize) -> usize {
 /// [`spool::live_probe`] per run (O(runs), each O(1)). A run still spooling,
 /// or whose lock would not open, keeps its spools waiting; a lock that would
 /// not open is named in `faults`, never read as free.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn not_live(
     root: &Path,
     spools: Vec<SpoolId>,

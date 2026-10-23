@@ -586,6 +586,7 @@ pub struct ClosedBy {
 /// What the journal keeps of one key's closes (IA-2; design §5.4 "What a
 /// reader keeps of each line"; D-4851, D-4882, round 6 SF-6), each `None`
 /// when no such line was read. Three hash probes, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct KeyHistory<'j> {
     /// The `reason=` of the key's last `incomplete` line: the hole's reason.
@@ -748,6 +749,7 @@ impl Journal {
     /// restated shares now are. O(days × the open keys) and O(1) a day for
     /// the rest, so a refresh's cost follows what was appended, not the
     /// journal's length (`docs/06-limits.md` L-IA-2).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     fn derive_days(&mut self, days: &HashSet<String>) {
         for of_day in days {
             let opened = self.open.iter().any(|key| {

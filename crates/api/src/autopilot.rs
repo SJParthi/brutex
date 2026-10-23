@@ -2805,6 +2805,7 @@ pub(crate) fn manifest_of(
 /// One `drift` call per loaded census, over the fixed vendor set; each reads
 /// one small receipt and asks the file system about at most three names, so
 /// O(1) in the store's size.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 #[must_use]
 pub(crate) fn refuse_drifted(
     censuses: Vec<VendorCensus>,

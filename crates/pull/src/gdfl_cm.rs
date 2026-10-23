@@ -1891,6 +1891,7 @@ impl<L> DayListing<L> {
     /// listing's scope whole with no extension at all (D-4835), that name,
     /// with `true`, which [`CmRefusal::ExtensionMissing`] refuses. `None` for
     /// every other entry. O(1) beyond the name's own length.
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     #[must_use]
     pub fn entry_stem<'a>(&self, file: &'a ListedFile<L>) -> Option<(&'a str, bool)> {
         let name = self.file_name(file)?;

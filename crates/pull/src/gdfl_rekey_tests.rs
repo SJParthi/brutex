@@ -2165,6 +2165,7 @@ fn plan_cost_per_key_is_flat_in_the_number_of_keys() {
 /// withdrawing 13 of them (the real ledger's count), 200 plans' census step
 /// each: p50, p99 and max per plan, and per entry. Run with
 /// `--ignored --nocapture census_step_cost`.
+/// The proof is this test, `pull::gdfl_rekey::tests::census_step_cost_is_one_load_per_plan_flat_per_entry` (gate 12, D-7149).
 #[test]
 #[ignore = "a measurement, run by hand: --ignored --nocapture census_step_cost"]
 fn census_step_cost_is_one_load_per_plan_flat_per_entry() {

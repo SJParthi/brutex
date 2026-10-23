@@ -1712,6 +1712,7 @@ impl Report {
     /// twice the bound and then drops its older half in one move, and
     /// [`Report::seal`] cuts it to the bound at the run's end, so no failure
     /// costs a move of the whole list.
+    /// Timed by `pull::gdfl_run::tests::progress_and_failure_costs` (C-GR-06), the cut by `pull::gdfl_run::tests::the_report_drops_names_only_at_twice_the_bound` (gate 12, D-7149).
     pub fn name(&mut self, cause: Cause, failure: Failure) {
         self.failures_total = self.failures_total.saturating_add(1);
         let counted = self

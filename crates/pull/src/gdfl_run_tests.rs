@@ -1614,6 +1614,7 @@ fn spread(samples: &mut [std::time::Duration]) -> String {
 /// amortised whatever the run already named, D-4839), each p50, p99 and
 /// max. Run on demand: `cargo test -p pull --release -- --ignored
 /// progress_and_failure_costs --nocapture`.
+/// The proof is this test, `pull::gdfl_run::tests::progress_and_failure_costs` (gate 12, D-7149).
 #[test]
 #[ignore = "a timing, run on demand"]
 fn progress_and_failure_costs() {

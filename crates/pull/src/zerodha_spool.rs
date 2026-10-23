@@ -166,6 +166,7 @@ pub enum Live {
 ///
 /// The lock could not be opened or the host refused the `flock` call: the
 /// caller names it and leaves the run's spools waiting.
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
     let path = live_lock_path(root, run);
     let file = open_live(root, &path)?;
@@ -1195,6 +1196,7 @@ fn take_records(
 /// finished its sync nor a last verdict record lacking a detail it declares
 /// becomes an earlier record (which would refuse the spool as damaged).
 /// One read of at most [`MAX_DETAILS`] + 2 records, O(1).
+/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
 fn resume_at(file: &File, end: u64, path: &Path) -> Result<u64, SpoolError> {
     let whole = (end - HEADER_LEN) / RECORD_LEN;
     let window = whole.min(MAX_DETAILS as u64 + 2);
@@ -1292,6 +1294,7 @@ pub struct LogRead {
 
 impl LogRead {
     /// Whether a refusal is on record. O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     #[must_use]
     pub const fn refused(&self) -> bool {
         self.refused
@@ -1313,6 +1316,7 @@ impl LogRead {
 
     /// The verdict records the last `seen` record says a merge read (0 for a
     /// log with none). O(1).
+    /// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
     #[must_use]
     pub const fn covered(&self) -> u32 {
         self.covered

@@ -10,6 +10,7 @@
 //! measurement; it asserts the shape (sealed p99 within a bound of raw p99,
 //! and flat with the month's size) with margins wide enough for a loaded
 //! machine. Prices are invented and absurd.
+//! The proof is this file, `crates/store/tests/sealed_door.rs` (gate 12, D-7149).
 
 #![allow(
     clippy::expect_used,
