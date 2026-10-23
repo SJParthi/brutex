@@ -5,6 +5,7 @@
 
 use crate::gdfl_cm::CmRefusal;
 use crate::gdfl_nfo::NfoRefusal;
+use crate::ingest::FailKind;
 use crate::session::Day;
 
 use super::census::CensusRoom;
@@ -187,6 +188,142 @@ pub enum ImportRefusal {
         /// What the run did before it stopped.
         done: Box<Report>,
     },
+    /// A store or repair door refused the file, TYPED (IA-16; D-4851,
+    /// D-4890; design §5.8): its code is its [`FailKind`]'s
+    /// (`month_busy` past its retry, `disk_full`, the five holes
+    /// `needs_month_generation`, `month_superseded`, `bars_differ_held`,
+    /// `repair_refused`, `repair_impossible`, and `store_io`,
+    /// `store_damaged`, `batch_refused`), at stage `file`, and it never
+    /// closes a day: the store never closes one. The importer acts on the
+    /// kind, never on the words.
+    Store {
+        /// The door's kind.
+        kind: FailKind,
+        /// The door's words.
+        why: String,
+    },
+    /// A later file of an instrument-month whose file failed earlier in this
+    /// run, not filed so the month never takes a later day before the earlier
+    /// one is owed (IA-16, D-4851, IA-GR-18). An open cause: the day closes
+    /// `incomplete`, and a resume files the earlier day first.
+    HeldBack {
+        /// The instrument-month, as the run keys it.
+        month: String,
+        /// The day whose file failed.
+        after: Day,
+    },
+    /// The day's listing held no wanted file at all, on a calendar-open day
+    /// the source holds, in a run asked for the whole tree (IA-16, F10,
+    /// D-4872, FM-038): never `done files=0`. Never closes the day: a
+    /// corrected delivery fills it.
+    NoWantedFile {
+        /// The entries the listing held, every one skipped.
+        skipped: usize,
+    },
+    /// A swept index (NIFTY or BANKNIFTY) absent from an indices day the
+    /// source holds, in a run that asked for it (IA-16, F10, FM-073): the
+    /// vendor's own listing, so it closes the day.
+    AbsentFromListing {
+        /// The swept index.
+        instrument: String,
+        /// The stems of the day's folder no scope files closest to the
+        /// swept symbol (≤ 4, design §5.8, D21; IA-16 repair 2), closest
+        /// first, ties in listing order: a renamed swept stem is among them.
+        unknown: Vec<String>,
+        /// How many such stems the day held, shown or not.
+        unknown_total: usize,
+    },
+    /// A stored alias index absent from a held day inside its listing span
+    /// as recorded in the charter (IA-16, D-4833). Inactive by name until
+    /// IA-0b records the spans ([`super::STORED_INDEX_SPANS_RECORDED`]): no
+    /// build of this tree raises it yet.
+    StoredIndexAbsent {
+        /// The stored index's stem.
+        stem: String,
+    },
+    /// The store said the disk is full (IA-16, D-4851, FM-085): the run took
+    /// no further file and ended after the files in hand; no new day began.
+    DiskFull {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended on.
+        day: Day,
+        /// The store's words.
+        why: String,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
+    /// The store refused a write for permission or a read-only volume with
+    /// its root still there (IA-16, FM-129): the run ended once the day was
+    /// closed, naming the path and the fix, so a store that takes no writes
+    /// is one named stop, never a file failure repeated on every later day.
+    StoreNotWritable {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended on.
+        day: Day,
+        /// What failed, with the path and the fix.
+        why: String,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
+    /// The store volume's free space could not be measured before a day, so
+    /// the free-space floor (IA-16, CONC-031) could not be checked: refused
+    /// before the day's first write, never assumed to hold.
+    FreeSpaceUnknown {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended before.
+        day: Day,
+        /// Why the meter could not answer.
+        why: String,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
+    /// The store's root went away mid-run (IA-16, D-4852, FM-086): a loss
+    /// probe found it gone after a refused write. Nothing more is written;
+    /// the run ends, and a resume once the volume is back reads the day
+    /// again.
+    StoreLost {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended on.
+        day: Day,
+        /// What failed, and the probe's answer.
+        why: String,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
+    /// The source's root went away mid-run with the store still there
+    /// (IA-16, D-4852): the day closes `incomplete stage=run
+    /// reason=source_lost`, no later day is read (so none is closed
+    /// `refused day_not_held` for a drive that is merely gone), and the run
+    /// ends.
+    SourceLost {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended on.
+        day: Day,
+        /// What failed, and the probe's answer.
+        why: String,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
+    /// More instrument-months were held back than one run holds
+    /// ([`super::HELD_BACK_CAP`]; IA-16, D-4851, RA-209): the run ends by
+    /// name with the count and the first, and a resume continues past it.
+    HeldBackCap {
+        /// The kind the run imports.
+        kind: ImportKind,
+        /// The day it ended on.
+        day: Day,
+        /// The first instrument-month held back.
+        first: String,
+        /// How many were held back.
+        count: usize,
+        /// What the run did before it ended.
+        done: Box<Report>,
+    },
 }
 
 impl ImportRefusal {
@@ -216,6 +353,17 @@ impl ImportRefusal {
             Self::FilterRenamed { .. } => "filter_renamed",
             Self::UnderlyingSplit { .. } => "underlying_split",
             Self::Stopped { .. } => "stopped",
+            Self::Store { kind, .. } => kind.code(),
+            Self::HeldBack { .. } => "held_back",
+            Self::NoWantedFile { .. } => "no_wanted_file",
+            Self::AbsentFromListing { .. } => "absent_from_listing",
+            Self::StoredIndexAbsent { .. } => "stored_index_absent",
+            Self::DiskFull { .. } => "disk_full",
+            Self::StoreLost { .. } => "store_lost",
+            Self::StoreNotWritable { .. } => "store_not_writable",
+            Self::FreeSpaceUnknown { .. } => "free_space_unknown",
+            Self::SourceLost { .. } => "source_lost",
+            Self::HeldBackCap { .. } => "held_back_cap",
         }
     }
 
@@ -227,7 +375,13 @@ impl ImportRefusal {
             Self::CensusFull { done, .. }
             | Self::CensusRefused { done, .. }
             | Self::Durability { done, .. }
-            | Self::Stopped { done, .. } => Some(done),
+            | Self::Stopped { done, .. }
+            | Self::DiskFull { done, .. }
+            | Self::StoreLost { done, .. }
+            | Self::StoreNotWritable { done, .. }
+            | Self::FreeSpaceUnknown { done, .. }
+            | Self::SourceLost { done, .. }
+            | Self::HeldBackCap { done, .. } => Some(done),
             _ => None,
         }
     }
@@ -241,7 +395,13 @@ impl ImportRefusal {
             Self::CensusFull { done, .. }
             | Self::CensusRefused { done, .. }
             | Self::Durability { done, .. }
-            | Self::Stopped { done, .. } => done.seal(),
+            | Self::Stopped { done, .. }
+            | Self::DiskFull { done, .. }
+            | Self::StoreLost { done, .. }
+            | Self::StoreNotWritable { done, .. }
+            | Self::FreeSpaceUnknown { done, .. }
+            | Self::SourceLost { done, .. }
+            | Self::HeldBackCap { done, .. } => done.seal(),
             _ => {}
         }
     }
@@ -269,6 +429,11 @@ fn split_said(f: &mut core::fmt::Formatter<'_>, held: &[(String, String)]) -> co
 }
 
 impl core::fmt::Display for ImportRefusal {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per refusal variant, each its own sentence: the match is the table \
+                  of what the receipt says, and splitting it would scatter that table"
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::KindUnknown { word } => write!(
@@ -369,6 +534,125 @@ impl core::fmt::Display for ImportRefusal {
             ),
             Self::UnderlyingSplit { held } => split_said(f, held),
             Self::Stopped { .. } => stop_said(f, self),
+            Self::Store { kind, why } => write!(f, "{} ({}): {why}", door_said(*kind), kind.code()),
+            Self::HeldBack { month, after } => write!(
+                f,
+                "{month} is held back: its file failed on {after} in this run, so no later day of \
+                 the month is filed before it (D-4851); a resume files {after} first"
+            ),
+            Self::NoWantedFile { skipped } => write!(
+                f,
+                "the day's listing held no wanted file: all {skipped} entr(y/ies) were skipped \
+                 (another day's folder, a renamed folder or an extra level of nesting); refused, \
+                 never closed done with files=0 (F10, D-4872), and read again after a corrected \
+                 delivery"
+            ),
+            Self::AbsentFromListing {
+                instrument,
+                unknown,
+                unknown_total,
+            } => {
+                write!(
+                    f,
+                    "{instrument}, a swept index, is absent from the day's listing, which the \
+                     source holds (F10): the vendor's own listing, so the day closes without it, \
+                     named; "
+                )?;
+                if unknown.is_empty() {
+                    write!(f, "the listing held no stem that no scope files")
+                } else {
+                    write!(
+                        f,
+                        "the day held {unknown_total} stem(s) no scope files, where a renamed \
+                         {instrument} would be; the {} closest to its name: {}",
+                        unknown.len(),
+                        unknown.join(" | ")
+                    )
+                }
+            }
+            Self::StoredIndexAbsent { stem } => write!(
+                f,
+                "{stem}, a stored index, is absent from a held day inside its listing span \
+                 (D-4833)"
+            ),
+            Self::DiskFull {
+                kind,
+                day,
+                why,
+                done,
+            } => write!(
+                f,
+                "the disk is full: {} {day} took no further file and the run ended after {} day(s) \
+                 imported; free space, then resume, which reads {day} again: {why}",
+                kind.as_str(),
+                done.days_imported
+            ),
+            Self::StoreLost {
+                kind,
+                day,
+                why,
+                done,
+            } => write!(
+                f,
+                "the store's root went away on {} {day} (drive gone, not durability or the \
+                 journal): nothing more was written and the run ended after {} day(s) imported; \
+                 a resume once the volume is back reads {day} again: {why}",
+                kind.as_str(),
+                done.days_imported
+            ),
+            Self::FreeSpaceUnknown {
+                kind,
+                day,
+                why,
+                done,
+            } => write!(
+                f,
+                "the free space of the store's volume could not be measured before {} {day} \
+                 ({why}), so the free-space floor could not be checked: the day was not begun \
+                 and the run ended after {} day(s) imported",
+                kind.as_str(),
+                done.days_imported
+            ),
+            Self::StoreNotWritable {
+                kind,
+                day,
+                why,
+                done,
+            } => write!(
+                f,
+                "the store took no write on {} {day} and the run ended after {} day(s) imported: \
+                 {why}",
+                kind.as_str(),
+                done.days_imported
+            ),
+            Self::SourceLost {
+                kind,
+                day,
+                why,
+                done,
+            } => write!(
+                f,
+                "the source's root went away on {} {day} with the store still there: the day \
+                 stays open and no later day was read, so none is named not held; the run ended \
+                 after {} day(s) imported: {why}",
+                kind.as_str(),
+                done.days_imported
+            ),
+            Self::HeldBackCap {
+                kind,
+                day,
+                first,
+                count,
+                done,
+            } => write!(
+                f,
+                "{count} instrument-months were held back by {} {day}, past the {} one run holds \
+                 (the first {first}); the run ended after {} day(s) imported and a resume \
+                 continues past them",
+                kind.as_str(),
+                super::HELD_BACK_CAP,
+                done.days_imported
+            ),
         }
     }
 }
@@ -411,6 +695,50 @@ fn stop_said(f: &mut core::fmt::Formatter<'_>, stopped: &ImportRefusal) -> core:
         kind.as_str(),
         done.days_imported
     )
+}
+
+/// What a store or repair door's refusal of `kind` means for the day, said
+/// before the door's own words (IA-16, design §5.8).
+const fn door_said(kind: FailKind) -> &'static str {
+    match kind {
+        FailKind::MonthBusy => {
+            "another process held the month past the retry; the file is held back and read \
+             again by the next run"
+        }
+        FailKind::DiskFull => "the disk is full; the run ends",
+        FailKind::NotHeld => {
+            "a day the month already passed: only a new generation lands it, so the day is a \
+             hole only a run with a repair reason reads"
+        }
+        FailKind::Superseded => {
+            "the month is served from a repair revision and this file holds a new bar: a hole \
+             only a run with a repair reason reads"
+        }
+        FailKind::Differs => {
+            "the month holds a bar of this day read differently; a held bar is never changed, \
+             so the day is a hole no run reads again"
+        }
+        FailKind::RepairRefused => {
+            "the repair refused the month for a reason a later build or repair can lift; a hole \
+             the next run with a repair reason reads"
+        }
+        FailKind::RepairImpossible => {
+            "the repair refused the month for good; a hole no run reads again"
+        }
+        FailKind::Io { .. } => "the host refused the store's read or write; the file is held back",
+        FailKind::StoreDamaged => {
+            "the month refused to open or append for a fault of its own; held back, never a hole"
+        }
+        FailKind::BatchRefused => {
+            "the store refused a batch this importer built wrongly; held back, an importer defect"
+        }
+        FailKind::Sealed => {
+            "the month is sealed or served from a repair revision and its raw form would append \
+             this file, but its successor generation was not filed; held back, never a hole, and \
+             read again by the next run"
+        }
+        FailKind::Other => "the store refused the file",
+    }
 }
 
 /// The tail every census refusal ends in: what was and was not published,
@@ -502,7 +830,35 @@ pub struct Cause {
     pub closes: bool,
 }
 
+/// The five STORE-HOLE reasons (IA-16; D-4851, D-4873, D-4876, round 5
+/// SF-10; design §5.5): the `reason=` of a key's last `incomplete` line that
+/// makes it a hole, a day its month already passed. The first three a
+/// repair-reason run reads (`admit` row 4a); the last two no run reads
+/// (row 4b). Each is its [`FailKind`]'s code, so the two cannot drift.
+pub(crate) const HOLE_REASONS: [&str; 5] = [
+    FailKind::NotHeld.code(),
+    FailKind::Superseded.code(),
+    FailKind::RepairRefused.code(),
+    FailKind::Differs.code(),
+    FailKind::RepairImpossible.code(),
+];
+
+/// The store-hole reasons a repair-reason run reads (`admit` row 4a): the
+/// first three of [`HOLE_REASONS`].
+pub(crate) const REPAIRABLE_HOLES: [&str; 3] = [
+    FailKind::NotHeld.code(),
+    FailKind::Superseded.code(),
+    FailKind::RepairRefused.code(),
+];
+
 impl Cause {
+    /// Whether this cause makes its day a store hole ([`HOLE_REASONS`]): an
+    /// open cause at stage `file` whose code is one of the five.
+    #[must_use]
+    pub fn is_hole(self) -> bool {
+        !self.closes && self.stage == Stage::File && HOLE_REASONS.contains(&self.code)
+    }
+
     /// A refusal of the vendor's own bytes by a named reader rule.
     #[must_use]
     pub const fn vendor(code: &'static str) -> Self {
@@ -662,7 +1018,13 @@ pub const fn import_cause(why: &ImportRefusal) -> Cause {
         | ImportRefusal::FilterName { .. }
         | ImportRefusal::StampPastTheDay { .. }
         | ImportRefusal::Filing { .. }
-        | ImportRefusal::Provenance { .. } => Cause::open(Stage::File, code),
+        | ImportRefusal::Provenance { .. }
+        // THE STORE NEVER CLOSES A DAY (IA-16, design §5.8, round 3 SF-11):
+        // every door's kind is an open cause at stage `file`; the five holes
+        // are told apart from the rest by their kind ([`decisive`] puts every
+        // other open cause first), never by closing.
+        | ImportRefusal::Store { .. }
+        | ImportRefusal::HeldBack { .. } => Cause::open(Stage::File, code),
         // A ledger beside the journal that would not take a line.
         ImportRefusal::Journal { .. }
         | ImportRefusal::DayLedger { .. }
@@ -671,10 +1033,26 @@ pub const fn import_cause(why: &ImportRefusal) -> Cause {
             Cause::open(Stage::Census, code)
         }
         // The source holds no file of a trading day: a vendor fact another
-        // copy can change, closed `refused`.
-        ImportRefusal::DayNotHeld { .. } => Cause::open(Stage::Vendor, code),
-        // The run itself (D-4853, D-4901).
-        ImportRefusal::KindUnknown { .. }
+        // copy can change, closed `refused`; and a listing with no wanted
+        // file, a copy fault a corrected delivery fills (F10), so it never
+        // closes the day.
+        ImportRefusal::DayNotHeld { .. } | ImportRefusal::NoWantedFile { .. } => {
+            Cause::open(Stage::Vendor, code)
+        }
+        // An index absent from the vendor's own listing: the same bytes say
+        // the same every time, so it closes (F10, D-4833).
+        ImportRefusal::AbsentFromListing { .. } | ImportRefusal::StoredIndexAbsent { .. } => {
+            Cause::vendor(code)
+        }
+        // The run itself (D-4853, D-4901), and the run's end (D-4851,
+        // D-4852): the day stays open.
+        ImportRefusal::DiskFull { .. }
+        | ImportRefusal::StoreLost { .. }
+        | ImportRefusal::StoreNotWritable { .. }
+        | ImportRefusal::FreeSpaceUnknown { .. }
+        | ImportRefusal::SourceLost { .. }
+        | ImportRefusal::HeldBackCap { .. }
+        | ImportRefusal::KindUnknown { .. }
         | ImportRefusal::RangeBackwards { .. }
         | ImportRefusal::Durability { .. }
         | ImportRefusal::FilterRenamed { .. }

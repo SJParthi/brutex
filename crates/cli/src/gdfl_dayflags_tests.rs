@@ -143,7 +143,76 @@ fn only_imported_days_are_read_and_nothing_but_the_ledger_is_written() {
     assert!(out.contains("days not in source  1 2024-04-01"), "{out}");
     assert!(out.contains("flags lines written 0"), "{out}");
     assert!(out.contains("lineage records     0"), "{out}");
-    assert_eq!(tree(&store), before, "nothing was written");
+    // Nothing of the data was written: the journal and the bars are byte for
+    // byte as they were. What the run's own locks leave (IA-16, D-6900) is
+    // its released claim (an empty lock file) and its one runs-ledger id.
+    let locks = |path: &Path| {
+        let name = path.to_string_lossy();
+        name.ends_with(".lock") || name.contains("runs.ledger")
+    };
+    let data = |all: Vec<(PathBuf, Vec<u8>)>| -> Vec<(PathBuf, Vec<u8>)> {
+        all.into_iter().filter(|(path, _)| !locks(path)).collect()
+    };
+    assert_eq!(
+        data(tree(&store)),
+        data(before),
+        "nothing of the data was written"
+    );
+    assert_eq!(
+        std::fs::read(store.join("imports/gdfl.lock")).unwrap(),
+        b"",
+        "the claim was released"
+    );
+    let ledger = pull::gdfl_run::ledger::read_all(&store).unwrap();
+    let last = ledger.last().unwrap().as_ref().unwrap();
+    assert_eq!(
+        (last.mode.as_str(), last.kind.as_str()),
+        ("dayflags", "options")
+    );
+    std::fs::remove_dir_all(store).unwrap();
+    std::fs::remove_dir_all(zips).unwrap();
+}
+
+/// IA-16 (D-6900 keep item 1; design §5.3; the cli half of IA-GR-14, whose
+/// import half is pull's): while the kind's locks are held the rescan is
+/// refused `run_busy` naming the holder's run, reads no day and writes no
+/// ledger line; once they are released it rescans.
+#[test]
+fn the_rescan_is_refused_by_name_while_an_import_of_its_kind_runs() {
+    let store = scratch("busy");
+    let zips = scratch("busy-zips");
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    std::fs::write(store.join("imports/gdfl.journal"), "").unwrap();
+    // The holder: the kind's locks, as a run of it holds them (the import
+    // half is pull's IA-GR-14).
+    let run =
+        pull::gdfl_run::claim_dayflags(&store, pull::gdfl_import::ImportKind::Options).unwrap();
+    let mut out = String::new();
+    let code = command_with(
+        &["options", "2024-04-01", "2024-04-01"],
+        &env_of(&[(NFO_ARCHIVES_VAR, zips.clone())]),
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.starts_with("GDFL DAYFLAGS REFUSED: run_busy: ")
+            && out.contains(&format!("run={} ", run.run))
+            && out.contains("read and wrote nothing"),
+        "{out}"
+    );
+    assert!(!out.contains("run_busy: run_busy"), "the code once: {out}");
+    assert!(!store.join("imports/gdfl.dayflags").exists(), "{out}");
+    run.release().unwrap();
+    let mut out = String::new();
+    let code = command_with(
+        &["options", "2024-04-01", "2024-04-01"],
+        &env_of(&[(NFO_ARCHIVES_VAR, zips.clone())]),
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("days not imported   1"), "{out}");
     std::fs::remove_dir_all(store).unwrap();
     std::fs::remove_dir_all(zips).unwrap();
 }
