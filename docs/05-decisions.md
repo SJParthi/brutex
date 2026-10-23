@@ -82868,3 +82868,31 @@ L-BRED23-02 names.
 None of the three was made to fail before its change on demand: the
 failures were load races seen by BASE-GATE11's and LEDGER-1023's runs
 (NOT PROVED failing first here).
+
+### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
+
+Gate 1e builds and tests the workspace in a worktree with `web/` removed
+(CLAUDE.md §2: no crate may need the front end to build, test or run). Two
+`api::server::bars_export` tests (R3-10) read `web/src/lib/db/bars-plan.js`
+and `web/src/lib/db/export.js` to check that the browser's `EXPORT_CAP` and
+`BAR_CSV_COLS` state the server's `EXPORT_CEILING` and `COLUMNS`, and
+panicked there with "No such file or directory". The cross-check is the same
+fact read from the other side now: `web/tests/export-agrees-with-the-server.test.js`
+reads `crates/api/src/bars_export.rs` as text and compares the cap and the
+35 column labels in order. The crate tests keep every assertion of the
+server's own behaviour (the 20,000-row ceiling written whole and one more
+refused, the header being the columns). Gate 1e's own run also met three
+load-sensitive tests, which D-7152 items 4 and 5 make robust.
+
+D-7152, items added the same day (append-only: the entry above is not
+edited):
+4. `api::audit::lock_wait_tests::eight_concurrent_appenders_lose_no_record`:
+   one of 800 fsynced appends waited past `APPEND_LOCK_WAIT` on a loaded
+   drive. A refused appender now asks again; every refusal must name its
+   bound, every record lands once, and a refusal is allowed only if a
+   successful append of the same run took at least half the bound (the
+   `try_lock` build it guards against refused while every success took
+   milliseconds, and still fails).
+5. `store::file::write_door_tests::the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars`:
+   up to three whole measurements, stopping at the first in which every
+   unchanged bound holds; a door that scans the month fails all three.

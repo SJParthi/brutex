@@ -1097,82 +1097,101 @@ fn the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars() {
     // time lookup and at most 60 record reads, whatever the month holds.
     // Measured on one warm writer handle per size, n = 2,000 each, times
     // printed; the assertion has margins for a loaded machine.
-    let mut p99s = Vec::new();
-    for size in [2_250u64, 22_500, 225_000] {
-        let bars = seconds(size);
-        let path = month_path(None);
-        let root = sealed_month("w-cost", path, &bars);
-        // THE SAME MONTH RAW, beside it: writer opens alternate between the
-        // two, so both forms meet the same moment of the machine's load.
-        let raw = Root::new("w-cost-raw");
-        write_raw(&raw.0, path, &bars);
-        let (mut opens, mut raw_opens) = (Vec::with_capacity(200), Vec::with_capacity(200));
-        for _ in 0..200 {
-            let started = Instant::now();
-            let writer = BarFile::open_or_create(&root.0, path, SYMBOL).unwrap();
-            opens.push(started.elapsed().as_secs_f64() * 1e6);
-            assert_eq!(writer.form(), Form::Sealed);
-            drop(writer);
-            let started = Instant::now();
-            let writer = BarFile::open_or_create(&raw.0, path, SYMBOL).unwrap();
-            raw_opens.push(started.elapsed().as_secs_f64() * 1e6);
-            assert_eq!(writer.form(), Form::Raw);
-            drop(writer);
-        }
-        let mut raw_writer = BarFile::open_or_create(&raw.0, path, SYMBOL).unwrap();
-        let mut raw_reoffers = Vec::with_capacity(N);
-        let mut writer = BarFile::open_or_create(&root.0, path, SYMBOL).unwrap();
-        let late = shift(&bars[..60], 3);
-        let (mut reoffers, mut refusals) = (Vec::with_capacity(N), Vec::with_capacity(N));
-        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-        for _ in 0..N {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            let from = (seed >> 33) as usize % (bars.len() - 60);
-            let started = Instant::now();
-            let answered = writer.append(&bars[from..from + 60]);
-            reoffers.push(started.elapsed().as_secs_f64() * 1e6);
-            assert!(matches!(answered, Ok(Appended::AlreadyPresent { .. })));
-            let started = Instant::now();
-            let answered = raw_writer.append(&bars[from..from + 60]);
-            raw_reoffers.push(started.elapsed().as_secs_f64() * 1e6);
-            assert!(matches!(answered, Ok(Appended::AlreadyPresent { .. })));
-            let started = Instant::now();
-            let answered = writer.append(&late);
-            refusals.push(started.elapsed().as_secs_f64() * 1e6);
-            assert!(matches!(answered, Err(StoreError::Sealed { .. })));
-        }
-        let (o50, o99, omax) = percentiles(&mut opens);
-        let (q50, q99, qmax) = percentiles(&mut raw_opens);
-        let (r50, r99, rmax) = percentiles(&mut reoffers);
-        let (w50, w99, wmax) = percentiles(&mut raw_reoffers);
-        let (s50, s99, smax) = percentiles(&mut refusals);
-        println!(
-            "SC4 write door at {size} bars: writer open n=200 sealed p50 {o50:.1} p99 {o99:.1} \
+    // UP TO THREE WHOLE MEASUREMENTS, STOPPING AT THE FIRST THAT HOLDS
+    // (BASE-REDS-1023, D-7152): one of them failed on unchanged code with
+    // the Mac's cores busy (a sealed open's median past three raw ones at
+    // one size). Interference only adds time, and a door that scans the
+    // month is slower at 100x in every measurement, so a regression still
+    // fails all three; the bounds below are unchanged.
+    let mut failed: Vec<String> = Vec::new();
+    for _attempt in 0..3 {
+        failed.clear();
+        let mut p99s = Vec::new();
+        for size in [2_250u64, 22_500, 225_000] {
+            let bars = seconds(size);
+            let path = month_path(None);
+            let root = sealed_month("w-cost", path, &bars);
+            // THE SAME MONTH RAW, beside it: writer opens alternate between the
+            // two, so both forms meet the same moment of the machine's load.
+            let raw = Root::new("w-cost-raw");
+            write_raw(&raw.0, path, &bars);
+            let (mut opens, mut raw_opens) = (Vec::with_capacity(200), Vec::with_capacity(200));
+            for _ in 0..200 {
+                let started = Instant::now();
+                let writer = BarFile::open_or_create(&root.0, path, SYMBOL).unwrap();
+                opens.push(started.elapsed().as_secs_f64() * 1e6);
+                assert_eq!(writer.form(), Form::Sealed);
+                drop(writer);
+                let started = Instant::now();
+                let writer = BarFile::open_or_create(&raw.0, path, SYMBOL).unwrap();
+                raw_opens.push(started.elapsed().as_secs_f64() * 1e6);
+                assert_eq!(writer.form(), Form::Raw);
+                drop(writer);
+            }
+            let mut raw_writer = BarFile::open_or_create(&raw.0, path, SYMBOL).unwrap();
+            let mut raw_reoffers = Vec::with_capacity(N);
+            let mut writer = BarFile::open_or_create(&root.0, path, SYMBOL).unwrap();
+            let late = shift(&bars[..60], 3);
+            let (mut reoffers, mut refusals) = (Vec::with_capacity(N), Vec::with_capacity(N));
+            let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+            for _ in 0..N {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                let from = (seed >> 33) as usize % (bars.len() - 60);
+                let started = Instant::now();
+                let answered = writer.append(&bars[from..from + 60]);
+                reoffers.push(started.elapsed().as_secs_f64() * 1e6);
+                assert!(matches!(answered, Ok(Appended::AlreadyPresent { .. })));
+                let started = Instant::now();
+                let answered = raw_writer.append(&bars[from..from + 60]);
+                raw_reoffers.push(started.elapsed().as_secs_f64() * 1e6);
+                assert!(matches!(answered, Ok(Appended::AlreadyPresent { .. })));
+                let started = Instant::now();
+                let answered = writer.append(&late);
+                refusals.push(started.elapsed().as_secs_f64() * 1e6);
+                assert!(matches!(answered, Err(StoreError::Sealed { .. })));
+            }
+            let (o50, o99, omax) = percentiles(&mut opens);
+            let (q50, q99, qmax) = percentiles(&mut raw_opens);
+            let (r50, r99, rmax) = percentiles(&mut reoffers);
+            let (w50, w99, wmax) = percentiles(&mut raw_reoffers);
+            let (s50, s99, smax) = percentiles(&mut refusals);
+            println!(
+                "SC4 write door at {size} bars: writer open n=200 sealed p50 {o50:.1} p99 {o99:.1} \
              max {omax:.1} us, raw p50 {q50:.1} p99 {q99:.1} max {qmax:.1} us; re-offer of 60 \
              n={N} sealed p50 {r50:.1} p99 {r99:.1} max {rmax:.1} us, raw p50 {w50:.1} p99 \
              {w99:.1} max {wmax:.1} us; refused late 60 n={N} p50 {s50:.1} p99 {s99:.1} max \
              {smax:.1} us"
-        );
-        // THE MEDIAN IS ASSERTED FOR OPENS, THE p99 PRINTED: a writer open
-        // takes and notes the month's lock, and a stall of the shared machine
-        // in two of 200 opens moves the p99 of either form by milliseconds
-        // (about 8 ms in both forms on 20 Oct, L-SC4-02). The re-offer and
-        // the refusal are asserted at p99, over 2,000 calls each.
-        assert!(
-            o50 <= 3.0 * q50 + 1_000.0,
-            "{size}: a sealed writer open p50 {o50:.1} us against raw {q50:.1} us"
-        );
-        p99s.push((o50, r99, s99));
+            );
+            // THE MEDIAN IS ASSERTED FOR OPENS, THE p99 PRINTED: a writer open
+            // takes and notes the month's lock, and a stall of the shared machine
+            // in two of 200 opens moves the p99 of either form by milliseconds
+            // (about 8 ms in both forms on 20 Oct, L-SC4-02). The re-offer and
+            // the refusal are asserted at p99, over 2,000 calls each.
+            if o50 > 3.0 * q50 + 1_000.0 {
+                failed.push(format!(
+                    "{size}: a sealed writer open p50 {o50:.1} us against raw {q50:.1} us"
+                ));
+            }
+            p99s.push((o50, r99, s99));
+        }
+        let (small, large) = (p99s[0], p99s[2]);
+        for (what, at_1, at_100) in [
+            ("open p50", small.0, large.0),
+            ("re-offer p99", small.1, large.1),
+            ("refusal p99", small.2, large.2),
+        ] {
+            if at_100 > 3.0 * at_1 + 1_000.0 {
+                failed.push(format!(
+                    "{what}: {at_100:.1} us at 100x against {at_1:.1} us at 1x"
+                ));
+            }
+        }
+        if failed.is_empty() {
+            break;
+        }
     }
-    let (small, large) = (p99s[0], p99s[2]);
-    for (what, at_1, at_100) in [
-        ("open p50", small.0, large.0),
-        ("re-offer p99", small.1, large.1),
-        ("refusal p99", small.2, large.2),
-    ] {
-        assert!(
-            at_100 <= 3.0 * at_1 + 1_000.0,
-            "{what}: {at_100:.1} us at 100x against {at_1:.1} us at 1x"
-        );
-    }
+    assert!(
+        failed.is_empty(),
+        "three measurements failed; the last: {failed:?}"
+    );
 }
