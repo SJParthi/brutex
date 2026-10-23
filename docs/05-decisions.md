@@ -83001,8 +83001,10 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     its phrase now says that on such an index the run itself is not judged.
     Both feeds serve `auction_aside`: `true`, `false`, or `null` on a day
     with no window. Where no minute is not judged the fold is the one it
-    was, so a day before 2026-08-03, a NIFTY or BANKNIFTY day and a day of
-    a series with no window answer exactly as before. **Rejected:** judging
+    was, so a day before 2026-08-03 and a NIFTY or BANKNIFTY day keep every
+    verdict, run and phrase they had, the new fields beside them; so does
+    every other index's auction-era day that holds no run of 180 s in the
+    window (INDIA VIX's, measured). **Rejected:** judging
     the window like any other minute on every other index, because 35 more
     indices hold still there on every auction-era session (measured) and
     would read "frozen in session" every day, a claim no source supports

@@ -3868,8 +3868,9 @@ fn scan_months(months: &[Month<'_>], inst: &Instrument) -> usize {
     // count of a scan that did not finish.
     std::thread::scope(|scope| {
         for (file, identity, days) in &cold {
-            let _thread = scope
-                .spawn(move || rules::scan_days(file, *identity, days, |day| minutes_on(inst, day)));
+            let _thread = scope.spawn(move || {
+                rules::scan_days(file, *identity, days, |day| minutes_on(inst, day))
+            });
         }
     });
     cold.iter().map(|(_, _, days)| days.len()).sum()

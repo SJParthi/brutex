@@ -1659,7 +1659,11 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
     assert_eq!(not_broken(flat(3, 1_001), Minute::Judged), 0);
     assert_eq!(not_broken(moving(3, 1_000), Minute::Judged), 0);
     assert_eq!(not_broken(flat(3, 1_000), Minute::Aside), 0);
-    assert_eq!(not_broken(flat(2, 1_000), Minute::Judged), 0, "no minute absent");
+    assert_eq!(
+        not_broken(flat(2, 1_000), Minute::Judged),
+        0,
+        "no minute absent"
+    );
     assert_eq!(not_broken(flat(3, 1_000), Minute::Judged), 1);
     // A run through a window not judged is broken by an absent minute too.
     assert_eq!(not_broken(flat(3, 1_000), Minute::Unjudged), 1);
@@ -3313,7 +3317,8 @@ fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
     assert_eq!(cold_days(identity, &spans[..1]), spans[..1].to_vec());
     assert_eq!(scan_days(&file, identity, &spans[..1], quiet), 1);
     for &(_, lo, hi) in &spans[..4] {
-        let kept = scan_day(&file, Some(identity), (lo, hi), |_| Minute::Judged).expect("from the memo");
+        let kept =
+            scan_day(&file, Some(identity), (lo, hi), |_| Minute::Judged).expect("from the memo");
         assert_eq!(kept.map(|scan| scan.bars), Some(2));
     }
 }
@@ -3535,7 +3540,8 @@ fn the_scans_edges_are_where_they_are_named() {
     else {
         panic!("the month opens");
     };
-    let whole = scan_day(&file, None, (0, MAX_SCAN_BARS), |_| Minute::Judged).expect("the day reads");
+    let whole =
+        scan_day(&file, None, (0, MAX_SCAN_BARS), |_| Minute::Judged).expect("the day reads");
     assert_eq!(whole.map(|scan| scan.bars), Some(MAX_SCAN_BARS));
     assert_eq!(
         scan_day(&file, None, (0, MAX_SCAN_BARS + 1), |_| Minute::Judged),
@@ -3592,7 +3598,8 @@ fn a_month_files_identity_is_its_own_device_and_inode() {
         .expect("the month file");
         assert_eq!(file_identity(file), Some((meta.dev(), meta.ino())), "{key}");
     }
-    let frozen = scan_day(&nifty, file_identity(&nifty), (0, 3), |_| Minute::Judged).expect("reads");
+    let frozen =
+        scan_day(&nifty, file_identity(&nifty), (0, 3), |_| Minute::Judged).expect("reads");
     let moving = scan_day(&bank, file_identity(&bank), (0, 3), |_| Minute::Judged).expect("reads");
     assert_eq!(frozen.map(|scan| scan.frozen_runs), Some(1));
     assert_eq!(
@@ -4129,7 +4136,11 @@ fn the_auction_stillness_is_sourced_for_the_circulars_two_indices_alone() {
         })
     );
     assert_eq!(
-        auction_of((Exchange::Nse, "INDIAVIX"), Venue::NseIndex, day("2026-07-31")),
+        auction_of(
+            (Exchange::Nse, "INDIAVIX"),
+            Venue::NseIndex,
+            day("2026-07-31")
+        ),
         None
     );
     assert_eq!(
@@ -4348,7 +4359,11 @@ fn an_index_whose_auction_stillness_is_not_sourced_is_never_said_not_frozen() {
     );
     // Two judged minutes before the window do not judge the run.
     let short = record(&got, "2026-09-29");
-    assert_eq!(short["index"]["frozen"]["flagged"], Value::Null, "{short:#}");
+    assert_eq!(
+        short["index"]["frozen"]["flagged"],
+        Value::Null,
+        "{short:#}"
+    );
     assert_eq!(short["index"]["frozen"]["unjudged_s"], 780);
     says_has(
         short,
@@ -4445,7 +4460,10 @@ fn a_ledger_run_in_the_window_of_an_index_not_sourced_is_not_judged() {
     let (json, says) = ledger(600, Some(15 * 3_600 + 10 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], true);
     assert_eq!(json["frozen"]["judged_s"], 300);
-    assert!(says[0].starts_with("index value frozen in session"), "{says:?}");
+    assert!(
+        says[0].starts_with("index value frozen in session"),
+        "{says:?}"
+    );
     let (json, says) = ledger(85, Some(15 * 3_600 + 27 * 60 + 9)).json();
     assert_eq!(json["frozen"]["flagged"], false);
     assert!(says.is_empty(), "{says:?}");
@@ -4460,7 +4478,10 @@ fn a_ledger_run_in_the_window_of_an_index_not_sourced_is_not_judged() {
     };
     let (json, says) = sourced.json();
     assert_eq!(json["frozen"]["auction_aside"], true);
-    assert!(!says[0].contains("NIFTY 50 and NIFTY BANK alone"), "{says:?}");
+    assert!(
+        !says[0].contains("NIFTY 50 and NIFTY BANK alone"),
+        "{says:?}"
+    );
     // THROUGH THE ROUTE: INDIAVIX's ledger line read as the real store's.
     let root = root_of("r3-13-ledger-unsourced");
     write(

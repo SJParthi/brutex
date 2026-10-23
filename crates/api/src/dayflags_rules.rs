@@ -1178,21 +1178,20 @@ pub(super) fn fold_minutes(
     let mut through: Option<Through> = None;
     // A judged run closes: counted where it reaches FROZEN_MIN_S, and its
     // length kept on the run through it.
-    let close_run = |run: Option<(i64, i64, i64)>,
-                     scan: &mut DayScan,
-                     through: &mut Option<Through>| {
-        let Some((first, last, _)) = run else { return };
-        let seconds = length(first, last);
-        if let Some(through) = through {
-            through.judged = through.judged.max(seconds);
-        }
-        if seconds >= FROZEN_MIN_S {
-            scan.frozen_runs = scan.frozen_runs.saturating_add(1);
-            if scan.longest.is_none_or(|(_, longest)| seconds > longest) {
-                scan.longest = Some((first, seconds));
+    let close_run =
+        |run: Option<(i64, i64, i64)>, scan: &mut DayScan, through: &mut Option<Through>| {
+            let Some((first, last, _)) = run else { return };
+            let seconds = length(first, last);
+            if let Some(through) = through {
+                through.judged = through.judged.max(seconds);
             }
-        }
-    };
+            if seconds >= FROZEN_MIN_S {
+                scan.frozen_runs = scan.frozen_runs.saturating_add(1);
+                if scan.longest.is_none_or(|(_, longest)| seconds > longest) {
+                    scan.longest = Some((first, seconds));
+                }
+            }
+        };
     // A run through closes: it is the day's unjudged run where it reaches
     // FROZEN_MIN_S, holds no judged run that does (so it reaches it only with
     // minutes not judged, [`Through`]), and is longer than any kept before it
@@ -1202,7 +1201,9 @@ pub(super) fn fold_minutes(
         let seconds = length(through.first, through.last);
         if through.judged < FROZEN_MIN_S
             && seconds >= FROZEN_MIN_S
-            && scan.unjudged.is_none_or(|(_, longest, _)| seconds > longest)
+            && scan
+                .unjudged
+                .is_none_or(|(_, longest, _)| seconds > longest)
         {
             scan.unjudged = Some((through.first, seconds, through.judged));
         }
