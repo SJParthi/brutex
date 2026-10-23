@@ -398,6 +398,21 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
         (RepairError::Conflict, FailKind::RepairRefused),
         (RepairError::Incomplete(p()), FailKind::RepairRefused),
         (RepairError::InvalidReceipt(p()), FailKind::RepairRefused),
+        // R4-18's drop and restate doors.
+        (RepairError::UnheldStamp(7), FailKind::RepairRefused),
+        (RepairError::WholeMonth { bars: 4 }, FailKind::RepairRefused),
+        (RepairError::NothingNamed, FailKind::RepairRefused),
+        (
+            RepairError::Reason("invented".to_owned()),
+            FailKind::RepairRefused,
+        ),
+        (
+            RepairError::ReadBack { index: 3 },
+            FailKind::Io {
+                kind: ErrorKind::InvalidData,
+                publication_may_be_visible: true,
+            },
+        ),
         (
             RepairError::HeldBarDiffers {
                 ts_micros: 1,

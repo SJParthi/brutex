@@ -186,7 +186,13 @@ impl FailKind {
             | RepairError::UnsealedSource
             | RepairError::Conflict
             | RepairError::Incomplete(_)
-            | RepairError::InvalidReceipt(_) => Self::RepairRefused,
+            | RepairError::InvalidReceipt(_)
+            // R4-18's drop and restate doors: a caller's malformed
+            // request, refused before anything is reserved or written.
+            | RepairError::UnheldStamp(_)
+            | RepairError::WholeMonth { .. }
+            | RepairError::NothingNamed
+            | RepairError::Reason(_) => Self::RepairRefused,
             RepairError::HeldBarDiffers { .. }
             | RepairError::IndexedSibling(_)
             | RepairError::RevisionLimit => Self::RepairImpossible,
@@ -196,6 +202,13 @@ impl FailKind {
             // So it is the visible-publication row: never a hole.
             RepairError::BeforePromote { .. } => Self::Io {
                 kind: ErrorKind::Other,
+                publication_may_be_visible: true,
+            },
+            // R4-18 (the restate policy): the revision is published and its
+            // read-back differs, so it is NOT promoted; like BeforePromote it
+            // exists unserved, and the bytes the host returned are the fault.
+            RepairError::ReadBack { .. } => Self::Io {
+                kind: ErrorKind::InvalidData,
                 publication_may_be_visible: true,
             },
             RepairError::Io {
