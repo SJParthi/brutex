@@ -82018,3 +82018,703 @@ it passes with four loose-entry warnings; and `.github/source_scan.rs` still
 says `/disk.json` runs `/bin/df` every 30 s, which D-5240 ended (the entry is
 still needed by `disk_route`'s test that compares with `df`). Both are edits
 under `.github/` that this merge does not make.
+
+### D-6900 — Ingest is always driven by Claude Code or the operator: the unattended one-click layer is dropped, one `cli ingest-run` command carries the chain, and everything that protects the data stays (one-command cut) — 2026-10-20
+
+**Status: locked.** Decided by the operator on 20 October 2026 at about 12:53
+IST, over Remote Control, in these words: *"anyhow always claude code ... just
+go ahead"*. **Recorded here on 23 October 2026** by the main session
+(LEDGER-1023) from the cut's draft, `state/oneclick-cut-20261020/decision.md`
+in the operator's work folder, outside this repository; the 21 Oct hand-over
+listed it as owed at landing. Block D-6900..D-6909: D-6901 is reserved for
+R4-10's import-journal decision and D-6902..D-6909 stay unused. The text below
+is the decision as made on 20 Oct. Where D-7135 (23 Oct, below) binds over a
+part of it, that part is named in **Read with D-7135** at the end, and is not
+reworded in place.
+
+**Where its earlier citations resolve.** IA-16's entries cited this number
+before it was written. D-4876 and D-4841 cite "D-6900 keep item 3", "keep item
+5" and "keep item 6": those are the numbered items of IA-16's KEEP text in the
+cut's `verdicts.json`, not the items below. The "Cited, never written" note
+under D-4841 named D-6900 pending "until D-6900's own entry is written"; this
+is that entry.
+
+**Context.**
+
+The 13 Oct aim was a one-click ingest that runs with nobody watching: the
+Ingest button was to run Dropbox, compress, seconds, store and checks every day
+"with zero Claude". Proof 2 on the deep-list page said the same: "by the app's
+Ingest button alone ... with no human or Claude step".
+
+The 18 Oct backtest-first cut marked the daily-automation halves as automation
+and DEFERRED them, without dropping them.
+
+On 20 Oct at about 12:50 IST the operator was shown the recommendation and
+decided that ingest is always driven by Claude Code. The operator can also run
+it from a terminal. So everything that exists only to run unwatched has no one
+to serve: the drop-folder watcher, the daily scheduler, the api child mode with
+its routes and alert queue, the network-down pause, the coverage board and
+daily report, the log archive and the gap worker.
+
+The protections stay, whoever presses the button:
+
+- crash-safe resume of an import cut at any point (a restart, a power cut, a
+  usage cutoff);
+- an idempotent rerun that writes nothing twice;
+- locks against two imports at once;
+- the disk floor;
+- verification of every file against the vendor;
+- loud named refusals of bad data;
+- the store format and compression;
+- /db correctness;
+- one reliable command for the whole chain, so Claude does not rebuild the
+  steps by hand.
+
+Sixteen candidate parts were judged, each removal was attacked by a skeptic,
+and after a failed first assembly check the attack was run a second time
+(workflow `wf_5e601f33-82f`). The verdicts, with evidence at file:line, are in
+the cut's `verdicts.json`.
+
+**Decision.**
+
+1. **Dropped, never built:**
+   - **IA-7**: inline verification during import. The command's verify stage
+     runs IA-6's cold verification instead (item 4).
+   - **R4-12**: the daily Zerodha scheduler, DLY-10's re-read control, AUT-08's
+     keep-awake and the /autopilot page. The merged autopilot (env-armed) and
+     credential law stay exactly as merged.
+   - **R4-14**: the gap queue, its worker and panel, GAP-16's record and
+     GAP-18's series checks.
+   - **R4-15**: the coverage board, the freshness light and the daily report.
+   - **IA-12a**, as a consequence of IA-10a's verdict: its /ingest panel calls
+     only the dropped `/gdfl/*` routes. It owns no failure case.
+
+   They leave `.only`, `.priority` and `.criticalPath`, and every edge to them
+   is cut.
+
+2. **Split.** The unattended half is dropped and the data half is built. Each
+   part's exact KEEP and "DROP, DO NOT BUILD" text is appended to its spec.
+   - **R4-11.** Kept: `cli ingest-run` and `pull::chain_journal`. Dropped: the
+     drop-folder watcher (DLY-02), `POST /ingest/run`, the panels (E2E-06) and
+     the route door (E2E-08).
+   - **IA-10a.** Kept: the read side. Every api reader of the GDFL journal's
+     filter understands member keys and holes (`/imports.json`,
+     `/audit.json?feed=gdfl`, `/dayflags.json`, `/provenance.json`, the
+     open-day scan), the day band finds a refusal's run from the event itself
+     (D-4896, O(1)), and the cli receipt prints the source census names
+     (D-4817) and the calendar horizon. Dropped: the api child mode, every
+     `/gdfl/*` route, the alerts routes, the restart scan and auto-resume.
+   - **IA-16.** Dropped: only its `alerts::put` calls for holes,
+     store_damaged and disk_full. Each stays a named stop or refusal on the
+     journal close and the receipt.
+   - **R4-13.** Kept: the Kite shape-change halt (`vendor_format_changed`,
+     Zerodha leg only), SEC-05's leak scan with a canary parameter path really
+     built in the process, and an honest limit for network drops. Dropped:
+     ERR-04's network-down pause and probe, its alerts and the autopilot halt.
+   - **R4-10.** Kept: `/logs.json` names a limit it ignored or clamped, the
+     import-journal measurement and its decision (D-6901), and a docs/06 row
+     for the bounded event stream. Dropped: the log archive and the segment
+     codec for logs.
+   - **IA-10b.** Kept: `GET /verify/days.json`, `GET /verify/day.json`, the
+     serve-path sample and the verdict key. Dropped: `POST /verify/run` and its
+     children.
+   - **R4-23.** Dropped: ERR-04's paused status. Kept, and no longer waiting on
+     R4-13: PERF-13's floor before any request.
+   - **R4-26.** Dropped: the schedule.rs registration and the board's expected
+     sets. The DayUniverse union is kept as a pure function.
+   - **R4-28.** Dropped: the scheduler line and the MasterChanges panel. The
+     diff keeps a reader in the refresh outcome.
+
+3. **Kept, with amended scope:**
+   - **R4-02**: FM-155's Zerodha half (the clock against a response Date),
+     FM-165's UNVERIFIED margin label, FM-160, FM-210's /instruments half,
+     every write route refusing an excluded feed even when named, and the one
+     `gaps_route.rs` alias call.
+   - **R4-19**: its data core only. Its display wiring goes to named builders:
+     R4-03, R4-02 and a proposed R4-19d.
+   - **PREC-10**: ZD-69's re-verify becomes the last leg of each Zerodha
+     `/pull/run` (also runnable alone) through api's credentialed door, with
+     crash-safe stamps, and it asks again for a same-evening day (FM-165).
+
+4. **The one command.** `cli ingest-run` runs one journalled plan.
+   - **Stages, in order:**
+     1. S0 reference files (security masters, dated session files);
+     2. fetch through `pull::gdfl_dropbox::run` (size, central directory and
+        every CRC before the rename, then R4-08's `write_day`: verify, read
+        back, rename);
+     3. day zips from a configured root through `write_day` too, so a zip
+        still being copied in is refused for that day in that run only and
+        imported by the next run;
+     4. import: one child `cli gdfl-import KIND tickstore FROM TO` per kind,
+        spawned from `current_exe()` with an argument vector, one kind at a
+        time (indices, stocks, options, oldest owed day first), each through
+        the verb's own door (`gdfl_import_guard`: the kind lock and IA-2's
+        claim) and each logging to its own `logs/gdfl/<kind>`. Never
+        `pull::gdfl_run::execute` or `execute_kind`, which take no lock and no
+        claim;
+     5. verification against the vendor: IA-6's cold `cli gdfl-verify` with
+        completeness for every kind, then `--deferred` over every pending day.
+        A day closes done only on verdict match;
+     6. stocks --stored through SURV-1's scope;
+     7. gdfl-rekey `--plan`, and `--apply` only when the plan read every file
+        and left 0 unresolved;
+     8. census recount;
+     9. a read-only fold-audit of the months touched;
+     10. the gap ledger;
+     11. a Zerodha check over the months Zerodha landings touched since the
+         last check: `cli zerodha-gaps --apply`, the `cli zerodha-repair` plan
+         and IA-9's `cli zerodha-verify`, stopping FAILED only on store-side
+         holes.
+   - **Consent.** `cli ingest-run --plan` lists and picks exactly as the fetch
+     would, downloads nothing, and shows every file's name and size and the
+     link print. That is what Claude shows the operator for the per-download
+     yes. The run refuses `plan_changed` if the listing no longer matches the
+     approved plan.
+   - **Lock.** One chain lock (`imports/ingest.lock`) is held from preflight to
+     the receipt; every stage keeps its own lock inside it.
+   - **Preflight, before any write:**
+     - the store identity marker. `--init-store role=<production|scratch>`
+       writes it with create_new, only into an empty root, and never
+       overwrites. The existing production root gets its marker only as a
+       recorded store step with the operator's yes;
+     - the mount check (the root's device id differs from the boot volume's,
+       never compared with its parent's);
+     - the writer gate (`unstamped_write_refusal` and `BRUTEX_READ_ONLY`, the
+       constant moved into `cli::store_write`);
+     - the wall clock against the Dropbox listing's Date;
+     - `started_inside_sandbox`;
+     - the calendar horizon.
+   - **Rehearsal.** On a production root R4-06's gate is asked per kind; a run
+     started by Claude is not a person's press, so not_rehearsed, stale and
+     operator_pending refuse by name. On a scratch root the run is the
+     rehearsal.
+   - **Floor.** R4-07's `floor_check` runs on the projected bytes before every
+     child and every stage. Kinds run one at a time under the chain lock, so
+     two kinds never pass the floor on one free-space reading (FIB-15 RQ-18).
+   - **Journal and receipt.** One CRC-checked chain-journal line per
+     transition; a rerun resumes at the journal boundary and writes no store
+     byte. The receipt (IST, vendor text escaped, every "done" citing its
+     journal line) is also a file in the run's own log directory, a new
+     `telemetry::run_dirs` row. Claude starts the command detached, so a
+     session that dies leaves the journal and the receipt for the next
+     session.
+
+   Claude runs the command outside its sandbox only where the operator's
+   permission settings allow it, and never changes those settings.
+
+5. **Rules decided here:**
+   - **(a) repair_in_open_month.** A repair-reason GDFL run whose range touches
+     a month whose last trading day has not passed is refused by name in
+     `gdfl_run::plan`, before any lock, unless the request explicitly accepts
+     it. This amends D-4876 (2). IA-GR-31's second test now reads "refused
+     unless accepted, and converges after the month ends".
+   - **(b) Holes on the receipt.** `cli gdfl-import`'s receipt prints the holes
+     in its range by reason, repairable or not, and the store-wide count of
+     standing holes by reason per kind. A hole that admit skips is never
+     counted in "days already done".
+   - **(c) The mid-month window rule, stated as the code applies it.** A
+     Zerodha window that starts mid-month opens the month at that day and
+     writes no gap line for the days before it. The read-only `cli
+     zerodha-repair` plan names those days `front`; `cli zerodha-gaps ...
+     --apply` records them as `why=stored_short fill=front`; only when a later
+     window that offers them is refused do they become `why=refused_front`
+     (D-3351 item 3). `pull/tests/zerodha_repair.rs` pins it: the first landing
+     writes 0 lines. IA-9 reads each of these as owed or missing_in_store,
+     never as match; PROVEN-GATE refuses the day; only the repair door fills
+     it, run by Claude Code or the operator, never by itself.
+   - **(d) master_stale.** A Zerodha `/pull/run` plan refuses `master_stale
+     age=<sessions>` before any request when the newest receipted master
+     snapshot is older than one session of the calendar of record, or when
+     there is none (R4-23, on R4-28's snapshot date).
+   - **(e) Dated tokens.** `token_on(date)` answers from the newest receipted
+     snapshot on or before the date only when the next later snapshot maps
+     that token to the same contract; otherwise `token_ambiguous`, naming both
+     dates. Before the first snapshot it answers nothing, by name. A snapshot
+     body without its receipt is never read (R4-28).
+   - **(f) clock_disagrees on both feeds.** GDFL: R4-11's preflight against the
+     Dropbox listing's Date. Zerodha: R4-02, against a response Date the press
+     already reads, before the first Kite request. The 5-minute settle margin
+     is labelled UNVERIFIED on a `/pull` receipt for a window that reaches
+     today, until a source is recorded in `docs/00-charter.md`. Making the
+     operator window a clamp would be a separate law change; it is not made
+     here.
+   - **(g) Store identity.** A root with no identity marker is refused
+     `store_identity_missing`; a copy is caught by `store_identity_mismatch`
+     when an api answers on the configured address while this root's
+     serve.lock is free. Tests, benches, rehearsals and agent scripts never
+     write a role=production root (FM-130, FM-282).
+   - **(h) What the verify stage verifies.** Every day closed by any GDFL
+     import since the previous verify stage closed, found from the import
+     journal's recorded length (`journal_replaced` if it shrank or changed
+     identity), each against the source its closing run recorded
+     (`source_not_held` otherwise). A day with no new close is never verified
+     again, so a second command writes no verdict generation.
+   - **(i) Excluded feeds.** Every write route (`/pull/spot`, `/pull/fno`,
+     `/pull/repair`, `/pull/run`, `/masters/refresh`) refuses dhan, groww and
+     truedata even when named, with feed_refusal's sentence (D-3338), and an
+     empty feed word is refused on every form instead of answering Dhan.
+   - **(j) Alert kinds.** KINDS stays append-only, so network_down,
+     feed_behind, gdfl_day_late and ingest_chain_failed are not appended:
+     their only producers are dropped. vendor_format_changed and
+     vendor_restated stay.
+
+6. **Design decisions this cut retires, moves or amends:**
+   - **Retired** (never landed; nothing to build): D-4821 (the plan ETA);
+     D-4840 (the route classes); D-4846 (every run a child of the api); D-4884
+     (the build-skew and calendar-horizon alerts); D-4806 and D-4886 (inline
+     verification); D-4856's round-5 end-of-run rules, including "No day waits
+     for a person while its input exists". A pending day now waits at most
+     until the next command, and it is named on every command until then.
+   - **Moved:**
+     - D-4805 to R3-23 (an interrupted run is a claim in a free lock);
+     - D-4848's surviving clauses (mode= on every claim, auto_resume=0 for
+       every cli claim, an interrupted verification re-run as a verification
+       and never resumed as an import) to IA-6;
+     - D-4837 and D-4863's code-6 sentence to IA-6, reworded to the cold mode;
+       D-4863's audit-cap sentence to IA-16;
+     - the verdict store's caller duties of D-4925 (near_ceiling) and D-4924
+       (lock_stalled) to IA-6's cold run, printed on its receipt with no
+       alert.
+   - **Landed by a kept half:** D-4896 (the day band's O(1) run lookup) by
+     IA-10a, with L-IA-39 rewritten.
+   - **Amended merged entries:**
+     - D-4883's caller list loses IA-16's three puts (disk_full, hole,
+       store_damaged), IA-7's two (mismatch, verdict_refused), IA-10a's alert
+       kinds and routes, and bench C-AL-03. `cli alerts` (IA-11a, merged) stays
+       the queue's reader.
+     - D-4925's "The alert is IA-7's": near_ceiling is printed by IA-6's cold
+       run, with no alert.
+     - The ownership line "IA-7: the deferred pass's driver" now reads: the
+       deferred pass is `cli gdfl-verify <kind> - --deferred` (IA-6), run by
+       R4-11's command or by hand.
+     - docs/04 IA1-01 ("The api half waits for POST /gdfl/import (IA-10a)"):
+       that api half will never exist; the cli door is the one import door.
+     - L-IA-12 is WP-16's alone, with no inline gather term (merged L-IA-60
+       cites it); L-IA-3 and L-IA-35 are never measured.
+     - D-4968 stays as written; "R4-10's rolled non-bar segments" are not
+       built.
+   - **Withdrawn, never fixed:** GAP-16, GAP-17 and GAP-18 (R4-14; no tracked
+     doc has a row for them). RT-DATA-01 closes only when its acceptance on the
+     new root passes (IA-10c's store step S4).
+   - **Store steps.** `config/store-steps.toml` S-14 (prerequisite R4-14,
+     commands `planned: POST /ingest/queue ...`) is re-planned in the same
+     commit as this entry: prerequisite IA-10c, attended per-month repairs, a
+     `[[package]] IA-10c` declared and `[[package]] R4-14` removed, gate 30
+     green. **Done in this entry's commit** (LEDGER-1023, 23 Oct): S-14's two
+     command lines are `POST /pull/repair` per month in S-13's and S-15's
+     shape, one for the index series and one for the shares, with a note on
+     why the keep hook decides the door.
+
+7. **Proof 2 is reworded**, the other five proofs unchanged; proof 3's
+   "identical bytes" is read as the store's data (bars, census, tick store),
+   because two fresh rebuilds write two different identity markers, run
+   ledgers and journals. The 20 Oct wording of proof 2:
+
+   > **One command from the Dropbox link.** A fresh, empty store is filled
+   > from your Dropbox link by one `cli ingest-run --init-store
+   > role=production`, started by Claude Code or by you from a terminal after
+   > `cli ingest-run --plan` has shown every file and its size and you said
+   > yes. Every file, for indices, stocks and options, is checked against the
+   > vendor: size, central directory and every CRC before it is kept, then a
+   > per-day verdict match from the vendor verification, with days waiting on
+   > another input cleared by the next run. No step is done by hand between
+   > the stages. A run cut at any stage resumes to the same bytes, and a
+   > second run writes no store byte.
+
+   It replaced: "**One click from the Dropbox link.** A fresh, empty store is
+   filled from your Dropbox link by the app's Ingest button alone, every file
+   checked against the vendor, with no human or Claude step."
+
+**Consequences.**
+
+- **Size.** About 6.8 part-equivalents are not built: the sum of the 16
+  verdicts' own estimates. IA-12a comes on top and is not costed by a verdict.
+  The optional R4-19d is not costed either.
+- **Critical path.** Unchanged in depth and parts on 20 Oct: D=6 with the
+  options filter, and the zero-slack set still equals `.criticalPath`. Path
+  parts gain scope: IA-16 (the dayflags kind lock, the holes and disk-full
+  receipt lines, the open-month refusal, the v=2 flags reader), IA-10c
+  (FM-163, the cost pin, the S4 store-step acceptance), R4-19 (call sites),
+  R4-23 (the restate-resume rule and four moved rows: FM-168, FM-169, FM-265,
+  FM-267), R4-28 (the token rules, the ISIN source, the receipt-last rule)
+  and PREC-10 (the re-verify leg and its stamps, FM-158, FM-165).
+- **Failure cases.** 184 owned or received cases plus 2 record-only rows (the
+  cut's `cases.json`): 125 stay with their judged owner; 26 move to a kept part
+  that holds that rule; 33 are not_applicable: 23 close as refused on purpose
+  under this decision, each with its reason shown (proof 1), and 10 (FM-176,
+  -177, -178, -179, -180, -182, -184, -185, -187, -188) are handled at head and
+  are recorded as handled with their tests, never as refused on purpose. No row
+  is closed by the cut itself: each closes only by its test.
+- **Honest limits** (`CLAUDE.md` §3 rule 6), as of 20 Oct at `453de6989`:
+  1. No file in crates/cli or crates/api called `pull::gdfl_dropbox`, so
+     R4-07's merged fetch cannot run until `cli ingest-run` lands. Until then a
+     GDFL re-delivery can be fetched only by hand, outside R4-07's size,
+     central directory, CRC, Range and never-overwrite checks.
+  2. Each door checks the disk floor alone, with no shared reservation: a GDFL
+     import and a Zerodha run started together can each pass it. The one-leg
+     doors (`POST /pull/spot`, `/pull/fno`, `/pull/repair`, `/pull/recovery`)
+     and `cli zerodha-repair --from-store` carry neither the floor nor
+     master_stale; Claude and the operator pull Zerodha through `/pull/run`.
+     On every door a full disk is still `StoreError::DiskFull`, a loud refusal.
+  3. The info events of an import older than the bounded event ring (8 MiB x
+     8) cannot be recovered; LOG-RETENTION (FM-091) is refused on purpose.
+  4. A network drop during a pull is not paused: each instrument it hits is
+     refused by name after 6 transport retries and left owed, and the rerun is
+     idempotent from the store's resume point.
+  5. The cold verification reads the vendor source once more for each day
+     verified (O(bytes), duration unmeasured): one large pass for the backlog
+     imported by hand before the command lands, then per new day.
+  6. Kinds run one at a time, which costs speed only.
+  7. R4-11's command and R4-13's shape-change halt still wait, through R4-05,
+     on R3-21 and R3-31, which were not judged here and carry stop-and-report
+     notes.
+- **Out of reach of this cut.** Parts that were not judged still read what it
+  removed: R3-21, R3-25 and R3-31 read the dropped alerts routes, and R3-26 and
+  R4-24 read the dropped child mode or pages. Each carries a NOTE to leave such
+  an item out by name, never to build a substitute.
+
+**Read with D-7135** (23 Oct 2026, recorded below; it binds over these parts
+of this entry, which stand as written above):
+
+- Item 4's preflight, "`--init-store role=<production|scratch>` writes it ...
+  only into an empty root": under D-7135 `--init-store role=production` runs
+  only on the EXISTING, non-empty production root, through its recorded store
+  step (`config/store-steps.toml` S-51) with the operator's yes, and into an
+  empty root it is refused `production_root_must_exist`;
+  `--init-store role=scratch` runs only into an empty root; neither form runs
+  the chain.
+- Item 4's rehearsal, "On a scratch root the run is the rehearsal": on a
+  role=scratch root the chain runs only over an explicit FROM..TO window the
+  caller names, and without one it is refused before any write.
+- Item 6's "RT-DATA-01 closes only when its acceptance on the new root passes":
+  its acceptance runs against the existing production store (IA-10c's text).
+- Item 7's proof 2, "A fresh, empty store is filled ... by one `cli ingest-run
+  --init-store role=production`": proof 2 is now the patch on the existing
+  store, in three recorded steps (D-7135 item 6). Proof 3 is the one-month
+  build-twice test in two role=scratch roots (D-7135 item 3), not two fresh
+  rebuilds.
+
+### D-7094 — Parts deferred, not dropped, at the 20 Oct follow-ups — 2026-10-20
+
+**Status: locked.** Decided by the main session on 20 October 2026, in the
+follow-ups run the operator released at about 13:40 IST with *"whatever is
+your recommendation go ahead"*. **Recorded here on 23 October 2026** by the
+main session (LEDGER-1023), from `state/followups-20261020/main-session.md`
+(section 3 and section 9, item 29) in the operator's work folder, outside this
+repository, where it was owed at landing. Block D-7090..D-7099 ("D-7094 the
+deferral record, landed by the main session"). The draft's number D-6993 is
+void: D-6920..D-6999 stays unused.
+
+**Decision.** Four parts stay in their launchers' priority lists and out of
+`.only`. None is dropped, and none is silently out of scope (`CLAUDE.md` §3
+rule 2):
+
+- **SC-12**, patched-alias sort columns. Only if the disk gets tight. It needs
+  only an index rebuild later, not a re-seal (the store-compression design,
+  section 9).
+- **CHG-2**, net P&L after charges in every report. Backtest side, after
+  CLOUD-CHG1 and CLOUD-CHG1-OPT.
+- **SC-9**, retirement of raw months beside sealed ones. It waits for the
+  operator's D-4931, because unlinking a stored file touches `CLAUDE.md` §1
+  ("append-only history applies to the store as well") and §3 rule 8. If the
+  operator says no or not yet, SC-9 stays deferred under this entry.
+- **CC-11**, sealing closed pull-journal pieces. It needs a segment codec and a
+  compactor, which the one-command cut (D-6900) dropped from R4-10. About
+  1.08 GB, 29x compressible, on 13 Oct. Revisit when R4-29 lands a codec. Its
+  failure case FM-618 is deferred with it, not dropped.
+
+**As recorded on 23 Oct.** The draft says each part "is named as deferred in
+`docs/07-plan.md`". At this entry's commit `docs/07-plan.md` names none of the
+four, so until the plan is edited this entry is the only tracked record of the
+deferral. No `Merge` subject on `feat/db-fix` names SC-12, CHG-2, SC-9 or
+CC-11, and D-4931 heads no entry here, so all four are still deferred.
+CLOUD-CHG1 has merged; CLOUD-CHG1-OPT has not.
+
+### D-7135 — No fresh-from-scratch rebuild of the store: a new vendor link, or any re-delivery, is a patch into the existing store, append-only (no-fresh-root cut) — 2026-10-23
+
+**Status: locked.** The operator's rule, 23 October 2026 at about 07:45 IST:
+*"forget about GDFL re-delivery and re-import everything freshly from scratch
+... even if I provide a fresh new GDFL link, just consider it as re-import or
+patching"*. Recorded by the main session (LEDGER-1023) from the cut's folder,
+`state/nofresh-20261023/` in the operator's work folder, outside this
+repository: `README.md` (the cut and its draft of this entry), `cases.json`
+(the failure cases) and `proofs.md` (the six proofs). Block D-7135..D-7144:
+D-7136 to D-7138 follow, and D-7139..D-7144 stay reserved for this cut.
+
+**Decision.**
+
+1. **The patch path.** A new GDFL link, or any vendor's re-delivery, is an
+   incremental re-import into the existing store, append-only. It goes through
+   CC-3's intake, which classes every day the store already holds as same,
+   new, changed or gone by its BYTES: its member sizes and CRCs against the
+   source member its own provenance names. Being held never makes a day
+   "same". Then PREC-5 rebuilds each changed day once, through R3-22's restate
+   door and R4-21's moves, and PREC-19 re-derives order flow. A changed day
+   becomes a new generation and the old generation stays byte for byte; an
+   unchanged day writes nothing, and so does a second press. A held day
+   missing from the new download is classed gone: it stays held, stops the
+   command by name, and goes on only after a one-use, journalled acceptance.
+   Only dependents are re-derived: order flow (PREC-19) and derived rows
+   (PREC-13 CR-08) bound to the old generation read as stale until they are
+   rebuilt. Every file is checked against the vendor, the re-delivered files
+   included.
+2. **Refused under this entry, and never built:** the full rebuild (R4-16's
+   second store of about 2 TB beside production, its own estimate and an
+   extrapolation), the fresh-clone harness, `cli fresh-check`, the digest
+   manifest, CC-3's `--against <old root>`, R4-11's chain run on an empty
+   root, the backtest-first plan's "root A", a whole-store old-versus-new
+   compare, and the delete list.
+3. **Proof 3 is a test, not a re-import.** One month of every kind (GDFL
+   indices, stocks, options and tick store, and that month's Zerodha pull) is
+   built twice, through the per-kind verbs, each time into a new, empty root
+   marked `role=scratch`. Then `cli store-compare <SCRATCH_A> <SCRATCH_B>
+   --month <YYYY-MM>` must report 0 bar differences and name every structural
+   difference (run ids, `landed_at`, layout); served bars decide (FM-157). It
+   tests `CLAUDE.md` §3 rule 5. It never touches production, never makes a
+   delete list, never runs `cli ingest-run` on an empty root (whose chain
+   would catch up every owed day there, which is the full rebuild of item 2),
+   and waits for R4-16 and SURV-1 to merge. `config/store-steps.toml` S-42 is
+   re-planned as proof 3 in this entry's commit, and OWED-22 reworded.
+4. **The store's disaster path is a backup, not a rebuild:** the backup verb
+   and its restore drill (OWED-21), split out of R4-09 as R4-09b by D-7137.
+   The 21 Oct sentence "the full fresh-clone rebuild (R4-16) stays built and
+   proved on a sample as the disaster path" is struck.
+5. **What stays law:** `CLAUDE.md` §3 rule 5 (idempotence) and rule 8
+   (append-only history); vendor verification of every file; crash-safe
+   resume; and the patch path itself (CC-3's intake, PREC-5's one rebuild per
+   changed day, PREC-19's re-deliveries bound to their source), now
+   strengthened. Data rigour is never traded for speed.
+6. **Proof 2 is the one command, as a patch on the store we keep,** in three
+   recorded steps: `cli ingest-run` (R4-11) imports the new days and stops at
+   CC-3's intake, before any tick-store write, on every day the new download
+   changes or drops; PREC-5's `--apply`, a listed store step, runs after the
+   operator's yes and rebuilds each changed day once; then `cli ingest-run`
+   again, whose verify stage proves the days that step applied against their
+   new source. Claude Code or the operator runs it from a terminal; there is
+   no unattended timer or button (D-6900).
+7. **R4-11's store identity marker.** `cli ingest-run --init-store
+   role=production` runs only on the existing, non-empty production root its
+   recorded store step names (`config/store-steps.toml` S-51, closing
+   OWED-32, both added in this entry's commit), by canonical path and
+   (dev, ino) given explicitly, never resolved from an inherited
+   `BRUTEX_STORE`, writes with create_new, never overwrites, and only with
+   that step's operator yes recorded; into an empty root it is refused
+   `production_root_must_exist`. `--init-store role=scratch` runs only into an
+   empty root, and on a role=scratch root the chain runs only over an explicit
+   FROM..TO window. Neither form runs the chain.
+8. **Constant time.** Every route and every store step stays O(1) at the 99th
+   percentile, measured. The one-time passes this decision makes necessary on
+   the kept store are O(bytes) by nature and are each listed in docs/06 as a
+   one-time pass with its measured time and a disk projection, never as a
+   per-operation cost: R4-11's one scope_widened read of held CASH days,
+   CC-1's deep pass over the tick store, CC-18's provenance back-fill, PREC-6's
+   closing-OI back-fill, PREC-17's special-session recount, and PREC-5 and
+   R3-22's restates.
+
+**What it supersedes.** The operator's plans of 14 Oct ("everything from
+fresh"), 17 Oct (a fresh run into a NEW empty root, rebuilt twice, compared
+item by item with a delete list) and 20 Oct (a fresh download, rebuilt twice,
+then the proofs), and the 21 Oct disaster-path sentence. Those plans lived in
+the operator's state folder and headed no entry here. Of this ledger it binds
+over the parts of D-6900 that D-6900's **Read with D-7135** names, and, by
+D-7138, over PROVEN-GATE's "proven root A".
+
+**The parts (24 judged, each judged and then attacked).** None dropped.
+Narrowed (10): R4-16, CC-3, PREC-5, R3-22, R4-21, R4-11, IA-10c, PREC-17,
+AH-06, IA-4. Kept with an amendment (7): CC-18, PREC-19, VKI-1, CC-1, PREC-6,
+PREC-13, WP-99. Unchanged (7): SURV-1, R4-29, CC-5, R3-26, R3-27, OF-1,
+PREC-18. Each part's binding text is in the cut's `texts.json`. Three
+judgement calls, each the conservative choice: FM-268 stays open with R4-16;
+proof 3 never runs `cli ingest-run` on an empty root; the edge R4-16 -> SURV-1
+stays. IA-10c's whole-history Zerodha re-pull stays REQUIRED (PROVEN-GATE (b))
+and lands into the existing store through the existing doors, never a root A.
+
+**The failure cases** (`cases.json`): 252 rows, 248 judged and 4 record-only
+(FM-014, FM-249, FM-266, FM-622). Keep 241: 20 already handled at head, FM-183
+among them (recorded as handled, never as refused); FM-268 open; FM-277 and
+FM-329 narrowed. Move 5: FM-254 and FM-290 to PREC-5, FM-215 to R4-11, FM-606
+to CC-1, FM-120 to PREC-17. Refuse 2, on purpose under this entry with the
+reason shown: FM-235 (a second store of about 2 TB beside production no longer
+exists) and FM-226 (days held from elsewhere stay held; a delivery that lacks
+them classes them gone, never deleted). No row is closed by this entry: each
+closes only by its test.
+
+**Honest limits.** The net build change is about zero, possibly more work: an
+estimate, not a measurement. The judges' gross cut was about 0.74
+part-equivalents, and the attacks added unestimated work back. The machine
+time saved (the rebuild twice of the 20 Oct plan, 2 to 5 days; a new tick
+store, about 49 h serial) was never timed, so it is an extrapolation; the
+whole-history Zerodha re-pull (about 12 h, stated in `sink.rs`, not measured)
+is not saved. On 17 Oct the drive had 1.6 TB free, so a second store of about
+2 TB would not have fit. Whether R4-09b's backup covers the untracked local
+configuration, the link file, unpushed commits and the work folder's `state/`
+is UNVERIFIED; D-7137 item 3 has docs/36 §4 list each with its second copy or
+"none", and the operator decides.
+
+**Rejected.** *A full fresh rebuild kept as the disaster path* (the 21 Oct
+sentence). It needs a second store of about 2 TB, which the drive could not
+hold on 17 Oct, and it is the fresh-from-scratch rebuild the operator's rule
+refuses; a verified second copy with a restore drill is the disaster path.
+*Deleting what a re-delivery lacks.* The store is append-only (§3 rule 8); a held day a delivery lacks is gone from the delivery,
+not from the store.
+
+### D-7136 — PREC-5 owns the append-only new tick-store version of a changed re-delivered day (no-fresh-root cut) — 2026-10-23
+
+**Status: locked, as an ownership decision.** The operator, 23 October 2026 at
+about 08:40 IST: *"add the changed-day tick-store writer to PREC-5"*, and *"we
+need maximum precision, accuracy and a working solution"*. **This entry records
+who builds the writer and what it may never do. It makes no design claim.**
+The binding clause PREC-5 builds from is
+`state/nofresh-20261023/src/writer-final.txt` in the operator's work folder,
+outside this repository, and it is **still under verification**: the
+independent check of 23 Oct at about 12:00 IST (`src/writer-verify.md` there)
+found the assembly correct and every mechanical check passing, and its verdict
+is "not ok yet", with one finding unresolved, three items only partly
+resolved, and six statements wrong against the code or against the clause
+itself. Every line the clause cites is at `feat/db-fix` `0dc8361c`; PREC-5
+re-checks each before it edits, and the clause's corrections bind over its
+first text where they differ. PREC-5's own locked choices take its block
+D-5480..D-5499.
+
+**Why it needed an owner.** Under D-7135 there is no fresh root to absorb a
+changed re-delivered day, and the tick store had no writer for one: R4-08's
+writer refuses `held_day_differs` (`crates/pull/src/tickstore_write.rs`), and
+R4-07's pick refuses `redelivered` (`crates/pull/src/gdfl_dropbox.rs`). It was
+the largest open gap the cut found.
+
+**Decision.**
+
+1. PREC-5's `--apply` writes an append-only new tick-store version of every
+   held day that CC-3's intake classes changed (and of a day CC-1 names
+   `day_file_damaged`), as one sequenced step of that day: after its bars,
+   before its receipt.
+2. The held day file is never rewritten, renamed or removed (`CLAUDE.md` §3
+   rule 8). The shape the clause proposes, under verification: a version file
+   `<stem>.r<N>.bts` beside the held file; the version served named by a
+   `store::generation`-style append-only pointer under `tick-versions-v1/`; at
+   most 1,024 versions a day; and one O(1) resolver through which every
+   tick-store path goes, with two answers: the served version for current
+   readers, and the named version for a verifier of a stored generation. The
+   store format gains it in `docs/02-store-format.md` only when PREC-5 lands
+   it, with its own tests; this entry fixes none of those bytes.
+3. The order of one day: the bars first, from the re-delivered zip by its
+   intake record; then version N from the same open zip, verified entry for
+   entry, and the pointer appended, in one call under one lock hold; order
+   flow is owed to PREC-19; the receipt comes last.
+4. The build graph gains exactly two edges for it: PREC-5 waits for CC-1, and
+   merges after R3-27 (files only). Never PREC-5 -> CC-3: CC-3 depends on
+   PREC-5, so that edge would be a cycle. CC-3 fills PREC-5's input from its
+   intake ledger after PREC-5 merges, as its own sequenced edit.
+5. The tick-store half of failure case FM-290 is PREC-5's (FM-290's rebuild
+   half moved to PREC-5 under D-7135 too).
+6. The draft said PREC-5 writes this entry first if it is missing when PREC-5
+   starts. It is present now, so PREC-5 writes no second D-7136.
+
+**Rejected.** *Leaving the tick-store half unowned.* A changed day's bars would
+be rebuilt while its tick-store day stayed refused `held_day_differs`, with no
+part to close it. *Rewriting the held day file in place.* §3 rule 8, and a
+verifier of an older generation would lose the bytes it was built from. *A new
+tick store built from scratch.* D-7135.
+
+### D-7137 — R4-09b: the store's backup verb and its restore drill (AUT-06) split out of R4-09 and placed right behind the critical path (no-fresh-root cut) — 2026-10-23
+
+**Status: locked.** The operator, 23 October 2026 at about 08:50 IST: *"move
+R4-09's backup and restore drill up, right behind the critical path"*. The
+part's spec is `state/nofresh-20261023/r409b-spec.txt` in the operator's work
+folder, outside this repository; its source item is AUT-06 of the ingest and
+/db checklist of 13 Oct.
+
+**Why now.** Under D-7135 there is never a fresh-from-scratch rebuild, so a
+verified second copy with a restore drill is the store's only disaster path,
+and /db says today that no copy of the store is recorded. R4-09's own text
+deferred its backup behind the backtest.
+
+**Decision.**
+
+1. **A part of its own.** R4-09b builds `cli backup --to <dir> [--plan]
+   [--mib-per-s N]` and `cli backup-drill --from <dir> [--months N]` (N
+   defaults to 3), and /disk.json and the /db band show the last backup date,
+   the manifest's file count and bytes, the last drill date and its result.
+   R4-09 keeps the rest of its scope (its scrub schedule and /verify work).
+   R4-09b touches neither, nor `crates/pull/src/scrub.rs` (SC-9) nor
+   `crates/store/src/file.rs`.
+2. **Placed right behind the critical path** in the build's priority order.
+   The launcher placement is the main session's.
+3. **What the spec binds**, among its rules: the verb copies what the store
+   already lists and the GDFL source archives by name and size, never a glob of
+   the whole drive; each new or changed file goes to the target as temporary,
+   fsync, rename and folder fsync with a blake3 digest, and it never deletes or
+   overwrites a file there (a changed source is a new name, the old copy kept);
+   one record per file in an append-only manifest on the target, looked up in
+   O(1) per file, never by a rescan; a month is copied under its reader lock,
+   and a writer-held month is a named `busy` line, retried, never copied half
+   written; it refuses by name a target on the store's device, a target inside
+   the store, a target with less free space than the plan needs, and a target
+   that is not a directory; it is idempotent (a second run copies nothing and
+   says so) and resumable (a kill leaves no file the manifest calls done); its
+   receipt is the line `ops/backups.log` already carries, read by the existing
+   parser, with no second one; the drill restores into a private role=scratch
+   root, compares byte for byte with the store and with the manifest digests,
+   and never writes the store; staleness is computed when the page is read and
+   shown by name, and no alert kind is added (D-6900: attended only). docs/36
+   §4 lists each item that lives only on the operator's Mac with its second
+   copy or "none" (FM-277): the untracked local configuration (copied to the
+   target as a file only, never into git, never printed; `CLAUDE.md` §8),
+   unpushed commits and the work folder's `state/`. The operator decides what
+   is covered, and no credential value is ever copied.
+4. **Store steps.** `config/store-steps.toml` S-17 (closing DB-B73 and
+   OWED-21) waits for R4-09b, its two planned commands use the two verbs, and
+   its dry runs gain `cli backup --to <SECOND_DRIVE> --plan`. The
+   `[[package]] R4-09` row, which no other step named, is now `R4-09b`, and
+   OWED-21's source names both.
+5. **The store write is the operator's.** The operator names the second
+   drive's path; then a `--plan`, a measured sample, the first full copy, and
+   one drill on 3 months. Its size is the store (about 913 GiB on 7 Oct) plus
+   the source archives (about 0.6 TB), so the second drive needs about 1.6 TB
+   or more: an extrapolation, measured by `--plan` first.
+6. **Numbers.** The spec's file list names "docs/05 entry D-7137": this is
+   that entry, so R4-09b writes no second D-7137. A locked choice of R4-09b's
+   own takes a number the main session assigns it.
+
+**Rejected.** *Leaving the backup behind the backtest*, as R4-09's text had it.
+Under D-7135 the backup and its drill are the store's only disaster path, and
+no copy of the store is recorded today.
+
+### D-7138 — FIB reads the existing store's admitted days, never a "proven root A": PROVEN-GATE item (5), and the D-6230 entry it writes, amended under D-7135 — 2026-10-23
+
+**Status: locked.** A consequence of D-7135, recorded by the main session
+(LEDGER-1023) from `state/nofresh-20261023/README.md` item 7 in the operator's
+work folder, outside this repository. It amends text; it edits no entry.
+
+**What it amends.** PROVEN-GATE (backtest-first, 18 Oct; block D-6230..D-6239)
+has an item (5), the FIB amendment, "recorded as the first docs/05 entry of
+this block (D-6230)": FIB-8's loader and FIB-12's `fib plan` read only ADMIT
+days (and WARMUP_ONLY days for warm-up) from the admission file, and "FIB-12's
+--store points at the proven root A built in store steps S3-S5", never the
+operator's store at `runtime/store`. The backtest-first README items 3 and 4
+say the same, and so does PROVEN-GATE's title ("FIB reads the proven root A
+through it"). Under D-7135 no root A is ever built.
+
+**Decision.**
+
+1. FIB-8's loader and FIB-12's `fib plan` still read only ADMIT days (and
+   WARMUP_ONLY days for warm-up) from PROVEN-GATE's admission file, and every
+   report still counts the refused stock-months by reason. FIB-12's `--store`
+   points at **the existing store**, so a FIB run reads the existing store's
+   admitted days. The words "never `runtime/store`" go with root A: the
+   existing store is the one store, and what keeps FIB on proven data is the
+   admission file, not a second root.
+2. **D-6230 heads no entry in this ledger at this commit**: PROVEN-GATE has not
+   merged. When it writes D-6230, the entry says "the existing store's
+   admitted days". If D-6230 lands with the root-A wording, this entry
+   supersedes that sentence, and D-6230 is never edited.
+3. The backtest-first plan's own store steps change with it (they are that
+   plan's names, S0 to S6, not `config/store-steps.toml` ids): S1's NEW tick
+   store becomes CC-2, then CC-1's deep read-only pass over the existing tick
+   store; S0(b) and S4 (Zerodha mode (i) into root A) become IA-10c's
+   whole-history re-pull into the existing store; S5 runs NEW-34q over the
+   existing store's touched months; and S6 (a second Kite pull into a root B)
+   is at most a one-month scratch compare, a report only.
+4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
+   months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
+   Placing that step is an ordering decision left to the main session.
