@@ -16335,7 +16335,7 @@ switch on the returned exception name."* A grep for `error_type` across
 
 **The pair that forced it.** `TokenException` and `PermissionException` are both
 answered under HTTP 403 — the first documented on the exceptions page, the
-second in the vendor's own Python SDK. On the status axis they are one event.
+second in the vendor's own SDK. On the status axis they are one event.
 They are not one event to an operator: the first is fixed by the credential
 somebody refreshes tonight, and the second is an API key with no
 historical-data subscription, which fails identically forever. The unentitled
@@ -81289,3 +81289,227 @@ comparison instead of set once a row.
 **Proof.** `bars::cloud_mutant_tests::the_scan_orders_open_interest_with_its_nulls_last`
 failed before the fix (`desc false`: the five nulls in stamped-value order)
 and passes after it. Invariant MUT-A-06.
+
+### D-5250 — The Py-language is used nowhere in this repository and its name appears in no tracked file; one line of D-0207 is the only recorded exception, and a `cargo test` gate refuses everything else — 2026-10-16
+
+**Status: locked.** The operator's rule, given on 16 October 2026 at 08:35 IST.
+Throughout this entry the language is called "the Py-language": the language
+whose source files end in `.py`. Its name is not written here, because this
+entry is a tracked file and the rule it records applies to it.
+
+**Decision.**
+
+1. **The rule.** The Py-language is never used anywhere in this repository —
+   not as a dependency, a tool, a build step, a script, a notebook or a file —
+   and its name appears in no tracked file, in any case, `web/` included. This
+   is stricter than `CLAUDE.md` §2 twice over: §2 refuses the language by
+   extension only outside `web/` (D-0053 made `web/` unrestricted), and §2 says
+   nothing about the name.
+2. **Five lines named it on `feat/db-fix` at `4756cce0`, in four files.** Four
+   are rewritten so the meaning stays and the name goes. Each now says "the
+   vendor's own SDK", which is the charter's own wording: `docs/00-charter.md`,
+   the `PermissionException` row, *"Live in the vendor's own SDK"*, which
+   already cites the SDK's repository and file. Nothing the sentences claimed
+   about the vendor changed; only the language's name went.
+
+   | File | Line | Was | Now |
+   |---|---|---|---|
+   | `crates/pull/src/kite.rs` | 25 | `vendor's own` + the name + ` SDK.` | `vendor's own SDK.` |
+   | `crates/pull/src/kite.rs` | 102 | the name + ` SDK. An entitlement failure, not a session failure.` | `SDK. An entitlement failure, not a session failure.` |
+   | `crates/pull/src/refusal.rs` | 29 | `in its own` + the name + ` SDK rather than on the` | `in its own SDK rather than on the` |
+   | `crates/pull/src/vendor.rs` | 6227 | `in the vendor's own` + the name + ` SDK -- so on the status axis they are one` | `in the vendor's own SDK -- so on the status axis they are one` |
+
+3. **The fifth is inside D-0207, and it stays.** This ledger's header says
+   *"Append only. Entries are never edited"*, and no decision allows an
+   editorial redaction of an old entry. Two entries bent the rule, each for one
+   named defect and neither as a general licence: D-0212 left a false claim
+   standing with *"an additive bracket, because this file is append-only and a
+   bracket is not a rewrite"*, and D-0215 repointed two citations in place
+   *"because leaving them would be worse than the append-only rule they
+   bend"*. Neither covers removing a word. So the line stays exactly as
+   written: `docs/05-decisions.md` line 16338, D-0207's paragraph headed **The
+   pair that forced it.**, the words "the vendor's own" + the name + " SDK".
+   **This entry supersedes that wording**: read D-0207's sentence as *"the
+   second in the vendor's own SDK"*. It is the only occurrence of the name in
+   the tree, and the only exception the gate below admits. Whether to redact it
+   in place is the operator's decision; doing so means removing the exception
+   from the gate and from `NOPY-04` in the same change.
+4. **The gate.** `crates/vocab/tests/no_py_language.rs`, beside
+   `workspace_is_rust.rs`, the other workspace-wide Rust-only scan that runs
+   under `cargo test`. It reads every file `git ls-files` lists, from the
+   working tree, every byte of each, and fails on: the name in any case, in a
+   file's bytes or in its path; a file whose extension is `py`, `pyi`, `pyc`,
+   `pyo`, `pyw`, `pyd`, `pyz` or `ipynb`; and a shebang line, on any line, that
+   runs the interpreter by its name or as `py`, `pypy`, `jython` or `graalpy`
+   (a `#![` Rust inner attribute is not a shebang). The needle is
+   two `concat!` halves that mean nothing apart, with a length tripwire, so the
+   test file never holds the word. The exception is matched by EXACT PATH AND EXACT LINE
+   CONTENT and must match exactly once: a copied line fails, and so does the
+   line's disappearance. A tree with no `.git` (a `cargo-mutants` copy) or a
+   host where `git` cannot run is walked as a directory instead, skipping
+   `.git`, the root `target` and every `node_modules`, and the run says so; a
+   `.git` that `git` cannot list is a failure. Invariants `NOPY-01` to
+   `NOPY-06` in `docs/04-invariants.md`.
+
+**What this does not change.**
+
+* **CI gate 15 and its allowlist in `.github/workflows/ci.yml` are untouched**:
+  this change edits no workflow. Its allowlist still names all four files; after
+  this change three of them hold no occurrence, which gate 15 reports as a loose
+  entry and does not fail on (*"THE COUNTS ARE CEILINGS, NOT EXACT"*). Pruning
+  it to `docs/05-decisions.md 1` is a workflow edit left to whoever may make one.
+* **`CLAUDE.md` §2 is not edited here.** It still says that under `web/` the
+  front end may use *"Any language"*. This entry narrows that for one language,
+  which is a scope change under §3 rule 2, and §2's sentence should say so; that
+  edit is the operator's. Until it lands, this entry and the gate are the
+  record, and `CLAUDE.md` §10's precedence rule reads the two as a
+  contradiction for `web/` alone.
+
+**Rejected.**
+
+* *Deleting the four sentences.* Gate 15's own comment refuses that trade: it
+  would delete true provenance about the vendor (§3 rule 1). The rewrite keeps
+  the provenance — the SDK is still the vendor's own, and the charter row still
+  names its repository — and drops only the name, which the provenance never
+  needed.
+* *Editing D-0207 in place.* See item 3: nothing allows it, and doing it
+  anyway is the move the ledger's header forbids.
+* *A per-file or pattern exception.* Gate 15's escape hatch is a count per
+  file, so any line of an allowed file may carry the name up to its ceiling.
+  This gate's is one path and one exact line, matched exactly once.
+* *Folding the extension and shebang checks into gate 15.* It lives in a
+  workflow, which this change does not edit, and it does not run under
+  `cargo test`, which §9 makes the definition of done.
+
+**Why.** A rule that lives in a document is negotiated in every pull request; a
+rule that fails the build is not (D-0001). Gate 15's own comment lists what it
+cannot see — the interpreter's binary name and a shebang line — and a `.py`
+under `web/` passes gate 1, because `web/` is exempt from the extension
+allowlist. This gate closes all three under `cargo test`.
+
+### D-5251 — D-0207's one line naming the Py-language is redacted in place, on the operator's word; no exception remains, and `CLAUDE.md` §2 states the rule — 2026-10-16
+
+**Status: locked.** The permission is the operator's, written in session
+e1d04fcd on 16 October 2026, just before 16:00 IST, in these words: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* That is permission for exactly one in-place edit, and this entry is
+the new decision entry it asks for. It supersedes D-5250 item 3 and its "What
+this does not change" bullet on `CLAUDE.md` §2.
+
+**Decision.**
+
+1. **One in-place edit of an old entry, and only this one.** D-0207's paragraph
+   headed **The pair that forced it.** (line 16338 at `4756cce0`) read "the
+   vendor's own" + the language's name + " SDK". It now reads *"the second in
+   the vendor's own SDK. On the status axis they are one event."* Nothing else
+   in D-0207, or in any other entry, is touched. The ledger's header rule —
+   *"Entries are never edited"* — stands for every other case; this is a named
+   exception granted by the operator for one word, in the same spirit as
+   D-0212's bracket and D-0215's repointing, and it grants nothing further.
+2. **The gate excuses nothing.** `crates/vocab/tests/no_py_language.rs` loses
+   its exception: no path, no line, no pattern. The line D-0207 used to hold is
+   kept in the test only as data, to prove it is now refused at any path
+   (`no_line_is_excused_not_even_the_one_d0207_held`, which also pins D-0207's
+   line as this entry left it). `NOPY-04` is restated to match.
+3. **`CLAUDE.md` §2 states the rule.** One paragraph under the `web/`
+   exception: the Py-language is never used anywhere, `web/` included, and its
+   name appears in no tracked file; it cites D-5250 and the gate. `CLAUDE.md`
+   and D-5250 no longer contradict each other for `web/`.
+
+**What it does not change.** CI gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files; all four now hold no
+occurrence, so gate 15 reports four loose entries and passes. Emptying it is a
+workflow edit this change does not make.
+
+**Rejected.** *Keeping the exception after the operator allowed the edit.* An
+exception is a place the rule does not hold; with the reason for it gone, it is
+only a place a future occurrence could hide.
+
+### D-5258 — NOPY-1 merged back onto `feat/db-fix`: D-5250 and D-5251 land, D-5252 to D-5257 stay off this ledger because each of their changes was already here, and the charter names the rule (CLOUD-NOPY1) — 2026-10-21
+
+**Status: locked.**
+
+**What was merged, one commit at a time.** `origin/cloud/nopy1-20261016` was
+cut from `4756cce0` and carries eleven commits. Each was taken onto
+`fix/db-CLOUD-NOPY1`, cut from `feat/db-fix` at `8c67456ac` (after CLOUD-RUST1,
+its dependency), with `git cherry-pick -x`, and a commit was left only when its
+change was already on `feat/db-fix`:
+
+| Cloud commit | What it carried | Taken or left, and why |
+|---|---|---|
+| `fb02605ad` | D-5250: four comment rewrites in `crates/pull`, the gate, `NOPY-01` to `NOPY-06`, the report | **taken**. The ledgers conflicted only where both sides appended at the end: both kept, `feat/db-fix`'s first. `crates/vocab/tests/no_float.rs` lists both new test files, this one and RUST-1's `no_runtime_spawn.rs` (eleven) |
+| `db622a8e6` | D-5251: D-0207's line, the gate with no exception, `CLAUDE.md` §2 | **taken**, and D-5251's status paragraph now quotes the operator's permission word for word (below) |
+| `c4327de34` | `web/build` regenerated from `web/src` at `4756cce0` | **left**: generated output of a tree that is not this one; `feat/db-fix` regenerates `web/build` from its own merged tree (`2a7ba92a6`) |
+| `dcc70714d` | D-5252 (gate 0 lists `/bin/df`), D-5253 (gate 1d's fifteen `crates/pull` literals) | **left**: GF-1 (`b2acb33ba`) put both here first: `SPAWN_PROGRAMS` in `.github/source_scan.rs` holds `/bin/df`, and all fifteen words are declared in `WP62_LITERAL` and `MERGED_AFTER_GF1_LITERAL` of `.github/gates_tree.rs` |
+| `9288716a8` | D-5254: invariant rows naming deleted or renamed tests | **left**: every row it restates (AF-23, AF-28j, AFA-13, AFG-71, APIC-05, C4-CLI-03-03, GI-01, GI-07, GI-10, MR-34, PIF-02, SS-06, ZMC-01, ZR-04, ZX-20) was already restated here, each by R3-14 (`7628699c6`) and three also by PREC-1 or another package; gate 10's two reds on `8c67456ac` are HA-02 and AG05-13, neither of them |
+| `4d9680881` | D-5255: gates 12, 19 and gate 11 rule 5c | **left**: each site is already resolved here (`bars_change`'s and `bars_series`'s proofs, `cash_session_cache`'s bound, `safe_files`' bench, `NotHeld::note_month`, `request_minutes`' event, the two test modules' allows), and `gdfl_import`'s `provenance` and `stop_at_census` moved since: they are in `gdfl_import_filing.rs` and `gdfl_import_census.rs`, where `provenance` hands its refusal back un-noted for the caller to note and `stop_at_census` emits its one event before the push, the same repair; the reds gates 12 and 19 show on `8c67456ac` are other sites, owned by the base-gate packages |
+| `a986ba9ef`, `f9ccaa52c` | the report's sections 6.1 to 6.5 | **taken**: the cloud branch's own record, as it ran on `4756cce0` |
+| `47dbd2c74` | D-5256: the staging test holds the leftover open | **left**: PREC-1 (`24a4a4300`) made the same repair to the same test |
+| `926b1106c` | D-5257: `521066e6` listed as squashed | **left**: BASE-CITED (`441da9fa7`, D-5820) listed it and reworded both limits sentences |
+| `bba8ec7c3` | the gate's walk guard: four anchor files read, not a read count | **taken** |
+
+**D-5252 to D-5257 head no entry here, and are never reused.** The cloud
+branch and `reports/cloud-nopy1-20261016.md` §6 name them; a reader following
+one from the report lands here, where the change it named is attributed to the
+entry or commit that made it on this branch.
+
+**The one in-place edit of an old entry.** D-0207's paragraph headed **The pair
+that forced it.** reads *"the second in the vendor's own SDK"*, and nothing else
+in D-0207 or in any other entry was edited. The operator gave that permission
+in session e1d04fcd on 16 October 2026, just before 16:00 IST: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* D-5251 is that entry; its status paragraph had paraphrased the
+permission and now quotes it. D-5251 was on no branch this ledger had merged,
+so correcting its text edits no landed entry.
+
+**The charter names the rule.** `docs/00-charter.md` holds the prohibitions
+(`CLAUDE.md` §10), and it gains prohibition 11, citing D-5250, D-5251 and the
+gate.
+
+**The gate's refusal line no longer leaks the name through a path.** The
+self-check of this merge-back planted, under `git`, a clean file inside a
+directory named for the language: the gate refused it, and its refusal line
+printed the path whole, the name in it, although the gate's own message says
+the name is masked so the message is not the leak. The line now masks the
+path as it masks the evidence, and the walk's own words (a root path, an
+absent file) are masked where they are printed. The test that found it failed
+before the change and passes after
+(`extreme_inputs_are_read_whole_through_the_gates_own_walk`, NOPY-08). The
+gate's three guards are now one function, `verdict`, so each is handed the walk
+it must refuse at its boundary (NOPY-07): before, the 1,000-file floor and the
+anchor count had no test that could fail them.
+
+**The merged tree, measured on 21 Oct 2026.** A case-insensitive `git grep`
+for the name over every tracked file finds nothing; no tracked path holds the
+name or ends in any of the gate's eight extensions; and
+`no_tracked_file_is_runs_or_names_the_py_language` passes over every tracked
+file with no exception in it. Nothing merged into `feat/db-fix` after
+`4756cce0` named the language: before the rewrites, the five lines the search
+found on `8c67456ac` were exactly the five D-5250 lists, at the same lines.
+`feat/db-fix` was merged in again at `5ff4956cc` (CLOUD-MUTPULL, DATA-1's fix
+and IA-3-OPT after `8c67456ac`); the same search over that merged tree, and
+over the messages of every commit between `4756cce0` and it, finds nothing, so
+nothing it brought needed rewording. It was merged in a third time on 22 Oct
+2026 at `a5d0bea8a` (R3-19 and R3-30 after `5ff4956cc`): only the three
+ledgers conflicted, each where both sides appended at the end, and both sides
+were kept, `feat/db-fix`'s rows first. The same two searches over that merged
+tree and over every commit message from `4756cce0` to `a5d0bea8a` find nothing.
+It was merged in a fourth time on 22 Oct 2026 at `58660b1d7` (PIT-1 after
+`a5d0bea8a`) and a fifth at `667db8e2a` (CLOUD-CHG1 and SC-4 after
+`58660b1d7`): no file conflicted either time, and the same two searches over
+each merged tree and over every commit message from `4756cce0` to `667db8e2a`
+find nothing.
+
+**One sentence of D-5250 corrected before it lands.** D-5250 is on no branch
+this ledger had merged, so its item 4 is corrected in place rather than
+superseded: it spelled the needle's two halves out in prose, which writes the
+name for a reader although no search finds it. It now says *"two `concat!`
+halves that mean nothing apart"*, and the report's same sentence says the same.
+The gate's own file keeps the halves; it cannot hold the needle any other way.
+
+**Left to their owners, said plainly.** Gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files that hold no occurrence, so
+it passes with four loose-entry warnings; and `.github/source_scan.rs` still
+says `/disk.json` runs `/bin/df` every 30 s, which D-5240 ended (the entry is
+still needed by `disk_route`'s test that compares with `df`). Both are edits
+under `.github/` that this merge does not make.

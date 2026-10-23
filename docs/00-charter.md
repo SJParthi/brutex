@@ -56,6 +56,11 @@ happen because a task seemed to need it.
     Documents carry the shape `/<org>/<env>/<vendor>/<field>`; the real
     segments are resolved at runtime from an untracked local configuration.
     Enforced by CI gate 1c, not by review. See D-0013.
+11. No Py-language anywhere, `web/` included: no file of it, no shebang that
+    runs its interpreter, and its name in no tracked file, in any case. It is
+    written "the Py-language" in this repository for that reason. The
+    operator's rule of 16 October 2026; enforced under `cargo test` by
+    `crates/vocab/tests/no_py_language.rs`, not by review. See D-5250, D-5251.
 
 ---
 
