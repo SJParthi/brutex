@@ -21475,7 +21475,7 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 ### Gate 11 — BASE-REDS-1023: IA-16, IA-9 and IA-2, fixed or declared (23 October 2026)
 
 ~~~~text
-After the BASE-GATE11 merge (5413c5e3b) gate 11 refused five files that IA-16
+After the BASE-GATE11 merge gate 11 refused five files that IA-16
 and IA-9 brought (state/fix/ci-gates-logs/bred1023-lp1). Fixed in code
 (D-7150): gdfl_import_day.rs rule 3 (the held-back map, pre-sized to
 HELD_BACK_CAP = 4,096), gdfl_import.rs rule 4 (closeness: a hash set, no
