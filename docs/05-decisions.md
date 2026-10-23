@@ -81191,7 +81191,15 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     concurrent cold asks, +1.39 GB). Now `dayflags_rules::FLAGS` keeps only
     `(masters directory, day, symbol) -> the master's answer` (the flag, or
     its refusal to name the share), in two generations of at most
-    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A load in flight is
+    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A master read keeps
+    the flag of every F&O underlying on its day
+    (`brutex_core::universe::FNO_UNDERLYINGS`, CLAUDE.md §1's 213 shares,
+    each under its universe ISIN, as `CasFlags::of` asks), not only the
+    asking share's: with only that one kept, each further share's first
+    auction-era page parsed the same masters again. That is 213 hash probes
+    against a parse already made, and 213 flags a day, at most 153
+    auction-era sessions in one generation; a share outside the list keeps
+    only its own flag, as it asks. A load in flight is
     shared by every reader that asks while it runs (`FLIGHTS`) and ended when
     its first reader is done, so a master lives only as long as the requests
     reading it. At most `LOADS_AT_ONCE` = 4 masters are parsed at once in the

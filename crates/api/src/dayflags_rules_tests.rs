@@ -436,10 +436,12 @@ fn a_flag_refused_by_one_request_is_read_by_the_next() {
 /// day's whole parsed master stayed for the life of the process (18-25 MB a
 /// day on the real store) beside `bars_change`'s own copy, and ten cold pages
 /// asking one day each parsed it. Now: twelve threads asking one share's day
-/// at once read its master once; a second share on that day reads it again
-/// (no master is held), and from then on both are one probe; no load of the
-/// directory is left in flight; and a refusal is shared only by the readers
-/// that asked while it ran, so the next request reads the day again (AF-03).
+/// at once read its master once; that read keeps every F&O underlying's flag
+/// on the day, so a second F&O share is one probe, and a share outside the
+/// list reads it again (no master is held), then is one probe; no load of
+/// the directory is left in flight; and a refusal is shared only by the
+/// readers that asked while it ran, so the next request reads the day again
+/// (AF-03).
 #[test]
 fn a_flag_is_kept_without_its_master_and_a_day_asked_at_once_is_read_once() {
     let root = root_of("r3-13-cas-flight");
@@ -482,16 +484,25 @@ fn a_flag_is_kept_without_its_master_and_a_day_asked_at_once_is_read_once() {
     let (kept, held) = kept_flag(&dir, on, "RELIANCE");
     assert!(kept && held >= 1);
     assert!(held <= FLAG_CAP);
-    // Another share that day: its master is read again, then kept as a flag.
+    // EVERY F&O UNDERLYING'S FLAG IS KEPT FROM THAT ONE READ (repair 1's
+    // measurement: a second share's first auction-era page parsed the same
+    // masters again, about 1 s each): INFY that day is one probe, never a
+    // second parse.
+    assert!(
+        kept_flag(&dir, on, "INFY").0,
+        "kept from RELIANCE's read"
+    );
     let other = CasFlags::of(&root, "INFY", true).on(on);
     assert_eq!(other.eligibility, CasEligibility::NotEligible);
-    assert_eq!(reads_of(&dir, on), 2);
+    assert_eq!(other.basis, CasBasis::DatedMaster);
+    assert_eq!(reads_of(&dir, on), 1, "one read answers every F&O share");
     for symbol in ["RELIANCE", "INFY", "RELIANCE"] {
         let _flag = CasFlags::of(&root, symbol, true).on(on);
     }
-    assert_eq!(reads_of(&dir, on), 2, "a kept flag is one probe");
-    // A MASTER'S OWN REFUSAL TO NAME A SHARE IS ITS ANSWER, KEPT: TCS has no
-    // row, read once, said on every request after.
+    assert_eq!(reads_of(&dir, on), 1, "a kept flag is one probe");
+    // A MASTER'S OWN REFUSAL TO NAME A SHARE IS ITS ANSWER, KEPT: TCS, an
+    // F&O share with no row, was answered by the same read and is said on
+    // every request after.
     let absent = CasFlags::of(&root, "TCS", true).on(on);
     assert!(
         matches!(&absent.basis, CasBasis::Unread(why) if why.starts_with("2026-08-11: ")),
@@ -500,7 +511,21 @@ fn a_flag_is_kept_without_its_master_and_a_day_asked_at_once_is_read_once() {
     let mut again = CasFlags::of(&root, "TCS", true);
     assert_eq!(again.on(on).basis, absent.basis);
     assert_eq!(again.refusals().len(), 1, "said on this request too");
-    assert_eq!(reads_of(&dir, on), 3);
+    assert_eq!(reads_of(&dir, on), 1);
+    // A SHARE OUTSIDE THE F&O LIST KEEPS ONLY ITS OWN FLAG: AAVAS, a market
+    // share the universe names and the F&O list does not, reads the master
+    // again, once, and is one probe after.
+    assert!(!brutex_core::universe::FNO_UNDERLYINGS.contains(&"AAVAS"));
+    assert!(brutex_core::universe::nse_isin("AAVAS").is_some());
+    assert!(!kept_flag(&dir, on, "AAVAS").0, "not kept from F&O reads");
+    let outside = CasFlags::of(&root, "AAVAS", true).on(on);
+    assert!(
+        matches!(&outside.basis, CasBasis::Unread(why) if why.starts_with("2026-08-11: ")),
+        "{outside:?}"
+    );
+    assert_eq!(reads_of(&dir, on), 2, "its own read");
+    let _flag = CasFlags::of(&root, "AAVAS", true).on(on);
+    assert_eq!(reads_of(&dir, on), 2, "then one probe");
     // A LOAD'S REFUSAL IS NEVER KEPT: a day with no master is read by every
     // request, once each.
     let missing = day("2026-08-12");
