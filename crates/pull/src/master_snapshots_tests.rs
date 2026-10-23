@@ -346,7 +346,7 @@ fn a_refresh_after_a_cut_body_names_every_incomplete_entry() {
         );
     }
     // STRUCTURED, OLDEST FIRST, THIS KIND'S ONLY; THE JSON NEWEST FIRST.
-    let named: Vec<&str> = outcome
+    let listed: Vec<&str> = outcome
         .incomplete
         .as_ref()
         .unwrap()
@@ -354,7 +354,7 @@ fn a_refresh_after_a_cut_body_names_every_incomplete_entry() {
         .map(|one| one.file.as_str())
         .collect();
     assert_eq!(
-        named,
+        listed,
         [cut_before.as_str(), partial.as_str(), cut_today.as_str()]
     );
     assert!(!json.contains(&nse_cut), "{json}");
