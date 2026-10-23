@@ -953,3 +953,469 @@ fn an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole
         })
     );
 }
+
+// ---------------------------------------------------------------------------
+// R4-18 repair 2. Each test below FAILED on the code the second check read
+// (ad0c60248) and names the blocking issue it closes.
+// ---------------------------------------------------------------------------
+
+/// The code of an apply's refusal, or a panic naming what came back.
+fn refusal_code(done: &Result<Applied, ApplyError>) -> &'static str {
+    match done {
+        Err(ApplyError::Quarantine(why)) => why.code(),
+        other => panic!("expected the quarantine to refuse by name, got {other:?}"),
+    }
+}
+
+/// Sets the audit directory's mode: `0o555` refuses every new file in it, as
+/// a full disk refuses the index's staging file.
+fn audit_mode(store: &Store, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(store.root.join("audit"), fs::Permissions::from_mode(mode))
+        .expect("the audit directory's mode");
+}
+
+/// BLOCKING 1: a ledger line that fails its checksum is NAMED and never
+/// rebuilt away. Before, the next writer rebuilt a torn index from the valid
+/// lines only: March, recorded whole by the damaged line, read as clear, the
+/// apply that rebuilt it answered success, and the summary under-counted.
+#[test]
+fn a_damaged_ledger_line_is_named_and_never_rebuilt_away() {
+    let store = Store::new("ledger-damaged");
+    let path = minute("QFIXV", march());
+    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 3_119)).collect();
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    let whole =
+        apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    assert!(
+        matches!(whole, Applied::WholeMonth { bars: 4, .. }),
+        "{whole:?}"
+    );
+    // ONE BYTE of the whole_month line's reason flipped, and the index torn.
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    let mut bytes = fs::read(&ledger).expect("ledger");
+    let at = bytes
+        .windows(8)
+        .position(|w| w == b"invented")
+        .expect("the reason");
+    bytes[at] ^= 0x20;
+    fs::write(&ledger, &bytes).expect("one byte damaged");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    let image = fs::read(&index).expect("index");
+    fs::write(&index, &image[..100]).expect("torn");
+    let damaged_at = read_ledger(&store.root, Vendor::Zerodha)
+        .expect("reads")
+        .damaged;
+    assert_eq!(damaged_at.len(), 1, "the damaged line is counted");
+    // THE NEXT APPLY, of another month, refuses by name and writes nothing ...
+    let other = minute("QFIXW", march());
+    store.month(other, &rows);
+    let audit_before = all_bytes_under(&store.root.join("audit"));
+    let next = apply_month(
+        &store.root,
+        other,
+        SYMBOL,
+        &[rows[1].ts_micros],
+        why(Cause::ZeroPrice),
+    );
+    assert_eq!(refusal_code(&next), "quarantine_ledger_damaged");
+    let words = next.expect_err("refused").to_string();
+    assert!(
+        words.contains(&damaged_at[0].to_string()),
+        "the damaged line's offset is named: {words}"
+    );
+    assert_eq!(
+        all_bytes_under(&store.root.join("audit")),
+        audit_before,
+        "nothing was written"
+    );
+    assert_eq!(store.served_bars(other).len(), 4, "no generation published");
+    // ... a rebuild refuses by name and publishes nothing, so every reader
+    // keeps answering "not known", never "clear" ...
+    assert_eq!(
+        rebuild(&store.root, Vendor::Zerodha).map_err(|why| why.code()),
+        Err("quarantine_ledger_damaged")
+    );
+    let march_now = probe(&store.root, path);
+    assert!(march_now.is_err(), "March is never read as clear: {march_now:?}");
+    // ... and the listings name the damage instead of under-counting.
+    assert_eq!(
+        Summary::load(&store.root, Vendor::Zerodha)
+            .map(|summary| summary.is_empty())
+            .map_err(|why| why.code()),
+        Err("quarantine_ledger_damaged")
+    );
+}
+
+/// A torn append ended by the next writer is never damage: the kill it
+/// records left no act, so it holds no rebuild and no listing refused.
+#[test]
+fn a_torn_append_ended_by_the_next_writer_is_not_damage() {
+    let store = Store::new("torn-not-damage");
+    let path = minute("QFIXA2", march());
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 2_207)).collect();
+    store.month(path, &rows);
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    apply_month(
+        &store.root,
+        path,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("applies");
+    // A WRITER KILLED MID-APPEND: half a line, no newline.
+    let mut text = fs::read(&ledger).expect("ledger");
+    text.extend_from_slice(b"1792\tzerodha\tNSE/CASH/QFIXA2/1min\t2018-03\twhole_mo");
+    fs::write(&ledger, &text).expect("a torn append");
+    let other = minute("QFIXB2", march());
+    store.month(other, &rows);
+    let next = apply_month(
+        &store.root,
+        other,
+        SYMBOL,
+        &[rows[2].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("the next writer ends the fragment and writes its act");
+    assert!(matches!(next, Applied::Dropped { .. }), "{next:?}");
+    let read = read_ledger(&store.root, Vendor::Zerodha).expect("reads");
+    assert!(read.damaged.is_empty(), "{:?}", read.damaged);
+    rebuild(&store.root, Vendor::Zerodha).expect("a rebuild is not refused");
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("the summary loads");
+    assert_eq!(summary.month(path).map(|e| e.bars), Some(1));
+    assert_eq!(summary.month(other).map(|e| e.bars), Some(1));
+}
+
+/// BLOCKING 2, a dropped month: the door promoted and the `dropped` line was
+/// synced, then the index publish was refused. Before, the readers read the
+/// month as clear and the rerun answered `already_dropped` without indexing
+/// it, so the stored sweep never refused what `/store.json` called dropped.
+#[test]
+fn an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply() {
+    let store = Store::new("publish-refused-drop");
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 4_211)).collect();
+    // An earlier act: the lock, the ledger and the index all exist.
+    let first = minute("QFIXX", march());
+    store.month(first, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("an earlier act");
+    let path = minute("QFIXY", march());
+    store.month(path, &rows);
+    let named = [rows[2].ts_micros, rows[3].ts_micros];
+    audit_mode(&store, 0o555);
+    let refused = apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel));
+    audit_mode(&store, 0o755);
+    assert!(refused.is_err(), "{refused:?}");
+    // UNTIL A WRITER CATCHES UP the readers say "not known", never "clear".
+    let between = probe(&store.root, path);
+    assert!(
+        between.is_err(),
+        "an index behind its ledger is not read as clear: {between:?}"
+    );
+    // THE RERUN finishes it: the month is indexed as dropped, once.
+    apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("the rerun");
+    match probe(&store.root, path) {
+        Ok(Probe::Quarantined(entry)) => {
+            assert_eq!((entry.scope, entry.bars), (Scope::Dropped, 2), "{entry:?}");
+        }
+        other => panic!("the rerun indexes the drop: {other:?}"),
+    }
+    assert_eq!(store.served_bars(path).len(), 4);
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("summary");
+    assert_eq!(
+        summary.month(path).map(|e| (e.scope, e.bars)),
+        Some((Scope::Dropped, 2)),
+        "the listing and the index say one thing"
+    );
+}
+
+/// BLOCKING 2, a month recorded whole: before, the readers served every bar
+/// of a month the ledger (and so `/store.json`) recorded whole, until a rerun
+/// wrote a second whole line.
+#[test]
+fn an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply() {
+    let store = Store::new("publish-refused-whole");
+    let rows: Vec<Bar> = (0..3).map(|i| bar(i, 4_407)).collect();
+    let first = minute("QFIXZ", march());
+    store.month(first, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("an earlier act");
+    let path = minute("QFIXA1", march());
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    audit_mode(&store, 0o555);
+    let refused = apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing));
+    audit_mode(&store, 0o755);
+    assert!(refused.is_err(), "{refused:?}");
+    let between = probe(&store.root, path);
+    assert!(
+        between.is_err(),
+        "a month the ledger records whole is not read as clear: {between:?}"
+    );
+    assert_eq!(
+        apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing)),
+        Ok(Applied::Nothing {
+            why: "already_whole"
+        }),
+        "the rerun finds the ledgered act and indexes it"
+    );
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth && e.bars == 3
+    ));
+    let key = series_key(path);
+    let wholes = read_ledger(&store.root, Vendor::Zerodha)
+        .expect("ledger")
+        .lines
+        .iter()
+        .filter(|line| line.key == key && line.scope == Scope::WholeMonth)
+        .count();
+    assert_eq!(wholes, 1, "one act, one line");
+}
+
+/// BLOCKING 2, killed: a writer killed between its ledger fsync and its
+/// index rename leaves the line and the old index. Before, every reader read
+/// the month as clear until the next act of that very month.
+#[test]
+fn a_writer_killed_between_its_ledger_line_and_its_index_is_caught_up_by_the_next() {
+    let store = Store::new("killed-before-rename");
+    let rows: Vec<Bar> = (0..2).map(|i| bar(i, 4_613)).collect();
+    let first = minute("QFIXB1", march());
+    store.month(first, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("an earlier act");
+    let path = minute("QFIXC1", march());
+    store.month(path, &rows);
+    let act = Record {
+        path,
+        scope: Scope::WholeMonth,
+        cause: Cause::BeforeListing,
+        stamps: &[],
+        bars: 2,
+        revision: 0,
+        source_digest: digest_of(&rows),
+        who: "killed",
+        reason: "killed before its rename",
+    };
+    let line = super::ledger_line(&series_key(path), &act, 1_792_000_000_000_000);
+    super::append_line(&ledger_path(&store.root, Vendor::Zerodha), &line).expect("the line");
+    let between = probe(&store.root, path);
+    assert!(between.is_err(), "not read as clear: {between:?}");
+    // THE NEXT WRITER, of any month of the feed, catches the index up first.
+    let other = minute("QFIXD1", march());
+    store.month(other, &rows);
+    apply_month(
+        &store.root,
+        other,
+        SYMBOL,
+        &[rows[1].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("the next act");
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth && e.bars == 2
+    ));
+}
+
+/// The second check's t4: an index of the right length whose header has no
+/// magic and no valid checksum (here every byte zero) read as all clear.
+#[test]
+fn a_zeroed_index_is_not_read_as_clear() {
+    let store = Store::new("zeroed-index");
+    let path = minute("QFIXE1", march());
+    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 4_819)).collect();
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    fs::write(
+        &index,
+        vec![0u8; usize::try_from(INDEX_LEN).expect("a length")],
+    )
+    .expect("zeroed");
+    assert_eq!(
+        probe(&store.root, path).map_err(|why| why.code()),
+        Err("quarantine_index_torn")
+    );
+    assert_eq!(
+        Snapshot::load(&store.root, Vendor::Zerodha)
+            .map(|snapshot| snapshot.len())
+            .map_err(|why| why.code()),
+        Err("quarantine_index_torn")
+    );
+    rebuild(&store.root, Vendor::Zerodha).expect("rebuilt from the ledger");
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth
+    ));
+}
+
+/// The second check's t2: a killed run's intent (ledgered, promoted, no
+/// `dropped` line) was finished only by an apply naming its stamps again; an
+/// apply of another subset of the month left it unindexed and uncounted.
+#[test]
+fn an_intent_a_killed_run_owes_is_finished_by_an_apply_of_another_subset() {
+    let store = Store::new("owed-intent");
+    let path = minute("QFIXF1", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 5_021)).collect();
+    store.month(path, &rows);
+    let first = [rows[1].ts_micros, rows[2].ts_micros];
+    record(
+        &store.root,
+        &Record {
+            path,
+            scope: Scope::Dropping,
+            cause: Cause::ForeignLevel,
+            stamps: &first,
+            bars: 2,
+            revision: 0,
+            source_digest: digest_of(&[rows[1], rows[2]]),
+            who: "killed",
+            reason: "killed after its promotion",
+        },
+    )
+    .expect("the intent");
+    repair::drop_month(&store.root, path, SYMBOL, &first, "killed").expect("promoted, then killed");
+    let second = apply_month(
+        &store.root,
+        path,
+        SYMBOL,
+        &[rows[4].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("another subset");
+    assert!(matches!(second, Applied::Dropped { .. }), "{second:?}");
+    let finished = read_ledger(&store.root, Vendor::Zerodha)
+        .expect("ledger")
+        .lines
+        .iter()
+        .any(|line| line.scope == Scope::Dropped && line.stamps == first);
+    assert!(finished, "the owed intent has its dropped line");
+    assert!(matches!(
+        probe(&store.root, path),
+        Ok(Probe::Quarantined(e)) if e.bars == 3
+    ));
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("summary");
+    assert_eq!(summary.month(path).map(|e| e.bars), Some(3));
+    assert_eq!(store.served_bars(path).len(), 3);
+}
+
+/// BLOCKING 3, the restate door (DLY-08): a vendor re-pull still holds the
+/// minutes a quarantine set aside, and the restate added them back while the
+/// index and the ledger said they were dropped. A month recorded whole is
+/// refused by name.
+#[test]
+fn a_restate_never_re_serves_a_quarantined_bar() {
+    let store = Store::new("restate-quarantined");
+    let path = minute("QFIXG1", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 5_227)).collect();
+    store.month(path, &rows);
+    let named = [rows[1].ts_micros, rows[2].ts_micros];
+    apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("dropped");
+    let mut offered = rows.clone();
+    offered[0].close += 2;
+    let restate = repair::Restate {
+        open_interest_applies: false,
+    };
+    let done = repair::restate_month(
+        &store.root,
+        path,
+        SYMBOL,
+        &offered,
+        restate,
+        "vendor restated",
+    );
+    assert!(done.is_ok(), "{done:?}");
+    let served = store.served_bars(path);
+    let back: Vec<i64> = named
+        .iter()
+        .copied()
+        .filter(|at| served.iter().any(|bar| bar.ts_micros == *at))
+        .collect();
+    assert!(back.is_empty(), "set-aside stamps served again: {back:?}");
+    assert_eq!(served.len(), 4);
+    assert_eq!(served[0], offered[0], "the correction itself lands");
+    // A MONTH RECORDED WHOLE is refused by name, and nothing is written.
+    let whole = minute("QFIXH1", march());
+    store.month(whole, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    apply_month(&store.root, whole, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    let before = all_bytes_under(&store.root);
+    let refused = repair::restate_month(
+        &store.root,
+        whole,
+        SYMBOL,
+        &offered,
+        restate,
+        "vendor restated",
+    );
+    let words = refused.as_ref().map_or_else(ToString::to_string, |done| format!("{done:?}"));
+    assert!(
+        refused.is_err() && words.contains("quarantined"),
+        "a whole month is refused by name: {words}"
+    );
+    assert_eq!(all_bytes_under(&store.root), before, "nothing was written");
+}
+
+/// BLOCKING 3, the repair door the ingest calls (`pull::ingest`'s
+/// `repair_after`): the same re-pull added the set-aside minutes back as bars
+/// the month lacked.
+#[test]
+fn a_repair_never_re_adds_a_quarantined_bar() {
+    let store = Store::new("repair-quarantined");
+    let path = minute("QFIXI1", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 5_431)).collect();
+    store.month(path, &rows);
+    let named = [rows[1].ts_micros, rows[2].ts_micros];
+    apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("dropped");
+    let policy = repair::Policy {
+        open_interest_applies: false,
+        basis_witness: true,
+    };
+    let done = repair::repair_month(&store.root, path, SYMBOL, &rows, policy);
+    assert!(done.is_ok(), "{done:?}");
+    let served = store.served_bars(path);
+    assert_eq!(served.len(), 4, "set-aside stamps never re-added: {done:?}");
+    // A NEW minute the month truly lacks is still added beside them.
+    let mut more = rows.clone();
+    more.push(bar(9, 5_431));
+    let added = repair::repair_month(&store.root, path, SYMBOL, &more, policy);
+    assert!(
+        matches!(added, Ok(repair::MonthRepair::Repaired { added: 1, .. })),
+        "{added:?}"
+    );
+    assert_eq!(store.served_bars(path).len(), 5);
+    // A MONTH RECORDED WHOLE takes no bar, by name.
+    let whole = minute("QFIXJ1", march());
+    store.month(whole, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    apply_month(&store.root, whole, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    let refused = repair::repair_month(&store.root, whole, SYMBOL, &more, policy);
+    let words = refused.as_ref().map_or_else(ToString::to_string, |done| format!("{done:?}"));
+    assert!(
+        refused.is_err() && words.contains("quarantined"),
+        "a whole month takes no bar: {words}"
+    );
+    assert_eq!(store.served_bars(whole).len(), 6, "nothing was written");
+}
