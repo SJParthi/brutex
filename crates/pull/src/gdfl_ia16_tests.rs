@@ -367,6 +367,65 @@ fn decisive_takes_every_other_open_cause_before_a_hole() {
     );
 }
 
+/// THE ONE-PASS RANKING (gate 11 rule 6, BASE-REDS-1023, D-7150): census,
+/// then run, then an open cause that is no hole, then a hole, then the first
+/// failure, each the EARLIEST of its rank, whatever order the day named them
+/// in; every permutation of five failures gives the same answer, and a list
+/// of closing causes alone, or none, gives its first, or nothing.
+#[test]
+fn the_decisive_failure_is_ranked_census_run_open_then_hole() {
+    let census = staged_at(Cause::open(Stage::Census, "census_lock"), "census");
+    let run = staged_at(Cause::open(Stage::Run, "disk_full"), "file");
+    let busy = staged_at(
+        Cause::open(Stage::File, FailKind::MonthBusy.code()),
+        "NIFTY",
+    );
+    let hole = staged_at(
+        Cause::open(Stage::File, FailKind::NotHeld.code()),
+        "BANKNIFTY",
+    );
+    let vendor = staged_at(Cause::vendor("price_refused"), "SBIN");
+    let all = [&census, &run, &busy, &hole, &vendor];
+    // Every rotation and its reverse of the five.
+    for start in 0..all.len() {
+        for reverse in [false, true] {
+            let mut order: Vec<Staged> = (0..all.len())
+                .map(|i| all[(start + i) % all.len()].clone())
+                .collect();
+            if reverse {
+                order.reverse();
+            }
+            assert_eq!(decisive(&order).map(|one| one.cause.code), Some("census_lock"));
+            let no_census: Vec<Staged> =
+                order.iter().filter(|one| one.cause.stage != Stage::Census).cloned().collect();
+            assert_eq!(decisive(&no_census).map(|one| one.cause.code), Some("disk_full"));
+            let no_run: Vec<Staged> =
+                no_census.iter().filter(|one| one.cause.stage != Stage::Run).cloned().collect();
+            assert_eq!(decisive(&no_run).map(|one| one.cause.code), Some("month_busy"));
+            let no_busy: Vec<Staged> =
+                no_run.iter().filter(|one| one.cause.code != "month_busy").cloned().collect();
+            assert_eq!(
+                decisive(&no_busy).map(|one| one.cause.code),
+                Some("needs_month_generation")
+            );
+        }
+    }
+    // The earliest of a rank wins: two busy months, the first named.
+    let other_busy = staged_at(
+        Cause::open(Stage::File, FailKind::MonthBusy.code()),
+        "FINNIFTY",
+    );
+    let two = [vendor.clone(), other_busy.clone(), busy.clone()];
+    assert_eq!(
+        decisive(&two).map(|one| one.failure.instrument.as_str()),
+        Some(other_busy.failure.instrument.as_str())
+    );
+    // Closing causes alone: the first. None: nothing.
+    let closing = [vendor.clone(), staged_at(Cause::vendor("row_refused"), "TCS")];
+    assert_eq!(decisive(&closing).map(|one| one.cause.code), Some("price_refused"));
+    assert!(decisive(&[]).is_none());
+}
+
 // ── FM-067: a passed day is a named hole, never read in a loop ─────────────
 
 /// A month that holds days 1 and 3 refuses day 2 through the append door.
@@ -2046,6 +2105,20 @@ fn the_unfiled_stems_are_ranked_by_closeness_to_the_swept_name() {
     crate::gdfl_import::keep_nearest(&mut kept, 1, "g");
     assert_eq!(kept.len(), 4);
     assert!(!kept.iter().any(|(_, stem)| stem == "g"), "{kept:?}");
+}
+
+/// The closeness count without a sort (gate 11 rule 4, BASE-REDS-1023,
+/// D-7150): each DISTINCT letter pair of the symbol the stem holds counts
+/// once, however often either repeats; the values the sorted count gave.
+#[test]
+fn closeness_counts_each_distinct_pair_once() {
+    let c = crate::gdfl_import::closeness;
+    assert_eq!(c("NIFTY BANK", "BANKNIFTY"), 7, "BA AN NK NI IF FT TY");
+    assert_eq!(c("NIFTY IT", "BANKNIFTY"), 4, "NI IF FT TY");
+    assert_eq!(c("AA", "AAAA"), 1, "one distinct pair, repeated");
+    assert_eq!(c("ABABAB", "ABAB"), 2, "AB and BA once each");
+    assert_eq!(c("B", "BANKNIFTY"), 0, "a one-letter stem holds no pair");
+    assert_eq!(c("x.y-z", "XYZ"), 2, "punctuation aside: XY, YZ");
 }
 
 // ── CMP-13: an option file that kept its good rows ─────────────────────────

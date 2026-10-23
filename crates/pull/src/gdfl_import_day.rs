@@ -12,7 +12,7 @@ use crate::session::{Day, Window};
 use crate::vendor::Granularity;
 
 use super::causes::{
-    Cause, HOLE_REASONS, ImportRefusal, Outcome, REPAIRABLE_HOLES, Stage, cm_cause, import_cause,
+    Cause, HOLE_REASONS, ImportRefusal, Outcome, Stage, cm_cause, import_cause,
 };
 use super::census::{Census, StoreCensus, stop_at_census};
 use super::filing::{DayFiler, make_durable, stop_at_durability};
@@ -96,18 +96,41 @@ impl Close {
 /// with X's cause: closed with Y's hole reason, `admit` would skip the day
 /// for ever and X's day D would never be read again, while X's later days
 /// (held back in this run) land on the next. A hole closes a day only when
-/// every open failure of the day is a hole. O(failures).
+/// every open failure of the day is a hole.
+///
+/// ONE PASS, in the order above (gate 11 rule 6, BASE-REDS-1023, D-7150):
+/// each failure fills the first empty rank it qualifies for, and the walk
+/// stops at the first census failure, which no later one outranks. The
+/// failures are the ones this day already named, so the pass is O(1)
+/// amortised per failure named, never a search of the store; the order is
+/// proved by `pull::gdfl_import::tests::ia16::the_decisive_failure_is_ranked_census_run_open_then_hole`.
 pub(super) fn decisive(failures: &[Staged]) -> Option<&Staged> {
-    failures
-        .iter()
-        .find(|one| one.cause.stage == Stage::Census)
-        .or_else(|| failures.iter().find(|one| one.cause.stage == Stage::Run))
-        .or_else(|| {
-            failures
-                .iter()
-                .find(|one| !one.cause.closes && !one.cause.is_hole())
-        })
-        .or_else(|| failures.iter().find(|one| !one.cause.closes))
+    // Ranks 0..=3: census, run, open and not a hole, open. Rank 4 is the first.
+    let mut ranked: [Option<&Staged>; 4] = [None; 4];
+    for one in failures {
+        let cause = &one.cause;
+        if cause.stage == Stage::Census {
+            return Some(one);
+        }
+        let rank = if cause.stage == Stage::Run {
+            Some(1)
+        } else if !cause.closes && !cause.is_hole() {
+            Some(2)
+        } else if !cause.closes {
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(slot) = rank.and_then(|at| ranked.get_mut(at))
+            && slot.is_none()
+        {
+            *slot = Some(one);
+        }
+    }
+    ranked
+        .into_iter()
+        .flatten()
+        .next()
         .or_else(|| failures.first())
 }
 
@@ -775,7 +798,7 @@ pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
         };
     }
     match state.hole {
-        Some(reason) if is_repairable_hole(reason) => {
+        Some(reason) if super::hole_is_repairable(reason) => {
             return if asks.repair_reason {
                 Admit::Read
             } else {
@@ -789,11 +812,6 @@ pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
         return Admit::Skip(Skip::Restated);
     }
     Admit::Read
-}
-
-/// Whether `reason` is one of [`REPAIRABLE_HOLES`] (row 4a).
-fn is_repairable_hole(reason: &str) -> bool {
-    REPAIRABLE_HOLES.contains(&reason)
 }
 
 /// Says a hole day was passed over unread (D-4851): at `warn`, with its
@@ -1379,7 +1397,7 @@ where
         started,
         announced: std::cell::Cell::new(false),
         scoped,
-        held_back: std::cell::RefCell::new(HashMap::new()),
+        held_back: std::cell::RefCell::new(HashMap::with_capacity(super::HELD_BACK_CAP)),
         store_id: std::cell::Cell::new(super::filing::store_identity(run.store_root)),
     };
     let _key = RunKey::claim(ctx.id);

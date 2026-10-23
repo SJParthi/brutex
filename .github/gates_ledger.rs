@@ -1840,7 +1840,11 @@ const ALLOW_SCAN: Allow = &[
     // site into the day file (its `gdfl_import.rs` entry is gone with it).
     ("crates/cli/src/gdfl_import_guard.rs", 2),
     ("crates/cli/src/watchdog_command.rs", 1),
-    ("crates/pull/src/gdfl_import_day.rs", 1),
+    // BASE-REDS-1023 (D-7150): `day::decisive` is one pass now, so the day
+    // file has no rule-6 site and its entry is gone; `keep_nearest`'s
+    // `position` walks at most `UNKNOWN_SHOWN` = 4 kept stems, a
+    // compile-time bound (docs/06-limits.md, "Gate 11 — BASE-REDS-1023").
+    ("crates/pull/src/gdfl_import.rs", 1),
     // GF-1, 18 Oct 2026: R4-06, merged after GF-1's run of 17 Oct; reason in
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
@@ -1891,12 +1895,86 @@ const ALLOW_SCAN: Allow = &[
     ("crates/pull/src/zerodha_verify.rs", 2),
 ];
 
-/// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
-/// saw, unread; each was opened and moved into `allow_scan` with its bound.
-/// The list stays, empty, so a future change to rule 6 that surfaces sites
-/// it cannot classify at once has a place that says so rather than a silent
-/// raise of `allow_scan`. It may only shrink, and it is at zero.
-const ALLOW_SCAN_UNREAD: Allow = &[];
+/// EMPTY SINCE D-1121 UNTIL D-7151. D-1115 pinned the 41 chained searches
+/// rule 6 first saw, unread; each was opened and moved into `allow_scan` with
+/// its bound. The list stayed, empty, so a future change to rule 6 that
+/// surfaces sites it cannot classify at once has a place that says so rather
+/// than a silent raise of `allow_scan`. It may only shrink.
+///
+/// D-7151 (BASE-REDS-1023, 23 Oct 2026) IS THAT CHANGE: rule 6 now reads
+/// `.into_iter()`, `.iter_mut()` and `.rev()` searches and `find_map`, and
+/// surfaced 108 sites in 63 production files that its old spelling never
+/// read. Each count below is that file's measured excess over `allow_scan`
+/// at e0668a4bd + this change, pinned UNREAD: no bound is claimed for any of
+/// them here. A later package opens each, moves it into `allow_scan` with
+/// its bound or removes the search, and lowers the count here; a NEW site in
+/// any file is refused, because the sum is exact. docs/06-limits.md
+/// L-BRED23-02 names the list and its owner.
+const ALLOW_SCAN_UNREAD: Allow = &[
+    ("crates/api/src/autopilot.rs", 2),
+    ("crates/api/src/bars_export.rs", 1),
+    ("crates/api/src/bars_route.rs", 3),
+    ("crates/api/src/bars_series.rs", 1),
+    ("crates/api/src/bars_sort.rs", 2),
+    ("crates/api/src/census.rs", 1),
+    ("crates/api/src/census_cache.rs", 2),
+    ("crates/api/src/chain.rs", 1),
+    ("crates/api/src/coverage.rs", 1),
+    ("crates/api/src/dayflags.rs", 5),
+    ("crates/api/src/import_journal.rs", 1),
+    ("crates/api/src/imports.rs", 3),
+    ("crates/api/src/ingest.rs", 5),
+    ("crates/api/src/logs.rs", 3),
+    ("crates/api/src/provenance.rs", 2),
+    ("crates/api/src/pullrun.rs", 4),
+    ("crates/api/src/scrub_route.rs", 2),
+    ("crates/api/src/server.rs", 3),
+    ("crates/api/src/settings_route.rs", 3),
+    ("crates/api/src/sweeprun.rs", 1),
+    ("crates/cli/src/census_recount.rs", 1),
+    ("crates/cli/src/feed_reconcile.rs", 1),
+    ("crates/cli/src/fold_audit.rs", 1),
+    ("crates/cli/src/gdfl_import_command.rs", 2),
+    ("crates/cli/src/index_consistency.rs", 2),
+    ("crates/cli/src/lib.rs", 1),
+    ("crates/cli/src/research_policy.rs", 3),
+    ("crates/cli/src/scrub_blocks.rs", 1),
+    ("crates/cli/src/series_identity.rs", 1),
+    ("crates/cli/src/srt_builder.rs", 1),
+    ("crates/cli/src/stored.rs", 1),
+    ("crates/cli/src/tix_rebuilder.rs", 1),
+    ("crates/cli/src/upkeep_command.rs", 1),
+    ("crates/costs/src/stack.rs", 1),
+    ("crates/pull/src/calendar.rs", 1),
+    ("crates/pull/src/census_store.rs", 1),
+    ("crates/pull/src/config.rs", 1),
+    ("crates/pull/src/expiry_alias.rs", 1),
+    ("crates/pull/src/fetch.rs", 1),
+    ("crates/pull/src/fno_membership.rs", 1),
+    ("crates/pull/src/gdfl_dropbox.rs", 2),
+    ("crates/pull/src/gdfl_import.rs", 2),
+    ("crates/pull/src/gdfl_import_journal.rs", 2),
+    ("crates/pull/src/gdfl_import_lineage.rs", 1),
+    ("crates/pull/src/gdfl_lineage.rs", 1),
+    ("crates/pull/src/gdfl_nfo.rs", 1),
+    ("crates/pull/src/gdfl_run.rs", 3),
+    ("crates/pull/src/http.rs", 1),
+    ("crates/pull/src/manifest.rs", 1),
+    ("crates/pull/src/masters.rs", 1),
+    ("crates/pull/src/reference_data.rs", 2),
+    ("crates/pull/src/rehearsal.rs", 1),
+    ("crates/pull/src/riskfree.rs", 1),
+    ("crates/pull/src/upkeep.rs", 2),
+    ("crates/pull/src/zerodha_spool.rs", 1),
+    ("crates/pull/src/zerodha_verify.rs", 4),
+    ("crates/runner/src/admission.rs", 1),
+    ("crates/runner/src/exit_grid_policy.rs", 1),
+    ("crates/store/src/catalog.rs", 1),
+    ("crates/store/src/provenance.rs", 2),
+    ("crates/store/src/settings.rs", 1),
+    ("crates/telemetry/src/level.rs", 1),
+    ("crates/telemetry/src/sink.rs", 5),
+];
 
 /// Rule 7: the ambiguous membership test.
 const ALLOW_MEMBER: Allow = &[
@@ -2016,7 +2094,7 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),
-    ("crates/pull/src/gdfl_import.rs", 1), // 3 -> 4, WP-12f merged after GF-1, GF-1 16 Oct; 4 -> 1, three moved to gdfl_import_journal.rs by R3-35, GF-1 17 Oct (docs/06-limits.md)
+    ("crates/pull/src/gdfl_import.rs", 3), // 3 -> 4, WP-12f merged after GF-1, GF-1 16 Oct; 4 -> 1, three moved to gdfl_import_journal.rs by R3-35, GF-1 17 Oct; 1 -> 3, BASE-REDS-1023: IA-16 and IA-9 (the three-entry REPAIRABLE_HOLES, the day's index files against SWEPT, the rescan's HashSet probe; docs/06-limits.md)
     ("crates/pull/src/gdfl_import_lineage.rs", 1),
     ("crates/pull/src/gdfl_import_quality.rs", 1),
     ("crates/pull/src/gdfl_lineage.rs", 4),
@@ -2034,7 +2112,7 @@ const ALLOW_MEMBER: Allow = &[
     // list of one day, a tree probe and the restart walk's closed list, a
     // verb's compile-time flag and environment tables, and R3-35's move of
     // three `gdfl_import.rs` sites into the journal file (4 -> 1 above).
-    ("crates/api/src/dayflags.rs", 1),
+    ("crates/api/src/dayflags.rs", 2), // 1 -> 2, BASE-REDS-1023: IA-16 moved in the two-entry FLAGS_VERSIONS probe (docs/06-limits.md)
     ("crates/cli/src/watchdog_command.rs", 3),
     ("crates/pull/src/gdfl_import_journal.rs", 3),
     // GF-1, 18 Oct 2026: R3-09 and R4-06, merged after GF-1's run of
@@ -2065,6 +2143,13 @@ const ALLOW_MEMBER: Allow = &[
     // two comparisons, the shape rule 7 permits. Reason in
     // docs/06-limits.md, "Gate 11 — BASE-GATE11".
     ("crates/pull/src/reference_data.rs", 1),
+    // BASE-REDS-1023, 23 Oct 2026 (D-7150): IA-16, merged after
+    // BASE-GATE11. `Cause::is_hole` and `day::source_lost` probe the
+    // five-entry `HOLE_REASONS` and the two-entry `SOURCE_UNREACHED`
+    // compile-time tables, a bound rule 7 names; reason in
+    // docs/06-limits.md, "Gate 11 — BASE-REDS-1023".
+    ("crates/pull/src/gdfl_import_causes.rs", 1),
+    ("crates/pull/src/gdfl_import_day.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {
@@ -2162,11 +2247,28 @@ fn rule5d(r: &str) -> bool {
     })
 }
 
-/// Rule 6: `\.iter\(\)\.(find|position|rposition)\(`.
+/// Rule 6: `\.(iter|into_iter|iter_mut)\(\)(\.rev\(\))?\.(find|find_map|position|rposition)\(`.
+///
+/// THE SPELLINGS WIDENED (BASE-REDS-1023, D-7151). It read only
+/// `.iter().find/position/rposition(`, so the same linear search written
+/// over an owned or a mutable iterator, reversed, or as `find_map` passed
+/// unseen (BASE-GATE11's merge agent, verify-BASE-GATE11-r1). It still
+/// cannot see `.any(`/`.all(` (a predicate over a compile-time table is the
+/// common, bounded use and the workspace holds hundreds) or a hand-written
+/// loop; both are named in docs/06-limits.md L-BRED23-02.
 fn rule6(r: &str) -> bool {
-    [".iter().find(", ".iter().position(", ".iter().rposition("]
-        .iter()
-        .any(|w| r.contains(w))
+    const OPENERS: [&str; 5] = [
+        ".iter().",
+        ".into_iter().",
+        ".iter_mut().",
+        ".iter().rev().",
+        ".into_iter().rev().",
+    ];
+    const SEARCHES: [&str; 4] = ["find(", "find_map(", "position(", "rposition("];
+    OPENERS.iter().any(|open| {
+        r.match_indices(open)
+            .any(|(at, _)| SEARCHES.iter().any(|s| r[at + open.len()..].starts_with(s)))
+    })
 }
 
 /// Rule 7: `\.contains\(&`.
@@ -2247,7 +2349,7 @@ fn disarms(scope: &[(String, &Line)]) -> Vec<String> {
     for (file, l) in scope {
         let t = ltrim(&l.text);
         if d <= 0 {
-            if !(t.starts_with(ALLOW_ATTR) || t.starts_with("#[expect(")) {
+            if !opens_disarm(t) {
                 continue;
             }
             acc = t.to_owned();
@@ -2406,6 +2508,21 @@ const DENIED_LINTS: [&str; 6] = [
 /// The opening of an allow attribute, in pieces so this file never carries
 /// one whole.
 const ALLOW_ATTR: &str = concat!("#[", "allow(");
+
+/// The opening of an INNER allow attribute, `#![allow(`, in pieces too.
+const ALLOW_INNER: &str = concat!("#![", "allow(");
+
+/// Whether `t` (leading blanks dropped) opens an allow or an expect
+/// attribute, outer or INNER (BASE-REDS-1023, D-7151): a file-level
+/// inner allow of `clippy::unwrap_used` at the top of a production file
+/// disarms the lint for the whole file, and rule 5c read only the outer
+/// `#[` forms, so it passed unseen (verify-BASE-GATE11-r1).
+fn opens_disarm(t: &str) -> bool {
+    t.starts_with(ALLOW_ATTR)
+        || t.starts_with("#[expect(")
+        || t.starts_with(ALLOW_INNER)
+        || t.starts_with("#![expect(")
+}
 
 /// `^LINT[[:space:]]*=[[:space:]]*"deny"`.
 fn denies(manifest: &str, lint: &str) -> bool {
@@ -3702,6 +3819,54 @@ mod tests {
         assert!(g11(&[("crates/a/src/x.rs", &src)], &lists()).0);
     }
 
+    /// BASE-REDS-1023 (D-7151): the two gaps verify-BASE-GATE11-r1 named.
+    /// An INNER allow or expect of a denied lint, one line or many, is a
+    /// rule 5c disarm like an outer one, and a harmless inner allow is not;
+    /// rule 6 reads a search over an owned, a mutable or a reversed
+    /// iterator, and `find_map`, as it reads `.iter().find(`, and still
+    /// passes the predicates and maps it was never about.
+    #[test]
+    fn gate11_reads_an_inner_allow_and_every_spelling_of_a_linear_search() {
+        let inner = concat!("#![", "allow(");
+        for src in [
+            format!("{inner}clippy::unwrap_used)]\nfn a() {{}}\n"),
+            format!("{inner}\n    clippy::panic,\n    reason = \"x\"\n)]\nfn a() {{}}\n"),
+            "#![expect(clippy::expect_used, reason = \"x\")]\nfn a() {}\n".to_owned(),
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", &src)], &lists());
+            assert!(!ok, "{src}");
+            assert!(text.contains("rule 5c: 1 occurrence(s)"), "{src}\n{text}");
+        }
+        let clean = format!("{inner}dead_code)]\nfn a() {{}}\n");
+        assert!(g11(&[("crates/a/src/x.rs", &clean)], &lists()).0);
+        for hit in [
+            "let p = xs.into_iter().find(|x| x.ok());\n",
+            "let p = xs.into_iter().position(|x| x.ok());\n",
+            "let p = xs.iter_mut().find(|x| x.ok());\n",
+            "let p = xs.iter().rev().find(|x| x.ok());\n",
+            "let p = xs.into_iter().rev().position(|x| x.ok());\n",
+            "let p = xs.iter().find_map(|x| x.ok());\n",
+            "let p = xs.into_iter().rposition(|x| x.ok());\n",
+        ] {
+            refused(hit, "6");
+        }
+        for clean in [
+            "let p = xs.into_iter().map(f);\n",
+            "let p = xs.iter().rev().map(f);\n",
+            "let p = xs.iter_mut().for_each(f);\n",
+            "let p = xs.iter().finder();\n",
+            "let p = xs.iter().any(f);\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
+            assert!(ok, "{clean}: {text}");
+        }
+        // A formatted chain of the new spellings folds into one record.
+        let src = "fn a() {\n    let p = xs\n        .into_iter()\n        .rev()\n        .find(f);\n}\n";
+        let (ok, text) = g11(&[("crates/a/src/x.rs", src)], &lists());
+        assert!(!ok);
+        assert!(text.contains("rule 6: 1 occurrence(s)"), "{text}");
+    }
+
     #[test]
     fn gate11_counts_an_assert_only_inside_a_function() {
         let src = "const _: () = {\n    assert!(N > 0);\n};\npub const ONE: u8 = 1;\nfn f() {\n    assert!(x);\n}\n";
@@ -3772,7 +3937,10 @@ mod tests {
                 assert!(seen.insert(*p), "{p} listed twice");
             }
         }
-        assert!(ALLOW_SCAN_UNREAD.is_empty());
+        // It may only shrink (D-1121): empty until D-7151 pinned the 108
+        // sites in 63 files the widened rule 6 surfaced, unread; never more.
+        let unread: usize = ALLOW_SCAN_UNREAD.iter().map(|(_, n)| *n).sum();
+        assert!(unread <= 108 && ALLOW_SCAN_UNREAD.len() <= 63, "{unread}");
         assert!(
             ALLOW_PENDING
                 .iter()

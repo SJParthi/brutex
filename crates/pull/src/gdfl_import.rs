@@ -2401,7 +2401,11 @@ const UNKNOWN_SHOWN: usize = 4;
 /// both read as upper-case ASCII letters and digits only, so `NIFTY BANK`
 /// is as close to `BANKNIFTY` as its spelling allows and `NIFTY IT` is
 /// not. A ranking for the operator to read, never a filing rule: no stem is
-/// filed by it. O(symbol × stem), both bounded by a file name.
+/// filed by it. The stem's pairs are one pre-sized hash set and each distinct
+/// pair of the symbol one probe of it: O(symbol + stem), both bounded by a
+/// file name, and no sort (gate 11 rule 4, BASE-REDS-1023, D-7150; the
+/// ranking is proved by
+/// `pull::gdfl_import::tests::ia16::closeness_counts_each_distinct_pair_once`).
 fn closeness(stem: &str, symbol: &str) -> usize {
     let letters = |text: &str| -> Vec<u8> {
         text.bytes()
@@ -2410,12 +2414,12 @@ fn closeness(stem: &str, symbol: &str) -> usize {
             .collect()
     };
     let (stem, symbol) = (letters(stem), letters(symbol));
-    let mut pairs: Vec<&[u8]> = symbol.windows(2).collect();
-    pairs.sort_unstable();
-    pairs.dedup();
-    pairs
-        .into_iter()
-        .filter(|pair| stem.windows(2).any(|held| held == *pair))
+    let mut held: HashSet<&[u8]> = HashSet::with_capacity(stem.len());
+    held.extend(stem.windows(2));
+    let mut counted: HashSet<&[u8]> = HashSet::with_capacity(symbol.len());
+    symbol
+        .windows(2)
+        .filter(|pair| held.contains(pair) && counted.insert(pair))
         .count()
 }
 
