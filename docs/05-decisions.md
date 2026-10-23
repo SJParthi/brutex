@@ -81569,3 +81569,124 @@ still add up, as they always did. A `--symbols` list in which no name is a
 share the store holds checked nothing and exited 0. It now names each name
 and exits `FAILED`. A list with at least one held share is judged by its rows
 as before, with the unknown names still printed. T2S-22.
+
+### D-5189 — A share directory the store's symbol rule refuses is filed under its percent-escaped name, one cell and one key; the check reads its own files and its archives only as regular files; and `--out` is held outside where a root's own top-level link leads (DATA-2 repair 3, verify-DATA-2-r3) — 2026-10-23
+
+**What was wrong.** A share directory whose name the store's symbol rule
+refuses (`core::symbol::Symbol::new` admits ASCII letters, digits, `-`, `_`
+and `&`) is filed as one `read_failed:store_symbol` row. Its `symbol` cell
+was the directory name as given, written with no escape. A name holding a
+comma made a row of 67 cells; one holding a line break made a row of 1 and
+a second line. The row went into an append-only day segment, and every later
+fold of that year read the segment back and refused the file as "not one of
+this layout's". A segment is never rewritten or removed, so every later run
+of that year on that `--out`, and every run with no YEAR, was refused for
+good, even after the stray directory was gone. Only a fresh `--out` ran, and
+it lost every answer already checked. T2S-16 claimed every free-text cell is
+one CSV cell; its test checked `file` and `source_name` only.
+
+Reproduced first with the previous release build on synthetic roots
+(`scratch/data2-fix-r3/comma.sh`, results in
+`scratch/data2-fix-r3/comma-pre/results.txt` of the operator's work folder):
+`ZZ,BAD` gave "a row of 67 cells, not 66", and a line break gave "a row of 1
+cells, not 66", on the first run, on a rerun, with no YEAR, and after the
+directory was renamed to a name the store admits.
+
+**The decision.**
+
+1. The `symbol` cell is the name percent-escaped (`symbol_cell`): `%`, the
+   comma and every byte outside printable ASCII are written `%XX`, every
+   other byte as it is. `clean`, which the other text cells use, is not
+   enough here, because the ledger is keyed by this cell and `clean` maps
+   two names onto one text (`ZZ,BAD` and `ZZ;BAD`). Two refused directories
+   would then share one key, and the rows of both, differing in nothing a
+   reader sees, would take turns being filed. The escape is decodable, so
+   two names never share a cell. It is the name itself for every name the
+   symbol rule admits, so no stored share's cell, row or index entry changes,
+   and an escaped name always holds a byte that rule refuses, so it can
+   never be a stored share's. Every other text cell (`status`, `compare`,
+   `session` and the build stamp among them) now goes through `clean`: a
+   no-op on every word this module writes today, and the guard for a word it
+   writes later.
+2. Every ledger probe builds its key with one function (`row_key`), the way
+   the line is read back: the plan's failed rows, the landing and extra
+   probes, and the instrument-month events. A refused directory still
+   standing therefore files nothing new on the next run, makes no segment and
+   no version, with a YEAR or without.
+3. An `--out` that an earlier build already poisoned stays refused. Its
+   segment is not a file of this layout, and a fold that read past it would
+   hide a failure (CLAUDE.md §4). The remedy is a fresh `--out`. No real run
+   wrote such a row. The real store's GDFL share tree holds 337 directories,
+   every one a name the rule admits (a read-only `ls`, 23 Oct 2026), and the
+   real-run folders `state/datacheck/rust-t2s-r3` to `-r7` of the operator's
+   work folder hold no `store_symbol` row.
+
+**Three follow-ups taken with it** (verify-DATA-2-r3, all in this package's
+files).
+
+- *A named pipe or a symbolic link at one of the check's own names.* Every
+  version CSV, index and day segment is read by `index::read_regular`:
+  `store::open_flags::open_read_no_follow` (`O_NOFOLLOW | O_NONBLOCK`), then
+  the handle's `fstat` must say a regular file. A pipe at a segment or
+  version name held `load_year` for good; it is now refused by name at once.
+  A dangling link read as a missing file; it is now refused as a link.
+  `SecondChecks::open` refuses the same way. This check's own files are
+  always regular files, made by a staged write and a hard link, so nothing
+  legitimate is refused.
+- *A named pipe given as `--archive`.* `Archive::open` opens with a plain
+  blocking open, which waits for good on a pipe with no writer. Every
+  archive, `--archive` and each one a landing recorded, is now opened here
+  with `O_NONBLOCK`; its own `fstat` must say a regular file before the
+  importer's reader indexes it through `Archive::from_source`. The name may
+  still be a link, since an archive is often named by one. The words of a
+  failed open are `Archive::open`'s own ("archive unavailable: ..."). No
+  change to `crates/pull`.
+- *An `--out` written as the physical target of a root's own link* (ATK-16,
+  `docs/06-limits.md` L-T2S-11). With `<store>/bars -> /data/bars`, an
+  `--out` of `/data/bars/r` lay inside neither form of the store that D-5187
+  compares, and a run there would write among the bars the store serves.
+  Every symbolic link at the top of the store root and of the tick store
+  root is now read once (`link_around`). A relative target is taken against
+  the root, and a dangling one is included, since `create_dir_all` would make
+  it real. An `--out` inside a target in either form of `inside` is refused
+  naming the link, before anything is made. A link deeper in a root is not
+  walked; the real store holds no link at its top (L-T2S-11), and a shadow
+  store holds its `bars` link there.
+
+**What it does not do.** Each item below stays named in `docs/06-limits.md`
+or in the package report.
+
+- A share directory that is a stray FILE, or an unreadable directory, still
+  refuses the whole no-YEAR run, because the share's month listing fails
+  before any day is known to file a row under. A YEAR run files it per
+  month.
+- A second, different `--archive` on the same `--out` is still answered from
+  the first one's extra rows. Those rows name the archive only by the text
+  given, so a refusal by name would misfire on a second name for the same
+  file; a key by archive identity is a layout change for its own decision.
+- A SIGKILLed run still leaves its `.tmp` staging name.
+
+**Proof.**
+
+- `tick_second_check::tests::a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice`
+  plants four directories: `ZZ,BAD`, a name with a line break, `ZZ;BAD`
+  (which `clean` would merge with the first), and `ZZ%2CBAD` (the first's
+  escape written out). It requires every line of every CSV to have 66 cells,
+  the fold to succeed, the four rows to be named under four keys, and the
+  stored shares to be answered as before. A second run with the directories
+  still there, and a run with no YEAR, must each leave the output folder
+  unchanged, file for file, size for size and time for time.
+- `words_and_fields_are_one_csv_cell_each` now covers the symbol cell, the
+  escape and `row_key`.
+- `a_pipe_or_a_link_at_one_of_the_checks_own_names_and_a_pipe_archive_are_refused_at_once`
+  covers a pipe at a segment name, a dangling link there, a link at a
+  version's index name (through `SecondChecks::open` too) and a pipe as
+  `--archive`. Each run must return within a minute.
+- `an_out_where_a_roots_own_top_link_leads_is_refused_before_anything_is_made`
+  covers an absolute, a relative and a dangling link at the store's top and
+  one at the tick store's. Each is refused naming the link, with nothing
+  made, and an `--out` beside them runs.
+- The cost of each new step is measured in L-T2S-11 and L-T2S-12
+  (`the_d_5189_steps_are_timed`).
+
+T2S-16 (amended), T2S-23, T2S-24.
