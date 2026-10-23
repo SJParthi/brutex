@@ -82896,3 +82896,27 @@ edited):
 5. `store::file::write_door_tests::the_write_door_costs_the_same_at_one_ten_and_a_hundred_times_the_bars`:
    up to three whole measurements, stopping at the first in which every
    unchanged bound holds; a door that scans the month fails all three.
+
+### D-7154 — The web job's three reds: W1 rebuilt, W3 from 32 type errors to 0 at their root, W5 portable (BASE-REDS-1023) — 2026-10-23
+
+1. **W1** (web/build matches web/src): the committed bundle was older than
+   its source (34 files at 59034d988). Rebuilt with `npm --prefix web run
+   build` and committed with this change, the only generated output it
+   carries; a package that changes web/src after it commits its own rebuild.
+2. **W3** (svelte-check, ceiling 0): 32 errors from five roots, none a
+   behaviour change. `read-pools.js` built each row by spreading
+   `Object.fromEntries`, so a row typed as `{ pool }` or `{ route, asked }`
+   alone and every reader of a counter erred (20 of the 32): each row is now
+   built field by field under the `PoolRow`/`RouteRow` typedefs. The panel
+   narrowed the answer by `!tables.fault`, which does not exclude an empty
+   string: it tests `fault === null`. `ingest-months.js`'s lane typedef
+   gained the `openEnd` it returns; `gap-verdict.js` reads a null
+   `unreadable_records` as 0, which `null > 0` already did; three test files
+   annotate their fixtures' parameters. `npm --prefix web run check`: 0
+   errors (one warning, which the gate does not count).
+3. **W5** (no comment swallows a CSS rule): `xargs -d '\n'` is GNU only, and
+   the Mac gate run (BSD xargs) refused the step while the checker passed
+   every one of its 64 files. The step hands the same list over
+   NUL-delimited (`tr '\n' '\0' | xargs -0`), which both xargs read alike.
+The web suite: 1,570 of 1,570 pass (two new tests:
+`web/tests/export-agrees-with-the-server.test.js`, D-7153).
