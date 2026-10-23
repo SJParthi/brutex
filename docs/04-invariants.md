@@ -8557,3 +8557,17 @@ L-BREDS-3).
 | BREDS-02 | **Each range is cut exactly at its published bounds.** `rustls-webpki` 0.103.15 and every older line (0.102.8, 0.0.0) are refused, 0.103.16 to 0.103.999 and 0.104.0 onwards cleared; `webpki-roots` 1.0.9, 1.0.0, 0.26.10 and 0.26.12 are refused, 1.0.10 onwards cleared, and 0.26.11 (with or without build metadata) cleared as the advisory's one `unaffected` version | `workspace_is_rust::each_range_is_cut_at_its_published_bounds` | ✓ |
 | BREDS-03 | **A version or comparator the check cannot read is refused by name, never cleared.** An empty, short, long, non-numeric, leading-zero or overflowing version, an empty pre-release or build tag, a stray dot, a stanza with no version line, a pre-release (cargo's pre-release matching is not modelled), and any operator other than `>= `, `< ` and `= ` | `workspace_is_rust::a_version_it_cannot_read_is_refused_by_name_never_cleared`, `workspace_is_rust::every_comparator_in_the_table_is_read_and_others_are_refused` | ✓ |
 | BREDS-04 | **Precedence is semver 2.0.0 §11's.** Its own example chain sorts in order, the table's bounds 0.103.16 < 0.104.0-alpha.1 < 0.104.0-alpha.8 < 0.104.0, and build metadata has no precedence | `workspace_is_rust::semver_precedence_is_the_specs` | ✓ |
+
+## Window reads at their edges: an instant past the calendar, a client gone mid-loop, the row budgets (cloud-mut-api-a; D-5420, D-5422)
+
+`crates/api/src/bars.rs`, `bars_series.rs`, `bars_sort.rs`, `spot.rs`. Every
+fixture is invented.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| MUT-A-01 | **An `at=` instant past the calendar's last year ranks after every row**; one before the epoch ranks before every row | `bars_series_rs::bars_series_an_instant_past_the_calendar_is_after_every_row` (`crates/api/tests/cloud_mutants_bars.rs`) | ✓ |
+| MUT-A-02 | **A client that goes away mid-read is seen at the next look of the stride, never sooner and never not at all**: a spot read looks every `CANCEL_EVERY` instants, a stretch read every `CANCEL_STRIDE` rows counted across the request's stretches | `server::spot::cloud_mutant_tests::a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride`, `bars::cloud_mutant_tests::a_stretch_read_looks_at_its_client_once_a_stride` | ✓ |
+| MUT-A-03 | **A client gone while the extremes are folded ends the request as `cancelled`, never as a page with its extremes withheld**, on the time-ordered and the open-interest-over-an-index paths | `bars::cloud_mutant_tests::a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled` | ✓ |
+| MUT-A-04 | **A value page that would read more rows than the scan budget is refused `scan_budget_exceeded` by name; exactly the budget is served** | `bars::sort::cloud_mutant_tests::a_value_page_is_served_to_the_scan_budget_and_refused_past_it` | ✓ |
+| MUT-A-05 | **The extremes budget counts only cut rows no earlier request folded**: past it the page is served with its extremes withheld by name, at it they are folded and held, and held they owe nothing | `bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`, `bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget` | ✓ |
+| MUT-A-06 | **The bars scan orders a null open interest by time, then series, in both directions**: an index's or a share's rows are null whatever number the vendor stamped (D-3322, D-5423), and a derivative's nulls follow its values | `bars::cloud_mutant_tests::the_scan_orders_open_interest_with_its_nulls_last` | ✓ |

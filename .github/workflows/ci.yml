@@ -1922,6 +1922,21 @@ jobs:
           #     `year_exclusions` and `year_record` (CAL-12).
           declared="$declared cli/src/calendar_days_tests.rs:eprintln!:3
           pull/src/calendar_tradable_tests.rs:eprintln!:5"
+          # TWO MORE FILES, from CLOUD-MUTAPIA (the cloud api half-A mutation
+          # pass, merged back on 21 Oct 2026, which ran this gate). Each print
+          # is the result line of a test re-run as its own child process, in
+          # a `#[cfg(test)] mod cloud_mutant_tests`; the parent test asserts on
+          # the line. No production path reaches any of them.
+          #   api/src/bars_sort.rs println! 1: the child of
+          #     `the_index_memos_hold_exactly_their_budgets` says both
+          #     process-wide memos held their budgets (it fills them, so it
+          #     runs alone in its own process).
+          #   api/src/render.rs println! 2: the child of
+          #     `folder_suggestions_follow_their_switch_and_walk_home` says the
+          #     folders it suggested and the note it wrote under the HOME the
+          #     parent gave it.
+          declared="$declared api/src/bars_sort.rs:println!:1
+          api/src/render.rs:println!:2"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
