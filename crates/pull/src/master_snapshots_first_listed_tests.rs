@@ -393,12 +393,16 @@ fn index_lines_that_landed_without_their_commit_line_are_taken_in_again_and_comm
     );
 }
 
+/// A damage done to an index file's text: the text left, or `None` for no
+/// file.
+type Damage = fn(&str) -> Option<String>;
+
 /// The verifier's three damages (R4-28 repair 2), and a line a kill cut
 /// short: the generation is left as it is, a new one is built from the
 /// receipted snapshots, and the listing is whole.
 #[test]
 fn a_file_missing_cut_or_garbled_against_its_commit_log_is_rebuilt_as_a_new_generation() {
-    let cases: [(&str, fn(&str) -> Option<String>, &str); 4] = [
+    let cases: [(&str, Damage, &str); 4] = [
         (
             "missing",
             |_| None,
