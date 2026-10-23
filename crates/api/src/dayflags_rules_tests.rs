@@ -654,6 +654,35 @@ fn the_flag_memo_is_bounded_and_keeps_a_flag_in_use() {
     );
 }
 
+/// **AT MOST [`LOADS_AT_ONCE`] MASTERS ARE PARSED AT ONCE** (verify-R3-13-r1
+/// blocking 2; repair 1, the one missed mutant of the slot, `+=` -> `*=` in
+/// `Slot::take`): with every slot taken a further load waits, and one slot
+/// given back lets it go. Other tests' loads only ever hold one slot and give
+/// it back, so taking all of them here always ends, and while they are held
+/// nothing else in the process can take one: the waiter cannot be let through
+/// by a correct count.
+#[test]
+fn a_load_past_the_bound_waits_until_a_slot_is_given_back() {
+    let mut held: Vec<Slot> = (0..LOADS_AT_ONCE).map(|_| Slot::take()).collect();
+    let (went, goes) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let slot = Slot::take();
+        went.send(())
+            .expect("the test listens until the waiter has gone");
+        drop(slot);
+    });
+    assert!(
+        goes.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "a load ran while all {LOADS_AT_ONCE} slots were held"
+    );
+    drop(held.pop());
+    goes.recv_timeout(std::time::Duration::from_secs(60))
+        .expect("one slot given back lets the waiting load go");
+    waiter.join().expect("the waiter ends");
+    drop(held);
+}
+
 // ══ The auction sidecar ══════════════════════════════════════════════════════
 
 /// **"KEPT APART" ONLY WHERE A SIDECAR KEEPS THEM** (SC-CLOSE-9). A GDFL share
