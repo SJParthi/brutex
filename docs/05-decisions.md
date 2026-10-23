@@ -82796,3 +82796,76 @@ through it"). Under D-7135 no root A is ever built.
 4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
+
+### D-7139 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
+
+**Context.** D-6892 drew one measured `corporate_actions` row from every
+PROVEN step between two basis runs (the factor interval excludes one). The
+first check of R4-26 (`state/fix/round2/verify-R4-26-r1.json`) ran it over
+DATA-1's full input (105 months, 2018-01..2026-09): 979 steps, 770 proven,
+770 rows. 289 of them had a factor below one, and the 17 shares with any
+down-step carried 648 rows that alternate around one (one share 121 rows:
+170/171, 128/129, 66/65, 154/153 ...), each shown on `/dayflags.json` as an
+action "at this session". Separately, a month missing from the input put a
+row's ex-date on the first day of the next month read, and the `/db` note
+claimed that day.
+
+**Decision.**
+
+1. `pull::corporate_actions::judge` is the one owner of the rule, used by
+   the ledger (`measured_rows`), the checker (`check`) and `cli basis-runs`'
+   report. A proven step is LASTING only when (a) no proven step the other
+   way lies within `REVERSAL_DAYS` = 90 calendar days of its ex-date, either
+   side (`basis_reversed`); (b) each of its runs holds at least `HOLD_DAYS`
+   = 5 days with a basis (`basis_short`); and (c) the near end of its factor
+   interval lies farther from one than the far end of every reversed step of
+   the same share within `WOBBLE_DAYS` = 365 days (`basis_within_wobble`):
+   the share's own noise, generated from its own steps. Only a lasting step
+   makes a row.
+2. Every other proven step is a named basis anomaly: printed by
+   `cli basis-runs` as `basis_anomaly <SYMBOL> (after, ex] ...; <reason>`,
+   counted on the summary line, logged once a run as a `warn` event
+   (`cli.basis_runs`, "basis anomalies", with the counts by reason) that
+   `/logs` shows, and reported by the checker as `Finding::BasisAnomaly`.
+   It is never a row and never dropped without a word.
+3. `Action::day_known`: a measured row whose window `(after, ex_date]` may
+   hold a session (`session_between`: a day the canonical calendar does not
+   call closed, or more than `MAX_WINDOW_WALK` = 14 days) does not know its
+   day. `/dayflags.json` says "on one session between <after> (excluded) and
+   <ex_date> (included); the day is unknown ...", never "at this session";
+   `/basis.json` and `/sources/day.json` carry `day_known`; the row's evidence
+   and the `cli` step line say the ex-date is UNKNOWN inside the window and
+   name the months of it missing from `DIR`.
+4. `cli basis-runs --apply` keeps the receipt day of a stored generation
+   whose source text and source SHA-256 are this run's, so a rerun on another
+   day over the same files renders the same bytes and lands nothing.
+5. A per-day `notes` value that is not an array is left as it was; the
+   corporate-action notes go in `corporate_action_notes` beside it.
+
+**Chosen, not sourced.** The three spans are chosen, as `STEP_PERMILLE` is
+(D-3339). They were chosen against the measurement above, not tuned to a
+vendor claim: nothing here asserts which way, or for which events, a vendor
+adjusts. The cost of the rule is stated in `docs/06-limits.md` L-R426-09: a
+genuine action inside a share's own wobble, or within 90 days of a step the
+other way, is a named anomaly and not a row until an NSE file
+(`docs/00-charter.md`, UNVERIFIED as fetchable unattended) sources it.
+
+**Proof.** `pull::corporate_actions::tests::a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row`,
+`a_one_session_two_percent_excursion_ledgers_no_row`,
+`a_step_inside_the_shares_own_wobble_is_named_and_one_beyond_it_is_ledgered`,
+`a_step_with_a_short_side_is_named_short_and_ledgers_no_row`,
+`a_two_for_one_step_across_a_missing_month_does_not_know_its_day`,
+`a_session_between_two_days_is_found_within_a_bounded_walk`;
+`cli::basis_runs::tests::a_ratio_that_alternates_is_named_as_basis_anomalies_and_never_ledgered`,
+`a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothing`;
+`api::basis_route::tests::a_two_for_one_step_across_a_missing_month_is_never_at_this_session`,
+`a_notes_value_that_is_not_an_array_keeps_its_shape`. Their assertions are
+the two failures the check reproduced on the D-6892 code (a row from every
+alternating or one-session proven step; "at this session" across a missing
+month); the tests call `judge` and `day_known`, which that code lacks, so
+they were not compiled against it. NOT PROVED as a run of the new tests on
+the old code.
+
+**Cost.** `judge` is O(steps) per share: one pass each way for the nearest
+step the other way and one monotone window maximum each way for the wobble.
+`session_between` is at most 14 calendar lookups. L-R426-08.
