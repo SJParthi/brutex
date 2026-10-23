@@ -1232,11 +1232,27 @@ table.
    its own. The row's `source` string says so in full. (This said every such
    trade "is currently priced 25% too high", which the refusal above
    contradicts. D-1779.)
-2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) reportedly re-splits
-   the transaction charge and the IPFT as ₹3,552 + ₹1 per crore, leaving the
-   total unchanged at 0.03553%.** If true, the 3,503 + 50 split is wrong from
-   2026-03-01 onward while their **sum** stays right — so any consumer that adds
-   the two is unaffected and any consumer that reports them separately is not.
+2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) — no longer one of
+   the two: read on 13 and 15 Oct 2026 and encoded by D-5100.** Its split is
+   ₹3,552.99 + ₹0.01 per crore of premium (not the ₹3,552 + ₹1 this line
+   quoted), and the total is unchanged at 0.03553%. One `BpsX100` unit is one
+   rupee per crore, so the 2026-03-01 rows **fold** the two: the exchange-charge
+   row is ₹3,553 and the IPFT row of the same date is zero. Before 2026-03-01
+   the 3,503 + 50 split stands as it was. What the fold costs, stated as a
+   bound: the totals are exact, and a consumer that reports the two lines
+   separately sees the IPFT inside the exchange line (as Dhan's calculator
+   shows it). Against the per-leg ceiling of the two lines apart, the folded
+   line is at most one paisa per leg cheaper; against a half-up rounding of
+   each line apart it is never lower while a leg's premium is under ₹50 lakh
+   (the ₹0.01 per crore is then under half a paisa), and at or above ₹50 lakh
+   on one leg it can be **one paisa per leg below** it — the one place the
+   fold can under-run "never below the real charge" (§27). It does at exactly
+   ₹50 lakh a leg (both of the circular's lines land on a half paisa: 177,651
+   paisa against the folded 177,650), and both bounds are checked from one
+   paisa to `i64::MAX` by
+   `the_fold_costs_at_most_one_paisa_a_leg_and_under_50_lakh_is_never_below_the_split`
+   (D-5101). Whether the exchange rounds per leg at all is UNVERIFIED. A finer
+   rate scale that would hold ₹3,552.99 exactly is CHG-1's question.
 
 ### The name `bps_x100` is arithmetically wrong by a factor of ten
 
@@ -1962,7 +1978,9 @@ window — that part holds. But `costs::trip::charge_stack` is `pub` and takes
 either**. `BpsX100::new` is crate-private, but `regime::NSE_EXCHANGE_CHARGE` and
 `regime::BSE_EXCHANGE_CHARGE` are `pub const BpsX100`, `regime::stt_options_rate`
 is `pub` and returns `Ok` for every representable day, and `rate::ipft` is a
-`pub const fn`. So an external caller can assemble a `Rates` and price a trade
+`pub const fn` (removed by D-5100: the IPFT is dated now, `regime::ipft_rate`,
+and `rate::NSE_IPFT` and `rate::BSE_IPFT` are the `pub const` figures in its
+place). So an external caller can assemble a `Rates` and price a trade
 dated inside the refusal window at the 2024-verified exchange rate, with nothing
 refusing. That is the runtime escape hatch the predecessor's
 `DEC-ETC-REGIME-HISTORY-001` §9 forbids. **The public signatures above were read
@@ -20103,6 +20121,14 @@ cited, as it did before this repair, on the strength of FA64232's row and that
 figure. CHG-0's branch reads `FA56129` for it; until that merges, the
 pre-2026-03-01 IPFT part is the predecessor's figure, not a circular read here.
 
+**Done by CHG-0 (D-5100, D-5101).** Both paragraphs above are history from
+the merge of `fix/db-CHG-0` on: the dated card reads
+`regime::ipft_rate(exchange, day)`, the regime holds `FA73061`'s ₹3,553 row and
+the folded zero IPFT from 2026-03-01, and the ₹50 before it is the 2023-04-01
+row of the dated IPFT table, cited to `FA56129` in `docs/00-charter.md`. The
+card's figures and the `dated-regime/r2` fingerprint did not change, and the
+October golden test and the trip-agreement test pass unchanged (CHG0-09).
+
 ### Dhan's calculator total: the page's last paisa is not reproduced
 
 Every **line** of all 49 readings is reproduced exactly (343 lines). The
@@ -21238,6 +21264,17 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-BREDS-1 | Which hosts `pull` contacts chain through the distrusted emSign keys is not known | RUSTSEC-2026-0382 and RUSTSEC-2026-0381 are cleared by refusing, during certificate verification, a path through any of the eight emSign intermediate keys `rustls-webpki` 0.103.16 lists, or one that anchors only at `emSign ECC Root CA - G3`, which `webpki-roots` 1.0.10 removed. A host `pull` reaches through `reqwest` (the broker, the Dropbox fetch, AWS Parameter Store) that presents such a chain is now refused. No handshake was made from this package: no gate contacts a vendor host, and none was contacted to find out. **UNVERIFIED** | the refusal is the call site's existing TLS error, named and never retried on weaker verification; nothing falls back to the old roots. The added work is a comparison against a fixed list of eight keys per certificate in a path, once per handshake, never per bar or per request served; not measured | BASE-REDS-1021 |
 | L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
 | L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
+
+## The Py-language gate (NOPY-1, merged back by CLOUD-NOPY1; D-5250, D-5251, D-5258)
+
+`crates/vocab/tests/no_py_language.rs` is a test, never on a request path. Measured on the operator's machine on 21 Oct 2026 under a load average of 13 to 15 on 14 cores: the gate test alone, its debug binary run 200 times in sequence, one process per run (start, `git ls-files`, every tracked file read and scanned, 1,453 files and 68,144,292 bytes): p50 0.136 s, p99 0.170 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200.txt`). Re-measured on 22 Oct 2026 by the same method on the tree after the third merge of `feat/db-fix` (1,464 files, 69,134,919 bytes) under a load average of 19 to 26: p50 0.142 s, p99 0.187 s, max 0.222 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r3.txt`). Re-measured again on 22 Oct 2026 by the same method on the tree after the fourth merge of `feat/db-fix` (1,469 files, 69,452,277 bytes) under a load average of 13 to 18: p50 0.120 s, p99 0.142 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r4.txt`).
+
+| Id | What is not held | Why | Measured, and what is done instead |
+|---|---|---|---|
+| L-NOPY-1 | The gate is not O(1): it reads every tracked byte on every `cargo test -p vocab` | Its input is the whole tree; a rule that every file obeys cannot be checked by reading fewer | Linear in tracked bytes, test-time only, figures above. A tree ten times this size extrapolates to under 2 s a run (an extrapolation, not a measurement) |
+| L-NOPY-2 | The gate does not see the name split across lines, written with a zero-width character or another script inside it, or encoded; nor, when `git` runs, any untracked file | A text rule over bytes, and its input is `git ls-files` | The module header says so. A name split by a space passes and is pinned as the limit (NOPY-03). CI gate 15 is a second reading of the same tracked bytes |
+| L-NOPY-3 | The extension written as text is not refused | The extension is not the name: the charter cites the vendor SDK's own file by its path, which is provenance | 55 lines in 17 tracked files hold the extension as text on 21 Oct 2026, and the same 55 in 17 on 22 Oct after the third, the fourth and the fifth merge of `feat/db-fix` (`git grep -iE`, the extension followed by a non-word character). A file OF the language is refused by its own extension (NOPY-05) |
+| L-NOPY-4 | CI gate 15's allowlist names four files that hold no occurrence | Emptying it is an edit of `.github/workflows/ci.yml`, which this merge does not make | Gate 15 passes with four loose-entry warnings on the merged tree (`state/fix/ci-gates-logs/P-CLOUD-NOPY1-fast-1/logs/language-purity/016-15.log`). CI gate 13's log prints crate names that hold the name, unmasked; a CI log is not a tracked file, and masking it is that gate's owner's edit |
 
 ## The quarantine (R4-18, D-7290)
 

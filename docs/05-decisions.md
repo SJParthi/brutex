@@ -16335,7 +16335,7 @@ switch on the returned exception name."* A grep for `error_type` across
 
 **The pair that forced it.** `TokenException` and `PermissionException` are both
 answered under HTTP 403 — the first documented on the exceptions page, the
-second in the vendor's own Python SDK. On the status axis they are one event.
+second in the vendor's own SDK. On the status axis they are one event.
 They are not one event to an operator: the first is fixed by the credential
 somebody refreshes tonight, and the second is an API key with no
 historical-data subscription, which fails identically forever. The unentitled
@@ -80625,6 +80625,159 @@ Tests: `pull::gdfl_nfo::tests::a_day_zip_in_the_next_years_zip_is_named`,
 (IA-GR-27, options half). Invariants IA3OPT-08 to IA3OPT-10. Limits
 L-IA3OPT-02 and L-IA3OPT-03. FM-043 is closed by this change.
 
+### D-5100 — NSE options exchange charge: a new dated row from 2026-03-01 for circular `FA73061`, the IPFT dated beside it, and the 2024-10-01 row kept as it was (CHG-0) — 2026-10-16
+
+**What was wrong.** `costs::regime` priced the NSE options exchange
+transaction charge at ₹3,503 per crore of premium (0.03503%, `FA64232`) on
+every day from 2024-10-01, with a flat ₹50 IPFT (`costs::rate::NSE_IPFT`)
+beside it on every day. NSE circular `FA73061` (`NSE/FA/73061`, dated
+2026-02-27, "applicable with effect from March 1, 2026") sets the equity
+options transaction charge at ₹3,552.99 and the IPFT contribution at ₹0.01
+per crore of premium each side. Read on 2026-10-13
+(`state/fno-winners-20261013/sources-charges.json` rows E-03, E-04) and again
+on 2026-10-15 (`state/charges-deep-check-20261015.json`); Dhan's public
+calculator showed `Exchange 5.08` and `IPFT 0.00` for a ₹14,300 NIFTY call
+premium turnover on 2026-10-15 (`state/charges/dhan-golden-20261015.json`),
+where the old row's exchange line reads 5.01. The repository had called
+`FA73061` UNVERIFIED and quoted a split of ₹3,552 + ₹1 (`docs/06-limits.md`
+§25); that split was never the circular's.
+
+**What the circular did and did not change.** The total is the same on both
+sides of the date: ₹3,503 + ₹50 = ₹3,553 before, ₹3,552.99 + ₹0.01 = ₹3,553
+after. So a consumer that adds the two lines was already right and one that
+reads the lines separately was not. This is a correction to the split, not to
+the money.
+
+1. **A new dated row, appended.** `NSE_EXCHANGE_CHARGE_TABLE` gains a third
+   row, from 2026-03-01, at ₹3,553 (`NSE_EXCHANGE_CHARGE_FA73061`). It went
+   into the table's empty second slot (`MAX_LATER_ROWS` is unchanged at 2), so
+   the lookup is still a fixed two-iteration loop. The refusal anchor and the
+   `FA64232` row are byte for byte what they were — including the 2024-10-01
+   row's note calling `FA73061` UNVERIFIED, which the new row supersedes and
+   nothing rewrites (`CLAUDE.md` §3 rule 8). The row before 2026-03-01 keeps
+   0.03503%, and `NSE_EXCHANGE_CHARGE` keeps its name and its 3,503.
+2. **The fold, and why.** One `BpsX100` unit is one rupee per crore, so
+   ₹3,552.99 and ₹0.01 cannot be written down. Keeping the circular's split
+   exactly would mean a hundred-times finer rate scale: every rate literal,
+   `RATE_SCALE`, `money.rs` and the overflow tests would move, and the
+   `FA64232` row's literal with them. This change does not do that. The
+   2026-03-01 exchange row carries the two added (₹3,553) and the IPFT row of
+   the same date carries zero, which is the IPFT's ₹0.01 **folded into the
+   exchange line**, never a claim that the IPFT is zero. The existing rows
+   modelled the IPFT separately and still do; only the 2026-03-01 rows fold,
+   and both their source strings say so. Dhan's calculator presents the same
+   fold. A compile-time assertion holds the circular's own claim: the NSE
+   outflow is ₹3,553 per crore on both sides of the date.
+3. **The NSE IPFT becomes a dated table** (`regime::ipft_rate`), because a
+   flat ₹50 beside the ₹3,553 row would charge ₹3,603 where the circular says
+   ₹3,553. Rows: a refusal before 2023-04-01 (`FA56129` gives ₹0.01 as the
+   figure it replaced, but its first day was never read), ₹50 from 2023-04-01
+   (`FA56129`; `NSE_IPFT` keeps that figure), zero by the folding rule from
+   2026-03-01. The refusal is never met by a priced round trip:
+   `trip::Rates::resolve` checks the exchange charge first and it refuses
+   every day before 2024-10-01. The undated `rate::ipft(exchange)` is
+   removed: it returned ₹50 for NSE on every day, and nothing outside
+   `crates/costs` called it. BSE is unchanged — no BSE circular is recorded
+   for 2026, so ₹3,250 and the UNVERIFIED zero IPFT stand.
+4. **What the round trip now prices.** On the predecessor's four worked
+   examples, all dated 2026-05-15: Ex.1's lines are exchange 510 and IPFT 0
+   (were 502 and 8) and its total is ₹67.12 as before; Ex.2 and Ex.3 are one
+   paisa cheaper (₹137.50, ₹53.20), because one ceiling of the folded row
+   replaces two separate IPFT ceilings. A trip straddling 2026-03-01 prices
+   each leg at its own day's row (D-1535).
+5. **The live case.** The rate for 2026-10-15 reproduces Dhan's
+   `Exchange 5.08` when applied to the ₹14,300 turnover and rounded half-up
+   once; the circular's own split, each line rounded alone, gives the same
+   5.08 + 0.00. The round-trip calculator's own figure for that trade is
+   5.09, by design: it ceils each leg to the paisa (`docs/06-limits.md` §27),
+   ₹2.309 → 2.31 and ₹2.771 → 2.78. That is the deliberate adverse rounding,
+   not a rate error. The same rate reproduces the exchange line of every
+   option case captured from that calculator on 15 and 16 Oct 2026 (eleven,
+   `state/charges/dhan-golden-20261015.json` and `-20261016.json`, IPFT 0.00
+   on each); the 2024-10-01 row misses eight of them, reading 1.3% to 1.4% low.
+
+**Proof.** `costs::regime::tests::fa73061_prices_the_days_before_2026_03_01_at_the_old_row_and_the_day_itself_at_the_new_one`,
+`…::the_fa64232_row_is_kept_byte_for_byte_and_the_fa73061_row_is_appended_after_it`,
+`…::the_nse_outflow_is_3553_per_crore_on_every_priced_day_on_both_sides_of_fa73061`,
+`…::the_ipft_refusal_names_its_window_and_a_priced_trip_meets_the_exchange_refusal_first`;
+`crates/costs/tests/fa73061.rs` (2026-02-27, 2026-03-01, 2026-03-02, a
+straddling trip, the live Dhan case, the eleven captured option cases,
+BSE unmoved, and an ignored timing measurement); the four worked examples in
+`costs::trip::tests`, updated with the old figures beside the new. Invariants CHG0-01 to CHG0-05; the fold's
+one-paisa bound is stated in `docs/06-limits.md` §25.
+
+**Not decided here.** A finer rate scale that would carry ₹3,552.99 and ₹0.01
+exactly is CHG-1's question (it needs ₹306.99 and ₹182.99 for cash and futures
+too). When it lands, the 2026-03-01 regime can be re-expressed exactly in a
+new table generation, and these rows stay as history.
+
+### D-5101 — CHG-0 completed on 22 Oct 2026: the extremes of the `FA73061` row proved, the undated `rate::ipft` stays removed, and the charge stack merged before it reads the one dated IPFT (CHG-0) — 2026-10-22
+
+**Why a second entry.** D-5100 was written on 16 Oct 2026 and its tests were
+never run before a usage limit cut the package off. Run on 21 Oct against
+`feat/db-fix` at `5ff4956cc`, one of them failed: `tests/adversarial.rs` had
+gained the `FA73061` constant as an eighth rate while still asserting
+`9 notionals x 7 rates = 63 cells`. The count now says 72 and the "every
+notional up to a crore is priced" floor 56. On 22 Oct the cloud charge stack
+(CLOUD-CHG1, `Merge CLOUD-CHG1:` at `7fe3b6cc8`) landed on `feat/db-fix`
+before this package, which is what items 2 and 3 are about. Nothing in
+D-5100's rates or rows changed.
+
+1. **The extremes, each a test** (`crates/costs/tests/fa73061.rs`,
+   invariants CHG0-06 to CHG0-08): every month and year boundary from
+   2023-03-31 to 2026-04-01 and the last representable day; the 2026-04-01
+   STT change, across which the exchange charge and IPFT hold while the STT
+   moves; dates that do not exist (2026-02-29 and the rest), refused before
+   any rate is looked up; the fold's bound from one paisa to `i64::MAX`, with
+   its one real under-run of the half-up split found at exactly ₹50 lakh a
+   leg (177,650 paisa folded against 177,651 split); and 14 threads asking
+   about the same 563 days at once, getting the single-threaded answers.
+2. **`rate::ipft(exchange)` stays removed, and the one caller the merge
+   brought reads the dated IPFT instead.** Nothing outside `crates/costs`
+   called it. CLOUD-CHG1's dated option card (`costs::schedule`,
+   `dated_option_card`) called it once, and beside the ₹3,553 row that line
+   would have charged 0.03603% from 2026-03-01; with the function gone it no
+   longer compiles, which is the point. It now reads
+   `crate::regime::ipft_rate(exchange, day)?`, the one dated IPFT authority
+   `trip::Rates::resolve` reads too, and the card's NSE and BSE source lines
+   name that function. The card is ₹3,503 + ₹50 to 2026-02-28 and ₹3,553 + a
+   folded zero from 2026-03-01: the same 0.03553% on every day from
+   2024-10-01, so every figure the card carries is unchanged and
+   `dated-regime/r2` keeps its pinned fingerprint
+   (`costs::schedule::tests::the_rate_set_versions_are_pinned_to_the_tables_they_name`
+   passes without a re-pin). The card's test now pins the rows it adds —
+   (3,503, 50) on 2026-02-28 and (3,553, 0) on 2026-03-01, 2026-10-15 and
+   today — where it had pinned 3,503 after 2026-03-01 with a message naming
+   this package as the one that moves it. Re-adding an undated `ipft` is
+   refused by this entry.
+3. **The CLOUD-CHG1 golden test runs unchanged.**
+   `costs::dhan_calculator::the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+   was un-ignored by D-5131 on CLOUD-CHG1's own branch, so there is no
+   `#[ignore]` left to lift and `crates/costs/tests/dhan_calculator.rs` is not
+   edited. It prices the eleven live October option readings under the dated
+   selector and under today's table on 2026-10-15, 2026-10-16 and 2026-03-01.
+   With this change it passes on all three, as written: on the two October
+   dates every line and the total agree; on 2026-03-01 every line but STT
+   agrees and STT differs exactly by the 0.10% against 0.15% rate the test
+   asserts (the dated STT row of 2026-04-01 is a month later). Nothing was
+   forced green; the result is in the CHG-0 report
+   (`state/fix/round2/fix-CHG-0.json`).
+4. **Timing**, measured (not a gate) by the ignored
+   `the_dated_lookups_cost_the_same_on_every_row_measured`, in release,
+   2,000 timed batches of 1,000 calls each per figure, on 22 Oct 2026 on the
+   M4 Pro while other builds shared the machine. Each sample is a batch's
+   mean per call (one lookup is shorter than the clock's tick), so p99 and max
+   are of batch means, not of single calls. Across the five days measured
+   (a 2020 refusal, 2024-10-01, 2026-02-27, 2026-03-01, 2100-12-31):
+   `exchange_charge_rate` p50 2 ns, p99 2 to 8 ns, max 16 to 52 ns;
+   `ipft_rate` p50 2 to 3 ns, p99 2 to 4 ns, max 18 to 28 ns;
+   `Rates::resolve` p50 6 to 8 ns, p99 6 to 21 ns, max 17 to 54 ns; the dated
+   `RateCard::resolve` p50 9 to 15 ns, p99 14 to 19 ns, max 23 to 68 ns; one
+   `price` of a 2026-03-02 NIFTY round trip p50 54 ns, p99 63 ns, max 167 ns.
+   The same on the refused, the first and the last row: each lookup is the
+   fixed two-slot table walk it was, and the new IPFT table is one more of
+   the same shape, so nothing here scans.
+
 ### D-6891 — R3-19: a day's census publish reads one header region, not the whole list; a segment directory is never followed; the AG-05 follow-ups closed — 2026-10-21
 
 The number is the ledger head + 1 (amendment A6): this entry was written as
@@ -81021,6 +81174,345 @@ ranking for a reader, never a filing rule.
 **Cost.** No new operation: a `Sealed` refusal costs the successor door
 SC-4 already bounds (L-SC4-01, `docs/06-limits.md`); the kind is one match
 arm.
+
+### D-5420 — An `at=` instant past the calendar's last year ranks after every row of a window, not before it — 2026-10-17
+
+**Number** taken above every ledger head on every remote branch on 17 Oct
+(the highest was D-5301). Amendment A6: the landing renumbers it from the
+head it lands on.
+
+**What was observed.** The cloud mutation pass on `crates/api` (half A,
+`reports/cloud-mut-api-a-20261016.md`) found the mutant `delete -` in
+`SeriesPlan::bucket_of` alive: turning its `-1` into `1` changed no test.
+`bucket_of` answered `-1`, "before the first month", for every day it could
+not name. That covered a day before the epoch, and also a day past
+`pull::session::MAX_YEAR` (9999), which `Day::from_days` refuses.
+`/bars/window.json` takes `at=` as any whole number of unix seconds that fits
+in microseconds, so `at=253402300800` (10000-01-01) reaches it, and that
+instant was ranked before every row: ascending its index was 0 instead of the
+total, and the page served for it was the wrong end of the window.
+
+**Decision.** A day before the epoch is `-1`, before every month, and a day
+past the calendar is `i64::MAX`, after every month. `rank` already answers
+any bucket at or past the last as past every row, so nothing else moves.
+
+**Rejected.** Refusing an `at=` past 9999 at the route: it changes the wire
+contract of `bars_route.rs`, and the instant is a well-formed question with a
+well-defined answer (after everything held). Clamping `at` to 9999-12-31: the
+same answer, by a second rule for one fact.
+
+**Proof.** `bars_series_rs::bars_series_an_instant_past_the_calendar_is_after_every_row`
+(`crates/api/tests/cloud_mutants_bars.rs`) failed before the fix with
+`left: Some(0), right: Some(2)`. Invariant MUT-A-01.
+
+### D-5421 — The universe-lookup timing test is the fastest of seven interleaved samples a size, as D-0800's is — 2026-10-17
+
+**Number** as D-5420.
+
+**What happened.** `coverage::tests::the_lookup_does_not_grow_with_the_universe`
+took ONE sample of 20,000 lookups a universe and failed on unchanged code
+while four mutation runs shared the machine (16 Oct pass, NOT DONE item 5).
+
+**Decision.** Both sizes are warmed, then sampled seven times in turn, and
+each keeps its minimum, exactly D-0800's method. The 4x ceiling and
+`Coverage::of` are unchanged: an index that went back to folding the merged
+map grows its minimum as surely as its single sample.
+
+**Rejected.** Skipping the test under load: a gate that steps aside when the
+machine is busy is the hidden fallback `CLAUDE.md` §4 bans. Raising the
+ceiling: it weakens the regression it exists to catch.
+
+**Limit.** It reduces the chance of a false failure and does not remove it;
+the ratio is a wall-clock measurement on a shared machine (§3 rule 6).
+
+### D-5422 — A mid-loop cancellation and the 24 M and 64 M row budgets are driven by test-only seams, on the `READ_HELD` precedent — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** Eighteen mutants in `crates/api` were left alive by
+the 16 Oct pass because no deterministic test could reach them: five differ
+only when a client goes away WHILE a loop runs (a flag set before the call
+is caught by the first look), and thirteen only past `MAX_SCAN_BARS`
+(24,000,000 rows read) or `MAX_EXTREMES_SCAN_BARS` (64,000,000 rows owed) in
+one request, about 0.9 GB and 2.4 GB of fixture.
+
+**Decision.** Three `#[cfg(test)]` seams, each compiled out of every non-test
+build:
+
+1. `bars::cancel_trip`: a flag from `Cancel::pair` reads "cancelled" from a
+   look a test chose, on the test's own thread. `Cancel::never` is untouched.
+2. `bars::sort::SCAN_BUDGET` and `EXTREMES_BUDGET`: thread-local lowerings of
+   the two budgets, read through `scan_budget()` and `extremes_budget()`,
+   exactly as `READ_HELD` lowers `MAX_READ_HELD` (D-3349). The production
+   values, the `pub const`s and the refusal sentences are unchanged.
+
+**Rejected.** Planting 24 M and 64 M rows: gigabytes of fixture a test. A
+second thread that sets the flag mid-loop: not deterministic, so a test that
+can pass on a broken stride. Making the budgets runtime parameters: it widens
+the production signature for a test. Leaving the eighteen as NOT DONE:
+`CLAUDE.md` §9 asks for no surviving mutant.
+
+**Proof.** `server::spot::cloud_mutant_tests::a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride`,
+`bars::cloud_mutant_tests::a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled`,
+`bars::cloud_mutant_tests::a_stretch_read_looks_at_its_client_once_a_stride`,
+`bars::sort::cloud_mutant_tests::a_value_page_is_served_to_the_scan_budget_and_refused_past_it`,
+`bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`,
+`bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget`.
+Invariants MUT-A-02 to MUT-A-05.
+
+### D-5423 — The bars scan orders a null open interest by time alone, never by the number a vendor stamped — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** A branch-coverage run of `crates/api/src/bars.rs`
+found the open-interest operand of the scan's candidate never read: the
+router sends a time-of-day order to `scan` and open interest elsewhere (the
+sort indexes for a derivative, a seek for an index or a share). Asked
+directly, `scan` broke `SortKey`'s contract. An index's or a share's open
+interest is not applicable (D-3322) and every one of its rows is a null, but
+the candidate still carried the number the vendor stamped, and the
+comparator ordered nulls by it before time: `[30, null, 10, null, 20]` came
+back `30, 20, 10, null, null` descending, a null ordered as a real number.
+
+**Decision.** A null candidate's value is `OI_NULL`, so nulls compare equal
+and fall to time, then series, in both directions, as `SortKey::of` and
+`window_cancellable` state.
+
+**Rejected.** Leaving it because no route reaches it: the scan is the
+documented brute force a future route may use, and a latent wrong order is
+the silent wrong answer `CLAUDE.md` §4 bans. Ordering in the comparator
+instead (ignore `value` when both are null): the same answer, read on every
+comparison instead of set once a row.
+
+**Limit.** Unreachable from any route today; no served page changes.
+
+**Proof.** `bars::cloud_mutant_tests::the_scan_orders_open_interest_with_its_nulls_last`
+failed before the fix (`desc false`: the five nulls in stamped-value order)
+and passes after it. Invariant MUT-A-06.
+
+### D-5250 — The Py-language is used nowhere in this repository and its name appears in no tracked file; one line of D-0207 is the only recorded exception, and a `cargo test` gate refuses everything else — 2026-10-16
+
+**Status: locked.** The operator's rule, given on 16 October 2026 at 08:35 IST.
+Throughout this entry the language is called "the Py-language": the language
+whose source files end in `.py`. Its name is not written here, because this
+entry is a tracked file and the rule it records applies to it.
+
+**Decision.**
+
+1. **The rule.** The Py-language is never used anywhere in this repository —
+   not as a dependency, a tool, a build step, a script, a notebook or a file —
+   and its name appears in no tracked file, in any case, `web/` included. This
+   is stricter than `CLAUDE.md` §2 twice over: §2 refuses the language by
+   extension only outside `web/` (D-0053 made `web/` unrestricted), and §2 says
+   nothing about the name.
+2. **Five lines named it on `feat/db-fix` at `4756cce0`, in four files.** Four
+   are rewritten so the meaning stays and the name goes. Each now says "the
+   vendor's own SDK", which is the charter's own wording: `docs/00-charter.md`,
+   the `PermissionException` row, *"Live in the vendor's own SDK"*, which
+   already cites the SDK's repository and file. Nothing the sentences claimed
+   about the vendor changed; only the language's name went.
+
+   | File | Line | Was | Now |
+   |---|---|---|---|
+   | `crates/pull/src/kite.rs` | 25 | `vendor's own` + the name + ` SDK.` | `vendor's own SDK.` |
+   | `crates/pull/src/kite.rs` | 102 | the name + ` SDK. An entitlement failure, not a session failure.` | `SDK. An entitlement failure, not a session failure.` |
+   | `crates/pull/src/refusal.rs` | 29 | `in its own` + the name + ` SDK rather than on the` | `in its own SDK rather than on the` |
+   | `crates/pull/src/vendor.rs` | 6227 | `in the vendor's own` + the name + ` SDK -- so on the status axis they are one` | `in the vendor's own SDK -- so on the status axis they are one` |
+
+3. **The fifth is inside D-0207, and it stays.** This ledger's header says
+   *"Append only. Entries are never edited"*, and no decision allows an
+   editorial redaction of an old entry. Two entries bent the rule, each for one
+   named defect and neither as a general licence: D-0212 left a false claim
+   standing with *"an additive bracket, because this file is append-only and a
+   bracket is not a rewrite"*, and D-0215 repointed two citations in place
+   *"because leaving them would be worse than the append-only rule they
+   bend"*. Neither covers removing a word. So the line stays exactly as
+   written: `docs/05-decisions.md` line 16338, D-0207's paragraph headed **The
+   pair that forced it.**, the words "the vendor's own" + the name + " SDK".
+   **This entry supersedes that wording**: read D-0207's sentence as *"the
+   second in the vendor's own SDK"*. It is the only occurrence of the name in
+   the tree, and the only exception the gate below admits. Whether to redact it
+   in place is the operator's decision; doing so means removing the exception
+   from the gate and from `NOPY-04` in the same change.
+4. **The gate.** `crates/vocab/tests/no_py_language.rs`, beside
+   `workspace_is_rust.rs`, the other workspace-wide Rust-only scan that runs
+   under `cargo test`. It reads every file `git ls-files` lists, from the
+   working tree, every byte of each, and fails on: the name in any case, in a
+   file's bytes or in its path; a file whose extension is `py`, `pyi`, `pyc`,
+   `pyo`, `pyw`, `pyd`, `pyz` or `ipynb`; and a shebang line, on any line, that
+   runs the interpreter by its name or as `py`, `pypy`, `jython` or `graalpy`
+   (a `#![` Rust inner attribute is not a shebang). The needle is
+   two `concat!` halves that mean nothing apart, with a length tripwire, so the
+   test file never holds the word. The exception is matched by EXACT PATH AND EXACT LINE
+   CONTENT and must match exactly once: a copied line fails, and so does the
+   line's disappearance. A tree with no `.git` (a `cargo-mutants` copy) or a
+   host where `git` cannot run is walked as a directory instead, skipping
+   `.git`, the root `target` and every `node_modules`, and the run says so; a
+   `.git` that `git` cannot list is a failure. Invariants `NOPY-01` to
+   `NOPY-06` in `docs/04-invariants.md`.
+
+**What this does not change.**
+
+* **CI gate 15 and its allowlist in `.github/workflows/ci.yml` are untouched**:
+  this change edits no workflow. Its allowlist still names all four files; after
+  this change three of them hold no occurrence, which gate 15 reports as a loose
+  entry and does not fail on (*"THE COUNTS ARE CEILINGS, NOT EXACT"*). Pruning
+  it to `docs/05-decisions.md 1` is a workflow edit left to whoever may make one.
+* **`CLAUDE.md` §2 is not edited here.** It still says that under `web/` the
+  front end may use *"Any language"*. This entry narrows that for one language,
+  which is a scope change under §3 rule 2, and §2's sentence should say so; that
+  edit is the operator's. Until it lands, this entry and the gate are the
+  record, and `CLAUDE.md` §10's precedence rule reads the two as a
+  contradiction for `web/` alone.
+
+**Rejected.**
+
+* *Deleting the four sentences.* Gate 15's own comment refuses that trade: it
+  would delete true provenance about the vendor (§3 rule 1). The rewrite keeps
+  the provenance — the SDK is still the vendor's own, and the charter row still
+  names its repository — and drops only the name, which the provenance never
+  needed.
+* *Editing D-0207 in place.* See item 3: nothing allows it, and doing it
+  anyway is the move the ledger's header forbids.
+* *A per-file or pattern exception.* Gate 15's escape hatch is a count per
+  file, so any line of an allowed file may carry the name up to its ceiling.
+  This gate's is one path and one exact line, matched exactly once.
+* *Folding the extension and shebang checks into gate 15.* It lives in a
+  workflow, which this change does not edit, and it does not run under
+  `cargo test`, which §9 makes the definition of done.
+
+**Why.** A rule that lives in a document is negotiated in every pull request; a
+rule that fails the build is not (D-0001). Gate 15's own comment lists what it
+cannot see — the interpreter's binary name and a shebang line — and a `.py`
+under `web/` passes gate 1, because `web/` is exempt from the extension
+allowlist. This gate closes all three under `cargo test`.
+
+### D-5251 — D-0207's one line naming the Py-language is redacted in place, on the operator's word; no exception remains, and `CLAUDE.md` §2 states the rule — 2026-10-16
+
+**Status: locked.** The permission is the operator's, written in session
+e1d04fcd on 16 October 2026, just before 16:00 IST, in these words: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* That is permission for exactly one in-place edit, and this entry is
+the new decision entry it asks for. It supersedes D-5250 item 3 and its "What
+this does not change" bullet on `CLAUDE.md` §2.
+
+**Decision.**
+
+1. **One in-place edit of an old entry, and only this one.** D-0207's paragraph
+   headed **The pair that forced it.** (line 16338 at `4756cce0`) read "the
+   vendor's own" + the language's name + " SDK". It now reads *"the second in
+   the vendor's own SDK. On the status axis they are one event."* Nothing else
+   in D-0207, or in any other entry, is touched. The ledger's header rule —
+   *"Entries are never edited"* — stands for every other case; this is a named
+   exception granted by the operator for one word, in the same spirit as
+   D-0212's bracket and D-0215's repointing, and it grants nothing further.
+2. **The gate excuses nothing.** `crates/vocab/tests/no_py_language.rs` loses
+   its exception: no path, no line, no pattern. The line D-0207 used to hold is
+   kept in the test only as data, to prove it is now refused at any path
+   (`no_line_is_excused_not_even_the_one_d0207_held`, which also pins D-0207's
+   line as this entry left it). `NOPY-04` is restated to match.
+3. **`CLAUDE.md` §2 states the rule.** One paragraph under the `web/`
+   exception: the Py-language is never used anywhere, `web/` included, and its
+   name appears in no tracked file; it cites D-5250 and the gate. `CLAUDE.md`
+   and D-5250 no longer contradict each other for `web/`.
+
+**What it does not change.** CI gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files; all four now hold no
+occurrence, so gate 15 reports four loose entries and passes. Emptying it is a
+workflow edit this change does not make.
+
+**Rejected.** *Keeping the exception after the operator allowed the edit.* An
+exception is a place the rule does not hold; with the reason for it gone, it is
+only a place a future occurrence could hide.
+
+### D-5258 — NOPY-1 merged back onto `feat/db-fix`: D-5250 and D-5251 land, D-5252 to D-5257 stay off this ledger because each of their changes was already here, and the charter names the rule (CLOUD-NOPY1) — 2026-10-21
+
+**Status: locked.**
+
+**What was merged, one commit at a time.** `origin/cloud/nopy1-20261016` was
+cut from `4756cce0` and carries eleven commits. Each was taken onto
+`fix/db-CLOUD-NOPY1`, cut from `feat/db-fix` at `8c67456ac` (after CLOUD-RUST1,
+its dependency), with `git cherry-pick -x`, and a commit was left only when its
+change was already on `feat/db-fix`:
+
+| Cloud commit | What it carried | Taken or left, and why |
+|---|---|---|
+| `fb02605ad` | D-5250: four comment rewrites in `crates/pull`, the gate, `NOPY-01` to `NOPY-06`, the report | **taken**. The ledgers conflicted only where both sides appended at the end: both kept, `feat/db-fix`'s first. `crates/vocab/tests/no_float.rs` lists both new test files, this one and RUST-1's `no_runtime_spawn.rs` (eleven) |
+| `db622a8e6` | D-5251: D-0207's line, the gate with no exception, `CLAUDE.md` §2 | **taken**, and D-5251's status paragraph now quotes the operator's permission word for word (below) |
+| `c4327de34` | `web/build` regenerated from `web/src` at `4756cce0` | **left**: generated output of a tree that is not this one; `feat/db-fix` regenerates `web/build` from its own merged tree (`2a7ba92a6`) |
+| `dcc70714d` | D-5252 (gate 0 lists `/bin/df`), D-5253 (gate 1d's fifteen `crates/pull` literals) | **left**: GF-1 (`b2acb33ba`) put both here first: `SPAWN_PROGRAMS` in `.github/source_scan.rs` holds `/bin/df`, and all fifteen words are declared in `WP62_LITERAL` and `MERGED_AFTER_GF1_LITERAL` of `.github/gates_tree.rs` |
+| `9288716a8` | D-5254: invariant rows naming deleted or renamed tests | **left**: every row it restates (AF-23, AF-28j, AFA-13, AFG-71, APIC-05, C4-CLI-03-03, GI-01, GI-07, GI-10, MR-34, PIF-02, SS-06, ZMC-01, ZR-04, ZX-20) was already restated here, each by R3-14 (`7628699c6`) and three also by PREC-1 or another package; gate 10's two reds on `8c67456ac` are HA-02 and AG05-13, neither of them |
+| `4d9680881` | D-5255: gates 12, 19 and gate 11 rule 5c | **left**: each site is already resolved here (`bars_change`'s and `bars_series`'s proofs, `cash_session_cache`'s bound, `safe_files`' bench, `NotHeld::note_month`, `request_minutes`' event, the two test modules' allows), and `gdfl_import`'s `provenance` and `stop_at_census` moved since: they are in `gdfl_import_filing.rs` and `gdfl_import_census.rs`, where `provenance` hands its refusal back un-noted for the caller to note and `stop_at_census` emits its one event before the push, the same repair; the reds gates 12 and 19 show on `8c67456ac` are other sites, owned by the base-gate packages |
+| `a986ba9ef`, `f9ccaa52c` | the report's sections 6.1 to 6.5 | **taken**: the cloud branch's own record, as it ran on `4756cce0` |
+| `47dbd2c74` | D-5256: the staging test holds the leftover open | **left**: PREC-1 (`24a4a4300`) made the same repair to the same test |
+| `926b1106c` | D-5257: `521066e6` listed as squashed | **left**: BASE-CITED (`441da9fa7`, D-5820) listed it and reworded both limits sentences |
+| `bba8ec7c3` | the gate's walk guard: four anchor files read, not a read count | **taken** |
+
+**D-5252 to D-5257 head no entry here, and are never reused.** The cloud
+branch and `reports/cloud-nopy1-20261016.md` §6 name them; a reader following
+one from the report lands here, where the change it named is attributed to the
+entry or commit that made it on this branch.
+
+**The one in-place edit of an old entry.** D-0207's paragraph headed **The pair
+that forced it.** reads *"the second in the vendor's own SDK"*, and nothing else
+in D-0207 or in any other entry was edited. The operator gave that permission
+in session e1d04fcd on 16 October 2026, just before 16:00 IST: *"Yes, edit
+D-0207 to remove the word, and add a new decision entry that records the edit
+and why."* D-5251 is that entry; its status paragraph had paraphrased the
+permission and now quotes it. D-5251 was on no branch this ledger had merged,
+so correcting its text edits no landed entry.
+
+**The charter names the rule.** `docs/00-charter.md` holds the prohibitions
+(`CLAUDE.md` §10), and it gains prohibition 11, citing D-5250, D-5251 and the
+gate.
+
+**The gate's refusal line no longer leaks the name through a path.** The
+self-check of this merge-back planted, under `git`, a clean file inside a
+directory named for the language: the gate refused it, and its refusal line
+printed the path whole, the name in it, although the gate's own message says
+the name is masked so the message is not the leak. The line now masks the
+path as it masks the evidence, and the walk's own words (a root path, an
+absent file) are masked where they are printed. The test that found it failed
+before the change and passes after
+(`extreme_inputs_are_read_whole_through_the_gates_own_walk`, NOPY-08). The
+gate's three guards are now one function, `verdict`, so each is handed the walk
+it must refuse at its boundary (NOPY-07): before, the 1,000-file floor and the
+anchor count had no test that could fail them.
+
+**The merged tree, measured on 21 Oct 2026.** A case-insensitive `git grep`
+for the name over every tracked file finds nothing; no tracked path holds the
+name or ends in any of the gate's eight extensions; and
+`no_tracked_file_is_runs_or_names_the_py_language` passes over every tracked
+file with no exception in it. Nothing merged into `feat/db-fix` after
+`4756cce0` named the language: before the rewrites, the five lines the search
+found on `8c67456ac` were exactly the five D-5250 lists, at the same lines.
+`feat/db-fix` was merged in again at `5ff4956cc` (CLOUD-MUTPULL, DATA-1's fix
+and IA-3-OPT after `8c67456ac`); the same search over that merged tree, and
+over the messages of every commit between `4756cce0` and it, finds nothing, so
+nothing it brought needed rewording. It was merged in a third time on 22 Oct
+2026 at `a5d0bea8a` (R3-19 and R3-30 after `5ff4956cc`): only the three
+ledgers conflicted, each where both sides appended at the end, and both sides
+were kept, `feat/db-fix`'s rows first. The same two searches over that merged
+tree and over every commit message from `4756cce0` to `a5d0bea8a` find nothing.
+It was merged in a fourth time on 22 Oct 2026 at `58660b1d7` (PIT-1 after
+`a5d0bea8a`) and a fifth at `667db8e2a` (CLOUD-CHG1 and SC-4 after
+`58660b1d7`): no file conflicted either time, and the same two searches over
+each merged tree and over every commit message from `4756cce0` to `667db8e2a`
+find nothing.
+
+**One sentence of D-5250 corrected before it lands.** D-5250 is on no branch
+this ledger had merged, so its item 4 is corrected in place rather than
+superseded: it spelled the needle's two halves out in prose, which writes the
+name for a reader although no search finds it. It now says *"two `concat!`
+halves that mean nothing apart"*, and the report's same sentence says the same.
+The gate's own file keeps the halves; it cannot hold the needle any other way.
+
+**Left to their owners, said plainly.** Gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files that hold no occurrence, so
+it passes with four loose-entry warnings; and `.github/source_scan.rs` still
+says `/disk.json` runs `/bin/df` every 30 s, which D-5240 ended (the entry is
+still needed by `disk_route`'s test that compares with `df`). Both are edits
+under `.github/` that this merge does not make.
 
 ### D-7290 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
 

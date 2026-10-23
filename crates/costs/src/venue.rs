@@ -1,9 +1,11 @@
 //! Which exchange's circular governs a trade.
 //!
 //! The exchange transaction charge and the IPFT are venue-scoped, because the
-//! circulars that fix them are: NSE `FA64232` and the BSE notice of
-//! 27-Sep-2024 are two documents about two exchanges. So the rate tables in
-//! [`crate::regime`] are keyed on [`Exchange`] and not on an instrument name.
+//! circulars that fix them are: NSE `FA64232` (from 2024-10-01) and `FA73061`
+//! (from 2026-03-01, D-5100) and the BSE notice of 27-Sep-2024 are documents
+//! about two exchanges, and an NSE circular moves no BSE rate. So the rate
+//! tables in [`crate::regime`] are keyed on [`Exchange`] and not on an
+//! instrument name.
 //!
 //! # Why this crate names no instrument of its own
 //!

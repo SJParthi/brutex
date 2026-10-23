@@ -47,7 +47,7 @@ use costs::money::{
     ceil_to_paisa, ceil_to_rupee, floor_to_paisa, levy_ceiling, scaled, statutory_levy,
 };
 use costs::rate::{BSE_IPFT, GST_ON_FEE_BASE, NSE_IPFT, SEBI_TURNOVER_FEE, STAMP_DUTY_BUY_SIDE};
-use costs::regime::{BSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE};
+use costs::regime::{BSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE, NSE_EXCHANGE_CHARGE_FA73061};
 
 /// Every rate this crate publishes, spanning zero to the GST base.
 fn rates() -> Vec<(&'static str, costs::rate::BpsX100)> {
@@ -58,6 +58,8 @@ fn rates() -> Vec<(&'static str, costs::rate::BpsX100)> {
         ("STAMP_DUTY_BUY_SIDE", STAMP_DUTY_BUY_SIDE),
         ("BSE_EXCHANGE_CHARGE", BSE_EXCHANGE_CHARGE),
         ("NSE_EXCHANGE_CHARGE", NSE_EXCHANGE_CHARGE),
+        // The 2026-03-01 row, FA73061, D-5100.
+        ("NSE_EXCHANGE_CHARGE_FA73061", NSE_EXCHANGE_CHARGE_FA73061),
         ("GST_ON_FEE_BASE", GST_ON_FEE_BASE),
     ]
 }
@@ -200,13 +202,14 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
         }
     }
     assert_eq!(
-        cells, 63,
-        "9 notionals x 7 rates = 63 cells; a generator that produced fewer \
-         would pass every assertion above without testing anything"
+        cells, 72,
+        "9 notionals x 8 rates = 72 cells (the eighth is the FA73061 row, D-5100); a \
+         generator that produced fewer would pass every assertion above without \
+         testing anything"
     );
     assert!(
-        checked >= 49,
-        "the 7 notionals up to a crore x 7 rates must all reach the guarded \
+        checked >= 56,
+        "the 7 notionals up to a crore x 8 rates must all reach the guarded \
          invariants above; only {checked} did"
     );
     // Every shipped rate is below `RATE_SCALE`, so no levy ceiling here leaves
