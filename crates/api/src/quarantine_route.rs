@@ -1,8 +1,4 @@
-    let pressing = Pressing;
-    let root = site.store_root.clone();
-    let run = crate::detail::run_ops_read(move || {
-        let _pressing = pressing;
-        let borrowed//! `GET /pull/quarantine.json` and `POST /pull/quarantine`: the Zerodha
+//! `GET /pull/quarantine.json` and `POST /pull/quarantine`: the Zerodha
 //! quarantine's plan and its press. R4-18; findings ING-01, RT-DATA-02, Z5,
 //! Z6.
 //!

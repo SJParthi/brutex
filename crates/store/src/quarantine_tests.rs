@@ -19,7 +19,8 @@ use brutex_core::vendor::Vendor;
 use super::{
     Applied, ApplyError, BUCKET, CAPACITY, Cause, Entry, INDEX_LEN, LEDGER_HEAD, MAX_REASON, Probe,
     QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month, check_reason, digest_of,
-    index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record, series_key,
+    index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record,
+    series_key,
 };
 use crate::file::BarFile;
 use crate::format::{Bar, OI_NULL};
@@ -776,7 +777,10 @@ fn a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing
         (Scope::WholeMonth, Cause::BeforeListing, 4)
     );
     let summary = Summary::load(&store.root, Vendor::Zerodha).expect("a summary");
-    assert_eq!(summary.month(path).map(|e| e.scope), Some(Scope::WholeMonth));
+    assert_eq!(
+        summary.month(path).map(|e| e.scope),
+        Some(Scope::WholeMonth)
+    );
     let row = summary
         .instrument("NSE", "CASH", "QFIXW")
         .expect("the share is flagged");
@@ -787,7 +791,11 @@ fn a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing
         apply_month(&store.root, path, SYMBOL, &[between], why(Cause::ZeroPrice)),
         Err(ApplyError::Repair(RepairError::UnheldStamp(between)))
     );
-    assert_eq!(all_bytes_under(&store.root), before, "still nothing written");
+    assert_eq!(
+        all_bytes_under(&store.root),
+        before,
+        "still nothing written"
+    );
 }
 
 /// The derived rung the verb applies next: a 2min month recorded whole is

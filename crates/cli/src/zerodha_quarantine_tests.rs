@@ -473,7 +473,11 @@ fn a_plan_whose_reason_is_the_apply_flag_is_a_plan_not_a_writer() {
     let code = command_at(&applied, &shadow.0, &mut out);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("ZERODHA QUARANTINE REFUSED"), "{out}");
-    assert_eq!(files_under(&real.0), before, "the refused press wrote nothing");
+    assert_eq!(
+        files_under(&real.0),
+        before,
+        "the refused press wrote nothing"
+    );
 }
 
 /// R4-18 repair 1: a plan row listing one stamp twice is refused by name,
@@ -495,7 +499,10 @@ fn a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one(
     let at = minute(1, 410).ts_micros;
     let twice = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[at, at])]);
     let refused = rows_of(&twice, &asked).expect_err("a stamp listed twice");
-    assert!(refused.contains(&format!("lists stamp {at} twice")), "{refused}");
+    assert!(
+        refused.contains(&format!("lists stamp {at} twice")),
+        "{refused}"
+    );
     let once = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[at])]);
     assert_eq!(rows_of(&once, &asked).map(|rows| rows.len()), Ok(1));
     let root = Root::new("lower");
@@ -518,8 +525,16 @@ fn a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one(
     assert!(out.contains(&format!("CASH {SYMBOL} 2018-12-01")), "{out}");
     assert!(out.contains("plan: 1 bar(s) would be set aside"), "{out}");
     assert_eq!(
-        ask(&[&lower, "2018-12-01", "2018-12-31", "--cause", "zero_price", "--reason", "r"])
-            .map(|asked| asked.symbol),
+        ask(&[
+            &lower,
+            "2018-12-01",
+            "2018-12-31",
+            "--cause",
+            "zero_price",
+            "--reason",
+            "r"
+        ])
+        .map(|asked| asked.symbol),
         Ok(Some(SYMBOL.to_owned()))
     );
 }

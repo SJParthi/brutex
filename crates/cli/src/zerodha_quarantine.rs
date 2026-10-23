@@ -28,15 +28,7 @@
 //! Month by month, oldest first, through `store::quarantine::apply_month`:
 //! a month whose every bar is named is RECORDED (no empty generation); any
 //! other gets a new generation without the named bars through
-//! `store::re                let twice = sorted.windows(2).find_map(|pair| match pair {
-                    [one, two] if one == two => Some(*one),
-                    _ => None,
-                });
-                if let Some(twice) = twice {
-                    return Err(format!(
-                        "a plan row lists stamp {twice} twice: `{key} {month}`"
-                    ));
-                }::drop_month`, the old one byte-identical. Each act is
+//! `store::repair::drop_month`, the old one byte-identical. Each act is
 //! ledgered in `<store>/audit/zerodha.quarantine.ledger` before the door
 //! publishes, and indexed after. A minute month's derived rungs (2 to 60
 //! minutes) are then set aside the same way: every derived bar whose span
@@ -124,8 +116,8 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     } else {
         // THE CORE'S CANONICAL SPELLING, the one the store and the plan key
         // a series by: `irfc` is `IRFC`, never a silent "nothing to do".
-        let symbol = brutex_core::symbol::Symbol::new(first)
-            .map_err(|why| format!("`{first}`: {why}"))?;
+        let symbol =
+            brutex_core::symbol::Symbol::new(first).map_err(|why| format!("`{first}`: {why}"))?;
         Some(symbol.as_str().to_owned())
     };
     let (from, to) = (parse_day(from)?, parse_day(to)?);
