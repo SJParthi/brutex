@@ -861,8 +861,11 @@ impl Journal {
         self.poisoned = true;
         self.read_lines(whole)?;
         self.poisoned = false;
-        // THE INDEXES OF THE DAYS THE NEW LINES NAMED, AND NO OTHER.
-        let mut days = HashSet::new();
+        // THE INDEXES OF THE DAYS THE NEW LINES NAMED, AND NO OTHER. One
+        // day a line at most, so the set is sized once by the new lines
+        // and an insert never rehashes (docs/07 law 2; BASE-GATE11, D-6621).
+        let read = newlines(whole.as_bytes()).saturating_add(1);
+        let mut days = HashSet::with_capacity(usize::try_from(read).unwrap_or(0));
         for line in whole.split('\n') {
             let mut fields = line.split(' ');
             let (Some(verb), Some(kind), Some(on), Some(only)) =
@@ -878,7 +881,6 @@ impl Journal {
             days.insert(of_day);
         }
         self.derive_days(&days);
-        let read = newlines(whole.as_bytes()).saturating_add(1);
         self.loaded = self
             .loaded
             .saturating_add(u64::try_from(whole.len() + 1).unwrap_or(u64::MAX));
