@@ -1634,100 +1634,117 @@ fn apart(a: Day, b: Day) -> u32 {
 #[must_use]
 pub fn judge(runs: &[Run]) -> Vec<Judged> {
     let steps = steps_of(runs);
-    let n = steps.len();
-    // The nearest proven step the other way, before and after: one pass each.
-    let mut nearest: Vec<Option<Day>> = vec![None; n];
-    let mut last: [Option<Day>; 2] = [None, None];
-    for (at, step) in steps.iter().enumerate() {
+    // The nearest proven step the other way, before then after: one pass
+    // each way, two days kept.
+    let mut nearest: Vec<Option<Day>> = vec![None; steps.len()];
+    let (mut last_up, mut last_down) = (None, None);
+    for (step, near) in steps.iter().zip(nearest.iter_mut()) {
         if !step.proven() {
             continue;
         }
-        let side = usize::from(step.up());
-        nearest[at] = last[1 - side];
-        last[side] = Some(step.ex_date);
+        if step.up() {
+            *near = last_down;
+            last_up = Some(step.ex_date);
+        } else {
+            *near = last_up;
+            last_down = Some(step.ex_date);
+        }
     }
-    let mut next: [Option<Day>; 2] = [None, None];
-    for (at, step) in steps.iter().enumerate().rev() {
+    let (mut next_up, mut next_down) = (None, None);
+    for (step, near) in steps.iter().zip(nearest.iter_mut()).rev() {
         if !step.proven() {
             continue;
         }
-        let side = usize::from(step.up());
-        if let Some(after) = next[1 - side] {
-            let closer = nearest[at]
-                .is_none_or(|before| apart(after, step.ex_date) < apart(before, step.ex_date));
-            if closer {
-                nearest[at] = Some(after);
-            }
+        let after = if step.up() { next_down } else { next_up };
+        if let Some(after) = after
+            && near.is_none_or(|before| apart(after, step.ex_date) < apart(before, step.ex_date))
+        {
+            *near = Some(after);
         }
-        next[side] = Some(step.ex_date);
+        if step.up() {
+            next_up = Some(step.ex_date);
+        } else {
+            next_down = Some(step.ex_date);
+        }
     }
     let reversed: Vec<Option<Day>> = steps
         .iter()
         .zip(&nearest)
         .map(|(step, by)| by.filter(|by| apart(*by, step.ex_date) <= REVERSAL_DAYS))
         .collect();
-    // The wobble: the largest far end of a REVERSED step within WOBBLE_DAYS,
-    // a monotone window maximum each way (each step enters and leaves once).
-    let mut wobble: Vec<Ratio> = vec![Ratio::ONE; n];
-    let mut window: std::collections::VecDeque<(Day, Ratio)> = std::collections::VecDeque::new();
-    for (at, step) in steps.iter().enumerate() {
-        while window
-            .front()
-            .is_some_and(|(day, _)| apart(*day, step.ex_date) > WOBBLE_DAYS)
-        {
-            window.pop_front();
-        }
-        if let Some((_, far)) = window.front() {
-            wobble[at] = wobble[at].max(*far);
-        }
-        if step.proven() && reversed[at].is_some() {
-            let far = step.far();
-            while window.back().is_some_and(|(_, held)| *held <= far) {
-                window.pop_back();
-            }
-            window.push_back((step.ex_date, far));
-        }
-    }
-    window.clear();
-    for (at, step) in steps.iter().enumerate().rev() {
-        while window
-            .front()
-            .is_some_and(|(day, _)| apart(*day, step.ex_date) > WOBBLE_DAYS)
-        {
-            window.pop_front();
-        }
-        if let Some((_, far)) = window.front() {
-            wobble[at] = wobble[at].max(*far);
-        }
-        if step.proven() && reversed[at].is_some() {
-            let far = step.far();
-            while window.back().is_some_and(|(_, held)| *held <= far) {
-                window.pop_back();
-            }
-            window.push_back((step.ex_date, far));
-        }
-    }
+    // The wobble: the largest far end of a REVERSED step within
+    // WOBBLE_DAYS, a window maximum each way.
+    let mut wobble: Vec<Ratio> = vec![Ratio::ONE; steps.len()];
+    wobble_pass(
+        steps
+            .iter()
+            .zip(reversed.iter().map(Option::is_some))
+            .zip(wobble.iter_mut())
+            .map(|((step, flag), held)| (step, flag, held)),
+    );
+    wobble_pass(
+        steps
+            .iter()
+            .zip(reversed.iter().map(Option::is_some))
+            .zip(wobble.iter_mut())
+            .rev()
+            .map(|((step, flag), held)| (step, flag, held)),
+    );
     steps
         .into_iter()
         .zip(reversed.into_iter().zip(wobble))
-        .map(|(step, (reversed, wobble))| {
-            let verdict = if !step.proven() {
-                Verdict::Unproven
-            } else if let Some(by) = reversed {
-                Verdict::Anomaly(Anomaly::Reversed { by })
-            } else if step.old_days < HOLD_DAYS || step.new_days < HOLD_DAYS {
-                Verdict::Anomaly(Anomaly::Short {
-                    old_days: step.old_days,
-                    new_days: step.new_days,
-                })
-            } else if step.near() <= wobble {
-                Verdict::Anomaly(Anomaly::WithinWobble { wobble })
-            } else {
-                Verdict::Lasting
-            };
-            Judged { step, verdict }
+        .map(|(step, (reversed, wobble))| Judged {
+            verdict: verdict_of(&step, reversed, wobble),
+            step,
         })
         .collect()
+}
+
+/// One direction of [`judge`]'s wobble: each step's wobble is raised to the
+/// largest far end of a reversed step already passed within
+/// [`WOBBLE_DAYS`]. A monotone window: each reversed step enters once and
+/// leaves once, so the pass is O(steps).
+fn wobble_pass<'a>(steps: impl Iterator<Item = (&'a Step, bool, &'a mut Ratio)>) {
+    let mut window: std::collections::VecDeque<(Day, Ratio)> = std::collections::VecDeque::new();
+    for (step, reversed, wobble) in steps {
+        while window
+            .front()
+            .is_some_and(|(day, _)| apart(*day, step.ex_date) > WOBBLE_DAYS)
+        {
+            window.pop_front();
+        }
+        if let Some((_, far)) = window.front() {
+            *wobble = (*wobble).max(*far);
+        }
+        if reversed {
+            let far = step.far();
+            while window.back().is_some_and(|(_, held)| *held <= far) {
+                window.pop_back();
+            }
+            window.push_back((step.ex_date, far));
+        }
+    }
+}
+
+/// The verdict of one step, given the nearest step the other way within
+/// [`REVERSAL_DAYS`] (if any) and the share's wobble around it.
+fn verdict_of(step: &Step, reversed: Option<Day>, wobble: Ratio) -> Verdict {
+    if !step.proven() {
+        return Verdict::Unproven;
+    }
+    if let Some(by) = reversed {
+        return Verdict::Anomaly(Anomaly::Reversed { by });
+    }
+    if step.old_days < HOLD_DAYS || step.new_days < HOLD_DAYS {
+        return Verdict::Anomaly(Anomaly::Short {
+            old_days: step.old_days,
+            new_days: step.new_days,
+        });
+    }
+    if step.near() <= wobble {
+        return Verdict::Anomaly(Anomaly::WithinWobble { wobble });
+    }
+    Verdict::Lasting
 }
 
 /// The measured rows the steps of `runs` make: one per LASTING step
