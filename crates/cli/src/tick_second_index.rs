@@ -669,18 +669,78 @@ pub fn years_in(dir: &Path) -> Result<Vec<u16>, String> {
     Ok(out)
 }
 
+/// The whole of one file this check wrote (a version's CSV or index, a day
+/// segment), read only if it is a regular file standing at its own name
+/// (D-5189).
+///
+/// Every such file is made by a staged write and a hard link, so it is
+/// always a regular file; anything else at the name is not one of them and
+/// is refused by name, never followed or waited on. The open is
+/// `store::open_flags::open_read_no_follow` (`O_NOFOLLOW | O_NONBLOCK`): a
+/// symbolic link is refused by the host (a dangling one is named a link,
+/// not a missing file), and a named pipe opens at once and is refused by its
+/// `fstat` instead of holding the run for good (verify-DATA-2-r3 follow-up).
+/// One open, one `fstat` and one read of the file.
+///
+/// # Errors
+///
+/// A link, a pipe, a directory or any other non-regular file, or the host's
+/// refusal, each naming `path`.
+pub fn read_regular(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut file = store::open_flags::open_read_no_follow(path).map_err(|why| {
+        if why.raw_os_error() == Some(store::open_flags::ELOOP) {
+            format!(
+                "{} is a symbolic link (never followed): this check's files are regular files \
+                 it wrote itself",
+                path.display()
+            )
+        } else {
+            format!("{}: {why}", path.display())
+        }
+    })?;
+    let meta = file
+        .metadata()
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    if !meta.is_file() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let kind = meta.file_type();
+        let what = if kind.is_fifo() {
+            "a named pipe"
+        } else if kind.is_dir() {
+            "a directory"
+        } else if kind.is_socket() {
+            "a socket"
+        } else if kind.is_block_device() || kind.is_char_device() {
+            "a device"
+        } else {
+            "something else"
+        };
+        return Err(format!(
+            "{} is {what}, not a regular file: this check's files are regular files it wrote \
+             itself",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.read_to_end(&mut bytes)
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    Ok(bytes)
+}
+
 /// The newest index of `year` in `dir`, `None` when it holds none.
 ///
 /// # Errors
 ///
-/// A directory that cannot be listed, an index that cannot be read, or one
-/// that is not this format's, named.
+/// A directory that cannot be listed, an index that cannot be read (or is
+/// not a regular file, [`read_regular`]), or one that is not this format's,
+/// named.
 pub fn newest(dir: &Path, year: u16) -> Result<Option<YearIndex>, String> {
     let Some(&version) = versions_in(dir, year, "idx")?.last() else {
         return Ok(None);
     };
     let path = dir.join(format!("tick-to-second-{year}.v{version:03}.idx"));
-    let bytes = std::fs::read(&path).map_err(|why| format!("{}: {why}", path.display()))?;
+    let bytes = read_regular(&path)?;
     YearIndex::decode(&bytes, &path, version).map(Some)
 }
 

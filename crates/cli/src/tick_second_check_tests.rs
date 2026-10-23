@@ -2176,6 +2176,49 @@ fn words_and_fields_are_one_csv_cell_each() {
     );
     assert_eq!(cells.get("no_such_column"), "");
     assert!(Cells::of("a,b").is_err());
+    // The symbol cell (D-5189): every name the store's symbol rule admits is
+    // itself; any other is escaped, decodably, into one cell, and the key a
+    // probe builds is the key the line is read back under.
+    for plain in ["ZZALPHA", "M&M", "BAJAJ-AUTO", "A_1", "zz"] {
+        assert_eq!(symbol_cell(plain), plain);
+        assert!(matches!(symbol_cell(plain), std::borrow::Cow::Borrowed(_)));
+    }
+    for (name, cell) in [
+        ("ZZ,BAD", "ZZ%2CBAD"),
+        ("ZZ\nNL", "ZZ%0ANL"),
+        ("ZZ\r", "ZZ%0D"),
+        ("ZZ%2CBAD", "ZZ%252CBAD"),
+        ("ZZ;BAD", "ZZ;BAD"),
+        ("ZZ\u{e9}", "ZZ%C3%A9"),
+        ("ZZ\u{7f}\t", "ZZ%7F%09"),
+    ] {
+        assert_eq!(symbol_cell(name), cell, "{name:?}");
+        let label = Label {
+            role: Role::Landing,
+            source: Source::Unrecorded,
+            source_name: String::new(),
+            landing: String::new(),
+        };
+        let row = Row::blank(name, d(D1), "", label).failed("store_symbol", "a, b\nc");
+        let line = csv_line(&row, "unstamped");
+        assert_eq!(
+            line.split(',').count(),
+            HEADER.split(',').count(),
+            "{line:?}"
+        );
+        assert!(!line.contains('\n') && !line.contains('\r'), "{line:?}");
+        let cells = Cells::of(&line).unwrap();
+        assert_eq!((cells.get("symbol"), cells.get("detail")), (cell, "a; b c"));
+        assert_eq!(
+            row_key(name, d(D1), Role::Landing),
+            (
+                cells.get("day").to_owned(),
+                cells.get("symbol").to_owned(),
+                cells.get("role").to_owned()
+            )
+        );
+    }
+    assert_ne!(symbol_cell("ZZ,BAD"), symbol_cell("ZZ;BAD"), "never merged");
     assert_eq!(session_word(d(D1)), "regular");
     assert_eq!(session_word(d(MUHURAT)), "special:Muhurat");
     assert_eq!(days_of_month(YearMonth::new(2024, 2).unwrap()).len(), 29);
@@ -2226,6 +2269,284 @@ fn a_store_that_holds_nothing_makes_no_version_and_says_so() {
         ),
         "named, in order: {out}"
     );
+}
+
+/// verify-DATA-2-r3 (D-5189): a share directory whose name the store's symbol
+/// rule refuses is filed as one CSV cell, under one key per name, and a run
+/// with the directories still standing files nothing new. The earlier build
+/// wrote the name raw: `ZZ,BAD` made a row of 67 cells and a line break one
+/// of 1, both in an append-only day segment, and the fold then refused that
+/// year of that `--out` for good, even after the directory was gone. Four
+/// names: two a raw cell breaks (a comma, a line break), one `clean` would
+/// merge with the first (`;`), and one that is the first's escape written out
+/// (`%2C`), so four directories are four rows under four keys.
+#[test]
+fn a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice() {
+    let (root, store, _) = imported_store("refused-names");
+    let cash = store.join("bars/gdfl/NSE/CASH");
+    for name in ["ZZ,BAD", "ZZ\nNL", "ZZ;BAD", "ZZ%2CBAD"] {
+        std::fs::create_dir_all(cash.join(name)).unwrap();
+    }
+    let (code, out, dir) = check(&root, &store, &none, &["2025"]);
+    assert_eq!(code, FAILED, "ZZDELTA's landing is unrecorded: {out}");
+    assert!(
+        out.contains("tick-to-second-2025.v001.csv"),
+        "the fold succeeds: {out}"
+    );
+    let want = HEADER.split(',').count();
+    let mut csvs = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "csv") {
+            csvs += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
+            for line in text.lines() {
+                assert_eq!(
+                    line.split(',').count(),
+                    want,
+                    "{}: {line:?}",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(csvs >= 2, "segments and the version were read: {csvs}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    for cell in ["ZZ%2CBAD", "ZZ%0ANL", "ZZ;BAD", "ZZ%252CBAD"] {
+        let row = &rows[&(
+            cell.to_owned(),
+            "2025-01-01".to_owned(),
+            "landing".to_owned(),
+        )];
+        assert_eq!(row["status"], "read_failed:store_symbol", "{cell}");
+        assert!(
+            row["detail"].contains("not a share symbol the store files"),
+            "{row:?}"
+        );
+    }
+    assert_eq!(
+        rows.keys()
+            .filter(|(_, day, _)| day == "2025-01-01")
+            .count(),
+        4,
+        "one row per directory: {:?}",
+        rows.keys().collect::<Vec<_>>()
+    );
+    // The stored shares are answered as before.
+    let checks = SecondChecks::open(&dir).unwrap();
+    assert_eq!(
+        checks.status_of("ZZALPHA", d(D1)).unwrap().status,
+        Status::ExactT
+    );
+    // A second run with the four directories still there, and a run with no
+    // YEAR: nothing new is filed, no segment and no version is made, and the
+    // output folder is unchanged file for file.
+    let before = listing(&dir);
+    let (code, out, _) = check(&root, &store, &none, &["2025"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("2025 nothing new to fold"), "{out}");
+    assert_eq!(listing(&dir), before, "the same files, sizes and times");
+    let (_, out, _) = check(&root, &store, &none, &[]);
+    assert!(!out.contains("REFUSED"), "{out}");
+    assert!(out.contains("2025 nothing new to fold"), "{out}");
+    assert_eq!(listing(&dir), before, "no YEAR: unchanged too");
+}
+
+/// Runs `f` on a thread and waits at most 60 s: a run that waits for good on
+/// a pipe fails the test instead of holding it.
+fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the run returned within a minute (it did not wait on a pipe)")
+}
+
+/// A named pipe at `path`, made by the host's `mkfifo` (an external program,
+/// run from a test only, as `pull`'s pipe tests do).
+fn pipe_at(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {}", path.display());
+}
+
+/// verify-DATA-2-r3 follow-ups (D-5189): a named pipe or a symbolic link at
+/// one of the check's own names, and a named pipe given as `--archive`, are
+/// refused by name at once. The earlier build read its own files with a
+/// plain blocking open (a pipe at a segment or version name held the run for
+/// good, a dangling link read as a missing file) and `--archive` through
+/// `Archive::open` (a pipe held the run for good). Each case is a fresh
+/// `--out`, and each run must return within a minute.
+#[test]
+fn a_pipe_or_a_link_at_one_of_the_checks_own_names_and_a_pipe_archive_are_refused_at_once() {
+    let (root, store, _) = imported_store("own-names");
+    let run = move |out_dir: PathBuf, args: Vec<String>| {
+        let held = store.clone();
+        within_a_minute(move || {
+            let mut all: Vec<&str> = vec!["2025", "--out", out_dir.to_str().unwrap()];
+            all.extend(args.iter().map(String::as_str));
+            let mut out = String::new();
+            let code = command_with(&all, &none, &|| Ok(held.clone()), &mut out);
+            (code, out)
+        })
+    };
+    // A pipe at the first segment's name.
+    let piped = root.join("piped");
+    std::fs::create_dir_all(&piped).unwrap();
+    pipe_at(&piped.join(segment_name(2025, 1)));
+    let (code, out) = run(piped.clone(), Vec::new());
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("is a named pipe, not a regular file"), "{out}");
+    // A dangling link there: named a link, never a missing file.
+    let linked = root.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere.csv"), linked.join(segment_name(2025, 1)))
+        .unwrap();
+    let (code, out) = run(linked.clone(), Vec::new());
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("is a symbolic link (never followed)"), "{out}");
+    assert!(!out.contains("No such file"), "{out}");
+    // A link at a version's index name, to a real file: refused, not read.
+    let answered = root.join("answered");
+    let (_, out) = run(answered.clone(), Vec::new());
+    assert!(out.contains("v001.idx"), "{out}");
+    let idx = answered.join("tick-to-second-2025.v001.idx");
+    let elsewhere = root.join("copied.idx");
+    std::fs::copy(&idx, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, answered.join("tick-to-second-2025.v002.idx")).unwrap();
+    let (code, out) = run(answered.clone(), Vec::new());
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("tick-to-second-2025.v002.idx is a symbolic link (never followed)"),
+        "{out}"
+    );
+    let why = SecondChecks::open(&answered).unwrap_err();
+    assert!(why.contains("is a symbolic link (never followed)"), "{why}");
+    // A pipe as --archive: refused by name, before a byte of it is read.
+    let fifo = root.join("archive.fifo");
+    pipe_at(&fifo);
+    let (code, out) = run(
+        root.join("with-pipe"),
+        vec!["--archive".to_owned(), fifo.to_str().unwrap().to_owned()],
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("not a regular file, and an archive is read only from one"),
+        "{out}"
+    );
+}
+
+/// verify-DATA-2-r3 follow-up (ATK-16, D-5189): an `--out` written as the
+/// physical target of one of the store's own top-level links (absolute,
+/// relative, or dangling), or of the tick store's, is refused before
+/// anything is made; [`inside`] alone saw neither form of the store in it.
+/// An `--out` beside the targets runs.
+#[test]
+fn an_out_where_a_roots_own_top_link_leads_is_refused_before_anything_is_made() {
+    let root = std::fs::canonicalize(scratch("top-links")).unwrap();
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let bars = root.join("data").join("bars");
+    std::fs::create_dir_all(&bars).unwrap();
+    std::os::unix::fs::symlink(&bars, store.join("bars")).unwrap();
+    std::fs::create_dir_all(root.join("data2")).unwrap();
+    std::os::unix::fs::symlink("../data2", store.join("rel")).unwrap();
+    std::os::unix::fs::symlink(root.join("gone"), store.join("dangling")).unwrap();
+    let ticks = root.join("ticks");
+    std::fs::create_dir_all(&ticks).unwrap();
+    std::fs::write(ticks.join("FORMAT.md"), b"synthetic tick store\n").unwrap();
+    let tick_data = root.join("tick-data");
+    std::fs::create_dir_all(&tick_data).unwrap();
+    std::os::unix::fs::symlink(&tick_data, ticks.join("cm")).unwrap();
+    let env = env_of(vec![(
+        crate::gdfl_import_command::TICKSTORE_VAR,
+        ticks.clone().into_os_string(),
+    )]);
+    let run = |out_dir: &Path| {
+        let mut out = String::new();
+        let code = command_with(
+            &["2025", "--out", out_dir.to_str().unwrap()],
+            &env,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        (code, out)
+    };
+    for (out_dir, link, what) in [
+        (bars.join("r"), "bars", "the store"),
+        (root.join("data2").join("x"), "rel", "the store"),
+        (root.join("gone").join("x"), "dangling", "the store"),
+        (tick_data.join("r"), "cm", "the tick store"),
+    ] {
+        let (code, out) = run(&out_dir);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(&format!("where {what}'s link")) && out.contains(link),
+            "{}: {out}",
+            out_dir.display()
+        );
+        assert!(!out_dir.exists(), "nothing was made: {}", out_dir.display());
+    }
+    // Beside the targets: not refused by any of them.
+    let beside = root.join("data").join("reports");
+    let (code, out) = run(&beside);
+    assert_eq!(code, OK, "{out}");
+    assert!(beside.exists());
+}
+
+/// The measurement behind `docs/06-limits.md` L-T2S-11 and L-T2S-12 for the
+/// steps D-5189 adds, each n = 1,000 calls with its answer checked:
+/// `link_around` (once per root per run) on a root of eight entries, two of
+/// them links; `index::read_regular` (once per file a run reads) of a 64 KiB
+/// file; `open_archive` (once per archive a run reads) of a small archive;
+/// and `symbol_cell` (once per row written) of a plain and an escaped name.
+/// Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "measurement: cargo test -p cli --lib -- --ignored --nocapture the_d_5189_steps"]
+fn the_d_5189_steps_are_timed() {
+    let root = std::fs::canonicalize(scratch("d5189-timed")).unwrap();
+    let store = root.join("store");
+    for name in ["bars", "manifest", "a", "b", "c", "d"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::create_dir_all(root.join("t1")).unwrap();
+    std::os::unix::fs::symlink(root.join("t1"), store.join("l1")).unwrap();
+    std::os::unix::fs::symlink("../t2", store.join("l2")).unwrap();
+    let out_dir = root.join("out");
+    let file = root.join("f.csv");
+    std::fs::write(&file, vec![b'x'; 65_536]).unwrap();
+    let archive = root.join("a.zip");
+    std::fs::write(&archive, v1()).unwrap();
+    let time = |name: &str, f: &mut dyn FnMut() -> bool| {
+        let mut ns: Vec<u128> = Vec::with_capacity(1_000);
+        for _ in 0..1_000 {
+            let t = Instant::now();
+            let ok = f();
+            ns.push(t.elapsed().as_nanos());
+            assert!(ok, "{name}");
+        }
+        ns.sort_unstable();
+        println!(
+            "{name}: n=1000 p50 {} ns p99 {} ns max {} ns",
+            ns[499], ns[989], ns[999]
+        );
+    };
+    time("link_around", &mut || {
+        link_around(&out_dir, &store).unwrap().is_none()
+    });
+    time("read_regular", &mut || {
+        index::read_regular(&file).unwrap().len() == 65_536
+    });
+    time("open_archive", &mut || open_archive(&archive).is_ok());
+    time("symbol_cell plain", &mut || {
+        std::hint::black_box(symbol_cell(std::hint::black_box("ZZALPHA"))).len() == 7
+    });
+    time("symbol_cell escaped", &mut || {
+        std::hint::black_box(symbol_cell(std::hint::black_box("ZZ,BAD\nX"))).len() == 12
+    });
 }
 
 #[test]

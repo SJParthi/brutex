@@ -801,6 +801,47 @@ pub(crate) fn clean(text: &str) -> String {
         .collect()
 }
 
+/// A share directory's name as its row's `symbol` cell, the cell every
+/// year's ledger is keyed by (D-5189): `%`, `,` and every byte outside
+/// printable ASCII written `%XX` (two upper-case hex digits), every other
+/// byte as it is.
+///
+/// [`clean`] is right for a cell nothing looks up, and wrong for this one:
+/// it maps two names onto one text (`ZZ,BAD` and `ZZ;BAD`), so two refused
+/// directories would share one key and each run would file one of them
+/// again. Percent-escaping is decodable, so two names never share a cell;
+/// and it is the name itself for every name the store's symbol rule admits
+/// (ASCII letters, digits, `-`, `_` and `&`, `core::symbol::Symbol::new`),
+/// so no stored share's cell changes, and an escaped name always holds a
+/// byte that rule refuses and can never be a stored share's. One pass over
+/// the name's bytes: a directory name is at most a host name's length.
+pub(crate) fn symbol_cell(name: &str) -> std::borrow::Cow<'_, str> {
+    let plain = |b: u8| (0x20..=0x7E).contains(&b) && b != b',' && b != b'%';
+    if name.bytes().all(plain) {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    let mut cell = String::with_capacity(name.len().saturating_mul(3));
+    for b in name.bytes() {
+        if plain(b) {
+            cell.push(char::from(b));
+        } else {
+            let _ = write!(cell, "%{b:02X}");
+        }
+    }
+    std::borrow::Cow::Owned(cell)
+}
+
+/// A row's key in its year's ledger, as [`csv_line`] files it and as
+/// [`absorb`] reads it back from the line: one construction for every probe
+/// (D-5189).
+pub(crate) fn row_key(symbol: &str, day: Day, role: Role) -> RowKey {
+    (
+        day.to_string(),
+        symbol_cell(symbol).into_owned(),
+        role.word().to_owned(),
+    )
+}
+
 /// The first and one-past-last UTC microsecond of IST `day`.
 pub(crate) fn day_span(day: Day) -> (i64, i64) {
     let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
@@ -1555,14 +1596,21 @@ pub(crate) fn plan_symbol(
         landing: String::new(),
     };
     let Ok(key) = InstrumentKey::cash(Exchange::Nse, symbol) else {
+        // The row keeps the directory's name as it is; `csv_line` writes it
+        // as its one-cell escape, and every ledger probe keys it the same way
+        // (`row_key`), so a name holding a comma or a line break is one cell
+        // and a second run with the directory still there files nothing new
+        // (verify-DATA-2-r3, D-5189).
         if let Some(day) = months
             .first()
             .and_then(|m| days_of_month(*m).first().copied())
         {
-            failed.push(
-                Row::blank(symbol, day, "", label())
-                    .failed("store_symbol", "not a share symbol the store files"),
-            );
+            failed.push(Row::blank(symbol, day, "", label()).failed(
+                "store_symbol",
+                "the directory's name is not a share symbol the store files (its symbol cell is \
+                 the name with every % or comma and every byte outside printable ASCII written \
+                 as %XX)",
+            ));
         }
         return (items, failed);
     };
@@ -1747,16 +1795,14 @@ impl Sources {
                 && let Some(path) = landed.archive(item.day)
                 && !archives.contains_key(path)
             {
-                let opened = Archive::open(Path::new(path))
-                    .map(|a| a.with_scope(Arc::clone(scope)))
-                    .map_err(|w| format!("{path}: {w}"));
+                let opened = open_archive(Path::new(path)).map(|a| a.with_scope(Arc::clone(scope)));
                 archives.insert(path.to_owned(), opened);
             }
         }
         let extra = match extra {
             Some((path, same_as)) => {
-                let archive = Archive::open(path)
-                    .map_err(|w| format!("--archive {}: {w}", path.display()))?
+                let archive = open_archive(path)
+                    .map_err(|w| format!("--archive {w}"))?
                     .with_scope(Arc::clone(scope));
                 Some(Extra {
                     path: path.display().to_string(),
@@ -1778,6 +1824,44 @@ impl Sources {
             tickstore,
         })
     }
+}
+
+/// The vendor archive at `path`, indexed by the importer's own reader
+/// (`Archive::from_source`), opened only as a regular file (D-5189): the
+/// name may be a link (an archive is often named by one), the open is
+/// `O_NONBLOCK` so a named pipe opens at once, and the opened file's own
+/// `fstat` must say a regular file before a byte is read. `Archive::open`
+/// opens with a plain blocking open, which waits for good on a pipe with no
+/// writer (verify-DATA-2-r3 follow-up). One open and one `fstat`.
+///
+/// # Errors
+///
+/// The host's refusal, a file that is not a regular one, or the reader's
+/// refusal, each naming `path`.
+fn open_archive(path: &Path) -> Result<Archive<std::fs::File>, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // The words `Archive::open` gives a failed open or size, kept.
+    let unavailable = |why: std::io::Error| {
+        format!(
+            "{}: {}",
+            path.display(),
+            CmRefusal::ArchiveUnavailable { kind: why.kind() }
+        )
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(store::open_flags::O_NONBLOCK)
+        .open(path)
+        .map_err(unavailable)?;
+    let meta = file.metadata().map_err(unavailable)?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: not a regular file, and an archive is read only from one (a pipe or a device \
+             would hold the run)",
+            path.display()
+        ));
+    }
+    Archive::from_source(file, meta.len()).map_err(|w| format!("{}: {w}", path.display()))
 }
 
 /// The file `key` has in `listing`, by the stem the listing's scope files it
@@ -2604,19 +2688,23 @@ pub(crate) fn csv_line(r: &Row, commit: &str) -> String {
     } else {
         "raw_unadjusted"
     };
+    // Every text cell is one cell (T2S-16): the symbol by its injective
+    // escape, since the ledger is keyed by it (D-5189); every other text cell
+    // by `clean`, a no-op on the words this module writes today and the
+    // guard for one it writes tomorrow.
     let mut line = format!(
         "{},{},{},{},{},{},{},{},{},{},{}",
-        r.symbol,
+        symbol_cell(&r.symbol),
         r.day,
         r.label.role.word(),
         r.label.source.word(),
-        r.status,
-        r.compare,
-        r.session,
+        clean(&r.status),
+        clean(&r.compare),
+        clean(&r.session),
         clean(&r.file),
         clean(&r.label.source_name),
         clean(&r.label.landing),
-        commit
+        clean(commit)
     );
     for n in c.values() {
         let _ = write!(line, ",{n}");
@@ -2811,11 +2899,13 @@ fn absorb(text: &str, path: &Path, lines: &mut BTreeMap<RowKey, String>) -> Resu
 }
 
 /// What `dir` holds of `year`: the newest version (its CSV held to the
-/// digest its index records) and every segment after it.
+/// digest its index records) and every segment after it, each read only as
+/// a regular file at its own name ([`index::read_regular`], D-5189).
 ///
 /// # Errors
 ///
-/// A file that cannot be read, a CSV that is not the one its index names,
+/// A file that cannot be read, a link, a pipe or any other non-regular file
+/// at a version or segment name, a CSV that is not the one its index names,
 /// or a file of another layout.
 pub(crate) fn load_year(dir: &Path, year: u16) -> Result<YearLedger, String> {
     let mut ledger = YearLedger::default();
@@ -2829,7 +2919,7 @@ pub(crate) fn load_year(dir: &Path, year: u16) -> Result<YearLedger, String> {
             "tick-to-second-{year}.v{:03}.csv",
             newest.version()
         ));
-        let bytes = std::fs::read(&path).map_err(|w| format!("{}: {w}", path.display()))?;
+        let bytes = index::read_regular(&path)?;
         if brutex_core::blake3::hash(&bytes) != newest.csv_digest() {
             return Err(format!(
                 "{} is not the CSV its index {} names (BLAKE3 differs)",
@@ -2847,8 +2937,8 @@ pub(crate) fn load_year(dir: &Path, year: u16) -> Result<YearLedger, String> {
     ledger.last_segment = segments.last().copied().unwrap_or(0).max(ledger.through);
     for seq in segments.into_iter().filter(|s| *s > ledger.through) {
         let path = dir.join(segment_name(year, seq));
-        let text =
-            std::fs::read_to_string(&path).map_err(|w| format!("{}: {w}", path.display()))?;
+        let text = String::from_utf8(index::read_regular(&path)?)
+            .map_err(|_| format!("{} is not text", path.display()))?;
         absorb(&text, &path, &mut ledger.lines)?;
         ledger.unfolded = ledger.unfolded.saturating_add(1);
     }
@@ -3331,6 +3421,54 @@ fn inside(inner: &Path, outer: &Path) -> Result<bool, String> {
     Ok(inner.physical.starts_with(&outer.physical) || inner.lexical.starts_with(&outer.lexical))
 }
 
+/// The first symbolic link at the top of `root` whose target holds `out`,
+/// with that target; `None` when no link there leads around `out` (D-5189).
+///
+/// [`inside`] places `--out` by where it really lies and by how it is
+/// written, and neither form sees an `--out` written as the physical target
+/// of one of the root's own links: `<store>/bars -> /data/bars` and `--out
+/// /data/bars/r` lies inside neither form of the store, yet a run there
+/// writes among the bars the store serves (verify-DATA-2-r3 follow-up,
+/// ATK-16). So every link at the root's top is read once (`read_link`, a
+/// relative target taken against the root, a dangling one included, since
+/// `create_dir_all` would make it real) and `--out` is held outside its
+/// target in both forms. A link deeper in the root is not walked: one
+/// listing of the root's top, bounded by its entries (`docs/06-limits.md`
+/// L-T2S-11).
+///
+/// # Errors
+///
+/// A root that cannot be listed (one that does not exist holds no link), a
+/// link that cannot be read, or [`inside`]'s refusal, named.
+fn link_around(out: &Path, root: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) => return Err(format!("{}: {why}", root.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|why| format!("{}: {why}", root.display()))?;
+        let link = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|why| format!("{}: {why}", link.display()))?;
+        if !kind.is_symlink() {
+            continue;
+        }
+        let target =
+            std::fs::read_link(&link).map_err(|why| format!("{}: {why}", link.display()))?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            root.join(target)
+        };
+        if inside(out, &target)? {
+            return Ok(Some((link, target)));
+        }
+    }
+    Ok(None)
+}
+
 /// What a run did, for its report.
 #[derive(Debug, Default)]
 pub(crate) struct Report {
@@ -3506,6 +3644,22 @@ fn run(
             ticks.display()
         ));
     }
+    // Where a root's own top-level link leads is the root's too (D-5189).
+    let roots = [
+        Some(("the store", &store)),
+        tick_root.as_ref().ok().map(|t| ("the tick store", t)),
+    ];
+    for (what, root) in roots.into_iter().flatten() {
+        if let Some((link, target)) = link_around(&ask.out, root)? {
+            return Err(format!(
+                "--out {} lies inside {}, where {what}'s link {} leads; this check never writes \
+                 {what}",
+                ask.out.display(),
+                target.display(),
+                link.display()
+            ));
+        }
+    }
     std::fs::create_dir_all(&ask.out).map_err(|w| format!("{}: {w}", ask.out.display()))?;
     let lock = take_lock(&ask.out.join(LOCK_NAME))?;
     let commit = crate::commit_stamp().unwrap_or("unstamped").to_owned();
@@ -3557,11 +3711,7 @@ fn run(
     }
     let row_of = |l: &YearLedger, item: &Item, role: Role| {
         l.lines
-            .get(&(
-                item.day.to_string(),
-                item.symbol.clone(),
-                role.word().to_owned(),
-            ))
+            .get(&row_key(&item.symbol, item.day, role))
             .and_then(|line| {
                 Cells::of(line).ok().map(|c| {
                     (
@@ -3665,13 +3815,12 @@ fn run(
         }
     }
     jobs.retain(|_, job| job.items.iter().any(|(_, l, e)| !l || !e) || (extra && !job.extra_seen));
+    // A failure the year already holds byte for byte under its key is not
+    // filed again (a refused share directory still standing files nothing
+    // new, D-5189); the key is the one `csv_line` writes.
     plan_failed.retain(|row| {
         let line = csv_line(row, &commit);
-        let key = (
-            row.day.to_string(),
-            row.symbol.clone(),
-            row.label.role.word().to_owned(),
-        );
+        let key = row_key(&row.symbol, row.day, row.label.role);
         ledgers
             .get(&row.day.year())
             .is_none_or(|l| l.lines.get(&key) != Some(&line))
@@ -3881,12 +4030,14 @@ fn note_day(day: Day, done: &DayOut) {
     );
 }
 
-/// One event per instrument-month: its rows and how many were exact.
+/// One event per instrument-month: its rows and how many were exact. The
+/// symbol is named by its row's cell (D-5189), so the event and the CSV name
+/// a refused share directory alike.
 fn note_months(rows: &[Row]) {
-    let mut months: BTreeMap<(&str, u16, u8), (u64, u64)> = BTreeMap::new();
+    let mut months: BTreeMap<(std::borrow::Cow<'_, str>, u16, u8), (u64, u64)> = BTreeMap::new();
     for r in rows {
         let slot = months
-            .entry((r.symbol.as_str(), r.day.year(), r.day.month()))
+            .entry((symbol_cell(&r.symbol), r.day.year(), r.day.month()))
             .or_insert((0, 0));
         slot.0 += 1;
         if exact(&r.status) {
@@ -3897,7 +4048,7 @@ fn note_months(rows: &[Row]) {
         let ym = format!("{year:04}-{month:02}");
         crate::note(
             &telemetry::Event::info(TARGET, "tick-to-second instrument-month")
-                .with("symbol", symbol)
+                .with("symbol", symbol.as_ref())
                 .with("month", ym.as_str())
                 .with("rows", days)
                 .with("exact", exact_rows),
