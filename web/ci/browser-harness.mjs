@@ -1478,7 +1478,15 @@ export async function runHarness(args) {
           else {
             // The first load that the server answered with a page is asked
             // which page the app drew: the build's own routes (READ_ROUTES).
-            if (i === 0 && l.status >= 200 && l.status < 300) stop = notTheApps(page, await tab.evaluate(READ_ROUTES));
+            if (i === 0 && l.status >= 200 && l.status < 300) {
+              try {
+                stop = notTheApps(page, await tab.evaluate(READ_ROUTES));
+              } catch (why) {
+                // A page that stopped answering is this page's failure, by name.
+                if (!(why instanceof CdpTimeout)) throw why;
+                stop = `the page stopped answering when asked for the app's routes: ${why.message}`;
+              }
+            }
             cold.push(l);
           }
         } finally {
