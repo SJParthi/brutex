@@ -1018,7 +1018,6 @@ impl CalendarTable {
         let mut kinds: Vec<DayKind> = (first..=last).map(weekday_rule).collect();
         debug_assert_eq!(kinds.len(), span);
         let mut notes = HashMap::with_capacity(parsed.rows.len());
-        let mut unsized_days = Vec::new();
         for (line, row) in &parsed.rows {
             let [kind, day, windows, name, source] = row.as_slice() else {
                 return Err(refuse(RefusalKind::Row, *line, "wrong field count".into()));
@@ -1070,12 +1069,18 @@ impl CalendarTable {
                     "a second row for one day".into(),
                 ));
             }
-            if answer == DayKind::OpenLengthUnmeasured {
-                unsized_days.push(day);
-            }
             *slot = answer;
         }
-        unsized_days.sort_unstable();
+        // The sessions of unrecorded length, in day order, read off `kinds`
+        // itself: one more pass over the span `kinds` was built over, so the
+        // list needs no sort whatever order the rows came in, and it cannot
+        // disagree with `kind_of` (BASE-GATE11, gate 11 rule 4, D-6629's
+        // addendum; `the_unsized_days_are_the_calendars_own_in_day_order`).
+        let unsized_days: Vec<i64> = (first..=last)
+            .zip(&kinds)
+            .filter(|(_, kind)| **kind == DayKind::OpenLengthUnmeasured)
+            .map(|(day, _)| day)
+            .collect();
         Ok(Self {
             first,
             last,
@@ -1730,7 +1735,9 @@ impl FnoTable {
             detail: format!("line {line}: {detail}"),
         };
         let mut symbols = Vec::new();
-        let mut spans: HashMap<String, Vec<FnoSpan>> = HashMap::new();
+        // Sized once for what it can hold, one symbol a row at most, so no
+        // insert rehashes (docs/07 law 2; BASE-GATE11, D-6629's addendum).
+        let mut spans: HashMap<String, Vec<FnoSpan>> = HashMap::with_capacity(parsed.rows.len());
         for (line, row) in &parsed.rows {
             let [symbol, entry, exit, source] = row.as_slice() else {
                 return Err(refuse(RefusalKind::Row, *line, "wrong field count".into()));

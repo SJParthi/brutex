@@ -185,7 +185,21 @@ impl SourceId {
             Self::TickStore => 3,
         }
     }
+
+    /// Its slot in a table of [`SOURCE_SLOTS`] held per source (the
+    /// [`SourceCache`]): distinct for each id and below [`SOURCE_SLOTS`],
+    /// pinned by `every_source_has_its_own_cache_slot`.
+    const fn slot(self) -> usize {
+        match self {
+            Self::CmZip => 0,
+            Self::NfoZips => 1,
+            Self::TickStore => 2,
+        }
+    }
 }
+
+/// How many [`SourceId`]s there are: the slots of a per-source table.
+const SOURCE_SLOTS: usize = 3;
 
 /// The source `word` resolves to for `kind`: `zip` is the capital-market
 /// outer zip for indices and stocks and the yearly zips for options.
@@ -410,8 +424,9 @@ impl Request {
     }
 
     /// What the request asks that no run may do, before anything is read:
-    /// `--stored` with options, a range that runs backwards, an empty name,
-    /// a filter of more than [`ONLY_MAX`] names, a name that is not a symbol
+    /// `--stored` with options, a range that runs backwards, a filter of
+    /// more than [`ONLY_MAX`] names (asked before any name is read), an
+    /// empty name, a name that is not a symbol
     /// as the store files it, a snapshot name outside its alphabet or bound. `None` for a request [`plan`] may go on with.
     #[must_use]
     pub fn misuse(&self) -> Option<RunRefusal> {
@@ -424,13 +439,18 @@ impl Request {
                 to: self.to,
             });
         }
-        if self.only.iter().any(|name| name.trim().is_empty()) {
-            return Some(RunRefusal::EmptySymbol);
-        }
+        // THE BOUND BEFORE ANY WALK (BASE-GATE11, D-6621): the count of
+        // names is one read, so a filter past `ONLY_MAX` is refused before
+        // either walk below reads a name, and each walk is at most
+        // `ONLY_MAX` names whatever the request carried (gate 11 rule 6's
+        // declared bound, docs/06-limits.md "Gate 11 — BASE-GATE11").
         if self.only.len() > ONLY_MAX {
             return Some(RunRefusal::FilterTooLong {
                 names: self.only.len(),
             });
+        }
+        if self.only.iter().any(|name| name.trim().is_empty()) {
+            return Some(RunRefusal::EmptySymbol);
         }
         if let Some(name) = self.only.iter().find(|name| !symbol_ok(name)) {
             return Some(RunRefusal::SymbolInvalid {
@@ -1243,11 +1263,12 @@ struct Measured {
 
 /// Each source's measured origin, kept while its root is unchanged (design
 /// §5.1): a run process measures once per run; the api (IA-10a) again only
-/// when a root's (device, inode, mtime, length) changes. At most one entry a
-/// source id, so a lookup is a walk of at most three.
+/// when a root's (device, inode, mtime, length) changes. One slot a source
+/// id ([`SourceId::slot`]), so a lookup is one index, never a walk of the
+/// held entries (BASE-GATE11, D-6621: gate 11 rule 6).
 #[derive(Debug, Default)]
 pub struct SourceCache {
-    held: Vec<Measured>,
+    held: [Option<Measured>; SOURCE_SLOTS],
     measures: u64,
 }
 
@@ -1259,13 +1280,13 @@ impl SourceCache {
     /// measured every time, and the measure names why.
     pub fn origin(&mut self, source: SourceId, root: &Path, commit: Option<&str>) -> Origin {
         let identity = RootIdentity::of(root);
+        let slot = source.slot();
         if let Some(identity) = identity
-            && let Some(held) = self.held.iter().find(|held| {
-                held.source == source
-                    && held.root == root
-                    && held.identity == identity
-                    && held.commit.as_deref() == commit
-            })
+            && let Some(held) = self.held.get(slot).and_then(Option::as_ref)
+            && held.source == source
+            && held.root == root
+            && held.identity == identity
+            && held.commit.as_deref() == commit
         {
             let mut origin = held.origin.clone();
             origin.started = now_unix_s();
@@ -1273,9 +1294,8 @@ impl SourceCache {
         }
         let origin = Origin::measure(source.origin(), root, commit);
         self.measures = self.measures.saturating_add(1);
-        self.held.retain(|held| held.source != source);
-        if let Some(identity) = identity {
-            self.held.push(Measured {
+        if let Some(entry) = self.held.get_mut(slot) {
+            *entry = identity.map(|identity| Measured {
                 source,
                 root: root.to_path_buf(),
                 identity,

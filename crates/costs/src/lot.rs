@@ -941,8 +941,11 @@ impl LotTable {
         });
         let mut slots: Vec<Option<LotRow>> = rows.into_iter().map(Some).collect();
         let mut sorted = Vec::with_capacity(slots.len());
+        // Sized once for what it can hold: every row naming its own
+        // underlying, at most MAX_LOT_ROWS (refused above), so no insert
+        // rehashes (docs/07 law 2; BASE-GATE11, D-6629's addendum).
         let mut by_underlying: std::collections::HashMap<String, core::ops::Range<usize>> =
-            std::collections::HashMap::new();
+            std::collections::HashMap::with_capacity(slots.len());
         for at in order {
             let Some(row) = slots.get_mut(at).and_then(Option::take) else {
                 continue;

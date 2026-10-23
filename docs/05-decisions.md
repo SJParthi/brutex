@@ -77669,6 +77669,511 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
 
+### D-6620 — Gate 11 is reproduced on the Mac exactly as CI runs it, every refusal on feat/db-fix is fixed at its cause or declared with its bound, and the Mac gate run gains the CI shell gates (BASE-GATE11) — 2026-10-20
+
+**Problem.** CI gate 11 ("banned constructs on the O(1) paths") refused
+feat/db-fix at `aab82424b` in files the reporting package (AH-05) never
+touched. The Mac gate run (`state/fix/gate-*.sh`) runs fmt, clippy, test, deny
+and the web tests only, so no merge ever ran a CI shell gate and every package
+merged since the last declaration (GF-1, 18 October) brought its constructs in
+unseen.
+
+**Reproduced** with the step's own commands: `rustc` builds
+`.github/source_scan.rs` and `.github/gates_ledger.rs`, `source-scan
+prod-files` lists the production closure (482 files) and `gates-ledger
+banned-constructs` refuses: 21 occurrences past their files' allowances in 10 files (the step names 25 lines, the allowed ones of those files counted), each traced by `git
+blame` to the merge that brought it:
+
+| Rule | File:line at `aab82424b` | Construct | Brought by |
+|---|---|---|---|
+| 1 | `pull/src/gdfl_rekey.rs:1570` | `binary_search_by` (`month_of`) | AG-02 |
+| 3 | `api/src/bars_series.rs:418` | `old: HashMap::new()` (`Weighed`) | R3-07 |
+| 3 | `pull/src/gdfl_import_journal.rs:865` | `HashSet::new()` (`days`) | IA-1 |
+| 3 | `pull/src/gdfl_rekey.rs:1419` | `HashSet::new()` (`copied`) | AG-02 repair r1e |
+| 4 | `pull/src/gdfl_rekey.rs:1617` | `sort_unstable` (`held_months` spans) | AG-02 |
+| 4 | `pull/src/gdfl_run_locks.rs:928` | `sort_unstable` (`filter_field`) | IA-2 |
+| 4 | `store/src/file_sealed.rs:302` | `sort_unstable` (`read_rows_at`) | SC-3 |
+| 6 | `api/src/import_journal.rs:214` | `fields.iter().find` (`RunLine::end`) | IA-2 repair 1 |
+| 6 | `cli/src/minute_gaps.rs:719` | `cuts.iter().position` (`tighten`) | AH-01 |
+| 6 | `pull/src/gdfl_run.rs:435` | `only.iter().find` (filter names) | IA-1 repair 1 |
+| 6 | `pull/src/gdfl_run.rs:1263` | `held.iter().find` (`SourceCache`) | IA-1 |
+| 6 | `store/src/file_sealed.rs:294` | `rows.iter().find` (`read_rows_at`) | SC-3 |
+| 7 | `pull/src/gdfl_rekey.rs:1748` | `copied.contains(&..)`, a `HashSet` | AG-02 repair r1e |
+| 7 | `pull/src/gdfl_run_ledger.rs:125-127` | `MODES`/`KINDS`/`BY.contains(&..)` | IA-2 |
+| 7 | `pull/src/gdfl_run_locks.rs:974,975,980,983` | `MODES`/`KINDS`/literal `.contains(&..)` | IA-2 |
+| 7 | `pull/src/gdfl_run_stop.rs:410` | `BY.contains(&..)` | IA-2 |
+
+**Reproduced again at `c76f9178c`** (feat/db-fix after R4-09a and IA-3 merged):
+22 occurrences past their allowances in 11 files, the 21 above (their lines
+moved, `store/src/file_sealed.rs` to 298 and 306) and ONE more, brought by the
+IA-3 merge (`65b3fc017`, merged as `c76f9178c`):
+
+| Rule | File:line at `c76f9178c` | Construct | Brought by |
+|---|---|---|---|
+| 3 | `pull/src/gdfl_dayzips.rs:242` | `HashMap::new()` (`days`, the loose day zips' day table) | IA-3 |
+
+It is rewritten (D-6624), not declared: the table is filed by a walk of a
+root, so its growth was the root's.
+
+**Decision.** A construct a request, a page or a per-row step reaches is
+rewritten so the step is O(1) (D-6621, D-6622, D-6623; D-6624 at `c76f9178c`):
+seven occurrences in six files. The rest are each one of the shapes the gate's own reasons already
+admit, and are declared in `.github/gates_ledger.rs` with the bound written in
+`docs/06-limits.md`, "Gate 11 — BASE-GATE11", in the same change: a `const`
+table of at most 15 words (rule 7's FIXED `const` ARRAY), a `HashSet` probe, a
+map that is only ever swapped in whole (the same reason WP-52 gave for its
+twin), a filter of at most `ONLY_MAX` = 256 names refused past it before any
+name is read (D-6621 item 4), the cut days of one span once per retry that refolds the whole column,
+and the `cli gdfl-rekey` planner, which no request reaches. No allow comment is
+written, no rule is narrowed and no pattern is changed. AH-01 moved
+`minute_gaps.rs`'s one construct from rule 7 to rule 6, so its rule-7 entry
+goes with the new rule-6 entry.
+
+**The Mac gate run gains the CI shell gates.**
+`state/fix/ci-shell-gates.sh <worktree>` (operator tooling outside the
+repository, shell only) reads the worktree's own `ci.yml`, extracts every step
+of the jobs `language-purity`, `build`, `web` and `macos`, and runs each `run:`
+block as GitHub does (`bash -e`, one `RUNNER_TEMP` and `GITHUB_ENV` a job, the
+workflow's `env:`), printing `GATE <id> rc=<rc>` per step and a last `EXIT`
+line. It never runs `npm ci` (the worktree's `node_modules` is a link to
+another tree) nor Gate 3's `cargo install`, and names fmt, clippy, the tests
+and W2 as the Mac gate run's own steps; `--fast` skips the five steps that
+compile the workspace again.
+
+**Proof.** Gate 11 on this branch: "OK — no banned construct outside the
+allowlist", the four loose entries it warns of being older than this change
+(`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+`indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7).
+`.github/gates_ledger.rs`'s own 46 tests pass with the new lists. Invariants
+BG11-01 to BG11-06; limits L-BG11-01 to L-BG11-05; the rule-2 declaration after the PREC-1 merge is D-6626, and the AG-06 and AG-05 merges' refusals D-6627.
+
+### D-6621 — Two sets are sized once by what they can hold, and the GDFL source cache is one slot a source, never a walk (BASE-GATE11) — 2026-10-20
+
+Gate 11 rules 3 and 6 (D-6620's table).
+
+1. **`pull::gdfl_import_journal`'s refresh** sized its set of the day keys the
+   new lines name by growth (`HashSet::new()`). A line names one day at most,
+   so the set is now made with the new lines' count, which the refresh already
+   counted for its `lines` figure (moved before the set, not counted twice):
+   no insert of the refresh rehashes. The set lives for one refresh and holds
+   at most one short key a new line, less than the lines' own bytes.
+2. **`pull::gdfl_rekey::copied_months`** sized its set of exactly-copied source
+   months by growth; it is now made with the moving keys' months (one fold of
+   `moves`, each a hash probe of `held`), the most it can hold. On a store
+   whose re-key was never cut short the set stays empty, so the capacity is
+   memory taken for one plan and given back with it; the plan already holds
+   the survey of every moving key's days, which is larger. The planner runs in
+   `cli gdfl-rekey` only.
+3. **`pull::gdfl_run::SourceCache`** held its measured origins in a `Vec` and
+   found one with `iter().find`, a walk the comment bounded at three by the
+   invariant that `retain` kept one entry a source. The bound is now the type:
+   `[Option<Measured>; SOURCE_SLOTS]`, indexed by `SourceId::slot` (an
+   exhaustive `const` match), so a lookup is one index and a re-measure
+   replaces that slot only. Behaviour is unchanged, pinned by the existing
+   `the_source_cache_measures_again_only_when_the_root_changed` and the new
+   `every_source_has_its_own_cache_slot` (a new id does not compile until the
+   test lists it) and `the_source_cache_holds_each_source_in_its_own_slot`.
+4. **`pull::gdfl_run::Request::misuse` refuses the filter's count before it
+   reads a name.** Its rule-6 walk (`only.iter().find`, a name that is no
+   symbol) is declared at `ONLY_MAX` = 256 names, but the empty-name walk
+   (`only.iter().any`) ran on the statement BEFORE the count was refused, so
+   a request of 100,000 names with an empty first one was read past the bound
+   and answered `symbol_empty`. The count is now the first check on the
+   filter: both walks read at most `ONLY_MAX` names whatever the request
+   carried, and a filter past it is `filter_too_long` before any name is
+   read. A filter inside the bound answers exactly as before. Pinned by
+   `a_filter_past_its_bound_is_refused_before_any_name_is_read`, which fails
+   on `aab82424b` (`symbol_empty` where `filter_too_long` is due).
+
+**Cost.** (1) and (2) change no answer and are not timed apart: each removes
+the rehashes of one set's growth. (3) is timed by
+`pull::gdfl_run::tests::source_cache_hit_timing`: release build, 20 Oct 2026, load 20 to 29: n = 6,000 hits (2,000 of each source) p50 1.13 µs, p99 3.17 µs, max 25.6 µs, the root's `stat` included. The walk of at most three entries it replaces was not timed. Invariants
+BG11-02, BG11-03 and (4) BG11-05; limits L-BG11-03.
+
+### D-6622 — A run line of the import journal takes one end, folded through one index of its names (BASE-GATE11) — 2026-10-20
+
+Gate 11 rule 6 refused `RunLine::end` (IA-2 repair 1), which walked the run's
+fields once for every field of its end line.
+
+1. **The fold is indexed.** `end` builds one map of the names the run holds,
+   pre-sized for every name it can hold, and each end field is one probe: the
+   fold costs the two lines' own fields, not their product. A name held twice
+   is found at its first place, as the walk found it, so every answer of
+   `a_run_end_line_is_folded_into_its_run_and_never_counted_twice` is
+   unchanged.
+2. **A run line takes one end.** The walk's cost was not the only defect: a
+   second `run <id> ended=..` line for the same newest start overwrote the
+   first end's `end_line` (losing which line ended the run, against IA-2's own
+   "neither value is lost") and appended an `end_*` field to the run, so a
+   journal repeating an end grew one run's fields and made each later fold
+   walk all of them. Now an end is folded only into a newest start of its id
+   that holds no end and is not itself an end; any other end is listed as
+   itself, exactly as an end whose start the journal does not hold already was
+   (IA-2: "never dropped"). The fold is therefore paid at most once a run
+   line, and the whole read stays O(its bytes). Two runs of one id ended
+   twice now show the first end on the newest start and the second as its own
+   line; before, the second end replaced the first.
+
+**Cost.** Timed by
+`api::server::import_journal::tests::end_line_fold_cost_by_field_count`
+(2,000 folds a width, release): release build, 2,000 folds a width, 20 Oct 2026, load 20 to 29: 8 / 64 / 512 fields p50 1.38 / 9.71 / 72.0 µs, p99 2.92 / 20.3 / 97.6 µs, max 68.3 / 49.5 / 114.2 µs. The walk it replaces, the same test on the base tree: p50 0.92 / 11.5 / 222.1 µs, p99 2.04 / 17.0 / 290.5 µs, max 32.5 / 43.8 / 322.2 µs. From 64 to 512 fields (8 times) the indexed fold grows 7.4 times at p50 and the walk 19.3 times: linear against quadratic. At 8 fields, the size of a real end line, the map costs about 0.5 µs more at p50 than the walk did, once a run. Invariant BG11-01; limits
+L-BG11-02.
+
+### D-6623 — `BarFile::read_rows_at` groups a scattered page by frame without a sort (BASE-GATE11) — 2026-10-20
+
+Gate 11 rules 4 and 6 refused SC-3's sorted page path: a `rows.iter().find`
+for the first uncommitted row, then `order.sort_unstable()` of (row, place)
+pairs so each frame decodes once, O(log r) a row for a page of r rows.
+
+1. **One pass** refuses the first uncommitted row in the order asked, before
+   anything is read (the same row the walk named), and gives each row its
+   frame's group by one probe of a map pre-sized for the rows; groups are
+   numbered in the order the page first meets their frames.
+2. **A count and one placement pass** lay the asked positions out group by
+   group; each frame is decoded once and each bar is written to the place it
+   was asked at. O(1) a row, expected; frames are decoded in first-met order
+   instead of block order, which changes no answer.
+3. The raw form keeps its own refusal pass before any read, and then reads
+   each row through the verified cache, as before.
+
+`read_rows_at` has no production caller yet (SC-5's sorted page is its
+consumer); it is fixed here because gate 11 reads the production closure, not
+the call graph, and because the consumer would inherit the sort.
+
+**Cost.** Timed by `store::file::sealed_door_tests::read_rows_at_timing`
+(sealed months of 2,250, 22,500 and 225,000 bars, pages of 100 and 1,000 rows,
+2,000 calls each, release): release build, 2,000 calls a case after one untimed, 20 Oct 2026, the machine at 1-minute load 20 to 29 on 14 cores: pages of 100 / 1,000 rows over 2,250 bars p50 56.4 / 68.9 µs, p99 73.0 / 77.8 µs, max 263.0 / 325.6 µs; over 22,500 bars p50 0.52 / 0.57 ms, p99 0.59 / 0.65 ms, max 1.05 / 1.37 ms; over 225,000 bars p50 0.68 / 4.80 ms, p99 0.81 / 5.26 ms, max 1.85 / 6.79 ms. A row costs what the frames its page meets cost: 68 ns a row when 1,000 rows fall in the 9 frames of 2,250 bars, 4.8 µs a row when they fall in hundreds of the 879 frames of 225,000, which is one frame decode (L-SC-1) a row at most. The sort it replaces, the same test on the base tree (`scratch/BASE-GATE11-before`, `aab82424b`): p50 55.2 / 69.5 µs, 0.49 / 0.56 ms, 0.62 / 4.60 ms; p99 105.7 / 101.3 µs, 0.57 / 0.63 ms, 0.75 / 4.86 ms. The same within the machine's noise: a sort of at most 1,000 pairs was never the cost, the frame decodes are, so this removes a log factor and buys no time at these sizes. Invariant BG11-04; limits L-BG11-01.
+
+### D-6624 — The loose day zips' day table is sized once, before the walk, for every key a walk can file (BASE-GATE11) — 2026-10-20
+
+Gate 11 rule 3 ("pre-size every map", docs/07 law 2) refused
+`pull/src/gdfl_dayzips.rs:242` on feat/db-fix at `c76f9178c`, brought by the
+IA-3 merge: `DayZips::open_capped` started its day table empty
+(`HashMap::new()`) and grew it with every day zip the walk of a root filed, so
+the table's rehashes were the root's: one each time the filed keys outgrew
+it.
+
+1. **The bound is the calendar's, not the root's.** `named` files a day only
+   inside the calendar's sourced span (any other day is `Unmeasured` there and
+   the name is counted `invalid`), and a key is (kind, day): at most
+   `LooseKind::ALL.len()` x the span's days, 3 x 3,287 = 9,861
+   (`DAYZIPS_KEYS_MAX`). The span is a literal beside a `const` assertion
+   against `SOURCED_LAST_DAY - SOURCED_FIRST_DAY + 1`, so the build fails the
+   day the calendar's record grows and the bound can never be stale; no
+   sign-losing cast is written.
+2. **Sized once, for the smaller of that bound and the walk's entry cap**
+   (each filed key is at least one entry). No insert of a walk rehashes, and
+   an empty root's table already has its room. The table lives for one open
+   of a root, which is a source open, not a request or a per-row step.
+3. **No answer changes.** The walk, its census and its refusals are as
+   before; only the table's capacity is set first.
+
+**Proof.** `the_day_table_is_sized_once_for_every_key_a_walk_can_file`: the
+bound is 9,861; an empty root's table has the room of a table made with it;
+every kind on the span's first and last days is filed and the days just
+outside it are invalid, never filed; the walk leaves the capacity as it found
+it; a walk capped at 64 entries reserves for 64 keys, not for the span. On
+`c76f9178c` it fails at its first capacity comparison, since a
+`HashMap::new()` has no room until its first insert. Invariant BG11-06;
+limits L-BG11-05; gate 23's `println!` of the timing is declared beside the
+other `#[ignore]` timings (ci.yml clause A).
+
+**Cost.** Timed by `pull::gdfl_dayzips::tests::day_table_sizing_timing`:
+release build, 20 Oct 2026, load 17 to 25 on 14 cores: n = 2,000 allocations
+of the table sized for 9,861 keys p50 208 ns, p99 250 ns, max 7.5 µs (the
+empty table it replaces allocates nothing: p50 0 ns, p99 42 ns); n = 200 opens
+of an empty root p50 14.5 µs, p99 32.3 µs, max 81.2 µs, and of a root of 6 day
+zips in 9 folders p50 143 µs, p99 289 µs, max 326 µs. The one allocation is
+paid once an open of a root, never an entry. Limits L-BG11-05.
+
+### D-6625 — The bench id C-HA-01 is declared as an invariant row (BASE-GATE11) — 2026-10-20
+
+R4-09a (`4df8b324f`, merged as `72c53d191`) added `slot_audit_is_flat` to
+`crates/store/benches/ratio.rs`, printing `C-HA-01`, and no row of
+`docs/04-invariants.md` declared that id. So `core` test
+`cost_invariants::every_measured_cost_invariant_is_declared` failed on
+feat/db-fix and `cargo test --workspace --locked` was red there, and CI gate
+14 refused `crates/store/benches/ratio.rs` (`C-HA-01: in-invariants=0
+in-bench=1`). BASE-GATE11's definition of done includes a green workspace
+test, so the row is added, in R4-09a's own section, worded from the bench's
+own doc and naming it (`store::bench::slot_audit_is_flat`); the bench and
+`slot_audit` are untouched. A row is added, none is removed or renumbered.
+
+### D-6626 — PREC-1's exact mean is declared on gate 11 rule 2 as the statistic it is (BASE-GATE11) — 2026-10-20
+
+Gate 11 was green on this branch at the IA-3 merge, and the next merges into
+feat/db-fix (R3-04 and PREC-1) made it refuse again: rule 2 counted 28 float
+spellings in `runner/src/outcome.rs` against an allowance of 26. Both are
+PREC-1's (`24a4a4300`, merged as `c152231ad`): `exact_mean(net: i128, n: u64)
+-> f64`, the reported mean of an itemset's forward moves as one divide of the
+exact `i128` sum by the count, so that a zero sum is a zero mean and the
+traded side is the sum's own sign (Welford's running mean left -2.22e-16 for a
+zero sum and traded it Short). Its return type and its `n as f64` are the two.
+
+**Decision.** Declared, 26 -> 28, with the reason in `docs/06-limits.md`,
+"Gate 11 — BASE-GATE11", rule 2. The value is `Edge::mean_paisa`, a statistic
+that was already a float and that this file's entry already admits ("only the
+mean, the t-statistic and the ratios derived from them are floating"); the
+paisa moves stay integers until the one divide, which is CLAUDE.md section 7's
+"statistics keep full precision". Rewriting it to dodge the count would change
+the spelling and not the arithmetic, which is the widening this package
+refuses. No other rule's count moved with those merges.
+
+**Proof.** Gate 11 on this branch after the merge of `c152231ad`: "OK — no
+banned construct outside the allowlist". PREC-1's own tests pin the
+arithmetic (`an_exactly_zero_sum_sample_has_a_zero_mean_and_is_read_long` and its
+neighbours in `crates/runner/src/outcome.rs`).
+
+### D-6627 — What the AG-05 and AG-06 merges brought to gate 11: a set sized once, a hash probe declared, and two test-module lint allows moved inside their own files (BASE-GATE11) — 2026-10-20
+
+The next two merges into feat/db-fix (AG-06, then AG-05) made gate 11 refuse
+again on three files:
+
+| Rule | File:line after the AG-05 merge | Construct | Brought by |
+|---|---|---|---|
+| 3 | `api/src/disk_route.rs:197` | `HashSet::new()` (`kept_bytes`'s `counted`) | AG-05 repair 2 |
+| 7 | `api/src/disk_route.rs:204` | `in_use.contains(&file.id)`, a `HashSet` | AG-05 repair 2 |
+| 5c | `api/src/audit.rs:3333, 3343` | `#[allow(clippy::expect_used, ..)]` on the `#[cfg(test)]` `mod` lines of `audit_lock_wait_tests.rs` and `audit_lock_wait_measure.rs` | AG-06 |
+
+1. **`kept_bytes`'s set of counted file identities is sized once** for every
+   census name it is handed (one identity a name at most), so no insert
+   rehashes (docs/07 law 2). One sum over the feeds' lengths, which the
+   function walks anyway; no answer changes, and AG-05's own tests of it
+   (`census_kept_bytes`, `disk_route_seal_tests.rs`) pin them.
+2. **The `in_use` probe is declared**, `ALLOW_MEMBER` 2 -> 3: a probe of a
+   `HashSet` of `(st_dev, st_ino)` built once a request, one probe a census
+   name, which is rule 7's own "a hash probe".
+3. **The two lint allows move inside the files they are for**, as inner
+   attributes at the head of `audit_lock_wait_tests.rs` and
+   `audit_lock_wait_measure.rs`, each the same four lints as before. Both
+   files are mounted under `#[cfg(test)]` only, so neither is in the
+   production closure gate 11 walks, and `audit.rs` itself carries no local
+   allow again (rule 5c's count stays at the two declared, `api/src/server.rs`
+   and `pull/src/ssm.rs`). No lint changes for any line of either test file.
+
+**Proof.** Gate 11 on this branch after merging the AG-05 merge: "OK — no
+banned construct outside the allowlist"; clippy with `-D warnings` over
+`api` and `--all-targets` green; `cargo test -p api` green with both test
+modules compiled.
+
+**For CLOUD-RUST1** (in flight on `crates/api/src/disk_route.rs`, based before
+AG-05): item 1 changes one statement inside AG-05's `kept_bytes`, which that
+branch never had; when it merges feat/db-fix it keeps the sized set and the
+`ALLOW_MEMBER` count of 3 unless its own change removes the probe.
+
+### D-6628 — What the R4-17 and CLOUD-RUST1 merges brought to gate 11: no refusal, one allowance left loose and tightened, and a limits row that cited a commit `main` cannot hold (BASE-GATE11) — 2026-10-21
+
+This branch merged feat/db-fix twice more before its gates: at the R4-17
+merge and at the CLOUD-RUST1 merge.
+
+1. **Neither merge brought a construct past an allowance.** Gate 11 on this
+   branch after each: "OK — no banned construct outside the allowlist". R4-17
+   declared its own (`docs/06-limits.md`, "Gate 11 — R4-17, declared at its
+   merge"). CLOUD-RUST1 kept AG-05's `kept_bytes` as this package left it: the
+   `counted` set sized once for every census name and the `in_use` probe that
+   `ALLOW_MEMBER`'s count of 3 declares (D-6627), so its in-flight note is
+   closed.
+2. **The rule-6 allowance of `api/src/disk_route.rs` is removed, 1 -> 0.**
+   RUST-1 measures the disk in-process, so `parse_df`, whose
+   `rposition` scanned the words of one `df` line for the capacity column, is
+   gone, and gate 11 warned that GF-1's entry no longer matched. An allowance
+   nothing uses admits the next scan in that file with no reason of its own,
+   so it is tightened, as the gate's warning asks, rather than left. This only
+   narrows the list; the four older loose entries the gate names
+   (`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+   `indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7) are
+   left as D-6620 found them, because in-flight packages edit at least one of
+   those files and may rely on the allowance; each owner tightens its own.
+3. **L-BG11-04 cited the AG-05 merge by a commit hash** that is no ancestor of
+   `origin/main` and is not in `crates/store/tests/cited_commits.rs`'s
+   `NOT_ON_MAIN`, so
+   `store::cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+   failed on this branch (`cargo test --workspace --locked`, 21 Oct 2026).
+   The row now names the merge by its subject, as the rest of it does, and
+   records the CI shell gates at the R4-17 merge. The test passes.
+
+**Proof.** Gate 11 green on this branch after the CLOUD-RUST1 merge with the
+entry removed (`state/fix/ci-shell-gates.sh --jobs language-purity`); the
+cited-commits test green; the CI shell gates at the R4-17 merge in
+L-BG11-04. D-6629 records the next merge.
+
+### D-6629 — What the DATA-1 and CLOUD-MUTPULL merges brought to gate 11: nothing; the CI shell gates restated at the CLOUD-MUTPULL merge (BASE-GATE11) — 2026-10-21
+
+This branch merged feat/db-fix once more, at the CLOUD-MUTPULL merge (after
+the DATA-1 merge), with no conflict and no change to any file this package
+owns.
+
+1. **Neither merge brought a construct past an allowance.** Gate 11 on this
+   branch after the merge, run with the step's own commands
+   (`state/fix/ci-shell-gates.sh --jobs language-purity`): "OK — no banned
+   construct outside the allowlist". DATA-1's `cli/src/feed_reconcile.rs`
+   and CLOUD-MUTPULL's ten `crates/pull` files are inside it. feat/db-fix's
+   own head still refuses the files this package fixes or declares (D-6620
+   to D-6628), and nothing more.
+2. **The four loose allowances D-6628 item 2 left stand as they were**
+   (`api/src/audit_json.rs` rule 6; `api/src/spot.rs`,
+   `indicators/src/column.rs`, `cli/src/gdfl_import_command.rs` rule 7):
+   neither merge touched those files, so the reason to leave them to their
+   owners is unchanged.
+3. **The other CI shell gates on feat/db-fix's head are restated in
+   L-BG11-04**: the same eleven steps red as at the R4-17 merge, the two
+   merges adding one gate-1d literal and one gate-23 temporary path, both
+   CLOUD-MUTPULL's, and gates 4, 13c and 6d run and green. This package
+   fixes none of them: each is its owner's (D-6620).
+
+**Proof.** Gate 11 green on this branch after the merge; the fast CI shell
+gate runs on feat/db-fix's head and on this branch, each step's log under
+`state/fix/ci-gates-logs/` (operator tooling, untracked), compared step by
+step; `cargo test --workspace --locked` on this branch after the merge.
+
+**Addendum, repair 4 (2026-10-21): the IA-3-OPT merge brought one rule-6
+occurrence, declared.** This package's block (D-6620 to D-6629) has no number
+left, so the next merge is recorded here, below the entry that recorded the
+last one, rather than under a number outside the block. This branch merged
+feat/db-fix at the IA-3-OPT merge with no conflict. Gate 11 then refused one
+occurrence: `crates/pull/src/gdfl_v3.rs:411`, rule 6, brought by IA-3-OPT's
+new file (`MARKER_KEYS.iter().position(..)` in `verify_marker`). It is
+declared, `ALLOW_SCAN` `crates/pull/src/gdfl_v3.rs` 0 -> 1, because the search
+is the shape rule 6 permits: its bound is `MARKER_KEYS`, a compile-time
+`[&str; 8]`, over a marker read capped at `MARKER_MAX_BYTES` = 4 KiB, whose
+unknown or repeated key is refused at its own line, so at most 9 lines and
+72 comparisons a marker. Rewriting it as a `match` over the eight literals
+was refused: that is a second copy of the table, which drifts the day a key
+is added. The reason is in `docs/06-limits.md`, "Gate 11 — BASE-GATE11";
+the CI shell gates at the IA-3-OPT merge are restated in L-BG11-04.
+**Proof.** Gate 11 refused the merged branch ("REFUSED
+crates/pull/src/gdfl_v3.rs — 1 occurrence(s), 0 allowed") and is green with
+the entry; the refusal arms that bound the walk are
+`pull::gdfl_v3::tests::an_unverified_v3_manifest_is_not_trusted`.
+
+**Addendum, repair 5 (2026-10-22): the R3-19 and R3-30 merges; R3-30 brought
+13 occurrences, three rewritten and ten declared.** Recorded here for the
+reason the repair-4 addendum gives: the block has no number left. This branch
+merged feat/db-fix at the R3-30 merge (after the R3-19 merge) with no
+conflict. Gate 11 then refused three files, every occurrence R3-30's
+(reference tables as store data); R3-19's census publish brought none.
+
+1. **Rewritten, because a load of every consumer reaches them and the law's
+   own remedy is cheap.** `costs::lot::LotTable::from_rows`'s map of
+   underlying to rows and `pull::reference_data::FnoTable::build`'s spans
+   map are sized for what they can hold, the rows handed in (rule 3).
+   `CalendarTable::build` no longer sorts its sessions of unrecorded length
+   (rule 4): it reads them off its own day kinds in one pass over the span
+   it has already built, so the list is ascending whatever order the rows
+   came in and cannot disagree with `kind_of` (BG11-07).
+2. **Declared, each with a constant or a once-per-load bound** (reasons in
+   `docs/06-limits.md`, "Gate 11 — BASE-GATE11", after the IA-3-OPT entry):
+   rule 1 `costs/src/lot.rs` 0 -> 1, `lot_on`'s bisection of one
+   underlying's at most 64 rows (`MAX_LOT_ROWS_PER_UNDERLYING`, refused past
+   it); rule 3 `pull/src/reference_data.rs` 0 -> 2, the process interner's
+   two maps, one entry a generation loaded; rule 4 `costs/src/lot.rs`
+   0 -> 1, `from_rows`' stable order by underlying, once per load, at most
+   `MAX_LOT_ROWS`; rule 6 `costs/src/lot.rs` 0 -> 1 (a slot's two
+   `CONTRACT_RULES`), `pull/src/reference_data.rs` 0 -> 2 (one row's fields,
+   its width held to a compile-time column list first) and
+   `pull/src/calendar.rs` 1 -> 2 (the three `SOURCED_SPECIAL_NOTES`); rule 7
+   `pull/src/reference_data.rs` 0 -> 1, `kind_of`'s RangeInclusive.
+   `calendar.rs` is edited by CAL-1 in flight, so only its allowance is
+   raised; the file is not touched.
+3. **Refused alternatives.** Rewriting a compile-time-bounded walk as a
+   `for` loop or an `.any` would change the spelling the gate reads and not
+   the cost, which is the evasion D-6620 refused; a pre-size of the
+   interner by a guessed number of generations would be a fixed number the
+   data never gave.
+4. **The four loose allowances D-6628 item 2 left stand**, for D-6629 item
+   2's reason; neither merge touched their files.
+5. **The other CI shell gates on feat/db-fix's head are restated in
+   L-BG11-04** at the R3-30 merge.
+
+**Proof.** Gate 11 refused the merged branch (`crates/costs/src/lot.rs` rules
+1, 3, 4 and 6; `crates/pull/src/reference_data.rs` rules 3 (3), 4, 6 (2) and
+7; `crates/pull/src/calendar.rs` rule 6, 2 of 1) and is green after this
+change ("OK — no banned construct outside the allowlist");
+`pull::reference_data::tests::the_unsized_days_are_the_calendars_own_in_day_order`;
+`cargo test --workspace --locked` on this branch after the merge.
+
+**Addendum, repair 6 (2026-10-22): the PIT-1, CLOUD-CHG1, SC-4 and CAL-1
+merges brought nothing to gate 11.** Recorded here for the reason the repair-4 addendum gives. This branch
+merged feat/db-fix at the PIT-1 merge (the point-in-time F&O membership).
+Git refused one hunk pair, both in `.github/gates_ledger.rs`: the tails of
+`ALLOW_SORT` and `ALLOW_SCAN`, where this package's rows and PIT-1's rows
+(`crates/cli/src/fno_membership_command.rs` 4 sorts of its own report and
+bench samples, `crates/pull/src/fno_membership.rs` 1 search inside the
+compile-time `NAME_LEN`, PIT-1's D-5163 and D-5164) were appended at the same
+place. Both sides are kept, every row unchanged, because each declares a
+different file; no allowance was raised or lowered by the resolution. PIT-1's
+declared occurrences are its own and are not restated here. Nothing else
+conflicted, and no manifest, `Cargo.lock` or `ci.yml` changed. The
+CLOUD-CHG1 merge (the charge stack and the Dhan calculator mode in `costs`)
+landed on feat/db-fix a minute later and was merged here with no conflict; it
+brought no occurrence to gate 11, and its `costs/Cargo.toml` change adds a
+bench and moves `[lints]` without a new dependency (`Cargo.lock` unchanged).
+The other CI shell gates at both merges are restated in L-BG11-04.
+**Proof.** Gate 11 green on the branch after each merge ("GATE 11 rc=0",
+`state/fix/ci-gates-logs/P-BASE-GATE11-r29-g11` and `P-BASE-GATE11-r30-g11`,
+operator tooling, untracked), and on feat/db-fix's own head, at each merge, it
+refuses exactly the R3-30 occurrences it refused before them, PIT-1's rows
+being in its allowlist; `cargo test --workspace --locked` on this branch after
+both merges.
+
+**The SC-4 and CAL-1 merges (same day), and gate 0 found red on feat/db-fix.**
+SC-4 (the write door of a sealed month) and CAL-1 (the tradable-day rule and
+the special-session list) landed next and were merged here. Git refused one
+hunk, in `.github/workflows/ci.yml`, gate 23 clause A's declared print
+surfaces, where this package's `pull/src/gdfl_dayzips_tests.rs` line and
+CAL-1's two test files were appended at the same place; both are kept, each
+declaring a different file. Neither merge brought an occurrence to gate 11:
+CAL-1's `crates/pull/src/calendar.rs` stays inside its rule-6 allowance (2 of
+2, the second being R3-30's `special_note`, raised by this package), and CAL-1
+lowered that file's own membership allowance itself.
+
+At the CAL-1 merge feat/db-fix's gate 0 does not build its own source
+scanner: `.github/gates_tree.rs` types `DECLARED` as `[&str; 73]` and lists 74
+groups, because PIT-1 and CAL-1 each raised 72 to 73 for its own group and the
+merge kept both groups. Every step that runs the scanner fails with it, gate
+11 among them, so gate 11 could not be green on any branch holding that merge.
+The length is corrected here, 73 to 74, with a comment; no group is added,
+removed or widened, so this declares nothing the two packages did not each
+declare and review. It is the one file this addendum touches outside the
+package (named in the report for the main session, which may land the same
+one-character change on feat/db-fix itself). The other red steps at the CAL-1
+merge, including gate 27b's two entries headed D-6247 (SC-4's and R3-30 repair
+2's), are restated in L-BG11-04 and left to their owners (D-6620).
+**Proof.** Gate 0's build error on feat/db-fix's head ("expected an array
+with a size of 73, found one with a size of 74"), and gates 0, 11, 13, 14 and
+25 green on this branch after the correction (`state/fix/ci-gates-logs/
+P-BASE-GATE11-r31-g11b`); `cargo test --workspace --locked` on this branch
+after the merge.
+
+**Addendum, repair 7 (2026-10-22): the BASE-REDS-1021 merge; D-6625's row
+gives way to D-7120's.** BASE-REDS-1021 (`cargo deny`'s two advisories, and
+the C-HA-01 cost row R4-09a named and never landed) was merged here. Git
+refused one hunk, in `docs/04-invariants.md`, where this branch's C-HA-01 row
+(D-6625) and BASE-REDS-1021's (D-7120 point 6) stand on the same line of
+R4-09a's table, placed there on purpose so the second to merge meets this
+conflict instead of landing a second row. The resolution keeps one row,
+BASE-REDS-1021's, which carries the gate-8 ceiling, the bench's three printed
+labels, the O(1) shape test and L-HA-01 where this branch's named only the
+bench; this branch's row is dropped. D-6625 therefore lands no row of its
+own: what it decided (C-HA-01 is declared, nothing in the bench or in
+`slot_audit` changes, no row is removed or renumbered) is what D-7120's row
+does, and the invariant is declared once. Keeping both would have been CI
+gate 10b's refusal (`INVARIANT IDENTIFIER DEFINED MORE THAN ONCE: C-HA-01`,
+D-7120 point 6). Nothing else conflicted. The merge brought no occurrence to
+gate 11: its only code is `Cargo.lock` (`rustls-webpki` 0.103.16,
+`webpki-roots` 1.0.10) and a test of `vocab`'s, and gate 11 refuses on
+feat/db-fix's head exactly the R3-30 occurrences it refused at the CAL-1
+merge. Gate 14 is now green on feat/db-fix too. Gate 0 is still red there,
+`.github/gates_tree.rs` being unchanged by the merge, so the 73 to 74
+correction above stays on this branch. The other CI shell gates at this merge
+are restated in L-BG11-04.
+**Proof.** Gates 0, 11 and 14 green on this branch after the merge, and the
+other red steps' refusals identical to feat/db-fix's head with gate 0's length
+corrected (`state/fix/ci-gates-logs/P-BASE-GATE11-r32-fast` and
+`dbfix-66fe38a38-g0fix-r32-fast`, operator tooling, untracked); one C-HA-01
+row in `docs/04-invariants.md` (`grep -c '^| C-HA-01 '` is 1); `cargo test
+--workspace --locked` on this branch after the merge.
+
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's

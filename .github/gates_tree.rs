@@ -2860,8 +2860,11 @@ const PIT_1_LITERAL: &str = "fnm fno-membership-v1 inferred_gdfl_options known n
 // parameter path.
 const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 
-/// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 73] = [
+/// Every declared group, in the order the step joined them. 73 -> 74 at
+/// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
+/// raised 72 -> 73 for its own group, and both groups landed, so the joined
+/// list holds 74 and the length below said 73, which failed gate 0's build.
+const DECLARED: [&str; 74] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,

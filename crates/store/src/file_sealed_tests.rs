@@ -825,3 +825,119 @@ fn a_linked_sealed_month_carries_its_provenance_as_the_door_serves_its_bars() {
         "{refused}"
     );
 }
+
+/// **A SCATTERED PAGE IS GROUPED BY FRAME WITHOUT A SORT, AND EVERY BAR GOES
+/// WHERE IT WAS ASKED** (BASE-GATE11, D-6623). On 20,000 bars (79 frames),
+/// raw and sealed: no row, one row, a row asked three times, every row in
+/// reverse order, rows that alternate between the first and the last frame,
+/// each frame's first and last row interleaved; then the refusals, in both forms: the FIRST
+/// uncommitted row in the order asked is named, whether it comes first, last
+/// or after another uncommitted one, and nothing is returned in part.
+#[test]
+fn a_scattered_page_is_answered_in_the_asked_order_by_both_forms() {
+    const N: u64 = 20_000;
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("rows-at-extremes");
+    let path = month_path(None);
+    let bars = seconds(N);
+    write_raw(&root.0, path, &bars);
+    let raw = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    let pages: Vec<Vec<u64>> = vec![
+        vec![],
+        vec![N / 2],
+        vec![7, 7, 7],
+        (0..N).rev().collect(),
+        (0..200)
+            .map(|k| if k % 2 == 0 { k } else { N - k })
+            .collect(),
+        (0..=(N / 256))
+            .flat_map(|frame| [frame * 256, (frame * 256 + 255).min(N - 1)])
+            .rev()
+            .collect(),
+    ];
+    let want = |page: &[u64]| -> Vec<Bar> {
+        page.iter()
+            .map(|&row| bars[usize::try_from(row).unwrap()])
+            .collect()
+    };
+    let refusals = [
+        (vec![N, 0, 1], N),
+        (vec![0, 1, N + 3], N + 3),
+        (vec![5, N + 3, N, u64::MAX], N + 3),
+        (vec![u64::MAX], u64::MAX),
+    ];
+    let refused = |file: &BarFile, form: &str| {
+        for (page, named) in &refusals {
+            assert!(
+                matches!(
+                    file.read_rows_at(page),
+                    Err(StoreError::NotCommitted { index, n_valid }) if index == *named && n_valid == N
+                ),
+                "{form}: {page:?} names {named}"
+            );
+        }
+    };
+    for page in &pages {
+        assert_eq!(
+            raw.read_rows_at(page).unwrap(),
+            want(page),
+            "raw, {} rows",
+            page.len()
+        );
+    }
+    refused(&raw, "raw");
+    drop(raw);
+    seal(&root.0, path);
+    let sealed = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+    assert_eq!(sealed.form(), Form::Sealed);
+    for page in &pages {
+        assert_eq!(
+            sealed.read_rows_at(page).unwrap(),
+            want(page),
+            "sealed, {} rows",
+            page.len()
+        );
+    }
+    refused(&sealed, "sealed");
+}
+
+/// **A SCATTERED PAGE, TIMED AT THREE MONTH SIZES** (BASE-GATE11, D-6623):
+/// what a row of the page pays is the frames the page meets, one decode a
+/// distinct frame, and this prints it: a sealed month of 2,250, 22,500 and 225,000
+/// one-second bars, pages of 100 and 1,000 rows scattered over the whole month
+/// by a fixed multiplicative step, 2,000 timed calls each after one untimed.
+/// Printed for `docs/06-limits.md`, never asserted: a timing on a shared
+/// machine is evidence, not a gate.
+#[test]
+#[ignore = "a timing, printed"]
+fn read_rows_at_timing() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    for n in [2_250_u64, 22_500, 225_000] {
+        let root = Root::new(&format!("rows-at-timing-{n}"));
+        let path = month_path(None);
+        let bars = seconds(n);
+        write_raw(&root.0, path, &bars);
+        seal(&root.0, path);
+        let sealed = BarFile::open_existing(&root.0, path, SYMBOL).unwrap();
+        for width in [100_u64, 1_000] {
+            let page: Vec<u64> = (0..width).map(|k| (k * 7_919 + 13) % n).collect();
+            let _warm = sealed.read_rows_at(&page).unwrap();
+            let mut took = Vec::with_capacity(2_000);
+            for _ in 0..2_000 {
+                let began = std::time::Instant::now();
+                let got = sealed.read_rows_at(&page).unwrap();
+                took.push(began.elapsed());
+                assert_eq!(got.len(), page.len());
+            }
+            took.sort_unstable();
+            let k = took.len();
+            println!(
+                "read_rows_at sealed n={n} rows={width}: calls={k} p50={:?} p99={:?} max={:?} per-row-p50={:?}",
+                took[k / 2],
+                took[k * 99 / 100],
+                took[k - 1],
+                took[k / 2] / u32::try_from(width).unwrap()
+            );
+        }
+    }
+}
