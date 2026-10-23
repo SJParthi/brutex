@@ -364,18 +364,28 @@ async fn the_plan_writes_nothing_and_the_press_applies_once() {
 /// Before the repair the guard lived in the request's future, so aborting it
 /// freed the press while `spawn_blocking` kept running, and the second press
 /// ran beside the first.
+///
+/// ONCE THE FIRST WORK HOLDS THE PIPE, the pipe is moved aside and an
+/// ordinary plan file takes its name, so a second press that a regression
+/// admits reads a plain file and answers at once: the test then FAILS on its
+/// status instead of hanging. With the pipe left at its name, the admitted
+/// second press's work read the pipe too, and this test run against the
+/// pre-repair route never ended: it was still running after 16 minutes and
+/// was killed.
 #[tokio::test]
 async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
     let _serial = PRESS_TESTS.lock().await;
     let fixture = Fixture::new("r418-press-left");
     let held = fixture.month(ym(2018, 3), 640, 4);
     let pipe = plan_file(&fixture.root);
+    let named = pipe.clone();
     let made = std::process::Command::new("mkfifo")
         .arg(&pipe)
         .status()
         .expect("mkfifo runs");
     assert!(made.success(), "mkfifo made {}", pipe.display());
     let body = plan_body(&[held[2].ts_micros]);
+    let plain = body.clone();
     let (opened_tx, opened_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let feeder = std::thread::spawn(move || {
@@ -404,6 +414,9 @@ async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert!(running, "the first press's work opened its plan");
+    // The first work holds the pipe open; its name now goes to a plain plan.
+    fs::rename(&named, named.with_extension("fifo")).expect("the pipe moves aside");
+    fs::write(&named, plain).expect("a plain plan takes the pipe's name");
     // THE CLIENT LEAVES while the work is blocked reading the plan.
     first.abort();
     let left = first.await;
