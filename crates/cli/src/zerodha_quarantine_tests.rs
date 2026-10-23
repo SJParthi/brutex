@@ -538,3 +538,62 @@ fn a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one(
         Ok(Some(SYMBOL.to_owned()))
     );
 }
+
+/// R4-18 repair 2, blocking 1 and 2 through the verb: a damaged ledger line
+/// is PRINTED by offset (a plan says it and fails, an apply refuses before
+/// anything is written), and an apply over an index behind its ledger names
+/// the rebuild it made before its first act. Before, both ran silent.
+#[test]
+fn the_verb_names_a_damaged_ledger_line_and_a_rebuilt_index() {
+    let root = Root::new("damaged-ledger");
+    let minutes: Vec<Bar> = (0..6).map(|i| minute(i, 517)).collect();
+    write(&root.0, Timeframe::MINUTE_1, &minutes);
+    let named = [minutes[1].ts_micros];
+    write_plan(
+        &root.0,
+        &plan_text(&[("1min", "2018-12", "timestamps", "zero_price", &named)]),
+    );
+    let base = [
+        SYMBOL,
+        "2018-12-01",
+        "2018-12-31",
+        "--cause",
+        "zero_price",
+        "--reason",
+        "invented zero rows",
+    ];
+    let applied = [&base[..], &["--apply"]].concat();
+    let (code, out) = run(&root.0, &applied);
+    assert_eq!(code, OK, "{out}");
+    // A WRITER KILLED BETWEEN ITS LEDGER LINE AND ITS INDEX: the image is
+    // torn here, and the next apply says it rebuilt it first.
+    let index = store::quarantine::index_path(&root.0, Vendor::Zerodha);
+    let image = fs::read(&index).expect("index");
+    fs::write(&index, &image[..64]).expect("torn");
+    let (code, out) = run(&root.0, &applied);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("QUARANTINE INDEX REBUILT from its ledger"),
+        "{out}"
+    );
+    assert!(out.contains("nothing written (already_dropped)"), "{out}");
+    // ONE BYTE OF A LEDGER LINE FLIPPED: named, never skipped.
+    let ledger = store::quarantine::ledger_path(&root.0, Vendor::Zerodha);
+    let mut bytes = fs::read(&ledger).expect("ledger");
+    let at = bytes
+        .windows(8)
+        .position(|w| w == b"invented")
+        .expect("a reason");
+    bytes[at] ^= 0x20;
+    fs::write(&ledger, &bytes).expect("damaged");
+    let before = files_under(&root.0);
+    let (code, out) = run(&root.0, &base);
+    assert_eq!(code, FAILED, "a plan over a damaged ledger fails: {out}");
+    assert!(out.contains("QUARANTINE LEDGER DAMAGED"), "{out}");
+    assert!(out.contains("quarantine_ledger_damaged"), "{out}");
+    let (code, out) = run(&root.0, &applied);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("QUARANTINE LEDGER DAMAGED"), "{out}");
+    assert!(out.contains("Nothing was written"), "{out}");
+    assert_eq!(files_under(&root.0), before, "nothing was written");
+}

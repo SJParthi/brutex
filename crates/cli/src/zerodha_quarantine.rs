@@ -532,6 +532,61 @@ fn note(ask: &Ask, symbol: &str, rung: Timeframe, month: YearMonth, outcome: &Ou
 /// The target of this verb's events on `/logs`.
 const EVENT_TARGET: &str = "cli.zerodha_quarantine";
 
+/// What the feed's quarantine says of itself before the first month: the
+/// lines to print, or why nothing may be written. A ledger with a damaged
+/// line is refused by name (its offsets); an apply then brings the index
+/// level with the ledger (`store::quarantine::catch_up`), naming a rebuild.
+/// O(ledger), once per run.
+fn quarantine_state(root: &Path, apply: bool) -> Result<Vec<String>, String> {
+    let ledger = store::quarantine::read_ledger(root, Vendor::Zerodha)
+        .map_err(|why| format!("LEDGER UNREADABLE: {why}"))?;
+    if !ledger.damaged.is_empty() {
+        return Err(format!(
+            "LEDGER DAMAGED: {}",
+            store::quarantine::QuarantineError::LedgerDamaged {
+                path: store::quarantine::ledger_path(root, Vendor::Zerodha),
+                offsets: ledger.damaged,
+            }
+        ));
+    }
+    let mut said = Vec::new();
+    if !ledger.ended.is_empty() {
+        said.push(format!(
+            "quarantine ledger: {} torn append(s) a killed writer left, ended and never read as acts (at byte {})",
+            ledger.ended.len(),
+            ledger
+                .ended
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if apply {
+        match store::quarantine::catch_up(root, Vendor::Zerodha) {
+            Ok(None) => {}
+            Ok(Some(rebuilt)) => said.push(format!(
+                "QUARANTINE INDEX REBUILT from its ledger before the first act: {} line(s), {} month(s) indexed",
+                rebuilt.lines, rebuilt.months
+            )),
+            Err(why) => return Err(format!("INDEX NOT LEVEL WITH ITS LEDGER: {why}")),
+        }
+    }
+    Ok(said)
+}
+
+/// One `/logs` event for a quarantine state that refused or failed a run.
+fn note_state(ask: &Ask, why: &str) {
+    crate::note(
+        &telemetry::Event::error(EVENT_TARGET, "zerodha quarantine state refused")
+            .with(
+                "mode",
+                telemetry::Value::Str(if ask.apply { "apply" } else { "plan" }),
+            )
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
 /// One month of one rung: planned, or applied.
 fn act(
     root: &Path,
@@ -646,14 +701,34 @@ pub(crate) fn command_with(
         },
         plan.display()
     );
+    // THE QUARANTINE'S OWN STATE FIRST (R4-18 repair 2): a damaged ledger
+    // line is printed by offset, never skipped, and an apply refuses before
+    // anything is written; an apply brings the index level with its ledger
+    // before its first act and says when it had to rebuild it.
+    let mut failed = match quarantine_state(&root, ask.apply) {
+        Ok(said) => {
+            for line in &said {
+                let _ = writeln!(out, "  {line}");
+            }
+            false
+        }
+        Err(why) => {
+            let _ = writeln!(out, "  QUARANTINE {why}");
+            note_state(&ask, &why);
+            if ask.apply {
+                let _ = writeln!(out, "ZERODHA QUARANTINE REFUSED. Nothing was written.");
+                return FAILED;
+            }
+            true
+        }
+    };
     if rows.is_empty() {
         let _ = writeln!(
             out,
             "  the plan names no bar of this cause in the window: nothing to do"
         );
-        return OK;
+        return if failed { FAILED } else { OK };
     }
-    let mut failed = false;
     for row in &rows {
         let stamps = match named(&root, &ask, row)
             .and_then(|stamps| check_listing(&root, &ask, &row.symbol, &stamps).map(|()| stamps))

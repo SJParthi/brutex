@@ -195,7 +195,15 @@ impl FailKind {
             | RepairError::Reason(_) => Self::RepairRefused,
             RepairError::HeldBarDiffers { .. }
             | RepairError::IndexedSibling(_)
-            | RepairError::RevisionLimit => Self::RepairImpossible,
+            | RepairError::RevisionLimit
+            // R4-18 repair 2: a month quarantined whole takes no bar, for
+            // good; no later build or repair lifts a quarantine.
+            | RepairError::Quarantined(_) => Self::RepairImpossible,
+            // R4-18 repair 2: the feed's quarantine index or ledger cannot
+            // be trusted (torn, stale, damaged), so which offered bars it
+            // set aside is not known: a fault of the store, held back, read
+            // again once a writer has rebuilt the index.
+            RepairError::QuarantineUnknown(_) => Self::StoreDamaged,
             RepairError::MissingTimestamp(_) => Self::BatchRefused,
             // D-4898 (IA-17): the revision is published, complete and not
             // served; the same repair offered again finds it and promotes.

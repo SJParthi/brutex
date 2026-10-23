@@ -308,23 +308,31 @@ fn a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired() {
     .expect("applies");
     let index = index_path(&store.root, Vendor::Zerodha);
     assert_eq!(fs::metadata(&index).expect("index").len(), INDEX_LEN);
-    // ONE READ: the source of `probe_at` reads one bucket, by one positional read.
+    // TWO POSITIONAL READS: `probe_at` reads one bucket, `open_index` the
+    // 64-byte header (R4-18 repair 2), and neither reads the whole index.
     let source = include_str!("quarantine.rs");
     let body = source
         .split("pub fn probe_at(")
         .nth(1)
-        .and_then(|rest| rest.split("\nfn refusal_kind").next())
+        .and_then(|rest| rest.split("\nfn open_index(").next())
         .expect("probe_at's body");
-    assert_eq!(
-        body.matches("read_exact_at(").count(),
-        1,
-        "one positional read"
-    );
-    assert_eq!(
-        body.matches("read_to_end").count(),
-        0,
-        "never the whole index"
-    );
+    let opener = source
+        .split("\nfn open_index(")
+        .nth(1)
+        .and_then(|rest| rest.split("\nfn described(").next())
+        .expect("open_index's body");
+    for (name, text) in [("probe_at", body), ("open_index", opener)] {
+        assert_eq!(
+            text.matches("read_exact_at(").count(),
+            1,
+            "{name}: one positional read"
+        );
+        assert_eq!(
+            text.matches("read_to_end").count(),
+            0,
+            "{name}: never the whole index"
+        );
+    }
     // A torn index answers by name, never "clear" ...
     let bytes = fs::read(&index).expect("bytes");
     fs::write(&index, &bytes[..bytes.len() - 17]).expect("tear it");
@@ -363,12 +371,18 @@ fn a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired() {
     )
     .expect("records");
     assert!(done.ended_torn);
+    assert!(done.rebuilt, "an image behind its ledger is rebuilt first");
     let read = read_ledger(&store.root, Vendor::Zerodha).expect("reads");
     assert_eq!(read.lines.len(), 3);
-    assert_eq!(
-        read.damaged.len(),
-        1,
-        "the ended fragment is named damaged, never parsed"
+    // ENDED, NEVER DAMAGE (R4-18 repair 2): the kill left no act, so the
+    // fragment is never parsed and never refuses a rebuild or a listing.
+    assert_eq!(read.ended.len(), 1, "the fragment is an ended torn append");
+    assert!(read.damaged.is_empty(), "{:?}", read.damaged);
+    assert!(
+        fs::read_to_string(&ledger)
+            .expect("text")
+            .contains("drop\ttorn\n"),
+        "ended by the torn mark, no byte of it changed"
     );
     assert!(
         fs::read_to_string(&ledger)
@@ -474,10 +488,14 @@ fn a_run_killed_after_the_promotion_is_resumed_from_its_ledgered_intent() {
     )
     .expect("the intent");
     repair::drop_month(&store.root, path, SYMBOL, &named, "the run that died").expect("promoted");
-    assert_eq!(
-        probe(&store.root, path),
-        Ok(Probe::Clear),
-        "not yet indexed"
+    // THE INTENT IS INDEXED as a drop of no bars (R4-18 repair 2): every
+    // reader knows the month is named before its `dropped` line exists.
+    assert!(
+        matches!(
+            probe(&store.root, path),
+            Ok(Probe::Quarantined(e)) if e.scope == Scope::Dropped && e.bars == 0
+        ),
+        "the intent is indexed, its bars not yet counted"
     );
     let resumed =
         apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("resumes");
@@ -667,12 +685,14 @@ fn a_linked_audit_directory_is_refused() {
     );
 }
 
-/// **A FULL BUCKET IS REFUSED BY NAME, AND THE LEDGER LINE STANDS** (the
-/// index's maximum, L-R418-04): nine months whose keys share one home slot
-/// fill its bucket of eight; the ninth record is `quarantine_index_full`, its
-/// ledger line is written, and the eight indexed months still probe.
+/// **A FULL BUCKET IS REFUSED BY NAME, AND NOTHING IS WRITTEN** (the index's
+/// maximum, L-R418-04): nine months whose keys share one home slot fill its
+/// bucket of eight; the ninth record is `quarantine_index_full`, refused
+/// BEFORE its ledger line (R4-18 repair 2: a line standing unindexed would
+/// leave every reader of the feed answering `quarantine_index_stale`, and no
+/// rebuild could index it), and the eight indexed months still probe.
 #[test]
-fn a_ninth_key_on_one_home_slot_is_refused_by_name_and_the_ledger_line_stands() {
+fn a_ninth_key_on_one_home_slot_is_refused_by_name_and_nothing_is_written() {
     let store = Store::new("full");
     let month = march();
     let target = super::home_of(&super::hash_of("NSE/CASH/QHOME0/1min", month));
@@ -710,13 +730,19 @@ fn a_ninth_key_on_one_home_slot_is_refused_by_name_and_the_ledger_line_stands() 
     for symbol in &symbols[..8] {
         act(symbol).expect("one of eight fits");
     }
+    let audit_before = all_bytes_under(&store.root.join("audit"));
     let refused = act(symbols[8]);
     assert!(
         matches!(refused, Err(QuarantineError::Full { .. })),
         "{refused:?}"
     );
+    assert_eq!(
+        all_bytes_under(&store.root.join("audit")),
+        audit_before,
+        "refused before its ledger line: nothing written"
+    );
     let ledger = read_ledger(&store.root, Vendor::Zerodha).expect("ledger");
-    assert_eq!(ledger.lines.len(), 9, "the ninth line stands in the ledger");
+    assert_eq!(ledger.lines.len(), 8, "the ninth act has no line");
     for symbol in &symbols[..8] {
         assert!(matches!(
             probe(&store.root, minute(symbol, month)),
@@ -902,6 +928,22 @@ fn the_merge_rule_never_lets_a_drop_lift_a_whole_record() {
     assert_eq!(merged(whole_a, dropped_b), whole_a);
     assert_eq!(merged(dropped_a, whole_b), whole_b);
     assert_eq!(merged(whole_a, whole_b), whole_b);
+    // AN INTENT (a drop of no bars, revision 0) adds nothing and keeps the
+    // revision served; its line is the newest (R4-18 repair 2).
+    let intent = Entry {
+        bars: 0,
+        revision: 0,
+        ..entry(Scope::Dropped, 0, 50)
+    };
+    assert_eq!(
+        merged(dropped_a, intent),
+        Entry {
+            bars: 3,
+            revision: 1,
+            ..intent
+        }
+    );
+    assert_eq!(merged(whole_a, intent), whole_a);
 }
 
 /// A killed run's intent owed on a month later recorded whole is finished
@@ -936,11 +978,25 @@ fn an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole
         matches!(whole, Applied::WholeMonth { bars: 4, .. }),
         "{whole:?}"
     );
+    // THE APPLY THAT RECORDED IT WHOLE FINISHED THE INTENT FIRST (R4-18
+    // repair 2, the second check's t2): its `dropped` line precedes the whole
+    // line, so the next apply of the intent's own stamps writes nothing.
+    let lines = read_ledger(&store.root, Vendor::Zerodha)
+        .expect("ledger")
+        .lines;
+    let scopes: Vec<Scope> = lines.iter().map(|line| line.scope).collect();
+    assert_eq!(
+        scopes,
+        vec![Scope::Dropping, Scope::Dropped, Scope::WholeMonth]
+    );
+    assert_eq!(lines[1].stamps, named);
     let resumed =
         apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)).expect("resumed");
-    assert!(
-        matches!(resumed, Applied::Resumed { bars: 2, .. }),
-        "{resumed:?}"
+    assert_eq!(
+        resumed,
+        Applied::Nothing {
+            why: "already_whole"
+        }
     );
     assert!(matches!(
         probe(&store.root, path),

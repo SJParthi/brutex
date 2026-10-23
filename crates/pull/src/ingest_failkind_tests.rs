@@ -423,6 +423,26 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
         ),
         (RepairError::IndexedSibling(p()), FailKind::RepairImpossible),
         (RepairError::RevisionLimit, FailKind::RepairImpossible),
+        // R4-18 repair 2: the doors that add or restate bars.
+        (
+            RepairError::Quarantined(store::quarantine::Entry {
+                scope: store::quarantine::Scope::WholeMonth,
+                cause: store::quarantine::Cause::BeforeListing,
+                bars: 4,
+                ledger_at: 28,
+                revision: 0,
+                written_at: 1,
+            }),
+            FailKind::RepairImpossible,
+        ),
+        (
+            RepairError::QuarantineUnknown(store::quarantine::QuarantineError::Stale {
+                path: p(),
+                built_from: 28,
+                ledger_len: 300,
+            }),
+            FailKind::StoreDamaged,
+        ),
         (RepairError::MissingTimestamp(7), FailKind::BatchRefused),
         (
             RepairError::BeforePromote {
