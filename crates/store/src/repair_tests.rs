@@ -914,20 +914,26 @@ fn the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation() 
         "vendor corrected one minute",
     )
     .expect("again");
-    assert_eq!(again, super::MonthRestate::NothingNew {
+    assert_eq!(
+        again,
+        super::MonthRestate::NothingNew {
             ordinal: 1,
             held_back: Vec::new()
-        });
+        }
+    );
     // A held 0 open interest against an offered null is no correction where
     // open interest does not apply.
     let mut zero_oi = rows[0];
     zero_oi.open_interest = 0;
     let same = super::restate_month(&fixture.root, path(), SYMBOL, &[zero_oi], policy, "oi")
         .expect("same");
-    assert_eq!(same, super::MonthRestate::NothingNew {
+    assert_eq!(
+        same,
+        super::MonthRestate::NothingNew {
             ordinal: 1,
             held_back: Vec::new()
-        });
+        }
+    );
     let refused = super::restate_month(&fixture.root, path(), SYMBOL, &[rows[0]], policy, "");
     assert!(matches!(refused, Err(RepairError::Reason(_))));
 }

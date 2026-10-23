@@ -1094,7 +1094,10 @@ fn a_damaged_ledger_line_is_named_and_never_rebuilt_away() {
         Err("quarantine_ledger_damaged")
     );
     let march_now = probe(&store.root, path);
-    assert!(march_now.is_err(), "March is never read as clear: {march_now:?}");
+    assert!(
+        march_now.is_err(),
+        "March is never read as clear: {march_now:?}"
+    );
     // ... and the listings name the damage instead of under-counting.
     assert_eq!(
         Summary::load(&store.root, Vendor::Zerodha)
@@ -1416,7 +1419,14 @@ fn a_restate_never_re_serves_a_quarantined_bar() {
     let whole = minute("QFIXH1", march());
     store.month(whole, &rows);
     let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
-    apply_month(&store.root, whole, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    apply_month(
+        &store.root,
+        whole,
+        SYMBOL,
+        &every,
+        why(Cause::BeforeListing),
+    )
+    .expect("whole");
     let before = all_bytes_under(&store.root);
     let refused = repair::restate_month(
         &store.root,
@@ -1426,7 +1436,9 @@ fn a_restate_never_re_serves_a_quarantined_bar() {
         restate,
         "vendor restated",
     );
-    let words = refused.as_ref().map_or_else(ToString::to_string, |done| format!("{done:?}"));
+    let words = refused
+        .as_ref()
+        .map_or_else(ToString::to_string, |done| format!("{done:?}"));
     assert!(
         refused.is_err() && words.contains("quarantined"),
         "a whole month is refused by name: {words}"
@@ -1466,9 +1478,18 @@ fn a_repair_never_re_adds_a_quarantined_bar() {
     let whole = minute("QFIXJ1", march());
     store.month(whole, &rows);
     let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
-    apply_month(&store.root, whole, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    apply_month(
+        &store.root,
+        whole,
+        SYMBOL,
+        &every,
+        why(Cause::BeforeListing),
+    )
+    .expect("whole");
     let refused = repair::repair_month(&store.root, whole, SYMBOL, &more, policy);
-    let words = refused.as_ref().map_or_else(ToString::to_string, |done| format!("{done:?}"));
+    let words = refused
+        .as_ref()
+        .map_or_else(ToString::to_string, |done| format!("{done:?}"));
     assert!(
         refused.is_err() && words.contains("quarantined"),
         "a whole month takes no bar: {words}"

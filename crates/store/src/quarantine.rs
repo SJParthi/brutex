@@ -831,10 +831,8 @@ impl Snapshot {
             let image = read_image(&index)?;
             let built_from = match &image {
                 None => 0,
-                Some(image) => described(image).ok_or_else(|| {
-                    QuarantineError::HeaderDamaged {
-                        path: index.clone(),
-                    }
+                Some(image) => described(image).ok_or_else(|| QuarantineError::HeaderDamaged {
+                    path: index.clone(),
                 })?,
             };
             match level_with_ledger(root, feed, &index, built_from) {
@@ -1084,7 +1082,9 @@ fn check_act(act: &Record<'_>) -> Result<(), QuarantineError> {
 
 /// Strictly ascending: what every reader of a line's stamps searches by.
 fn ascending(stamps: &[i64]) -> bool {
-    stamps.windows(2).all(|pair| matches!(pair, [a, b] if a < b))
+    stamps
+        .windows(2)
+        .all(|pair| matches!(pair, [a, b] if a < b))
 }
 
 /// Lets the writer lock go, naming a release the host refused.
@@ -1120,13 +1120,16 @@ fn note_recorded(act: &Record<'_>, done: &Recorded) {
 /// One event for an index rebuilt from its ledger, and why it had to be.
 fn note_rebuilt(feed: Vendor, why: &str, done: &Rebuilt) {
     let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn("store.quarantine", "quarantine index rebuilt from its ledger")
-            .with("feed", telemetry::Value::Str(feed.as_str()))
-            .with("why", telemetry::Value::Str(why))
-            .with("lines", telemetry::Value::Uint(done.lines as u64))
-            .with("months", telemetry::Value::Uint(done.months as u64))
-            .with("ended_torn", telemetry::Value::Uint(done.ended as u64))
-            .with("torn_tail", telemetry::Value::Bool(done.torn_tail)),
+        &telemetry::Event::warn(
+            "store.quarantine",
+            "quarantine index rebuilt from its ledger",
+        )
+        .with("feed", telemetry::Value::Str(feed.as_str()))
+        .with("why", telemetry::Value::Str(why))
+        .with("lines", telemetry::Value::Uint(done.lines as u64))
+        .with("months", telemetry::Value::Uint(done.months as u64))
+        .with("ended_torn", telemetry::Value::Uint(done.ended as u64))
+        .with("torn_tail", telemetry::Value::Bool(done.torn_tail)),
     );
 }
 
@@ -1139,7 +1142,10 @@ fn note_damaged(feed: Vendor, refused: &QuarantineError) {
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::error("store.quarantine", "quarantine ledger damaged")
                 .with("feed", telemetry::Value::Str(feed.as_str()))
-                .with("damaged_lines", telemetry::Value::Uint(offsets.len() as u64))
+                .with(
+                    "damaged_lines",
+                    telemetry::Value::Uint(offsets.len() as u64),
+                )
                 .with("first_at", telemetry::Value::Uint(first))
                 .with("why", telemetry::Value::Str(&text)),
         );
@@ -1316,7 +1322,12 @@ fn tail_of(file: &File, path: &Path) -> Result<Tail, QuarantineError> {
 
 /// Writes `tail`'s prefix and `line` in ONE write, syncs, and answers the
 /// line's offset.
-fn write_tail(file: &mut File, path: &Path, tail: &Tail, line: &str) -> Result<u64, QuarantineError> {
+fn write_tail(
+    file: &mut File,
+    path: &Path,
+    tail: &Tail,
+    line: &str,
+) -> Result<u64, QuarantineError> {
     let mut bytes = String::with_capacity(tail.prefix.len() + line.len());
     bytes.push_str(&tail.prefix);
     bytes.push_str(line);
@@ -2192,7 +2203,11 @@ fn judge(
         })
         .collect();
     let mut wanted = named.to_vec();
-    wanted.extend(unfinished.iter().flat_map(|line| line.stamps.iter().copied()));
+    wanted.extend(
+        unfinished
+            .iter()
+            .flat_map(|line| line.stamps.iter().copied()),
+    );
     wanted.sort_unstable();
     wanted.dedup();
     let (held, n_valid) = held_at(root, path, symbol_id, &wanted)?;

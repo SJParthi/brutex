@@ -1227,7 +1227,10 @@ fn note_restated(path: StorePath<'_>, reason: &str, done: &MonthRestate) {
             .with("key", telemetry::Value::Str(&key))
             .with("month", telemetry::Value::Str(&month))
             .with("from_generation", telemetry::Value::Uint(u64::from(*from)))
-            .with("to_generation", telemetry::Value::Uint(u64::from(to.ordinal())))
+            .with(
+                "to_generation",
+                telemetry::Value::Uint(u64::from(to.ordinal())),
+            )
             .with("restated", telemetry::Value::Uint(restated_at.len() as u64))
             .with("added", telemetry::Value::Uint(*added))
             .with("held_back", telemetry::Value::Uint(held_back.len() as u64))
