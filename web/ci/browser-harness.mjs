@@ -21,6 +21,16 @@
  * content p99 under 300 ms, no pause over 50 ms, heap under 100 MB, under
  * 400 KB on the wire. A page that misses one FAILS, by name and figure.
  *
+ * A PAGE IS THE APP'S, OR IT IS NOT TIMED (verify r4, 23 Oct): the server
+ * answers every path with the app's shell and 200, so the first load of
+ * each page asks the build that answered for its own routes
+ * ({@link READ_ROUTES}); a page none of them routes, or a document that is
+ * not the app's, fails by name and is not loaded again. EVERY WAIT ON THE
+ * BROWSER IS BOUNDED: a DevTools command by {@link CDP_WAIT_MS}, a load by
+ * `--load-wait-ms`, two frames by {@link FRAME_WAIT_MS}; a load that does
+ * not end within its bound fails its page by name, and a browser that stops
+ * answering ends the run with the sheet still written.
+ *
  * Then four timed interactions: a picker click, a feed switch, a page turn
  * of option cells and a sort at the 20,000-row browser sort edge
  * (`LOCAL_SORT_BUDGET`), each in a browser context of its own. Each is
@@ -74,21 +84,24 @@
  *     [--chrome <path to Chrome or Chromium>] [--n 200] [--pages /db,/ingest] \
  *     [--idle-tabs 1,10,20] [--idle-ms 3600000] [--no-interactions] [--no-idle] [--no-sandbox] \
  *     [--no-report-check] [--read-only] [--hook <module.mjs>]... [--capture <file>] [--out <sheet.md>] \
- *     [--settle-ms 500] [--step-wait-ms 30000] [--instrument <key>]
+ *     [--settle-ms 500] [--step-wait-ms 30000] [--load-wait-ms 30000] [--instrument <key>]
  *
  * No npm dependency: it drives the browser over the DevTools protocol on
  * Node's own WebSocket. Exit 0 when every target holds; 1 with every reason
- * otherwise; 2 for a misused command or no browser.
+ * otherwise (the sheet is written, and names the build that answered); 2
+ * for a misused command, an `--out` or `--capture` that cannot be written,
+ * or no browser.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { PAGE_TARGETS, MEASURED_PAGES, summary } from '../src/lib/speed.js';
+import { PAGE_TARGETS, MEASURED_PAGES, summary, routePath } from '../src/lib/speed.js';
 import { UP_ROUTE, UP_METHOD } from '../src/lib/api-status.js';
 import { REPORT_ROUTE } from '../src/lib/page-report.js';
+import { BUILD_HEADER } from '../src/lib/runtime-inspection.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
 import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
 import { linkOfKey } from '../src/lib/db/selection-model.js';
@@ -331,19 +344,105 @@ export function chromeOf(given, env, exists) {
 }
 
 /**
- * A page as one page, however it is spelled: its path in lower case (the
- * app's routes are), its trailing slashes dropped (the root `/` kept), and a
- * query kept exactly as given (a value such as an instrument key is case
- * sensitive). Linear in the length, with no pattern that can backtrack.
+ * A page as one page, however it is spelled — as the browser reads the
+ * address the run opens (`<base><page>`: dot segments resolved, a fragment
+ * dropped, an empty query dropped) and then as the app's router reads its
+ * path (`$lib/speed.js` `routePath`: escapes decoded, case kept, one
+ * trailing slash the same page); the query is kept as the browser wrote it
+ * (a value such as an instrument key is case sensitive). `null` for a path
+ * the router cannot read. Linear in the length, with no pattern that can
+ * backtrack.
  *
- * @param {string} page
+ * NOT FOLDED TO LOWER CASE (verify r4, 23 Oct): the router matches a route
+ * case-sensitively, so `/SPEED` draws the app's not-found page, not the
+ * Speed page; this key folded it into `/speed` and the run then measured the
+ * not-found page under the Speed page's name. And `/speed/../speed`,
+ * `/%73peed`, `/speed#x`, `/speed?` and `/speed/.` each opened the Speed
+ * page under a key of its own, so one page could be measured twice.
+ *
+ * @param {string} page a path, starting `/`
+ * @returns {string | null}
  */
 export function pageKey(page) {
-  const q = page.indexOf('?');
-  const path = q === -1 ? page : page.slice(0, q);
-  let end = path.length;
-  while (end > 1 && path[end - 1] === '/') end -= 1;
-  return path.slice(0, end).toLowerCase() + (q === -1 ? '' : page.slice(q));
+  const u = new URL(`http://h${page}`);
+  const path = routePath(u.pathname);
+  return path === null ? null : path + u.search;
+}
+
+/**
+ * The route the app's router draws for `page`, from `routes`, the route ids
+ * of the build that answered (its route dictionary, {@link READ_ROUTES}):
+ * matched as the router matches a route with no parameter — the path read
+ * by `routePath`, equal to the id less its group segments (`(name)`), case
+ * kept. `{route: null, unmatched}` when none matches; `unmatched` lists the
+ * ids with a parameter (`[id]`), which this harness does not match, so a
+ * page that could be one of them is said, never passed as no page or as a
+ * page.
+ *
+ * @param {string} page a path, starting `/`
+ * @param {readonly string[]} routes
+ * @returns {{route: string | null, unmatched: string[]}}
+ */
+export function routeOf(page, routes) {
+  const path = routePath(new URL(`http://h${page}`).pathname);
+  /** @type {string[]} */
+  const unmatched = [];
+  for (const id of routes) {
+    const segments = id.split('/').filter((s) => s !== '' && !/^\(.+\)$/.test(s));
+    if (segments.some((s) => s.includes('['))) unmatched.push(id);
+    else if (path !== null && `/${segments.join('/')}` === path) return { route: id, unmatched: [] };
+  }
+  return { route: null, unmatched };
+}
+
+/**
+ * The route ids of the build that drew the page in a tab: the app entry the
+ * document names (`/_app/immutable/entry/app.<hash>.js`, the module
+ * SvelteKit's start script ran) imported again in the page — the module the
+ * page already holds, so nothing is fetched (checked on the Mac, 23 Oct: 0
+ * new resource entries, under 1 ms) — and the ids of its route
+ * `dictionary`. A document that names no app entry, or an entry with no
+ * dictionary, answers `{routes: null, why}`: that document is not the app's.
+ *
+ * WHY THE BUILD'S OWN LIST (verify r4, 23 Oct): the server answers every
+ * path it has no file for with the app's shell and 200, so the status says
+ * nothing, and the shell then draws the app's not-found page; `--pages
+ * /nope,/SPEED` wrote a PASS sheet for two pages the app does not have. The
+ * build that answered is the one that knows its routes; the harness's own
+ * source tree may be another build's.
+ */
+export const READ_ROUTES = `(async () => {
+  const entry = /\\/_app\\/immutable\\/entry\\/app\\.[^/]+\\.js$/;
+  const named = [...document.querySelectorAll('link[href]')].map((l) => l.href)
+    .concat([...document.scripts].flatMap((s) => [...s.textContent.matchAll(/import\\(\\s*["']([^"']+)["']\\s*\\)/g)].map((m) => new URL(m[1], document.baseURI).href)));
+  const at = named.find((u) => { try { return entry.test(new URL(u).pathname); } catch { return false; } });
+  if (at === undefined) return { routes: null, why: 'the document names no app entry (/_app/immutable/entry/app.*.js)' };
+  const where = new URL(at).pathname;
+  try {
+    const d = (await import(at)).dictionary;
+    if (d === null || typeof d !== 'object' || Array.isArray(d)) return { routes: null, why: 'its app entry ' + where + ' holds no route dictionary' };
+    return { routes: Object.keys(d), entry: where };
+  } catch (e) {
+    return { routes: null, why: 'its app entry ' + where + ' could not be imported: ' + String((e && e.message) || e) };
+  }
+})()`;
+
+/**
+ * Why a page is not the app's, or `''` when it is: the route list read in
+ * the tab ({@link READ_ROUTES}) and the page's path ({@link routeOf}).
+ *
+ * @param {string} page
+ * @param {{routes?: unknown, why?: unknown} | undefined} read what `READ_ROUTES` answered in the tab
+ */
+export function notTheApps(page, read) {
+  if (read === undefined || read === null || typeof read !== 'object') return 'the harness could not read the app\'s routes in the page';
+  if (!Array.isArray(read.routes)) return `the document is not the app's: ${String(read.why ?? 'it named no route list')}`;
+  const routes = read.routes.map(String);
+  const r = routeOf(page, routes);
+  if (r.route !== null) return '';
+  const listed = routes.filter((id) => !r.unmatched.includes(id)).join(', ');
+  if (r.unmatched.length > 0) return `the harness cannot tell whether the app has this page: no plain route of the build that answered is ${page}, and it does not match the routes with a parameter (${r.unmatched.join(', ')})`;
+  return `the app has no such page: no route of the build that answered matches ${page} (its routes: ${listed}), so it drew its not-found page`;
 }
 
 /** @param {string[]} argv */
@@ -351,7 +450,7 @@ export function parseArgs(argv) {
   /** @type {Record<string, string | boolean | string[]>} */
   const o = { hook: [] };
   const flags = new Set(['no-interactions', 'no-idle', 'no-report-check', 'no-sandbox', 'read-only']);
-  const valued = new Set(['base', 'chrome', 'n', 'pages', 'idle-tabs', 'idle-ms', 'capture', 'out', 'settle-ms', 'step-wait-ms', 'instrument']);
+  const valued = new Set(['base', 'chrome', 'n', 'pages', 'idle-tabs', 'idle-ms', 'capture', 'out', 'settle-ms', 'step-wait-ms', 'load-wait-ms', 'instrument']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
@@ -375,14 +474,15 @@ export function parseArgs(argv) {
   };
   const pages = String(o.pages ?? MEASURED_PAGES.join(',')).split(',');
   if (pages.some((p) => !p.startsWith('/'))) throw new Error('--pages is a comma list of paths, each starting /');
-  // ONE PAGE, ONE SPELLING: the app's routes are lower case and a trailing
-  // slash names the same page, so /speed, /speed/ and /SPEED are one page
-  // (verify r3, 22 Oct: they were measured as three).
-  // One pass, one map lookup a page.
+  // ONE PAGE, ONE SPELLING, AS THE ROUTER READS IT (pageKey): /speed,
+  // /speed/, /%73peed and /speed/../speed are one page (verify r3 and r4);
+  // /SPEED is another address, which the run then finds is no page of the
+  // app. One pass, one map lookup a page.
   /** @type {Map<string, string>} each page's key, to the spelling that named it first */
   const named = new Map();
   for (const p of pages) {
     const key = pageKey(p);
+    if (key === null) throw new Error(`--pages names ${p}, whose path no router can read: a percent escape that is not UTF-8`);
     const first = named.get(key);
     if (first !== undefined) throw new Error(`--pages names ${first} twice${first === p ? '' : ` (as ${first} and ${p})`}: each page is measured once a run`);
     named.set(key, p);
@@ -404,6 +504,8 @@ export function parseArgs(argv) {
     // option takes a value no timer could hold.
     settleMs: whole('settle-ms', 500, 50, MAX_WAIT_MS),
     stepWaitMs: whole('step-wait-ms', STEP_WAIT_MS, 100, MAX_WAIT_MS),
+    // A load's bound: from the navigation to its load event (verify r4).
+    loadWaitMs: whole('load-wait-ms', LOAD_WAIT_MS, 100, MAX_WAIT_MS),
     interactions: o['no-interactions'] !== true,
     idle: o['no-idle'] !== true,
     // --read-only sends no write, so it never runs the reporter check (one POST).
@@ -417,34 +519,95 @@ export function parseArgs(argv) {
 }
 
 /**
+ * How long any DevTools command waits for the browser's answer, ms, unless
+ * its caller gives a bound of its own (a load, a step's selector wait, the
+ * two frames). A browser that does not answer within it is refused by name
+ * ({@link CdpTimeout}), never waited on for ever (verify r4, 23 Oct: a
+ * document that sent its headers and part of its body held a run for 9 min
+ * 49 s with nothing printed, because no wait on the browser had a bound).
+ */
+export const CDP_WAIT_MS = 30_000;
+
+/** How long one load waits for its load event, ms (`--load-wait-ms`). */
+export const LOAD_WAIT_MS = 30_000;
+
+/**
+ * How long a tab is given to draw two frames, ms. A hidden tab draws none
+ * (verify r4, 23 Oct: 3 of 3 hidden tabs drew no frame in 10 s), so the
+ * wait ends after this and says the frames were not drawn.
+ */
+export const FRAME_WAIT_MS = 2_000;
+
+/** A DevTools command the browser did not answer within its bound. */
+export class CdpTimeout extends Error {}
+
+/**
+ * A wait on the browser for `expression` (a page-side wait bounded by
+ * `pageMs`), given {@link CDP_WAIT_MS} more for the answer to travel, and
+ * never more than a timer holds.
+ *
+ * @param {number} pageMs
+ */
+export const answerWithin = (pageMs) => Math.min(MAX_WAIT_MS, pageMs + CDP_WAIT_MS);
+
+/**
  * One DevTools connection: commands answered by id, events by name and
- * session.
+ * session. EVERY COMMAND IS BOUNDED: an answer that has not come within its
+ * wait rejects with {@link CdpTimeout} naming the command and the bound, and
+ * an answer that comes after that is dropped (the command was already
+ * refused by name). A connection that closes refuses every command still
+ * waiting, and every later one, by name.
  */
 export class Cdp {
-  /** @param {WebSocket} ws */
-  constructor(ws) {
+  /** @param {WebSocket} ws @param {number} [waitMs] the default bound of a command */
+  constructor(ws, waitMs = CDP_WAIT_MS) {
     this.ws = ws;
     this.next = 1;
-    /** @type {Map<number, {resolve: (v: any) => void, reject: (e: Error) => void}>} */
+    this.waitMs = waitMs;
+    /** Why the connection can carry no command, once it cannot. @type {string | null} */
+    this.closed = null;
+    /** @type {Map<number, {resolve: (v: any) => void, reject: (e: Error) => void, timer: ReturnType<typeof setTimeout>, method: string}>} */
     this.waiting = new Map();
     /** @type {Set<(m: any) => void>} */
     this.listeners = new Set();
     ws.addEventListener('message', (ev) => {
       const m = JSON.parse(String(ev.data));
       if (m.id !== undefined) {
-        const w = /** @type {{resolve: (v: any) => void, reject: (e: Error) => void}} */ (this.waiting.get(m.id));
+        const w = this.waiting.get(m.id);
+        // Answered after its wait ended: that command was already refused.
+        if (w === undefined) return;
         this.waiting.delete(m.id);
+        clearTimeout(w.timer);
         if (m.error) w.reject(new Error(`${m.error.message} (${m.error.code})`));
         else w.resolve(m.result);
       } else for (const l of this.listeners) l(m);
     });
+    ws.addEventListener('close', () => {
+      this.closed = 'the browser\'s DevTools connection closed';
+      for (const w of this.waiting.values()) {
+        clearTimeout(w.timer);
+        w.reject(new Error(`${w.method}: ${this.closed}`));
+      }
+      this.waiting.clear();
+    });
   }
 
-  /** @param {string} method @param {object} [params] @param {string} [sessionId] @returns {Promise<any>} */
-  send(method, params = {}, sessionId) {
+  /**
+   * @param {string} method @param {object} [params] @param {string} [sessionId]
+   * @param {number} [waitMs] how long the answer may take, ms (the connection's default)
+   * @returns {Promise<any>}
+   */
+  send(method, params = {}, sessionId, waitMs = this.waitMs) {
+    if (this.closed !== null) return Promise.reject(new Error(`${method}: ${this.closed}`));
     const id = this.next++;
-    this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-    return new Promise((resolve, reject) => this.waiting.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.waiting.delete(id);
+        reject(new CdpTimeout(`the browser did not answer ${method} within ${waitMs} ms`));
+      }, waitMs);
+      this.waiting.set(id, { resolve, reject, timer, method });
+      this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
   }
 
   /** @param {(m: any) => void} f @returns {() => void} */
@@ -701,7 +864,9 @@ function tracked(child, profile) {
         clearTimeout(timer);
         if (alive()) {
           signalGroup(child, 'SIGKILL');
-          await exited;
+          // Bounded too: a process the kernel cannot end yet is waited on no longer than the rest.
+          await Promise.race([exited, new Promise((resolve) => (timer = setTimeout(resolve, STOP_WAIT_MS)))]);
+          clearTimeout(timer);
         }
       }
       if (!(await groupLeft(STOP_WAIT_MS))) {
@@ -819,6 +984,27 @@ export function isReportWrite(request, origin) {
  */
 
 /**
+ * The page-side wait for two frames, bounded: `true` once two frames are
+ * drawn, `false` when `ms` passed first (a hidden tab draws no frame).
+ *
+ * @param {number} ms
+ */
+export const twoFrames = (ms) =>
+  `new Promise((r) => { const t = setTimeout(() => r(false), ${ms}); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); r(true); })); })`;
+
+/**
+ * A response header by name, whatever case the browser reports it in, or
+ * `null`.
+ *
+ * @param {Record<string, unknown> | undefined} headers
+ * @param {string} name in lower case
+ */
+export function headerOf(headers, name) {
+  for (const [k, v] of Object.entries(headers ?? {})) if (k.toLowerCase() === name) return String(v);
+  return null;
+}
+
+/**
  * A tab: a target attached flat, with its network watched.
  *
  * `readOnly` (`--read-only`, with the run's `base`): the one write a page
@@ -863,8 +1049,14 @@ export async function openTab(cdp, context, options = {}) {
   const done = [];
   /** @type {string[]} */
   const errors = [];
-  /** The status the page's own document was answered with, per load. */
-  const doc = { status: 0 };
+  /**
+   * The status the page's own document was answered with, per load, and the
+   * build that answered it (its `x-brutex-build` header, or `null`).
+   * @type {{status: number, build: string | null}}
+   */
+  const doc = { status: 0, build: null };
+  /** @type {{drew: boolean | null}} */
+  const frames = { drew: null };
   let lastActivity = Date.now();
   const off = cdp.on((m) => {
     if (m.sessionId !== sessionId) return;
@@ -888,7 +1080,10 @@ export async function openTab(cdp, context, options = {}) {
         r.answered = true;
         r.status = m.method === 'Network.responseReceived' ? p.response.status : r.status || Number(p.statusCode);
       }
-      if (p.type === 'Document') doc.status = p.response.status;
+      if (p.type === 'Document') {
+        doc.status = p.response.status;
+        doc.build = headerOf(p.response.headers, BUILD_HEADER);
+      }
     } else if (m.method === 'Network.dataReceived') {
       const r = inflight.get(p.requestId);
       lastActivity = Date.now();
@@ -934,8 +1129,11 @@ export async function openTab(cdp, context, options = {}) {
     errors,
     /** Every write this tab sent or tried (see `Write`). */
     writes,
-    /** @param {string} expression */
-    evaluate: async (expression) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId)).result?.value,
+    /**
+     * @param {string} expression
+     * @param {number} [waitMs] how long the answer may take (the connection's default)
+     */
+    evaluate: async (expression, waitMs) => (await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, sessionId, waitMs)).result?.value,
     /** When this tab last saw a network event, ms since the epoch. */
     lastActive: () => lastActivity,
     /** Every request this tab made since its last `reset`, ended or not, with its bytes. */
@@ -945,13 +1143,23 @@ export async function openTab(cdp, context, options = {}) {
       inflight.clear();
       done.length = 0;
       doc.status = 0;
+      doc.build = null;
+      frames.drew = null;
     },
-    /** Settled: no network event for `quietMs` and no request still waiting for its answer, then two frames drawn; at most `capMs`. */
-    settle: async (quietMs = 500, capMs = 30_000) => {
+    /** Whether the last settle saw two frames drawn (`null` before any). */
+    frames,
+    /**
+     * Settled: no network event for `quietMs` and no request still waiting
+     * for its answer, at most `capMs`; then two frames drawn, at most
+     * `frameMs` — a hidden tab draws none, and that is said in `frames.drew`
+     * rather than waited on (verify r4, 23 Oct: the two-frame wait had no
+     * bound). Whether no request was still waiting.
+     */
+    settle: async (quietMs = 500, capMs = 30_000, frameMs = FRAME_WAIT_MS) => {
       const end = Date.now() + capMs;
       const waiting = () => [...inflight.values()].some((r) => !r.answered);
       while (Date.now() < end && (waiting() || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
-      await cdp.send('Runtime.evaluate', { expression: 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))', awaitPromise: true }, sessionId);
+      frames.drew = (await cdp.send('Runtime.evaluate', { expression: twoFrames(frameMs), awaitPromise: true, returnByValue: true }, sessionId, answerWithin(frameMs))).result?.value === true;
       return !waiting();
     },
     close: async () => {
@@ -962,37 +1170,80 @@ export async function openTab(cdp, context, options = {}) {
 }
 
 /**
- * One load of `path`: navigate, settle, read the four figures.
+ * One load of `path`: navigate, wait for the load event, settle, read the
+ * four figures.
+ *
+ * EVERY WAIT ON THE BROWSER IS BOUNDED (verify r4, 23 Oct): the navigation
+ * and its load event together by `loadWaitMs`; the settle by its cap and its
+ * two frames by {@link FRAME_WAIT_MS}; each command after by its own bound.
+ * A load that did not end within its bound — a document whose body never
+ * ends, a server that never answers, or a page that stopped answering the
+ * browser — answers `ended: false` with `why`, its loading stopped, and its
+ * figures are not figures of the page. Before, `/stall` (headers and part of
+ * a body, never the end) held a run for 9 min 49 s with nothing printed.
  *
  * @param {Awaited<ReturnType<typeof openTab>>} tab
  * @param {Cdp} cdp
  * @param {string} url
  * @param {number} settleMs
+ * @param {number} [loadWaitMs]
  */
-export async function loadOnce(tab, cdp, url, settleMs) {
+export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_MS) {
   tab.reset();
+  /** @type {() => void} */
+  let off = () => undefined;
   const loaded = new Promise((resolve) => {
-    const off = cdp.on((m) => {
-      if (m.sessionId === tab.sessionId && m.method === 'Page.loadEventFired') {
-        off();
-        resolve(undefined);
-      }
+    off = cdp.on((m) => {
+      if (m.sessionId === tab.sessionId && m.method === 'Page.loadEventFired') resolve(true);
     });
   });
-  await cdp.send('Page.navigate', { url }, tab.sessionId);
-  await loaded;
-  const settled = await tab.settle(settleMs);
-  await tab.evaluate(AWAIT_PAINT);
-  const h = await tab.evaluate(READ_FIGURES);
-  const heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer;
+  const bound = new Promise((resolve) => (timer = setTimeout(() => resolve(false), loadWaitMs)));
+  const t0 = Date.now();
+  /** @param {string} why */
+  const unended = async (why) => {
+    // What the tab is still loading is stopped; the caller closes the tab.
+    await cdp.send('Page.stopLoading', {}, tab.sessionId).catch(() => undefined);
+    const seen = tab.seen();
+    return { ended: false, why, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
+  };
+  let ended;
+  try {
+    ended = await Promise.race([cdp.send('Page.navigate', { url }, tab.sessionId, loadWaitMs).then(() => loaded), bound]);
+  } catch (why) {
+    if (!(why instanceof CdpTimeout)) throw why;
+    ended = false;
+  } finally {
+    clearTimeout(timer);
+    off();
+  }
+  if (!ended) return unended(`the load did not end within ${loadWaitMs} ms${tab.doc.status === 0 ? ' (no answer to its document)' : ` (its document was answered HTTP ${tab.doc.status} and did not finish)`}`);
+  let settled;
+  let h;
+  let heap;
+  try {
+    settled = await tab.settle(settleMs);
+    await tab.evaluate(AWAIT_PAINT, answerWithin(PAINT_WAIT_MS));
+    h = await tab.evaluate(READ_FIGURES);
+    heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
+  } catch (why) {
+    // The page loaded and then stopped answering: its renderer is busy or gone.
+    if (!(why instanceof CdpTimeout)) throw why;
+    return unended(`the page stopped answering ${Date.now() - t0} ms after its load began: ${why.message}`);
+  }
   const seen = tab.seen();
   return {
+    ended: true,
+    why: '',
     fcp: typeof h.fcp === 'number' ? h.fcp : null,
     longest: Number(h.longest),
     heap: Number(heap.usedSize),
     wire: seen.reduce((s, r) => s + r.bytes, 0),
     settled,
+    drew: tab.frames.drew === true,
     status: tab.doc.status,
+    build: tab.doc.build,
     requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed }))
   };
 }
@@ -1001,9 +1252,13 @@ export async function loadOnce(tab, cdp, url, settleMs) {
  * A page's figures against the targets: the lines to print and the
  * failures, each naming the figure.
  *
+ * A load whose tab drew no frame within {@link FRAME_WAIT_MS} once settled
+ * (`drew: false`; a hidden tab draws none) is not a settled load, said by
+ * count (verify r4, 23 Oct).
+ *
  * @param {string} page
  * @param {string} phase
- * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean, status: number}[]} loads
+ * @param {{fcp: number | null, longest: number, heap: number, wire: number, settled: boolean, status: number, drew?: boolean}[]} loads
  */
 export function judge(page, phase, loads) {
   const fcp = summary(loads.map((l) => l.fcp).filter((v) => v !== null).map(Number));
@@ -1024,6 +1279,8 @@ export function judge(page, phase, loads) {
   if (wire.max >= PAGE_TARGETS.wireBytes) failures.push(`${page} ${phase}: ${(wire.max / 1e3).toFixed(1)} KB on the wire, not under ${PAGE_TARGETS.wireBytes / 1e3} KB`);
   const unsettled = loads.filter((l) => !l.settled).length;
   if (unsettled > 0) failures.push(`${page} ${phase}: ${unsettled} loads still had a request in flight after 30 s`);
+  const undrawn = loads.filter((l) => l.drew === false).length;
+  if (undrawn > 0) failures.push(`${page} ${phase}: ${undrawn} of ${loads.length} loads drew no frame within ${FRAME_WAIT_MS} ms of settling (a hidden tab draws none), so they are not settled loads`);
   const f = (/** @type {{n: number, p50: number, p99: number, max: number}} */ s, /** @type {(v: number) => string} */ t) => `${t(s.p50)} / ${t(s.p99)} / ${t(s.max)}`;
   const ms = (/** @type {number} */ v) => v.toFixed(1);
   const row = `| ${page} | ${phase} | ${loads.length} | ${fcp.n === 0 ? 'not painted' : f(fcp, ms)} | ${f(longest, ms)} | ${f(heap, (v) => (v / 1e6).toFixed(1))} | ${f(wire, (v) => (v / 1e3).toFixed(1))} | ${failures.length === 0 ? 'holds' : 'FAILS'} |`;
@@ -1077,11 +1334,13 @@ export function captured(page, requests, base) {
  * @param {Cdp} cdp
  * @param {string} base
  * @param {number} settleMs
+ * @param {number} [loadWaitMs]
  */
-async function reportCheck(cdp, base, settleMs) {
+async function reportCheck(cdp, base, settleMs, loadWaitMs = LOAD_WAIT_MS) {
   const tab = await openTab(cdp, undefined);
   try {
-    await loadOnce(tab, cdp, `${base}/speed`, settleMs);
+    const opened = await loadOnce(tab, cdp, `${base}/speed`, settleMs, loadWaitMs);
+    if (!opened.ended) return { row: 'not checked: /speed did not load', failures: [`the shared reporter was not checked: /speed: ${opened.why}`] };
     const marker = `/feeds.json?harness=${Date.now()}`;
     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: `*${marker}*` }] }, tab.sessionId);
     const off = cdp.on((m) => {
@@ -1094,8 +1353,10 @@ async function reportCheck(cdp, base, settleMs) {
     const sent = tab.seen().find((r) => r.method === 'POST' && new URL(r.url).pathname === REPORT_ROUTE);
     if (!sent) return { row: 'the failed request sent no report', failures: [`the shared reporter sent no ${REPORT_ROUTE} for a failed ${marker}`] };
     if (sent.status !== 202) return { row: `${REPORT_ROUTE} answered ${sent.status}`, failures: [`${REPORT_ROUTE} answered ${sent.status} for the report of ${marker}, not 202 written`] };
-    const logs = await tab.evaluate(`fetch('/logs.json?target=api.page.access&limit=50', { cache: 'no-store' }).then((r) => r.text())`);
-    const found = String(logs).includes(marker);
+    // Bounded in the page and in the answer: a log that does not answer is said, never waited on.
+    const logs = await tab.evaluate(`fetch('/logs.json?target=api.page.access&limit=50', { cache: 'no-store', signal: AbortSignal.timeout(${CDP_WAIT_MS}) }).then(async (r) => ({ text: await r.text() }), (e) => ({ why: String((e && e.message) || e) }))`, answerWithin(CDP_WAIT_MS));
+    if (typeof logs?.why === 'string') return { row: 'the log could not be read', failures: [`the report of the failed ${marker} was answered 202 and /logs.json?target=api.page.access could not be read: ${logs.why}`] };
+    const found = String(logs?.text).includes(marker);
     return found
       ? { row: `a failed ${marker} was reported (202) and found in /logs.json`, failures: [] }
       : { row: 'the report was written and not found in the log', failures: [`the report of the failed ${marker} was answered 202 and is not in /logs.json?target=api.page.access`] };
@@ -1134,9 +1395,11 @@ export const WARM_UP_PAGE = 'data:text/html,<!doctype html><title>warm-up</title
 async function warmUp(cdp, open, settleMs) {
   const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
   const tab = await open(browserContextId);
-  await loadOnce(tab, cdp, WARM_UP_PAGE, settleMs);
+  const warmed = await loadOnce(tab, cdp, WARM_UP_PAGE, settleMs);
   await tab.close();
   await cdp.send('Target.disposeBrowserContext', { browserContextId });
+  // A browser that cannot draw a page that asks nothing of the server can time no page.
+  if (!warmed.ended) throw new Error(`the browser did not draw its warm-up page: ${warmed.why}`);
 }
 
 /** @param {ReturnType<typeof parseArgs>} args */
@@ -1155,26 +1418,73 @@ export async function runHarness(args) {
   const writes = [];
   /** @param {string | undefined} context */
   const open = (context) => openTab(cdp, context, { readOnly: args.readOnly, base: args.base, writes });
+  /** Every build that answered a page's document this run (`x-brutex-build`). @type {Set<string>} */
+  const builds = new Set();
+  let unstamped = 0;
+  /** A document the server answered names its build, or is counted unstamped. @param {{build: string | null, status: number}} l */
+  const stamped = (l) => {
+    if (l.status === 0) return;
+    if (l.build === null) unstamped += 1;
+    else builds.add(l.build);
+  };
+  /** One load of `page`, bounded. @param {Awaited<ReturnType<typeof openTab>>} tab @param {string} page */
+  const load = async (tab, page) => {
+    const l = await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs, args.loadWaitMs);
+    stamped(l);
+    return l;
+  };
   try {
     await warmUp(cdp, open, args.settleMs);
     for (const page of args.pages) {
+      // A PAGE THAT IS NOT THE APP'S, OR WHOSE LOAD DOES NOT END, IS NOT
+      // TIMED AGAIN: its row says why, it fails by name, and the run goes on
+      // to the next page (verify r4, 23 Oct).
+      let stop = '';
+      let stoppedIn = 'cold';
       /** @type {Awaited<ReturnType<typeof loadOnce>>[]} */
       const cold = [];
-      for (let i = 0; i < args.n; i += 1) {
+      for (let i = 0; i < args.n && stop === ''; i += 1) {
         const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
         const tab = await open(browserContextId);
-        cold.push(await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs));
-        await tab.close();
-        await cdp.send('Target.disposeBrowserContext', { browserContextId });
+        try {
+          const l = await load(tab, page);
+          if (!l.ended) stop = l.why;
+          else {
+            // The first load that the server answered with a page is asked
+            // which page the app drew: the build's own routes (READ_ROUTES).
+            if (i === 0 && l.status >= 200 && l.status < 300) stop = notTheApps(page, await tab.evaluate(READ_ROUTES));
+            cold.push(l);
+          }
+        } finally {
+          await tab.close();
+          await cdp.send('Target.disposeBrowserContext', { browserContextId });
+        }
       }
-      capture.push(...captured(page, cold[0].requests, args.base));
-      const tab = await open(undefined);
-      await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs);
       /** @type {Awaited<ReturnType<typeof loadOnce>>[]} */
       const warm = [];
-      for (let i = 0; i < args.n; i += 1) warm.push(await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs));
-      for (const e of tab.errors) failures.push(`${page}: an uncaught error: ${e}`);
-      await tab.close();
+      if (stop === '') {
+        stoppedIn = 'warm';
+        const tab = await open(undefined);
+        try {
+          const first = await load(tab, page);
+          if (!first.ended) stop = first.why;
+          for (let i = 0; i < args.n && stop === ''; i += 1) {
+            const l = await load(tab, page);
+            if (l.ended) warm.push(l);
+            else stop = l.why;
+          }
+          for (const e of tab.errors) failures.push(`${page}: an uncaught error: ${e}`);
+        } finally {
+          await tab.close();
+        }
+      }
+      if (stop !== '') {
+        // Not measured, so not captured either: the sheet replays only a measured page's own requests.
+        lines.push(`| ${page} | ${stoppedIn} | ${stoppedIn === 'cold' ? cold.length : warm.length} | NOT MEASURED: ${stop} | — | — | — | FAILS |`);
+        failures.push(`${page} ${stoppedIn}: ${stop}`);
+        continue;
+      }
+      capture.push(...captured(page, cold[0].requests, args.base));
       for (const [phase, loads] of /** @type {const} */ ([['cold', cold], ['warm', warm]])) {
         const j = judge(page, phase, loads);
         lines.push(j.row);
@@ -1190,8 +1500,13 @@ export async function runHarness(args) {
       if (interactions.some((it) => it.edge)) {
         try {
           edge = await sortEdge(async (path) => {
-            const r = await fetch(`${args.base}${path}`, { cache: 'no-store' });
-            return { status: r.status, body: await r.text() };
+            // Bounded like a load: a server that does not answer is said, never waited on.
+            try {
+              const r = await fetch(`${args.base}${path}`, { cache: 'no-store', signal: AbortSignal.timeout(args.loadWaitMs) });
+              return { status: r.status, body: await r.text() };
+            } catch (why) {
+              throw new Error(`finding the sort edge: ${path} had no whole answer within ${args.loadWaitMs} ms: ${/** @type {Error} */ (why).message}`);
+            }
           }, args.instrument);
           notes.push(`sort edge: ${edge.address} holds ${edge.rows} bars of ${edge.feed} ${edge.rung}, the longest range of days ending ${edge.to} at or under ${LOCAL_SORT_BUDGET} (${edge.asked} GETs${edge.passed.length > 0 ? `; passed over ${edge.passed.join('; ')}` : ''})`);
         } catch (why) {
@@ -1209,8 +1524,11 @@ export async function runHarness(args) {
         const times = [];
         let pause = 0;
         let missing = '';
+        /** Why a sample could not be taken at all: its page did not load, or stopped answering. */
+        let broke = '';
         let unsettled = 0;
-        for (let i = 0; i < Math.min(args.n, 50) && missing === ''; i += 1) {
+        let undrawn = 0;
+        for (let i = 0; i < Math.min(args.n, 50) && missing === '' && broke === ''; i += 1) {
           // A BROWSER CONTEXT OF ITS OWN FOR EVERY SAMPLE (found on the Mac,
           // 20 Oct): the feed switch persists the feed it chose, so in one
           // shared context the next sample of the next interaction opened
@@ -1219,35 +1537,54 @@ export async function runHarness(args) {
           // opening the address starts from.
           const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
           const tab = await open(browserContextId);
-          await loadOnce(tab, cdp, `${args.base}${at}`, args.settleMs);
-          let t0 = 0;
-          let drawnAt = 0;
-          for (const step of it.steps) {
-            const sel = 'click' in step ? step.click : 'type' in step ? step.type[0] : step.waitFor;
-            const found = await tab.evaluate(`(async () => { const end = Date.now() + ${args.stepWaitMs}; while (Date.now() < end) { if (document.querySelector(${JSON.stringify(sel)})) return true; await new Promise((r) => setTimeout(r, 50)); } return Boolean(document.querySelector(${JSON.stringify(sel)})); })()`);
-            if (!found) {
-              missing = sel;
-              break;
+          try {
+            const opened = await load(tab, at);
+            if (!opened.ended) {
+              broke = `${at}: ${opened.why}`;
+              continue;
             }
-            if ('type' in step) await tab.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(step.type[0])}); el.focus(); el.value = ${JSON.stringify(step.type[1])}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-            if ('click' in step) {
-              // SETTLED BEFORE EVERY CLICK: the click is timed alone, never
-              // with the tail of the step before it still loading.
-              await tab.settle(args.settleMs);
-              await tab.evaluate(RESET_PAUSE);
-              t0 = Date.now();
-              await tab.evaluate(`[...document.querySelectorAll(${JSON.stringify(step.click)})].at(${step.last ? -1 : 0}).click()`);
-              await tab.evaluate('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
-              drawnAt = Date.now();
+            let t0 = 0;
+            let drawnAt = 0;
+            let drew = true;
+            for (const step of it.steps) {
+              const sel = 'click' in step ? step.click : 'type' in step ? step.type[0] : step.waitFor;
+              const found = await tab.evaluate(`(async () => { const end = Date.now() + ${args.stepWaitMs}; while (Date.now() < end) { if (document.querySelector(${JSON.stringify(sel)})) return true; await new Promise((r) => setTimeout(r, 50)); } return Boolean(document.querySelector(${JSON.stringify(sel)})); })()`, answerWithin(args.stepWaitMs));
+              if (!found) {
+                missing = sel;
+                break;
+              }
+              if ('type' in step) await tab.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(step.type[0])}); el.focus(); el.value = ${JSON.stringify(step.type[1])}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+              if ('click' in step) {
+                // SETTLED BEFORE EVERY CLICK: the click is timed alone, never
+                // with the tail of the step before it still loading.
+                await tab.settle(args.settleMs);
+                await tab.evaluate(RESET_PAUSE);
+                t0 = Date.now();
+                await tab.evaluate(`[...document.querySelectorAll(${JSON.stringify(step.click)})].at(${step.last ? -1 : 0}).click()`);
+                // Two frames after the click, bounded: a tab that draws none is not timed.
+                drew = (await tab.evaluate(twoFrames(FRAME_WAIT_MS), answerWithin(FRAME_WAIT_MS))) === true;
+                drawnAt = Date.now();
+              }
             }
+            if (missing === '') {
+              if (!drew) undrawn += 1;
+              else if (await tab.settle(args.settleMs)) times.push(Math.max(tab.lastActive(), drawnAt) - t0);
+              else unsettled += 1;
+              pause = Math.max(pause, Number((await tab.evaluate(READ_FIGURES)).longest));
+            }
+          } catch (why) {
+            // A page that stopped answering ends this interaction, by name; the browser itself is asked again below.
+            if (!(why instanceof CdpTimeout)) throw why;
+            broke = `${at}: the page stopped answering: ${why.message}`;
+          } finally {
+            await tab.close();
+            await cdp.send('Target.disposeBrowserContext', { browserContextId });
           }
-          if (missing === '') {
-            if (await tab.settle(args.settleMs)) times.push(Math.max(tab.lastActive(), drawnAt) - t0);
-            else unsettled += 1;
-            pause = Math.max(pause, Number((await tab.evaluate(READ_FIGURES)).longest));
-          }
-          await tab.close();
-          await cdp.send('Target.disposeBrowserContext', { browserContextId });
+        }
+        if (broke !== '') {
+          lines.push(`| ${it.name} | 0 | NOT MEASURED: ${broke} | — |`);
+          failures.push(`${it.name}: NOT MEASURED — ${broke}`);
+          continue;
         }
         if (missing !== '') {
           lines.push(`| ${it.name} | 0 | NOT MEASURED: ${missing} is not on ${at} | — |`);
@@ -1255,6 +1592,7 @@ export async function runHarness(args) {
           continue;
         }
         if (unsettled > 0) failures.push(`${it.name}: ${unsettled} click(s) still had a request in flight 30 s later, not timed`);
+        if (undrawn > 0) failures.push(`${it.name}: ${undrawn} click(s) drew no frame within ${FRAME_WAIT_MS} ms, not timed`);
         const s = summary(times);
         lines.push(s.n === 0 ? `| ${it.name} | 0 | NOT TIMED: no click settled within 30 s | ${pause.toFixed(1)} |` : `| ${it.name} | ${s.n} | ${s.p50.toFixed(1)} / ${s.p99.toFixed(1)} / ${s.max.toFixed(1)} | ${pause.toFixed(1)} |`);
         if (pause > PAGE_TARGETS.longestPauseMs) failures.push(`${it.name}: a pause of ${pause.toFixed(1)} ms, over ${PAGE_TARGETS.longestPauseMs} ms`);
@@ -1273,7 +1611,10 @@ export async function runHarness(args) {
           const { browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true });
           contexts.push(browserContextId);
           const tab = await open(browserContextId);
-          await loadOnce(tab, cdp, `${args.base}${args.pages[i % args.pages.length]}`, args.settleMs);
+          const idlePage = args.pages[i % args.pages.length];
+          const opened = await load(tab, idlePage);
+          // Still idled and listed: what a tab whose load did not end asks is still asked.
+          if (!opened.ended) failures.push(`${count} idle tabs: ${idlePage}: ${opened.why}`);
           tab.reset();
           tabs.push(tab);
         }
@@ -1294,7 +1635,7 @@ export async function runHarness(args) {
       }
     }
     if (args.reportCheck) {
-      const r = await reportCheck(cdp, args.base, args.settleMs);
+      const r = await reportCheck(cdp, args.base, args.settleMs, args.loadWaitMs);
       lines.push('', `Shared reporter: ${r.row}.`);
       failures.push(...r.failures);
     }
@@ -1308,6 +1649,13 @@ export async function runHarness(args) {
       lines.push('', `Hook ${hook}:`, ...(out.rows ?? []));
       failures.push(...(out.failures ?? []));
     }
+  } catch (why) {
+    // A RUN THAT COULD NOT FINISH IS SAID, AND ITS SHEET IS STILL WRITTEN: the
+    // browser stopped answering (every command is bounded), or a hook threw.
+    // What was measured before it stands; the run fails by name.
+    const said = String(/** @type {{message?: unknown}} */ (why)?.message ?? why);
+    lines.push('', `The run stopped here: ${said}.`);
+    failures.push(`the run stopped before it finished: ${said}`);
   } finally {
     await browser.close();
   }
@@ -1316,8 +1664,20 @@ export async function runHarness(args) {
     notes.push(...v.notes);
     failures.push(...v.failures);
   }
-  if (args.capture) writeWhole(args.capture, `${JSON.stringify({ base: args.base, requests: capture }, null, 1)}\n`);
-  return { ok: failures.length === 0, lines, failures, notes };
+  // THE BUILD THAT ANSWERED, named (verify r4 follow-up): the speed sheet
+  // stamps every row; the harness names the build of every document it
+  // timed, and two builds in one run fail it (a deploy mid-run).
+  if (builds.size > 1) failures.push(`the pages were answered by ${builds.size} builds (${[...builds].join(', ')}): a deploy during the run, so its figures are not one build's`);
+  if (unstamped > 0) notes.push(`page loads answered with no ${BUILD_HEADER} header, so no build is named for them: ${unstamped}`);
+  if (args.capture) {
+    try {
+      writeWhole(args.capture, `${JSON.stringify({ base: args.base, requests: capture }, null, 1)}\n`);
+    } catch (why) {
+      // The sheet is still written: a capture that cannot be is this run's failure, never its end.
+      failures.push(`the capture could not be written: ${/** @type {Error} */ (why).message}`);
+    }
+  }
+  return { ok: failures.length === 0, lines, failures, notes, builds: [...builds] };
 }
 
 /**
@@ -1349,19 +1709,53 @@ export function readOnlyVerdict(writes, base) {
 }
 
 /**
- * The harness's sheet as Markdown: its tables, then every note and every failure.
+ * The harness's sheet as Markdown: its tables, then every note and every
+ * failure, under a line naming the base and the build that answered.
  *
- * @param {{ok: boolean, lines: string[], notes: string[], failures: string[]}} result
+ * @param {{ok: boolean, lines: string[], notes: string[], failures: string[], builds?: string[]}} result
  * @param {{n: number, base: string}} args
  */
 export function renderHarness(result, args) {
-  return [`# Browser harness — ${result.ok ? 'PASS' : 'FAIL'}`, '', `n = ${args.n} cold and ${args.n} warm loads a page against ${args.base}.`, '', ...result.lines, '', ...result.notes.map((n) => `- ${n}`), ...result.failures.map((f) => `- FAILED: ${f}`), ''].join('\n');
+  const builds = result.builds ?? [];
+  const by = builds.length === 0 ? 'answered by no named build' : builds.length === 1 ? `answered by build ${builds[0]}` : `answered by ${builds.length} builds: ${builds.join(', ')}`;
+  return [`# Browser harness — ${result.ok ? 'PASS' : 'FAIL'}`, '', `n = ${args.n} cold and ${args.n} warm loads a page against ${args.base}, ${by}.`, '', ...result.lines, '', ...result.notes.map((n) => `- ${n}`), ...result.failures.map((f) => `- FAILED: ${f}`), ''].join('\n');
+}
+
+/**
+ * Why a file the run will write at its end cannot be written, or `''`: its
+ * directory must exist, be a directory and take a new file, and the path
+ * must not be a directory itself. Asked before the browser starts, so a run
+ * is never thrown away at its end for a path it could have refused at once
+ * (verify r4 follow-up: a `--capture` that could not be written ended the
+ * run with exit 2 and no sheet, after the whole run).
+ *
+ * @param {string} option `--out` or `--capture`
+ * @param {string} path
+ */
+export function unwritable(option, path) {
+  const dir = dirname(path);
+  try {
+    if (!statSync(dir).isDirectory()) return `${option} ${path}: ${dir} is not a directory`;
+    accessSync(dir, fsConstants.W_OK);
+  } catch (why) {
+    return `${option} ${path}: ${dir} cannot take a new file: ${/** @type {Error} */ (why).message}`;
+  }
+  try {
+    if (statSync(path).isDirectory()) return `${option} ${path} is a directory`;
+  } catch {
+    // Not there yet: the file is made whole at the end (writeWhole).
+  }
+  return '';
 }
 
 async function main() {
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
+    for (const [option, path] of /** @type {const} */ ([['--out', args.out], ['--capture', args.capture]])) {
+      const why = path === null ? '' : unwritable(option, path);
+      if (why !== '') throw new Error(why);
+    }
   } catch (why) {
     console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
@@ -1375,7 +1769,15 @@ async function main() {
   }
   const text = renderHarness(result, args);
   process.stdout.write(text);
-  if (args.out) writeWhole(args.out, text);
+  if (args.out) {
+    try {
+      writeWhole(args.out, text);
+    } catch (why) {
+      // The sheet is on stdout already; the file that could not be written is named.
+      console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
+      process.exit(2);
+    }
+  }
   process.exit(result.ok ? 0 : 1);
 }
 

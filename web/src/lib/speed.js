@@ -414,6 +414,44 @@ export function selfAdd(reading, entries, at = {}) {
 }
 
 /**
+ * A path as the app's router reads it, so two spellings of one page are one
+ * path: SvelteKit 2 (2.70.2, `get_url_path` and `parse_route_id`) decodes
+ * the path as `decode_pathname` does — each part between `%25`s through
+ * `decodeURI`, so `/%73peed` is `/speed` and a reserved escape such as `%2F`
+ * stays as it is — keeps its case (a route matches case-sensitively, so
+ * `/SPEED` is no spelling of `/speed`), and matches a route by a pattern
+ * that ends `/?$`, so ONE trailing slash is the same page (`/speed/` is
+ * `/speed`; `/speed//` is neither, and the root is `/` alone, whose pattern
+ * is `^/$`). Checked on the Mac, 23 Oct, against the served app: `/speed`,
+ * `/speed/` and `/%73peed` drew the Speed page, `/SPEED` and `/nope` drew
+ * its not-found page. `null` for a path whose escapes `decodeURI` cannot
+ * read, which the router cannot route either. Linear in the path.
+ *
+ * @param {string} path a URL's pathname
+ * @returns {string | null}
+ */
+export function routePath(path) {
+  let decoded;
+  try {
+    decoded = path.split('%25').map(decodeURI).join('%25');
+  } catch {
+    return null;
+  }
+  return decoded.length > 1 && decoded.endsWith('/') && decoded[decoded.length - 2] !== '/' ? decoded.slice(0, -1) : decoded;
+}
+
+/**
+ * Whether two paths are one page to the app's router ({@link routePath}); a
+ * path it cannot read is compared as written.
+ *
+ * @param {string} a
+ * @param {string} b
+ */
+export function samePage(a, b) {
+  return (routePath(a) ?? a) === (routePath(b) ?? b);
+}
+
+/**
  * Whose figures a reading holds: `'page'` when they are this page's own
  * load, `'tab'` when the tab came here by a link inside the app and every
  * figure is the tab's since it opened — either the document the tab opened
@@ -422,12 +460,19 @@ export function selfAdd(reading, entries, at = {}) {
  * 1.2 MB over 63 fetches as this page's own, against the page's 408.6 KB
  * over 35, because only the first case was checked).
  *
+ * "ANOTHER PAGE" IS THE ROUTER'S, NOT THE SPELLING'S (verify r4, 23 Oct): a
+ * tab opened straight at `/speed/` has the document `/speed/` while the
+ * router has already made the address `/speed`, and the exact comparison
+ * drew "This tab opened on /speed/ and came here by a link inside the app"
+ * over the document's own 414,363 B load. The two are compared by
+ * {@link samePage}.
+ *
  * @param {SelfReading} r
  * @param {string} here this page's own path, `/speed`
  * @returns {'page' | 'tab'}
  */
 export function selfWhose(r, here) {
-  return r.revisit || (r.documentPath !== null && r.documentPath !== here) ? 'tab' : 'page';
+  return r.revisit || (r.documentPath !== null && !samePage(r.documentPath, here)) ? 'tab' : 'page';
 }
 
 /**
@@ -473,7 +518,7 @@ export function selfText(r, here) {
   const whose =
     selfWhose(r, here) === 'page'
       ? ''
-      : r.documentPath !== null && r.documentPath !== here
+      : r.documentPath !== null && !samePage(r.documentPath, here)
         ? ` This tab opened on ${r.documentPath} and came here by a link inside the app, ${tabs}`
         : r.documentPath === null
           ? ` This tab left this page and came back by a link inside the app, ${tabs}`
