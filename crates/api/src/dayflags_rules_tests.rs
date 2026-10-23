@@ -3889,6 +3889,15 @@ fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
     let (json, says) = ledger(150, Some(15 * 3_600 + 15 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], false);
     assert!(says.is_empty(), "{says:?}");
+    // AT THE THRESHOLD (repair 1's mutants): a longest run of exactly 180 s
+    // is not under it, so inside the window it is not judged; one second less
+    // is the day's "not frozen".
+    let (json, says) = ledger(FROZEN_MIN_S, Some(15 * 3_600 + 15 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert!(says[0].starts_with("index frozen not judged"), "{says:?}");
+    let (json, says) = ledger(FROZEN_MIN_S - 1, Some(15 * 3_600 + 15 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], false, "{json:#}");
+    assert!(says.is_empty(), "{says:?}");
     let (json, says) = ledger(600, Some(15 * 3_600 + 10 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], true);
     assert_eq!(json["frozen"]["judged_s"], 300);
