@@ -62,7 +62,7 @@
 //! `an_unexplained_rate_gap_is_still_refused`).
 //!
 //! A gap row CONTINUES a clock; it never starts one (R3-30 repair 2,
-//! D-6247). It documents one scheduled auction, so it restarts the clock only
+//! D-7146). It documents one scheduled auction, so it restarts the clock only
 //! when the row before it was itself live and at most [`MAX_AGE_DAYS`] older:
 //! the clock still running on the gap's release day. A gap row after an
 //! unexplained hole (a result whose clock had already run out, or another gap
@@ -668,7 +668,7 @@ impl Series {
         // day after the first release.
         //
         // A gap row CONTINUES a clock and never starts one (R3-30 repair 2,
-        // D-6247): it is live only when the row before it was live and at
+        // D-7146): it is live only when the row before it was live and at
         // most MAX_AGE_DAYS older, the clock still running on the gap's
         // release day. An unlinked gap's days hold no auction slot, so they
         // are refused, and keep the gap's own slot so the refusal names it.

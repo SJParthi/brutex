@@ -81040,11 +81040,11 @@ SC-CLOSE-24, DB-B21 (partial), FM-106, FM-109, FM-112, FM-263; repair 1 of
    any other words cites the file that holds it, with the row's words as
    what it says.
 
-### D-6247 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
+### D-7146 — R3-30 repair 2: a documented RBI gap row continues a running staleness clock and never restarts an expired one — 2026-10-21
 
 Number taken from the ledger head at commit (amendment A6; `feat/db-fix`'s
 head is D-6245 and D-6246 is R3-30's own); the landing renumbers it if
-another package lands D-6247 first. Amends D-6246 item 3; finding DB-B44,
+another package lands D-6247 first (it did: SC-4 repair round 1 took D-6247 at 80799, so BASE-REDS-1023 gave this entry D-7146, D-7145). Amends D-6246 item 3; finding DB-B44,
 blocking issue of `verify-R3-30-r2`.
 
 1. **What was wrong.** D-6246 item 3 let a gap row restart the 14-day clock

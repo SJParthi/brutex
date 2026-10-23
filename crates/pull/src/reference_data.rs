@@ -2567,7 +2567,7 @@ fn told<T>(table: Table, slot: &Slot<T>) {
 }
 
 /// The gap rows a loaded rate table holds that carry nothing, because each
-/// follows an unexplained hole (R3-30 repair 2, D-6247), in one sentence, or
+/// follows an unexplained hole (R3-30 repair 2, D-7146), in one sentence, or
 /// `None` when every gap row continues a running clock.
 fn unlinked_gaps_said(series: &crate::riskfree::Series) -> Option<String> {
     let unlinked = series.unlinked_gaps();

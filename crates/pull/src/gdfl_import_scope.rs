@@ -335,7 +335,9 @@ mod cloud_mutant_tests {
     /// The ledger is `<store>/imports/gdfl.scopes`, beside the journal.
     #[test]
     fn the_ledger_lies_beside_the_import_journal() {
-        let root = std::env::temp_dir().join("Store");
+        // A path named for this process (gate 23 clause C, BASE-REDS-1023):
+        // nothing is created, but a fixed name is the shape two runs share.
+        let root = std::env::temp_dir().join(format!("brutex-scopes-{}", std::process::id()));
         assert_eq!(scopes_path(&root), root.join("imports/gdfl.scopes"));
     }
 
