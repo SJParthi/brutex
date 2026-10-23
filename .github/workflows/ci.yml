@@ -4940,7 +4940,10 @@ jobs:
           # under web/src, sorted, exactly as `find -name ... | sort` did, and
           # refuses an empty list before the program does.
           "$RUNNER_TEMP/gates-jobs" w5-files > "$RUNNER_TEMP/w5-files.txt"
-          xargs -d '\n' node web/ci/css-comments.mjs < "$RUNNER_TEMP/w5-files.txt"
+          # One file a line, handed over NUL-delimited: `xargs -d` is GNU only,
+          # and the Mac gate run (BSD xargs) refused the step while every file
+          # it names passed (BASE-REDS-1023, D-7154). Same files, same order.
+          tr '\n' '\0' < "$RUNNER_TEMP/w5-files.txt" | xargs -0 node web/ci/css-comments.mjs
 
       - name: Gate W6 — the masters script spends no vendor request on load
         run: |

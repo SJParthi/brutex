@@ -4,12 +4,27 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { POOL_FIELDS, ROUTE_FIELDS, poolTables } from '../src/lib/read-pools.js';
 
+/** @param {string} name @param {Record<string, any>} [over] @returns {Record<string, any>} */
 const pool = (name, over = {}) => ({ pool: name, slots: 4, running: 0, waiting: 0, answered: 10, busy: 0, cancelled: 0, ...over });
+/** @param {string} path @param {Record<string, any>} [over] @returns {Record<string, any>} */
 const route = (path, over = {}) => ({ route: path, answered: 5, busy: 0, being_written: 0, cancelled: 0, refused: 0, failed: 0, ...over });
+/** @param {Record<string, any>} [over] @returns {Record<string, any>} */
 const body = (over = {}) => ({ cores: 14, wait_ms: 250, max_waiting: 64, read_patience_ms: 200, pools: [pool('store-read')], routes: [route('/bars.json')], say: 'since start', ...over });
 
+/**
+ * The tables of a body that must be whole: its fault asserted null first, so
+ * every counter below is read off the whole answer's type (gate W3,
+ * BASE-REDS-1023, D-7154).
+ * @param {Record<string, any>} served
+ */
+const whole = (served) => {
+  const t = poolTables(served);
+  assert.equal(t.fault, null);
+  return /** @type {import('../src/lib/read-pools.js').PoolTables} */ (t);
+};
+
 test('a whole answer becomes rows, with every counter kept as served', () => {
-  const t = poolTables(body());
+  const t = whole(body());
   assert.equal(t.fault, null);
   assert.equal(t.cores, 14);
   assert.equal(t.waitMs, 250);
@@ -19,7 +34,7 @@ test('a whole answer becomes rows, with every counter kept as served', () => {
 });
 
 test('the routes turned away come first: busy, being written and cancelled; ties by route', () => {
-  const t = poolTables(
+  const t = whole(
     body({
       routes: [route('/a.json'), route('/z.json', { being_written: 2 }), route('/m.json', { busy: 1, cancelled: 1 }), route('/b.json')]
     })
@@ -65,7 +80,7 @@ test('the front end row the server names is one more route row, never a fault', 
     pools: [pool('store-read'), pool('verify', { slots: 1 })],
     routes: [route('(front end)', { answered: 31 }), route('/feeds.json'), route('/pools.json', { answered: 1 })]
   });
-  const t = poolTables(served);
+  const t = whole(served);
   assert.equal(t.fault, null);
   assert.deepEqual(
     t.routes.map((r) => r.route),
@@ -91,7 +106,7 @@ test('the server names the front end row it counts, from the same constant', () 
 
 test('empty lists and an absent patience are kept as they are', () => {
   const { read_patience_ms: _, ...rest } = body({ pools: [], routes: [] });
-  const t = poolTables(rest);
+  const t = whole(rest);
   assert.equal(t.fault, null);
   assert.deepEqual(t.pools, []);
   assert.deepEqual(t.routes, []);
