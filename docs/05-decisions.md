@@ -75702,6 +75702,450 @@ its id is refused `run_not_stoppable` (a new code, never reused) and nothing is
 written. (6) A runs ledger whose last id is `u64::MAX` refuses
 `runs_ledger_entry` by name rather than repeat it. **Proof:** IA2-21 to IA2-26.
 
+### D-5890 — Logs and audit: a never-rolling state stream laid out as an audit stream and seeded once, one table of state-change events, `target=` alone and a time span through the index, a capped answer that continues, and the `/logs` picture kept at write time (R3-24) — 2026-10-18
+
+R3-24 was built by a cloud session (branch `cloud/db-R3-24-20261017`) and
+finished on the Mac. Its spec (`reports/db-specs-20261016/R3-24.md`) names no
+decision block; the number is taken from the ledger's head at landing (A6),
+past the numbers other branches in flight already hold.
+
+**The who-did-what lines get their own stream, and it never rolls.** The
+audit stream took an event by its SHAPE (every `error`; at `info` or above a
+target ending `lifecycle` or `access`, or a lifecycle word), so a state change
+whose words missed that shape reached the 8 MiB x 8 ring alone and was gone
+within minutes of a pull's flood (DB-023: one file rolled about every 35 s),
+and refusals rolled even the audit stream (DB-G88). Every state change and
+every lifecycle line is now also appended to `<log dir>/audit.state/`, laid
+out exactly as an audit stream (same files, index, pointers and readers) but
+never rolled and never reaped. Refusals are not state changes and stay in the
+rolling stream, which is what lets this one never roll. A directory an earlier
+build wrote is seeded once at open from its audit stream and ring, merged by
+`seq`, a line both hold copied once. It is loud past 256 MiB
+(`STATE_LOUD_BYTES`), a size to look at, not a bound: it never drops a line.
+Considered and not taken: keeping refusals out of the audit stream instead
+(the operator searches refusals there by run and code, FM-203), and
+aggregating repeated refusals at their emit sites (DB-G88's fix hint), which is
+`crates/pull` and `crates/store` code this package does not own; the flood's
+volume is unchanged and is named as such in `docs/06-limits.md`.
+
+**State changes are named, not guessed.** `telemetry::run_dirs::state_events::TABLE`
+holds one row per `(target, message)` a writer emits as a state change, with
+its levels, its class (operator, server, maintenance, lag, run) and the file
+its emit sits in; `is_audited` takes every row at `info` or above whatever its
+words. A test reads each row's emit site as text, because `telemetry` may
+depend on nothing, so a message renamed at its site fails the build here. The
+table is hosted in `run_dirs.rs` with `#[path]` and its names are re-exported
+through `telemetry::run_dirs::`, because `crates/telemetry/src/lib.rs` is not
+this package's file; moving them to the crate root changes nothing else.
+
+**More keys, through the index.** `month=`, `reason=` and `kind=` are keys;
+`reason` and `kind` are new index dimensions, recorded per generation in its
+`dims` file so an older generation is named as not covering them. `target=`
+alone goes through the index over every audited line instead of filtering the
+newest 4 MiB of the ring (DB-023). A time span (`from=`/`to=`, epoch ms or an
+IST or UTC day, minute or second) uses the 16-byte `span` file each audit
+generation keeps (first and last event time): beside a key it passes every
+generation whose span misses; alone it reads the files its time meets by one
+span probe and one binary search over byte offsets per generation, and at most
+`SPAN_SLICE_BYTES` = 1 MiB of backward reads in all, saying "at least N" when
+it stopped there. A capped answer says "the first 2,000 of N" and hands back a
+cursor that continues it. Every answer says how far back it reaches, with one
+alert while the audited history is younger than 30 days.
+
+**A contradicted "day imported" line is marked, not rewritten** (DB-A48). The
+old CLI log called days "imported" that the import journal closed
+`incomplete`; the log is append-only history and is never edited, so the
+reader marks each such line with the journal's outcome and line beside it.
+`/imports.json` is `crates/api/src/imports.rs`, not this package's: the mark is
+one call to `logs::contradicted` for that file's owner.
+
+**A "day imported" line that cannot be checked says UNCHECKED** (the Mac's
+finishing pass, 19 Oct). The cloud's reader took a journal it could not read
+as "nothing to compare with" and left the line unmarked, and a line naming no
+kind and day it parses went unmarked the same way; an unmarked line is what a
+line the journal agrees with looks like, so both were a failure dressed as
+agreement (`CLAUDE.md` section 4). Each now carries
+`journal_outcome: "unchecked"` with the reason in its note, and the page marks
+it UNCHECKED, never CONFLICT and never nothing
+(`a_day_imported_line_beside_an_unreadable_journal_is_said_unchecked`, which
+failed on the cloud's reader). A store with no journal at all is still
+"nothing to compare with": there is no record that could disagree.
+
+**What a page request may read is fixed.** The `/logs` picture (events per
+minute by level for 60 minutes, a 16-code space-saving table of top codes, the
+ring's oldest line) is counted by the sink at write time, and the live tail is
+its in-memory copy of the newest 512 lines, so the page reads no log file. An
+importer's refusal lines are read at most 256 KiB per request
+(`REQUEST_SLICE_BYTES`); one background thread reads 1 MiB slices of each
+followed directory every 100 ms, and a directory still behind says how many
+bytes are unread, never "none".
+
+**What the Mac's finishing pass changed (19 Oct), each with a test that failed
+on the cloud's code first.** Run over a shadow of the real store, with a clone
+of the live server's own log directory (`<store>/telemetry`, 82 MB):
+
+- *A target alone reads the index only.* The cloud read the newest 4 MiB of
+  every ring beside the index on a target-alone first page, so
+  `target=pull.spot` cost p50 94 ms, p99 197 ms on the real logs, against the
+  5 ms every keyed search is held to. The ring's newest bytes are now read only
+  on `ring=1`, as for every other key, and the answer's `keyed.ring.note` says
+  so (`a_target_alone_reads_every_audited_line_not_the_newest_4_mib`).
+- *A day that did not close done is a state change; "day imported" is not.*
+  "day incomplete" and "day refused" (a handful a run, each a day the store
+  lacks) are rows of the state-change table (class `run`), so each is kept
+  for good and found by its day, and a new state stream copies the old ring's
+  ones when it is seeded (`an_old_day_incomplete_line_is_found_by_its_day_once_seeded`,
+  `a_day_that_did_not_close_done_is_a_state_change_and_a_day_imported_is_not`).
+  "day imported" was a row too for one build and was taken out, measured: on
+  the shadow, seeding the store's `logs/cli` copied 11,497 of them (27,445
+  lines, 6.6 MB, a 47 MB index), and a `contract=` search, which reads the
+  `gdfl.import` lines, then read 2,000 of 12,048 and found nothing on its
+  first page (p50 29 ms, p99 52 ms). It is the bulk of every run (about 6,000
+  a full import); the import journal is its record. What that experiment
+  also showed, on real data: of the "day imported" lines the store's ring
+  still holds, the journal's newest close contradicts two (options
+  2018-11-06 and 2018-11-09, `incomplete`), and with the line found the mark
+  is right (`journal_outcome: incomplete, journal_line: 8029`); the other 210
+  days DB-A48 counted were since closed `recounted`, which the journal reader
+  takes as done. Those lines sit in the oldest file of the store's
+  `logs/cli` ring, which no request reaches without a key, so no page shows
+  them unmarked.
+- *The seed names a file it could not read*, in the state stream's health
+  (served on every `/logs.json`), instead of passing it over in silence; a file
+  that is not there is no failure (`a_seed_names_a_file_it_could_not_read`).
+- *`run=` alone stays the ring's filter* (a page polls it for a live sweep); a
+  run is found in the durable streams with `durable=1`, and the ring answer
+  says how far back the audited history reaches beyond the ring (FM-203,
+  `a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`).
+- *The three findings are stated once more through `/logs.json`'s public body*
+  in `crates/api/tests/logs_r3_24.rs`, which compiles unchanged on the base
+  and fails there on all three (DB-G88, DB-023, DB-A48).
+- *`/audit.json` reads the directory a server on the store logs to.* Its
+  served half was `<store>/logs`, which holds only the run directories beneath
+  it; a server started on the store logs to `<store>/telemetry`
+  (`telemetry::dir_beneath_store`). On the shadow the answer named no state
+  change at all while the server's own state stream held 141. It now reads
+  `<store>/telemetry` as served
+  (`the_audit_answer_reads_the_directory_a_server_on_the_store_logs_to`).
+
+**What the Mac's second finishing pass found and changed (19 Oct), running
+the cloud report's NEEDS THE MAC list on the Mac.** Each change has a test
+that failed on the code before it; the measurements are `docs/06-limits.md`
+L-R324-01 to L-R324-14.
+
+- *A `/db` read named by `key=` is filed under its instrument* (the NIFTY
+  check). Since R3-07 the bar window names its series
+  `key=NSE-INDEX-NIFTY`, and the access line carried that key alone, so the
+  audit index filed no NIFTY read of the page under an instrument and
+  `/logs.json?instrument=NIFTY` found none of them. An access line whose
+  query names no `symbol` and no `instrument` now takes the exchange,
+  segment, symbol and contract its key names, through the route's own reader
+  (`bars::SeriesKey::parse`), symbol first so the field cap keeps it; the
+  query's own value of a name wins. Taken over teaching the telemetry index
+  to read a `key` field, which other events use for other things. Checked on
+  the shadow for NIFTY spot, a NIFTY option, BANKNIFTY, RELIANCE and a far
+  RECLTD strike (`a_db_read_named_by_key_is_filed_under_its_instrument`).
+- *A file a key does not index is said, never answered for.* Over the real
+  logs `kind=options` read "0 of 0 indexed line(s) read: every match the
+  streams hold is on this page" while `logs/cli`'s audit stream held 487
+  importer lines carrying `kind`, all written before `kind` was a dimension.
+  The posting probe already named such files (`uncovered`); the words did
+  not. The answer now leads with how many files each probed key does not
+  index and how to reach their lines, and says "every match the INDEXED
+  lines hold" (`a_file_the_key_does_not_index_is_said_never_answered_for`).
+  Re-indexing old generations was not taken: it is a write on the log
+  directory, and its cost is unmeasured.
+- *A span probe reads 4 KiB first.* Each probe of the span search read two
+  lines' ceiling, 128 KiB, so placing one cut in a 64 MiB audit file read
+  about 3 MiB, outside the 1 MiB the span's bound named, and C-LG-03's
+  `span alone` measured p50 5.6 ms at its 10x store. A probe now reads
+  `PROBE_FIRST_BYTES` = 4 KiB and the full ceiling only when no whole line
+  follows its cut, placing the same line
+  (`a_probe_reads_a_few_kib_and_still_places_a_long_line_whole`).
+- *A key beside a span passes the lines after the span by a search.* Over
+  the shadow, `from=2026-10-16&to=2026-10-17&code=vendor_empty` read the
+  lines of the days after the span one by one, up to the 2,000-line budget,
+  to find 20 (p50 26.7 ms, p99 41.1 ms): a key's posting is pruned by whole
+  files, and a file whose span meets the span asked was read line by line.
+  The second Mac pass (19 Oct) places the span's end by a gallop and a
+  bisection over the fetched pointers (their lines are in time order, the
+  premise `end_of_span` already rests on), each probe settled by its file's
+  span when it can be, else one line read against the request's budget, and
+  ends a stream at the first line older than the span, which before read on
+  to the budget's end. Pointers passed over are counted in `passed` and said
+  beside the lines read. Taken over pruning by byte range inside a file
+  (two binary searches per file over byte offsets, about 36 probe reads a
+  file): the pointers are already in memory and already in time order, so
+  their own order is the cheaper index
+  (`a_key_beside_a_span_passes_the_lines_after_it_by_a_search`, R324-16).
+- *Measured, not changed:* the 2 GiB proof at the real bounds on WD_BLACK
+  (51.8 s, peak 1.33 GiB); the audit roll at n=40 on WD_BLACK; C-LG-03 for
+  one client, 60 clients and beside a writer (the 5 ms target holds for one
+  client and is not met for 60 clients or beside a writer on this machine
+  under load, L-R324-07); every key, the page and `/audit.json` over the
+  shadow of the real store.
+
+**What the Mac's third pass found and changed (19 Oct)**, running the cloud
+report's NEEDS THE MAC list once more on the merged tree and on a fresh
+shadow of the real store. Each change has a test that failed on the code
+before it.
+
+- *A new state stream is seeded aside and named by one rename.* The seed
+  wrote under `audit.state/` itself, and a stream is seeded only when it has
+  never existed, so a start stopped part-way left a stream holding the first
+  lines of its seed that every later start took for a whole one: the state
+  changes after the stop were missing for good, and nothing said so
+  (`CLAUDE.md` section 4). The seed is now written in
+  `<dir>/audit.state.seeding/` (`run_dirs::STATE_SEEDING_DIR`), synced, and
+  renamed to `audit.state/`, the tmp + rename every writer here keeps; a seed
+  an earlier start left there is moved aside to `audit.state.seeding.<ms>`,
+  kept and never deleted, named in the state stream's health, and the seed is
+  run again whole. A seed that cannot be named is refused by name and nothing
+  is opened half-way (R324-17,
+  `a_seed_stopped_part_way_leaves_no_half_seeded_stream`, which stops a seed
+  after one line by a panic, as a kill would, and failed on the seed written
+  in place). Considered and not taken: resuming a stopped seed from its last
+  `seq` (two lines may share one, `a_ring_line_sharing_a_seq_with_another_is_seeded_too`,
+  so the cut is not exact) and a completion marker beside a stream seeded in
+  place (a reader would still see the half-seeded stream until the marker
+  check ran).
+- *A line written per minute or per request is no state change.* On the
+  fresh shadow the state stream's first start seeded 265 lines, and 186 were
+  `api.speed minute ended` (one per route asked in each minute, taken as a
+  lifecycle by the word `ended`) and 4 `api.bars request abandoned; work
+  stopped` (one per request a reader left): a never-rolling stream growing
+  with traffic, and `/audit.json`'s newest state changes were all
+  "minute ended". `state_events::SAMPLED` names them; the rolling audit
+  stream keeps them, the state stream neither writes nor seeds them, and each
+  row is checked against its emit site (R324-18,
+  `a_sampled_line_is_audited_and_is_no_state_change`,
+  `a_sampled_line_reaches_the_audit_stream_and_never_the_state_stream`).
+  Taken over narrowing the lifecycle word rule, which the rolling audit stream
+  and the importer's run lines share. Re-measured: the same seed now takes
+  83 lines, about 6.4 a day (L-R324-01).
+- *Four mutants of the span search survived and are now killed*: a probe
+  settled by its file's span costs no line read
+  (`a_probe_is_settled_by_its_files_span_before_any_line_is_read`), a stream
+  the search left at its newest pointer keeps that pointer for the next page
+  (`a_stream_placed_at_its_newest_pointer_keeps_it_for_the_next_page`: a
+  search that marked it consumed while passing nothing would have lost that
+  line from every page), and a stream reads no line once the request's budget
+  is spent (`a_stream_with_no_budget_left_reads_no_line`). L-R324-14.
+- *Measured, not changed:* every route R3-24 touched on the final build over
+  the fresh shadow, NIFTY first (L-R324-15). A span beside a key now answers
+  in p99 1.7 ms where it took 41.1 ms before the second pass's search; the
+  two contract searches, `kind=` by day and `/imports.json` stay over the
+  5 ms target at p99, named there. The second pass's `/imports.json` figure
+  was of the route's refusal of a request naming no feed and is corrected in
+  L-R324-04.
+
+**What the repair round found and changed (20 Oct)**, after a second check of
+the committed head (`dbfa9074a`) reproduced two defects this package made,
+each now with a test that failed on that head:
+
+- *Two per-request lines still reached the never-rolling stream.* The CSV
+  export's `api.bars export abandoned; work stopped` and `export stopped
+  short` hold the lifecycle words `stopped`, so the word rule took one line
+  per export a reader left or that stopped short; five abandoned exports on
+  the shadow wrote five lines, and `/audit.json` listed them as `run` state
+  changes. Both are rows of `SAMPLED` now, and the list is no longer kept by
+  hand alone: `every_lifecycle_word_emit_in_the_server_is_classified` scans
+  every `Event` constructor outside test code in `crates/api/src` and fails
+  on any emit the rule takes that is no row of `TABLE`, of `SAMPLED`, of its
+  reviewed `KEPT` list (twelve lines written once per run, start or stop) or
+  of its `DYNAMIC` list (six sites whose message is a variable) (R324-19).
+  The second check's other offer, narrowing `is_state_change` to `TABLE`
+  rows and targets ending `.lifecycle`, was not taken: it would drop the
+  run lifecycles no table row names (`pull.run started` and `finished`,
+  `pull.recovery recovery ended`, `gdfl.import run started`, the stops a
+  refusal ends a run with), which the stream exists to keep. `/audit.json`
+  also puts each line it reads to the rule again, so a line an earlier rule
+  let in is left out of its rows and counted in `passed_over`, never shown
+  as a state change and never hidden; and its 64 KiB slice no longer skips
+  its first piece unread, which lost a whole line whenever the slice began
+  on a line's first byte (found by the mutation run, R324-21).
+- *A span alone after a torn line answered short and called itself
+  complete.* The span search's probe answered "no line" for a first line
+  that did not decode, and the search read that as "nothing starts below
+  here" and cut the span above the torn line. The probe now steps past an
+  undecodable line, at most `MAX_UNDECODABLE_STEPS` = 16 in a row, and
+  places the span by the first line that decodes; past the bound, or on a
+  read that fails, the span is refused in that file by name (R324-20,
+  L-R324-16). Any answer with a stream or line it could not read now says
+  so and never "every match the streams hold is on this page" (R324-22).
+- *Taken from the check's follow-ups, in this package's files:* a span
+  image no writer makes (first at or before 1970, last before first, or not
+  16 bytes) is read from the file's own lines instead, so a zeroed span can
+  no longer end a span search (R324-23). The span file itself is still
+  rewritten in place, NOT converted to a temporary and a rename: gate 28
+  allows a crate one door for a temporary, `store::staging::create`, which
+  `telemetry` (depending on nothing) cannot call, and a temporary of its own
+  is the refusal that gate exists for. What a crash mid-write can leave is
+  each read from the file's lines, and the first time never changes within
+  a generation, so an eight-byte half of each image is still a true span
+  (L-R324-18). Also NOT DONE, named: syncing the seed's index files and its parent directory
+  (the index of the rolling stream is not synced per append either, and a
+  whole-tree sync of a large seed is thousands of full syncs at one start),
+  the state stream's index growth by one posting file per run, and the
+  per-rung and per-stage CLI lines' growth of the stream (L-R324-17);
+  the first two now have rows of their own, L-R324-20 and L-R324-21.
+
+**The repair round, finished (20 Oct, after its first agent stopped mid-check).**
+- *A seed beside a taken name is kept, never copied again* (R324-24, from
+  the check's follow-ups): a start that finds an earlier seed under
+  `audit.state.seeding/` while `audit.state` is held by something a rename
+  cannot replace refuses the stream by name before it moves or seeds
+  anything. Each such start used to move the seed aside, seed again and fail
+  the same rename, one more whole copy per start with no bound. A refusal
+  was chosen over a cap on the copies: a cap still copies, and a copy that
+  cannot be named helps no later start.
+- *A span search these tests ask for answers inside a deadline*: six
+  mutants of `end_of_span` that make its loop endless ran to the mutation
+  run's 600 s timeout, because the tests called it with no deadline. They
+  now ask through a 20 s deadline and fail by name, so such a mutant is
+  caught. The walk's early stop at a closed file whose last line is the
+  span's start is pinned by a test (it survived `<` made `<=` and `==`).
+- *Gate 21 counts the seed's new listing.* `name_taken` lists
+  `<dir>/audit.state` to tell an empty directory a seed may be renamed onto
+  from a name something else holds, which is a second `std::fs::read_dir`
+  in `telemetry`'s sink; the gate's declaration still said one, so gate 21
+  failed on the finished tree. The declaration now counts two and says
+  which path the second lists and why. Found by running the local CI rows
+  on the finished tree, which the round's earlier agents had not.
+- *Measured on the final tree beside the head it repaired*, interleaved on
+  one shadow at one load (L-R324-19): the 150-line span page is over the
+  5 ms target at p99 on both builds, the final tree's p99 0.6 to 0.9 ms
+  above the repaired head's in each of the two rounds and its p50 within
+  0.2 ms, which two rounds under that load cannot tell from noise (named,
+  not claimed either way); the mutation run over the repair's search
+  (`end_of_span`, `span_page`, `line_after`, `line_within`,
+  `state_changes_json`) finished at 50 mutants, 48 caught, 2 unviable, none
+  missed.
+
+**Repair round 2 (20 Oct, after the third check).**
+- *A run of damage longer than a probe's window cut a span short and the
+  page called itself complete.* Each step of the span probe read at most
+  two lines' ceiling, 128 KiB, and answered "no line" for a window holding
+  no newline though bytes were left before the search's end, so a NUL run
+  a later open closed with its newline cut every span over it: the third
+  check's shadow answered 80 of 150 lines at `limit=20`, the last page
+  saying every match was there. The probe now reads on, to the newline it
+  looks for, within `MAX_PROBE_BYTES` (1 MiB, the span page's own slice)
+  in all, and says "no line" only when its read reached the end (R324-25).
+- *Past a probe's bounds the search now goes around the damage instead of
+  refusing the span in that file.* Chosen over the refusal the check also
+  offered because a refusal cannot be honest across pages: either the
+  cursor stands still (the check's follow-up: `next` did not move and
+  `more` stayed true, so a client looped) or it moves past the file and a
+  later page calls itself complete with that file's lines unread. Going
+  around is sound by the stream's time order: a line stamped after the
+  span's end found below the damage proves every line from it on, and the
+  cut is exact again; else the cut is the lowest place proved, and the
+  backward walk passes the lines stamped after the span over by their
+  time. The damage costs reads (at most `MAX_PROBE_BYTES` a probe), never
+  lines, and is named in the posting's `damage` and in `said` (R324-26,
+  L-R324-22). A slice of more than two lines' ceiling no line starts in is
+  read past and named, and a page that stopped short says where it goes
+  on from, so the cursor moves on every page (R324-27). A span open at its
+  end is not searched at all.
+- *Taken from the check's follow-ups, in this package's files:* one file
+  that will not read is named once per stream with a count, not once per
+  pointer; `/audit.json`'s state changes name an absent state stream
+  (`no_stream`) and the serving sink's refusal of its own
+  (`served_state_error`) (R324-28); the new mode-bit test in `telemetry`
+  (`a_name_is_taken_by_anything_a_rename_cannot_replace`) runs through
+  `where_permission_binds` (D-0995), so it holds as root in a cloud
+  container; the open-ended span over history is measured (L-R324-23).
+- *What damage costs, measured, and what it does not cost.* On a shadow of
+  the real store, a 3 MiB NUL run in the served audit file made every span
+  search ending after it 3.4 to 7 ms slower at p50 (5.81 against 2.40 at
+  `limit=20` at load average 12 to 14, 9.42 against 2.53 at 18 to 21), a
+  200 KiB run nothing measurable; every line was answered
+  once across both, at `limit=20` and 200, and following `next` from 0
+  reached the end of the kept history (L-R324-22, L-R324-23). Remembering,
+  within one search, a stretch a probe found holds no newline would spare
+  the probes below it reading the run again; not done, and named there.
+- *`cargo deny` went red on 21 Oct with two new advisories, fixed by their
+  own named solutions:* RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 may
+  accept distrusted emSign intermediates; fixed in 0.103.16) and
+  RUSTSEC-2026-0381 (`webpki-roots` 1.0.9 bundles roots that trust them;
+  fixed in 1.0.10), both reached through `reqwest` and `hyper-rustls` from
+  `pull`. `Cargo.lock` takes `rustls-webpki` 0.103.16 and `webpki-roots`
+  1.0.10, resolved offline from crates already in the local registry
+  cache; no manifest changes and no other crate moves. A new advisory is a
+  finding to fix, never a baseline, as DENY-1 fixed the last ones under
+  D-5090.
+- *The mutation run over this round's lines found 11 survivors, and each is
+  repaired* (L-R324-14). The probe's read now ends on what was read: a
+  read's own "I read a byte" answer is gone, so no wrong answer can spin
+  it, and a redundant guard went with it; a short read is the file's end,
+  never a bound met first (`a_file_shorter_than_the_search_end_answers_no_line`).
+  New tests pin the first read's size, a page already full, the span
+  stream's cursor and the damage sentence. Run again: 0 missed.
+- *`telemetry`'s reopen tests hold the fork gate* (D-1462). Wrapping the
+  mode-bit test in `where_permission_binds` (above) put one more forking
+  test beside the state-stream and picture tests that drop a sink and open
+  it again on the same directory; a child forked in that window holds the
+  one-writer lock, and two of them failed once under load ("another sink
+  ... holds this telemetry directory"). The twelve such tests R3-24 wrote
+  now take `no_fork_in_flight()`, as the crate's older ones do; the suite
+  then passed three times in a row.
+
+**Repair round 3 (22 Oct, after the fourth check).**
+
+- *A time span's end that cannot be read is UNKNOWN, recorded as unknown,
+  named, and never a reason to pass a file over (R324-29, R324-30).* The
+  check found two ways a reopen invented a span. Over a file whose last
+  64 KiB held no line that decodes, the reopen took the generation's last
+  time to be its first line's, and the next roll closed it as
+  `[first, first]` (B9). Over a generation with no believable span image
+  whose first line does not decode (every generation a build before R3-24
+  wrote), the first line this process appended recorded its own time as
+  the generation's first (B3); and `span_page` passed a kept file whose
+  first line will not decode over by its `let`-`else`. Each lost every
+  older line to a span search, and each answer called itself complete. Now
+  `telemetry::AuditSpan::first_ms` is an `Option` like `last_ms`, and
+  `None` at either end overlaps every span. An unread last is kept as
+  `i64::MAX` (the image's existing "unknown" value, which `audit_span`
+  already answers as open-ended for a closed file), and no later line
+  lowers it. An unread first records no span file, and only a generation
+  that held no byte takes an appended line's time as its first
+  (`SpanStart::{Empty, At, Unknown}`). `audit_span` answers a span for
+  every kept file that holds a byte. `span_page` reads a file with an
+  unknown end and names it in `damage`. The reopen names the damage in
+  `AuditHealth::span_damage`, which is loud and is served on `/logs.json`
+  (`span_damage`) and `/logs`.
+  *Rejected:* scanning back past the 64 KiB block for the last line that
+  decodes. The check's damage was 64 MiB long, so a bounded scan still
+  ends in "unknown". An unbounded one is a scan at every start.
+  *Rejected:* taking the first line that DOES decode as the first time.
+  It is a true lower bound only for the lines that decode, and it would
+  name nothing. Unknown costs a search reads (L-R324-24) and never lines.
+- *`Cargo.lock`'s two bumps of repair round 2 are re-pinned in `vocab`'s
+  dependency fingerprint, with the scan recorded beside it (B10).* Repair
+  round 2 moved `rustls-webpki` 0.103.15 -> 0.103.16 and `webpki-roots`
+  1.0.9 -> 1.0.10 for RUSTSEC-2026-0381/-0382 and did not run
+  `the_dependency_set_has_not_moved_without_review`. That test failed on
+  the head and on every merge with `feat/db-fix`, and the round's report
+  called the tests green because the run never included `-p vocab`. The
+  registry sources of both new versions were scanned: no
+  .c/.cc/.cpp/.h/.S/.s/.asm/.js, no `build.rs`. Their only non-Rust files
+  are `LICENSE`, the packaged `Cargo.lock`, `Cargo.toml.orig`,
+  `.cargo_vcs_info.json` and DER data (`rustls-webpki` 0.103.16 ships 11 `.der`
+  files where 0.103.15 shipped 3: the 8 new ones are the distrusted emSign
+  intermediates' public keys, `src/data/distrusted/*.spki.der`, which the
+  fix reads; `webpki-roots` 1.0.10 ships 3 test certificates, as 1.0.9
+  did). The
+  count stays 194. No `dependencies` list moved: the lock's diff against
+  `feat/db-fix` is the two versions and their checksums. `feat/db-fix`
+  then took the same two bumps itself (D-7120) and pinned the same
+  fingerprint, `0x57F8_69FF_1E0D_4A5C`; the merge keeps its comment and adds
+  one line naming this round, and `Cargo.lock` equals `feat/db-fix`'s.
+- *Taken from the check's follow-ups, in this package's files:* a time span
+  with an end that does not read names every end given (R324-31). A good
+  end beside a bad one is named as not applied; before, it was dropped
+  without a word.
+
 ### D-5899 — One read door for both forms of a month: `.sbar`, then `.bin`, then `.sbar` once more; a sealed month takes no lock and is served from the same block cache; never answered from the other form — 2026-10-18
 
 The store-compression design (`state/design/store-compression-20261012.md`
@@ -76416,6 +76860,300 @@ or promotion over a month whose `.lock` a retirement removed would be refused
 for want of the lock (`repair::publish`, `generation::promote` take it shared);
 retirement is SC-9's and ships off, and SC-9 must either keep the `.lock` or
 teach those two that a sealed source needs none. Sealing itself is SC-6's.
+
+### D-4811 — Zerodha verification: an independent landing oracle, every stored rung, spooled and merged (IA-9) — 2026-10-20
+
+**Number** the design's own (§15). **Decision.** A Zerodha day is verified
+minute by minute against its kept answer through an independent landing
+oracle, verifier-only (as D-4807): `http::decode_body`'s rows, D-3351's row
+rules applied by the oracle itself, the scale only, the asked window and the
+calendar. Every stored rung gets a record: 1min, the seven derived rungs
+refolded under D-3321 (D-4858), and 1day against its own kept answer and by
+`daycheck`. A day no window landed is still verified (the calendar sweep), and so is
+every calendar-open day of a month missing in the middle of a series' life;
+the sweep checks series side by side on up to 8 workers (RA-145), its
+records and report the same whatever their count.
+A pull from before IA-8, a landing killed before its keep and a window
+landed from another store are `no_response_kept`, never `match`; a stored
+minute no kept answer asked for is never vouched for. A run's records go to
+its spool (D-4881) and are merged into one generation per (segment,
+timeframe, day). Re-fetch is a pull run, never automatic (D-4859). **Implemented by**
+IA-9: `pull::zerodha_verify` (`oracle`, `verify_day`, `verify_window`, `cold`,
+`merge_all`, `merge_observed`, `cold_observed`), `cli zerodha-verify`, `cli verify-merge`; each
+run keeps its design §5.7 progress file (`verify/zerodha.progress`,
+`verify/merge.progress`) in the GDFL run's §37 v1 record, written only while
+it holds its lock (`docs/02-store-format.md` §35.10). **Not wired here:**
+the keep-and-spool hook on both landing doors and `POST /verify/run
+feed=zerodha` are IA-10c's (critic IA-10b-1, D-4919), so no pull of this
+build spools a window yet; `cli zerodha-verify` (cold) is the path that runs
+today. **The checker's own eyes on a kept body (RA-318).** The oracle decodes
+with the pull's decoder, so a vendor change that still decodes (a new field)
+is dropped by both alike. Each kept body that decoded is therefore read once
+more against the shape `docs/00-charter.md` §4z records (`{status,
+data:{candles:[…]}}`): a root key other than `status` and `data`, a `data`
+key other than `candles`, and a `status` absent or not text are counted
+(`answer_shape`), the record carries detail kind 20 `vendor_shape` (the count,
+then the first field's path), its code is unchanged, and one alert of the new
+kind 21 `vendor_shape_changed` (appended to `pull::alerts::KINDS`, never
+renumbering 1..20) is put per (rung, first field), so one change seen in every
+instrument's answers is one alert until acknowledged. The status WORD is not
+compared: no recorded source names the word a successful answer carries
+(UNVERIFIED). **A month a writer holds (design §6.3; round 4 SF-4, F67).**
+A pull appending a month holds its writer's lock, so the verifier's shared
+open meets `StoreError::Locked`. It is tried again every 100 ms for up to
+`MONTH_BUSY_RETRY` (2 s, the importer's bound); past it that rung's records
+are `not_compared (month_busy)`. A month that would not open for any other
+reason is `store_unreadable (month_refused)`. Neither is ever read as a month
+not held: before this, a busy or refused DERIVED month read as absent and
+every day of it was `missing_in_store (rung_day_absent)`, a store defect
+that was not there. The cold run lists such months apart (`BUSY`, not a
+fault; the run is not OK, its span not wholly compared, and the next run
+reads them again); the window path writes the same records and one event
+per month instead of failing the whole window, and opens each month a
+window touches once, not once per day. **Proof:** IA-ZV-01..12,
+IA-ZV-X12..X25, IA-VD-08, IA-VD-15 (`docs/04-invariants.md`).
+
+### D-4822 — No cross-process Zerodha pull lock; the verifier's two locks are its own (IA-9) — 2026-10-20
+
+**Number** the design's own (§15, round 2). **Decision.** No
+cross-process Zerodha pull lock is added: `serve.lock` refuses a second api
+on one store, and no other process pulls. The verifier adds only its own
+two run locks, each a `try_lock` whose loser exits `run_busy` at once:
+`verify/zerodha.lock` for a cold run and `verify/merge.lock` for a merge
+(`telemetry::run_dirs::VERIFY_ZERODHA`, `VERIFY_MERGE`, D-4897). **Proof:**
+IA-VD-08 (`run_busy`), IA-ZV-X5.
+
+### D-4857 — Zerodha owed minutes, the gap ledger's reasons, and D-3351 mirrored (IA-9) — 2026-10-20
+
+**Number** the design's own (§15; amended by rounds 3 and 5). **Decision.**
+(1) The minutes a day owes come from `ingest::repair_plan::owed`, the one
+function the repair plan and the stored-month gap ledger share (calendar of
+record, venue hours under every closing-auction eligibility, recorded halts
+owed by no one), never `expected_bars`. (2) Owed minutes inside a kept
+answer's asked window that the answer lacks are the vendor's hole, said by
+the answer: `vendor_hole (vendor_empty)`, or `answer_short` when the answer
+stopped before the end it was asked for (RA-300). (3) The rest are
+classified by the gap ledger's last line for the key and day: `vendor_empty`
+→ `vendor_hole`; `withheld_unmeasured_session` → `withheld_by_rule`;
+`calendar_unverified`, `calendar_past_record`, `unordered_stamps`, and
+`pull_halted` (RA-301: a pull that halted before it asked for the day; its
+writer is the pull runtime's, WP-62) →
+`not_compared`; `refused_day`, `refused_front` (D-4879) and R3-18's
+`stored_short` → `owed` (DB-G46: a month stored before the ledger takes its
+reason from the stored-month ledger, never `no_ledger`); `repaired` still
+short, or no line in a month the ledger covers (any `gap` or `derive` line
+of the key in that month) → `missing_in_store (unexplained)`, the one
+Zerodha store defect; a month the ledger does not cover → `no_ledger`. (4)
+Where GDFL's one-second bars of the same instrument hold no second of those
+minutes either, they are `vendor_hole (neither_vendor_has_it)` (DB-A12,
+"neither vendor has it"); a minute GDFL traded sets `peer_minute_absent`
+and detail `peer`. A GDFL month that holds no second of the WHOLE day did
+not import that day, so it says nothing of the day's minutes: the day reads
+`peer_unavailable` and keeps its ledger class, never "neither vendor has
+it" (measured on the operator's store 22 Oct 2026: GDFL's NIFTY 1s month is
+held but holds no second of 2021-02-24, 2022-03-07 or the 2024-11-01 Muhurat
+session, and a first build read 590 NIFTY minutes as neither vendor's on
+that); a peer read that fails is named among the run's refusals, never read
+as no peer in silence. (5) The oracle applies D-3351 itself (identical candles
+once, `dup_minutes`; both candles of a conflicting stamp refused; an
+off-grid candle refused; every other row lands) and takes the words it
+cannot judge from the answer alone (`cash_eligibility_unknown`,
+`price_off_grid`, WP-13d's `before_first_day_bar` and `foreign_level`) from
+the landing's own refused-row records (`.rsx`, DB-G46); a count of the
+words it judges that differs from the landing's, or a total that differs
+from the receipt's "rows the landing refused", sets `quality_differs`
+(sub-kind 1); a kept answer whose oracle decode gives a row count other than
+the receipt's "rows decoded" sets it with sub-kind 2, so a candle the shared
+decoder skips as impossible (DB-G46, §8 Z6) is skipped and counted alike on
+both sides. (6) A
+stored minute before the series' first served day bar is
+`store_without_source (before_first_day_bar)` (WP-13d mirrored, CMP-18). (7)
+A renamed share whose two names the store both holds owes, under each
+name, only the days of that name (the alias table's lineage, D-3332): an
+empty day the other held name owes gets no record (RA-302). A share held
+under one name only (Zerodha files the whole history under the newest
+name: ETERNAL, TMPV) owes every day under it, so a rename never hides a
+hole.
+**R4-17's three landing words.** R4-17 (series identity, D-4991 to D-4995)
+merged three per-row refusal causes after the reason table was minted:
+`non_positive_price`, `before_listing`, `in_session_jump`. The oracle takes
+the landing's refused rows by their cause, so each read as reason 0, a
+refusal with no word; they are reasons 35, 36 and 37, appended, and the
+test that every landing cause has a number is now an exhaustive match, so
+the next cause fails to compile until it is numbered.
+**Proof:** IA-ZV-01, -04, -05, -06, IA-ZV-X3, IA-ZV-X10, IA-ZV-X13, IA-ZV-X26, Z15
+(`a_foreign_minute_is_refused_as_the_landing_refuses_it`).
+
+### D-4858 — Derived rungs refolded under D-3321; 1day by its answer and `daycheck` (IA-9) — 2026-10-20
+
+**Number** the design's own (§15). **Decision.** The verifier refolds stored
+1min into each derived rung with its own fold, anchored at 09:15 IST (the
+store's grid, D-1447): an INDEX or futures bucket that lacks an owed minute,
+or holds one the day does not owe, is withheld (`withheld_by_rule
+(index_bucket_incomplete)`); a CASH bucket folds as partial over the minutes
+that traded. Options are never derived and have no derived record. The rule
+set is read from the month's D-3335 `derive` ledger line: `v=1` is rule set
+1 ("D-3321 as of WP-13b"), compared by value; no line means the month was
+derived before the ledger, `built_under_earlier_rule (pre_ledger)` with its
+counts recorded and detail 14, never judged by value. **Departure from the
+design, named:** the design has IA-9's build write `rules=` at `v=2` on the
+`derive` line; `/dayflags.json`'s reader (`api/src/dayflags.rs`,
+`parse_derive`) refuses any `v` but 1, so a `v=2` line would make every new
+derive line a fault there. The line stays at `v=1` until that reader takes
+`v=2` (IA-10b); rule set 1 is read from `v=1`. 1day is compared with its
+kept answer, and `daycheck::compare` is re-run over the day's minutes: a day
+that differs or contradicts sets `daycheck_differs` with detail `daycheck`
+(D-3347). A day whose 1min folds to at least one standing bucket while the
+rung holds no bar of it (its month held or not) is `missing_in_store
+(rung_day_absent)` under every rule set, a month derived before the ledger
+included: the rung holds fewer days than its source (RA-267), which no
+bucket rule explains. **Proof:** IA-ZV-03, IA-ZV-07, IA-ZV-11, IA-ZV-X11.
+
+**Repair 1 (22 Oct 2026, the second check's blocking 2).** The cold sweep
+listed only series holding a 1min directory and walked only the months
+between a series' first and last 1min month, so the eleven NSE indices the
+operator's store holds at 1day only, and NIFTY's 1day months of 2015 to
+2017, were never verified and never named, and the run said OK. Now every
+Zerodha series holding 1min, a derived rung or 1day is listed, and every
+month held at any rung in the span is walked beside the 1min span. Outside
+a series' 1min months the 1min rung is not the store's to owe: no 1min
+record, and a derived rung only where its month is held; the 1day bar is
+compared with its kept answer (`no_response_kept` with none), and a day bar
+`daycheck` could not read carries detail 21 `daycheck_not_run` with its
+why (1 beyond the 1min months, 2 no minute of the day, 3 the 1min month
+unread), inside the 1min months too. Outside the calendar of record
+(before 2018), a day of such a month holding no bar at any rung and no kept
+answer is not judged and is counted (`unattested_days`, said in the
+report): no calendar says it traded, and a record would claim an answer was
+owed (measured on the clones: NIFTY 2016 gave 366 records, weekends
+included, before this rule). A name the request asks for that no
+held series answers to is said (`NO SERIES`) and the run is not OK.
+**Proof:** IA-ZV-X29.
+
+### D-4881 — The Zerodha spool: format, tail rule, merge log and merge (IA-9) — 2026-10-20
+
+**Number** the design's own (§15, round 3; round 5's length-based tail).
+**Decision.** As `docs/02-store-format.md` §35.10: a 64-byte header
+(`BRUTEXVS`, version 1, stride 160, feed, segment, timeframe code, mode,
+month, run, created, the timeframe's seconds, CRC-32C over 0..60), then
+160-byte records each with its own CRC: kind 1 a verdict record (§35.3's
+layout with the day and exchange in its reserved bytes and the receipt at
+offset 120), kind 2 one detail of up to 128 bytes of the record before it.
+One writer per run holds each file's handle and offset behind one mutex
+(critic IA-9-2); an append is one `write_all` at that offset and one
+`sync_data`, and a failed write is written over by the next. The merge, the
+one reader, takes the whole records, ignores and names a torn tail and an
+unsynced last record, and refuses a spool with an earlier bad record by name
+once, with an alert (kind 10) and a `refused` line in its merge log, until
+`cli verify-merge --retry` names it. The merge log's 16-byte records
+(`intent`, `committed`, `refused`) follow the same tail rule (RA-319).
+**Departures from the design, named:** (a) the intent records the
+generation the year index named BEFORE the merge, not the one about to be
+linked: `store::verdict::commit` takes the day's commit lock itself, so no
+caller can append between the lock and the link; a re-merge reads the year
+index and walks back from its generation by `previous` (at most 64) looking
+for an image of this run, which under `verify/merge.lock` is at most one
+commit. (b) The mode (`zerodha_merge`, `zerodha_cold`) is written in the
+header byte the design left reserved. (c) A merged spool and its log are
+removed, as the design says, and then each directory left empty up to the
+run's (`remove_dir`, which refuses a directory holding anything: a stray
+name keeps it). (d) **The merge runs on workers** (the rules audit's
+RA-050: the design's one thread was hours for a backfill's orphan spools,
+an extrapolation from C-ZV-02): the spools of a listing are put in (run,
+segment, timeframe, month) order once, O(s log s), and grouped by
+(segment, timeframe, month); one worker merges a group whole and in that
+order, groups run side by side on up to `MAX_MERGE_WORKERS` = 8
+(`merge_workers()`, the host's parallelism by default;
+`merge_observed_on` names a width). Two groups never write one day image,
+and one year's commits are serialised by the verdict store's own commit
+lock (D-4865), so a day's generations, and which run's record is committed
+last, are the same at any width and whatever the drive's directory order;
+the one-commit-per-day bound of (a)'s walk-back holds per day. A worker
+that panicked leaves its spools waiting, each named in the outcome's
+faults. **Proof:** IA-VD-08, IA-VD-15, IA-ZV-X1, IA-ZV-X2, IA-ZV-X23;
+C-ZV-02, C-ZV-03.
+
+**Repair 1 (22 Oct 2026, the second check's blocking 1).** Nothing marked a
+spool live or closed: a `verify-merge` started while a cold run spooled
+committed 38,096 of the run's 39,024 records and lost 928, every exit 0 (the
+merger committed what the file held, logged the day and removed the spool;
+the live writer then wrote into the removed file, or, had the spool stayed,
+its later records of a logged day were skipped as merged). Three rules close
+it, each at its cause. (e) **A run is live while its writer lives**: the
+writer takes `verify/live/<run>.lock` (`flock`, with its holder's note) at
+its first append and holds it until it is dropped; a merger tries each
+run's lock once per listing, leaves a live run's spools unread and names the
+run (`MergeOutcome::live`), and holds every free run's lock for the pass, so
+a writer of that run resuming meanwhile waits for it (`LIVE_WAIT`, 30 s,
+then `run_live_busy` by name). A live run's spools waiting are not a failed
+merge; any other spool left waiting is. The lock files are never removed.
+The alternative, a writer that re-checks and re-births a removed spool,
+was refused: it cannot cover a record appended between the merger's read
+and its removal, and it would give a run that a merge met mid-way a second
+generation of the same day, against IA-VD-08. (f) **A committed day answers
+only for what its merge read**: a merge logs `seen(n)` (state 4) before any
+day, and a day is `already` only when its commit covered every record of
+the day the spool now holds; otherwise the whole day merges again into a new
+generation. (g) **The log goes before the spool**, and a log that will not
+go keeps its spool, so no log outlives its spool to answer for the next one
+born at that name. Beside them: an append past the 256 MiB the merge reads
+is refused `spool_full` before a byte is written; a log whose spool is gone
+is stray; `cli verify-merge` takes `verify/merge.lock` before its runs-ledger
+id, so a `run_busy` loser takes none. A verdict record counts the details after it
+(bytes 150..152, at most 32), so a last record whose detail an append never
+finished is ignored whole and named, never merged without it. **Proof:** IA-ZV-X27, IA-ZV-X28,
+IA-ZV-X30, IA-ZV-X31.
+
+**Amended by IA-9 repair 2 (2026-10-23), after the third check found the
+resume rule above leaving a spool no merge could read.** A writer resuming
+over an ignored last group (a verdict record and up to 32 details) wrote its
+new bytes from the group's start but never cut the file, so an append
+shorter than the group left the group's rest after it; the next merge read
+that leftover detail as damage and refused the whole spool, losing every
+intact record in it. (h) **A resume cuts before it appends**: when the
+resume point is below the file's length, the writer cuts the spool there
+(`set_len`, then `sync_all`) under the run's live lock, at its first append
+that is taken and before that append's first byte, so a crash between the
+cut and the append leaves only whole records, and an append refused
+`spool_full` still writes nothing. The same cut follows a write of the
+writer's own that failed part-way.
+The alternative, cutting to the append's end after it, was refused: a crash
+mid-append would then leave the new torn bytes followed by the old group.
+(i) **A merge holds at most 64 runs' live locks at once**
+(`LIVE_LOCKS_AT_ONCE`): it merges the runs waiting in run order a bounded
+slice at a time and lets each slice's locks go before the next, which
+replaces "holds every free run's lock for the pass" in (e); 300 runs under
+`ulimit -n 256` used to fail every open past the limit. A run's lock held
+only while its own spools merge is enough: a writer resuming after the
+slice appends after what the merge read, which (f) already answers. (j)
+**A refused open keeps the host's words**: only a name that is not a
+regular file is `not_regular`; `EMFILE` or `EACCES` at a regular spool or
+log is `io` with the host's error. The lock files' growth, one empty name
+per run, is named in `docs/06-limits.md` L-IA-65 with the tidy rule a later
+package may build. **Proof:** IA-ZV-X32, IA-ZV-X33, IA-ZV-X34.
+
+### D-4921 — A merge is started at the end of any landing request that spooled (IA-9; wired by IA-10c) — 2026-10-20
+
+**Number** the critic's (round 7, IA-9-1). **Decision.** Every landing
+request has its own runs-ledger id and so its own spool directory, so the
+trigger is the end of any landing request that spooled, run or single: the
+api keeps one flag, "merge wanted", and at most one `verify-merge` child
+(the merge lock already makes that so); when the child exits with the flag
+set it starts one more, so a spool waits at most one merge run. A merge run
+lists `verify/spool/` at its start and once more before it releases, so a
+spool that arrived meanwhile is merged by it or the next. L-IA-17 gains the
+bound: spools waiting ≤ the landing requests that ended during one merge
+run. **Implemented by** IA-9 (`merge_all`'s two listings and its one-merger
+lock; `cli verify-merge`, the child's verb); the api's flag and the child it
+starts are IA-10c's, with the keep-and-spool hook. **Proof:** IA-VD-08 (100
+single-request spools leave none once the merge that followed them ends).
+
+**Repair 1 (22 Oct 2026).** The landing request drops its spool writer
+before it starts the child, so its run is no longer live when the child
+lists the spools (D-4881 (e)); a child that meets another request still
+spooling names that run and leaves its spools for the merge that request
+starts at its own end. `cli zerodha-verify` drops its writer before its
+in-process merge for the same reason.
 
 ### D-6240 — A damaged header slot is named: `store::header::slot_audit`, `BarFile::slot_audit` and the `store.header.slot_damaged` line; the read's selection is unchanged (R4-09a, ING-09) — 2026-10-18
 
@@ -77669,6 +78407,385 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
 
+### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
+
+**Number** reserved for IA-16 by the ingest automation design (§15, round 4,
+critic BL-B, SF-18); unused in the ledger until this change.
+
+**Decided.**
+
+1. `pull::gdfl_import::day::admit_rule(&KeyState, Asks) -> Admit` is rows 2
+   to 4b of design §5.5's table, the first matching row deciding, a pure
+   `const fn` of the key's journal state (five hash probes,
+   `KeyState::of`) and the run's asks (`retry_refused`, `skip_restated`,
+   whether a repair reason is carried). `Admit` is `Read` or
+   `Skip(Done | Restated | Hole(reason) | Unrepairable(reason))` (D-4910's
+   answer, less `Reopen`, which stays `widen`'s, row 1, WP-12f). Row 5 is
+   the calendar gate, unchanged; row 6 reads.
+2. A key is a hole when its LAST line is `incomplete` with one of the five
+   store-hole reasons (`HOLE_REASONS`: `needs_month_generation`,
+   `month_superseded`, `repair_refused`, `bars_differ_held`,
+   `repair_impossible`). A later `begin`, `refused` or `done` ends it. The
+   reason is IA-2's `Journal::hole_reason`, never re-read from the store.
+3. Row 4a (the first three) is skipped and counted `holes_skipped` without
+   a repair reason and read with one; row 4b (the last two) is skipped and
+   counted `holes_unrepairable` by every run, a repair-reason run included:
+   only IA-18's restate run may read it (D-4912; until then it is "held under
+   an earlier reading", never "unrepairable for ever" in any new text). Each
+   skipped hole is in `Report::holes_in_range` with its reason and says so
+   at `warn` (`code=hole_skipped`, `repairable=`), and nothing of the day is
+   read or written.
+4. **Row 3's sense is kept, deliberately.** The design names a `restate`
+   flag whose `0` skips a restated day. No cli or api caller sets such a
+   flag yet, so a default of "skip" would silently stop D-2822's re-read for
+   every caller. The field is `skip_restated` (`RunOptions`, `gdfl_run::Request`
+   and its request line), default `false` = today's rule; `true` skips and
+   counts `restated_skipped`. Flipping the default is a later change with
+   the cli flag (IA-1's owner), not this one.
+5. Not built here: row 4c (`source_lacks`, D-4910). In the run the read is
+   itself the one probe of the source's day table and a re-refusal is not
+   written again (`refused_close`), so nothing loops; the plan that would
+   count it (`to_import`) does not exist at the head. Row 4d
+   (`store_damaged`, D-4911) needs the damaged months recorded per key, and
+   is not built.
+
+**Proof.** `pull::gdfl_import::tests::ia16::admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`,
+`…::a_hole_is_known_by_the_last_line_alone`,
+`…::a_passed_day_is_named_and_never_read_in_a_loop`,
+`…::a_restated_day_with_other_bars_is_named_once`.
+
+### D-4889 — The GDFL back-fill door opens only for a run that carries a repair reason; without one a passed day is a named hole (IA-16; critic X-1; the field D-4874 left to IA-16) — 2026-10-20
+
+**Number** the critic's resolution D-4889 (critic-round7, "lands with IA-16").
+
+**Decided.** WP-12d filed every GDFL file through `ingest::repair_rows`, so
+any run back-filled a month unasked: one whole-month copy per file, kept for
+ever (L-IA-26). Now:
+
+1. `RunOptions::repair_reason` and `gdfl_run::Request::repair_reason`
+   (written to and read from the request line as `repair_reason=`, percent
+   encoded) carry the operator's reason, judged by
+   `ingest::repair_reason_ok` (D-4890 item 5); a bad one is
+   `RunRefusal::RepairReasonInvalid` (`repair_reason_invalid`, a misuse)
+   before anything is read.
+2. The filing step tries the append door. Only when the append was refused
+   `NotHeld` or `Superseded` AND the run carries a reason does the file go
+   to the back-fill door, whose journal reason is the operator's text first
+   and the import's own sentence after it. Every other refusal, and every
+   refusal of a run with no reason, is the file's, typed
+   (`ImportRefusal::Store { kind, why }`, code = the kind's code).
+3. WP-12d's tests pass a reason (`gdfl_backfill_tests.rs`, item (c) of the
+   critic's resolution); the no-reason behaviour is IA-16's
+   `a_passed_day_is_named_and_never_read_in_a_loop`.
+4. Named interim, still true: the cli has no `--repair-reason` flag in this
+   change (`crates/cli/src/gdfl_import_command.rs` is not IA-16's file), so a
+   cli import cannot back-fill until that flag lands; the api's request line
+   can carry the reason.
+
+### D-4890 — Two doors over one repair, both typed; the append door judges a refused day's hole by the month's shape; the repair journal's three writers under the ledger lock (IA-16; critic X-2; amends D-4851, D-4888) — 2026-10-20
+
+**Number** the critic's resolution D-4890 (critic-round7, "lands with IA-16").
+
+**Decided.**
+
+1. `ingest::FailKind` (`ingest_failkind.rs`) is design §5.8's table, one row
+   per `StoreError` and `RepairError` variant (`of_store`, `of_repair`); the
+   store's `#[non_exhaustive]` wildcard answers `Other` (`filing`), and
+   IA-GR-39 builds every variant this build knows and fails if one reaches
+   it. `SealedRefused` (SC-3/SC-4's sealed form failing its check) and
+   `Misfiled` are `StoreDamaged`; `SortIndex` (WP-39) too.
+2. Every door returns `DoorRefusal { kind, why }` instead of `String`. The
+   Zerodha door (`repair_or_append`) and the GDFL back-fill door
+   (`back_fill_or_append`) hand a month to the one repair (`repair_after`)
+   only when the append's kind is `NotHeld` or `Superseded`; any other
+   append refusal is answered as itself, kind and words. **What a Zerodha
+   repair lands is unchanged; what it prints for any other refusal is the
+   append's own words, without "the versioned repair refused it too".**
+   One refinement, GDFL's door only and only for a run with a repair
+   reason: a month still busy past the retry (`MonthBusy`, a reader's
+   shared lock among them) is judged by its shape too, and repaired only
+   when it lacks the whole batch (`Lack::Lacked`); a busy month holding
+   bars inside the span stays `month_busy`, never `bars_differ_held`,
+   since the busy append compared nothing (WP-12d's
+   `a_reader_open_across_a_back_fill_keeps_the_generation_it_opened`).
+3. WP-12d's `Lack` is mapped: `Overlaps` is `Differs` (`bars_differ_held`),
+   `Lacked` repairs, `AppendDoors` keeps the append's kind, a month that
+   cannot be judged takes its refusal's kind. The APPEND door does the same
+   judgement on a `NotHeld` refusal with no repair reason (`ingest::judged`,
+   read only, on a refusal only), so a half-filled contract-month whose held
+   bars differ is `bars_differ_held` (row 4b), and one that holds nothing of
+   the day is `needs_month_generation` (row 4a) (FM-067).
+4. A repair refusal splits: `HeldBarDiffers`, `IndexedSibling`,
+   `RevisionLimit` are `RepairImpossible`; `RowLimit`, `NoBasisWitness`,
+   `UnsealedSource`, `Conflict`, `Incomplete`, `InvalidReceipt` are
+   `RepairRefused`; `StaleSource` is `MonthBusy`; `BeforePromote` and an I/O
+   error with `publication_may_be_visible` are never a hole.
+5. `MAX_REPAIR_REASON` (200 bytes) and `repair_reason_ok` (not empty, at
+   most 200 bytes, no control character) are the one repair-reason rule for
+   both feeds (D-4874, round 6 SF-10, IA-GR-42); IA-10c's `POST /pull/repair`
+   is to call it.
+6. All three writers of `audit/<vendor>.repairs` (`journal_intent`'s
+   `repairing`, `journal_repair`'s `repair`, `journal_refusal`'s `refused`)
+   append through `ingest::audit_ledger::append` (D-4888).
+
+### D-4851 — A failure never strands an earlier day: the store never closes a day, holes are reasons, the held-back set, the busy-month retry, a full disk ends the run (IA-16) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15); unused until this change.
+
+**Decided.**
+
+1. A store or repair door's refusal is an OPEN cause at stage `file` whose
+   code is its `FailKind`'s; it never closes a day. `decisive()` takes the
+   census's cause, else the run's, else the first open cause that is NOT a
+   hole, else the first hole (round 4, BL-C): a day closes with a hole
+   reason only when every open failure of it is a hole, so a busy month on
+   day D is never hidden behind another instrument's hole.
+2. A file that fails with an open cause that is not a hole and not the
+   run's own (a busy month past its retry, a CRC fault in the copy, a host
+   error, a damaged month, a batch refused) adds its instrument-month
+   (`HeldKey`: symbol, contract, month) to the run's held-back set. Every
+   later file of it in the run is not read (so neither its bars nor its
+   `.auc` prints reach the store) and fails `held_back{after}`. The check is
+   one hash probe a job on the coordinating thread, before any worker takes
+   a file. At `HELD_BACK_CAP` (4,096) the run ends `held_back_cap`, naming
+   the pair and the count, after the day in hand.
+3. `MONTH_BUSY_RETRY`: a month another process holds is asked again up to 20
+   times, 100 ms apart (at most 2 s per file), at the import's call site,
+   never inside `BarFile::open_or_create`. Every attempt after the first is
+   counted (`Report::month_busy_retries`).
+4. The store's `DiskFull` (and a repair's `StorageFull`) is `disk_full`: no
+   further file of the day is taken (each untaken file is named at stage
+   `run`), the day closes `incomplete reason=disk_full`, and the run ends
+   `disk_full` with no new `begin`.
+5. Not changed: the store's `Locked` text still says "another writer holds"
+   (design: "another process holds"); the words are pinned by `cli`'s
+   `vix_reference` test, which is not IA-16's file.
+6. THE FREE-SPACE FLOOR (CONC-031, FM-085; D-6900 keep item 5, the stop
+   that replaces the dropped `disk_full` alert): before the run's first day
+   and before each day it reads, the store volume's free space (one
+   `statfs(2)` through `rustix`, `gdfl_import::volume_space`, the call
+   `/disk.json` makes since D-5240; never a child process) is compared with the request's
+   `free_floor` (`DEFAULT_FREE_FLOOR`, 10 GiB, chosen: L-IA16-12; the cli's
+   `BRUTEX_GDFL_FREE_FLOOR`; `0` checks nothing). Below it the run ends
+   `disk_full` naming both figures before the day is begun; a meter that
+   cannot answer ends it `free_space_unknown`. The stop is on the receipt
+   (stdout) before exit, so a disk too full for the journal's close is still
+   named, and the next run's check names it before its first write.
+7. A STORE THAT TAKES NO WRITES (FM-129; D-6900 keep item 6): a host refusal
+   for permission or a read-only volume with the root still there ends the
+   run `store_not_writable` once the day is closed, naming the store's words
+   and the fix (`chflags nouchg`, `chmod -N`, a read-write remount), never a
+   file failure repeated on every later day.
+8. THE `.auc` TORN TAIL (IA-AUC-01, FM-099): the next append cuts a killed
+   append's torn tail (a partial record, whole records of zero bytes, a
+   partial header of a file with no record) back to the last whole record
+   that verifies, under the exclusive lock, and then lands whole; every
+   reader still refuses a torn file, and any other damage stays refused. The
+   held-back check (item 2) runs before the `.auc` append, so a held-back
+   day writes no print.
+
+### D-4852 — Loss is detected per refused write and per unreachable source day: a gone store root ends the run with nothing more written and is never recreated; a gone source root ends it `source_lost` and names no day not held (IA-16; FM-086, FM-125) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15).
+
+**Decided.** A door refusal of kind `Io` is followed by ONE `metadata` of the
+store's root (`filing::store_root_lost`). A root that is not a directory or
+cannot be reached ends the run `store_lost`: the day's flush, ledger lines,
+census batch and close are not written, and neither is the run's `run …
+ended=` line (`end_line` probes the root first), because the journal's
+append makes its directory and would make a phantom root on whatever disk
+holds the mount point. The day stays begun; a resume once the volume is back
+reads it again.
+
+**The source's half** (FM-086, IA-GR-09, INFRA-024; added at landing). A
+day the source says it does not hold, or one of whose files it could not
+reach at all (`archive_unavailable`, `tick_store_unavailable`, the codes an
+options source's faults share), is followed by ONE `metadata` of the
+source's root as the run's `Origin` names it (`day::source_lost`). A root
+that does not answer ends the run `source_lost`, with words that name the
+root, why, and, since macOS answers a revoked volume with a refusal rather
+than an absence, where its access is given back. A day nothing of which
+reached the store gets NO line, so an unplugged drive is never journalled as
+days the vendor does not hold (`refused day_not_held`); a day some of whose
+files already landed closes `incomplete stage=run reason=source_lost`
+(`decisive` takes the run's cause first) and the run ends after it. A run
+that names no origin (a test's bare reader) has no root to ask and closes the
+day by its own refusals. Proof:
+`pull::gdfl_import::tests::ia16::a_lost_source_or_store_stops_the_run_at_the_failing_file`,
+over the four sources (both tick stores, the outer zip through a `ReadAt` that
+fails EIO, and the yearly options zips).
+
+**The root's identity** (RA-284; added at landing). A root that is a
+directory again but ANOTHER one (a volume unplugged and mounted back, under
+its old name or with an empty folder left at its mount point) is lost as
+surely as one that is gone: writing on would file the run's lines and bars
+into a folder that is not the store. The run records the root's device and
+inode numbers when it begins (`filing::store_identity`; a run that began
+before its root existed learns them before the day after its first lines),
+and the probe compares them: after a refused write as above, and before each
+calendar day (`day::root_check`, one `metadata` call per day, never per
+file), where a root gone or changed ends the run `store_lost` before the day
+is begun. A re-mounted volume whose device number changed is lost even when
+it is the same drive, because the run's open files died with the mount; a
+resume once it is back reads the day again. What it does not see, a swap in
+the middle of a day whose writes all succeed into the new folder until the
+next day's check, is L-IA16-13. Proof:
+`pull::gdfl_import::tests::ia16::a_store_root_that_came_back_as_another_directory_is_store_lost`,
+`pull::gdfl_import::tests::ia16::a_fresh_store_learns_its_root_and_is_never_lost`;
+bench C-GR-11 (`the_loss_probes_cost_one_metadata_call_each`) prints the
+probe's p50, p99 and max.
+
+### D-4872 — Day-close rules: an unfiltered day with no wanted file is refused `no_wanted_file`; a swept index absent from an indices day is named `absent_from_listing` (IA-16; F10, FM-038, FM-073; with D-4833) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15).
+
+**Decided.** For a day the source holds, read whole (never a member key's
+pass), and whose listing refused nothing by name:
+
+1. an UNFILTERED run (no `only`) whose listing held entries and NOT ONE of
+   them under the day's own folder (another day's folder, a renamed folder,
+   an extra level of nesting; for options, nothing under `Options\`) is
+   refused `no_wanted_file{skipped}` (stage `vendor`, an open cause, a
+   failure of the DAY and of no entry, so every entry is still one file,
+   skip or refusal), never `done files=0`, and is read again after a
+   corrected delivery. A filtered run's empty day, an empty listing and a
+   listing of files off the scope (IA-3's FM-119 day) still close `done`
+   (L-IA16-08);
+2. in an UNFILTERED run, an indices day with at least one wanted file that
+   lacks a swept index (`InstrumentKey::SWEPT`, the one table of them) is
+   refused `absent_from_listing{instrument}`, a day failure,
+   a vendor cause that closes the day `done … vendor_refused=<n>` with the
+   index named (D-4833: the vendor's own listing reads the same each time;
+   `--retry-refused` reads it again). FM-073's "never done" is answered by
+   that close: the day is done WITH the refusal, never clean;
+3. `stored_index_absent` (D-4833) is a variant with its code and words and
+   is not raised: no listing span of a stored alias index is recorded in the
+   charter (`STORED_INDEX_SPANS_RECORDED = false`; IA-0b records them).
+
+### D-4888 — Every `audit/<vendor>.<name>` append is locked, bounded and closes a torn tail; the repair journal moves to it (IA-16; SF-4, RA-125, FM-127) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15, round 6).
+
+**Decided.** `pull::audit_ledger::append(store_root, vendor, name, lines)`
+refuses a name that is not one lower-case word and a root that is not a
+directory (it never creates a root or an ancestor, FM-125), takes
+`<store>/audit/<vendor>.<name>.lock` exclusive within `LOCK_WAIT` (D-4906;
+past it the holder is named and nothing is written), then appends through
+the ledger's own torn-tail rule (`request_minutes::append_named`: a last line
+with no line break is closed first, the line rules checked, the write
+synced). The repair journal's three writers use it (D-4890 item 6). The gap
+ledger's writers move with IA-10b, which owns `request_minutes.rs`; until
+then they take the ledger file's own `flock`, which this append also takes
+inside its lock, so the two never interleave a batch. Cost: O(1) in the
+ledger's length (bench-style test `appends_cost_the_same_at_any_ledger_length`).
+
+### D-4876 — A repair-reason run whose range touches a month still being traded is refused by name before any lock, unless accepted (IA-16; round 5 SF-9, as the one-command cut D-6900 keep item 3 amends it) — 2026-10-20
+
+**Number** reserved for IA-16 by the design (§15, round 5 items (2) and (3)).
+
+**Decided.** (1) A month served from a repair revision answers held bars
+`AlreadyPresent` and names a new bar `month_superseded`, a store hole a
+repair-reason run fills (D-4851, `FailKind::Superseded`; built by D-4890).
+(2) The design's plan warning `repair_in_open_month{month}` has no page to
+be shown on: `/gdfl/plan.json` is dropped, and `cli gdfl-import` does not
+pause for an answer (D-6900 keep item 3). So `gdfl_run::plan` REFUSES, before
+any lock and before anything is read, a request that carries a repair
+reason and whose range touches a month whose last trading day by the
+calendar of record has not passed (`RunRefusal::RepairInOpenMonth`, code
+`repair_in_open_month`, naming the first such month), unless the request
+says `accept_open_month` (`cli gdfl-import … --accept-open-month`; the
+request line's last field, `accept_open_month=0|1`). The rule
+(`gdfl_run::open_month_in`): a month that ended before today has passed; in
+today's month every remaining day, today included, is asked of the calendar
+(`calendar::kind_of`), and any day not proved `Closed` (an unmeasured day
+included) keeps the month open; a later month is open; a clock that names no
+day keeps the first month open. A request without a repair reason is never
+asked. (3) Repairs run after the month ends (IA-14's runbook rule): the same
+request the day after the month's last trading day passes the check, and one
+repair-reason Resume lands the month's remaining days in one more repair.
+
+**Cost.** O(months in the range) comparisons and at most 31 calendar probes,
+once per request (L-IA16-11).
+
+**Proof:** IA16-18,
+`pull::gdfl_import::tests::ia16::a_repair_in_an_open_month_is_refused_unless_accepted_and_converges_after_the_month_ends`.
+
+### D-4841 — The D-3335 day ledger's flags line at `v=2`: what this build counts, and one reader of `v=1` and `v=2` alike that never reads a missing field as 0 (IA-16; with the reader moved in from IA-10b by D-6900) — 2026-10-20
+
+**Number** of the ingest automation design (§6.4); named pending until now in
+the "Cited, never written" note above (D-4809 point 2). One authority per
+per-day quality fact stays the rule: the ledger holds the per-day counts, the
+verdict records hold what verification found.
+
+**Decided.** (1) The importer and `cli gdfl-dayflags` (the one function
+`DayLedger::lines`) write `flags <kind> <day> <scope> v=2 …`: every `v=1`
+field in its place, then, before `max_defer_s`, the `v=2` fields this build
+counts: `indices` `separator_backslash` (0 or 1: the day zip named a file of
+its folder with `\`, D-4828); `stocks` `volume_saturated_files` (files whose
+running LTQ sum reached 2,147,483,647 or 2,147,483,648 on their last traded
+row, the IDEA shape of design row F35, D-4830; bars unchanged) and
+`separator_backslash`; `options` no `v=2` field yet. (2) The design's other
+`v=2` fields (`dup_traded_rows`, `dup_traded_files`, `dup_echo_rows`,
+`snapped_rows`, `trailing_empty_files`) need counts only the readers' raw
+rows hold (`gdfl_cm.rs`, `gdfl_nfo.rs`; IA-4 owns the options header): until
+a reader counts one, the field is ABSENT from the line, never written as 0
+(L-IA16-10). (3) `api`'s `/dayflags.json` reader reads `v=1` and `v=2` lines
+alike: every `v=2` field is an optional later field, a key of every record
+and `null` where the line lacks it; a version other than 1 or 2 is a fault
+named with its reason. The gap-line and derive-line readers stay `v=1`-only
+until some part writes `v=2` of those lines (D-6900).
+
+**Proof:** IA16-19,
+`pull::gdfl_import::tests::ia16::a_volume_stopped_at_the_32_bit_limit_is_counted_and_the_line_is_v2`,
+`api::dayflags::v2_tests::a_v2_flags_line_reads_like_v1_and_a_missing_v2_field_is_never_zero`
+(a file R3-13 does not edit, so a merge that reverts the reader fails), and
+`api::dayflags::tests::a_line_this_reader_cannot_name_is_counted_with_its_reason`
+(its unknown version moved to `v=3`).
+
+#### Cited, never written
+
+Each number below is cited under `crates/` by IA-16 and heads no entry here.
+Each says where its citation resolves.
+
+* **D-4829 and D-4830.** Numbers of the ingest automation design
+  (`state/design/ingest-automation.md` §15, outside this repository) for the
+  options header's trailing empty columns and a share's volume stopped at
+  the vendor's 32-bit limit. The day-ledger halves IA-16 cites them for are
+  recorded by D-4841 items (1) and (2); a citation of either resolves to
+  D-4841.
+* **D-4833.** The design's number for "a vendor fact the listing shows reads
+  the same every time" (the stored alias indices' listing spans). The half
+  IA-16 cites it for is D-4872 item 3; a citation resolves to D-4872.
+* **D-4873.** The design's number for the bar definition a held day was built
+  under. IA-16 cites it beside the hole reasons; the rule is D-4885's row 4b
+  and D-4851; a citation resolves to D-4885.
+* **D-4910 and D-4912.** Critic round 7's numbers for `admit`'s skip classes
+  (row 4c, `source_lacks`) and row 4b's restate exception. Both are recorded
+  in D-4885, whose title names them; row 4c is not built (L-IA16-03). A
+  citation resolves to D-4885.
+* **D-6900.** The one-command cut's decision (block D-6900..D-6909,
+  `state/oneclick-cut-20261020/decision.md`, outside this repository), whose
+  entry the main session lands. The parts IA-16 cites it for are recorded
+  here: the open-month refusal (D-4876 item 2), the `v=2` reader moved in
+  from IA-10b (D-4841 item 3), and the dayflags lock, the holes on the
+  receipt and the named stops that replace the dropped alerts (invariants
+  IA16-16, IA16-17 and IA16-20). A citation resolves to those until D-6900's
+  own entry is written.
+  D-6900 also amends D-4883's caller list: the line naming "IA-16
+  (`disk_full`, `hole`, `store_damaged`)" as a queue caller no longer holds.
+  IA-16 writes no `alerts::put`; each of the three is a typed `FailKind`
+  named by stage and reason on the journal close, the cli receipt and the
+  exit code (IA16-08, IA16-17, IA16-20, IA16-23).
+
+**D-4878's round-5 ledger sentence (IA-GR-40, round 5 B3), which WP-12f
+merged without.** A member-key close (`<filter>+<member>`) writes no D-3335
+whole-day line: a stocks or options day's `*` line stays the base close's,
+byte for byte, after a wider scope reopens the day for a new member (a
+`.BE`/`.BZ` spell, a new index), and an index member key writes its own
+index's line and no other. The rule was already the code's
+(`write_flags` is asked `whole` only for an unfiltered base key); IA16-30
+pins it.
+
 ### D-5839 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Renumbered at merge (A6).** Written as D-4990 on `fix/db-R4-17`. GF-1's
@@ -78218,6 +79335,270 @@ field must be refused, so a checker that refuses nothing fails the build.
 Proof: `no_store_or_census_key_is_built_from_a_token`,
 `the_module_list_is_closed_over_every_definition_of_a_key`,
 `a_token_field_in_a_fixture_key_builder_is_refused`.
+
+### D-6270 — One upkeep runner: the store's catch-up builders run as tracked runs on workers, with a run id, a journal, Stop and resume, under the import's own run locks — 2026-10-17 (item 4 replaced by amendment 1, 2026-10-20: beside no live GDFL run, each item under its own verb's locks)
+
+**Implemented by** R3-17: `pull::upkeep` (`crates/pull/src/upkeep.rs`: `run`,
+`status`, `request_stop`, `months`, `parse`) and `cli upkeep`
+(`crates/cli/src/upkeep_command.rs`), which builds each item with the step the
+verb that owns it takes — `srt_builder::upkeep_month`,
+`tix_rebuilder::upkeep_month`, `msum_builder::upkeep_month`,
+`census_recount::upkeep_span` and `gdfl_rekey::upkeep_underlying` — under the
+import guard's `RunLock`, re-exported from `gdfl_import_command`.
+**Closes** the store half of DB-N14 (no step could give a whole feed its sort
+index; it is now one run) and the store half of DB-027 (the three impossible
+NIFTY `25JUN20` strikes leave the census through the re-key, run as an upkeep
+step; their refusal at decode is D-3331's `StrikeImplausible`, already in
+`pull::gdfl_nfo`). **Number**: the ledger's head was D-4996 on 17 October 2026
+and D-4990 to D-4995 are taken on an open branch (R4-17); the merge renumbers
+this if another lands first (amendment A6). Renumbered four times under A6:
+from D-4997 to D-5831 (AG-04 took D-4997 first), at the merge of 18 October
+2026 from D-5831 to D-5836 (IA-1 repair 1 took D-5831 first; the head of
+feat/db-fix was D-5834, and D-5832 and D-5835 are taken on open branches),
+at the second merge of 18 October 2026 from D-5836 to D-5839 (AH-03 landed
+D-5835 to D-5838 first; the head of feat/db-fix was D-5838 at `371b1a506`),
+and at the merge of 21 October 2026 from D-5839 to D-6270: R4-17 took D-5839
+at its own repair-3 merge and landed it first (`47013fe18`), so the merged
+ledger headed D-5839 twice. The merged head is D-6245; D-6246 and D-6247 are
+headed on open branches, D-6248 to D-6269 lie in blocks the run registers
+(R4-09a, NEW-34q, IA-10c), and D-6270 is the lowest number above the head that
+no local or `origin/` branch cites and no registered block holds. R4-17's
+D-5839 and its citations are unchanged; every R3-17 citation (code, §43,
+UK-*, L-R317-*, S-50) now names D-6270. Former numbers of this entry: D-4997,
+D-5831, D-5836 and D-5839.
+**Bytes**: `docs/02-store-format.md` §43.
+
+**Decision.**
+
+1. **One runner, the builders unchanged.** An item is built by the very
+   function its verb runs for it, and the receipt line that verb prints is the
+   item's reason: there is one way to build a `.tix`, a `.srt`, a `.sum`, a
+   recount and a re-key, and the runner adds none. What the runner owns is the
+   run: the plan, the journal, the workers, Stop, resume and the locks.
+2. **One journal per vendor and kind**, `audit/upkeep.<vendor>.<kind>.log`,
+   append-only, three line shapes (`run`, `item`, `end`, §43). **Every `item`
+   line carries the run's running totals** (`n`, `ok`, `of`, `t`), so where
+   the newest run stands is the journal's last whole line: one bounded tail
+   read, whatever the run has written (`status`). A tail a kill or a full disk
+   left is ended as a void line before anything is appended, exactly as
+   `cli scrub-blocks` ends its own. Per kind, not one file for all, because
+   each kind is its own history with its own resume chain, a page reads one
+   kind's tail, and kinds that share no lock (Zerodha's) run side by side; a
+   GDFL run holds the import's locks of every kind (item 4; since amendment
+   1 it holds none, and item (e) there keeps this), so two GDFL
+   kinds run one after the other.
+3. **The run id** is the clock's UNIX seconds, or one more than the newest id
+   the journal's tail holds when that is not earlier, so no two runs of one
+   journal share an id whatever the clock says.
+4. **Locks: the import's own, and one run of a kind.** *Every lock of an
+   import below is replaced by amendment 1 (IA-2); the journal's own `flock`
+   stands.* The run holds its
+   journal's `flock` for its whole life: a second run of the same vendor and
+   kind is refused by name. A GDFL run first takes the import's run lock of
+   EVERY kind (`imports/gdfl.<kind>.lock` on the version-4 census, the one
+   `imports/gdfl.lock` on version 3; `RunLock::take`, no waiting), its holder
+   record naming the upkeep verb: an import of any kind refuses it `run_busy`
+   and it refuses every import. Every kind, because a recount writes every
+   segment's census and the import journal, a capital-market import files
+   more than one segment, and an import that met a recount's census lock
+   stopped its whole run (`census_refused`). Under them each month is opened
+   under its own exclusive store lock, which the builders already take: a
+   month an import's writer holds is refused by name and left for a resume.
+   Zerodha has no import run lock; its upkeep meets a pull on month locks
+   alone.
+5. **Stop between items, never inside one**: the caller's flag (an app that
+   runs the library itself) or a request file, `audit/upkeep.<vendor>.<kind>.stop`,
+   that NAMES the run (`stop <id>`), written whole and renamed into place. A
+   request for another id is not this run's, so a stale request never stops a
+   later run and nothing ever removes the file. Each worker finishes the item
+   it holds and takes no other; the run ends `stopped` with the count left.
+6. **Resume along a chain.** A resume is a new run whose `run` line names the
+   run it resumes; every key a run of that chain (the run named, the one it
+   resumed, and so on) closed CLEAN is skipped, and every other key of the
+   plan the resume makes NOW is built: what a Stop or a kill left, what was
+   refused (a held month, a name held by a directory), and what the store
+   gained since. A failure is never remembered as done.
+7. **Workers.** The three indexes take up to 64 (`MAX_WORKERS`), each item one
+   month file and nothing else; the recount and the re-key take ONE, because
+   they write one census, one import journal and one lineage ledger a second
+   worker would race. Workers take the next item from one counter, so no item
+   is built twice; the outcomes come back in plan order, and what a builder
+   writes for one month is that month's alone, so the store's bytes do not
+   depend on the count. `cli upkeep` starts one unless `--workers N` is given.
+8. **The items.** For an index, the month files in the scope whose sidecar of
+   that kind is ABSENT beside the generation a reader opens (one `lstat`,
+   no read), or with `--all` every month in scope (a done month is kept after
+   its checks). A month under 1,024 bars is listed and the run says `small`
+   for it (D-4933). Beside a month, a name ending in a store sibling's
+   extension is that sibling, and so is a month's closing-auction sidecar
+   `<YYYY-MM>.auc` (`pull::gdfl_cm::auction::EXTENSION`), which is not a
+   `FileKind`: anything else in a rung directory is a stray, counted and
+   named, never walked. (The first walk named every `.auc` a stray: 227 of
+   them on the operator's store, 18 October 2026, the Mac's check.) For the recount, one calendar month of the days asked an
+   item, both ends required (the span decides which import days are closed,
+   D-3317). For the re-key, one option underlying an item, GDFL's alone, and
+   **stricter than `gdfl-rekey --apply` on one point**: nothing is written for
+   an underlying whose survey left a file unread or whose plan left a key
+   unresolved — the rule the one-press chain applies (R4-11) — so an
+   unattended run never moves half of a ladder it could not read whole.
+   **AG-02's rules, merged into feat/db-fix on 19 October 2026, hold at this
+   door as at the verb** (added at that merge): what the lineage ledger
+   already records is done, so an item's plan moves and retires only what
+   is not recorded, its line says how many moves and retirements are
+   recorded and what is pending, and a second run stops at `nothing to
+   change` before any apply (the `already applied` outcome this item had
+   before is gone: no apply is reached that would write nothing); an
+   underlying whose walk read no option key with a bar is refused by name,
+   never read as nothing pending; and a census step that is not known
+   (`census: not read` or `could not be read`) is a third case of the strict
+   rule — nothing is written. An applied item names the keys it retired and
+   whether it installed an FNO census epoch.
+9. **The unstamped-build rule** (DB-B71): `upkeep run` and `upkeep resume` are
+   store writers in `store_write::WRITERS`; `plan` and `status` read; `stop`
+   writes a request naming a run, which carries no store data a commit would
+   answer for, and is not refused.
+10. **It never starts by itself.** No timer, autopilot or route starts a run;
+    each kind is run on the operator's yes, from the store-step list. Its
+    step is in `config/store-steps.toml` as S-50 (the sort index of every
+    GDFL and Zerodha month that lacks one, closing DB-N14; the Zerodha run,
+    added on 19 Oct after a whole-history NIFTY 1min sort was measured
+    reading all 796,027 of its rows, is run with no Zerodha pull beside it,
+    item 4), pending and waiting for this
+    package's merge: gate 30 refuses rehearsal figures beside an unmerged
+    prerequisite, so the figures the Mac took on a private copy are in the
+    step's note, to be moved into `rehearsed_*` when the merge sets
+    `merged = true` (R3-36).
+
+**Refused.** A stop asked by a line another process appends to the journal
+(two writers' bytes join lines; the journal has one writer, the run). Removing
+the stop file at the end of a run (nothing here deletes; a request names its
+run instead). `rayon` in `pull` (`pull` has no `rayon`; `std::thread::scope`
+over one counter, as `gdfl_import_filing::on_workers` does). Inferring that a
+present sidecar is current from its name alone in the run (`--all` re-checks
+it, and the plan says it reads names, not bodies).
+
+**Proof.** `crates/pull/src/upkeep_tests.rs` (30 tests) and
+`crates/cli/src/upkeep_command_tests.rs`: `an_upkeep_run_stops_and_resumes_where_it_stopped`,
+`upkeep_and_an_import_exclude_each_other_on_a_month`,
+`the_sort_index_is_the_same_bytes_at_1_and_8_workers`,
+`a_failed_index_open_is_retried`,
+`the_three_impossible_strikes_are_retired_by_an_upkeep_rekey_run`,
+`a_whole_feed_gets_its_sort_index_in_one_run`,
+`a_recount_runs_one_month_of_days_an_item_and_resumes`. Invariants UK-01 to
+UK-15 in `docs/04-invariants.md` (UK-15 at the merge of AG-02); limits L-R317-01 to L-R317-10 in
+`docs/06-limits.md` (L-R317-10, Zerodha's sort index, added on 19 October 2026
+with item 10's Zerodha run).
+
+**Amendment 1 — 2026-10-20 (R3-17 repair 1): the locks under IA-2.** IA-2,
+merged into feat/db-fix after this entry was written, changed what an
+import's run lock is and what a recount takes, and item 4 as first written
+no longer holds. Found by the round-2 check of `fix/db-R3-17`
+(`state/fix/round2/verify-R3-17-r1.json`, blocking item 1).
+
+- (a) **An upkeep run takes no lock of an import, no id in the runs ledger,
+  and writes no claim.** `RunLock::take` now CLAIMS an import run: it
+  allocates an id in the runs ledger (`audit/runs.ledger`, mode `import`) and
+  writes the claim into the kind lock (`pull::gdfl_run::claim_with`), so one
+  GDFL upkeep run would have registered as three import runs that imported
+  nothing (one a kind on version 4), and an import refused beside it would
+  have been told that an options run held the store. The ledger's mode words
+  (`pull::gdfl_run::ledger::MODES`, and a claim's, `locks::MODES`) hold no
+  upkeep word, and a record whose mode a reader does not know is not one
+  (`Entry::parse`): adding one would change the ledger for every reader
+  and every older build. The upkeep journal (§43) is the run's record, and
+  its run id is that journal's (item 3).
+- (b) **It never holds the GDFL store lock.** `census_store::recount` takes
+  it EXCLUSIVE itself (`claim_census`, mode `census-recount`, its own ledger
+  id; IA-GR-14), so an upkeep run that held it — shared on version 4 under
+  the kind locks, exclusive on version 3 — refused its own recount items
+  `run_busy`. Each recount item takes the census hold for itself, with one
+  `census-recount` id an item, which is what it is: `cli census-recount`
+  takes one a call.
+- (c) **What keeps an upkeep from a live GDFL run now is a look, not a
+  hold.** `cli upkeep` probes the GDFL lock files (`live_run`, through
+  `pull::gdfl_run::locks::lock_state`: each existing file shared and
+  non-blocking, never created, at most 1 KiB read and released at once; a
+  probe never makes an import's press busy, D-4849) before its walk, and
+  hands the same probe to `pull::upkeep::run` as the run's look
+  (`Ask::busy`), which every worker asks before every item. A held lock — an
+  import of any kind, a census verb — refuses the run `run_busy` naming the
+  holder's claim before anything is written, or makes it take no further
+  item and end `stopped` with those words, for a resume once it is free; a
+  lock file that cannot be probed refuses the same way (an upkeep run never
+  starts beside a run it cannot see). A claim its holder left when it died is
+  not a live run. Under it, the month's exclusive store lock still keeps an
+  upkeep and an import from one month at once.
+- (d) **What is no longer excluded, named.** An import that starts while an
+  item is being built is not refused at its door (nothing of its is held);
+  it may meet that one month's exclusive lock and is refused that month by
+  name by the store, and the upkeep stops at its next look. One item wide:
+  `docs/06-limits.md` L-R317-12, with the look's measured cost.
+- (e) **Two GDFL upkeep kinds still run one after the other** (item 2): a
+  GDFL run is refused while a run of another kind holds its GDFL upkeep
+  journal (`pull::upkeep::status` reads it `RUNNING`), named. Two starts in
+  the same instant can both pass that check; they then meet only on month
+  locks, each refused by name.
+- (f) Zerodha is unchanged: no import run lock, month locks alone.
+
+**Also in repair 1** — no new choice, the refusals `CLAUDE.md` §4 asks for,
+each found by the same check: a scope whose segments name no directory under
+`bars/<vendor>/` (`NSE/INDX`, `BSE`), or whose walk finds no month file in
+the rung and months asked, refuses the run and the plan by name before any
+line is written, so a mistyped S-50 command can no longer end `done` (a scope
+whose months all have the file is still a clean run of no item); `stop`
+writes a request only for the running run, so no request waits for a later
+run the clock gives its id; a resume of a journal that does not exist
+creates none; a run whose every item was taken but not every one ended
+clean ends `done` with words that say how many did not, never "every item
+of the run was built"; a status gives no ETA before one whole second; and
+the DB-027 test's bars carry invented values, not the vendor row's.
+
+**Proof (amendment 1).** `upkeep_and_an_import_exclude_each_other_on_a_month`
+(rewritten: a live import refuses the run before its walk; an import claimed
+between items stops it, and the resume builds the rest; every kind's lock on
+version 4 is seen), `an_upkeep_run_holds_no_import_lock_and_takes_no_run_id`,
+`every_live_run_a_probe_can_see_is_named`, `an_empty_span_is_said_as_it_was_asked`,
+`a_second_gdfl_upkeep_kind_waits_for_the_first`,
+`a_scope_that_names_nothing_is_refused_before_any_line`,
+`status_and_stop_read_and_ask_the_newest_run` (`crates/cli/src/upkeep_command_tests.rs`);
+`a_run_takes_no_item_beside_a_run_its_look_names`,
+`a_run_whose_items_were_refused_is_not_said_built`,
+`a_run_under_a_second_old_has_no_eta`, `a_resume_with_no_journal_writes_nothing`,
+`the_walk_lists_every_month_and_what_it_lacks` (`crates/pull/src/upkeep_tests.rs`).
+`a_recount_runs_one_month_of_days_an_item_and_resumes`, unchanged, failed on
+the merged tree before this amendment (its recount items refused `run_busy`
+by the upkeep's own lock) and passes after it. Invariants UK-02 (restated),
+UK-16 to UK-18; limits L-R317-11 and L-R317-12.
+
+### D-6271 — `cargo deny` green on R3-17's branch: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 in `Cargo.lock`, and the dependency-set pin moved after the scan (R3-17, repair 1e) — 2026-10-21
+
+**Why.** `cargo deny check` on this branch at its merge of `feat/db-fix`
+`47013fe18`, with the lock's `rustls-webpki` 0.103.15 and `webpki-roots`
+1.0.9 (the versions `feat/db-fix` still pins at `02e2d5ec4`), failed
+`advisories` with RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15 accepts the
+distrusted emSign intermediates) and RUSTSEC-2026-0381 (`webpki-roots` 1.0.9
+bundles the emSign ECC Root CA - G3), both reached through `hyper-rustls` and
+`reqwest` from `pull` (`state/fix/round2/logs-R3-17/repair1d/deny.out`,
+21 Oct 2026 03:51 IST); bans, licenses and sources were ok. A new
+advisory is a finding to fix, never a baseline, so the branch takes the two
+patch bumps in `Cargo.lock` alone: no manifest changes, the package count
+stays 197 and no `dependencies` list moves.
+
+**The scan before the pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
+`the_dependency_set_has_not_moved_without_review`): both registry sources
+declare `build = false`, ship no `build.rs` and no .c/.cc/.cpp/.h/.S/.s/.asm;
+`rustls-webpki` 0.103.16's only new files are eight `.spki.der` public keys
+under `src/data/distrusted/`, and `webpki-roots` 1.0.10's file set equals
+1.0.9's. The fingerprint moves `0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C`
+with that scan written beside it.
+
+**The same bump on other branches.** R3-15 (`a141d9c96`) and R3-24
+(`ec75148b4`) take the identical `Cargo.lock` hunk on their own branches,
+from older bases, so their pins differ from this one; whichever merges second
+re-pins after `api -> rustix` (D-5240) as this entry does. The repair-1d
+commit of this branch (`3bda62319`) took the lock hunk and left the pin, so
+`the_dependency_set_has_not_moved_without_review` failed on it; this entry is
+that repair.
 
 ### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
 
@@ -79653,10 +81034,163 @@ document row. The added verification work is `rustls-webpki`'s comparison of
 a path's certificates against a fixed list of eight keys, once per TLS
 handshake, bounded by that constant and not measured here.
 
-### D-7132 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+### D-7130 — IA-16 repair 1: a hole is asked before a restated `done`; no writer below a store root makes the root; `absent_from_listing` names the stems no scope files — 2026-10-22
 
-The number is the ledger head + 1 (amendment A6); renumber at landing if it
-is taken.
+From the block D-7130..D-7134 recorded for IA-16 repair 1 in
+`state/decision-blocks.json`. It amends D-4885 (the admit table's order),
+D-4852 (who may make a store root) and D-4833 / design §5.8 (what
+`absent_from_listing` names). The second agent's check of IA-16
+(`state/fix/round2/verify-IA-16-r1.json`) found all three by reproduction.
+
+1. **A hole is the key's last line and is asked before row 3.** A day
+   done under a definition no longer current (an option day under 2, a
+   share day of the closing auction's era under 2 or 3) is read again, and
+   a re-read whose bars differ at held seconds closes `incomplete
+   reason=bars_differ_held`, a hole no repair fills (D-4912). `admit_rule`
+   asked row 3 first and the journal kept the key in its restated set, so
+   every later run read the day again, a repair-reason run included: 226
+   files and 79 refusals per run on a clone of a real NIFTY options month.
+   Now `KeyState::of` calls a key restated only while its last close is a
+   `done` or `recounted` line (D-3317: the last line wins), and
+   `admit_rule` asks rows 4a and 4b before row 3, so a hand-built state
+   with both is judged by its hole. A restated day closed any other way
+   (`stopped`, `refused`) is row 6's and is read, a run that skips
+   restated days included. D-2822's naming of a re-read day as restated
+   is unchanged.
+2. **A store root is made once, by the run, and by no writer below it.**
+   The journal, the day, lineage, lot and scope ledgers and the progress
+   record made their directory with `create_dir_all`, which made a root
+   that went away mid-run again on whatever disk held its path, and the
+   rest of the day landed there while the stop said nothing more was
+   written. Each now makes only its own `imports/` under a root that is a
+   directory (`gdfl_import::make_leaf_dir`), as `audit_ledger::append` and
+   the store's bar writer (D-1522) already did; the telemetry sink, whose
+   run log sits under the store's root, makes nothing beneath its own
+   directory once that directory went away (`telemetry::sink`'s audit
+   postings, generations and roll), the posting counted as an index
+   failure and named in its last error. A fresh store's root is
+   made once by the run before its journal is read, under a parent that is
+   there (`fresh_root`); a missing parent is refused `store_lost`. The
+   root's identity is asked before every file's first write, after the
+   day's files, and after every refused store write: the durability
+   barrier's refusal at a lost root ends the run `store_lost`, never
+   `durability`, and the options day's lineage is not folded into a lost
+   root. The race this leaves (a root swapped between one file's probe and
+   its open, and the census writer's own `create_dir_all`) is L-IA16-13.
+3. **`absent_from_listing` names the stems no scope files.** Beside the
+   swept index it misses, the refusal names the first four stems of the
+   day's folder that `filing` files under no key, in listing order, and
+   how many there were (design §5.8's `unknown: ≤4`, §9's "Renamed file"
+   row, D21). No table of every index name exists to rank them by, so they
+   are not ranked: on a day whose listing holds a hundred unfiled indices a
+   renamed stem is named only when it is among the first four, and is
+   always among the counted ones.
+
+Proof: `pull::gdfl_import::tests::ia16::admit_is_one_ordered_table_and_a_hole_is_read_only_when_asked`,
+`a_hole_is_known_by_the_last_line_alone`, `a_restated_day_with_other_bars_is_named_once`
+(its option restated instance), `a_root_lost_inside_a_run_is_never_made_again_and_takes_nothing`,
+`a_durability_refusal_at_a_lost_root_is_store_lost`,
+`a_store_on_a_missing_volume_is_refused_and_nothing_is_made`,
+`telemetry::sink::tests::a_sink_whose_directory_went_away_never_makes_it_again` and
+`a_swept_stem_absent_from_a_held_day_is_named_with_the_unknown_stems`
+(docs/04-invariants.md IA16-01, IA16-02, IA16-05, IA16-09, IA16-11, IA16-32).
+
+### D-7131 — IA-16 repair 2: `Sealed` is a failure kind; a month the writer door never appends to is answered as its raw form, typed; only `Sealed` crosses D-4889's gate without a repair reason — 2026-10-22
+
+From the block D-7130..D-7134 recorded for IA-16 repair 1 in
+`state/decision-blocks.json`. It amends D-4851 / design §5.8 (the store's
+refusal table gains a row), D-4889 (which refusals reach the GDFL back-fill
+door without a repair reason) and D-4890 (how a month served from a repair
+revision is judged), and it merges with SC-4's D-5904 and D-6247 without
+changing what either lands.
+
+**Context.** SC-4 merged into `feat/db-fix` (667db8e2a) while IA-16 was in
+its first repair. It added `StoreError::Sealed` (the store's 36th variant)
+and carried the append door's refusal as `Unwritten { why: String, follows }`,
+filing a batch the month's raw form would append as the month's successor
+generation (D-5904, and D-6247 for a month already served from a revision).
+IA-16 had made the same door return a typed `DoorRefusal` and had gated the
+GDFL back-fill door behind a repair reason (D-4889). The second agent's check
+(`state/fix/round2/verify-IA-16-r2.json`) measured the collision: four files
+conflicted; `FailKind::of_store`'s wildcard named `Sealed` `Other`
+(`filing`), so IA-GR-39 counted 36 variants against the 35 it asserted; and
+the GDFL import, which hands a refused file to the back-fill door only with a
+repair reason, would have made every sealed month's late day a named
+`filing` failure in a plain run, against SC-4's
+`a_late_day_for_a_sealed_month_lands_as_its_successor_generation`.
+
+**Decided.**
+
+1. `Unwritten { why: DoorRefusal, follows: Option<Follows> }`: the typed
+   refusal every caller acts on, and SC-4's fact of which month a successor
+   follows. `follows` is `Some` exactly when the kind is `Sealed`.
+2. A new kind, `FailKind::Sealed`, code `month_sealed`: a month the writer
+   door never appends to whose RAW form would commit the batch, whether the
+   month is held sealed (`StoreError::Sealed` with `SealedOffer::Follows`) or
+   is served from a repair revision whose served generation says the same
+   (`BarFile::offer`, D-6247). Never a hole; it holds back like every non-hole
+   kind; it reaches a journal only when the successor's `repairing` line was
+   refused before the repair (the repair's own refusal keeps the repair's
+   kind). `SealedOffer::Disagrees(c)`, at a sealed month and at a revision,
+   is the raw form's own `OverlapDisagrees(c)` row (`FailKind::of_conflict`):
+   `NotHeld` is `needs_month_generation`, `Restated` and `Skipped` are
+   `bars_differ_held`. The form and the generation are never the kind.
+3. `FailKind::files_as_successor` is true of `Sealed` alone, and the GDFL
+   coordinator hands a file the append door refused `Sealed` to the
+   back-fill door with or without a repair reason; D-4889 stands for every
+   other refusal. The back-fill door asks the successor first (SC-4's arm),
+   then IA-16's judgement of a `NotHeld`, `Superseded` or busy month. A
+   successor filed with no repair reason journals the import's own sentence
+   after the door's `sealed-month successor` or `revision successor` head,
+   never a stand-in for the operator's words.
+4. A month served from a repair revision is judged by SC-4's `offer`, not by
+   IA-16's bar-by-bar compare: a day after its last held bar is its next
+   successor (D-6247), so IA-GR-31's "a day with NEW bars is
+   `month_superseded`" is restated: a new bar AFTER the last held one is
+   filed, a new bar INSIDE the held range is `needs_month_generation`, named
+   once and landed by one repair-reason run. `month_superseded` stays the row
+   of the store's own `StoreError::Superseded`.
+5. The Zerodha repair door (`repair_or_append`) hands `Sealed` to the repair
+   as SC-4 did, beside `NotHeld` and `Superseded` (D-4890's round-6 rule is
+   unchanged for every other kind).
+
+**Rejected.** Mapping `Sealed` to `Other` and leaving the wildcard to answer
+it: IA-GR-39 exists to refuse exactly that. Making `Sealed` repairable:
+`repairable` is what a repair REASON unlocks, and a sealed month's late day
+must land in the daily run with no person asked (D-6247's own rejection of a
+manual step). Two kinds, one per form: a successor of a sealed month and of a
+revision are filed by one door with one bound (L-SC4-01), and a reader of the
+journal or the receipt has nothing to do differently.
+
+**Also (cheap follow-ups of the same check).** `repair_reason_ok` refuses a
+reason of zero-width marks alone and any U+2028 or U+2029 (one line), which
+`char::is_control` does not count. `absent_from_listing` names the four
+unfiled stems CLOSEST to the missing swept symbol (its distinct letter pairs
+the stem holds; ties in listing order), kept per swept index while the
+listing is read, O(4) a stem, instead of the first four in listing order: a
+real indices day holds about seventy unfiled stems, so a renamed NIFTY Bank
+was named only when it happened to be listed early (FM-073, D21). It is a
+ranking for a reader, never a filing rule.
+
+**Proved by** `pull::ingest::failkind::tests::every_store_and_repair_refusal_maps_to_its_row`
+(36 variants, 42 rows), `a_sealed_months_refusal_is_its_raw_forms_answer`,
+`each_kind_is_a_hole_holds_back_or_is_repaired_by_its_row`,
+`one_repair_reason_rule_for_both_feeds`,
+`pull::gdfl_import::tests::ia16::a_sealed_months_late_day_is_its_successor_never_a_hole_nor_filing`,
+`a_repaired_month_answers_held_bars_and_names_new_ones_as_a_hole`,
+`a_swept_stem_absent_from_a_held_day_is_named_with_the_unknown_stems`,
+`the_unfiled_stems_are_ranked_by_closeness_to_the_swept_name`, and SC-4's
+`gdfl_sealed_tests` and `crates/pull/tests/sealed_month.rs` unchanged
+(docs/04-invariants.md IA16-11, IA16-13, IA16-14, IA16-33, IA16-34).
+
+**Cost.** No new operation: a `Sealed` refusal costs the successor door
+SC-4 already bounds (L-SC4-01, `docs/06-limits.md`); the kind is one match
+arm.
+
+### D-7135 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+
+The number is the next one after the block D-7130..D-7134 that IA-16
+recorded (amendment A6); renumber at landing if it is taken.
 
 1. **The defect.** D-6894 made the first-listed index the only place
    `fnowork::futures_plan` learns which contracts exist and from which day,

@@ -86,11 +86,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// whose `--out` is literally `build` is counted as a write, the conservative
 /// direction.
 ///
+/// `verify-merge` and `zerodha-verify` (IA-9) write the verdict store under
+/// `verify/` and a runs-ledger record; `verify-merge --list` writes nothing.
+///
 /// `series-identity` (R4-17) is one unless `--dry-run`: it writes no bar, but
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 16] = [
+pub(crate) const WRITERS: [&str; 19] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -105,8 +108,11 @@ pub(crate) const WRITERS: [&str; 16] = [
     "srt-build",
     "tickstore-write",
     "tix-rebuild",
+    "upkeep",
+    "verify-merge",
     "zerodha-gaps",
     "zerodha-repair",
+    "zerodha-verify",
 ];
 
 /// Whether `verb`, invoked with `arguments`, writes the store.
@@ -120,7 +126,12 @@ pub(crate) const WRITERS: [&str; 16] = [
 /// state in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it; `series-identity ... --dry-run`
-/// names the plan it would write and writes none.
+/// names the plan it would write and writes none; `verify-merge --list`
+/// writes nothing, and `--list` beside any other word is a misuse its own
+/// parse refuses before a write, so the rule reads only the flag (IA-9).
+/// `upkeep` writes only as `upkeep run` and `upkeep resume` (R3-17): `plan`
+/// and `status` read, and `stop` writes a request naming a run, which carries
+/// no store data a commit answers for.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
@@ -129,9 +140,11 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
             !arguments.contains(&"--dry-run")
         }
+        "upkeep" => matches!(arguments.first(), Some(&("run" | "resume"))),
         "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
+        "verify-merge" => !arguments.contains(&"--list"),
         other => WRITERS.contains(&other),
     }
 }
@@ -387,6 +400,17 @@ mod tests {
                 true,
             ),
             ("scrub-blocks", &["gdfl"], true),
+            ("verify-merge", &[], true),
+            ("verify-merge", &["--list"], false),
+            // `--list` beside anything else is a misuse, refused before any
+            // write, so the rule reads it as `--list` (gate 30 reads this form).
+            ("verify-merge", &["--list", "--retry", "x.vsp"], false),
+            ("verify-merge", &["--retry", "x.vsp"], true),
+            (
+                "zerodha-verify",
+                &["2024-01-01", "2024-01-31", "NIFTY"],
+                true,
+            ),
             ("series-identity", &["ALL", "--segment", "CASH"], true),
             ("series-identity", &["PIIND", "--workers", "2"], true),
             ("series-identity", &["ALL", "--dry-run"], false),
@@ -441,7 +465,7 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 16] = [
+        let writing: [(&str, &[&str]); 19] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -456,8 +480,11 @@ mod tests {
             ("srt-build", &[]),
             ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
+            ("upkeep", &["run"]),
+            ("verify-merge", &[]),
             ("zerodha-gaps", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),
+            ("zerodha-verify", &["2024-01-01", "2024-01-31"]),
         ];
         assert_eq!(writing.map(|(verb, _)| verb), WRITERS, "every writer, once");
         for (verb, arguments) in writing {
@@ -486,6 +513,7 @@ mod tests {
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-gaps", &[][..]),
             ("zerodha-repair", &[][..]),
+            ("verify-merge", &["--list"][..]),
             ("top", &[][..]),
         ] {
             assert_eq!(

@@ -70,8 +70,9 @@ pub const FLAG_TEXT_CUT: u8 = 1;
 /// The kind table of format v1: append-only, never renamed or reused.
 ///
 /// 1 to 12 are the design's; 13 to 20 are the kinds the rules audit of
-/// 11 Oct 2026 asked for before the format was pinned (D-4883).
-pub const KINDS: [(u8, &str); 20] = [
+/// 11 Oct 2026 asked for before the format was pinned (D-4883); 21 was
+/// appended by IA-9 for RA-318 (D-4811).
+pub const KINDS: [(u8, &str); 21] = [
     (1, "interrupted_twice"),
     (2, "store_lost"),
     (3, "build_skew"),
@@ -92,6 +93,9 @@ pub const KINDS: [(u8, &str); 20] = [
     (18, "file_shrank"),
     (19, "month_damaged"),
     (20, "index_refused"),
+    // RA-318 (IA-9): a kept Zerodha answer carries fields its documented
+    // shape does not name, so the pull and its checker both read past them.
+    (21, "vendor_shape_changed"),
 ];
 
 /// Kind 12, the first record of a queue that replaced a damaged one.

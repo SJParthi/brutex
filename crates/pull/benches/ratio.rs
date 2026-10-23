@@ -747,13 +747,21 @@ fn census_is_flat_across_a_compaction() -> bool {
 /// Printed beside each ratio, never gated: one call sits near the clock's
 /// resolution, which the ratio above amortises and these do not.
 fn spread(label: &str, n: u32, mut op: impl FnMut()) {
-    let mut ns: Vec<u128> = (0..n)
+    let ns: Vec<u128> = (0..n)
         .map(|_| {
             let start = Instant::now();
             op();
             start.elapsed().as_nanos()
         })
         .collect();
+    spread_of(label, ns);
+}
+
+/// [`spread`]'s line from samples the caller timed itself (nanoseconds), for
+/// an operation whose setup must stay outside the timing (IA-9's C-ZV-02:
+/// the spool a merge reads is written first, untimed).
+fn spread_of(label: &str, mut ns: Vec<u128>) {
+    let n = ns.len();
     ns.sort_unstable();
     let at = |q: usize| {
         ns.get(ns.len().saturating_sub(1) * q / 100)
@@ -1286,6 +1294,400 @@ fn keep_append_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
     a && b
 }
 
+// ══ Zerodha verification (IA-9; D-4811, D-4881): C-ZV-01, C-ZV-02, C-ZV-03 ═══
+//
+// Every bar here is invented (`ZZIDX`, prices near 11,111.00). The store
+// grows by instruments and the spool by records; neither one landed window's
+// verification nor one spool append nor one merge-log step may grow with
+// them (L-IA-18, L-IA-17).
+
+/// One IST day the calendar of record holds as a full session.
+fn zv_day() -> pull::session::Day {
+    pull::session::Day::new(2024, 4, 23).unwrap_or_else(|_| refuse("a day"))
+}
+
+/// The UTC second of `minute` past IST midnight of [`zv_day`].
+fn zv_second(minute: u32) -> i64 {
+    i64::from(zv_day().days_from_epoch()) * 86_400 - 19_800 + i64::from(minute) * 60
+}
+
+/// One full invented session, 09:15..15:29.
+fn zv_minutes() -> Vec<store::format::Bar> {
+    (555..930_u32)
+        .map(|m| store::format::Bar {
+            ts_micros: zv_second(m) * 1_000_000,
+            open: 1_111_100 + i64::from(m),
+            high: 1_111_150 + i64::from(m),
+            low: 1_111_050 + i64::from(m),
+            close: 1_111_110 + i64::from(m),
+            volume: i64::from(m),
+            open_interest: store::format::OI_NULL,
+        })
+        .collect()
+}
+
+fn zv_series(n: u32) -> pull::zerodha_verify::Series {
+    pull::zerodha_verify::Series {
+        exchange: Exchange::Nse,
+        segment: Segment::Index,
+        symbol: format!("ZZIDX{n}"),
+        contract: None,
+    }
+}
+
+/// A scratch store holding `instruments` series of one 1min month each.
+fn zv_store(root: &std::path::Path, instruments: u32) {
+    std::fs::create_dir_all(root).unwrap_or_else(|_| refuse("a scratch store root"));
+    let bars = zv_minutes();
+    let month = zv_day().year_month().unwrap_or_else(|_| refuse("a month"));
+    for n in 0..instruments {
+        let series = zv_series(n);
+        let path = store::path::StorePath::new(series.parts(Timeframe::MINUTE_1, month))
+            .unwrap_or_else(|_| refuse("a store path"));
+        let id = pull::ingest::repair_plan::symbol_id(&series.symbol);
+        let mut file = store::file::BarFile::open_or_create(root, path, id)
+            .unwrap_or_else(|_| refuse("a scratch month"));
+        file.append(&bars)
+            .unwrap_or_else(|_| refuse("scratch bars"));
+    }
+}
+
+fn zv_rows() -> Vec<pull::fetch::RawRow> {
+    zv_minutes()
+        .iter()
+        .map(|b| pull::fetch::RawRow {
+            timestamp: b.ts_micros / 1_000_000,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            open_interest: None,
+        })
+        .collect()
+}
+
+/// C-ZV-01: one landed window's verification (one day: the oracle, the
+/// 1min compare, seven refolds, completeness, one spool append per rung),
+/// flat at 1x, 10x and 100x instruments held; and one record's spool append
+/// flat at 1x, 10x and 100x records already spooled.
+fn zerodha_window_is_flat() -> bool {
+    let root = std::env::temp_dir().join(format!("brutex-bench-zv-{}", std::process::id()));
+    let stores = [root.join("1"), root.join("10"), root.join("100")];
+    for (store, n) in stores.iter().zip([1_u32, 10, 100]) {
+        zv_store(store, n);
+    }
+    let rows = zv_rows();
+    let ledger = pull::zerodha_verify::GapLedger::default();
+    let series = zv_series(0);
+    let asked = (zv_second(0), zv_second(0) + 86_399);
+    let receipt = std::cell::Cell::new(0_u32);
+    let verify = |store: &std::path::Path, run: u64| {
+        let writer = pull::zerodha_verify::spool::SpoolWriter::new(
+            store,
+            run,
+            store::verdict::Mode::ZerodhaMerge,
+            1,
+        );
+        receipt.set(receipt.get() + 1);
+        let window = pull::zerodha_verify::WindowInput {
+            series: &series,
+            rung: Timeframe::MINUTE_1,
+            rows: &rows,
+            asked,
+            receipt: receipt.get(),
+            refused: &[],
+            rows_refused: 0,
+            first_day_bar: None,
+            shape: &pull::zerodha_verify::Shape::default(),
+        };
+        pull::zerodha_verify::verify_window(store, &window, &ledger, &writer)
+            .unwrap_or_else(|why| refuse(&why))
+    };
+    let best = |store: &std::path::Path| {
+        let mut best = u128::MAX;
+        for _ in 0..8 {
+            let start = Instant::now();
+            black_box(verify(black_box(store), 1));
+            best = best.min(start.elapsed().as_nanos() * 1_000);
+        }
+        best
+    };
+    let [one, ten, hundred] = &stores;
+    let base = best(one);
+    let a = ratio("C-ZV-01 window verification, 10x store", base, best(ten));
+    let b = ratio(
+        "C-ZV-01 window verification, 100x store",
+        base,
+        best(hundred),
+    );
+    spread("C-ZV-01 window verification, 100x store", 200, || {
+        black_box(verify(hundred, 2));
+    });
+    // The pure check, no disk: one day of one instrument (L-IA-18's
+    // "per answer" cost the rules audit asked for, RA-049).
+    let minutes = zv_minutes();
+    let derived_bars: Vec<(Timeframe, Vec<store::format::Bar>)> =
+        pull::zerodha_verify::derived_rungs()
+            .into_iter()
+            .map(|tf| (tf, Vec::new()))
+            .collect();
+    spread("C-ZV-01 one day verified in memory, no disk", 2_000, || {
+        let inputs = pull::zerodha_verify::DayInputs {
+            minutes: &minutes,
+            derived: derived_bars
+                .iter()
+                .map(|(tf, bars)| (*tf, Some(bars.as_slice()), Some(1)))
+                .collect(),
+            covered: true,
+            ..pull::zerodha_verify::DayInputs::default()
+        };
+        black_box(pull::zerodha_verify::verify_day(&series, zv_day(), &inputs));
+    });
+    let appended = zerodha_spool_append_is_flat(&root);
+    let _cleanup = std::fs::remove_dir_all(&root);
+    a && b && appended
+}
+
+/// C-ZV-01's second half: one record's spool append, against spools of 1x,
+/// 10x and 100x records already spooled.
+fn zerodha_spool_append_is_flat(root: &std::path::Path) -> bool {
+    let one = |n: u32| pull::zerodha_verify::spool::SpoolRecord {
+        exchange: Exchange::Nse,
+        day: zv_day(),
+        key: store::verdict::Key::instrument(&format!("NSE-INDEX-ZZ{n}"))
+            .unwrap_or_else(|_| refuse("a key")),
+        facts: store::verdict::Facts::of(store::verdict::Code::Match),
+        receipt: n,
+        details: Vec::new(),
+    };
+    let spools: Vec<(std::path::PathBuf, pull::zerodha_verify::spool::SpoolWriter)> =
+        [1_u32, 10, 100]
+            .iter()
+            .map(|n| {
+                let dir = root.join(format!("spool-{n}"));
+                let writer = pull::zerodha_verify::spool::SpoolWriter::new(
+                    &dir,
+                    u64::from(*n),
+                    store::verdict::Mode::ZerodhaMerge,
+                    1,
+                );
+                let filler: Vec<_> = (0..n * 100).map(one).collect();
+                writer
+                    .append(Segment::Index, Timeframe::MINUTE_1, &filler)
+                    .unwrap_or_else(|_| refuse("a filled spool"));
+                (dir, writer)
+            })
+            .collect();
+    let append = |writer: &pull::zerodha_verify::spool::SpoolWriter| {
+        let mut best = u128::MAX;
+        for i in 0..12 {
+            let start = Instant::now();
+            black_box(
+                writer
+                    .append(Segment::Index, Timeframe::MINUTE_1, &[one(i)])
+                    .is_ok(),
+            );
+            best = best.min(start.elapsed().as_nanos() * 1_000);
+        }
+        best
+    };
+    let [(_, first), (_, tenth), (_, hundredth)] = spools.as_slice() else {
+        refuse("three spools")
+    };
+    let base = append(first);
+    let c = ratio("C-ZV-01 spool append, 10x records", base, append(tenth));
+    let d = ratio(
+        "C-ZV-01 spool append, 100x records",
+        base,
+        append(hundredth),
+    );
+    spread("C-ZV-01 spool append, 100x records", 200, || {
+        black_box(
+            hundredth
+                .append(Segment::Index, Timeframe::MINUTE_1, &[one(7)])
+                .is_ok(),
+        );
+    });
+    c && d
+}
+
+/// `records` invented CASH instruments' records of one day, each
+/// `no_response_kept`: the spool input C-ZV-02 merges.
+fn zv_day_records(
+    on: pull::session::Day,
+    records: u32,
+) -> Vec<pull::zerodha_verify::spool::SpoolRecord> {
+    (0..records)
+        .map(|n| pull::zerodha_verify::spool::SpoolRecord {
+            exchange: Exchange::Nse,
+            day: on,
+            key: store::verdict::Key::instrument(&format!("NSE-CASH-ZZ{n}"))
+                .unwrap_or_else(|_| refuse("a key")),
+            facts: store::verdict::Facts::of(store::verdict::Code::NoResponseKept),
+            receipt: 0,
+            details: Vec::new(),
+        })
+        .collect()
+}
+
+/// C-ZV-02: one day's generation through the spool merge (the read, the one
+/// sort, the merge-log steps and the commit), per record, at 343, 3,430 and
+/// 27,440 records (1x, 10x, 80x a Zerodha day's instruments, the last near
+/// the largest real day). Its sort is O(n log n): the ceiling allows it.
+fn zerodha_merge_per_record_is_flat() -> bool {
+    let root = std::env::temp_dir().join(format!("brutex-bench-zvm-{}", std::process::id()));
+    // ONE MERGE, TIMED ALONE: the day's spool is written first, untimed, and
+    // only `merge_all` (the listing, the read, the sort, the merge-log steps
+    // and the commit) is on the clock. Nanoseconds for the whole day.
+    let merge_once = |records: u32, tag: u32, trial: u32| -> u128 {
+        let store = root.join(format!("{tag}-{trial}"));
+        let writer = pull::zerodha_verify::spool::SpoolWriter::new(
+            &store,
+            u64::from(tag),
+            store::verdict::Mode::ZerodhaMerge,
+            1,
+        );
+        writer
+            .append(
+                Segment::Cash,
+                Timeframe::MINUTE_1,
+                &zv_day_records(zv_day(), records),
+            )
+            .unwrap_or_else(|_| refuse("a spool"));
+        // THE RUN ENDS before its merge: a live run's spools are never read.
+        drop(writer);
+        let start = Instant::now();
+        let done = pull::zerodha_verify::merge_all(&store, None, None)
+            .unwrap_or_else(|why| refuse(&why.to_string()));
+        let took = start.elapsed().as_nanos();
+        if done.generations != 1 {
+            refuse("the merge wrote no generation");
+        }
+        took
+    };
+    // Per record, in picoseconds: the best of three merges.
+    let merge = |records: u32, tag: u32| -> u128 {
+        (0..3_u32)
+            .map(|trial| merge_once(records, tag, trial) * 1_000 / u128::from(records))
+            .min()
+            .unwrap_or(u128::MAX)
+    };
+    let base = merge(343, 1);
+    let a = ratio(
+        "C-ZV-02 merge per record, 10x records",
+        base,
+        merge(3_430, 2),
+    );
+    let b = ratio(
+        "C-ZV-02 merge per record, 80x records",
+        base,
+        merge(27_440, 3),
+    );
+    // n = 200 merges, each of its own fresh day spool (tags 11..=210).
+    let samples: Vec<u128> = (11..211_u32)
+        .map(|tag| black_box(merge_once(343, tag, 0)))
+        .collect();
+    spread_of("C-ZV-02 one day of 343 records merged", samples);
+    // RA-050: 48 day spools (12 months x 4 timeframes, 343 records each)
+    // merged at 1 and at 4 workers, each width on its own fresh store; the
+    // spools are written first, untimed.
+    let wide = |workers: usize, tag: u32| -> u128 {
+        let store = root.join(format!("wide-{tag}"));
+        let writer = pull::zerodha_verify::spool::SpoolWriter::new(
+            &store,
+            u64::from(tag),
+            store::verdict::Mode::ZerodhaMerge,
+            1,
+        );
+        for month in 1..=12_u8 {
+            let on = pull::session::Day::new(2024, month, 10).unwrap_or_else(|_| refuse("a day"));
+            for tf in [
+                Timeframe::MINUTE_1,
+                Timeframe::MINUTE_5,
+                Timeframe::MINUTE_15,
+                Timeframe::MINUTE_60,
+            ] {
+                writer
+                    .append(Segment::Cash, tf, &zv_day_records(on, 343))
+                    .unwrap_or_else(|_| refuse("a spool"));
+            }
+        }
+        drop(writer);
+        let start = Instant::now();
+        let done = pull::zerodha_verify::merge_observed_on(&store, None, None, None, workers)
+            .unwrap_or_else(|why| refuse(&why.to_string()));
+        let took = start.elapsed().as_nanos();
+        if done.generations != 48 {
+            refuse("the wide merge wrote fewer than 48 generations");
+        }
+        took
+    };
+    let (narrow, four) = (wide(1, 300), wide(4, 301));
+    println!(
+        "  {:<44} 1 worker {narrow:>12} ns  4 workers {four:>12} ns  (48 spools, 16,464 records)",
+        "C-ZV-02 48 day spools merged (RA-050)"
+    );
+    let _cleanup = std::fs::remove_dir_all(&root);
+    a && b
+}
+
+/// C-ZV-03: one merge-log step (the probe of the log's index for the day's
+/// last record, a 16-byte append and its sync) flat at 1x, 10x and 100x
+/// records already logged.
+fn zerodha_merge_log_step_is_flat() -> bool {
+    let root = std::env::temp_dir().join(format!("brutex-bench-zvl-{}", std::process::id()));
+    let _made = std::fs::create_dir_all(&root);
+    let record = |day: u32| pull::zerodha_verify::spool::LogRecord {
+        day,
+        generation: day,
+        state: pull::zerodha_verify::spool::LogState::Committed,
+        exchange: 1,
+    };
+    let logs: Vec<(
+        std::path::PathBuf,
+        std::cell::RefCell<pull::zerodha_verify::spool::LogRead>,
+    )> = [1_u32, 10, 100]
+        .iter()
+        .map(|n| {
+            let path = root.join(format!("{n}.vsp.merged"));
+            let mut log =
+                pull::zerodha_verify::spool::read_log(&path).unwrap_or_else(|_| refuse("a log"));
+            for day in 0..n * 30 {
+                pull::zerodha_verify::spool::append_log(&path, &mut log, record(day))
+                    .unwrap_or_else(|_| refuse("a log record"));
+            }
+            (path, std::cell::RefCell::new(log))
+        })
+        .collect();
+    let step = |at: usize| {
+        let mut best = u128::MAX;
+        let Some((path, log)) = logs.get(at) else {
+            refuse("a log")
+        };
+        for day in 0..12 {
+            let mut log = log.borrow_mut();
+            let start = Instant::now();
+            black_box(log.last_of(1, day));
+            black_box(pull::zerodha_verify::spool::append_log(path, &mut log, record(day)).is_ok());
+            best = best.min(start.elapsed().as_nanos() * 1_000);
+        }
+        best
+    };
+    let base = step(0);
+    let a = ratio("C-ZV-03 merge-log step, 10x log", base, step(1));
+    let b = ratio("C-ZV-03 merge-log step, 100x log", base, step(2));
+    spread("C-ZV-03 merge-log step, 100x log", 200, || {
+        if let Some((path, log)) = logs.get(2) {
+            let mut log = log.borrow_mut();
+            black_box(log.last_of(1, 9));
+            black_box(pull::zerodha_verify::spool::append_log(path, &mut log, record(9)).is_ok());
+        }
+    });
+    let _cleanup = std::fs::remove_dir_all(&root);
+    a && b
+}
+
 // ══ The fold, per bar (cloud/attack-o1-20261016): C-FD-01 ══════════════════
 
 /// Snapshot counts folded: 1x / 10x / 100x.
@@ -1468,6 +1870,9 @@ fn main() {
     ok &= keep_lookup_is_flat(&keep_stores);
     ok &= keep_append_is_flat(&keep_stores);
     let _cleanup = std::fs::remove_dir_all(&keep_root);
+    ok &= zerodha_window_is_flat();
+    ok &= zerodha_merge_per_record_is_flat();
+    ok &= zerodha_merge_log_step_is_flat();
     ok &= fold_is_flat_per_bar();
     ok &= nfo_read_is_flat_per_row();
     // C-PIT-01's id is printed from this file because

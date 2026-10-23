@@ -819,6 +819,44 @@ fn the_census_and_dayflags_verbs_share_the_import_locks_and_verbs() {
             .is_empty()
     );
 
+    // THE DAYFLAGS HALF (IA-16, D-6900 keep item 1; design §5.3): the rescan
+    // takes the locks a run of its kind takes, never waiting. While an
+    // import of the kind holds them it is refused `run_busy` naming the run;
+    // while it holds them an import of the kind is refused naming it; it
+    // takes its id from the runs ledger and leaves an empty claim behind.
+    let import = claim_with(&store, template("options", "cli"), 0, None, clock_now()).unwrap();
+    let busy = claim_dayflags(&store, ImportKind::Options).unwrap_err();
+    assert_eq!(busy.code(), "run_busy", "{busy}");
+    assert!(
+        busy.to_string().contains(&format!("run={} ", import.run)),
+        "{busy}"
+    );
+    import.release().unwrap();
+    let before = ledger::read_all(&store).unwrap().len();
+    let rescan = claim_dayflags(&store, ImportKind::Options).unwrap();
+    let claim = std::fs::read_to_string(store.join(locks::STORE_LOCK)).unwrap();
+    assert!(
+        claim.contains(" mode=dayflags kind=options ") && claim.contains(" by=cli "),
+        "{claim}"
+    );
+    let blocked = claim_with(&store, template("options", "cli"), 0, None, clock_now()).unwrap_err();
+    assert_eq!(blocked.code(), "run_busy", "{blocked}");
+    assert!(
+        blocked
+            .to_string()
+            .contains(&format!("run={} ", rescan.run)),
+        "{blocked}"
+    );
+    rescan.release().unwrap();
+    let all = ledger::read_all(&store).unwrap();
+    assert_eq!(all.len(), before + 1);
+    assert_eq!(all.last().unwrap().as_ref().unwrap().mode, "dayflags");
+    assert!(
+        std::fs::read(store.join(locks::STORE_LOCK))
+            .unwrap()
+            .is_empty()
+    );
+
     // One verb table: the census reader reads what the importer writes.
     assert_eq!(
         crate::gdfl_import::VERB_WORDS,

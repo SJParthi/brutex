@@ -620,6 +620,14 @@ fn the_dependency_set_has_not_moved_without_review() {
     // 0x8ACF_7E51_E4A6_F150, the same two packages pinned 0x0D06_2B04_5053_8A00.
     // The scan is recorded beside the count above, and no other package's
     // `dependencies` list moved.
+    // 0x8070_52EA_72E5_1027 -> 0xEF62_60E1_BE35_175C IS ONE NEW ARROW, NOT A NEW
+    // PACKAGE (IA-16, CONC-031): `pull` names `rustix` 1.1.4 for the GDFL
+    // import's free-space floor (one `statfs(2)`, the call `/disk.json` makes),
+    // in place of the `/bin/df` child the no-runtime-spawn gate refuses. The
+    // package was already in the lock under `api` with the same features
+    // (`std`, `fs`), the count is unchanged, and its scan is the one D-5240
+    // recorded: no .c/.cc/.h/.S/.asm, and a `build.rs` that runs only `rustc`
+    // feature probes. Only `pull`'s `dependencies` list moved.
     // 0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C IS TWO VERSION BUMPS, NOT A
     // NEW PACKAGE (D-7120): `rustls-webpki` 0.103.15 -> 0.103.16
     // (RUSTSEC-2026-0382) and `webpki-roots` 1.0.9 -> 1.0.10
@@ -633,8 +641,17 @@ fn the_dependency_set_has_not_moved_without_review() {
     // `rustls-webpki`'s `rust-version`, 1.70 -> 1.71): same features, so
     // `ring` stays off by default and the skipped `rustls-webpki -> ring` edge
     // above is still a weak one. DECLARED is unchanged.
+    // R3-17 (D-6271) made the same two bumps on its own branch, to the same
+    // `Cargo.lock` bytes and the same pin, with the same scan result.
+    // R3-24 repair round 3 (D-5890) made the same two bumps and its own scan
+    // of both registry sources independently, and reached this same pin: its
+    // repair round 2 had bumped the lock without the re-pin (B10).
+    // 0x57F8_69FF_1E0D_4A5C -> 0xADFB_F4EE_30AF_1851 IS THE TWO CHANGES ABOVE,
+    // TOGETHER, NOT A THIRD (IA-16 repair 2, merging feat/db-fix): the two bumps
+    // (D-7120) and IA-16's one arrow `pull -> rustix`. No package was added,
+    // no version moved beyond D-7120's, and both scans stand as recorded.
     assert_eq!(
-        h, 0x57F8_69FF_1E0D_4A5C,
+        h, 0xADFB_F4EE_30AF_1851,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \
