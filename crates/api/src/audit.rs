@@ -3329,23 +3329,14 @@ fn note_index(path: &Path, outcome: &Result<IndexBuilt, String>) {
         telemetry::emit(&event.with("path", telemetry::Value::Str(&shown)));
 }
 
+// Each test file switches its own lints off inside itself (BASE-GATE11,
+// D-6627): a lint allow on this file's `mod` line is a local allow in a
+// production file, which gate 11 rule 5c refuses.
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic
-)]
 #[path = "audit_lock_wait_tests.rs"]
 mod lock_wait_tests;
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::print_stdout
-)]
 #[path = "audit_lock_wait_measure.rs"]
 mod lock_wait_measure;
 
@@ -3471,6 +3462,7 @@ mod tests {
             counted: 194,
             census: census(0, 170, 0, 0),
             failures: Vec::new(),
+            door_kind: None,
         }
     }
 

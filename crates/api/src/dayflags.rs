@@ -1723,14 +1723,56 @@ const LATER_EVERY: [(&str, Shape); 2] = [("halt_s", Shape::Count), ("halt_held_s
 const LATER_INDICES: [(&str, Shape); 2] =
     [("flat_max_s", Shape::Count), ("flat_max_at", Shape::Clock)];
 
-/// A kind's later, optional fields.
+/// The fields D-3335's `v=2` adds to every kind's line (D-4841; IA-16):
+/// identical consecutive rows, traded (LTQ above zero, so the volume was
+/// counted twice) and echoed (LTQ zero). Optional: a `v=1` line, and a `v=2`
+/// line from a build that does not count one, has none, and a missing one is
+/// `null`, never `0`.
+const V2_EVERY: [(&str, Shape); 3] = [
+    ("dup_traded_rows", Shape::Count),
+    ("dup_traded_files", Shape::Count),
+    ("dup_echo_rows", Shape::Count),
+];
+
+/// An index line's `v=2` fields (D-4841): rows the half-up price rule
+/// snapped (INDIA VIX), and whether the day zip named its files with `\`.
+const V2_INDICES: [(&str, Shape); 2] = [
+    ("snapped_rows", Shape::Count),
+    ("separator_backslash", Shape::Count),
+];
+
+/// A stocks line's `v=2` fields (D-4841, D-4830): files whose running
+/// volume stopped at the vendor's 32-bit limit, and the separator.
+const V2_STOCKS: [(&str, Shape); 2] = [
+    ("volume_saturated_files", Shape::Count),
+    ("separator_backslash", Shape::Count),
+];
+
+/// An options line's `v=2` field (D-4841, D-4829): files whose header
+/// carried trailing empty columns.
+const V2_OPTIONS: [(&str, Shape); 1] = [("trailing_empty_files", Shape::Count)];
+
+/// The versions of a flags line this reader reads (D-3335, D-4841): `v=1`
+/// and `v=2` alike, a `v=2` field read only where the line has it.
+const FLAGS_VERSIONS: [&str; 2] = ["1", "2"];
+
+/// A table of a line's fields, by name and shape.
+type FieldTable = &'static [(&'static str, Shape)];
+
+/// A kind's later, optional fields: WP-11c's, then `v=2`'s.
 fn later_fields(kind: ImportKind) -> Vec<(&'static str, Shape)> {
-    let own: &[(&str, Shape)] = if kind == ImportKind::Indices {
-        &LATER_INDICES
-    } else {
-        &[]
+    let (own, v2): (FieldTable, FieldTable) = match kind {
+        ImportKind::Indices => (&LATER_INDICES, &V2_INDICES),
+        ImportKind::Stocks => (&[], &V2_STOCKS),
+        ImportKind::Options => (&[], &V2_OPTIONS),
     };
-    LATER_EVERY.iter().chain(own).copied().collect()
+    LATER_EVERY
+        .iter()
+        .chain(own)
+        .chain(&V2_EVERY)
+        .chain(v2)
+        .copied()
+        .collect()
 }
 
 /// A kind's own fields.
@@ -1929,9 +1971,11 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
             }
         }
     }
-    if version != Some("1") {
+    // v=1 AND v=2 ALIKE (D-4841; IA-16, moved in from IA-10b): a v=2 field
+    // the line lacks stays `null` in `later`, never 0.
+    if !version.is_some_and(|v| FLAGS_VERSIONS.contains(&v)) {
         return Err(format!(
-            "v={} is not 1, the version this reader reads",
+            "v={} is not 1 or 2, the versions this reader reads",
             version.unwrap_or("(none)")
         ));
     }
@@ -5392,6 +5436,13 @@ fn rules_json() -> Value {
 #[path = "dayflags_filter_tests.rs"]
 mod filter_tests;
 
+/// The guard of the flags-line reader's two versions (IA-16, D-4841, D-6900
+/// moved in from IA-10b): in a file of its own, so a merge that reverts the
+/// reader to `v=1` alone fails here.
+#[cfg(test)]
+#[path = "dayflags_v2_tests.rs"]
+mod v2_tests;
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -6759,7 +6810,7 @@ mod tests {
         let root = root_of("faults");
         let good = index_flags("2022-03-07", "NIFTY", &[]);
         let bad = [
-            good.replace("v=1", "v=2"),
+            good.replace("v=1", "v=3"),
             good.replace(" zero_ltp_rows=0", ""),
             good.replace("rows=0", "rows=07"),
             good.replace(" NIFTY ", " * "),
@@ -6779,7 +6830,7 @@ mod tests {
             .map(|(_, _, why)| why.as_str())
             .collect();
         for wanted in [
-            "v=2 is not 1",
+            "v=3 is not 1 or 2",
             "zero_ltp_rows is missing",
             "rows=\"07\" is not a Count",
             "scope \"*\"",

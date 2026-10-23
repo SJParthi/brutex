@@ -111,8 +111,11 @@
 //! when the lock was taken and the failure is named. No reader sees them:
 //! a reader takes the shared lock ([`read`]). That is the append undone
 //! before it was ever visible, not an in-place change of a held record.
-//! A process killed inside the write leaves a torn tail no one cut back,
-//! which every reader and the next append refuse by name (IA-16 repairs).
+//! A process killed inside the write leaves a torn tail: every reader
+//! refuses it by name, and the next append cuts it back to the last whole
+//! record that verifies before it writes (IA-16, IA-AUC-01, FM-099). Only a
+//! partial record, whole records of zero bytes, or a partial header of a
+//! file with no record are cut; any other damage stays refused.
 //!
 //! **A new file's directory is synced.** When an append creates the file
 //! (or finds it empty), the file's directory, and the parent of every
@@ -657,6 +660,24 @@ fn write_day(
     reader
         .read_to_end(&mut bytes)
         .map_err(|why| format!("{}: {why}", path.display()))?;
+    // A TORN TAIL A KILLED APPEND LEFT IS CUT BACK BY THE NEXT (IA-16,
+    // IA-AUC-01, FM-099): every reader refused it, so no reader ever saw it;
+    // only bytes after the last whole record that verifies are cut, under
+    // the exclusive lock, and never a record the file held whole.
+    if let Some(keep) = torn_tail(&bytes) {
+        let had = bytes.len();
+        file.set_len(u64::try_from(keep).unwrap_or(u64::MAX))
+            .and_then(|()| file.sync_data())
+            .map_err(|why| {
+                format!(
+                    "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
+                    path.display(),
+                    had - keep
+                )
+            })?;
+        bytes.truncate(keep);
+        note_torn_cut(path, had, keep);
+    }
     let fresh = bytes.is_empty();
     let held = if fresh {
         Sidecar {
@@ -774,6 +795,54 @@ pub(crate) mod seam {
 
 /// One `info` line per filed day (D-3320): the share, the day, the prints
 /// offered and written, the sidecar and its format version.
+/// The length to cut a sidecar's bytes back to when they end in a TORN TAIL
+/// (IA-16, IA-AUC-01): a killed append's partial record, or whole records of
+/// zero bytes (a length that reached the disk before its bytes; a record of
+/// zeros is no print, its time is 1970), after records that all verify. A
+/// partial header of a file that holds no record is cut to nothing, so the
+/// next append writes a fresh file. `None` for bytes that end whole, and for
+/// any damage other than the tail: a flipped bit, a bad header, a record
+/// that fails its check in place stays refused by name, never repaired.
+/// O(bytes): one parse of the kept prefix.
+fn torn_tail(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+    if bytes.len() < HEADER_LEN {
+        let partial_header = [VERSION, VERSION_1]
+            .into_iter()
+            .any(|version| header_of(version).starts_with(bytes));
+        return partial_header.then_some(0);
+    }
+    let whole = HEADER_LEN + (bytes.len() - HEADER_LEN) / RECORD_LEN * RECORD_LEN;
+    let mut keep = whole;
+    while keep > HEADER_LEN
+        && bytes
+            .get(keep - RECORD_LEN..keep)
+            .is_some_and(|record| record.iter().all(|&byte| byte == 0))
+    {
+        keep -= RECORD_LEN;
+    }
+    (keep < bytes.len() && bytes.get(..keep).is_some_and(|kept| parse(kept).is_ok()))
+        .then_some(keep)
+}
+
+/// Says a torn tail was cut back before an append (IA-16, IA-AUC-01), with
+/// the lengths, at `warn`: a state change of the sidecar a search finds.
+fn note_torn_cut(path: &Path, had: usize, kept: usize) {
+    let path_text = path.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            crate::gdfl_import::TARGET,
+            "auction sidecar torn tail cut back",
+        )
+        .with("sidecar", path_text.as_str())
+        .with("bytes", had)
+        .with("kept", kept)
+        .with("code", "auction_torn_tail"),
+    );
+}
+
 fn note_filed(
     key: &InstrumentKey,
     day: Day,

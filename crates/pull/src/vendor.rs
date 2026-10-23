@@ -6224,7 +6224,7 @@ const ZERODHA: Descriptor = Descriptor {
         //
         // `TokenException` and `PermissionException` are BOTH answered under
         // HTTP 403 -- the first documented on the exceptions page, the second
-        // in the vendor's own Python SDK -- so on the status axis they are one
+        // in the vendor's own SDK -- so on the status axis they are one
         // event. They are not one event to an operator: the first is fixed by
         // the credential somebody refreshes tonight, and the second is an API
         // key with no historical-data subscription, which fails identically

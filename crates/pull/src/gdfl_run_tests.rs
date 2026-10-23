@@ -91,8 +91,9 @@ fn the_request_line_carries_a_256_name_filter_and_a_snapshot_intact() {
     );
     assert_eq!(
         line.split(' ').count(),
-        14,
-        "two head words and twelve fields"
+        18,
+        "two head words and sixteen fields (IA-16: repair_reason, skip_restated, \
+         accept_open_month, free_floor)"
     );
     let back = Request::from_line(&line).unwrap();
     assert_eq!(back, asked);
@@ -503,6 +504,12 @@ fn every_run_refusal_has_its_own_code() {
         RunRefusal::ClockImplausible { why: String::new() },
         RunRefusal::RunsLedgerUnwritten { why: String::new() },
         RunRefusal::ClaimUnwritten { why: String::new() },
+        // IA-16's: the one repair-reason rule (D-4874, IA-GR-42).
+        RunRefusal::RepairReasonInvalid { bytes: 0 },
+        // IA-16's: a repair in a month still being traded (D-4876).
+        RunRefusal::RepairInOpenMonth {
+            month: String::new(),
+        },
     ];
     let codes: Vec<&str> = all.iter().map(RunRefusal::code).collect();
     assert_eq!(codes, RunRefusal::CODES);
@@ -510,8 +517,8 @@ fn every_run_refusal_has_its_own_code() {
     assert_eq!(unique.len(), codes.len());
     assert_eq!(
         all.iter().filter(|r| r.misuse()).count(),
-        7,
-        "the request's seven, never the process's"
+        8,
+        "the request's eight (IA-16 added `repair_reason_invalid`), never the process's"
     );
 }
 
@@ -704,6 +711,176 @@ fn the_source_cache_measures_again_only_when_the_root_changed() {
     let _b = cache.origin(SourceId::TickStore, &gone, None);
     assert_eq!(cache.measures(), 5);
     assert!(a.fault.is_some(), "{a:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// **A FILTER PAST ITS BOUND IS REFUSED BEFORE ANY NAME IS READ**
+/// (BASE-GATE11, D-6621): the walks of the filter's names (an empty one, one
+/// that is no symbol) are gate 11 rule 6's declared bound only because the
+/// count is refused first. `ONLY_MAX + 1` names with the empty one or the bad
+/// one FIRST are refused `filter_too_long`, never by the walk that would have
+/// read them; exactly `ONLY_MAX` names with the same first name are refused
+/// by that name's own walk, and `ONLY_MAX` good names pass. Before this rule
+/// an empty first name of 100,000 was `symbol_empty`, read past the bound.
+#[test]
+fn a_filter_past_its_bound_is_refused_before_any_name_is_read() {
+    let good = |i: usize| format!("S{i}");
+    for (first, at_bound) in [("", "symbol_empty"), ("a b", "symbol_invalid")] {
+        for names in [ONLY_MAX + 1, 100_000] {
+            let mut asked = request(&[ImportKind::Stocks]);
+            asked.only = std::iter::once(first.to_owned())
+                .chain((1..names).map(good))
+                .collect();
+            assert_eq!(
+                asked.misuse(),
+                Some(RunRefusal::FilterTooLong { names }),
+                "{names} names, the first {first:?}"
+            );
+        }
+        let mut asked = request(&[ImportKind::Stocks]);
+        asked.only = std::iter::once(first.to_owned())
+            .chain((1..ONLY_MAX).map(good))
+            .collect();
+        assert_eq!(asked.only.len(), ONLY_MAX);
+        assert_eq!(
+            asked.misuse().map(|refused| refused.code()),
+            Some(at_bound),
+            "{first:?} at the bound"
+        );
+    }
+    let mut asked = request(&[ImportKind::Stocks]);
+    asked.only = (0..ONLY_MAX).map(good).collect();
+    assert_eq!(asked.misuse(), None);
+    // NIFTY FIRST, then BANKNIFTY and an F&O share, through the same shared
+    // check: one index alone and the three together pass; the same names
+    // padded past the bound are refused by the count, never read.
+    for only in [&["NIFTY"][..], &["NIFTY", "BANKNIFTY", "RELIANCE"][..]] {
+        let mut asked = request(&[ImportKind::Indices, ImportKind::Stocks]);
+        asked.only = only.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(asked.misuse(), None, "{only:?}");
+        asked.only.extend((asked.only.len()..=ONLY_MAX).map(good));
+        assert_eq!(
+            asked.misuse(),
+            Some(RunRefusal::FilterTooLong {
+                names: ONLY_MAX + 1
+            }),
+            "{only:?} padded past the bound"
+        );
+    }
+}
+
+/// **ONE CACHE SLOT A SOURCE, DISTINCT, INSIDE THE TABLE** (BASE-GATE11,
+/// D-6621): the cache is indexed by [`SourceId::slot`], so an id whose slot
+/// collided with another's would evict it, and one past [`SOURCE_SLOTS`]
+/// would never be held. Every id is listed through an exhaustive match, so
+/// a new id fails to compile here until it is given a slot.
+#[test]
+fn every_source_has_its_own_cache_slot() {
+    let every = |id: SourceId| match id {
+        SourceId::CmZip | SourceId::NfoZips | SourceId::TickStore => id,
+    };
+    let ids = [
+        every(SourceId::CmZip),
+        every(SourceId::NfoZips),
+        every(SourceId::TickStore),
+    ];
+    let mut seen = [false; SOURCE_SLOTS];
+    for id in ids {
+        let slot = id.slot();
+        assert!(slot < SOURCE_SLOTS, "{id:?} -> {slot}");
+        assert!(!seen[slot], "{id:?} shares slot {slot}");
+        seen[slot] = true;
+    }
+    assert!(seen.iter().all(|held| *held), "{seen:?}");
+}
+
+/// **THREE SOURCES ARE HELD SIDE BY SIDE, AND A RE-MEASURE OF ONE KEEPS THE
+/// OTHERS** (BASE-GATE11, D-6621): each source is measured once and then
+/// answered from its own slot; a changed root of one source re-measures that
+/// source only; an unreadable root empties only its own slot.
+#[test]
+fn the_source_cache_holds_each_source_in_its_own_slot() {
+    let root = scratch("cache.slots");
+    let ids = [SourceId::CmZip, SourceId::NfoZips, SourceId::TickStore];
+    let mut roots = Vec::new();
+    // Each source's own root, then a second root that NfoZips moves to.
+    for dir in ids
+        .iter()
+        .map(|id| root.join(id.as_str()))
+        .chain([root.join("ts")])
+    {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("FORMAT.md"), b"synthetic\n").unwrap();
+        roots.push(dir);
+    }
+    let mut cache = SourceCache::default();
+    for (id, dir) in ids.iter().zip(&roots) {
+        let _first = cache.origin(*id, dir, Some("abc"));
+    }
+    assert_eq!(cache.measures(), 3);
+    for (id, dir) in ids.iter().zip(&roots) {
+        let _again = cache.origin(*id, dir, Some("abc"));
+    }
+    assert_eq!(cache.measures(), 3, "every source answered from its slot");
+    // NfoZips at another root: measured, and only it.
+    let _moved = cache.origin(SourceId::NfoZips, &roots[3], Some("abc"));
+    assert_eq!(cache.measures(), 4);
+    let _cm = cache.origin(SourceId::CmZip, &roots[0], Some("abc"));
+    let _ts = cache.origin(SourceId::TickStore, &roots[2], Some("abc"));
+    let _nfo = cache.origin(SourceId::NfoZips, &roots[3], Some("abc"));
+    assert_eq!(cache.measures(), 4, "the other two kept their slots");
+    // The first NfoZips root again: its slot holds the second root now.
+    let _back = cache.origin(SourceId::NfoZips, &roots[1], Some("abc"));
+    assert_eq!(cache.measures(), 5);
+    // An unreadable root empties its own slot only.
+    let gone = root.join("gone");
+    let missing = cache.origin(SourceId::TickStore, &gone, Some("abc"));
+    assert!(missing.fault.is_some(), "{missing:?}");
+    assert_eq!(cache.measures(), 6);
+    let _ts_again = cache.origin(SourceId::TickStore, &roots[2], Some("abc"));
+    assert_eq!(cache.measures(), 7, "the emptied slot measures again");
+    let _cm_again = cache.origin(SourceId::CmZip, &roots[0], Some("abc"));
+    assert_eq!(cache.measures(), 7, "CmZip's slot was never touched");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// **A CACHED SOURCE IS ONE STAT AND ONE INDEX** (BASE-GATE11, D-6621):
+/// 2,000 hits of each of the three sources, after one measure each, every
+/// call timed. Printed for `docs/06-limits.md`, never asserted: a timing on a
+/// shared machine is evidence, not a gate.
+#[test]
+#[ignore = "a timing, printed"]
+fn source_cache_hit_timing() {
+    let root = scratch("cache.timing");
+    let ids = [SourceId::CmZip, SourceId::NfoZips, SourceId::TickStore];
+    let mut dirs = Vec::new();
+    for id in ids {
+        let dir = root.join(id.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("FORMAT.md"), b"synthetic\n").unwrap();
+        dirs.push(dir);
+    }
+    let mut cache = SourceCache::default();
+    for (id, dir) in ids.iter().zip(&dirs) {
+        let _first = cache.origin(*id, dir, Some("abc"));
+    }
+    let mut took = Vec::with_capacity(6_000);
+    for _ in 0..2_000 {
+        for (id, dir) in ids.iter().zip(&dirs) {
+            let began = std::time::Instant::now();
+            let _hit = cache.origin(*id, dir, Some("abc"));
+            took.push(began.elapsed());
+        }
+    }
+    assert_eq!(cache.measures(), 3, "every call after the first three hit");
+    took.sort_unstable();
+    let n = took.len();
+    println!(
+        "source cache hit: n={n} p50={:?} p99={:?} max={:?}",
+        took[n / 2],
+        took[n * 99 / 100],
+        took[n - 1]
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

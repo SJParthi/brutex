@@ -103,6 +103,14 @@ leftovers = [
   "OWED-15", "OWED-16", "OWED-17", "OWED-18", "OWED-19", "OWED-20", "OWED-21",
   "OWED-22", "OWED-23", "OWED-24", "OWED-25", "OWED-26", "OWED-27", "OWED-28",
   "OWED-29", "OWED-30", "OWED-31",
+  # R4-11's marker of the existing production root (D-7135, 23 Oct 2026).
+  "OWED-32",
+  # R3-17's store half of DB-N14: the months a value sort still reads row by
+  # row because they have no sort index (18 Oct: 15,247 share months and
+  # 360,259 option months; a whole-history RELIANCE sort by close is refused,
+  # 32,417,004 rows unindexed; 19 Oct: Zerodha 198,188 of 251,270 month files
+  # lack one, and a whole-history NIFTY 1min sort by close reads 796,027 rows).
+  "DB-N14",
 ]
 
 # ------------------------------------------------------------- environment --
@@ -236,21 +244,34 @@ merged = false
 title = "The sweep: which months are closed, workers, disk floor, state file, events, Stop and resume"
 
 # Round-3 packages a step below waits for (R4-06, AUT-07). None is merged.
+# 23 Oct 2026 (D-6900, D-7135, D-7137): R4-14 left with S-14's re-plan (the
+# gap queue is dropped), R4-09 became R4-09b, and R4-11, IA-10c and SURV-1
+# joined, none of them merged.
 
 [[package]]
-name = "R4-09"
+name = "R4-09b"
 merged = false
-title = "backup verb and its drill"
+title = "the store's backup verb and its restore drill (AUT-06), split out of R4-09 by D-7137: cli backup to a second drive with a manifest, cli backup-drill restoring 3 months byte-equal"
 
 [[package]]
-name = "R4-14"
+name = "R4-11"
 merged = false
-title = "the gap queue: holes filed and pulled in one press"
+title = "cli ingest-run, the one attended command for the GDFL chain, and the store identity marker (D-6900, narrowed by D-7135)"
 
 [[package]]
 name = "R4-16"
 merged = false
-title = "the chain into a separate store root and the store compare"
+title = "the store compare root to root (cli store-compare --month) for proof 3's one-month build-twice test in two role=scratch roots; no full rebuild (D-7135)"
+
+[[package]]
+name = "IA-10c"
+merged = false
+title = "Zerodha half of IA-10b (D-4919): the keep-and-spool hook on both landing doors and a runs-ledger id on every Zerodha landing, into the existing store"
+
+[[package]]
+name = "SURV-1"
+merged = false
+title = "survivorship guard: the CASH (stocks) import scope comes from PIT-1 dated F&O membership, and a missing source is refused by name"
 
 [[package]]
 name = "R4-18"
@@ -301,6 +322,11 @@ title = "Zerodha futures 1day"
 name = "R4-29"
 merged = false
 title = "widened indices and non-F&O equities from GDFL"
+
+[[package]]
+name = "R3-17"
+merged = false
+title = "one upkeep runner: the store's catch-up builders as tracked runs on workers, with progress, Stop and resume"
 
 # ------------------------------------------------------------------- rules --
 
@@ -648,15 +674,15 @@ title = "Zerodha re-pull of every other series with the same holes: the shares (
 state = "pending"
 writes = "New generations of each listed series' Zerodha months with their derived rungs refolded, audit/zerodha.repairs, audit/zerodha.gaps, census."
 command = [
-  "planned: POST /ingest/queue vendor=zerodha segment=INDEX from=2018-01-01 to=2026-09-30 (R4-14's gap queue: one press files the holes the read-only plan lists and pulls them one month a request)",
-  "planned: POST /ingest/queue vendor=zerodha segment=CASH from=2018-01-01 to=2026-09-30 (the same for the shares, target=equities)",
+  "POST /pull/repair target=indices&vendor=zerodha&granularity=1min&cash_identity=zerodha_nse_checked&member=<INDEX>&from=<FIRST_DAY>&to=<LAST_DAY>&repair_reason=R3-36 S-14",
+  "POST /pull/repair target=equities&vendor=zerodha&granularity=1min&member=<SYMBOL>&from=<FIRST_DAY>&to=<LAST_DAY>&repair_reason=R3-36 S-14",
 ]
 dry_run = [
   "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX",
   "cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment CASH",
 ]
 env = ["BRUTEX_STORE"]
-prerequisites = ["WP-13c", "R4-14", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
+prerequisites = ["WP-13c", "IA-10c", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
 after = ["S-13"]
 check = [
   "the two dry-run commands again name no month that needs a repair",
@@ -664,7 +690,8 @@ check = [
 ]
 closes = ["DB-012", "DB-G33", "OWED-03", "OWED-30"]
 helps = ["CMP-19"]
-not_rehearsed = "waits for R4-14: the gap queue that files the plan's holes in one press is not built (until then each month is one POST /pull/repair from the /pull form, as S-13 lists NIFTY's); then for operator: a Kite access token valid on the day, for the index series"
+not_rehearsed = "waits for IA-10c: the keep-and-spool hook that keeps every window's answer for IA-9 is not merged, so a month repaired before it lands keeps no answer IA-9 can prove (PROVEN-GATE (b)); then for operator: a Kite access token valid on the day"
+note = "Re-planned on 23 Oct 2026 (D-6900 item 6, recorded with that entry; IA-10c's text under D-7135). R4-14's gap queue, which this step waited for, is dropped by D-6900, so each month is one attended repair into the existing store, in S-13's and S-15's shape: the two command lines are written once a month the dry run names, <INDEX> or <SYMBOL> the series, <FIRST_DAY> and <LAST_DAY> that month's first and last day, each pressed from the /pull repair form after the operator's yes, and each rehearsed first on a role=scratch copy of the affected months. A hole that cannot be filled stays owed and named, and PROVEN-GATE refuses its day. IA-10c's text: minutes landed through cli zerodha-repair --from-store read no_response_kept, which PROVEN-GATE (b) refuses, so a hole that must be admitted is filled through POST /pull/repair with the keep hook. Whether the shares batch Z4 landed that way on 13 Oct (last_run) need the same is not decided here."
 last_run = "13 Oct 2026, by the main session on build app18 (batch Z4, about 18:01 to 18:13 UTC): the shares' 42 hole sessions in 10 months, 1,933 symbol-months, each copied by cli zerodha-repair <SYMBOL> <FROM> <TO> --segment CASH --from-store <a scratch store of a fresh pull> --reason <batch Z4>: 15,302 repair lines in audit/zerodha.repairs (a new generation per month and rung, every held bar kept). No index series was in it, so DB-012 and the NIFTY and BANKNIFTY half of DB-G33 stay open."
 disk = "measured on the dry run"
 
@@ -738,13 +765,16 @@ note = "Read 15 Oct: the month ranges are already folded for the series checked,
 id = "S-17"
 title = "An independent copy of the raw archives and the store on a second drive"
 state = "pending"
-writes = "The copy on the second drive, and one line appended to <store>/ops/backups.log: copied=<UTC> dest=<path> raw_bytes=<n> store_bytes=<n> by=<who>."
+writes = "The copy on the second drive with its append-only manifest there, and one line appended to <store>/ops/backups.log: copied=<UTC> dest=<path> raw_bytes=<n> store_bytes=<n> by=<who>; then the restore drill's one line (date, months, result). The drill restores into a private role=scratch root and writes nothing into the store (R4-09b, D-7137)."
 command = [
-  "planned: cli backup <SECOND_DRIVE> (R4-09: the first full copy of the raw archives and the store)",
-  "planned: cli backup <SECOND_DRIVE> --drill 3 (R4-09: the restore drill on three months)",
+  "planned: cli backup --to <SECOND_DRIVE> (R4-09b: the first full copy of the raw archives and the store)",
+  "planned: cli backup-drill --from <SECOND_DRIVE> --months 3 (R4-09b: the restore drill on three months)",
 ]
-dry_run = ["rsync -a --dry-run --stats RAW_ARCHIVES STORE SECOND_DRIVE"]
-prerequisites = ["WP-81", "R4-09", "operator: a second drive of at least the store plus the raw archives", "operator: every writer stopped (the app and every cli run) while the copy is taken"]
+dry_run = [
+  "rsync -a --dry-run --stats RAW_ARCHIVES STORE SECOND_DRIVE",
+  "planned: cli backup --to <SECOND_DRIVE> --plan (R4-09b: file counts and bytes, copies nothing)",
+]
+prerequisites = ["WP-81", "R4-09b", "operator: a second drive of at least the store plus the raw archives", "operator: every writer stopped (the app and every cli run) while the copy is taken"]
 check = [
   "GET /disk.json answers backup.recorded true and backup.last the copied= instant, and every page's standing no-copy line is gone (recorded:false today: ops/backups.log does not exist; read 15 Oct)",
   "cli census-recount gdfl --from 2018-09-03 --to 2018-11-05 with BRUTEX_STORE on the copy, before any other writer starts on it (this check writes the copy's GDFL census and GDFL import journal, so it is the first writer on the copy): every count equals the census copied",
@@ -756,7 +786,7 @@ check = [
 ]
 env = ["BRUTEX_STORE"]
 closes = ["DB-B73", "OWED-21"]
-not_rehearsed = "waits for R4-09: cli backup is not built; then for operator: no second drive is attached"
+not_rehearsed = "waits for R4-09b: cli backup and cli backup-drill are not built (split out of R4-09 by D-7137, 23 Oct 2026, as the store's only disaster path under D-7135); then for operator: no second drive is attached"
 disk = "on the second drive: the store plus the raw archives (about 3.6 TiB used on this drive on 13 Oct); on this drive: one log line"
 note = "RAW_ARCHIVES, STORE and SECOND_DRIVE are the operator's three paths. The copy is append-only: no --delete-after, so a file removed from this drive is never removed from the copy (the store is append-only, CLAUDE.md section 3 rule 8; verify-R3-36-r1 followup). The dry run writes nothing on either side. The GDFL recount spans leave out 2018-11-06 and 2018-11-09 for the reason S-01's note gives (D-3317 item 5, verify-R3-36-r3), and the Zerodha one starts at the oldest Zerodha month the store holds, not at the GDFL archive's first day."
 
@@ -1230,17 +1260,23 @@ note = "Filtered to BANKNIFTY: an unfiltered options run is refused underlying_s
 
 [[step]]
 id = "S-42"
-title = "One month of every kind built by the chain into a NEW separate store root and compared with the production store (E2E-07)"
+title = "Proof 3: one month of every kind built twice, through the per-kind verbs, into two NEW empty role=scratch roots, and the two compared (E2E-07; D-7135)"
 state = "pending"
-writes = "Nothing in the operator's store: a NEW store root that the chain fills with one month of every kind, and the compare's report."
-command = ["planned: cli store-compare <SLICE_ROOT> $BRUTEX_STORE --month <YYYY-MM> (R4-16)"]
-dry_run = ["planned: the chain into a NEW empty root on a one-day slice (R4-16's rehearsal)"]
+writes = "Nothing in the operator's store: two NEW empty scratch roots, each marked role=scratch first and filled with the same one month of every kind through the per-kind verbs, and the compare's report."
+command = [
+  "planned: cli ingest-run --init-store role=scratch with BRUTEX_STORE set to <SCRATCH_A>, then to <SCRATCH_B> (R4-11: it marks an empty root and runs no chain stage; FM-282)",
+  "planned: cli gdfl-import indices tickstore <FROM> <TO>, then stocks, then options, for one month, with BRUTEX_STORE set to <SCRATCH_A>, then the same with it set to <SCRATCH_B> (the per-kind verbs, never cli ingest-run's chain on an empty root)",
+  "planned: POST /pull/run for that month's Zerodha window, from an app serving <SCRATCH_A>, then one serving <SCRATCH_B> (R4-16 names the door)",
+  "planned: cli store-compare <SCRATCH_A> <SCRATCH_B> --month <YYYY-MM> (R4-16)",
+]
+dry_run = ["planned: the same per-kind builds over one day, not one month, into two role=scratch roots, then cli store-compare <SCRATCH_A> <SCRATCH_B> --month <YYYY-MM> (R4-16's rehearsal)"]
 env = ["BRUTEX_STORE"]
-prerequisites = ["R4-16", "operator: the full 2018-09 to 2026-09 rebuild only on the operator's yes and above the free-space floor"]
-check = ["the compare reports every month of the slice equal, or each difference named by series, rung and second"]
+prerequisites = ["R4-16", "SURV-1", "R4-11"]
+check = ["the compare reports 0 bar differences for the month, and names every structural difference (run ids, landed_at, layout); served bars decide (FM-157)"]
 closes = ["OWED-22"]
-not_rehearsed = "waits for R4-16: the chain into a separate root and the store compare are not built"
-disk = "the slice root: one month of every kind (to be measured); the full rebuild is about 2 TB (an extrapolation, measured first)"
+not_rehearsed = "waits for R4-16: cli store-compare is not built; then for SURV-1 (proof 3's scratch stocks import waits for its scope) and R4-11 (the role=scratch marker)"
+disk = "two scratch roots of one month of every kind each (to be measured on the rehearsal); nothing in the operator's store"
+note = "Re-planned on 23 Oct 2026 as proof 3 (D-7135; R4-16's text, its correction (iv)). It is a test of CLAUDE.md section 3 rule 5, never a re-import: it never touches production, never makes a delete list, and never runs cli ingest-run's chain on an empty root, which on an empty root would catch up every owed day and be the full rebuild D-7135 refuses. Struck with it: the chain into a NEW empty root (the old dry run), the full 2018-09 to 2026-09 rebuild on the operator's yes (the old operator prerequisite), and the about 2 TB disk line. The kinds are GDFL indices, stocks, options and tick store, plus that month's Zerodha pull (proof 3's text). Comparing a scratch month with production stays possible with the same verb, as a report only. R4-11 is a prerequisite because the role=scratch marker each root gets first is its verb; R4-16's text names R4-16 and SURV-1."
 
 [[step]]
 id = "S-43"
@@ -1356,3 +1392,49 @@ check = ["store imports/gdfl.journal: a done line for every indices day 2018-09-
 closes = ["OWED-29"]
 not_rehearsed = "waits for R4-29: the widened index rows are not built"
 disk = "the widened index rows' months, about 9 files a day (the 14 Oct S-09 run's figure; to be measured on the rehearsal)"
+
+[[step]]
+id = "S-50"
+title = "Sort index (.srt) for every GDFL and Zerodha month that lacks one, by the upkeep runner: GDFL's index months (five widened indices and INDIAVIX), then its shares, then its options, then Zerodha's whole feed"
+state = "pending"
+writes = "<month>.srt beside the generation each reader opens (a repaired month's beside its revision), each into a new inode, synced and renamed into place; audit/upkeep.gdfl.srt.log and audit/upkeep.zerodha.srt.log, each run's journal, appended. A GDFL run takes no lock of an import (D-6270 amendment 1): it is refused before its walk while a GDFL import or census verb holds its lock, and stops at its next item, for a resume, if one starts while it runs; so it is run with no GDFL import running. Zerodha has no import run lock: its run meets a pull on each month's own lock alone, so it is run with no Zerodha pull running (autopilot paused). While a worker builds a month's .srt it holds that one month's lock exclusive (srt_builder: one month's lock at a time), so a /db or /bars read of that month that waits past api::detail::READ_PATIENCE_MS (200 ms) answers 503 'being written, ask again' with Retry-After until the item ends; every other month answers as before (an item took about 140 ms on average on the private copy, 170 GDFL index months in 23.8 s at 1 worker, 21 Oct 2026). No bar changes."
+command = [
+  "cli upkeep run srt gdfl NSE/INDEX --workers 8",
+  "cli upkeep run srt gdfl NSE/CASH --workers 8",
+  "cli upkeep run srt gdfl NSE/FNO --workers 8",
+  "cli upkeep run srt zerodha --workers 8",
+]
+dry_run = [
+  "cli upkeep plan gdfl",
+  "cli upkeep plan zerodha",
+  "cli upkeep run srt gdfl --workers 8 with BRUTEX_STORE on a private copy",
+  "cli upkeep run srt zerodha --workers 8 with BRUTEX_STORE on a private copy",
+]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R3-17"]
+check = [
+  "cli upkeep status srt gdfl: the newest run ended done, every item clean (no run yet on 18 Oct)",
+  "cli upkeep plan gdfl: lacks .srt only on months the run named small (INDEX 67, CASH 15,247 and FNO 360,259 lacking on 18 Oct, small ones among them)",
+  "GET /bars/window.json?feed=gdfl&exchange=NSE&segment=CASH&symbol=RELIANCE&contract=&timeframe=1s&from=2018-09&to=2026-09&sort=c&dir=desc&offset=0&limit=50 answers 200 with scan_rows 0 (400 today: scan_budget_exceeded, 32417004 rows in months with no .srt)",
+  "cli upkeep status srt zerodha: the newest run ended done, every item clean (no run yet on 19 Oct)",
+  "cli upkeep plan zerodha: lacks .srt only on months the run named small (198,188 of 251,270 lacking on 19 Oct, small ones among them)",
+  "GET /bars/window.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&contract=&timeframe=1min&from=2018-01&to=2026-09&sort=c&dir=desc&offset=0&limit=50 answers 200 with scan_rows 0 (796027 today, 19 Oct: none of its 105 months has a .srt)",
+]
+closes = ["DB-N14"]
+not_rehearsed = "waits for R3-17: gate 30 refuses rehearsal figures beside an unmerged prerequisite; the figures the branch's build took on a private copy are in the note, to be moved into rehearsed_* when the merge sets merged = true"
+disk = "Measured on 18 Oct 2026 by the read-only `cli upkeep plan gdfl` on the shadow R3-17 (the drive's bars read through its link, generation pointers cloned): months that lack a .srt, INDEX 67 of 268, CASH 15,247 of 29,214, FNO 360,259 of 2,068,972. A month under 1,024 bars gets no file (the run says small); the plan reads names, not bodies, so how many of these are small is NOT MEASURED before the run. Bytes a built month adds, measured on the private copy: 21,952,672 a NIFTY one-second month, 18,268,561 a RELIANCE one, 1,043,981 a NIFTY option month of 2019-03. Upper bounds, every lacking month built (an extrapolation): INDEX 67 x 22.0 MB = 1.5 GB, CASH 15,247 x 18.3 MB = 279 GB, FNO 360,259 x 1.04 MB = 376 GB. The drive had 1.3 TiB free on 18 Oct. Zerodha, measured on 19 Oct 2026 by the read-only `cli upkeep plan zerodha` on the same shadow (52 s): 198,188 of 251,270 month files lack a .srt. On the Zerodha private copy (NIFTY, BANKNIFTY and RELIANCE, nine rungs each) 1,152 of its 2,707 lacking months were built and 1,555 were small, adding 217,578,720 bytes (188,870 a built month on average). Extrapolated from that sample, not measured: 198,188 x 1,152 / 2,707 = 84,341 built months x 188,870 bytes = 15.9 GB; every lacking month built, 37.4 GB. The drive had 1.2 TiB free on 19 Oct."
+note = "Rehearsed on the branch's build (stamped 101473942; its crates differ from the branch head only in doc comments and the plan's .auc rule), 18 Oct 2026, on private copies under work-20260925/shadow/R3-17-priv (APFS clones, cp -c, of the operator's NIFTY and BANKNIFTY spot, RELIANCE and NIFTY 2019-03 option months with every sidecar left out, generation pointers and revisions included; manifest/, imports/, audit/ and session-masters/ cloned), every run under the kernel write lock rolock.sb: the whole private feed, 1,107 month files, in one run at 8 workers: 16,688 ms, 600 built and 507 small, 6,354,220,416 bytes of .srt in 600 files, exit 0 (feed8); a whole-history RELIANCE sort by close there answers 200 with scan_rows 0, p50 6.0 ms, p99 8.1 ms (n = 200). The NIFTY and BANKNIFTY spot months stopped by `cli upkeep stop` after 23 and resumed at 4 workers (171 built) leave all 194 .srt byte for byte those of the one-run copy (sr1). At 1, 4 and 8 workers the .srt, .tix and .sum of every month are byte for byte alike (1,509 files compared). An import started during an upkeep run on the copy was refused run_busy, its holder record naming the upkeep verb (ex1): that was the design before D-6270 amendment 1 (20 Oct, IA-2); under it the import is not refused at its door, the upkeep stops at its next item naming the import's claim, and the resume builds the rest (proved by upkeep_and_an_import_exclude_each_other_on_a_month; the rehearsal of the amended build is in the R3-17 repair-1 report). A month under 1,024 bars gets no .srt and stays listed as lacking, so the plan never reads zero lacking: the check names the small months instead. While the run indexes a month, a /db sorted page of that month answers 503 until its .srt is renamed into place (seen by the round-2 check of 20 Oct, state/fix/round2/verify-R3-17-r1.json; not re-measured by repair 1). Months per second and the stage that holds 8 workers back: docs/06-limits.md L-R317-01. NIFTY and BANKNIFTY spot need nothing: S-05 and the repairs' revisions index every month a reader opens (scan_rows 0 of 44,102,990 on 18 Oct, L-R317-09). Run it after no other cli run works on the store (R-01). The day index needs no step: the same plan found 0 months lacking a .tix in INDEX, CASH and FNO. The month summary (.sum) lacks on every month (2,068,972 FNO, 29,214 CASH, 268 INDEX) and has no row in this list: R3-06 closed DB-A30 in code; a step for its store half (cli upkeep run msum gdfl) is the operator's to order. ZERODHA, rehearsed 19 Oct 2026 on the branch's release build on a private copy work-20260925/shadow/R3-17-z19 (APFS clones of the operator's Zerodha NIFTY, BANKNIFTY and RELIANCE months, all nine rungs, with manifest/, imports/, audit/, logs/, session-masters/, bar-generations-v1/, bar-revisions-v1/ and the masters cloned), one fresh clone a worker count (z19w1, z19w4, z19w8), every run under rolock.sb, NIFTY first: `cli upkeep run srt zerodha NSE/INDEX/NIFTY --workers N`, 981 items (416 built, 565 small) at 129.2, 475.2 and 418.6 items a second at 1, 4 and 8 workers; then `cli upkeep run srt zerodha --workers N` over the rest of the copy, 2,291 items (736 built, 1,555 small) at 168.9, 628.3 and 491.2; exit 0 every run. The 1,352 .srt files of the three copies are byte for byte alike (the 200 RELIANCE ones the import had written among them) and all 2,907 bar files are byte for byte the untouched copy's. Served from the copies, n = 200 sequential GETs each (curl time_total, 127.0.0.1:9701), untouched then after the run: a whole-history NIFTY 1min sort by close p50 72.65 then 3.21 ms, p99 98.86 then 4.11 ms, max 123.06 then 4.38 ms, scan_rows 796,027 then 0; BANKNIFTY 1min p50 54.16 then 4.99 ms, p99 69.83 then 8.65 ms; RELIANCE 1min p50 49.40 then 5.75 ms, p99 63.90 then 10.64 ms. At 8 workers the whole Zerodha feed would take about 404 to 474 s of items plus the walk (an extrapolation from these rates). Run it with no Zerodha pull running: Zerodha has no import run lock (D-6270 item 4)."
+
+[[step]]
+id = "S-51"
+title = "The existing production root's store identity marker (role=production), written once by this recorded step before the first real cli ingest-run (R4-11; D-6900 item 4 as D-7135 narrows it)"
+state = "pending"
+writes = "One store identity marker on the existing, non-empty production root, written create_new and never overwritten. No chain stage runs, so no bar, census or journal line is written (R4-11)."
+command = ["planned: cli ingest-run --init-store role=production (R4-11: only on the existing, non-empty production root this step names by canonical path and (dev, ino), given explicitly and never resolved from an inherited BRUTEX_STORE, and only with this step's operator_yes recorded)"]
+dry_run = ["planned: cli ingest-run --init-store role=production into an empty private root, which is refused production_root_must_exist and writes nothing (R4-11's a_production_marker_into_an_empty_root_is_refused)"]
+prerequisites = ["R4-11", "operator: the yes this step records as its operator_yes"]
+check = ["the production root holds its role=production marker, and cli ingest-run --plan there is no longer refused store_identity_missing (D-6900 item 5 (g))"]
+closes = ["OWED-32"]
+not_rehearsed = "waits for R4-11: cli ingest-run and its --init-store are not built; then for operator: the yes this step records"
+disk = "one marker file (to be measured on the rehearsal)"
+note = "Added on 23 Oct 2026 from R4-11's text under D-7135: the existing root gets its marker only through the recorded config/store-steps.toml step with the operator's yes, and that step is a prerequisite of the first real run (proof 2). A role=production init into an EMPTY root is refused by name: a new empty production root is the fresh-scratch path D-7135 refuses. --init-store role=scratch runs only into an empty root, and neither form runs the chain. A fixture that needs a production-role root builds it through this same step with a fixture row, never by relaxing the refusal (R4-11's text). Tests: a_production_marker_is_written_only_by_its_recorded_store_step_on_the_existing_root and a_production_marker_into_an_empty_root_is_refused."

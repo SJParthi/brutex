@@ -1360,6 +1360,17 @@ const ALLOW_SEARCH: Allow = &[
     // 86,400). O(log n) per auction record of the asked day. Reason in
     // docs/06-limits.md, "Gate 11 — AG-04, declared after it merged".
     ("crates/api/src/sources.rs", 1),
+    // BASE-GATE11, 20 Oct 2026 (D-6620): AG-02, merged before gate 11 ran
+    // on the Mac; reason in docs/06-limits.md, "Gate 11 — BASE-GATE11":
+    // the re-key planner's `month_of`, a bisection of one key's months
+    // (oldest first, at most a few dozen), in `cli gdfl-rekey` only.
+    ("crates/pull/src/gdfl_rekey.rs", 1),
+    // BASE-GATE11, 22 Oct 2026 (repair 5, D-6629's addendum): R3-30's
+    // `LotTable::lot_on` bisects ONE underlying's rows, at most
+    // `MAX_LOT_ROWS_PER_UNDERLYING` = 64 (a compile-time cap, refused past it
+    // when the table is built), so at most 7 comparisons a lookup whatever
+    // the table holds. Reason in docs/06-limits.md, "Gate 11 — BASE-GATE11".
+    ("crates/costs/src/lot.rs", 1),
 ];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
@@ -1384,7 +1395,7 @@ const ALLOW_FLOAT: Allow = &[
     ("crates/runner/src/admission.rs", 4),
     ("crates/runner/src/bootstrap.rs", 52),
     ("crates/runner/src/bootstrap_family_pass.rs", 17),
-    ("crates/runner/src/outcome.rs", 26),
+    ("crates/runner/src/outcome.rs", 28), // 26 -> 28, PREC-1 declared by BASE-GATE11 (D-6626, docs/06-limits.md)
     ("crates/runner/src/report.rs", 4),
     ("crates/runner/src/validate.rs", 1),
     ("crates/store/src/format.rs", 14),
@@ -1477,7 +1488,7 @@ const ALLOW_UNSIZED: Allow = &[
     // — the /db fix round and the ingest automation, declared together".
     ("crates/api/src/audit_json.rs", 1),
     ("crates/api/src/bars.rs", 1),
-    ("crates/api/src/bars_series.rs", 1),
+    ("crates/api/src/bars_series.rs", 2), // 1 -> 2, R3-07 declared by BASE-GATE11 (docs/06-limits.md)
     ("crates/api/src/calendar_build.rs", 1),
     ("crates/api/src/dayflags.rs", 1),
     ("crates/api/src/import_journal.rs", 1),
@@ -1497,6 +1508,14 @@ const ALLOW_UNSIZED: Allow = &[
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": the keys of one table of the committed step list.
     ("crates/pull/src/rehearsal.rs", 1),
+    // BASE-GATE11, 22 Oct 2026 (repair 5, D-6629's addendum): R3-30's
+    // process interner, two maps keyed by the SHA-256 of a reference file,
+    // one entry a distinct generation a process loads, inserted only by a
+    // load (`intern_index_rows`, `build_lineage`), never by a request or a
+    // row; how many generations a process meets is not known when the
+    // `OnceLock` builds it. Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-GATE11". Its F&O spans map is sized instead (rewritten).
+    ("crates/pull/src/reference_data.rs", 2),
 ];
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -1515,7 +1534,7 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/bars.rs", 3),
     ("crates/api/src/calendar_of.rs", 3),
     ("crates/api/src/constituents.rs", 3),
-    ("crates/api/src/logs.rs", 4), // 1 -> 4, GF-1 (docs/06-limits.md)
+    ("crates/api/src/logs.rs", 5), // 1 -> 4, GF-1; 4 -> 5, R3-24 (docs/06-limits.md)
     ("crates/cli/src/frontier.rs", 1),
     ("crates/cli/src/global_replay_v3.rs", 1),
     ("crates/cli/src/knobs.rs", 1),
@@ -1568,6 +1587,15 @@ const ALLOW_SORT: Allow = &[
     // order; O(n log n) per image written (L-IA-4), never on a lookup. Its
     // reason is in docs/06-limits.md, gate 11 rule 4 (D-4861).
     ("crates/store/src/verdict.rs", 1),
+    // D-4881 (IA-9): a Zerodha spool merge sorts the spool's records once by
+    // (exchange, day, key, receipt), so each day is one bucket and one key's
+    // records follow its receipts; O(n log n) per spool merged, in a
+    // `verify-merge` process, never on a request path (L-IA-17). And the
+    // spools waiting once per listing by (run, segment, timeframe, month),
+    // O(s log s), s bounded by D-4921 (RA-050), so a later run commits after
+    // an earlier one at any width. Its reason is in docs/06-limits.md, gate
+    // 11 rule 4 (D-4861).
+    ("crates/pull/src/zerodha_verify.rs", 2),
     // R3-05 repair 4: `store::settings::list_numbers` sorts the generation
     // numbers of one settings directory, O(g log g) for g generations on
     // disk, once per reader start and once per save; never on a refresh or
@@ -1644,6 +1672,17 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — R3-09 and R4-06, declared after they
     // merged": one answer's cells, at most `CELLS_MOST` = 4,096.
     ("crates/api/src/census_rollup.rs", 1),
+    // R3-24, 18 Oct 2026: the /logs picture's top codes, ordered once per
+    // answer over its fixed table of `PICTURE_CODES` = 16 entries; reason in
+    // docs/06-limits.md, "Gate 11 — R3-24".
+    ("crates/telemetry/src/sink.rs", 1),
+    // BASE-GATE11, 20 Oct 2026 (D-6620): AG-02 and IA-2; reasons in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11": the re-key planner's
+    // spans of the keys moving into one target month, in `cli
+    // gdfl-rekey` only; and a claim's filter digest, the names of one
+    // run's filter (at most `ONLY_MAX` = 256) once per run start.
+    ("crates/pull/src/gdfl_rekey.rs", 1),
+    ("crates/pull/src/gdfl_run_locks.rs", 1),
     // PIT-1 (D-5164, docs/06-limits.md L-PIT-8): `cli fno-membership` sorts
     // only its own report and bench samples, once per run, never a lookup:
     // the build's per-month timings (at most the months it wrote), the
@@ -1657,6 +1696,13 @@ const ALLOW_SORT: Allow = &[
     // per load; one series' in-session jumps, once per scan.
     ("crates/pull/src/listing.rs", 1),
     ("crates/cli/src/series_identity.rs", 1),
+    // BASE-GATE11, 22 Oct 2026 (repair 5, D-6629's addendum): R3-30's
+    // `LotTable::from_rows` groups the lot table's rows by underlying once
+    // per load of the table, at most `MAX_LOT_ROWS` = 100,000 (refused
+    // past it before the order is built); a lookup never sorts. Reason in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
+    // its unmeasured days was rewritten instead.
+    ("crates/costs/src/lot.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1763,7 +1809,7 @@ const ALLOW_SCAN: Allow = &[
     // of one df line. Reasons in docs/06-limits.md, gate 11 rules 6 and 7.
     ("crates/pull/src/gdfl_dropbox.rs", 3),
     ("crates/pull/src/disk_projection.rs", 1),
-    ("crates/telemetry/src/sink.rs", 3), // 1 -> 3, GF-1 (docs/06-limits.md)
+    ("crates/telemetry/src/sink.rs", 4), // 1 -> 3, GF-1; 3 -> 4, R3-24 (docs/06-limits.md)
     // GF-1, 13 Oct 2026: the /db fix round and the ingest automation,
     // read occurrence by occurrence; reasons in docs/06-limits.md, "Gate 11
     // — the /db fix round and the ingest automation, declared together".
@@ -1773,17 +1819,18 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/census.rs", 1),
     ("crates/api/src/chain.rs", 2),
     ("crates/api/src/dayflags.rs", 2),
-    ("crates/api/src/disk_route.rs", 1),
+    // api/src/disk_route.rs 1 -> 0, tightened by BASE-GATE11 (D-6628): RUST-1
+    // measures the disk in-process, so `parse_df`'s scan of one df line is gone.
     ("crates/api/src/gaps_route.rs", 1),
     ("crates/api/src/import_journal.rs", 3),
     ("crates/api/src/imports.rs", 3), // 2 -> 3, AF-02 merged after GF-1, GF-1 17 Oct (docs/06-limits.md)
-    ("crates/api/src/logs.rs", 2),
+    ("crates/api/src/logs.rs", 7), // 2 -> 8, R3-24; 8 -> 7, its repair round 2 (docs/06-limits.md)
     ("crates/api/src/scrub_route.rs", 3),
     ("crates/cli/src/scrub_blocks.rs", 1),
     ("crates/pull/src/expiry_alias.rs", 4),
     ("crates/pull/src/gdfl_lineage.rs", 2),
     ("crates/telemetry/src/run_dirs.rs", 1),
-    ("crates/pull/src/calendar.rs", 1), // 0 -> 1, WP-62 after the round, GF-1 (docs/06-limits.md)
+    ("crates/pull/src/calendar.rs", 2), // 0 -> 1, WP-62 after the round, GF-1; 1 -> 2, R3-30 declared by BASE-GATE11 (D-6629, docs/06-limits.md)
     ("crates/store/src/sealed.rs", 2), // 0 -> 2, SC-2 merged after GF-1, GF-1 16 Oct (docs/06-limits.md)
     // GF-1, 17 Oct 2026: AF-01, R3-32 and R3-35, merged after GF-1's run of
     // 16 Oct; reasons in docs/06-limits.md, "Gate 11 — the packages merged
@@ -1799,10 +1846,49 @@ const ALLOW_SCAN: Allow = &[
     // merged": the eight-word `NEVER_AUTOMATIC` table over a kind of at
     // most `MAX_KIND_BYTES` = 64 bytes.
     ("crates/pull/src/rehearsal.rs", 1),
+    // R3-24, 18 Oct 2026: the state-change table's `row_of`, a search of
+    // the 23-row compile-time `TABLE`; reason in docs/06-limits.md, "Gate 11
+    // — R3-24".
+    ("crates/telemetry/src/state_events.rs", 1),
+    // BASE-GATE11, 20 Oct 2026 (D-6620): AH-01 and IA-1; reasons in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11": `tighten`, the cut
+    // days of one span, once per retry that rebuilds the whole column
+    // (the rule-7 entry it replaces is gone); and a run filter's names,
+    // refused past `ONLY_MAX` = 256 before any walk of them reads a name.
+    ("crates/cli/src/minute_gaps.rs", 1),
+    ("crates/pull/src/gdfl_run.rs", 1),
+    // BASE-GATE11, 21 Oct 2026 (repair 4, D-6629's addendum): IA-3-OPT's
+    // `verify_marker` finds one ok-marker line's key among `MARKER_KEYS`, a
+    // compile-time `[&str; 8]`, in a marker read capped at `MARKER_MAX_BYTES`
+    // = 4 KiB; an unknown or repeated key is refused at its line, so at most
+    // 9 lines are searched, 72 comparisons a marker. Reason in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11".
+    ("crates/pull/src/gdfl_v3.rs", 1),
+    // BASE-GATE11, 22 Oct 2026 (repair 5, D-6629's addendum): R3-30's
+    // searches, each bounded by a compile-time table or by the row it
+    // checks. `costs::lot::compiled_rows` finds a lot row's contract rule
+    // among one slot's `CONTRACT_RULES` (`RULES_PER_SLOT` = 2), once per
+    // compiled row when the store's table is seeded; `reference_data`'s
+    // `render` and `rate_draft` find the first field of one row that the
+    // grammar cannot carry, after the row's width is held to the table's
+    // compile-time `columns()` (render) or to the 8 columns of
+    // `riskfree::HEADER`, which `Series::parse` refuses any other count of
+    // first (rate_draft), so each is one pass over a row it then writes; and
+    // `calendar::special_note` (1 -> 2 above) walks the three
+    // `SOURCED_SPECIAL_NOTES`. Reasons in docs/06-limits.md, "Gate 11 —
+    // BASE-GATE11".
+    ("crates/costs/src/lot.rs", 1),
+    ("crates/pull/src/reference_data.rs", 2),
     // PIT-1 (D-5163, docs/06-limits.md L-PIT-8): the membership file's name
     // decoder finds the end of one zero-padded name inside its fixed
     // `NAME_LEN` bytes, a compile-time width; never a search over the data.
     ("crates/pull/src/fno_membership.rs", 1),
+    // IA-9 (D-4858, D-4904; docs/06-limits.md, "Gate 11 — IA-9"): the first
+    // complete bucket of ONE day's refold, at most the session's minutes
+    // (375 on a regular day), inside a verification already O(minutes); and
+    // a word's position in the runs ledger's compiled `MODES` (15) and
+    // `KINDS` (6), once per run.
+    ("crates/pull/src/zerodha_verify.rs", 2),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -1880,7 +1966,6 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/indexstopjson.rs", 1),
     ("crates/cli/src/operation_audit.rs", 2),
     ("crates/api/src/indexstoplaunch.rs", 1),
-    ("crates/cli/src/minute_gaps.rs", 1),
     ("crates/api/src/indexstopqualificationjson.rs", 1),
     ("crates/api/src/index_consistency_projection.rs", 1),
     ("crates/cli/src/index_stop_search_reader.rs", 1),
@@ -1913,10 +1998,10 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/calendar_record.rs", 1),
     ("crates/api/src/calendar_route.rs", 2),
     ("crates/api/src/chain.rs", 1),
-    ("crates/api/src/disk_route.rs", 2),
+    ("crates/api/src/disk_route.rs", 3), // 2 -> 3, AG-05 declared by BASE-GATE11 (D-6627, docs/06-limits.md)
     ("crates/api/src/gaps_route.rs", 3),
     ("crates/api/src/imports.rs", 2),
-    ("crates/api/src/logs.rs", 5),
+    ("crates/api/src/logs.rs", 6), // 5 -> 6, R3-24 (docs/06-limits.md)
     ("crates/api/src/repair_route.rs", 1),
     ("crates/cli/src/gdfl_import_command.rs", 2),
     // 4 -> 5, DATA-1 (D-5172): `feed-reconcile` writes only with `--out`, a
@@ -1925,7 +2010,9 @@ const ALLOW_MEMBER: Allow = &[
     // `fno-membership` arm `arguments.contains(&"build")` is one of the three
     // arm shapes gate 30's `form_of` reads, over the verb's own command line
     // (a handful of words), never the data.
-    ("crates/cli/src/store_write.rs", 6),
+    // 6 -> 7, IA-9 (D-4881): `verify-merge` writes unless `--list`, the same
+    // probe of its own argument slice, bounded by its argument count.
+    ("crates/cli/src/store_write.rs", 7),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),
@@ -1959,10 +2046,25 @@ const ALLOW_MEMBER: Allow = &[
     ("crates/api/src/census_rollup.rs", 1),
     ("crates/api/src/settings_route.rs", 1),
     ("crates/pull/src/rehearsal.rs", 2),
+    // BASE-GATE11, 20 Oct 2026 (D-6620): AG-02 and IA-2; reasons in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11": a hash probe of the
+    // re-key planner's copied months, and FIXED `const` ARRAYS -- the
+    // runs ledger's 15 modes, 6 kinds and 3 askers, a claim's 7 modes,
+    // 4 kinds and 5 sources, and a stop's 4 askers.
+    ("crates/pull/src/gdfl_rekey.rs", 1),
+    ("crates/pull/src/gdfl_run_ledger.rs", 3),
+    ("crates/pull/src/gdfl_run_locks.rs", 4),
+    ("crates/pull/src/gdfl_run_stop.rs", 1),
     // R4-17 repair 2, 18 Oct 2026: a hash probe of the torn day months
     // (`DayBook::unread_holds`, C-ZI-03); docs/06-limits.md, "Gate 11 —
     // R4-17, declared at its merge".
     ("crates/pull/src/series_identity.rs", 1),
+    // BASE-GATE11, 22 Oct 2026 (repair 5, D-6629's addendum): R3-30's
+    // `CalendarTable::kind_of` asks whether a day lies in the record's own
+    // span with `(self.first..=self.last).contains(&day)`, a RangeInclusive:
+    // two comparisons, the shape rule 7 permits. Reason in
+    // docs/06-limits.md, "Gate 11 — BASE-GATE11".
+    ("crates/pull/src/reference_data.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

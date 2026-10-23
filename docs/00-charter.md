@@ -56,6 +56,11 @@ happen because a task seemed to need it.
     Documents carry the shape `/<org>/<env>/<vendor>/<field>`; the real
     segments are resolved at runtime from an untracked local configuration.
     Enforced by CI gate 1c, not by review. See D-0013.
+11. No Py-language anywhere, `web/` included: no file of it, no shebang that
+    runs its interpreter, and its name in no tracked file, in any case. It is
+    written "the Py-language" in this repository for that reason. The
+    operator's rule of 16 October 2026; enforced under `cargo test` by
+    `crates/vocab/tests/no_py_language.rs`, not by review. See D-5250, D-5251.
 
 ---
 
@@ -1678,6 +1683,35 @@ not `f_blocks − f_bfree` (boot volume: 334,431,264,768 bytes against
 figure it prints. Which call `df` reads it from was not read: UNVERIFIED. The
 route's `used_bytes` stays `f_blocks − f_bfree` and says so (D-5241,
 `docs/06-limits.md` L-RUST1-1).
+
+## NSE charge circulars for options premium — read 13 and 15 Oct 2026 (D-5100)
+
+`CLAUDE.md` §3 rule 1 requires every exchange cost the code applies to trace to
+a source recorded here. The circulars below were read as PDF text from
+`nsearchives.nseindia.com` on 13 Oct 2026 (IST) for the F&O charge survey
+(`state/fno-winners-20261013/sources-charges.json`, rows E-03, E-04 and E-06)
+and `FA73061` again on 15 Oct 2026 by the charge attack run
+(`state/charges-deep-check-20261015.json`, keys `rates` and `rateVerdicts`).
+Neither read recorded a digest of the bytes, so none is given: **the sha256 of
+each circular is UNVERIFIED**, and the exchange may serve other bytes later.
+Each circular's title was not recorded either and is UNVERIFIED.
+
+| Circular | Dated | Effective | URL | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|---|---|
+| `NSE/FA/73061` | 27 Feb 2026 | 1 Mar 2026 — "The above revision will be applicable with effect from March 1, 2026." | `https://nsearchives.nseindia.com/content/circulars/FA73061.pdf` | Equity options transaction charge ₹3,552.99 per crore of premium each side, and the NSE IPFT contribution ₹0.01 per crore each side: ₹3,553 in all, the same total as before (₹3,503 + ₹50). "Equity Options" with no index/stock split. Its text cites the preceding circular as `FA/64323`, a misprint of `FA64232`. | `costs::regime::NSE_EXCHANGE_CHARGE_FA73061` and the 2026-03-01 rows of the NSE exchange-charge and IPFT tables, folded to ₹3,553 + zero because the encoding is one rupee per crore (D-5100) |
+| `NSE/FA/64232` | UNVERIFIED (not recorded) | 1 Oct 2024 | `https://nsearchives.nseindia.com/content/circulars/FA64232.pdf` | Equity options transaction charge ₹3,503 per crore of premium each side, under SEBI's true-to-label circular. The row carried from the predecessor's `COSTS_VERIFIED` §2 row 3; read again on 13 Oct 2026 beside `FA73061` (E-03 `also_read`). | `costs::regime::NSE_EXCHANGE_CHARGE`, the 2024-10-01 row, unchanged |
+| `NSE/FA/56129` | UNVERIFIED (not recorded) | 1 Apr 2023 | `https://nsearchives.nseindia.com/content/circulars/FA56129.pdf` | NSE IPFT contribution on options ₹50 per crore of premium from 1 Apr 2023 (the figure `FA73061` revised), and ₹0.01 per crore as the figure it replaced, whose first day the read did not establish. | `costs::rate::NSE_IPFT` and the 2023-04-01 row of the NSE IPFT table; the window before it refuses (D-5100) |
+
+**The live calculator figure** that confirmed the 2026-03-01 rate is a public
+calculator's output for an invented trade, not vendor market data: Dhan's
+brokerage calculator on 15 Oct 2026, NIFTY 19 OCT 25300 CALL, one lot of 65,
+bought at 100 and sold at 120 — turnover 14,300, `Exchange 5.08`, `IPFT 0.00`
+(`state/charges/dhan-golden-20261015.json`, captured that day with a
+screenshot). It is a test vector in `crates/costs/tests/fa73061.rs`, cited by
+file and date.
+
+**No BSE circular** moving the BSE options exchange charge or IPFT after the
+27 Sep 2024 notice is recorded here, so the BSE rows are unchanged.
 
 ## RustSec advisories RUSTSEC-2026-0381 and RUSTSEC-2026-0382 — read 21 Oct 2026 (D-7120)
 

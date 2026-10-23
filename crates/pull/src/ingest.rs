@@ -126,10 +126,18 @@
 //! measurement, however sound it is.
 
 use std::fs;
+/// The one append of every `audit/<vendor>.<name>` ledger: locked, bounded,
+/// torn tail closed (IA-16; D-4888, D-4906). Also `pull::audit_ledger`.
+#[path = "audit_ledger.rs"]
+pub mod audit_ledger;
 /// The census on disk: single file or per-segment epochs, compaction into the
 /// next epoch, migration and recount. D-3316 (WP-10).
 #[path = "census_store.rs"]
 pub mod census_store;
+/// The failure kind of a store or repair refusal, and the one repair-reason
+/// rule for both feeds (IA-16; D-4851, D-4874, D-4890).
+#[path = "ingest_failkind.rs"]
+pub mod failkind;
 /// The gap ledger for months already stored, from the store and the calendar
 /// with no vendor call (R3-18).
 #[path = "gap_backfill.rs"]
@@ -142,6 +150,7 @@ pub mod identity_screen;
 pub mod repair_plan;
 #[path = "request_minutes.rs"]
 mod request_minutes;
+pub use failkind::{DoorRefusal, FailKind, MAX_REPAIR_REASON, repair_reason_ok};
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
@@ -318,6 +327,12 @@ pub struct Ingested {
     pub census: DropCensus,
     /// Members that failed, named. The run continued past each.
     pub failures: Vec<Failure>,
+    /// The KIND of the store or repair door's refusal among `failures`,
+    /// when a write was refused (IA-16, D-4851, D-4890): the first such, by
+    /// [`FailKind`]. One call of [`from_rows`] or [`repair_rows`] files one
+    /// month, so it names at most one; a caller acts on it, never on the
+    /// words. `None` when no door refused.
+    pub door_kind: Option<FailKind>,
 }
 
 impl Ingested {
@@ -343,6 +358,7 @@ impl Ingested {
         self.counted += other.counted;
         self.census.absorb(other.census);
         self.failures.extend(other.failures);
+        self.door_kind = self.door_kind.or(other.door_kind);
     }
 
     /// Whether every row is accounted for: stored, folded into a bar that was
@@ -1807,7 +1823,7 @@ fn rows_mode(
         // batch again through the back-fill door, which routes it (SC-4).
         RowsDoor::Append => write_and_count(bars, store_root, symbol_id, parts, key)
             .map(|(one, committed)| (one, committed, Filed::Appended))
-            .map_err(|unwritten| unwritten.why),
+            .map_err(|unwritten| judged(unwritten.why, bars, store_root, symbol_id, parts)),
         RowsDoor::BackFill { reason } => back_fill_or_append(
             bars,
             store_root,
@@ -1822,10 +1838,11 @@ fn rows_mode(
             done.bars_committed = committed;
             (one, filed)
         }
-        Err(why) => {
-            note_not_filed(instrument, "bars", &why);
+        Err(refusal) => {
+            note_not_filed(instrument, "bars", &refusal.why);
+            done.door_kind = Some(refusal.kind);
             done.failures
-                .push(Failure::new(instrument, why).in_month(ym));
+                .push(Failure::new(instrument, refusal.why).in_month(ym));
             return (done, Filed::Appended);
         }
     };
@@ -2084,11 +2101,13 @@ fn closes_in_hand(header: &Header, batch: &[Bar]) -> Option<(i64, i64)> {
 /// asks for record 0 of an empty file — which
 /// [`BarFile::read_record`] refuses by name, with both numbers, rather than
 /// being answered by an arm here that no successful append could reach.
-fn closes_on_disk(file: &BarFile, n_valid: u64) -> Result<(i64, i64), String> {
-    let first = file.read_record(0).map_err(|why| why.to_string())?;
+fn closes_on_disk(file: &BarFile, n_valid: u64) -> Result<(i64, i64), DoorRefusal> {
+    let first = file
+        .read_record(0)
+        .map_err(|why| DoorRefusal::store(&why))?;
     let last = file
         .read_record(n_valid.saturating_sub(1))
-        .map_err(|why| why.to_string())?;
+        .map_err(|why| DoorRefusal::store(&why))?;
     Ok((first.close, last.close))
 }
 
@@ -2129,12 +2148,15 @@ fn closes_on_disk(file: &BarFile, n_valid: u64) -> Result<(i64, i64), String> {
 /// the host's error. That leaves the bars written and the manifest entry
 /// unrecorded, which the next run resolves: the append answers `AlreadyPresent`
 /// and the read is retried. Recoverable, and not the same shape of fault.
-fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes, String> {
+fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes, DoorRefusal> {
     let (first, last) = match closes_in_hand(header, batch) {
         Some(pair) => pair,
         None => closes_on_disk(file, header.n_valid)?,
     };
-    Closes::known(first, last).map_err(|why| why.to_string())
+    // A pair that is not a pair of prices came from the batch in hand or from
+    // the month as committed; either way the store took bars it should not
+    // have been offered, so it is the batch's kind (IA-16).
+    Closes::known(first, last).map_err(|why| DoorRefusal::batch(why.to_string()))
 }
 
 /// One member: convert, fold, append, and describe the month file that
@@ -2443,17 +2465,25 @@ fn repair_policy(plan: Plan<'_>) -> store::repair::Policy {
     }
 }
 
-/// Why [`write_and_count`] committed nothing: the append door's words, and,
-/// for a month the writer door never appends to (held in its SEALED form,
-/// SC-4 D-5904, or served from a repair revision, D-3350), whether the same
-/// batch would have been committed by the month's raw form.
+/// Why [`write_and_count`] committed nothing: the append door's refusal,
+/// typed (IA-16, D-4890), and, for a month the writer door never appends to
+/// (held in its SEALED form, SC-4 D-5904, or served from a repair revision,
+/// D-3350), whether the same batch would have been committed by the month's
+/// raw form.
+///
+/// **ONE REFUSAL, TWO FACTS (IA-16 repair 2, D-7131).** SC-4 carried the
+/// store's words as a `String` beside `follows`; IA-16 carried a
+/// [`DoorRefusal`] (kind and words) alone. Both are kept: `why` is the typed
+/// refusal every caller acts on by kind, and `follows` says which month the
+/// successor generation follows when the kind is [`FailKind::Sealed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Unwritten {
-    /// The refusal, in the store's or the path's own words.
-    why: String,
+    /// The refusal: its kind and the store's or the path's own words.
+    why: DoorRefusal,
     /// `Some` only when the raw form would have committed the batch: the
     /// month the batch follows, and so the successor generation it is filed
-    /// as by [`append_or_successor`] and the back-fill door.
+    /// as by [`append_or_successor`] and the back-fill door. `Some` exactly
+    /// when `why.kind` is [`FailKind::Sealed`].
     follows: Option<Follows>,
 }
 
@@ -2480,7 +2510,8 @@ impl Follows {
 }
 
 impl Unwritten {
-    /// The store's refusal, keeping a sealed month's `Follows` offer.
+    /// The store's refusal, typed by [`FailKind::of_store`], keeping a sealed
+    /// month's `Follows` offer.
     fn of_store(why: &store::file::StoreError) -> Self {
         let follows = matches!(
             why,
@@ -2491,14 +2522,14 @@ impl Unwritten {
         )
         .then_some(Follows::Sealed);
         Self {
-            why: why.to_string(),
+            why: DoorRefusal::store(why),
             follows,
         }
     }
 }
 
-impl From<String> for Unwritten {
-    fn from(why: String) -> Self {
+impl From<DoorRefusal> for Unwritten {
+    fn from(why: DoorRefusal) -> Self {
         Self { why, follows: None }
     }
 }
@@ -2572,7 +2603,7 @@ fn append_or_successor(
     (parts, key): (PathParts<'_>, EntryKey),
     open_interest_applies: bool,
     reason: Option<&str>,
-) -> Result<(Held, usize, Vec<i64>), String> {
+) -> Result<(Held, usize, Vec<i64>), DoorRefusal> {
     let (unwritten, follows) = match write_and_count(bars, store_root, symbol_id, parts, key) {
         Ok((held, written)) => return Ok((held, written, Vec::new())),
         Err(Unwritten {
@@ -2593,23 +2624,34 @@ fn append_or_successor(
 /// [`append_or_successor`]'s second half: the `repairing` line, then the
 /// repair, outside any durable batch (the repair's flushes are its own,
 /// D-3350).
+///
+/// **TYPED (IA-16 repair 2).** A refusal before the repair keeps a kind: a
+/// generation pointer that cannot be read is the store's own kind, and a
+/// journal that will not take the `repairing` line keeps the append's kind
+/// ([`FailKind::Sealed`]): never a hole, held back, read again by the next
+/// run, exactly as the back-fill door answers the same journal refusal. The
+/// repair's own refusal is [`FailKind::of_repair`]'s ([`repair_after`]).
 fn successor_of_served(
-    appended: &str,
+    appended: &DoorRefusal,
     bars: &[store::format::Bar],
     (store_root, symbol_id): (&Path, u32),
     (parts, key): (PathParts<'_>, EntryKey),
     (open_interest_applies, follows, reason): (bool, Follows, Option<&str>),
-) -> Result<(Held, usize, Vec<i64>), String> {
-    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+) -> Result<(Held, usize, Vec<i64>), DoorRefusal> {
+    let path = StorePath::new(parts).map_err(|why| DoorRefusal::batch(why.to_string()))?;
     let served = store::generation::served(store_root, path)
-        .map_err(|why| format!("{appended}; the generation served could not be read: {why}"))?
+        .map_err(|why| DoorRefusal {
+            kind: FailKind::of_store(&why),
+            why: format!("{appended}; the generation served could not be read: {why}"),
+        })?
         .ordinal();
     let head = follows.reason();
     let reason = reason.map_or_else(|| head.to_owned(), |caller| format!("{head}: {caller}"));
-    journal_intent(store_root, &parts, served, bars, &reason).map_err(|why| {
-        format!(
+    journal_intent(store_root, &parts, served, bars, &reason).map_err(|why| DoorRefusal {
+        kind: appended.kind,
+        why: format!(
             "{appended}; not filed as the month's successor generation: the repair journal would not take the `repairing` line ({why}), so nothing was published"
-        )
+        ),
     })?;
     let _outside_the_batch = store::file::DurableBatch::suspend();
     let policy = store::repair::Policy {
@@ -2635,22 +2677,84 @@ fn successor_of_served(
 /// to [`store::repair::repair_month`], which publishes a new generation with
 /// every held bar and every offered one and promotes it. The census row is
 /// the served month's header. Each repair is journaled.
+///
+/// **THE DOOR REPAIRS ONLY WHAT AN APPEND CANNOT TAKE** (IA-16; D-4890,
+/// round 4 SF-1, round 6 SF-5). Until IA-16 this fell into a repair on ANY
+/// append error: a month a reader held for a moment, a full disk, a month
+/// whose checksums failed or a held bar read differently were each handed
+/// to `repair_month`, and the caller printed the repair's refusal for what
+/// was the append's. Now only [`FailKind::NotHeld`] and
+/// [`FailKind::Superseded`] reach the repair; every other append refusal is
+/// answered as itself, typed, and its words are the append's own. What a
+/// Zerodha repair LANDS is unchanged: a `NotHeld` or `Superseded` batch is
+/// repaired exactly as before. What `/pull/spot`, `/pull/repair`, the
+/// `/pull/run` leg summary and `cli zerodha-repair` PRINT for any other
+/// refusal changes: the append's words, without "the versioned repair
+/// refused it too".
 fn repair_or_append(
     bars: &[store::format::Bar],
     store_root: &Path,
     symbol_id: u32,
     (parts, key): (PathParts<'_>, EntryKey),
     (policy, reason): (store::repair::Policy, &str),
-) -> Result<(Held, usize, Vec<i64>), String> {
+) -> Result<(Held, usize, Vec<i64>), DoorRefusal> {
     match write_and_count(bars, store_root, symbol_id, parts, key) {
         Ok((held, written)) => Ok((held, written, Vec::new())),
-        Err(appended) => repair_after(
-            &appended.why,
-            bars,
-            (store_root, symbol_id),
-            (parts, key),
-            (policy, reason),
-        ),
+        // A MONTH THE WRITER DOOR NEVER APPENDS TO, WHOSE RAW FORM WOULD
+        // COMMIT THE BATCH ([`FailKind::Sealed`]; SC-4 D-5904, D-6247), is
+        // handed to the same repair, which publishes its next successor.
+        Err(Unwritten { why: appended, .. })
+            if appended.kind.repairable() || appended.kind.files_as_successor() =>
+        {
+            repair_after(
+                &appended,
+                bars,
+                (store_root, symbol_id),
+                (parts, key),
+                (policy, reason),
+            )
+        }
+        Err(unwritten) => Err(unwritten.why),
+    }
+}
+
+/// AN APPEND REFUSED `NotHeld`, JUDGED BY THE MONTH'S SHAPE (IA-16; D-4890,
+/// critic X-2, FM-067): the append door alone, with no repair reason, says
+/// which hole the day is. A month that holds a bar inside the offered span
+/// holds the day differently, `bars_differ_held`, which no repair fills;
+/// one that holds nothing of it lacks it, `needs_month_generation`, which a
+/// repair-reason run fills. Every other refusal keeps its own kind. Read
+/// only, and only on a refusal: one pointer read, one open and one indexed
+/// probe of the month (`lack_of`).
+fn judged(
+    appended: DoorRefusal,
+    bars: &[store::format::Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+) -> DoorRefusal {
+    if appended.kind != FailKind::NotHeld {
+        return appended;
+    }
+    let Ok(path) = StorePath::new(parts) else {
+        return appended;
+    };
+    match lack_of(store_root, path, symbol_id, bars) {
+        Ok(Lack::Overlaps { held_at }) => DoorRefusal {
+            kind: FailKind::Differs,
+            why: format!(
+                "{appended}; the month holds a bar at {held_at}, inside the offered span, so it \
+                 holds this day differently: a held bar is never changed and no repair completes \
+                 or restates a held day (D-3350), so nothing was written"
+            ),
+        },
+        // Lacked, or judged as the append door: the append's own kind.
+        Ok(Lack::Lacked { .. } | Lack::AppendDoors) => appended,
+        // THE MONTH COULD NOT BE JUDGED: the append's kind stands, and the
+        // words say why it was not judged further.
+        Err(why) => appended.and(&format!(
+            "; the month as served could not be read to tell which hole the day is ({why})"
+        )),
     }
 }
 
@@ -2660,13 +2764,13 @@ fn repair_or_append(
 /// repair door and the back-fill door ([`back_fill_or_append`]), so there is
 /// one repair, one journal line and one refusal sentence.
 fn repair_after(
-    appended: &str,
+    appended: &DoorRefusal,
     bars: &[store::format::Bar],
     (store_root, symbol_id): (&Path, u32),
     (parts, key): (PathParts<'_>, EntryKey),
     (policy, reason): (store::repair::Policy, &str),
-) -> Result<(Held, usize, Vec<i64>), String> {
-    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+) -> Result<(Held, usize, Vec<i64>), DoorRefusal> {
+    let path = StorePath::new(parts).map_err(|why| DoorRefusal::batch(why.to_string()))?;
     match store::repair::repair_month(store_root, path, symbol_id, bars, policy) {
         Ok(store::repair::MonthRepair::NothingNew { .. }) => Ok((
             held_of_served(store_root, path, symbol_id, key)?,
@@ -2692,21 +2796,39 @@ fn repair_after(
                 reason,
             );
             let held_now = held_of_served(store_root, path, symbol_id, key)?;
-            journaled.map(|()| {
-                (
-                    held_now,
-                    usize::try_from(added).unwrap_or(usize::MAX),
-                    added_at,
-                )
-            })
+            journaled
+                .map(|()| {
+                    (
+                        held_now,
+                        usize::try_from(added).unwrap_or(usize::MAX),
+                        added_at,
+                    )
+                })
+                // THE MONTH IS REPAIRED AND SERVED; only its journal line is
+                // missing. Never a hole and never a damaged month: the kind
+                // of a publication already visible (IA-16).
+                .map_err(|why| DoorRefusal {
+                    kind: FailKind::Io {
+                        kind: ErrorKind::Other,
+                        publication_may_be_visible: true,
+                    },
+                    why,
+                })
         }
         Err(why) => {
+            // THE REPAIR'S OWN KIND (IA-16, design §5.8): a refusal a later
+            // build or repair can lift, one none can, a busy source, a full
+            // disk, or the host's.
+            let kind = FailKind::of_repair(&why);
             let refused = format!("{appended}; the versioned repair refused it too: {why}");
             match journal_refusal(store_root, &parts, &why.to_string(), reason) {
-                Ok(()) => Err(refused),
-                Err(journal) => Err(format!(
-                    "{refused}; and the repair journal line was not written: {journal}"
-                )),
+                Ok(()) => Err(DoorRefusal { kind, why: refused }),
+                Err(journal) => Err(DoorRefusal {
+                    kind,
+                    why: format!(
+                        "{refused}; and the repair journal line was not written: {journal}"
+                    ),
+                }),
             }
         }
     }
@@ -2719,9 +2841,9 @@ fn held_of_served(
     path: StorePath<'_>,
     symbol_id: u32,
     key: EntryKey,
-) -> Result<Held, String> {
-    let file =
-        BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+) -> Result<Held, DoorRefusal> {
+    let file = BarFile::open_existing(store_root, path, symbol_id)
+        .map_err(|why| DoorRefusal::store(&why))?;
     let header = file.header();
     let closes = month_closes(&file, &header, &[])?;
     Ok(Held::new(
@@ -2772,14 +2894,15 @@ enum Lack {
 ///
 /// # Errors
 ///
-/// The store's words for a pointer, an open or a read it refuses (a month a
-/// writer holds locked among them): the month could not be judged.
+/// The store's refusal of a pointer, an open or a read (a month a writer
+/// holds locked among them), TYPED (IA-16, D-4890): the month could not be
+/// judged, and its kind is [`FailKind::of_store`]'s.
 fn lack_of(
     store_root: &Path,
     path: StorePath<'_>,
     symbol_id: u32,
     bars: &[store::format::Bar],
-) -> Result<Lack, String> {
+) -> Result<Lack, store::file::StoreError> {
     let Some((first, last)) = bars.first().zip(bars.last()) else {
         return Ok(Lack::AppendDoors);
     };
@@ -2792,11 +2915,11 @@ fn lack_of(
     {
         return Ok(Lack::AppendDoors);
     }
-    let served = store::generation::served(store_root, path).map_err(|why| why.to_string())?;
+    let served = store::generation::served(store_root, path)?;
     let file = match BarFile::open_existing(store_root, path, symbol_id) {
         Ok(file) => file,
         Err(store::file::StoreError::Missing { .. }) => return Ok(Lack::AppendDoors),
-        Err(why) => return Err(why.to_string()),
+        Err(why) => return Err(why),
     };
     let header = file.header();
     if header.n_valid == 0 {
@@ -2806,11 +2929,9 @@ fn lack_of(
     if original && first.ts_micros > header.last_ts_micros {
         return Ok(Lack::AppendDoors);
     }
-    let at = file
-        .first_at_or_after(first.ts_micros)
-        .map_err(|why| why.to_string())?;
+    let at = file.first_at_or_after(first.ts_micros)?;
     if at < header.n_valid {
-        let held = file.read_record(at).map_err(|why| why.to_string())?;
+        let held = file.read_record(at)?;
         if held.ts_micros <= last.ts_micros {
             return Ok(Lack::Overlaps {
                 held_at: held.ts_micros,
@@ -2831,13 +2952,22 @@ fn lack_of(
 ///
 /// The repair itself is [`repair_after`], the one WP-13c built; this door
 /// adds the judgement before it and the `repairing` line.
+///
+/// **TYPED, BOTH JUDGEMENTS KEPT (IA-16, D-4890).** Only an append refused
+/// [`FailKind::NotHeld`] or [`FailKind::Superseded`] is judged by the
+/// month's shape at all; any other append refusal (a busy, full, damaged
+/// month, the host, a batch built wrongly) is answered as itself, kind and
+/// words. Judged: [`Lack::Lacked`] is repaired; [`Lack::Overlaps`] is
+/// [`FailKind::Differs`] (`bars_differ_held`: no repair completes or
+/// restates a held day); [`Lack::AppendDoors`] keeps the append's kind; a
+/// month that cannot be judged takes its own refusal's kind.
 fn back_fill_or_append(
     bars: &[store::format::Bar],
     store_root: &Path,
     symbol_id: u32,
     (parts, key): (PathParts<'_>, EntryKey),
     (policy, reason): (store::repair::Policy, &str),
-) -> Result<(Held, usize, Filed), String> {
+) -> Result<(Held, usize, Filed), DoorRefusal> {
     let appended = match write_and_count(bars, store_root, symbol_id, parts, key) {
         Ok((held, written)) => return Ok((held, written, Filed::Appended)),
         // A LATE DAY OF A MONTH THE WRITER DOOR NEVER APPENDS TO (SC-4,
@@ -2845,6 +2975,8 @@ fn back_fill_or_append(
         // or one served from a revision, is its next successor generation,
         // before the back-fill's own judgement, which asks only of bars no
         // append could ever land. The same door the pull's append takes.
+        // Its kind is [`FailKind::Sealed`], which the GDFL coordinator hands
+        // to this door with or without a repair reason (IA-16 repair 2).
         Err(Unwritten {
             why,
             follows: Some(follows),
@@ -2865,31 +2997,55 @@ fn back_fill_or_append(
                 (held, added, filed)
             });
         }
-        Err(unwritten) => unwritten.why,
+        // A BUSY MONTH (another process holds its writer's lock, a reader
+        // among them) is judged by its shape as well: one that lacks the
+        // whole batch is repaired, as WP-12d's door did, and a reader keeps
+        // the generation it opened. Anything else about a busy month stays
+        // `month_busy`: a month holding bars inside the span is NOT judged
+        // to differ, since the busy append never compared them.
+        Err(Unwritten { why, .. }) if why.kind.repairable() || why.kind == FailKind::MonthBusy => {
+            why
+        }
+        // NOTHING ABOUT THE MONTH'S SHAPE ASKS FOR A REPAIR.
+        Err(unwritten) => return Err(unwritten.why),
     };
-    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let path = StorePath::new(parts).map_err(|why| DoorRefusal::batch(why.to_string()))?;
+    let busy = appended.kind == FailKind::MonthBusy;
     let served = match lack_of(store_root, path, symbol_id, bars) {
         Ok(Lack::Lacked { served }) => served,
         // THE APPEND DOOR'S REFUSAL, UNCHANGED: nothing about the month's
         // shape asks for a repair.
         Ok(Lack::AppendDoors) => return Err(appended),
+        Ok(Lack::Overlaps { .. }) if busy => return Err(appended),
         Ok(Lack::Overlaps { held_at }) => {
-            return Err(format!(
-                "{appended}; not back-filled: the month holds a bar at {held_at}, inside the offered span, and a back-fill adds only bars the month holds nothing of (D-3350): it never completes, restates or mixes a held day, so nothing was written"
-            ));
+            return Err(DoorRefusal {
+                kind: FailKind::Differs,
+                why: format!(
+                    "{appended}; not back-filled: the month holds a bar at {held_at}, inside the offered span, and a back-fill adds only bars the month holds nothing of (D-3350): it never completes, restates or mixes a held day, so nothing was written"
+                ),
+            });
         }
         Err(why) => {
-            return Err(format!(
-                "{appended}; not back-filled: the month as served could not be read to judge it ({why}), so nothing was written"
-            ));
+            let unread = DoorRefusal::store(&why);
+            return Err(DoorRefusal {
+                kind: unread.kind,
+                why: format!(
+                    "{appended}; not back-filled: the month as served could not be read to judge it ({unread}), so nothing was written"
+                ),
+            });
         }
     };
     // JOURNALED BEFORE ANYTHING IS PUBLISHED, so a generation is never served
     // that the journal does not name, whatever kills the process after it.
+    // A journal that will not take the line leaves the month as it was: the
+    // append's own kind, the words saying why nothing was published.
     journal_intent(store_root, &parts, served, bars, reason).map_err(|why| {
-        format!(
-            "{appended}; not back-filled: the repair journal would not take the `repairing` line ({why}), so nothing was published"
-        )
+        DoorRefusal {
+            kind: appended.kind,
+            why: format!(
+                "{appended}; not back-filled: the repair journal would not take the `repairing` line ({why}), so nothing was published"
+            ),
+        }
     })?;
     repair_after(
         &appended,
@@ -2934,7 +3090,7 @@ fn journal_intent(
         ledger_field(reason),
         telemetry::global().map_or(0, telemetry::Sink::run)
     );
-    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line])
+    audit_ledger::append(store_root, parts.vendor, "repairs", &[line])
 }
 
 /// The census key text a ledger line names a month by.
@@ -3019,7 +3175,7 @@ fn journal_repair(
             .with("skipped", telemetry::Value::Str(&skipped_field))
             .with("reason", telemetry::Value::Str(reason)),
     );
-    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line]).map_err(|why| {
+    audit_ledger::append(store_root, parts.vendor, "repairs", &[line]).map_err(|why| {
         note_not_filed(parts.symbol, "repair journal", &why);
         format!(
             "{}: repaired to generation {to} and served, but its journal line was not written: {why}",
@@ -3054,7 +3210,7 @@ fn journal_refusal(
         ledger_field(reason),
         telemetry::global().map_or(0, telemetry::Sink::run)
     );
-    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line])
+    audit_ledger::append(store_root, parts.vendor, "repairs", &[line])
 }
 
 /// Every refusal a landing made before any file was opened: each day of
@@ -3869,7 +4025,7 @@ fn derive_repair(
                 ledger.push(request_minutes::derive_line(&parts, tally));
             }
             Err(why) => {
-                note_not_derived(instrument, rung, &why);
+                note_not_derived(instrument, rung, &why.why);
                 failures.push(
                     Failure::new(instrument, format!("{}: {why}", rung.as_str()))
                         .in_month(into.month),
@@ -4353,6 +4509,7 @@ fn derive(
             .then(|| request_minutes::derive_line(&parts, tally));
         (held, diagnostics, line)
     })
+    .map_err(String::from)
 }
 
 /// Compare historical derived bytes at the monthly boundary, O(source + held).
@@ -4472,7 +4629,7 @@ fn write_and_count(
     parts: PathParts<'_>,
     key: EntryKey,
 ) -> Result<(Held, usize), Unwritten> {
-    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let path = StorePath::new(parts).map_err(|why| DoorRefusal::batch(why.to_string()))?;
     // A MONTH SERVED FROM A REPAIR REVISION (D-3350). The writer door refuses
     // it — an append to its original would never be served — so the served
     // generation is ASKED, through the read door, what its raw form would do
@@ -4481,12 +4638,12 @@ fn write_and_count(
     // `Follows::Revision`, filed as the next successor by the caller; any
     // other is refused in the raw form's words.
     if let store::generation::Served::Revision(pointer) =
-        store::generation::served(store_root, path).map_err(|why| why.to_string())?
+        store::generation::served(store_root, path).map_err(|why| DoorRefusal::store(&why))?
     {
         return already_served(bars, store_root, path, symbol_id, key, pointer);
     }
-    let mut file =
-        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let mut file = BarFile::open_or_create(store_root, path, symbol_id)
+        .map_err(|why| DoorRefusal::store(&why))?;
     // THE DISCRIMINANT IS KEPT, AND IT WAS THROWN AWAY. `Committed` and
     // `AlreadyPresent` are the difference between a run that wrote a month and
     // one that re-offered it, and `?` on its own erased that.
@@ -4561,14 +4718,15 @@ fn already_served(
     key: EntryKey,
     pointer: store::generation::Pointer,
 ) -> Result<(Held, usize), Unwritten> {
-    let file =
-        BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    let file = BarFile::open_existing(store_root, path, symbol_id)
+        .map_err(|why| DoorRefusal::store(&why))?;
     let header = file.header();
-    let offered = file.offer(bars).map_err(|why| {
-        format!(
+    let offered = file.offer(bars).map_err(|why| DoorRefusal {
+        kind: FailKind::of_store(&why),
+        why: format!(
             "the month is served from repair revision {} (D-3350): {why}",
             pointer.revision.ordinal()
-        )
+        ),
     })?;
     drop(file);
     let store::file::Offered::Unheld {
@@ -4590,8 +4748,16 @@ fn already_served(
         header.last_ts_micros,
         offer.as_str(),
     );
+    // TYPED AS THE RAW MONTH'S OWN ANSWER (IA-16 repair 2): one the raw
+    // form would commit is [`FailKind::Sealed`], filed as the next
+    // successor; a stamp inside the held range it never held is
+    // [`FailKind::NotHeld`], and a held stamp read differently or skipped
+    // is [`FailKind::Differs`], exactly as at a raw month.
     Err(Unwritten {
-        why,
+        why: DoorRefusal {
+            kind: FailKind::of_offer(offer),
+            why,
+        },
         follows: (offer == store::file::SealedOffer::Follows).then_some(Follows::Revision),
     })
 }

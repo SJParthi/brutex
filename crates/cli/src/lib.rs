@@ -121,6 +121,12 @@ mod srt_builder;
 mod tickstore_command;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuilder;
+/// `cli upkeep`: the store's catch-up steps as tracked runs, with a run id,
+/// progress, Stop and resume, never beside a live GDFL run (R3-17, D-6270).
+mod upkeep_command;
+/// `cli verify-merge`: every Zerodha verification spool waiting merged into the
+/// verdict store, in a process of its own (IA-9, D-4881, D-4921).
+pub mod verify_merge_command;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
 /// the store and the calendar with no vendor call (R3-18).
 mod zerodha_gaps_command;
@@ -128,6 +134,9 @@ mod zerodha_gaps_command;
 /// for every series, or repaired to a new generation from bars another store
 /// holds (D-3350, WP-13c).
 mod zerodha_repair;
+/// `cli zerodha-verify`: the cold Zerodha verification of a span, from the store
+/// alone, spooled and merged (IA-9, D-4811).
+mod zerodha_verify_command;
 // THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
 // compiled only into `build.rs` and an integration test, and cargo-mutants
 // mutates neither, so gate 18 could never mutate it. It is test-only here for
@@ -670,6 +679,20 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    a month not held is not created, a month
                                    another process holds is refused. --dry-run
                                    writes nothing (D-3340).
+       cli upkeep plan VENDOR [SCOPE] [--rung R] [--from YYYY-MM] [--to YYYY-MM]
+       cli upkeep run KIND VENDOR [SCOPE] [--rung R] [--from M] [--to M] [--workers N] [--all]
+       cli upkeep resume KIND VENDOR RUN [the run's arguments]
+       cli upkeep stop KIND VENDOR [RUN]
+       cli upkeep status KIND VENDOR
+                                   the store's catch-up steps as tracked runs
+                                   (KIND tix, srt, msum, recount --from DAY
+                                   --to DAY, or rekey [--underlying S,...]):
+                                   plan says what each month lacks and writes
+                                   nothing; run builds them on N workers, never
+                                   beside a live GDFL run, one line per item in
+                                   audit/upkeep.VENDOR.KIND.log; stop asks the
+                                   running run to stop between items; resume
+                                   skips what its chain closed clean (R3-17).
        cli series-identity INSTRUMENT|ALL [--segment INDEX|CASH] [--feed FEED] [--workers N]
                           [--dry-run]
                                    writes no bar: every stored bar of a series
@@ -686,6 +709,25 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    series in parallel, prints one line per
                                    series and names each with no minute rung
                                    (WP-13d, D-4994).
+       cli verify-merge [--retry SPOOL] | --list
+                                   merge every Zerodha verification spool
+                                   waiting into the verdict store, one
+                                   generation per segment, timeframe and day,
+                                   under verify/merge.lock (a second merger
+                                   exits run_busy); a damaged spool is refused
+                                   by name once, with an alert, until --retry
+                                   names it. --list writes nothing (D-4881).
+       cli zerodha-verify FROM TO [INSTRUMENT ...] [--no-merge] [--workers N]
+                                   the cold Zerodha verification (FROM, TO are
+                                   YYYY-MM-DD): every stored rung of every
+                                   calendar-open day checked from the store
+                                   alone (1min against a kept answer or
+                                   no_response_kept, every derived rung
+                                   refolded under D-3321, 1day with daycheck),
+                                   each missing minute classed by the gap
+                                   ledger, spooled and merged; writes only
+                                   verify/ (D-4811, D-4857, D-4858). --workers N
+                                   checks N series side by side (1 to 8).
        cli zerodha-gaps INSTRUMENT|ALL FROM TO [--segment INDEX|CASH] [--apply]
                                    the gap ledger for stored Zerodha 1min months
                                    (FROM, TO are YYYY-MM-DD), from the store and
@@ -2965,6 +3007,13 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["srt-build", arguments @ ..] if !arguments.is_empty() => {
             srt_builder::command(arguments, out)
         }
+        ["upkeep", arguments @ ..] if !arguments.is_empty() => {
+            upkeep_command::command(arguments, out)
+        }
+        ["verify-merge", arguments @ ..] => verify_merge_command::command(arguments, out),
+        ["zerodha-verify", arguments @ ..] if !arguments.is_empty() => {
+            zerodha_verify_command::command(arguments, out)
+        }
         ["zerodha-gaps", arguments @ ..] if !arguments.is_empty() => {
             zerodha_gaps_command::command(arguments, out)
         }
@@ -3057,7 +3106,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 57] = [
+const COMMANDS: [&str; 60] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3111,10 +3160,13 @@ const COMMANDS: [&str; 57] = [
     "tickstore-write",
     "tix-rebuild",
     "top",
+    "upkeep",
     "verify",
+    "verify-merge",
     "watchdog",
     "zerodha-gaps",
     "zerodha-repair",
+    "zerodha-verify",
 ];
 
 /// Whether this canonical CLI verb performs sweep or strategy computation.
@@ -30020,7 +30072,13 @@ mod tests {
             // AND A THIRD (D-4883, IA-11a): `alerts` alone prints the
             // unacknowledged alerts of the newest window, one read of the
             // store's queue. Its misuses are its own module's tests.
-            if matches!(word, "alerts" | "results" | "top") {
+            //
+            // AND A FOURTH (D-4881, IA-9): `verify-merge` alone merges every
+            // Zerodha verification spool waiting, which is the request, not a
+            // mistake; it WRITES the store, so it is not run here at all. Its
+            // misuses (`--retry` without a spool, an unknown flag) are
+            // `verify_merge_command`'s tests.
+            if matches!(word, "alerts" | "results" | "top" | "verify-merge") {
                 continue;
             }
 

@@ -455,3 +455,140 @@ fn a_root_past_the_walk_cap_is_refused_whole() {
     assert_eq!((at_cap.census().held, at_cap.census().stray), (1, 1));
     assert!(TOO_MANY_ENTRIES.starts_with("dayzips_too_many_entries"));
 }
+
+/// BASE-GATE11 (D-6624; gate 11 rule 3, docs/07 law 2): the day table is
+/// sized ONCE, before the walk, for every key a walk can file, and no walk
+/// grows it. The bound is every kind on every day of the calendar's sourced
+/// span: the span's first and last days of all three kinds are filed, the
+/// day before its first and the day after its last are invalid and never
+/// filed. A capped walk reserves no more than its cap asks. Before D-6624
+/// the table started empty and grew with the root, so an empty root's
+/// table had no room at all and this test failed on its first comparison.
+#[test]
+fn the_day_table_is_sized_once_for_every_key_a_walk_can_file() {
+    assert_eq!(DAYZIPS_KEYS_MAX, 3 * 3_287);
+    let span_room = HashMap::<(LooseKind, Day), Copies>::with_capacity(DAYZIPS_KEYS_MAX).capacity();
+    let empty = DayZips::open(&fresh("sized.empty")).unwrap();
+    assert_eq!(empty.days.len(), 0);
+    assert_eq!(
+        empty.days.capacity(),
+        span_room,
+        "an empty root's table already holds room for every key"
+    );
+    let first = Day::new(2018, 1, 1).unwrap();
+    let last = Day::new(2026, 12, 31).unwrap();
+    assert_eq!(
+        i64::from(first.days_from_epoch()),
+        crate::calendar::SOURCED_FIRST_DAY
+    );
+    assert_eq!(
+        i64::from(last.days_from_epoch()),
+        crate::calendar::SOURCED_LAST_DAY
+    );
+    let root = fresh("sized.edges");
+    for kind in LooseKind::ALL {
+        for day in [first, last] {
+            put(&root, &kind.path_of(day), b"");
+        }
+    }
+    // One day outside each end of the span.
+    put(
+        &root,
+        "INDICES/DEC_2017/GFDLCM_INDICES_TICK_31122017.zip",
+        b"",
+    );
+    put(
+        &root,
+        "INDICES/JAN_2027/GFDLCM_INDICES_TICK_01012027.zip",
+        b"",
+    );
+    let edges = DayZips::open(&root).unwrap();
+    assert_eq!(
+        edges.days.len(),
+        6,
+        "every kind on the span's first and last day is filed"
+    );
+    assert_eq!(edges.census().held, 6);
+    assert_eq!(
+        edges.census().invalid,
+        2,
+        "a day past either end of the span is never filed"
+    );
+    assert_eq!(
+        edges.days.capacity(),
+        span_room,
+        "the walk did not grow the table"
+    );
+    // 19 entries: three kind folders, eight month folders, eight zips.
+    let capped = DayZips::open_capped(&root, 64).unwrap();
+    assert_eq!(capped.days.len(), 6);
+    let small = capped.days.capacity();
+    assert!(
+        (64..span_room).contains(&small),
+        "a walk capped at 64 entries reserves for 64 keys, not for the span: {small}"
+    );
+}
+
+/// THE COST OF SIZING THE TABLE ONCE (BASE-GATE11, D-6624; L-BG11-05): n =
+/// 2,000 allocations each of the empty table the walk used to start from and
+/// of the table sized for [`DAYZIPS_KEYS_MAX`] keys, then n = 200 walks each
+/// of an empty root and of a root holding every kind on the sourced span's
+/// two edge days. Printed for `docs/06-limits.md`, never asserted: a timing
+/// on a shared machine is evidence, not a gate.
+#[test]
+#[ignore = "a timing, printed"]
+fn day_table_sizing_timing() {
+    fn stats(mut took: Vec<std::time::Duration>) -> String {
+        took.sort_unstable();
+        let n = took.len();
+        format!(
+            "n={n} p50={:?} p99={:?} max={:?}",
+            took[n / 2],
+            took[n * 99 / 100],
+            took[n - 1]
+        )
+    }
+    let alloc = |sized: bool| {
+        (0..2_000)
+            .map(|_| {
+                let began = std::time::Instant::now();
+                let table: HashMap<(LooseKind, Day), Copies> = if sized {
+                    HashMap::with_capacity(DAYZIPS_KEYS_MAX)
+                } else {
+                    HashMap::default()
+                };
+                let took = began.elapsed();
+                assert!(table.capacity() >= usize::from(sized) * DAYZIPS_KEYS_MAX);
+                took
+            })
+            .collect::<Vec<_>>()
+    };
+    let empty = fresh("timing.empty");
+    let edges = fresh("timing.edges");
+    for kind in LooseKind::ALL {
+        for day in [
+            Day::new(2018, 1, 1).unwrap(),
+            Day::new(2026, 12, 31).unwrap(),
+        ] {
+            put(&edges, &kind.path_of(day), b"");
+        }
+    }
+    let walk = |root: &Path| {
+        (0..200)
+            .map(|_| {
+                let began = std::time::Instant::now();
+                let zips = DayZips::open(root).unwrap();
+                let took = began.elapsed();
+                assert!(zips.days.capacity() >= DAYZIPS_KEYS_MAX);
+                took
+            })
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "day table: empty {} | sized for {DAYZIPS_KEYS_MAX} keys {} | open of an empty root {} | open of 6 day zips in 9 folders {}",
+        stats(alloc(false)),
+        stats(alloc(true)),
+        stats(walk(&empty)),
+        stats(walk(&edges))
+    );
+}

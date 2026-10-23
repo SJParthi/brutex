@@ -1096,6 +1096,7 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
         counted: 1,
         census,
         failures: Vec::new(),
+        door_kind: None,
     };
     assert!(
         balanced.balances(),

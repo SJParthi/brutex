@@ -438,6 +438,127 @@ pub(crate) fn command_with(
     }
 }
 
+/// One underlying re-keyed as an item of an upkeep run (R3-17, D-6270): the
+/// survey, plan and apply this verb runs, narrowed to `underlying` (a day's
+/// strike ladder is one underlying's, so its plan is the same narrowed or
+/// not).
+///
+/// STRICTER THAN `--apply` ON ONE POINT: nothing is written for an underlying
+/// whose survey left a file unread, whose plan left a key unresolved, or
+/// whose census step is not known (AG-02's `census: not read` or `could not
+/// be read`) — the rule the one-press chain applies (R4-11) — so an
+/// unattended run never moves half of a ladder it could not read whole. The
+/// item says so and is not clean; `cli gdfl-rekey --plan --underlying <it>`
+/// names each key.
+///
+/// AG-02's two rules hold here as at the verb: a walk that read no option key
+/// under the underlying is refused by name, never read as nothing pending;
+/// and what the ledger already records is done, so a second run stops at
+/// `nothing to change` before any apply (the plan's moves and retirements
+/// are only those not yet recorded) and the item says how many are recorded
+/// and what is pending.
+pub(crate) fn upkeep_underlying(root: &Path, underlying: Symbol) -> pull::upkeep::Outcome {
+    use pull::upkeep::Outcome;
+    let only = BTreeSet::from([underlying]);
+    let read = gdfl_rekey::withdrawn(root)
+        .and_then(|ledger| gdfl_rekey::survey(root, Some(&only)).map(|found| (ledger, found)));
+    let (ledger, found) = match read {
+        Ok(read) => read,
+        Err(why) => return Outcome::failed("REFUSED", format!("{why}; nothing was written")),
+    };
+    let plan = gdfl_rekey::plan(&found, &ledger);
+    let judged = format!(
+        "{} key(s) in {} month file(s): {} kept, {} to move, {} to retire; {} moved and {} \
+         retired already recorded; pending {}",
+        plan.keys,
+        found.files,
+        plan.kept,
+        plan.moves.len(),
+        plan.retired.len(),
+        plan.recorded_moves.len(),
+        plan.recorded_retired.len(),
+        plan.pending()
+    );
+    let census_unknown = matches!(plan.census, CensusStep::NotRead | CensusStep::Unreadable(_));
+    if found.unreadable > 0 || !plan.unresolved.is_empty() || census_unknown {
+        return Outcome::failed(
+            "NOT_APPLIED",
+            format!(
+                "{judged}; {} file(s) unreadable and {} key(s) unresolved; {}; so nothing was \
+                 written (`cli gdfl-rekey --plan --underlying {}` names each)",
+                found.unreadable,
+                plan.unresolved.len(),
+                plan.census.describe(),
+                underlying.as_str()
+            ),
+        );
+    }
+    // A NAMED UNDERLYING WITH NO KEY IS REFUSED (AG-02 repair r4), here as at
+    // the verb: a walk that reads nothing plans nothing and would read as
+    // done. After the check above, so a file the walk could not read is named
+    // as that and not as an absence.
+    if !unwalked(Some(&only), &found).is_empty() {
+        return Outcome::failed(
+            "REFUSED",
+            format!(
+                "{judged}; no option key under bars/gdfl/NSE/FNO/{} holds a bar, and a walk \
+                 that reads nothing is not read as nothing pending; nothing was written",
+                underlying.as_str()
+            ),
+        );
+    }
+    if !plan.changes() {
+        return Outcome::clean("kept", format!("{judged}; nothing to change"));
+    }
+    applied_outcome(&judged, gdfl_rekey::apply(root, &found, &plan, &ledger))
+}
+
+/// What an apply did, as an upkeep item. A refusal at the apply is a race
+/// since AG-02: the plan already leaves a move into a held month, and a
+/// verdict the ledger contradicts, unresolved, so only a target or a key
+/// that changed between the plan and the apply's own re-read under its lock
+/// is refused there. That is why this mapping is its own function: a test
+/// hands it each answer an apply can give, which no fixture can provoke
+/// through the plan.
+pub(crate) fn applied_outcome(
+    judged: &str,
+    applied: Result<Applied, String>,
+) -> pull::upkeep::Outcome {
+    use pull::upkeep::Outcome;
+    match applied {
+        Ok(done) if done.refused.is_empty() => Outcome::clean(
+            "applied",
+            format!(
+                "{judged}; {} moved ({} month file(s) written, {} already held exactly), {} \
+                 ledger line(s) appended, {} key(s) retired, {}",
+                done.moved.len(),
+                done.months_written,
+                done.months_already,
+                done.lines_written,
+                done.retired.len(),
+                if done.withdrawal.is_some() {
+                    "an FNO census epoch installed without the withdrawn key(s)"
+                } else {
+                    "no census epoch installed"
+                }
+            ),
+        ),
+        Ok(done) => Outcome::failed(
+            "REFUSED",
+            format!(
+                "{judged}; {} move(s) or retirement(s) refused: {}",
+                done.refused.len(),
+                done.refused
+                    .iter()
+                    .map(|one| format!("{}: {}", one.key, one.why))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+        Err(why) => Outcome::failed("STOPPED", why),
+    }
+}
+
 /// `cli gdfl-rekey`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     // `--apply` BY AN UNSTAMPED BUILD IS REFUSED (DB-B71, WP-81); `--plan`

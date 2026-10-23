@@ -10,6 +10,13 @@
 //! cargo test -p api --locked --lib audit::lock_wait_measure -- --ignored
 //! --nocapture`.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::print_stdout
+)]
+
 use super::*;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};

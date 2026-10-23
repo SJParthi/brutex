@@ -31,6 +31,53 @@ use super::*;
 use crate::gdfl_fixtures::{csv, row, scratch};
 use crate::ingest::{Filed, repair_rows};
 
+/// THE REASON EVERY IMPORT OF THESE TESTS CARRIES (IA-16; D-4889, critic X-1
+/// item (c)): the back-fill door opens only for a run with a repair reason,
+/// so WP-12d's tests, which prove what that door lands, pass one. What a run
+/// with NO reason does with the same months is IA-16's
+/// `a_passed_day_is_named_and_never_read_in_a_loop`.
+const BACK_FILL: &str = "WP-12d test: back-fill the day the month lacks";
+
+/// [`super::import`] carrying [`BACK_FILL`].
+fn import(root: &Path, src: Src, kind: ImportKind, from: Day, to: Day, store: &Path) -> Report {
+    import_only(root, src, kind, from, to, store, &[])
+}
+
+/// [`super::import_only`] carrying [`BACK_FILL`].
+fn import_only(
+    root: &Path,
+    src: Src,
+    kind: ImportKind,
+    from: Day,
+    to: Day,
+    store: &Path,
+    only: &[String],
+) -> Report {
+    let options = RunOptions {
+        repair_reason: Some(BACK_FILL),
+        ..RunOptions::default()
+    };
+    import_only_with(root, (src, kind), (from, to), (store, only), options)
+}
+
+/// [`super::run_from`] carrying [`BACK_FILL`].
+fn run_from(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    (store, only): (&Path, &[String]),
+    origin: bool,
+) -> Report {
+    run_from_with(
+        root,
+        (src, kind),
+        (from, to),
+        (store, only),
+        origin,
+        Some(BACK_FILL),
+    )
+}
+
 /// The NIFTY one-second month of April 2024.
 fn nifty_april() -> StorePath<'static> {
     month_of_key("INDEX", "NIFTY", d1())
@@ -245,7 +292,12 @@ fn a_day_a_held_month_lacks_lands_as_a_new_generation_every_reader_opens() {
     let lines = repair_lines(&holed);
     assert_eq!(lines.len(), 2 * got.months_repaired, "{lines:?}");
     let run = run_ids(&journal).into_iter().max().unwrap();
-    let reason = format!("reason=gdfl-import_indices_2024-04-02_NIFTY_50.NSE_IDX.csv_run:{run}:_");
+    // The operator's reason first, the import's own sentence after it
+    // (IA-16, D-4889).
+    let reason = format!(
+        "reason={}___gdfl-import_indices_2024-04-02_NIFTY_50.NSE_IDX.csv_run:{run}:_",
+        BACK_FILL.replace(' ', "_")
+    );
     let intent = lines
         .iter()
         .position(|line| line.starts_with("repairing NSE-INDEX-NIFTY 1s 2024-04 v=1 "))
@@ -583,10 +635,14 @@ fn a_file_that_would_change_a_held_bar_is_refused_by_name_and_writes_nothing() {
     assert_eq!(got.failures.len(), 1, "{:?}", got.failures);
     let why = &got.failures[0].why;
     assert!(why.contains("restates the record held at"), "{why}");
-    assert!(why.contains("not back-filled"), "{why}");
+    // TYPED AT THE APPEND DOOR (IA-16, D-4890): a held bar read differently
+    // is the hole `bars_differ_held`, never handed to the repair.
+    assert!(why.contains("(bars_differ_held)"), "{why}");
+    assert!(why.contains("a held bar is never changed"), "{why}");
+    let closed = std::fs::read_to_string(journal_path(&holed)).unwrap();
     assert!(
-        why.contains("never completes, restates or mixes a held day"),
-        "{why}"
+        closed.contains("indices 2024-04-01 NIFTY ") && closed.contains(" reason=bars_differ_held"),
+        "{closed}"
     );
     assert_eq!(got.closed_incomplete, vec![d1()]);
     assert_eq!(generation(&holed, nifty_april()), 0);
@@ -612,7 +668,17 @@ fn a_held_day_read_with_one_more_second_is_refused_never_merged() {
     nifty_world(&more, d1(), nifty_with_one_more_second(d1()));
     // THE PREMISE, CHECKED: the new reading is the held day plus one bar.
     let alone = root.join("alone");
-    let fresh = import(&more, Src::Store, ImportKind::Indices, d1(), d1(), &alone);
+    // A NIFTY-only day: filtered, so BANKNIFTY's absence is not asked
+    // (IA-16, D-4833 `absent_from_listing`).
+    let fresh = import_only(
+        &more,
+        Src::Store,
+        ImportKind::Indices,
+        d1(),
+        d1(),
+        &alone,
+        &["NIFTY".to_owned()],
+    );
     assert!(fresh.failures.is_empty(), "{:?}", fresh.failures);
     let day_one = i64::from(d1().days_from_epoch());
     let held_day: Vec<Bar> = bars(&holed, "INDEX", "NIFTY", None)
@@ -630,9 +696,30 @@ fn a_held_day_read_with_one_more_second_is_refused_never_merged() {
             let filled = import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &holed);
             assert!(filled.failures.is_empty(), "{:?}", filled.failures);
             assert_eq!(generation(&holed, nifty_april()), 1);
+            // THE DAY THE FIRST PASS NAMED `bars_differ_held` IS A HOLE NO RUN
+            // READS AGAIN under its key (IA-16, D-4885 row 4b): passed over,
+            // nothing read, nothing refused again.
+            let passed = import_only(
+                &more,
+                Src::Store,
+                ImportKind::Indices,
+                d1(),
+                d1(),
+                &holed,
+                &only,
+            );
+            assert!(passed.failures.is_empty(), "{:?}", passed.failures);
+            assert_eq!((passed.files, passed.holes_unrepairable), (0, 1));
         }
         let before = (tree(&holed.join("bars")), repair_lines(&holed));
         let revisions = tree_or_empty(&holed.join("bar-revisions-v1"));
+        // The served-from-a-revision case reads the same NIFTY file under
+        // another filter's key, so the month's own refusal is what is proved.
+        let asked: Vec<String> = if served == 0 {
+            only.to_vec()
+        } else {
+            vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()]
+        };
         let got = import_only(
             &more,
             Src::Store,
@@ -640,13 +727,17 @@ fn a_held_day_read_with_one_more_second_is_refused_never_merged() {
             d1(),
             d1(),
             &holed,
-            &only,
+            &asked,
         );
         assert_eq!(got.months_repaired, 0, "served {served}");
         assert_eq!(got.seconds_committed, 0, "served {served}");
         assert_eq!(got.failures.len(), 1, "{:?}", got.failures);
         let why = &got.failures[0].why;
-        assert!(why.contains("not back-filled"), "served {served}: {why}");
+        // JUDGED AT THE APPEND DOOR BY THE MONTH'S SHAPE (IA-16, D-4890): a
+        // month holding a bar inside the offered span holds the day
+        // differently, the hole `bars_differ_held`, never handed to the
+        // back-fill even by a run with a repair reason.
+        assert!(why.contains("(bars_differ_held)"), "served {served}: {why}");
         assert!(
             why.contains("inside the offered span"),
             "served {served}: {why}"
@@ -1158,7 +1249,11 @@ fn the_door_repairs_only_what_the_month_lacks_and_no_append_can_land() {
     two_months.extend(seconds_of(day(2024, 5, 2), 0, 2));
     for (name, batch, says) in [
         ("overlaps and adds", &wider, "not back-filled"),
-        ("restates", &restated, "not back-filled"),
+        // A held stamp read differently is `bars_differ_held` at the append
+        // door itself (IA-16, D-4890), never handed to the back-fill.
+        // At a revision-served month the served generation answers as its
+        // raw form (SC-4 D-6247, typed by IA-16 repair 2, D-7131).
+        ("restates", &restated, "(offer=restated)"),
         ("two months", &two_months, "bars span 2024-04 to 2024-05"),
     ] {
         let refused = offer(&store, batch);
