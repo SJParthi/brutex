@@ -365,7 +365,10 @@ pub(crate) fn kept_bytes(feeds: &[&[CensusFile]]) -> Vec<u64> {
         .filter(|file| !file.retained)
         .map(|file| file.id)
         .collect();
-    let mut counted = std::collections::HashSet::new();
+    // SIZED ONCE (BASE-GATE11, D-6627; docs/07 law 2): at most one identity a
+    // census name, so no insert rehashes.
+    let names: usize = feeds.iter().map(|files| files.len()).sum();
+    let mut counted = std::collections::HashSet::with_capacity(names);
     feeds
         .iter()
         .map(|files| {
