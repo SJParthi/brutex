@@ -2412,7 +2412,7 @@ fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
     std::thread::spawn(move || {
         let _ = tx.send(f());
     });
-    rx.recv_timeout(std::time::Duration::from_secs(60))
+    rx.recv_timeout(std::time::Duration::from_mins(1))
         .expect("the run returned within a minute (it did not wait on a pipe)")
 }
 
