@@ -603,6 +603,13 @@ impl CashCloses {
         self.dated
     }
 
+    /// The dated schedule itself, for a fold that must judge a cash day as
+    /// the derive did (`cli padded-measure`, R4-27).
+    #[must_use]
+    pub const fn schedule(&self) -> &pull::cash_auction::Schedule {
+        &self.schedule
+    }
+
     /// How many days needed a dated close and could not get one.
     #[must_use]
     pub fn unverified_days(&self) -> usize {
