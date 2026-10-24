@@ -253,6 +253,9 @@ mod tests {
             "calendar-days",
             "checksum-audit-stored",
             "descend",
+            // CC-5 (D-7047): walks the folders disk.extra_copy_roots names and
+            // reads the settings; it opens nothing for writing anywhere.
+            "disk-copies",
             "elite",
             "expression-backtest-stored",
             "expression-search-stored",

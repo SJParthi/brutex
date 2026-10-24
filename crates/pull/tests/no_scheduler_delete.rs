@@ -40,7 +40,7 @@
 )]
 
 /// Every module the plan declares scheduler-reachable (R4-06 item 2).
-const DECLARED: [&str; 12] = [
+const DECLARED: [&str; 15] = [
     "crates/api/src/autopilot.rs",
     "crates/pull/src/upkeep.rs",
     "crates/api/src/watcher.rs",
@@ -53,10 +53,16 @@ const DECLARED: [&str; 12] = [
     "crates/api/src/schedule.rs",
     "crates/api/src/keep_awake.rs",
     "crates/api/src/gap_worker.rs",
+    // The copies register and its route and verb (CC-5, FM-607): they walk
+    // folders that hold the only vendor originals, so they join the list
+    // that refuses every delete, rename and truncate in code.
+    "crates/pull/src/copies_register.rs",
+    "crates/api/src/copies_route.rs",
+    "crates/cli/src/disk_copies_command.rs",
 ];
 
 /// The declared members that exist at this head, read at compile time.
-const LISTED: [(&str, &str); 4] = [
+const LISTED: [(&str, &str); 7] = [
     (
         "crates/api/src/autopilot.rs",
         include_str!("../../api/src/autopilot.rs"),
@@ -72,6 +78,18 @@ const LISTED: [(&str, &str); 4] = [
     (
         "crates/pull/src/tickstore_write.rs",
         include_str!("../src/tickstore_write.rs"),
+    ),
+    (
+        "crates/pull/src/copies_register.rs",
+        include_str!("../src/copies_register.rs"),
+    ),
+    (
+        "crates/api/src/copies_route.rs",
+        include_str!("../../api/src/copies_route.rs"),
+    ),
+    (
+        "crates/cli/src/disk_copies_command.rs",
+        include_str!("../../cli/src/disk_copies_command.rs"),
     ),
 ];
 

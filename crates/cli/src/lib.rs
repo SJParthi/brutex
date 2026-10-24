@@ -73,6 +73,9 @@ pub mod checksum_receipts;
 mod columns;
 #[cfg(test)]
 mod columns_tests;
+/// `cli disk-copies`: the copies register from a terminal, always a fresh
+/// walk; exits non-zero while a live archive has a second name (CC-5).
+mod disk_copies_command;
 /// `cli feed-reconcile`: Zerodha minutes vs Zerodha day bar vs GDFL seconds,
 /// per stock-day, read from the store directly, and the factor reader
 /// (DATA-1, D-5170..D-5175).
@@ -569,6 +572,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    read. --ack acknowledges one; --older lists the
                                    older ones; --replace-damaged keeps a damaged
                                    queue and starts a new one; --file lists a kept one.
+       cli disk-copies              the copies register, a fresh walk of the
+                                   folders disk.extra_copy_roots names: each with
+                                   its bytes, reader, proof and twin; every second
+                                   name of a live archive file as a HAZARD line;
+                                   and the retirement list, which the operator
+                                   acts on by hand. Exits non-zero on a hazard, a
+                                   root not walked whole, or the key unset. Reads
+                                   only.
        cli watchdog URL --state-dir DIR [--store DIR] [--timeout-ms N] [--notify open|record]
                                    ask URL (the app's /health, http:// on an IP
                                    or localhost) once, within 5 s; two probes in
@@ -2998,6 +3009,7 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["padded-measure", feed, list] => decision_measure::padded(feed, list, out),
         ["rate-replay", table, from, to] => decision_measure::rate_replay(table, from, to, out),
         ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
+        ["disk-copies", arguments @ ..] => disk_copies_command::command(arguments, out),
         ["watchdog", arguments @ ..] if !arguments.is_empty() => {
             watchdog_command::command(arguments, out)
         }
@@ -3127,7 +3139,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 62] = [
+const COMMANDS: [&str; 63] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3146,6 +3158,7 @@ const COMMANDS: [&str; 62] = [
     "census-recount",
     "checksum-audit-stored",
     "descend",
+    "disk-copies",
     "elite",
     "expression-backtest-stored",
     "expression-search-stored",
@@ -30101,7 +30114,14 @@ mod tests {
             // mistake; it WRITES the store, so it is not run here at all. Its
             // misuses (`--retry` without a spool, an unknown flag) are
             // `verify_merge_command`'s tests.
-            if matches!(word, "alerts" | "results" | "top" | "verify-merge") {
+            //
+            // AND A FIFTH (CC-5, D-7047): `disk-copies` takes no argument at
+            // all; alone it walks the copy roots afresh and reads only. Its
+            // misuse (any argument) and its waits are its own module's tests.
+            if matches!(
+                word,
+                "alerts" | "results" | "top" | "verify-merge" | "disk-copies"
+            ) {
                 continue;
             }
 

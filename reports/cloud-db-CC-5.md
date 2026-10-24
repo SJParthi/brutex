@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-5 — Copies register (cloud build report)
 
@@ -34,9 +34,17 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   Wired in `server.rs` (one `mod` line, one `.route`), `operation_audit_tests.rs` (EXEMPT, DATA)
   and `pool_table_tests.rs` (OpsRead row).
 
+- `crates/cli/src/disk_copies_command.rs` (new, 3 tests, all pass): `cli disk-copies`, no arguments,
+  always a fresh walk; exit 1 on a hazard, a root not walked whole, the key unset or a refused
+  store root; exit 2 on any argument. Wired in `crates/cli/src/lib.rs` (`mod`, one dispatch arm,
+  `COMMANDS` 62 -> 63, one usage entry, the zero-argument exemption), `store_write.rs` (reader
+  list) and `sweep_wiring_tests.rs` (non-sweep list).
+- `crates/pull/tests/no_scheduler_delete.rs` (R4-06): `DECLARED` 12 -> 15 and `LISTED` 4 -> 7 with
+  `copies_register.rs`, `copies_route.rs` and `disk_copies_command.rs`; its 5 tests pass.
+
 ## Left
 
-- The cli verb `disk-copies` and its wiring,
+-
   the R4-06 no-delete list, the /ingest panel and the web bundle, the bench, the docs ledgers
   (02 §42, 04, 05 D-7040.., 06), every gate.
 
@@ -95,3 +103,17 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   line, `store_write.rs` reader list, `sweep_wiring_tests.rs` non-sweep list, the zero-argument
   exemption in `a_known_command_with_the_wrong_arity_is_not_called_unknown`; then R4-06's
   `no_scheduler_delete.rs` rows.
+
+### 2026-10-24 — GO-CC-5 (19:47 IST), save point 5
+
+- `GO-CC-5` appeared on the base: CC-5 builds while HOLD stands for parts without their own GO.
+- Wrote `crates/cli/src/disk_copies_command.rs`; wired `cli/src/lib.rs`, `store_write.rs`,
+  `sweep_wiring_tests.rs`; added the three files to R4-06's `no_scheduler_delete.rs`.
+- `cargo test -p cli --lib --locked -- disk_copies a_known_command every_command_is_listed the_words`:
+  `test result: ok. 7 passed; 0 failed`.
+- `cargo test -p cli --lib --locked -- disk_copies every_command a_known_command store_write sweep`:
+  `test result: ok. 85 passed; 0 failed`.
+- `cargo test -p pull --test no_scheduler_delete --locked`: `test result: ok. 5 passed; 0 failed`.
+- `cargo clippy -p cli -p pull --all-targets --locked`: no warning.
+- NEXT: the /ingest panel (`web/src/routes/ingest/panels/Copies.svelte`, `web/src/lib/copies.js`,
+  `web/tests/copies.test.js`, the rebuilt `web/build`), then the bench `crates/api/benches/ratio/copies.rs`.

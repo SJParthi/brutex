@@ -198,6 +198,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 // The tick-to-second check (DATA-2, D-5181): a read-only
                 // store check, never a sweep.
                 | "tick-to-second-check"
+                // The copies register (CC-5, D-7047): a read-only walk of the
+                // folders a setting names, never a sweep.
+                | "disk-copies"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }
