@@ -1,2 +1,0 @@
-HOLD 2026-10-24 12:56 IST
-The shared 5-hour window burns ~0.73%/min (23% at 12:55 IST, resets 17:30 IST). Parts WITHOUT a GO-<NAME> file: at your NEXT save point commit, push, write STATUS: HELD with a NEXT line, then wait until this file is gone. Parts with GO-<NAME> (R4-09b, IA-17b, IA-3b) keep building. Expected lift: when the Mac wave thins out, at the latest after 17:30 IST.
