@@ -1419,3 +1419,69 @@ fn a_receipt_already_at_its_name_is_refused_and_left_as_it_is() {
         b"held"
     );
 }
+
+/// R4-28 repair 4 (the r4 check's follow-up): a receipt cut before its rename
+/// holds its ordinal even when its body is gone, so the next write takes the
+/// ordinal after it instead of being refused at that partial receipt's name.
+#[test]
+fn a_lone_partial_receipt_holds_its_ordinal_and_the_next_write_steps_past_it() {
+    let root = scratch("lone-partial");
+    let on = day(2026, 1, 5);
+    let partial = format!("{}{PARTIAL}", receipt_name(Kind::Kite, stamp(on, 1)));
+    fs::write(root.join(&partial), b"cut").unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert_eq!(catalog.highest(Kind::Kite, on), 1);
+    assert!(
+        catalog.incomplete().iter().any(|one| one.file == partial),
+        "{:?}",
+        catalog.incomplete()
+    );
+    let body = dump(&[fut(9_000_051, "ZQIDX26JANFUT", "2026-01-29", 75)]);
+    assert_eq!(
+        snapshot(&root, Kind::Kite, on, URL, body.as_bytes()),
+        Ok(Wrote::New(stamp(on, 2)))
+    );
+    assert_eq!(
+        fs::read(root.join(&partial)).unwrap(),
+        b"cut",
+        "the cut receipt is left exactly as found"
+    );
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up): past [`DIFF_NAMED`] named
+/// changes the outcome names the first `DIFF_NAMED` in the diff's order and
+/// counts the rest, and the `.diff` file still holds every one.
+#[test]
+fn named_diff_changes_past_the_bound_are_counted_and_all_kept_in_the_diff_file() {
+    let dir = scratch("diff-many");
+    let root = dir.join(SNAPSHOT_DIR);
+    let (a, b) = (day(2026, 5, 4), day(2026, 5, 5));
+    let many = DIFF_NAMED + 3;
+    let rows = |lot| -> Vec<String> {
+        (0..many)
+            .map(|n| {
+                let token = 9_500_000 + u64::try_from(n).unwrap();
+                fut(token, &format!("ZQ{n:04}26MAYFUT"), "2026-05-26", lot)
+            })
+            .collect()
+    };
+    after_land(&dir, kite_source(), &dump(&rows(75)), &written(), Ok(a)).unwrap();
+    let outcome = after_land(&dir, kite_source(), &dump(&rows(30)), &written(), Ok(b)).unwrap();
+    let Some(Ok(Some(ref summary))) = outcome.diff else {
+        panic!("a diff against the day before: {:?}", outcome.diff);
+    };
+    assert_eq!(summary.named.len(), many, "every lot change is in the summary");
+    let (named, unnamed) = summary.named_bounded();
+    assert_eq!((named.len(), unnamed), (DIFF_NAMED, 3));
+    assert_eq!(named, &summary.named[..DIFF_NAMED], "the diff's own order");
+    let json = outcome.json();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["diff"]["named"].as_array().map(Vec::len), Some(DIFF_NAMED));
+    assert_eq!(value["diff"]["named_total"], many);
+    assert_eq!(value["diff"]["unnamed"], 3);
+    assert_eq!(value["diff"]["counts"]["lot_size"], many);
+    let text = fs::read_to_string(root.join(diff_name(stamp(b, 1)))).unwrap();
+    let (head, items) = parse_diff(&text).unwrap();
+    assert_eq!((head.records, items.len()), (many, many));
+    assert!(items.iter().all(|one| one.change == Change::LotSize));
+}

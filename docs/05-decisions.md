@@ -83065,3 +83065,18 @@ D-7185).
    blocking-item tests failed on the unfixed tip (82d389b5b with only those
    tests, written against the fields it had: `state/fix/round2/R4-28-r4-logs/`
    `before.log`).
+6. **The r4 check's follow-ups taken in the same files.** (a) A receipt cut
+   before its rename holds its ordinal even with its body gone, so the next
+   write steps past it instead of being refused at that partial receipt's
+   name (R428-19). (b) A refresh names at most `DIFF_NAMED` (256) diff
+   changes in its outcome and its Warn events and counts the rest
+   (`named_total`, `unnamed`, one more event naming the `.diff` file, which
+   keeps every change): an exchange-wide lot-size revision is one change
+   per contract (R428-20, `docs/06-limits.md` L-R428-11). (c) A futures plan
+   refuses a newest snapshot dated after today by name,
+   `snapshot_from_the_future`, as `newest_snapshot_day` already did
+   (R428-21). (d) The `Snapshot::parse` note on a token listed twice now says
+   which row takes the slot (the later one; neither is answered).
+   (e) Each futures landing runs off the async workers (`block_in_place`
+   on a multi-thread runtime, inline on a current-thread one), as the
+   plan already did in the server (R428-22).

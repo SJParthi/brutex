@@ -755,6 +755,18 @@ pub fn futures_plan(
              first"
         ));
     };
+    // A NEWEST SNAPSHOT FROM THE FUTURE IS NEVER PLANNED FROM (R4-28 repair
+    // 4, the r4 check's follow-up), for the reason `newest_snapshot_day`
+    // refuses it: the clock that dated it ran ahead, and every token here is
+    // checked against the newest dump and the near month chosen from it.
+    if newest.day > today {
+        return Err(format!(
+            "snapshot_from_the_future: the newest dated Kite master snapshot {newest} is dated \
+             after today {today}: the clock that wrote it ran ahead or this one runs behind, so \
+             no future of {underlying} was planned from it. Move the future-dated snapshot and \
+             its receipt aside by hand to resume"
+        ));
+    }
     let through = window.to().min(last_settled);
     let listing = book
         .root()
@@ -1197,6 +1209,18 @@ impl SeriesOutcome {
     }
 }
 
+/// Runs blocking store work off the async workers when there are workers to
+/// keep free: `block_in_place` on a multi-thread runtime, which hands this
+/// worker's other tasks to another while `work` runs; inline on a
+/// current-thread runtime (`block_in_place` panics there, and there is no
+/// other worker to starve) and outside any runtime.
+fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
 /// Asks and lands one series, chunk by chunk.
 async fn pull_one<D: crate::chain::Discovery>(
     from: &D,
@@ -1254,24 +1278,29 @@ async fn pull_one<D: crate::chain::Discovery>(
             window: chunk,
             granularity: route.granularity,
         };
-        let landed = crate::ingest::from_window(
-            &raw,
-            &instrument,
-            landing.origin,
-            landing.store_root,
-            crate::ingest::Plan {
-                calendar: crate::calendar::Runtime::default(),
-                cash_schedule: None,
-                columns: crate::csv::Columns::Gdfl,
-                request: &request,
-                encoding: spec.timestamps,
-                scale: crate::http::DECODED_PRICE_SCALE,
-                vendor: landing.vendor,
-                exchange: VENUE.as_str(),
-                segment: Segment::Fno.as_str(),
-                contract,
-            },
-        );
+        // THE LANDING IS BLOCKING FILE WORK (bar files, the census, fsync),
+        // so it runs off the async workers when there are workers to keep
+        // free (R4-28 repair 4, the r4 check's follow-up).
+        let landed = off_the_workers(|| {
+            crate::ingest::from_window(
+                &raw,
+                &instrument,
+                landing.origin,
+                landing.store_root,
+                crate::ingest::Plan {
+                    calendar: crate::calendar::Runtime::default(),
+                    cash_schedule: None,
+                    columns: crate::csv::Columns::Gdfl,
+                    request: &request,
+                    encoding: spec.timestamps,
+                    scale: crate::http::DECODED_PRICE_SCALE,
+                    vendor: landing.vendor,
+                    exchange: VENUE.as_str(),
+                    segment: Segment::Fno.as_str(),
+                    contract,
+                },
+            )
+        });
         out.absorb(&landed);
         if let Some(failure) = landed.failures.first() {
             let why = failure.why.clone();

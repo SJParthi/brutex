@@ -985,7 +985,9 @@ fn a_real_size_plan_does_not_grow_with_the_snapshots_held() {
     let path = std::env::var_os("BRUTEX_KITE_DUMP").expect("BRUTEX_KITE_DUMP");
     let body = std::fs::read(path).expect("the dump reads");
     let root = scratch("real-size");
-    let first = day(2026, 10, 6);
+    // 100 daily snapshots from here end 2026-10-08, before the plan's today
+    // (2026-10-22): a newest snapshot dated after today is refused (repair 4).
+    let first = day(2026, 7, 1);
     let asked = window(day(2026, 10, 1), day(2026, 12, 31));
     let mut held = 0_u32;
     let mut p50s = Vec::new();
@@ -1441,5 +1443,93 @@ fn one_day_answered_twice_is_folded_when_alike_and_stops_the_series_when_not() {
         unlike.series[0].contains("; then stopped: ") && !unlike.series[0].contains("already held"),
         "{}",
         unlike.series[0]
+    );
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up, its attack A6): a newest
+/// snapshot dated after today, written by a clock that ran ahead, is never
+/// planned from; it is refused by name. A snapshot dated today is planned
+/// from as usual.
+#[test]
+fn a_futures_plan_refuses_a_newest_snapshot_dated_after_today() {
+    let rows = [fut(8_100_001, "ZQIDX26JANFUT", "2026-01-27")];
+    let asked = window(day(2026, 1, 1), day(2026, 1, 9));
+    let ahead = scratch("future-dated");
+    snapshot_on(&ahead, day(2026, 1, 5), &rows);
+    snapshot_on(&ahead, day(2030, 1, 5), &rows);
+    let plan = |masters: &Path| {
+        futures_plan(
+            &Book::open(masters).unwrap(),
+            route(),
+            "ZQIDX",
+            asked,
+            day(2026, 1, 7),
+            day(2026, 1, 6),
+        )
+    };
+    let why = plan(&ahead).unwrap_err();
+    assert!(
+        why.starts_with("snapshot_from_the_future: ")
+            && why.contains("2030-01-05")
+            && why.contains("after today 2026-01-07"),
+        "{why}"
+    );
+    let today = scratch("dated-today");
+    snapshot_on(&today, day(2026, 1, 5), &rows);
+    snapshot_on(&today, day(2026, 1, 7), &rows);
+    let planned = plan(&today).unwrap();
+    assert!(planned.refused.is_empty(), "{:?}", planned.refused);
+    assert_eq!(planned.asks.len(), 2, "the contract and the continuous series");
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up): on a multi-thread runtime, as
+/// the server runs it, every landing runs through `block_in_place`, off the
+/// async workers, and lands exactly what a current-thread pull lands.
+#[test]
+fn a_futures_pull_on_a_multi_thread_runtime_lands_the_same_bars() {
+    let (masters, store_root) = (scratch("mt-masters"), scratch("mt-store"));
+    snapshot_on(
+        &masters,
+        day(2026, 1, 2),
+        &[
+            fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24"),
+        ],
+    );
+    let plan = futures_plan(
+        &Book::open(&masters).unwrap(),
+        route(),
+        "ZQIDX",
+        window(day(2026, 1, 1), day(2026, 1, 9)),
+        day(2026, 1, 12),
+        day(2026, 1, 9),
+    )
+    .unwrap();
+    let vendor = Vendorish {
+        seen: RefCell::new(Vec::new()),
+        reply: january_reply,
+    };
+    let landed = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a multi-thread runtime")
+        .block_on(pull_futures_day(
+            &vendor,
+            &spec(),
+            &plan,
+            &store_root,
+            Vendor::Zerodha,
+            "test://futures",
+        ));
+    assert!(landed.failed.is_empty(), "{:?}", landed.failed);
+    assert_eq!((landed.bars_offered, landed.bars_committed), (15, 15));
+    let month = YearMonth::new(2026, 1).unwrap();
+    assert_eq!(
+        bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month)
+            .iter()
+            .map(|bar| bar.open_interest)
+            .collect::<Vec<_>>(),
+        [1_005, 1_006, 1_007, 1_008, 1_009]
     );
 }

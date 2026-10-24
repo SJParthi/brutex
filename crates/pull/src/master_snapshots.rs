@@ -281,6 +281,15 @@ const LONE_RECEIPT: &str = "a receipt with no body";
 /// never dropped silently (R4-28 repair 3; `docs/06-limits.md` L-R428-10).
 pub const INCOMPLETE_NAMED: usize = 64;
 
+/// The most named diff changes (symbol, ISIN, lot size, expiry) one refresh
+/// outcome carries and one refresh emits a Warn event for, in the diff's own
+/// order. The rest are counted, `unnamed` in the outcome and one Warn event,
+/// and every one of them is in the `.diff` file (R4-28 repair 4, the r4
+/// check's follow-up): an exchange-wide lot-size revision changes one row per
+/// contract, tens of thousands in one dump, and naming each would be that
+/// many events and an outcome of that many objects.
+pub const DIFF_NAMED: usize = 256;
+
 /// One directory entry that is not a snapshot: named, never read.
 ///
 /// A kill between a body and its receipt, or inside the receipt's rename,
@@ -377,6 +386,14 @@ impl Catalog {
         }
         for stamps in catalog.receipted.values_mut() {
             stamps.sort_unstable();
+        }
+        // A RECEIPT CUT BEFORE ITS RENAME HOLDS ITS ORDINAL TOO (R4-28 repair
+        // 4, the r4 check's follow-up): with its body gone, the next write
+        // would otherwise take that ordinal and be refused at its own partial
+        // receipt name.
+        for one in &partials {
+            let highest = catalog.highest.entry((one.kind, one.stamp.day)).or_insert(0);
+            *highest = (*highest).max(one.stamp.ordinal);
         }
         catalog.incomplete.extend(partials);
         catalog
@@ -1146,8 +1163,9 @@ impl Snapshot {
             let row = u32::try_from(snapshot.rows.len())
                 .map_err(|_| "the dump holds more rows than a u32 counts".to_owned())?;
             if snapshot.by_token.insert((exchange, token), row).is_some() {
-                // TWO ROWS FOR ONE TOKEN: neither is believed. The first row
-                // keeps its slot, and the token answers `Duplicated`.
+                // TWO ROWS FOR ONE TOKEN: neither is believed. The later row
+                // takes the slot (`insert` replaces), and the token answers
+                // `Duplicated`, so neither row is ever answered for it.
                 snapshot.duplicated.insert((exchange, token));
             }
             snapshot.rows.push(Row {
@@ -2225,6 +2243,18 @@ impl DiffSummary {
         }
     }
 
+    /// The named changes an outcome and the events carry, at most
+    /// [`DIFF_NAMED`] in the diff's own order, and how many more are counted
+    /// only (every one is in the `.diff` file).
+    #[must_use]
+    pub fn named_bounded(&self) -> (&[Item], usize) {
+        let shown = self.named.len().min(DIFF_NAMED);
+        (
+            self.named.get(..shown).unwrap_or_default(),
+            self.named.len().saturating_sub(shown),
+        )
+    }
+
     /// `listing=1 delisting=0 ... isin_unknown_total=9`, the counts as one
     /// line.
     #[must_use]
@@ -2348,8 +2378,8 @@ impl Snapshotted {
                     .zip(summary.counts)
                     .map(|(change, count)| format!("{}:{count}", json_string(change.word())))
                     .collect();
-                let named: Vec<String> = summary
-                    .named
+                let (named, unnamed) = summary.named_bounded();
+                let named: Vec<String> = named
                     .iter()
                     .map(|one| {
                         format!(
@@ -2364,13 +2394,14 @@ impl Snapshotted {
                     })
                     .collect();
                 format!(
-                    r#"{{"previous":{},"current":{},"file":{},"counts":{{{}}},"isin_unknown_total":{},"named":[{}]}}"#,
+                    r#"{{"previous":{},"current":{},"file":{},"counts":{{{}}},"isin_unknown_total":{},"named":[{}],"named_total":{},"unnamed":{unnamed}}}"#,
                     json_string(&summary.previous.to_string()),
                     json_string(&summary.current.to_string()),
                     json_string(&summary.file),
                     counts.join(","),
                     summary.isin_unknown_total,
                     named.join(","),
+                    summary.named.len(),
                 )
             }
         };
@@ -2554,7 +2585,19 @@ fn note(outcome: &Snapshotted) {
         "incomplete" => telemetry::Value::Uint(incomplete),
     );
     if let Some(Ok(Some(ref summary))) = outcome.diff {
-        for one in &summary.named {
+        let (named, unnamed) = summary.named_bounded();
+        if unnamed > 0 {
+            let _ = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                EVENT_TARGET,
+                "more master changes than one refresh names; the rest are counted here and every one is in the .diff file",
+                "named" => telemetry::Value::Uint(named.len() as u64),
+                "unnamed" => telemetry::Value::Uint(unnamed as u64),
+                "diff" => telemetry::Value::Str(&summary.file),
+                "day" => telemetry::Value::Str(&day),
+            );
+        }
+        for one in named {
             let token = one.token.to_string();
             let _ = telemetry::emit_if!(
                 telemetry::Level::Warn,
