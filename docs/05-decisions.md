@@ -84623,3 +84623,103 @@ files lands nothing (`already held these bytes`).
 **Cost.** `judge` is O(steps) per share: one pass each way for the nearest
 step the other way and one monotone window maximum each way for the wobble.
 `session_between` is at most 14 calendar lookups. L-R426-08.
+
+### D-7196 — R4-26 repair 2: a basis step is crossed back by the ratio's LEVELS, never by one step's size alone; a side holds its basis across short runs; only a reversed step feeds the wobble; the ledger reads back the runs generation it names — 2026-10-24
+
+**Context.** D-7195 decision 1 (a) called a proven step `basis_reversed`
+when ANY proven step the other way lay within 90 days, whatever its size,
+and (b) measured a side's hold by the single adjacent run's days. The second
+check of R4-26 (`state/fix/round2/verify-R4-26-r2.json`) ran it over
+DATA-1's full input (105 months, 2018-01..2026-09) and found it dropping the
+largest real steps of noisy shares with a false reason: TATASTEEL
+(2022-07-26, 2022-07-29], ratio 14/149 to 67/71, factor 161/16, judged
+reversed by a 145/146 step (about 0.7%) on 2022-05-27, its old run holding
+4 days on a share whose runs break up at 0.2%; GAIL 159/80 (2019-07-11),
+GAIL 3/2 (2022-09-06) and IOC 27/19 (2022-07-26) the same way. None had a
+row, a `/db` note, a `/basis.json` action or a `/sources/day.json` action.
+Being "reversed", the tenfold step then fed TATASTEEL's wobble for 365 days:
+its 262/263 step of 2021-09-22 was reported within a wobble of about 10.06.
+
+**Decision.** It supersedes D-7195 decision 1 (a) and (b); 1 (c) and
+decisions 2 to 5 stand. `pull::corporate_actions::judge` stays the one owner.
+
+1. CROSSED BACK BY LEVELS. A proven step is `basis_reversed` when the ratio
+   crosses it the other way within `REVERSAL_DAYS` = 90 calendar days of its
+   ex-date: a LATER run starting in that span whose band reaches the old
+   run's band or lies beyond it (the ratio came back, in one step or in
+   several), or an EARLIER run whose band reached the new run's band or lay
+   beyond it and which the ratio left in that span (the step only returns
+   the ratio where it stood). The day named is that later run's first day,
+   or the first day after that earlier run, the nearer either side. A step
+   the other way counts only through the level it leaves: a 0.7% step does
+   not cross a tenfold one, and four smaller steps that together walk a
+   fourfold one back do. This is the verifier's "an opposite step that could
+   undo it", read on the levels so that a walk back in several steps, which
+   no single step could undo, is also caught.
+2. ONLY A REVERSED STEP FEEDS THE WOBBLE (D-7195 1 (c), now with its reason
+   stated): a step judged lasting is never reversed, so it never becomes the
+   share's wobble.
+3. A SIDE HOLDS ACROSS RUNS. `basis_short` means a side holds fewer than
+   `HOLD_DAYS` = 5 days with a basis on its own basis: the runs outward from
+   the step, however short each is, while each lies farther than the share's
+   wobble from the other side's adjacent run in the step's direction, counted
+   to 5. A side whose ratio comes back within the wobble stops there. The
+   order is: proven, reversed, within the wobble, held; `basis_short` names
+   the two counts.
+4. A run ending `step` whose factor terms pass `MAX_TERM` (10^18) makes no
+   step; `steps_skipped` counts it, and `cli basis-runs` prints it on its own
+   line and in its `warn` event. Rows whose ratios multiply past 10^18 are
+   the checker's `product_too_large`, never "the rows multiply to 1/1".
+5. `cli basis-runs --apply --ledger` draws the ledger from the basis-runs
+   generation its own write answered, read back at that generation's name
+   (`pull::reference_data::load_written`: the file's checksum and the
+   write's SHA-256 both checked), never from the newest generation, which a
+   second writer may land between the two writes.
+
+**Chosen, not sourced.** The three spans stay D-7195's. The level test and
+the hold walk are definitions over the data, not vendor claims; nothing here
+says which way or for which events a vendor adjusts. A verdict depends on
+the months read: `--from 2025-08 --to 2025-08` leaves HDFCBANK's 2:1 of
+2025-08-26 `basis_short` (16 and 3 days), lasting over the full input
+(L-R426-09).
+
+**Proof.** `pull::corporate_actions::tests::a_tenfold_step_beside_a_small_opposite_wobble_is_ledgered`,
+`a_lasting_large_step_never_becomes_the_shares_wobble`,
+`a_large_step_walked_back_in_smaller_steps_within_90_days_is_reversed`,
+`a_step_most_of_the_way_back_is_not_shown_to_hold`,
+`a_step_whose_factor_would_pass_the_bound_is_counted_never_dropped_silently`,
+`rows_whose_factors_multiply_past_the_bound_are_named_never_called_one`,
+`a_generation_is_read_back_at_its_own_name_never_the_newest`;
+`cli::basis_runs::tests::a_run_cut_between_the_runs_and_the_ledger_is_finished_by_a_rerun`,
+`a_step_too_large_to_measure_is_counted_on_its_own_line`. The first four,
+run on D-7195's code (a scratch worktree at fd61e5858 with them appended,
+the two `held` assertions left out because that code has no such field),
+FAIL, 0 passed and 4 failed: the tenfold step has no lasting verdict (0 for
+1); the tenfold step of the wobble test is `Reversed { by: 2021-11-04 }`,
+not lasting; the walked-back step is reversed by 2024-02-26, the first step
+back, not by 2024-03-18, the day the ratio stands at the old level again;
+the 20% step most of the way back is `Reversed`, not `Short { 30, 1 }`.
+
+**Measured, before and after (24 Oct 2026, release builds, one run each).**
+D-7195's build over DATA-1's full input printed `steps 979, lasting 179 (a
+ledger row each), basis anomalies 591 (reversed 509, short 60,
+within_wobble 22) on 17 share(s), within_noise 209`. This rule's build
+prints `steps 979, lasting 196 (a ledger row each), basis anomalies 574
+(reversed 450, short 19, within_wobble 105) on 17 share(s), within_noise
+209` and ledgers 196 rows: TATASTEEL 161/16 (2022-07-29), GAIL 159/80
+(2019-07-11), GAIL 3/2 (2022-09-06) and IOC 27/19 (2022-07-26) each have a
+row, a `/dayflags.json` note ("on one session between ..."; each window
+holds sessions with no basis), a `/basis.json` action and a
+`/sources/day.json` action on a shadow; TATASTEEL's 262/263 of 2021-09-22 is
+now `basis_reversed` by the ratio crossing it on 2021-07-30, not within a
+wobble of 10. 20 steps became lasting (among them those four, UNIONBANK
+36/35 of 2024-07-19, VEDL 22/21 of 2023-12-27 and 2024-09-10, BPCL 21/20 of
+2023-12-12) and 3 small ones stopped being lasting (HEROMOTOCO 152/151 and
+TECHM 206/205 within their wobble, TECHM 300/301 crossed back). The
+alternating shares stay anomalies: UNIONBANK 4 rows and 117 anomalies (was
+2 and 119), BANKBARODA 4 and 97 (unchanged).
+
+**Cost.** `judge` is O(steps) per share with a constant per step: rule 1
+reads at most the runs starting within 90 days either side (fewer than 92 a
+side), rule 3 at most 5 runs a side, and the wobble is one monotone window
+maximum each way. L-R426-08.

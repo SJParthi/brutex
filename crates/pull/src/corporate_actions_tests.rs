@@ -1711,3 +1711,46 @@ fn a_generation_is_read_back_at_its_own_name_never_the_newest() {
     let refused = crate::reference_data::load_written(&gone, BasisRuns::build).unwrap_err();
     assert_eq!(refused.kind, RefusalKind::Read, "{refused}");
 }
+
+#[test]
+fn rows_whose_factors_multiply_past_the_bound_are_named_never_called_one() {
+    // SPLITCO's 2:1 step of 2023-07-03 against two sourced rows on its day
+    // whose ratios multiply past 10^18: the checker cannot compare their
+    // product with the step's interval and says so, never "they multiply
+    // to 1/1".
+    let (loaded, _) = loaded("cor-product-runs", &[("SPLITCO", split_days())]);
+    let store = scratch("cor-product-too-large");
+    write(
+        &store,
+        &actions_draft(
+            Standing::Sourced,
+            &[
+                nse(
+                    "SPLITCO",
+                    day(2023, 7, 3),
+                    Kind::Split,
+                    "999999999999999989/2",
+                ),
+                nse(
+                    "SPLITCO",
+                    day(2023, 7, 3),
+                    Kind::Bonus,
+                    "999999999999999877/3",
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+    let found = check(&loaded, load_actions(&store).table().unwrap());
+    assert_eq!(
+        found.iter().map(Finding::word).collect::<Vec<_>>(),
+        ["product_too_large"],
+        "{found:#?}"
+    );
+    let said = found[0].to_string();
+    assert!(
+        said.contains("product_too_large SPLITCO (2023-06-30, 2023-07-03]: the 2 rows there")
+            && !said.contains("multiply to 1/1"),
+        "{said}"
+    );
+}

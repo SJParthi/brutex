@@ -1941,7 +1941,7 @@ pub fn measured_draft(runs: &BasisRuns, generation: u64, sha256: &str, fetched: 
         table: Table::CorporateActions,
         source: format!(
             "measured: the lasting ratio steps of basis_runs generation {generation} (cli \
-             basis-runs over DATA-1's per stock-day factor, D-7195); not an NSE file"
+             basis-runs over DATA-1's per stock-day factor, D-7195, D-7196); not an NSE file"
         ),
         source_sha256: Some(sha256.to_owned()),
         fetched,
@@ -1967,6 +1967,15 @@ pub enum Finding {
         /// The product of the rows' ratios.
         product: Ratio,
     },
+    /// Rows lie in the window and their factors multiply past [`MAX_TERM`]:
+    /// the product cannot be compared with the step's interval, and is
+    /// never stood in for by one.
+    ProductTooLarge {
+        /// The step.
+        step: Step,
+        /// How many rows lie in its window.
+        rows: usize,
+    },
     /// A row that moves the price lies inside one run: the basis never moved
     /// across it.
     RowWithoutStep(Action),
@@ -1987,6 +1996,7 @@ impl Finding {
         match self {
             Self::NoRow(_) => "no_row",
             Self::FactorDiffers { .. } => "factor_differs",
+            Self::ProductTooLarge { .. } => "product_too_large",
             Self::RowWithoutStep(_) => "row_without_step",
             Self::BasisAnomaly { .. } => "basis_anomaly",
         }
@@ -2013,6 +2023,12 @@ impl fmt::Display for Finding {
                 f,
                 "factor_differs {} ({}, {}]: the rows multiply to {product}, the step's factor \
                  lies in [{}, {}]",
+                step.symbol, step.after, step.ex_date, step.low, step.high
+            ),
+            Self::ProductTooLarge { step, rows } => write!(
+                f,
+                "product_too_large {} ({}, {}]: the {rows} rows there multiply past 10^18, so \
+                 their product cannot be compared with the step's factor in [{}, {}]",
                 step.symbol, step.after, step.ex_date, step.low, step.high
             ),
             Self::RowWithoutStep(row) => write!(
@@ -2064,9 +2080,11 @@ pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
             match product {
                 Some(product) if step.low <= product && product <= step.high => {}
                 Some(product) => found.push(Finding::FactorDiffers { step, product }),
-                None => found.push(Finding::FactorDiffers {
+                // NEVER STOOD IN FOR BY ONE: a product past the bound is
+                // named as what it is.
+                None => found.push(Finding::ProductTooLarge {
                     step,
-                    product: Ratio::ONE,
+                    rows: rows.len(),
                 }),
             }
         }
