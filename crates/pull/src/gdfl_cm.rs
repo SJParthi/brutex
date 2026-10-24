@@ -1345,8 +1345,10 @@ fn share_member(name: &str) -> String {
 /// symbol less the prefix and less a trade-for-trade series, since a `.BE`
 /// or `.BZ` day file is the share's own day (D-4878 item 8). A name without
 /// the prefix is read as the symbol. One prefix strip and one
-/// [`series_of`].
-pub(crate) fn member_share(member: &str) -> &str {
+/// [`series_of`]. Public so every api reader of the import journal maps a
+/// member key to its share by this one rule, never by a copy (IA-10a item 0).
+#[must_use]
+pub fn member_share(member: &str) -> &str {
     let name = member.strip_prefix(SHARE_MEMBER_PREFIX).unwrap_or(member);
     series_of(name).map_or(name, |(share, _series)| share)
 }

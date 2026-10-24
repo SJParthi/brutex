@@ -854,50 +854,18 @@ struct JournalRows {
     last_day: Option<Day>,
     /// The journal file's own state, as `/imports.json` gives it.
     journal: Value,
-    /// Every `run` line (D-3317 item 4): its id, the second it started and
-    /// the commit it was built from, oldest first. A logged refusal is
-    /// attributed to the run that was running when it was logged (DB-B45).
-    runs: Vec<RunLine>,
+    /// The journal's parse the rows were read from: a run's start and commit
+    /// are one probe of its id index, and the run running at a moment one
+    /// probe of its start index (D-4896), so no request decodes every `run`
+    /// line (`docs/06-limits.md` L-IA-39). A logged refusal is attributed to
+    /// its own run, or, when it carries none the journal names, to the run
+    /// that was running when it was logged (DB-B45).
+    parsed: std::sync::Arc<super::import_journal::Parsed>,
     /// Each day's closing runs: the `run=` of every row of the kind and day,
     /// under ANY filter, the instrument's or not. A logged refusal is a
     /// close's only before the next of these started (AF-02 repair 2): a later
     /// list close's refusal is never an earlier close's.
     closers: HashMap<String, Vec<u64>>,
-}
-
-/// One `run` line of the import journal, as a refusal's attribution needs it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RunLine {
-    /// The run's id (`run=` on its closing lines).
-    id: u64,
-    /// Unix seconds the run started (`started=`), its id where absent.
-    started: u64,
-    /// The commit the run was built from, where the line names one.
-    commit: Option<String>,
-}
-
-/// The run lines of an `/imports.json` answer, oldest first.
-fn runs_of(body: &Value) -> Vec<RunLine> {
-    let mut runs: Vec<RunLine> = body
-        .get("runs")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|run| {
-            let id = run.get("id").and_then(Value::as_u64)?;
-            let fields = run.get("fields");
-            let field = |name: &str| fields.and_then(|f| f.get(name)).and_then(Value::as_str);
-            Some(RunLine {
-                id,
-                started: field("started")
-                    .and_then(|text| text.parse::<u64>().ok())
-                    .unwrap_or(id),
-                commit: field("commit").map(str::to_owned),
-            })
-        })
-        .collect();
-    runs.sort_by_key(|run| (run.started, run.id));
-    runs
 }
 
 /// The journal rows of `first..=last` for `inst`'s kind, read by
@@ -918,9 +886,11 @@ fn journal_rows(
     let mut page = 0usize;
     let mut journal = Value::Null;
     let mut last_day = None;
-    let mut runs = Vec::new();
+    let mut parsed = std::sync::Arc::default();
     let mut closers: HashMap<String, Vec<u64>> = HashMap::with_capacity(PAGE_DAYS as usize);
     loop {
+        // NO `run` LINE DECODED (D-4896): `Asked::whole` asks for none, and
+        // each run the band needs is one probe of the parse's indexes.
         let asked = super::imports::Asked {
             from: Some(first),
             to: Some(last),
@@ -929,10 +899,10 @@ fn journal_rows(
             page,
             ..super::imports::Asked::whole()
         };
-        let body = super::imports::answer(root, &asked)?;
+        let (body, read) = super::imports::answer_and_parse(root, &asked)?;
         if page == 0 {
             journal = body.get("journal").cloned().unwrap_or(Value::Null);
-            runs = runs_of(&body);
+            parsed = read;
             last_day = body
                 .get("kinds")
                 .and_then(Value::as_array)
@@ -998,7 +968,7 @@ fn journal_rows(
         by_day,
         last_day,
         journal,
-        runs,
+        parsed,
         closers,
     })
 }
@@ -1014,7 +984,11 @@ fn journal_rows(
 /// `NIFTY` is named by `BANKNIFTY,NIFTY` and not by `NIFTYNXT50,BANKNIFTY`,
 /// whose text merely contains it. `*` names no symbol: it is the whole tree,
 /// and covers every symbol; of the closes that cover one, the newest line
-/// wins ([`journal_rows`]).
+/// wins ([`journal_rows`]). A member key `<filter>+<member>` (D-4878; IA-10a)
+/// names its one member's symbol
+/// ([`super::import_journal::member_symbol`], `pull`'s rule) and nothing
+/// else: its member's day stands on it, its base's other members keep the
+/// base close.
 ///
 /// # Cost
 ///
@@ -1047,7 +1021,14 @@ impl<'s> Names<'s> {
         }
         #[cfg(test)]
         SPLITS.with(|splits| splits.set(splits.get().saturating_add(1)));
-        let named = filter != "*" && filter.split(',').any(|name| name == self.symbol);
+        // A MEMBER KEY NAMES ITS ONE MEMBER AND NOTHING ELSE (IA-10a, F84):
+        // `*+NSE-INDEX-NIFTYIT` is NIFTYIT's day, reopened under its own key
+        // because the `*` close's scope lacked it, and covers no other
+        // instrument, so every other member of the base keeps the base close.
+        let named = match super::import_journal::member_key(filter) {
+            Some((_, member)) => super::import_journal::member_symbol(member) == self.symbol,
+            None => filter != "*" && filter.split(',').any(|name| name == self.symbol),
+        };
         let _first = self.seen.insert(filter.to_owned(), named);
         named
     }
@@ -1123,23 +1104,25 @@ struct Refusals {
     later_this_count: usize,
     /// The first of those.
     later_this_first: Option<(String, String)>,
-}
-
-/// The second run `id` started, as its `run` line names it, else the id
-/// itself (a run's id is the second it started, D-3317).
-fn start_of(runs: &[RunLine], id: u64) -> u64 {
-    runs.iter()
-        .find(|run| run.id == id)
-        .map_or(id, |run| run.started)
+    /// Logged refusals placed by their own run, which the journal names
+    /// (D-4896).
+    placed_by_run: usize,
+    /// Logged refusals placed by their time against the runs' starts: no run
+    /// of their own, or one no `run` line names, or a close naming no run.
+    placed_by_time: usize,
 }
 
 /// One refusal an earlier run logged, attributed to its run where the
 /// journal records one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Superseded {
-    /// The run that was running when it was logged, or `None` for a run
-    /// before the journal recorded `run` lines (D-3317).
+    /// The run that logged it: its own run when the event carries one the
+    /// journal names (D-4896), else the run that was running when it was
+    /// logged, or `None` for a run before the journal recorded `run` lines
+    /// (D-3317).
     run: Option<u64>,
+    /// How [`Self::run`] was found: by the event's own run or by its time.
+    run_from: super::imports::PlacedBy,
     /// That run's commit, where its line names one.
     commit: Option<String>,
     /// When it was logged, epoch milliseconds.
@@ -1155,19 +1138,27 @@ struct Superseded {
 /// logged by an EARLIER run than the one whose line closes the row (DB-B45).
 /// Each distinct refusal is decided once.
 ///
-/// # Grouped by run
+/// # Grouped by run (D-4896)
 ///
-/// A day attempted by several runs logged each run's refusals, and the
-/// importer's events carry no run id. The row's closing line does
-/// (`run=`, D-3317), and every `run` line names the second it started: a
-/// refusal logged at or after the closing run's start is that run's, and
-/// one logged before it is an earlier run's, attributed to the latest run
-/// started before it, or to none for a run before the journal recorded run
-/// lines. 2024-03-02's indices were refused by a build that called the drill
-/// "not a regular session", then admitted and refused at filing by run
-/// 1791602895: the current reason is the filing, and the calendar refusal is
-/// history. A row with no `run=` (a line written before D-3317) keeps every
-/// refusal current: nothing says which run logged it.
+/// A day attempted by several runs logged each run's refusals. Each event a
+/// run writes while it reads its days carries that run as its record's run
+/// (`pull`'s `RunKey`), and the row's closing line names its own (`run=`,
+/// D-3317): a refusal whose run IS the close's is the close's, one whose run
+/// started before it is an earlier run's (history, attributed to that run),
+/// and any other run's is never this close's. That is one probe of the
+/// journal's id index a refusal, whatever the journal holds. Only a refusal
+/// with no run the journal names (every one logged before DB-A41's fix, or
+/// under a `cli` attempt's key) is placed by its time: at or after the
+/// closing run's start it is that run's, before it an earlier run's,
+/// attributed to the latest run started at or before it (one probe of the
+/// start index), or to none for a run before the journal recorded run lines.
+/// The answer counts how each was placed (`placed`), and each superseded
+/// refusal says how its run was found (`run_from`). 2024-03-02's indices
+/// were refused by a build that called the drill "not a regular session",
+/// then admitted and refused at filing by run 1791602895: the current reason
+/// is the filing, and the calendar refusal is history. A row with no `run=`
+/// (a line written before D-3317) keeps every refusal current: nothing says
+/// which run logged it.
 ///
 /// # Bounded by the next close (AF-02 repair 2)
 ///
@@ -1176,13 +1167,20 @@ struct Superseded {
 /// that run's and never this close's: a later `ABCAPITAL,RELIANCE` run's
 /// refusal is not the first of an earlier `BANKNIFTY,NIFTY` close. It is
 /// counted as `later_count` and named nowhere else. The placing is
-/// `/imports.json`'s own ([`super::imports::placed`]), so the two routes
+/// `/imports.json`'s own ([`super::imports::placed_of`]), so the two routes
 /// cannot disagree about whose a refusal is.
+///
+/// # A member key's refusals are its member's (IA-10a)
+///
+/// A member key's close (`member_own`, its member being this instrument)
+/// read only its member's files (D-4878, `admit` row 1), so every refusal
+/// of its own is about this instrument, whatever `about_this` can decode
+/// of a stored index's or share's file name.
 fn refusals_of(
     row: &Value,
     inst: &Instrument,
     day: Day,
-    runs: &[RunLine],
+    parsed: &super::import_journal::Parsed,
     next_s: Option<u64>,
 ) -> Refusals {
     let mut distinct: std::collections::BTreeSet<(String, String)> =
@@ -1191,10 +1189,11 @@ fn refusals_of(
         std::collections::BTreeSet::new();
     let mut later: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let mut out = Refusals::default();
-    let started_s = row
-        .get("run")
-        .and_then(Value::as_u64)
-        .map(|id| start_of(runs, id));
+    let close_run = row.get("run").and_then(Value::as_u64);
+    let member_own = row
+        .get("member")
+        .and_then(Value::as_str)
+        .is_some_and(|member| super::import_journal::member_symbol(member) == inst.symbol);
     for logged in row
         .get("logged")
         .and_then(Value::as_array)
@@ -1210,7 +1209,14 @@ fn refusals_of(
         };
         let pair = (text("about"), text("why"));
         let at_ms = logged.get("at_ms").and_then(Value::as_u64);
-        let placed = super::imports::placed(at_ms, started_s, next_s);
+        let event_run = logged.get("run").and_then(Value::as_u64);
+        let (placed, by) = super::imports::placed_of(parsed, event_run, at_ms, close_run, next_s);
+        match by {
+            super::imports::PlacedBy::Run => out.placed_by_run = out.placed_by_run.saturating_add(1),
+            super::imports::PlacedBy::Time => {
+                out.placed_by_time = out.placed_by_time.saturating_add(1);
+            }
+        }
         if placed == super::imports::Placed::After {
             if later.insert(pair.clone()) {
                 out.later_count = out.later_count.saturating_add(1);
@@ -1232,14 +1238,20 @@ fn refusals_of(
             }
             out.superseded_count = out.superseded_count.saturating_add(1);
             if out.superseded.len() < MAX_REFUSALS_NAMED {
-                let by = at_ms.and_then(|at| {
-                    runs.iter()
-                        .rev()
-                        .find(|run| run.started.saturating_mul(1_000) <= at)
-                });
+                // ITS OWN RUN, ELSE THE ONE RUNNING WHEN IT WAS LOGGED: one
+                // probe of the id index, or one of the start index.
+                let run = match by {
+                    super::imports::PlacedBy::Run => {
+                        event_run.and_then(|id| parsed.runs_of(id).next())
+                    }
+                    super::imports::PlacedBy::Time => {
+                        at_ms.and_then(|at| parsed.run_running_at(at))
+                    }
+                };
                 out.superseded.push(Superseded {
-                    run: by.map(|run| run.id),
-                    commit: by.and_then(|run| run.commit.clone()),
+                    run: run.map(|run| run.id),
+                    run_from: by,
+                    commit: run.and_then(|run| run.field("commit")).map(str::to_owned),
                     at_ms,
                     about: pair.0,
                     why: pair.1,
@@ -1253,7 +1265,7 @@ fn refusals_of(
         if !distinct.insert(pair.clone()) {
             continue;
         }
-        if about_this(&pair.0, inst, day) {
+        if member_own || about_this(&pair.0, inst, day) {
             out.this_count = out.this_count.saturating_add(1);
             if out.this.len() < MAX_REFUSALS_NAMED {
                 out.this.push(pair);
@@ -1278,10 +1290,12 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "reached": reached,
             "stage": null, "reason": null, "files": null, "failures": null, "run": null,
             "from": null, "line": null, "late": null, "max_back_s": null,
+            "filter": null, "member": null, "hole": null,
             "refusals": {
                 "this": [], "this_count": 0, "other_count": 0, "other_first": null,
                 "superseded": [], "superseded_count": 0, "later_count": 0,
                 "later_this_count": 0, "later_this_first": null,
+                "placed": { "by_event_run": 0, "by_time": 0 },
             },
         });
     };
@@ -1289,14 +1303,15 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
     let recounted = row.get("recounted").and_then(Value::as_bool) == Some(true);
     // THE CLOSE'S OWN WINDOW: from its run's start to the start of the next
     // run that closed the same kind-day, under any filter (AF-02 repair 2).
+    // Each start is one probe of the journal's id index (D-4896).
     let next_s = row.get("run").and_then(Value::as_u64).and_then(|id| {
         let ids = rows.closers.get(&day.to_string())?;
         super::imports::next_start(
-            start_of(&rows.runs, id),
-            ids.iter().map(|other| start_of(&rows.runs, *other)),
+            rows.parsed.started_of(id),
+            ids.iter().map(|other| rows.parsed.started_of(*other)),
         )
     });
-    let refusals = refusals_of(row, inst, day, &rows.runs, next_s);
+    let refusals = refusals_of(row, inst, day, &rows.parsed, next_s);
     // A DAY THE LOG ALONE NAMES, AND NOTHING IN IT ABOUT THIS INSTRUMENT:
     // a run refused other files of the day and left no journal line (DB-025's
     // shape), and nothing says this instrument's day was refused. It reads
@@ -1329,6 +1344,12 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
         "line": field("line"),
         "late": field("late"),
         "max_back_s": field("max_back_s"),
+        // THE KEY THE DAY STANDS ON, AND A MEMBER'S HOLE (IA-10a, F84): a
+        // member key's row is its member's day; a store hole is named with
+        // whether a repair-reason run reads it, never a plain `incomplete`.
+        "filter": field("filter"),
+        "member": field("member"),
+        "hole": unless_others_only("hole"),
         "refusals": {
             "this": refusals.this.iter().map(pair).collect::<Vec<_>>(),
             "this_count": refusals.this_count,
@@ -1336,6 +1357,7 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "other_first": refusals.other_first.as_ref().map(pair),
             "superseded": refusals.superseded.iter().map(|old| json!({
                 "run": old.run,
+                "run_from": old.run_from.as_str(),
                 "commit": old.commit,
                 "at_ms": old.at_ms,
                 "about": old.about,
@@ -1345,6 +1367,12 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "later_count": refusals.later_count,
             "later_this_count": refusals.later_this_count,
             "later_this_first": refusals.later_this_first.as_ref().map(pair),
+            // HOW EACH LOGGED REFUSAL WAS PLACED (D-4896): by the event's own
+            // run, which the journal names, or by its time.
+            "placed": {
+                "by_event_run": refusals.placed_by_run,
+                "by_time": refusals.placed_by_time,
+            },
         },
     })
 }
@@ -5894,18 +5922,13 @@ mod tests {
     /// current, since nothing says which run logged it.
     #[test]
     fn an_earlier_refusal_names_the_run_that_logged_it() {
-        let runs = vec![
-            RunLine {
-                id: 10,
-                started: 10,
-                commit: Some("aaa".to_owned()),
-            },
-            RunLine {
-                id: 20,
-                started: 20,
-                commit: None,
-            },
-        ];
+        let root = crate::server::import_journal::tests::journal(
+            "dayflags-earlier-run",
+            "run 10 source=zip commit=aaa started=10\nrun 20 source=zip started=20\n",
+        );
+        let runs = crate::server::import_journal::snapshot(&root)
+            .expect("reads")
+            .parsed;
         let row = json!({
             "run": 20,
             "logged": [

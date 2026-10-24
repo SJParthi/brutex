@@ -34,6 +34,20 @@
 //! row says so with `stage: null`, and `/imports.json` names the evidence the
 //! importer logged for the day instead ([`crate::logs::import_refusals`]).
 //!
+//! # Member keys and holes (IA-10a; F84, SF-9)
+//!
+//! A day done under a narrower scope is reopened for each new member under
+//! that member's own key, `<filter>+<member>` (D-4878; `indices 2019-01-02
+//! *+NSE-INDEX-NIFTYIT`): `+` is outside the symbol alphabet, so no filter
+//! name holds one. A row keeps its key's filter whole and the place of the
+//! `+` ([`member_key`]), so [`DayRow::base`] and [`DayRow::member`] are O(1)
+//! after the one split the row's creation pays; the store symbol a member
+//! names is [`member_symbol`], through `pull`'s one rule. An `incomplete`
+//! row whose reason is one of the five store-hole reasons
+//! (`pull::gdfl_import::hole_reasons`) is a hole ([`DayRow::hole`]), named
+//! with whether a repair-reason run reads it, and never a plain
+//! `incomplete`.
+//!
 //! # Cost: a tail, never a re-read
 //!
 //! The journal is append-only, so [`snapshot`] keeps what it parsed, keyed by
@@ -144,8 +158,12 @@ pub(crate) struct DayRow {
     pub(crate) kind: ImportKind,
     /// The day.
     pub(crate) day: Day,
-    /// The instrument filter (`*` for the whole tree).
+    /// The instrument filter (`*` for the whole tree), whole: a member key's
+    /// `<filter>+<member>` included.
     pub(crate) filter: String,
+    /// Where a member key's `+` is in [`Self::filter`] ([`member_key`]),
+    /// `None` for a base key: found once, when the row is made.
+    pub(crate) member_at: Option<usize>,
     /// How it stands.
     pub(crate) outcome: DayOutcome,
     /// Whether the deciding line is a `recounted` line.
@@ -186,6 +204,85 @@ impl DayRow {
                 .definition
                 .is_some_and(|definition| !definition_is_current(self.kind, self.day, definition))
     }
+
+    /// The key's base filter: a member key's `<filter>` before its `+`, else
+    /// the whole filter. O(1).
+    pub(crate) fn base(&self) -> &str {
+        self.member_at
+            .and_then(|at| self.filter.get(..at))
+            .unwrap_or(&self.filter)
+    }
+
+    /// The member a member key names (`*+NSE-INDEX-NIFTYIT` names
+    /// `NSE-INDEX-NIFTYIT`), `None` for a base key. O(1).
+    pub(crate) fn member(&self) -> Option<&str> {
+        self.filter.get(self.member_at?.checked_add(1)?..)
+    }
+
+    /// The store hole the row is, when its deciding line is `incomplete` with
+    /// one of the five store-hole reasons, by `pull`'s one list
+    /// (`pull::gdfl_import::hole_reasons`); `repairable` is `admit` row 4a's
+    /// answer (`pull::gdfl_import::hole_is_repairable`). At most five
+    /// compares of a short word.
+    pub(crate) fn hole(&self) -> Option<Hole<'_>> {
+        if self.outcome != DayOutcome::Incomplete {
+            return None;
+        }
+        let reason = self.reason.as_deref()?;
+        pull::gdfl_import::hole_reasons()
+            .iter()
+            .any(|known| *known == reason)
+            .then(|| Hole {
+                reason,
+                repairable: pull::gdfl_import::hole_is_repairable(reason),
+            })
+    }
+}
+
+/// A store hole (IA-16's five reasons; IA-10a): a day its month already
+/// passed, read again only by a repair-reason run, or by none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hole<'r> {
+    /// The deciding line's `reason=`.
+    pub(crate) reason: &'r str,
+    /// Whether a run with a repair reason reads it (`admit` row 4a); a hole
+    /// no repair fills is row 4b's.
+    pub(crate) repairable: bool,
+}
+
+impl Hole<'_> {
+    /// The hole as the wire carries it.
+    pub(crate) fn json(self) -> serde_json::Value {
+        serde_json::json!({ "reason": self.reason, "repairable": self.repairable })
+    }
+}
+
+/// A member key's filter split at its `+` (D-4878): `(base, member)`, or
+/// `None` for a base key. A `+` with nothing before or after it names no
+/// member, so such a filter is a base key of its own text, which names no
+/// symbol and covers none (a journal the importer never writes). O(bytes of
+/// the filter), paid once per row made and once per distinct filter a
+/// reader memoises.
+pub(crate) fn member_key(filter: &str) -> Option<(&str, &str)> {
+    filter
+        .split_once('+')
+        .filter(|(base, member)| !base.is_empty() && !member.is_empty())
+}
+
+/// The prefix of an index member's name: the instrument id's own
+/// (`NSE-INDEX-<store key>`, `pull::gdfl_cm`'s `index_member`), checked
+/// against `pull`'s own member names by
+/// `a_member_names_its_symbol_by_pulls_one_rule`.
+const INDEX_MEMBER_PREFIX: &str = "NSE-INDEX-";
+
+/// The store symbol a member names: a share member (`NSE-CASH-<symbol>`,
+/// with or without a trade-for-trade series) by `pull`'s one rule,
+/// [`pull::gdfl_cm::member_share`], and an index member (`NSE-INDEX-<store
+/// key>`), which that rule leaves whole, behind its prefix. O(bytes of the
+/// member): one prefix strip, one split, one more strip.
+pub(crate) fn member_symbol(member: &str) -> &str {
+    let share = pull::gdfl_cm::member_share(member);
+    share.strip_prefix(INDEX_MEMBER_PREFIX).unwrap_or(share)
 }
 
 /// One `run` line: its id, its line and its fields, decoded.
@@ -205,6 +302,20 @@ pub(crate) struct RunLine {
 }
 
 impl RunLine {
+    /// The second the run started: its `started=`, else its id (D-3317).
+    pub(crate) fn started(&self) -> u64 {
+        self.field("started")
+            .and_then(|text| text.parse::<u64>().ok())
+            .unwrap_or(self.id)
+    }
+
+    /// The first value of field `name`, when the line carries it.
+    pub(crate) fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find_map(|(held, value)| (held == name).then_some(value.as_str()))
+    }
+
     /// Folds the run's end line (number `number`, fields `fields`) into it:
     /// each field it does not carry is added; one it carries with another
     /// value is kept beside it as `end_<name>`, so neither value is lost.
@@ -272,6 +383,12 @@ pub(crate) struct Parsed {
     /// other (D-4813 round 6, R6; IA-LG-03). Two processes that start in one
     /// second share an id, which is why a value is a list.
     runs_by_id: std::collections::HashMap<u64, Vec<u32>>,
+    /// Each run by the second it started (`started=`, else its id) and its
+    /// id, to its first line in [`Self::runs`]: kept as each `run` line is
+    /// parsed, one ordered insert, so a refusal logged with no run of its
+    /// own is placed by time in one range probe, never by decoding every
+    /// `run` line on each request (D-4896; `docs/06-limits.md` L-IA-39).
+    runs_by_start: BTreeMap<(u64, u64), u32>,
     /// Whole lines read.
     pub(crate) lines: u64,
     /// Lines this reader cannot name: the first [`MAX_NAMED_FAULTS`], by
@@ -348,6 +465,28 @@ impl Parsed {
         usize::try_from(*at).ok()
     }
 
+    /// The second run `id` started: its first `run` line's `started=`, else
+    /// the id itself (a run's id is the second it started, D-3317). One hash
+    /// probe through the id index.
+    pub(crate) fn started_of(&self, id: u64) -> u64 {
+        self.runs_of(id).next().map_or(id, RunLine::started)
+    }
+
+    /// Whether the journal holds a `run` line of `id`: one hash probe.
+    pub(crate) fn holds_run(&self, id: u64) -> bool {
+        self.runs_by_id.contains_key(&id)
+    }
+
+    /// The run that was running at `at_ms` (epoch milliseconds) by the
+    /// clock: the one that started latest at or before it, ties broken by
+    /// the larger id, `None` before every run. O(log runs): one range probe
+    /// of the start index (D-4896), for a refusal that carries no run.
+    pub(crate) fn run_running_at(&self, at_ms: u64) -> Option<&RunLine> {
+        let at_s = at_ms / 1_000;
+        let (_, at) = self.runs_by_start.range(..=(at_s, u64::MAX)).next_back()?;
+        self.runs.get(usize::try_from(*at).ok()?)
+    }
+
     /// Which of its id's lines (from 0, oldest first) the `run` line at
     /// position `at` of [`Self::runs`] is: what a page that ends there names
     /// as its cursor. A walk of that id's own lines only.
@@ -419,16 +558,20 @@ impl Parsed {
                 // THE INDEX BESIDE THE LIST, in the same step: a line past
                 // `u32::MAX` runs is not indexed and `runs_unindexed` says so,
                 // rather than a position that wraps and names another run.
-                match u32::try_from(self.runs.len()) {
-                    Ok(at) => self.runs_by_id.entry(id).or_default().push(at),
-                    Err(_) => self.runs_unindexed = self.runs_unindexed.saturating_add(1),
-                }
-                self.runs.push(RunLine {
+                let run = RunLine {
                     id,
                     line: number,
                     fields: decoded,
                     end_line: None,
-                });
+                };
+                match u32::try_from(self.runs.len()) {
+                    Ok(at) => {
+                        self.runs_by_id.entry(id).or_default().push(at);
+                        let _first_kept = self.runs_by_start.entry((run.started(), id)).or_insert(at);
+                    }
+                    Err(_) => self.runs_unindexed = self.runs_unindexed.saturating_add(1),
+                }
+                self.runs.push(run);
             }
             ["begin", kind, day, filter] => {
                 let (kind, day) = key_parts(kind, day)?;
@@ -476,6 +619,7 @@ impl Parsed {
             kind,
             day,
             filter: filter.to_owned(),
+            member_at: member_key(filter).map(|(base, _)| base.len()),
             outcome,
             recounted: false,
             stats: Stats::default(),

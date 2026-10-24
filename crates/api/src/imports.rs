@@ -92,11 +92,12 @@ pub(crate) enum RunsAsked {
     /// `n`-th line, from 0, for an id with several lines), and the answer's
     /// `runs_next` is the next one. O(page).
     Page(Option<(u64, usize)>),
-    /// Every run, for a caller inside this crate that resolves a run by time
-    /// and so needs the whole list: `/dayflags.json`'s day band
-    /// (`dayflags::journal_rows`). O(runs), the cost it had before the page
-    /// existed; never what the route returns.
-    Every,
+    /// No `run` line decoded, only counted: for a caller inside this crate
+    /// that resolves each run it needs through the journal's id and start
+    /// indexes instead (`/dayflags.json`'s day band, D-4896, which until
+    /// IA-10a asked for every run and decoded each on every request,
+    /// `docs/06-limits.md` L-IA-39). Never what the route returns.
+    Unasked,
 }
 
 /// How many `run` lines one answer decodes and returns: the newest, or the
@@ -350,9 +351,24 @@ pub(super) async fn imports_json(
 ///
 /// A journal that is there and cannot be read, in its own words.
 pub(crate) fn answer(root: &std::path::Path, asked: &Asked) -> Result<Value, String> {
+    answer_and_parse(root, asked).map(|(body, _)| body)
+}
+
+/// [`answer`], and the journal's parse it was computed from, so a caller
+/// inside this crate resolves a run through the parse's own indexes in one
+/// probe (D-4896) and never from a list of every run.
+///
+/// # Errors
+///
+/// As [`answer`].
+pub(crate) fn answer_and_parse(
+    root: &std::path::Path,
+    asked: &Asked,
+) -> Result<(Value, std::sync::Arc<Parsed>), String> {
     let snapshot = crate::server::import_journal::snapshot(root)?;
     let evidence = crate::logs::import_refusals(root);
-    Ok(body(root, &snapshot, &evidence, asked))
+    let body = body(root, &snapshot, &evidence, asked);
+    Ok((body, snapshot.parsed))
 }
 
 impl Asked {
@@ -369,7 +385,7 @@ impl Asked {
             stage: None,
             reason: None,
             why: None,
-            runs: RunsAsked::Every,
+            runs: RunsAsked::Unasked,
         }
     }
 }
@@ -478,6 +494,9 @@ pub(crate) fn summary_of(
     if unsettled {
         notes.push(UNSETTLED.to_owned());
     }
+    if let Some(note) = walked.holes_note() {
+        notes.push(note);
+    }
     let runs = runs_page(parsed, RunsAsked::Page(None));
     json!({
         "route": "/imports.json?feed=gdfl",
@@ -491,6 +510,8 @@ pub(crate) fn summary_of(
             .zip(walked.counts)
             .map(|(outcome, n)| (outcome.as_str().to_owned(), Value::from(n)))
             .collect::<serde_json::Map<String, Value>>(),
+        "holes": walked.holes_json(),
+        "holes_unrepairable": walked.holes_unrepairable,
         "census_refused": {
             "count": walked.census_refused.len(),
             "days": walked.census_refused,
@@ -691,6 +712,11 @@ fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> 
             json!({
                 "seq": record.seq,
                 "at_ms": record.at_unix_millis,
+                // THE EVENT'S OWN RUN (D-4896): the sink's run key the import
+                // held while it read its days (`pull`'s `RunKey`), `null` for
+                // an event logged outside any run (every line before DB-A41's
+                // fix). What the day band places a refusal by, before time.
+                "run": (record.run != 0).then_some(record.run),
                 "message": record.message,
                 "about": field(record, "about"),
                 "why": field(record, "why"),
@@ -703,7 +729,15 @@ fn row_json(root: &std::path::Path, row: &DayRow, evidence: &ImportRefusals) -> 
         "kind": row.kind.as_str(),
         "day": row.day.to_string(),
         "filter": row.filter,
+        // A MEMBER KEY NAMES ITS BASE FILTER AND ITS MEMBER (IA-10a, F84):
+        // `*+NSE-INDEX-NIFTYIT` is `*`'s day reopened for that one member.
+        "base_filter": row.base(),
+        "member": row.member(),
+        "member_symbol": row.member().map(crate::server::import_journal::member_symbol),
         "outcome": row.outcome.as_str(),
+        // A STORE HOLE IS NEVER A PLAIN `incomplete` (IA-16's five reasons):
+        // named with whether a repair-reason run reads it.
+        "hole": row.hole().map(crate::server::import_journal::Hole::json),
         "stage": stage.as_ref().map(|(stage, _)| stage.clone()),
         "stage_from": stage.as_ref().map(|(_, from)| match from {
             StageFrom::Journal => "journal",
@@ -749,8 +783,13 @@ fn wanted(
     run_attempt: Option<u64>,
 ) -> bool {
     let kind_day = || (row.kind.as_str(), row.day.to_string());
+    // `outcome=incomplete` ASKS FOR THE PLAIN ONES: a store hole is counted
+    // under `holes` by its reason, never as an `incomplete` (IA-10a), and is
+    // found by `reason=<its reason>`.
     asked.kind.is_none_or(|kind| kind == row.kind)
-        && asked.outcome.is_none_or(|outcome| outcome == row.outcome)
+        && asked.outcome.is_none_or(|outcome| {
+            outcome == row.outcome && (outcome != DayOutcome::Incomplete || row.hole().is_none())
+        })
         && asked.run.is_none_or(|run| {
             let (kind, day) = kind_day();
             let attempts = evidence.attempts_of(kind, &day);
@@ -795,6 +834,7 @@ fn logged_only(kind: ImportKind, day: Day, failures: usize) -> DayRow {
         kind,
         day,
         filter: "*".to_owned(),
+        member_at: None,
         outcome: DayOutcome::Refused,
         recounted: false,
         stats: crate::server::import_journal::Stats {
@@ -815,8 +855,15 @@ fn logged_only(kind: ImportKind, day: Day, failures: usize) -> DayRow {
 /// What one walk of the asked range found.
 #[derive(Debug, Default)]
 struct Walk<'p> {
-    /// Rows by outcome, in [`DayOutcome::ALL`] order, over the range and kind.
+    /// Rows by outcome, in [`DayOutcome::ALL`] order, over the range and kind:
+    /// a store hole is not among the `incomplete` ones, it is in
+    /// [`Self::holes`].
     counts: [u64; DayOutcome::ALL.len()],
+    /// Store holes by reason, in `pull::gdfl_import::hole_reasons` order
+    /// (IA-10a, F84).
+    holes: [u64; pull::gdfl_import::hole_reasons().len()],
+    /// The holes no repair fills (`admit` row 4b), counted apart.
+    holes_unrepairable: u64,
     /// `<kind> <day>` of every day the census refused and is not done.
     census_refused: Vec<String>,
     /// `<kind> <day>` of every day the census refused and that later closed.
@@ -824,6 +871,56 @@ struct Walk<'p> {
     /// The rows the request asked for, oldest first: the journal's, and a
     /// [`logged_only`] row for each day the log alone names.
     rows: Vec<std::borrow::Cow<'p, DayRow>>,
+}
+
+impl Walk<'_> {
+    /// Counts one row: a store hole under its reason (and apart when no
+    /// repair fills it), every other row under its outcome. At most five
+    /// compares of the reason against `pull`'s list.
+    fn count(&mut self, row: &DayRow) {
+        let slot = match row.hole() {
+            Some(hole) => {
+                if !hole.repairable {
+                    self.holes_unrepairable = self.holes_unrepairable.saturating_add(1);
+                }
+                pull::gdfl_import::hole_reasons()
+                    .iter()
+                    .zip(self.holes.iter_mut())
+                    .find_map(|(reason, n)| (*reason == hole.reason).then_some(n))
+            }
+            None => DayOutcome::ALL
+                .iter()
+                .zip(self.counts.iter_mut())
+                .find_map(|(outcome, n)| (*outcome == row.outcome).then_some(n)),
+        };
+        if let Some(n) = slot {
+            *n = n.saturating_add(1);
+        }
+    }
+
+    /// The sentence an answer holding a hole owes its reader, `None` for none.
+    fn holes_note(&self) -> Option<String> {
+        let total: u64 = self.holes.iter().sum();
+        (total > 0).then(|| {
+            format!(
+                "{total} row(s) closed `incomplete` are store holes (IA-16's five reasons): \
+                 counted under holes by reason, {} of them under holes_unrepairable (no repair \
+                 fills them), and never under counts.incomplete. outcome=incomplete lists the \
+                 plain ones; reason=<the hole's reason> lists the holes.",
+                self.holes_unrepairable
+            )
+        })
+    }
+
+    /// The holes by reason as the wire carries them: every reason named,
+    /// zero or not, so an answer with none says 0 rather than nothing.
+    fn holes_json(&self) -> serde_json::Map<String, Value> {
+        pull::gdfl_import::hole_reasons()
+            .iter()
+            .zip(self.holes)
+            .map(|(reason, n)| ((*reason).to_owned(), Value::from(n)))
+            .collect()
+    }
 }
 
 /// ONE WALK OF THE RANGE: the counts, the census days and the rows asked
@@ -845,13 +942,7 @@ fn walk<'p>(
         if asked.kind.is_some_and(|kind| kind != row.kind) {
             continue;
         }
-        if let Some(slot) = DayOutcome::ALL
-            .iter()
-            .position(|outcome| *outcome == row.outcome)
-            .and_then(|at| out.counts.get_mut(at))
-        {
-            *slot = slot.saturating_add(1);
-        }
+        out.count(&row);
         let logged = evidence.of(row.kind.as_str(), &row.day.to_string());
         let logged: &[telemetry::Record] = &logged;
         let census =
@@ -878,15 +969,19 @@ fn walk<'p>(
 ///
 /// # Which refusals a close owns (AF-02, ingest-6, repair 2)
 ///
-/// The importer's `refused` event carries no run id and no filter
-/// (`pull::gdfl_import::note_failure`), so a refusal is placed by WHAT it is
-/// about and WHEN it was logged ([`placed`]). A close OWNS a refusal when:
+/// The importer's `refused` event carries no filter and no run field of its
+/// own (`pull::gdfl_import::note_failure`), so a refusal is placed by WHAT it
+/// is about and by its record's run, which `pull`'s `RunKey` stamps while a
+/// run reads its days, or, for a record with no run the journal names, WHEN
+/// it was logged ([`placed_of`], D-4896). A close OWNS a refusal when:
 ///
 /// * its filter NAMES the refusal's subject ([`Subject`]): `*` names every
-///   subject; a list names an underlying it holds as a whole name; only `*`
-///   names a day-level refusal (the calendar, the census), which is about
-///   every instrument of the kind; and a file no decoder places is about no
-///   instrument, so any close may own it; and
+///   subject; a list names an underlying it holds as a whole name; a member
+///   key names its one member, and a day-level refusal when its base is `*`;
+///   only `*` (and a member key of it) names a day-level refusal (the
+///   calendar, the census), which is about every instrument of the kind; and
+///   a file no decoder places is about no instrument, so any close may own
+///   it; and
 /// * the refusal was not logged in a LATER closing run's window: one logged
 ///   at or after the start of the next run that closed the same kind-day is
 ///   that run's. One logged BEFORE the close's run is an earlier attempt's,
@@ -996,19 +1091,66 @@ pub(crate) fn next_start(start_s: u64, closing_s: impl IntoIterator<Item = u64>)
     closing_s.into_iter().filter(|start| *start > start_s).min()
 }
 
-/// The second run `id` started: its first `run` line's `started=`, else the
-/// id itself (a run's id is the second it started, D-3317).
-fn started_of(parsed: &Parsed, id: u64) -> u64 {
-    parsed
-        .runs_of(id)
-        .next()
-        .and_then(|run| {
-            run.fields
-                .iter()
-                .find(|(name, _)| name == "started")
-                .and_then(|(_, value)| value.parse::<u64>().ok())
-        })
-        .unwrap_or(id)
+/// What placed a logged refusal against a close (D-4896).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacedBy {
+    /// The event's own run, which the journal names (`pull`'s `RunKey`
+    /// stamps every event a run writes while it reads its days): exact,
+    /// whatever the clocks said.
+    Run,
+    /// Its time against the runs' starts ([`placed`]): an event that carries
+    /// no run (every one logged before DB-A41's fix), one whose run no `run`
+    /// line names (a `cli` attempt held the sink's key), or a close that
+    /// names no run.
+    Time,
+}
+
+impl PlacedBy {
+    /// The word the wire names it by.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "event",
+            Self::Time => "time",
+        }
+    }
+}
+
+/// Where a refusal logged by run `event_run` at `at_ms` falls against one
+/// close of its kind-day, whose run is `close_run`, and by what (D-4896).
+///
+/// By the event's own run when the journal names that run and the close
+/// names its own: the close's run is [`Placed::Within`]; a run that started
+/// before it (by `(start, id)`) is [`Placed::Before`], an earlier attempt's;
+/// any other run is [`Placed::After`], never this close's, whether it closed
+/// the day or left no line. Else by time ([`placed`]), against the close's
+/// run's start and `next_s`. The two routes that place a refusal
+/// (`/imports.json`'s log-only rows and `/dayflags.json`'s day band) call
+/// this one function, so they cannot disagree. O(1): at most two probes of
+/// the journal's id index.
+pub(crate) fn placed_of(
+    parsed: &Parsed,
+    event_run: Option<u64>,
+    at_ms: Option<u64>,
+    close_run: Option<u64>,
+    next_s: Option<u64>,
+) -> (Placed, PlacedBy) {
+    if let (Some(event), Some(close)) = (
+        event_run.filter(|run| *run != 0 && parsed.holds_run(*run)),
+        close_run,
+    ) {
+        if event == close {
+            return (Placed::Within, PlacedBy::Run);
+        }
+        let earlier = (parsed.started_of(event), event) < (parsed.started_of(close), close);
+        let placed = if earlier {
+            Placed::Before
+        } else {
+            Placed::After
+        };
+        return (placed, PlacedBy::Run);
+    }
+    let start = close_run.map(|id| parsed.started_of(id));
+    (placed(at_ms, start, next_s), PlacedBy::Time)
 }
 
 /// What a logged refusal is about, as a close's filter names it.
@@ -1068,8 +1210,26 @@ struct Owners<'p> {
 }
 
 impl<'p> Owners<'p> {
-    /// Whether `filter` names `subject` (see [`Subject`]).
-    fn names(&mut self, filter: &'p str, subject: &Subject) -> bool {
+    /// Whether `close`'s filter names `subject` (see [`Subject`]).
+    ///
+    /// A MEMBER KEY (`<filter>+<member>`, IA-10a) names its one member's
+    /// symbol ([`crate::server::import_journal::member_symbol`]) and closes
+    /// its base filter's kind-day: a whole-day refusal is its own when its
+    /// base is `*`, as it is the base's. So a day whose only keys are member
+    /// keys is journalled, and gains no made-up log-only `*` row for the
+    /// refusals its own closes own. O(1): the key's split was paid when its
+    /// row was made.
+    fn names(&mut self, close: &'p DayRow, subject: &Subject) -> bool {
+        if let Some(member) = close.member() {
+            return match subject {
+                Subject::Day => close.base() == "*",
+                Subject::Unknown => true,
+                Subject::Underlying(symbol) => {
+                    crate::server::import_journal::member_symbol(member) == symbol
+                }
+            };
+        }
+        let filter = close.filter.as_str();
         if filter == "*" {
             return true;
         }
@@ -1102,12 +1262,13 @@ impl<'p> Owners<'p> {
         let at_ms = u64::try_from(record.at_unix_millis).ok();
         let starts: Vec<Option<u64>> = closes
             .iter()
-            .map(|close| close.stats.run.map(|id| started_of(parsed, id)))
+            .map(|close| close.stats.run.map(|id| parsed.started_of(id)))
             .collect();
         closes.iter().zip(&starts).any(|(close, start)| {
             let next = start.and_then(|start| next_start(start, starts.iter().flatten().copied()));
-            self.names(close.filter.as_str(), &subject)
-                && placed(at_ms, *start, next) != Placed::After
+            self.names(close, &subject)
+                && placed_of(parsed, Some(record.run), at_ms, close.stats.run, next).0
+                    != Placed::After
         })
     }
 }
@@ -1383,7 +1544,8 @@ struct Unlisted {
 }
 
 /// `/dayflags.json`'s body for `query` over the store at `root`: the day
-/// band's read, which calls [`answer`] with [`RunsAsked::Every`]. Here, and
+/// band's read, which calls [`answer_and_parse`] with [`RunsAsked::Unasked`]
+/// and resolves each run it needs through the parse's indexes (D-4896). Here, and
 /// not in `dayflags`, only because this module is the one of the two that a
 /// caller outside `server` can reach; `logs::dayflags_json_over` is that
 /// caller, for the bench that measures `docs/06-limits.md` L-IA-39.
@@ -1452,7 +1614,7 @@ struct RunsPage {
 fn runs_page(parsed: &Parsed, asked: RunsAsked) -> RunsPage {
     let total = parsed.runs.len();
     let (end, take, refused) = match asked {
-        RunsAsked::Every => (total, total, None),
+        RunsAsked::Unasked => (total, 0, None),
         RunsAsked::Page(None) => (total, RUNS_PAGE, None),
         RunsAsked::Page(Some((id, nth))) => match parsed.runs_before(id, nth) {
             Some(end) => (end, RUNS_PAGE, None),
@@ -1595,7 +1757,10 @@ pub(crate) fn body(
         .take(PAGE_ROWS)
         .map(|row| row_json(root, row, evidence))
         .collect();
-    let notes = notes_of(snapshot, &rows);
+    let mut notes = notes_of(snapshot, &rows);
+    if let Some(note) = walked.holes_note() {
+        notes.push(note);
+    }
     let runs = runs_page(parsed, asked.runs);
     let dirs: Vec<Value> = evidence
         .dirs()
@@ -1640,6 +1805,10 @@ pub(crate) fn body(
             .zip(walked.counts)
             .map(|(outcome, n)| (outcome.as_str().to_owned(), Value::from(n)))
             .collect::<serde_json::Map<String, Value>>(),
+        // THE STORE HOLES, BY REASON, AND THE ONES NO REPAIR FILLS APART
+        // (IA-10a, F84): a hole is never counted as a plain `incomplete`.
+        "holes": walked.holes_json(),
+        "holes_unrepairable": walked.holes_unrepairable,
         "census_refused": { "count": walked.census_refused.len(), "days": walked.census_refused },
         "census_refused_then_done": {
             "count": walked.census_then_done.len(),
@@ -2617,11 +2786,13 @@ mod tests {
         assert_eq!(decoded(), RUNS_PAGE);
         assert_eq!(brief["runs_total"], total);
 
-        // A CALLER THAT RESOLVES A RUN BY TIME (the day band) asks for every
-        // run and gets every run.
-        let every = runs_page(parsed, RunsAsked::Every);
-        assert_eq!(every.runs.len(), total);
-        assert_eq!(every.next, None);
+        // A CALLER THAT RESOLVES ITS RUNS THROUGH THE INDEXES (the day band,
+        // D-4896) asks for none: every run counted, none decoded, no cursor.
+        let unasked = runs_page(parsed, RunsAsked::Unasked);
+        assert!(unasked.runs.is_empty());
+        assert_eq!(unasked.total, total);
+        assert_eq!(unasked.next, None);
+        assert_eq!(decoded(), 0, "and decodes nothing");
         let _ignored = std::fs::remove_dir_all(&root);
     }
 }

@@ -1019,6 +1019,13 @@ pub fn hole_is_repairable(reason: &str) -> bool {
     causes::REPAIRABLE_HOLES.contains(&reason)
 }
 
+/// The five store-hole reasons (`admit` rows 4a and 4b), for a reader that
+/// names a hole by this one list and never by a copy of it (IA-10a).
+#[must_use]
+pub const fn hole_reasons() -> &'static [&'static str; 5] {
+    &causes::HOLE_REASONS
+}
+
 /// Whether the charter records the listing spans of the stored alias
 /// indices (D-4833): `stored_index_absent` is raised only inside such a
 /// span, and no span is recorded in this tree (IA-0b records them), so no
