@@ -78649,9 +78649,51 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     since the start) heads the Speed page, which every page links from the
     nav. A health page is not R3-15's to add; if one is made, the tile is
     one import.
+30. **Every wait of the speed sheet is bounded, and a request that ran its
+    bound is asked no more** (R315-28, repair 5; verify r5, 23 Oct). The
+    bound is on the whole answer, from its send to its last byte: the
+    socket's idle time let an answer that sends a byte every 500 ms run
+    forever. A request that ran it is not asked again in the run, as item
+    24 does for a page: n asks a row, each a whole bound, would hold a
+    deploy step for hours with one fact to say, and a warm row's kept
+    connection ended with the first. Not taken, as in item 24: a bound only
+    on the whole run, which names no request. The `--restart` command has
+    `--restart-wait-ms`, by default `--up-wait-ms` (one budget for the
+    server to come back, so the verifier's own `--up-wait-ms 2000` case
+    ends in 2 s); past it its process group is ended, SIGTERM and then
+    SIGKILL after `COMMAND_STOP_MS` (5,000 ms, the harness's wait for a
+    browser), because a command run through the shell starts processes of
+    its own. A command that exits in time is not followed into its group: a
+    server it started in the background is the deploy's. The up wait is
+    `--up-wait-ms` in all, each check at most the time left, and a server
+    not up ends the restart pass, since every request asked of it would wait
+    a bound with nothing to time. Commands run detached, so the terminal's
+    signal no longer reaches them: the sheet sends its own signal to every
+    command still running when it ends first, and the writer is ended with
+    its group. `groupRunning`, `signalGroup` and `GROUP_POLL_MS` move to
+    the sheet, the module the harness already imports, so one rule stops a
+    browser and a command.
+31. **A garbled ask that tells nothing is said, never passed** (R315-29,
+    repair 5; verify r5 follow-up). A garbled field answered 5xx, or not
+    answered, fails the run by name: the server failed on a value it should
+    refuse, and nothing says whether it reads the field. Busy is NOT
+    MEASURED, the run's other rows already saying busy is not a failure.
+    Only a request whose own ask was answered 2xx is asked garbled: only a
+    2xx original can be compared, so a garbled ask of any other told
+    nothing and cost one ask a field.
+32. **The harness bounds the browser's handshake, hears every tab's errors,
+    and no command writes its sheet over its own input** (R315-30, repair
+    5; verify r5 follow-ups). The handshake waits the launch's wait, the one
+    the DevTools address already had. An uncaught error is heard from every
+    tab and counted by where, so 200 cold loads that each throw are one line
+    with its count, not 200. `--out` naming the `--capture` file, or the
+    sheet's `--out` naming its `--from-pages` file, is refused before
+    anything runs: the paths are compared resolved, so a link to the same
+    file is not caught (an output and an input are named by the operator in
+    one command line).
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-27);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-23.
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-30);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-25.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
