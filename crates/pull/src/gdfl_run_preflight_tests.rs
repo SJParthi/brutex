@@ -561,7 +561,7 @@ fn an_empty_nested_day_zip_refuses_its_day_and_stays_open() {
     assert_eq!(
         archive.day(CmKind::Indices, d1()).unwrap_err(),
         CmRefusal::DayZipEmpty {
-            name: crate::gdfl_archive::day_zip_name(CmKind::Indices, d1())
+            name: "GFDLCM_INDICES_TICK_01042024.zip".to_owned()
         }
     );
     let store = store_at(&root);
@@ -582,7 +582,7 @@ fn an_empty_nested_day_zip_refuses_its_day_and_stays_open() {
     assert_eq!(
         zips.day(d1()).unwrap_err(),
         CmRefusal::DayZipEmpty {
-            name: NfoZips::day_zip_name(d1())
+            name: "GFDLNFO_TICK_01042024.zip".to_owned()
         }
     );
     let store = store_at(&nfo_root);
@@ -610,12 +610,13 @@ fn an_empty_tick_store_day_refuses_its_day_and_stays_open() {
     let _empty = tick_day(&ts, d1(), &[]);
     let store_reader = TickStore::new(&ts);
     let refused = store_reader.day(CmKind::Indices, d1()).unwrap_err();
-    let CmRefusal::DayZipEmpty { name } = &refused else {
-        panic!("{refused:?}");
-    };
-    assert!(
-        name.starts_with("cm/INDICES/2024/APR_2024/") && name.ends_with(".bts"),
-        "{name}"
+    // The vendor day zip's own name, as the archive names it: two sources
+    // of one day report one run (D-2806).
+    assert_eq!(
+        refused,
+        CmRefusal::DayZipEmpty {
+            name: "GFDLCM_INDICES_TICK_01042024.zip".to_owned()
+        }
     );
     let store = store_at(&root);
     faulty_index_day_stays_open(&store_reader, &store, "day_zip_empty");

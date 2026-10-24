@@ -1086,7 +1086,7 @@ impl NfoSource for NfoTickStore {
         // an index of zero entries refuses the day `day_zip_empty`, and the
         // file is watched to its last read (IA-3b items 2 and 4).
         let Some((file, watch, entries)) =
-            crate::gdfl_tickstore::open_watched_day(&self.root, &self.day_path(day))?
+            crate::gdfl_tickstore::open_watched_day(&self.day_path(day), &format!("{}.zip", day_folder_name(day)))?
         else {
             return table.absent(NFO_TREE, day).map(|()| None);
         };
@@ -1528,7 +1528,7 @@ fn day_listing<B: ReadAt>(
     // RA-322, design §8 B28a): the day stays open.
     if members.is_empty() {
         return Err(CmRefusal::DayZipEmpty {
-            name: inner.name.clone(),
+            name: format!("{}.zip", day_folder_name(day)),
         });
     }
     let mut listing = NfoDay::new(day, members.len()).with_member_bytes(span);

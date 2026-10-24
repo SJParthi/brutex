@@ -817,6 +817,14 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                 }
             }
         }
+        // ADAPTED (IA-3b; RA-322, design §8 B28a): a day whose day zip (and
+        // tick-store day file) lists zero entries is refused `day_zip_empty`,
+        // one refused listing and a failure of the day, never a day of no
+        // file: it stays open, whatever the filter.
+        if entries.is_empty() {
+            want.totals.files_refused += 1;
+            late_failures.push((format!("{on} listing"), "lists zero entries"));
+        }
         let read_clean = !files.is_empty();
         for (opt, expect) in files {
             want.totals.file(&expect, *on);
@@ -1007,7 +1015,8 @@ fn r2_03_random_options_worlds_match_the_reference_through_both_sources() {
         let want = want_nfo(&world, &only);
         assert_eq!(totals_of(&ra), want.totals, "{ctx}: {ra:?}");
         assert_eq!(ra.seconds_committed, ra.seconds, "{ctx}");
-        let entries: usize = world.iter().map(|(_, e)| e.len()).sum();
+        // ADAPTED (IA-3b, RA-322): an empty day's listing is one refusal.
+        let entries: usize = world.iter().map(|(_, e)| e.len().max(1)).sum();
         assert_eq!(
             ra.files + ra.files_skipped + ra.files_refused,
             entries,
@@ -1283,6 +1292,12 @@ fn r2_04_random_stocks_worlds_match_the_reference_through_both_sources() {
                     }
                 }
             }
+            // ADAPTED (IA-3b; RA-322, design §8 B28a): an empty day zip is
+            // refused `day_zip_empty`, one refused listing, the day open.
+            if entries.is_empty() {
+                totals.files_refused += 1;
+                late.push((format!("{on} listing"), "lists zero entries"));
+            }
             for (sym, expect) in files {
                 totals.file(&expect, *on);
                 series
@@ -1293,7 +1308,8 @@ fn r2_04_random_stocks_worlds_match_the_reference_through_both_sources() {
             failures.extend(late);
         }
         assert_eq!(totals_of(&ra), totals, "{ctx}: {ra:?}");
-        let entries: usize = world.iter().map(|(_, e)| e.len()).sum();
+        // ADAPTED (IA-3b, RA-322): an empty day's listing is one refusal.
+        let entries: usize = world.iter().map(|(_, e)| e.len().max(1)).sum();
         assert_eq!(
             ra.files + ra.files_skipped + ra.files_refused,
             entries,

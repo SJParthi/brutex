@@ -77,6 +77,12 @@ mod fno_membership;
 #[path = "ratio/day_table.rs"]
 mod day_table;
 
+/// C-GR-05: the import preflight's checks, flat at 1x, 10x and 100x the
+/// census's entries and the journal's lines, with the cold and repeated plan
+/// and the largest day's listing read printed beside (IA-3b, RA-103).
+#[path = "ratio/gdfl_preflight.rs"]
+mod gdfl_preflight;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1871,6 +1877,9 @@ fn main() {
     // `benches/ratio.rs` alone; the module prints each ratio and spread.
     println!("C-PIT-01 F&O membership lookups at 1x, 10x, 100x the held days (PIT-1, D-5164)");
     ok &= fno_membership::fno_membership_lookup_is_flat();
+    // C-GR-05's id is printed here for the same reason as C-PIT-01's.
+    println!("C-GR-05 the import preflight at 1x, 10x, 100x the census and journal (IA-3b)");
+    ok &= gdfl_preflight::preflight_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {

@@ -813,7 +813,7 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
 /// A day file opened through [`open_day`], its identity taken through that
 /// one handle, its index read and held to at least one entry (IA-3b, RA-322:
 /// an index of zero entries refuses the day [`CmRefusal::DayZipEmpty`] naming
-/// the file under `root`, the day open), and the file checked unchanged after
+/// `zip`, the vendor day zip the file holds, the day open), and the file checked unchanged after
 /// the index read (item 4). `Ok(None)` only when no file has the name. Shared
 /// by the capital-market and the options day readers.
 ///
@@ -822,8 +822,8 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
 /// [`open_day`]'s and [`read_index`]'s refusals, [`CmRefusal::DayZipEmpty`]
 /// and [`tick_unchanged`]'s.
 pub(crate) fn open_watched_day(
-    root: &Path,
     path: &Path,
+    zip: &str,
 ) -> Result<Option<(Arc<std::fs::File>, Arc<Watch>, Vec<IndexEntry>)>, CmRefusal> {
     let Some((file, file_len)) = open_day(path)? else {
         return Ok(None);
@@ -835,11 +835,7 @@ pub(crate) fn open_watched_day(
     tick_unchanged(&watch)?;
     if entries.is_empty() {
         return Err(CmRefusal::DayZipEmpty {
-            name: path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string(),
+            name: zip.to_owned(),
         });
     }
     Ok(Some((file, Arc::new(watch), entries)))
@@ -889,9 +885,8 @@ impl CmSource for TickStore {
         }
         // The day's own place is opened by its exact path, so a day the
         // writer published after the walk is read whole (`FORMAT.md` §2).
-        let Some((file, watch, entries)) =
-            open_watched_day(&self.root, &self.day_path(kind, day))?
-        else {
+        let zip = format!("{}.zip", crate::gdfl_cm::day_folder_name(kind, day));
+        let Some((file, watch, entries)) = open_watched_day(&self.day_path(kind, day), &zip)? else {
             return table.absent(tree_byte(kind), day).map(|()| None);
         };
         let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));

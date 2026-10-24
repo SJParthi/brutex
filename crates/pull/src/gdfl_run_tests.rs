@@ -510,6 +510,40 @@ fn every_run_refusal_has_its_own_code() {
         RunRefusal::RepairInOpenMonth {
             month: String::new(),
         },
+        // IA-3b's: the preflight (D-4802, D-4850, D-4864, D-4908, D-7000..).
+        RunRefusal::YearZipMissing {
+            year: 0,
+            near_miss: Vec::new(),
+        },
+        RunRefusal::SourceUnreadable {
+            path: PathBuf::new(),
+            mode: String::new(),
+        },
+        RunRefusal::YearZipEmpty { year: 0 },
+        RunRefusal::SourceBusy {
+            root: PathBuf::new(),
+            holder: String::new(),
+        },
+        RunRefusal::CensusRoomShort {
+            layout: "v3",
+            free_now: 0,
+            free_after: 0,
+            need_first_day: 0,
+        },
+        RunRefusal::CensusCompactionNoDisk {
+            need_bytes: 0,
+            free_bytes: 0,
+            floor: 0,
+        },
+        RunRefusal::LegacyRunMayBeLive { key: String::new() },
+        RunRefusal::StoreReadOnly {
+            root: PathBuf::new(),
+        },
+        RunRefusal::StoreNotLocal {
+            root: PathBuf::new(),
+            fs: String::new(),
+        },
+        RunRefusal::OpenFilesShort { have: 0, need: 0 },
     ];
     let codes: Vec<&str> = all.iter().map(RunRefusal::code).collect();
     assert_eq!(codes, RunRefusal::CODES);

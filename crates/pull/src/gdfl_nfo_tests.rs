@@ -1740,8 +1740,10 @@ fn the_decoders_costs_on_real_days_are_measured() {
 /// LOOKUP. The first day asked opens the year zip and reads its central
 /// directory; every later day of that year is found in the index and read
 /// through the same open file, so a run never reopens or rewalks it — shown
-/// here by moving the zip away after the first day: the same `NfoZips` still
-/// lists and reads the second day, while a new one finds no year zip at all.
+/// here by the one index the first day built being the one the second day is
+/// read through, by any clone. A zip moved away after that is refused for its
+/// day (IA-3b item 4: a source whose path no longer names the file a run
+/// listed is never read as if it did), while a new source finds no year zip.
 /// Two records of one day zip in the index refuse that day by name; an absent
 /// year is asked again, so a zip that appears later is read.
 #[test]
@@ -1772,17 +1774,37 @@ fn a_year_zip_is_indexed_once_and_each_day_is_one_lookup() {
         300
     );
 
-    std::fs::rename(&at, root.join("moved.zip")).unwrap();
-    assert!(
-        NfoZips::new(&root.join("zips")).day(d2).unwrap().is_none(),
-        "a new source finds no year zip"
-    );
+    // The second day comes from the same index, its file opened once: no
+    // second index of the year is built, by any clone.
+    let index = |source: &NfoZips| {
+        let years = source.years.lock().unwrap();
+        assert_eq!(years.zips.len(), 1, "one year indexed");
+        Arc::clone(years.zips.get(&2024).unwrap())
+    };
+    let before = index(&zips);
     let shared = zips.clone();
     let second = shared.day(d2).unwrap().unwrap();
     let got = read_file(&shared, &second, &second.entries()[0]).unwrap();
     assert_eq!(
         got.file.rows[0].oi, 310,
         "read through the year zip opened once"
+    );
+    assert!(Arc::ptr_eq(&before, &index(&zips)), "never indexed again");
+    // IA-3b (item 4, RA-323): a year zip moved away under a run is never
+    // read as if it were still there. The open file would still read, but its
+    // path no longer names it, so the next read is refused for its day by the
+    // reader's own `archive_unavailable` (the loss probe asks the root),
+    // and a new source finds no year zip at all.
+    std::fs::rename(&at, root.join("moved.zip")).unwrap();
+    assert!(
+        NfoZips::new(&root.join("zips")).day(d2).unwrap().is_none(),
+        "a new source finds no year zip"
+    );
+    assert_eq!(
+        read_file(&shared, &second, &second.entries()[0]).err(),
+        Some(NfoRefusal::Source(CmRefusal::ArchiveUnavailable {
+            kind: std::io::ErrorKind::NotFound
+        }))
     );
     assert_eq!(
         zips.day(day(2024, 4, 3)).err(),

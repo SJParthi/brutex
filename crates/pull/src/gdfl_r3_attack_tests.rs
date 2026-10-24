@@ -1078,6 +1078,12 @@ fn want_cm(kind: CmKind, world: &[(Day, Vec<Cm>)], only: &[&str]) -> WantCm {
                 want.failures.push((file, "does not fit an i64"));
             }
         }
+        // ADAPTED (IA-3b; RA-322, design §8 B28a): an empty day zip is
+        // refused `day_zip_empty`, one refused listing, the day open.
+        if entries.is_empty() {
+            want.totals.files_refused += 1;
+            late.push((format!("{on} listing"), "lists zero entries"));
+        }
         let read_clean = !files.is_empty();
         for (symbol, expect) in files {
             want.totals.file(&expect, *on);
@@ -1181,7 +1187,8 @@ fn cm_worlds(kind: CmKind, seed: u64, cases: usize) -> (usize, usize, usize) {
         assert_eq!(tree(&a, ""), tree(&b, ""), "{ctx}: one store");
         let mut want = want_cm(kind, &world, &only);
         assert_eq!(totals_of(&ra), want.totals, "{ctx}: {ra:?}");
-        let entries: usize = world.iter().map(|(_, e)| e.len()).sum();
+        // ADAPTED (IA-3b, RA-322): an empty day's listing is one refusal.
+        let entries: usize = world.iter().map(|(_, e)| e.len().max(1)).sum();
         assert_eq!(
             ra.files + ra.files_skipped + ra.files_refused,
             entries,
@@ -1385,7 +1392,9 @@ fn r3_07_a_run_of_filters_over_one_store_converges_on_the_unfiltered_store() {
         let world = random_nfo_world(&mut rng);
         let root = scratch("r3-filters");
         write_nfo_world(&root, &world);
-        let entries: usize = world.iter().map(|(_, e)| e.len()).sum();
+        // ADAPTED (IA-3b, RA-322): an empty day's listing is one refusal.
+        let entries: usize = world.iter().map(|(_, e)| e.len().max(1)).sum();
+        let empty_days = world.iter().filter(|(_, e)| e.is_empty()).count();
         let ctx = format!("case {case} world {world:?}");
         let (s1, s2) = (root.join("S1"), root.join("S2"));
         // Every underlying once, in a random order, each its own filter.
@@ -1404,7 +1413,9 @@ fn r3_07_a_run_of_filters_over_one_store_converges_on_the_unfiltered_store() {
                 entries,
                 "{ctx} {under}"
             );
-            claimed += got.files + got.files_refused;
+            // ADAPTED (IA-3b, RA-322): each filtered run refuses an empty
+            // day's listing too, which no filter claims.
+            claimed += got.files + got.files_refused - empty_days;
         }
         let all = run_nfo_world(&root, &world, &s1, &[]);
         assert_eq!(
@@ -1416,9 +1427,9 @@ fn r3_07_a_run_of_filters_over_one_store_converges_on_the_unfiltered_store() {
         // between them claim exactly what the unfiltered run does.
         assert_eq!(
             claimed,
-            all.files + all.files_refused,
+            all.files + all.files_refused - empty_days,
             "{ctx}: the filters claimed {claimed}, the whole run {}",
-            all.files + all.files_refused
+            all.files + all.files_refused - empty_days
         );
         claimed_total += claimed;
         let alone = run_nfo_world(&root, &world, &s2, &[]);

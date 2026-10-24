@@ -475,7 +475,8 @@ pub enum CmRefusal {
     /// file whose index names nothing. Its day is refused by name and stays
     /// open, never read as a day that holds no wanted file.
     DayZipEmpty {
-        /// The day zip's name inside its archive, or the day file's path.
+        /// The vendor day zip's file name (`GFDLNFO_TICK_08042024.zip`), the same
+        /// whichever source holds the day, so two sources report one run (D-2806).
         name: String,
     },
     /// A member whose stated size is past `tickstore_write::MEMBER_CAP`, the
@@ -603,8 +604,9 @@ impl core::fmt::Display for CmRefusal {
             Self::DayFileMisfiled { found, expected } => misfiled(f, BTS_WORD, (found, expected)),
             Self::DayZipEmpty { name } => write!(
                 f,
-                "{name} lists zero entries: an empty container is never a day that holds no \
-                 file, so the day stays open"
+                "the day zip {name} lists zero entries, as its source holds it (the archive, the \
+                 year zip or the tick store's day file of it): an empty container is never a day \
+                 that holds no file, so the day stays open"
             ),
             Self::MemberTooLarge { name, size } => write!(
                 f,

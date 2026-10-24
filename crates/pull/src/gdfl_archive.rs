@@ -843,7 +843,7 @@ impl<B: ReadAt> CmSource for Archive<B> {
         // design §8 B28a): the day stays open.
         if entries.is_empty() {
             return Err(CmRefusal::DayZipEmpty {
-                name: day_zip_name(kind, day),
+                name: format!("{}.zip", crate::gdfl_cm::day_folder_name(kind, day)),
             });
         }
         for entry in entries {
