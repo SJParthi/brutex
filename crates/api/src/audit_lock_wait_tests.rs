@@ -586,7 +586,13 @@ fn a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_agai
     let named = "/j: cannot take the journal append lock for a x record (y) within its 1000 ms bound (APPEND_LOCK_WAIT): held; so this record was refused rather than interleaved";
     // The `try_lock` build's shape: refused at once, or anywhere inside the bound.
     assert!(a_refusal_is_the_bound(Duration::ZERO, named).is_err());
-    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT - Duration::from_nanos(1), named).is_err());
+    assert!(
+        a_refusal_is_the_bound(
+            APPEND_LOCK_WAIT.saturating_sub(Duration::from_nanos(1)),
+            named
+        )
+        .is_err()
+    );
     // A whole bound waited, but the text does not name it.
     assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, "/j: held").is_err());
     assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, named).is_ok());
