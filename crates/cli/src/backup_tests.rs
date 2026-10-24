@@ -1449,3 +1449,32 @@ fn a_manifest_line_the_disk_did_not_finish_is_ended_before_the_next() {
     assert_eq!(book.newest_run, 5);
     assert_eq!(book.files, 0);
 }
+
+/// **THE ONE-TIME PASS'S RATE, SAMPLED** (`docs/06-limits.md`): one run over
+/// a store holding the three months and a 256 MiB invented archive, its
+/// wall time and bytes per second. Run with `--ignored --nocapture`; the
+/// rate goes to the report as a sample, and a full copy's time is an
+/// extrapolation from it.
+#[test]
+#[ignore = "a measurement for the report, not a gate"]
+fn measure_the_copy_rate() {
+    let fx = Fixture::standard("rate");
+    let big = fx.base.join("archives/big.zip");
+    let chunk: Vec<u8> = (0..CHUNK).map(|n| u8::try_from(n % 251).unwrap()).collect();
+    let mut file = File::create(&big).unwrap();
+    for _ in 0..256 {
+        file.write_all(&chunk).unwrap();
+    }
+    file.sync_all().unwrap();
+    drop(file);
+    fx.journal(&[&big]);
+    let started = Instant::now();
+    let ran = fx.backup();
+    let took = started.elapsed();
+    let bytes = ran.total().copied_bytes;
+    let files = ran.total().copied;
+    let rate = u128::from(bytes) * 1_000 / took.as_millis().max(1) / (1024 * 1024);
+    println!("copied {files} files {bytes} bytes in {took:?}: {rate} MiB/s");
+    assert!(bytes >= 256 * CHUNK as u64);
+    fx.every_record_verifies();
+}

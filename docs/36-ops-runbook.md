@@ -186,22 +186,95 @@ One drive holds the purchased archives (`Options/`, the capital-market zip,
 the tick store) and the whole store; Time Machine has no destination and
 excludes both. Until a second drive is attached nothing below can be done, and
 `/disk.json` says `"recorded": false` on every read — loudly, on purpose.
+Under D-7135 there is never a fresh rebuild, so the copy below and its drill
+are the store's only disaster path (D-7137).
 
-- **Independent copy.** A second drive of at least the store plus the raw
-  archives. Copy raw and store with `rsync -a --delete-after` (raw archives
-  never change, so after the first copy only new files move), then append one
-  line to `<store>/ops/backups.log`:
-  `copied=<UTC> dest=<path> raw_bytes=<n> store_bytes=<n> by=<who>`.
+- **Independent copy: `cli backup` (R4-09b, D-7137, D-7175..D-7181).** A
+  second drive of at least the store plus the raw archives, named by the
+  operator. With every writer stopped (the app and every `cli` run; S-17):
+  1. `cli backup --to <SECOND_DRIVE> --plan` — counts and bytes per class, what
+     is new or changed, the target's free space, and the store's top-level
+     names the verb does NOT copy. Writes nothing on either side.
+  2. `cli backup --to <SECOND_DRIVE>` — copies every month the census names
+     (each sibling but the `.lock`, the generation pointer, every revision with
+     its receipt), the census (`manifest/`), the journals (`imports/`), the
+     ledgers (`audit/`), `ops/` (less its own two logs), `verify/`,
+     `reference/`, `session-masters/`, and every source archive the GDFL
+     journal's `run` lines name, the tick store's root included (D-7175,
+     D-7180). Each new or changed file goes to
+     `<SECOND_DRIVE>/brutex-backup-v1/runs/<run>/...` as a temporary name,
+     fsynced, renamed (refused if the name exists) and its folder fsynced, then
+     recorded in the append-only `brutex-backup-v1/manifest.log` with its
+     length, time and BLAKE3. **Nothing on the target is ever deleted or
+     overwritten** (the old `rsync -a --delete-after` step is withdrawn): a
+     changed file is a new name in a newer run's folder, the old copy kept. A
+     month a writer holds is a `busy` line, not copied, copied by the next run.
+     A second run copies nothing and says so. A run cut short (a kill, a full
+     disk, the drive pulled) leaves no record of an unfinished copy; run it
+     again. It refuses by name a target on the store's own device, inside the
+     store, inside a source archive, not a directory, absent, too long for a
+     receipt, or with less free space than the plan copies.
+  3. On success the verb appends ONE line to `<store>/ops/backups.log`, the
+     receipt this section always defined, first words unchanged:
+     `copied=<UTC> dest=<path> raw_bytes=<n> store_bytes=<n> by=cli-backup
+     run=<id> state=<complete|partial> files=<n> bytes=<n> copied_files=<n>
+     copied_bytes=<n> unchanged=<n> busy=<n> missing=<n> unreadable=<n>
+     commit=<sha>` (`dest=` percent-encoded as the GDFL journal encodes paths).
+     A partial run (a busy month, a missing archive) says `state=partial` and
+     exits non-zero; a run the target stopped appends no receipt.
   `/disk.json` serves the newest WHOLE line that carries `copied=` and `dest=`
-  as `backup.last`; a newest line that is anything else (a note, a shell error,
+  as `backup.last`, and its words as `backup.receipt` (the manifest's file
+  count and bytes). A newest line that is anything else (a note, a shell error,
   half a line) is `recorded: false` with `unreadable receipt`, never "the last
   copy". The log must be a regular file: a link or a FIFO at its name is
-  refused by name. Write the date as `copied=YYYY-MM-DDTHH:MM:SSZ` (UTC): every
-  page carries a standing line while no copy is recorded, while the last one
-  is more than 7 days old, or while its `copied=` word is not a date in that
-  form or is after now (`web/src/lib/CopyAlert.svelte`, rules audit RA-163).
-  The line is the page's; nothing sends an alert when no page is open (the
-  alert kind is NEW-25's).
+  refused by name (by the page, and by the verb before it copies). A receipt
+  written by hand in the old form still reads; its missing words are `null`.
+  When the page is read (within the 30 s `/disk.json` keeps an answer), it
+  says by name whether the copy is stale — `backup stale: last copy <date>;
+  target missing` (one `stat` of `dest=`), more than 7 days old, dated after
+  now, or the last run partial — and every page carries that line
+  (`web/src/lib/CopyAlert.svelte`, rules audit RA-163). The line is the
+  page's; nothing sends an alert when no page is open, and no alert kind is
+  added (D-6900: attended only).
+- **The restore drill: `cli backup-drill --from <SECOND_DRIVE> [--months N]`**
+  (N = 3). It restores N months chosen from the manifest across kinds (the
+  store path's segment: index, share, option), rotated by the drill's id so
+  successive drills cover different months, into a NEW folder under the
+  system's temporary folder (refused inside the store or the target), checks
+  every restored file against its manifest BLAKE3 and against the store's
+  file byte for byte under the month's shared lock (a file the store changed
+  since the copy is checked against the digest only, counted `moved`), and
+  appends ONE line to `<store>/ops/backup-drills.log`: `drilled=<UTC>
+  from=<path> drill=<id> result=<pass|fail|incomplete> months=<n> asked=<n>
+  held=<n> files=<n> bytes=<n> moved=<n> failed=<n> busy=<n> scratch=<path>
+  commit=<sha> month=<path>,...`. `/disk.json` serves it as `backup.drill`, and
+  a drill that did not pass is on every page. The drill writes nothing else in
+  the store and leaves its scratch folder for inspection (D-7178).
+- **Restoring INTO the store is the operator's, by hand, from the manifest**
+  (D-7180). No verb writes the store from the copy. For each path wanted, the
+  newest `file` record of `manifest.log` names the run whose folder holds its
+  bytes: a store path P recorded in run R is at
+  `brutex-backup-v1/runs/R/store/P`, an archive A at
+  `brutex-backup-v1/runs/R/archives/A` (A without its leading `/`). Copy it
+  back with every writer stopped, and check its BLAKE3 against the record. A
+  month's files come back together (its siblings, its pointer and every
+  revision), and **a tick-store day's version files come back together, never
+  `rK+1` without `rK`** (PREC-5's readers assume no gap). Then, before any
+  writer starts, `cli census-recount` and `cli scrub-blocks` on the restored
+  store (FM-221).
+- **Local-only items (FM-277).** What lives only on the operator's Mac, and
+  its second copy today. `cli backup` copies only what `--to` and the store
+  list name, and never reads, prints or copies a credential value
+  (`CLAUDE.md` §8). The operator decides what is covered:
+
+  | Item | Second copy |
+  |---|---|
+  | The untracked local configuration (`~/.brutex`, parameter-path segments and the vendor link) | none. It may be copied to the second drive as a FILE by hand, never into git and never printed |
+  | Unpushed commits of `feat/db-fix` and the work branches | none until pushed; `git push` is the copy |
+  | The work folder's `state/` (plans, specs, run scripts, logs) | none |
+  | The store root's `logs/`, `telemetry/`, `results/` and every other top-level name the plan lists as not covered | none: `cli backup --plan` names them on every run |
+  | Months on disk that no census names | none until `cli census-recount` counts them |
+  | The store and the source archives the GDFL journal names | `cli backup` (above), once the second drive is attached (S-17) |
 - **Snapshot before every format or bulk write** (census migrate or seal,
   recount, a re-import, a deploy that is followed by one) — **NOT PROVED on
   this drive; do the drill below before relying on it** (rules audit RA-288).

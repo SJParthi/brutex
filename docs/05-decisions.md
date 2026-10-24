@@ -83398,3 +83398,206 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-7175 — R4-09b: `cli backup` copies what the store lists — every census month with every generation, the listed store folders and the GDFL source archives the journal names — and names what it does not — 2026-10-24
+
+**Status: locked.** Implements D-7137 item 3's first clause ("the verb copies
+what the store already lists and the GDFL source archives by name and size,
+never a glob of the whole drive").
+
+**Decision.**
+
+1. **Months come from the census.** Every month each vendor's census names
+   (`census_store::read_vendor`, the newest entries) is copied with every
+   sibling the store keeps (`store::path::FileKind::ALL` but the `.lock`, which
+   holds no data), its generation pointer under `bar-generations-v1/`, and
+   every revision under `bar-revisions-v1/<n>/` with its `.repair-v1` receipt.
+   Revision ordinals are probed from 1 until the first that holds nothing and
+   is past the pointer's newest, a bounded walk (`store::repair::MAX_REVISIONS`)
+   that no gap can cut short.
+2. **Seven store folders are walked whole**, never following a link:
+   `manifest/` (census), `imports/` (journals), `audit/` (ledgers), `ops/` (less
+   `ops/backups.log` and `ops/backup-drills.log`, which change with every run of
+   the verbs themselves), `verify/` (the verdict store), `reference/`
+   (reference tables) and `session-masters/` (fetched by hand, FM-277).
+3. **Source archives are the journal's.** Every distinct `archive=<path>` of a
+   `run` line of `imports/gdfl.journal` (percent-decoded; `unrecorded` and a
+   torn last line left out) is copied: a file by itself, a folder (the yearly
+   options zips, the tick store's root) file by file. An archive is unchanged
+   while its name and size are (D-7137 item 3, "by name and size").
+4. **What is not copied is said.** Every other top-level name of the store
+   root (`logs/`, `telemetry/`, `results/`, `probe-verify/`,
+   `and-checkpoint-v2/`, `serve.lock`, ...) is printed by every plan and run as
+   NOT COVERED, and docs/36 §4 lists it with "none". `logs/` and `telemetry/`
+   are appended to by every `cli` run, this one included, so copying them
+   would make every run copy something. A month on disk that no census names
+   is not copied: `cli census-recount` brings it into the census.
+5. **A store that lists nothing is refused** (`nothing_listed`): a root with no
+   census month, no listed file and no archive is a wrong `BRUTEX_STORE`, and
+   a receipt would say a copy of it exists.
+
+**Rejected.** *Walking `bars/` and the drive*: D-7137 forbids a glob, and a
+census-listed month is the unit the store vouches for. *Copying `logs/` and
+`telemetry/`*: the idempotence D-7137 binds ("a second run copies nothing")
+could not hold.
+
+Proof: BK-01, BK-07, BK-08, BK-09 (`docs/04-invariants.md`).
+
+### D-7176 — R4-09b: the target holds run-named copies and one append-only manifest; nothing on it is ever overwritten or deleted, and a cut run leaves no record of an unfinished copy — 2026-10-24
+
+**Status: locked.**
+
+**Decision.**
+
+1. **Layout.** `<dir>/brutex-backup-v1/manifest.log`, `backup.lock`, and
+   `runs/<run>/store/<store path>` or `runs/<run>/archives/<absolute path
+   without its leading />`. A run's id is its start in Unix seconds, or one more
+   than the newest id the manifest names, so ids only grow and a run's names
+   are new names.
+2. **One copy.** `<name>.tmp` created new, filled while its BLAKE3 is taken,
+   fsynced, `<name>` checked absent, renamed, and every folder a unit wrote in
+   fsynced before the unit's records are appended. A record never names a copy
+   that is not whole and durable. A changed source is a new name in a newer
+   run's folder; the old copy stays.
+3. **The manifest** (first line `brutex-backup-manifest v1`): `run`, `file`,
+   `busy`, `missing`, `unreadable`, `skipped`, `unlisted`, `stopped` and `end`
+   lines; a `file` record is `run= class= len= mtime= blake3= path=` and, for a
+   month's file, `unit=`, read strictly. It is read once per run into a map
+   keyed by the first 16 bytes of each path's BLAKE3, so each listed file costs
+   one probe. A whole line this build cannot read, or a first line that is not
+   the head, refuses the run (`manifest_unreadable`): what the target holds
+   could not be told.
+4. **Torn tails.** A run killed mid-append leaves a fragment; the next run ends
+   it as a void line (` #void`) before it appends, and a write the disk cut
+   short inside a run is ended the same way before the next line (found by this
+   part's own kill test: a `stopped` line was joined onto the fragment).
+5. **Unchanged.** A store file is unchanged while its length and nanosecond
+   modification time equal its newest record's; the same length with another
+   time is hashed, and the same digest is a new record over the copy already
+   held (`recorded_only`), not a second copy.
+6. **One run per target**: an exclusive lock on `backup.lock`; a second run is
+   refused `target_busy`, and a drill takes it shared.
+
+**Rejected.** *rsync with `--delete-after`* (the old runbook step): it deletes
+on the target. *Overwriting a copy in place when its source changes*: D-7137
+item 3 ("a changed source is a new name, the old copy kept").
+
+Proof: BK-02, BK-03, BK-04, BK-05, BK-10, BK-11, BK-12.
+
+### D-7177 — R4-09b: the receipt is the line `ops/backups.log` always carried, with the run's words after its first two; a partial run says so and a stopped run appends none; `backup` is a store writer except `--plan` — 2026-10-24
+
+**Status: locked.** Resolves the spec's points 4.3 item 2 and the writer table.
+
+**Decision.**
+
+1. A run that reaches its end appends `copied=<UTC> dest=<path> raw_bytes=<n>
+   store_bytes=<n> by=cli-backup run=<id> state=<complete|partial> files=<n>
+   bytes=<n> copied_files=<n> copied_bytes=<n> unchanged=<n> busy=<n>
+   missing=<n> unreadable=<n> commit=<sha|unstamped>` (`cli::BackupReceipt`).
+   `files` and `bytes` are the manifest's file count and bytes (every path's
+   newest copy); `dest=` is percent-encoded. `api`'s `last_backup` reads it
+   unchanged: no second parser. A target whose widest receipt would pass the
+   1,024-byte line `api` reads is refused before a copy.
+2. A busy month, a missing month or archive, or an unreadable file makes the
+   run `state=partial`, named, and the verb exits non-zero. A run the target
+   stops (a full disk, a lost drive) or a kill appends NO receipt: it was no
+   copy, and the next run finishes it. A receipt log that is not a regular file
+   is refused before anything is copied.
+3. `backup` joins `store_write::WRITERS`; `writes_the_store("backup", ..)` is
+   false only with `--plan`, so S-17's dry run reads as read-only (gate 30).
+
+Proof: BK-06, BK-13, BK-14.
+
+### D-7178 — R4-09b: the drill restores across kinds into a new scratch folder under the system's temporary folder and appends its line to `ops/backup-drills.log`; `backup-drill` is a store writer — 2026-10-24
+
+**Status: locked.** Resolves the spec's points 4.3 items 1, 6 and 9.
+
+**Decision.**
+
+1. **Which months.** From the manifest's newest month records, grouped by
+   month and by kind (the store path's segment: `INDEX`, `CASH`, `FNO`), one of
+   each kind in turn, each kind's months rotated by the drill's id, every month
+   tried once; a month a writer holds is skipped, named, and the next tried. A
+   batch of months is restored side by side.
+2. **Where.** A NEW folder `brutex-backup-drill-<id>-<pid>` under the system's
+   temporary folder, made with create-new semantics, refused when its parent is
+   inside the store or the target, and left for inspection. The `role=scratch`
+   store identity is R4-11's marker and is not built at this head; the drill
+   neither builds nor needs it.
+3. **What it checks.** Every restored file against its manifest BLAKE3, and
+   against the store's file byte for byte under the month's shared lock; a store
+   file whose length or time moved since the copy is checked against the digest
+   only and counted `moved`. `pass`, `fail` or `incomplete` (fewer months than
+   asked: busy, or the manifest holds fewer).
+4. **Its line** (`cli::BackupDrillLine`) goes to `<store>/ops/backup-drills.log`,
+   never `ops/backups.log`, whose newest line must stay a receipt or every page
+   reads "unreadable receipt". D-7137's "never writes into the store" is read as
+   never restoring into the store: the line is the store's operations area, as
+   the receipt is, and `backup-drill` therefore joins `WRITERS` in every form.
+
+Proof: BK-15, BK-16, BK-17.
+
+### D-7179 — R4-09b: `/disk.json` and the page compute the copy's staleness when read, by name, from its age, its target's presence and its state; the last drill is shown; no alert kind — 2026-10-24
+
+**Status: locked.**
+
+**Decision.** `/disk.json`'s `backup` object keeps `recorded`, `last` and
+`why`, and gains `receipt` (each word, `null` when a hand-written receipt lacks
+it), `target` (`present`, `missing`, `not_a_directory`, `unreadable`: one
+`stat` of the decoded `dest=`), `age_days`, `stale`, `stale_why`
+("backup stale: last copy <date>; target missing", "; <n> days old (more than
+7)", "; the copy is dated after now", "; the last run was partial", each that
+holds), `stale_after_days` (the page's own 7, served so the page uses the
+server's number), and `drill` (the newest whole line of `ops/backup-drills.log`
+with `drilled=` and `result=`, or `recorded: false`). "When the page is read"
+means within `DISK_TTL` (30 s), the time `/disk.json` keeps an answer. Every
+page's standing line shows `stale_why`, and a drill that did not pass. No alert
+kind is added (D-6900: attended only; R4-05 adds no kind without a producer).
+
+Proof: BK-18, BK-19, BK-20.
+
+### D-7180 — R4-09b: the tick store is copied as a journal-named archive, and a restore INTO the store is the operator's copy back by the manifest, a day's version files together — 2026-10-24
+
+**Status: locked.** Answers the spec's 3.7 and 4.3 items 4, 5 and 8 for PREC-5.
+
+**Decision.**
+
+1. The tick store's root is the `archive=` of every `source=tickstore` run line
+   of the GDFL journal, so it is "what the store already lists": its day files,
+   its version files (`<stem>.r<N>.bts`) and `tick-versions-v1/` are copied file
+   by file like any archive folder, by name and size. A tick-store root no run
+   line names is not copied, and no run line names one today unless an import
+   ran from it (UNVERIFIED on the operator's store: NEEDS THE MAC).
+2. No verb restores into the store. The restore PREC-5's text routes a lost or
+   partly restored tree to is the operator copying files back from the target by
+   the manifest (docs/36 §4): the newest record of each path names its run; a
+   month comes back whole, and a tick-store day's version files come back
+   together, never `rK+1` without `rK`; then `census-recount` and `scrub-blocks`
+   before any writer. A store-writing restore verb would need its own decision.
+
+**Rejected.** *A `cli restore` into the store inside this part*: the spec
+builds only the drill ("it never writes into the store"), and a store-writing
+verb is a store step of its own.
+
+Proof: BK-08 (archive folders copied file by file).
+
+### D-7181 — R4-09b: the copy runs serially to one target, unthrottled unless `--mib-per-s` says otherwise; the manifest is synced every 256 records or 2 seconds — 2026-10-24
+
+**Status: locked.**
+
+**Decision.**
+
+1. Units are copied one at a time: one target device takes one write stream
+   best (a spinning drive seeks between parallel streams), and the rate limit is
+   one budget. The drill's months of one batch run side by side.
+2. `--mib-per-s` defaults to unthrottled: the copy is taken with every writer
+   stopped (S-17), so there is no import to share the drive with. The rate is
+   paid after a month's lock is released, never with it held (rules audit
+   RA-128).
+3. A record is appended only after its copy and its folder are fsynced; the
+   manifest itself is synced every 256 records or 2 seconds and at the run's
+   end, so a crash costs at most the records of the last 2 seconds, whose copies
+   the next run makes again under its own names. These two numbers bound fsync
+   calls, not data, and are named in `docs/06-limits.md` L-BK-03.
+
+Proof: BK-04, BK-21; `docs/06-limits.md` L-BK-01 to L-BK-04.
