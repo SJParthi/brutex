@@ -84,6 +84,11 @@ mod day_table;
 #[path = "ratio/master_snapshots.rs"]
 mod master_snapshots;
 
+/// C-PD-01 and C-PD-02: the cash derive fold, which judges every minute for
+/// vendor padding, and the padded count per day, flat per minute (R4-27).
+#[path = "ratio/padded.rs"]
+mod padded;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1874,6 +1879,7 @@ fn main() {
     ok &= zerodha_merge_per_record_is_flat();
     ok &= zerodha_merge_log_step_is_flat();
     ok &= fold_is_flat_per_bar();
+    ok &= padded::padded_fold_is_flat_per_minute();
     ok &= nfo_read_is_flat_per_row();
     // C-PIT-01's id is printed from this file because
     // `crates/core/tests/cost_invariants.rs` reads the ids a bench prints from

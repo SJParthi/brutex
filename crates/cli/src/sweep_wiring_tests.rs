@@ -158,6 +158,10 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "gdfl-rekey"
                 | "gdfl-stop"
                 | "msum-build"
+                // The padded-minute measurement and the rate-table replay
+                // (R4-27): measurements, never a sweep.
+                | "padded-measure"
+                | "rate-replay"
                 | "srt-build"
                 | "tix-rebuild"
                 | "research-plan"
@@ -191,6 +195,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "calendar-days"
                 // The upkeep runner (R3-17, D-6270): a store verb.
                 | "upkeep"
+                // The tick-to-second check (DATA-2, D-5181): a read-only
+                // store check, never a sweep.
+                | "tick-to-second-check"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

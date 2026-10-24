@@ -93,6 +93,10 @@ mod gdfl_stop_command;
 /// `cli scrub-blocks`: every block of every census month read whole and checked,
 /// with a durable ledger of what would not verify (DB-B74, WP-81).
 mod scrub_blocks;
+/// `cli tick-to-second-check`: every stored GDFL share-day rebuilt from the
+/// source its landing recorded under rule T and rule A and compared,
+/// read-only; its index answers `status_of` in O(1) (D-5180, D-5184).
+pub mod tick_second_check;
 /// `cli watchdog` and `cli launch-agent`: the app's supervisor and watchdog (R3-32, D-4996).
 pub mod watchdog_command;
 pub use scrub_blocks::{
@@ -104,6 +108,9 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+/// `cli padded-measure` and `cli rate-replay`: the measurements R4-27's
+/// decisions were taken on, read only (INT-15, AUT-10).
+mod decision_measure;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored bar of a series judged as a landing
@@ -542,6 +549,19 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    dirty minute month yields coarse bars built out
                                    of gaps that no other check can see. Exits
                                    non-zero on any disagreement. Reads only.
+       cli padded-measure FEED LIST
+                                   the vendor-padded minute measured over the
+                                   `SYMBOL YYYY-MM` months LIST names: padded
+                                   minutes, and every derived rung folded as
+                                   before INT-15, keeping a padded-only bucket
+                                   flat, and leaving it absent, each against the
+                                   stored month. Reads only.
+       cli rate-replay  TABLE FROM TO
+                                   the RBI 91-day T-bill TABLE replayed over the
+                                   calendar's sessions FROM..TO (YYYY-MM-DD) under
+                                   staleness bounds of 14, 21 and 28 days: each
+                                   session fresh, carried over a documented gap,
+                                   or refused, by code. Reads only.
        cli alerts [--ack N | --older | --before N | --replace-damaged | --file PATH]
                                    The alert queue (<store>/audit/alerts): with no
                                    flag, the unacknowledged alerts among the newest
@@ -598,6 +618,16 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]
                                    one stock-day's factor from the newest
                                    version file, O(1) per lookup, timed.
+       cli tick-to-second-check [YEAR] --out DIR [--workers N] [--symbols SYM ...]
+                                   [--archive ZIP]
+                                   rebuild every stored GDFL share-day (of YEAR,
+                                   or every year) not yet checked from the source
+                                   its .prv landing recorded, read-only, under
+                                   rule T (trades) and rule A (every row) and
+                                   compare with the store; --archive adds a
+                                   comparison labelled not the landing source;
+                                   writes day segments and the next version
+                                   under DIR only (D-5180).
        cli gdfl-dayflags KIND FROM TO [--lineage]
                                    the GDFL day ledger (D-3335) of every day
                                    of the range the import journal records as
@@ -2965,6 +2995,8 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
+        ["padded-measure", feed, list] => decision_measure::padded(feed, list, out),
+        ["rate-replay", table, from, to] => decision_measure::rate_replay(table, from, to, out),
         ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
         ["watchdog", arguments @ ..] if !arguments.is_empty() => {
             watchdog_command::command(arguments, out)
@@ -3026,6 +3058,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["gdfl-rekey", arguments @ ..] if !arguments.is_empty() => {
             gdfl_rekey::command(arguments, out)
+        }
+        ["tick-to-second-check", arguments @ ..] if !arguments.is_empty() => {
+            tick_second_check::command(arguments, out)
         }
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
@@ -3092,7 +3127,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 59] = [
+const COMMANDS: [&str; 62] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3127,11 +3162,13 @@ const COMMANDS: [&str; 59] = [
     "ledger-v6",
     "ledger-v6-replay",
     "msum-build",
+    "padded-measure",
     "policy-check",
     "pool",
     "pool-oos",
     "range-all",
     "range-rung",
+    "rate-replay",
     "research-plan",
     "results",
     "screen",
@@ -3142,6 +3179,7 @@ const COMMANDS: [&str; 59] = [
     "sweep-all",
     "sweep-audited-stored",
     "sweep-stored",
+    "tick-to-second-check",
     "tickstore-write",
     "tix-rebuild",
     "top",

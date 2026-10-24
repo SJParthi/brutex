@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::gdfl_fixtures::{Method, bts, bts_stating, csv, mon, put, row, scratch, zip};
+use crate::gdfl_fixtures::{Method, bts, bts_stating, csv, hms, mon, put, row, scratch, zip};
 
 fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).unwrap()
@@ -689,113 +689,151 @@ fn line_endings_headers_and_a_missing_final_newline_are_read() {
     );
 }
 
+/// D-4816 (bar definition 5): every row fault refuses ITS ROW by name, with
+/// its line and its fault, and the rest of the file is read; alone in its
+/// file (no row kept) the same row is the file's refusal, which names it as
+/// definition 4 did. A Ticker or Date of another file still refuses the
+/// whole file. Faults are the capital-market reader's `RowFault`s.
 #[test]
 fn every_row_fault_is_refused_by_name_at_its_line() {
+    use RowFault::{Malformed, OffGrid, ZeroLtp};
     let good = rows(&[(33_300, "10", 1, 5)])[0].clone();
-    let check = |line: String, want: NfoRefusal| {
-        let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), line.clone()]);
+    let before = rows(&[(33_299, "10", 1, 5)])[0].clone();
+    let whole = |line: String, want: NfoRefusal| {
+        let bytes = csv(&[before.clone(), line.clone()]);
         assert_eq!(decode(&bytes, STEM, trade()), Err(want), "{line}");
     };
-    check(
+    whole(
         good.replacen(STEM, "OTHER.NFO", 1),
         NfoRefusal::TickerMismatch { line: 3 },
     );
-    check(
+    whole(
         good.replacen("/04/", "/05/", 1),
         NfoRefusal::DateMismatch { line: 3 },
     );
-    check(
-        good.replacen("09:15:00", "9:15:00", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen("09:15:00", "24:00:00", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen("09:15:00", "09:60:00", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen("09:15:00", "09:15:60", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.rsplit_once(',').unwrap().0.to_owned(),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(format!("{good},0"), NfoRefusal::MalformedRow { line: 3 });
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,x,0,0,0,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,x.5,0,0,0,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,0,,0,0,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,0,x,0,0,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,0,0,x,0,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",10,0,0,0,0,", ",10,0,0,0,x,", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",0,0,1,5", ",0,0,x,5", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",0,0,1,5", ",0,0,99999999999999999999,5", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",1,5", ",1,x", 1),
-        NfoRefusal::MalformedRow { line: 3 },
-    );
-    check(
-        good.replacen(",1,5", ",1,9223372036854775808", 1),
-        NfoRefusal::OpenInterestRefused { line: 3 },
-    );
-    check(
-        good.replacen(",10,", ",10.001,", 1),
-        NfoRefusal::PriceRefused { line: 3 },
-    );
-    check(
-        good.replacen(",10,", ",-10,", 1),
-        NfoRefusal::PriceRefused { line: 3 },
-    );
-    check(
-        good.replacen(",10,", ",0,", 1),
-        NfoRefusal::PriceRefused { line: 3 },
-    );
-    check(
-        good.replacen(",10,", ",0.00,", 1),
-        NfoRefusal::PriceRefused { line: 3 },
-    );
+    let malformed = |line| NfoRefusal::MalformedRow { line };
+    let price = |line| NfoRefusal::PriceRefused { line };
+    let oi = |line| NfoRefusal::OpenInterestRefused { line };
+    let check = |line: String, fault: RowFault, want: &dyn Fn(u32) -> NfoRefusal| {
+        let bytes = csv(&[before.clone(), line.clone()]);
+        let got = decode(&bytes, STEM, trade()).unwrap_or_else(|why| panic!("{line}: {why}"));
+        let kept: Vec<u32> = got.rows.iter().map(|row| row.line).collect();
+        assert_eq!(kept, [2], "{line}");
+        let named: Vec<(u32, RowFault)> = got
+            .refused
+            .named
+            .iter()
+            .map(|row| (row.line, row.fault))
+            .collect();
+        assert_eq!(named, [(3, fault)], "{line}");
+        assert_eq!(got.refused.total(), 1, "{line}");
+        let alone = csv(std::slice::from_ref(&line));
+        assert_eq!(decode(&alone, STEM, trade()), Err(want(2)), "{line} alone");
+    };
+    for (line, fault, want) in [
+        (
+            good.replacen("09:15:00", "9:15:00", 1),
+            Malformed,
+            &malformed as &dyn Fn(u32) -> NfoRefusal,
+        ),
+        (
+            good.replacen("09:15:00", "24:00:00", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen("09:15:00", "09:60:00", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen("09:15:00", "09:15:60", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.rsplit_once(',').unwrap().0.to_owned(),
+            Malformed,
+            &malformed,
+        ),
+        (format!("{good},0"), Malformed, &malformed),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,x,0,0,0,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,x.5,0,0,0,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,0,,0,0,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,0,x,0,0,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,0,0,x,0,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",10,0,0,0,0,", ",10,0,0,0,x,", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",0,0,1,5", ",0,0,x,5", 1),
+            Malformed,
+            &malformed,
+        ),
+        (
+            good.replacen(",0,0,1,5", ",0,0,99999999999999999999,5", 1),
+            Malformed,
+            &malformed,
+        ),
+        (good.replacen(",1,5", ",1,x", 1), Malformed, &malformed),
+        (
+            good.replacen(",1,5", ",1,9223372036854775808", 1),
+            Malformed,
+            &oi,
+        ),
+        (good.replacen(",10,", ",10.001,", 1), OffGrid, &price),
+        (good.replacen(",10,", ",-10,", 1), Malformed, &price),
+        (good.replacen(",10,", ",0,", 1), ZeroLtp, &price),
+        (good.replacen(",10,", ",0.00,", 1), ZeroLtp, &price),
+        (
+            good.replacen(",10,", ",92233720368547758.08,", 1),
+            OffGrid,
+            &price,
+        ),
+    ] {
+        check(line, fault, want);
+    }
     let penny = csv(&[good.replacen(",10,", ",0.01,", 1)]);
     assert_eq!(
         decode(&penny, STEM, trade()).unwrap().rows[0].ltp,
         1,
         "one paisa traded is a price"
     );
-    check(
-        good.replacen(",10,", ",92233720368547758.08,", 1),
-        NfoRefusal::PriceRefused { line: 3 },
-    );
     let mut bad = csv(std::slice::from_ref(&good));
     bad.insert(bad.len() - 3, 0xFF);
     assert_eq!(
         decode(&bad, STEM, trade()),
         Err(NfoRefusal::MalformedRow { line: 2 })
+    );
+    let mut after = csv(&[before.clone(), good.clone()]);
+    after.insert(after.len() - 3, 0xFF);
+    let got = decode(&after, STEM, trade()).unwrap();
+    assert_eq!(
+        (got.rows.len(), got.refused.malformed),
+        (1, 1),
+        "not UTF-8 refuses its row (F10)"
     );
 }
 
@@ -830,16 +868,27 @@ fn the_options_row_loop_collects_no_field_vector() {
 }
 
 /// An eleventh field is refused at the line it is on, however many follow:
-/// a row of a thousand commas is the same `MalformedRow` as one of eleven
-/// fields, and the rows before it still decode in a file that has none.
+/// a row of a thousand commas is the same malformed row as one of eleven
+/// fields, refused by name while the rows before it are read (D-4816), and
+/// the file's own `MalformedRow` when it is the only row.
 #[test]
 fn a_row_of_many_fields_is_malformed_at_its_line() {
     let good = rows(&[(33_300, "10", 1, 5)])[0].clone();
     let wide = format!("{good}{}", ",0".repeat(1_000));
-    let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), wide]);
+    let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), wide.clone()]);
+    let got = decode(&bytes, STEM, trade()).unwrap();
+    assert_eq!(got.rows.len(), 1);
     assert_eq!(
-        decode(&bytes, STEM, trade()),
-        Err(NfoRefusal::MalformedRow { line: 3 })
+        got.refused
+            .named
+            .iter()
+            .map(|row| (row.line, row.fault))
+            .collect::<Vec<_>>(),
+        [(3, RowFault::Malformed)]
+    );
+    assert_eq!(
+        decode(&csv(&[wide]), STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 2 })
     );
     let bytes = csv(&rows(&[(33_299, "10", 1, 5), (33_300, "10", 1, 5)]));
     assert_eq!(
@@ -2474,12 +2523,58 @@ fn decode_by_field_vector(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile,
             oi,
         });
     }
-    Ok(NfoFile { rows, quoted_rows })
+    Ok(NfoFile {
+        rows,
+        quoted_rows,
+        refused: crate::gdfl_cm::RowsRefused::default(),
+        trailing_empty: 0,
+    })
 }
 
-/// The oracle agrees with the fixed array on invented files: a good file, a
-/// row of eleven fields, a row of nine, a quoted row and a bad price, so the
-/// real-day check below compares two readers that are known to agree here.
+/// D-4816's whole delta, file by file: `per_row` (bar definition 5's
+/// reader) against `whole` (the whole-file rule of definition 4 and before,
+/// the oracle above). Where the old reader read a file the new one reads the
+/// same rows and refuses none; where the old reader named a row fault at
+/// line L, the new one either names the same refusal, or reads the file and
+/// names L as its first refused row, or refuses later, past L, by a rule the
+/// old reader never reached; a header the old reader refused is read only
+/// with empty trailing fields (D-4829).
+fn definition_5_differs_only_where_4_refused(
+    per_row: &Result<NfoFile, NfoRefusal>,
+    whole: &Result<NfoFile, NfoRefusal>,
+) -> bool {
+    let row_fault = |why: &NfoRefusal| match why {
+        NfoRefusal::MalformedRow { line }
+        | NfoRefusal::PriceRefused { line }
+        | NfoRefusal::OpenInterestRefused { line } => Some(*line),
+        _ => None,
+    };
+    match (per_row, whole) {
+        (Ok(new), Ok(old)) => {
+            new.rows == old.rows
+                && new.quoted_rows == old.quoted_rows
+                && new.refused.total() == 0
+                && new.trailing_empty == 0
+        }
+        (Err(new), Err(old)) if new == old => true,
+        (Ok(new), Err(NfoRefusal::HeaderUnknown)) => new.trailing_empty > 0,
+        (Ok(new), Err(old)) => row_fault(old)
+            .is_some_and(|at| new.refused.named.first().is_some_and(|row| row.line == at)),
+        (Err(new), Err(old)) => row_fault(old).is_some_and(|at| match new {
+            NfoRefusal::TooManyBadRows { .. } | NfoRefusal::RowsOverCap { .. } => true,
+            NfoRefusal::TickerMismatch { line } | NfoRefusal::DateMismatch { line } => *line > at,
+            other => row_fault(other).is_some_and(|line| line > at),
+        }),
+        (Err(_), Ok(_)) => false,
+    }
+}
+
+/// The oracle agrees with the fixed array on invented files under D-4816's
+/// relation (bar definition 5 differs from 4 only where 4 refused a file): a
+/// good file, a row of eleven fields after a good one, a row of nine, a
+/// quoted row and a bad price, so the real-day check below compares two
+/// readers that are known to agree here. Every file of the good kind, and
+/// each lone bad row, is still byte for byte the same answer.
 #[test]
 fn the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files() {
     let good = rows(&[(33_300, "10.05", 75, 300), (33_301, "0", 0, 300)]);
@@ -2495,19 +2590,34 @@ fn the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files() {
         csv(&[bad_price]),
         b"Ticker,Date\r\n".to_vec(),
     ] {
-        assert_eq!(
+        let (new, old) = (
             decode(&file, STEM, trade()),
-            decode_by_field_vector(&file, STEM, trade())
+            decode_by_field_vector(&file, STEM, trade()),
+        );
+        assert!(
+            definition_5_differs_only_where_4_refused(&new, &old),
+            "{new:?} against {old:?}"
         );
     }
+    let (eleven, alone) = (
+        csv(&[good[0].clone(), format!("{},0", good[0])]),
+        csv(&[format!("{},0", good[0])]),
+    );
+    assert_eq!(
+        decode(&alone, STEM, trade()),
+        decode_by_field_vector(&alone, STEM, trade())
+    );
+    assert!(decode(&eleven, STEM, trade()).is_ok());
+    assert!(decode_by_field_vector(&eleven, STEM, trade()).is_err());
 }
 
 /// **D-5800 ON REAL DAYS, READ-ONLY.** Every option file of NIFTY,
 /// BANKNIFTY and RELIANCE on the first options day of the tick store
 /// (2018-09-03, the early day form), a special session (the 2023-11-12
 /// Muhurat session) and 2026-08-03 (11,524 files) decodes through the fixed
-/// array with exactly the outcome the field vector gave: the same rows, or
-/// the same refusal. `BRUTEX_GDFL_TICKSTORE` is the tick store root, opened
+/// array with the outcome the field vector gave, under D-4816's relation
+/// (`definition_5_differs_only_where_4_refused`): the same rows, or the same
+/// refusal, or the file read where the old rule refused it whole. `BRUTEX_GDFL_TICKSTORE` is the tick store root, opened
 /// read-only by `NfoTickStore`; only counts are printed, no vendor row
 /// reaches the repository.
 #[test]
@@ -2538,7 +2648,10 @@ fn the_fixed_array_decodes_real_days_as_the_field_vector_did() {
             let at = std::time::Instant::now();
             let vector = decode_by_field_vector(&bytes, &stem, on);
             vector_ns += at.elapsed().as_nanos();
-            assert_eq!(fixed, vector, "{on} {name}");
+            assert!(
+                definition_5_differs_only_where_4_refused(&fixed, &vector),
+                "{on} {name}: {fixed:?} against {vector:?}"
+            );
             files += 1;
             match fixed {
                 Ok(read) => rows += u64::try_from(read.rows.len()).unwrap(),
@@ -2547,10 +2660,820 @@ fn the_fixed_array_decodes_real_days_as_the_field_vector_did() {
         }
         eprintln!(
             "{on}: {files} NIFTY/BANKNIFTY/RELIANCE option files, {rows} rows, {refused} refused \
-             files, both readers equal; fixed array {} ms, field vector {} ms (debug build)",
+             files, the readers agree under D-4816; fixed array {} ms, field vector {} ms (debug build)",
             fixed_ns / 1_000_000,
             vector_ns / 1_000_000
         );
         assert!(files > 0, "{on}: the day holds the three underlyings");
     }
+}
+
+// ── IA-4: per-row parity (D-4816) and the trailing-empty header (D-4829) ────
+
+/// `n` invented rows of `STEM` from 09:15:00, one a second, every one traded
+/// at an invented price no real option file carries.
+fn many(n: u32) -> Vec<String> {
+    (0..n)
+        .map(|i| row(STEM, trade(), 33_300 + i % 22_000, "10.05", 1, 300))
+        .collect()
+}
+
+/// The lines a decoded file kept and the `(line, fault)` it named.
+fn shape(file: &NfoFile) -> (Vec<u32>, Vec<(u32, RowFault)>) {
+    (
+        file.rows.iter().map(|row| row.line).collect(),
+        file.refused
+            .named
+            .iter()
+            .map(|row| (row.line, row.fault))
+            .collect(),
+    )
+}
+
+/// `IA-MX-F6`: a row of eleven fields is refused by name, and the file read.
+#[test]
+fn an_option_row_with_eleven_fields_is_refused_and_the_file_read() {
+    let mut lines = many(3);
+    lines[1] = format!("{},0", lines[1]);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+    assert_eq!(got.refused.malformed, 1);
+}
+
+/// `IA-MX-F10` (critic IA-4-1): a row that is not UTF-8 is refused by name
+/// and the file read; under definition 4 it refused the whole file, which
+/// the oracle of definition 4 still says.
+#[test]
+fn an_option_row_that_is_not_utf8_is_refused_and_the_file_read() {
+    let mut bytes = csv(&many(3));
+    let at = bytes.windows(8).position(|w| w == b"09:15:01").unwrap();
+    bytes.insert(at, 0xC3);
+    let got = decode(&bytes, STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+    assert_eq!(
+        decode_by_field_vector(&bytes, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 3 }),
+        "definition 4 refused the whole file"
+    );
+}
+
+/// `IA-MX-F13`: 2018-11-09's shape, invented: 4,353 data rows, line 451 a
+/// ten-field row whose time is `99:a9:99`. 4,352 rows are read and line 451
+/// is named; under definition 4 the contract-day was lost.
+#[test]
+fn an_option_row_with_a_bad_time_is_refused_by_line_and_the_rest_read() {
+    let mut lines = many(4_353);
+    lines[449] = lines[449].replacen(&hms(33_300 + 449), "99:a9:99", 1);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(got.rows.len(), 4_352);
+    assert_eq!(shape(&got).1, [(451, RowFault::Malformed)]);
+    assert!(got.rows.iter().all(|row| row.line != 451));
+    assert_eq!(got.refused.named[0].sod, None, "no time read");
+}
+
+/// `IA-MX-F38`: 2018-11-06's shape, invented: 13,991 data rows, line 13,668
+/// a ten-field row whose LTP is four characters with a letter in it. 13,990
+/// rows are read and line 13,668 is named `malformed` with its second; alone
+/// in its file the same row is still the file's `price_refused`, as
+/// definition 4 named the whole file (the contract-day it lost, journal line
+/// 8,029).
+#[test]
+fn an_option_row_with_letters_in_its_price_is_refused_by_line_and_the_rest_read() {
+    let mut lines = many(13_991);
+    let at = 13_668 - 2;
+    lines[at] = lines[at].replacen(",10.05,", ",1O.5,", 1);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(got.rows.len(), 13_990);
+    assert_eq!(shape(&got).1, [(13_668, RowFault::Malformed)]);
+    assert!(got.rows.iter().all(|row| row.line != 13_668));
+    let sod = 33_300 + u32::try_from(at).unwrap() % 22_000;
+    assert_eq!(got.refused.named[0].sod, Some(sod), "its time was read");
+    assert_eq!(
+        decode(&csv(&lines[at..=at]), STEM, trade()),
+        Err(NfoRefusal::PriceRefused { line: 2 })
+    );
+}
+
+/// FM-077's decode half (the e2e failure matrix; its owner IMPORT-BAD-ROW,
+/// R4-22, names each refused row in the durable audit stream and closes the
+/// row): ONE traded row at zero in an options file refuses that row by name,
+/// line and second, and the file is kept with every other row in file order.
+/// Under definition 4 the same bytes refused the whole file, and with it the
+/// contract-day, as the definition-4 reader kept as an oracle still says.
+#[test]
+fn one_zero_priced_traded_row_is_refused_and_the_file_kept() {
+    let mut lines = many(5);
+    lines[2] = lines[2].replacen(",10.05,", ",0.00,", 1);
+    let bytes = csv(&lines);
+    let got = decode(&bytes, STEM, trade()).unwrap();
+    assert_eq!(
+        shape(&got),
+        (vec![2, 3, 5, 6], vec![(4, RowFault::ZeroLtp)])
+    );
+    assert_eq!(
+        (
+            got.refused.total(),
+            got.refused.zero_ltp,
+            got.refused.named[0].sod
+        ),
+        (1, 1, Some(33_302))
+    );
+    assert!(got.rows.iter().all(|row| row.ltp == 1_005), "{got:?}");
+    assert_eq!(
+        decode_by_field_vector(&bytes, STEM, trade()),
+        Err(NfoRefusal::PriceRefused { line: 4 }),
+        "definition 4 refused the whole file"
+    );
+}
+
+/// `IA-MX-F20` (critic IA-4-1): a TRADED row at zero is refused by name as
+/// `zero_ltp`, the file read; an untraded row at zero is still kept.
+#[test]
+fn a_traded_option_row_at_zero_is_refused_and_the_file_read() {
+    let mut lines = many(3);
+    lines[0] = lines[0]
+        .replacen(",10.05,", ",0,", 1)
+        .replacen(",1,300", ",0,300", 1);
+    lines[1] = lines[1].replacen(",10.05,", ",0.00,", 1);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::ZeroLtp)]));
+    assert_eq!(
+        (got.refused.zero_ltp, got.refused.named[0].sod),
+        (1, Some(33_301))
+    );
+}
+
+/// `IA-MX-F21` (critic IA-4-1): an LTP with a third decimal is refused as
+/// `off_grid`, never snapped; the rest of the file is read.
+#[test]
+fn an_option_price_with_a_third_decimal_refuses_its_row() {
+    let mut lines = many(3);
+    lines[2] = lines[2].replacen(",10.05,", ",10.055,", 1);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 3], vec![(4, RowFault::OffGrid)]));
+    assert_eq!(got.refused.off_grid, 1);
+}
+
+/// `IA-MX-F23`: 2026-04-16's shape, invented: one negative LTQ refuses its
+/// row as `malformed` (D-3335 `rows_refused_malformed`) and the file lands.
+#[test]
+fn a_negative_option_quantity_refuses_its_row_and_the_file_lands() {
+    let mut lines = many(4);
+    lines[1] = lines[1].replacen(",1,300", ",-1,300", 1);
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4, 5], vec![(3, RowFault::Malformed)]));
+    assert_eq!(got.refused.malformed, 1);
+}
+
+/// `IA-MX-F33`: a malformed quote field refuses its row in BOTH readers,
+/// the same fault, the rest of each file read.
+#[test]
+fn a_malformed_quote_field_refuses_its_row_in_both_readers() {
+    for bent in [",x,0,0,0,", ",0,x,0,0,", ",0,0,1.5.5,0,", ",0,0,0,-1,"] {
+        let mut lines = many(3);
+        lines[1] = lines[1].replacen(",0,0,0,0,", bent, 1);
+        let got = decode(&csv(&lines), STEM, trade()).unwrap();
+        assert_eq!(
+            shape(&got),
+            (vec![2, 4], vec![(3, RowFault::Malformed)]),
+            "{bent}"
+        );
+        let cm_stem = "ZZTEST.NSE";
+        let cm: Vec<String> = lines.iter().map(|l| l.replacen(STEM, cm_stem, 1)).collect();
+        let expect = crate::gdfl_cm::Expect {
+            kind: crate::gdfl_cm::CmKind::Stocks,
+            stem: cm_stem,
+            day: trade(),
+        };
+        let cash = crate::gdfl_cm::decode(&csv(&cm), &expect).unwrap();
+        let named: Vec<(u32, RowFault)> = cash
+            .refused
+            .named
+            .iter()
+            .map(|row| (row.line, row.fault))
+            .collect();
+        assert_eq!(
+            named,
+            [(3, RowFault::Malformed)],
+            "{bent}: the capital-market reader"
+        );
+    }
+}
+
+/// `IA-MX-F39`: a blank line after line 1, in the middle or as CRLF CRLF at
+/// the end, is a malformed row in both readers: refused by name, never the
+/// file.
+#[test]
+fn a_blank_line_is_a_malformed_row() {
+    let lines = many(2);
+    let middle = vec![lines[0].clone(), String::new(), lines[1].clone()];
+    let got = decode(&csv(&middle), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+    let mut tail = csv(&lines);
+    tail.extend_from_slice(b"\r\n");
+    let got = decode(&tail, STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 3], vec![(4, RowFault::Malformed)]));
+    let cm_stem = "ZZTEST.NSE";
+    let cm: Vec<String> = middle
+        .iter()
+        .map(|l| l.replacen(STEM, cm_stem, 1))
+        .collect();
+    let expect = crate::gdfl_cm::Expect {
+        kind: crate::gdfl_cm::CmKind::Stocks,
+        stem: cm_stem,
+        day: trade(),
+    };
+    let cash = crate::gdfl_cm::decode(&csv(&cm), &expect).unwrap();
+    assert_eq!(
+        (
+            cash.rows.len(),
+            cash.refused.malformed,
+            cash.refused.named[0].line
+        ),
+        (2, 1, 3),
+        "the capital-market reader"
+    );
+}
+
+/// `IA-MX-F40`: a repeated header (a later line starting `Ticker,`). The
+/// design reads it as a malformed row by its time `Time`; both readers check
+/// the Ticker field FIRST, and `Ticker` is not the file's stem, so it is a
+/// row of another file, which refuses the whole file in both readers
+/// (D-4816 keeps that rule; 0 such lines measured, `FMT-12`). The same line
+/// carrying this file's own Ticker and Date (its time `Time`) is the
+/// malformed row the design means.
+#[test]
+fn a_repeated_header_line_is_a_malformed_row() {
+    let lines = many(2);
+    let again = vec![
+        lines[0].clone(),
+        HEADER_OPEN_INTEREST.to_owned(),
+        lines[1].clone(),
+    ];
+    let got = decode(&csv(&again), STEM, trade());
+    assert_eq!(got, Err(NfoRefusal::TickerMismatch { line: 3 }));
+    let cm_stem = "ZZTEST.NSE";
+    let cm: Vec<String> = again.iter().map(|l| l.replacen(STEM, cm_stem, 1)).collect();
+    let expect = crate::gdfl_cm::Expect {
+        kind: crate::gdfl_cm::CmKind::Stocks,
+        stem: cm_stem,
+        day: trade(),
+    };
+    assert_eq!(
+        crate::gdfl_cm::decode(&csv(&cm), &expect).map(|f| f.rows.len()),
+        Err(CmRefusal::TickerMismatch { line: 3 }),
+        "the capital-market reader: the same rule"
+    );
+    let spelled =
+        HEADER_OPEN_INTEREST
+            .replacen("Ticker", STEM, 1)
+            .replacen("Date", "01/04/2024", 1);
+    let again = vec![lines[0].clone(), spelled, lines[1].clone()];
+    let got = decode(&csv(&again), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+}
+
+/// `IA-MX-F41`: a double-quoted field fails its own rule: a quoted price,
+/// quantity or open interest refuses its row; a quoted ticker is a row of
+/// another file.
+#[test]
+fn a_quoted_field_is_refused_by_its_rule() {
+    let lines = many(3);
+    for (bent, fault) in [
+        (
+            lines[1].replacen(",10.05,", ",\"10.05\",", 1),
+            RowFault::Malformed,
+        ),
+        (
+            lines[1].replacen(",1,300", ",\"1\",300", 1),
+            RowFault::Malformed,
+        ),
+        (
+            lines[1].replacen(",1,300", ",1,\"300\"", 1),
+            RowFault::Malformed,
+        ),
+    ] {
+        let file = vec![lines[0].clone(), bent.clone(), lines[2].clone()];
+        let got = decode(&csv(&file), STEM, trade()).unwrap();
+        assert_eq!(shape(&got), (vec![2, 4], vec![(3, fault)]), "{bent}");
+    }
+    let quoted = lines[1].replacen(STEM, &format!("\"{STEM}\""), 1);
+    let file = vec![lines[0].clone(), quoted, lines[2].clone()];
+    assert_eq!(
+        decode(&csv(&file), STEM, trade()),
+        Err(NfoRefusal::TickerMismatch { line: 3 })
+    );
+}
+
+/// `IA-MX-F42` and F9: a run of NUL bytes ending the file is a last line
+/// with no newline that is not ten fields: a cut file, refused WHOLE as
+/// before D-4816. The same NUL line with a newline after it is a malformed
+/// row, refused by name.
+#[test]
+fn a_nul_tail_is_read_as_a_cut_last_line() {
+    let mut torn = csv(&many(3));
+    torn.extend_from_slice(&[0_u8; 64]);
+    assert_eq!(
+        decode(&torn, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 5 })
+    );
+    torn.push(b'\n');
+    let got = decode(&torn, STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 3, 4], vec![(5, RowFault::Malformed)]));
+    // A row cut short with no newline: the file, whole.
+    let mut cut = csv(&many(3));
+    cut.truncate(cut.len() - 6);
+    assert_eq!(
+        decode(&cut, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 4 })
+    );
+    // A complete last row with no newline is read (§8 F8), and a last row
+    // whose fault is its price, not its shape, is refused alone, as the
+    // capital-market reader does.
+    let mut complete = csv(&many(3));
+    complete.truncate(complete.len() - 2);
+    assert_eq!(decode(&complete, STEM, trade()).unwrap().rows.len(), 3);
+    let mut lines = many(3);
+    lines[2] = lines[2].replacen(",10.05,", ",10.055,", 1);
+    let mut priced = csv(&lines);
+    priced.truncate(priced.len() - 2);
+    let got = decode(&priced, STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 3], vec![(4, RowFault::OffGrid)]));
+}
+
+/// `IA-MX-F7` (design §8 F7, D-4816): a last line ending in a bare CR with no
+/// LF after it is a file cut between its CR and its LF, whether the row
+/// before the CR is complete or cut short: the whole file is refused at that
+/// line, by the one rule the capital-market reader applies to the same
+/// bytes. The same complete row with its CRLF, or with no line end at all
+/// (§8 F8), is read; a stray CR on a line that has its LF is that row's own
+/// fault, refused alone. Before this, the options reader stripped the CR and
+/// read a cut file as a whole one.
+#[test]
+fn an_option_file_cut_between_cr_and_lf_is_refused_whole() {
+    let cm_of = |bytes: &[u8]| {
+        let text = String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .replace(STEM, "ZZTEST.NSE");
+        let expect = crate::gdfl_cm::Expect {
+            kind: crate::gdfl_cm::CmKind::Stocks,
+            stem: "ZZTEST.NSE",
+            day: trade(),
+        };
+        crate::gdfl_cm::decode(text.as_bytes(), &expect).map(|file| file.rows.len())
+    };
+    for n in [1_u32, 3] {
+        let last = n + 1;
+        let whole = csv(&many(n));
+        let mut cut = whole.clone();
+        assert_eq!(cut.pop(), Some(b'\n'));
+        assert_eq!(cut.last(), Some(&b'\r'), "the cut keeps the CR");
+        assert_eq!(
+            decode(&cut, STEM, trade()),
+            Err(NfoRefusal::MalformedRow { line: last }),
+            "{n} rows, cut between CR and LF"
+        );
+        assert_eq!(
+            cm_of(&cut),
+            Err(CmRefusal::MalformedRow { line: last }),
+            "the capital-market reader refuses the same cut the same way"
+        );
+        let mut bare = cut.clone();
+        assert_eq!(bare.pop(), Some(b'\r'));
+        let kept = usize::try_from(n).unwrap();
+        assert_eq!(decode(&bare, STEM, trade()).unwrap().rows.len(), kept);
+        assert_eq!(cm_of(&bare), Ok(kept));
+        assert_eq!(decode(&whole, STEM, trade()).unwrap().rows.len(), kept);
+        // A row cut short and ending in a CR: the file, whole, at that line.
+        let mut short = bare.clone();
+        short.truncate(short.len() - 6);
+        short.push(b'\r');
+        assert_eq!(
+            decode(&short, STEM, trade()),
+            Err(NfoRefusal::MalformedRow { line: last })
+        );
+    }
+    let mut lines = many(3);
+    lines[1].push('\r');
+    let got = decode(&csv(&lines), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+}
+
+/// `IA-MX-F43`: a line longer than 256 bytes is split like any other and its
+/// rules refuse it; no cap is added. A long LTP and a long ticker.
+#[test]
+fn an_overlong_line_is_a_malformed_row() {
+    let lines = many(3);
+    let long_price = lines[1].replacen(",10.05,", &format!(",1{}.05,", "0".repeat(300)), 1);
+    let file = vec![lines[0].clone(), long_price.clone(), lines[2].clone()];
+    assert!(long_price.len() > 256);
+    let got = decode(&csv(&file), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::OffGrid)]));
+    let long_tail = format!("{}{}", lines[1], ",".repeat(300));
+    let file = vec![lines[0].clone(), long_tail, lines[2].clone()];
+    let got = decode(&csv(&file), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 4], vec![(3, RowFault::Malformed)]));
+}
+
+/// `IA-MX-F36`, D-4829: 2025-03-11's shape, invented: the header followed by
+/// k = 4 empty fields and every row by 4 empty fields is read, the fields
+/// dropped and k counted; k from 1 to 8 is admitted, 9 is not; a row that
+/// breaks the shape (no empty fields, a value in one, one too few) is a
+/// malformed row; both observed headers take the rule.
+#[test]
+fn a_header_with_empty_trailing_fields_is_read_when_every_row_matches() {
+    let body = |header: &str, k: usize, rows: &[String]| {
+        let mut text = format!("{header}{}\r\n", ",".repeat(k));
+        for r in rows {
+            text.push_str(r);
+            text.push_str("\r\n");
+        }
+        text.into_bytes()
+    };
+    let plain = many(1_446);
+    let padded: Vec<String> = plain.iter().map(|r| format!("{r},,,,")).collect();
+    let got = decode(&body(HEADER_OPEN_INTEREST, 4, &padded), STEM, trade()).unwrap();
+    let want = decode(&csv(&plain), STEM, trade()).unwrap();
+    assert_eq!((got.rows.clone(), got.trailing_empty), (want.rows, 4));
+    assert_eq!((got.refused.total(), want.trailing_empty), (0, 0));
+    for k in 1..=MAX_TRAILING_EMPTY {
+        for header in [HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED] {
+            let rows: Vec<String> = many(2)
+                .iter()
+                .map(|r| format!("{r}{}", ",".repeat(k)))
+                .collect();
+            let got = decode(&body(header, k, &rows), STEM, trade()).unwrap();
+            assert_eq!((got.rows.len(), usize::from(got.trailing_empty)), (2, k));
+        }
+    }
+    let nine: Vec<String> = many(1).iter().map(|r| format!("{r},,,,,,,,,")).collect();
+    assert_eq!(
+        decode(&body(HEADER_OPEN_INTEREST, 9, &nine), STEM, trade()),
+        Err(NfoRefusal::HeaderUnknown)
+    );
+    let mut broken = padded[..4].to_vec();
+    broken[1] = plain[1].clone();
+    broken[2] = format!("{},,,x,", plain[2]);
+    broken[3] = format!("{},,,", plain[3]);
+    let got = decode(&body(HEADER_OPEN_INTEREST, 4, &broken), STEM, trade()).unwrap();
+    assert_eq!(
+        shape(&got),
+        (
+            vec![2],
+            vec![
+                (3, RowFault::Malformed),
+                (4, RowFault::Malformed),
+                (5, RowFault::Malformed)
+            ]
+        )
+    );
+    // A non-empty "field" after the names, or a space, is no header.
+    for bad in [
+        format!("{HEADER_OPEN_INTEREST},x"),
+        format!("{HEADER_OPEN_INTEREST}, "),
+        format!("{HEADER_OPEN_INTEREST} ,"),
+    ] {
+        assert_eq!(
+            decode(&body(&bad, 0, &padded[..1]), STEM, trade()),
+            Err(NfoRefusal::HeaderUnknown),
+            "{bad:?}"
+        );
+    }
+}
+
+/// Extremes at once (D-4816 with D-4829): the widest header admitted
+/// (`k` = [`MAX_TRAILING_EMPTY`]), refused rows at the bound's exact edge
+/// (one in every [`BAD_ROWS_PER`] of the rows read, past [`MAX_BAD_ROWS`]),
+/// a duplicate and an out-of-order row first, and a complete last row with no
+/// newline: every good row is kept in file order, every bad one counted, and
+/// `k` is told. One more bad row refuses the file by the bound with both
+/// counts; the same file cut between its last CR and LF is refused whole at
+/// its last line; and a refused LAST row, where the newline is missing, is
+/// still refused alone when its fault is not its shape.
+#[test]
+fn the_widest_header_at_the_bound_with_no_final_newline_keeps_every_good_row() {
+    let k = MAX_TRAILING_EMPTY;
+    let pad = ",".repeat(k);
+    let over = MAX_BAD_ROWS + 1;
+    let read = over * BAD_ROWS_PER;
+    let file = |bad: u32, end: &[u8]| {
+        let mut lines = many(read);
+        let first = lines[0].clone();
+        lines[1] = first.clone();
+        lines[2] = row(STEM, trade(), 33_200, "10.10", 2, 301);
+        for line in lines
+            .iter_mut()
+            .skip(3)
+            .step_by(97)
+            .take(usize::try_from(bad).unwrap())
+        {
+            *line = line.replacen(",1,300", ",-1,300", 1);
+        }
+        let mut text = format!("{HEADER_OPEN_INTEREST}{pad}\r\n");
+        for line in &lines {
+            text.push_str(line);
+            text.push_str(&pad);
+            text.push_str("\r\n");
+        }
+        let mut bytes = text.into_bytes();
+        bytes.truncate(bytes.len() - 2);
+        bytes.extend_from_slice(end);
+        bytes
+    };
+    let got = decode(&file(over, b""), STEM, trade()).unwrap();
+    let kept = usize::try_from(read - over).unwrap();
+    assert_eq!(
+        (
+            got.rows.len(),
+            got.refused.total(),
+            usize::from(got.trailing_empty)
+        ),
+        (kept, over, k)
+    );
+    assert_eq!(got.refused.malformed, over);
+    assert_eq!(got.refused.named.len(), crate::gdfl_cm::NAMED_ROWS);
+    assert!(got.rows.windows(2).all(|pair| pair[0].line < pair[1].line));
+    assert_eq!(
+        (got.rows[0].sod, got.rows[1].sod, got.rows[2].sod),
+        (33_300, 33_300, 33_200),
+        "a duplicate and an earlier second are kept where the file has them"
+    );
+    assert_eq!(got.rows.last().unwrap().line, read + 1);
+    assert_eq!(
+        decode(&file(over + 1, b""), STEM, trade()),
+        Err(NfoRefusal::TooManyBadRows {
+            refused: over + 1,
+            rows: read,
+        })
+    );
+    assert_eq!(
+        decode(&file(over, b"\r"), STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: read + 1 })
+    );
+    let crlf = decode(&file(over, b"\r\n"), STEM, trade()).unwrap();
+    assert_eq!(crlf.rows, got.rows);
+    let mut priced = file(over - 1, b"");
+    let tail = format!(",10.05,0,0,0,0,1,300{pad}");
+    assert!(priced.ends_with(tail.as_bytes()));
+    let at = priced.len() - tail.len();
+    priced.splice(at.., format!(",10.055,0,0,0,0,1,300{pad}").into_bytes());
+    let last = decode(&priced, STEM, trade()).unwrap();
+    assert_eq!(
+        (last.refused.total(), last.refused.off_grid),
+        (over, 1),
+        "the last row's price, refused alone at the bound's edge"
+    );
+    assert_eq!(last.refused.named.first().map(|row| row.line), Some(5));
+}
+
+/// D-4816's bound IS the capital-market reader's (D-3318): a file may refuse
+/// up to [`MAX_BAD_ROWS`] rows whatever its size, and more only while they
+/// are at most one in every [`BAD_ROWS_PER`] of the rows read; past both the
+/// file is refused whole, by name, with both counts. Every refused row is
+/// counted, the first `NAMED_ROWS` named.
+#[test]
+fn too_many_bad_rows_refuse_an_options_file_at_the_capital_markets_bound() {
+    let bent = |n: u32, bad: u32| {
+        let mut lines = many(n);
+        for line in lines.iter_mut().take(usize::try_from(bad).unwrap()) {
+            *line = line.replacen(",1,300", ",x,300", 1);
+        }
+        csv(&lines)
+    };
+    let got = decode(&bent(MAX_BAD_ROWS + 1, MAX_BAD_ROWS), STEM, trade()).unwrap();
+    assert_eq!((got.rows.len(), got.refused.total()), (1, MAX_BAD_ROWS));
+    assert_eq!(got.refused.named.len(), crate::gdfl_cm::NAMED_ROWS);
+    let over = MAX_BAD_ROWS + 1;
+    let rows = over * BAD_ROWS_PER;
+    let got = decode(&bent(rows, over), STEM, trade()).unwrap();
+    assert_eq!(
+        got.refused.total(),
+        over,
+        "one in every {BAD_ROWS_PER}: read"
+    );
+    assert_eq!(
+        decode(&bent(rows - 1, over), STEM, trade()),
+        Err(NfoRefusal::TooManyBadRows {
+            refused: over,
+            rows: rows - 1,
+        })
+    );
+    let why = NfoRefusal::TooManyBadRows {
+        refused: over,
+        rows: rows - 1,
+    }
+    .to_string();
+    assert!(
+        why.contains(&format!("{over} of {} rows refused", rows - 1)),
+        "{why}"
+    );
+    // Every row bad: the first row's own refusal names the file.
+    assert_eq!(
+        decode(&bent(3, 3), STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 2 })
+    );
+}
+
+/// The row bound counts every row READ, kept or refused, as the
+/// capital-market reader's does: refused rows cannot carry a file past it.
+#[test]
+fn the_row_bound_counts_refused_rows_too() {
+    let mut lines = many(3);
+    lines[0] = lines[0].replacen(",1,300", ",x,300", 1);
+    let bytes = csv(&lines);
+    assert_eq!(
+        decode_capped(&bytes, STEM, trade(), 3).map(|f| f.rows.len()),
+        Ok(2)
+    );
+    assert_eq!(
+        decode_capped(&bytes, STEM, trade(), 2),
+        Err(NfoRefusal::RowsOverCap { cap: 2 })
+    );
+}
+
+/// Extreme shapes under per-row refusal: an empty file and a bare header;
+/// one row, good or bad; duplicate and out-of-order rows, kept in file
+/// order and never refused for it (placing them is the import's rule); a
+/// refused row between two of one second.
+#[test]
+fn per_row_refusal_keeps_every_good_row_in_file_order_at_the_extremes() {
+    assert_eq!(decode(b"", STEM, trade()), Err(NfoRefusal::HeaderUnknown));
+    let bare = decode(&csv(&[]), STEM, trade()).unwrap();
+    assert_eq!((bare.rows.len(), bare.refused.total()), (0, 0));
+    let one = many(1);
+    assert_eq!(decode(&csv(&one), STEM, trade()).unwrap().rows.len(), 1);
+    let bad_one = vec![one[0].replacen(",1,300", ",-1,300", 1)];
+    assert_eq!(
+        decode(&csv(&bad_one), STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 2 })
+    );
+    let a = row(STEM, trade(), 33_310, "10.05", 1, 300);
+    let b = row(STEM, trade(), 33_305, "10.10", 2, 301);
+    let bad = a.replacen(",1,300", ",1,", 1);
+    let file = vec![a.clone(), a.clone(), bad, b];
+    let got = decode(&csv(&file), STEM, trade()).unwrap();
+    assert_eq!(shape(&got), (vec![2, 3, 5], vec![(4, RowFault::Malformed)]));
+    let sods: Vec<u32> = got.rows.iter().map(|row| row.sod).collect();
+    assert_eq!(sods, [33_310, 33_310, 33_305]);
+}
+
+/// **D-4816 AND D-4829 ON THE MEASURED FILES, READ-ONLY.** The four shapes
+/// the design measured on the real tick store (§8 F13, F23, F36, F38), each
+/// read through this build's reader and the definition-4 oracle: 2018-11-09
+/// `AXISBANK18NOV580PE` (a bad time at line 451 of 4,353 rows), 2018-11-06
+/// `BANKNIFTY15NOV1826700CE` (a letter in one LTP at line 13,668 of
+/// 13,991), every file of 2026-04-16 whose oracle answer is a refusal (the
+/// ten negative-LTQ files), and 2025-03-11 `BANKNIFTY26JUN2546500CE` (four
+/// empty trailing fields). Each file the oracle refused whole is read with
+/// its bad rows named and every other row kept. Only counts and line
+/// numbers are printed; no vendor row reaches the repository.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_TICKSTORE (the tick store root); read-only"]
+fn the_measured_bad_option_files_are_read_row_by_row() {
+    let root = std::env::var_os("BRUTEX_GDFL_TICKSTORE").expect("BRUTEX_GDFL_TICKSTORE");
+    let store = NfoTickStore::new(Path::new(&root));
+    let named = [
+        (day(2018, 11, 9), Some("AXISBANK18NOV580PE")),
+        (day(2018, 11, 6), Some("BANKNIFTY15NOV1826700CE")),
+        (day(2026, 4, 16), None),
+        (day(2025, 3, 11), Some("BANKNIFTY26JUN2546500CE")),
+    ];
+    for (on, only) in named {
+        let listing = store.day(on).unwrap().expect("a tick-store day");
+        let mut recovered = 0_u32;
+        for file in listing.entries() {
+            let Some(name) = listing.ticker_of(file) else {
+                continue;
+            };
+            if only.is_some_and(|wanted| wanted != name) {
+                continue;
+            }
+            let bytes = store.fetch(file).unwrap();
+            crate::gdfl_cm::verify(file, &bytes).unwrap();
+            let stem = format!("{name}{ROW_SUFFIX}");
+            let old = decode_by_field_vector(&bytes, &stem, on);
+            if old.is_ok() && only.is_none() {
+                continue;
+            }
+            let new = decode(&bytes, &stem, on);
+            assert!(
+                definition_5_differs_only_where_4_refused(&new, &old),
+                "{on} {name}: {new:?} against {old:?}"
+            );
+            let got = new.unwrap_or_else(|why| panic!("{on} {name}: {why}"));
+            let lines: Vec<String> = got
+                .refused
+                .named
+                .iter()
+                .map(|row| format!("{}:{}", row.line, row.fault.code()))
+                .collect();
+            eprintln!(
+                "{on} {name}: definition 4 {}; definition 5 kept {} rows, refused {} ({}), trailing empty {}",
+                old.as_ref().map_or_else(ToString::to_string, |f| format!(
+                    "read {} rows",
+                    f.rows.len()
+                )),
+                got.rows.len(),
+                got.refused.total(),
+                lines.join(" "),
+                got.trailing_empty
+            );
+            recovered += 1;
+        }
+        assert!(recovered > 0, "{on}: no file of the measured shape found");
+    }
+}
+
+/// The cost of per-row refusal, measured: one invented file of 4,353 rows
+/// (2018-11-09's size) decoded n = 200 times clean, with one refused row and
+/// with 64 (the bound), p50, p99 and max printed. Per-row refusal adds one
+/// counter increment a refused row, so the three must stay within one
+/// another's spread: the bound asserted is a generous 3x on p50. The three
+/// files are decoded in turn inside each of the 200 rounds, so a burst of
+/// load on a shared machine falls on all three alike.
+#[test]
+fn per_row_refusal_costs_what_a_clean_file_costs() {
+    let lines = many(4_353);
+    let bent = |bad: usize| {
+        let mut lines = lines.clone();
+        for line in lines.iter_mut().skip(1).step_by(60).take(bad) {
+            *line = line.replacen(",1,300", ",-1,300", 1);
+        }
+        csv(&lines)
+    };
+    let files = [
+        ("clean", bent(0), 0),
+        ("one", bent(1), 1),
+        ("bound", bent(64), 64),
+    ];
+    let mut nanos: [Vec<u128>; 3] = Default::default();
+    for _ in 0..200 {
+        for ((_, bytes, refused), spent) in files.iter().zip(nanos.iter_mut()) {
+            let at = std::time::Instant::now();
+            let got = decode(bytes, STEM, trade()).unwrap();
+            spent.push(at.elapsed().as_nanos());
+            assert_eq!(got.refused.total(), *refused);
+        }
+    }
+    let mut p50s = Vec::new();
+    for ((label, _, refused), spent) in files.iter().zip(nanos.iter_mut()) {
+        spent.sort_unstable();
+        let (p50, p99, max) = (spent[100], spent[198], spent[199]);
+        eprintln!(
+            "decode 4,353 rows, {label} ({refused} refused): n=200 p50={p50}ns p99={p99}ns max={max}ns"
+        );
+        p50s.push(p50);
+    }
+    assert!(p50s[2] < p50s[0].saturating_mul(3), "{p50s:?}");
+}
+
+/// D-4816 and design §8 F7, F8 ON REAL DAYS, READ-ONLY: every option file of
+/// every tick-store day from 2018-09-03 to 2018-12-31, the months that hold
+/// the newline-less `.NFO.CSV` days (§8 F8: 5,093 of 5,094 files on
+/// 2018-10-03), ends in its LF or in its last row's last field, and none in
+/// a bare CR, so the cut-between-CR-and-LF rule
+/// (`an_option_file_cut_between_cr_and_lf_is_refused_whole`) refuses no file
+/// those days hold. Only counts are printed; no vendor row reaches the
+/// repository.
+#[test]
+#[ignore = "requires BRUTEX_GDFL_TICKSTORE (the tick store root); read-only"]
+fn no_real_option_file_of_2018_ends_in_a_bare_cr() {
+    let root = std::env::var_os("BRUTEX_GDFL_TICKSTORE").expect("BRUTEX_GDFL_TICKSTORE");
+    let store = NfoTickStore::new(Path::new(&root));
+    let (mut on, last) = (day(2018, 9, 3), day(2018, 12, 31));
+    let (mut days, mut files, mut lf, mut bare_cr, mut no_newline) =
+        (0_u32, 0_u64, 0_u64, 0_u64, 0_u64);
+    while on <= last {
+        if let Some(listing) = store.day(on).unwrap() {
+            days += 1;
+            let mut newline_less = 0_u64;
+            for file in listing.entries() {
+                let bytes = store.fetch(file).unwrap();
+                crate::gdfl_cm::verify(file, &bytes).unwrap();
+                files += 1;
+                match bytes.last() {
+                    Some(b'\n') => lf += 1,
+                    Some(b'\r') => {
+                        bare_cr += 1;
+                        eprintln!("{on}: {} ends in a bare CR", file.entry);
+                    }
+                    _ => newline_less += 1,
+                }
+            }
+            if newline_less > 0 {
+                eprintln!("{on}: {newline_less} option files end with no newline");
+            }
+            no_newline += newline_less;
+        }
+        on = on.succ().unwrap();
+    }
+    eprintln!(
+        "2018-09-03..2018-12-31: {days} days, {files} option files: {lf} end in LF, \
+         {no_newline} in a row's last field, {bare_cr} in a bare CR"
+    );
+    assert!(
+        days > 0 && files > 0,
+        "the tick store holds the 2018 options days"
+    );
+    assert_eq!(bare_cr, 0, "a real file ends in a bare CR");
 }

@@ -1742,3 +1742,28 @@ above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
 **What is NOT sourced here.** Which certificate chains the hosts `pull`
 contacts present was not read: no connection was made. It is UNVERIFIED
 (`docs/06-limits.md` L-BREDS-1).
+
+## GDFL share rows, measured by the tick-to-second check (DATA-2, D-5181)
+
+Measured 19 and 20 October 2026 by `cli tick-to-second-check` (build of
+commit `4465735a0`, four workers, read-only under a kernel write lock). It
+read every share file that a stored GDFL share-day of 2019, 2025 and 2026 (to
+30 September) landed from, plus the vendor archive's files of the same days
+named for a stored share. The counts are over the files read, not over the
+whole archive, and they are the `.summary.txt` of each year's version 1
+under `state/datacheck/rust-t2s-r6/out/` in the operator's work folder. No
+row is reproduced.
+
+| Fact | 2019 | 2025 | 2026 (to 30 Sep) | How measured | Lane |
+|---|---|---|---|---|---|
+| Data lines read | 790,237,579 | 655,116,344 | 428,295,294 | every line after the header, in files of 71,202, 78,056 and 58,449 share-day rows | measured, those files |
+| Rows with LTQ = 0 (no new volume, a price all the same) | 346,833,013 | 209,616,804 | 120,460,139 | the decoder's kept rows with LTQ 0 | measured |
+| LTQ = 0 rows in session whose LTP differs from the last traded LTP | 1,292,445 | 2,361,290 | 1,692,796 | one comparison per row against the last traded LTP | measured |
+| Lines byte-identical to the line before | 106,158 | 23,694 | 18,520 | a byte compare of consecutive lines, CR excluded | measured |
+| Crossed quotes (bid above ask, both positive) | 298 | 23,742 | 1,831 | the half-up paisa reader on fields 5 and 7 | measured |
+| One-sided quotes (exactly one of bid and ask positive) | 3,483,233 | 3,056,277 | 2,021,001 | same | measured |
+| Kept rows stamped below an earlier row of the file | 0 | 0 | 0 | the running maximum stamp | measured |
+| LTP of zero, LTP off the two-place grid, malformed line, minus sign | 0 | 0 | 0 | the import's own decoder (`pull::gdfl_cm::read_listed`) and the census | measured |
+| Traded seconds stamped at or after the session's close | 688,669 | 980,389 | 705,880 | `pull::session::Window::verdict` on rule-T seconds | measured |
+| Trade-for-trade series files (`<SYM>.BE.NSE.csv`, `<SYM>.BZ.NSE.csv`) on a day the store holds nothing for that share | 212 (142 BE, 70 BZ) | 651 (BE) | 377 (BE) | the archive files the import's scope maps to a stored share | measured |
+| Closing-auction prints the decoder diverts | 0 | 0 | 8,868 (LTQ sum 2,324,708,814, every identical row counted) | `pull::gdfl_cm` diversion count | measured |

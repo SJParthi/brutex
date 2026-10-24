@@ -258,6 +258,11 @@ mod tests {
             "expression-search-stored",
             "expression-stored",
             "fold-audit",
+            // R4-27: measures the padded-minute fold rule; opens bar files
+            // read-only and writes nothing.
+            "padded-measure",
+            // R4-27: replays a rate table it is given; reads no store at all.
+            "rate-replay",
             // IA-2 (D-4894, exempt by name): a stop must never be refused,
             // and the one stop file it writes beside a run's lock changes no
             // bar, census entry or journal line.
@@ -279,6 +284,10 @@ mod tests {
             "sweep-all",
             "sweep-audited-stored",
             "sweep-stored",
+            // DATA-2 (D-5181): reads the store, the tick store and the vendor
+            // archive; writes only its own `--out` folder, which it refuses to
+            // place inside the store root or the tick store.
+            "tick-to-second-check",
             "top",
             "verify",
             // R3-32 (D-4996): one /health probe; it writes only its own state
