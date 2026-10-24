@@ -115,6 +115,9 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+/// `cli padded-measure` and `cli rate-replay`: the measurements R4-27's
+/// decisions were taken on, read only (INT-15, AUT-10).
+mod decision_measure;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored bar of a series judged as a landing
@@ -553,6 +556,19 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    dirty minute month yields coarse bars built out
                                    of gaps that no other check can see. Exits
                                    non-zero on any disagreement. Reads only.
+       cli padded-measure FEED LIST
+                                   the vendor-padded minute measured over the
+                                   `SYMBOL YYYY-MM` months LIST names: padded
+                                   minutes, and every derived rung folded as
+                                   before INT-15, keeping a padded-only bucket
+                                   flat, and leaving it absent, each against the
+                                   stored month. Reads only.
+       cli rate-replay  TABLE FROM TO
+                                   the RBI 91-day T-bill TABLE replayed over the
+                                   calendar's sessions FROM..TO (YYYY-MM-DD) under
+                                   staleness bounds of 14, 21 and 28 days: each
+                                   session fresh, carried over a documented gap,
+                                   or refused, by code. Reads only.
        cli alerts [--ack N | --older | --before N | --replace-damaged | --file PATH]
                                    The alert queue (<store>/audit/alerts): with no
                                    flag, the unacknowledged alerts among the newest
@@ -3006,6 +3022,8 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
+        ["padded-measure", feed, list] => decision_measure::padded(feed, list, out),
+        ["rate-replay", table, from, to] => decision_measure::rate_replay(table, from, to, out),
         ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
         ["watchdog", arguments @ ..] if !arguments.is_empty() => {
             watchdog_command::command(arguments, out)
@@ -3140,7 +3158,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 62] = [
+const COMMANDS: [&str; 64] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3177,11 +3195,13 @@ const COMMANDS: [&str; 62] = [
     "ledger-v6",
     "ledger-v6-replay",
     "msum-build",
+    "padded-measure",
     "policy-check",
     "pool",
     "pool-oos",
     "range-all",
     "range-rung",
+    "rate-replay",
     "research-plan",
     "results",
     "screen",

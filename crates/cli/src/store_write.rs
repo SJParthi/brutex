@@ -269,6 +269,11 @@ mod tests {
             "expression-search-stored",
             "expression-stored",
             "fold-audit",
+            // R4-27: measures the padded-minute fold rule; opens bar files
+            // read-only and writes nothing.
+            "padded-measure",
+            // R4-27: replays a rate table it is given; reads no store at all.
+            "rate-replay",
             // IA-2 (D-4894, exempt by name): a stop must never be refused,
             // and the one stop file it writes beside a run's lock changes no
             // bar, census entry or journal line.
