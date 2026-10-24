@@ -1743,8 +1743,11 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
 /// the auction's print stayed a bar; admission then refuses it by name,
 /// `a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`);
 /// the same definitions stay current for
-/// a share's day before it, for an index day, and under 3 for an option day
-/// (an option day under 2 is restated, D-3342). A share key whose day word is
+/// a share's day before it and for an index day. D-4877 (bar definition 5,
+/// the options reader's per-row refusal): an option day under 2, 3 or 4 is
+/// restated (4 left option bars as 3 built them, and 2 also took the last
+/// traded row's open interest, D-3342), and 4 stays current for every share
+/// and index day. A share key whose day word is
 /// no date is read again, never passed. The rule asks one predicate, the
 /// vendor's own `cash_auction_eligibility_required`, for every kind.
 #[test]
@@ -1760,9 +1763,12 @@ fn a_share_day_of_the_auction_era_under_an_older_definition_is_restated() {
         ("stocks 2026-8-7 *+NSE-CASH-INFY", 4, true),
         ("indices 2026-08-04 *", 2, true),
         ("indices 2026-08-05 *", 3, true),
-        ("options 2026-08-04 *", 3, true),
+        ("options 2026-08-04 *", 3, false),
         ("options 2026-08-05 *", 2, false),
-        ("options 2019-02-01 *", 4, true),
+        ("options 2019-02-01 *", 4, false),
+        ("options 2019-02-04 *", 5, true),
+        ("indices 2026-08-06 *", 4, true),
+        ("stocks 2026-07-30 *", 4, true),
     ];
     let root = scratch("wp12f-definition4");
     let mut text = String::new();
@@ -1795,7 +1801,7 @@ fn a_share_day_of_the_auction_era_under_an_older_definition_is_restated() {
         on(2026, 8, 3),
         u64::from(BAR_DEFINITION)
     ));
-    assert_eq!(BAR_DEFINITION, 4);
+    assert_eq!(BAR_DEFINITION, 5);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1881,7 +1887,9 @@ fn a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended() {
     assert_eq!(
         lines_starting(
             &journal,
-            "refused stocks 2026-08-04 * definition=4 stage=file reason=restated_auction_band"
+            &format!(
+                "refused stocks 2026-08-04 * definition={BAR_DEFINITION} stage=file reason=restated_auction_band"
+            )
         ),
         1,
         "the third run names the same refusal in its failures and does not write an \
@@ -1890,7 +1898,9 @@ fn a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended() {
     assert_eq!(
         lines_starting(
             &journal,
-            "refused stocks 2026-08-04 RELIANCE definition=4 stage=file reason=restated_auction_band"
+            &format!(
+                "refused stocks 2026-08-04 RELIANCE definition={BAR_DEFINITION} stage=file reason=restated_auction_band"
+            )
         ),
         1,
         "{journal}"
@@ -2032,7 +2042,7 @@ fn a_share_another_filter_built_under_an_earlier_definition_is_refused_under_eve
             lines_starting(
                 &journal,
                 &format!(
-                    "refused stocks {era} {filter} definition=4 stage=file \
+                    "refused stocks {era} {filter} definition={BAR_DEFINITION} stage=file \
                      reason=restated_auction_band"
                 )
             ),
@@ -2127,7 +2137,7 @@ fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
             lines_starting(
                 &journal,
                 &format!(
-                    "refused stocks {d} RELIANCE definition=4 stage=file \
+                    "refused stocks {d} RELIANCE definition={BAR_DEFINITION} stage=file \
                      reason=restated_auction_band"
                 )
             ),
@@ -2138,7 +2148,7 @@ fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
     // This build's run line says its definition.
     assert!(
         journal.lines().any(|line| line.starts_with("run ")
-            && line.ends_with(" definition=4")
+            && line.ends_with(&format!(" definition={BAR_DEFINITION}"))
             && !line.starts_with("run 12 ")),
         "{journal}"
     );
@@ -2183,7 +2193,7 @@ fn an_early_open_share_key_is_refused_on_every_run_whatever_refusal_follows() {
         ),
         (
             "future run",
-            format!("run 15 source=zip started=15 definition=5\nbegin stocks {d} RELIANCE\n"),
+            format!("run 15 source=zip started=15 definition=6\nbegin stocks {d} RELIANCE\n"),
         ),
     ];
     let reliance = ["RELIANCE".to_owned()];
@@ -2261,7 +2271,9 @@ fn an_early_open_member_key_is_refused_on_every_run() {
         assert!(
             lines_starting(
                 &journal,
-                &format!("refused {member} definition=4 stage=file reason=restated_auction_band")
+                &format!(
+                    "refused {member} definition={BAR_DEFINITION} stage=file reason=restated_auction_band"
+                )
             ) >= 1,
             "{shape}: {journal}"
         );
@@ -2314,7 +2326,7 @@ fn a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused() {
         lines_starting(
             &journal,
             &format!(
-                "refused stocks {era} *+NSE-CASH-ZZFOO definition=4 stage=file \
+                "refused stocks {era} *+NSE-CASH-ZZFOO definition={BAR_DEFINITION} stage=file \
                  reason=restated_auction_band"
             )
         ),

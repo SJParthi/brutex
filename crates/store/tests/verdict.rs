@@ -134,6 +134,20 @@ fn home(hash: u64, capacity: u32) -> u64 {
     hash & u64::from(capacity - 1)
 }
 
+/// `Key::stem(text)` made on a worker and given 20 seconds, so a cut that
+/// never steps back to a character fails the test instead of hanging the
+/// binary.
+fn stem_within(text: &str) -> Result<Key, VerdictError> {
+    let (send, answer) = std::sync::mpsc::channel();
+    let text = text.to_owned();
+    std::thread::spawn(move || {
+        let _receiver_gone = send.send(Key::stem(&text));
+    });
+    answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the stem returned")
+}
+
 /// IA-VD-01 — a verdict is found by one bounded probe at every day size: at
 /// 1x (2,758 records), 10x (27,580, past the largest day measured, 26,820)
 /// and 50x, a present key costs 5 reads and 2 opens cold (0 opens warm), an
@@ -396,7 +410,7 @@ fn a_long_key_is_refused_and_a_long_stem_is_kept_whole() {
     );
     // A multi-byte character straddling byte 64 is not split.
     let accented = format!("{}é{}", "Y".repeat(63), "Y".repeat(10));
-    let kept = Key::stem(&accented).unwrap();
+    let kept = stem_within(&accented).unwrap();
     assert_eq!(kept.text(), "Y".repeat(63));
     assert_eq!(Key::stem("ZZ_SHORT.csv").unwrap().whole(), None);
 

@@ -1345,8 +1345,30 @@ fn dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line() {
             Ok(file) => {
                 ok += 1;
                 assert!(file.rows.len() <= 4);
-                for (k, row) in file.rows.iter().enumerate() {
-                    assert_eq!(row.line, u32::try_from(k + 2).unwrap());
+                // D-4816: a bent row is refused by name and the rest read, so
+                // every row is kept or refused, once, in file order, and no
+                // row before the first bent one is refused.
+                let refused = usize::try_from(file.refused.total()).unwrap();
+                assert_eq!(file.rows.len() + refused, n, "every row read once");
+                let mut lines: Vec<u32> = file
+                    .rows
+                    .iter()
+                    .map(|row| row.line)
+                    .chain(file.refused.named.iter().map(|row| row.line))
+                    .collect();
+                lines.sort_unstable();
+                assert_eq!(lines, (2_u32..).take(n).collect::<Vec<u32>>());
+                assert!(file.rows.windows(2).all(|w| w[0].line < w[1].line));
+                match bent_at {
+                    Some(first) => assert!(
+                        file.refused
+                            .named
+                            .iter()
+                            .all(|row| usize::try_from(row.line).unwrap() >= first)
+                    ),
+                    None => assert_eq!(refused, 0),
+                }
+                for row in &file.rows {
                     assert!(row.ltp >= 0 && row.oi >= 0);
                     assert!(row.ltq == 0 || row.ltp >= costs::rate::TICK.raw());
                     assert!(row.sod < 86_400);
@@ -1502,8 +1524,9 @@ fn dpn_16_random_entry_names_file_only_bare_names() {
     assert!(filed > 100, "{filed}");
 }
 
-/// The two measured headers read, CRLF or LF; any other first line is
-/// refused by name, including near misses and a byte-order mark.
+/// The two measured headers read, CRLF or LF, and (D-4829) either followed by
+/// one to eight empty fields; any other first line is refused by name,
+/// including near misses and a byte-order mark.
 #[test]
 fn dpn_17_exactly_the_two_measured_headers_read() {
     assert_eq!(
@@ -1533,7 +1556,8 @@ fn dpn_17_exactly_the_two_measured_headers_read() {
         HEADER_OPEN_INTEREST.to_lowercase(),
         HEADER_OPEN_INTEREST.replace(',', "\t"),
         HEADER_OPEN_INTEREST.replace(",OpenInterest", ""),
-        format!("{HEADER_OPEN_INTEREST},"),
+        format!("{HEADER_OPEN_INTEREST},x"),
+        format!("{HEADER_OPEN_INTEREST}{}", ",".repeat(9)),
         "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ".to_owned(),
         String::new(),
     ] {
@@ -1544,6 +1568,19 @@ fn dpn_17_exactly_the_two_measured_headers_read() {
             "{bad:?}"
         );
     }
+    // D-4829: the names followed by one to eight EMPTY fields are the header
+    // with trailing empties, read when the rows carry them; a ten-field row
+    // under it breaks the shape and is a malformed row, here the only one.
+    let one = format!("{HEADER_OPEN_INTEREST},\r\n{row}\r\n");
+    assert_eq!(
+        decode(one.as_bytes(), STEM, on),
+        Err(NfoRefusal::MalformedRow { line: 2 })
+    );
+    let padded = format!("{HEADER_OPEN_INTEREST},\r\n{row},\r\n");
+    assert_eq!(
+        decode(padded.as_bytes(), STEM, on).unwrap().trailing_empty,
+        1
+    );
 }
 
 /// Both measured extensions (`.csv` and the 2018 `.CSV`) are filed; no other

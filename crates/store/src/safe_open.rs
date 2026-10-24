@@ -329,8 +329,13 @@ fn open_regular(options: &mut fs::OpenOptions, path: &Path) -> Result<(File, u64
 ///
 /// Public so a door that must CREATE (a lock file, which
 /// [`open_read_write`] never does) names its refusals in the same words.
+///
+/// Under `cfg(test)` each call is counted on its thread, so the cost the
+/// first paragraph states (no look on any other path) is measured.
 #[must_use]
 pub fn name_the_refusal(path: &Path, why: io::Error) -> ReadRefusal {
+    #[cfg(test)]
+    tests::count_look();
     match fs::symlink_metadata(path)
         .ok()
         .as_ref()

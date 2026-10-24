@@ -87,8 +87,14 @@ pub fn done_whole_days(store_root: &Path) -> Result<HashSet<String>, ImportRefus
 /// price, booked or not, and the zero-book rows of `[15:30:00, 15:35:00)`, to
 /// the `.auc` sidecar instead of the fold, so one such file builds different
 /// bars under 4 than under 3 or 2 (`gdfl_cm::AUCTION_BAND_END`,
-/// `gdfl_cm::AUCTION_MATCH_FROM`).
-pub const BAR_DEFINITION: u32 = 4;
+/// `gdfl_cm::AUCTION_MATCH_FROM`); 5 is the options reader's per-row
+/// refusal (D-4816: a bad row is refused by name with the capital-market
+/// reader's D-3318 types and bounds, and the rest of its file read, where 4
+/// and earlier refused the whole file) and its header followed by empty
+/// fields (D-4829), so one options file builds different bars under 5 than
+/// under 4 (D-4877; the design's number for this rule was 4, taken first by
+/// the closing auction's rule, bd0da3c27).
+pub const BAR_DEFINITION: u32 = 5;
 
 /// The definition D-3342 replaced.
 const D3342_PREVIOUS: u32 = 2;
@@ -97,24 +103,35 @@ const D3342_PREVIOUS: u32 = 2;
 /// (SC-CLOSE-5, SC-CLOSE-6).
 const AUCTION_PREVIOUS: u32 = 3;
 
+/// The definition the options reader's per-row refusal replaced (D-4816,
+/// D-4877): the closing auction's.
+const OPTION_ROWS_PREVIOUS: u32 = 4;
+
 /// Whether a day of `kind` built under `definition` holds the bars this
-/// build would build (D-2822, D-3342, D-4878 item 10): [`BAR_DEFINITION`]
-/// always; 3 for every day but a share's from 2026-08-03; and 2 for an index,
-/// and for a share before 2026-08-03.
+/// build would build (D-2822, D-3342, D-4878 item 10, D-4877):
+/// [`BAR_DEFINITION`] always; for an OPTIONS day nothing else; for a share's
+/// day from 2026-08-03, 4 as well; and for an index, and for a share before
+/// 2026-08-03, 2, 3 and 4 as well.
 ///
 /// Definition 3 changed only the open interest of a second, and the
 /// capital-market trees carry none (`OI_NULL`, D-3322), so an index's or a
 /// share's bars under 2 and 3 are the same bars, byte for byte. Definition 4
 /// changed only what an eligible share's file folds from 2026-08-03, the one
 /// rule [`crate::vendor::cash_auction_eligibility_required`] answers, so an
-/// index's, an option's and a share's earlier day hold under 3 the bars 4
-/// builds. Reading those days again would change nothing and is not asked of
-/// them. A share's day from 2026-08-03 under 2 or 3 is restated, eligible or
-/// not (the journal's key names no share's flag, and the store judges what a
-/// second reading offers: `AlreadyPresent` for the same bars, a refusal by
-/// name for different ones); so is an option day under 2, whose open
-/// interest may differ (CMP-07: before this, a share day under 2 passed as
-/// current whichever rule set had built it).
+/// index's and a share's earlier day hold under 3 the bars 4 builds.
+/// Definition 5 changed only what an OPTIONS file builds (D-4816, D-4829:
+/// rows refused one by one where 4 refused the file whole, and a header with
+/// empty trailing fields read), so every capital-market day holds under 4
+/// the bars 5 builds, and an options day under 2, 3 or 4 is restated: 4 left
+/// option bars exactly as 3 built them, and 2 also took a second's open
+/// interest from its last traded row. Reading the current days again would
+/// change nothing and is not asked of them. A share's day from 2026-08-03
+/// under 2 or 3 is restated, eligible or not (the journal's key names no
+/// share's flag, and the store judges what a second reading offers:
+/// `AlreadyPresent` for the same bars, a refusal by name for different
+/// ones); so is every options day under 2, 3 or 4 (CMP-07: before this, a
+/// share day under 2 passed as current whichever rule set had built it).
+/// Definition 1, 0 and any number past [`BAR_DEFINITION`] are never current.
 #[must_use]
 pub fn definition_is_current(kind: ImportKind, day: Day, definition: u64) -> bool {
     current_under(
@@ -130,11 +147,16 @@ fn current_under(kind: ImportKind, auction_era: bool, definition: u64) -> bool {
     if definition == u64::from(BAR_DEFINITION) {
         return true;
     }
-    if kind == ImportKind::Stocks && auction_era {
-        return false;
+    match kind {
+        // D-4877: 5 changed what an options file builds, and nothing else.
+        ImportKind::Options => false,
+        ImportKind::Stocks if auction_era => definition == u64::from(OPTION_ROWS_PREVIOUS),
+        ImportKind::Indices | ImportKind::Stocks => {
+            definition == u64::from(OPTION_ROWS_PREVIOUS)
+                || definition == u64::from(AUCTION_PREVIOUS)
+                || definition == u64::from(D3342_PREVIOUS)
+        }
     }
-    definition == u64::from(AUCTION_PREVIOUS)
-        || (definition == u64::from(D3342_PREVIOUS) && kind != ImportKind::Options)
 }
 
 /// [`definition_is_current`] for a journal key's kind and day words; a word

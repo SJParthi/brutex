@@ -2846,6 +2846,9 @@ impl BarFile {
         // past it by name rather than truncating. The bytes read and the CRC
         // sealed are unchanged; only where they are held moved.
         let mut room = [0u8; MAX_BLOCK_LEN];
+        // A REFUSED WRITE OF THE SIDECAR NAMES THE SIDECAR. It named the bar
+        // file, which the host had not refused (cloud pass 2026-10-17, D-6017).
+        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
             // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
@@ -2873,14 +2876,8 @@ impl BarFile {
             // FOUR BYTES AT `block * 4`. The sidecar is addressed by arithmetic
             // exactly as the bar file is — one checksum per block, in order, so
             // a reader seeks rather than scans.
-            write_fully(
-                crc,
-                &self.bars_path,
-                block.saturating_mul(4),
-                &sum.to_le_bytes(),
-            )?;
+            write_fully(crc, crc_path, block.saturating_mul(4), &sum.to_le_bytes())?;
         }
-        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
         barrier_in(self.batch.as_ref(), crc, crc_path, &self.bars_path)
     }
 
@@ -3684,6 +3681,11 @@ impl BarFile {
             return Ok(Reindexed::Unindexable(Why::NotBars));
         };
         let named = fs::symlink_metadata(&tix.path);
+        // Under `cfg(test)` the look can be refused through the file seam,
+        // as `measuring`: a look the host refuses otherwise than "not there"
+        // needs a directory that changes between two calls of this function.
+        #[cfg(test)]
+        let named = tests::host_fault(Action::Measure, &tix.path).map_or(named, Err);
         // THE SMALL-MONTH RULE (D-4933): a month under the threshold with NO
         // `.tix` is given none — not created, not built, nothing written. Only
         // a name that is not there at all qualifies: a link, a directory or
@@ -5073,6 +5075,11 @@ fn initialise(
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
     write_fully(dst, path, commit.offset, &commit.bytes)?;
+    // Under `cfg(test)` an actor can run here, between the open's capture of
+    // its batch and the genesis' flush: the one place a batch sealed under an
+    // opening writer can be staged.
+    #[cfg(test)]
+    tests::before_genesis_flush();
     if let Some(batch) = batch
         && batch.defer_file(dst, path)?
     {
@@ -5398,17 +5405,30 @@ fn sync_index(index: &File, path: &Path, batch: Option<&DurableBatch>) -> Result
 /// An append's durability barrier on `file` (the records, the checksum
 /// sidecar or the header slot of the month at `month`), or its deferral to
 /// `batch` while the batch is open. A failed barrier is remembered for
-/// `month` ([`barrier`]).
+/// `month` ([`barrier`]), and so is a deferral the batch refused: the file
+/// is then in no flush the batch will make, so the commit it was guarding
+/// is no more durable than one whose sync failed, and no later append may
+/// confirm it either (D-1907). It was returned unremembered, and the same
+/// process then reopened and appended past a commit its caller had been
+/// told failed (cloud pass 2026-10-17, D-6017).
 fn barrier_in(
     batch: Option<&DurableBatch>,
     file: &File,
     path: &Path,
     month: &Path,
 ) -> Result<(), StoreError> {
-    if let Some(batch) = batch
-        && batch.defer_file(file, path)?
-    {
-        return Ok(());
+    if let Some(batch) = batch {
+        match batch.defer_file(file, path) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(refusal) => {
+                FAILED_BARRIERS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(month.to_path_buf());
+                return Err(refusal);
+            }
+        }
     }
     barrier(file, month)
 }
@@ -6126,12 +6146,23 @@ trait Positional {
     fn get(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 }
 
+/// Under `cfg(test)` each call can be refused by the same per-thread
+/// injector as [`fault`], BEFORE the host is asked, so a refused write
+/// writes nothing.
 impl Positional for File {
     fn put(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(refusal) = tests::host_fault_on(Action::Write, self) {
+            return Err(refusal);
+        }
         FileExt::write_at(self, buf, offset)
     }
 
     fn get(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        if let Some(refusal) = tests::host_fault_on(Action::Read, self) {
+            return Err(refusal);
+        }
         FileExt::read_at(self, buf, offset)
     }
 }
@@ -6415,7 +6446,16 @@ fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
 }
 
 /// Lifts an [`io::Result`] into this module's errors.
+///
+/// Under `cfg(test)` a refusal armed for `action` on this thread replaces
+/// the host's answer, once, AFTER the call has run: the shape of
+/// [`sync_hooked`], for the host calls whose refusal no test can stage on a
+/// file this process has just opened, measured or written (a flush, an
+/// `fstat`, a read of a file the writer holds). The injector adds a branch
+/// under test, so the lift that ships is the lift every test runs (D-6017).
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
+    #[cfg(test)]
+    let result = tests::host_fault(action, path).map_or(result, Err);
     match result {
         Ok(value) => Ok(value),
         Err(refusal) => Err(classify(path, action, &refusal)),
@@ -6469,6 +6509,83 @@ mod tests {
         static THRESHOLD_FAULT: Cell<bool> = const { Cell::new(false) };
     }
 
+    /// A host refusal armed on this thread for [`super::fault`] and for the
+    /// reads and writes of a `File`.
+    struct HostFault {
+        /// The action it refuses.
+        action: Action,
+        /// The one file it refuses on: a path for [`super::fault`], and the
+        /// file at that path, by device and inode, for an open handle.
+        path: PathBuf,
+        /// How many matching calls pass first.
+        skip: u32,
+        /// The kind it answers with.
+        kind: ErrorKind,
+    }
+
+    thread_local! {
+        static HOST_FAULT: RefCell<Option<HostFault>> = const { RefCell::new(None) };
+    }
+
+    /// Arms the host refusal: `skip` calls of `action` on `path` pass on
+    /// this thread, the next one is refused with `kind`, once.
+    pub(super) fn arm_host_fault(action: Action, path: &Path, skip: u32, kind: ErrorKind) {
+        HOST_FAULT.with(|armed| {
+            *armed.borrow_mut() = Some(HostFault {
+                action,
+                path: path.to_path_buf(),
+                skip,
+                kind,
+            });
+        });
+    }
+
+    /// Disarms the host refusal, fired or not.
+    pub(super) fn disarm_host_fault() {
+        HOST_FAULT.with(|armed| *armed.borrow_mut() = None);
+    }
+
+    /// Whether the armed host refusal is still waiting to fire.
+    pub(super) fn host_fault_armed() -> bool {
+        HOST_FAULT.with(|armed| armed.borrow().is_some())
+    }
+
+    /// The armed host refusal, when it fires now for `action` on `path`.
+    pub(super) fn host_fault(action: Action, path: &Path) -> Option<io::Error> {
+        fires(action, |armed| armed == path)
+    }
+
+    /// The armed host refusal, when it fires now for `action` on the open
+    /// `file`: the armed path names it when both are the same device and
+    /// inode, so a handle is matched without its name.
+    pub(super) fn host_fault_on(action: Action, file: &std::fs::File) -> Option<io::Error> {
+        use std::os::unix::fs::MetadataExt as _;
+        fires(action, |armed| {
+            match (std::fs::metadata(armed), file.metadata()) {
+                (Ok(want), Ok(this)) => (want.dev(), want.ino()) == (this.dev(), this.ino()),
+                _ => false,
+            }
+        })
+    }
+
+    /// The one decision of both: fires once, after `skip` matching calls.
+    fn fires(action: Action, names: impl Fn(&Path) -> bool) -> Option<io::Error> {
+        HOST_FAULT.with(|armed| {
+            let mut armed = armed.borrow_mut();
+            let fault = armed.as_mut()?;
+            if fault.action != action || !names(&fault.path) {
+                return None;
+            }
+            if fault.skip > 0 {
+                fault.skip -= 1;
+                return None;
+            }
+            let kind = fault.kind;
+            *armed = None;
+            Some(io::Error::new(kind, "refused by the file test seam"))
+        })
+    }
+
     /// Arms the threshold write's fault for the next one on this thread.
     pub(super) fn arm_threshold_fault() {
         THRESHOLD_FAULT.with(|armed| armed.set(true));
@@ -6510,8 +6627,27 @@ mod tests {
     }
 
     /// The time-index flushes on this thread since the last call.
-    fn index_flushes() -> usize {
+    pub(super) fn index_flushes() -> usize {
         INDEX_FLUSHES.with(|flushed| flushed.replace(0))
+    }
+
+    thread_local! {
+        /// What runs before this thread's next genesis flush, once.
+        static BEFORE_GENESIS_FLUSH: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Arms `actor` to run before this thread's next genesis flush.
+    pub(super) fn arm_before_genesis_flush(actor: impl FnOnce() + 'static) {
+        BEFORE_GENESIS_FLUSH.with(|armed| *armed.borrow_mut() = Some(Box::new(actor)));
+    }
+
+    /// Runs the armed actor once, taken out first so it may open files.
+    pub(super) fn before_genesis_flush() {
+        let actor = BEFORE_GENESIS_FLUSH.with(|armed| armed.borrow_mut().take());
+        if let Some(actor) = actor {
+            actor();
+        }
     }
 
     /// The directories flushed on this thread since the last call.
@@ -10461,6 +10597,113 @@ pub use sealed_door::Form;
 #[cfg(test)]
 #[path = "file_sealed_tests.rs"]
 mod sealed_door_tests;
+
+#[cfg(test)]
+#[path = "file_fault_tests.rs"]
+mod file_fault_tests;
+
+/// Mutation-survivor tests for this module's private items (cloud session
+/// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{Bar, BarFile};
+    use crate::format::OI_NULL;
+    use crate::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+
+    /// A one-second NIFTY month of 2031-02 (GDFL, NSE INDEX).
+    fn month() -> StorePath<'static> {
+        StorePath::new(PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month: YearMonth::new(2031, 2).unwrap(),
+            file: FileKind::Bars,
+        })
+        .unwrap()
+    }
+
+    /// Invented one-second bar `i` of the month, from 09:15 IST on the 1st.
+    fn bar(i: i64) -> Bar {
+        let origin = YearMonth::new(2031, 2).unwrap().ist_bounds_micros().0;
+        Bar {
+            ts_micros: origin + (555 * 60 + i) * 1_000_000,
+            open: 5_550_000 + i,
+            high: 5_550_100 + i,
+            low: 5_549_900 + i,
+            close: 5_550_050 + i,
+            volume: i % 17,
+            open_interest: OI_NULL,
+        }
+    }
+
+    fn bars(from: i64, to: i64) -> Vec<Bar> {
+        (from..to).map(bar).collect()
+    }
+
+    /// **AN OVERLAP THAT AGREES WITH EVERYTHING IT MEETS HAS NO DIAGNOSIS.**
+    ///
+    /// Kills `replace && with ||`, and `replace < with <=` on either side, in
+    /// `BarFile::diagnose_overlap`'s last check. Its contract is `None` when
+    /// the walk finds no disagreement (`append` keeps the header's own
+    /// refusal then), and "skipped" only when held bars remain AND the batch
+    /// goes on past the held range. Against a month of 40 bars: a batch
+    /// wholly inside it that matches (held bars remain, nothing goes on), and
+    /// one matching its last five bars that goes on past them (nothing
+    /// remains, the batch goes on), each have no diagnosis; a batch that
+    /// matches bars 5 to 9 and then jumps past the whole held range is
+    /// "skipped" at bar 10, by the last check.
+    #[test]
+    fn an_overlap_that_agrees_with_everything_it_meets_has_no_diagnosis() {
+        // Held on this thread, so a body that never returns lets go of it at
+        // the deadline.
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        super::file_fault_tests::within(20, agreeing_overlap_body);
+    }
+
+    /// The test above, on a worker given 20 s, where it takes well under
+    /// one. Under `first_at_or_after`'s `low < high` made `<=`, or its
+    /// midpoint's `/` made `%`, a lookup in this month never returns, and in
+    /// the mutation gate's order (nextest, one thread, stop at the first
+    /// failure) this is the first test that meets it: unbounded, the gate
+    /// waited out its timeout on it, where a deadline fails it.
+    fn agreeing_overlap_body() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-file-cloud-diagnose-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut writer = BarFile::open_or_create(&root, month(), 11).unwrap();
+        writer.append(&bars(0, 40)).unwrap();
+        assert!(writer.diagnose_overlap(&bars(5, 10)).is_none(), "inside");
+        assert!(
+            writer.diagnose_overlap(&bars(35, 45)).is_none(),
+            "past the end"
+        );
+        let mut skipping = bars(5, 10);
+        skipping.extend(bars(45, 50));
+        let said = writer.diagnose_overlap(&skipping).expect("a diagnosis");
+        assert!(
+            matches!(
+                &said,
+                super::StoreError::OverlapDisagrees { at: 5, conflict: super::Conflict::Skipped, ts_micros, .. }
+                    if *ts_micros == bar(10).ts_micros
+            ),
+            "{said:?}"
+        );
+        drop(writer);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
 
 /// The write door over a sealed month (SC-4, D-5904): `Sealed`,
 /// `AlreadyPresent`, the probe under the lock, the repair over a sealed

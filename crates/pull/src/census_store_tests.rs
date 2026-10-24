@@ -615,7 +615,7 @@ fn the_recount_closes_only_the_census_refused_days_it_can_prove() {
 /// in `gdfl_import_ia2_tests.rs`) for the census recount's own lines: under a
 /// ledger id every `recounted` line carries ` at=<unix_s>` before `run=`,
 /// which stays its last field, and the same append ends with `run <id>
-/// ended=<unix_s> outcome=finished definition=4`; the import's loader reads
+/// ended=<unix_s> outcome=finished definition=<BAR_DEFINITION>`; the import's loader reads
 /// it, the end line is not a second run, and a second closing that closes
 /// nothing writes no second end. Before IA-2 repair 2 neither was written.
 #[test]
@@ -683,9 +683,13 @@ fn a_ledger_recounts_closes_carry_a_clock_time_and_its_end_a_line() {
         );
     }
     let end = tail[4];
+    let suffix = format!(
+        " outcome=finished definition={}",
+        crate::gdfl_import::BAR_DEFINITION
+    );
     let ended: u64 = end
         .strip_prefix(&format!("run {id} ended="))
-        .and_then(|rest| rest.strip_suffix(" outcome=finished definition=4"))
+        .and_then(|rest| rest.strip_suffix(suffix.as_str()))
         .expect("the run's end line")
         .parse()
         .expect("unix seconds");

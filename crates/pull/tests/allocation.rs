@@ -628,7 +628,7 @@ mod sealed_codec {
 
 mod gdfl_nfo {
     use pull::gdfl_archive::crc32;
-    use pull::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, ListedFile};
+    use pull::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, ListedFile, RowFault};
     use pull::gdfl_nfo::{NfoDay, NfoRefusal, NfoSource, day_folder_name, read_file};
     use pull::session::Day;
 
@@ -691,6 +691,31 @@ mod gdfl_nfo {
         counted(|| read_file(&source, &listing, &file).map(|day| day.file.rows.len()))
     }
 
+    /// What [`read_named`] answers: the rows kept, and each row refused by
+    /// name with its line and fault (D-4816).
+    type Named = Result<(usize, Vec<(u32, RowFault)>), NfoRefusal>;
+
+    /// The rows kept and the rows refused by name of [`read`]'s one file,
+    /// and the bytes allocated reading it. The named list is taken after the
+    /// count, so it is never charged to the read.
+    fn read_named(bytes: Vec<u8>) -> (Named, usize) {
+        let mut listing: NfoDay<()> = NfoDay::new(trade(), 1);
+        let entry = format!("{}/Options/{TICKER}.NFO.csv", day_folder_name(trade()));
+        let len = u64::try_from(bytes.len()).expect("fits");
+        listing.push(&entry, len, crc32(&bytes), ());
+        let source = OneFile(bytes);
+        let file = listing.entries().first().expect("one entry").clone();
+        let (got, _, allocated) = counted(|| read_file(&source, &listing, &file));
+        let got = got.map(|day| {
+            let named = day.file.refused.named.iter();
+            (
+                day.file.rows.len(),
+                named.map(|refused| (refused.line, refused.fault)).collect(),
+            )
+        });
+        (got, allocated)
+    }
+
     /// **TWICE THE OPTIONS ROWS COST NO ALLOCATION PER ROW** (D-5800).
     ///
     /// 4,096 rows and then 8,192 are read, and the second may make at most
@@ -722,17 +747,57 @@ mod gdfl_nfo {
     /// the row's own 1 MB, so the bytes allocated on the way to the refusal
     /// must stay under twice the file: the source's one copy of it, and
     /// nothing that scales with the fields.
+    ///
+    /// Since bar definition 5 (D-4816, IA-4) the options reader refuses a
+    /// bad row BY NAME and reads the rest of its file, as the capital-market
+    /// reader has since D-3318: the wide row with its newline is line 3,
+    /// `malformed`, and the file's good rows before and after it are kept.
+    /// A file that is read is also kept whole for its day
+    /// (`NfoDayFile::bytes`, one shared copy), so a read file may take two
+    /// copies of itself and [`KEPT_SLACK`] more, never anything that scales
+    /// with the fields (that would be 8 MB). The same row as the LAST line
+    /// with no newline after it is where a cut file shows: it still refuses
+    /// the whole file by its old name, under the refusal's own bound.
     #[test]
     fn a_row_of_half_a_million_fields_is_refused_without_holding_them() {
         assert_eq!(read(file_of(1, "")).0, Ok(1), "the fixture row decodes");
         let wide = row(33_301).replace("\r\n", &format!("{}\r\n", ",0".repeat(500_000)));
+        // In the middle of the file: the row refused by name, both good
+        // rows kept.
+        let bytes = file_of(1, &format!("{wide}{}", row(33_302)));
+        let size = bytes.len();
+        let (outcome, allocated) = read_named(bytes);
+        assert_eq!(outcome, Ok((2, vec![(3, RowFault::Malformed)])));
+        assert!(
+            allocated < size.saturating_mul(2).saturating_add(KEPT_SLACK),
+            "refusing a row of a {size}-byte file allocated {allocated} bytes: fields held"
+        );
+        // The file's last line, with its newline: the row alone.
         let bytes = file_of(1, &wide);
+        let size = bytes.len();
+        let (outcome, allocated) = read_named(bytes);
+        assert_eq!(outcome, Ok((1, vec![(3, RowFault::Malformed)])));
+        assert!(
+            allocated < size.saturating_mul(2).saturating_add(KEPT_SLACK),
+            "refusing the last row of a {size}-byte file allocated {allocated} bytes"
+        );
+        // The file's last line with NO newline after it: a cut file, refused
+        // whole by the old name.
+        let cut = wide.strip_suffix("\r\n").expect("the row ends in CRLF");
+        let bytes = file_of(1, cut);
         let size = bytes.len();
         let (outcome, _, allocated) = read(bytes);
         assert_eq!(outcome, Err(NfoRefusal::MalformedRow { line: 3 }));
         assert!(
             allocated < size.saturating_mul(2),
-            "refusing a {size}-byte file allocated {allocated} bytes: its fields were held"
+            "refusing a {size}-byte cut file allocated {allocated} bytes: its fields were held"
         );
     }
+
+    /// What a READ options file may allocate past its two copies (the
+    /// source's and the day file's shared one): its rows, its named
+    /// refusals and its names, 1,442 bytes for this fixture (measured on 23
+    /// Oct 2026). Far below one more copy of the 1 MB file, and below the
+    /// 8 MB of a vector of its fields.
+    const KEPT_SLACK: usize = 16 * 1024;
 }
