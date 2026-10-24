@@ -84065,6 +84065,20 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     kinds bounded by `DAY_KINDS`; no request. **Rejected:** colouring a cell
     by more than one kind, which would change every day's colour for one
     legend line.
+28. **The run through is decided by one comparison of its step with a
+    minute** (repair 2's mutation run on the lines it changed). The fold
+    counted a run broken by absent minutes with `step > MINUTE` in the match
+    arm whose guard had already found the same value's step not to be one
+    minute, so `>` and `>=` could not differ there: the `>=` mutant
+    (`dayflags_rules.rs:1254:51` at 312923190) survived as an equivalent,
+    and its `-` to `+` twin was equivalent on every stored, minute-aligned
+    input. As D-0192 directs it is restructured, never excluded: the same
+    unchanged value on a minute not set aside compares its step with a
+    minute once (`std::cmp::Ordering`): equal goes on, greater counts the run
+    broken and starts anew, less (no next minute of a one-minute rung) ends
+    the run unbroken. Read arm by arm against the old guard, no answer
+    changes for any input; a sub-minute step case is added to
+    `a_frozen_run_is_three_unchanged_minutes_in_a_row`.
 
 **Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
