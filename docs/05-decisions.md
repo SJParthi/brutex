@@ -84463,3 +84463,14 @@ D-7185).
    default) it is the very name `create_new` would make, so the next write
    now steps past it instead of being refused on every refresh while the
    listing, which compares bytes, saw nothing there (R428-25).
+8. **The event half, proved.** No test read a `pull.futures` series event
+   back: the receipt tests read `FuturesLanded`, and no futures site is in
+   `emit_sites`. `crates/pull/tests/futures_events.rs`, a binary of its own
+   because `telemetry::install` is a process singleton, drives the shipped
+   `pull_futures_day` three times and reads the lines off the sink's file:
+   the first pull of six candles says written 3, offered 3, dropped 3 with
+   each reason; the identical re-pull says written 0, offered 3 and "3
+   already held"; a contract answered no candle is an error line naming
+   `history_ends`. Every line is whole: nothing cut at its ceiling and no
+   field counted away past `telemetry::MAX_FIELDS` (the event carries 11 of
+   the 12).

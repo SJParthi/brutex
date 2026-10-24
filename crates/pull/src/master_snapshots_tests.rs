@@ -1557,7 +1557,7 @@ fn a_diff_is_committed_whole_by_its_rename_and_leaves_no_partial() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.contains(".diff"))
         .collect();
-    assert_eq!(names, vec![diff_name(b)]);
+    assert_eq!(names, [diff_name(b)]);
     assert!(
         Catalog::read(&root).unwrap().incomplete().is_empty(),
         "a committed diff leaves nothing incomplete"
@@ -1637,7 +1637,10 @@ fn a_book_opened_beside_a_write_in_flight_waits_for_it_and_names_nothing_cut() {
         book.incomplete()
     );
     assert!(
-        Book::open(&root.join("never-made")).unwrap().stamps().is_empty(),
+        Book::open(&root.join("never-made"))
+            .unwrap()
+            .stamps()
+            .is_empty(),
         "a missing root is an empty book"
     );
     assert!(

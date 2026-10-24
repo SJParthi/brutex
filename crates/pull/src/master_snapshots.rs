@@ -291,8 +291,9 @@ fn diff_partial_name(stamp: Stamp, attempt: u32) -> String {
 fn parse_diff_partial(name: &str) -> Option<Stamp> {
     let (base, attempt) = name.split_once(".diff")?;
     let attempt = attempt.strip_prefix(PARTIAL)?;
-    if !attempt.is_empty() {
-        parse_ordinal(attempt.strip_prefix('_')?)?;
+    let first = attempt.is_empty();
+    if !first && attempt.strip_prefix('_').and_then(parse_ordinal).is_none() {
+        return None;
     }
     parse_base(base)
 }
@@ -2425,7 +2426,9 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
         let summary = held_diff(&path, &file, previous, current);
         held.release().map_err(|why| why.to_string())?;
         return summary?.map(Some).ok_or_else(|| {
-            format!("{file} is a name with nothing readable behind it; the diff is not written over it")
+            format!(
+                "{file} is a name with nothing readable behind it; the diff is not written over it"
+            )
         });
     }
     commit_diff(root, current, &path, rendered.as_bytes())?;
