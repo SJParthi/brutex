@@ -979,11 +979,16 @@ fn measure_the_ledger_calls_uncontended() {
             summary("RunLedger::close", closes),
         ]
     });
-    let lines = runtime.block_on(measured).expect("the measuring task");
+    report(&runtime.block_on(measured).expect("the measuring task"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Prints a measurement's lines for `docs/06-limits.md`: the one print in this
+/// file, so its print surface (CI gate 23) is one site.
+fn report(lines: &[String]) {
     for line in lines {
         println!("{line}");
     }
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// **MEASURED, BY HAND: GET `/feeds.json` WHILE A HOLDER KEEPS THE APPEND
@@ -1042,11 +1047,13 @@ fn measure_feeds_json_while_a_holder_keeps_the_append_lock() {
             done.store(true, Ordering::SeqCst);
             let runs = runs.await.expect("the runs");
             holder.release().expect("released");
-            println!("{}", summary("GET /feeds.json, no holder", free));
-            println!(
-                "{} runs_opened_meanwhile={runs}",
-                summary("GET /feeds.json, holder and runs opening", held)
-            );
+            report(&[
+                summary("GET /feeds.json, no holder", free),
+                format!(
+                    "{} runs_opened_meanwhile={runs}",
+                    summary("GET /feeds.json, holder and runs opening", held)
+                ),
+            ]);
             let _ = std::fs::remove_dir_all(&root);
         });
 }
