@@ -2105,8 +2105,9 @@ impl RowsRefused {
             .saturating_add(self.malformed)
     }
 
-    /// Counts one refused row, and names it while there is room.
-    fn note(&mut self, row: RefusedRow) {
+    /// Counts one refused row, and names it while there is room. The one
+    /// counter both GDFL readers use (D-3318, D-4816).
+    pub(crate) fn note(&mut self, row: RefusedRow) {
         let counter = match row.fault {
             RowFault::ZeroLtp => &mut self.zero_ltp,
             RowFault::OffGrid => &mut self.off_grid,
@@ -3202,8 +3203,9 @@ pub fn read_listed<S: CmSource>(
 
 /// One `warn` line for a file whose rows were refused (D-3318; D-3341: one
 /// line per file, never one per row): the day, the file, every count, and
-/// the named rows as `line:fault` words.
-fn note_refused_rows(day: Day, name: &str, refused: &RowsRefused) {
+/// the named rows as `line:fault` words. The options import says the same
+/// line for an options file (D-4816).
+pub(crate) fn note_refused_rows(day: Day, name: &str, refused: &RowsRefused) {
     if refused.total() == 0 {
         return;
     }
