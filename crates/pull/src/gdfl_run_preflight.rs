@@ -180,7 +180,11 @@ impl Watch {
         let unreachable = |why: std::io::Error| WatchFault::Unreachable(why.kind());
         let held = SourceIdentity::of(&self.handle.metadata().map_err(unreachable)?);
         let named = SourceIdentity::of(&std::fs::metadata(&self.path).map_err(unreachable)?);
-        let after = if held == self.listed { named } else { held };
+        // The path's identity is what the next reader would read, so it is
+        // the one named when it moved (a rename names the new inode); the
+        // handle's alone moves when the listed file changed under its name
+        // without the name moving (its link count dropped, say).
+        let after = if named == self.listed { held } else { named };
         if after == self.listed {
             return Ok(());
         }
@@ -216,17 +220,25 @@ pub const NOT_WRITABLE_FIX: &str = "clear the file's immutable flag (`chflags no
      remount the volume read-write, then resume";
 
 /// The descriptors one worker of an import holds at once beyond the run's
-/// own (L-IA-35, IA-GR-08): MEASURED, never typed, by
+/// own (L-IA-35, IA-GR-08): CITED, the design's count of one month handle
+/// (its pointer, `.bin`, `.lock`, `.crc` and `.tix`), a worker filing one
+/// month at a time. Checked against a measurement, never typed alone:
 /// `the_descriptors_a_run_holds_are_measured_at_one_and_four_workers`
-/// (`gdfl_run_preflight_tests.rs`), which samples the process's open
-/// descriptors through a synthetic options day and fails when a run holds
-/// more than [`files_needed`] says.
-pub const FILES_PER_WORKER: u64 = 8;
+/// (`gdfl_run_preflight_tests.rs`) samples the process's descriptors
+/// through an invented 400-file options day and fails when a run holds more
+/// than [`files_needed`] says. Sampled on 24 Oct 2026 (Linux, three runs): 32
+/// at one and at four workers, 36 to 37 at twelve, beyond the 3 held before
+/// (`docs/06-limits.md` L-IA3B-04). A sample is a lower bound of the peak,
+/// which is why the per-worker count is the structural one.
+pub const FILES_PER_WORKER: u64 = 5;
 
 /// The descriptors an import run holds beside its workers' (the journal, the
-/// census, the locks, the progress record, the log sink, the source's
-/// handles, the standard streams), measured with [`FILES_PER_WORKER`].
-pub const FILES_PER_RUN: u64 = 64;
+/// census, the source's handles, the store's directories): MEASURED, the
+/// one-worker peak of the sample above, so it already holds one worker's
+/// handles. The cli's own (its event sink, the claim lock, the runs ledger,
+/// the progress record) are not in that sample: NOT MEASURED, NEEDS THE MAC
+/// M7, named in `docs/06-limits.md` L-IA3B-04.
+pub const FILES_PER_RUN: u64 = 32;
 
 /// What a run of `workers` holds open at once (RA-306, L-IA-35): the run's
 /// own plus each worker's, as measured.
@@ -1265,3 +1277,7 @@ pub fn say(refusal: &RunRefusal, f: &mut core::fmt::Formatter<'_>) -> core::fmt:
         other => f.write_str(other.code()),
     }
 }
+
+#[cfg(test)]
+#[path = "gdfl_run_preflight_tests.rs"]
+mod tests;
