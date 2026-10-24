@@ -126,10 +126,29 @@ pub enum Key {
     /// filesystem or a byte amount (`<n>`, `<n>GiB`, `<n>TiB`, `<n>GB`, `<n>TB`).
     /// Read through [`disk_floor`] (R4-07, PERF-13).
     DiskFloor,
+    /// The folders that hold EXTRA COPIES the copies register lists (CC-5,
+    /// FM-607): absolute directories separated by [`COPY_ROOT_SEPARATOR`],
+    /// read through [`copy_roots`]. Unset is a named wait, never a default
+    /// (D-7040).
+    ExtraCopyRoots,
 }
 
 /// How many keys exist.
-pub const KEYS: usize = 11;
+pub const KEYS: usize = 12;
+
+/// What separates the folders of [`Key::ExtraCopyRoots`]: a folder name may
+/// hold a comma, and a value is one line, so neither a comma nor a line
+/// break can. A folder whose own path holds this character cannot be named
+/// there, and is refused by name, never split silently (D-7040).
+pub const COPY_ROOT_SEPARATOR: char = '|';
+
+/// The most folders [`Key::ExtraCopyRoots`] may name (D-7040).
+pub const MAX_COPY_ROOTS: usize = 16;
+
+/// The longest [`Key::ExtraCopyRoots`] value, in bytes: the settings route's
+/// own ceiling on a value it will look at (`brutex_core::secret_shape`), so a
+/// value this check passes is never refused there as over that cap (D-7040).
+pub const MAX_COPY_ROOTS_BYTES: usize = brutex_core::secret_shape::MAX_VALUE_BYTES;
 
 impl Key {
     /// Every key, in the order a file lists them.
@@ -145,6 +164,7 @@ impl Key {
         Self::SourceGdfl,
         Self::SourceMasters,
         Self::DiskFloor,
+        Self::ExtraCopyRoots,
     ];
 
     /// The key's name in a file and on the wire.
@@ -162,6 +182,7 @@ impl Key {
             Self::SourceGdfl => "source.gdfl",
             Self::SourceMasters => "source.masters",
             Self::DiskFloor => "disk.floor",
+            Self::ExtraCopyRoots => "disk.extra_copy_roots",
         }
     }
 
@@ -197,6 +218,7 @@ impl Key {
             Self::SourceGdfl => 8,
             Self::SourceMasters => 9,
             Self::DiskFloor => 10,
+            Self::ExtraCopyRoots => 11,
         }
     }
 }
@@ -504,6 +526,59 @@ fn directory(text: &str) -> Result<(), String> {
     }
 }
 
+/// The folders a [`Key::ExtraCopyRoots`] value names, in the order written,
+/// checked for SHAPE only: each absolute, at most [`MAX_PATH_BYTES`], free
+/// of `..` and of [`COPY_ROOT_SEPARATOR`]'s empty pieces; at most
+/// [`MAX_COPY_ROOTS`] of them in at most [`MAX_COPY_ROOTS_BYTES`]; none
+/// named twice and none inside another, so no byte is a file of two roots.
+/// O(roots²) with roots at most [`MAX_COPY_ROOTS`]: bounded, never by the
+/// tree. The one reader of the value: [`check`] adds that each exists, and
+/// `pull::copies_register` reads a stored value through this (D-7040).
+///
+/// # Errors
+///
+/// The sentence naming the folder and why.
+pub fn copy_roots(value: &str) -> Result<Vec<PathBuf>, String> {
+    if value.len() > MAX_COPY_ROOTS_BYTES {
+        return Err(format!(
+            "the value is {} bytes, past the {MAX_COPY_ROOTS_BYTES} a value may hold",
+            value.len()
+        ));
+    }
+    let mut roots: Vec<PathBuf> = Vec::with_capacity(MAX_COPY_ROOTS);
+    for (at, piece) in value.split(COPY_ROOT_SEPARATOR).enumerate() {
+        if roots.len() == MAX_COPY_ROOTS {
+            return Err(format!(
+                "more than {MAX_COPY_ROOTS} folders; name at most {MAX_COPY_ROOTS}"
+            ));
+        }
+        if piece.is_empty() {
+            return Err(format!(
+                "folder {} is empty: two '{COPY_ROOT_SEPARATOR}' with nothing between, or one \
+                 at an end",
+                at + 1
+            ));
+        }
+        path_shape(piece)?;
+        let root = PathBuf::from(piece);
+        // AT MOST `MAX_COPY_ROOTS` EARLIER ROOTS, the loop above's bound.
+        for other in &roots {
+            if other.as_path() == root.as_path() {
+                return Err(format!("{piece:?} is named twice"));
+            }
+            if other.starts_with(&root) || root.starts_with(other) {
+                return Err(format!(
+                    "{piece:?} and {:?} overlap, one inside the other; name each folder once, \
+                     and never a folder inside another",
+                    other.display()
+                ));
+            }
+        }
+        roots.push(root);
+    }
+    Ok(roots)
+}
+
 /// Whether `text` is free of control characters, so it fits on one line.
 fn one_line(text: &str) -> bool {
     !text.chars().any(char::is_control)
@@ -580,6 +655,11 @@ pub fn check(key: Key, value: &str) -> Result<String, Refusal> {
         Key::DiskFloor => {
             let floor = disk_floor(value).map_err(invalid)?;
             return Ok(floor.to_string());
+        }
+        Key::ExtraCopyRoots => {
+            for root in copy_roots(value).map_err(invalid)? {
+                directory(&root.to_string_lossy()).map_err(invalid)?;
+            }
         }
     }
     Ok(value.to_owned())
@@ -720,6 +800,9 @@ fn check_whole(settings: &Settings) -> Result<(), Refusal> {
 fn check_stored(key: Key, value: &str) -> Result<(), String> {
     let canonical = match key {
         Key::SourceGdfl | Key::SourceMasters => path_shape(value).map(|()| value.to_owned()),
+        Key::ExtraCopyRoots => copy_roots(value)
+            .map(|_| value.to_owned())
+            .map_err(|why| format!("{}: {why}", key.name())),
         _ => check(key, value).map_err(|refusal| refusal.to_string()),
     }?;
     if canonical != value {

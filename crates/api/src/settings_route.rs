@@ -237,6 +237,7 @@ fn default_of(key: Key) -> (Option<String>, String) {
             Some(pull::disk_projection::DEFAULT_FLOOR.to_string()),
             pull::disk_projection::DEFAULT_FLOOR_SOURCE.to_owned(),
         ),
+        Key::ExtraCopyRoots => (None, pull::copies_register::UNSET_WAIT.to_owned()),
     }
 }
 
@@ -421,6 +422,10 @@ pub const fn reader_of(key: Key) -> Result<&'static str, &'static str> {
         Key::DiskFloor => Err(
             "nothing reads a saved value yet: pull::gdfl_dropbox checks the floor its caller \
              passes before every file; owner: the ingest chain (R4-11), R4-23, R4-29",
+        ),
+        Key::ExtraCopyRoots => Ok(
+            "pull::copies_register, on GET /disk/copies.json (re-walked when a root's own stat \
+             changes) and on every cli disk-copies (a fresh walk)",
         ),
     }
 }

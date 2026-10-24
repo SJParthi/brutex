@@ -124,6 +124,10 @@ pub mod cash_session_cache;
 /// THE CALLER `crate::fno` NEVER HAD -- expiries, then contracts, then bars.
 pub mod chain;
 pub mod config;
+/// The copies register: every extra copy the operator names, with its bytes,
+/// reader and proof; second names of live archive files flagged red; a
+/// retirement list the operator acts on by hand (CC-5, FM-607).
+pub mod copies_register;
 pub mod csv;
 /// The pulled day bar, checked against the days its minute bars fold to.
 pub mod daycheck;

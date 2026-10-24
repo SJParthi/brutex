@@ -1233,3 +1233,64 @@ fn the_disk_floor_is_checked_and_stored_canonically() {
         assert!(disk_floor(bad).is_err(), "{bad:?}");
     }
 }
+
+/// `disk.extra_copy_roots` (CC-5, D-7040): several absolute folders, one
+/// `|` between each, every one existing when saved; a comma inside a folder
+/// name is a folder name, never a separator; twice, nested, relative,
+/// climbing, empty or too many is refused by name. A stored value is held to
+/// its shape only, so a folder moved since the save is the register's to
+/// report, not a damaged generation.
+#[test]
+fn the_extra_copy_roots_key_is_checked_and_stored_canonically() {
+    use super::{COPY_ROOT_SEPARATOR, MAX_COPY_ROOTS, check_stored, copy_roots};
+    assert_eq!(
+        Key::of_name("disk.extra_copy_roots"),
+        Some(Key::ExtraCopyRoots)
+    );
+    assert_eq!(Key::ExtraCopyRoots.slot(), 11);
+    assert_eq!(Key::ExtraCopyRoots.env(), None, "no fallback: a named wait");
+    let base = root("copy-roots");
+    let one = base.join("one, with a comma");
+    let two = base.join("two");
+    std::fs::create_dir_all(&one).unwrap();
+    std::fs::create_dir_all(&two).unwrap();
+    let value = format!("{}{COPY_ROOT_SEPARATOR}{}", one.display(), two.display());
+    assert_eq!(check(Key::ExtraCopyRoots, &format!(" {value} ")).unwrap(), value);
+    assert_eq!(copy_roots(&value).unwrap(), vec![one.clone(), two.clone()]);
+    assert!(check_stored(Key::ExtraCopyRoots, &value).is_ok());
+    let gone = base.join("moved-away");
+    assert!(
+        check_stored(Key::ExtraCopyRoots, &gone.display().to_string()).is_ok(),
+        "a stored folder is held to its shape only"
+    );
+    let refused = |text: &str| match check(Key::ExtraCopyRoots, text) {
+        Err(Refusal::Invalid {
+            key: Some(Key::ExtraCopyRoots),
+            why,
+        }) => why,
+        other => panic!("{text:?} must be refused naming the key, got {other:?}"),
+    };
+    assert!(refused(&gone.display().to_string()).contains("cannot be opened"));
+    assert!(refused("relative/folder").contains("not an absolute path"));
+    assert!(refused(&format!("{}/../two", one.display())).contains("climbs"));
+    assert!(refused(&format!("{value}|")).contains("folder 3 is empty"));
+    assert!(refused(&format!("{}|{}", two.display(), two.display())).contains("named twice"));
+    let inner = two.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    assert!(refused(&format!("{}|{}", two.display(), inner.display())).contains("overlap"));
+    assert!(refused(&format!("{}|{}", inner.display(), two.display())).contains("overlap"));
+    let many: Vec<String> = (0..=MAX_COPY_ROOTS)
+        .map(|n| {
+            let folder = base.join(format!("many-{n}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            folder.display().to_string()
+        })
+        .collect();
+    assert!(refused(&many.join("|")).contains(&format!("more than {MAX_COPY_ROOTS}")));
+    assert!(check(Key::ExtraCopyRoots, &many[..MAX_COPY_ROOTS].join("|")).is_ok());
+    let long = format!("/{}", "a".repeat(super::MAX_COPY_ROOTS_BYTES));
+    assert!(refused(&long).contains("bytes, past the"));
+    assert!(check_stored(Key::ExtraCopyRoots, "relative").is_err());
+    assert!(check_stored(Key::ExtraCopyRoots, &format!("{value}|{value}")).is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
