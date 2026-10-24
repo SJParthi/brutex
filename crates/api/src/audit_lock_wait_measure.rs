@@ -28,6 +28,30 @@ fn rank(sorted: &[u128], p: usize) -> u128 {
     sorted[at.min(n - 1)]
 }
 
+/// One harness run: its opening, one member failure and its close, each
+/// timed, as `(operation, microseconds, landed)`.
+fn one_run(journal: &Journal, src: &str, at: SystemTime, window: Window) -> [(usize, u128, bool); 3] {
+    let head = Record::opened(Scope::Spot, at, src, window, 1, 0xa5);
+    let t = Instant::now();
+    let thread = journal.open_run(&head);
+    let opened = (0, t.elapsed().as_micros(), thread.is_ok());
+    let failure = Record::member_failure(Scope::Spot, at, src, window, "measured");
+    let t = Instant::now();
+    let member = journal.append_member(&failure, "measured");
+    let member = (1, t.elapsed().as_micros(), member.is_ok());
+    // CLOSED THE WAY A REAL RUN CLOSES (AG-06b, AG06B-3): `of_run` with the
+    // opening's source and window, as `server::recovery_spot` builds its
+    // close. A windowless `Record::refused(.., Stored, ..)` never pairs with
+    // the opening in the restart scan (`same_key` compares the window).
+    let close = Record::of_run(Scope::Spot, at, 0, src, window, &Ingested::default());
+    let t = Instant::now();
+    let closed = match thread {
+        Ok(mut thread) => journal.close_run(&mut thread, &close),
+        Err(_) => journal.close_unopened(&head, &close),
+    };
+    [opened, member, (2, t.elapsed().as_micros(), closed.is_ok())]
+}
+
 #[test]
 #[ignore = "a measurement over a cloned journal, run by hand with BRUTEX_AG06_MEASURE_ROOT"]
 fn measure_append_latency_under_contention() {
@@ -49,22 +73,7 @@ fn measure_append_latency_under_contention() {
                     barrier.wait();
                     for i in 0..per {
                         let src = format!("ag06-measure-w{writers}-{w}-{i}");
-                        let head = Record::opened(Scope::Spot, at, &src, window, 1, 0xa5);
-                        let t = Instant::now();
-                        let thread = journal.open_run(&head);
-                        out.push((0, t.elapsed().as_micros(), thread.is_ok()));
-                        let failure =
-                            Record::member_failure(Scope::Spot, at, &src, window, "measured");
-                        let t = Instant::now();
-                        let member = journal.append_member(&failure, "measured");
-                        out.push((1, t.elapsed().as_micros(), member.is_ok()));
-                        let close = Record::refused(Scope::Spot, Outcome::Stored, at, &src, "done");
-                        let t = Instant::now();
-                        let closed = match thread {
-                            Ok(mut thread) => journal.close_run(&mut thread, &close),
-                            Err(_) => journal.close_unopened(&head, &close),
-                        };
-                        out.push((2, t.elapsed().as_micros(), closed.is_ok()));
+                        out.extend(one_run(&journal, &src, at, window));
                     }
                     out
                 })
@@ -96,4 +105,37 @@ fn measure_append_latency_under_contention() {
         }
     }
     println!("journal records after: {}", journal.look().records());
+}
+
+/// **THE HARNESS CLOSES EVERY RUN IT OPENS** (AG-06b, AG06B-3). Its close was
+/// `Record::refused(.., Outcome::Stored, ..)` with no window, so the restart
+/// scan's `same_key` (scope, window, source) never matched it with the
+/// opening, which carries the window: 221 harness runs read as unclosed on
+/// the checker's shadow. Three runs of the harness's own [`one_run`] on a
+/// temp root go through the scan, which must find no open run.
+#[test]
+fn the_measure_harness_closes_every_run_it_opens() {
+    let dir = crate::scratch::path("ag06b-harness-closes");
+    let _ignored = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let journal = Journal::at(&dir);
+    let day = pull::session::Day::new(2025, 7, 1).expect("a date");
+    let window = Window::new(day, day).expect("forwards");
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
+    for i in 0..3 {
+        let ran = one_run(&journal, &format!("ag06-measure-w1-0-{i}"), at, window);
+        assert!(ran.iter().all(|&(_, _, landed)| landed), "{ran:?}");
+    }
+    // FOUR RECORDS A RUN: its opening, its member failure, and its close
+    // behind a restatement of its opening, because the member failure was
+    // appended outside the run's thread (`close_run`, D-3341).
+    assert_eq!(journal.look().records(), 12, "three runs of four records");
+    let scan = crate::pullrun::restart_scan(&journal);
+    assert!(
+        scan.interrupted().is_none(),
+        "a harness run reads as unclosed: {}",
+        scan.words()
+    );
+    assert_eq!(scan.word(), "clean", "{}", scan.words());
+    let _ = std::fs::remove_dir_all(&dir);
 }

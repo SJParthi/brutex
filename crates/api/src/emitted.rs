@@ -1955,7 +1955,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // bars_export::tests::a_streamed_export_stops_when_cancelled`,
     // `the_export_is_every_page_of_the_window_in_its_order` and
     // `rows_that_change_mid_export_cut_the_stream_with_a_warning`.
-    const REACHED_IN_SERVER_TESTS: usize = 32;
+    // 32 -> 33 at AG-06b (D-7100): `pull.run refused`, the one site of
+    // `server::note_run_refused` (a spot run or an F&O walk the journal
+    // refused at its opening), read back by `server::
+    // journal_unavailable_tests::
+    // a_run_whose_opening_is_refused_after_the_bound_asks_the_vendor_nothing_and_lands_nothing`
+    // and `an_fno_walk_whose_opening_is_refused_asks_nothing_and_appends_nothing`.
+    const REACHED_IN_SERVER_TESTS: usize = 33;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2180,9 +2186,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 95 -> 96 at R3-10: the streamed export's one line
     // (`server::bars_export::ExportBody::end`), named above
     // `REACHED_IN_SERVER_TESTS`.
+    //
+    // 96 -> 97 at AG-06b (D-7100): `pull.run refused`
+    // (`server::note_run_refused`), named above `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 96,
+        lib_sites, 97,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

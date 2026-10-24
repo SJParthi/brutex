@@ -3573,7 +3573,15 @@ async fn broker_answer(
         .with_window(asked.window);
         facts.push(("Refused because", blocked.why.clone()));
         facts.extend(order_class_fact(blocked.code));
-        facts.push(recorded_fact(journal, &record));
+        // A RUN THE JOURNAL REFUSED AT ITS OPENING APPENDS NOTHING MORE
+        // (AG-06b, AG06B-1; D-7100): the journal just refused a record, and a
+        // second append would wait the bound again to say what the refusal
+        // says. Its retry class is transient: the holder lets go.
+        if run.ledger.unavailable().is_some() {
+            facts.extend(journal_unavailable_facts());
+        } else {
+            facts.push(off_the_workers(|| recorded_fact(journal, &record)));
+        }
         return (blocked.code, refused_html("Spot pull", facts, &blocked.why));
     }
 
@@ -4138,12 +4146,23 @@ fn store_unavailable_sentence(fault: &str, streak: u32, done: usize, total: usiz
 /// even when another run appends in between. The caller still writes the
 /// closing record; the failures are not written a second time.
 ///
-/// # A journal that refuses the opening record
+/// # A journal that refuses the opening record refuses the run
 ///
-/// Then nothing is appended during the run: a failure appended behind another
-/// run's record would be filed under that run. The caller appends the
-/// failures after its closing record instead, as before D-3341
-/// ([`RunLedger::rest`]), and the receipt says the opening record was refused.
+/// The landed opening record is a precondition of the run (AG-06b, AG06B-1;
+/// D-7100). A run that went on after a refused opening fetched and landed
+/// with nothing on the journal, and the restart scan, which reads only the
+/// journal, then read a run that died as clean. [`broker_run_by`] now refuses
+/// such a run by name, `journal_unavailable` ([`RunLedger::unavailable`]),
+/// before its first vendor request. `opened_refused` keeps the journal's own
+/// words; [`RunLedger::rest`] still appends behind a closing record for a
+/// ledger that never opened, a path no refused run reaches.
+///
+/// # No tokio worker waits on the journal lock
+///
+/// A contended append waits up to [`audit::APPEND_LOCK_WAIT`] for the append
+/// lock, and the pull runs call this ledger from async code. Every journal
+/// call here goes through [`off_the_workers`], the one mechanism the landing
+/// already uses (AG-06b, AG06B-2; D-7101), so the wait never holds a worker.
 #[derive(Debug, Default)]
 pub(crate) struct RunLedger {
     /// The run's place in the journal, when its opening record landed.
@@ -4202,11 +4221,20 @@ impl RunLedger {
             head: Some(head.clone()),
             ..Self::default()
         };
-        match journal.open_run(&head) {
+        // OFF THE WORKERS (AG06B-2): a contended opening waits its bound.
+        match off_the_workers(|| journal.open_run(&head)) {
             Ok(thread) => ledger.thread = Some(thread),
             Err(why) => ledger.opened_refused = Some(why),
         }
         ledger
+    }
+
+    /// The run's refusal when the journal refused its opening record, by name
+    /// ([`journal_unavailable`]); `None` for a ledger whose opening landed
+    /// or that never asked (AG-06b, AG06B-1; D-7100).
+    #[must_use]
+    pub(crate) fn unavailable(&self) -> Option<String> {
+        self.opened_refused.as_deref().map(journal_unavailable)
     }
 
     /// The run's source, whole: what every closing record of this run is
@@ -4234,11 +4262,12 @@ impl RunLedger {
         journal: &audit::Journal,
         record: &audit::Record,
     ) -> Result<(), String> {
-        match (self.thread.as_mut(), self.head.as_ref()) {
+        // OFF THE WORKERS (AG06B-2): the close waits its bound too.
+        off_the_workers(|| match (self.thread.as_mut(), self.head.as_ref()) {
             (Some(thread), _) => journal.close_run(thread, record),
             (None, Some(head)) => journal.close_unopened(head, record),
             (None, None) => journal.append(record),
-        }
+        })
     }
 
     /// Appends every failure of `failures` not yet on disk, each as its own
@@ -4248,11 +4277,11 @@ impl RunLedger {
     ///
     /// # A refused append is retried, not skipped
     ///
-    /// The journal's lock is taken without waiting, so a second writer in the
-    /// middle of its own append refuses this one. The failure is then left
-    /// where it is and offered again with the next instrument's, so one busy
-    /// moment does not lose a reason; the first refusal still waiting is on
-    /// the receipt ([`Self::fact`]).
+    /// The journal's lock is waited for up to [`audit::APPEND_LOCK_WAIT`]
+    /// (AG-06), off the workers (AG06B-2), and an append still refused past
+    /// that bound is left where it is and offered again with the next
+    /// instrument's, so one busy moment does not lose a reason; the first
+    /// refusal still waiting is on the receipt ([`Self::fact`]).
     ///
     /// # Cost
     ///
@@ -4266,12 +4295,14 @@ impl RunLedger {
         let Some(mut thread) = self.thread.take() else {
             return;
         };
-        self.write(
-            failures,
-            window,
-            std::time::SystemTime::now(),
-            |record, whole| journal.append_failure(&mut thread, record, whole),
-        );
+        off_the_workers(|| {
+            self.write(
+                failures,
+                window,
+                std::time::SystemTime::now(),
+                |record, whole| journal.append_failure(&mut thread, record, whole),
+            );
+        });
         self.thread = Some(thread);
     }
 
@@ -4301,8 +4332,10 @@ impl RunLedger {
         let Some(window) = self.window else {
             return;
         };
-        self.write(failures, window, now, |record, whole| {
-            journal.append_member(record, whole)
+        off_the_workers(|| {
+            self.write(failures, window, now, |record, whole| {
+                journal.append_member(record, whole)
+            });
         });
     }
 
@@ -4355,6 +4388,87 @@ impl RunLedger {
         )
     }
 }
+
+/// The word a run refused at its opening is refused under: the journal did
+/// not take the run's opening record, so the run never started (AG-06b,
+/// AG06B-1; D-7100). Matched by tests and by an operator's search of
+/// `/logs`, never parsed for a decision.
+pub(crate) const JOURNAL_UNAVAILABLE: &str = "journal_unavailable";
+
+/// The refusal of a run whose opening record the pull audit journal refused,
+/// carrying the journal's own words `why`: for a held lock, the bound, the
+/// wait, the attempts, the record's kind and outcome and the holder in
+/// `store::flock::holder_note`'s words (`audit::Journal::open_run`).
+///
+/// # Why the run is refused rather than run unjournalled
+///
+/// The restart scan reads only the journal. A run that went on after its
+/// opening was refused fetched and landed with no record of itself, and if
+/// it then died the next start read the journal as clean (L-AG06-03). One
+/// sentence for every pull path, spot and F&O, so the refusal reads the same
+/// wherever it is met.
+pub(crate) fn journal_unavailable(why: &str) -> String {
+    format!(
+        "{JOURNAL_UNAVAILABLE}: the pull audit journal did not take this run's opening \
+         record, so the run was refused before its first vendor request and nothing was \
+         fetched, landed or appended; a run that is not on the journal is a run the restart \
+         scan cannot see. Ask again once the journal takes appends. The journal said: {why}"
+    )
+}
+
+/// The one `pull.run` `refused` event of a run refused at its opening, at
+/// `Error` (so `/logs` audits it, `telemetry::is_audited`), and the run key
+/// `claimed` released, because a refused run never reaches
+/// [`note_run_finished`], the only other place that releases it: left held,
+/// every later event of the process would be stamped with a run that never
+/// ran (AG-06b, AG06B-1; D-7100). `scope` is `spot` or `fno`.
+fn note_run_refused(
+    scope: &str,
+    feed: &str,
+    window: pull::session::Window,
+    why: &str,
+    claimed: Option<u64>,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.run", "refused")
+            .with("scope", telemetry::Value::Str(scope))
+            .with("feed", telemetry::Value::Str(feed))
+            .with("from", telemetry::Value::Str(&window.from().to_string()))
+            .with("to", telemetry::Value::Str(&window.to().to_string()))
+            .with("why", telemetry::Value::Str(why)),
+    );
+    if let (Some(sink), Some(run)) = (telemetry::global(), claimed) {
+        sink.release_run(run);
+    }
+}
+
+/// The receipt's two lines for a run refused at its opening: its retry
+/// class, transient (the journal takes appends again once its holder lets
+/// go, so `/pull/run` asks the leg again), and its `Recorded` line, which
+/// says that no record was appended and why (AG-06b, AG06B-1; D-7100).
+fn journal_unavailable_facts() -> [(&'static str, String); 2] {
+    [
+        (
+            crate::pullrun::RETRY_CLASS_FACT,
+            format!(
+                "{} — the journal refused this run's opening record; another attempt runs \
+                 once the journal takes appends again",
+                crate::pullrun::RetryClass::Transient.word()
+            ),
+        ),
+        (
+            "Recorded",
+            format!(
+                "NO — this run is NOT in the journal: the journal refused its opening record \
+                 ({JOURNAL_UNAVAILABLE}), so the run was refused and nothing more was appended"
+            ),
+        ),
+    ]
+}
+
+#[cfg(test)]
+#[path = "journal_unavailable_tests.rs"]
+mod journal_unavailable_tests;
 
 /// What every record of a broker run of `asked` names as its source: the
 /// endpoint it fetches from ([`planned_origin`]) through the cash-identity
@@ -4616,6 +4730,16 @@ impl BrokerRun {
     ///
     /// `attempted` is EVERY instrument asked for, the withheld ones included:
     /// they are part of what this run was expected to cover and did not.
+    ///
+    /// # A refused opening refuses the run
+    ///
+    /// When the journal refused the opening record, the run is [`Self::blocked`]
+    /// with [`journal_unavailable`]'s sentence and `503` (this process cannot
+    /// keep a journal now; nothing upstream was asked), and keeps its ledger,
+    /// so `opened_refused` still carries the journal's words to the
+    /// autopilot's `journal_error`. Nothing was attempted, so nothing is
+    /// counted: the withheld instruments are not recorded either (AG-06b,
+    /// AG06B-1; D-7100).
     fn opened(
         journal: &audit::Journal,
         asked: &ingest::SpotRequest,
@@ -4623,10 +4747,17 @@ impl BrokerRun {
         withheld: Vec<(brutex_core::instrument::InstrumentKey, String)>,
         driver: crate::autopilot::Driver,
     ) -> Self {
+        let ledger = RunLedger::open(journal, asked, of, driver);
+        if let Some(why) = ledger.unavailable() {
+            return Self {
+                ledger,
+                ..Self::blocked(why, axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            };
+        }
         let mut out = Self {
             attempted: of.saturating_add(withheld.len()),
             window: Some(asked.window),
-            ledger: RunLedger::open(journal, asked, of, driver),
+            ledger,
             ..Self::default()
         };
         for (key, why) in withheld {
@@ -6156,6 +6287,20 @@ pub(crate) async fn broker_run_by(
     // follows as its member lands (`RunLedger`, D-3341, DB-055, DB-G46).
     let journal = site.journal();
     let mut out = BrokerRun::opened(&journal, asked, targets.len(), withheld, driver);
+    // NO RUN STARTS UNJOURNALLED (AG-06b, AG06B-1; D-7100): a refused opening
+    // record is the run's refusal, here, before its first vendor request.
+    // Its `started` event is already written (above); this is its one
+    // `refused` event, and the run key is released with it.
+    if let Some(blocked) = out.blocked.as_ref() {
+        note_run_refused(
+            "spot",
+            asked.feed.wire(),
+            asked.window,
+            &blocked.why,
+            claimed_run,
+        );
+        return out;
+    }
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
     // started with, so a stop that arrives after this run began stops it and a
     // stop that happened before it began does not.
@@ -6461,6 +6606,11 @@ pub(crate) async fn recovery_spot(
     // this route's endpoint text, the very source every spot run of the window
     // opens with, so it closed whichever such run had been cut short.
     if let Some(blocked) = &run.blocked {
+        // A UNIT REFUSED AT ITS OPENING IS A FAILED AUDIT APPEND, and it
+        // appends nothing more (AG-06b, AG06B-1; D-7100).
+        if run.ledger.unavailable().is_some() {
+            return Err(blocked.why.clone());
+        }
         let record = audit::Record::refused(
             audit::Scope::Spot,
             audit::Outcome::Refused,
@@ -6469,7 +6619,7 @@ pub(crate) async fn recovery_spot(
             &blocked.why,
         )
         .with_window(asked.window);
-        journal.append(&record)?;
+        off_the_workers(|| journal.append(&record))?;
     } else {
         let origin = run.ledger.source().map_or_else(
             || spot_audit_origin(asked.cash_identity, &run.origin),
@@ -10465,7 +10615,9 @@ impl FnoPage<'_> {
             counts.bars_stored,
             counts.failures,
         );
-        facts.push(recorded_fact(self.journal, &record));
+        // OFF THE WORKERS (AG-06b, AG06B-2; D-7101): the walk's close waits
+        // its bound for a contended lock like any append.
+        facts.push(off_the_workers(|| recorded_fact(self.journal, &record)));
         let body = if outcome == audit::Outcome::NotStarted {
             facts.push(("Reason", why.to_owned()));
             accepted_html("Expired F&O pull", facts, self.broker)
@@ -11371,16 +11523,24 @@ const FNO_OPENED_NOTE: &str = "expired F&O walk opened";
 /// the one outcome the scan does not read as a close (a request refused
 /// before any run began).
 ///
-/// # A journal that refuses it
+/// # A journal that refuses it refuses the walk
 ///
-/// The walk still runs and the receipt says the restart scan would not see
-/// it cut short; [`audit::Journal::append`] logs the refusal (it always has),
-/// and the outcome record is attempted as before.
+/// The walk ran on and the receipt said a restart would not see it cut
+/// short. Now the refusal is the walk's (AG-06b, AG06B-1; D-7100): `Err`
+/// carries the journal's words, [`audit::Journal::append`] has logged them
+/// (it always has), and [`fno_walk`] refuses by name before any arm, the
+/// credential read and the first vendor request included.
+///
+/// # Off the workers
+///
+/// The append waits up to [`audit::APPEND_LOCK_WAIT`] for a contended lock,
+/// on the walk's tokio worker unless it goes through [`off_the_workers`]
+/// (AG06B-2; D-7101).
 fn fno_opened(
     journal: &audit::Journal,
     asked: &ingest::FnoRequest,
     now: std::time::SystemTime,
-) -> (&'static str, String) {
+) -> Result<(&'static str, String), String> {
     // THE WALK'S ASK ON ITS OPENING RECORD (DB-B34, repair 6): a later walk
     // of the same underlying and window supersedes this one, if it is cut
     // short, only when it asked for the same feed, series, expiry and rung.
@@ -11392,18 +11552,33 @@ fn fno_opened(
         &audit::ask_note(FNO_OPENED_NOTE, fno_ask(asked)),
     )
     .with_window(asked.window);
-    match journal.append(&head) {
-        Ok(()) => (
+    off_the_workers(|| journal.append(&head)).map(|()| {
+        (
             "Opened in the journal",
             "yes — its outcome record (Recorded) closes it, so a restart during the walk is \
              seen at the next start"
                 .to_owned(),
-        ),
-        Err(why) => (
-            "Opened in the journal",
-            format!("NO — a restart during this walk would not be seen at the next start. {why}"),
-        ),
-    }
+        )
+    })
+}
+
+/// The answer of an expired-F&O walk whose opening record the journal
+/// refused: `503` and [`journal_unavailable`]'s sentence, the same receipt
+/// lines as a spot run refused at its opening, the walk's one `pull.run`
+/// `refused` event, and no record appended (AG-06b, AG06B-1; D-7100).
+fn fno_unjournalled(
+    asked: &ingest::FnoRequest,
+    mut facts: Vec<(&'static str, String)>,
+    why: &str,
+) -> (axum::http::StatusCode, String) {
+    let refusal = journal_unavailable(why);
+    note_run_refused("fno", asked.feed.wire(), asked.window, &refusal, None);
+    facts.push(("Refused because", refusal.clone()));
+    facts.extend(journal_unavailable_facts());
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        refused_html("Expired F&O pull", facts, &refusal),
+    )
 }
 
 async fn fno_walk(
@@ -11423,8 +11598,12 @@ async fn fno_walk(
     };
     let mut facts = fno_facts(asked, today);
     // THE WALK IS OPENED IN THE JOURNAL BEFORE ANY ARM (DB-B34, repair 5), so
-    // every arm's outcome record closes it and a walk cut short is seen.
-    facts.push(fno_opened(journal, asked, now));
+    // every arm's outcome record closes it and a walk cut short is seen; a
+    // walk the journal refuses at its opening is refused (AG-06b, AG06B-1).
+    match fno_opened(journal, asked, now) {
+        Ok(opened) => facts.push(opened),
+        Err(why) => return fno_unjournalled(asked, facts, &why),
+    }
 
     // THE TRANSPORT DECIDES THE PATH, AND IT IS ASKED FIRST.
     //
@@ -28185,7 +28364,8 @@ mod tests {
     /// It now opens its run first, and its outcome record closes it by the
     /// same window and source: whole, the scan reads clean; cut between the
     /// two, it reads INTERRUPTED naming the underlying and the window. A
-    /// journal that refuses the opening record is said on the receipt.
+    /// journal that refuses the opening record refuses the walk by name
+    /// (AG-06b, AG06B-1; D-7100).
     #[test]
     fn an_expired_fno_walk_cut_short_is_seen_at_the_next_start() {
         // Mode bits do not bind root, so as root this failed for a reason that
@@ -28289,8 +28469,10 @@ mod tests {
         options.series = ingest::Series::Options;
         assert_ne!(fno_ask(&options), fno_ask(&asked));
 
-        // A JOURNAL THAT REFUSES THE OPENING RECORD: the walk still answers,
-        // and the receipt says a restart during it would not be seen.
+        // A JOURNAL THAT REFUSES THE OPENING RECORD REFUSES THE WALK (AG-06b,
+        // AG06B-1; D-7100). The walk used to run on, its receipt saying that
+        // a restart during it would not be seen; now it is refused by name
+        // before any arm, and still nothing is appended.
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o444))
@@ -28304,10 +28486,7 @@ mod tests {
         }
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(
-            page.contains(
-                "<th>Opened in the journal</th><td>NO — a restart during this walk would not \
-                 be seen at the next start."
-            ),
+            page.contains("journal_unavailable: ") && !page.contains("Opened in the journal"),
             "{page}"
         );
         assert_eq!(journal.look().records(), 1, "nothing was appended");
