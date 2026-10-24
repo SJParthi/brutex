@@ -1189,13 +1189,38 @@ fn ascending_merges_two_ordered_lists() {
     assert!(ascending(&[], &[]).next().is_none());
 }
 
-/// A journal filter takes a symbol only by its exact name.
+/// A journal key of `filter` on one invented day, as the journal reader
+/// makes it.
+fn key_row(filter: &str) -> DayRow {
+    let root = super::super::import_journal::tests::journal(
+        &format!("provenance-key-{}", filter.replace(['*', ',', '+', '.'], "_")),
+        &format!("begin indices 2019-03-01 {filter}\n"),
+    );
+    let snapshot = super::super::import_journal::snapshot(&root).expect("reads");
+    let row = snapshot
+        .parsed
+        .range(day("2019-03-01"), day("2019-03-01"))
+        .next()
+        .cloned()
+        .expect("one row");
+    assert_eq!(row.filter, filter);
+    row
+}
+
+/// A journal filter takes a symbol only by its exact name; a member key
+/// takes its one member's symbol and nothing else (IA-10a item 5).
 #[test]
 fn a_filter_takes_a_symbol_by_its_exact_name() {
-    assert!(filter_holds("*", "NIFTY"));
-    assert!(filter_holds("BANKNIFTY,NIFTY", "NIFTY"));
-    assert!(!filter_holds("NIFTYIT", "NIFTY"));
-    assert!(!filter_holds("BANKNIFTY", "NIFTY"));
+    assert!(filter_holds(&key_row("*"), "NIFTY"));
+    assert!(filter_holds(&key_row("BANKNIFTY,NIFTY"), "NIFTY"));
+    assert!(!filter_holds(&key_row("NIFTYIT"), "NIFTY"));
+    assert!(!filter_holds(&key_row("BANKNIFTY"), "NIFTY"));
+    let member = key_row("*+NSE-INDEX-NIFTYIT");
+    assert!(filter_holds(&member, "NIFTYIT"));
+    assert!(!filter_holds(&member, "NIFTY"), "the member's, not the base's");
+    let share = key_row("*+NSE-CASH-ZZSHARE.BE");
+    assert!(filter_holds(&share, "ZZSHARE"), "its series is its share's day");
+    assert!(!filter_holds(&share, "ZZSHARE.BE"));
 }
 
 /// The unrecorded ranges: before the first record, between two, after the

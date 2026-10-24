@@ -958,10 +958,8 @@ fn journal_of_record(record: &Record, journals: &Journals, asked: &Asked) -> Val
             }),
             (Ok(snapshot), Some(day)) => {
                 let kind = import_kind(asked.segment);
-                let rows: Vec<Value> = snapshot
-                    .parsed
-                    .range(day, day)
-                    .filter(|row| row.kind == kind && filter_holds(&row.filter, &asked.symbol))
+                let rows: Vec<Value> = symbol_rows(&snapshot.parsed, (day, day), kind, &asked.symbol)
+                    .into_iter()
                     .map(|row| day_json(row, asked, None, None))
                     .collect();
                 json!({
@@ -1017,10 +1015,50 @@ const fn import_kind(segment: Segment) -> ImportKind {
     }
 }
 
-/// Whether a journal key's filter (`*`, or the sorted names a run was given)
-/// takes `symbol`. Bounded by the filter's own text.
-fn filter_holds(filter: &str, symbol: &str) -> bool {
-    filter == "*" || filter.split(',').any(|name| name == symbol)
+/// Whether a journal key's filter (`*`, the sorted names a run was given, or
+/// a member key `<filter>+<member>`) takes `symbol`. A member key takes its
+/// one member's symbol and no other (IA-10a item 5; `pull`'s rule,
+/// [`super::import_journal::member_symbol`]). Bounded by the filter's own
+/// text; a member key's split was paid when its row was made.
+fn filter_holds(row: &DayRow, symbol: &str) -> bool {
+    match row.member() {
+        Some(member) => super::import_journal::member_symbol(member) == symbol,
+        None => row.filter == "*" || row.filter.split(',').any(|name| name == symbol),
+    }
+}
+
+/// The journal rows of `from..=to` that are `symbol`'s days of `kind`, in
+/// day order: each row whose filter takes the symbol ([`filter_holds`]),
+/// except a base row on a day where a member key of that very base names the
+/// symbol. That member key exists because the base close's scope lacked the
+/// member (D-4878, `admit` row 1), so the member key's row is the member's
+/// day row: a member close that filed bars is never missed, and its bars are
+/// never credited to the base close's run (IA-10a item 5). The base close's
+/// own members keep it. O(rows in the range), and within one day O(rows of
+/// the day squared), a handful.
+fn symbol_rows<'p>(
+    parsed: &'p Parsed,
+    (from, to): (Day, Day),
+    kind: ImportKind,
+    symbol: &str,
+) -> Vec<&'p DayRow> {
+    let held: Vec<&DayRow> = parsed
+        .range(from, to)
+        .filter(|row| row.kind == kind && filter_holds(row, symbol))
+        .collect();
+    let mut rows = Vec::with_capacity(held.len());
+    for day in held.chunk_by(|a, b| a.day == b.day) {
+        for row in day {
+            let reopened = row.member().is_none()
+                && day
+                    .iter()
+                    .any(|other| other.member().is_some() && other.base() == row.filter);
+            if !reopened {
+                rows.push(*row);
+            }
+        }
+    }
+    rows
 }
 
 /// The month (or `t`'s day) rebuilt from `imports/gdfl.journal`, each import
@@ -1041,10 +1079,7 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile, serve
     let generation = header.generation;
     let kind = import_kind(asked.segment);
     let parsed = &snapshot.parsed;
-    let rows: Vec<&DayRow> = parsed
-        .range(from, to)
-        .filter(|row| row.kind == kind && filter_holds(&row.filter, &asked.symbol))
-        .collect();
+    let rows = symbol_rows(parsed, (from, to), kind, &asked.symbol);
     let scope = cm_scope(asked);
     // THE BARS EACH IMPORT DAY HOLDS, by two time lookups a day (through the
     // month's `.tix`, one entry each; else the D-1434 bisection), so every bar
@@ -1061,6 +1096,7 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile, serve
     let (held_on_days, lookup_errors) = spans.totals();
     let with_bars = spans.days_with_bars();
     let done = rows.iter().filter(|row| row.outcome.is_done()).count();
+    let holes = rows.iter().filter(|row| row.hole().is_some()).count();
     let mut runs: Vec<Value> = Vec::with_capacity(rows.len().min(4));
     let mut named: Vec<u64> = Vec::with_capacity(rows.len().min(4));
     let mut unnamed = 0usize;
@@ -1098,6 +1134,7 @@ fn gdfl_reconstruction(journals: &Journals, asked: &Asked, bars: &BarFile, serve
         "days": days,
         "journal_days": rows.len(),
         "journal_days_done": done,
+        "journal_days_holes": holes,
         "journal_days_with_bars": with_bars,
         "bars_on_journal_days": held_on_days,
         "bars_on_no_journal_day": whole_month.then(|| header.n_valid.saturating_sub(held_on_days)),
@@ -1154,7 +1191,12 @@ fn day_json(row: &DayRow, asked: &Asked, scope: Option<&CmScope>, bars: Option<S
         "day": row.day.to_string(),
         "kind": row.kind.as_str(),
         "filter": row.filter,
+        // A MEMBER KEY'S ROW IS ITS MEMBER'S DAY ROW, AND A HOLE IS SHOWN AS
+        // ONE (IA-10a item 5): never a plain `incomplete`.
+        "base_filter": row.base(),
+        "member": row.member(),
         "outcome": row.outcome.as_str(),
+        "hole": row.hole().map(super::import_journal::Hole::json),
         "line": row.line,
         "attempts": row.attempts,
         "closes": row.closes,

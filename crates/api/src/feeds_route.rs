@@ -951,7 +951,8 @@ pub(crate) struct ImportReach {
     /// Days of the asked range, at or before `to`, whose whole-tree import
     /// (`*`) was begun and never closed and was never closed before: their
     /// bars were not written, so their minutes are not imported, not lost.
-    /// Ascending.
+    /// Ascending. An open member key (`*+<member>`, IA-10a) is one member's
+    /// day, not the segment's, and is counted in [`Self::from`] instead.
     pub(crate) open: Vec<i64>,
     /// Today, IST epoch days, read once when the reach was built; `None`
     /// when the clock could not be read (then no day is `not_yet`).
@@ -1116,20 +1117,44 @@ pub(crate) fn imported_to(
     // `panic = "abort"`, took the API down; `Parsed::range` now also answers
     // a reversed span with nothing).
     let last = days.1.min(to);
+    // AN OPEN MEMBER KEY IS ONE MEMBER'S DAY, NOT THE SEGMENT'S (IA-10a item
+    // 4, D-TBD-IA-10a-1): `*+NSE-INDEX-NIFTYIT` begun and never closed says
+    // NIFTYIT's reopened day wrote nothing, while its base key's close still
+    // stands for every other member. This reach is per segment, so it does
+    // not list that day among the segment's open days; it counts such keys
+    // and names the first in `from`, so the reader is told a member's day
+    // may be unimported rather than shown nothing.
+    let mut open_members = 0usize;
+    let mut first_open_member: Option<String> = None;
     if days.0 <= last
         && let (Some(first), Some(last)) = (civil(days.0), civil(last))
     {
         for row in snapshot.parsed.range(first, last) {
-            if row.kind == *kind
-                && row.filter == "*"
-                && row.outcome == crate::server::import_journal::DayOutcome::Open
-                && !row.previous.is_some_and(wrote)
+            if row.kind != *kind
+                || row.outcome != crate::server::import_journal::DayOutcome::Open
+                || row.previous.is_some_and(wrote)
             {
+                continue;
+            }
+            if row.filter == "*" {
                 open.push(i64::from(row.day.days_from_epoch()));
+            } else if row.member().is_some() {
+                open_members = open_members.saturating_add(1);
+                if first_open_member.is_none() {
+                    first_open_member =
+                        Some(format!("{} {} {}", row.kind.as_str(), row.day, row.filter));
+                }
             }
         }
     }
     open.dedup();
+    if let Some(key) = first_open_member {
+        from = format!(
+            "{from}; {open_members} open member key(s) in these days (the first: `{key}`) are \
+             each one member's day begun and never closed: not the segment's open days, which \
+             stand as their base keys do"
+        );
+    }
     ImportReach {
         to: Some(to),
         from,

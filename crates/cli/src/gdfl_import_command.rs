@@ -568,6 +568,227 @@ pub(crate) fn command_in(
     receipt((kind, source, &store, &plan.request), end, door, out)
 }
 
+/// How many names of each reason the receipt prints: the sources' own bound
+/// (D-4817: at most 16 named per reason per source), applied again here so
+/// three reasons print at most 48 names whatever a source kept.
+const CENSUS_NAMED: usize = 16;
+
+/// One reason a source's census counts, as the receipt prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Counted {
+    /// The reason's word.
+    reason: &'static str,
+    /// Every entry of the reason, counted.
+    count: usize,
+    /// The first entries by name, as the source kept them.
+    named: Vec<String>,
+    /// Why the source keeps no names for this reason, when it keeps none.
+    unnamed: Option<&'static str>,
+}
+
+/// A source's census for the receipt (D-4817; IA-10a item 7a): what the
+/// source found beside the days it files, each reason counted and its first
+/// names kept, or why there is none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Census {
+    /// The reasons, in the source's own order.
+    Counted(Vec<Counted>),
+    /// The source keeps no census, or it could not be read: why.
+    None(String),
+}
+
+impl Census {
+    /// The capital-market outer zip's census: names that are not day zips
+    /// (counted only: the archive keeps no names for them), day zips under
+    /// another folder than their own, and names whose date is not real.
+    fn of_archive(census: &pull::gdfl_archive::ArchiveCensus) -> Self {
+        Self::Counted(vec![
+            Counted {
+                reason: "ignored",
+                count: census.ignored,
+                named: Vec::new(),
+                unnamed: Some("the archive counts an entry that is not a day zip and keeps no name"),
+            },
+            Counted {
+                reason: "misfiled",
+                count: census.misfiled,
+                named: census.misfiled_named.clone(),
+                unnamed: None,
+            },
+            Counted {
+                reason: "invalid",
+                count: census.invalid,
+                named: census.invalid_named.clone(),
+                unnamed: None,
+            },
+        ])
+    }
+
+    /// The tick store's census (D-4866): day files filed elsewhere than
+    /// their name says (each named on its own day's refusal, not kept as a
+    /// list), and stray entries, never opened. A walk that could not finish
+    /// says why.
+    fn of_ticks(table: &pull::gdfl_tickstore::DayTable) -> Self {
+        let mut reasons = vec![
+            Counted {
+                reason: "misfiled",
+                count: table.misfiled_count,
+                named: Vec::new(),
+                unnamed: Some("each is named on its own day's refusal, day_file_misfiled"),
+            },
+            Counted {
+                reason: "stray",
+                count: table.stray,
+                named: table.stray_named.clone(),
+                unnamed: None,
+            },
+        ];
+        if let Some(fault) = &table.fault {
+            reasons.push(Counted {
+                reason: "walk stopped",
+                count: 1,
+                named: vec![fault.to_string()],
+                unnamed: None,
+            });
+        }
+        Self::Counted(reasons)
+    }
+
+    /// The census of the source `kind` read, read through `pull`'s own
+    /// readers. The run's own reader is inside `pull::gdfl_run` and hands no
+    /// census back, so this opens the source once more (outside the run,
+    /// read only): the outer zip's central directory, or the tick store's
+    /// tree walk, O(entries) once a run, never per day (`docs/06-limits.md`
+    /// L-IA10A-2). The options zips keep no census at the head, and no
+    /// production code opens the day-zip source (`pull::gdfl_dayzips`), so
+    /// neither prints one: the receipt says so instead of inventing one.
+    fn of(kind: &KindPlan) -> Self {
+        match (kind.source, kind.kind) {
+            (gdfl_run::SourceId::CmZip, _) => match pull::gdfl_archive::Archive::open(&kind.root) {
+                Ok(archive) => Self::of_archive(archive.census()),
+                Err(why) => Self::None(format!("the archive could not be opened to count it: {why}")),
+            },
+            (gdfl_run::SourceId::TickStore, ImportKind::Options) => {
+                Self::of_ticks(pull::gdfl_nfo::NfoTickStore::new(&kind.root).table())
+            }
+            (gdfl_run::SourceId::TickStore, _) => {
+                Self::of_ticks(pull::gdfl_tickstore::TickStore::new(&kind.root).table())
+            }
+            (gdfl_run::SourceId::NfoZips, _) => Self::None(
+                "the yearly options zips keep no census of their entries (pull::gdfl_nfo::NfoZips)"
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+/// THE SOURCE'S CENSUS ON THE RECEIPT (D-4817; IA-10a item 7a): each
+/// reason's count, then its first [`CENSUS_NAMED`] names, or why it has
+/// none. At most three reasons of 16 names: O(1).
+fn render_census(out: &mut String, source: gdfl_run::SourceId, census: &Census) {
+    let reasons = match census {
+        Census::None(why) => {
+            let _ = writeln!(
+                out,
+                "  source census       {}: none ({})",
+                source.as_str(),
+                guard::plain(why)
+            );
+            return;
+        }
+        Census::Counted(reasons) => reasons,
+    };
+    let counts: Vec<String> = reasons
+        .iter()
+        .map(|counted| format!("{} {}", counted.reason, counted.count))
+        .collect();
+    let _ = writeln!(
+        out,
+        "  source census       {}: {} (D-4817)",
+        source.as_str(),
+        counts.join(", ")
+    );
+    for counted in reasons.iter().filter(|counted| counted.count > 0) {
+        let named: Vec<String> = counted
+            .named
+            .iter()
+            .take(CENSUS_NAMED)
+            .map(|name| guard::plain(name))
+            .collect();
+        let more = counted.count.saturating_sub(named.len());
+        let _ = match counted.unnamed {
+            Some(why) if named.is_empty() => {
+                writeln!(out, "    {:<17} {} ({why})", counted.reason, counted.count)
+            }
+            _ => writeln!(
+                out,
+                "    {:<17} {}: {}{}",
+                counted.reason,
+                counted.count,
+                named.join(" "),
+                if more > 0 {
+                    format!(" and {more} more, counted")
+                } else {
+                    String::new()
+                }
+            ),
+        };
+    }
+}
+
+/// Today in IST by the host's clock, or `None` when the clock names no day
+/// (before 1970, or past the session's range): `pull::gdfl_run`'s reading.
+fn today_ist() -> Option<Day> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())?;
+    pull::session::IstMoment::from_epoch_secs(secs)
+        .ok()
+        .map(pull::session::IstMoment::day)
+}
+
+/// THE CALENDAR'S HORIZON ON THE RECEIPT (FM-080; IA-10a item 7b): seen
+/// from `today`, the calendar of record's last sourced day, said when the
+/// warning has started (`pull::calendar::record_horizon`: from 1 January of
+/// the last sourced year, D-5156) or the record has ended, and nothing
+/// before. A clock that names no day is said, never taken for a day inside
+/// the record. A few comparisons.
+fn render_horizon(out: &mut String, today: Option<Day>) {
+    let Some(today) = today else {
+        let _ = writeln!(
+            out,
+            "  calendar horizon    not checked: the host clock names no day (FM-080)"
+        );
+        return;
+    };
+    let horizon = pull::calendar::record_horizon(i64::from(today.days_from_epoch()));
+    if !horizon.ends_soon && !horizon.ended {
+        return;
+    }
+    let last = u32::try_from(horizon.last_day)
+        .ok()
+        .and_then(|days| Day::from_days(days).ok())
+        .map_or_else(|| horizon.last_day.to_string(), |day| day.to_string());
+    if horizon.ended {
+        let _ = writeln!(
+            out,
+            "  calendar horizon    ENDED: the calendar of record ended {last}, {} day(s) before \
+             today ({today}); every later day is refused calendar_unmeasured until NSE's holiday \
+             circular for {} is recorded (D-5156, FM-080)",
+            horizon.days_left.unsigned_abs(),
+            horizon.owed_year
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  calendar horizon    the calendar of record ends {last}, {} day(s) after today \
+             ({today}); NSE's holiday circular for {} is owed (D-5156, FM-080)",
+            horizon.days_left, horizon.owed_year
+        );
+    }
+}
+
 /// The run's receipt and the door's close, by how the run ended.
 fn receipt(
     (kind, source, store, request): (&KindPlan, &str, &Path, &Request),
@@ -576,6 +797,10 @@ fn receipt(
     out: &mut String,
 ) -> u8 {
     let how = (request.workers, request.durability);
+    // THE RECEIPT IS THE WATCHER'S SURFACE (IA-10a item 7, D-6900): the
+    // calendar's horizon on every receipt, the source's census on every one
+    // whose source opened.
+    let today = today_ist();
     match end {
         KindEnd::Report(report) => {
             let report: Report = *report;
@@ -584,6 +809,8 @@ fn receipt(
             if let Some(words) = &kind.scope_words {
                 let _ = writeln!(out, "  scope               {}", guard::plain(words));
             }
+            render_census(out, kind.source, &Census::of(kind));
+            render_horizon(out, today);
             let failed = report.failures_total > 0;
             let door_failed = door.close(Some(&report), failed.then_some("failed"), out);
             if failed || door_failed { FAILED } else { OK }
@@ -595,6 +822,8 @@ fn receipt(
                 render(out, kind.kind, source, store, done);
                 render_how(out, how);
             }
+            render_census(out, kind.source, &Census::of(kind));
+            render_horizon(out, today);
             let _ = writeln!(
                 out,
                 "GDFL IMPORT REFUSED: {}",
@@ -604,6 +833,7 @@ fn receipt(
             FAILED
         }
         KindEnd::Unopened(refused) => {
+            render_horizon(out, today);
             let _ = writeln!(
                 out,
                 "GDFL IMPORT REFUSED: {}",
