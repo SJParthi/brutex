@@ -83546,6 +83546,27 @@ its general form. The hash that failed is replayed in
 (BRED-17). No bound was loosened: the assertions are as strict, and now
 about the status alone.
 
+**Addendum, 24 Oct 2026 (the code-4 barrier experiment under load).** Gate
+1e of the full run on aaca34f6f (state/fix/ci-gates-logs/bred1023-full10,
+load average about 25, other builds fsyncing the same drive) failed
+`api::audit::lock_wait_tests::the_code_4_barrier_experiment_loses_no_record_in_300_runs`
+with 7 of 900 appends refused: two walks contend, so each refusal is the
+other walk's one fsynced append holding the lock past the 1 s
+`APPEND_LOCK_WAIT`, and the old `lost == 0` counted a refusal by name as a
+lost record. This is the eight-appenders case above at two writers. The
+rule is now the one a refused caller lives by: a refusal counts as the
+bound working only when the refused call itself waited at least the bound
+and its text names it (`a_refusal_is_the_bound`), and then the record is
+asked for again (at most 8 asks); any other refusal panics, and every
+record of every run must land. The `try_lock` build refused at once,
+inside the bound, and still fails. The rule is proved both ways in
+`a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_again`
+(a zero-bound refusal from a held lock read as a loss; a hold of 2.5
+bounds waited out by name and the record landing on a later ask) (BRED-18).
+No bound was loosened: `APPEND_LOCK_WAIT` is unchanged, and the test now
+also requires that each refusal waited the whole of it, which the old one
+never checked.
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed

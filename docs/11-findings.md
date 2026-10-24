@@ -1040,3 +1040,11 @@ confirmed by two skeptics; their corrections are applied.
   off the status line (`status_line`, five sites), the failing hash replayed
   in a test (BRED-17, D-7152 addendum). Not load: the hash, so a rerun on the
   same commit fails every time and a rerun on the next one hides it.
+- **BRED23-F16: the code-4 barrier experiment counted a named refusal as a
+  lost record.** Gate 1e on aaca34f6f (bred1023-full10, load average about
+  25): 7 of 900 contended journal appends were refused after the other
+  walk's fsynced append held the lock past `APPEND_LOCK_WAIT`, and
+  `lost == 0` failed. FIXED: a refusal must have waited the whole bound and
+  name it, and is then asked again; every record must land (BRED-18, D-7152
+  addendum). The production wait is unchanged; this is a load race in a
+  test's reading of a right refusal.

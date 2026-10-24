@@ -492,9 +492,21 @@ fn a_reader_never_waits_on_the_append_bound() {
 /// it lost a record on every contended run; here it loses none. `fno_answer`
 /// and `fno_opened` are private to `server.rs` (batch-1 AF-04's file), so the
 /// three journal calls they make (`Journal::append`) are made directly.
+///
+/// UNDER LOAD (BASE-REDS-1023, D-7152 addendum): the full gate run of
+/// 24 Oct 2026 (load average about 25, other builds fsyncing the same drive)
+/// saw 7 of 900 appends refused, each after the other walk's one fsynced
+/// append held the lock past `APPEND_LOCK_WAIT`, and the old `lost == 0`
+/// counted those named refusals as lost records. A refusal is the bound
+/// working, not a loss, ONLY when the refused call itself waited the whole
+/// bound and names it ([`a_refusal_is_the_bound`]); [`append_or_ask_again`]
+/// then asks again, as a refused caller does, so every record must still
+/// land. The `try_lock` build refused at once, well inside the bound, and
+/// still fails here.
 #[test]
 fn the_code_4_barrier_experiment_loses_no_record_in_300_runs() {
     let mut lost = 0_usize;
+    let mut waited_out = 0_usize;
     for run in 0..300 {
         let root = scratch(&format!("barrier-{run}"));
         let journal = Journal::at(&root);
@@ -502,22 +514,114 @@ fn the_code_4_barrier_experiment_loses_no_record_in_300_runs() {
         let (a, b) = std::thread::scope(|s| {
             let a = s.spawn(|| {
                 barrier.wait();
-                let open = journal.append(&opened("gdfl")).is_ok();
-                let close = journal.append(&closed("gdfl")).is_ok();
-                usize::from(open) + usize::from(close)
+                let open = append_or_ask_again(&journal, &opened("gdfl"));
+                let close = append_or_ask_again(&journal, &closed("gdfl"));
+                (usize::from(open.0) + usize::from(close.0), open.1 + close.1)
             });
             let b = s.spawn(|| {
                 barrier.wait();
-                usize::from(journal.append(&opened("zerodha")).is_ok())
+                let open = append_or_ask_again(&journal, &opened("zerodha"));
+                (usize::from(open.0), open.1)
             });
             (a.join().expect("walk A"), b.join().expect("walk B"))
         });
         let on_disk = usize::try_from(journal.look().records()).expect("small");
-        assert_eq!(on_disk, a + b, "run {run}: an answered success is on disk");
+        assert_eq!(
+            on_disk,
+            a.0 + b.0,
+            "run {run}: an answered success is on disk"
+        );
         lost += 3 - on_disk;
+        waited_out += a.1 + b.1;
         let _ = std::fs::remove_dir_all(&root);
     }
-    assert_eq!(lost, 0, "records lost in 300 contended runs");
+    assert_eq!(
+        lost, 0,
+        "records lost in 300 contended runs ({waited_out} refusals waited out the bound and asked again)"
+    );
+}
+
+/// How often [`append_or_ask_again`] asks before it gives a record up as
+/// lost: each ask past the first follows a whole refused bound, so a record
+/// refused this often meets a lock that never frees, which the test must
+/// report rather than wait on.
+const ASKS: usize = 8;
+
+/// Whether a refusal that came `waited` after its ask is the bound doing its
+/// job: it waited at least `APPEND_LOCK_WAIT` and its text names the bound.
+/// A refusal sooner than the bound is the `try_lock` build's loss, which no
+/// retry may hide.
+fn a_refusal_is_the_bound(waited: Duration, why: &str) -> Result<(), String> {
+    if waited < APPEND_LOCK_WAIT {
+        return Err(format!(
+            "refused after {waited:?}, inside the {APPEND_LOCK_WAIT:?} bound: {why}"
+        ));
+    }
+    if !(why.contains("(APPEND_LOCK_WAIT)") && why.contains("refused rather than interleaved")) {
+        return Err(format!("a refusal that does not name its bound: {why}"));
+    }
+    Ok(())
+}
+
+/// Appends `record`, asking again after each refusal [`a_refusal_is_the_bound`]
+/// accepts and panicking on any other. Answers whether the record landed and
+/// how many bounded refusals it met first.
+fn append_or_ask_again(journal: &Journal, record: &Record) -> (bool, usize) {
+    for refusals in 0..ASKS {
+        let asked = Instant::now();
+        match journal.append(record) {
+            Ok(()) => return (true, refusals),
+            Err(why) => {
+                if let Err(loss) = a_refusal_is_the_bound(asked.elapsed(), &why) {
+                    panic!("{loss}");
+                }
+            }
+        }
+    }
+    (false, ASKS)
+}
+
+#[test]
+fn a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_again() {
+    let named = "/j: cannot take the journal append lock for a x record (y) within its 1000 ms bound (APPEND_LOCK_WAIT): held; so this record was refused rather than interleaved";
+    // The `try_lock` build's shape: refused at once, or anywhere inside the bound.
+    assert!(a_refusal_is_the_bound(Duration::ZERO, named).is_err());
+    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT - Duration::from_nanos(1), named).is_err());
+    // A whole bound waited, but the text does not name it.
+    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, "/j: held").is_err());
+    assert!(a_refusal_is_the_bound(APPEND_LOCK_WAIT, named).is_ok());
+    // On a real journal: a zero-bound refusal from a held lock is read as a
+    // loss, and an append that waits out a hold longer than the bound is
+    // refused by name once (or more) and lands on a later ask.
+    let (root, journal) = journal_with_one_record("ask-again");
+    let holder = hold(&journal);
+    let asked = Instant::now();
+    let quick = journal
+        .appended_within(Duration::ZERO, &closed("quick"), |_| {
+            closed("quick").image().to_vec()
+        })
+        .expect_err("held: a zero bound refuses");
+    assert!(
+        a_refusal_is_the_bound(asked.elapsed(), &quick).is_err(),
+        "{quick}"
+    );
+    let waiter = std::thread::scope(|s| {
+        let waiter = s.spawn(|| append_or_ask_again(&journal, &closed("patient")));
+        std::thread::sleep(APPEND_LOCK_WAIT * 5 / 2);
+        holder.release().expect("released");
+        waiter.join().expect("the waiter")
+    });
+    assert!(waiter.0, "the record lands on a later ask: {waiter:?}");
+    assert!(
+        waiter.1 >= 1,
+        "the first ask waited out the bound: {waiter:?}"
+    );
+    assert_eq!(
+        journal.look().records(),
+        2,
+        "the seed and the patient record"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// code-5 itself: a run whose opening met another writer's append, and whose
