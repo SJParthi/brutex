@@ -92,14 +92,20 @@
 //! | 60 | 4 | CRC-32C of bytes 0..60 |
 //!
 //! THE INDEX NEVER LAGS ITS LEDGER UNSAID. A reader compares the ledger
-//! bytes the image describes with the ledger's length (one `lstat`): equal,
-//! or a writer holds the lock now (an act in flight: the image is the state
-//! before it), and the image is the answer; otherwise an act is ledgered and
-//! not indexed — a publish refused or killed after its ledger line, a ledger
-//! restored or cut — and the reader answers [`QuarantineError::Stale`] by
-//! name. A writer that finds the image behind (or ahead of) the ledger
-//! rebuilds it from the ledger under the lock before its own act, so the
-//! next writer of any month of the feed finishes what a failed one left.
+//! bytes the image describes with the ledger's length (one `lstat`), and only
+//! an image that describes the WHOLE ledger is ever the answer. One behind it
+//! holds an act ledgered and not indexed: a writer's act in flight, an act
+//! whose publish was refused or cut off by a kill after its ledger line, or a
+//! ledger restored or cut. While the next writer is bringing the index level,
+//! a reader cannot tell an act in flight from a failed one, so it never takes
+//! the lag for the first: while a writer holds the lock it waits for that
+//! writer's image within its thread's patience ([`crate::flock::patience`]:
+//! none for the CLI and the importer, some for the server's page reads) and is
+//! refused by name when that runs out ([`QuarantineError::BeingWritten`]);
+//! with no writer it is refused by name too ([`QuarantineError::Stale`]). A
+//! writer that finds the image behind (or ahead of) the ledger rebuilds it
+//! from the ledger under the lock before its own act, so the next writer of
+//! any month of the feed finishes what a failed one left.
 //!
 //! # Writers
 //!
@@ -120,8 +126,10 @@
 //!
 //! [`probe`]: one `open` (ENOENT for a feed never quarantined), one `fstat`,
 //! one `lstat` of the ledger and two positional reads (the 64-byte header and
-//! the 512-byte bucket) — O(1); a second try of the same when the image and
-//! the ledger disagree, and one non-blocking `flock` then. [`Snapshot::load`]:
+//! the 512-byte bucket) — O(1); when the image and the ledger disagree, a
+//! second look at once and one non-blocking `flock`, and while a writer holds
+//! the lock the same again after each pause, for at most the thread's
+//! patience (never past [`crate::flock::MAX_PATIENCE`]). [`Snapshot::load`]:
 //! one read of the whole index (524,800 bytes), once per cached body; each
 //! lookup after it O(1). [`record`]: one ledger append and one index image —
 //! O(index) on the write path, never on a read, plus one pass over the ledger
@@ -135,7 +143,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use brutex_core::vendor::Vendor;
 
@@ -647,7 +655,9 @@ fn encode_slot(hash: &[u8; 16], month: u32, entry: &Entry, slot: u64) -> [u8; SL
 /// [`QuarantineError::Torn`] for an index of the wrong length,
 /// [`QuarantineError::HeaderDamaged`] for one whose header does not check,
 /// [`QuarantineError::Stale`] for one that does not describe the whole
-/// ledger while no writer is at work, [`QuarantineError::Damaged`] for a slot
+/// ledger while no writer is at work, [`QuarantineError::BeingWritten`] for
+/// one that still does not as the thread's patience runs out while a writer
+/// holds the lock, [`QuarantineError::Damaged`] for a slot
 /// on the key's run that fails its checksum, and a host refusal. Never
 /// [`Probe::Clear`] for an index it cannot trust.
 pub fn probe(root: &Path, path: StorePath<'_>) -> Result<Probe, QuarantineError> {
@@ -666,20 +676,7 @@ pub fn probe_at(
     month: YearMonth,
 ) -> Result<Probe, QuarantineError> {
     let index = index_path(root, feed);
-    // TWO TRIES, NO MORE: a writer may rename a new image between this read
-    // of the index and the ledger's length, and the second try reads it.
-    let mut tries = 0;
-    let opened = loop {
-        tries += 1;
-        let opened = open_index(&index)?;
-        let built_from = opened.as_ref().map_or(0, |(_, built)| *built);
-        match level_with_ledger(root, feed, &index, built_from) {
-            Ok(()) => break opened,
-            Err(_) if tries < 2 => {}
-            Err(stale) => return Err(stale),
-        }
-    };
-    let Some((file, _)) = opened else {
+    let Some(file) = level_read(root, feed, &index, || open_index(&index))? else {
         return Ok(Probe::Clear);
     };
     let hash = hash_of(key, month);
@@ -739,26 +736,125 @@ fn described(header: &[u8]) -> Option<u64> {
     checks.then(|| u64::from_le_bytes(field(header, 40)))
 }
 
-/// Whether an image describing `built_from` ledger bytes answers now: the
-/// ledger holds exactly that many, or more while a writer holds the lock (an
-/// act in flight, whose state before it is the image). Anything else is
-/// [`QuarantineError::Stale`]. One `lstat`, and one non-blocking shared
-/// `flock` only when the two disagree.
-fn level_with_ledger(
+/// One look at the feed's index against its ledger.
+enum Look<T> {
+    /// The image describes the whole ledger: what was read of it, `None`
+    /// when there is no index and no ledger.
+    Level(Option<T>),
+    /// It does not: the ledger bytes it describes, the ledger's length, and
+    /// whether a writer held the lock at this instant.
+    Behind {
+        built_from: u64,
+        ledger_len: u64,
+        writing: bool,
+    },
+}
+
+/// `open` once, then the ledger's length (one `lstat`), and one
+/// non-blocking shared `flock` of the writer's lock only when the two
+/// disagree.
+fn look<T>(
+    root: &Path,
+    feed: Vendor,
+    open: &mut impl FnMut() -> Result<Option<(T, u64)>, QuarantineError>,
+) -> Result<Look<T>, QuarantineError> {
+    let opened = open()?;
+    let built_from = opened.as_ref().map_or(0, |(_, built)| *built);
+    let ledger_len = ledger_len(root, feed)?;
+    if ledger_len == built_from {
+        return Ok(Look::Level(opened.map(|(found, _)| found)));
+    }
+    Ok(Look::Behind {
+        built_from,
+        ledger_len,
+        writing: ledger_len > built_from && writer_active(root, feed),
+    })
+}
+
+/// What `open` reads of the feed's index (it answers what it read and the
+/// ledger bytes the image describes), ONLY from an image that describes the
+/// whole ledger. AN IMAGE BEHIND ITS LEDGER IS NEVER THE ANSWER (R4-18
+/// repair 2): a writer holding the lock may be writing its own act, or
+/// bringing the index level with one a failed publish left unindexed, and a
+/// reader cannot tell which — taking the lag for the first answered "clear"
+/// for a month the second recorded whole.
+///
+/// Each attempt looks twice, the second at once: a writer may rename a new
+/// image between the read of the index and the ledger's length. While a
+/// writer holds the lock the reader asks again through the store's one wait
+/// loop ([`crate::flock::patiently`], pausing 1 ms doubling to 16 ms) for at
+/// most its thread's patience ([`crate::flock::patience`]: none, so refused
+/// at once, unless its caller set some, as the server's page reads do), and
+/// what it waited is spent from that patience, so the months one request
+/// probes share one budget.
+///
+/// # Errors
+///
+/// [`QuarantineError::Stale`] when the image lags its ledger and no writer
+/// holds the lock, [`QuarantineError::BeingWritten`] when one still does as
+/// the patience runs out, and `open`'s and the ledger's refusals.
+fn level_read<T>(
     root: &Path,
     feed: Vendor,
     index: &Path,
-    built_from: u64,
-) -> Result<(), QuarantineError> {
-    let ledger_len = ledger_len(root, feed)?;
-    if ledger_len == built_from || (ledger_len > built_from && writer_active(root, feed)) {
-        return Ok(());
-    }
-    Err(QuarantineError::Stale {
+    mut open: impl FnMut() -> Result<Option<(T, u64)>, QuarantineError>,
+) -> Result<Option<T>, QuarantineError> {
+    let started = Instant::now();
+    let mut behind = (0, 0);
+    let mut answer: Result<Option<T>, QuarantineError> = Err(QuarantineError::Stale {
         path: index.to_path_buf(),
-        built_from,
-        ledger_len,
-    })
+        built_from: 0,
+        ledger_len: 0,
+    });
+    let waited = crate::flock::patiently(
+        crate::flock::patience(),
+        Instant::now,
+        std::thread::sleep,
+        || {
+            let mut writing = false;
+            for _ in 0..2 {
+                match look(root, feed, &mut open) {
+                    Ok(Look::Behind {
+                        built_from,
+                        ledger_len,
+                        writing: now,
+                    }) => {
+                        behind = (built_from, ledger_len);
+                        writing = now;
+                    }
+                    Ok(Look::Level(found)) => {
+                        answer = Ok(found);
+                        return Ok(());
+                    }
+                    Err(why) => {
+                        answer = Err(why);
+                        return Ok(());
+                    }
+                }
+            }
+            answer = Err(QuarantineError::Stale {
+                path: index.to_path_buf(),
+                built_from: behind.0,
+                ledger_len: behind.1,
+            });
+            if writing {
+                Err(std::fs::TryLockError::WouldBlock)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    let spent = started.elapsed();
+    crate::flock::spend_patience(spent);
+    match waited {
+        Ok(()) => answer,
+        Err(_still_written) => Err(QuarantineError::BeingWritten {
+            path: index.to_path_buf(),
+            built_from: behind.0,
+            ledger_len: behind.1,
+            waited_ms: u64::try_from(spent.as_millis()).unwrap_or(u64::MAX),
+        }),
+    }
 }
 
 /// The ledger's length, `0` when there is none. One `lstat`; a ledger that is
@@ -854,23 +950,16 @@ impl Snapshot {
     /// As [`probe`], for the header and any slot of the index.
     pub fn load(root: &Path, feed: Vendor) -> Result<Self, QuarantineError> {
         let index = index_path(root, feed);
-        // TWO TRIES, as `probe_at`: a writer may publish in between.
-        let mut tries = 0;
-        let image = loop {
-            tries += 1;
-            let image = read_image(&index)?;
-            let built_from = match &image {
-                None => 0,
-                Some(image) => described(image).ok_or_else(|| QuarantineError::HeaderDamaged {
-                    path: index.clone(),
-                })?,
+        // ONLY A LEVEL IMAGE, as `probe_at` (`level_read`).
+        let image = level_read(root, feed, &index, || {
+            let Some(image) = read_image(&index)? else {
+                return Ok(None);
             };
-            match level_with_ledger(root, feed, &index, built_from) {
-                Ok(()) => break image,
-                Err(_) if tries < 2 => {}
-                Err(stale) => return Err(stale),
-            }
-        };
+            let built_from = described(&image).ok_or_else(|| QuarantineError::HeaderDamaged {
+                path: index.clone(),
+            })?;
+            Ok(Some((image, built_from)))
+        })?;
         let Some(image) = image else {
             return Ok(Self::default());
         };

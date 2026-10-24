@@ -824,10 +824,6 @@ pub fn repair_month_with(
     check_rows(path, offered.len() as u64)?;
     survey(offered)?;
     Admission::new(path.month(), path.timeframe().secs()).admit(offered)?;
-    // NEVER A BAR THE QUARANTINE SET ASIDE (R4-18 repair 2): a vendor
-    // re-pull still holds them, and they are not bars the month lacks.
-    let (offered, _held_back) = outside_quarantine(root, path, offered)?;
-    let offered: &[Bar] = &offered;
     let served = crate::generation::served(root, path)?;
     let served_root = served.root(root);
     for kind in [FileKind::Overlay, FileKind::Greeks] {
@@ -840,6 +836,16 @@ pub fn repair_month_with(
         let source = BarFile::open_existing(root, path, symbol_id)?;
         let header = source.header();
         check_header(path, header)?;
+        // NEVER A BAR THE QUARANTINE SET ASIDE (R4-18 repair 2): a vendor
+        // re-pull still holds them, and they are not bars the month lacks.
+        // JUDGED ONCE THE SERVED MONTH IS OPEN: a drop ledgers its intent
+        // before its door promotes, so a month opened after that promotion
+        // meets the intent here, and one opened before it is refused at this
+        // repair's promotion (`RepairError::StaleSource`). Judged before the
+        // open, a drop landing between the two read as nothing set aside and
+        // its stamps were added back to the generation it promoted.
+        let (offered, _held_back) = outside_quarantine(root, path, offered)?;
+        let offered: &[Bar] = &offered;
         let ceiling = row_ceiling(path);
         let limit = |_| RepairError::RowLimit {
             rows: header.n_valid,
@@ -1119,17 +1125,19 @@ pub fn restate_month(
     check_rows(path, corrected.len() as u64)?;
     survey(corrected)?;
     Admission::new(path.month(), path.timeframe().secs()).admit(corrected)?;
-    let (corrected, held_back) = outside_quarantine(root, path, corrected)?;
-    let corrected: &[Bar] = &corrected;
     let served = crate::generation::served(root, path)?;
     let compare = Policy {
         open_interest_applies: policy.open_interest_applies,
         basis_witness: false,
     };
-    let (header, merged, restated_at, added) = {
+    let (header, merged, restated_at, added, held_back) = {
         let source = BarFile::open_existing(root, path, symbol_id)?;
         let header = source.header();
         check_header(path, header)?;
+        // NEVER A STAMP THE QUARANTINE SET ASIDE, judged once the served
+        // month is open, as `repair_month_with` judges it and for its reason.
+        let (corrected, held_back) = outside_quarantine(root, path, corrected)?;
+        let corrected: &[Bar] = &corrected;
         let held = usize::try_from(header.n_valid).unwrap_or(usize::MAX);
         let mut merged = Vec::with_capacity(held.saturating_add(corrected.len()));
         let mut offer = corrected.iter().peekable();
@@ -1152,7 +1160,7 @@ pub fn restate_month(
             added += 1;
             merged.push(*late);
         }
-        (header, merged, restated_at, added)
+        (header, merged, restated_at, added, held_back)
     };
     if restated_at.is_empty() && added == 0 {
         return Ok(MonthRestate::NothingNew {

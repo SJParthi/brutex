@@ -457,3 +457,43 @@ async fn a_press_whose_client_leaves_holds_the_press_until_its_work_ends() {
         "the left press's work applied once: {ledger}"
     );
 }
+
+/// THE SELF-CHECK OF REPAIR 2: while a writer held the feed's quarantine
+/// lock, `/bars.json` answered from an index behind its ledger — the month
+/// served, its bars and all, whatever the unindexed act said of it. Now the
+/// read waits for the writer's image within its patience and answers "being
+/// written, ask again" (503, `"being_written":true`) when it does not land,
+/// and with no writer at work the lag is named stale.
+#[tokio::test]
+async fn bars_json_asks_again_while_a_quarantine_writer_brings_its_index_level() {
+    let fixture = Fixture::new("r418-being-written");
+    fixture.month(ym(2018, 3), 77_713, 3);
+    // The lock, the ledger and the index exist.
+    fixture.quarantine_whole(ym(2018, 2), 3);
+    // THE LEDGER AHEAD OF ITS INDEX: an append in flight.
+    let ledger = store::quarantine::ledger_path(&fixture.root, Vendor::Zerodha);
+    let mut text = fs::read(&ledger).expect("the ledger");
+    text.extend_from_slice(b"1792\tzerodha\tNSE/CASH/QFIXQ/1min\t2018-03\twhole_mo");
+    fs::write(&ledger, &text).expect("a ledger ahead of its index");
+    // A WRITER HOLDS THE FEED'S QUARANTINE LOCK.
+    let lock = fs::File::open(fixture.root.join("audit").join("zerodha.quarantine.lock"))
+        .expect("the quarantine lock");
+    lock.lock().expect("held by a writer");
+    let uri =
+        format!("/bars.json?feed=zerodha&exchange=NSE&segment=CASH&symbol={SYMBOL}&month=2018-03");
+    let (status, body) = get(&fixture.site, &uri).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["being_written"], true, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|said| said.contains("quarantine_being_written")),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("77713"), "never its bars: {body}");
+    // THE WRITER GONE, THE INDEX STILL BEHIND: named stale.
+    lock.unlock().expect("let go");
+    let (status, stale) = get(&fixture.site, &uri).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{stale}");
+    assert_eq!(stale["code"], "quarantine_index_stale");
+}

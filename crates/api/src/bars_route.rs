@@ -590,16 +590,23 @@ fn quarantine_answer(site: &Loaded, asked: &Addressed) -> Option<(axum::http::St
             ))
         }
         Ok(_) => None,
-        Err(why) => Some((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                r#"{{"error":{},"code":{}}}"#,
-                render::json_string(&format!(
-                    "whether this month is quarantined is not known: {why}"
-                )),
-                render::json_string(why.code())
-            ),
-        )),
+        Err(why) => {
+            let said = format!("whether this month is quarantined is not known: {why}");
+            // A WRITER STILL BRINGING THE INDEX LEVEL past the read's
+            // patience is "being written, ask again" (R4-18 repair 2): 503
+            // with `Retry-After`, as a month a writer holds, never a 500.
+            if let Some(answer) = crate::detail::being_written_answer(std::slice::from_ref(&said)) {
+                return Some(answer);
+            }
+            Some((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    r#"{{"error":{},"code":{}}}"#,
+                    render::json_string(&said),
+                    render::json_string(why.code())
+                ),
+            ))
+        }
     }
 }
 

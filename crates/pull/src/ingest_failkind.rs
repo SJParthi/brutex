@@ -34,7 +34,9 @@ use store::repair::RepairError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FailKind {
     /// Another process holds the month (a writer, or a reader's shared lock),
-    /// or the repair found its source advanced under it. Retried for at most
+    /// or the repair found its source advanced under it, or the feed's
+    /// quarantine index was still being brought level by its writer (R4-18
+    /// repair 2). Retried for at most
     /// two seconds at the import's call site, then `month_busy`; held back.
     MonthBusy,
     /// The host said the disk is full: the run ends `disk_full`.
@@ -199,6 +201,13 @@ impl FailKind {
             // R4-18 repair 2: a month quarantined whole takes no bar, for
             // good; no later build or repair lifts a quarantine.
             | RepairError::Quarantined(_) => Self::RepairImpossible,
+            // R4-18 repair 2: a writer of the feed's quarantine still bringing
+            // its index level as the reader's patience ran out (the
+            // importer's is none): the month is busy, as a month a writer
+            // holds, retried at the import's call site; never store damage.
+            RepairError::QuarantineUnknown(
+                store::quarantine::QuarantineError::BeingWritten { .. },
+            ) => Self::MonthBusy,
             // R4-18 repair 2: the feed's quarantine index or ledger cannot
             // be trusted (torn, stale, damaged), so which offered bars it
             // set aside is not known: a fault of the store, held back, read

@@ -443,6 +443,15 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
             }),
             FailKind::StoreDamaged,
         ),
+        (
+            RepairError::QuarantineUnknown(store::quarantine::QuarantineError::BeingWritten {
+                path: p(),
+                built_from: 28,
+                ledger_len: 300,
+                waited_ms: 0,
+            }),
+            FailKind::MonthBusy,
+        ),
         (RepairError::MissingTimestamp(7), FailKind::BatchRefused),
         (
             RepairError::BeforePromote {

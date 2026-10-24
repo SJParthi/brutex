@@ -1651,3 +1651,55 @@ fn an_image_behind_its_ledger_is_never_the_answer_while_a_writer_holds_the_lock(
         "{after:?}"
     );
 }
+
+/// THE SELF-CHECK OF REPAIR 2, the doors: a repair judged the quarantine
+/// before it opened the served month, so a drop intended and promoted between
+/// the two read as nothing set aside and its stamps were added back. The door
+/// judges it once the month is open now; this is the other half of that
+/// protocol, which holds by the promotion's check: a drop landing after the
+/// repair opened the month (here between its publication and its promotion)
+/// refuses the repair's promotion, and the repair asked again holds the
+/// dropped stamps back and adds only the minute the month truly lacks.
+#[test]
+fn a_drop_landing_inside_a_repair_refuses_its_promotion_and_the_retry_holds_the_stamps_back() {
+    let store = Store::new("repair-meets-drop");
+    let path = minute("QFIXO1", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 6_241)).collect();
+    store.month(path, &rows);
+    let named = [rows[2].ts_micros, rows[3].ts_micros];
+    let mut offered = rows.clone();
+    offered.push(bar(9, 6_241));
+    let policy = repair::Policy {
+        open_interest_applies: false,
+        basis_witness: true,
+    };
+    let root = store.root.clone();
+    let mut drop_lands = |_revision: &Path| {
+        apply_month(&root, path, SYMBOL, &named, why(Cause::ForeignLevel))
+            .map(|_| ())
+            .map_err(|why| why.to_string())
+    };
+    let raced = repair::repair_month_with(
+        &store.root,
+        path,
+        SYMBOL,
+        &offered,
+        policy,
+        Some(&mut drop_lands),
+    );
+    assert_eq!(raced.as_ref().err(), Some(&RepairError::StaleSource), "{raced:?}");
+    let served: Vec<i64> = store.served_bars(path).iter().map(|b| b.ts_micros).collect();
+    assert_eq!(served.len(), 4, "the drop stands: {served:?}");
+    assert!(named.iter().all(|at| !served.contains(at)), "{served:?}");
+    let again = repair::repair_month(&store.root, path, SYMBOL, &offered, policy);
+    assert!(
+        matches!(again, Ok(repair::MonthRepair::Repaired { added: 1, .. })),
+        "{again:?}"
+    );
+    let served: Vec<i64> = store.served_bars(path).iter().map(|b| b.ts_micros).collect();
+    assert_eq!(served.len(), 5, "{served:?}");
+    assert!(
+        named.iter().all(|at| !served.contains(at)),
+        "never re-served: {served:?}"
+    );
+}
