@@ -32,6 +32,8 @@ files on `origin/cloud/db-base-20261024`, in this folder:
    `origin/feat/db-fix`: `git log origin/feat/db-fix --first-parent --merges --format=%s | grep "^Merge <name>:"`.
    If one is missing, write `STATUS: BLOCKED` with the missing names, push, and wait for GO again
    (the Mac re-arms you when they merge). Never build on an unmerged part.
+   A link your file marks FILES_ONLY ("merge first, do not block the start") does NOT block your start:
+   build now; only your merge-back waits for it (24 Oct: AG-06b's link to IA-10c, R4-05's link to R3-21).
 2. Branch `cloud/db-<NAME>-20261024` from the newest `origin/feat/db-fix`. Merge the newest
    `origin/feat/db-fix` into it again before your final gates.
 3. Read `CLAUDE.md` (the law), `CONTEXT.md`, then your part's file in full. Edit only the files your
@@ -85,8 +87,8 @@ files on `origin/cloud/db-base-20261024`, in this folder:
   is the option greek).
 - Gates, all green before `STATUS: DONE`: `cargo fmt --all --check`;
   `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked`;
-  `cargo deny check` (green on `feat/db-fix` since 17 Oct: it must stay green after you merge the newest
-  `origin/feat/db-fix`); the CI shell gates under `.github/` that touch your files; 100% line and branch
+  `cargo deny check` (green on `feat/db-fix` since BASE-REDS-1021 merged on 22 Oct; it was red 21-22 Oct on
+  RUSTSEC-2026-0381/0382; it must stay green after you merge the newest `origin/feat/db-fix`); the CI shell gates under `.github/` that touch your files; 100% line and branch
   coverage and no surviving mutant on the modules you touched (`cargo llvm-cov --branch`,
   `cargo mutants --in-diff`). If a tool cannot be installed here, say so plainly and list the run
   under NEEDS THE MAC.
