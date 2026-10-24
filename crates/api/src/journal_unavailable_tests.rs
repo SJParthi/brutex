@@ -784,6 +784,30 @@ async fn an_fno_walk_whose_opening_is_refused_asks_nothing_and_appends_nothing()
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **A RECOVERY UNIT REFUSED AT ITS OPENING FAILS AND APPENDS NOTHING**
+/// (extreme: the third driver). `recovery_spot` runs the same `broker_run_by`
+/// with `Driver::Recovery`; a unit whose opening the journal refuses returns
+/// the refusal as its error, the failed audit append it is, asks the vendor
+/// nothing, and writes no `Refused` record behind it.
+#[tokio::test]
+async fn a_recovery_unit_refused_at_its_opening_fails_by_name_and_appends_nothing() {
+    let vendor = CountingVendor::rejecting();
+    let (site, asked, root) = spot_site("recovery", &vendor);
+    let journal = site.journal();
+    let seat = site
+        .autopilot
+        .take_seat(asked.feed)
+        .expect("nothing else holds the feed's seat");
+    let holder = hold(&journal);
+    let unit = recovery_spot(&site, &asked, seat).await;
+    holder.release().expect("released");
+    let why = unit.expect_err("a unit refused at its opening is a failure");
+    assert!(why.starts_with("journal_unavailable: "), "{why}");
+    assert_eq!(vendor.asked(), 0);
+    assert_eq!(journal.look().records(), 0, "nothing appended");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// **OUT OF THE BOX: THE JOURNAL REPLACED WHILE THE OPENING WAITS.** The
 /// opening opened the journal, met the held lock and waited; meanwhile the
 /// journal was moved aside and a new one put at its path, and only then did
