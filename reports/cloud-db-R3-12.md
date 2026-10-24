@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-12: /db reads its lists from the server: no whole-list download, no typed lists, rows kept as columns
 
@@ -92,13 +92,50 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
   - W4 (unused CSS selectors, ceiling 0): 0 on this branch, 0 at base.
   - `npm run build`: exit 0.
 
+## Done in the fourth round (commits 1d5d9677, 1b4986b3, c42e9730, 01889efe)
+
+- D-7111 (the one decision R3-12 locks: a /db view reads only what it shows), invariants
+  R312-01..11, limits L-R312-01..07.
+- DB-B47, the page half: the window route's half is fixed at the head (`life_of`, `served_end` in
+  `crates/api/src/bars_series.rs`: an `INDEX` is owed to the feed's served end; a `CASH` share and a
+  contract keep their held life). The Coverage grid drew an index's months after its newest file as
+  nothing; now `owedTo` (selection-model.js) moves its last owed month to the wider of the feed's
+  `archive.to` and `window.to` (the route's widest-of rule; `archive.to` on `/feeds.json` is itself
+  the widest of the descriptor, the import journal and the census), and `absentMonthsOf`
+  (DbCoverageGrid.svelte) draws them as absent rows. Test `an_index_owes_its_months_to_the_feeds_span_end`
+  (census-scope.test.js, 30 pass).
+- L-R312-07, said plainly: a scope's rows are row objects (`decodeCensus`, at most 4,096 a segment
+  read), not typed columns; the typed columns are WP-56b's whole-census path, which /db no longer
+  takes. Making the scope columnar changes `StoreRow` for every reader of `store.rows`; not done.
+- Rust gates on this branch (R3-12 changes no file under `crates/`: `git diff 7b397bbe HEAD --
+  crates Cargo.toml Cargo.lock` is empty):
+  - `cargo fmt --all --check`: exit 0. `cargo clippy --workspace --all-targets --locked -- -D
+    warnings`: exit 0.
+  - `cargo test --workspace --locked` stopped at its first failing suite, `api --lib`: 2,461 pass,
+    10 fail, 13 ignored. Nine reproduce alone and are red at the base inputs too (the tree's `web/`
+    and `docs/` checked out at 7b397bbe, then restored): `detail::tests::a_refused_admission_names_what_its_bound_and_why`,
+    `pullrun::restart_tests::the_journals_own_extremes`, `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`
+    ("this host reads a 000 directory (root?)": the container runs as root), five
+    `server::head_deadline_body_tests` (slow-reader timing), and
+    `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+    (its child process never finishes: killed after 25 min on the branch; at the base inputs it did
+    not finish inside 240 s either). The tenth, `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`,
+    passed when run again alone.
+  - `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit`
+    (the hanging test is skipped only so the other crates' suites are reached; it is reported
+    above, not called green): running locally across the hold, log in the scratchpad.
+  - Gate 27 (`gates-ledger invariant-ids`): OK, 3,210 rows unique. Gate 27b: red at base only
+    (D-6247 heads two entries; not R3-12's). Gate 10: red at base only (R427-11, HA-02, AG05-13); with
+    those three rows taken out of a scratch copy, `invariant-paths` checks 3,024 references with exit
+    0 and `invariant-tests` names only HA-02 and AG05-13: every R312 row resolves.
+
 ## Left (NEXT)
 
-- NEXT: on GO: the cargo gates on the merged tree (`cargo fmt --all --check`, `cargo clippy
-  --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`; the workspace
-  test build had finished before the hold), `cargo deny` (not installed here: try `cargo install`,
-  else NEEDS THE MAC), one full `npm test`, the CI shell gates that touch R3-12's files, then the final
-  report with the extreme-case list, the measurements and NEEDS THE MAC.
+- NEXT: when HOLD is gone (or a GO-R3-12 returns): read the `--no-fail-fast` workspace run's result,
+  `cargo deny` (not installed here: `cargo install cargo-deny --locked`, else NEEDS THE MAC), one full
+  `npm test`, svelte-check and `npm run build` (then `git checkout -- web/build`), the ten-times
+  numbers at n = 20, then the final report: STATUS, every gate with its command, p50/p99/max, the
+  extreme-case list, files outside ownership, D-7111, and NEEDS THE MAC M1-M18.
 
 ## Log
 
@@ -143,9 +180,19 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
   `b422255d` pushed, report HELD; the cargo workspace build started before the hold runs on
   locally. Waiting for GO.
 
+### 2026-10-24 19:47 IST resumed (GO-R3-12 released the part)
+
+- Cargo gates, DB-B47's page half, D-7111 and the ledger rows (round four above).
+
+### 2026-10-24 20:30 IST save point, HOLD applies again
+
+- Every GO-<NAME> removed at 20:20 IST (`604b8f20`), HOLD present. Step finished, `01889efe`
+  pushed, report HELD. The `--no-fail-fast` cargo run continues locally. Waiting for HOLD to go.
+
 ## Decision numbers
 
-None used yet. D-7111 is reserved for R3-12 only if it locks a choice.
+D-7111 (the block D-7110..D-7119's second id, R3-12's): /db reads only what its view shows. No
+other number used.
 
 ## NEEDS THE MAC
 
