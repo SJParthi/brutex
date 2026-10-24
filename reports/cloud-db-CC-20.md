@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -121,3 +121,28 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
 - `docs/06-limits.md`: L-CHK-04 filled with the three api runs, and a paragraph naming the api
   harness's own reds.
 - NEXT: merge the newest `origin/feat/db-fix`, then the final gates.
+
+### 2026-10-24 14:46 IST: save point 8 (merged the newest base; gates so far; HELD)
+
+- Merged `origin/feat/db-fix` at `7b397bbe` (IA-4, R4-27, CLOUD-MUTSTORE, CLOUD-MUTCLI): commit
+  d0bcdd6e; conflicts only in the pull harness's mount list and the three ledgers, resolved as
+  both, in merge order. `cargo fmt --all` then formatted only CC-20's own files (94288974).
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: `Finished`, exit 0.
+- `cargo deny check` (cargo-deny 0.19.0, CI's pin): `advisories ok, bans ok, licenses ok, sources ok`.
+- `cargo mutants --in-diff <the CC-20 diff> --list --workspace` (26.2.0, CI's pin): `No mutants to
+  filter` (the diff changes no library or binary source).
+- `cargo test --workspace --locked --no-fail-fast`: 10,988 passed, 59 failed, in api (8),
+  cli (29 + 2 in `gdfl_run_logs`), pull (12), store (3 + 1 in `cited_commits`), telemetry; none in
+  core (`bench_modules` 4 passed, `cost_invariants` 5 passed). Two existing api tests HANG in this
+  container (0% CPU for 24 and 15 minutes, again alone under a 3-minute timeout):
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+  and `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
+  (`tests/cloud_mutants_bars.rs`); the run skipped exactly those two by name, and
+  `cloud_mutants_bars`' other 58 passed. No failing or hanging test is in a file CC-20 touched;
+  the messages name root (a mode-000 directory read), read-only folders, the build stamp and timing.
+  A run of the same five crates' tests on an unmodified base worktree is in progress to compare
+  the failure sets (the first try ran out of disk; scratch build output was deleted and it was
+  restarted).
+- HOLD found at 14:46 IST: held. The base comparison keeps running in the background.
+- NEXT: compare the base's failure set with this branch's; then the final report.
