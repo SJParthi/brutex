@@ -1574,7 +1574,6 @@ mod tests {
         assert!(is_claim("worst worst casecase"));
     }
 
-
     /// The price-shape sense of `flat` (R4-27, INT-15, D-7270): a FLAT CARRY
     /// is a minute whose four prices equal the close before it, a shape of a
     /// bar and never a cost. R4-27's merge brought 21 such blocks, which the

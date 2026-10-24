@@ -1048,3 +1048,10 @@ confirmed by two skeptics; their corrections are applied.
   name it, and is then asked again; every record must land (BRED-18, D-7152
   addendum). The production wait is unchanged; this is a load race in a
   test's reading of a right refusal.
+- **BRED23-F17: gate 6c, two gate tools left unformatted by this package's
+  own R4-27 edits.** `.github/gates_bounds.rs` (a doubled blank line) and
+  `.github/gates_tree.rs` (`R4_27_LITERAL` wrapped) failed
+  `rustfmt --edition 2024 --check` in bred1023-full10; `cargo fmt` never
+  reads `.github/`, so the fast language-purity runs could not see it.
+  FIXED: both formatted; gate 6c's fmt and both clippy-driver passes run by
+  hand clean.

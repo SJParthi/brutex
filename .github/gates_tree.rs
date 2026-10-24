@@ -2997,8 +2997,7 @@ const MERGED_17_23_OCT_LITERAL: &str = "\
 // `padded_tests` fixture (`root("match")`). None names an account, an
 // environment, a vendor credential or a field of a parameter path; none is one
 // of gate 1c's ten environment words.
-const R4_27_LITERAL: &str =
-    "as_trade keep_flat match rate_before_series rate_carried_too_long rate_hole_before_gap rate_stale";
+const R4_27_LITERAL: &str = "as_trade keep_flat match rate_before_series rate_carried_too_long rate_hole_before_gap rate_stale";
 
 // IA-4's merge (24 Oct 2026; BASE-REDS-1023, D-7147 addendum): `ia4-f44`,
 // `ia4-currency` and `ia4-resume` are scratch-root names of
