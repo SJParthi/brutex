@@ -83718,3 +83718,216 @@ with the day's shape, which needs DATA-1's per-stock-day verdicts kept as
 store data rather than CSVs under `--out` (owner: DATA-1 / R4-26).
 
 **Proof.** `cli::research_policy::tests::a_percentage_statistic_on_a_quantised_run_is_refused_or_labelled`.
+
+### D-4816 — The options reader refuses per row, with the capital-market reader's D-3318 types and bounds (IA-4; design §8 F8, FM-077's decode half) — 2026-10-23
+
+**Number** of the ingest automation design (§15); landed by IA-4, the
+package its "Lands with" column names.
+
+**Decided.** `gdfl_nfo::decode` refuses a bad row by name and reads the rest
+of its file, exactly as `gdfl_cm` has since D-3318 and with its own types:
+`RowFault` (`malformed`, `off_grid`, `zero_ltp`), `RefusedRow`,
+`RowsRefused` (every row counted by fault, the first `NAMED_ROWS` = 16
+named with their line) and the bound `MAX_BAD_ROWS` = 64 AND one in every
+`BAD_ROWS_PER` = 1,000 rows read, past both of which the file is
+`NfoRefusal::TooManyBadRows { refused, rows }`, whose cause is the capital
+market's `too_many_bad_rows` (vendor, closes). No second, looser rule
+exists: the options reader imports the capital-market reader's constants,
+and `RowsRefused::note` is the one counter both readers call. A row that is
+not ten well-formed fields, not UTF-8, whose Time is not `HH:MM:SS`, whose
+quote, quantity or open-interest field is not a plain number (a negative LTQ
+included), or whose LTP is not a plain decimal is `malformed`; an LTP off
+the two-place grid or past what paisa hold is `off_grid`; a TRADED row at
+zero is `zero_ltp` (an untraded row at zero is still kept; one paisa is a
+price, D-2806). Whole-file refusals stay: a Ticker or Date that is not the
+file's (a row of another file), a LAST line with no newline after it that
+is malformed (where a cut or NUL-padded file shows, §8 F9, F42) or ends in a
+bare CR (a file cut between the CR and its LF, complete row or not, §8 F7:
+the capital-market reader's rule for the same bytes; until this change the
+options reader stripped that CR and read a cut file as a whole one; 0 such
+files on every options day of 2018-09-03 to 2018-12-31, the newline-less
+days of §8 F8 included, `no_real_option_file_of_2018_ends_in_a_bare_cr`,
+measured read-only on the tick store on 23 Oct 2026: 79 days, 482,538
+files, 446,963 ending in LF, 35,575 in a row's last field, 0 in a bare CR), the row bound (which
+now counts every row READ, kept or refused, as the capital market's does),
+and a file that kept no row, which names its first refused row's own
+refusal (`MalformedRow`, `PriceRefused`, `OpenInterestRefused`), so a lone
+bad row is refused exactly as before. The import says one `warn` line per
+file with refused rows (`gdfl_cm::note_refused_rows`, D-3341), and
+`option_handed` passes the count into the D-3335 ledger (§8 F44).
+
+**Why.** One bad row lost whole contract-days: 2018-11-09 (a time
+`99:a9:99` at line 451 of 4,353 rows), 2018-11-06 (an LTP with a letter at
+line 13,668 of 13,991) and 2026-04-16's ten negative-LTQ files. The capital
+market's rule was already decided (D-3318); two rules for one vendor's one
+row shape would be the special case the operator's standing rule refuses.
+
+**Changes the bars an options file builds,** so it lands with bar
+definition 5 in the same change (D-4877, D-2822).
+
+**Proved by** `pull::gdfl_nfo::tests::every_row_fault_is_refused_by_name_at_its_line`,
+`an_option_row_with_eleven_fields_is_refused_and_the_file_read` (IA-MX-F6),
+`an_option_row_that_is_not_utf8_is_refused_and_the_file_read` (F10),
+`an_option_row_with_a_bad_time_is_refused_by_line_and_the_rest_read` (F13),
+`an_option_row_with_letters_in_its_price_is_refused_by_line_and_the_rest_read` (F38),
+`a_traded_option_row_at_zero_is_refused_and_the_file_read` (F20),
+`one_zero_priced_traded_row_is_refused_and_the_file_kept` (FM-077's decode
+half; R4-22, IMPORT-BAD-ROW, names the row in the audit stream and closes it),
+`an_option_price_with_a_third_decimal_refuses_its_row` (F21),
+`a_negative_option_quantity_refuses_its_row_and_the_file_lands` (F23),
+`a_malformed_quote_field_refuses_its_row_in_both_readers` (F33),
+`a_blank_line_is_a_malformed_row` (F39), `a_repeated_header_line_is_a_malformed_row`
+(F40), `a_quoted_field_is_refused_by_its_rule` (F41),
+`a_nul_tail_is_read_as_a_cut_last_line` (F42),
+`an_option_file_cut_between_cr_and_lf_is_refused_whole` (F7), `an_overlong_line_is_a_malformed_row`
+(F43), `too_many_bad_rows_refuse_an_options_file_at_the_capital_markets_bound`,
+`the_row_bound_counts_refused_rows_too`,
+`per_row_refusal_keeps_every_good_row_in_file_order_at_the_extremes`,
+`the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files`
+(the definition-4 reader as an oracle: 5 differs from it only where 4
+refused a file), `pull::gdfl_nfo::attack_tests::dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line`
+and `pull::gdfl_import::tests::ia4::too_many_bad_option_rows_have_the_capital_markets_cause`
+(docs/04-invariants.md IA4-01 to IA4-04). D-5800's allocation test
+(`crates/pull/tests/allocation.rs`
+`gdfl_nfo::a_row_of_half_a_million_fields_is_refused_without_holding_them`)
+pinned the whole-file refusal of a wide row in the MIDDLE of a file, which
+this decision ends: it now proves the row refused by name at line 3 with the
+good rows kept, a read file bounded at two copies of its bytes plus 16 KiB
+(the day file keeps one shared copy, `NfoDayFile::bytes`; 1,442 bytes over
+two copies measured), and the cut last line still refused whole under twice
+the file (docs/04-invariants.md AO1-02, amended).
+
+**Cost.** Unchanged class: O(bytes) per file, O(1) per row (a fixed
+18-slot field array, no allocation per row); one counter increment and at
+most 16 named rows per file. Measured on 23 Oct 2026
+(`per_row_refusal_costs_what_a_clean_file_costs`, a debug test build of
+this reader on the loaded shared machine, n = 200 decodes each of one
+invented 4,353-row file): clean p50 0.650 ms, p99 0.806 ms, max 1.005 ms;
+one refused row p50 0.653 ms, p99 0.756 ms, max 0.784 ms; 64 refused (the
+bound) p50 0.652 ms, p99 0.791 ms, max 0.828 ms, so refusing rows costs
+what reading them does. Taken again on the merged tree (the same test, same
+n, 23 Oct 2026 20:58 IST): clean p50 0.645 ms, p99 0.695 ms, max 0.708 ms;
+one refused p50 0.651 ms, p99 0.684 ms, max 0.694 ms; 64 refused p50
+0.653 ms, p99 0.690 ms, max 0.706 ms.
+
+**F40 differs from the design's wording.** A repeated header line is
+`Ticker,…`: both readers check the Ticker field first, so it is a row of
+another file and refuses the whole file in both, as D-4816's first
+whole-file rule says (0 such lines measured, `FMT-12`); a header-shaped
+line carrying the file's own Ticker and Date (its time `Time`) is the
+malformed row the design means.
+
+### D-4829 — An options header followed by empty fields is read when every row carries them (IA-4; design §8 F36) — 2026-10-23
+
+**Number** of the ingest automation design; landed by IA-4.
+
+**Decided.** A header of the ten known names (either observed header)
+followed by `k` exactly-empty fields, `1 <= k <= MAX_TRAILING_EMPTY` = 8
+(chosen, not sourced: the one measured file carries 4), is admitted: each
+data row must carry exactly `10 + k` fields whose last `k` are empty, the
+`k` fields are dropped, and `NfoFile::trailing_empty` says `k`. A row that
+breaks the shape is a malformed row under D-4816; a header with `k` past 8,
+a non-empty field, a space or anything else is `HeaderUnknown`, as before.
+The day ledger counts such files as D-4841's `trailing_empty_files` on the
+options `v=2` line (before `max_defer_s`), which `/dayflags.json` already
+reads; L-IA16-10's `trailing_empty_files` is counted from this change.
+
+**Why.** 2025-03-11's `BANKNIFTY26JUN2546500CE` (1,446 rows) carries four
+empty fields on its header and every row and was refused whole at its header
+(`header_unknown`); per-row refusal alone would refuse every row and end in
+`too_many_bad_rows`.
+
+**Proved by** `pull::gdfl_nfo::tests::a_header_with_empty_trailing_fields_is_read_when_every_row_matches`,
+`pull::gdfl_nfo::attack_tests::dpn_17_exactly_the_two_measured_headers_read`,
+`pull::gdfl_import::tests::ia4::an_options_days_refused_rows_reach_the_day_ledger`
+and `the_options_line_counts_trailing_empty_files_and_refused_rows`
+(IA4-05, IA4-06).
+
+### D-4877 — Bar definition 5: the options reader's per-row rule; options days under 2, 3 or 4 restate, every capital-market day stays current (IA-4) — 2026-10-23
+
+**Number** of the ingest automation design, which numbers this rule 4. **The
+design's `4` was taken first** by the cash closing auction's band through
+matching (SC-CLOSE-5, SC-CLOSE-6, D-3320, D-4878 item 10; merged with WP-12f
+repair 4, bd0da3c27, 13 Oct), so this rule is **5**; 1 to 4 keep their
+meanings (append-only).
+
+**Decided.** `BAR_DEFINITION` is 5, set in the same change as D-4816's and
+D-4829's decode (D-2822), and its doc's numbered list gains `5`. Currency
+stays per kind (`definition_is_current`): 5 is current for every kind; an
+OPTIONS day is current only under 5, so its days closed under 2, 3 or 4
+restate (4 left option bars exactly as 3 built them); a share's day from
+2026-08-03 is current under 4 or 5; an index day, and a share's day before
+2026-08-03, under 2, 3, 4 or 5, since 5 changes nothing a capital-market file
+builds. 0, 1 and any number past 5 are never current. `AUCTION_PREVIOUS`
+stays 3; `OPTION_ROWS_PREVIOUS` = 4 names what 5 replaced.
+
+**The restate (L-IA-28).** On the real journal as of 14 Oct 2026 (read only,
+`imports/gdfl.journal`, 23,270 lines), 3,490 options keys whose last close is
+`done` or `recounted` were closed under 2 (498) or 3 (2,992) and none under
+4: they cover **1,996 distinct options days, 2018-09-03 to 2026-09-30**, and
+every one restates under 5 (before this change only the 498 keys under 2
+did). At WP-16's measured 9.8 s wall for one options day (2020-09-15, empty
+scratch store) that is about **5.4 hours**, an EXTRAPOLATION that IA-13's
+measurement replaces. A restated file whose bars equal the held ones is
+answered `AlreadyPresent`; one whose bars differ is the hole
+`bars_differ_held` (D-4873), whose door is R3-22 (the critic's IA-18), not
+this change.
+
+**No fresh root (the no-fresh-root cut of 23 Oct 2026, D-7135, recorded by
+the cut, not here).** The store is never rebuilt from scratch: a new GDFL
+link, or any vendor's re-delivery, is an incremental, append-only patch into
+the existing store. So an options day first imported, or re-delivered and
+patched, by a build that holds this change closes under 5 and is current;
+every options day already held under 2, 3 or 4 is re-read in place through
+R3-22's restate door; only a day whose rebuilt bars differ
+(`bars_differ_held`) is filed as a new generation of its month, for
+example a contract-day refused whole by one bad row that now lands its good
+rows; an unchanged day writes no generation (R3-22's
+`a_restate_of_an_unchanged_day_writes_nothing`) and older generations stay
+byte-identical. There is no fresh-root alternative. Where the journal can
+tell (the same read-only journal), the days expected to differ are four:
+2026-04-16 (its members key, `done` under 3 with `vendor_refused=10
+reason=malformed_row`: the ten negative-LTQ files), 2025-03-11 (its
+`BANKNIFTY,NIFTY` key, `done` under 3 with `vendor_refused=1
+reason=header_unknown`: the trailing-empty header of D-4829), and 2018-11-06
+and 2018-11-09 (`*`, still `incomplete` under 2 with `failures=1`, so
+every run reads them again anyway), each of which now lands the file it
+lost with one row refused: 13 contract-days in all (measured by
+`the_measured_bad_option_files_are_read_row_by_row`). The 498 keys under 2
+may also differ in a second's open interest (D-3342 measured 235 of 545,134
+bars on its sample), which the journal cannot tell day by day. **PREC-6's
+options bar rules (GO-01, GO-02, GO-15) take the next definition number
+after 5**, so the held options days can be restated once, after the last
+pending options bar rule, rather than once per bump. No door sets
+`skip_restated` yet (`gdfl_import::RunOptions`, `admit`'s row 3, D-4885: a
+day done under a definition no longer current is skipped and counted in
+`restated_skipped`, never dropped silently; `cli gdfl-import` passes
+`false`, and IA-10a's `restate` flag is not built), so until one does every
+options run whose range holds such a day reads it again: restating once
+means running no options range over held days before then, or accepting a
+second re-read. `plan.json` (`/gdfl/plan.json`, IA-10a's, not built at
+feat/db-fix e0668a4bd) is to show these counts and costs; until it exists
+docs/06-limits.md L-IA-28 carries them.
+
+**Rule sets.** The oracle's rule-set table (`pull::gdfl_verify`, IA-6, not
+merged) gains row `5` (options per row plus the trailing-empty header) and
+IA-GV-11 pins it; IA-6 merges after IA-4 and builds both. R3-13's
+`definition_means` (the /db day band) gains its `5 =>` sentence with
+R4-27-OPT (docs/06-limits.md L-IA4-03).
+
+**PIT-1 is untouched.** Its membership reads only each day's ticker NAMES
+(`fno_membership.rs` → `gdfl_nfo::decode_ticker` →
+`gdfl_lineage::filed_underlying` and the expiry settlement); this change
+alters the file reader (`decode`, `parse_row`, the header), never that path,
+so no membership file version or run-identity term moves.
+
+**Proved by** `pull::gdfl_import::tests::ia4::every_kind_era_and_definition_has_its_currency`
+(every kind × closing-auction era × definition 0..7 and `u32::MAX`, through
+`definition_is_current` and through the journal's own reader),
+`pull::gdfl_import::tests::an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not`
+(the pin, 4 → 5) and `pull::gdfl_import::tests::scope_reopen::a_share_day_of_the_auction_era_under_an_older_definition_is_restated`
+(WP-12f's cells, options under 3 and 4 now restated) and
+`api::import_journal::tests::a_recounted_close_is_restated_where_the_importer_restates_it`
+(`/imports.json` reads a `recounted` close by the definition it carries, as
+the importer's journal does; until IA-4 the page called every recounted
+row current, among them the 210 options keys recounted under 2) (IA4-07).
