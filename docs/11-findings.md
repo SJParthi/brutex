@@ -1063,5 +1063,5 @@ confirmed by two skeptics; their corrections are applied.
   by their crate path; `store`'s cited-commits test refused a WIP hash cited
   in BRED-17. FIXED: the citations name the mounted modules
   (`causal_tests::...`, `measure_tests::...`), BRED-17 names its run folder
-  instead of the hash (bred1023-full10). Gate 1e's run of the same suite
-  passed both, so a red here is visible only to gate 31.
+  instead of the hash (bred1023-full10). Gate 1e stopped at its first failing
+  test binary (api) and never reached either.
