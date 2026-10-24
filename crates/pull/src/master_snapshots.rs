@@ -1,5 +1,5 @@
 //! Dated Kite instrument-master snapshots, the day's diff, and `token_on`.
-//! R4-28 (DLY-09); D-6892.
+//! R4-28 (DLY-09); D-7185.
 //!
 //! # Why this exists
 //!
@@ -917,7 +917,7 @@ pub const INCOMPLETE_MESSAGE: &str = "an incomplete master snapshot entry is hel
 
 /// A Kite snapshot's futures go into the first-listed index, under the lock
 /// the write already holds, so no futures plan has to open it again (R4-28
-/// repair 1; D-6894). Its outcome is a [`EVENT_TARGET`] event; a failure
+/// repair 1; D-7187). Its outcome is a [`EVENT_TARGET`] event; a failure
 /// leaves the snapshot for the next plan to take in and name.
 fn index_futures(root: &Path, kind: Kind) {
     if kind == Kind::Kite {

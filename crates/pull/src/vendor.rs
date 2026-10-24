@@ -2856,7 +2856,7 @@ pub enum FnoAccess {
 /// an expired future are UNVERIFIED and never asked for. The vendor states no
 /// roll day: which contract a continuous candle came from is UNVERIFIED, so
 /// the continuous answer is filed as its own series and never split into
-/// contracts (D-6893).
+/// contracts (D-7186).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContinuousSpec {
     /// The query parameter that asks for the continuous series.
@@ -6028,7 +6028,7 @@ const ZERODHA_FLOOR: GranularityFloor = GranularityFloor {
 /// the rung (D-0133), the scheme carries a prefix and a SECOND secret
 /// (D-0134), and the timestamp carries its own zone (D-0135).
 /// Kite's futures route: a future's own token, and the continuous flag for
-/// the near-month series (R4-28, CON-12; D-6893).
+/// the near-month series (R4-28, CON-12; D-7186).
 pub const ZERODHA_CONTINUOUS: ContinuousSpec = ContinuousSpec {
     param: "continuous",
     value: "1",
@@ -6051,7 +6051,7 @@ pub const KITE_MASTER_HEADER: &str = "instrument_token,exchange_token,tradingsym
 
 /// Why a Kite token is resolved by date and never by today's master: the
 /// exchanges flush a derivative's token at every expiry and reuse it, and the
-/// instruments API lists only what trades now (R4-28, DLY-09; D-6892).
+/// instruments API lists only what trades now (R4-28, DLY-09; D-7185).
 pub const KITE_TOKENS_ARE_REUSED: &str = "docs/00-charter.md §4z, the Expired F&O row and the \
      instruments API rows (read 14 Aug 2026): expired contracts' instrument_tokens are flushed \
      by the exchange and not obtainable from the instrument master; CLAUDE.md section 1: NSE \
@@ -6087,7 +6087,7 @@ const ZERODHA: Descriptor = Descriptor {
         // give intraday history for an expired contract at all.
         //
         // IT WAS `None` UNTIL 2026-10-22, FOR THREE REASONS, AND EACH IS NOW
-        // ANSWERED (R4-28, CON-12; D-6893 supersedes the 2026-08-21 refusal
+        // ANSWERED (R4-28, CON-12; D-7186 supersedes the 2026-08-21 refusal
         // for FUTURES only):
         //
         // 1. The operator's instruction of 2026-08-21 was that Zerodha carries
@@ -6319,7 +6319,7 @@ const ZERODHA: Descriptor = Descriptor {
         .with(Granularity::Day1),
     history: ZERODHA_HISTORY,
     granularity_floor: ZERODHA_FLOOR,
-    // SPOT AND FUTURES DAY CANDLES (R4-28, CON-12; D-6893). This read "SPOT
+    // SPOT AND FUTURES DAY CANDLES (R4-28, CON-12; D-7186). This read "SPOT
     // ONLY": `continuous=1` returns day candles for expired NFO and MCX
     // futures, a real capability the build did not use. Futures are now
     // STORED and never swept (CLAUDE.md section 1): `FnoAccess::ByToken`

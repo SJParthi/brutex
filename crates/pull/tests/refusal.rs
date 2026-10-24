@@ -676,7 +676,7 @@ fn the_join_key_is_derived_from_the_vendors_own_master_columns() {
 ///
 /// The operator's rule of 19 Aug 2026 made Zerodha spot only. On 20 Oct 2026
 /// the operator put its FUTURES back (CON-12, FUT-C1: stored and never swept;
-/// R4-28, D-6893). Options stay refused, and nothing here weakens that half:
+/// R4-28, D-7186). Options stay refused, and nothing here weakens that half:
 ///
 /// | Refusal | Where | What it stops |
 /// |---|---|---|

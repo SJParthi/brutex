@@ -448,7 +448,7 @@ async fn obtain<D: Discovery, P: masters::Pause>(
                 let landed = masters::land(dir, source, body);
                 // THE DATED SNAPSHOT AND THE DAY'S DIFF, after the landing and
                 // never over it: the one call R4-28 adds at the only
-                // `masters::land` call site (DLY-09, D-6892). A refused landing
+                // `masters::land` call site (DLY-09, D-7185). A refused landing
                 // writes no snapshot.
                 let snapshot = pull::master_snapshots::after_land(
                     dir,

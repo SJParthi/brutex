@@ -587,7 +587,7 @@ pub fn gaps<S: core::hash::BuildHasher>(
 
 // ─────── futures day candles through a token: stored, never swept ───────
 //
-// R4-28, CON-12 and FUT-C1; D-6893. A future is filed as one contract keyed
+// R4-28, CON-12 and FUT-C1; D-7186. A future is filed as one contract keyed
 // (underlying, expiry) through `Contract::of(Kind::Future)`, under
 // `bars/<vendor>/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/`, with its open
 // interest. The vendor's token is only the ADDRESS: which contract it names is
@@ -599,7 +599,7 @@ pub fn gaps<S: core::hash::BuildHasher>(
 // `Instrument::is_sweepable` refuses every contract and every FNO key.
 
 use crate::master_snapshots::{Book, Listed, Stamp, TokenOn, first_listed};
-use crate::session::Window;
+use crate::session::{DropCensus, DropReason, Window};
 use crate::vendor::{ContinuousSpec, HttpSpec};
 
 /// The continuous series' symbol suffix: `<UNDERLYING>-FUT-C1`.
@@ -720,7 +720,7 @@ fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
 /// expiry, inside the window. That first day is read from the
 /// [`first_listed`](crate::master_snapshots::first_listed) index, which every
 /// snapshot write fills, so no older snapshot is opened here: the cost does not
-/// grow with the snapshots held (R4-28 repair 1; D-6894). A snapshot on or
+/// grow with the snapshots held (R4-28 repair 1; D-7187). A snapshot on or
 /// before the window's end that the index does not hold yet is taken in first,
 /// once; one that cannot be is refused by name. An index that does not match
 /// its commit log (a file missing, cut or garbled) is never planned from: a
@@ -922,19 +922,129 @@ fn continuous_ask(
     }))
 }
 
-/// What one futures pull did.
+/// What one futures pull did: what it read, what it offered the store, what
+/// the store WROTE, and where every other row went.
+///
+/// # Offered is not written (R4-28 repair 4; D-7190)
+///
+/// [`crate::ingest::Ingested`] keeps two counts because they part on every
+/// re-pull: `bars_stored` is what a landing OFFERED the store and
+/// `bars_committed` what `Appended::Committed` wrote. This type used to carry
+/// the first under the words "bars written", so an identical re-pull that
+/// wrote nothing answered "4 bars stored" and was journalled `Stored`, the
+/// misreport `bars_committed` exists to end, and a row the landing dropped (a
+/// day the calendar records closed, a day before or after the window asked)
+/// was counted nowhere on the receipt. Both counts are carried under their
+/// own names now, with the fold count and the drop census beside them, so
+/// [`Self::balances`] can account for every row read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FuturesLanded {
     /// Requests sent.
     pub requests: usize,
-    /// Rows the vendor answered with.
+    /// Rows the vendor answered with, decoded.
     pub rows_read: usize,
-    /// Bars written to the store.
-    pub bars_stored: usize,
+    /// Bars OFFERED to the store (`Ingested::bars_stored`), not necessarily
+    /// written: a re-pull offers every bar again.
+    pub bars_offered: usize,
+    /// Bars this pull WROTE (`Ingested::bars_committed`): zero on a re-pull
+    /// of days the store already holds byte for byte.
+    pub bars_committed: usize,
+    /// Rows folded into a day bar already open: one day answered twice.
+    pub rows_folded: usize,
+    /// Every row that did not become a bar, by reason.
+    pub census: DropCensus,
     /// One line per series asked: what it is and what came of it.
     pub series: Vec<String>,
     /// Every series that did not land whole, and why.
     pub failed: Vec<String>,
+}
+
+impl FuturesLanded {
+    /// Whether every row read is accounted for (offered to the store, folded
+    /// into an open bar, or dropped by reason) and no series stopped.
+    ///
+    /// The same check as `Ingested::balances`, over the whole pull. A row
+    /// that is in none of the three is indistinguishable from one the vendor
+    /// never sent.
+    #[must_use]
+    pub fn balances(&self) -> bool {
+        self.failed.is_empty()
+            && self.rows_read
+                == self
+                    .bars_offered
+                    .saturating_add(self.rows_folded)
+                    .saturating_add(self.census.total() as usize)
+    }
+
+    /// The receipt's balance line, in the spot receipt's words.
+    #[must_use]
+    pub fn balance_line(&self) -> String {
+        if self.balances() {
+            format!(
+                "yes — {} read = {} offered + {} folded + {} dropped",
+                self.rows_read,
+                self.bars_offered,
+                self.rows_folded,
+                self.census.total()
+            )
+        } else {
+            format!(
+                "NO — {} rows read, {} offered, {} folded, {} dropped, {} series stopped",
+                self.rows_read,
+                self.bars_offered,
+                self.rows_folded,
+                self.census.total(),
+                self.failed.len()
+            )
+        }
+    }
+
+    /// Every reason that dropped a row, with its count; `none` when nothing
+    /// was dropped.
+    #[must_use]
+    pub fn dropped_by_reason(&self) -> String {
+        dropped_by_reason(&self.census)
+    }
+
+    /// Adds one series' outcome to the pull's totals.
+    fn absorb(&mut self, one: &SeriesOutcome) {
+        self.requests = self.requests.saturating_add(one.requests);
+        self.rows_read = self.rows_read.saturating_add(one.read);
+        self.bars_offered = self.bars_offered.saturating_add(one.offered);
+        self.bars_committed = self.bars_committed.saturating_add(one.committed);
+        self.rows_folded = self.rows_folded.saturating_add(one.folded);
+        self.census.absorb(one.census);
+    }
+}
+
+/// The reasons a futures receipt names, in the order `/audit` shows them.
+const DROP_REASONS: [DropReason; 5] = [
+    DropReason::BeforeWindow,
+    DropReason::AfterWindow,
+    DropReason::BeforeSessionOpen,
+    DropReason::AtOrAfterSessionClose,
+    DropReason::OnClosedDay,
+];
+
+/// Each reason in `census` that dropped a row, with its count, joined by
+/// ` · `; `none` when nothing was dropped.
+///
+/// The names explain the total and never replace it: every surface prints
+/// `census.total()` beside this line, so a drop under a reason this list did
+/// not yet name would still be counted there.
+fn dropped_by_reason(census: &DropCensus) -> String {
+    let named: Vec<String> = DROP_REASONS
+        .iter()
+        .filter_map(|reason| {
+            let n = census.of(*reason);
+            (n > 0).then(|| format!("{} {n}", reason.label()))
+        })
+        .collect();
+    if named.is_empty() {
+        "none".to_owned()
+    } else {
+        named.join(" · ")
+    }
 }
 
 /// Asks the vendor for every request of `plan` and lands each answer under
@@ -970,26 +1080,20 @@ pub async fn pull_futures_day<D: crate::chain::Discovery>(
     };
     for ask in &plan.asks {
         let label = ask.series.label(&plan.underlying);
+        let window = ask.window_text();
         let one = pull_one(from, spec, route, &plan.underlying, ask, landing).await;
-        out.requests = out.requests.saturating_add(one.requests);
-        out.rows_read = out.rows_read.saturating_add(one.read);
-        out.bars_stored = out.bars_stored.saturating_add(one.stored);
-        let line = match one.stopped {
-            None => format!(
-                "{label}: {} bars stored from {} rows over {}",
-                one.stored,
-                one.read,
-                ask.window_text()
-            ),
-            Some(ref why) => format!("{label}: {} bars stored, then stopped: {why}", one.stored),
-        };
+        out.absorb(&one);
+        let line = one.line(&label, &window);
         let (level, message) = if one.stopped.is_some() {
             (telemetry::Level::Error, "a futures series stopped by name")
         } else {
             (telemetry::Level::Info, "a futures series landed")
         };
         let token = ask.token.to_string();
-        let window = ask.window_text();
+        let dropped_by = dropped_by_reason(&one.census);
+        // THE EVENT COUNTS WHAT WAS WRITTEN, BESIDE WHAT WAS OFFERED, and
+        // carries the receipt's own line, so `/logs` and the receipt cannot
+        // disagree about one series (R4-28 repair 4; D-7190).
         let _ = telemetry::emit_if!(
             level,
             FUTURES_EVENT,
@@ -998,7 +1102,12 @@ pub async fn pull_futures_day<D: crate::chain::Discovery>(
             "token" => telemetry::Value::Str(&token),
             "window" => telemetry::Value::Str(&window),
             "rows" => telemetry::Value::Uint(one.read as u64),
-            "stored" => telemetry::Value::Uint(one.stored as u64),
+            "offered" => telemetry::Value::Uint(one.offered as u64),
+            "written" => telemetry::Value::Uint(one.committed as u64),
+            "folded" => telemetry::Value::Uint(one.folded as u64),
+            "dropped" => telemetry::Value::Uint(u64::from(one.census.total())),
+            "dropped_by" => telemetry::Value::Str(&dropped_by),
+            "line" => telemetry::Value::Str(&line),
             "detail" => telemetry::Value::Str(one.stopped.as_deref().unwrap_or("")),
         );
         if let Some(why) = one.stopped {
@@ -1025,10 +1134,18 @@ struct Landing<'a> {
     origin: &'a str,
 }
 
-/// What one series came to.
+/// What one series came to, summed over its chunks from each landing's own
+/// `Ingested`.
 #[derive(Default)]
 struct SeriesOutcome {
-    stored: usize,
+    /// Bars offered to the store (`Ingested::bars_stored`).
+    offered: usize,
+    /// Bars the store wrote (`Ingested::bars_committed`).
+    committed: usize,
+    /// Rows folded into a bar already open (`Ingested::rows_folded`).
+    folded: usize,
+    /// Rows dropped, by reason (`Ingested::census`).
+    census: DropCensus,
     read: usize,
     requests: usize,
     stopped: Option<String>,
@@ -1038,6 +1155,45 @@ impl SeriesOutcome {
     fn stop(mut self, why: String) -> Self {
         self.stopped = Some(why);
         self
+    }
+
+    /// Adds one chunk's landing.
+    fn absorb(&mut self, landed: &crate::ingest::Ingested) {
+        self.offered = self.offered.saturating_add(landed.bars_stored);
+        self.committed = self.committed.saturating_add(landed.bars_committed);
+        self.folded = self.folded.saturating_add(landed.rows_folded);
+        self.census.absorb(landed.census);
+    }
+
+    /// The receipt's line for this series: what was WRITTEN first, what was
+    /// offered beside it, and where every other row went.
+    ///
+    /// "already held" is the offered bars the store did not write: on a
+    /// landing that did not fail, `BarFile::append` wrote only what it did not
+    /// already hold byte for byte, so that is exactly what the difference is.
+    /// On a series that stopped it is not claimed.
+    fn line(&self, label: &str, window: &str) -> String {
+        let held = self.offered.saturating_sub(self.committed);
+        let held = if held > 0 && self.stopped.is_none() {
+            format!(" ({held} already held)")
+        } else {
+            String::new()
+        };
+        let dropped = self.census.total();
+        let dropped = if dropped == 0 {
+            "0 dropped".to_owned()
+        } else {
+            format!("{dropped} dropped ({})", dropped_by_reason(&self.census))
+        };
+        let stopped = self
+            .stopped
+            .as_ref()
+            .map_or_else(String::new, |why| format!("; then stopped: {why}"));
+        format!(
+            "{label}: {} bars written, {} offered{held} from {} rows over {window}; \
+             {} folded into an open bar; {dropped}{stopped}",
+            self.committed, self.offered, self.read, self.folded
+        )
     }
 }
 
@@ -1116,7 +1272,7 @@ async fn pull_one<D: crate::chain::Discovery>(
                 contract,
             },
         );
-        out.stored = out.stored.saturating_add(landed.bars_stored);
+        out.absorb(&landed);
         if let Some(failure) = landed.failures.first() {
             let why = failure.why.clone();
             return out.stop(format!("{span} did not land whole: {why}"));

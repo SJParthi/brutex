@@ -333,8 +333,17 @@ fn a_futures_day_pull_stores_contracts_with_expiry_and_oi() {
     ));
     assert!(landed.failed.is_empty(), "{:?}", landed.failed);
     assert_eq!(
-        (landed.requests, landed.rows_read, landed.bars_stored),
-        (3, 15, 15)
+        (
+            landed.requests,
+            landed.rows_read,
+            landed.bars_offered,
+            landed.bars_committed
+        ),
+        (3, 15, 15, 15)
+    );
+    assert_eq!(
+        landed.balance_line(),
+        "yes — 15 read = 15 offered + 0 folded + 0 dropped"
     );
     let month = YearMonth::new(2026, 1).unwrap();
     // EACH CONTRACT UNDER ITS OWN EXPIRY, WITH ITS OWN OPEN INTEREST.
@@ -633,7 +642,24 @@ fn an_expired_token_the_vendor_no_longer_serves_ends_its_history_by_name() {
         "{:?}",
         landed.failed
     );
-    assert_eq!(landed.bars_stored, 10);
+    assert_eq!((landed.bars_offered, landed.bars_committed), (10, 10));
+    // A SERIES THAT STOPPED NEVER BALANCES, and the line says how many did.
+    assert!(!landed.balances());
+    assert!(
+        landed.balance_line().ends_with("1 series stopped"),
+        "{}",
+        landed.balance_line()
+    );
+    let stopped = landed
+        .series
+        .iter()
+        .find(|line| line.contains("2026-03-31-FUT"))
+        .expect("the refused series has its own line");
+    assert!(
+        stopped.contains("0 bars written, 0 offered from 0 rows")
+            && stopped.contains("; then stopped: vendor_refused"),
+        "{stopped}"
+    );
     let quiet = Vendorish {
         seen: RefCell::new(Vec::new()),
         reply: empty_reply,
@@ -655,7 +681,7 @@ fn an_expired_token_the_vendor_no_longer_serves_ends_its_history_by_name() {
             .count(),
         2
     );
-    assert_eq!(none.bars_stored, 0);
+    assert_eq!((none.bars_offered, none.bars_committed), (0, 0));
 }
 
 #[test]
@@ -706,7 +732,7 @@ fn a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_spli
     assert!(!contract_dir.exists(), "{}", contract_dir.display());
 }
 
-/// R4-28 repair 1 (D-6894): a plan reads the first-listed index, never the
+/// R4-28 repair 1 (D-7187): a plan reads the first-listed index, never the
 /// older snapshots. Two older snapshots rotted on disk after they were written
 /// leave the plan untouched, and the contracts they first listed are still
 /// asked from their own days. Before the index, every plan opened, unpacked
@@ -1175,4 +1201,245 @@ fn a_snapshot_written_over_a_cut_futures_index_never_re_dates_a_contract() {
     );
     assert_planned_whole(&after);
     assert_eq!(after.plan.rebuilt, None, "the write rebuilt it already");
+}
+
+// ───── R4-28 repair 4 (D-7190): written beside offered, every row counted ─────
+
+/// One contract, `ZQIDX` 2023-11-30-FUT through token 8,400,001, asked over
+/// `span` and answered by `reply`, pulled into `store_root`. The plan is
+/// built by hand: what it asks is not under test here, what the receipt says
+/// about the answer is.
+fn pull_november_contract(
+    store_root: &Path,
+    span: Window,
+    reply: fn(&str) -> Result<String, Refusal>,
+) -> FuturesLanded {
+    let plan = FuturesPlan {
+        underlying: "ZQIDX".to_owned(),
+        newest: master_snapshots::Stamp {
+            day: day(2023, 11, 1),
+            ordinal: 1,
+        },
+        asks: vec![FuturesAsk {
+            token: 8_400_001,
+            series: FuturesSeries::Contract {
+                contract: contract(2023, 11, 30),
+                expiry: day(2023, 11, 30),
+            },
+            window: span,
+        }],
+        refused: Vec::new(),
+        rebuilt: None,
+        incomplete: Vec::new(),
+    };
+    let vendor = Vendorish {
+        seen: RefCell::new(Vec::new()),
+        reply,
+    };
+    block_on(pull_futures_day(
+        &vendor,
+        &spec(),
+        &plan,
+        store_root,
+        Vendor::Zerodha,
+        "test://futures",
+    ))
+}
+
+/// The November contract's bars held for `month`.
+fn november_bars(store_root: &Path, month: u8) -> Vec<store::format::Bar> {
+    bars_of(
+        store_root,
+        "ZQIDX",
+        Some(contract(2023, 11, 30)),
+        YearMonth::new(2023, month).unwrap(),
+    )
+}
+
+/// Six candles for the four-day window 2023-11-27..30: one before it
+/// (11-20), the exchange holiday 2023-11-27 inside it, three sessions, and
+/// one past the contract's expiry and the window (12-01).
+#[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
+fn late_and_early_reply(_url: &str) -> Result<String, Refusal> {
+    let candles: Vec<String> = [(11, 20), (11, 27), (11, 28), (11, 29), (11, 30), (12, 1)]
+        .iter()
+        .zip(140..)
+        .map(|(&(m, d), price)| candle(day(2023, m, d), price, u64::from(price) * 10))
+        .collect();
+    Ok(answer(&candles))
+}
+
+/// Three sessions with 11-28 answered twice, the copies identical.
+#[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
+fn twice_alike_reply(_url: &str) -> Result<String, Refusal> {
+    let one = |d, price| candle(day(2023, 11, d), price, u64::from(price) * 10);
+    Ok(answer(&[one(28, 150), one(28, 150), one(29, 151), one(30, 152)]))
+}
+
+/// Three sessions with 11-28 answered twice, the copies disagreeing.
+#[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
+fn twice_unlike_reply(_url: &str) -> Result<String, Refusal> {
+    let one = |d, price| candle(day(2023, 11, d), price, u64::from(price) * 10);
+    Ok(answer(&[one(28, 150), one(28, 159), one(29, 151), one(30, 152)]))
+}
+
+/// R4-28 repair 4 (D-7190): THE SAME WINDOW PULLED TWICE WRITES NOTHING THE
+/// SECOND TIME, AND EVERY COUNT SAYS SO. The second pull offers all fifteen
+/// bars again and the store, holding each byte for byte, writes none. The
+/// receipt used to answer the offered count as "bars stored" (the verifier's
+/// probe: "4 bars stored from 4 rows" with nothing committed).
+#[test]
+fn a_futures_window_pulled_twice_writes_nothing_the_second_time_and_says_so() {
+    let (masters, store_root) = (scratch("twice-masters"), scratch("twice-store"));
+    snapshot_on(
+        &masters,
+        day(2026, 1, 2),
+        &[
+            fut(8_000_001, "ZQIDX26JANFUT", "2026-01-27"),
+            fut(8_000_002, "ZQIDX26FEBFUT", "2026-02-24"),
+        ],
+    );
+    let asked = window(day(2026, 1, 1), day(2026, 1, 9));
+    let (_, first) = plan_and_pull(&masters, &store_root, asked, day(2026, 1, 12), january_reply);
+    let month = YearMonth::new(2026, 1).unwrap();
+    let held = bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month);
+    assert_eq!(
+        (first.bars_offered, first.bars_committed, first.failed.len()),
+        (15, 15, 0)
+    );
+    assert_eq!(
+        first.series[0],
+        "ZQIDX 2026-01-27-FUT: 5 bars written, 5 offered from 5 rows over \
+         2026-01-02..2026-01-09; 0 folded into an open bar; 0 dropped"
+    );
+
+    let (_, again) = plan_and_pull(&masters, &store_root, asked, day(2026, 1, 12), january_reply);
+    assert!(again.failed.is_empty(), "{:?}", again.failed);
+    assert_eq!(
+        (
+            again.requests,
+            again.rows_read,
+            again.bars_offered,
+            again.bars_committed
+        ),
+        (3, 15, 15, 0),
+        "offered again, written never"
+    );
+    assert!(again.balances());
+    assert_eq!(
+        again.balance_line(),
+        "yes — 15 read = 15 offered + 0 folded + 0 dropped"
+    );
+    assert_eq!(again.series.len(), 3);
+    for line in &again.series {
+        assert!(
+            line.contains(": 0 bars written, 5 offered (5 already held) from 5 rows"),
+            "{line}"
+        );
+    }
+    // AND THE STORE IS EXACTLY WHAT THE FIRST PULL LEFT.
+    assert_eq!(
+        bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month),
+        held
+    );
+}
+
+/// R4-28 repair 4 (D-7190): A ROW THE LANDING DROPS IS COUNTED ON THE
+/// RECEIPT, BY REASON. Of six candles three are filed; the one before the
+/// window, the one on the holiday and the one past expiry are dropped, each
+/// named, and the balance adds up. The receipt used to say "3 bars stored
+/// from 6 rows" and name none of the three.
+#[test]
+fn a_closed_day_or_out_of_window_candle_is_counted_as_dropped_on_the_receipt() {
+    let store_root = scratch("drops-store");
+    let span = window(day(2023, 11, 27), day(2023, 11, 30));
+    let landed = pull_november_contract(&store_root, span, late_and_early_reply);
+    assert!(landed.failed.is_empty(), "{:?}", landed.failed);
+    assert_eq!(
+        (
+            landed.rows_read,
+            landed.bars_offered,
+            landed.bars_committed,
+            landed.rows_folded
+        ),
+        (6, 3, 3, 0)
+    );
+    assert_eq!(landed.census.total(), 3);
+    for reason in [
+        DropReason::BeforeWindow,
+        DropReason::OnClosedDay,
+        DropReason::AfterWindow,
+    ] {
+        assert_eq!(landed.census.of(reason), 1, "{reason}");
+    }
+    assert_eq!(
+        landed.dropped_by_reason(),
+        "before the requested window 1 · after the requested window 1 · on a day the \
+         exchange calendar records closed 1"
+    );
+    assert_eq!(
+        landed.balance_line(),
+        "yes — 6 read = 3 offered + 0 folded + 3 dropped"
+    );
+    assert_eq!(
+        landed.series,
+        ["ZQIDX 2023-11-30-FUT: 3 bars written, 3 offered from 6 rows over \
+          2023-11-27..2023-11-30; 0 folded into an open bar; 3 dropped (before the \
+          requested window 1 · after the requested window 1 · on a day the exchange \
+          calendar records closed 1)"]
+    );
+    // NOTHING OF A DROPPED DAY IS ON DISK.
+    let held: Vec<i64> = november_bars(&store_root, 11)
+        .iter()
+        .map(|bar| bar.open_interest)
+        .collect();
+    assert_eq!(held, [1_420, 1_430, 1_440], "11-28, 11-29 and 11-30 only");
+}
+
+/// R4-28 repair 4: ONE DAY ANSWERED TWICE. Identical copies fold into one
+/// bar and are counted as folded, so the balance still holds; copies that
+/// disagree stop the series by name, and the receipt never balances a series
+/// that stopped.
+#[test]
+fn one_day_answered_twice_is_folded_when_alike_and_stops_the_series_when_not() {
+    let span = window(day(2023, 11, 28), day(2023, 11, 30));
+    let alike = pull_november_contract(&scratch("twice-alike"), span, twice_alike_reply);
+    assert!(alike.failed.is_empty(), "{:?}", alike.failed);
+    assert_eq!(
+        (
+            alike.rows_read,
+            alike.bars_offered,
+            alike.bars_committed,
+            alike.rows_folded
+        ),
+        (4, 3, 3, 1)
+    );
+    assert_eq!(
+        alike.balance_line(),
+        "yes — 4 read = 3 offered + 1 folded + 0 dropped"
+    );
+    assert!(
+        alike.series[0].contains("; 1 folded into an open bar; 0 dropped"),
+        "{}",
+        alike.series[0]
+    );
+
+    let unlike = pull_november_contract(&scratch("twice-unlike"), span, twice_unlike_reply);
+    assert_eq!(unlike.failed.len(), 1, "{:?}", unlike.failed);
+    assert!(
+        unlike.failed[0].contains("did not land whole"),
+        "{:?}",
+        unlike.failed
+    );
+    assert!(!unlike.balances());
+    assert!(
+        unlike.balance_line().starts_with("NO — 4 rows read"),
+        "{}",
+        unlike.balance_line()
+    );
+    assert!(
+        unlike.series[0].contains("; then stopped: ") && !unlike.series[0].contains("already held"),
+        "{}",
+        unlike.series[0]
+    );
 }

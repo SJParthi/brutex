@@ -81373,171 +81373,6 @@ and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
 
-### D-6892 — R4-28 (DLY-09): the Kite instrument dump is kept by date, one receipted snapshot per refresh, diffed against the one before, and a token is resolved by date — 2026-10-22
-
-The number is the ledger head + 1 (amendment A6); it is taken again from the
-head at landing if another package lands first.
-
-1. **Every landing of the Kite dump, and of NSE's NIFTY Total Market file,
-   is also written as a dated snapshot** under `<masters>/master-snapshots/`:
-   `instruments_<yyyymmdd>.csv.gz` and `nse_total_market_<yyyymmdd>.csv.gz`,
-   each with a `.receipt` binding the date, the URL, the compressed length
-   and SHA-256 and the body's length and SHA-256. The one call is made after
-   `masters::land` at its only call site (`api::mastersrun::obtain`); a
-   landing that refused writes no snapshot and the newest one stands.
-   `pull::master_snapshots`, on `cash_session_cache`'s pattern.
-2. **Nothing is rewritten.** Both files are created `O_EXCL`. The receipt is
-   the commit marker, written last: a body with no receipt (a kill between
-   the two) is named incomplete by `Catalog` and never read. A refresh whose
-   body equals the day's newest receipted snapshot is `already_held`; a
-   different body takes the next ordinal (`_2`, `_3`, ... up to 99, then a
-   refusal by name), past any incomplete entry, and the newest receipted
-   ordinal is the day's snapshot. Writers take one advisory lock beside the
-   snapshots; the refresh's own FIFO lock already serialises one process.
-3. **`token_on(day, exchange, token)`** (`Book::token_on`) answers from the
-   newest receipted snapshot on or before the day, through that snapshot's
-   own hash index, found by a day table (one index). On a snapshot day that
-   snapshot answers alone. Between two snapshots the older one is believed
-   only when the next later one maps the token to the same contract (the
-   diff's key); otherwise `token_ambiguous`, naming both. Before the first
-   snapshot: `before_first_snapshot`, never the earliest row and never
-   today's. A token two rows carry in one snapshot: `token_duplicated`. A
-   snapshot that does not check: `snapshot_unreadable`, named.
-4. **The diff** of each Kite snapshot against the receipted one before it is
-   written once, `O_EXCL`, as `<yyyymmdd>[_n].diff`: fixed 192-byte lines, a
-   header naming both snapshots and the count. Kinds: `listing`, `delisting`
-   (counted), `symbol` (the same token under a new symbol, or the same ISIN
-   under a new symbol), `isin`, `lot_size`, `expiry`, `token` (the same key
-   under a new token) (each named), and `isin_unknown`: a share is named
-   the day its ISIN becomes unknown (known on the old date) or the day it
-   appears without one, and the day's total is the header's
-   `isin_unknown_total` (the dump landed 6 Oct 2026 holds 10,182 NSE cash
-   rows against the Total Market file's 750, so naming every unknown share
-   every day would repeat some 9,400 names a day). The ISIN of
-   a share is read from the NSE Total Market snapshot **of the same date**
-   only: the Kite dump has no ISIN column (charter §4z), and a share neither
-   file lists that day is `isin_unknown`, never inferred. Whether every F&O
-   underlying is in the NIFTY Total Market file is UNVERIFIED. The
-   `/masters/refresh` outcome carries the snapshot and the diff's counts and
-   every named change; `pull.masters.snapshot` carries one event per refresh
-   source and one per named change. A refresh the same day reads the written
-   diff back rather than recomputing it.
-5. **`newest_snapshot_day`** reads the newest Kite snapshot's date from its
-   checked receipt, for R4-23's `master_stale` refusal (FM-267); a newest
-   snapshot that does not check is refused by name, never answered with an
-   older date.
-6. **Not built (the operator's one-command cut of 20 Oct 2026):** the scheduled morning
-   refresh and the MasterChanges panel. A refresh stays the attended
-   `POST /masters/refresh`; the diff's reader is its outcome and the events.
-
-Proof: `pull::master_snapshots::tests` (21 tests, among them
-`one_token_two_dates_resolves_to_two_contracts`,
-`the_diff_of_two_days_lists_exactly_the_injected_changes`,
-`a_snapshot_is_never_rewritten`,
-`a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contract`,
-`a_date_before_the_first_snapshot_resolves_nothing`,
-`a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used`,
-`an_isin_change_between_masters_is_named`); the bound is C-MS-01 in
-`crates/pull/benches/ratio/master_snapshots.rs` (docs/06-limits.md
-L-R428-01..04).
-
-### D-6893 — R4-28 (CON-12, FUT-C1): Zerodha futures day candles are stored and never swept; the token is an address, never an identity — 2026-10-22
-
-The number is the ledger head + 1 (amendment A6).
-
-1. **Scope.** The operator put the futures legs back on 20 Oct 2026 (CON-12
-   and its continuous series FUT-C1, "stored and never swept"). This
-   supersedes, for FUTURES only, the 21 Aug 2026 instruction that Zerodha
-   carries no expired F&O; options stay refused on Zerodha. `CLAUDE.md` §1
-   already allows contracts to be stored and never swept, so the engine
-   surface does not change: `Instrument::is_sweepable` refuses every
-   contract and every FNO key
-   (`fnowork::futures_tests::a_future_is_never_sweepable`).
-2. **The source and its lane** are the charter's new rows beside "Expired
-   F&O" (§4z): Kite, `day` candles only, NFO futures only, `oi=1`. Minute
-   candles of an expired future stay UNVERIFIED and are never asked. GDFL
-   holds no futures (ingest design E22); whether it sells them is the
-   operator's question.
-3. **Identity.** A future is one contract keyed (underlying, expiry) through
-   `core::instrument::Contract::of(Kind::Future)`, filed at
-   `bars/zerodha/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/<yyyy-mm>.bin` with
-   its open interest. Its expiry is the one the dated snapshot states (the
-   settled date, so an expiry the exchange moved for a holiday is the moved
-   one). The vendor's token is only the ADDRESS: a contract is asked through
-   its own token from the first dated snapshot that lists it to its expiry,
-   and a token the newest snapshot maps to another contract is refused
-   `token_reused` and never asked for the older contract's history
-   (`two_contracts_reusing_a_token_on_different_dates_stay_separate`). A
-   token the newest snapshot no longer lists (flushed after expiry) is
-   asked: an answer of nothing ends that contract's history by name
-   (`history_ends`), and a refusal stops that series by name
-   (`vendor_refused`, with the vendor's own words) while the pull goes on.
-4. **The continuous series** is asked with `continuous=1` through the newest
-   snapshot's nearest future expiring on or after the day of the pull, and
-   filed **as answered** under its own symbol `<UNDERLYING>-FUT-C1` (segment
-   FNO, no contract). The vendor states no roll day, so the series is never
-   split into contracts and no contract is inferred from a date
-   (`a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_split`).
-5. **The route.** `pull::vendor::FnoAccess::ByToken(ZERODHA_CONTINUOUS)` on
-   the Zerodha descriptor, whose segments now include FNO with no basis row
-   (unmeasured, `Basis::segment` answers `None`). `POST /pull/fno` with
-   `vendor=zerodha&series=futures&granularity=1day` plans through the dated
-   snapshots (`fnowork::futures_plan`) and lands through
-   `fnowork::pull_futures_day`; options and minutes are refused by name; a
-   named expiry asks that contract alone. Every plan refusal and every series
-   is a `pull.futures` event.
-6. **The store write is the operator's**, inside 2018-01-01..2026-09-30 and
-   after a masters refresh has written a snapshot: one `/pull/fno
-   series=futures` per F&O underlying. Before the first snapshot nothing is
-   planned (`no_snapshot`). History before the first snapshot reaches the
-   store only as the continuous series.
-
-### D-6894 — R4-28 repair 1: a futures plan reads an append-only first-listed index, never every snapshot; its cost does not grow with the snapshots held — 2026-10-22
-
-The number is the ledger head + 1 (amendment A6).
-
-1. **The defect.** `fnowork::futures_plan` found the first snapshot that
-   lists each future by opening, unpacking and parsing every receipted
-   snapshot on or before the window's end, on every `POST /pull/fno
-   series=futures` run and for every underlying, keeping nothing between
-   runs. A second agent measured it on copies of the real 108,915-row dump
-   (dev profile, NIFTY): 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at
-   40 — linear, unbounded, and against the operator's rule that no work is
-   redone that an index can remember. `docs/06-limits.md` L-R428-04 named
-   the cost and bounded nothing.
-2. **The rule.** The day a receipted snapshot first listed a contract never
-   changes, so it is written down once. `master_snapshots::first_listed`
-   keeps, under the snapshots directory in `futures-first-listed/`, one
-   append-only file per (exchange, underlying name) — a line per (type,
-   expiry, token) the first time a snapshot lists it, and again only when an
-   older snapshot taken in later lists it earlier; the reader takes the
-   earliest day — and `absorbed.idx`, a line per snapshot taken in, written
-   after every line it added is synced. That line is the commit marker, as a
-   receipt is a snapshot's. Every Kite snapshot write takes its futures in
-   under the writers' lock it already holds; a plan reads the index and
-   parses the newest snapshot alone (for `token_reused` and the continuous
-   series). A snapshot on or before the window's end that the index does
-   not hold (one held before the index existed, or a kill before its commit
-   line) is taken in by the next plan, once, under the same lock.
-3. **Nothing is dropped silently.** Every line ends in a check over its own
-   bytes: a line cut by a kill is skipped and counted (`pull.futures` event),
-   and the next append starts a new line; no line is rewritten. A snapshot
-   whose checked body does not parse is recorded unparseable once and named
-   by every plan that needs it, exactly as before (`snapshot_unreadable`); a
-   snapshot whose receipt or body does not check is not recorded, is named,
-   and is retried. A future row with a field a line cannot carry is counted
-   on its commit line and in the `pull.masters.snapshot` event. A book built
-   in memory has no index and is refused `futures_index` by name.
-4. **Scope.** Only the route's own exchange and future type are taken in
-   (`ZERODHA_CONTINUOUS`: NFO, FUT), so a refresh touches only the files of
-   underlyings with a new contract — about one line per underlying when a
-   new month is listed, none on other days. Another route's (exchange,
-   type) is its own index, taken in on its first plan.
-5. **Proof.** C-MS-02 holds `futures_plan` flat at 1, 10 and 100 snapshots
-   on disk; `docs/04-invariants.md` R428-09..11 name the tests;
-   `docs/06-limits.md` L-R428-04 is closed and L-R428-07/08 state what
-   remains.
-
 ### D-7120 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 in `Cargo.lock` only, clearing RUSTSEC-2026-0382 and RUSTSEC-2026-0381; and the C-HA-01 cost row R4-09a named and never landed (BASE-REDS-1021) — 2026-10-21
 
 **Context** (BASE-REDS-1021). The full gate on `feat/db-fix` at 8c67456ac
@@ -82884,14 +82719,179 @@ through it"). Under D-7135 no root A is ever built.
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
 
-### D-7139 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+### D-7185 — R4-28 (DLY-09): the Kite instrument dump is kept by date, one receipted snapshot per refresh, diffed against the one before, and a token is resolved by date — 2026-10-22
 
-The number is the next one after the block D-7130..D-7134 that IA-16
-recorded (amendment A6); renumber at landing if it is taken. It was taken:
-LEDGER-1023 recorded D-7135..D-7138 on `feat/db-fix` first, so this entry,
-written as D-7135, is D-7139 from R4-28 repair 3 on.
+The number is the first of R4-28's own block D-7185..D-7194
+(`state/decision-blocks.json`, OPS-08). This entry and the four after it
+were first written under numbers inside blocks other parts own, and were
+renumbered into this block, in order, before landing (R4-28 repair 4,
+the LEDGER-1023 follow-up). Nothing in them changed but the numbers.
 
-1. **The defect.** D-6894 made the first-listed index the only place
+1. **Every landing of the Kite dump, and of NSE's NIFTY Total Market file,
+   is also written as a dated snapshot** under `<masters>/master-snapshots/`:
+   `instruments_<yyyymmdd>.csv.gz` and `nse_total_market_<yyyymmdd>.csv.gz`,
+   each with a `.receipt` binding the date, the URL, the compressed length
+   and SHA-256 and the body's length and SHA-256. The one call is made after
+   `masters::land` at its only call site (`api::mastersrun::obtain`); a
+   landing that refused writes no snapshot and the newest one stands.
+   `pull::master_snapshots`, on `cash_session_cache`'s pattern.
+2. **Nothing is rewritten.** Both files are created `O_EXCL`. The receipt is
+   the commit marker, written last: a body with no receipt (a kill between
+   the two) is named incomplete by `Catalog` and never read. A refresh whose
+   body equals the day's newest receipted snapshot is `already_held`; a
+   different body takes the next ordinal (`_2`, `_3`, ... up to 99, then a
+   refusal by name), past any incomplete entry, and the newest receipted
+   ordinal is the day's snapshot. Writers take one advisory lock beside the
+   snapshots; the refresh's own FIFO lock already serialises one process.
+3. **`token_on(day, exchange, token)`** (`Book::token_on`) answers from the
+   newest receipted snapshot on or before the day, through that snapshot's
+   own hash index, found by a day table (one index). On a snapshot day that
+   snapshot answers alone. Between two snapshots the older one is believed
+   only when the next later one maps the token to the same contract (the
+   diff's key); otherwise `token_ambiguous`, naming both. Before the first
+   snapshot: `before_first_snapshot`, never the earliest row and never
+   today's. A token two rows carry in one snapshot: `token_duplicated`. A
+   snapshot that does not check: `snapshot_unreadable`, named.
+4. **The diff** of each Kite snapshot against the receipted one before it is
+   written once, `O_EXCL`, as `<yyyymmdd>[_n].diff`: fixed 192-byte lines, a
+   header naming both snapshots and the count. Kinds: `listing`, `delisting`
+   (counted), `symbol` (the same token under a new symbol, or the same ISIN
+   under a new symbol), `isin`, `lot_size`, `expiry`, `token` (the same key
+   under a new token) (each named), and `isin_unknown`: a share is named
+   the day its ISIN becomes unknown (known on the old date) or the day it
+   appears without one, and the day's total is the header's
+   `isin_unknown_total` (the dump landed 6 Oct 2026 holds 10,182 NSE cash
+   rows against the Total Market file's 750, so naming every unknown share
+   every day would repeat some 9,400 names a day). The ISIN of
+   a share is read from the NSE Total Market snapshot **of the same date**
+   only: the Kite dump has no ISIN column (charter §4z), and a share neither
+   file lists that day is `isin_unknown`, never inferred. Whether every F&O
+   underlying is in the NIFTY Total Market file is UNVERIFIED. The
+   `/masters/refresh` outcome carries the snapshot and the diff's counts and
+   every named change; `pull.masters.snapshot` carries one event per refresh
+   source and one per named change. A refresh the same day reads the written
+   diff back rather than recomputing it.
+5. **`newest_snapshot_day`** reads the newest Kite snapshot's date from its
+   checked receipt, for R4-23's `master_stale` refusal (FM-267); a newest
+   snapshot that does not check is refused by name, never answered with an
+   older date.
+6. **Not built (the operator's one-command cut of 20 Oct 2026):** the scheduled morning
+   refresh and the MasterChanges panel. A refresh stays the attended
+   `POST /masters/refresh`; the diff's reader is its outcome and the events.
+
+Proof: `pull::master_snapshots::tests` (21 tests, among them
+`one_token_two_dates_resolves_to_two_contracts`,
+`the_diff_of_two_days_lists_exactly_the_injected_changes`,
+`a_snapshot_is_never_rewritten`,
+`a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contract`,
+`a_date_before_the_first_snapshot_resolves_nothing`,
+`a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used`,
+`an_isin_change_between_masters_is_named`); the bound is C-MS-01 in
+`crates/pull/benches/ratio/master_snapshots.rs` (docs/06-limits.md
+L-R428-01..04).
+
+### D-7186 — R4-28 (CON-12, FUT-C1): Zerodha futures day candles are stored and never swept; the token is an address, never an identity — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **Scope.** The operator put the futures legs back on 20 Oct 2026 (CON-12
+   and its continuous series FUT-C1, "stored and never swept"). This
+   supersedes, for FUTURES only, the 21 Aug 2026 instruction that Zerodha
+   carries no expired F&O; options stay refused on Zerodha. `CLAUDE.md` §1
+   already allows contracts to be stored and never swept, so the engine
+   surface does not change: `Instrument::is_sweepable` refuses every
+   contract and every FNO key
+   (`fnowork::futures_tests::a_future_is_never_sweepable`).
+2. **The source and its lane** are the charter's new rows beside "Expired
+   F&O" (§4z): Kite, `day` candles only, NFO futures only, `oi=1`. Minute
+   candles of an expired future stay UNVERIFIED and are never asked. GDFL
+   holds no futures (ingest design E22); whether it sells them is the
+   operator's question.
+3. **Identity.** A future is one contract keyed (underlying, expiry) through
+   `core::instrument::Contract::of(Kind::Future)`, filed at
+   `bars/zerodha/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/<yyyy-mm>.bin` with
+   its open interest. Its expiry is the one the dated snapshot states (the
+   settled date, so an expiry the exchange moved for a holiday is the moved
+   one). The vendor's token is only the ADDRESS: a contract is asked through
+   its own token from the first dated snapshot that lists it to its expiry,
+   and a token the newest snapshot maps to another contract is refused
+   `token_reused` and never asked for the older contract's history
+   (`two_contracts_reusing_a_token_on_different_dates_stay_separate`). A
+   token the newest snapshot no longer lists (flushed after expiry) is
+   asked: an answer of nothing ends that contract's history by name
+   (`history_ends`), and a refusal stops that series by name
+   (`vendor_refused`, with the vendor's own words) while the pull goes on.
+4. **The continuous series** is asked with `continuous=1` through the newest
+   snapshot's nearest future expiring on or after the day of the pull, and
+   filed **as answered** under its own symbol `<UNDERLYING>-FUT-C1` (segment
+   FNO, no contract). The vendor states no roll day, so the series is never
+   split into contracts and no contract is inferred from a date
+   (`a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_split`).
+5. **The route.** `pull::vendor::FnoAccess::ByToken(ZERODHA_CONTINUOUS)` on
+   the Zerodha descriptor, whose segments now include FNO with no basis row
+   (unmeasured, `Basis::segment` answers `None`). `POST /pull/fno` with
+   `vendor=zerodha&series=futures&granularity=1day` plans through the dated
+   snapshots (`fnowork::futures_plan`) and lands through
+   `fnowork::pull_futures_day`; options and minutes are refused by name; a
+   named expiry asks that contract alone. Every plan refusal and every series
+   is a `pull.futures` event.
+6. **The store write is the operator's**, inside 2018-01-01..2026-09-30 and
+   after a masters refresh has written a snapshot: one `/pull/fno
+   series=futures` per F&O underlying. Before the first snapshot nothing is
+   planned (`no_snapshot`). History before the first snapshot reaches the
+   store only as the continuous series.
+
+### D-7187 — R4-28 repair 1: a futures plan reads an append-only first-listed index, never every snapshot; its cost does not grow with the snapshots held — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** `fnowork::futures_plan` found the first snapshot that
+   lists each future by opening, unpacking and parsing every receipted
+   snapshot on or before the window's end, on every `POST /pull/fno
+   series=futures` run and for every underlying, keeping nothing between
+   runs. A second agent measured it on copies of the real 108,915-row dump
+   (dev profile, NIFTY): 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at
+   40 — linear, unbounded, and against the operator's rule that no work is
+   redone that an index can remember. `docs/06-limits.md` L-R428-04 named
+   the cost and bounded nothing.
+2. **The rule.** The day a receipted snapshot first listed a contract never
+   changes, so it is written down once. `master_snapshots::first_listed`
+   keeps, under the snapshots directory in `futures-first-listed/`, one
+   append-only file per (exchange, underlying name) — a line per (type,
+   expiry, token) the first time a snapshot lists it, and again only when an
+   older snapshot taken in later lists it earlier; the reader takes the
+   earliest day — and `absorbed.idx`, a line per snapshot taken in, written
+   after every line it added is synced. That line is the commit marker, as a
+   receipt is a snapshot's. Every Kite snapshot write takes its futures in
+   under the writers' lock it already holds; a plan reads the index and
+   parses the newest snapshot alone (for `token_reused` and the continuous
+   series). A snapshot on or before the window's end that the index does
+   not hold (one held before the index existed, or a kill before its commit
+   line) is taken in by the next plan, once, under the same lock.
+3. **Nothing is dropped silently.** Every line ends in a check over its own
+   bytes: a line cut by a kill is skipped and counted (`pull.futures` event),
+   and the next append starts a new line; no line is rewritten. A snapshot
+   whose checked body does not parse is recorded unparseable once and named
+   by every plan that needs it, exactly as before (`snapshot_unreadable`); a
+   snapshot whose receipt or body does not check is not recorded, is named,
+   and is retried. A future row with a field a line cannot carry is counted
+   on its commit line and in the `pull.masters.snapshot` event. A book built
+   in memory has no index and is refused `futures_index` by name.
+4. **Scope.** Only the route's own exchange and future type are taken in
+   (`ZERODHA_CONTINUOUS`: NFO, FUT), so a refresh touches only the files of
+   underlyings with a new contract — about one line per underlying when a
+   new month is listed, none on other days. Another route's (exchange,
+   type) is its own index, taken in on its first plan.
+5. **Proof.** C-MS-02 holds `futures_plan` flat at 1, 10 and 100 snapshots
+   on disk; `docs/04-invariants.md` R428-09..11 name the tests;
+   `docs/06-limits.md` L-R428-04 is closed and L-R428-07/08 state what
+   remains.
+
+### D-7188 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** D-7187 made the first-listed index the only place
    `fnowork::futures_plan` learns which contracts exist and from which day,
    and nothing checked an underlying's file against `absorbed.idx`. A second
    agent showed it (`state/fix/round2/verify-R4-28-r2.json`): the file gone,
@@ -82945,10 +82945,10 @@ written as D-7135, is D-7139 from R4-28 repair 3 on.
    parse the dump.
 8. **Proof.** `docs/04-invariants.md` R428-12 and R428-13 name the tests.
 
-### D-7140 — R4-28 repair 3: every incomplete snapshot entry is named by every refresh that finds it; a token is never resolved past its own expiry; a future-dated newest snapshot is refused — 2026-10-23
+### D-7189 — R4-28 repair 3: every incomplete snapshot entry is named by every refresh that finds it; a token is never resolved past its own expiry; a future-dated newest snapshot is refused — 2026-10-23
 
-The number follows D-7139 (renumbered from D-7135 above); renumber at
-landing if it is taken.
+The number follows D-7188 in R4-28's own block D-7185..D-7194 (see
+D-7185).
 
 1. **The defect.** A snapshot write cut by a kill leaves a body with no
    receipt (or a receipt cut before its rename). `Catalog::read` listed it
@@ -83016,3 +83016,52 @@ landing if it is taken.
    blocking-item tests failed first on the unfixed tree (5d009f454 with only
    the new tests, `state/fix/round2/R4-28-r3-logs/before3.log` and
    `before3-pull.log`): the outcome JSON named none of the cut entries.
+
+### D-7190 — R4-28 repair 4: a futures pull counts the bars it WROTE, beside the bars it offered, and accounts for every row it read; its journal outcome comes from the written count — 2026-10-24
+
+The number follows D-7189 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** `fnowork::FuturesLanded` carried `Ingested::bars_stored`,
+   the bars a landing OFFERED the store, under the words "Bars written to
+   the store", and the futures arm of `POST /pull/fno` printed it as "Bars
+   stored", put it in the journal record's count and chose `Stored` or
+   `Empty` from it. An identical re-pull, which writes nothing because the
+   store holds every bar byte for byte, answered "4 bars stored from 4 rows"
+   and was journalled `Stored`: the misreport `Ingested::bars_committed`
+   was added to end (`pull::ingest`, the field's own note). A row the
+   landing dropped (a day the calendar records closed, a day before the
+   window, a day past the window and the expiry) was counted nowhere on the
+   receipt, which had no written count, no drop census and no balance line,
+   while the options landings on the same route count `bars_committed` and
+   the spot receipt shows written, dropped and the balance. The pull
+   ladder's written-bars figure reads "Bars written to the file" first and
+   "Bars stored" after it, so a futures leg added bars that were never
+   written to the run's total.
+2. **The rule.** The futures pull sums each landing's own `Ingested`:
+   offered (`bars_stored`), written (`bars_committed`), folded
+   (`rows_folded`) and the drop census. The receipt shows them under the
+   spot receipt's words ("Bars offered to the store", "Bars written to the
+   file", "Rows folded into an open bar", "Rows dropped"), names the drops
+   by reason ("Dropped, by reason") and prints the balance line
+   (`read = offered + folded + dropped`, or `NO` naming the stopped series).
+   Each series line and each `pull.futures` series event say the written
+   count first and the offered count beside it (with "N already held" when
+   the store already held them), the folded count and the drops by reason;
+   the event carries the line itself, so `/logs` and the receipt cannot
+   disagree.
+3. **The journal.** The record's count is the WRITTEN count, as the options
+   landings' is (`FnoLanded::record_landing`), and it now carries the rows
+   folded and the drops by reason the futures arm measured; every other arm
+   keeps the zeroes `Record::refused` writes, byte for byte. The outcome
+   comes from the written count: `Stored` when a bar was written, `Empty`
+   when every bar offered was already held (or nothing was left to file),
+   with the reason inside the note's 60 kept bytes, and `Failed` when a
+   series stopped, a contract was not asked, or the rows do not balance.
+4. **Cost.** Four additions per landing and one line per series; nothing
+   new is read. The pull ladder treats `Empty` as clean, as it does for the
+   options walk, so a re-pull of a held window still completes its leg.
+5. **Proof.** `docs/04-invariants.md` R428-18 names the tests. The two
+   blocking-item tests failed on the unfixed tip (82d389b5b with only those
+   tests, written against the fields it had: `state/fix/round2/R4-28-r4-logs/`
+   `before.log`).

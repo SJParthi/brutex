@@ -1,5 +1,5 @@
 //! The futures first-listed index: for each future a dated Kite snapshot
-//! lists, the first snapshot day that listed it. R4-28 repair 1; D-6894.
+//! lists, the first snapshot day that listed it. R4-28 repair 1; D-7187.
 //! Checked against its own commit log and rebuilt as a new generation when it
 //! does not match: R4-28 repair 2.
 //!
