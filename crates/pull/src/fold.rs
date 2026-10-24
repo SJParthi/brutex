@@ -899,7 +899,7 @@ pub fn complete_minutes_with_calendar(
     cash_schedule: Option<&crate::cash_auction::Schedule>,
     runtime: crate::calendar::Runtime<'_>,
 ) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
-    let folded = fold_month(bars, bucket, venue, cash_schedule, runtime)?;
+    let folded = fold_month(bars, bucket, venue, cash_schedule, runtime, PADDED_FOLD)?;
     Ok((
         folded.bars,
         folded.notes.into_iter().map(|note| note.text).collect(),
@@ -1026,12 +1026,101 @@ pub fn derive_minutes(
     cash_schedule: Option<&crate::cash_auction::Schedule>,
     runtime: crate::calendar::Runtime<'_>,
 ) -> Result<Derived, FoldError> {
-    let folded = fold_month(bars, bucket, venue, cash_schedule, runtime)?;
+    derive_minutes_with(bars, bucket, venue, cash_schedule, runtime, PADDED_FOLD)
+}
+
+/// How a cash share's derived fold reads a VENDOR-PADDED minute
+/// ([`crate::padded`], INT-15, R4-27).
+///
+/// Every rule but [`Self::AsTrade`] reads a padded minute as a minute in
+/// which nothing traded: a bucket opens on its first unpadded minute, its
+/// high and low come from its unpadded minutes, its close is its last
+/// unpadded minute's (which every padded minute after it repeats), its
+/// volume is unchanged (a padded minute adds zero) and it is `partial` when
+/// it holds fewer unpadded minutes than the session scheduled. The rules
+/// differ only on a bucket that holds padded minutes and NOTHING ELSE. Only a
+/// cash share's minutes are judged ([`crate::vendor::Venue::NseCash`]); an
+/// index and a future fold as before under every rule.
+///
+/// The rule in force is [`PADDED_FOLD`]; the other two are kept because the
+/// decision was MEASURED both ways and a second agent repeats that
+/// measurement through [`derive_minutes_with`] (`cli padded-measure`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PaddedFold {
+    /// The fold before INT-15: a padded minute is a minute like any other.
+    AsTrade,
+    /// Treatment (a): a bucket of only padded minutes keeps the bar the
+    /// fold before INT-15 wrote (flat at the carried price, volume zero),
+    /// counted `partial`.
+    KeepFlat,
+    /// Treatment (b): a bucket of only padded minutes has no bar, exactly as
+    /// a share's bucket with no minute at all has none (D-3321 item 2): it
+    /// is neither written nor withheld.
+    Absent,
+}
+
+impl PaddedFold {
+    /// The rule's stable name, as the measurement and the rule event carry it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AsTrade => "as_trade",
+            Self::KeepFlat => "keep_flat",
+            Self::Absent => "absent",
+        }
+    }
+}
+
+/// The padded-minute rule every derive and every completeness audit folds
+/// under: treatment (b), [`PaddedFold::Absent`]. The choice and both
+/// measurements are R4-27's docs/05 entry.
+pub const PADDED_FOLD: PaddedFold = PaddedFold::Absent;
+
+/// The padded-minute rule every derived month stored BEFORE D-7270 was folded
+/// under: [`PaddedFold::AsTrade`], the fold before INT-15.
+///
+/// Read only to NAME a stored rung-month that [`PADDED_FOLD`] folds
+/// differently (`ingest`'s historical reconcile and the repair door's derive,
+/// verify-R4-27-r1 B2): such a month is refused as "stored under the fold
+/// before D-7270", the rule change it is, never as missing source or a
+/// conflict. No new bar is ever folded under it.
+pub const PADDED_FOLD_BEFORE: PaddedFold = PaddedFold::AsTrade;
+
+/// [`derive_minutes`] under an explicit padded-minute rule: the measurement's
+/// door ([`PaddedFold`]). Production folds call [`derive_minutes`], which is
+/// this under [`PADDED_FOLD`].
+///
+/// # Errors
+/// Returns the same order/width/overflow refusals as `complete_minutes`.
+pub fn derive_minutes_with(
+    bars: &[Bar],
+    bucket: Bucket,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+    runtime: crate::calendar::Runtime<'_>,
+    padded: PaddedFold,
+) -> Result<Derived, FoldError> {
+    let folded = fold_month(bars, bucket, venue, cash_schedule, runtime, padded)?;
     Ok(Derived {
         bars: folded.bars,
         tally: folded.tally,
         diagnostics: aggregate(&folded.notes),
     })
+}
+
+/// The session the derived fold folds day `day` inside: the calendar decides
+/// which days trade, the venue their hours, a special session its recorded
+/// windows ([`day_session`]). `Unmeasured` for a day the venue cannot attest;
+/// the reason is the fold's to name, not this lookup's. Read by
+/// [`crate::padded::per_day`] so its windows are the fold's.
+#[must_use]
+pub fn session_of(
+    day: i64,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+    runtime: crate::calendar::Runtime<'_>,
+) -> crate::calendar::DayKind {
+    day_session(day, venue, cash_schedule, runtime, &mut Vec::new()).1
 }
 
 /// One withheld bucket, range or day, with the reason it is counted under.
@@ -1078,6 +1167,7 @@ fn fold_month(
     venue: crate::vendor::Venue,
     cash_schedule: Option<&crate::cash_auction::Schedule>,
     runtime: crate::calendar::Runtime<'_>,
+    padded: PaddedFold,
 ) -> Result<Folded, FoldError> {
     let candidates = fold_from_bars(bars, bucket, Bucket::MINUTE)?;
     let width = i64::from(bucket.secs()) * 1_000_000;
@@ -1092,6 +1182,12 @@ fn fold_month(
     // bar rather than a withheld one. Futures keep the index's rule: nothing
     // records which of their minutes were no trade.
     let no_trade_is_absence = venue == crate::vendor::Venue::NseCash;
+    // A VENDOR-PADDED MINUTE IS NOT A TRADE (INT-15, R4-27): a share's minute
+    // that repeats the minute before it flat, with no volume, in the same
+    // session window. Judged bar by bar by the walk `crate::padded::per_day`
+    // takes, so the fold and the count cannot disagree. One comparison a bar.
+    let judge_padded = no_trade_is_absence && padded != PaddedFold::AsTrade;
+    let mut walk = crate::padded::Walk::new();
     let mut out = Folded {
         bars: Vec::with_capacity(candidates.len()),
         notes: Vec::new(),
@@ -1177,6 +1273,9 @@ fn fold_month(
         let mut count = 0_i64;
         let mut valid = true;
         let mut previous = None;
+        // The bucket as its UNPADDED minutes make it, and how many there were.
+        let mut traded = 0_i64;
+        let mut traded_bar: Option<Bar> = None;
         while let Some(source) = bars.get(cursor).filter(|source| source.ts_micros < end) {
             let minute = u16::try_from(
                 (i128::from(source.ts_micros) - i128::from(midnight))
@@ -1189,7 +1288,36 @@ fn fold_month(
             previous = Some(source.ts_micros);
             count += 1;
             cursor += 1;
+            let padded_minute = judge_padded
+                && walk.step(
+                    source,
+                    day,
+                    minute.and_then(|m| crate::padded::window_of(session, m)),
+                );
+            if !padded_minute {
+                traded += 1;
+                traded_bar = Some(traded_bar.map_or(*source, |so_far| Bar {
+                    high: so_far.high.max(source.high),
+                    low: so_far.low.min(source.low),
+                    close: source.close,
+                    ..so_far
+                }));
+            }
         }
+        // A bucket with a padded minute reads its prices off its unpadded
+        // minutes: the open is the first one's, never a carried price. Its
+        // stamp, volume (a padded minute adds zero) and open interest are the
+        // whole bucket's.
+        let bar = match traded_bar {
+            Some(unpadded) if judge_padded => Bar {
+                open: unpadded.open,
+                high: unpadded.high,
+                low: unpadded.low,
+                close: unpadded.close,
+                ..bar
+            },
+            _ => bar,
+        };
         let expected = scheduled_minutes(session, midnight, start, end);
         // AN UNMEASURED OR WITHHELD DAY IS NAMED ONCE, NOT ONCE PER BUCKET
         // (o1api-44, D-1201; hunt-pull-3, D-1533). The day sentence above
@@ -1203,13 +1331,23 @@ fn fold_month(
             }
             continue;
         }
-        let complete = valid && expected > 0 && i128::from(count) == expected;
+        // Every minute present counts toward coverage; only an unpadded one
+        // is a trade. Without the padded rule the two counts are one.
+        let complete = valid && expected > 0 && i128::from(count) == expected && traded == count;
         let partial = no_trade_is_absence
             && valid
-            && count > 0
+            && traded > 0
             && expected > 0
-            && i128::from(count) < expected;
-        if complete || partial {
+            && i128::from(traded) < expected;
+        // A share's bucket of ONLY padded minutes: nothing traded in it.
+        let only_padded = judge_padded && valid && expected > 0 && count > 0 && traded == 0;
+        if only_padded && padded == PaddedFold::Absent {
+            // No trade, so no bar, exactly as a bucket with no minute at all
+            // (D-3321 item 2): neither written nor withheld.
+            continue;
+        }
+        if complete || partial || only_padded {
+            let partial = partial || only_padded;
             out.bars.push(bar);
             out.tally.buckets = out.tally.buckets.saturating_add(1);
             out.tally.partial = out.tally.partial.saturating_add(u32::from(partial));

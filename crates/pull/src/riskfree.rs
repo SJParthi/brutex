@@ -129,6 +129,15 @@ pub const SOURCE_PREFIX: &str = "https://www.rbi.org.in/";
 /// The auction is weekly, so consecutive releases are seven days apart and a
 /// holiday moves one by a day or two. Fourteen admits one such shift with a
 /// week to spare and refuses a whole missing week. D-2810.
+///
+/// **Measured both ways and kept (AUT-10 decision 2, R4-27, D-7272).**
+/// Replayed over the 1,990 sessions of 2018-09-03..2026-09-24 ([`replay`],
+/// `cli rate-replay`): the operator's table refuses 10 sessions at 14 days,
+/// 1 (2024-10-03, an expiry) at 21 and none at 28; with RBI's documented
+/// gaps as gap rows it refuses none at 14 and labels 33 `rate_carried`, at
+/// most 0.032 volatility points from the next result's IV. A wider bound
+/// would also carry an UNDOCUMENTED hole without a word, so the bound stays
+/// and the gaps are rows.
 pub const MAX_AGE_DAYS: i32 = 14;
 
 /// The oldest a CARRIED result may be, in calendar days: two staleness
@@ -265,6 +274,10 @@ pub struct Series {
     first_release: TradeDay,
     last_release: TradeDay,
     sha256: [u8; 32],
+    /// The carried bound the day table was built with: twice
+    /// [`MAX_AGE_DAYS`] ([`MAX_CARRIED_AGE_DAYS`]) for every series a caller
+    /// can hold; twice another staleness bound only inside [`replay`].
+    max_carried: i32,
 }
 
 /// Why a row was refused.
@@ -340,6 +353,12 @@ pub enum SeriesError {
         /// What was wrong with it.
         fault: RowFault,
     },
+    /// A replay asked for a staleness bound outside 1 to 366 days
+    /// ([`replay`]).
+    Bound {
+        /// The bound asked.
+        days: i32,
+    },
 }
 
 /// Why a day has no rate.
@@ -399,6 +418,10 @@ impl std::fmt::Display for SeriesError {
             Self::Row { line, fault } => {
                 write!(f, "the T-bill series refuses line {line}: {fault:?}")
             }
+            Self::Bound { days } => write!(
+                f,
+                "a replay's staleness bound must be 1 to 366 days, and {days} is not"
+            ),
         }
     }
 }
@@ -632,6 +655,15 @@ impl Series {
     /// [`SeriesError::Header`], [`SeriesError::Empty`], [`SeriesError::Row`]
     /// naming the line and the fault, and [`SeriesError::SpanTooLong`].
     pub fn parse(text: &str) -> Result<Self, SeriesError> {
+        Self::parse_bounded(text, MAX_AGE_DAYS)
+    }
+
+    /// [`Self::parse`] under staleness bound `max_age` (and carried bound
+    /// twice it). Private: a series a caller holds is always built under
+    /// [`MAX_AGE_DAYS`], whose words its refusals carry; another bound is
+    /// built only inside [`replay`], which answers in codes.
+    fn parse_bounded(text: &str, max_age: i32) -> Result<Self, SeriesError> {
+        let max_carried = max_age.saturating_mul(2);
         let mut lines = text.lines();
         if lines.next() != Some(HEADER) {
             return Err(SeriesError::Header);
@@ -688,7 +720,7 @@ impl Series {
                 }
                 Entry::Gap(gap) => {
                     gaps.push(*gap);
-                    let linked = live.is_some_and(|previous| released - previous <= MAX_AGE_DAYS);
+                    let linked = live.is_some_and(|previous| released - previous <= max_age);
                     if !linked {
                         unlinked.push(*gap);
                     }
@@ -705,9 +737,9 @@ impl Series {
             };
             let owns_until = entries
                 .get(index + 1)
-                .map_or(released + MAX_AGE_DAYS, |next| next.released().ordinal());
+                .map_or(released + max_age, |next| next.released().ordinal());
             for day in released + 1..=owns_until {
-                let fresh = day - released <= MAX_AGE_DAYS;
+                let fresh = day - released <= max_age;
                 by_day.push(if fresh { slot } else { 0 });
                 carried_by.push(if fresh { carried } else { 0 });
             }
@@ -722,6 +754,7 @@ impl Series {
             first_release,
             last_release,
             sha256: Sha256::digest(text.as_bytes()).into(),
+            max_carried,
         })
     }
 
@@ -763,7 +796,7 @@ impl Series {
             }));
         };
         if let Some(gap) = carried
-            && day.ordinal() - auction.released.ordinal() > MAX_CARRIED_AGE_DAYS
+            && day.ordinal() - auction.released.ordinal() > self.max_carried
         {
             return Err(LookupError::CarriedTooLong {
                 day,
@@ -825,6 +858,75 @@ impl Series {
     pub const fn sha256(&self) -> [u8; 32] {
         self.sha256
     }
+}
+
+impl LookupError {
+    /// The refusal's stable code, as a replay and a log count it.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::BeforeSeries { .. } => "rate_before_series",
+            Self::Stale { .. } => "rate_stale",
+            Self::CarriedTooLong { .. } => "rate_carried_too_long",
+            Self::HoleBeforeGap { .. } => "rate_hole_before_gap",
+        }
+    }
+}
+
+/// How a run of trade days fares against one table under one staleness
+/// bound: priced on a fresh result, priced on a result carried over a
+/// documented gap (labelled `rate_carried`), or refused, each refused day
+/// with its code ([`LookupError::code`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Replay {
+    /// The bound the days were judged under, in calendar days.
+    pub max_age_days: i32,
+    /// Days priced on a fresh result.
+    pub fresh: u32,
+    /// Days priced on a result carried over a documented gap.
+    pub carried: u32,
+    /// Days refused, in the order asked, with the refusal's code.
+    pub refused: Vec<(TradeDay, &'static str)>,
+}
+
+/// The table `text` replayed over `days` under staleness bound
+/// `max_age_days` (and twice it for a carried result): the MEASUREMENT behind
+/// R4-27's decision on the bound (AUT-10 decision 2, DB-B44), repeatable by
+/// `cli rate-replay`. The series a caller prices with is always built under
+/// [`MAX_AGE_DAYS`] ([`Series::parse`]); a replay builds its own and answers
+/// in codes, so no refusal sentence ever names a bound it was not judged by.
+///
+/// # Errors
+///
+/// [`SeriesError::Bound`] for a bound outside 1 to 366 days, and every
+/// refusal of [`Series::parse`].
+///
+/// # Cost
+///
+/// [`Series::parse`]'s, once, then one O(1) [`Series::on`] a day asked.
+pub fn replay(
+    text: &str,
+    max_age_days: i32,
+    days: impl IntoIterator<Item = TradeDay>,
+) -> Result<Replay, SeriesError> {
+    // A RANGE PATTERN, NOT A MEMBERSHIP CALL: one O(1) bound check, which
+    // Gate 11 rule 7 reads as what it is (BASE-GATE11).
+    if !matches!(max_age_days, 1..=366) {
+        return Err(SeriesError::Bound { days: max_age_days });
+    }
+    let series = Series::parse_bounded(text, max_age_days)?;
+    let mut out = Replay {
+        max_age_days,
+        ..Replay::default()
+    };
+    for day in days {
+        match series.on(day) {
+            Ok(asof) if asof.carried.is_some() => out.carried = out.carried.saturating_add(1),
+            Ok(_) => out.fresh = out.fresh.saturating_add(1),
+            Err(why) => out.refused.push((day, why.code())),
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1838,5 +1940,128 @@ mod tests {
             assert_eq!(GapKind::of_column(kind.column()), Some(kind));
             assert!(!kind.word().is_empty());
         }
+    }
+
+    // ═════════ the bound, measured both ways (R4-27, AUT-10 decision 2) ═════════
+
+    /// Every day from `from` to `to`, inclusive.
+    fn days_between(from: TradeDay, to: TradeDay) -> Vec<TradeDay> {
+        (from.ordinal()..=to.ordinal())
+            .map(|ordinal| TradeDay::from_ordinal(ordinal).expect("in the window"))
+            .collect()
+    }
+
+    /// Weekly results on Wednesdays, with the week of 2020-01-15 MISSING and
+    /// the next result moved by a holiday to Thursday 2020-01-23: fifteen
+    /// days after the result before it.
+    fn a_week_missing() -> String {
+        table(&[
+            ("2020-01-01", "98.5000", "6.1081"),
+            ("2020-01-08", "98.4000", "6.5219"),
+            ("2020-01-23", "98.6000", "5.6951"),
+        ])
+    }
+
+    #[test]
+    fn r_missing_for_a_week_is_refused_by_the_chosen_bound() {
+        // THE CHOSEN BOUND (14 days, unchanged). 23 Jan reads the result
+        // released strictly before it, 8 Jan: fifteen days, refused. One day.
+        let bare = series(&a_week_missing());
+        assert_eq!(
+            bare.on(day(2020, 1, 23)),
+            Err(LookupError::Stale {
+                day: day(2020, 1, 23)
+            })
+        );
+        assert!(bare.on(day(2020, 1, 22)).is_ok(), "day 14 is fresh");
+        assert!(bare.on(day(2020, 1, 24)).is_ok(), "the next result");
+        let days = days_between(day(2020, 1, 2), day(2020, 1, 31));
+        let replayed = replay(&a_week_missing(), MAX_AGE_DAYS, days.clone()).unwrap();
+        assert_eq!(replayed.refused, vec![(day(2020, 1, 23), "rate_stale")]);
+        assert_eq!(replayed.fresh, u32::try_from(days.len() - 1).unwrap());
+        assert_eq!(replayed.carried, 0);
+        // The same table under the wider bounds the decision measured: none
+        // refused, and nothing says the rate was carried over a hole.
+        for bound in [21, 28] {
+            let wider = replay(&a_week_missing(), bound, days.clone()).unwrap();
+            assert_eq!(wider.refused, Vec::new(), "{bound}");
+            assert_eq!(wider.carried, 0, "{bound}: unlabelled");
+            assert_eq!(wider.max_age_days, bound);
+        }
+    }
+
+    #[test]
+    fn a_cancelled_auction_week_is_not_stale() {
+        // The same week, DOCUMENTED: a CANCELLED row for 2020-01-15. Under the
+        // unchanged 14-day bound nothing is refused, and every day the gap
+        // covers says it is carried, naming the gap.
+        let mut text = String::from(HEADER);
+        for row in [
+            line("2020-01-01", "98.5000", "6.1081"),
+            line("2020-01-08", "98.4000", "6.5219"),
+            gap_line("2020-01-15", GapKind::Cancelled),
+            line("2020-01-23", "98.6000", "5.6951"),
+        ] {
+            text.push('\n');
+            text.push_str(&row);
+        }
+        text.push('\n');
+        let days = days_between(day(2020, 1, 2), day(2020, 1, 31));
+        let replayed = replay(&text, MAX_AGE_DAYS, days).unwrap();
+        assert_eq!(replayed.refused, Vec::new());
+        // 16 Jan to 23 Jan: the eight days the cancelled week's row owns.
+        assert_eq!(replayed.carried, 8);
+        let documented = series(&text);
+        let carried = documented.on(day(2020, 1, 23)).unwrap();
+        assert_eq!(carried.state(), "rate_carried");
+        assert_eq!(carried.auction.released, day(2020, 1, 8));
+        assert_eq!(
+            carried.carried,
+            Some(Gap {
+                released: day(2020, 1, 15),
+                kind: GapKind::Cancelled
+            })
+        );
+    }
+
+    #[test]
+    fn a_replay_refuses_a_bound_it_cannot_mean_and_names_every_code() {
+        for bound in [i32::MIN, -1, 0, 367, i32::MAX] {
+            let why = replay(&three(), bound, []).unwrap_err();
+            assert_eq!(why, SeriesError::Bound { days: bound });
+            assert!(why.to_string().contains("1 to 366"), "{why}");
+        }
+        // A refused table is refused through the replay as through parse.
+        assert_eq!(replay("", 14, []), Err(SeriesError::Header));
+        // Before the series, and long after it.
+        let replayed = replay(&three(), 14, [day(2019, 12, 31), day(2020, 6, 1)]).unwrap();
+        assert_eq!(
+            replayed.refused,
+            vec![
+                (day(2019, 12, 31), "rate_before_series"),
+                (day(2020, 6, 1), "rate_stale")
+            ]
+        );
+        let gap = Gap {
+            released: day(2020, 1, 15),
+            kind: GapKind::NotHeld,
+        };
+        assert_eq!(
+            LookupError::CarriedTooLong {
+                day: day(2020, 2, 20),
+                result: day(2020, 1, 8),
+                gap
+            }
+            .code(),
+            "rate_carried_too_long"
+        );
+        assert_eq!(
+            LookupError::HoleBeforeGap {
+                day: day(2020, 2, 20),
+                gap
+            }
+            .code(),
+            "rate_hole_before_gap"
+        );
     }
 }
