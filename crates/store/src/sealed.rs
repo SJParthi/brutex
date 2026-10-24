@@ -1544,8 +1544,8 @@ fn widen(range: &mut Option<(i64, i64)>, value: i64) {
 
 /// Folds one bar into the extremes; the earlier bar keeps a tie. The rule
 /// `sort_index`'s run header keeps (D-3326), repeated because that fold is
-/// private to the sort index; `sealed::the_head_extremes_are_the_sort_runs`
-/// holds the two equal.
+/// private to the sort index; `the_head_extremes_are_the_sort_runs`
+/// (`crates/store/tests/cloud_mutants_store.rs`) holds the two equal.
 fn fold_extremes(held: &mut Option<RunExtremes>, bar: &Bar) {
     let at = |v: i64| Extreme {
         v,
@@ -2520,3 +2520,74 @@ impl<R: Positional> SealedMonth<R> {
 #[cfg(test)]
 #[path = "sealed_tests.rs"]
 mod sealed_tests;
+
+/// Mutation-survivor and coverage tests for this module's private items
+/// (cloud session 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{TABLE_SLOTS, table_entries_for};
+
+    /// **A MONTH'S TIME TABLE HAS ONE ENTRY PER `TABLE_SLOTS` BARS OF ITS
+    /// SPAN, ROUNDED UP, AT EVERY TIMEFRAME.**
+    ///
+    /// Kills `replace * with /` and `replace * with +` in the slot width and
+    /// `replace - with +` and `replace - with /` in the rounding of
+    /// `table_entries_for`. Only a month of more than `TABLE_AFTER_BLOCKS`
+    /// blocks has a table, so the suite meets this function only in its heavy
+    /// tests, at one second, where `4096 / 1` equals `4096 * 1`; here every
+    /// edge of the rounding is pinned at three timeframes: an empty span, one
+    /// microsecond, exactly one slot, one microsecond past it, and a whole
+    /// 31-day month.
+    #[test]
+    fn a_time_table_has_one_entry_per_slot_of_the_span_rounded_up() {
+        for timeframe in [1u32, 60, 86_400] {
+            let slot = i64::from(TABLE_SLOTS) * i64::from(timeframe) * 1_000_000;
+            for (span, entries) in [
+                (0, 0),
+                (1, 1),
+                (slot - 1, 1),
+                (slot, 1),
+                (slot + 1, 2),
+                (3 * slot, 3),
+            ] {
+                assert_eq!(
+                    table_entries_for(span, timeframe),
+                    entries,
+                    "{span} us at {timeframe} s"
+                );
+            }
+        }
+        // 2,678,400 one-second bars over slots of 4,096: 653.9, so 654.
+        assert_eq!(table_entries_for(31 * 86_400 * 1_000_000, 1), 654);
+        assert_eq!(table_entries_for(31 * 86_400 * 1_000_000, 60), 11);
+    }
+
+    /// **A PUT PAST THE BUFFER'S END WRITES NOTHING, AND A TAKE PAST IT IS
+    /// ZEROS.**
+    ///
+    /// Covers the `None` arms of the byte primitives `put` and `take`: every
+    /// call site passes an offset inside a buffer sized for it, so only a
+    /// direct call reaches them. Their contract is that no offset panics: a
+    /// write that would run past the end (or start past it) changes no byte,
+    /// and a read that would is all zeros, never a short or shifted value.
+    #[test]
+    fn a_put_past_the_end_writes_nothing_and_a_take_past_it_is_zeros() {
+        let mut out = [7u8; 8];
+        super::put(&mut out, 6, &[1, 2, 3]);
+        super::put(&mut out, 9, &[1]);
+        assert_eq!(out, [7u8; 8], "nothing written");
+        super::put(&mut out, 5, &[1, 2, 3]);
+        assert_eq!(out, [7, 7, 7, 7, 7, 1, 2, 3], "a put that fits lands");
+        assert_eq!(super::take::<4>(&out, 6), [0u8; 4], "straddling the end");
+        assert_eq!(super::take::<2>(&out, 9), [0u8; 2], "past the end");
+        assert_eq!(super::take::<3>(&out, 5), [1, 2, 3], "a take that fits");
+    }
+}
