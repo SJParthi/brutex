@@ -546,7 +546,12 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
     };
     let root = scratch("stored");
     let store = root.join("store");
-    let tree = options_tree(&store);
+    // The fixture is built from the tree's own spelling, never from the
+    // function under test: under a mutant of `options_tree` the fixture
+    // would otherwise land in the test's working directory (cloud report
+    // 2026-10-16, "Real bugs").
+    let tree = store.join("bars").join("gdfl").join("NSE").join("FNO");
+    assert_eq!(options_tree(&store), tree);
     for name in ["HDFC", "NIFTY", "TATAMOTORS"] {
         std::fs::create_dir_all(tree.join(name)).unwrap();
     }

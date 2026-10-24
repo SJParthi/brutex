@@ -345,7 +345,10 @@ fn the_recount_closes_as_a_ledger_run(tail: &str) {
     }
     assert!(lines[3].starts_with(&format!("run {run} ended=")), "{tail}");
     assert!(
-        lines[3].ends_with(" outcome=finished definition=4"),
+        lines[3].ends_with(&format!(
+            " outcome=finished definition={}",
+            pull::gdfl_import::BAR_DEFINITION
+        )),
         "{tail}"
     );
 }
