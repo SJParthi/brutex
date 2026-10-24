@@ -83357,6 +83357,22 @@ the merge 561741719 printed `RED 1d 23 30 19 10 12`
 Gate 12 is D-7149's addendum. After both, `--only "1d 1c 0"` and gate 12
 printed `RED none` (state/fix/ci-gates-logs/bred1023-lp15).
 
+**Addendum, 24 Oct 2026 (gate 1e on DATA-2's fixture; IA-4 and
+CLOUD-MUTSTORE, merged after R4-27).** The full run on 5c1d50a91
+(state/fix/ci-gates-logs/bred1023-full8) failed gate 1e: the workspace tests
+stop at `pull::gdfl_cm::tests::fixtures_are_built_not_pasted`, which walks
+every `.rs` file under `crates/` and refuses a whole GDFL capital-market row
+written as one literal (design section 12). DATA-2's
+`crates/cli/src/tick_second_check_tests.rs` held two, invented (`ZZ`, ₹5);
+its five census rows are now joined at run time by a closure, the same
+strings at run time, and the census test is unchanged. Then IA-4
+(1c094c904) and CLOUD-MUTSTORE (d39e789ed) merged; the merge printed
+`RED 1d 23 30 11` (bred1023-lp17): IA-4 marked merged (its steps S-23, S-24
+and S-41 still wait for R3-22, R4-21 and R4-22); `gdfl_nfo_tests.rs`'s
+declared `eprintln!` count 13 -> 18 in `ci.yml` (IA-4's bare-CR and
+newline counts); `IA_4_LITERAL` declares `300`, `ia4-currency`, `ia4-f44`
+and `ia4-resume`; gate 11 is D-7150's addendum. lp18: `RED none`.
+
 ### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
 
 Gate 1c refused `pull::zerodha_spool`'s documented lock path
@@ -83463,6 +83479,14 @@ per report, per file written or per index written (rule 4); a
 check. Tests:
 `cli::tick_second_check::tests::every_code_and_word_of_the_index_reads_back_in_one_step`,
 `cli::tick_second_check::tests::the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes`.
+
+**Addendum, 24 Oct 2026 (IA-4).** Gate 11 rule 6 refused one new site,
+`pull::gdfl_nfo::header_trailing`, a `find_map` over the two known headers.
+Fixed in code: two probes in order (`after(HEADER_OPEN_INTEREST)
+.or_else(|| after(HEADER_OPEN_INTEREST_SPACED))`), the same answers; the
+file's one pinned unread site (`NFO_SUFFIXES`) stays pinned, so
+`ALLOW_SCAN_UNREAD` did not grow. Test:
+`pull::gdfl_nfo::tests::the_header_reader_answers_both_headers_at_every_trailing_edge`.
 
 ### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
 

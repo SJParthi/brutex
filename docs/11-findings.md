@@ -1025,3 +1025,10 @@ confirmed by two skeptics; their corrections are applied.
   price-shape sense of a flat carry with a test that failed first, four
   claims name their proof and three say UNVERIFIED (D-7149 addendum,
   BRED-13, L-BRED23-07). Same cause as F12.
+- **BRED23-F14: a workspace test the gate runs was red on feat/db-fix, and
+  IA-4 turned gates 1d, 11, 23 and 30 red.** `pull::gdfl_cm::tests::fixtures_are_built_not_pasted`
+  refused DATA-2's two literal census rows (gate 1e, full8); FIXED by
+  joining them at run time (BRED-16). IA-4's reds FIXED: merged flag, a
+  print count, four literals, one search turned into two probes (D-7147 and
+  D-7150 addenda, BRED-15). Same cause as F12: a merge that runs neither
+  the shell gates nor the whole workspace suite cannot see either.
