@@ -1549,6 +1549,7 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
             "7 × O(n_m)",
             "quadratic in `s`",
             "`reconcile_derived`",
+            "`walk_held`",
         ],
     );
     assert!(
@@ -1565,9 +1566,18 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
         item(INGEST, "fn derive(").contains("derive_minutes("),
         "each rung folds the whole month it is handed"
     );
+    // THE READ-BACK IS `walk_held`'s, AND `reconcile_derived` CALLS IT (R4-27
+    // repair 1): one walk shared with the repair door's check and with the
+    // naming of a month stored under the fold before D-7270, so the record
+    // loop moved out of `reconcile_derived` and the cost the bullet states
+    // did not. Both halves are asserted, so neither can drift alone.
     assert!(
-        item(INGEST, "fn reconcile_derived(").contains("for index in 0..file.header().n_valid"),
-        "and every stored derived record is read back"
+        item(INGEST, "fn reconcile_derived(").contains("walk_held(&file, bars, same_bytes)"),
+        "every stored derived record is walked, byte for byte"
+    );
+    assert!(
+        item(INGEST, "fn walk_held(").contains("for index in 0..file.header().n_valid"),
+        "and read back, one record at a time"
     );
     d_0955_names(
         "ET-bars-candles-store-8",
