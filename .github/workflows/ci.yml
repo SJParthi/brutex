@@ -1790,14 +1790,15 @@ jobs:
           #     println! 3: the rename-lineage counts and the p50/p99/max of
           #     detect, `LineageRun::load`, `LineageRun::day` and the split
           #     probe.
-          #   pull/src/gdfl_nfo_tests.rs eprintln! 12: the decoded, stored,
+          #   pull/src/gdfl_nfo_tests.rs eprintln! 18: the decoded, stored,
           #     re-keyed, refused and resettled counts of the GDFL NFO decode
-          #     tests.
+          #     tests, and (IA-4, 24 Oct; BASE-REDS-1023) the tick store's
+          #     option files that end in a bare CR or with no newline.
           declared="$declared api/src/dayflags.rs:println!:2
           pull/src/alerts_tests.rs:println!:5
           pull/src/calendar.rs:eprintln!:1
           pull/src/gdfl_lineage_tests.rs:println!:5
-          pull/src/gdfl_nfo_tests.rs:eprintln!:13
+          pull/src/gdfl_nfo_tests.rs:eprintln!:18
           pull/src/gdfl_wp12e_tests.rs:println!:3"
           # FIVE MORE, the same kind, from WP-62 (merged after the 12 Oct
           # run; declared by GF-1 on 14 Oct 2026). All are in api's

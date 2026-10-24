@@ -230,7 +230,7 @@ title = "one log folder per run (ingest automation)"
 
 [[package]]
 name = "IA-4"
-merged = false
+merged = true
 title = "options rows checked one by one, bar definition 4 (ingest automation)"
 
 [[package]]

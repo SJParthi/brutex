@@ -3000,6 +3000,13 @@ const MERGED_17_23_OCT_LITERAL: &str = "\
 const R4_27_LITERAL: &str =
     "as_trade keep_flat match rate_before_series rate_carried_too_long rate_hole_before_gap rate_stale";
 
+// IA-4's merge (24 Oct 2026; BASE-REDS-1023, D-7147 addendum): `ia4-f44`,
+// `ia4-currency` and `ia4-resume` are scratch-root names of
+// `pull::gdfl_ia4_tests`; `300` is an invented traded quantity the options
+// rows of `pull::gdfl_nfo`'s tests carry (`",1,300"`, replaced by `",0,300"` in a refusal case). None names
+// an account, an environment, a vendor credential or a parameter-path field.
+const IA_4_LITERAL: &str = "300 ia4-currency ia4-f44 ia4-resume";
+
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
 /// raised 72 -> 73 for its own group, and both groups landed, so the joined
@@ -3008,7 +3015,8 @@ const R4_27_LITERAL: &str =
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with BASE-REDS-1023's group of the 17..23 Oct merges (D-7147).
 /// 76 -> 77 with R4-27's group, declared at its merge (D-7147 addendum).
-const DECLARED: [&str; 77] = [
+/// 77 -> 78 with IA-4's group, declared at its merge (D-7147 addendum).
+const DECLARED: [&str; 78] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3086,6 +3094,7 @@ const DECLARED: [&str; 77] = [
     IA9_LITERAL,
     MERGED_17_23_OCT_LITERAL,
     R4_27_LITERAL,
+    IA_4_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

@@ -1623,14 +1623,15 @@ const FIELDS: usize = 10;
 /// (its CR already stripped), or `None` for no header this reader reads
 /// (D-4829): `Some(0)` for either observed header as it is.
 fn header_trailing(header: &[u8]) -> Option<usize> {
-    [HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED]
-        .into_iter()
-        .find_map(|known| {
-            header
-                .strip_prefix(known.as_bytes())
-                .filter(|rest| rest.len() <= MAX_TRAILING_EMPTY && rest.iter().all(|&b| b == b','))
-                .map(<[u8]>::len)
-        })
+    // Two known headers, asked in order: two probes, never a search (gate 11
+    // rule 6; BASE-REDS-1023).
+    let after = |known: &str| {
+        header
+            .strip_prefix(known.as_bytes())
+            .filter(|rest| rest.len() <= MAX_TRAILING_EMPTY && rest.iter().all(|&b| b == b','))
+            .map(<[u8]>::len)
+    };
+    after(HEADER_OPEN_INTEREST).or_else(|| after(HEADER_OPEN_INTEREST_SPACED))
 }
 
 /// Why [`parse_row`] did not keep a row (D-4816, the capital-market
