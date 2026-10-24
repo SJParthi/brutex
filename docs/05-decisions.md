@@ -79085,12 +79085,50 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     tab and counted by where, so 200 cold loads that each throw are one line
     with its count, not 200. `--out` naming the `--capture` file, or the
     sheet's `--out` naming its `--from-pages` file, is refused before
-    anything runs: the paths are compared resolved, so a link to the same
-    file is not caught (an output and an input are named by the operator in
-    one command line).
+    anything runs. (This item said the paths were compared resolved, so a
+    link to the same file was not caught; item 35 compares the files.)
+33. **A restart row is its own answers', and another build that comes back
+    ends the restart pass** (R315-31, repair 6; verify r6, 24 Oct). Each
+    `first after restart` row counts what its answers said — classes,
+    builds, bytes — as every other row does; the up check after a restart
+    names the build it found. A server back as another build than the run's
+    fails by name and ends the pass rather than timing it: what it would
+    time is not the build the sheet measures, and twenty restarts of it
+    would print 280 lines for one fact. Not taken: going on and stamping
+    each row with the other build, which the verifier's wording allowed but
+    which measures a build the deploy did not ship. An answer that named no
+    build beside answers that named one counts as a second build, and a run
+    whose server named none fails a row another build answered: the api
+    stamps every answer (`api::server::never_framed`), so either is a server
+    swapped mid-run.
+34. **What the sheet keeps of an answer has a bound in bytes; a timed row
+    keeps only its start** (R315-32, repair 6; verify r6). A timed row reads
+    no body but the first words of a refusal, so it keeps `HEAD_BYTES`
+    (4,096 B) and counts the rest; discovery and the field check keep up to
+    `MAX_TEXT_BYTES` and past it hash as the bytes come, so a 591 MB
+    `/store.json` still has its exact length and sha256. One buffer grown by
+    doubling replaces the list of chunks, so a stream of tiny chunks costs no
+    object a chunk either. Not taken: a ceiling on the bytes of an answer,
+    which would cut a real 591 MB answer; the time bound already ends one
+    that never ends. `--max-answer-bytes` stays, and its reason is now the
+    server's load and the wire's, since a timed row no longer holds its
+    answers (L-R315-08).
+35. **Verify r6's follow-ups** (R315-33, repair 6). An output and an input
+    are one file by device and inode (`sameFile`), so a link, `/tmp` and
+    `/private/tmp`, or another case on a volume that folds case is caught;
+    a day and a month must be ones the calendar has; the sheet's `--out` is
+    checked before the run, as the harness's outputs are; both commands exit
+    only once stdout has the whole sheet, waiting at most `STDOUT_WAIT_MS`
+    (60 s) and saying so, because a piped sheet past 64 KB was cut at the
+    exit and the FAILED lines, printed last, were the ones lost; a writer the
+    sheet had to SIGKILL is a FAILED line, since its import was ended by
+    force; the harness keeps only the last `STDERR_TAIL` characters of the
+    browser's stderr and reads on keeping nothing once it has the address,
+    taken only from a whole line; the shared reporter check's tab and a
+    hook's tabs are heard for uncaught errors, as R315-30 said of every tab.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-30);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-25.
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-33);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-27.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
