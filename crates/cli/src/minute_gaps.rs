@@ -273,7 +273,7 @@ impl Cut {
 
 /// The admission rule of a list of cuts, as one O(1) probe per bar: a map from
 /// each cut day to its first withheld bar-open. Built once per span.
-/// Proved by `cli::minute_gaps::causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month` (gate 12, D-7149).
+/// Proved by `causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `measure_tests::admission_cost_per_bar_and_month`, the two test modules this file mounts (gate 12, D-7149; named by module so the file names no `crate` path to itself, which `runner`'s D-0694 record reads).
 #[derive(Clone, Debug, Default)]
 pub struct Admission {
     from: std::collections::HashMap<i64, i64>,
@@ -744,7 +744,7 @@ pub fn tighten(cuts: &mut Vec<Cut>, cut: Cut) -> bool {
 /// Returns the kept bars and the number removed. One [`Admission`] probe per
 /// bar: a hash lookup of the bar's day, O(1) however many days are cut, so the
 /// loop is O(bars) (the reasoning the old day SET gave, kept).
-/// Proved by `cli::minute_gaps::causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `cli::minute_gaps::measure_tests::admission_cost_per_bar_and_month` (gate 12, D-7149).
+/// Proved by `causal_tests::the_admission_probe_and_the_fold_pairs_agree` and timed per bar by `measure_tests::admission_cost_per_bar_and_month`, the two test modules this file mounts (gate 12, D-7149; named by module so the file names no `crate` path to itself, which `runner`'s D-0694 record reads).
 #[must_use]
 pub fn withhold(bars: &[Candle], cuts: &[Cut]) -> (Vec<Candle>, u64) {
     if cuts.is_empty() {
