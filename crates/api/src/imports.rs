@@ -1846,6 +1846,13 @@ pub(crate) fn body(
 #[path = "imports_filter_tests.rs"]
 mod filter_tests;
 
+/// IA-10a: member keys and holes through every api reader of the GDFL
+/// journal (IA-JR-01), the day band's run from the event (D-4896), and their
+/// extreme cases. Its own file, beside AF-02's, for the same reason.
+#[cfg(test)]
+#[path = "imports_member_tests.rs"]
+mod member_tests;
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,

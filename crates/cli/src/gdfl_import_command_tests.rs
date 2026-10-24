@@ -1214,3 +1214,157 @@ fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
     .unwrap();
     assert_eq!(request.free_floor, pull::gdfl_import::DEFAULT_FREE_FLOOR);
 }
+
+/// **A SOURCE'S CENSUS IS NAMED ON THE RECEIPT** (D-4817; IA-10a item 7a):
+/// the outer zip's ignored entries are counted (it keeps no names for them,
+/// and the receipt says so), its misfiled and invalid ones counted and their
+/// first 16 named, the rest counted as more; a reason with none prints only
+/// its count; the tick store's stray entries are named and its misfiled
+/// ones counted where they are named; a walk that stopped says why; and a
+/// source that keeps no census says so rather than printing an empty one.
+/// End to end, a tick store holding a stray file names it on the receipt
+/// of a run that read nothing. Every name is invented.
+#[test]
+fn a_source_census_is_named_on_the_receipt() {
+    let archive = pull::gdfl_archive::ArchiveCensus {
+        ignored: 2,
+        misfiled: 17,
+        misfiled_named: (0..16).map(|i| format!("ZZ/zz{i:02}.zip")).collect(),
+        invalid: 1,
+        invalid_named: vec!["ZZ_IDX_31022019.zip".to_owned()],
+    };
+    let mut out = String::new();
+    render_census(
+        &mut out,
+        gdfl_run::SourceId::CmZip,
+        &Census::of_archive(&archive),
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[0],
+        "  source census       cm_zip: ignored 2, misfiled 17, invalid 1 (D-4817)"
+    );
+    assert!(lines[1].starts_with("    ignored           2 (the archive counts"), "{out}");
+    assert!(
+        lines[2].starts_with("    misfiled          17: ZZ/zz00.zip ZZ/zz01.zip"),
+        "{out}"
+    );
+    assert!(lines[2].ends_with("ZZ/zz15.zip and 1 more, counted"), "{out}");
+    assert_eq!(lines[3], "    invalid           1: ZZ_IDX_31022019.zip");
+    assert_eq!(lines.len(), 4, "{out}");
+
+    let mut table = pull::gdfl_tickstore::DayTable::default();
+    table.misfiled_count = 3;
+    table.stray = 1;
+    table.stray_named = vec!["cm/zz-stray.txt".to_owned()];
+    table.fault = Some(pull::gdfl_cm::CmRefusal::TickStoreUnavailable {
+        kind: std::io::ErrorKind::PermissionDenied,
+    });
+    let mut out = String::new();
+    render_census(
+        &mut out,
+        gdfl_run::SourceId::TickStore,
+        &Census::of_ticks(&table),
+    );
+    assert!(
+        out.starts_with(
+            "  source census       tickstore: misfiled 3, stray 1, walk stopped 1 (D-4817)\n"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("    misfiled          3 (each is named on its own day's refusal"));
+    assert!(out.contains("    stray             1: cm/zz-stray.txt\n"), "{out}");
+    assert!(out.contains("    walk stopped      1: "), "{out}");
+
+    let mut out = String::new();
+    render_census(
+        &mut out,
+        gdfl_run::SourceId::NfoZips,
+        &Census::None("zz no census kept".to_owned()),
+    );
+    assert_eq!(out, "  source census       nfo_zips: none (zz no census kept)\n");
+    let empty = Census::of_archive(&pull::gdfl_archive::ArchiveCensus::default());
+    let mut out = String::new();
+    render_census(&mut out, gdfl_run::SourceId::CmZip, &empty);
+    assert_eq!(
+        out,
+        "  source census       cm_zip: ignored 0, misfiled 0, invalid 0 (D-4817)\n",
+        "a reason with none prints its count alone"
+    );
+
+    // END TO END: a stray file in the tick store's `cm` tree.
+    let root = scratch("census-receipt");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    tick_store(&ts);
+    std::fs::create_dir_all(ts.join("cm")).unwrap();
+    std::fs::write(ts.join("cm").join("zz-stray.txt"), b"not a day file\n").unwrap();
+    let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
+    let mut out = String::new();
+    let _code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert!(
+        out.contains("  source census       tickstore: misfiled 0, stray 1 (D-4817)\n"),
+        "{out}"
+    );
+    assert!(out.contains("    stray             1: cm/zz-stray.txt"), "{out}");
+    // The receipt also carries the horizon as today's clock sees it.
+    let mut horizon = String::new();
+    render_horizon(&mut horizon, today_ist());
+    assert!(out.contains(&horizon), "{out}\n---\n{horizon}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// **THE CALENDAR HORIZON IS WARNED ON THE RECEIPT BEFORE IT PASSES**
+/// (IA-GR-34 reworded; FM-080, D-5156; IA-10a item 7b), with an injected
+/// today, every day derived from `pull::calendar`'s own constants and none
+/// typed: nothing on the day before the last sourced year starts; from its
+/// first day to the record's last day a warning naming the last day, the
+/// days left and the circular owed; past it an `ENDED` line naming the days
+/// since; and a clock that names no day said as unchecked, never taken for a
+/// day inside the record.
+#[test]
+fn the_calendar_horizon_is_warned_on_the_receipt_before_it_passes() {
+    use pull::calendar::{LAST_SOURCED_YEAR_STARTS, SOURCED_LAST_DAY, SOURCED_LAST_YEAR};
+    let on = |epoch: i64| Day::from_days(u32::try_from(epoch).unwrap()).unwrap();
+    let said = |today: Option<Day>| {
+        let mut out = String::new();
+        render_horizon(&mut out, today);
+        out
+    };
+    let last = on(SOURCED_LAST_DAY);
+    let owed = SOURCED_LAST_YEAR + 1;
+    assert_eq!(said(Some(on(LAST_SOURCED_YEAR_STARTS - 1))), "");
+    let first = on(LAST_SOURCED_YEAR_STARTS);
+    assert_eq!(
+        said(Some(first)),
+        format!(
+            "  calendar horizon    the calendar of record ends {last}, {} day(s) after today \
+             ({first}); NSE's holiday circular for {owed} is owed (D-5156, FM-080)\n",
+            SOURCED_LAST_DAY - LAST_SOURCED_YEAR_STARTS
+        )
+    );
+    assert!(
+        said(Some(last)).contains(&format!("ends {last}, 0 day(s) after today ({last})")),
+        "the last day is still inside the record"
+    );
+    let after = on(SOURCED_LAST_DAY + 1);
+    assert_eq!(
+        said(Some(after)),
+        format!(
+            "  calendar horizon    ENDED: the calendar of record ended {last}, 1 day(s) before \
+             today ({after}); every later day is refused calendar_unmeasured until NSE's \
+             holiday circular for {owed} is recorded (D-5156, FM-080)\n"
+        )
+    );
+    assert!(said(Some(on(SOURCED_LAST_DAY + 400))).contains("400 day(s) before today"));
+    assert_eq!(
+        said(None),
+        "  calendar horizon    not checked: the host clock names no day (FM-080)\n"
+    );
+}
