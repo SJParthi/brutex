@@ -470,7 +470,8 @@ impl Opt {
 #[derive(Clone, Debug)]
 enum Entry {
     /// An option file of the day: its contract, its rows, and whether one
-    /// row is bent (a three-place price) so the reader refuses it.
+    /// row is bent (a three-place price) so the reader refuses that row
+    /// (D-4816), and the file only when it holds no other row.
     Option {
         opt: Opt,
         rows: Vec<Row>,
@@ -802,7 +803,10 @@ fn want_nfo(world: &[(Day, Vec<Entry>)], only: &[&str]) -> Want {
                         late_failures.push((format!("{on} {name}"), "strike implausible"));
                         continue;
                     }
-                    if *bent {
+                    // D-4816 (bar definition 5): a bent row is refused by name
+                    // and the file read on, as the stocks reader's D-3318; only
+                    // a file of nothing else names it as the file's refusal.
+                    if *bent && rows.is_empty() {
                         want.totals.files_refused += 1;
                         late_failures.push((format!("{on} {name}"), "the LTP is not a two-place"));
                         continue;

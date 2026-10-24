@@ -1248,8 +1248,24 @@ fn note_restated(path: StorePath<'_>, reason: &str, done: &MonthRestate) {
 
 /// Whether an offered bar says what the held bar at its stamp says.
 const fn agrees(held: &Bar, offered: &Bar, policy: Policy) -> bool {
+    same_bar(held, offered, policy.open_interest_applies)
+}
+
+/// Whether `offered` says what `held` says, the comparison [`repair_month`]
+/// makes at every held stamp: every field equal, except that where open
+/// interest is not a measurement for the instrument (`open_interest_applies`
+/// false: an index or a share, D-3322) a held `0` and an offered null are the
+/// same absence. O(1).
+///
+/// Public so that a caller which must ask the door's question before it hands
+/// the door a batch asks it in the door's own words, not in a copy of them:
+/// `pull::ingest`'s derived-rung check (R4-27 repair 1), where a share's
+/// derived month an earlier build wrote with open interest `0` meets this
+/// build's fold of the same minutes with it null.
+#[must_use]
+pub const fn same_bar(held: &Bar, offered: &Bar, open_interest_applies: bool) -> bool {
     let interest = held.open_interest == offered.open_interest
-        || (!policy.open_interest_applies
+        || (!open_interest_applies
             && (held.open_interest == 0 || held.open_interest == crate::format::OI_NULL)
             && (offered.open_interest == 0 || offered.open_interest == crate::format::OI_NULL));
     held.ts_micros == offered.ts_micros
