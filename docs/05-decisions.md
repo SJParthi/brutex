@@ -83696,7 +83696,37 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     master read to every index day (L-R3-13-4). Chosen, not tuned: the two
     indices are the source's, not a measurement's, and a third is added only
     by a cited source and a new row here.
+26. **A GDFL ledger run the day's session cannot hold is refused by name,
+    never judged** (the check of 23 October, verify-R3-13-r2 attack E6, a
+    follow-up). Lines appended only to a shadow's clone of
+    `imports/gdfl.dayflags` (999999 s from 23:59:59, `u64::MAX` s from
+    09:15:00, 600 s from 15:29:59) were each served "index value frozen in
+    session", the second with `judged_s` 18446744073709495815. The import
+    measures `flat_max_s` over the session's own rows only
+    (`pull::gdfl_import_quality`, `FlatRun`: "the longest run of in-session
+    rows"), so its first and its last second each lie inside a window of the
+    day's session. `IndexDay` now carries that session, as the import reads
+    it (`pull::gdfl_cm::session_of`: the full session or a special one's
+    windows), and `IndexDay::outside_session` refuses a run that starts
+    outside every window, ends outside every window, has no stamp and is
+    longer than the session spans (first open to last close, gaps between
+    windows included), or falls on a day the calendar holds no session for:
+    `flagged` and `judged_s` are `null`, `frozen.refused` names why
+    (`starts_outside_session`, `ends_outside_session`,
+    `longer_than_session`, `no_session`), and the phrase is "index frozen
+    refused: the day ledger's longest unchanged run, N s from HH:MM:SS,
+    <why> (<the session's windows>); the import measures a run over the
+    session's own rows only, so the line is not that measure and the day's
+    frozen run is not judged (UNVERIFIED)". A short run is refused as a long
+    one is, since neither is the import's measure. A run across the gap of a
+    two-window day has both its ends in session and is judged. Every real
+    line holding `flat_max_s` (the 36 of 2026-09-25..30, read 2026-10-24)
+    lies inside 09:15:00-15:30:00, its latest end 15:29:24, so no served
+    answer changes. At most four window comparisons and one calendar lookup a
+    day. **Rejected:** refusing the whole record, because the day's other
+    flags do not depend on the run; and `session_s`, the line's own session
+    length, as the bound, because it places no stamp.
 
-**Proof:** R313-01 to R313-39 (`docs/04-invariants.md`); the limits are
+**Proof:** R313-01 to R313-40 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
 10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
