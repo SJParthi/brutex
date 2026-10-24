@@ -178,7 +178,7 @@ fn basis_runs(store: &Path, arguments: &[&str]) -> (u8, String) {
     (code, text)
 }
 
-/// SPLITCO: a 2:1 split on 2025-03-11, five sessions a side (D-7139: a side
+/// SPLITCO: a 2:1 split on 2025-03-11, five sessions a side (D-7195: a side
 /// must hold to be lasting). Zerodha reads half of GDFL before
 /// it and equal from it; 2025-03-03 seeds the lag history DATA-1 aligns by.
 /// IDLECO: GDFL only, so no stock-day has a basis.

@@ -1133,7 +1133,7 @@ fn an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured() {
     );
 }
 
-// ─────────────────────────────── proven is not lasting (D-7139) ───────────────────────────────
+// ─────────────────────────────── proven is not lasting (D-7195) ───────────────────────────────
 
 /// The runs of `days` for `symbol`, loaded back through the store as the
 /// ledger reads them.

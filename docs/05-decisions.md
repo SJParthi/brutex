@@ -82797,7 +82797,7 @@ through it"). Under D-7135 no root A is ever built.
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
 
-### D-7139 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
+### D-7195 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
 
 **Context.** D-6892 drew one measured `corporate_actions` row from every
 PROVEN step between two basis runs (the factor interval excludes one). The

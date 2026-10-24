@@ -39,7 +39,7 @@
 //! endpoint is cookie-gated); until one is recorded in `docs/00-charter.md`
 //! every row a store holds is measured.
 //!
-//! # Proven is not lasting (D-7139)
+//! # Proven is not lasting (D-7195)
 //!
 //! A step whose factor interval excludes one is PROVEN: the two runs' bands
 //! separate. That alone made a ledger row until the first check of this
@@ -130,7 +130,7 @@ pub const STEP_PERMILLE: u16 = 2;
 
 /// A proven step is LASTING only when each of its two runs holds at least
 /// this many days with a basis ([`Anomaly::Short`] otherwise): a one-session
-/// excursion is not a change of basis. Chosen, not sourced (D-7139): on
+/// excursion is not a change of basis. Chosen, not sourced (D-7195): on
 /// DATA-1's full input (105 months, 2018-01..2026-09) no step the other two
 /// rules keep has a side shorter than this, and 498 of the 770 proven steps
 /// have one.
@@ -139,7 +139,7 @@ pub const HOLD_DAYS: u32 = 5;
 /// A proven step with a proven step the OTHER way within this many calendar
 /// days of its ex-date, on either side, is [`Anomaly::Reversed`]: the ratio
 /// went back, so neither step is a lasting change of basis. Chosen, not
-/// sourced (D-7139): every share whose ledger the verifier found
+/// sourced (D-7195): every share whose ledger the verifier found
 /// alternating (121 rows of one share around 1) steps both ways inside it.
 pub const REVERSAL_DAYS: u32 = 90;
 
@@ -148,7 +148,7 @@ pub const REVERSAL_DAYS: u32 = 90;
 /// lasting only when the near end of its factor interval lies farther from
 /// one than the far end of every reversed step's there. The number is the
 /// share's own, generated from its own steps; only the span is chosen
-/// (D-7139).
+/// (D-7195).
 pub const WOBBLE_DAYS: u32 = 365;
 
 /// The most days [`session_between`] walks between two days before it
@@ -1616,7 +1616,7 @@ fn apart(a: Day, b: Day) -> u32 {
 }
 
 /// Every step of `runs` (one share's, by first day) with its verdict
-/// (D-7139): a proven step is LASTING only when
+/// (D-7195): a proven step is LASTING only when
 ///
 /// 1. no proven step the other way lies within [`REVERSAL_DAYS`] of it
 ///    ([`Anomaly::Reversed`]: an alternation 0.80/0.81/0.80, a one-session
@@ -1792,7 +1792,7 @@ pub fn measured_draft(runs: &BasisRuns, generation: u64, sha256: &str, fetched: 
         table: Table::CorporateActions,
         source: format!(
             "measured: the lasting ratio steps of basis_runs generation {generation} (cli \
-             basis-runs over DATA-1's per stock-day factor, D-7139); not an NSE file"
+             basis-runs over DATA-1's per stock-day factor, D-7195); not an NSE file"
         ),
         source_sha256: Some(sha256.to_owned()),
         fetched,

@@ -43,7 +43,7 @@
 //! is refused (it must be looked at first). Both are `measured`: a measured
 //! row labels and never excuses.
 //!
-//! # Only a LASTING step is a row (D-7139)
+//! # Only a LASTING step is a row (D-7195)
 //!
 //! Every step is printed with its verdict from `pull::corporate_actions::judge`,
 //! the one owner of the rule: `step` (lasting, a ledger row), `step_within_noise`
@@ -690,7 +690,7 @@ pub(crate) fn command_with(
 }
 
 /// What the steps of one fold came to, by verdict (`pull`'s `judge`, the
-/// one owner of the lasting rule, D-7139).
+/// one owner of the lasting rule, D-7195).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Tally {
     /// Every step.
