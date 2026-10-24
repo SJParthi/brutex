@@ -135,6 +135,8 @@ IA-16, R3-16, R3-36, SC-4.
   point; the api lib suite had 9 failures (root-owned permission checks, slow-reader timing under
   load, and `a_full_calendar_pool_refuses_the_census_and_the_audit`, whose child sat at 0% CPU for
   25 min and was stopped by me). None touches this part's files; to be compared with the base.
-- NEXT: when HOLD is gone: read the finished workspace run, rerun every failure on this branch and on
+- NOT YET TESTED: the slot-order edit in `recover.rs` (one comparison in place of the sort) came after
+  the test runs above; the store suite runs again first.
+- NEXT: when HOLD is gone: the store suite, read the finished workspace run, rerun every failure on this branch and on
   the base worktree, then llvm-cov (lines and regions, stable; branch coverage needs a nightly this
   container lacks) and cargo-mutants on recover.rs, file.rs's diff and month_recover_command.rs.
