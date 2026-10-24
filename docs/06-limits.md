@@ -20480,6 +20480,68 @@ worktree's sources forced the rebuild. Every gate result this package reports
 was taken after that rebuild. Other packages on shared target directories are
 exposed to the same thing.
 
+### The dated options card after CHG-0: one IPFT authority, a row-naming source, and what the checks cannot see (CLOUD-CHG1-OPT; D-6740, D-6741, D-6742)
+
+New rows; nothing above is edited. The line the package was written to supersede — that the
+October golden option test "stays `#[ignore]` until package CHG-0 merges" — is no longer in this
+file: D-5131 removed the ignore, and the subsection on the dated options exchange charge above
+already records what CHG-0 did. What this package changed and what it leaves:
+
+- **One IPFT authority, held by the card's text and by value.** The dated card's IPFT is
+  `regime::ipft_rate` and nothing else, and `FA73061_EFFECTIVE` is the regime's own `MAR_2026`
+  (D-6740). `the_dated_option_card_reads_the_ipft_from_the_regime_only` is a source-shape check: it
+  reads spellings in `dated_option_card`, not meaning, and only inside that one function. A second
+  figure written under a name with no "ipft" in it — the regime row shadowed by a larger one, say —
+  passes the shape check; the value checks catch it, because
+  `fa73061_effective_is_the_one_day_the_nse_option_rows_and_the_cards_source_turn_on` holds the
+  card to the regime's two rows on every representable day and
+  `the_dated_option_card_is_the_trip_stacks_exchange_charge_plus_ipft_on_every_day` holds it to
+  `trip` from 2018 to 2027.
+- **The source line is chosen by one date between two constants.** From 2026-03-01 the dated NSE
+  line names `FA73061` alone; before it, the unchanged `REGIME_EXCHANGE_NSE`, which names `FA64232`
+  and the `FA56129` IPFT but also states the `FA73061` row that follows (D-6741: rewording it is
+  outside this package). The source names the row; the row's own citation text stays on the row in
+  `crate::regime`. The NSE exchange table's two later-row slots are full (a CHG-0 follow-up), so
+  the next NSE options circular needs that table widened **and** a third source line: until it has
+  one, the every-day test fails on the new row's first day, because the rows would move there and
+  the source would not.
+- **The card cannot be read where the IPFT can.** On 2023-04-01 to 2024-09-30 the IPFT table
+  answers ₹50 and the card refuses with the exchange charge's refusal (CHG0-04, CHG1OPT-02): the
+  card's IPFT is unobservable on those days, and nothing prices them.
+- **A day with no session is priced.** `FA73061_EFFECTIVE`, 2026-03-01, is a Sunday; asked about
+  it, the card answers the regime's row for that date, labelled. `costs` is no session calendar: the
+  tradable-day authority is `pull::calendar::tradable_day` (CAL-1), and refusing a non-session day
+  is the caller's, not the charge stack's.
+- **Cost.** The change adds one date comparison to `RateCard::resolve` under
+  `RateSelector::Dated` for an option, on the path that already does the regime's fixed two-slot
+  walks: a constant per call, no loop. Measured with `cargo bench -p costs --locked --bench stack`
+  on the cloud container (4 cores, nothing else building), 24 Oct 2026, 20,000 samples of 16 calls
+  each, per call; the head (`feat/db-fix` before this package) and this branch in turn:
+  - **`open a dated options day`** — the one timed call this change reaches,
+    `ClientSecurityDay::open` for an NSE option on the fixture's day under `RateSelector::Dated` —
+    ten runs of each tree, alternated and pinned to one core (`taskset -c 2`): head p50 49.5 to
+    80.3 ns (median 56.0), p99 70.2 to 115.5 ns (median 96.9), max 3,926 to 28,617 ns; this branch
+    p50 49.8 to 65.8 ns (median 49.9), p99 57.6 to 105.8 ns (median 80.7), max 2,061 to 9,196 ns.
+    Each sample is a 16-call batch's mean per call, so p99 and max are of batch means, not of
+    single calls.
+  - **Unpinned**, fifteen runs of each, the branch's p50 was 92.5 to 98.1 ns in four runs and 49.8
+    to 63.0 ns in the other eleven, the head's 49.5 to 64.6 ns in all fifteen. The pinned runs did
+    not reproduce the 98 ns mode on either tree, so it is recorded as scheduling on a shared
+    container, not as the cost of one date comparison; that attribution is NOT PROVED beyond the
+    pinned runs.
+  - **The gated ratios**, C-CHG-01 to C-CHG-10, in three full runs of each tree: 48 of 48 within
+    the ceiling on each, the branch 0.851x to 1.659x and the head 0.785x to 1.833x; the one-off
+    highs fall on different checks on each tree, and no gated check times the dated card.
+  Absolute figures belong to their machine and are not gated; the gated ratios are within the
+  bench's 3.0x ceiling on both trees.
+- **Unchanged and still not priced**, as the subsections above say: the calculator's one-paisa
+  total rule stays UNVERIFIED as measured; stock-option physical delivery is refused by name (rows
+  B-06, whose effective date is UNVERIFIED, and S-06, UNVERIFIED in every field); BSE futures, and
+  BSE futures and options in calculator mode, stay refused. Pricing B-06 and S-06 needs the operator
+  to charter their sources first, and is a new package.
+- **Not checked against a contract note.** As the first subsection of this section says, no dated
+  NSE options figure here has been compared with a real contract note.
+
 ## Read pools and the being-written answer: what R3-08 leaves bounded or unmeasured (R3-08; decision numbers at landing, A6)
 
 Every store read runs in a named pool (`api::detail::Named`), waits at most

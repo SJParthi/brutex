@@ -83398,3 +83398,135 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-6740 — The dated options card has one IPFT authority and one boundary: `FA73061_EFFECTIVE` is the regime's own `MAR_2026`, kept by name, and the card's IPFT is `regime::ipft_rate` and nothing else, held by its text (CLOUD-CHG1-OPT) — 2026-10-24
+
+**What was found at the head (`feat/db-fix` at `e851da1ca`).** CHG-0 (D-5100,
+D-5101) had already made `costs::schedule::dated_option_card` read the IPFT
+from `crate::regime::ipft_rate(exchange, day)`, so the package text's "two
+rules decide the NSE options IPFT for a date" was no longer true of the
+figure. What was left was the date: `schedule::FA73061_EFFECTIVE` was a second
+literal of the day `crate::regime::MAR_2026` holds, read by nothing outside its
+own tests, with a doc comment still saying the IPFT is "folded into the dated
+options row package CHG-0 adds". No test held the two equal, and no test said
+the card had no IPFT rule of its own.
+
+**Decided.**
+
+1. **One boundary.** `MAR_2026` in `crates/costs/src/regime.rs` becomes
+   `pub(crate)`, with one doc line; no rate, row, table or other item of that
+   file changes. That is less than the one named function the package allowed
+   `regime.rs` as its sequenced edit. `FA73061_EFFECTIVE` is now defined as
+   `crate::regime::MAR_2026` — the same day, one definition — and its doc
+   comment says what the regime carries from it.
+2. **Kept, not removed.** `FA73061_EFFECTIVE` is `pub` in `costs`, a crate
+   shared with another project by contract (`docs/10-shared-core.md`), and a
+   consumer may name it; no file in this repository outside `schedule.rs`
+   does. Removing it would break that consumer to delete an alias; defining it
+   as the regime's constant removes the second copy without that.
+3. **One IPFT authority, held by the text.** The test
+   `costs::schedule::tests::the_dated_option_card_reads_the_ipft_from_the_regime_only`
+   reads `dated_option_card` from `schedule.rs` itself and refuses, with the
+   reason named, any card whose code (comments dropped) binds the IPFT other
+   than once from `crate::regime::ipft_rate(exchange, day)`, adds it other than
+   once, carries any other IPFT spelling, writes a date, or reads a date for
+   anything but choosing its NSE source line (D-6741). It refuses the card CLOUD-CHG1
+   first shipped (`e6d05d708`: its own match, `0` from `FA73061_EFFECTIVE`,
+   else `NSE_IPFT`) and the one CHG-0's merge replaced (`0dc8361c3`:
+   `crate::rate::ipft(exchange)` on every day), both kept verbatim as test
+   strings, and five mutations of the head's own text.
+4. **The value test the package asked for, with the head's facts.** The card's
+   IPFT (its rate less the regime row) is `regime::ipft_rate` on 2026-02-27
+   (50) and 2026-03-02 (0). On 2023-04-01 the card cannot be read — the
+   exchange charge's refusal row covers every day before 2024-10-01 and is
+   reached first — so the test asserts that exact refusal beside the IPFT
+   table's 50, as `the_dated_option_card_refuses_the_pre_2024_window_with_the_regimes_own_refusal`
+   does on 2024-09-30 (that test is unchanged).
+5. **Today's table is untouched**: `NSE_OPTIONS_EXCHANGE`, `STT_OPTIONS`,
+   `current_card`, both versions and both fingerprints. No figure of either
+   rate set moves.
+
+**Red before, honestly.** At the head the card already read the regime's IPFT,
+so the IPFT half of the check passes there. The shape test was taken red three
+ways: on the head's behaviour it fails because the card reads no boundary
+(item 3's last clause, D-6741); at `0dc8361c3`, with the check added and nothing
+else, it fails with `0 copies of the binding of the regime's IPFT ..., not one`;
+and the two historical texts fail inside the test itself.
+
+Invariants CHG1OPT-01 to CHG1OPT-03. Implemented by CLOUD-CHG1-OPT.
+
+### D-6741 — The dated NSE options exchange line names the row it is priced at: `FA64232` and the `FA56129` IPFT before 2026-03-01, `FA73061` alone from it, chosen by the regime's boundary and moving no figure (CLOUD-CHG1-OPT) — 2026-10-24
+
+**What was found.** The package asked for a stack test in which "each line's
+source string names its own row". At the head the dated NSE card carried one
+constant, `REGIME_EXCHANGE_NSE`, on both sides of the date, naming both rows
+in one string; a dated 2026-03-02 line therefore cited FA64232 as much as
+FA73061. The stack carries one exchange line priced at one summed rate, so the
+3,503 + 50 against 3,553 + 0 split is visible only beside the line, through
+`regime::exchange_charge_rate` and `regime::ipft_rate`, and the source string
+is the only part of the line that can say which rows made it.
+
+**Decided.**
+
+1. `dated_option_card` chooses the NSE source by the regime's boundary
+   (`day.before(FA73061_EFFECTIVE)`, D-6740): before it the existing
+   `REGIME_EXCHANGE_NSE`, unchanged, which `schedule.rs`'s value test still pins
+   on 2026-02-28; from it a new `REGIME_EXCHANGE_NSE_FA73061`, naming
+   `NSE/FA/73061`, its date, `crate::regime::NSE_EXCHANGE_CHARGE_FA73061`, the
+   folded zero IPFT and sources row E-03, and naming neither FA64232 nor
+   FA56129. BSE keeps `REGIME_EXCHANGE_BSE`.
+2. **A source is a label, not a rate.** The status (cited) and every rate on
+   the card are unchanged on both sides of the date; the `dated-regime/r2`
+   fingerprint folds rates, not sources, and is unchanged, so no version
+   moves and no run identity changes (D-5127).
+3. `REGIME_EXCHANGE_NSE` itself is not reworded: it is outside the package's
+   owned items, and before the date it does name its own rows (it also names
+   the later one, which a reader of a 2026-02-27 line may find redundant;
+   that is recorded in `docs/06-limits.md`, not changed).
+4. The stack test
+   `costs::stack::tests::a_dated_option_exchange_line_is_fa64232_plus_ipft_on_2026_02_27_and_fa73061_alone_on_2026_03_02`
+   pins the line (₹5.08 on both days, today's rate), the rows ((3,503, 50) then
+   (3,553, 0), the IPFT part equal to `regime::ipft_rate`) and the source on
+   both days. CHG-0's trip-level tests pin the regime rows; no identical stack
+   test existed at the head.
+
+**Red before.** At `0dc8361c3` (CHG-0's merge first parent; D-5131 was in, so
+2026-03-02 read 3,503 + 50, not the package text's 3,503 + 0) the split pin
+fails: `left: (3503, 50)`, `right: (3553, 0)`, message `FA73061's folded row
+alone`. On the head's behaviour — this branch with only the two lines that
+choose the NSE source put back as they were — nine tests fail, the eight new
+ones in `schedule.rs` and `stack.rs` and the changed golden test (D-6742),
+each on a source line or on the card's missing boundary read, none on a
+figure.
+
+Invariants CHG1OPT-04 to CHG1OPT-06. Implemented by CLOUD-CHG1-OPT.
+
+### D-6742 — The October golden option test reads the split beside the lines and brackets the 2026-04-01 STT row; its stale doc comment is corrected (CLOUD-CHG1-OPT) — 2026-10-24
+
+**Item 1 was settled at the head, and is not redone.**
+`the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases`
+had no `#[ignore]` (D-5131) and, as D-5101 item 3 records, passed on all three
+dates with the corrected 2026-03-01 assertion (every line but STT equal, STT
+the dated 0.10% against today's 0.15%). Run at the head (`e851da1ca`), the
+file unchanged, it passed: `test result: ok. 12 passed` for the file. No rate,
+regime row or golden value was changed for it.
+
+**What CHG-0's second check left for this package**, and what was done:
+
+1. Its doc comment said the dated card is "FA64232's 0.03503% plus the 0.0005%
+   IPFT" on and after 2026-03-01; since CHG-0 it is FA73061's folded ₹3,553 row
+   plus a zero IPFT. Corrected.
+2. Under a mutation that moves the split and keeps the total, the test passed,
+   because it compares line values only. Measured on this branch: with the
+   2026-03-01 rows of `regime.rs` set to 3,503 and 50, the test as it stood
+   passed (`1 passed`). It now asserts on every date that the regime's NSE rows
+   are (3,553, 0) and that each reading's dated exchange line names FA73061
+   alone (D-6741), and under the same mutation it fails:
+   `the rows in force on 2026-10-15`, `left: (Ok(3503), Ok(50))`,
+   `right: (Ok(3553), Ok(0))`. The split's own boundaries stay pinned in CHG-0's
+   trip-level tests and at the stack (D-6741).
+3. The package's "the STT line is the dated 0.10% row against today's 0.15%
+   until 2026-03-31" is now asserted on 2026-03-31 as on 2026-03-01, and
+   2026-04-01 is asserted equal line for line, like the October dates.
+
+Invariant CHG1OPT-07. Implemented by CLOUD-CHG1-OPT.

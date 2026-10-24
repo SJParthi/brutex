@@ -1713,6 +1713,13 @@ file and date.
 **No BSE circular** moving the BSE options exchange charge or IPFT after the
 27 Sep 2024 notice is recorded here, so the BSE rows are unchanged.
 
+**Where the dated options card names these rows (CLOUD-CHG1-OPT, D-6741).** Under
+`RateSelector::Dated`, the NSE options card in `crates/costs/src/schedule.rs` names, as the source
+of its exchange line, the `NSE/FA/73061` row above as `crate::regime` carries it — the folded
+₹3,553 row and a zero IPFT line (D-5100) — on and after 2026-03-01, and the `NSE/FA/64232` row with
+the `NSE/FA/56129` IPFT before it. No rate was added or changed: the card's figures are the
+regime's, read on the trade day.
+
 ## RustSec advisories RUSTSEC-2026-0381 and RUSTSEC-2026-0382 — read 21 Oct 2026 (D-7120)
 
 Two advisories turned `cargo deny check` red on an unchanged tree. What they

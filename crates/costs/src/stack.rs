@@ -2576,6 +2576,19 @@ mod tests {
                     selector,
                 );
                 assert_eq!(crore.exchange_charge(), rs(3_553_00), "{on} {selector:?}");
+                // Whatever the size, the line names the row of its day: FA64232
+                // under the dated rows before the date, FA73061 alone from it
+                // and in today's table on every day.
+                for charges in [&tiny, &crore] {
+                    let source = charges.rates_used()[0].expect("the exchange line").source();
+                    let fa64232 = selector == RateSelector::Dated && on.before(FA73061_EFFECTIVE);
+                    assert_eq!(source.contains("FA64232"), fa64232, "{on} {selector:?}");
+                    assert_eq!(
+                        source.contains("NSE/FA/73061"),
+                        !fa64232,
+                        "{on} {selector:?}"
+                    );
+                }
             }
         }
     }
