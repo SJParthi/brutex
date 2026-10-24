@@ -1724,7 +1724,8 @@ export async function runHarness(args) {
     await browser.close();
   }
   for (const [where, by] of thrown) {
-    for (const [e, count] of by) failures.push(`${where}: an uncaught error: ${e}${count > 1 ? ` (${count} times)` : ''}`);
+    // The count before the text: an error's text can end in its stack, many lines long.
+    for (const [e, count] of by) failures.push(`${where}: an uncaught error${count > 1 ? `, thrown ${count} times` : ''}: ${e}`);
   }
   if (args.readOnly) {
     const v = readOnlyVerdict(writes, args.base);

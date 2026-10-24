@@ -1142,9 +1142,9 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     assert.match(text, /hook saw http:\/\/127\.0\.0\.1:\d+/);
     assert.ok(r.failures.includes('2 idle tabs asked for more than the header-only up check: GET /feeds.json'), r.failures.join('\n'));
     // Every tab's uncaught errors, by where, counted (repair 5: only the warm tab's were read).
-    assert.ok(r.failures.includes('/gaps warm: an uncaught error: Error: boom (3 times)'), r.failures.join('\n'));
-    assert.ok(r.failures.some((f) => f.startsWith('/gaps warm: an uncaught error: Uncaught')), 'a thrown string is named by its text');
-    assert.ok(r.failures.includes('/gaps cold: an uncaught error: Error: boom (2 times)'), 'a cold load\'s error is heard too');
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps warm: an uncaught error, thrown 3 times: Error: boom')), r.failures.join('\n'));
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps warm: an uncaught error, thrown 3 times: Uncaught')), 'a thrown string is named by its text');
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps cold: an uncaught error, thrown 2 times: Error: boom')), 'a cold load\'s error is heard too, once a load');
     assert.ok(r.failures.some((f) => f.startsWith('2 idle tabs: an uncaught error: Error: boom')), 'and an idle tab\'s');
     assert.ok(!r.failures.some((f) => f.startsWith('/db') && f.includes('an uncaught error')), 'a page that throws nothing is said to throw nothing');
     assert.ok(r.failures.some((f) => f.startsWith('/blank cold: 2 of 2 loads painted no first content')));
