@@ -1837,6 +1837,172 @@ fn nfo_read_is_flat_per_row() -> bool {
         & ratio("C-NFO-01 options read per row, 1k -> 100k", base, big)
 }
 
+// ══ The once-per-month gather (IA-17b, D-4899): C-RP-02 ════════════════════
+
+/// The sessions of January 2025: 23, the most a month holds. The store holds
+/// the last, so the run gathers every other one, which no append can land.
+fn january_sessions() -> Vec<pull::session::Day> {
+    [
+        1_u8, 2, 3, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24, 27, 28, 29, 30, 31,
+    ]
+    .into_iter()
+    .map(|d| pull::session::Day::new(2025, 1, d).unwrap_or_else(|_| refuse("a January day")))
+    .collect()
+}
+
+/// One invented NIFTY file of `on`: a print every second of the session
+/// (22,500 seconds, a real-sized index day), prices that no index had.
+fn gathered_file(on: pull::session::Day) -> pull::gdfl_import::TickFile {
+    let base = 7_000_000 + i64::from(on.day()) * 1_000;
+    pull::gdfl_import::TickFile {
+        symbol: "NIFTY".to_owned(),
+        contract: None,
+        name: format!("NIFTY {on}.invented"),
+        ticks: (0..22_500_u32)
+            .map(|at| pull::gdfl_import::Tick {
+                sod: 9 * 3_600 + 15 * 60 + at,
+                ltp: base + i64::from(at % 977),
+                ltq: 0,
+                oi: None,
+            })
+            .collect(),
+    }
+}
+
+/// One import of `days` through the synthetic driver into `store`, carrying
+/// a repair reason when `reason` is set: what the run reported.
+fn drive_days(
+    store: &std::path::Path,
+    days: &[pull::session::Day],
+    reason: Option<&str>,
+) -> pull::gdfl_import::Report {
+    let (Some(&from), Some(&to)) = (days.first(), days.last()) else {
+        refuse("no day to drive");
+    };
+    let run = pull::gdfl_import::Run {
+        kind: pull::gdfl_import::ImportKind::Indices,
+        from,
+        to,
+        only: &[],
+        store_root: store,
+    };
+    let options = pull::gdfl_import::RunOptions {
+        repair_reason: reason,
+        ..pull::gdfl_import::RunOptions::default()
+    };
+    pull::gdfl_import::drive_from(&run, options, |on, sink| {
+        sink(gathered_file(on));
+        pull::gdfl_import::DayRead {
+            held: true,
+            ..pull::gdfl_import::DayRead::default()
+        }
+    })
+    .unwrap_or_else(|why| refuse(&format!("the run refused: {why}")))
+}
+
+/// NIFTY's January 2025 one-second month.
+fn january_month() -> store::path::StorePath<'static> {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: YearMonth::new(2025, 1).unwrap_or_else(|_| refuse("a month")),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap_or_else(|_| refuse("a month path"))
+}
+
+/// `trials` repair-reason runs over the first `gathered` sessions of
+/// January, each into a fresh store holding only the month's last session
+/// (built untimed): the nanoseconds of each timed run. Each run must end with
+/// the month at ONE generation, every gathered day closed: anything else is
+/// the per-day repair this bench exists to catch, refused.
+fn gathered_runs(gathered: usize, trials: u32) -> Vec<u128> {
+    let sessions = january_sessions();
+    let (Some(lacked), Some(&last)) = (sessions.get(..gathered), sessions.last()) else {
+        refuse("fewer sessions than asked");
+    };
+    let mut ns = Vec::new();
+    for trial in 0..trials {
+        let store = std::env::temp_dir().join(format!(
+            "brutex-c-rp-02-{}-{gathered}-{trial}",
+            std::process::id()
+        ));
+        let _fresh = std::fs::remove_dir_all(&store);
+        let held = drive_days(&store, &[last], None);
+        if held.days_imported != 1 {
+            refuse("the month's last session did not land");
+        }
+        let start = Instant::now();
+        let got = drive_days(&store, lacked, Some("C-RP-02 bench: gather the month"));
+        ns.push(start.elapsed().as_nanos());
+        let served = store::generation::served(&store, january_month())
+            .unwrap_or_else(|why| refuse(&format!("the month's pointer: {why}")))
+            .ordinal();
+        if served != 1 || got.months_repaired != 1 || got.days_imported != gathered {
+            refuse(&format!(
+                "{gathered} gathered days: generation {served}, {} months repaired, {} days \
+                 closed; the gather is one generation per month",
+                got.months_repaired, got.days_imported
+            ));
+        }
+        let _ignored = std::fs::remove_dir_all(&store);
+    }
+    ns
+}
+
+/// The peak resident set Linux keeps (`VmHWM`), in bytes; `None` elsewhere.
+fn peak_resident() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?;
+    let kib: u64 = line.trim().trim_end_matches("kB").trim().parse().ok()?;
+    kib.checked_mul(1_024)
+}
+
+/// C-RP-02 (IA-17b, D-4899; critic IA-17-3): ONE GATHERED REPAIR OF A MONTH
+/// COSTS NO MORE PER GATHERED DAY AT 22 DAYS THAN AT 2. A repair-reason run
+/// over the sessions of January 2025 a store holding only the 31st lacks:
+/// every day is gathered and the month repaired ONCE, so the run is O(held +
+/// offered) bars, one copy of the month. Repaired a day at a time (the
+/// back-fill before IA-17b), each day copied the month again, the cost per
+/// day grew with the days already landed, and 22 days took 22 generations
+/// (refused above). The ratio is the fastest run's cost per gathered day;
+/// p50, p99 and max of every run are printed with n, and the peak resident
+/// set of the 22-day runs where the host reports one (printed, never gated:
+/// one process's peak rises across repairs, verify-IA-17-r1 follow-up 1).
+fn gathered_repair_is_flat_per_day() -> bool {
+    println!("C-RP-02 one gathered repair of a month, per gathered day (IA-17b, D-4899)");
+    let few = gathered_runs(2, 5);
+    let restarted = std::fs::write("/proc/self/clear_refs", "5").is_ok();
+    let many = gathered_runs(22, 5);
+    let peak = peak_resident();
+    let per_day = |ns: &[u128], days: u128| ns.iter().min().copied().unwrap_or(0) * 1_000 / days;
+    let ok = ratio(
+        "C-RP-02 gathered repair a day, 22-day month",
+        per_day(&few, 2),
+        per_day(&many, 22),
+    );
+    spread_of("C-RP-02 2 gathered days, one run", few);
+    spread_of("C-RP-02 22 gathered days, one run", many);
+    match peak {
+        Some(bytes) => println!(
+            "  C-RP-02 peak resident set, 22-day runs          {bytes} B ({})",
+            if restarted {
+                "the five 22-day runs' own"
+            } else {
+                "the whole process's: the host would not restart its peak"
+            }
+        ),
+        None => println!(
+            "  C-RP-02 peak resident set, 22-day runs          NOT MEASURED on this host (no /proc/self/status)"
+        ),
+    }
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -1871,6 +2037,7 @@ fn main() {
     // `benches/ratio.rs` alone; the module prints each ratio and spread.
     println!("C-PIT-01 F&O membership lookups at 1x, 10x, 100x the held days (PIT-1, D-5164)");
     ok &= fno_membership::fno_membership_lookup_is_flat();
+    ok &= gathered_repair_is_flat_per_day();
     if ok {
         println!("all ratios within the ceiling");
     } else {

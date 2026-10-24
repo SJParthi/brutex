@@ -83398,3 +83398,107 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-4899 — One repair per (instrument, month) per run: the gather, its stop, crash and full-disk rules (amends D-4875 (3), (6) and D-4836's V-4 line) — 2026-10-24
+
+**Implemented by** IA-17b (IA-17's second part). **Amends** D-4875 (3) and (6),
+whose entry IA-17 headed and which this entry does not edit (critic X-4), and
+the V-4 line of D-4836: V-4 was ready before this part and stays ready; V-5
+(the 67 alias months) is ready from this part on.
+
+**What was wrong.** The back-fill door repaired one FILE at a time
+(`Filing::through`, `Door::BackFill`, `ingest::repair_rows`), and each repair
+keeps a whole copy of its month for ever (D-3350). A month that held only a
+later day took one generation for every other day of it, and once a month
+was served from a revision every later day it lacked was one more
+(`docs/06-limits.md` L-IA-26: 2,843 GDFL months repaired up to generation 21,
+66.22 GiB of superseded generations, on 14 Oct 2026).
+
+**The rule.**
+
+1. **Gathered, never repaired alone.** The back-fill pass asks
+   `ingest::gather_rows`, the back-fill door's own judgement (`judge_back_fill`,
+   split out of `back_fill_or_append` with its behaviour unchanged) with
+   nothing published: a file its month takes only as a new generation is
+   answered `Filed::Gathered` and its bars join the run's offer for that
+   (instrument, month) (`gdfl_import_filing::Gather`). Every other answer is
+   the door's as before.
+2. **Offered once.** The run's offers are repaired once each
+   (`ingest::repair_gathered`: the `repairing` line, then `repair_month_with`
+   through the one repair authority) when the run leaves the month (the first
+   day of another month, at the top of its pass), when it ends, and when it
+   is stopped. Each day was judged alone when it was gathered, so a month
+   holding a day between the days it lacks is never refused for a span that
+   crosses it; the store merges held and offered bars in order and refuses
+   the whole month only if a held bar would change.
+3. **With or without a repair reason.** The rule binds every generation the
+   back-fill door publishes: a sealed or revision-served month's successor
+   (D-6247, D-7131), which reaches that door without a reason, is gathered
+   too. Only a repair-reason run gathers a hole (D-4889 is unchanged).
+4. **A gathered day closes when its months are repaired, in day order**, by
+   its own failures and those its months' repairs gave its files, with its
+   own counts. Until then it is begun. `months_repaired` counts months.
+5. **A stop** offers what is gathered and closes those days before the run
+   ends `Stopped`: a stop never leaves a gathered day begun.
+6. **A crash** leaves the gathered days begun, nothing published (or a
+   revision published and unpromoted); the next run reads them again
+   (D-2821), gathers them again and publishes, or finds the revision
+   `Published::Reused` and promotes it.
+7. **A full disk at the repair** (and a store gone or one that takes no
+   writes) ends the run `disk_full` (`store_lost`, `store_not_writable`) with
+   no gathered day closed; months repaired earlier in the same flush stay
+   served, and the next run finds their bars held.
+8. **Bounded.** An offer past `store::repair::MAX_ROWS` is refused by name
+   (`repair_refused`), never cut; a second gathered twice differently is
+   refused (`bars_differ_held`), and alike is kept once.
+
+**Proof.** `pull::gdfl_import::tests::gather` (IA-RP-03, IA-RP-04, IA-RP-05,
+FM-092, FM-098 and the extreme cases; `docs/04-invariants.md`), bench C-RP-02
+(`crates/pull/benches/ratio.rs`), `docs/06-limits.md` L-IA-26's restatement of
+24 Oct 2026.
+
+**Not built here (BACKTEST-FIRST, spec §4b).** The plan's generation and byte
+count per month (FM-092's first sentence) and the "rewrites used of the
+1,024" view (RA-266) are `plan.json`'s (IA-10a) and R3-28's.
+
+### D-TBD-IA-17b-1 — A repaired CASH month's `.auc` follows its served generation, and a print is carried, never dropped — 2026-10-24
+
+**Implemented by** IA-17b. Number to be assigned by the Mac at merge-back
+(the part has no block; `README.md`). It builds what D-4875 (5) left NOT
+BUILT: the CASH writer passed as `repair_month_with`'s step, and
+`auction::path` resolving the served generation.
+
+1. **Readers read the served generation's `.auc`.** `gdfl_cm::auction::path`
+   resolves the month through `store::generation::served` (one pointer probe,
+   O(1)): the original's sidecar while the month is served as the original,
+   exactly the path it always answered, and the promoted revision's once a
+   repair is served. Its signature is unchanged (`api` and `cli` call it).
+2. **An append never writes inside a served revision.** `auction::append`
+   refuses a month served from a revision by name (CLAUDE.md §3 rule 8,
+   D-3350) and writes only the original's sidecar.
+3. **Prints the month takes only with a new generation are carried.**
+   `auction::file_or_carry`, the import's door: a day older than one the
+   sidecar holds, or a day a revision-served month's sidecar lacks, is
+   `DayPrints::WithGeneration`, its prints carried with the day's bars
+   (`FileFacts::auction`) instead of refusing the whole file. A carried day
+   whose bars land in the month as served (no new generation needs them) is
+   named a failure of the day, never dropped silently.
+4. **The step writes the new generation's whole `.auc`.**
+   `auction::write_revision`, passed by the gathered repair of a CASH month:
+   the served sidecar's records and the carried days' prints, in IST day
+   order, in format version 2, written beside itself, synced, renamed, its
+   directory synced, inside the revision root it is handed and nowhere else.
+   A day held differently refuses the step, so the repair stops before the
+   promotion and the exact retry runs it again. No served sidecar and nothing
+   carried writes no file.
+
+**Not built here.** The `.auc`'s typed kinds of IA-16 (the older-day refusal
+`NotHeld`, records-differ `Differs`, spec §8 item 2) stay an open cause
+(`auction_sidecar`) at `gdfl_import_causes.rs:955`: the carry above means
+the older-day case no longer reaches it at the import. A revision published
+before this part carries no `.auc`; the operator's store held no `.auc` at
+all on 13 Oct 2026 (SC-CLOSE-4), so no served month loses a sidecar.
+
+**Proof.** `pull::gdfl_import::tests::gather::a_cash_months_gathered_repair_writes_its_auction_file_before_it_is_served`,
+`pull::gdfl_cm::auction::revision_tests` (`docs/04-invariants.md` IA-RP-02b,
+IA-AUC-02, IA-AUC-03).

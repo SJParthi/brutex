@@ -21486,3 +21486,76 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-T2S-10 | A run reads the year's newest version and every segment since, and a fold writes the year's whole next version | resumption needs the rows already answered, and a version is the whole year so a reader needs one file; nothing is replaced or deleted (append-only), so a year's folder grows by one version per run that learns something | O(rows of the year) at a run's start and at its fold, never per row checked: 37,958,020 (2019), 40,962,920 (2025) and 31,078,057 (2026) bytes of CSV a version, and the day segments are kept beside it (the three years' folder holds 218 MB). **Measured** fold phase: 2019 1,673 ms, 2025 2,948 ms, 2026 1,318 ms | DATA-2 |
 | L-T2S-11 | The `--out` containment check (D-5187, D-5189) asks the host where each component of `--out` and of each root is, and follows a root's links outward only at the root's top | a path is placed only by the host: each component that exists is resolved with `canonicalize`, which walks the path again from its root, so one check is O(c^2) host lookups for c components, bounded by the path's depth and paid once per run, never per row or per day; a link INSIDE the store is refused by the written form. An `--out` written as the physical target of a link at the TOP of the store or of the tick store (`/data/bars/r` where `<store>/bars -> /data/bars`) was not refused until D-5189 (amended 23 Oct 2026, verify-DATA-2-r3 ATK-16): `link_around` lists each root's top once and reads each link there once (a relative target taken against the root, a dangling one included), O(entries at the root's top) once per run. The target of a link DEEPER in a root is still not followed, and a link swapped in between the check and `create_dir_all` is not seen. Its lock name is opened once per run by `pull::gdfl_run::locks::open_lock_path` (D-5188, amended 23 Oct 2026: `O_NOFOLLOW \| O_NONBLOCK`, then a regular file with exactly one name); the name is not checked again after the lock is taken, so a lock file removed or replaced under a live run is not seen (no command of this repository deletes one) | `take_lock` (open and lock of a name a run left), n = 1,000 calls in the host's temp directory on the internal disk (dev profile at opt-level 3, `the_lock_name_is_timed_once_per_run`, 23 Oct 2026, machine loaded by other builds): p50 21,584 ns p99 33,333 ns max 517,208 ns, **measured**, once per run; on WD_BLACK not measured (UNVERIFIED). `inside`, n = 1,000 calls for each of four shapes on WD_BLACK under a loaded machine (dev profile at opt-level 3, `the_out_containment_check_is_timed_once_per_shape`, 21 Oct 2026): through `..` p50 130,291 ns p99 276,459 ns max 392,875 ns; a bare relative name p50 113,166 p99 152,375 max 537,041 ns; through a link p50 101,291 p99 159,542 max 320,125 ns; outside p50 73,792 p99 144,125 max 470,417 ns. **Measured**, once per run. Re-measured 23 Oct 2026 at 19:12 IST in the host's temp directory on the internal disk (dev profile at opt-level 3 with debuginfo, all six of the machine's cargo slots busy, n = 1,000 each): `take_lock` p50 14,042 ns p99 47,083 ns max 91,500 ns; `inside` through `..` p50 124,958 p99 505,791 max 19,915,000 ns, a bare relative name p50 105,042 p99 364,375 max 7,965,667 ns, through a link p50 97,625 p99 309,667 max 17,083,750 ns, outside p50 69,042 p99 203,334 max 12,909,166 ns; `link_around` (D-5189) on a root of eight entries, two of them links, `--out` outside both, p50 129,500 ns p99 450,292 ns max 16,975,292 ns (`the_d_5189_steps_are_timed`). **Measured**, once per run each; the maxima of several milliseconds are single calls on a machine that busy, and p99 stays under 0.51 ms. The real store and the tick store hold no link at their top (`ls -la` and `find -maxdepth 1 -type l`, read-only, 23 Oct 2026), so on them `link_around` refuses nothing; a shadow store holds its `bars` link there. Deeper levels were not walked (UNVERIFIED) | DATA-2 |
 | L-T2S-12 | Each file the check reads back, each archive it opens and each row's symbol cell costs one more bounded step (D-5189) | a version CSV, index or day segment is opened `O_NOFOLLOW \| O_NONBLOCK` and `fstat`ed before its one read (`index::read_regular`, once per file a run reads; the read itself is O(file bytes), as L-T2S-10 says); an archive is opened `O_NONBLOCK` and `fstat`ed before the importer's reader indexes it (`open_archive`, once per archive a run reads); a row's symbol cell is one pass over the share's name, at most the host's file-name length (255 bytes), so O(1) per row; a share whose months cannot be listed in a run with no YEAR is planned by every month of the years in play, 12 opens a year at most, as L-T2S-03 counts | n = 1,000 calls each, the host's temp directory on the internal disk, dev profile at opt-level 3 with debuginfo, all six cargo slots busy (`the_d_5189_steps_are_timed`, 23 Oct 2026 19:12 IST): `read_regular` of a 64 KiB file p50 11,958 ns p99 34,625 ns max 82,708 ns; `open_archive` of a small invented archive p50 12,958 ns p99 57,083 ns max 321,625 ns (the open, the `fstat` and the reader's central directory); `symbol_cell` of a name the store admits p50 0 ns (below the clock's step) p99 42 ns max 292 ns, of a name it escapes p50 42 ns p99 84 ns max 38,583 ns. **Measured**. On WD_BLACK and on the 128 GB vendor archive not measured by this test (UNVERIFIED); the real-data runs time whole share-days (L-T2S-04) | DATA-2 |
+
+## Ingest automation: the once-per-month gather and the CASH `.auc` of a repaired month — D-4899, D-TBD-IA-17b-1, 24 October 2026
+
+IA-17b, IA-17's second part. A dated restatement of L-IA-26's disk item and
+L-IA-12's gather term for what the gather now does; IA-17's measured lines
+above are left as they were written.
+
+- **L-IA-26, disk, restated 24 Oct 2026: one copy per (instrument, month)
+  per run.** The back-fill no longer repairs a file at a time: every day of a
+  month a run reads that the month takes only as a new generation is
+  gathered and the month is repaired ONCE, when the run leaves it, ends or is
+  stopped (D-4899). A run over a month that lacks 22 of its days keeps one
+  copy of the month, not 22. The copies already kept (66.22 GiB superseded on
+  14 Oct) are not touched: removing one is a deletion, the operator's. Across
+  RUNS the rule is unchanged: a month repaired by one run and lacking a day
+  the next run reads takes one more generation in that run, so a month read
+  one day per run (a daily import into a revision-served month) still costs a
+  generation per run, at most `MAX_REVISIONS` (1,024) per month; how many a
+  month has used is shown on no page yet (RA-266: R3-28's list and IA-10a's
+  `plan.json`, not built here).
+- **L-IA-26, time, measured: C-RP-02** (`crates/pull/benches/ratio.rs`,
+  `pull::bench::gathered_repair_is_flat_per_day`), 24 Oct 2026, the cloud
+  session's Linux host (4 cores, the bench alone on it), `cargo bench -p pull
+  --locked --bench ratio`, each run a repair-reason import over January 2025
+  of a fresh store in the host's temporary directory holding only the 31st,
+  22,500 one-second NIFTY bars a day, the store built outside the clock: 2
+  gathered days, n = 5, p50 83,819,494 ns, p99 86,497,787 ns, max 89,069,269
+  ns; 22 gathered days (495,000 bars offered, 517,500 merged), n = 5, p50
+  749,859,448 ns, p99 765,790,364 ns, max 885,713,329 ns. The fastest run's
+  cost per gathered day: 39,483,049,000 ps at 2 days, 30,569,860,590 ps at 22,
+  ratio 0.774 (gate 8's ceiling 3.0). With n under 100 the p99 is the slowest
+  sample but one. Every run ended with the month at generation 1 (the bench
+  refuses any other). NOT MEASURED: the same on the operator's Mac and its
+  store volume (NEEDS THE MAC, `reports/cloud-db-IA-17b.md`).
+- **L-IA-26, memory, measured once here.** The peak resident set of the five
+  22-day runs, in one process, restarted before them (Linux `VmHWM` after
+  `clear_refs` 5): 261,095,424 B. One process's peak rises across repairs
+  (verify-IA-17-r1 follow-up 1), so this is five runs' peak, not one's, and
+  it is printed, never gated.
+- **L-IA-12, the gather's term, restated.** Besides L-IA-12's 224 B per file,
+  a run holds, for the ONE calendar month it is gathering, the bars of every
+  gathered file (56 B a bar, `store::format::Bar`), each file's name and its
+  day's request, and one waiting close per gathered day (its failures and two
+  report marks). Bounded per (instrument, month) by `store::repair::MAX_ROWS`
+  bars (2,678,400 × 56 B ≈ 150 MB), refused by name past it, never cut; the
+  month's offers are released when it is repaired. A real index month of 22
+  lacked days is about 495,000 bars, 27.7 MB by type size. For an options
+  month the bound is per contract-month, and the total is the gathered
+  contract-days' bars: NOT MEASURED, an upper bound from type sizes only.
+- **The gather's per-operation costs.** One gathered file: one hash probe for
+  its month's offer and an append of its bars after the offer's last (O(bars
+  of the file)); a file gathered out of order is merged with the offer
+  (O(offer + file)), which no run in day order meets. The month's leave test
+  before each day: one compare. The flush: one repair per month gathered,
+  O(held + offered) bars (above), plus, per gathered file, one binary search
+  of the stamps the repair added. Nothing O(month) per day.
+- **The `.auc` reads one pointer more.** `gdfl_cm::auction::path` (every
+  reader, `GET /sources/day.json` among them) and the import's
+  `file_or_carry` resolve the served generation first: one pointer probe, an
+  `open` that answers not-found for a month never repaired. O(1). NOT
+  MEASURED against the head's answer on the real store (NEEDS THE MAC).
+  `write_revision`, the gathered repair's step for a CASH month: one read of
+  the served sidecar and one write of the new one, O(records of the month),
+  once per repaired CASH month, never on a read path.
+- **Named, not hidden.** (1) A gathered day stays begun until its month is
+  repaired: a crash re-reads up to a month of days (D-2821), never loses one.
+  (2) An open refusal of a month's gathered repair (`month_busy`, a host
+  error) is known only at the flush, after later days of the same month may
+  have appended to it; the earlier days are then read again by the next run,
+  which, with no repair reason, names them `needs_month_generation`
+  (IA-GR-18's held-back check runs at file time and cannot see the flush).
+  (3) A revision published before IA-17b carries no `.auc`; the store held
+  none on 13 Oct 2026 (SC-CLOSE-4), so no reader lost one.
