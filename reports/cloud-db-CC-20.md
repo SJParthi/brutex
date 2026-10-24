@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -108,3 +108,16 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   the full gates.
 - HOLD found at 13:28 IST after this save point: held. The api bench build left running in the
   background (no session work); nothing else started.
+
+### 2026-10-24 save point 7 (GO again; api runs A, B, C; L-CHK-04 filled)
+
+- GO without HOLD again; resumed. The api chain had finished while held.
+- api runs A (`cargo bench -p api --bench ratio --locked -j 2`), B and C (its built binary,
+  `--bench`): C-CHK-07 passed in all three (hit 10x 1.001x / 1.002x / 0.979x, 100x 1.010x /
+  1.007x / 0.995x; `SymbolAbsent` 10x 1.006x / 1.002x / 1.007x, 100x 0.987x / 1.013x / 1.014x).
+  The harness then exits 1 in `reads.rs` in every run (base red: a 102,400-bar month past the
+  60,000-row cap), and `C-LG-03` breached in all three (3.502x / 3.423x / 3.636x), `C-15`
+  marginal rows in B and C: rows CC-20 does not own or touch.
+- `docs/06-limits.md`: L-CHK-04 filled with the three api runs, and a paragraph naming the api
+  harness's own reds.
+- NEXT: merge the newest `origin/feat/db-fix`, then the final gates.
