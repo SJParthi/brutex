@@ -182,7 +182,15 @@ impl FailKind {
     pub const fn of_repair(why: &RepairError) -> Self {
         match why {
             RepairError::Store(inner) => Self::of_store(inner),
-            RepairError::StaleSource => Self::MonthBusy,
+            // A source that moved under the repair, or (R4-18 repair 2) a writer
+            // of the feed's quarantine still bringing its index level as the
+            // reader's patience ran out (the importer's is none): the month is
+            // busy, as a month a writer holds, retried at the import's call
+            // site; never store damage.
+            RepairError::StaleSource
+            | RepairError::QuarantineUnknown(
+                store::quarantine::QuarantineError::BeingWritten { .. },
+            ) => Self::MonthBusy,
             RepairError::RowLimit { .. }
             | RepairError::NoBasisWitness
             | RepairError::UnsealedSource
@@ -201,13 +209,6 @@ impl FailKind {
             // R4-18 repair 2: a month quarantined whole takes no bar, for
             // good; no later build or repair lifts a quarantine.
             | RepairError::Quarantined(_) => Self::RepairImpossible,
-            // R4-18 repair 2: a writer of the feed's quarantine still bringing
-            // its index level as the reader's patience ran out (the
-            // importer's is none): the month is busy, as a month a writer
-            // holds, retried at the import's call site; never store damage.
-            RepairError::QuarantineUnknown(
-                store::quarantine::QuarantineError::BeingWritten { .. },
-            ) => Self::MonthBusy,
             // R4-18 repair 2: the feed's quarantine index or ledger cannot
             // be trusted (torn, stale, damaged), so which offered bars it
             // set aside is not known: a fault of the store, held back, read

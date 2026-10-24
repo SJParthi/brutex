@@ -83550,12 +83550,20 @@ R418-19..R418-23):
    ledger line was synced left the line unindexed; a dropped month was then
    never re-indexed (`already_dropped`), and a month recorded whole was
    served while the listings called it quarantined. NOW the index header
-   (version 2) records the ledger bytes the image describes. A reader trusts
-   an image whose header checks and whose described length is the ledger's,
-   or less while a writer holds the feed's lock (an act in flight, whose
-   state before it is the image); otherwise it answers
-   `quarantine_index_stale` or `quarantine_index_torn` by name, never
-   "clear" (a zeroed image included). Every writer brings the image level
+   (version 2) records the ledger bytes the image describes. A reader answers
+   ONLY from an image whose header checks and whose described length is the
+   ledger's; otherwise it answers `quarantine_index_stale` or
+   `quarantine_index_torn` by name, never "clear" (a zeroed image included).
+   An image behind its ledger is never the answer even while a writer holds
+   the feed's lock: the repair's own self-check before landing found that
+   taking such a lag for the writer's act in flight answered "clear", during
+   the next writer's catch-up, for a month an act a failed publish left
+   unindexed recorded whole. While a writer holds the lock the reader waits
+   for its image within its thread's patience (`store::flock::patience`: the
+   server's page reads have some, the CLI and the importer none) through the
+   store's one wait loop and is refused `quarantine_being_written` ("being
+   written, ask again": 503 with `Retry-After` on `/bars.json`, `month_busy`
+   to the importer) when it runs out. Every writer brings the image level
    with the ledger (a rebuild) under the lock before its own act, and refuses
    a damaged ledger and a full bucket BEFORE its ledger line, so a refusal
    writes nothing and only a host refusal of the final publish can leave a
@@ -83576,8 +83584,14 @@ R418-19..R418-23):
    is held back (never served again, one `store.repair` event); a month
    recorded whole is `RepairError::Quarantined` and a quarantine that cannot
    be read `RepairError::QuarantineUnknown`, each with nothing written.
+   The rule is judged ONCE THE SERVED MONTH IS OPEN (the self-check before
+   landing: judged before the open, a drop intended and promoted between the
+   two read as nothing set aside): a drop ledgers its intent before its door
+   promotes, so a month opened after that promotion meets the intent, and one
+   opened before it refuses the door's own promotion (`StaleSource`).
    `pull`'s failure table files them as `repair_impossible` and
-   `store_damaged`. `restate_month` reports what it held back and emits one
+   `store_damaged` (a writer still bringing the index level, `month_busy`).
+   `restate_month` reports what it held back and emits one
    `store.restate` event with its reason and what changed; the journal line
    a run keeps is its caller's (R4-23), from those fields, as `pull::ingest`
    keeps one for `repair_month`.

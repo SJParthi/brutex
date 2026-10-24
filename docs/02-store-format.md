@@ -5298,11 +5298,17 @@ matching slot of the 8 from its home, which never wrap. Slot: 16-byte hash,
 month `yyyy*100+mm`, scope (1 whole month, 2 dropped), cause (1, 2, 3), bars,
 ledger offset, revision, written at, CRC-32C of bytes 0..60 and the slot's
 index. Every write is a whole new image, staged, synced and renamed. A
-`dropping` intent is indexed as a drop of no bars. A reader trusts an image
-whose header checks and whose described length is the ledger's (or less
-while a writer holds `audit/<feed>.quarantine.lock`: an act in flight); any
-other is `quarantine_index_torn` or `quarantine_index_stale` by name, and the
-next writer rebuilds it from the ledger before its own act.
+`dropping` intent is indexed as a drop of no bars. A reader answers only
+from an image whose header checks and whose described length IS the
+ledger's: one behind it is never the answer, because a writer holding
+`audit/<feed>.quarantine.lock` may be writing its own act or bringing the
+index level with one a failed publish left unindexed, and a reader cannot
+tell which. While a writer holds the lock the reader waits for its image
+within its thread's patience and is refused `quarantine_being_written` (a
+"being written, ask again" sentence) when that runs out; with no writer the
+lag is `quarantine_index_stale`, and a wrong length or header
+`quarantine_index_torn`, each by name; the next writer rebuilds the image
+from the ledger before its own act (D-7291).
 
 **A dropped month** is a new generation under `bar-revisions-v1/<n>` through
 `store::repair::publish_without` and `generation::promote`; a month named

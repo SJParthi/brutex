@@ -490,7 +490,10 @@ async fn bars_json_asks_again_while_a_quarantine_writer_brings_its_index_level()
             .is_some_and(|said| said.contains("quarantine_being_written")),
         "{body}"
     );
-    assert!(!body.to_string().contains("77713"), "never its bars: {body}");
+    assert!(
+        !body.to_string().contains("77713"),
+        "never its bars: {body}"
+    );
     // THE WRITER GONE, THE INDEX STILL BEHIND: named stale.
     lock.unlock().expect("let go");
     let (status, stale) = get(&fixture.site, &uri).await;

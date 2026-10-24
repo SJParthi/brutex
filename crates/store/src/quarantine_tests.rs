@@ -1687,8 +1687,16 @@ fn a_drop_landing_inside_a_repair_refuses_its_promotion_and_the_retry_holds_the_
         policy,
         Some(&mut drop_lands),
     );
-    assert_eq!(raced.as_ref().err(), Some(&RepairError::StaleSource), "{raced:?}");
-    let served: Vec<i64> = store.served_bars(path).iter().map(|b| b.ts_micros).collect();
+    assert_eq!(
+        raced.as_ref().err(),
+        Some(&RepairError::StaleSource),
+        "{raced:?}"
+    );
+    let served: Vec<i64> = store
+        .served_bars(path)
+        .iter()
+        .map(|b| b.ts_micros)
+        .collect();
     assert_eq!(served.len(), 4, "the drop stands: {served:?}");
     assert!(named.iter().all(|at| !served.contains(at)), "{served:?}");
     let again = repair::repair_month(&store.root, path, SYMBOL, &offered, policy);
@@ -1696,7 +1704,11 @@ fn a_drop_landing_inside_a_repair_refuses_its_promotion_and_the_retry_holds_the_
         matches!(again, Ok(repair::MonthRepair::Repaired { added: 1, .. })),
         "{again:?}"
     );
-    let served: Vec<i64> = store.served_bars(path).iter().map(|b| b.ts_micros).collect();
+    let served: Vec<i64> = store
+        .served_bars(path)
+        .iter()
+        .map(|b| b.ts_micros)
+        .collect();
     assert_eq!(served.len(), 5, "{served:?}");
     assert!(
         named.iter().all(|at| !served.contains(at)),
