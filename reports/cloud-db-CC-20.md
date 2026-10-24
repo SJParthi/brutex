@@ -88,3 +88,21 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   (a cost claim naming no proof), which now names `crates/pull/benches/ratio.rs`. Re-run: gate 1d's
   undeclared set and gate 12's refusals are now identical to the base's.
 - NEXT: api run A, rebuild pull bench with this save point, runs B and C, docs/06 rows.
+
+### 2026-10-24 14:20 IST: save point 6 (pull runs A, B, C green; docs/06 rows)
+
+- `cargo bench -p pull --bench ratio --locked` run B: `all ratios within the ceiling`, exit 0;
+  run C by the same built binary (`--bench`): `all ratios within the ceiling`, exit 0. Run A
+  (save point 3) also green. Every C-CHK pull row passed in all three.
+- `docs/06-limits.md`: section "Check primitives, each with a ratio bench (CC-20; D-6800 to
+  D-6804)" appended, L-CHK-01 to L-CHK-07 with the three runs' figures; L-CHK-04 (api) waits for
+  the api runs. The 13 Oct "not timed" sentence is left as written and superseded by L-CHK-01.
+- `crates/pull/tests/check_primitive_real.rs` (new, `#[ignore]`, read only): the Mac's real-size
+  run for the options year index and the census cold load, real paths only from
+  `BRUTEX_GDFL_NFO_ARCHIVES` and `BRUTEX_CC20_CENSUS_ROOT`, no default.
+  `cargo clippy -p pull --test check_primitive_real --locked -- -D warnings`: `Finished`.
+- api: the harness at this tree exits in `reads.rs` (base red, see save point 5's commit
+  1fd9fd6e); C-CHK-07 now runs before the served routes. Its build (`cli` in the bench profile) is
+  in progress.
+- NEXT: api runs A, B, C; the C-CHK-07 figures; then the final merge of `origin/feat/db-fix` and
+  the full gates.
