@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -89,7 +89,7 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   undeclared set and gate 12's refusals are now identical to the base's.
 - NEXT: api run A, rebuild pull bench with this save point, runs B and C, docs/06 rows.
 
-### 2026-10-24 14:20 IST: save point 6 (pull runs A, B, C green; docs/06 rows)
+### 2026-10-24 13:28 IST: save point 6 (pull runs A, B, C green; docs/06 rows)
 
 - `cargo bench -p pull --bench ratio --locked` run B: `all ratios within the ceiling`, exit 0;
   run C by the same built binary (`--bench`): `all ratios within the ceiling`, exit 0. Run A
@@ -106,3 +106,5 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   in progress.
 - NEXT: api runs A, B, C; the C-CHK-07 figures; then the final merge of `origin/feat/db-fix` and
   the full gates.
+- HOLD found at 13:28 IST after this save point: held. The api bench build left running in the
+  background (no session work); nothing else started.
