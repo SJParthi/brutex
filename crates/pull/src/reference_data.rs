@@ -2708,6 +2708,46 @@ pub fn load_one<T>(
     loaded
 }
 
+/// The generation [`write`] answered, read back at ITS OWN name: the file
+/// `written.path` names, read capped, parsed as `written.generation` of
+/// `written.table` (checksum verified) and built. Never the newest
+/// generation in its stead: a second writer may land one after it, and a
+/// caller deriving a second table from this one must derive it from these
+/// bytes (R4-26: the measured ledger from the basis runs it names). One read
+/// and one build, O(rows).
+///
+/// # Errors
+///
+/// The [`Refusal`] of the read, the parse or the build, by name.
+pub fn load_written<T>(
+    written: &Written,
+    build: impl Fn(&Parsed, &Path) -> Result<T, Refusal>,
+) -> Result<(Receipt, T), Refusal> {
+    let table = written.table;
+    let bytes = read_capped(&written.path).map_err(|(kind, detail)| Refusal {
+        table,
+        path: written.path.clone(),
+        generation: Some(written.generation),
+        kind,
+        detail,
+    })?;
+    let parsed = parse(table, Some(written.generation), &written.path, &bytes)?;
+    if parsed.receipt.sha256 != written.sha256 {
+        return Err(Refusal {
+            table,
+            path: written.path.clone(),
+            generation: Some(written.generation),
+            kind: RefusalKind::Checksum,
+            detail: format!(
+                "the generation reads sha256 {}, not the {} its write answered",
+                parsed.receipt.sha256, written.sha256
+            ),
+        });
+    }
+    let made = build(&parsed, &written.path)?;
+    Ok((parsed.receipt, made))
+}
+
 /// One table through [`slot`], told as its event, its strays told and kept.
 fn kept<T>(
     strays: &mut Vec<(Table, Strays)>,

@@ -46,11 +46,14 @@
 //! package found 770 rows on DATA-1's full input, 289 of them below one and
 //! 648 on the 17 shares whose ratio steps both ways (one share 121 rows
 //! alternating 170/171, 128/129, 66/65 ...). A row is drawn only from a
-//! LASTING step ([`judge`]): no proven step the other way within
-//! [`REVERSAL_DAYS`], each side holding [`HOLD_DAYS`] days with a basis, and
-//! a factor beyond the share's own wobble within [`WOBBLE_DAYS`]. Every
-//! other proven step is a named basis anomaly ([`Anomaly`]): counted,
-//! reported by the checker ([`Finding::BasisAnomaly`]) and never a row.
+//! LASTING step ([`judge`]): the ratio does not cross it back within
+//! [`REVERSAL_DAYS`] (by its levels, so a 0.7% step the other way never
+//! undoes a tenfold one, D-7196), a factor beyond the share's own wobble
+//! within [`WOBBLE_DAYS`] (fed only by reversed steps, so a lasting step
+//! never becomes it), and each side holding [`HOLD_DAYS`] days with a basis
+//! on its own basis, across as many short runs as it takes. Every other
+//! proven step is a named basis anomaly ([`Anomaly`]): counted, reported by
+//! the checker ([`Finding::BasisAnomaly`]) and never a row.
 //!
 //! A row whose window `(after, ex_date]` holds a session with no basis (a
 //! month missing from the input, days the factor could not be measured)
@@ -128,19 +131,24 @@ pub const DECISION: &str = "D-6892";
 /// disjoint) would be a "corporate action".
 pub const STEP_PERMILLE: u16 = 2;
 
-/// A proven step is LASTING only when each of its two runs holds at least
-/// this many days with a basis ([`Anomaly::Short`] otherwise): a one-session
-/// excursion is not a change of basis. Chosen, not sourced (D-7195): on
-/// DATA-1's full input (105 months, 2018-01..2026-09) no step the other two
-/// rules keep has a side shorter than this, and 498 of the 770 proven steps
-/// have one.
+/// A proven step is LASTING only when each side holds at least this many
+/// days with a basis on its own basis ([`Anomaly::Short`] otherwise): the
+/// runs outward from the step, however short each one is, while each lies
+/// beyond the share's wobble from the other side ([`judge`], rule 3). A
+/// one-session excursion is not a change of basis. Chosen, not sourced
+/// (D-7195; counted across runs since D-7196, when the first check of
+/// repair 1 found a tenfold step whose adjacent run held 4 days, on a share
+/// whose runs break up at 0.2%).
 pub const HOLD_DAYS: u32 = 5;
 
-/// A proven step with a proven step the OTHER way within this many calendar
+/// A proven step the ratio crosses the OTHER way within this many calendar
 /// days of its ex-date, on either side, is [`Anomaly::Reversed`]: the ratio
-/// went back, so neither step is a lasting change of basis. Chosen, not
-/// sourced (D-7195): every share whose ledger the verifier found
-/// alternating (121 rows of one share around 1) steps both ways inside it.
+/// went back, or the step only returns it where it stood ([`judge`], rule
+/// 1). Crossed by LEVELS (D-7196): a later run back at or across the old
+/// run's band, or an earlier run at or across the new run's band, never a
+/// step the other way whatever its size. Chosen, not sourced (D-7195):
+/// every share whose ledger the verifier found alternating (121 rows of one
+/// share around 1) steps both ways inside it.
 pub const REVERSAL_DAYS: u32 = 90;
 
 /// The span, in calendar days either side of a step, over which a share's
@@ -1506,17 +1514,23 @@ impl Step {
 /// Why a proven step is not a lasting change of basis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anomaly {
-    /// A proven step the other way lies within [`REVERSAL_DAYS`]: the ratio
-    /// went back (an excursion, an alternation, a wander).
+    /// The ratio crosses the step the other way within [`REVERSAL_DAYS`]
+    /// of its ex-date ([`judge`], rule 1): it came back (in one step or in
+    /// several), or the step only returns it where it stood. An excursion,
+    /// an alternation, a wander.
     Reversed {
-        /// The nearest such step's first day on its new basis.
+        /// The nearest day the ratio crosses the step the other way: the
+        /// first day of the later run that stands back across it, or the
+        /// first day after the earlier run that stood across it.
         by: Day,
     },
-    /// A side holds fewer than [`HOLD_DAYS`] days with a basis.
+    /// A side holds fewer than [`HOLD_DAYS`] days with a basis on its own
+    /// basis, beyond the share's wobble ([`judge`], rule 3).
     Short {
-        /// The old run's days.
+        /// The days with a basis the old side holds, counted outward from
+        /// the step to [`HOLD_DAYS`].
         old_days: u32,
-        /// The new run's days.
+        /// The days the new side holds, counted the same way.
         new_days: u32,
     },
     /// The factor does not clear the share's own wobble within
@@ -1544,12 +1558,13 @@ impl fmt::Display for Anomaly {
         match self {
             Self::Reversed { by } => write!(
                 f,
-                "basis_reversed: a proven step the other way on {by}, within {REVERSAL_DAYS} days"
+                "basis_reversed: the ratio crosses this step the other way on {by}, within \
+                 {REVERSAL_DAYS} days"
             ),
             Self::Short { old_days, new_days } => write!(
                 f,
-                "basis_short: the runs hold {old_days} and {new_days} days with a basis, fewer \
-                 than {HOLD_DAYS} on a side"
+                "basis_short: the old basis holds {old_days} and the new {new_days} day(s) with a \
+                 basis beyond the share's wobble, fewer than {HOLD_DAYS} on a side"
             ),
             Self::WithinWobble { wobble } => write!(
                 f,
@@ -1565,9 +1580,10 @@ impl fmt::Display for Anomaly {
 pub enum Verdict {
     /// Not proven ([`Step::proven`]): within the measurement's noise.
     Unproven,
-    /// A LASTING change of basis: proven, each side holds [`HOLD_DAYS`],
-    /// no step back within [`REVERSAL_DAYS`], and beyond the share's own
-    /// wobble. The only verdict that makes a ledger row.
+    /// A LASTING change of basis: proven, never crossed back within
+    /// [`REVERSAL_DAYS`], beyond the share's own wobble, and each side
+    /// holding [`HOLD_DAYS`] days with a basis on its own basis. The only
+    /// verdict that makes a ledger row.
     Lasting,
     /// Proven, and still not a lasting change of basis: a named basis
     /// anomaly, counted and reported, never a row.
@@ -1581,33 +1597,65 @@ pub struct Judged {
     pub step: Step,
     /// What the data says it is.
     pub verdict: Verdict,
+    /// The days with a basis each side holds (old, new), counted outward
+    /// to [`HOLD_DAYS`] ([`judge`], rule 3): `Some` for a step judged
+    /// [`Verdict::Lasting`] or [`Anomaly::Short`], the only verdicts that
+    /// count them.
+    pub held: Option<(u32, u32)>,
 }
 
-/// Every step of `runs` (one share's, by first day). O(runs).
-#[must_use]
-pub fn steps_of(runs: &[Run]) -> Vec<Step> {
+/// One share's steps, each with the index in `runs` of its old run (its new
+/// run is the next). A pair whose factor terms would pass [`MAX_TERM`] has
+/// no step: [`steps_skipped`] counts them. O(runs).
+fn indexed_steps(runs: &[Run]) -> Vec<(usize, Step)> {
     runs.windows(2)
-        .filter_map(|pair| {
+        .enumerate()
+        .filter_map(|(at, pair)| {
             let [old, new] = pair else { return None };
             if old.end != RunEnd::Step {
                 return None;
             }
             let low = new.low.over(old.high)?;
             let high = new.high.over(old.low)?;
-            Some(Step {
-                symbol: old.symbol.clone(),
-                after: old.last,
-                ex_date: new.first,
-                from: old.ratio,
-                to: new.ratio,
-                low,
-                high,
-                factor: Ratio::simplest_between(low, high)?,
-                old_days: old.days,
-                new_days: new.days,
-            })
+            Some((
+                at,
+                Step {
+                    symbol: old.symbol.clone(),
+                    after: old.last,
+                    ex_date: new.first,
+                    from: old.ratio,
+                    to: new.ratio,
+                    low,
+                    high,
+                    factor: Ratio::simplest_between(low, high)?,
+                    old_days: old.days,
+                    new_days: new.days,
+                },
+            ))
         })
         .collect()
+}
+
+/// Every step of `runs` (one share's, by first day). O(runs).
+#[must_use]
+pub fn steps_of(runs: &[Run]) -> Vec<Step> {
+    indexed_steps(runs)
+        .into_iter()
+        .map(|(_, step)| step)
+        .collect()
+}
+
+/// How many runs of `runs` end `step` and still make no [`Step`]: their
+/// factor's terms would pass [`MAX_TERM`]. Counted so that a caller says
+/// so out loud; never one on DATA-1's full input (979 runs end `step`,
+/// 979 steps). O(runs).
+#[must_use]
+pub fn steps_skipped(runs: &[Run]) -> usize {
+    let ended = runs
+        .windows(2)
+        .filter(|pair| matches!(pair, [old, _] if old.end == RunEnd::Step))
+        .count();
+    ended.saturating_sub(indexed_steps(runs).len())
 }
 
 /// Calendar days from `a` to `b`, whichever is first.
@@ -1615,62 +1663,148 @@ fn apart(a: Day, b: Day) -> u32 {
     a.days_from_epoch().abs_diff(b.days_from_epoch())
 }
 
+/// Whether `run`'s band stands back across a step that went `up` from
+/// `from`'s: it reaches `from`'s band, or lies beyond it the other way.
+fn back_across(up: bool, from: &Run, run: &Run) -> bool {
+    if up {
+        run.low <= from.high
+    } else {
+        run.high >= from.low
+    }
+}
+
+/// The nearest day within [`REVERSAL_DAYS`] of the ex-date on which the
+/// ratio crosses the step whose old run is `runs[at]` the other way, before
+/// on a tie; `None` when it does not ([`judge`], rule 1).
+///
+/// - AFTER the step: a later run starting within the span whose band
+///   reaches the old run's band or lies beyond it (the ratio came back,
+///   in one step or in several smaller ones). Its first day.
+/// - BEFORE the step: an earlier run whose band reached the new run's band
+///   or lay beyond it, the ratio leaving it within the span (the step only
+///   returns the ratio where it stood). The first day after that run.
+///
+/// The magnitude is the levels', never a step's alone: a 0.7% step beside a
+/// tenfold one is crossed back by it; the tenfold one is crossed by neither.
+/// Each side stops at the span's edge, so at most the runs starting within
+/// [`REVERSAL_DAYS`] either side are read: O(1) for one step.
+fn crossed_back(runs: &[Run], at: usize, step: &Step) -> Option<Day> {
+    let up = step.up();
+    let (old, new) = (runs.get(at)?, runs.get(at.checked_add(1)?)?);
+    let after = runs
+        .iter()
+        .skip(at.saturating_add(2))
+        .take_while(|later| apart(later.first, step.ex_date) <= REVERSAL_DAYS)
+        .find(|later| back_across(up, old, later))
+        .map(|later| later.first);
+    let before = runs
+        .get(..=at)
+        .unwrap_or_default()
+        .windows(2)
+        .rev()
+        .take_while(
+            |pair| matches!(pair, [_, left] if apart(left.first, step.ex_date) <= REVERSAL_DAYS),
+        )
+        .find_map(|pair| match pair {
+            // The earlier run stood at or across the new run's band: seen
+            // from the new run, it lies back across a step the other way.
+            [earlier, left] if back_across(!up, new, earlier) => Some(left.first),
+            _ => None,
+        });
+    match (before, after) {
+        (Some(before), Some(after)) => Some(
+            if apart(after, step.ex_date) < apart(before, step.ex_date) {
+                after
+            } else {
+                before
+            },
+        ),
+        (before, after) => before.or(after),
+    }
+}
+
+/// How far `to`'s band lies from `from`'s in the direction of a step that
+/// went `up`, AT LEAST, as a factor: above one when it lies that way. `None`
+/// when a term would pass [`MAX_TERM`] (the run is then not shown to hold).
+fn least_move(up: bool, from: &Run, to: &Run) -> Option<Ratio> {
+    if up {
+        to.low.over(from.high)
+    } else {
+        from.low.over(to.high)
+    }
+}
+
+/// The days with a basis of the runs of `side`, outward from a step, while
+/// each lies on its side's basis (`on_basis`), counted until they reach
+/// [`HOLD_DAYS`]: at most [`HOLD_DAYS`] runs are read, each holding a day.
+fn hold<'a>(side: impl Iterator<Item = &'a Run>, on_basis: impl Fn(&Run) -> bool) -> u32 {
+    let mut days = 0_u32;
+    for run in side {
+        if days >= HOLD_DAYS || !on_basis(run) {
+            break;
+        }
+        days = days.saturating_add(run.days);
+    }
+    days
+}
+
+/// The days with a basis each side of the step whose old run is `runs[at]`
+/// holds on its own basis ([`judge`], rule 3), old side first: the runs
+/// outward from the step, while each lies farther than `wobble` from the
+/// OTHER side's adjacent run in the step's direction, counted to
+/// [`HOLD_DAYS`]. A side of short runs that stay on their basis holds; a
+/// side whose ratio comes back within the wobble stops there.
+fn held(runs: &[Run], at: usize, up: bool, wobble: Ratio) -> (u32, u32) {
+    let (Some(old), Some(new)) = (runs.get(at), at.checked_add(1).and_then(|next| runs.get(next)))
+    else {
+        return (0, 0);
+    };
+    let old_side = hold(runs.get(..=at).unwrap_or_default().iter().rev(), |run| {
+        least_move(up, run, new).is_some_and(|moved| moved > wobble)
+    });
+    let new_side = hold(runs.iter().skip(at.saturating_add(1)), |run| {
+        least_move(up, old, run).is_some_and(|moved| moved > wobble)
+    });
+    (old_side, new_side)
+}
+
 /// Every step of `runs` (one share's, by first day) with its verdict
-/// (D-7195): a proven step is LASTING only when
+/// (D-7195, D-7196): a proven step is LASTING only when
 ///
-/// 1. no proven step the other way lies within [`REVERSAL_DAYS`] of it
-///    ([`Anomaly::Reversed`]: an alternation 0.80/0.81/0.80, a one-session
-///    excursion and back, or a ratio that wanders both ways);
-/// 2. each of its runs holds at least [`HOLD_DAYS`] days with a basis
-///    ([`Anomaly::Short`]); and
-/// 3. the near end of its factor interval lies farther from one than the
-///    far end of every reversed step of the same share within
+/// 1. the ratio does not cross it the other way within [`REVERSAL_DAYS`] of
+///    its ex-date ([`Anomaly::Reversed`]): no later run starting in that
+///    span stands back at or across the old run's band, and no earlier run
+///    the ratio left in that span stood at or across the new run's band. An
+///    alternation 0.80/0.81/0.80, an excursion and back, a walk back in
+///    several smaller steps, a wander both ways. A step is crossed by LEVELS,
+///    never by one step's size alone: a 0.7% step the other way does not
+///    cross a tenfold one;
+/// 2. the near end of its factor interval lies farther from one than the
+///    far end of every REVERSED step of the same share within
 ///    [`WOBBLE_DAYS`] ([`Anomaly::WithinWobble`]): the share's own noise
-///    there, generated from its own steps.
+///    there, generated from its own steps. Only a reversed step feeds the
+///    wobble, so a lasting step never becomes it; and
+/// 3. each side holds at least [`HOLD_DAYS`] days with a basis on its own
+///    basis ([`Anomaly::Short`]): the runs outward from the step, while each
+///    lies beyond that wobble from the other side's adjacent run, however
+///    short each run is.
 ///
-/// O(steps): one pass each way for the nearest step the other way, and one
-/// monotone window maximum each way for the wobble; no step is compared
-/// with every other.
+/// O(steps): for each step at most the runs starting within
+/// [`REVERSAL_DAYS`] either side for rule 1 (fewer than 92 a side) and at
+/// most [`HOLD_DAYS`] runs a side for rule 3; one monotone window maximum
+/// each way for the wobble. No step is compared with every other.
 #[must_use]
 pub fn judge(runs: &[Run]) -> Vec<Judged> {
-    let steps = steps_of(runs);
-    // The nearest proven step the other way, before then after: one pass
-    // each way, two days kept.
-    let mut nearest: Vec<Option<Day>> = vec![None; steps.len()];
-    let (mut last_up, mut last_down) = (None, None);
-    for (step, near) in steps.iter().zip(nearest.iter_mut()) {
-        if !step.proven() {
-            continue;
-        }
-        if step.up() {
-            *near = last_down;
-            last_up = Some(step.ex_date);
-        } else {
-            *near = last_up;
-            last_down = Some(step.ex_date);
-        }
-    }
-    let (mut next_up, mut next_down) = (None, None);
-    for (step, near) in steps.iter().zip(nearest.iter_mut()).rev() {
-        if !step.proven() {
-            continue;
-        }
-        let after = if step.up() { next_down } else { next_up };
-        if let Some(after) = after
-            && near.is_none_or(|before| apart(after, step.ex_date) < apart(before, step.ex_date))
-        {
-            *near = Some(after);
-        }
-        if step.up() {
-            next_up = Some(step.ex_date);
-        } else {
-            next_down = Some(step.ex_date);
-        }
-    }
+    let steps = indexed_steps(runs);
     let reversed: Vec<Option<Day>> = steps
         .iter()
-        .zip(&nearest)
-        .map(|(step, by)| by.filter(|by| apart(*by, step.ex_date) <= REVERSAL_DAYS))
+        .map(|(at, step)| {
+            if step.proven() {
+                crossed_back(runs, *at, step)
+            } else {
+                None
+            }
+        })
         .collect();
     // The wobble: the largest far end of a REVERSED step within
     // WOBBLE_DAYS, a window maximum each way.
@@ -1680,7 +1814,7 @@ pub fn judge(runs: &[Run]) -> Vec<Judged> {
             .iter()
             .zip(reversed.iter().map(Option::is_some))
             .zip(wobble.iter_mut())
-            .map(|((step, flag), held)| (step, flag, held)),
+            .map(|(((_, step), flag), held)| (step, flag, held)),
     );
     wobble_pass(
         steps
@@ -1688,14 +1822,18 @@ pub fn judge(runs: &[Run]) -> Vec<Judged> {
             .zip(reversed.iter().map(Option::is_some))
             .zip(wobble.iter_mut())
             .rev()
-            .map(|((step, flag), held)| (step, flag, held)),
+            .map(|(((_, step), flag), held)| (step, flag, held)),
     );
     steps
         .into_iter()
         .zip(reversed.into_iter().zip(wobble))
-        .map(|(step, (reversed, wobble))| Judged {
-            verdict: verdict_of(&step, reversed, wobble),
-            step,
+        .map(|((at, step), (reversed, wobble))| {
+            let (verdict, held) = verdict_of(runs, at, &step, reversed, wobble);
+            Judged {
+                step,
+                verdict,
+                held,
+            }
         })
         .collect()
 }
@@ -1726,25 +1864,32 @@ fn wobble_pass<'a>(steps: impl Iterator<Item = (&'a Step, bool, &'a mut Ratio)>)
     }
 }
 
-/// The verdict of one step, given the nearest step the other way within
-/// [`REVERSAL_DAYS`] (if any) and the share's wobble around it.
-fn verdict_of(step: &Step, reversed: Option<Day>, wobble: Ratio) -> Verdict {
+/// The verdict of the step whose old run is `runs[at]`, given the day the
+/// ratio crosses it back (if any) and the share's wobble around it, with
+/// the days each side holds where they were counted.
+fn verdict_of(
+    runs: &[Run],
+    at: usize,
+    step: &Step,
+    reversed: Option<Day>,
+    wobble: Ratio,
+) -> (Verdict, Option<(u32, u32)>) {
     if !step.proven() {
-        return Verdict::Unproven;
+        return (Verdict::Unproven, None);
     }
     if let Some(by) = reversed {
-        return Verdict::Anomaly(Anomaly::Reversed { by });
-    }
-    if step.old_days < HOLD_DAYS || step.new_days < HOLD_DAYS {
-        return Verdict::Anomaly(Anomaly::Short {
-            old_days: step.old_days,
-            new_days: step.new_days,
-        });
+        return (Verdict::Anomaly(Anomaly::Reversed { by }), None);
     }
     if step.near() <= wobble {
-        return Verdict::Anomaly(Anomaly::WithinWobble { wobble });
+        return (Verdict::Anomaly(Anomaly::WithinWobble { wobble }), None);
     }
-    Verdict::Lasting
+    let (old_days, new_days) = held(runs, at, step.up(), wobble);
+    let verdict = if old_days < HOLD_DAYS || new_days < HOLD_DAYS {
+        Verdict::Anomaly(Anomaly::Short { old_days, new_days })
+    } else {
+        Verdict::Lasting
+    };
+    (verdict, Some((old_days, new_days)))
 }
 
 /// The measured rows the steps of `runs` make: one per LASTING step
@@ -1756,9 +1901,10 @@ pub fn measured_rows(runs: &BasisRuns, generation: u64) -> Vec<Action> {
     let mut rows = Vec::new();
     for symbol in runs.symbols() {
         for judged in judge(runs.of(symbol)) {
-            if judged.verdict != Verdict::Lasting {
+            let (Verdict::Lasting, Some((old_held, new_held))) = (judged.verdict, judged.held)
+            else {
                 continue;
-            }
+            };
             let step = judged.step;
             let window = if step.day_known() {
                 "the ex-date is the first session on the new basis"
@@ -1775,8 +1921,9 @@ pub fn measured_rows(runs: &BasisRuns, generation: u64) -> Vec<Action> {
                 after: Some(step.after),
                 evidence: format!(
                     "basis_runs generation {generation}: ratio {} to {}, factor in [{}, {}], lasting \
-                     ({} and {} days a side); {window}",
-                    step.from, step.to, step.low, step.high, step.old_days, step.new_days
+                     (each side holds at least {HOLD_DAYS} days with a basis on its own basis: \
+                     {old_held} and {new_held} counted); {window}",
+                    step.from, step.to, step.low, step.high
                 ),
             });
         }
@@ -1898,7 +2045,7 @@ impl fmt::Display for Finding {
 pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
     let mut found = Vec::new();
     for symbol in runs.symbols() {
-        for Judged { step, verdict } in judge(runs.of(symbol)) {
+        for Judged { step, verdict, .. } in judge(runs.of(symbol)) {
             let rows = actions.labels(symbol, Some(step.after), step.ex_date);
             if rows.is_empty() {
                 match verdict {

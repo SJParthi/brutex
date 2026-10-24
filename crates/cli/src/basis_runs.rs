@@ -43,7 +43,7 @@
 //! is refused (it must be looked at first). Both are `measured`: a measured
 //! row labels and never excuses.
 //!
-//! # Only a LASTING step is a row (D-7195)
+//! # Only a LASTING step is a row (D-7195, D-7196)
 //!
 //! Every step is printed with its verdict from `pull::corporate_actions::judge`,
 //! the one owner of the rule: `step` (lasting, a ledger row), `step_within_noise`
@@ -51,7 +51,15 @@
 //! `basis_short`, `basis_within_wobble`). Anomalies are counted on the summary
 //! line and in one `warn` event on `/logs`, and never ledgered. A lasting step
 //! whose window holds a session with no basis says its ex-date is UNKNOWN
-//! inside the window and names the months of it missing from `DIR`.
+//! inside the window and names the months of it missing from `DIR`. A run
+//! ending `step` whose factor terms pass 10^18 makes no step: it is counted
+//! (`steps_skipped`) on its own line and in that event, never dropped silently.
+//!
+//! With `--ledger`, the ledger is drawn from the basis-runs generation THIS
+//! run wrote or found holding its bytes, read back at that generation's own
+//! name (`pull::reference_data::load_written`), never from whichever
+//! generation is newest when it looks: a second writer landing between the
+//! two writes cannot lend the ledger its runs.
 //!
 //! A receipt keeps the day its exact source bytes were first read: a rerun on
 //! another day over the same files renders the same bytes and lands nothing.
@@ -549,7 +557,7 @@ pub(crate) fn command_with(
         );
         return FAILED;
     };
-    if tally.anomalies() > 0 {
+    if tally.anomalies() > 0 || tally.steps_skipped > 0 {
         // NAMED, COUNTED AND ON /logs: proven steps the data does not show
         // to last are never ledgered, and never dropped without a word.
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
@@ -565,7 +573,8 @@ pub(crate) fn command_with(
             .with("within_wobble", count(tally.within_wobble))
             .with("shares", count(tally.shares_with_anomalies))
             .with("steps", count(tally.steps))
-            .with("lasting", count(tally.lasting)),
+            .with("lasting", count(tally.lasting))
+            .with("steps_skipped", count(tally.steps_skipped)),
         );
     }
     let root = match store() {
@@ -644,13 +653,17 @@ pub(crate) fn command_with(
         }
         _ => {}
     }
-    let runs = match reference_data::load_one(&root, Table::BasisRuns, BasisRuns::build) {
-        Slot::Store { table, .. } => table,
-        other => {
+    // THE RUNS THIS RUN WROTE, read back at their own generation's name:
+    // never the newest generation, which a second writer may have landed
+    // since, so the ledger always names the runs it was drawn from.
+    let runs = match reference_data::load_written(&written, BasisRuns::build) {
+        Ok((_, table)) => table,
+        Err(why) => {
             let _ = writeln!(
                 out,
-                "LEDGER REFUSED: the basis runs just written do not load back: {:?}",
-                other.table().err()
+                "LEDGER REFUSED: the basis runs generation {} just written does not load back: \
+                 {why}",
+                written.generation
             );
             return FAILED;
         }
@@ -699,14 +712,17 @@ pub(crate) struct Tally {
     pub(crate) lasting: usize,
     /// Not proven: within the measurement's noise.
     pub(crate) unproven: usize,
-    /// Proven, with a proven step the other way near it.
+    /// Proven, and the ratio crosses back over it within 90 days.
     pub(crate) reversed: usize,
-    /// Proven, with a side too short to hold.
+    /// Proven, with a side that does not hold its basis 5 days.
     pub(crate) short: usize,
     /// Proven, inside the share's own wobble.
     pub(crate) within_wobble: usize,
     /// Shares with at least one anomaly.
     pub(crate) shares_with_anomalies: usize,
+    /// Runs ending `step` that make no step: their factor terms pass
+    /// 10^18 (`pull::corporate_actions::steps_skipped`), so no verdict.
+    pub(crate) steps_skipped: usize,
 }
 
 impl Tally {
@@ -754,7 +770,8 @@ fn report_steps(out: &mut String, folded: &Folded) -> Tally {
     let mut tally = Tally::default();
     for runs in folded.runs.chunk_by(|a, b| a.symbol == b.symbol) {
         let mut anomalous = false;
-        for Judged { step, verdict } in corporate_actions::judge(runs) {
+        tally.steps_skipped += corporate_actions::steps_skipped(runs);
+        for Judged { step, verdict, .. } in corporate_actions::judge(runs) {
             tally.steps += 1;
             let (word, why) = match verdict {
                 Verdict::Lasting => {
@@ -806,6 +823,16 @@ fn report_steps(out: &mut String, folded: &Folded) -> Tally {
         tally.shares_with_anomalies,
         tally.unproven
     );
+    if tally.steps_skipped > 0 {
+        // NEVER DROPPED WITHOUT A WORD: a run that ends `step` and makes no
+        // step has no verdict, so it is counted here and on /logs.
+        let _ = writeln!(
+            out,
+            "steps_skipped {}: run(s) ending step whose factor terms pass 10^18 make no step and \
+             no verdict",
+            tally.steps_skipped
+        );
+    }
     tally
 }
 

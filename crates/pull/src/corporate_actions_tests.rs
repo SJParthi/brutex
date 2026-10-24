@@ -1214,7 +1214,7 @@ fn a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row() {
         .to_string();
     assert!(
         said.contains("basis_anomaly SEGCO (2022-01-28, 2022-01-31]")
-            && said.contains("basis_reversed: a proven step the other way on 2022-02-28"),
+            && said.contains("basis_reversed: the ratio crosses this step the other way on 2022-02-28"),
         "{said}"
     );
 }
@@ -1258,7 +1258,7 @@ fn a_one_session_two_percent_excursion_ledgers_no_row() {
     assert!(
         found[0]
             .to_string()
-            .contains("basis_short: the runs hold 23 and 1 days"),
+            .contains("basis_short: the old basis holds 23 and the new 1 day(s)"),
         "{}",
         found[0]
     );
@@ -1388,4 +1388,317 @@ fn a_step_with_a_short_side_is_named_short_and_ledgers_no_row() {
     days.extend(weekdays(day(2022, 4, 1), day(2022, 4, 7), "1"));
     let (runs, generation) = loaded("cor-short-held", &[("SHORTCO", days)]);
     assert_eq!(measured_rows(&runs, generation).len(), 1);
+}
+
+// ─────────────────────────────── crossed by levels, held across runs (D-7196) ───────────────────────────────
+
+/// `ratio x by`, as text for [`around`].
+fn scaled(ratio: &str, by: &str) -> String {
+    r(ratio).times(r(by)).unwrap().to_string()
+}
+
+/// The first weekday on or after `at`.
+fn weekday_from(mut at: Day) -> Day {
+    while matches!(at.days_from_epoch() % 7, 2 | 3) {
+        at = at.succ().unwrap();
+    }
+    at
+}
+
+/// `sessions` weekdays from `from` on, the ratio alternating between
+/// `first` and `second` in runs whose lengths cycle through `lengths`: a
+/// share whose ratio wobbles and breaks up into runs of a few sessions.
+/// Answers the days and the first weekday after them.
+fn wobbling(
+    from: Day,
+    sessions: usize,
+    (first, second): (&str, &str),
+    lengths: &[usize],
+) -> (Vec<BasisDay>, Day) {
+    let mut days = Vec::new();
+    let mut at = from;
+    let (mut run, mut left) = (0_usize, lengths[0]);
+    while days.len() < sessions {
+        if !matches!(at.days_from_epoch() % 7, 2 | 3) {
+            if left == 0 {
+                run += 1;
+                left = lengths[run % lengths.len()];
+            }
+            days.push(around(at, if run % 2 == 0 { first } else { second }));
+            left -= 1;
+        }
+        at = at.succ().unwrap();
+    }
+    (days, weekday_from(at))
+}
+
+/// 0.094 and 0.944, each give or take 0.35%: a 0.7% wobble at each level.
+fn tenfold_levels() -> ((String, String), (String, String)) {
+    (
+        (scaled("47/500", "1993/2000"), scaled("47/500", "2007/2000")),
+        (scaled("118/125", "1993/2000"), scaled("118/125", "2007/2000")),
+    )
+}
+
+#[test]
+fn a_tenfold_step_beside_a_small_opposite_wobble_is_ledgered() {
+    // TENCO: the ratio wobbles 0.7% around 0.094 in runs of 3, 2 and 4
+    // sessions for nine weeks, steps tenfold to 0.944 and wobbles the same
+    // way there (the shape DATA-1 shows for one share, invented here). The
+    // run just before the step holds 4 sessions and the one after it 2, and
+    // a proven 0.7% step the other way lies 4 sessions before it. ONE
+    // lasting change of basis, one row; every 0.7% step is crossed back.
+    let ((a_lo, a_hi), (b_lo, b_hi)) = tenfold_levels();
+    let (mut days, ex) = wobbling(day(2022, 3, 1), 45, (&a_lo, &a_hi), &[3, 2, 4]);
+    let after = days.last().unwrap().day;
+    days.extend(wobbling(ex, 45, (&b_lo, &b_hi), &[2, 4, 3]).0);
+    let (runs, generation) = loaded("cor-tenfold", &[("TENCO", days)]);
+    let judged = judge(runs.of("TENCO"));
+    assert_eq!(judged.len(), 29, "a step between each two of 30 runs");
+    assert!(judged.iter().all(|j| j.step.proven()), "{judged:#?}");
+    let lasting: Vec<&Judged> = judged
+        .iter()
+        .filter(|j| j.verdict == Verdict::Lasting)
+        .collect();
+    assert_eq!(lasting.len(), 1, "{judged:#?}");
+    let tenfold = lasting[0];
+    assert_eq!((tenfold.step.after, tenfold.step.ex_date), (after, ex));
+    // Neither adjacent run holds 5 sessions; each side holds its basis
+    // across the runs beside it, counted to 5.
+    assert_eq!((tenfold.step.old_days, tenfold.step.new_days), (4, 2));
+    assert_eq!(tenfold.held, Some((6, 6)));
+    // The level moved from 0.094 x 0.9965 to 0.944 x 0.9965: 472/47.
+    assert!(tenfold.step.low <= r("472/47") && r("472/47") <= tenfold.step.high);
+    // Every other step is crossed back, the one beside the tenfold step too.
+    assert!(
+        judged
+            .iter()
+            .filter(|j| j.verdict != Verdict::Lasting)
+            .all(|j| matches!(j.verdict, Verdict::Anomaly(Anomaly::Reversed { .. }))),
+        "{judged:#?}"
+    );
+    let rows = measured_rows(&runs, generation);
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    let row = &rows[0];
+    assert_eq!(
+        (row.symbol.as_str(), row.after, row.ex_date),
+        ("TENCO", Some(after), ex)
+    );
+    assert!(tenfold.step.low <= row.ratio && row.ratio <= tenfold.step.high);
+    assert_eq!((row.tag, row.kind), (Tag::Measured, Kind::Unclassed));
+    assert!(row.day_known(), "the day is as measured: {row:#?}");
+    assert!(
+        row.evidence.contains("6 and 6 counted"),
+        "{}",
+        row.evidence
+    );
+    // The checker asks this one row, and names the 28 others by reason.
+    let found = check(&runs, &no_actions("cor-tenfold-ca"));
+    assert_eq!(found.iter().filter(|f| f.word() == "no_row").count(), 1);
+    assert_eq!(
+        found.iter().filter(|f| f.word() == "basis_anomaly").count(),
+        28
+    );
+}
+
+#[test]
+fn a_lasting_large_step_never_becomes_the_shares_wobble() {
+    // WIDECO: a 0.7% wobble around 0.094 from January 2021 (nine weeks),
+    // calm to the end of August, a tenfold step on 2021-09-01, calm two
+    // months, the same wobble around 0.944 for nine weeks from November,
+    // calm to the end of May 2022, then a 0.6% step on 2022-06-01 that
+    // holds three months. The tenfold step is lasting and never feeds the
+    // wobble: the June step, 273 days after it, is judged against the
+    // share's own 0.7% wobble, never against ten.
+    let ((a_lo, a_hi), (b_lo, b_hi)) = tenfold_levels();
+    let (mut days, calm) = wobbling(day(2021, 1, 4), 45, (&a_lo, &a_hi), &[3, 2, 4]);
+    days.extend(weekdays(calm, day(2021, 8, 31), &a_lo));
+    days.extend(weekdays(day(2021, 9, 1), day(2021, 10, 29), &b_lo));
+    let (wobble, calm) = wobbling(day(2021, 11, 1), 45, (&b_hi, &b_lo), &[3, 2, 4]);
+    days.extend(wobble);
+    days.extend(weekdays(calm, day(2022, 5, 31), &b_lo));
+    days.extend(weekdays(
+        day(2022, 6, 1),
+        day(2022, 8, 31),
+        &scaled(&b_lo, "503/500"),
+    ));
+    let (runs, generation) = loaded("cor-wide-wobble", &[("WIDECO", days)]);
+    let judged = judge(runs.of("WIDECO"));
+    let on = |ex: Day| judged.iter().find(|j| j.step.ex_date == ex).unwrap();
+    let tenfold = on(day(2021, 9, 1));
+    assert_eq!(tenfold.verdict, Verdict::Lasting, "{judged:#?}");
+    // The share's own wobble around June: its reversed steps within 365 days.
+    let june = day(2022, 6, 1);
+    let own = judged
+        .iter()
+        .filter(|j| matches!(j.verdict, Verdict::Anomaly(Anomaly::Reversed { .. })))
+        .filter(|j| j.step.ex_date.days_from_epoch().abs_diff(june.days_from_epoch()) <= 365)
+        .map(|j| j.step.far())
+        .max()
+        .unwrap();
+    assert!(r("1007/1000") < own && own < r("11/10"), "{own}");
+    assert_eq!(
+        on(june).verdict,
+        Verdict::Anomaly(Anomaly::WithinWobble { wobble: own }),
+        "{judged:#?}"
+    );
+    // ONE ROW: the tenfold step.
+    let rows = measured_rows(&runs, generation);
+    assert_eq!(
+        rows.iter()
+            .map(|a| (a.symbol.as_str(), a.ex_date))
+            .collect::<Vec<_>>(),
+        [("WIDECO", day(2021, 9, 1))]
+    );
+}
+
+#[test]
+fn a_large_step_walked_back_in_smaller_steps_within_90_days_is_reversed() {
+    // WALKCO: 1/8 for six weeks, a fourfold step to 1/2 that holds ten
+    // sessions, then four steps of about 1/sqrt(2) a week apart, back to
+    // 1/8 for six weeks. No single step back could undo the fourfold one
+    // (each moves the ratio by 1.42 at most); together they do, and the
+    // ratio stands at 1/8 again 35 days after it. Every step is crossed
+    // back; none is lasting; no row.
+    let mut days = weekdays(day(2024, 1, 1), day(2024, 2, 9), "1/8");
+    days.extend(weekdays(day(2024, 2, 12), day(2024, 2, 23), "1/2"));
+    days.extend(weekdays(day(2024, 2, 26), day(2024, 3, 1), "99/280"));
+    days.extend(weekdays(day(2024, 3, 4), day(2024, 3, 8), "1/4"));
+    days.extend(weekdays(day(2024, 3, 11), day(2024, 3, 15), "99/560"));
+    days.extend(weekdays(day(2024, 3, 18), day(2024, 4, 26), "1/8"));
+    let (runs, generation) = loaded("cor-walk-back", &[("WALKCO", days)]);
+    let judged = judge(runs.of("WALKCO"));
+    assert_eq!(judged.len(), 5, "{judged:#?}");
+    assert!(judged.iter().all(|j| j.step.proven()), "{judged:#?}");
+    assert_eq!(
+        judged[0].verdict,
+        Verdict::Anomaly(Anomaly::Reversed {
+            by: day(2024, 3, 18)
+        })
+    );
+    assert!(
+        judged[1..]
+            .iter()
+            .all(|j| !j.step.up() && j.step.far() < judged[0].step.near()),
+        "{judged:#?}"
+    );
+    // Each step back returns the ratio toward where it stood before the
+    // fourfold step: crossed on that step's day.
+    assert!(
+        judged[1..].iter().all(|j| j.verdict
+            == Verdict::Anomaly(Anomaly::Reversed {
+                by: day(2024, 2, 12)
+            })),
+        "{judged:#?}"
+    );
+    assert_eq!(measured_rows(&runs, generation), []);
+}
+
+#[test]
+fn a_step_most_of_the_way_back_is_not_shown_to_hold() {
+    // PARTCO: 1/1 for six weeks, 4/5 for ONE session, then 49/50 for six
+    // weeks: down 20%, then back 90% of the way. The step back is crossed
+    // (it returns the ratio toward where it stood); the step down is not,
+    // and its new basis holds one session beyond the share's wobble there
+    // (the step back's far end, 1.23): short. Neither is a row.
+    let mut days = weekdays(day(2024, 5, 6), day(2024, 6, 14), "1");
+    days.push(around(day(2024, 6, 17), "4/5"));
+    days.extend(weekdays(day(2024, 6, 18), day(2024, 7, 26), "49/50"));
+    let (runs, generation) = loaded("cor-partly-back", &[("PARTCO", days)]);
+    let judged = judge(runs.of("PARTCO"));
+    assert_eq!(judged.len(), 2, "{judged:#?}");
+    assert_eq!(
+        judged[1].verdict,
+        Verdict::Anomaly(Anomaly::Reversed {
+            by: day(2024, 6, 17)
+        })
+    );
+    assert_eq!(
+        judged[0].verdict,
+        Verdict::Anomaly(Anomaly::Short {
+            old_days: 30,
+            new_days: 1
+        }),
+        "{judged:#?}"
+    );
+    assert_eq!(judged[0].held, Some((30, 1)));
+    assert_eq!(measured_rows(&runs, generation), []);
+}
+
+#[test]
+fn a_step_whose_factor_would_pass_the_bound_is_counted_never_dropped_silently() {
+    // BIGCO: two runs whose factor's reduced terms pass 10^18. No exact
+    // interval exists, so no step and no verdict: the count says so.
+    let huge = Ratio::new(999_999_999_999_999_989, 2).unwrap();
+    let tiny = Ratio::new(3, 999_999_999_999_999_877).unwrap();
+    assert!(huge.over(tiny).is_none(), "the factor's terms pass the bound");
+    let old = Run {
+        symbol: "BIGCO".to_owned(),
+        first: day(2024, 1, 1),
+        last: day(2024, 1, 5),
+        ratio: tiny,
+        low: tiny,
+        high: tiny,
+        days: 5,
+        end: RunEnd::Step,
+    };
+    let new = Run {
+        first: day(2024, 1, 8),
+        last: day(2024, 1, 12),
+        ratio: huge,
+        low: huge,
+        high: huge,
+        end: RunEnd::Open,
+        ..old.clone()
+    };
+    let big = [old, new];
+    assert!(steps_of(&big).is_empty());
+    assert!(judge(&big).is_empty());
+    assert_eq!(steps_skipped(&big), 1);
+    // A pair that fits is a step, and nothing is skipped.
+    let fits = [
+        Run {
+            end: RunEnd::Step,
+            ..run("FITCO", day(2024, 1, 1), day(2024, 1, 5), "1/2")
+        },
+        run("FITCO", day(2024, 1, 8), day(2024, 1, 12), "1"),
+    ];
+    assert_eq!(steps_of(&fits).len(), 1);
+    assert_eq!(steps_skipped(&fits), 0);
+}
+
+#[test]
+fn a_generation_is_read_back_at_its_own_name_never_the_newest() {
+    // This writer lands generation 1; another lands generation 2 before
+    // the first reads back. The first reads ITS generation.
+    let store = scratch("cor-load-written");
+    let mine = fold_runs("SPLITCO", split_days()).unwrap();
+    let theirs = fold_runs("OTHERCO", split_days()).unwrap();
+    let written = write(&store, &runs_draft(&mine)).unwrap();
+    let other = write(&store, &runs_draft(&theirs)).unwrap();
+    assert_eq!((written.generation, other.generation), (1, 2));
+    let (receipt, table) =
+        crate::reference_data::load_written(&written, BasisRuns::build).unwrap();
+    assert_eq!(
+        (receipt.generation, receipt.sha256.as_str()),
+        (1, written.sha256.as_str())
+    );
+    assert_eq!(table.symbols(), ["SPLITCO"]);
+    // The newest is the other writer's.
+    assert_eq!(load_runs(&store).table().unwrap().symbols(), ["OTHERCO"]);
+    // A write answer that names other bytes is refused by name.
+    let forged = crate::reference_data::Written {
+        sha256: other.sha256.clone(),
+        ..written.clone()
+    };
+    let refused = crate::reference_data::load_written(&forged, BasisRuns::build).unwrap_err();
+    assert_eq!(refused.kind, RefusalKind::Checksum, "{refused}");
+    // A generation whose file is gone is refused by name, never answered
+    // by the newest in its stead.
+    let gone = crate::reference_data::Written {
+        path: store.join("reference").join("absent.tsv"),
+        ..written
+    };
+    let refused = crate::reference_data::load_written(&gone, BasisRuns::build).unwrap_err();
+    assert_eq!(refused.kind, RefusalKind::Read, "{refused}");
 }

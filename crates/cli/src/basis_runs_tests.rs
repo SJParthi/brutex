@@ -543,3 +543,102 @@ fn a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothi
         "{again}"
     );
 }
+
+#[test]
+fn a_run_cut_between_the_runs_and_the_ledger_is_finished_by_a_rerun() {
+    // A kill after the runs' generation links and before the ledger's
+    // leaves what `--apply` without `--ledger` leaves: the runs stand, no
+    // ledger. The rerun finds the runs' bytes held, reads THAT generation
+    // back at its own name and lands the ledger drawn from it; a third run
+    // lands nothing.
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    split_store(&store.0);
+    reconcile(&store.0, &out.0, "2025-03");
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply"]);
+    assert_eq!(code, OK, "{text}");
+    assert!(text.contains("basis_runs generation 1 landed"), "{text}");
+    assert!(
+        matches!(
+            load_one(&store.0, Table::CorporateActions, CorporateActions::build),
+            Slot::Refused(why) if why.kind == pull::reference_data::RefusalKind::Absent
+        ),
+        "no ledger yet: {text}"
+    );
+    let (code, text) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
+    assert_eq!(code, OK, "{text}");
+    assert!(
+        text.contains("basis_runs generation 1 already held these bytes"),
+        "{text}"
+    );
+    assert!(
+        text.contains("corporate_actions generation 1 landed (1 measured rows)"),
+        "{text}"
+    );
+    let Slot::Store { table, receipt, .. } =
+        load_one(&store.0, Table::CorporateActions, CorporateActions::build)
+    else {
+        panic!("the ledger loads: {text}");
+    };
+    assert!(
+        receipt.source.contains("basis_runs generation 1 "),
+        "{}",
+        receipt.source
+    );
+    assert_eq!(table.of("SPLITCO").len(), 1);
+    let (code, again) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply", "--ledger"]);
+    assert_eq!(code, OK, "{again}");
+    assert!(
+        again.contains("basis_runs generation 1 already held these bytes")
+            && again.contains("corporate_actions generation 1 already held these bytes"),
+        "{again}"
+    );
+}
+
+#[test]
+fn a_step_too_large_to_measure_is_counted_on_its_own_line() {
+    // BIGCO: two runs whose factor's reduced terms pass 10^18 make no step
+    // and no verdict; the report counts them on their own line, never
+    // silently.
+    use pull::corporate_actions::{Ratio, Run, RunEnd};
+    let huge = Ratio::new(999_999_999_999_999_989, 2).unwrap();
+    let tiny = Ratio::new(3, 999_999_999_999_999_877).unwrap();
+    let old = Run {
+        symbol: "BIGCO".to_owned(),
+        first: day(2025, 3, 3),
+        last: day(2025, 3, 7),
+        ratio: tiny,
+        low: tiny,
+        high: tiny,
+        days: 5,
+        end: RunEnd::Step,
+    };
+    let new = Run {
+        first: day(2025, 3, 10),
+        last: day(2025, 3, 14),
+        ratio: huge,
+        low: huge,
+        high: huge,
+        end: RunEnd::Open,
+        ..old.clone()
+    };
+    let folded = super::Folded {
+        read: Vec::new(),
+        missing: Vec::new(),
+        runs: vec![old, new],
+        no_run: Vec::new(),
+        refused: Vec::new(),
+        skipped: BTreeMap::new(),
+        stock_days: 10,
+    };
+    let mut out = String::new();
+    let tally = super::report_steps(&mut out, &folded);
+    assert_eq!((tally.steps, tally.steps_skipped), (0, 1));
+    assert!(
+        out.contains("steps 0, lasting 0 (a ledger row each)")
+            && out.contains(
+                "steps_skipped 1: run(s) ending step whose factor terms pass 10^18 make no step \
+                 and no verdict"
+            ),
+        "{out}"
+    );
+}
