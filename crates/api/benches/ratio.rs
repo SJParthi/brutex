@@ -778,6 +778,12 @@ fn main() {
     ok &= sources::pages_are_flat();
     ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
     ok &= greeks::cells_are_flat();
+    // CC-20's id is printed here because `crates/core/tests/cost_invariants.rs`
+    // reads printed ids from this file alone; the module prints each ratio. It
+    // runs before the served routes, whose `reads` row stops the harness on
+    // this tree (a 102,400-bar month past `/bars.json`'s 60,000-row cap).
+    println!("C-CHK-07 nse identity confirm per symbol (CC-20, D-6800)");
+    ok &= nse_identity::confirm_is_flat();
     ok &= served_routes_are_flat();
     ok &= the_speed_table_costs_under_a_microsecond_a_request();
     let by_modules = [
@@ -796,10 +802,6 @@ fn main() {
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));
     ok &= months::rows_are_measured();
-    // CC-20's id is printed here because `crates/core/tests/cost_invariants.rs`
-    // reads printed ids from this file alone; the module prints each ratio.
-    println!("C-CHK-07 nse identity confirm per symbol (CC-20, D-6800)");
-    ok &= nse_identity::confirm_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {
