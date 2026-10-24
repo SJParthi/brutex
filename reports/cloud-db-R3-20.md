@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -82,3 +82,11 @@ IA-16, R3-16, R3-36, SC-4.
   is unchanged).
 - `cargo clippy -p store --all-targets --locked -- -D warnings`: clean.
 - NEXT: run the bench, the D-7093 and L-IA-40 texts, then the full gates.
+
+### 2026-10-24 18:27 IST — HELD (HOLD of 18:16 IST)
+
+- HOLD found at this save point ("HOLD 2026-10-24 18:16 IST", lift at the latest after 22:30 IST;
+  no GO-R3-20). Commit `ec816448` and the `cargo fmt` order of the cli module list pushed.
+- NEXT: when HOLD is gone, run `cargo bench -p store --bench ratio` (C-RC-01, C-RC-02), write the
+  D-7093 and L-IA-40 texts, then the full gates (fmt, clippy, workspace tests, deny, CI shell gates,
+  llvm-cov branch coverage and cargo-mutants on the touched modules).

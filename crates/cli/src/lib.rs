@@ -108,12 +108,12 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
-/// `cli month-recover`: a month a power cut left refused, brought back at its
-/// last good commit as a new revision, on the operator's yes (R3-20, D-7093).
-mod month_recover_command;
 /// `cli padded-measure` and `cli rate-replay`: the measurements R4-27's
 /// decisions were taken on, read only (INT-15, AUT-10).
 mod decision_measure;
+/// `cli month-recover`: a month a power cut left refused, brought back at its
+/// last good commit as a new revision, on the operator's yes (R3-20, D-7093).
+mod month_recover_command;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored bar of a series judged as a landing
