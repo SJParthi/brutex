@@ -93,6 +93,10 @@ mod gdfl_stop_command;
 /// `cli scrub-blocks`: every block of every census month read whole and checked,
 /// with a durable ledger of what would not verify (DB-B74, WP-81).
 mod scrub_blocks;
+/// `cli tick-to-second-check`: every stored GDFL share-day rebuilt from the
+/// source its landing recorded under rule T and rule A and compared,
+/// read-only; its index answers `status_of` in O(1) (D-5180, D-5184).
+pub mod tick_second_check;
 /// `cli watchdog` and `cli launch-agent`: the app's supervisor and watchdog (R3-32, D-4996).
 pub mod watchdog_command;
 pub use scrub_blocks::{
@@ -609,6 +613,16 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli feed-reconcile factor SYMBOL YYYY-MM-DD --dir DIR [--repeat N]
                                    one stock-day's factor from the newest
                                    version file, O(1) per lookup, timed.
+       cli tick-to-second-check [YEAR] --out DIR [--workers N] [--symbols SYM ...]
+                                   [--archive ZIP]
+                                   rebuild every stored GDFL share-day (of YEAR,
+                                   or every year) not yet checked from the source
+                                   its .prv landing recorded, read-only, under
+                                   rule T (trades) and rule A (every row) and
+                                   compare with the store; --archive adds a
+                                   comparison labelled not the landing source;
+                                   writes day segments and the next version
+                                   under DIR only (D-5180).
        cli gdfl-dayflags KIND FROM TO [--lineage]
                                    the GDFL day ledger (D-3335) of every day
                                    of the range the import journal records as
@@ -3050,6 +3064,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["gdfl-rekey", arguments @ ..] if !arguments.is_empty() => {
             gdfl_rekey::command(arguments, out)
         }
+        ["tick-to-second-check", arguments @ ..] if !arguments.is_empty() => {
+            tick_second_check::command(arguments, out)
+        }
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["top"] => top_arm(out, None),
         ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),
@@ -3115,7 +3132,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 60] = [
+const COMMANDS: [&str; 61] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3165,6 +3182,7 @@ const COMMANDS: [&str; 60] = [
     "sweep-all",
     "sweep-audited-stored",
     "sweep-stored",
+    "tick-to-second-check",
     "tickstore-write",
     "tix-rebuild",
     "top",
