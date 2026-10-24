@@ -263,7 +263,7 @@ impl Fixture {
             &self.target.join(HOME).join(RUNS),
             "x",
             None,
-            &[],
+            None,
             &mut faults,
         )
         .into_iter()
@@ -645,7 +645,7 @@ fn the_drill_restores_three_months_byte_equal() {
         .collect();
     assert_eq!(scratch.len(), 1, "one new scratch folder");
     let mut faults = Faults::default();
-    let restored = walk(&scratch[0], "x", Some(&scratch[0]), &[], &mut faults);
+    let restored = walk(&scratch[0], "x", Some(&scratch[0]), None, &mut faults);
     assert!(restored.len() >= 6, "{restored:?}");
     for file in restored {
         let rel = Path::new(std::ffi::OsStr::from_bytes(&file.path));

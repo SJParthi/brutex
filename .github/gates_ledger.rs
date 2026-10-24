@@ -2012,7 +2012,9 @@ const ALLOW_MEMBER: Allow = &[
     // (a handful of words), never the data.
     // 6 -> 7, IA-9 (D-4881): `verify-merge` writes unless `--list`, the same
     // probe of its own argument slice, bounded by its argument count.
-    ("crates/cli/src/store_write.rs", 7),
+    // 7 -> 8, R4-09b (D-7177): `backup` writes unless `--plan`, the same
+    // probe of its own argument slice, in the one arm shape gate 30 reads.
+    ("crates/cli/src/store_write.rs", 8),
     ("crates/costs/src/lot.rs", 1),
     ("crates/pull/src/alerts.rs", 2), // 1 -> 2, GF-1: `listed`'s range (docs/06-limits.md)
     ("crates/pull/src/census_store.rs", 1),

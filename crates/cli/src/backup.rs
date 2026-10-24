@@ -903,7 +903,7 @@ fn walk(
     dir: &Path,
     class: &'static str,
     rel_root: Option<&Path>,
-    exclude: &[PathBuf],
+    exclude: Option<&[PathBuf; 2]>,
     faults: &mut Faults,
 ) -> Vec<Found> {
     let mut out = Vec::new();
@@ -936,7 +936,7 @@ fn walk(
         // in reverse. The copy reads no order, so none is sorted for.
         let mut folders = Vec::new();
         for path in names {
-            if exclude.contains(&path) {
+            if exclude.is_some_and(|own| own.iter().any(|log| *log == path)) {
                 continue;
             }
             match fs::symlink_metadata(&path) {
@@ -1049,7 +1049,7 @@ fn archive_found(archive: &Path, faults: &mut Faults) -> Vec<Found> {
             mtime: mtime_ns(&meta),
             unit: None,
         }],
-        Ok(meta) if meta.is_dir() => walk(archive, ARCHIVE, None, &[], faults),
+        Ok(meta) if meta.is_dir() => walk(archive, ARCHIVE, None, None, faults),
         Ok(_) => {
             faults.skipped.add(format!(
                 "{} (not a regular file or folder)",
@@ -1081,7 +1081,7 @@ fn not_covered(root: &Path) -> Vec<String> {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| {
-            !BY_MONTH.contains(&name.as_str()) && !LISTED.iter().any(|(_, dir)| dir == name)
+            !BY_MONTH.iter().any(|by| by == name) && !LISTED.iter().any(|(_, dir)| dir == name)
         })
         .collect()
 }
@@ -1403,7 +1403,7 @@ fn units(root: &Path, faults: &mut Faults) -> Result<(Vec<Unit>, Vec<PathBuf>), 
     let own = [root.join(RECEIPTS), root.join(DRILLS)];
     for (class, dir) in LISTED {
         out.extend(
-            walk(&root.join(dir), class, Some(root), &own, faults)
+            walk(&root.join(dir), class, Some(root), Some(&own), faults)
                 .into_iter()
                 .map(Unit::File),
         );
@@ -1447,10 +1447,10 @@ pub(crate) fn backup(root: &Path, ask: &Ask, env: &Env<'_>) -> Result<Ran, Refus
             ),
         ));
     }
-    if let Some(archive) = archive_roots
-        .iter()
-        .find(|archive| dest.starts_with(archive))
-    {
+    // ONE HASH PROBE PER ANCESTOR OF THE TARGET, bounded by its path's depth,
+    // never a scan of the archives the journal names.
+    let roots: HashSet<&Path> = archive_roots.iter().map(PathBuf::as_path).collect();
+    if let Some(archive) = dest.ancestors().find(|at| roots.contains(at)) {
         return Err(refused(
             "inside_archive",
             format!(

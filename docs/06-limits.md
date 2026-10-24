@@ -21526,3 +21526,18 @@ their two logs is per measurement, kept for `DISK_TTL`.
 | L-BK-03 | **The manifest is synced every 256 records or 2 seconds, not after each** | a sync per record would add a third `fsync` per file to a pass already paying two | a crash loses at most the records of the last 2 seconds; their copies are whole on the target and are made again, under the next run's names, by the next run (orphans, never records of torn files). The 256 and the 2 s bound `fsync` calls, not data (D-7181) | R4-09b |
 | L-BK-04 | **A store file changed in place at the same length and the same nanosecond time is not seen as changed** | a run judges a store file by its length and modification time and hashes only when the time moved: rehashing every byte on every run would make each run a full O(bytes) read | the store writes by append, new generations and new files, each moving the time; only a deliberate time reset (`touch -d`, `rsync -t`) could hide a change. The drill reads copies back and compares them with the store byte for byte, and S-17's `scrub-blocks` on the copy reads every block | R4-09b |
 | L-BK-05 | **A month is held under its shared lock for as long as its files take to copy**, and the drill holds a month for its compare | a writer of that month is refused (`StoreError::Locked`) meanwhile, as with any reader | O(the month's bytes) per month: a one-second month is at most a few tens of MB. The rate limit is paid with no month held (RA-128). Not measured on the operator's drive (NOT MEASURED) | R4-09b |
+
+Gate 11 allowlist reason (`.github/gates_ledger.rs`; "Gate 11 allowlist
+reasons" above):
+
+~~~~
+RULE 7 (`ALLOW_MEMBER`) -- cli/src/store_write.rs 7 -> 8: `backup` writes
+  the store unless `--plan`, read by `writes_the_store` as one probe of the
+  verb's own argument slice, bounded by its argument count, once per process
+  start (D-7177); `!arguments.contains(&"--plan"),` is the one arm shape gate
+  30's `form_of` reads for a read-only flag, the same form as `verify-merge`'s
+  `--list`. `crates/cli/src/backup.rs` declares nothing: its archive check is
+  a hash probe per ancestor of the target (bounded by the path's depth) and
+  its two other membership tests scan the compile-time tables `BY_MONTH` (3)
+  and the verbs' own two logs.
+~~~~
