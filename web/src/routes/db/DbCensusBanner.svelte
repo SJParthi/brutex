@@ -31,15 +31,15 @@
    */
   import { untrack } from 'svelte';
   import { page } from '$app/state';
-  import { store, syncStore, wholeStore, surveyStores, survey, refreshStore, watchCensus, checkCensusHead, facets } from '$lib/store.svelte.js';
-  import { decodeDb, DB_DEFAULTS, addressNow } from '$lib/urlstate.js';
+  import { store, syncStore, surveyStores, survey, refreshStore, watchCensus, checkCensusHead, facets } from '$lib/store.svelte.js';
+  import { decodeDb, addressNow } from '$lib/urlstate.js';
   import { linkOfKey, keyConflict, DEFAULT_INSTRUMENT } from '$lib/db/selection-model.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { denominators } from '$lib/completeness.js';
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
   import { instrumentMemo, databasePreparation } from '$lib/database-preparation.js';
   import { yieldTask, inSlices } from '$lib/census-worker.js';
-  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes, scopeNeed, scopeWanted } from '$lib/store-census.js';
+  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes, scopeNeed, scopeWanted, scopeCovers, unknownViews, scopeUnderlyings } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
   import { SKELETON } from '$lib/db/bars-plan.js';
@@ -77,21 +77,13 @@
     const live = $derived(store.feed === feeds.active ? store.rows : []);
     /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>,heldNames:number|null}|null,why:string|null,scope:import('$lib/store-census.js').CensusScope|null,feed:string|null}} */
     let prepared = $state.raw({ input: null, body: null, why: null, scope: null, feed: null });
-    /* ONE INSTRUMENT'S ROWS STAY ON SCREEN WHILE THE WHOLE CENSUS IS PREPARED
-       BEHIND THEM (WP-56b). The first paint is drawn from the census rows of
-       the instrument on screen (`store.scope`, `readScope`); when the whole
-       census then lands, decorating its rows takes about a second on GDFL,
-       and blanking the page for it would take away the control the reader
-       had just reached for. `behind` is true for exactly that interval: the
-       store holds the whole census, the page still shows the instrument's
-       prepared rows, and the banner still says so. */
-    const behind = $derived(
-      prepared.scope !== null && prepared.body !== null && prepared.feed === feeds.active &&
-        store.scope === null && live.length > 0 && prepared.input !== live
-    );
-    const rows = $derived(behind ? /** @type {StoreRow[]} */ (prepared.input) : live);
+    /* NO WHOLE CENSUS IS PREPARED BEHIND A SCOPE ANY MORE (R3-12): every read
+       of this page is the scope of the selection on screen, so the rows on
+       screen are the store's rows, always, and the interval WP-56b kept the
+       old rows through (`behind`) does not exist. */
+    const rows = $derived(live);
     /** The scope of the rows ON SCREEN, or null when they are the whole census. */
-    const shownScope = $derived(behind ? prepared.scope : store.feed === feeds.active ? store.scope : null);
+    const shownScope = $derived(store.feed === feeds.active ? store.scope : null);
     const preparing = $derived(rows.length > 0 && (prepared.input !== rows || (!prepared.body && !prepared.why)));
     const error = $derived(store.error ?? (prepared.input === rows ? prepared.why : null));
     /* A READING THIS FEED HAS NOT ANSWERED FOR YET IS STILL "IN FLIGHT", even in
@@ -149,78 +141,79 @@
        rather than by care: the shared reading CLEARS its value on a feed change
        before the request leaves, and `rows` above refuses to hand back anything
        the reading did not stamp with this feed. */
-    /* THE INSTRUMENT THE FIRST PAINT IS FOR (WP-56b): the one the address
-       bar names, else the page's opening instrument (operator answer 11).
-       Read once. The Coverage grid lists every instrument, so a link that
-       opens on it asks for the whole census from the start. */
-    /** @type {import('$lib/store-census.js').ScopeWanted | null | undefined} */
-    let first;
+    /* THE SCOPE THE SELECTION ON SCREEN READS (WP-56b; R3-12, FM-621): its
+       instrument, the segments its segment control shows and its expiry.
+       Before the link reader has filled the selection, the address bar's
+       (else the page's opening instrument, operator answer 11). EVERY change
+       of the selection the scope held does not cover is read as ITS scope,
+       one request per segment read; nothing on this page reads the whole
+       census, so a segment switch, another instrument, another expiry and
+       the Coverage grid each cost the size of their own answer. */
+    /** @type {import('$lib/store-census.js').ScopeWanted | null} */
+    let first = null;
     /* THE FEED `first` WAS WORKED OUT FOR. A feed chosen later is asked for
        the instrument on screen then, never for the page's opening one (the
-       second check's follow-up): `scopeWanted` decides, and is tested. */
+       WP-56b second check's follow-up): `scopeWanted` decides, and is tested. */
     /** @type {string | null | undefined} */
     let firstFeed;
+    /** The page's opening instrument (operator answer 11). */
+    const opening = () => DEFAULT_INSTRUMENT;
     const firstScope = () => {
       /* THE ADDRESS ON SCREEN (R3-01): after Back from another page
          `page.url` is the URL /db was entered with, not this entry's. */
       const { sel } = decodeDb(addressNow(page.url.search));
-      if (sel.view && sel.view !== DB_DEFAULTS.view) return null;
       /* A key whose underlying the `sym` beside it contradicts is not read,
          as the link reader does not read it (`keyConflict`, R3-01); inside
          one underlying a field beside the key wins, as it does there. */
       const keyed = sel.key ? linkOfKey(sel.key) : null;
       const link = keyConflict(sel, keyed) ? null : keyed;
-      return { underlying: sel.sym ?? link?.sym ?? DEFAULT_INSTRUMENT, expiry: sel.exp ?? link?.expiry ?? null };
+      /* A `seg` this page does not know (seg=index) is refused by name in the
+         link notes and read as if the link named none (`linkedSegment`):
+         never every segment for it, never the whole census. */
+      const kind = sel.seg && unknownViews([sel.seg]).length === 0 ? sel.seg : link?.contract ?? '';
+      return scopeWanted({ filter: sel.sym ?? link?.sym ?? '', kind, expiry: sel.exp ?? link?.expiry ?? null, fallback: opening() });
     };
     $effect(() => {
       const f = feeds.active;
-      if (first === undefined) {
-        first = untrack(firstScope);
-        firstFeed = f;
-      } else if (f && firstFeed && f !== firstFeed) {
-        first = untrack(() => scopeWanted({ view: db.view, defaultView: DB_DEFAULTS.view,
-          filter: db.filter, expiry: db.expiry, fallback: DEFAULT_INSTRUMENT }));
-        firstFeed = f;
-      } else if (f && !firstFeed) {
-        firstFeed = f;
-      }
+      const want = db.filter !== '' ? scopeWanted({ filter: db.filter, kind: db.kind, expiry: db.expiry, fallback: opening() }) : untrack(firstScope);
+      if (f !== firstFeed || !scopeCovers(first, want)) first = want;
+      firstFeed = f;
       syncStore(f, first);
     });
 
-    /* WHAT NEEDS EVERY ROW ASKS FOR EVERY ROW (WP-56b), and says why in the
-       refresh log: the Coverage grid, an instrument other than the one read,
-       a selection the rows read do not hold (a segment or an expiry that was
-       not listed). Waited 60 ms and re-armed on every change, so a rung the
-       seeds are still filling is not mistaken for an empty selection. */
-    /* `shownScope`, NOT `store.scope`: the scope of the rows ON SCREEN. While
-       the whole census is prepared behind one instrument's rows (`behind`)
-       the store already holds the whole census and the page still draws the
-       instrument's rows, and a grid drawn from them said 'No
-       instrument-month matches' for the 0.3 s the preparation took (seen in
-       headless Chrome on the real store, fix-WP-56b-r2-cdp.mjs M). */
-    const need = $derived(scopeNeed({ scope: shownScope, view: db.view, defaultView: DB_DEFAULTS.view,
-      filter: db.filter, kind: db.kind, reconciling: db.reconciling, matched: db.matched.length }));
     /* THE SELECTION ON SCREEN IS NOT IN THE ROWS READ (WP-56b, the second
-       check's blocking 2): one instrument's rows cannot say the store holds
-       none of it, so the page shows its reading state (`+page.svelte`) from
-       this moment until the whole census has landed, and the grid's 'No
-       instrument-month matches this query' is never drawn from a scope. */
+       check's blocking 2; R3-12): another instrument, a segment or an expiry
+       the scope did not read. The page shows its reading state
+       (`+page.svelte`) until that selection's own scope lands, and the
+       grid's 'No instrument-month matches this query' is never drawn from
+       rows that were not read for it. */
+    const need = $derived(scopeNeed({ scope: shownScope, filter: db.filter, kind: db.kind, expiry: db.expiry }));
     const scopeMissing = $derived(shownScope !== null && need?.missing === true);
+
+    /* THE INSTRUMENT LIST IS THE SERVER'S (R3-12; RA-005, RA-027): the
+       underlyings of the segments the scope on screen read, one facets
+       answer per segment, moved forward by a delta when the census moves
+       (`facets.refresh`). It replaced the whole-census read a click on the
+       instrument picker made. A list that could not be read is named. */
+    let underlyings = $state.raw(/** @type {{key: string, rows: import('$lib/store-census.js').ListedUnderlying[], why: string | null} | null} */ (null));
     $effect(() => {
-      const scope = store.scope;
-      if (!scope || store.feed !== feeds.active || store.state !== 'ready' || preparing || deco.length === 0) return;
-      const why = need?.why ?? null;
-      if (why === null) return;
-      const timer = setTimeout(() => void wholeStore(why), 60);
-      return () => clearTimeout(timer);
+      const scope = shownScope;
+      const feed = store.feed;
+      const generation = store.lag?.generation ?? null;
+      if (!scope || !feed) {
+        underlyings = null;
+        return;
+      }
+      const key = `${feed}|${generation}|${scope.segments.join(',')}`;
+      if (untrack(() => underlyings)?.key === key) return;
+      let live = true;
+      void Promise.all(scope.segments.map((segment) => facets.refresh({ feed, segment })
+        .catch((why) => ({ ok: false, reason: String(why?.message ?? why), body: null }))))
+        .then((answers) => {
+          if (live) underlyings = { key, ...scopeUnderlyings(scope, answers) };
+        });
+      return () => { live = false; };
     });
-    /** A control outside the bar rows was reached for: its lists need every row. */
-    const reach = (/** @type {Event} */ event) => {
-      if (store.scope === null) return;
-      const target = event.target;
-      if (target instanceof Element && target.closest('[data-census-rows]')) return;
-      void wholeStore('a control outside the bar rows was used');
-    };
 
     $effect(() => {
       const f = feeds.active;
@@ -303,12 +296,8 @@
       const stated = store.observed;
       const feed = feeds.active;
       const controller = new AbortController();
-      // THE WHOLE CENSUS BEHIND ONE INSTRUMENT'S ROWS is prepared without
-      // taking those rows off the screen (`behind`, above); every other
-      // input replaces what was prepared before it, as it always did.
-      const before = untrack(() => prepared);
-      const keep = scope === null && input.length > 0 && before.scope !== null && before.body !== null && before.feed === feed;
-      if (!keep) prepared = { input, body: null, why: null, scope, feed };
+      // Every input replaces what was prepared before it.
+      prepared = { input, body: null, why: null, scope, feed };
       if (input.length > 0) {
         const describe = instrumentMemo(instrumentDescription);
         const work = scope !== null && stated !== null
@@ -373,16 +362,20 @@
       // SERVER'S to state (the root answer, `/census/facets.json?feed=`):
       // this page keeps no list of segments, so a new one needs no change
       // here (WP-56b).
-      const key = `${feed}|${underlying}|${m.to}|${m.segments.join(',')}`;
+      // A SCOPE ON SCREEN ASKS ONLY THE SEGMENTS IT READ (R3-12, FM-621): a
+      // spot view never asks a contract segment anything, a delta included.
+      const readHere = shownScope?.segments ?? null;
+      const key = `${feed}|${underlying}|${m.to}|${m.segments.join(',')}|${readHere?.join(',') ?? '*'}`;
       if (selectionDelta?.key === key) return;
       let live = true;
-      const asked = m.segments.length > 0
+      const named = m.segments.length > 0
         ? Promise.resolve({ segments: m.segments, why: null })
-        : facets.root(feed).then(
+        : readHere !== null ? Promise.resolve({ segments: readHere, why: null }) : facets.root(feed).then(
           (root) => (root.ok
             ? { segments: root.body.segments.map((/** @type {any} */ row) => row.segment), why: null }
             : { segments: [], why: root.reason ?? 'the feed\'s segments could not be read' }),
           (why) => ({ segments: [], why: String(why?.message ?? why) }));
+      const asked = named.then(({ segments, why }) => ({ why, segments: readHere === null ? segments : segments.filter((/** @type {string} */ s) => readHere.includes(s)) }));
       asked.then(({ segments, why }) => (why !== null
         ? [{ ok: false, status: 0, query: { feed, segment: 'every segment', underlying }, reason: `which segments ${feed} holds could not be read (${why})`, body: null }]
         : Promise.all(segments.map((/** @type {string} */ segment) => {
@@ -399,14 +392,16 @@
     /** The banner's lines, from the census headers and the watch. */
     const banner = $derived.by(() => {
       const feed = store.feed;
-      // ONE INSTRUMENT'S ROWS KEEP THEIR LINE while the whole census is read
-      // and prepared behind them: the page still shows them, so it says so.
+      // ONE INSTRUMENT'S ROWS KEEP THEIR LINE while the scope of a new
+      // selection is read behind them: the page still shows them, so it says so.
       const scope = shownScope;
-      const reading = scope !== null && (store.state === 'reading' || behind);
-      return feed !== null && feed === feeds.active && (store.state === 'ready' || reading)
-        ? censusLines({ feed, at: store.at, lag: store.lag, worker: store.worker, head: store.head, how: store.how,
-          scope, scopeWhy: store.scopeWhy, reading })
-        : [];
+      const reading = scope !== null && (store.state === 'reading' || scopeMissing);
+      if (feed === null || feed !== feeds.active || (store.state !== 'ready' && !reading)) return [];
+      const lines = censusLines({ feed, at: store.at, lag: store.lag, worker: store.worker, head: store.head, how: store.how, scope, reading });
+      // AN INSTRUMENT LIST THE SERVER COULD NOT GIVE WHOLE IS SAID (R3-12):
+      // the picker then offers only what was read, and this is why.
+      const list = scope !== null ? underlyings?.why ?? null : null;
+      return list ? [...lines, { key: 'list', tone: /** @type {const} */ ('warn'), text: `${list[0].toUpperCase()}${list.slice(1)}: the instrument picker offers ${scope?.underlying} alone until it answers.` }] : lines;
     });
     const movedSaid = $derived(store.feed === feeds.active && moved
       ? movedLines(moved, store.head, store.at, db.picked ?? null, selectionDelta?.answers ?? null)
@@ -445,6 +440,10 @@
       error: { get: () => error },
       loading: { get: () => loading },
       scopeMissing: { get: () => scopeMissing },
+      scopeNeedWhy: { get: () => need?.why ?? '' },
+      // A SCOPE READ AND PREPARED, EMPTY OR NOT (R3-12): the seeds may settle
+      // on what it says, since an empty scope is the store's own answer.
+      censusSettled: { get: () => shownScope !== null && store.state === 'ready' && !preparing },
       fetchedAt: { get: () => fetchedAt },
       nonce: { get: () => nonce },
       loadedFeed: { get: () => loadedFeed, set: (v) => (loadedFeed = v) },
@@ -456,10 +455,14 @@
       // rows are on screen (WP-56b): appended to every sentence that counts
       // rows, so none of them states the store's total from one instrument.
       censusScopeNote: { get: () => (shownScope
-        ? ` Counted from the census rows read for ${shownScope.underlying} alone: the whole census is not read yet.`
+        ? ` Counted from the census rows read for ${shownScope.underlying} alone: this page never reads the whole census.`
         : '') },
-      censusReach: { get: () => reach },
-      readWholeCensus: { get: () => () => wholeStore('the reader asked for the whole census') },
+      /* NOTHING TO REACH FOR (R3-12): a control outside the bar rows read the
+         whole census for its lists; those lists are the server's now
+         (`censusUnderlyings`, the scope's `expiries` and `listed`). The shell
+         still binds it, and an absent handler binds no listener. */
+      censusReach: { get: () => undefined },
+      censusUnderlyings: { get: () => underlyings },
       censusMoved: { get: () => moved },
       censusBanner: { get: () => banner },
       censusMovedSaid: { get: () => movedSaid },
@@ -484,7 +487,7 @@
 {#if db.censusBanner.length || db.censusMovedSaid.length}
   <section class="cbanner" aria-label="Census" data-census-rows>
     {#each db.censusBanner as line (line.key)}
-      <p class="cline {line.tone}" role={line.tone === 'warn' ? 'alert' : 'status'}>{line.text}{#if line.key === 'read' && db.censusScope && store.state === 'ready' && store.scope}{' '}<button class="btn" onclick={() => db.readWholeCensus()}>Read the whole census now</button>{/if}</p>
+      <p class="cline {line.tone}" role={line.tone === 'warn' ? 'alert' : 'status'}>{line.text}</p>
     {/each}
     {#if db.censusMovedSaid.length}
       <div class="cline moved" role="status">
@@ -518,10 +521,10 @@
 
 {#snippet censusLoading(/** @type {any} */ db)}
   {#if db.scopeMissing}
-    <!-- WHY THE PAGE IS READING AGAIN (WP-56b): said, not left as a bare
-         skeleton. One instrument's rows cannot say the store holds none of
-         the selection; the whole census can, and is being read. -->
-    <p class="inline-note" role="status" data-scope-missing>Reading the whole census of {db.feedName}: the rows read for one instrument do not list the selection on screen, and only the whole census can say whether the store holds it.</p>
+    <!-- WHY THE PAGE IS READING AGAIN (WP-56b; R3-12): said, not left as a
+         bare skeleton. The rows on screen were read for another selection,
+         and the one now on screen is read as its own scope. -->
+    <p class="inline-note" role="status" data-scope-missing>Reading the census rows of the selection on screen from /census/facets.json ({db.scopeNeedWhy}): the rows on screen were read for another instrument, segment or expiry of {db.feedName}, and say nothing about this one.</p>
   {/if}
   {#if db.preparing}
     <p class="inline-note" role="status">Preparing the database view for {fmt(db.rows.length)} stored month rows… Totals appear after the complete snapshot is ready.</p>

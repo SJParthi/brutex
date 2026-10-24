@@ -942,10 +942,14 @@
              of record (`expiryTags`) — never a written weekday rule. */
           ...db.expiryOffered.map((/** @type {any} */ d) => {
             const t = db.expiryTagMap.get(d);
+            /* AN EXPIRY THE SERVER LISTS AND WHOSE ROWS ARE NOT READ YET
+               (R3-12) is counted in the listing's own unit, its contracts:
+               "0 instrument-month(s)" would claim a count nobody took. */
+            const listed = db.expiryCount.has(d) ? null : db.expiryListed.get(d);
             return {
               key: d,
               name: dayLabel(d),
-              detail: `${t ? `${t.weekday} · ${t.cadence} · ` : ''}${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`,
+              detail: `${t ? `${t.weekday} · ${t.cadence} · ` : ''}${listed ? `${fmt(listed.contracts)} contract(s) listed` : `${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`}`,
               why: t?.shift ? `${t.shift.from ? 'Shifted' : 'Off its neighbours'}: ${t.shift.why}.` : undefined,
               title: `Contracts expiring ${dayLabel(d)}${t ? `, a ${t.weekday}, the ${t.cadence} expiry (${t.cadence === 'monthly' ? 'the last stored expiry of its month' : 'not the last stored expiry of its month'})` : ''} — the store's own key for it is ${d}.`
             };
@@ -960,10 +964,13 @@
         {:else if db.expiry}
           {fmt(db.expiryCount.get(db.expiry) ?? 0)} row(s) on this contract{#if db.expiryHeld > 0}
             · {fmt(db.expiryHeld)} on another expiry are not shown{/if}{#if db.censusScope?.read.some((/** @type {any} */ part) => part.expiry !== null)}
-            · the other expiries are not read yet{/if}
+            · the other expiries are listed, and read when chosen{/if}
         {:else if db.expiryHeld > 0}
           {fmt(db.expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
           belongs to one contract, so nothing here blends two
+        {:else if db.expiryListed.size > 0}
+          {fmt(db.expiryListed.size)} expiries listed by the server · a contract's rows are read once its
+          expiry is chosen
         {:else}
           {fmt(db.expiriesAll.length)} expiry/expiries stored · no contract row is in this selection,
           so nothing is being held back

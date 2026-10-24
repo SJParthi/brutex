@@ -80,6 +80,28 @@ export function contractRungsOf(seg) {
   return { expiry: false, strike: false, money: false, side: false };
 }
 
+/**
+ * THE LISTED EXPIRIES A SEGMENT KEY OFFERS (R3-12; FM-621): a facets answer's
+ * expiries (`readScope`'s `scope.expiries`), kept to the segment on screen. A
+ * key with a strike rung (options) offers an expiry with strikes, one without
+ * (futures) an expiry with a future, a cut or live key the expiries filed
+ * under it today (`filedAs`), the empty key every one, and spot none. One
+ * pass over the listing.
+ *
+ * @template {{expiry: string, strikes: number, future: boolean}} E
+ * @param {E[]} expiries
+ * @param {string} kind the segment control's key
+ * @param {(expiry: E, family: string) => string} filedAs the key a listed expiry is filed under today
+ * @returns {E[]}
+ */
+export function listedOf(expiries, kind, filedAs) {
+  const family = String(kind ?? '').replace(/-(cut|live)$/, '');
+  if (family === '') return [...expiries];
+  const rungs = contractRungsOf(family);
+  if (!rungs.expiry) return [];
+  return expiries.filter((e) => (rungs.strike ? e.strikes > 0 : e.future) && filedAs(e, family) === kind);
+}
+
 /* ======================================================================
    THE EXACT INSTRUMENT (DB-001)
    ----------------------------------------------------------------------
