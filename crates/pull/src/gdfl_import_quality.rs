@@ -29,8 +29,12 @@
 //!   directory states it; `0` when the source holds no zip, the tick store,
 //!   and `member_src=none` says so: no real zip is 0 bytes), `late` (kept
 //!   rows deferred), `max_back_s`, `deferred_s` (placed seconds that took at
-//!   least one late row), `rows_refused` (D-3318; `0` for options, whose
-//!   reader refuses a file whole, never a row);
+//!   least one late row), `rows_refused` (D-3318: the rows a reader refused
+//!   by name and did not keep; for options from bar definition 5 on, D-4816,
+//!   design §8 F44: a line with `definition=5` or later counts the options
+//!   rows refused one by one, and a line under 2, 3 or 4 reads `0` because
+//!   those readers refused an options file whole, never a row; the line's
+//!   own `definition=` says which, so a 0 is never a silent one, D-4841);
 //! - `indices`: `rows`, `seconds` (session seconds held), `session_s`,
 //!   `ss_distinct`, `holes_5s`, `hole_max_s`, `hole_max_at` (the first
 //!   missing second), `dual_spread_s`, `dual_spread_max_bps`,
@@ -47,9 +51,10 @@
 //! `separator_backslash` (0 or 1: the day zip named a file of its folder
 //! with `\`, D-4828); `stocks` `volume_saturated_files` (files whose running
 //! LTQ sum stopped at the vendor's 32-bit limit, [`VOLUME_LIMITS`], D-4830)
-//! and `separator_backslash`. The design's other `v=2` fields
-//! (`dup_traded_rows`, `dup_traded_files`, `dup_echo_rows`, `snapped_rows`,
-//! `trailing_empty_files`) need counts only the readers' raw rows hold
+//! and `separator_backslash`; `options` `trailing_empty_files` (files read
+//! under a header followed by empty fields, D-4829; IA-4). The design's
+//! other `v=2` fields (`dup_traded_rows`, `dup_traded_files`,
+//! `dup_echo_rows`, `snapped_rows`) need counts only the readers' raw rows hold
 //! (`gdfl_cm.rs`, `gdfl_nfo.rs`): until a reader counts one it is ABSENT
 //! from the line, never 0, and `/dayflags.json` reads it as `null`.
 //!
@@ -141,8 +146,9 @@ pub const VOLUME_LIMITS: [u64; 2] = [2_147_483_647, 2_147_483_648];
 /// The version of the flags line this writer writes (D-3335, D-4841): `v=2`
 /// carries every `v=1` field, then the `v=2` fields this build counts (IA-16:
 /// `separator_backslash` for indices and stocks, `volume_saturated_files`
-/// for stocks). A `v=2` field this build does not count is ABSENT, never
-/// written as 0, and a reader reads it as unknown.
+/// for stocks; IA-4: `trailing_empty_files` for options). A `v=2` field
+/// this build does not count is ABSENT, never written as 0, and a reader
+/// reads it as unknown.
 pub const FLAGS_VERSION: u32 = 2;
 
 /// A shared hole is shared by at least this percentage of the day's traded
@@ -219,6 +225,9 @@ pub struct ReaderCounts {
     /// For an options file, its rows whose bid or ask is not zero; `None`
     /// for a capital-market file, which is never judged on quotes.
     pub quoted_rows: Option<u64>,
+    /// For an options file, the empty fields its header and rows carried
+    /// after the ten known names, dropped (D-4829); 0 for every other file.
+    pub trailing_empty: u8,
 }
 
 /// The seconds `kind`'s one-second series spends in the halt the calendar of
@@ -607,6 +616,9 @@ pub struct DayLedger {
     volume_saturated_files: u64,
     /// Whether the day zip named a file with `\` (D-4828, D-4841).
     separator_backslash: bool,
+    /// An options day's files read under a header with empty trailing
+    /// fields (D-4829, D-4841 `trailing_empty_files`; IA-4).
+    trailing_empty_files: u64,
 }
 
 impl DayLedger {
@@ -637,6 +649,7 @@ impl DayLedger {
             },
             volume_saturated_files: 0,
             separator_backslash: false,
+            trailing_empty_files: 0,
         }
     }
 
@@ -750,6 +763,9 @@ impl DayLedger {
             .saturating_add(file.reader.auction_prints);
         if file.volume_saturated {
             self.volume_saturated_files += 1;
+        }
+        if file.reader.trailing_empty > 0 {
+            self.trailing_empty_files += 1;
         }
         if file.reader.quoted_rows == Some(0) && file.rows > 0 {
             self.zero_quote_files += 1;
@@ -919,7 +935,8 @@ impl DayLedger {
                     text,
                     " files={} files_traded={} zero_quote_files={} ltq1_lead_files={} \
                      ltq1_lead_rows={} ltq0_new_ltp_rows={} first_trade_p50={} \
-                     halt_s={halt_s} halt_held_s={} max_defer_s={} member_src={}",
+                     halt_s={halt_s} halt_held_s={} trailing_empty_files={} max_defer_s={} \
+                     member_src={}",
                     self.files,
                     self.files_traded,
                     self.zero_quote_files,
@@ -928,6 +945,7 @@ impl DayLedger {
                     self.ltq0_new_ltp_rows,
                     clock(p50),
                     self.halt_held_s,
+                    self.trailing_empty_files,
                     self.every.max_defer_s,
                     src_of(self.member_bytes),
                 );
