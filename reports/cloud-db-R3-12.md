@@ -121,9 +121,26 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
     (its child process never finishes: killed after 25 min on the branch; at the base inputs it did
     not finish inside 240 s either). The tenth, `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`,
     passed when run again alone.
-  - `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit`
-    (the hanging test is skipped only so the other crates' suites are reached; it is reported
-    above, not called green): running locally across the hold, log in the scratchpad.
+  - Every other test target, one at a time with its own timeout (a hang cannot hide the rest;
+    `cargo test --locked -p <crate> --no-fail-fast`, the api targets by `--test`), on this
+    4-core container running as root with 4.5 to 9 GB of disk free:
+
+    | target | pass | fail | ignored | why it fails here |
+    |---|---|---|---|---|
+    | core, costs, engine, greeks, indicators, lake, runner, vocab | 255, 374, 131, 59, 504, 130, 797, 171 | 0 | 0, 2, 0, 0, 0, 6, 0, 0 | green |
+    | api lib (with the hang skipped) | 2,462 | 8 | 13 | the 8 named above, red at the base inputs |
+    | api `cloud_mutants_bars` | 58 | 0 (+1 hang) | 0 | `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` never ends (killed at 900 s); the other 58 pass with it skipped |
+    | api `logs_r3_24`, `pool_load`, `state_stream_emits`, `store_step_forms`, `binary`, bin, doc | 6, 5, 3, 3, 4, 4, 1 | 0 | 0 | green |
+    | cli | 2,428 | 30 | 12 | 26 GDFL-import and tick-second-check tests: the import refuses `disk_full` below `pull::gdfl_import::DEFAULT_FREE_FLOOR` (10 GiB) and the volume has 4.7 GB free (`BRUTEX_GDFL_FREE_FLOOR=0` frees the two integration tests, 2,430 pass / 28 fail: the unit tests pass their own environment); `scrub_blocks` unwritable ledger and two `watchdog_command` read-only tests: root writes anyway |
+    | pull | 2,507 | 12 | 49 | the same disk floor (`ia16`, `gdfl_run`), read-only and refused-open tests root passes, and `gdfl_cm::tests::fixtures_are_built_not_pasted` (a check over `crates/cli/src/tick_second_check_tests.rs`, unchanged from the base) |
+    | store | 905 | 3 | 8 | three `settings` tests that need an unreadable or unwritable directory: root reads and writes it |
+    | telemetry | 237 | 4 | 1 | four `sink` tests that need a refused rename, delete or look-up: root is not refused |
+
+    THE TWO HANGS HAVE ONE CAUSE, and it is the machine: `api::detail`'s `calendar` and
+    `store_read` pools are sized `cores().clamp(1, 8)`, 4 slots here, and both tests park
+    `MAX_*_CONCURRENT` (8) holders on a `Barrier` of 8 + 1 parties: four holders never get a slot,
+    so the barrier never fills. A host with 8 or more cores passes them. None of these failures is
+    in a file R3-12 changed or reads a file R3-12 changed; the Mac's run is in NEEDS THE MAC.
   - Gate 27 (`gates-ledger invariant-ids`): OK, 3,210 rows unique. Gate 27b: red at base only
     (D-6247 heads two entries; not R3-12's). Gate 10: red at base only (R427-11, HA-02, AG05-13); with
     those three rows taken out of a scratch copy, `invariant-paths` checks 3,024 references with exit
@@ -131,7 +148,7 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
 
 ## Left (NEXT)
 
-- NEXT: when HOLD is gone (or a GO-R3-12 returns): read the `--no-fail-fast` workspace run's result,
+- NEXT: when HOLD is gone (or a GO-R3-12 returns): the per-crate cargo results are in (above);
   `cargo deny` (not installed here: `cargo install cargo-deny --locked`, else NEEDS THE MAC), one full
   `npm test`, svelte-check and `npm run build` (then `git checkout -- web/build`), the ten-times
   numbers at n = 20, then the final report: STATUS, every gate with its command, p50/p99/max, the
