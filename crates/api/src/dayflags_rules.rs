@@ -1398,61 +1398,7 @@ impl IndexDay {
         let mut says = Vec::new();
         let rung = finest_of(self.feed).as_str();
         let frozen = match (self.scan, self.ledger) {
-            (Some(scan), _) => {
-                let longest = scan.longest;
-                if let Some((from, seconds)) = longest {
-                    let to = from.saturating_add(
-                        i64::try_from(seconds).unwrap_or(0) * 1_000_000 - 60_000_000,
-                    );
-                    says.push(format!(
-                        "index value frozen in session: {} run(s) of {} minutes or more with no \
-                         change, the longest {} minute(s) from {} to {} ({rung}), outside any \
-                         recorded halt{}",
-                        scan.frozen_runs,
-                        FROZEN_MIN_S / 60,
-                        seconds / 60,
-                        clock_of(self.midnight, from),
-                        clock_of(self.midnight, to),
-                        self.aside(),
-                    ));
-                }
-                if scan.broken > 0 {
-                    says.push(format!(
-                        "index value unchanged across absent minutes {} time(s): a minute the \
-                         file does not hold ends a run, so each part is measured alone ({rung})",
-                        scan.broken
-                    ));
-                }
-                if let Some(unjudged) = scan.unjudged {
-                    says.push(self.unjudged_minutes(unjudged, rung));
-                }
-                // NEVER "NOT FROZEN" FOR A RUN NOT JUDGED (verify-R3-13-r2 X1):
-                // a judged run flags the day; else a run not judged leaves it
-                // null; else no run of the day reached FROZEN_MIN_S.
-                let flagged = if scan.frozen_runs > 0 {
-                    Some(true)
-                } else if scan.unjudged.is_some() {
-                    None
-                } else {
-                    Some(false)
-                };
-                serde_json::json!({
-                    "basis": "minutes_scanned",
-                    "rung": rung,
-                    "flagged": flagged,
-                    "runs": scan.frozen_runs,
-                    "broken_by_absent": scan.broken,
-                    "longest_s": longest.map(|(_, s)| s),
-                    "longest_from": longest.map(|(from, _)| clock_of(self.midnight, from)),
-                    "unjudged_s": scan.unjudged.map(|(_, seconds, _)| seconds),
-                    "unjudged_from": scan
-                        .unjudged
-                        .map(|(from, _, _)| clock_of(self.midnight, from)),
-                    "auction_window": self.auction_json(),
-                    "auction_aside": self.auction.map(|auction| auction.aside),
-                    "line": null,
-                })
-            }
+            (Some(scan), _) => self.minutes_frozen(scan, &mut says),
             (None, Some(ledger)) => self.ledger_frozen(ledger, &mut says),
             (None, None) => serde_json::Value::Null,
         };
@@ -1506,6 +1452,63 @@ impl IndexDay {
             serde_json::json!({ "frozen": frozen, "outside_day_range": outside }),
             says,
         )
+    }
+
+    /// The minutes' frozen runs (Zerodha): the record's `frozen` from the
+    /// day's scan ([`DayScan`]), and the phrases it says. Its own function, as
+    /// [`Self::ledger_frozen`] is the ledger's, since the run not judged
+    /// (verify-R3-13-r2 X1) took [`Self::json`] past clippy's line bound.
+    fn minutes_frozen(&self, scan: DayScan, says: &mut Vec<String>) -> serde_json::Value {
+        let rung = finest_of(self.feed).as_str();
+        let longest = scan.longest;
+        if let Some((from, seconds)) = longest {
+            let to =
+                from.saturating_add(i64::try_from(seconds).unwrap_or(0) * 1_000_000 - 60_000_000);
+            says.push(format!(
+                "index value frozen in session: {} run(s) of {} minutes or more with no change, \
+                 the longest {} minute(s) from {} to {} ({rung}), outside any recorded halt{}",
+                scan.frozen_runs,
+                FROZEN_MIN_S / 60,
+                seconds / 60,
+                clock_of(self.midnight, from),
+                clock_of(self.midnight, to),
+                self.aside(),
+            ));
+        }
+        if scan.broken > 0 {
+            says.push(format!(
+                "index value unchanged across absent minutes {} time(s): a minute the file does \
+                 not hold ends a run, so each part is measured alone ({rung})",
+                scan.broken
+            ));
+        }
+        if let Some(unjudged) = scan.unjudged {
+            says.push(self.unjudged_minutes(unjudged, rung));
+        }
+        // NEVER "NOT FROZEN" FOR A RUN NOT JUDGED (verify-R3-13-r2 X1): a
+        // judged run flags the day; else a run not judged leaves it null; else
+        // no run of the day reached FROZEN_MIN_S.
+        let flagged = if scan.frozen_runs > 0 {
+            Some(true)
+        } else if scan.unjudged.is_some() {
+            None
+        } else {
+            Some(false)
+        };
+        serde_json::json!({
+            "basis": "minutes_scanned",
+            "rung": rung,
+            "flagged": flagged,
+            "runs": scan.frozen_runs,
+            "broken_by_absent": scan.broken,
+            "longest_s": longest.map(|(_, s)| s),
+            "longest_from": longest.map(|(from, _)| clock_of(self.midnight, from)),
+            "unjudged_s": scan.unjudged.map(|(_, seconds, _)| seconds),
+            "unjudged_from": scan.unjudged.map(|(from, _, _)| clock_of(self.midnight, from)),
+            "auction_window": self.auction_json(),
+            "auction_aside": self.auction.map(|auction| auction.aside),
+            "line": null,
+        })
     }
 
     /// The ledger's frozen run (GDFL): the record's `frozen` from the day
