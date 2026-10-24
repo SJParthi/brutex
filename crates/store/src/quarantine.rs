@@ -62,8 +62,9 @@
 //! | 0 | 16 | BLAKE3 of the series key and month, first 16 bytes |
 //! | 16 | 4 | month, `yyyy * 100 + mm`, `u32` LE |
 //! | 20 | 1 | scope: 1 whole month, 2 dropped |
-//! | 21 | 1 | cause: 1 before listing, 2 foreign level, 3 zero price |
-//! | 24 | 8 | bars named (cumulative over drops) |
+//! | 21 | 1 | cause of the newest act: 1 before listing, 2 foreign level, 3 zero price |
+//! | 22 | 1 | EVERY cause the month's acts named, a set: bit 1 before listing, 2 foreign level, 4 zero price (R4-18 repair 2) |
+//! | 24 | 8 | bars set aside over every act: cumulative over drops, and a whole record adds the bars the drops before it set aside |
 //! | 32 | 8 | byte offset of the newest ledger line for it |
 //! | 40 | 4 | the revision ordinal served without them (0: none) |
 //! | 44 | 8 | written at, UTC micros |
@@ -103,9 +104,17 @@
 //! none for the CLI and the importer, some for the server's page reads) and is
 //! refused by name when that runs out ([`QuarantineError::BeingWritten`]);
 //! with no writer it is refused by name too ([`QuarantineError::Stale`]). A
-//! writer that finds the image behind (or ahead of) the ledger rebuilds it
-//! from the ledger under the lock before its own act, so the next writer of
-//! any month of the feed finishes what a failed one left.
+//! writer that finds the image behind the ledger rebuilds it from the ledger
+//! under the lock before its own act, so the next writer of any month of the
+//! feed finishes what a failed one left. One whose checked header describes
+//! MORE of the ledger than it holds (the ledger put back from an older copy,
+//! or cut) is never rebuilt away: every writer refuses it by name
+//! ([`QuarantineError::LedgerCut`]) until the ledger is restored, because a
+//! rebuild from what is left would forget acts the index records.
+//!
+//! The ledger's head is found past the ended torn heads a killed first write
+//! leaves (the head and the first line are one write): every reader and
+//! every writer read the ledger by one rule.
 //!
 //! # Writers
 //!
@@ -247,6 +256,74 @@ impl Cause {
             _ => None,
         }
     }
+
+    /// The cause's bit in a [`Causes`] set.
+    const fn bit(self) -> u8 {
+        match self {
+            Self::BeforeListing => 1,
+            Self::ForeignLevel => 2,
+            Self::ZeroPrice => 4,
+        }
+    }
+}
+
+/// Every cause the acts of one month named, as a set (R4-18 repair 2): a month
+/// dropped for one cause and then recorded whole for another names both, and
+/// its [`Entry::bars`] counts the bars of both. Never empty in an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Causes(u8);
+
+impl Causes {
+    /// Every bit a cause owns.
+    const EVERY: u8 = 0b111;
+
+    /// The set of one cause.
+    #[must_use]
+    pub const fn of(cause: Cause) -> Self {
+        Self(cause.bit())
+    }
+
+    /// Both sets in one.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether `cause` is in the set.
+    #[must_use]
+    pub const fn contains(self, cause: Cause) -> bool {
+        self.0 & cause.bit() != 0
+    }
+
+    /// Every cause in the set, in code order.
+    pub fn each(self) -> impl Iterator<Item = Cause> {
+        Cause::ALL
+            .into_iter()
+            .filter(move |cause| self.contains(*cause))
+    }
+
+    /// The set as every answer's sentence names it: `zero_price`, or
+    /// `foreign_level and zero_price`, or `before_listing, foreign_level and
+    /// zero_price`.
+    #[must_use]
+    pub fn said(self) -> String {
+        let codes: Vec<&str> = self.each().map(Cause::code).collect();
+        match codes.split_last() {
+            None => String::new(),
+            Some((last, [])) => (*last).to_owned(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+
+    /// The set a slot's byte holds, or `None` for a byte no writer here
+    /// wrote: empty, or a bit no cause owns.
+    const fn of_byte(byte: u8) -> Option<Self> {
+        if byte == 0 || byte & !Self::EVERY != 0 {
+            None
+        } else {
+            Some(Self(byte))
+        }
+    }
 }
 
 /// What a ledger line records.
@@ -299,9 +376,13 @@ impl Scope {
 pub struct Entry {
     /// Whole month, or dropped from a served generation.
     pub scope: Scope,
-    /// Why.
+    /// Why, as the newest act of the month said it.
     pub cause: Cause,
-    /// Bars named, over every drop of the month.
+    /// Every cause the month's acts named, [`Self::cause`] among them (R4-18
+    /// repair 2).
+    pub causes: Causes,
+    /// Bars set aside over every act of the month: every drop's, and a whole
+    /// record's on top of the drops before it (R4-18 repair 2).
     pub bars: u64,
     /// Byte offset of the newest ledger line for the month.
     pub ledger_at: u64,
@@ -349,7 +430,9 @@ pub enum QuarantineError {
     /// the ledger, which holds `ledger_len`, and no writer holds the lock: an
     /// act is ledgered and not indexed (a publish refused or killed after its
     /// ledger line), or the ledger was restored or cut. Never "clear"; the
-    /// next writer of the feed rebuilds the index first.
+    /// next writer of the feed rebuilds the index first — unless the ledger
+    /// holds fewer bytes than the image describes, which every writer refuses
+    /// ([`QuarantineError::LedgerCut`]) until the ledger is restored.
     Stale {
         /// The index.
         path: PathBuf,
@@ -385,6 +468,22 @@ pub enum QuarantineError {
         path: PathBuf,
         /// Every damaged line's byte offset, ascending.
         offsets: Vec<u64>,
+    },
+    /// `quarantine_ledger_cut`: the index's header, which checks, says its
+    /// image was built from `described` bytes of the ledger, which holds only
+    /// `ledger_len`: bytes the index records acts from are gone (the ledger
+    /// put back from an older copy, or cut). A rebuild from what is left would
+    /// forget those acts — a month one recorded whole would be served again —
+    /// so no writer rebuilds or writes past it and no listing
+    /// ([`Summary::load`]) counts from it, and every reader of the index
+    /// answers [`QuarantineError::Stale`] meanwhile (R4-18 repair 2).
+    LedgerCut {
+        /// The index.
+        path: PathBuf,
+        /// The ledger bytes the image describes.
+        described: u64,
+        /// The ledger's length now.
+        ledger_len: u64,
     },
     /// `quarantine_index_full`: every slot of the key's bucket holds another
     /// key. Nothing was written: refused before the ledger line.
@@ -426,6 +525,7 @@ impl QuarantineError {
             Self::Stale { .. } => "quarantine_index_stale",
             Self::BeingWritten { .. } => "quarantine_being_written",
             Self::LedgerDamaged { .. } => "quarantine_ledger_damaged",
+            Self::LedgerCut { .. } => "quarantine_ledger_cut",
             Self::Full { .. } => "quarantine_index_full",
             Self::Held { .. } => "quarantine_held",
             Self::Reason(_) => "quarantine_reason",
@@ -457,9 +557,18 @@ impl fmt::Display for QuarantineError {
                 path,
                 built_from,
                 ledger_len,
+            } if built_from > ledger_len => write!(
+                f,
+                "quarantine_index_stale: {} describes {built_from} bytes of its ledger, which holds only {ledger_len}: bytes the index records acts from are gone (the ledger put back from an older copy, or cut); the quarantine is not known until the ledger is restored, and every writer refuses it meanwhile (quarantine_ledger_cut)",
+                path.display()
+            ),
+            Self::Stale {
+                path,
+                built_from,
+                ledger_len,
             } => write!(
                 f,
-                "quarantine_index_stale: {} describes {built_from} bytes of its ledger, which holds {ledger_len}, and no writer is at work: an act is ledgered and not indexed (a publish refused or killed after its ledger line), or the ledger was restored or cut; the quarantine is not known until the next writer rebuilds the index from its ledger",
+                "quarantine_index_stale: {} describes {built_from} bytes of its ledger, which holds {ledger_len}, and no writer is at work: an act is ledgered and not indexed (a publish refused or killed after its ledger line); the quarantine is not known until the next writer rebuilds the index from its ledger",
                 path.display()
             ),
             Self::BeingWritten {
@@ -485,6 +594,15 @@ impl fmt::Display for QuarantineError {
                     .collect::<Vec<_>>()
                     .join(", ")
                     + if offsets.len() > 8 { ", ..." } else { "" }
+            ),
+            Self::LedgerCut {
+                path,
+                described,
+                ledger_len,
+            } => write!(
+                f,
+                "quarantine_ledger_cut: {} describes {described} bytes of its ledger, which holds only {ledger_len}: bytes the index records acts from are gone (the ledger put back from an older copy, or cut), and a rebuild from what is left would forget those acts; nothing was written. Restore the ledger; or, to accept the ledger as it is, set the index aside and the next writer rebuilds it from the ledger",
+                path.display()
             ),
             Self::Full { path } => write!(
                 f,
@@ -611,11 +729,17 @@ fn decode_slot(bytes: &[u8], slot: u64) -> Slot {
     }
     let hash = field::<16>(bytes, 0);
     let month = u32::from_le_bytes(field(bytes, 16));
-    let entry = Scope::of_byte(bytes.get(20).copied().unwrap_or(0))
-        .zip(Cause::of_byte(bytes.get(21).copied().unwrap_or(0)))
-        .map(|(scope, cause)| Entry {
+    let byte = |at: usize| bytes.get(at).copied().unwrap_or(0);
+    // A cause set that does not hold the newest act's cause is no slot a
+    // writer here wrote: damage, never a guess.
+    let entry = Scope::of_byte(byte(20))
+        .zip(Cause::of_byte(byte(21)))
+        .zip(Causes::of_byte(byte(22)))
+        .filter(|((_, cause), causes)| causes.contains(*cause))
+        .map(|((scope, cause), causes)| Entry {
             scope,
             cause,
+            causes,
             bars: u64::from_le_bytes(field(bytes, 24)),
             ledger_at: u64::from_le_bytes(field(bytes, 32)),
             revision: u32::from_le_bytes(field(bytes, 40)),
@@ -633,7 +757,10 @@ fn encode_slot(hash: &[u8; 16], month: u32, entry: &Entry, slot: u64) -> [u8; SL
         (32, &entry.ledger_at.to_le_bytes()),
         (40, &entry.revision.to_le_bytes()),
         (44, &entry.written_at.to_le_bytes()),
-        (20, &[entry.scope.byte(), entry.cause.byte()]),
+        (
+            20,
+            &[entry.scope.byte(), entry.cause.byte(), entry.causes.0],
+        ),
     ];
     for (at, value) in fields {
         if let Some(dst) = bytes.get_mut(at..at + value.len()) {
@@ -1271,6 +1398,26 @@ fn note_damaged(feed: Vendor, refused: &QuarantineError) {
     }
 }
 
+/// One event for a ledger cut below what its index describes: the refusal
+/// says so on `/logs`, with both lengths.
+fn note_cut(feed: Vendor, refused: &QuarantineError) {
+    if let QuarantineError::LedgerCut {
+        described,
+        ledger_len,
+        ..
+    } = refused
+    {
+        let text = refused.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error("store.quarantine", "quarantine ledger cut")
+                .with("feed", telemetry::Value::Str(feed.as_str()))
+                .with("described", telemetry::Value::Uint(*described))
+                .with("ledger_len", telemetry::Value::Uint(*ledger_len))
+                .with("why", telemetry::Value::Str(&text)),
+        );
+    }
+}
+
 fn audit_dir(root: &Path) -> Result<PathBuf, QuarantineError> {
     let dir = root.join(DIR);
     match fs::symlink_metadata(&dir) {
@@ -1345,6 +1492,7 @@ fn record_locked(root: &Path, act: &Record<'_>) -> Result<Recorded, QuarantineEr
     let entry = Entry {
         scope,
         cause: act.cause,
+        causes: Causes::of(act.cause),
         bars,
         ledger_at,
         revision: act.revision,
@@ -1395,9 +1543,10 @@ struct Tail {
     ends_torn: bool,
 }
 
-/// The ledger's [`Tail`]. A ledger that does not start with its head (and
-/// is not a torn head: a strict prefix of it) is damaged at byte 0 and
-/// refused: nothing is written past it.
+/// The ledger's [`Tail`]. Its head is found by [`parse_ledger`]'s own rule,
+/// past the ended torn heads killed first writes left ([`headed`]); a ledger
+/// whose first line that is no ended torn append is not its head is damaged
+/// there and refused: nothing is written past it.
 fn tail_of(file: &File, path: &Path) -> Result<Tail, QuarantineError> {
     let len = io_at(file.metadata(), path, "measure the quarantine ledger")?.len();
     let mut prefix = String::new();
@@ -1414,29 +1563,60 @@ fn tail_of(file: &File, path: &Path) -> Result<Tail, QuarantineError> {
             ends_torn = true;
         }
     }
-    let head = format!("{LEDGER_HEAD}\n");
-    let head_len = head.len() as u64;
-    let mut first = vec![0u8; usize::try_from(len.min(head_len)).unwrap_or(0)];
-    io_at(
-        file.read_exact_at(&mut first, 0),
-        path,
-        "read the ledger head",
-    )?;
-    if first.as_slice() != head.as_bytes() {
-        let torn_head = len < head_len && head.as_bytes().starts_with(&first);
-        if !torn_head {
-            return Err(QuarantineError::LedgerDamaged {
-                path: path.to_path_buf(),
-                offsets: vec![0],
-            });
-        }
-        prefix.push_str(&head);
+    if !headed(file, path, len)? {
+        prefix.push_str(LEDGER_HEAD);
+        prefix.push('\n');
     }
     Ok(Tail {
         len,
         prefix,
         ends_torn,
     })
+}
+
+/// The most bytes of the ledger's start [`headed`] reads: room for about a
+/// hundred ended torn heads before the head. A head further in is damage.
+const HEAD_SCAN: u64 = 4_096;
+
+/// Whether the ledger holds its head, by [`parse_ledger`]'s own rule: the
+/// first complete line that is no ended torn append ([`TORN_MARK`]) is
+/// [`LEDGER_HEAD`]. A feed's first act writes the head and its line in ONE
+/// write, so a writer killed inside it (or refused by a full disk) leaves a
+/// strict prefix of the head, which the next writer ends with [`TORN_END`]
+/// before writing the head again (R4-18 repair 2: the head was looked for
+/// only at byte 0, so every writer after that one refused the ledger as
+/// damaged at byte 0 while every reader of it read it whole). `false` when no
+/// complete line is the head yet and what follows the last newline is a
+/// strict prefix of it (or nothing); damage at the first line that is
+/// neither. One positional read of at most [`HEAD_SCAN`] bytes.
+fn headed(file: &File, path: &Path, len: u64) -> Result<bool, QuarantineError> {
+    let mut start = vec![0u8; usize::try_from(len.min(HEAD_SCAN)).unwrap_or(0)];
+    io_at(
+        file.read_exact_at(&mut start, 0),
+        path,
+        "read the ledger head",
+    )?;
+    let damaged = |at: u64| QuarantineError::LedgerDamaged {
+        path: path.to_path_buf(),
+        offsets: vec![at],
+    };
+    let mut at = 0u64;
+    let mut rest = start.as_slice();
+    while let Some(end) = rest.iter().position(|byte| *byte == b'\n') {
+        let (raw, after) = rest.split_at(end);
+        if raw == LEDGER_HEAD.as_bytes() {
+            return Ok(true);
+        }
+        if !raw.ends_with(TORN_MARK) {
+            return Err(damaged(at));
+        }
+        at += end as u64 + 1;
+        rest = after.get(1..).unwrap_or(&[]);
+    }
+    if start.len() as u64 == len && LEDGER_HEAD.as_bytes().starts_with(rest) {
+        return Ok(false);
+    }
+    Err(damaged(at))
 }
 
 /// Writes `tail`'s prefix and `line` in ONE write, syncs, and answers the
@@ -1806,9 +1986,15 @@ fn image_trusted(image: &[u8]) -> bool {
 /// drop adds its bars (an intent adds none, and keeps the revision served);
 /// a drop onto a month recorded whole keeps the whole record, because a
 /// whole record means the reader serves none of the month and a later
-/// partial drop must never re-serve the rest; anything else is the newer
-/// line.
+/// partial drop must never re-serve the rest; a whole record onto drops adds
+/// the bars they set aside (its own are the bars the generation served after
+/// them, so the month's every bar is then set aside); a whole record onto a
+/// whole record is the newer line. Every arm keeps every cause any line
+/// named (R4-18 repair 2: the whole record after drops kept only its own
+/// bars and cause, so a reader said "all 2 of its bars are zero_price" of a
+/// month that set aside 6).
 fn merged(held: Entry, newer: Entry) -> Entry {
+    let causes = held.causes.union(newer.causes);
     match (held.scope, newer.scope) {
         (Scope::Dropped, Scope::Dropped) => Entry {
             bars: held.bars.saturating_add(newer.bars),
@@ -1817,10 +2003,16 @@ fn merged(held: Entry, newer: Entry) -> Entry {
             } else {
                 newer.revision
             },
+            causes,
             ..newer
         },
-        (Scope::WholeMonth, Scope::Dropped) => held,
-        _ => newer,
+        (Scope::Dropped, Scope::WholeMonth) => Entry {
+            bars: held.bars.saturating_add(newer.bars),
+            causes,
+            ..newer
+        },
+        (Scope::WholeMonth, Scope::Dropped) => Entry { causes, ..held },
+        _ => Entry { causes, ..newer },
     }
 }
 
@@ -1904,6 +2096,7 @@ fn entry_of(line: &Line) -> Entry {
     Entry {
         scope,
         cause: line.cause,
+        causes: Causes::of(line.cause),
         bars,
         ledger_at: line.at,
         revision: line.revision,
@@ -1940,6 +2133,18 @@ enum Level {
     Behind(String),
 }
 
+/// Where the feed's published image stands against a ledger of `ledger_len`
+/// bytes, for a writer under the lock.
+///
+/// # Errors
+///
+/// [`QuarantineError::LedgerCut`] (one event on `/logs`) for an image whose
+/// header checks and describes MORE of the ledger than it holds: rebuilt
+/// from what is left, it would forget acts it records (R4-18 repair 2: the
+/// next writer rebuilt it so, and a month a lost line recorded whole was
+/// served again). An image that cannot be trusted at all (a wrong length, a
+/// header that does not check) still says nothing of the ledger and is
+/// rebuilt from it.
 fn level(root: &Path, feed: Vendor, ledger_len: u64) -> Result<Level, QuarantineError> {
     let index = index_path(root, feed);
     let why = match read_image(&index) {
@@ -1949,6 +2154,15 @@ fn level(root: &Path, feed: Vendor, ledger_len: u64) -> Result<Level, Quarantine
         Ok(None) if ledger_len == 0 => return Ok(Level::Current(empty_image())),
         Ok(Some(image)) => match described(&image) {
             None => "its header did not check".to_owned(),
+            Some(built) if built > ledger_len => {
+                let refused = QuarantineError::LedgerCut {
+                    path: index,
+                    described: built,
+                    ledger_len,
+                };
+                note_cut(feed, &refused);
+                return Err(refused);
+            }
             Some(built) if built != ledger_len => {
                 format!("it described {built} of the ledger's {ledger_len} bytes")
             }
@@ -2128,9 +2342,30 @@ impl Summary {
     ///
     /// As [`read_ledger`], and [`QuarantineError::LedgerDamaged`]: a listing
     /// that left out the act a damaged line recorded would under-count
-    /// without a word, so the feed's rows say the code instead.
+    /// without a word, so the feed's rows say the code instead. The same for
+    /// [`QuarantineError::LedgerCut`]: a ledger shorter than the index's
+    /// checked header describes has lost acts the index records (R4-18
+    /// repair 2). The header is read FIRST (one open, one 64-byte read), so
+    /// a writer appending between the two reads only lengthens the ledger
+    /// and can never read as a cut.
     pub fn load(root: &Path, feed: Vendor) -> Result<Self, QuarantineError> {
+        let index = index_path(root, feed);
+        let described = open_index(&index)
+            .ok()
+            .flatten()
+            .map(|(_, described)| described);
         let ledger = checked_ledger(root, feed)?;
+        if let Some(described) = described
+            && described > ledger.len
+        {
+            let refused = QuarantineError::LedgerCut {
+                path: index,
+                described,
+                ledger_len: ledger.len,
+            };
+            note_cut(feed, &refused);
+            return Err(refused);
+        }
         let mut months: HashMap<(String, String), Entry> = HashMap::new();
         let mut causes: HashMap<String, Vec<Cause>> = HashMap::new();
         for line in &ledger.lines {

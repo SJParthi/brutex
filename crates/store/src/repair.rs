@@ -308,7 +308,7 @@ impl fmt::Display for RepairError {
                 f,
                 "refused: the month is quarantined whole ({} bar(s), {}; its ledger line at byte {}): nothing of it is served, so no repair or restate adds or changes a bar; nothing was written",
                 entry.bars,
-                entry.cause.code(),
+                entry.causes.said(),
                 entry.ledger_at
             ),
             Self::QuarantineUnknown(why) => write!(

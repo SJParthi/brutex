@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use brutex_core::vendor::Vendor;
 
 use super::{
-    Applied, ApplyError, BUCKET, CAPACITY, Cause, Entry, INDEX_LEN, LEDGER_HEAD, MAX_REASON, Probe,
-    QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month, catch_up, check_reason,
-    digest_of, index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record,
-    series_key,
+    Applied, ApplyError, BUCKET, CAPACITY, Cause, Causes, Entry, INDEX_LEN, LEDGER_HEAD,
+    MAX_REASON, Probe, QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month,
+    catch_up, check_reason, digest_of, index_path, ledger_path, ledger_stamps, merged, probe,
+    read_ledger, rebuild, record, series_key,
 };
 use crate::file::BarFile;
 use crate::format::{Bar, OI_NULL};
@@ -903,12 +903,15 @@ fn a_dropped_line_after_a_whole_line_never_downgrades_index_rebuild_or_summary()
 }
 
 /// The one merge rule, every arm: drop on drop adds, drop on whole keeps
-/// whole, whole on drop and whole on whole take the newer line.
+/// whole, whole on drop takes the newer line and ADDS the bars the drops set
+/// aside (R4-18 repair 2: it kept only its own), whole on whole takes the
+/// newer line; every arm keeps every cause any line named.
 #[test]
 fn the_merge_rule_never_lets_a_drop_lift_a_whole_record() {
     let entry = |scope, bars, ledger_at| Entry {
         scope,
         cause: Cause::ForeignLevel,
+        causes: Causes::of(Cause::ForeignLevel),
         bars,
         ledger_at,
         revision: 1,
@@ -926,8 +929,70 @@ fn the_merge_rule_never_lets_a_drop_lift_a_whole_record() {
         }
     );
     assert_eq!(merged(whole_a, dropped_b), whole_a);
-    assert_eq!(merged(dropped_a, whole_b), whole_b);
+    assert_eq!(
+        merged(dropped_a, whole_b),
+        Entry { bars: 9, ..whole_b },
+        "a whole record after a drop counts the dropped bars too"
+    );
     assert_eq!(merged(whole_a, whole_b), whole_b);
+    // EVERY CAUSE, in every arm: the newest line's `cause`, every line's
+    // `causes`.
+    let zero = |scope, bars, ledger_at| Entry {
+        cause: Cause::ZeroPrice,
+        causes: Causes::of(Cause::ZeroPrice),
+        ..entry(scope, bars, ledger_at)
+    };
+    let both = Causes::of(Cause::ForeignLevel).union(Causes::of(Cause::ZeroPrice));
+    for (held, newer, scope, cause, bars) in [
+        (
+            dropped_a,
+            zero(Scope::Dropped, 4, 20),
+            Scope::Dropped,
+            Cause::ZeroPrice,
+            7,
+        ),
+        (
+            dropped_a,
+            zero(Scope::WholeMonth, 6, 40),
+            Scope::WholeMonth,
+            Cause::ZeroPrice,
+            9,
+        ),
+        (
+            whole_a,
+            zero(Scope::Dropped, 4, 20),
+            Scope::WholeMonth,
+            Cause::ForeignLevel,
+            9,
+        ),
+        (
+            whole_a,
+            zero(Scope::WholeMonth, 6, 40),
+            Scope::WholeMonth,
+            Cause::ZeroPrice,
+            6,
+        ),
+    ] {
+        let after = merged(held, newer);
+        assert_eq!(
+            (after.scope, after.cause, after.causes, after.bars),
+            (scope, cause, both, bars),
+            "{held:?} then {newer:?}"
+        );
+        assert_eq!(after.causes.said(), "foreign_level and zero_price");
+    }
+    assert_eq!(
+        Causes::of(Cause::BeforeListing)
+            .union(both)
+            .each()
+            .collect::<Vec<_>>(),
+        Cause::ALL.to_vec(),
+        "code order"
+    );
+    assert_eq!(
+        Causes::of(Cause::BeforeListing).union(both).said(),
+        "before_listing, foreign_level and zero_price"
+    );
     // AN INTENT (a drop of no bars, revision 0) adds nothing and keeps the
     // revision served; its line is the newest (R4-18 repair 2).
     let intent = Entry {
@@ -998,9 +1063,13 @@ fn an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole
             why: "already_whole"
         }
     );
+    // EVERY BAR SET ASIDE (R4-18 repair 2, D-7292): the 2 the finished intent
+    // dropped and the 4 recorded whole after it, and both causes.
     assert!(matches!(
         probe(&store.root, path),
-        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth && e.bars == 4
+        Ok(Probe::Quarantined(e)) if e.scope == Scope::WholeMonth
+            && e.bars == 6
+            && e.causes.said() == "before_listing and foreign_level"
     ));
     assert_eq!(
         apply_month(&store.root, path, SYMBOL, &named, why(Cause::ForeignLevel)),
@@ -1763,7 +1832,10 @@ fn a_head_torn_by_a_killed_first_write_never_stops_a_later_writer() {
         let read = read_ledger(&store.root, Vendor::Zerodha).expect("reads");
         assert!(read.damaged.is_empty(), "{tag}: {:?}", read.damaged);
         assert_eq!(read.lines.len(), 4, "{tag}: two intents, two dropped lines");
-        assert!(!read.ended.is_empty(), "{tag}: the torn head is an ended append");
+        assert!(
+            !read.ended.is_empty(),
+            "{tag}: the torn head is an ended append"
+        );
         assert!(
             fs::read(&ledger).expect("bytes").starts_with(&torn),
             "{tag}: no byte the killed write left is changed"
@@ -1843,6 +1915,13 @@ fn a_ledger_cut_below_what_its_index_describes_is_refused_and_never_rebuilt_away
         Err("quarantine_ledger_cut")
     );
     assert!(probe(&store.root, path).is_err(), "never clear");
+    // ... and the listings name it instead of counting without the lost act.
+    assert_eq!(
+        Summary::load(&store.root, Vendor::Zerodha)
+            .map(|summary| summary.is_empty())
+            .map_err(|why| why.code()),
+        Err("quarantine_ledger_cut")
+    );
     assert_eq!(files(), before, "still nothing written");
 }
 
@@ -1859,8 +1938,14 @@ fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() 
     let rows: Vec<Bar> = (0..6).map(|i| bar(i, 2_633)).collect();
     store.month(path, &rows);
     let foreign: Vec<i64> = rows[..4].iter().map(|b| b.ts_micros).collect();
-    let dropped = apply_month(&store.root, path, SYMBOL, &foreign, why(Cause::ForeignLevel))
-        .expect("dropped");
+    let dropped = apply_month(
+        &store.root,
+        path,
+        SYMBOL,
+        &foreign,
+        why(Cause::ForeignLevel),
+    )
+    .expect("dropped");
     assert!(matches!(dropped, Applied::Dropped { .. }), "{dropped:?}");
     let rest: Vec<i64> = rows[4..].iter().map(|b| b.ts_micros).collect();
     let whole = apply_month(&store.root, path, SYMBOL, &rest, why(Cause::ZeroPrice))
@@ -1869,11 +1954,18 @@ fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() 
         matches!(whole, Applied::WholeMonth { bars: 2, .. }),
         "{whole:?}"
     );
+    let both = Causes::of(Cause::ForeignLevel).union(Causes::of(Cause::ZeroPrice));
     let says = |what: &str, entry: Option<Entry>| {
         let entry = entry.unwrap_or_else(|| panic!("{what}: the month is named"));
         assert_eq!(
             (entry.scope, entry.cause, entry.bars),
             (Scope::WholeMonth, Cause::ZeroPrice, 6),
+            "{what}"
+        );
+        assert_eq!(entry.causes, both, "{what}");
+        assert_eq!(
+            entry.causes.said(),
+            "foreign_level and zero_price",
             "{what}"
         );
     };
