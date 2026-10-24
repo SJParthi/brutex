@@ -684,7 +684,7 @@ impl Census {
 
 /// THE SOURCE'S CENSUS ON THE RECEIPT (D-4817; IA-10a item 7a): each
 /// reason's count, then its first [`CENSUS_NAMED`] names, or why it has
-/// none. At most three reasons of 16 names: O(1).
+/// none. At most three reasons of 16 names: O(1) (IA-RS-06).
 fn render_census(out: &mut String, source: gdfl_run::SourceId, census: &Census) {
     let reasons = match census {
         Census::None(why) => {

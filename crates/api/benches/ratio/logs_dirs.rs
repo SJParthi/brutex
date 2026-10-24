@@ -289,11 +289,11 @@ fn the_runs_page_is_flat(id: &str) -> bool {
         spread(&format!("{id} run=<id>, {runs} runs"), 300, || {
             api::logs::imports_json_over(&root, &one).map_or(0, |body| body.len())
         });
-        // THE DAY BAND'S READ OF THE SAME JOURNAL (L-IA-39): it resolves a
-        // refusal's run by time, so it keeps every `run` line and its cost
-        // tracks the journal. Printed at every size and NEVER gated: it is a
-        // named limit until the run comes from the event's own field
-        // (D-4896), and a ratio gate here would only say what the row says.
+        // THE DAY BAND'S READ OF THE SAME JOURNAL (L-IA-39): since D-4896
+        // (IA-10a) it decodes no `run` line, placing a refusal by its own run
+        // through the run-id index, so these rows show it flat. Printed at
+        // every size and not gated here: before D-4896 its cost tracked the
+        // journal, and these same rows are its before-and-after record.
         let Ok(band) = api::logs::dayflags_json_over(&root, DAY_BAND) else {
             refuse("the day band's request was refused");
         };

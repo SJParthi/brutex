@@ -1126,7 +1126,7 @@ impl PlacedBy {
 /// run's start and `next_s`. The two routes that place a refusal
 /// (`/imports.json`'s log-only rows and `/dayflags.json`'s day band) call
 /// this one function, so they cannot disagree. O(1): at most two probes of
-/// the journal's id index.
+/// the journal's id index (IA-RS-02, IA-RS-03).
 pub(crate) fn placed_of(
     parsed: &Parsed,
     event_run: Option<u64>,
@@ -1218,7 +1218,7 @@ impl<'p> Owners<'p> {
     /// base is `*`, as it is the base's. So a day whose only keys are member
     /// keys is journalled, and gains no made-up log-only `*` row for the
     /// refusals its own closes own. O(1): the key's split was paid when its
-    /// row was made.
+    /// row was made (IA-JR-01, IA-RS-04).
     fn names(&mut self, close: &'p DayRow, subject: &Subject) -> bool {
         if let Some(member) = close.member() {
             return match subject {

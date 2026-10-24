@@ -46,7 +46,7 @@
 //! row whose reason is one of the five store-hole reasons
 //! (`pull::gdfl_import::hole_reasons`) is a hole ([`DayRow::hole`]), named
 //! with whether a repair-reason run reads it, and never a plain
-//! `incomplete`.
+//! `incomplete` (IA-JR-01, IA-RS-01, IA-RS-04).
 //!
 //! # Cost: a tail, never a re-read
 //!
@@ -211,7 +211,8 @@ impl DayRow {
     }
 
     /// The key's base filter: a member key's `<filter>` before its `+`, else
-    /// the whole filter. O(1).
+    /// the whole filter. O(1): the `+` was found when the row was made
+    /// (IA-RS-04).
     pub(crate) fn base(&self) -> &str {
         self.member_at
             .and_then(|at| self.filter.get(..at))
@@ -219,7 +220,8 @@ impl DayRow {
     }
 
     /// The member a member key names (`*+NSE-INDEX-NIFTYIT` names
-    /// `NSE-INDEX-NIFTYIT`), `None` for a base key. O(1).
+    /// `NSE-INDEX-NIFTYIT`), `None` for a base key. O(1), as
+    /// [`Self::base`] (IA-RS-04).
     pub(crate) fn member(&self) -> Option<&str> {
         self.filter.get(self.member_at?.checked_add(1)?..)
     }

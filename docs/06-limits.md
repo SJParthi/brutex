@@ -17001,7 +17001,7 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   `Parsed::run_running_at`, one range probe of a `BTreeMap` of the runs by
   start the parse keeps (one ordered insert per `run` line as the tail is
   read). `RunsAsked::Every` is removed; the band asks `RunsAsked::Unasked`,
-  which counts the `run` lines and decodes none (IA10A-03 counts zero over
+  which counts the `run` lines and decodes none (IA-RS-03 counts zero over
   10,000). What stays O(runs) is unchanged and not per request: the parse's
   copy of itself once per new batch of journal lines while an answer is kept
   against it (below). Measured: the paragraph after the next.

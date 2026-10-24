@@ -84150,7 +84150,7 @@ NEEDS THE MAC list).
 `api::server::imports::member_tests::a_refusal_is_placed_by_its_own_run_and_by_time_only_without_one`,
 `api::server::imports::member_tests::the_day_band_decodes_no_run_line_whatever_the_journal_holds`
 and `api::server::dayflags::tests::an_earlier_refusal_names_the_run_that_logged_it`
-(DB-B45's attribution, now through the parse) (IA10A-02, IA10A-03).
+(DB-B45's attribution, now through the parse) (IA-RS-02, IA-RS-03).
 
 ### D-TBD-IA-10a-1 — Three rules the read side's specification left to its builder: an open member key, a member close's refusals, and the receipt's census read (IA-10a) — 2026-10-24
 
