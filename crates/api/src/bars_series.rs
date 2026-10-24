@@ -1215,7 +1215,8 @@ impl SeriesPlan {
             return;
         };
         // A MONTH QUARANTINED WHOLE IS NAMED, AND THE REST OF THE WINDOW IS
-        // SERVED (R4-18): one probe per month opened, one positional read.
+        // SERVED (R4-18): one probe per month opened, two positional reads
+        // (the index header and the key's bucket), O(1) whatever the store holds.
         match store::quarantine::probe(root, address) {
             Ok(store::quarantine::Probe::Quarantined(entry))
                 if entry.scope == store::quarantine::Scope::WholeMonth =>

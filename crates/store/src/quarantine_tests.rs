@@ -5,7 +5,8 @@
     clippy::panic,
     clippy::unwrap_used
 )]
-//! The quarantine: ledger first, an index probed in one read, a door that
+//! The quarantine: ledger first, an index probed in two positional reads
+//! (its header and one bucket), a door that
 //! drops only named bars and keeps the old generation byte-identical, a whole
 //! month recorded rather than published empty. R4-18; ING-01, RT-DATA-02,
 //! Z5, Z6. Every price is invented (paisa a real share never printed).

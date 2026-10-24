@@ -354,8 +354,9 @@ fn month_answer(
     // writer's hold stays 503 with `Retry-After`.
     // A MONTH QUARANTINED WHOLE IS ANSWERED BY NAME, NEVER ITS BARS (R4-18;
     // ING-01 b, Z5): 409 `month_quarantined` with the cause, the bars named
-    // and the ledger line. One probe, one positional read, before the month
-    // is opened. A month served as a generation without its named bars is
+    // and the ledger line. One probe (two positional reads: the index header
+    // and the key's bucket) before the month is opened, O(1) whatever the
+    // store holds. A month served as a generation without its named bars is
     // served as it is: what it holds is the instrument's own. An index that
     // cannot be trusted answers 500 by name, never the bars.
     if let Some(answer) = quarantine_answer(site, asked) {

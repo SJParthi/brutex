@@ -1,5 +1,6 @@
 //! The quarantine of named bars (D-7290): an append-only ledger that is the truth, and
-//! an index every reader probes in ONE positional read. R4-18; findings
+//! an index its readers probe in two positional reads (the 64-byte header and
+//! the key's bucket), whatever the store holds. R4-18; findings
 //! ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6.
 //!
 //! # Why this exists
@@ -14,7 +15,12 @@
 //! place (`CLAUDE.md` §3 rule 8):
 //!
 //! * a month whose EVERY bar is named is recorded here and answered BY NAME
-//!   by every reader — no empty generation is published for it;
+//!   by the readers that probe this index — `/bars.json`, `/bars/window.json`,
+//!   the stored sweep (`cli`), `/store.json` and `/instruments.json`, and the
+//!   doors that add or restate bars ([`crate::repair::RepairError::Quarantined`])
+//!   — and no empty generation is published for it. The server-rendered
+//!   `/bars` page does not probe it yet, and serves such a month without a
+//!   word (`docs/06-limits.md` L-R418-18: R4-03's, or that page's owner's);
 //! * a month where only SOME bars are named gets a new generation without
 //!   them through [`crate::repair::drop_month`] (the old generation stays
 //!   byte-identical), and is recorded here so a reader can say what was
@@ -54,8 +60,9 @@
 //! the BLAKE3 of (series key, month). A key's home slot is its hash modulo
 //! [`CAPACITY`]; it lives in the first free or matching slot of the
 //! [`BUCKET`] slots from there, and the trailing `BUCKET - 1` overflow slots
-//! mean that run never wraps. So a probe is ONE `pread` of
-//! [`BUCKET`] `x 64` bytes, whatever the store holds.
+//! mean that run never wraps. So a probe reads ONE bucket, one `pread` of
+//! [`BUCKET`] `x 64` bytes, whatever the store holds; since R4-18 repair 2 the
+//! 64-byte header is a second `pread` beside it (the Cost section below).
 //!
 //! | Offset | Bytes | Slot field |
 //! | --- | --- | --- |

@@ -2705,8 +2705,9 @@ fn load_classified_with_ceiling(
     // A QUARANTINED MONTH IS REFUSED BY NAME (R4-18; ING-01 b, Z5, Z6): a
     // month the quarantine names — recorded whole (every bar another
     // security's, or zero), or served as a generation without its named bars
-    // — is not a clean instrument-month to sweep. ONE PROBE, one positional
-    // read of the feed's index (`store::quarantine::probe`), before anything
+    // — is not a clean instrument-month to sweep. ONE PROBE, two positional
+    // reads of the feed's index (`store::quarantine::probe`: its header and
+    // the key's bucket), before anything
     // of the month is opened; an index that cannot be trusted refuses too,
     // never reads as "clear".
     refuse_quarantined(root, path, (underlying, rung_name, year, month))?;
