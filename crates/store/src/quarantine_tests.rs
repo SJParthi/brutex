@@ -1930,7 +1930,7 @@ fn a_ledger_cut_below_what_its_index_describes_is_refused_and_never_rebuilt_away
 /// the snapshot and the summary (the second check's follow-up on `merged`).
 /// Before, the whole record kept only its own bars (the served generation's,
 /// after the drop) and its own cause: the reader said "all 2 of its bars are
-/// zero_price" of a month that set aside 6, and the listing under-counted.
+/// `zero_price`" of a month that set aside 6, and the listing under-counted.
 #[test]
 fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() {
     let store = Store::new("drop-then-whole");

@@ -505,7 +505,7 @@ async fn bars_json_asks_again_while_a_quarantine_writer_brings_its_index_level()
 /// repair 2, the second check's follow-up on `merged`): `/bars.json` names
 /// every bar the two acts set aside and both causes, and the listing counts
 /// them all. Before, the whole record kept only its own bars and cause, so
-/// the answer said "all 2 of its bars are zero_price" of a month that set
+/// the answer said "all 2 of its bars are `zero_price`" of a month that set
 /// aside 6, and `/instruments.json` under-counted by the bars dropped first.
 #[tokio::test]
 async fn bars_json_names_every_bar_and_every_cause_a_month_set_aside() {

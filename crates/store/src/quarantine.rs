@@ -302,9 +302,9 @@ impl Causes {
             .filter(move |cause| self.contains(*cause))
     }
 
-    /// The set as every answer's sentence names it: `zero_price`, or
-    /// `foreign_level and zero_price`, or `before_listing, foreign_level and
-    /// zero_price`.
+    /// The set as every answer's sentence names it, one cause, two joined by
+    /// "and", three by a comma and "and":
+    /// `before_listing, foreign_level and zero_price`.
     #[must_use]
     pub fn said(self) -> String {
         let codes: Vec<&str> = self.each().map(Cause::code).collect();
@@ -1991,8 +1991,8 @@ fn image_trusted(image: &[u8]) -> bool {
 /// them, so the month's every bar is then set aside); a whole record onto a
 /// whole record is the newer line. Every arm keeps every cause any line
 /// named (R4-18 repair 2: the whole record after drops kept only its own
-/// bars and cause, so a reader said "all 2 of its bars are zero_price" of a
-/// month that set aside 6).
+/// bars and cause, so a reader said "all 2 of its bars are `zero_price`" of
+/// a month that set aside 6).
 fn merged(held: Entry, newer: Entry) -> Entry {
     let causes = held.causes.union(newer.causes);
     match (held.scope, newer.scope) {
