@@ -1478,3 +1478,70 @@ fn measure_the_copy_rate() {
     assert!(bytes >= 256 * CHUNK as u64);
     fx.every_record_verifies();
 }
+
+/// **A JOURNAL RUN LINE WHOSE ARCHIVE CANNOT BE READ IS NAMED**, never skipped
+/// in silence: the archive it names would go uncopied with nothing said. An
+/// escape that does not decode, a relative path and a run line with no
+/// `archive=` are each named by line; the run is partial.
+#[test]
+fn a_journal_run_line_whose_archive_cannot_be_read_is_named() {
+    let fx = Fixture::standard("bad-journal");
+    let path = pull::gdfl_import::journal_path(&fx.root);
+    fs::write(
+        &path,
+        "run 1 source=zip archive=%zz archive_bytes=1 started=1\n\
+         begin indices 2025-01-02 *\n\
+         run 2 source=zip archive=relative/x.zip archive_bytes=1 started=2\n\
+         run 3 source=zip archive_bytes=1 started=3\n\
+         run 4 source=unrecorded archive=unrecorded archive_bytes=unrecorded started=4\n",
+    )
+    .unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("UNREADABLE      3 "), "{out}");
+    for line in [1, 3, 4] {
+        assert!(
+            out.contains(&format!("gdfl.journal line {line} (")),
+            "line {line}: {out}"
+        );
+    }
+    assert!(
+        !out.contains("gdfl.journal line 5 ("),
+        "unrecorded is no fault: {out}"
+    );
+    assert!(
+        fx.receipts()[0].contains(" state=partial "),
+        "{:?}",
+        fx.receipts()
+    );
+}
+
+/// **A MONTH WHOSE GENERATION POINTER CANNOT BE READ IS COPIED AND NAMED**:
+/// its bytes, the broken pointer's included, go to the target, but a revision
+/// past a gap could not be found, so the month is not called whole.
+#[test]
+fn a_month_whose_pointer_cannot_be_read_is_copied_and_named() {
+    let fx = Fixture::standard("bad-pointer");
+    let path = month_path("INDEX", "NIFTY", false, 1);
+    let pointer = store::generation::pointer_path(&fx.root, path);
+    fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+    // ONE WHOLE RECORD THAT DOES NOT VERIFY: the store refuses it
+    // (`store::generation::served`); a shorter file is only a torn tail.
+    fs::write(&pointer, [0x5a_u8; 64]).unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("UNREADABLE") && out.contains("its generation pointer cannot be read"),
+        "{out}"
+    );
+    let unit = path.to_string();
+    let copied: Vec<String> = fx
+        .records()
+        .into_iter()
+        .filter(|r| r.unit.as_deref() == Some(unit.as_bytes()))
+        .map(|r| shown(&r.path))
+        .collect();
+    assert!(copied.contains(&unit), "{copied:?}");
+    assert!(copied.iter().any(|p| p.ends_with(".gen-v1")), "{copied:?}");
+    fx.every_record_verifies();
+}

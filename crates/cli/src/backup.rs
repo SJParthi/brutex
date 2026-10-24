@@ -99,9 +99,12 @@
 //! `target_missing`, `not_a_directory`, `inside_store`, `same_device` (the
 //! target's `st_dev` is the store root's), `inside_archive` (the target lies
 //! inside a source archive this verb copies), `target_path_too_long` (the
-//! receipt line could not hold it), `insufficient_space` (less free space
-//! than the plan's bytes to copy), `target_busy` (another run holds the
-//! target), and a manifest this build cannot read.
+//! receipt line could not hold it), `receipt_unwritable` (the receipt log is
+//! no regular file), `nothing_listed` (the store lists nothing: a wrong
+//! root), `insufficient_space` (less free space than the plan's bytes to
+//! copy) or `space_unknown`, `journal_unreadable`, `target_busy` (another run
+//! holds the target), and `manifest_unreadable` (a line this build cannot
+//! read). A run the target stops is `target_failed` or `target_unwritable`.
 //!
 //! # The receipt (D-7177)
 //!
@@ -778,6 +781,10 @@ fn months(root: &Path, faults: &mut Faults) -> Vec<Month> {
 struct MonthFiles {
     files: Vec<PathBuf>,
     locks: Vec<PathBuf>,
+    /// Why the generation pointer could not be read: its bytes are still
+    /// copied, but a revision past a gap in the ordinals would not be found,
+    /// so the month is named unreadable rather than called whole.
+    pointer_fault: Option<String>,
 }
 
 fn month_files(root: &Path, path: StorePath<'_>) -> MonthFiles {
@@ -800,7 +807,14 @@ fn month_files(root: &Path, path: StorePath<'_>) -> MonthFiles {
     // could otherwise hide.
     let newest = match store::generation::served(root, path) {
         Ok(store::generation::Served::Revision(pointer)) => pointer.revision.ordinal(),
-        _ => 0,
+        Ok(store::generation::Served::Original) => 0,
+        Err(why) => {
+            out.pointer_fault = Some(format!(
+                "its generation pointer cannot be read ({why}); a revision past a gap in \
+                 its ordinals would not be found"
+            ));
+            0
+        }
     };
     for ordinal in 1..=store::repair::MAX_REVISIONS {
         let Ok(revision) = store::repair::Revision::new(ordinal) else {
@@ -950,8 +964,9 @@ fn walk(
 }
 
 /// Every distinct archive the GDFL journal's `run` lines name, in the order
-/// first named; `unrecorded` and undecodable values are left out.
-pub(crate) fn archives(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// first named; `unrecorded` is left out, and a run line whose archive cannot
+/// be read is named in `faults.unreadable`.
+pub(crate) fn archives(root: &Path, faults: &mut Faults) -> Result<Vec<PathBuf>, String> {
     let journal = pull::gdfl_import::journal_path(root);
     let file = match store::open_flags::open_read_no_follow(&journal) {
         Ok(file) => file,
@@ -962,6 +977,7 @@ pub(crate) fn archives(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     let mut reader = io::BufReader::new(file);
     let mut line = Vec::new();
+    let mut number = 0_u64;
     loop {
         line.clear();
         let read = reader
@@ -971,23 +987,35 @@ pub(crate) fn archives(root: &Path) -> Result<Vec<PathBuf>, String> {
         if read == 0 || line.pop() != Some(b'\n') {
             break;
         }
+        number += 1;
         if !line.starts_with(b"run ") {
             continue;
         }
-        let Ok(text) = std::str::from_utf8(&line) else {
-            continue;
-        };
-        let Some(path) = text
-            .split(' ')
-            .find_map(|word| word.strip_prefix("archive="))
-            .filter(|value| *value != "unrecorded")
-            .and_then(decoded)
-        else {
-            continue;
-        };
-        let path = PathBuf::from(std::ffi::OsStr::from_bytes(&path));
-        if path.is_absolute() && seen.insert(path.clone()) {
-            out.push(path);
+        // A RUN LINE WHOSE ARCHIVE CANNOT BE READ IS NAMED, never skipped in
+        // silence: the archive it names would go uncopied unseen.
+        let value = std::str::from_utf8(&line).ok().and_then(|text| {
+            text.split(' ')
+                .find_map(|word| word.strip_prefix("archive="))
+        });
+        match value {
+            Some("unrecorded") => {}
+            Some(value) => {
+                match decoded(value).map(|path| PathBuf::from(std::ffi::OsStr::from_bytes(&path))) {
+                    Some(path) if path.is_absolute() => {
+                        if seen.insert(path.clone()) {
+                            out.push(path);
+                        }
+                    }
+                    _ => faults.unreadable.add(format!(
+                        "{} line {number} (its archive= is no absolute path this build can decode)",
+                        journal.display()
+                    )),
+                }
+            }
+            None => faults.unreadable.add(format!(
+                "{} line {number} (a run line with no readable archive=)",
+                journal.display()
+            )),
         }
     }
     Ok(out)
@@ -1375,7 +1403,7 @@ fn units(root: &Path, faults: &mut Faults) -> Result<(Vec<Unit>, Vec<PathBuf>), 
                 .map(Unit::File),
         );
     }
-    let archives = archives(root).map_err(|why| refused("journal_unreadable", why))?;
+    let archives = archives(root, faults).map_err(|why| refused("journal_unreadable", why))?;
     for archive in &archives {
         out.extend(archive_found(archive, faults).into_iter().map(Unit::File));
     }
@@ -1478,6 +1506,9 @@ fn plan(root: &Path, units: &[Unit], book: &mut Book, ran: &mut Ran, mut faults:
                     continue;
                 };
                 let files = month_files(root, path);
+                if let Some(why) = &files.pointer_fault {
+                    faults.unreadable.add(format!("{} ({why})", month.unit));
+                }
                 match hold(&files.locks) {
                     Ok(held) => drop(held),
                     Err(Ok(_)) => faults.busy.add(month.unit.clone()),
@@ -1846,6 +1877,9 @@ impl Copying<'_> {
         let done = self.files(&found);
         drop(held);
         done?;
+        if let Some(why) = &files.pointer_fault {
+            self.unreadable(month.unit.as_bytes(), why)?;
+        }
         self.throttle();
         Ok(true)
     }

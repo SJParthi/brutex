@@ -55,7 +55,7 @@ export function diskSummary(body) {
 export function copyText(backup) {
   const receipt = backup?.receipt;
   if (!receipt || typeof receipt.files !== 'number') return String(backup?.last ?? '');
-  const target = backup.target === 'present' ? '' : ` (target ${String(backup.target ?? 'unknown').replace('_', ' ')})`;
+  const target = backup.target === 'present' ? '' : ` (target ${String(backup.target ?? 'unknown').replaceAll('_', ' ')})`;
   return `${String(receipt.copied)} to ${String(receipt.dest)}${target}, ${receipt.files} files, ${bytesText(receipt.bytes)}`;
 }
 

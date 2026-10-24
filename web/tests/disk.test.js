@@ -190,6 +190,7 @@ test('the band shows the last backup with its manifest count and bytes, the last
   assert.equal(drillText({ recorded: false, why: 'never' }), 'no restore drill recorded');
   assert.equal(drillFailed({ recorded: false }), false);
   assert.equal(copyText({ last: 'copied=2026-10-23T00:00Z dest=/x by=op' }), 'copied=2026-10-23T00:00Z dest=/x by=op');
+  assert.ok(copyText({ ...backup, target: 'not_a_directory' }).includes('(target not a directory)'));
   // THE SERVER'S THRESHOLD WINS over the page's when it serves one.
   assert.equal(backupAlert({ backup: { ...backup, stale_after_days: 0 } }, now)?.text,
     'The last copy of this store is 1 days old.');
