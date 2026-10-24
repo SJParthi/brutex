@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-12: /db reads its lists from the server: no whole-list download, no typed lists, rows kept as columns
 
@@ -62,12 +62,43 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
 - `db_loads_at_ten_times_the_list_without_a_long_task` (web/tests/db-ten-times.test.js).
 - `yieldTask` refs its MessagePort while a yield waits: census-worker tests 9-10 pass in Node 22.22.
 
+## Done in the third round (commits 34b28d51, 7548d5fd, b422255d)
+
+- Merged the newest `origin/feat/db-fix` (7b397bbe: R4-27, IA-4, CLOUD-MUTSTORE, CLOUD-MUTCLI; no
+  file under `web/` changed upstream) as `34b28d51`.
+- Extreme cases (census-scope.test.js, census-first-load.test.js): one record; the 4,096 cap and one
+  past it; today / archive end / one day past it / a year turning; an out-of-order listing; torn
+  root, rows and listing bodies (now named "its body is not JSON", never thrown); garbage views;
+  out of the box, a hyphenated and an ampersand symbol (`BAJAJ-AUTO` is not BAJAJ's row: readScope
+  now reads its own rows by `parseKey`, and a chain's rows carry the expiry asked); a superseded read
+  never published; combinations: saturated + moved generation, ten times the expiries + a chain past
+  the cap, a segment switch in flight + a failing read.
+- Fails before, passes after (base = e851da1c sources exported to the scratchpad, the new test files
+  copied in): census-scope, no-typed-lists and db-ten-times fail at import at base (the functions they
+  test do not exist there); census-first-load 7 (`no_db_view_downloads_the_whole_census`), 8 and 9
+  fail on behaviour; census-worker 9-10 are cancelled at base by the `yieldTask` defect.
+  Behaviour of the three FM-621 cases on the base `readScope`/`planRead`, by script: the spot view
+  asks `segment=FNO&underlying=ALPHA&rows=census-tuples-v1`; the options view with no expiry offers
+  no expiries (`scope.expiries` undefined, FNO named unread); a segment switch is the same request key
+  (`example#0#scope:ALPHA:`), so nothing is re-read. `a_silent_worker_is_dropped_and_the_page_says_so`
+  PASSES at base when run alone: the 10 s ceiling and the page decode already existed (WP-56b); the
+  test is R3-12's proof of it, not a fix.
+- Web gates in this container (Node 22.22.0; CI runs Node 24):
+  - W1 (`web/build` matches a fresh build): RED AT BASE: a fresh build of the unmodified base changes
+    55 files under `web/build` (worktree of e851da1c in the scratchpad). R3-12 does not commit
+    `web/build` (the spec's rule); the Mac rebuilds it at merge-back.
+  - W3 (svelte-check, ceiling 0): base 32 errors in 9 files, this branch 32 in 9 (the same set; none
+    in a file R3-12 touched). Red at base, not raised by R3-12.
+  - W4 (unused CSS selectors, ceiling 0): 0 on this branch, 0 at base.
+  - `npm run build`: exit 0.
+
 ## Left (NEXT)
 
-- NEXT: on GO: extreme-case tests (one-record listing, today/archive-end/year boundaries, out-of-order
-  listing, mixed garbage views, a superseded read never published, two combinations), fails-before
-  proof of every new named test against the base, merge the newest `origin/feat/db-fix`, the gates
-  (cargo fmt/clippy/test/deny, web test/build, svelte-check, CI shell gates), final report.
+- NEXT: on GO: the cargo gates on the merged tree (`cargo fmt --all --check`, `cargo clippy
+  --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`; the workspace
+  test build had finished before the hold), `cargo deny` (not installed here: try `cargo install`,
+  else NEEDS THE MAC), one full `npm test`, the CI shell gates that touch R3-12's files, then the final
+  report with the extreme-case list, the measurements and NEEDS THE MAC.
 
 ## Log
 
@@ -99,6 +130,18 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
 ### 2026-10-24 12:56 IST save point, HOLD found again
 
 - HOLD present again. Step finished (task 4), committed `5a93cc1e`, pushed; waiting for GO.
+
+### 2026-10-24 18:05 IST resumed (worker restarted; HOLD lifted)
+
+- Merged `origin/feat/db-fix` (`34b28d51`); extreme cases and the parseKey / torn-body hardening
+  (`7548d5fd`): `node --test tests/census-scope.test.js` 29 pass, `tests/census-first-load.test.js`
+  9 pass. svelte-check 33 then 32 after typing the fake server's answers (`b422255d`).
+
+### 2026-10-24 18:25 IST save point, HOLD found a third time
+
+- HOLD present (18:16 IST note: expected lift at the latest after 22:30 IST). Step finished,
+  `b422255d` pushed, report HELD; the cargo workspace build started before the hold runs on
+  locally. Waiting for GO.
 
 ## Decision numbers
 
