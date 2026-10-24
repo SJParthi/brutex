@@ -258,6 +258,7 @@ pub(crate) fn explain(path: &Path, points: &str) -> Result<String, String> {
             field.name()
         );
     }
+    percentage_rule_lines(&mut out);
     Ok(out)
 }
 
@@ -493,6 +494,141 @@ pub(crate) const fn explanation(field: AdmissionFieldV1) -> (&'static str, &'sta
     }
 }
 
+// ══════ A PERCENTAGE OF PRICE ON A VENDOR-ADJUSTED RUN (R4-27, AUT-10 decision 4) ══════
+//
+// D-3323 left one question to the operator: what research does with a
+// percentage statistic on a share run whose prices the vendor back-adjusted,
+// or quantised. R4-27 measured it both ways over the five sample months
+// (`cli feed-reconcile`, 18,663 matched stock-days; its docs/05 entry): on a
+// vendor-adjusted stock-day whose one factor holds across the day, a
+// percentage of price stays within the same bound as on an unadjusted day
+// (the factor interval every minute admits: p99 0.85% against 0.58%), and
+// on a quantised one within 0.19%, while an absolute paisa figure is off by
+// the factor itself (p50 33%). On a stock-day whose factor moves within the
+// day no factor relates the two feeds at all. So the rule is by the
+// stock-day's measured shape, never by the share's name, and it is the same
+// rule for every share and every feed.
+
+/// What one stock-day of a run is against the exchange's own prints, as the
+/// one per-stock-day authority measures it (`cli feed-reconcile`, DATA-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DayShape {
+    /// One factor holds across the day: the reconcile's range intersection
+    /// holds (no `range_not_constant`).
+    pub(crate) proportional: bool,
+    /// The run's prints sit on a coarser grid than the exchange's
+    /// (`grid_z` above `grid_g`).
+    pub(crate) quantised: bool,
+}
+
+/// What a percentage-of-price statistic computed on a run is worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PercentVerdict {
+    /// The exchange's own figure: raw prints, or a published index level.
+    Exact,
+    /// Admitted, and shown with these words beside it.
+    Labelled(&'static str),
+    /// Refused, for the reason named: never shown as a figure.
+    Refused(&'static str),
+}
+
+/// The label of a percentage of price on a vendor-adjusted, proportional
+/// stock-day on the exchange's grid.
+pub(crate) const PERCENT_ON_ADJUSTED: &str = "computed on vendor back-adjusted prices \
+     (D-3323); one factor across the day leaves a percentage of price within the bound an \
+     unadjusted day carries";
+
+/// The label of a percentage of price on a vendor-adjusted, proportional
+/// stock-day whose prints sit on a coarser grid than the exchange's.
+pub(crate) const PERCENT_ON_QUANTISED: &str = "computed on vendor back-adjusted prices on a \
+     coarser grid than the exchange's (a D-3323 quantised run): a percentage of price is \
+     within the measured 0.19%, a tick-level distance is not the exchange's tick";
+
+/// The label when no measured shape is at hand for the day.
+pub(crate) const PERCENT_SHAPE_UNMEASURED: &str = "computed on vendor back-adjusted prices \
+     (D-3323); no per-stock-day reconcile states whether one factor held across the day, \
+     so the figure is the exchange's only if it did";
+
+/// The refusal on a stock-day whose factor moved within the day.
+pub(crate) const PERCENT_ON_NON_PROPORTIONAL: &str = "refused: the vendor's prices are not \
+     one factor of the exchange's across the day (a D-3323 non-proportional run), so a \
+     percentage of price is not the exchange's";
+
+/// What a percentage-of-price statistic is worth on a run of `basis`, for a
+/// stock-day of measured `shape` (`None` when no reconcile row states it).
+/// The decision of R4-27's docs/05 entry, AUT-10 decision 4: refused on a
+/// non-proportional stock-day, labelled on every other vendor-adjusted one
+/// (a quantised one with its own words), exact on raw prints and published
+/// index levels. O(1).
+pub(crate) const fn percentage_statistic(
+    basis: pull::vendor::PriceBasis,
+    shape: Option<DayShape>,
+) -> PercentVerdict {
+    use pull::vendor::PriceBasis;
+    match (basis, shape) {
+        (PriceBasis::Raw | PriceBasis::AsPublished, _) => PercentVerdict::Exact,
+        (PriceBasis::VendorAdjusted, None) => PercentVerdict::Labelled(PERCENT_SHAPE_UNMEASURED),
+        (
+            PriceBasis::VendorAdjusted,
+            Some(DayShape {
+                proportional: false,
+                ..
+            }),
+        ) => PercentVerdict::Refused(PERCENT_ON_NON_PROPORTIONAL),
+        (
+            PriceBasis::VendorAdjusted,
+            Some(DayShape {
+                quantised: true, ..
+            }),
+        ) => PercentVerdict::Labelled(PERCENT_ON_QUANTISED),
+        (PriceBasis::VendorAdjusted, Some(_)) => PercentVerdict::Labelled(PERCENT_ON_ADJUSTED),
+    }
+}
+
+/// The policy report's last section: the rule above, said once, so a reader
+/// of the thresholds knows what a percentage of price means on each basis.
+fn percentage_rule_lines(out: &mut String) {
+    use pull::vendor::PriceBasis;
+    out.push_str("\nPRICE BASIS OF A PERCENTAGE OF PRICE (D-3323; R4-27, AUT-10 decision 4)\n");
+    let shapes = [
+        ("any stock-day", PriceBasis::Raw, None),
+        ("any stock-day", PriceBasis::AsPublished, None),
+        (
+            "one factor across the day, exchange grid",
+            PriceBasis::VendorAdjusted,
+            Some(DayShape {
+                proportional: true,
+                quantised: false,
+            }),
+        ),
+        (
+            "factor moved within the day",
+            PriceBasis::VendorAdjusted,
+            Some(DayShape {
+                proportional: false,
+                quantised: false,
+            }),
+        ),
+        (
+            "prints on a coarser grid",
+            PriceBasis::VendorAdjusted,
+            Some(DayShape {
+                proportional: true,
+                quantised: true,
+            }),
+        ),
+        ("shape not measured", PriceBasis::VendorAdjusted, None),
+    ];
+    for (shape, basis, measured) in shapes {
+        let verdict = match percentage_statistic(basis, measured) {
+            PercentVerdict::Exact => "exact".to_owned(),
+            PercentVerdict::Labelled(words) => format!("labelled: {words}"),
+            PercentVerdict::Refused(words) => words.to_owned(),
+        };
+        let _ = writeln!(out, "- {} prices, {shape}: {verdict}", basis.label());
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -502,6 +638,63 @@ pub(crate) const fn explanation(field: AdmissionFieldV1) -> (&'static str, &'sta
 mod tests {
     use super::*;
     const PROFILE: &str = include_str!("../../../config/intraday-research-v1.toml");
+
+    #[test]
+    fn a_percentage_statistic_on_a_quantised_run_is_refused_or_labelled() {
+        use pull::vendor::PriceBasis;
+        let shape = |proportional, quantised| {
+            Some(DayShape {
+                proportional,
+                quantised,
+            })
+        };
+        // QUANTISED, one factor across the day: labelled with its own words
+        // (measured within 0.19% of the exchange's percentage), never exact.
+        assert_eq!(
+            percentage_statistic(PriceBasis::VendorAdjusted, shape(true, true)),
+            PercentVerdict::Labelled(PERCENT_ON_QUANTISED)
+        );
+        // A factor that moved within the day: refused, quantised or not.
+        for quantised in [true, false] {
+            assert_eq!(
+                percentage_statistic(PriceBasis::VendorAdjusted, shape(false, quantised)),
+                PercentVerdict::Refused(PERCENT_ON_NON_PROPORTIONAL)
+            );
+        }
+        // One factor across the day on the exchange's grid: labelled, not
+        // silently exact; unmeasured: labelled as unmeasured, never exact.
+        assert_eq!(
+            percentage_statistic(PriceBasis::VendorAdjusted, shape(true, false)),
+            PercentVerdict::Labelled(PERCENT_ON_ADJUSTED)
+        );
+        assert_eq!(
+            percentage_statistic(PriceBasis::VendorAdjusted, None),
+            PercentVerdict::Labelled(PERCENT_SHAPE_UNMEASURED)
+        );
+        // Raw prints and published index levels are the exchange's own, on
+        // every shape.
+        for basis in [PriceBasis::Raw, PriceBasis::AsPublished] {
+            for measured in [None, shape(true, true), shape(false, false)] {
+                assert_eq!(percentage_statistic(basis, measured), PercentVerdict::Exact);
+            }
+        }
+        for words in [
+            PERCENT_ON_QUANTISED,
+            PERCENT_ON_NON_PROPORTIONAL,
+            PERCENT_ON_ADJUSTED,
+            PERCENT_SHAPE_UNMEASURED,
+        ] {
+            assert!(words.contains("D-3323"), "{words}");
+        }
+        // THE REPORT SAYS IT, once, after the thresholds.
+        let mut out = String::new();
+        percentage_rule_lines(&mut out);
+        assert!(out.starts_with("\nPRICE BASIS OF A PERCENTAGE OF PRICE"));
+        assert_eq!(out.lines().filter(|line| line.starts_with("- ")).count(), 6);
+        assert_eq!(out.matches("refused: ").count(), 1);
+        assert_eq!(out.matches("labelled: ").count(), 3);
+        assert!(out.contains("raw, as traded prices, any stock-day: exact"));
+    }
 
     #[test]
     fn shipped_profile_resolves_all_37_without_requiring_manual_values() {

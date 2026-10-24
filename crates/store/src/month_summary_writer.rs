@@ -24,6 +24,15 @@
 //! [`crate::staging`]) and renamed over `<yyyy-mm>.sum`, so a reader never
 //! sees a file change under it.
 //!
+//! # A version 1 summary (R4-27)
+//!
+//! A one-minute month's version 1 summary counts no padded minute: its rows
+//! were never judged for flat carries. It is kept as it is while it still
+//! describes the month (no write happens), and it is never extended: the next
+//! commit, or the rebuild door ([`BarFile::month_summary_existing`]), builds
+//! it whole as version 2, as a new file renamed over the old, and the
+//! `store.sum` line names `summary_v1` as the reason.
+//!
 //! # Not flushed, and why that is safe
 //!
 //! The summary is derived from bars that are already durable, and every read
@@ -155,6 +164,13 @@ impl BarFile {
         let Refused::Stale { .. } = refused else {
             return Plan::Whole(refused.to_string());
         };
+        // A VERSION 1 SUMMARY OF A ONE-MINUTE MONTH IS NOT EXTENDED (R4-27):
+        // the rows it folded were never judged for flat carries, so extending
+        // it would write a version 2 summary that counts only the new rows.
+        // It is built whole, once, and the log names why.
+        if summary.wants_carries() {
+            return Plan::Whole(V1_UPGRADE.to_owned());
+        }
         // STALE BY APPENDS ONLY: an older generation of THIS file, fewer
         // rows, and its last row still the stamp it names.
         let prefix = summary.generation < header.generation
@@ -244,6 +260,10 @@ impl BarFile {
             &file.header,
             file.admission.month,
         ) {
+            // A VERSION 1 SUMMARY OF A ONE-MINUTE MONTH describes these bars
+            // but counts no padded minute (R4-27): the door builds it whole
+            // as version 2, a new file renamed over the old, and names it.
+            Ok(kept) if kept.wants_carries() => V1_UPGRADE.to_owned(),
             Ok(_) => return Ok(Summarized::Kept),
             Err(Refused::BelowThreshold) => return Ok(Summarized::BelowThreshold),
             Err(why) => why.to_string(),
@@ -313,6 +333,11 @@ fn note_summary_lags(path: &Path, why: &str, n_valid: u64) {
             .with("n_valid", telemetry::Value::Uint(n_valid)),
     );
 }
+
+/// Why a one-minute month's version 1 summary was built whole (R4-27).
+const V1_UPGRADE: &str = "summary_v1: a version 1 summary of a one-minute month holds no \
+     flat-carry bitmaps, so its padded minutes were not counted; built whole as version 2 \
+     (INT-15, R4-27)";
 
 /// Why a month that was sparse was read whole at this commit.
 const DENSE_AGAIN: &str = "dense_again: the month holds at least half the seconds it spans \

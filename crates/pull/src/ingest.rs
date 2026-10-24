@@ -4215,8 +4215,12 @@ fn derive_month(
 /// each rung month goes through the same repair door as its source: appended
 /// where the append door takes it, repaired to a new generation where the
 /// month holds bars around the days the fold now fills. A held derived bar is
-/// never dropped or changed; one the fold would change refuses that rung by
-/// name, and the source month's repair stands.
+/// never dropped or changed; one the fold would change or drop refuses that
+/// rung by name ([`held_against_repair`]: a dropped one used to read as
+/// repaired, verify-R4-27-r1 B1), a rung-month stored under the fold before
+/// D-7270 is refused as that, and the source month's repair stands. So this
+/// door does NOT refold a month the padded-minute rule changes: no door
+/// restates a held derived bar yet (store step S-47 waits for one).
 ///
 /// Spot and futures only, minute source only, never GDFL — the rules
 /// [`derive_all`] states.
@@ -4281,18 +4285,26 @@ fn derive_repair(
         } = match folded {
             Ok(folded) => folded,
             Err(why) => {
-                let why = why.to_string();
-                note_not_derived(instrument, rung, &why);
-                failures.push(
-                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
-                        .in_month(into.month),
-                );
+                failures.push(rung_refused(instrument, rung, into.month, &why.to_string()));
                 continue;
             }
         };
         failures.extend(diagnostics.into_iter().map(|why| {
             Failure::new(instrument, format!("{}: {why}", rung.as_str())).in_month(into.month)
         }));
+        // EVERY HELD BAR MUST BE A BAR OF THE FOLD, ASKED BEFORE THE DOOR
+        // (verify-R4-27-r1 B1). The door keeps every held bar, so a held bar
+        // the fold has no bar for answered "nothing new" and the rung read as
+        // repaired, unchanged; asked first, it is refused by name, and a held
+        // month that is the fold before D-7270 is named as that. Before the
+        // empty check: a fold with no bar at all still meets the held ones.
+        let before = fold_before(&minutes, bucket, venue, (into.cash_schedule, into.calendar));
+        let asked = (bars.as_slice(), policy.open_interest_applies);
+        if let Err(why) = held_against_repair((store_root, symbol_id), parts, asked, before) {
+            let journal = (store_root, &parts, reason);
+            failures.push(held_refused(journal, (instrument, rung, into.month), &why));
+            continue;
+        }
         if bars.is_empty() {
             continue;
         }
@@ -4301,13 +4313,7 @@ fn derive_repair(
                 entries.push(held);
                 ledger.push(request_minutes::derive_line(&parts, tally));
             }
-            Err(why) => {
-                note_not_derived(instrument, rung, &why.why);
-                failures.push(
-                    Failure::new(instrument, format!("{}: {why}", rung.as_str()))
-                        .in_month(into.month),
-                );
-            }
+            Err(why) => failures.push(rung_refused(instrument, rung, into.month, &why.why)),
         }
     }
     failures.extend(request_minutes::record_derived(
@@ -4318,6 +4324,103 @@ fn derive_repair(
         &ledger,
     ));
     failures
+}
+
+/// A derived rung's refusal in the repair door's derive: logged "not derived"
+/// and filed under the month it was folded for (DB-G45), in the words
+/// `<rung>: <why>` every derive refusal has.
+fn rung_refused(
+    instrument: &str,
+    rung: Timeframe,
+    month: store::path::YearMonth,
+    why: &str,
+) -> Failure {
+    note_not_derived(instrument, rung, why);
+    Failure::new(instrument, format!("{}: {why}", rung.as_str())).in_month(month)
+}
+
+/// A refusal of [`held_against_repair`], journaled as the door journals a
+/// refusal of its versioned repair ([`journal_refusal`], as [`repair_after`]
+/// calls it: one `refused` line in the repair journal, with the run's
+/// reason, and one `pull.repair` event), then filed as the rung's failure
+/// ([`rung_refused`]). Asked before the door, it would otherwise reach
+/// neither: a repair run that refused every derived rung this way left no
+/// line in `audit/<vendor>.repairs` (R4-27 repair 1, measured on a private
+/// copy). An append refusal the door answers as itself (IA-16: a held bar
+/// the fold restates, `batch record N restates the record held at T`) is
+/// filed and logged `pull.derive` and, as before, not journaled.
+fn held_refused(
+    (store_root, parts, reason): (&Path, &PathParts<'_>, &str),
+    (instrument, rung, month): (&str, Timeframe, store::path::YearMonth),
+    why: &str,
+) -> Failure {
+    let why = match journal_refusal(store_root, parts, why, reason) {
+        Ok(()) => why.to_owned(),
+        Err(journal) => format!("{why}; and the repair journal line was not written: {journal}"),
+    };
+    rung_refused(instrument, rung, month, &why)
+}
+
+/// Whether the repair door may be handed `bars`, the fold of a source month
+/// as now served, for the rung-month at `parts` (D-3350, verify-R4-27-r1
+/// B1): every held bar must be a bar of the fold.
+///
+/// * A held bar the fold has no bar for is refused HERE, by name: the door
+///   keeps every held bar and would answer the rung repaired, unchanged.
+/// * A held bar the fold changes is the door's own refusal
+///   (`store::repair::RepairError::HeldBarDiffers`, whose comparison reads
+///   open interest by the instrument's policy), so it is handed on.
+/// * A held month that is, every held bar of it, the fold before D-7270 is
+///   refused as that ([`stored_under_the_fold_before`]) either way.
+///
+/// Every comparison is the door's own (`store::repair::same_bar` under the
+/// instrument's `open_interest_applies`): a share's held `0` and the fold's
+/// null are one absence (D-3322), as the door reads them. So a difference the
+/// door ignores neither hides a later held bar the fold drops nor stops the
+/// rule change being named; byte for byte, a share's month an earlier build
+/// wrote with open interest `0` met this build's fold with it null at its
+/// first bar and was never named (measured on a private copy of a real
+/// share-month, R4-27 repair 1).
+///
+/// A rung-month that does not exist yet is the door's to create.
+///
+/// # Cost
+///
+/// One read-only open and O(held + candidates) on every repair of a derived
+/// rung, the order of the door's own merge; the fold before D-7270 only on a
+/// disagreement.
+///
+/// # Errors
+///
+/// The refusal, or the store's words for a month or a record it refuses to
+/// read.
+fn held_against_repair(
+    (store_root, symbol_id): (&Path, u32),
+    parts: PathParts<'_>,
+    (bars, open_interest_applies): (&[Bar], bool),
+    before: impl FnOnce() -> Option<Vec<Bar>>,
+) -> Result<(), String> {
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let file = match BarFile::open_existing(store_root, path, symbol_id) {
+        Ok(file) => file,
+        Err(store::file::StoreError::Missing { .. }) => return Ok(()),
+        Err(why) => return Err(why.to_string()),
+    };
+    let Err(disagrees) = walk_held(&file, bars, as_the_door(open_interest_applies))? else {
+        return Ok(());
+    };
+    if held_under_the_fold_before(&file, bars, before, open_interest_applies)? {
+        return Err(stored_under_the_fold_before(
+            disagrees,
+            "the repair door never changes or drops a held bar, and adding the fold's new bars to it would put bars of two fold rules in one month",
+        ));
+    }
+    match disagrees {
+        HeldDisagrees::NoCandidate(at) => Err(format!(
+            "historical derived bar at {at} has no bar in the fold of the source month as now served; the repair door never drops a held bar (D-3350), so the rung is refused by name, not kept and reported repaired; bytes preserved, not repaired"
+        )),
+        HeldDisagrees::Differs(_) => Ok(()),
+    }
 }
 
 /// Every bar of a source month as it is now served, and the venue its
@@ -4749,13 +4852,18 @@ fn derive(
         }
         note_not_derived(parts.symbol, rung, why);
     }
-    let historical = reconcile_derived(&mut bars, store_root, symbol_id, parts).map_err(|why| {
-        if diagnostics.is_empty() {
-            why
-        } else {
-            format!("{why}; {}", diagnostics.join("; "))
-        }
-    })?;
+    // THE FOLD BEFORE D-7270, ONLY TO NAME A HELD MONTH STORED UNDER IT
+    // (verify-R4-27-r1 B2): folded on the refusal path alone.
+    let before = fold_before(minutes, bucket, venue, (cash_schedule, calendar));
+    let naming = (before, crate::vendor::open_interest_applies(segment));
+    let historical =
+        reconcile_derived(&mut bars, (store_root, symbol_id), parts, naming).map_err(|why| {
+            if diagnostics.is_empty() {
+                why
+            } else {
+                format!("{why}; {}", diagnostics.join("; "))
+            }
+        })?;
     let behind = !historical.is_empty();
     diagnostics.extend(historical);
     if bars.is_empty() {
@@ -4789,15 +4897,195 @@ fn derive(
     .map_err(String::from)
 }
 
+/// Where a stored derived rung-month first disagrees with a fold of its
+/// committed source month, walking the held bars in order ([`walk_held`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldDisagrees {
+    /// The fold has no bar at this held stamp.
+    NoCandidate(i64),
+    /// The fold's bar at this held stamp carries other values.
+    Differs(i64),
+}
+
+impl HeldDisagrees {
+    /// The append door's refusal of a disagreement that is NOT the padded
+    /// rule's change ([`stored_under_the_fold_before`] is that one's), in the
+    /// words it has always had.
+    fn refusal(self) -> String {
+        match self {
+            Self::NoCandidate(at) => format!(
+                "historical derived evidence incomplete at {at}: no complete source candidate for stored bar; restore complete minute source and verified schedule evidence before retrying derivation; rung refused; bytes preserved, not repaired"
+            ),
+            Self::Differs(at) => format!(
+                "historical derived conflict at {at}: stored bar differs from complete source; rung refused; bytes preserved, not repaired; explicit versioned correction required"
+            ),
+        }
+    }
+}
+
+/// What [`walk_held`] found when every held bar agreed with the fold.
+#[derive(Debug, Clone, Copy, Default)]
+struct HeldWalk {
+    /// Folded candidates before a held stamp that history lacks (D-3341,
+    /// WP-13b: counted, not repeated).
+    gaps: u64,
+    /// The first and the last of them.
+    first_gap: Option<i64>,
+    last_gap: i64,
+    /// The last held bar.
+    last: Option<Bar>,
+}
+
+/// Walks every bar `file` holds against `candidates`, a fold of the month's
+/// committed source minutes in stamp order: each held bar must be a
+/// candidate that `same` takes for it ([`same_bytes`] for the append door's
+/// reconcile, [`as_the_door`] for the repair door's check and for naming the
+/// rule change). One record read per held bar and one step per candidate,
+/// O(held + candidates).
+///
+/// # Errors
+///
+/// The store's words for a record it refuses to read.
+fn walk_held(
+    file: &BarFile,
+    candidates: &[Bar],
+    same: impl Fn(&Bar, &Bar) -> bool,
+) -> Result<Result<HeldWalk, HeldDisagrees>, String> {
+    let mut walked = HeldWalk::default();
+    let mut candidates = candidates.iter().peekable();
+    for index in 0..file.header().n_valid {
+        let held = file.read_record(index).map_err(|why| why.to_string())?;
+        while let Some(candidate) = candidates.next_if(|b| b.ts_micros < held.ts_micros) {
+            walked.gaps = walked.gaps.saturating_add(1);
+            walked.first_gap = walked.first_gap.or(Some(candidate.ts_micros));
+            walked.last_gap = candidate.ts_micros;
+        }
+        match candidates.next_if(|b| b.ts_micros == held.ts_micros) {
+            None => return Ok(Err(HeldDisagrees::NoCandidate(held.ts_micros))),
+            Some(candidate) if !same(&held, candidate) => {
+                return Ok(Err(HeldDisagrees::Differs(held.ts_micros)));
+            }
+            Some(_) => walked.last = Some(held),
+        }
+    }
+    Ok(Ok(walked))
+}
+
+/// A held bar and a candidate are one bar, byte for byte: the append door's
+/// historical reconcile, whose conflict is any difference (D-3341).
+fn same_bytes(held: &Bar, candidate: &Bar) -> bool {
+    held == candidate
+}
+
+/// A held bar and a candidate are one bar as the repair door reads them
+/// (`store::repair::same_bar`): where open interest is not a measurement for
+/// the instrument, a held `0` and a null are one absence (D-3322).
+fn as_the_door(open_interest_applies: bool) -> impl Fn(&Bar, &Bar) -> bool {
+    move |held, candidate| store::repair::same_bar(held, candidate, open_interest_applies)
+}
+
+/// The fold before D-7270 ([`crate::fold::PADDED_FOLD_BEFORE`]) of a
+/// month's committed `minutes` into `bucket`, deferred: what
+/// [`reconcile_derived`] and [`held_against_repair`] call only on a
+/// disagreement, so a month that agrees never pays for a second fold. A fold
+/// that refuses is `None`: the disagreement keeps its own words.
+fn fold_before<'a>(
+    minutes: &'a [Bar],
+    bucket: crate::fold::Bucket,
+    venue: crate::vendor::Venue,
+    (cash_schedule, calendar): (
+        Option<&'a crate::cash_auction::Schedule>,
+        crate::calendar::Runtime<'a>,
+    ),
+) -> impl FnOnce() -> Option<Vec<Bar>> + 'a {
+    move || {
+        crate::fold::derive_minutes_with(
+            minutes,
+            bucket,
+            venue,
+            cash_schedule,
+            calendar,
+            crate::fold::PADDED_FOLD_BEFORE,
+        )
+        .ok()
+        .map(|folded| folded.bars)
+    }
+}
+
+/// Whether a held rung-month that disagrees with the fold in force is,
+/// every held bar of it, the fold before D-7270
+/// ([`crate::fold::PADDED_FOLD_BEFORE`]): the rule change, which
+/// [`stored_under_the_fold_before`] names, and not missing source or a
+/// conflict (verify-R4-27-r1 B2).
+///
+/// `before` folds the same committed minutes under the rule before; it is
+/// called only here, on a refusal path, so an agreeing month never pays for
+/// the second fold. A month the two rules fold identically (an index, a
+/// future, a share with no padded minute) cannot be the rule change and is
+/// not walked again.
+///
+/// The held bars are walked against the fold before as the repair door
+/// compares ([`as_the_door`]): a share's month an earlier build wrote with
+/// open interest `0` is still the fold before of minutes this build holds
+/// with it null (D-3322), which byte for byte it never is. Measured on a
+/// private copy of a real share-month (SIEMENS 2019-03, R4-27 repair 1):
+/// every rung disagreed with its refold at its first bar by that absence
+/// alone, and the rule change went unnamed.
+///
+/// # Errors
+///
+/// The store's words for a record it refuses to read.
+fn held_under_the_fold_before(
+    file: &BarFile,
+    in_force: &[Bar],
+    before: impl FnOnce() -> Option<Vec<Bar>>,
+    open_interest_applies: bool,
+) -> Result<bool, String> {
+    let Some(old) = before().filter(|old| old.as_slice() != in_force) else {
+        return Ok(false);
+    };
+    Ok(walk_held(file, &old, as_the_door(open_interest_applies))?.is_ok())
+}
+
+/// The refusal of a stored derived rung-month whose every held bar is the
+/// fold before D-7270 and which the rule in force folds differently: named
+/// for the rule change it is, with the step that owes the refold (S-47) and
+/// why that step cannot run yet, never as missing source or a conflict
+/// (verify-R4-27-r1 B1, B2). `door` is the door refusing: the append door
+/// takes no new day of the rung-month, and the repair door adds nothing to
+/// it, since either would put bars of two fold rules in one month.
+fn stored_under_the_fold_before(disagrees: HeldDisagrees, door: &str) -> String {
+    let (at, what) = match disagrees {
+        HeldDisagrees::NoCandidate(at) => (
+            at,
+            "has no bar at it (a bucket of only vendor-padded minutes has none)",
+        ),
+        HeldDisagrees::Differs(at) => (
+            at,
+            "folds it differently (a vendor-padded minute is no trade)",
+        ),
+    };
+    format!(
+        "historical derived bar at {at} stored under the fold before D-7270: every held bar of this rung-month is the fold of its committed minutes with a vendor-padded minute read as a trade, and the rule in force (D-7270) {what}; {door}; rung refused until the rung-month is refolded as a new generation (store step S-47, which waits for a door that restates a held derived bar: none does today); the rule changed, not the source; bytes preserved, not repaired"
+    )
+}
+
 /// Compare historical derived bytes at the monthly boundary, O(source + held).
 /// History is never replaced. Missing evidence and byte conflicts both refuse
 /// the rung, but only a complete-source comparison proves a conflict. Unfillable holes
 /// produce failures while complete buckets after the tail may still append.
+///
+/// A held month that disagrees with the fold in force but is, held bar for
+/// held bar, the fold before D-7270 (`before`, folded only on that refusal
+/// path) is refused as that, by [`stored_under_the_fold_before`]: the rule
+/// changed, not the source (verify-R4-27-r1 B2). The reconcile itself stays
+/// byte for byte ([`same_bytes`]); only the naming reads a share's open
+/// interest as the repair door does ([`held_under_the_fold_before`]).
 fn reconcile_derived(
     bars: &mut Vec<Bar>,
-    root: &Path,
-    symbol_id: u32,
+    (root, symbol_id): (&Path, u32),
     parts: PathParts<'_>,
+    (before, open_interest_applies): (impl FnOnce() -> Option<Vec<Bar>>, bool),
 ) -> Result<Vec<String>, String> {
     let mut diagnostics = Vec::new();
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
@@ -4809,39 +5097,27 @@ fn reconcile_derived(
         return Ok(diagnostics);
     }
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| why.to_string())?;
-    let mut candidates = bars.iter().peekable();
-    let mut last = None;
-    // COUNTED, NOT REPEATED (D-3341, WP-13b): one line for every candidate
-    // behind the tail, where there was one line each.
-    let mut gaps = 0_u64;
-    let mut first_gap: Option<i64> = None;
-    let mut last_gap = 0_i64;
-    for index in 0..file.header().n_valid {
-        let held = file.read_record(index).map_err(|why| why.to_string())?;
-        while let Some(candidate) = candidates.peek().filter(|b| b.ts_micros < held.ts_micros) {
-            gaps = gaps.saturating_add(1);
-            first_gap = first_gap.or(Some(candidate.ts_micros));
-            last_gap = candidate.ts_micros;
-            candidates.next();
+    let walked = match walk_held(&file, bars, same_bytes)? {
+        Ok(walked) => walked,
+        Err(disagrees) => {
+            return Err(
+                if held_under_the_fold_before(&file, bars, before, open_interest_applies)? {
+                    stored_under_the_fold_before(
+                        disagrees,
+                        "the append door takes no new day of it, which would put bars of two fold rules in one month",
+                    )
+                } else {
+                    disagrees.refusal()
+                },
+            );
         }
-        let matching = candidates
-            .peek()
-            .is_some_and(|b| b.ts_micros == held.ts_micros);
-        if !matching {
-            return Err(format!(
-                "historical derived evidence incomplete at {}: no complete source candidate for stored bar; restore complete minute source and verified schedule evidence before retrying derivation; rung refused; bytes preserved, not repaired",
-                held.ts_micros
-            ));
-        }
-        if candidates.peek().is_some_and(|b| **b != held) {
-            return Err(format!(
-                "historical derived conflict at {}: stored bar differs from complete source; rung refused; bytes preserved, not repaired; explicit versioned correction required",
-                held.ts_micros
-            ));
-        }
-        candidates.next();
-        last = Some(held);
-    }
+    };
+    let HeldWalk {
+        gaps,
+        first_gap,
+        last_gap,
+        last,
+    } = walked;
     if let Some(first) = first_gap {
         let why = if gaps == 1 {
             format!(
