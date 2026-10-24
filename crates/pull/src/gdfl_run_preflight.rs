@@ -1,5 +1,5 @@
 //! `pull::gdfl_run::preflight`: the refusals IA-3 left (IA-3b, D-7000 to
-//! D-7009; the design's D-4802, D-4819, D-4850, D-4864 and the critic's
+//! D-7007; the design's D-4802, D-4819, D-4850, D-4864 and the critic's
 //! D-4908), run once per run inside [`super::plan`], after the scope is
 //! resolved and before any lock, claim or journal line.
 //!

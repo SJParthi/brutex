@@ -81,7 +81,7 @@ pub mod stop;
 pub mod start;
 
 /// The preflight refusals IA-3 left (IA-3b; D-4802, D-4819, D-4850, D-4864,
-/// D-4908, D-7000 to D-7009).
+/// D-4908, D-7000 to D-7007).
 #[path = "gdfl_run_preflight.rs"]
 pub mod preflight;
 
