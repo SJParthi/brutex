@@ -310,7 +310,7 @@ title = "reference tables: corporate actions, F&O membership, basis runs"
 
 [[package]]
 name = "R4-27"
-merged = false
+merged = true
 title = "padded-minute decision and AUT-10's decisions"
 
 [[package]]

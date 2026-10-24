@@ -4008,7 +4008,7 @@ fn derive_repair(
         } = match folded {
             Ok(folded) => folded,
             Err(why) => {
-                failures.push(rung_refused(instrument, rung, into.month, &why.to_string()));
+                failures.push(note_rung_refused(instrument, rung, into.month, &why.to_string()));
                 continue;
             }
         };
@@ -4025,7 +4025,7 @@ fn derive_repair(
         let asked = (bars.as_slice(), policy.open_interest_applies);
         if let Err(why) = held_against_repair((store_root, symbol_id), parts, asked, before) {
             let journal = (store_root, &parts, reason);
-            failures.push(held_refused(journal, (instrument, rung, into.month), &why));
+            failures.push(note_held_refused(journal, (instrument, rung, into.month), &why));
             continue;
         }
         if bars.is_empty() {
@@ -4036,7 +4036,7 @@ fn derive_repair(
                 entries.push(held);
                 ledger.push(request_minutes::derive_line(&parts, tally));
             }
-            Err(why) => failures.push(rung_refused(instrument, rung, into.month, &why.why)),
+            Err(why) => failures.push(note_rung_refused(instrument, rung, into.month, &why.why)),
         }
     }
     failures.extend(request_minutes::record_derived(
@@ -4052,7 +4052,7 @@ fn derive_repair(
 /// A derived rung's refusal in the repair door's derive: logged "not derived"
 /// and filed under the month it was folded for (DB-G45), in the words
 /// `<rung>: <why>` every derive refusal has.
-fn rung_refused(
+fn note_rung_refused(
     instrument: &str,
     rung: Timeframe,
     month: store::path::YearMonth,
@@ -4066,13 +4066,13 @@ fn rung_refused(
 /// refusal of its versioned repair ([`journal_refusal`], as [`repair_after`]
 /// calls it: one `refused` line in the repair journal, with the run's
 /// reason, and one `pull.repair` event), then filed as the rung's failure
-/// ([`rung_refused`]). Asked before the door, it would otherwise reach
+/// ([`note_rung_refused`]). Asked before the door, it would otherwise reach
 /// neither: a repair run that refused every derived rung this way left no
 /// line in `audit/<vendor>.repairs` (R4-27 repair 1, measured on a private
 /// copy). An append refusal the door answers as itself (IA-16: a held bar
 /// the fold restates, `batch record N restates the record held at T`) is
 /// filed and logged `pull.derive` and, as before, not journaled.
-fn held_refused(
+fn note_held_refused(
     (store_root, parts, reason): (&Path, &PathParts<'_>, &str),
     (instrument, rung, month): (&str, Timeframe, store::path::YearMonth),
     why: &str,
@@ -4081,7 +4081,7 @@ fn held_refused(
         Ok(()) => why.to_owned(),
         Err(journal) => format!("{why}; and the repair journal line was not written: {journal}"),
     };
-    rung_refused(instrument, rung, month, &why)
+    note_rung_refused(instrument, rung, month, &why)
 }
 
 /// Whether the repair door may be handed `bars`, the fold of a source month

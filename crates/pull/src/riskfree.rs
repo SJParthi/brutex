@@ -903,7 +903,8 @@ pub struct Replay {
 ///
 /// # Cost
 ///
-/// [`Series::parse`]'s, once, then one O(1) [`Series::on`] a day asked.
+/// [`Series::parse`]'s, once, then one O(1) [`Series::on`] a day asked, timed
+/// by `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table`.
 pub fn replay(
     text: &str,
     max_age_days: i32,

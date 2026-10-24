@@ -2987,6 +2987,19 @@ const MERGED_17_23_OCT_LITERAL: &str = "\
      withdraw witness word writable write-costs write_all wrong_table zerodha-repair \
      zerodha_first zerodha_last failures_total names_dropped names_kept census_lock row_refused";
 
+// R4-27's merge (24 Oct 2026; BASE-REDS-1023, D-7147 addendum): every word
+// read at its first site. `as_trade` and `keep_flat` are
+// `pull::fold::PaddedFold`'s names, the reading before INT-15 and the
+// treatment (a) of D-7270; `rate_before_series`, `rate_stale`,
+// `rate_carried_too_long` and `rate_hole_before_gap` are
+// `pull::riskfree::LookupError::code`'s refusal codes, which a replay prints
+// beside each refused day; `match` is the invented store-root name of a
+// `padded_tests` fixture (`root("match")`). None names an account, an
+// environment, a vendor credential or a field of a parameter path; none is one
+// of gate 1c's ten environment words.
+const R4_27_LITERAL: &str =
+    "as_trade keep_flat match rate_before_series rate_carried_too_long rate_hole_before_gap rate_stale";
+
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
 /// raised 72 -> 73 for its own group, and both groups landed, so the joined
@@ -2994,7 +3007,8 @@ const MERGED_17_23_OCT_LITERAL: &str = "\
 /// 74 -> 75 with IA-9's group, which feat/db-fix already counted; the
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with BASE-REDS-1023's group of the 17..23 Oct merges (D-7147).
-const DECLARED: [&str; 76] = [
+/// 76 -> 77 with R4-27's group, declared at its merge (D-7147 addendum).
+const DECLARED: [&str; 77] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3071,6 +3085,7 @@ const DECLARED: [&str; 76] = [
     CAL1_CIRCULAR_SERIAL,
     IA9_LITERAL,
     MERGED_17_23_OCT_LITERAL,
+    R4_27_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

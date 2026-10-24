@@ -610,8 +610,8 @@ fn image_at(version: u16, payload: &[u8]) -> Vec<u8> {
     image
 }
 
-/// Days 5 to 7 of May 2031 at one minute, every tenth minute of each a flat
-/// carry of the minute before: 1,125 rows, over the summary threshold.
+/// Days 5 to 7 of May 2031 at one minute, every tenth minute of each a
+/// flat carry of the minute before: 1,125 rows, over the summary threshold.
 fn carried_days() -> Vec<Bar> {
     let mut rows = Vec::new();
     for day in 5..=7 {

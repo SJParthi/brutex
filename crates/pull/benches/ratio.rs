@@ -79,6 +79,8 @@ mod day_table;
 
 /// C-PD-01 and C-PD-02: the cash derive fold, which judges every minute for
 /// vendor padding, and the padded count per day, flat per minute (R4-27).
+/// Run and held to the ratio by this harness, `crates/pull/benches/ratio.rs`
+/// (gate 12, D-7149).
 #[path = "ratio/padded.rs"]
 mod padded;
 

@@ -707,7 +707,8 @@ const fn agrees(held: &Bar, offered: &Bar, policy: Policy) -> bool {
 /// makes at every held stamp: every field equal, except that where open
 /// interest is not a measurement for the instrument (`open_interest_applies`
 /// false: an index or a share, D-3322) a held `0` and an offered null are the
-/// same absence. O(1).
+/// same absence. O(1) UNVERIFIED: a fixed number of field compares, not timed
+/// (docs/06-limits.md L-BRED23-01).
 ///
 /// Public so that a caller which must ask the door's question before it hands
 /// the door a batch asks it in the door's own words, not in a copy of them:

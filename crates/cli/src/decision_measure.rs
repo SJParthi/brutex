@@ -21,15 +21,15 @@
 //! `SYMBOL YM RUNG padded flat0 buckets open_moved range_moved only_padded
 //! stored diff_as_trade diff_keep_flat diff_absent`
 //!
-//! * `padded`: the month's vendor-padded minutes, and `flat0` its flat
-//!   zero-volume minutes of any price (the offline script's `only_z_flat`
+//! * `padded`: the month's vendor-padded minutes, and `flat0` its
+//!   flat zero-volume minutes of any price (the offline script's `only_z_flat`
 //!   further asks that GDFL has no trade in them);
 //! * `buckets`: bars the fold before INT-15 writes;
 //! * `open_moved`, `range_moved`: of those, the bars whose open, or whose
 //!   high or low, the new reading changes (the two treatments agree on every
 //!   bucket that traded at all);
 //! * `only_padded`: buckets of padded minutes and nothing else, which (a)
-//!   keeps flat and (b) leaves without a bar;
+//!   keeps as a flat bar and (b) leaves without a bar;
 //! * `stored`: bars the store holds for the rung-month, or `-` when it holds
 //!   no readable month;
 //! * `diff_*`: buckets on which the stored month and that rule's fold differ
@@ -581,7 +581,8 @@ mod tests {
             "{out}"
         );
         let mut out = String::new();
-        let missing = std::env::temp_dir().join("brutex-no-such-rate-table");
+        let missing = std::env::temp_dir()
+            .join(format!("brutex-no-such-rate-table-{}", std::process::id()));
         assert_eq!(
             rate_replay(
                 missing.to_str().unwrap(),
