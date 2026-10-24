@@ -1998,6 +1998,15 @@ jobs:
           store/src/file_write_door_tests.rs:println!:1
           store/src/flock_patient_tests.rs:println!:1
           store/src/sealed_codec_tests.rs:eprintln!:2"
+          # DATA-2 (merged 23 Oct after the block above; declared by
+          # BASE-REDS-1023, D-7147 addendum, read first): the
+          # four prints of `cli/src/tick_second_check_tests.rs` are the
+          # n = 1,000 p50 / p99 / max lines of `take_lock`, `inside` and the
+          # link and archive guards, and the n = 400 status_of lookup
+          # timing BASE-REDS-1023 added, printed beside what each test asserts.
+          # The file is mounted `#[cfg(test)] #[path]` by
+          # `cli::tick_second_check`; no production path reaches it.
+          declared="$declared cli/src/tick_second_check_tests.rs:println!:4"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

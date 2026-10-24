@@ -1981,7 +1981,7 @@ pub(crate) fn check_day(
             groups.entry(group_of(item, day)).or_default().push(item);
         }
     }
-    let mut seen: HashSet<(String, Role)> = HashSet::new();
+    let mut seen: HashSet<(String, Role)> = HashSet::with_capacity(job.items.len());
     for (group, items) in &groups {
         match group {
             Group::Archive(path) => match sources.archives.get(path) {
@@ -2441,7 +2441,7 @@ fn extra_pass(
         }
     };
     let keeping = Keeping::new(&extra.archive);
-    let mut seen: HashSet<(String, Role)> = HashSet::new();
+    let mut seen: HashSet<(String, Role)> = HashSet::with_capacity(targets.len());
     for item in &targets {
         seen.insert((item.symbol.clone(), Role::Extra));
         let Ok(key) = InstrumentKey::cash(Exchange::Nse, &item.symbol) else {
@@ -3683,9 +3683,13 @@ fn run(
     // The plan: the store's own days, each with its landing.
     let names = store_symbols(&store, ask.symbols.as_ref())?;
     let unknown_symbols: Vec<String> = ask.symbols.as_ref().map_or_else(Vec::new, |asked| {
+        // One hash probe per asked name against the held ones, never a
+        // search of the listing.
+        let mut held: HashSet<&str> = HashSet::with_capacity(names.len());
+        held.extend(names.iter().map(String::as_str));
         let mut missing: Vec<String> = asked
             .iter()
-            .filter(|name| names.binary_search(*name).is_err())
+            .filter(|name| !held.contains(name.as_str()))
             .cloned()
             .collect();
         missing.sort_unstable();
@@ -3764,7 +3768,7 @@ fn run(
     // The recorded archives that are the --archive file itself: a landing
     // from one of them is never compared with it twice. One resolution per
     // distinct recorded path.
-    let mut same_paths: HashSet<String> = HashSet::new();
+    let mut same_paths: HashSet<String> = HashSet::with_capacity(usize::from(extra));
     if let Some(path) = &ask.archive {
         let real = std::fs::canonicalize(path)
             .map_err(|w| format!("--archive {}: {w}", path.display()))?;
@@ -3775,6 +3779,7 @@ fn run(
                 _ => None,
             })
             .collect();
+        same_paths.reserve(recorded.len());
         for p in recorded {
             if std::fs::canonicalize(p).is_ok_and(|r| r == real) {
                 same_paths.insert(p.to_owned());

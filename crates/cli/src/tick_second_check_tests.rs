@@ -2701,3 +2701,190 @@ fn every_month_of_either_form_is_listed_once_and_nothing_else() {
     assert_eq!(year.first(), Some(&ym(2025, 1)));
     assert_eq!(year.last(), Some(&ym(2025, 12)));
 }
+
+/// BASE-REDS-1023 (D-7150 addendum): `from_code` reads `ALL[code - 1]` and
+/// `Source::of_word` is a match, where both searched their table. Every one
+/// of the 256 codes and every word a source writes reads back through the
+/// one-step form exactly as the table's own definition says, and nothing
+/// else does.
+#[test]
+fn every_code_and_word_of_the_index_reads_back_in_one_step() {
+    for code in 0..=u8::MAX {
+        let mut want_status = None;
+        for s in Status::ALL {
+            if s.code() == code {
+                want_status = Some(s);
+            }
+        }
+        assert_eq!(Status::from_code(code), want_status, "status code {code}");
+        let mut want_source = None;
+        for s in Source::ALL {
+            if s.code() == code {
+                want_source = Some(s);
+            }
+        }
+        assert_eq!(Source::from_code(code), want_source, "source code {code}");
+    }
+    assert_eq!(Status::from_code(8), Some(Status::ReadFailed));
+    assert_eq!(Status::from_code(9), None);
+    assert_eq!(Source::from_code(4), Some(Source::NotTheLandingSource));
+    assert_eq!(Source::from_code(5), None);
+    for s in Source::ALL {
+        assert_eq!(Source::of_word(s.word()), Some(s), "{}", s.word());
+    }
+    // Near misses of a real word are not a source: case, padding, a prefix.
+    for word in [
+        "",
+        "Archive_member",
+        " archive_member",
+        "archive_member ",
+        "archive",
+        "archive_not_the_landing",
+        "tickstore_day\n",
+    ] {
+        assert_eq!(Source::of_word(word), None, "{word:?}");
+    }
+}
+
+/// BASE-REDS-1023 (D-7150 addendum): the writer finds each cell's row by one
+/// hash probe of the distinct symbols, where it searched the sorted table.
+/// Extreme inputs at once: no cell at all, one cell, a symbol given many
+/// times on many days (the later cell of a share-day wins), the leap year's
+/// 366th day, names that differ only in case or by a byte outside ASCII,
+/// and a bad name hidden among good ones, refused by name whatever its place.
+#[test]
+fn the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes() {
+    let answer = |status, row| SecondStatus {
+        status,
+        source: Source::ArchiveMember,
+        store_seconds: 1,
+        fill_compared: 2,
+        fill_worse: 3,
+        row,
+    };
+    let path = Path::new("x.idx");
+    // Empty: a valid image of no symbols, which answers nothing.
+    let empty = index::encode(2024, &[], 0, [0; 32]).unwrap();
+    let idx = index::YearIndex::decode(&empty, path, 1).unwrap();
+    assert!(idx.symbols().is_empty());
+    assert_eq!(
+        idx.status_of("ZZA", day(2024, 6, 3)),
+        Err(NotChecked::SymbolUnknown { year: 2024 })
+    );
+    // One cell.
+    let one = answer(Status::ExactT, 1);
+    let image = index::encode(2024, &[("ZZA", day(2024, 6, 3), one)], 0, [0; 32]).unwrap();
+    let idx = index::YearIndex::decode(&image, path, 1).unwrap();
+    assert_eq!(idx.status_of("ZZA", day(2024, 6, 3)), Ok(one));
+    // Many cells: 300 symbols on both ends of a leap year, every symbol
+    // repeated, the later cell of a share-day replacing the earlier, and
+    // two names that only case and a non-ASCII byte tell apart.
+    let names: Vec<String> = (0..300).map(|i| format!("ZZ{i:03}")).collect();
+    let first = day(2024, 1, 1);
+    let last = day(2024, 12, 31);
+    let early = answer(Status::Differs, 7);
+    let late = answer(Status::StoreOnly, 9);
+    let mut cells: Vec<index::Cell<'_>> = Vec::with_capacity(names.len() * 3 + 3);
+    for name in names.iter().rev() {
+        cells.push((name.as_str(), last, early));
+        cells.push((name.as_str(), first, one));
+        cells.push((name.as_str(), last, late));
+    }
+    cells.push(("ZZa", first, early));
+    cells.push(("ZZA", first, late));
+    cells.push(("ZZ\u{e9}", last, one));
+    let image = index::encode(2024, &cells, 5, [1; 32]).unwrap();
+    let idx = index::YearIndex::decode(&image, path, 2).unwrap();
+    assert_eq!(idx.symbols().len(), 303);
+    for name in &names {
+        assert_eq!(idx.status_of(name, first), Ok(one), "{name}");
+        assert_eq!(idx.status_of(name, last), Ok(late), "{name}");
+        assert_eq!(
+            idx.status_of(name, day(2024, 2, 29)),
+            Err(NotChecked::NotChecked { version: 2 }),
+            "{name}"
+        );
+    }
+    assert_eq!(idx.status_of("ZZa", first), Ok(early));
+    assert_eq!(idx.status_of("ZZA", first), Ok(late));
+    assert_eq!(idx.status_of("ZZ\u{e9}", last), Ok(one));
+    // The table is still sorted on disk, whatever order the cells came in.
+    let mut sorted = idx.symbols().to_vec();
+    sorted.sort_unstable();
+    assert_eq!(idx.symbols(), sorted.as_slice());
+    // A bad name is refused by name, first or last among good ones.
+    for bad in ["", "ZZ\nB"] {
+        let mut with_bad = cells.clone();
+        with_bad.push((bad, first, one));
+        let why = index::encode(2024, &with_bad, 0, [0; 32]).unwrap_err();
+        assert_eq!(why, format!("{bad:?} cannot be an index symbol"));
+        with_bad.rotate_right(1);
+        let why = index::encode(2024, &with_bad, 0, [0; 32]).unwrap_err();
+        assert_eq!(why, format!("{bad:?} cannot be an index symbol"));
+    }
+    // A day of another year, after hundreds of good cells, is named.
+    let mut stray = cells.clone();
+    stray.push(("ZZ000", day(2025, 1, 1), one));
+    let why = index::encode(2024, &stray, 0, [0; 32]).unwrap_err();
+    assert_eq!(why, "2025-01-01 is not a day of 2024");
+}
+
+/// BASE-REDS-1023 (D-7150 addendum), the proof gate 12 asks of the claim that
+/// `status_of` is O(1): a lookup in an index of 4,096 symbols costs what one
+/// in an index of one symbol costs, within a factor a search could never
+/// meet (a scan of the large table would be thousands of times dearer). The
+/// two are timed interleaved in one loop, so a loaded machine slows both
+/// alike; each sample is 256 lookups, so the clock's step does not decide
+/// it.
+#[test]
+fn a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand() {
+    let on = day(2025, 7, 1);
+    let a = SecondStatus {
+        status: Status::ExactA,
+        source: Source::TickstoreDay,
+        store_seconds: 1,
+        fill_compared: 1,
+        fill_worse: 0,
+        row: 1,
+    };
+    let path = Path::new("x.idx");
+    let small_image = index::encode(2025, &[("ZZ0000", on, a)], 0, [0; 32]).unwrap();
+    let small = index::YearIndex::decode(&small_image, path, 1).unwrap();
+    let names: Vec<String> = (0..4_096).map(|i| format!("ZZ{i:04}")).collect();
+    let cells: Vec<index::Cell<'_>> = names.iter().map(|n| (n.as_str(), on, a)).collect();
+    let large_image = index::encode(2025, &cells, 0, [0; 32]).unwrap();
+    let large = index::YearIndex::decode(&large_image, path, 1).unwrap();
+    assert_eq!(large.symbols().len(), 4_096);
+    const BATCH: usize = 256;
+    const SAMPLES: usize = 400;
+    let mut small_ns: Vec<u128> = Vec::with_capacity(SAMPLES);
+    let mut large_ns: Vec<u128> = Vec::with_capacity(SAMPLES);
+    for s in 0..SAMPLES {
+        let t = Instant::now();
+        for _ in 0..BATCH {
+            assert_eq!(small.status_of(std::hint::black_box("ZZ0000"), on), Ok(a));
+        }
+        small_ns.push(t.elapsed().as_nanos());
+        let t = Instant::now();
+        for k in 0..BATCH {
+            let name = &names[(s * BATCH + k * 97) % names.len()];
+            assert_eq!(large.status_of(std::hint::black_box(name), on), Ok(a));
+        }
+        large_ns.push(t.elapsed().as_nanos());
+    }
+    small_ns.sort_unstable();
+    large_ns.sort_unstable();
+    let (small_p50, large_p50) = (small_ns[SAMPLES / 2], large_ns[SAMPLES / 2]);
+    println!(
+        "status_of per {BATCH}: one symbol p50 {small_p50} ns p99 {} ns max {} ns; \
+         4,096 symbols p50 {large_p50} ns p99 {} ns max {} ns (n = {SAMPLES} each)",
+        small_ns[SAMPLES * 99 / 100],
+        small_ns[SAMPLES - 1],
+        large_ns[SAMPLES * 99 / 100],
+        large_ns[SAMPLES - 1],
+    );
+    assert!(
+        large_p50 <= small_p50.max(1) * 16,
+        "a lookup in 4,096 symbols ({large_p50} ns per {BATCH}) is more than 16 times one in one symbol ({small_p50} ns)"
+    );
+}

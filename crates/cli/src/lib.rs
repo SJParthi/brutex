@@ -95,7 +95,8 @@ mod gdfl_stop_command;
 mod scrub_blocks;
 /// `cli tick-to-second-check`: every stored GDFL share-day rebuilt from the
 /// source its landing recorded under rule T and rule A and compared,
-/// read-only; its index answers `status_of` in O(1) (D-5180, D-5184).
+/// read-only; its index answers `status_of` in O(1) (D-5180, D-5184; proved by
+/// `cli::tick_second_check::tests::a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand`).
 pub mod tick_second_check;
 /// `cli watchdog` and `cli launch-agent`: the app's supervisor and watchdog (R3-32, D-4996).
 pub mod watchdog_command;

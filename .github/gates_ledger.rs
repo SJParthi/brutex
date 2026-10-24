@@ -1516,6 +1516,15 @@ const ALLOW_UNSIZED: Allow = &[
     // `OnceLock` builds it. Reason in docs/06-limits.md, "Gate 11 —
     // BASE-GATE11". Its F&O spans map is sized instead (rewritten).
     ("crates/pull/src/reference_data.rs", 2),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2, merged after
+    // the 23 Oct run. `Sources::open` keys its map by the DISTINCT archive
+    // paths the year's landings recorded (one per GDFL delivery a run met),
+    // filled once per run before any day is checked; the count is not known
+    // before that walk and the items it walks are the whole year's, so sizing
+    // to them would reserve ~100,000 slots for a handful. Its three other
+    // sets were pre-sized instead. Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 1),
 ];
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -1703,6 +1712,18 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
     // its unmeasured days was rewritten instead.
     ("crates/costs/src/lot.rs", 1),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2's batch check,
+    // which no request reaches. tick_second_check.rs: the segment numbers of
+    // one year's folder listing (once per run), the unknown `--symbols`
+    // names (the operator's own list, once per run), and each day's segment
+    // lines and each version's whole-year lines (once per file written, the
+    // byte order a reader and a re-run compare). tick_second_index.rs: the
+    // DISTINCT symbols of one index (its on-disk table order, once per index
+    // written; a lookup is one hash probe), the segment numbers and the
+    // years of one folder listing (once per open). Reason and measured
+    // phases in docs/06-limits.md, "Gate 11 — BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 4),
+    ("crates/cli/src/tick_second_index.rs", 3),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -2150,6 +2171,14 @@ const ALLOW_MEMBER: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-REDS-1023".
     ("crates/pull/src/gdfl_import_causes.rs", 1),
     ("crates/pull/src/gdfl_import_day.rs", 1),
+    // BASE-REDS-1023, 24 Oct 2026 (D-7150 addendum): DATA-2. Each of the
+    // four is a probe rule 7 names: `symbol_cell`'s printable test is the
+    // RangeInclusive `(0x20..=0x7E)`, two comparisons; the day's filed
+    // auction prints are a `HashSet<(i64, i64, u64, u32)>`, the share
+    // listing's `--symbols` filter a `HashSet<String>` and the days the
+    // `--archive` already answered a `HashSet<String>`, one hash probe
+    // each. Reason in docs/06-limits.md, "Gate 11 — BASE-REDS-1023: DATA-2".
+    ("crates/cli/src/tick_second_check.rs", 4),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

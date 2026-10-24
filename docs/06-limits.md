@@ -21496,6 +21496,38 @@ Then rule 6 was widened (D-7151) and 108 sites in 63 files were pinned
 unread in ALLOW_SCAN_UNREAD (L-BRED23-02).
 ~~~~
 
+### Gate 11 — BASE-REDS-1023: DATA-2, fixed or declared (24 October 2026)
+
+~~~~text
+DATA-2 (cli tick-to-second-check) merged after the 23 Oct run and brought
+20 gate-11 sites in two files (state/fix/ci-gates-logs/bred1023-lp10).
+Fixed in code (D-7150 addendum), 9:
+  rule 1, 2 -> 0: the index writer's row of a symbol is one probe of a
+    pre-sized HashMap (was a binary search of the table); the unknown
+    --symbols names are one probe of a pre-sized HashSet of the held names.
+  rule 3, 4 -> 1: the two per-day `seen` sets are sized to the day's items
+    and the --archive same-path set to the distinct recorded paths.
+  rule 6, 4 -> 0: Status::from_code and Source::from_code read ALL[code-1]
+    (a const item proves ALL is in code order), Source::of_word is a match,
+    and the index writer's symbol check runs inside the loop that fills
+    the row map (no search).
+Declared, 11, none on a request path (no route reaches this check):
+  rule 3, tick_second_check.rs 0 -> 1: Sources::open's archive map, keyed
+    by the distinct recorded archive paths (one per GDFL delivery a run
+    meets), filled once per run; the year's items it walks are ~100,000.
+  rule 4, tick_second_check.rs 0 -> 4 and tick_second_index.rs 0 -> 3:
+    one sort per folder listing (segment numbers, index years), per
+    unknown-symbol report, per file written (a day segment's lines, a
+    version's lines) and per index written (its distinct symbols, the
+    on-disk table order). Each is once per run or once per file, never
+    per row or per lookup; the fold phase that holds the version sort is
+    measured in L-T2S-10 (1,318 to 2,948 ms a year) and the lookup in
+    L-T2S-09 (p99 42 to 84 ns).
+  rule 7, tick_second_check.rs 0 -> 4: a RangeInclusive and three hash
+    probes (HashSet of filed auction prints, of --symbols, of the days the
+    --archive answered).
+~~~~
+
 ## The tick-to-second check (DATA-2, D-5181 to D-5186)
 
 `cli tick-to-second-check [YEAR] --out DIR`, read-only over the store, the
