@@ -25489,7 +25489,10 @@ mod tests {
         assert_eq!(status_line(response), "HTTP/1.1 403 Forbidden");
         assert!(!status_line(response).contains("413"));
         assert_eq!(status_line(""), "");
-        assert_eq!(status_line("HTTP/1.1 404 Not Found"), "HTTP/1.1 404 Not Found");
+        assert_eq!(
+            status_line("HTTP/1.1 404 Not Found"),
+            "HTTP/1.1 404 Not Found"
+        );
     }
 
     /// Sends one form POST and reads the whole response.
