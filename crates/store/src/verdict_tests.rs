@@ -57,6 +57,38 @@ pub(super) fn refused_write() -> io::Result<()> {
     Ok(())
 }
 
+/// What another actor does to a writer's files at a named point: given the
+/// temporary and the final name.
+type Actor = fn(&Path, &Path);
+
+thread_local! {
+    /// The interference armed for this thread, if any: its point and actor.
+    static INTERFERE: Cell<Option<(&'static str, Actor)>> = const { Cell::new(None) };
+}
+
+/// The seam `write_durable`, `remove_tmp`, `genesis` and `publish` call
+/// before a host call under `cfg(test)`: when `at` is armed on this
+/// thread, it disarms it and runs the actor, as another process would act
+/// between two of the writer's calls, then the writer goes on.
+pub(super) fn interfere(at: &'static str, tmp: &Path, path: &Path) {
+    if let Some((armed, actor)) = INTERFERE.with(Cell::get)
+        && armed == at
+    {
+        INTERFERE.with(|armed| armed.set(None));
+        actor(tmp, path);
+    }
+}
+
+/// Arms one interference for the next commit on this thread.
+fn arm_interference(at: &'static str, actor: Actor) {
+    INTERFERE.with(|armed| armed.set(Some((at, actor))));
+}
+
+/// Whether the armed interference is still waiting.
+fn interference_armed() -> bool {
+    INTERFERE.with(Cell::get).is_some()
+}
+
 /// Arms one crash point for the next commit on this thread.
 fn arm(at: &'static str) {
     ARMED.with(|armed| armed.set(Some(at)));
@@ -523,4 +555,405 @@ fn a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits() {
     )
     .unwrap();
     assert_eq!((next.generation, next.previous), (2, 1));
+}
+
+/// The refusal's action, the host's kind and the path it names.
+fn io_refusal(refused: &VerdictError) -> (&'static str, ErrorKind, PathBuf) {
+    match refused {
+        VerdictError::Io {
+            action,
+            source,
+            path,
+        } => (*action, source.kind(), path.clone()),
+        other => panic!("expected the host's refusal, got {other}"),
+    }
+}
+
+/// The year's first temporary of the year index, as a writer of `run`
+/// names it.
+fn index_tmp(series: &Series<'_>, run: u64) -> PathBuf {
+    let path = series.year_index(2031);
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push(format!(".{}-{run}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// **A REFUSED WRITE WHOSE TEMPORARY ANOTHER ACTOR TOOK SAYS ONLY THAT THE
+/// WRITE WAS REFUSED; ONE WHOSE NAME IT CANNOT REMOVE SAYS THAT TOO.**
+///
+/// Kills the three mutants of `write_durable`'s guard
+/// `left.kind() != ErrorKind::NotFound` (to `true`, to `false`, and `!=` to
+/// `==`): a full disk refuses the year index's temporary, and before the
+/// writer removes it another actor has either removed it already (gone: the
+/// refusal is the write's alone) or put a directory at its name (held: the
+/// refusal also says the temporary could not be removed). Both arms are
+/// reached only through a second actor between two calls, so the seam is
+/// that actor.
+#[test]
+fn a_refused_writes_temporary_gone_or_held_is_said_as_it_is() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm(DISK_FULL);
+    arm_interference("refused tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(31)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("write", ErrorKind::StorageFull, index_tmp(&series, 31))
+    );
+
+    arm(DISK_FULL);
+    arm_interference("refused tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(32)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        (
+            "write (its temporary could not be removed)",
+            ErrorKind::StorageFull,
+            index_tmp(&series, 32)
+        )
+    );
+    assert!(
+        index_tmp(&series, 32).is_dir(),
+        "what held the name is left"
+    );
+    fs::remove_dir(index_tmp(&series, 32)).unwrap();
+    assert_eq!(commit(&series, &one(33)).unwrap().generation, 1);
+}
+
+/// **A TEMPORARY ALREADY GONE AFTER ITS LINK IS REMOVED; ONE WHOSE NAME
+/// CANNOT BE REMOVED REFUSES THE COMMIT AS A REMOVE.**
+///
+/// Kills `remove_tmp`'s guard `why.kind() != ErrorKind::NotFound` to
+/// `true`, to `false`, and `!=` to `==`: after the year index is linked
+/// another actor removes its temporary (the commit goes on: nothing is left
+/// to remove), or puts a directory at its name (the commit is refused as
+/// the `remove` of that name, naming it). The index is linked either way,
+/// so the next commit finds it and lands.
+#[test]
+fn a_linked_temporary_gone_is_done_and_one_held_refuses_as_a_remove() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm_interference("tmp removed", |tmp, _| fs::remove_file(tmp).unwrap());
+    assert_eq!(commit(&series, &one(41)).unwrap().generation, 1);
+    assert!(!interference_armed());
+
+    let other = Root::new();
+    let series = other.series();
+    arm_interference("tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(42)).unwrap_err();
+    assert!(!interference_armed());
+    let (action, _, path) = io_refusal(&refused);
+    assert_eq!((action, path), ("remove", index_tmp(&series, 42)));
+    assert!(series.year_index(2031).exists(), "the index was linked");
+    fs::remove_dir(index_tmp(&series, 42)).unwrap();
+    assert_eq!(commit(&series, &one(43)).unwrap().generation, 1);
+}
+
+/// **A YEAR INDEX ANOTHER WRITER LINKED FIRST IS READ; A LINK THE HOST
+/// REFUSES OTHERWISE IS THE LINK'S REFUSAL, AND NOTHING IS LEFT.**
+///
+/// Kills `genesis`' guard `why.kind() == ErrorKind::AlreadyExists` to
+/// `true` and to `false`, and `==` to `!=`. Between the writer's temporary
+/// and its link, another actor either links an identical index at the name
+/// first (the creation race's loser reads the winner's, and the commit
+/// lands at generation 1), or takes the temporary away (`ENOENT` at the
+/// link: refused as the `link` of the year index, and neither the index nor
+/// a temporary is left).
+#[test]
+fn a_year_index_linked_first_is_read_and_any_other_refused_link_is_said() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm_interference("index linked", |tmp, path| {
+        fs::hard_link(tmp, path).unwrap();
+    });
+    assert_eq!(commit(&series, &one(51)).unwrap().generation, 1);
+    assert!(!interference_armed());
+    assert!(!index_tmp(&series, 51).exists());
+
+    let other = Root::new();
+    let series = other.series();
+    arm_interference("index linked", |tmp, _| fs::remove_file(tmp).unwrap());
+    let refused = commit(&series, &one(52)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("link", ErrorKind::NotFound, series.year_index(2031))
+    );
+    assert_eq!(names(&series.dir()), ["2031", "2031.vdi.lock"]);
+}
+
+/// **AN IMAGE LINK THE HOST REFUSES OTHER THAN "EXISTS" IS THE LINK'S
+/// REFUSAL, NEVER A GENERATION TO STEP PAST.**
+///
+/// Kills `publish`'s guard `why.kind() == ErrorKind::AlreadyExists` to
+/// `true`: every link refusal would be taken for a generation a crashed
+/// writer left, and the writer would step on to the next one and publish
+/// there. Between the image's temporary and its link another actor takes
+/// the temporary away: the commit is refused as the `link` of generation
+/// 2's image, the committed generation 1 still answers, and no image of
+/// generation 2 or 3 exists.
+#[test]
+fn an_image_link_refused_otherwise_than_exists_is_never_stepped_past() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    commit(
+        &series,
+        &generation(61, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap();
+    arm_interference("image linked", |tmp, _| fs::remove_file(tmp).unwrap());
+    let refused = commit(
+        &series,
+        &generation(62, vec![entry("NSE-FNO-ZZTEST-A", Code::ValueMismatch)]),
+    )
+    .unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("link", ErrorKind::NotFound, series.image_path(day(), 2))
+    );
+    assert_eq!(
+        names(&series.dir().join("2031")),
+        ["2031-03-04.g0000000001.vdt"]
+    );
+    let mut reader = Reader::new();
+    let held = reader.lookup(&series, day(), &key).unwrap();
+    assert_eq!(held.answer.unwrap().code(), Some(Code::Match));
+}
+
+/// **A LOCK THE HOST REFUSES OTHER THAN "HELD" IS THE LOCK'S REFUSAL, AT
+/// ONCE, AND NOTHING IS WRITTEN.**
+///
+/// Covers `lock_within`'s arm for a `flock` refused other than
+/// `EWOULDBLOCK`, which no lock file gives on request: the flock test seam
+/// refuses the commit's one try (`EACCES` standing in for `ENOLCK`). The
+/// refusal is `io` with the action `lock`, naming the year's lock file, and
+/// it is not waited on (a held lock is waited on, and only it). No index
+/// and no image is made.
+#[test]
+fn a_lock_the_host_refuses_is_the_locks_refusal_and_nothing_is_written() {
+    let root = Root::new();
+    let series = root.series();
+    crate::flock::tests::refuse_next_lock(ErrorKind::PermissionDenied);
+    let refused = commit(
+        &series,
+        &generation(71, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap_err();
+    assert!(!crate::flock::tests::lock_refusal_armed());
+    let (action, kind, path) = io_refusal(&refused);
+    assert_eq!((action, kind), ("lock", ErrorKind::PermissionDenied));
+    assert_eq!(path.file_name().unwrap(), "2031.vdi.lock");
+    assert!(!series.year_index(2031).exists(), "no index");
+    assert_eq!(names(&series.dir().join("2031")), Vec::<String>::new());
+}
+
+/// **A YEAR INDEX BORN BETWEEN A READER'S TWO LOOKS IS READ, NEVER CALLED
+/// LOST.**
+///
+/// Covers `index_handle`'s second look succeeding: the reader finds no
+/// index, finds a day image in the year directory (so the index would be
+/// lost), and looks once more before saying so; the index is there by
+/// then. Staged here by moving a committed index aside and back between the
+/// two looks. The lookup answers the committed code at the cost of the
+/// extra look: the index opened on the second try, the directory listed,
+/// the image opened.
+#[test]
+fn a_year_index_born_between_a_readers_two_looks_is_read() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    commit(
+        &series,
+        &generation(81, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap();
+    let index = series.year_index(2031);
+    let aside = index.with_extension("vdi.aside");
+    fs::rename(&index, &aside).unwrap();
+    arm_interference("index looked for again", |path, _| {
+        fs::rename(path.with_extension("vdi.aside"), path).unwrap();
+    });
+    let mut reader = Reader::new();
+    let found = reader.lookup(&series, day(), &key).unwrap();
+    assert!(!interference_armed());
+    assert_eq!(found.answer.unwrap().code(), Some(Code::Match));
+    assert_eq!(found.cost.opens, 3, "the index, the directory, the image");
+
+    // The same, with no index coming: the lost index's refusal.
+    fs::rename(&index, &aside).unwrap();
+    let mut reader = Reader::new();
+    assert_eq!(
+        reader.lookup(&series, day(), &key).unwrap_err().word(),
+        "index_missing"
+    );
+}
+
+/// The `why` of a reader's `image_corrupt`, or a panic naming what came.
+fn corrupt_why(answer: Result<super::Lookup, VerdictError>) -> String {
+    match answer {
+        Err(VerdictError::ImageCorrupt { why, .. }) => why,
+        other => panic!("not image_corrupt: {other:?}"),
+    }
+}
+
+/// **A DAY IMAGE WHOSE HEADER NAMES ANOTHER SERIES, DAY OR GENERATION IS
+/// REFUSED BY THE READER, NEVER ANSWERED FROM.**
+///
+/// Covers each condition of the reader's `same` check one at a time: an
+/// image's bytes are whole and its own checks pass, but the name it was
+/// found under is not the one its header was written for. A generation's
+/// image copied over the next generation's name; one day's image put under
+/// another day's name; and the series' index and image copied under a
+/// series that differs in its feed, its exchange, its segment or its
+/// timeframe alone. Each is `image_corrupt`, saying so, and the image under
+/// its own name still answers.
+#[test]
+fn an_image_naming_another_series_day_or_generation_is_refused() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    let other_day = Day::new(2031, 3, 5).unwrap();
+    let named = |code| vec![entry("NSE-FNO-ZZTEST-A", code)];
+    commit(&series, &generation(91, named(Code::Match))).unwrap();
+    let mut later = generation(92, named(Code::Match));
+    later.day = other_day;
+    commit(&series, &later).unwrap();
+    commit(&series, &generation(93, named(Code::ValueMismatch))).unwrap();
+    let said = "the header names another series, day or generation";
+
+    let g2 = series.image_path(day(), 2);
+    let kept = fs::read(&g2).unwrap();
+    fs::copy(series.image_path(day(), 1), &g2).unwrap();
+    assert_eq!(
+        corrupt_why(Reader::new().lookup(&series, day(), &key)),
+        said
+    );
+    fs::write(&g2, &kept).unwrap();
+
+    let elsewhere = series.image_path(other_day, 1);
+    let kept_elsewhere = fs::read(&elsewhere).unwrap();
+    fs::copy(series.image_path(day(), 1), &elsewhere).unwrap();
+    assert_eq!(
+        corrupt_why(Reader::new().lookup(&series, other_day, &key)),
+        said
+    );
+    fs::write(&elsewhere, &kept_elsewhere).unwrap();
+
+    let alike = |change: fn(&mut Series<'_>)| {
+        let mut other = root.series();
+        change(&mut other);
+        other
+    };
+    let others = [
+        alike(|s| s.feed = Feed::Dhan),
+        alike(|s| s.exchange = Exchange::Bse),
+        alike(|s| s.segment = Segment::Index),
+        alike(|s| s.timeframe = crate::path::Timeframe::MINUTE_1),
+    ];
+    for other in &others {
+        fs::create_dir_all(other.dir().join("2031")).unwrap();
+        fs::copy(series.year_index(2031), other.year_index(2031)).unwrap();
+        fs::copy(&g2, other.image_path(day(), 2)).unwrap();
+        assert_eq!(
+            corrupt_why(Reader::new().lookup(other, day(), &key)),
+            said,
+            "{}",
+            other.dir().display()
+        );
+    }
+    let answer = Reader::new().lookup(&series, day(), &key).unwrap();
+    assert_eq!(answer.answer.unwrap().code(), Some(Code::ValueMismatch));
+}
+
+/// **A YEAR-INDEX SLOT IS READ ONLY WHEN IT IS WHOLE, THIS STORE'S, OF
+/// THIS VERSION AND OF THIS YEAR.**
+///
+/// Covers each condition of `decode_slot`'s check one at a time: a slot cut
+/// one byte short, one whose magic, version or checksum is changed (the
+/// checksum sealed again over the change for the first two), and a whole
+/// slot asked for another year are each `None`, never a slot read wrongly;
+/// the slot as written decodes to its commit and its days.
+#[test]
+fn a_year_index_slot_is_read_only_when_whole_and_its_own() {
+    use super::{DayEntry, crc_to, decode_slot, encode_slot};
+    let mut days = vec![DayEntry::default(); super::YEAR_DAYS];
+    days[62].generation = 3;
+    let slot = encode_slot(2031, 7, &days);
+    let decoded = decode_slot(&slot, 2031).unwrap();
+    assert_eq!(decoded.0, 7);
+    assert_eq!(decoded.1[62].generation, 3);
+    let len = slot.len();
+    let sealed = |mut bytes: Vec<u8>| {
+        let crc = crc_to(&bytes, len - 4);
+        bytes[len - 4..].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    };
+    assert!(decode_slot(&slot[..len - 1], 2031).is_none(), "short");
+    let mut magic = slot.clone();
+    magic[0] ^= 0x01;
+    assert!(decode_slot(&sealed(magic), 2031).is_none(), "magic");
+    let mut version = slot.clone();
+    version[8] ^= 0x01;
+    assert!(decode_slot(&sealed(version), 2031).is_none(), "version");
+    assert!(decode_slot(&slot, 2030).is_none(), "another year");
+    let mut crc = slot.clone();
+    crc[len - 1] ^= 0x01;
+    assert!(decode_slot(&crc, 2031).is_none(), "checksum");
+}
+
+/// **A DAY WITH NO DETAILS OF ITS OWN, BESIDE A RECORD THAT HAS SOME,
+/// ANSWERS NONE.**
+///
+/// Covers `Reader::details`' walk for the day (`record` `None`) when the
+/// section's first entry is a record's: the walk stops at once, and an
+/// empty answer for the day is the truth, not the "entry is not this
+/// record's own" refusal a record with an offset would earn. The record's
+/// own details still read back.
+#[test]
+fn a_day_with_no_details_of_its_own_answers_none() {
+    let root = Root::new();
+    let series = root.series();
+    let mut with = entry("NSE-FNO-ZZTEST-A", Code::Match);
+    with.details = vec![super::Detail {
+        kind: 2,
+        payload: b"an invented why".to_vec(),
+    }];
+    let done = commit(&series, &generation(101, vec![with.clone()])).unwrap();
+    let mut reader = Reader::new();
+    assert_eq!(
+        reader
+            .details(&series, day(), done.generation, None)
+            .unwrap(),
+        Vec::new(),
+        "the day owns no entry"
+    );
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    let found = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
+    let super::Found::Record { ordinal, record } = found.found else {
+        panic!("the key's record: {:?}", found.found);
+    };
+    assert_eq!(
+        reader
+            .details(&series, day(), done.generation, Some((ordinal, &record)))
+            .unwrap(),
+        with.details
+    );
 }

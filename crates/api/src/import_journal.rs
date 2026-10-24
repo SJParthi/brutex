@@ -172,15 +172,20 @@ pub(crate) struct DayRow {
 }
 
 impl DayRow {
-    /// Whether the deciding line is `done` under a definition the importer
-    /// does not take as current: it imports the day again (D-2822). The one
-    /// rule is `pull::gdfl_import::definition_is_current`, asked with the
-    /// key's day: an index day under 2 or 3 is current (D-3342), and a
-    /// share's day from 2026-08-03 under 2 or 3 is not, its closing auction's
-    /// band having changed what it folds (D-4878 item 10, CMP-07).
+    /// Whether the deciding line is `done` or `recounted` under a
+    /// definition the importer does not take as current: it imports the day
+    /// again (D-2822). The one rule is
+    /// `pull::gdfl_import::definition_is_current`, asked with the key's day:
+    /// an index day under 2 to 5 is current (D-3342, D-4877), a share's day
+    /// from 2026-08-03 under 2 or 3 is not, its closing auction's band having
+    /// changed what it folds (D-4878 item 10, CMP-07), and an options day is
+    /// current only under 5 (D-4877). A `recounted` close carries the
+    /// definition of the close it recounted, and the importer's journal reads
+    /// it under the same rule as a `done` (`Journal::read_line`), so this
+    /// reader does too (IA-4): until IA-4 a recounted options day under 2 read
+    /// here as not restated while the importer imported it again.
     pub(crate) fn restated(&self) -> bool {
         self.outcome.is_done()
-            && !self.recounted
             && self
                 .stats
                 .definition
@@ -1363,9 +1368,10 @@ pub(crate) mod tests {
 
     /// CMP-07: a share's day from 2026-08-03 built under 2 or 3 is restated
     /// (its closing auction's band changed what it folds, D-4878 item 10),
-    /// while the same definitions stay current for a share's day before it,
-    /// for an index day and, under 3, for an option day; under this build's
-    /// definition nothing is restated.
+    /// while the same definitions stay current for a share's day before it
+    /// and for an index day; under this build's definition nothing is
+    /// restated. D-4877 (bar definition 5, the options reader's per-row
+    /// refusal): an option day under 3 is restated, one under 5 is not.
     #[test]
     fn a_share_day_of_the_auction_era_under_an_older_definition_is_restated() {
         let root = journal(
@@ -1375,7 +1381,8 @@ pub(crate) mod tests {
              done stocks 2026-08-04 * definition=3 files=1\n\
              done stocks 2026-08-05 * definition=4 files=1\n\
              done indices 2026-08-04 * definition=2 files=2\n\
-             done options 2026-08-04 * definition=3 files=2\n",
+             done options 2026-08-04 * definition=3 files=2\n\
+             done options 2026-08-05 * definition=5 files=2\n",
         );
         let snap = snapshot(&root).expect("reads");
         let restated = |kind, text| {
@@ -1388,6 +1395,54 @@ pub(crate) mod tests {
         assert!(restated(ImportKind::Stocks, "2026-08-04"));
         assert!(!restated(ImportKind::Stocks, "2026-08-05"));
         assert!(!restated(ImportKind::Indices, "2026-08-04"));
-        assert!(!restated(ImportKind::Options, "2026-08-04"));
+        assert!(restated(ImportKind::Options, "2026-08-04"));
+        assert!(!restated(ImportKind::Options, "2026-08-05"));
+    }
+
+    /// IA-4: a `recounted` close is restated exactly where the importer's
+    /// journal restates it, by the definition it carries: an options day
+    /// recounted under 2 (the real journal holds 210 such keys, 14 Oct 2026)
+    /// or under 0 (a recount of a close that named none) is imported again,
+    /// one recounted under 5 is not, and an index day recounted under 2 is
+    /// current. Before IA-4 every recounted row read as not restated here.
+    #[test]
+    fn a_recounted_close_is_restated_where_the_importer_restates_it() {
+        let root = journal(
+            "recounted-restated",
+            "begin options 2019-11-14 *\n\
+             incomplete options 2019-11-14 * definition=2 files=1 seconds=1 failures=1 stage=census reason=too_many_entries run=1\n\
+             recounted options 2019-11-14 * definition=2 months=1 run=2\n\
+             begin options 2019-11-15 *\n\
+             incomplete options 2019-11-15 * files=1 seconds=1 failures=1 stage=census reason=too_many_entries run=1\n\
+             recounted options 2019-11-15 * definition=0 months=1 run=2\n\
+             begin options 2019-11-18 *\n\
+             incomplete options 2019-11-18 * definition=5 files=1 seconds=1 failures=1 stage=census reason=too_many_entries run=1\n\
+             recounted options 2019-11-18 * definition=5 months=1 run=2\n\
+             begin indices 2019-11-14 *\n\
+             incomplete indices 2019-11-14 * definition=2 files=1 seconds=1 failures=1 stage=census reason=too_many_entries run=1\n\
+             recounted indices 2019-11-14 * definition=2 months=1 run=2\n",
+        );
+        let snap = snapshot(&root).expect("reads");
+        let restated = |kind, text| {
+            let row = row_of(&snap.parsed, kind, day(text)).expect("row");
+            assert!(row.recounted, "{text}: a recounted row");
+            row.restated()
+        };
+        assert!(restated(ImportKind::Options, "2019-11-14"));
+        assert!(restated(ImportKind::Options, "2019-11-15"));
+        assert!(!restated(ImportKind::Options, "2019-11-18"));
+        assert!(!restated(ImportKind::Indices, "2019-11-14"));
+        for (kind, text, definition) in [
+            (ImportKind::Options, "2019-11-14", 2),
+            (ImportKind::Options, "2019-11-15", 0),
+            (ImportKind::Options, "2019-11-18", 5),
+            (ImportKind::Indices, "2019-11-14", 2),
+        ] {
+            assert_eq!(
+                restated(kind, text),
+                !definition_is_current(kind, day(text), definition),
+                "{text}: the importer's rule"
+            );
+        }
     }
 }

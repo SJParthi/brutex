@@ -228,6 +228,10 @@ pub mod masters;
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
 pub mod nseindex;
+/// VENDOR-PADDED MINUTES -- a cash share's flat zero-volume minute that only
+/// repeats the minute before it: defined, counted per day, and never read as
+/// a trade by a derived fold (INT-15, R4-27).
+pub mod padded;
 pub mod pricing;
 pub mod rate;
 /// Reference tables as store data, through ONE loader (R3-30): the calendar

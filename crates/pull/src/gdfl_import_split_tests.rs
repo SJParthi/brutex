@@ -380,7 +380,10 @@ const SAID: [&str; 5] = [
 ];
 
 /// Every file the runs leave and its digest, taken on the unsplit importer
-/// and on the split.
+/// and on the split. Retaken at bar definition 5 (IA-4, D-4877): the 17
+/// files that NAME the definition (each month's `.prv` record, the journal
+/// and the day ledger, whose options line also gains `trailing_empty_files`)
+/// moved; no bar, census, lineage, lot or scope file changed a byte.
 const LEFT: [(&str, &str); 68] = [
     (
         "bars/gdfl/NSE/CASH/RELIANCE/1s/2024-04.bin",
@@ -396,7 +399,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/CASH/RELIANCE/1s/2024-04.prv",
-        "cd3a877fb035f9dcbae336e9544dcc0ead267943a6d9c98fe66035de8ae457ad",
+        "bcc51ebf1863a783e1f88d0e1ec9104ff4e60464560576d616da48984dc7f818",
     ),
     (
         "bars/gdfl/NSE/CASH/SBIN/1s/2024-04.bin",
@@ -412,7 +415,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/CASH/SBIN/1s/2024-04.prv",
-        "cd3a877fb035f9dcbae336e9544dcc0ead267943a6d9c98fe66035de8ae457ad",
+        "bcc51ebf1863a783e1f88d0e1ec9104ff4e60464560576d616da48984dc7f818",
     ),
     (
         "bars/gdfl/NSE/FNO/BANKNIFTY/2024-04-10-4700000-CE/1s/2024-04.bin",
@@ -428,7 +431,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/BANKNIFTY/2024-04-10-4700000-CE/1s/2024-04.prv",
-        "a09e946439116fc9740e86a3fd0b39d26653013293e00d6728b5b91bd84fe9b2",
+        "3c4997aa5b79ea03aa54f18fc9c085b6aa9070367b3aeb08de44dba231afbad0",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2100000-CE/1s/2024-04.bin",
@@ -444,7 +447,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2100000-CE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2100000-PE/1s/2024-04.bin",
@@ -460,7 +463,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2100000-PE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2105000-CE/1s/2024-04.bin",
@@ -476,7 +479,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2105000-CE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2105000-PE/1s/2024-04.bin",
@@ -492,7 +495,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2105000-PE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2110000-CE/1s/2024-04.bin",
@@ -508,7 +511,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2110000-CE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2110000-PE/1s/2024-04.bin",
@@ -524,7 +527,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2110000-PE/1s/2024-04.prv",
-        "9da6934f9ad5a61389b50d1c1c807cff202914b60c0300249747af15fbb1bb8f",
+        "7e951b5c70fae471bacf4843632baf27a519b6e485871e15829dd495106824d8",
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2500000-CE/1s/2024-04.bin",
@@ -540,7 +543,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/NIFTY/2024-04-04-2500000-CE/1s/2024-04.prv",
-        "5213dc2a68e4f91554680585a051c38b0c274a91a32b77ada803e018c5dad918",
+        "047e5ef3c5f629f9900953ff4f84bf082ed90486169f353caa6c7dcfe05f589f",
     ),
     (
         "bars/gdfl/NSE/FNO/RELIANCE/2024-04-25-290000-CE/1s/2024-04.bin",
@@ -556,7 +559,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/FNO/RELIANCE/2024-04-25-290000-CE/1s/2024-04.prv",
-        "70f94ed624f91aa9e167c590ee3f44229b02648c7d98939a9cbf2f41f804e20a",
+        "8d58f855a2346e4425f85da04e2b90c1f447f5591b7c69330633a114f5ef7978",
     ),
     (
         "bars/gdfl/NSE/INDEX/BANKNIFTY/1s/2020-02.bin",
@@ -572,7 +575,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/INDEX/BANKNIFTY/1s/2020-02.prv",
-        "aa8fd4cbd5c35f8f4b121bd15cce77b8437ffe9d9b9da7378fb00dc56c28957f",
+        "0f1dcb82da1927c978d9c98f12c4e54f274878ca150ca4f66d3ad5f4deded49a",
     ),
     (
         "bars/gdfl/NSE/INDEX/BANKNIFTY/1s/2024-04.bin",
@@ -588,7 +591,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/INDEX/BANKNIFTY/1s/2024-04.prv",
-        "388a2caddc70cb43371bf5c4a6803a7e19030fa4a123cb47d6f66ab2d9d2d1b1",
+        "0bd48f572cc98a018aacb32bc930c9c9eb97c15362ce7874140bdb4a783948e4",
     ),
     (
         "bars/gdfl/NSE/INDEX/NIFTY/1s/2020-02.bin",
@@ -604,7 +607,7 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/INDEX/NIFTY/1s/2020-02.prv",
-        "aa8fd4cbd5c35f8f4b121bd15cce77b8437ffe9d9b9da7378fb00dc56c28957f",
+        "0f1dcb82da1927c978d9c98f12c4e54f274878ca150ca4f66d3ad5f4deded49a",
     ),
     (
         "bars/gdfl/NSE/INDEX/NIFTY/1s/2024-04.bin",
@@ -620,20 +623,20 @@ const LEFT: [(&str, &str); 68] = [
     ),
     (
         "bars/gdfl/NSE/INDEX/NIFTY/1s/2024-04.prv",
-        "388a2caddc70cb43371bf5c4a6803a7e19030fa4a123cb47d6f66ab2d9d2d1b1",
+        "0bd48f572cc98a018aacb32bc930c9c9eb97c15362ce7874140bdb4a783948e4",
     ),
     // IA-16 (D-4841): the day ledger's lines are `v=2`, with the separator
     // and the stocks volume-limit count; no other byte moved.
     (
         "imports/gdfl.dayflags",
-        "53ca50e327fbfd83192f8faa6601832c0eddac6022bb3acd1fee5f2c75722a20",
+        "de90ede576be3cb1d159678d542884ff9400fdc7ed4a1031426f859ed4fc47bd",
     ),
     // IA-3 (D-5903, DB-A49): every close now says what its listing was
     // (`skipped=`, `entries=`, `listing=`); no other byte the runs leave
     // moved, the months, the census and the day ledger included.
     (
         "imports/gdfl.journal",
-        "faca81e53fe129e726c33aaf0a03e3222566878ab5a53280778d38aebc913e0c",
+        "8ac6e0674b4a8c64352c6faa28272e30d9a3fddb3eeb28d5d89818ae4c3d0cfb",
     ),
     // IA-2 (D-4803): the journal append lock every append takes, empty.
     (
