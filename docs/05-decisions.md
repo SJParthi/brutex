@@ -72186,6 +72186,7 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
 ### D-5170 — Volume is GDFL's, never Zerodha's minutes; decisions are taken on Zerodha minutes, GDFL only at the seconds level, and the per-stock-day factor converts at the fill boundary — 2026-10-16
 
 **Context** (DATA-1; hand-over FINDING 2, FINDING 3, FINDING 4 and the DATA
@@ -72705,6 +72706,155 @@ rule and a test:
    name and never picks a factor of its own. `Ok` alone is not enough
    either: a close intersection can survive off the median, and then the
    range intersection, or nothing, is the basis.
+
+### D-6017 — The store's host refusals a disk cannot stage are driven by `#[cfg(test)]` seams; a look that catches a staging file mid-unlink is a free name; a refused checksum write names the sidecar; a durable batch's refused barrier deferral is remembered as a failed barrier — 2026-10-17
+
+**Implemented by** the store mutation and coverage pass of 17 October 2026
+(`reports/cloud-mut-store-20261017.md`, branch `cloud/mut-store-20261017`),
+which continues the 16 October pass. **Number** chosen above every number in
+use or reserved on any branch on 17 October 2026 (D-5619 the highest, on
+`cloud/fib1-20261016`), so no package landing beside this one meets it.
+
+**What was observed.** `CLAUDE.md` §9 asks for 100% line and branch
+coverage and no surviving mutant on every touched module. The 16 October
+pass left 34 mutants and about 110 production lines in `crates/store` and
+`crates/telemetry/src/sink.rs` it argued no test could reach. Fifteen of
+the mutants, and most of the lines, sit on arms that only a host refusal
+reaches, on a file the same function has just opened, measured or written,
+or only a race between two calls of one function. No test can stage those
+on a real disk. Three of the arms answered wrongly when they were driven:
+
+1. `store::staging::create` refused a file whose last name went between
+   the host's lookup of the name and its read of the file's status as
+   `staging_linked`, "one of 0 names of a file". A file with no name has none
+   to protect. The 16 October pass observed this under a real race.
+2. `BarFile::seal_committed` named the BAR file when the host refused the
+   write of the checksum sidecar. The bar file had not been refused.
+3. **Inside a `DurableBatch`, a refused append barrier was forgotten.** A
+   plain writer remembers a failed barrier for the month, so no later
+   append in the process confirms the commit it guarded (D-1907). Under a
+   batch, `barrier_in` defers the flush instead, and when the deferral was
+   refused (the device's `fstat`) it returned the refusal without
+   remembering it. The same process then reopened the month and appended
+   past the refused commit: 1,100 bars the caller was told were refused
+   became the first 1,100 rows of a month confirmed at 1,101.
+
+**Decided.**
+
+1. **Seams, `#[cfg(test)]` only, in the codebase's existing shape.** Each
+   seam adds a branch under test, so the call that ships is the call every
+   test runs (`file::sync_hooked`, D-2740; `flock::unlock`'s refusal; the
+   verdict crash seam, D-4865). There are nine:
+   - `file::fault` and `impl Positional for File`: one per-thread host
+     refusal, armed for one `Action` on one file. The file is matched by
+     path, or by device and inode for an open handle. `fault` replaces the
+     answer after the call; a read or write is refused before it, so a
+     refused write writes nothing. The same refusal also reaches
+     `index_on_open`'s look at the `.tix` name.
+   - `file::initialise`: an actor before the genesis' flush. It is the one
+     place a batch can be sealed between an open's capture of it and that
+     open's first deferral, so `defer_file`'s sealed answer is reached at
+     every writer call site.
+   - `staging`: a stand-in for the look, and an open refusal, so the Nth
+     open can be refused.
+   - `sort_index_writer`: the index's looks and positional reads go through
+     the file seam (`look`, `read_index_at`).
+   - `verdict`: an interference seam, which runs another actor's step before
+     a host call. It sits before the removal of a refused temporary,
+     `remove_tmp`, the year index's link, the image's link, and a reader's
+     second look for a year index.
+   - `flock::Flock::try_lock`: a one-shot refusal, in the shape of its
+     unlock seam.
+   - `safe_open::name_the_refusal`: a per-thread look counter, so the cost
+     its doc states (no look on any other path) is measured.
+   - `telemetry::sink::Audit::retire`: an actor between making the
+     roll-aside folder and looking at it.
+   - `telemetry::sink::Sink::open`: the clock its "ahead of the clock" check
+     reads, pinned once on a thread, because only a pinned clock can equal a
+     resumed stamp on request
+     (`a_resumed_floor_equal_to_the_clock_is_not_ahead_of_it`). This ninth
+     seam came later on 17 October than the list above was first written;
+     the merge-back (CLOUD-MUTSTORE) counted it.
+2. **A staging look that sees 0 links is a free name.** The create is tried
+   once more and nothing is cleared, exactly as for a name gone by the look
+   (`staging.rs`'s table gains the row).
+3. **A refused sidecar write names the sidecar**, which is the path the
+   host refused.
+4. **`sort_index_writer::write_whole` loses its `n_valid == 0` guard.** Its
+   only route (`keep_sort_index`) returns first for an empty month, so no
+   input reached the guard. It now returns `()`.
+5. **A refused deferral is a failed barrier.** `barrier_in` remembers the
+   month when the batch refuses to defer its flush, exactly as `barrier`
+   remembers a failed sync, so the next append in the process is refused
+   `barrier_failed`. The deferral was refused, so the file is in no flush
+   the batch will make; the commit it guarded is no more durable than one
+   whose sync failed.
+
+**Rejected.**
+- *Restructuring production paths so a test could reach these arms from
+  data.* That changes production control flow to serve a test (D-0696
+  item 6 rejected the same for `cli`'s two seams).
+- *Declaring every such arm unreachable.* The two defects above were on
+  such arms.
+
+**What is still not reached**, each with its reason, is listed in the
+report's "Coverage" and "Equivalent mutants" sections. Two kinds remain.
+Defensive re-borrows (`let Some(tix) = self.tix.as_ref() else`) after a
+caller has checked the same value. And `cfg` arms for targets that are not
+built here (`safe_open`'s and `file`'s unverified-flag arms).
+
+**Merged back** onto `feat/db-fix` by CLOUD-MUTSTORE on 21 October 2026, and
+measured there again on macOS (uid 501; cargo-mutants 26.2.0 with nextest
+0.9.145 under Gate 18's flags; line numbers are the merged tree's):
+
+- Gate 18's own plan for this change (`--in-diff` against `feat/db-fix`
+  over `crates/store/src` and `crates/telemetry/src`): 38 mutants, 22
+  caught, 16 unviable, none missed, none timed out.
+- The 12 mutants argued equivalent each survive the whole suite, every
+  argument re-read at its current line: `file.rs` `MAX_ROW_LEN` (215:32
+  `>` made `==` and `>=`, 220:15 `>` made `>=`), `DurableBatch::defer_file`'s
+  guard `O_SYNC.is_none()` made `false` (5322:42; `O_SYNC` is `Some` on
+  macOS as on Linux), `flush_all`'s `<` made `<=` (5533:67),
+  `writer_flags`' guard `through` made `true` or `false` (5747:27, an arm
+  compiled on no verified target), `verdict.rs` `Code::worse`'s `<` made
+  `<=` (410:29), `sealed.rs` `Fold::push`'s `<` made `<=` (1504:32),
+  `last_before`'s guard `block > 0` made `true` and its `>` made `>=`
+  (2352:35, 2352:41), and `sink.rs` `Audit::mark_coverage`'s `>` made `>=`
+  (3272:32).
+- Of the three mutants that stop a loop ending, `first_at_or_after`'s two
+  were caught where 18 October caught them, by the agreeing-overlap test at
+  its 20 s deadline (the 33rd of 875 tests). The sealed audit's
+  `chunk < n_blocks` made `<=` TIMED OUT at 900 s: SC-3 (D-4965), merged
+  after this pass, added
+  `the_audited_door_audits_both_forms_and_compares_them`, which audits with
+  no deadline and is now the 67th test in the default order, ahead of every
+  deadline. So `.config/nextest.toml` runs
+  `first_at_or_after_never_probes_more_than_the_bisection_height` and
+  `an_empty_month_is_a_head_alone` first, as the 18 October report
+  proposed; order only, nothing skipped. Measured with that order, all
+  three are caught: the two lookup mutants by the first in 0.015 s, the
+  2nd of 875 tests, and the audit mutant by the second at its 60 s
+  deadline, the 7th.
+- `crates/telemetry/tests/cloud_mutants_sink.rs` imported, at file level,
+  what only its Linux-only `fsync` test uses: an unused import on macOS,
+  which `-D warnings` refuses (clippy, and Gate 31's macOS test run under
+  the workflow's `RUSTFLAGS`). The import moved into that test. On macOS
+  that test does not run, so there `FileTarget::sync` made `Ok(())` has no
+  catch; Gate 18 runs on Linux.
+- Coverage, by the 16 to 18 October passes' per-binary union
+  (`cargo llvm-cov` 0.8.4 with `--branch` builds; each of the 43 test
+  binaries run alone): `path`, `safe_open`, `sealed`, `sealed_codec`,
+  `sort_index_writer`, `staging`, `time_index`, `verdict` and `sink` give
+  the 18 October figures line for line and branch for branch. `file`,
+  `flock` and `emits` give those figures plus lines `feat/db-fix` added
+  after the cut, each uncovered by its own package's tests: in `file.rs`,
+  24 lines of PREC-1's `#[ignore]`d full-volume test and 1 line and 1
+  branch of SC-3's `write_sealed_refused`; in `flock.rs`, 15 lines and 8
+  branches of R3-08's and AG-06's bounded waits; in `emits.rs`, 1 branch of
+  an R4-09a test helper. No line or branch this change adds to production
+  code is uncovered.
+
+Invariants: `docs/04-invariants.md` CMS-01 to CMS-09.
 
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 
