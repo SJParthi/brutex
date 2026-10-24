@@ -3418,6 +3418,22 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   assert.ok(Date.now() - t1 >= sheet.COMMAND_STOP_MS - 50);
   assert.equal(sheet.groupRunning(stubborn.child.pid), false, 'no process of its group is left');
   assert.equal(await stubborn.stop(), 'had already left', 'a second stop signals nothing');
+  // A process of the group that outlives the command and ignores SIGTERM is waited for, bounded, then killed with the group.
+  const orphan = join(dir, 'orphan.pid');
+  const outlived = sheet.run(`(trap '' TERM; exec sleep 1000) & echo $! > '${orphan}'; sleep 1000`);
+  const left = await pidIn(orphan);
+  const t2 = Date.now();
+  assert.equal(await outlived.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
+  assert.ok(Date.now() - t2 >= sheet.COMMAND_STOP_MS - 50, 'its group was given the wait after the command itself left');
+  assert.ok(await endsWithin(left), 'and the process that outlived it was killed with the group');
+  // A command that exited with a process of its group still running: the stop ends that process too.
+  const behind = join(dir, 'behind.pid');
+  const quick = sheet.run(`sleep 1000 & echo $! > '${behind}'`);
+  assert.equal(await quick.wait, 0);
+  const straggler = await pidIn(behind);
+  assert.ok(running(straggler));
+  assert.equal(await quick.stop(), 'was sent SIGTERM and left');
+  assert.ok(await endsWithin(straggler), 'what the command left behind ended with its group');
   // In a run: the restart pass ends by name, and the sheet is still made.
   const r = await sheet.runSheet({ ...argsFor(), restart: 'sleep 1000', restarts: 2, restartWaitMs: 300 }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(r.failures.includes('restart 1: the --restart command did not exit within 300 ms (--restart-wait-ms), so its process group was sent SIGTERM and left'), r.failures.join('\n'));
