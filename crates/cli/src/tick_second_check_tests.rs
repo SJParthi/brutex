@@ -2019,12 +2019,16 @@ fn the_census_is_one_pass_and_its_work_grows_with_the_rows_alone() {
         assert_eq!(c.lines, c.steps);
         assert_eq!(c.identical, 0);
     }
+    // Joined at run time, never one literal: a whole row in `crates/` is what
+    // `pull::gdfl_cm::tests::fixtures_are_built_not_pasted` refuses (design
+    // section 12), even an invented one (BASE-REDS-1023).
+    let row = |at: &str, rest: &str| format!("ZZ.NSE,07/03/2025,{at},{rest}");
     let rows = vec![
-        "ZZ.NSE,07/03/2025,10:00:00,5.00,0,0,0,0,1,0".to_owned(),
-        "ZZ.NSE,07/03/2025,10:00:00,5.00,0,0,0,0,1,0".to_owned(),
-        "ZZ.NSE,07/03/2025,10:00:01,-5.00,6.00,1,5.00,1,1,0".to_owned(),
-        "ZZ.NSE,07/03/2025,10:00:01,5.00,0,-1,4.00,0,1,0".to_owned(),
-        "ZZ.NSE,07/03/2025,10:00:02,5.00,0,0,0".to_owned(),
+        row("10:00:00", "5.00,0,0,0,0,1,0"),
+        row("10:00:00", "5.00,0,0,0,0,1,0"),
+        row("10:00:01", "-5.00,6.00,1,5.00,1,1,0"),
+        row("10:00:01", "5.00,0,-1,4.00,0,1,0"),
+        row("10:00:02", "5.00,0,0,0"),
     ];
     let c = census(&csv(&rows));
     assert_eq!(
