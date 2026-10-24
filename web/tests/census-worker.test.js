@@ -194,3 +194,56 @@ test('a worker that never answers is given up on at the ceiling, named, and no t
   assert.equal(timers3[0].cleared, true);
   assert.equal(quiet.broken, null);
 });
+
+/* ----------------------------------------------------------------------
+   R3-12 (RA-043, the fix plan's goal item 2): THE PAGE STILL SHOWS ROWS
+   ---------------------------------------------------------------------- */
+import { mock } from 'node:test';
+import { storeModule, tuples, HEADERS } from './store-module.js';
+import { censusLines } from '../src/lib/store-census.js';
+
+test('a_silent_worker_is_dropped_and_the_page_says_so', async () => {
+  // A WORKER THAT TAKES THE MESSAGE AND NEVER ANSWERS, in the store module
+  // itself: the whole census another page reads is decoded on the page at
+  // the ceiling, its rows are published, and the banner says why.
+  /** @type {any[]} */
+  const sent = [];
+  let terminated = false;
+  const realWorker = /** @type {any} */ (globalThis).Worker;
+  const realFetch = globalThis.fetch;
+  /** @type {any} */ (globalThis).Worker = class { postMessage(/** @type {any} */ m) { sent.push(m); } terminate() { terminated = true; } };
+  const body = tuples('example', [['NSE-INDEX-ALPHA', '2019-03', '1min', 60], ['NSE-INDEX-ALPHA', '2019-02', '1min', 55]]);
+  globalThis.fetch = /** @type {any} */ (async () => new Response(JSON.stringify(body), { status: 200, headers: HEADERS }));
+  const turn = () => new Promise((done) => setImmediate(done));
+  try {
+    const { store, syncStore } = await storeModule();
+    mock.timers.enable({ apis: ['setTimeout'] });
+    syncStore('example', null);
+    for (let i = 0; i < 200 && sent.length === 0; i++) await turn();
+    assert.equal(sent.length, 1, 'the census went to the worker');
+    assert.equal(store.state, 'reading', 'nothing is shown before the ceiling');
+    mock.timers.tick(9_999);
+    for (let i = 0; i < 20; i++) await turn();
+    assert.equal(store.state, 'reading', 'nothing gives up before the ceiling');
+    mock.timers.tick(1);
+    // The page's own decode yields with zero-delay timers, run as they fall due.
+    for (let i = 0; i < 400 && store.state === 'reading'; i++) {
+      mock.timers.tick(0);
+      await turn();
+    }
+    // DROPPED AT ITS CEILING: terminated, and the page decoded the census itself.
+    assert.equal(terminated, true);
+    assert.equal(store.state, 'ready', String(store.error));
+    assert.deepEqual(store.rows.map((/** @type {any} */ row) => `${row.instrument}|${row.month}|${row.rows}`), ['NSE-INDEX-ALPHA|2019-03|60', 'NSE-INDEX-ALPHA|2019-02|55']);
+    assert.equal(store.worker, 'the census worker failed (the census worker did not answer within 10 s), so this page decoded the census on its own thread');
+    // AND THE PAGE SAYS SO, in the banner's own line.
+    const lines = censusLines({ feed: 'example', at: store.at, lag: store.lag, worker: store.worker, head: null, how: store.how });
+    assert.deepEqual(lines.filter((line) => line.key === 'worker').map((line) => line.text),
+      ['The census worker failed (the census worker did not answer within 10 s), so this page decoded the census on its own thread.']);
+    assert.equal(store.refreshes.at(-1)?.worker, store.worker, 'the refresh log keeps why');
+  } finally {
+    mock.timers.reset();
+    /** @type {any} */ (globalThis).Worker = realWorker;
+    globalThis.fetch = realFetch;
+  }
+});

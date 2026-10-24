@@ -147,7 +147,7 @@ if (typeof scope.WorkerGlobalScope !== 'undefined' && scope instanceof scope.Wor
 /* ======================================================================
    THE PAGE'S SIDE
    ====================================================================== */
-/** @type {{port: MessagePort, queue: (() => void)[]} | null} */
+/** @type {{port: MessagePort, queue: (() => void)[], hold: () => void} | null} */
 let channel = null;
 
 /**
@@ -162,16 +162,28 @@ export function yieldTask() {
   if (typeof MessageChannel !== 'function') return new Promise((done) => setTimeout(done, 0));
   if (!channel) {
     const pair = new MessageChannel();
+    /** @type {any} */
+    const listener = pair.port1;
     /** @type {(() => void)[]} */
     const queue = [];
-    pair.port1.onmessage = () => queue.shift()?.();
-    // NODE ONLY: a port with a listener keeps the process alive.
-    /** @type {any} */ (pair.port1).unref?.();
-    channel = { port: pair.port2, queue };
+    /* NODE ONLY: a port with a listener keeps the process alive, so an idle
+       channel is unref'd; but WHILE A YIELD WAITS it is ref'd (R3-12). Left
+       unref'd, a yield with nothing else pending let Node end the event loop
+       before the message came back, and the work behind it never resumed
+       ("Promise resolution is still pending but the event loop has already
+       resolved", census-worker.test.js, Node 22). A browser's port has
+       neither call. */
+    listener.onmessage = () => {
+      queue.shift()?.();
+      if (queue.length === 0) listener.unref?.();
+    };
+    listener.unref?.();
+    channel = { port: pair.port2, queue, hold: () => listener.ref?.() };
   }
-  const { port, queue } = channel;
+  const { port, queue, hold } = channel;
   return new Promise((done) => {
     queue.push(done);
+    hold();
     port.postMessage(null);
   });
 }

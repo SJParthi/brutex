@@ -23,7 +23,9 @@ export async function storeModule() {
     : path.startsWith('$lib/') ? new URL(path.slice(5), LIB).href
       : path.startsWith('.') ? new URL(path, file).href
         : import.meta.resolve(path));
-  const code = js.code.replace(/from (["'])([^"']+)\1/g, (_m, q, path) => `from ${q}${resolve(path)}${q}`);
+  // `import.meta.url` is the file's own, so the worker's URL resolves as it does in the page.
+  const code = js.code.replace(/from (["'])([^"']+)\1/g, (_m, q, path) => `from ${q}${resolve(path)}${q}`)
+    .replaceAll('import.meta.url', JSON.stringify(file.href));
   return import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}#${Math.random()}`);
 }
 
