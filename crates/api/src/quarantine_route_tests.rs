@@ -576,7 +576,11 @@ async fn bars_json_names_every_bar_and_every_cause_a_month_set_aside() {
     .expect("JSON");
     assert_eq!(
         (&flag["months"], &flag["whole_months"], &flag["bars"]),
-        (&serde_json::json!(1), &serde_json::json!(1), &serde_json::json!(6)),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(1),
+            &serde_json::json!(6)
+        ),
         "{flag}"
     );
     assert_eq!(

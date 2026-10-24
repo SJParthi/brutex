@@ -5287,7 +5287,11 @@ append, never an act and never damage (R4-18 repair 2, D-7291). Every other
 complete line that is not valid UTF-8, fails its checksum or does not parse
 (a month that is no month, stamps out of order) is DAMAGE: refused by name,
 `quarantine_ledger_damaged` with its byte offsets, by every rebuild, listing
-and apply, never skipped.
+and apply, never skipped. The head is the first complete line that is no
+ended torn append, for every reader and every writer alike: a feed's first
+act writes the head and its line in one write, so a writer killed in it
+leaves a strict prefix of the head, which the next writer ends with the torn
+mark before writing the head again (D-7292).
 
 **The index** (derived, rebuilt from the ledger): exactly 524,800 bytes — a
 64-byte header (`BRXQIX01`, version 2, slot length 64, capacity 8,192,
@@ -5295,9 +5299,13 @@ bucket 8, entries at 32, the LEDGER BYTES THE IMAGE DESCRIBES at 40, CRC-32C
 at 60) and 8,199 slots of 64 bytes, open-addressed
 by the BLAKE3 of (series key, month); a key lives in the first free or
 matching slot of the 8 from its home, which never wrap. Slot: 16-byte hash,
-month `yyyy*100+mm`, scope (1 whole month, 2 dropped), cause (1, 2, 3), bars,
-ledger offset, revision, written at, CRC-32C of bytes 0..60 and the slot's
-index. Every write is a whole new image, staged, synced and renamed. A
+month `yyyy*100+mm`, scope (1 whole month, 2 dropped), the newest act's cause
+(1, 2, 3), EVERY cause the month's acts named (byte 22, a set: 1 before
+listing, 2 foreign level, 4 zero price; it holds the newest's), the bars set
+aside over every act (a drop adds its bars; a whole record after drops adds
+its own, the served generation's, to theirs), ledger offset, revision,
+written at, CRC-32C of bytes 0..60 and the slot's index (D-7292). Every write
+is a whole new image, staged, synced and renamed. A
 `dropping` intent is indexed as a drop of no bars. A reader answers only
 from an image whose header checks and whose described length IS the
 ledger's: one behind it is never the answer, because a writer holding
@@ -5308,7 +5316,11 @@ within its thread's patience and is refused `quarantine_being_written` (a
 "being written, ask again" sentence) when that runs out; with no writer the
 lag is `quarantine_index_stale`, and a wrong length or header
 `quarantine_index_torn`, each by name; the next writer rebuilds the image
-from the ledger before its own act (D-7291).
+from the ledger before its own act (D-7291) — unless the image's checked
+header describes MORE of the ledger than it holds (the ledger put back from
+an older copy, or cut): a rebuild from what is left would forget acts the
+index records, so every writer refuses it, `quarantine_ledger_cut`, until
+the ledger is restored (D-7292).
 
 **A dropped month** is a new generation under `bar-revisions-v1/<n>` through
 `store::repair::publish_without` and `generation::promote`; a month named

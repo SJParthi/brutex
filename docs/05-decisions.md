@@ -83602,3 +83602,45 @@ quarantine files, measured) and never merged. An image of version 1 is not
 read as current (its version does not check) and is rebuilt from its
 ledger; index version 2 and the ledger as `docs/02-store-format.md` now
 states them are frozen from their first landing.
+
+### D-7292 — R4-18 repair 2, the resumed self-check: the ledger's head is found past torn heads; a ledger cut below its index is refused, never rebuilt away; a month's entry counts every bar it set aside and names every cause — 2026-10-24
+
+The repair's self-check before landing, resumed after the second check's
+three blocking issues were closed (D-7291), found two more defects in the
+package's own code and closed one follow-up the second check listed, each by
+a test that failed on the code it read (304c702f5) (`docs/04-invariants.md`
+R418-24..R418-26):
+
+1. **A head torn by a killed first write stopped every later writer.** A
+   feed's first act writes the ledger's head and its line in one write, so a
+   writer killed in it (or refused by a full disk) leaves a strict prefix of
+   the head. The next writer ended it and wrote the head again — and every
+   writer after it looked for the head only at byte 0 and refused the ledger
+   as `quarantine_ledger_damaged` at byte 0, for ever (the first apply's own
+   `dropped` line among them, after its door had promoted), while every
+   reader of the ledger read it whole and undamaged. NOW the writer finds the
+   head by the readers' own rule: the first complete line that is no ended
+   torn append (one positional read of at most 4,096 bytes).
+2. **A ledger cut below what its index describes was rebuilt away.** Put back
+   from an older copy, or truncated, the ledger no longer held acts the index
+   records, and the next writer of any month of the feed rebuilt the index
+   from what was left: a month a lost line had recorded whole read as clear
+   and was served again. NOW an image whose checked header describes MORE of
+   the ledger than it holds is refused by every writer, `quarantine_ledger_cut`
+   (both lengths named, one `store.quarantine` error event), with nothing
+   written; every reader answers `quarantine_index_stale` meanwhile, its
+   sentence saying the ledger must be restored. An image that cannot be
+   trusted at all (a wrong length, a header that does not check) still says
+   nothing of the ledger and is rebuilt from it; `store::quarantine::rebuild`,
+   asked for by name, still rebuilds from the ledger as it is.
+3. **A month dropped for one cause and then recorded whole for another kept
+   only the whole record's bars and cause** (the second check's follow-up on
+   `merged`): its bars were the served generation's after the drops, so the
+   bars the drops set aside before it were left out of the index, its
+   rebuild, the snapshot and the summary, and `/bars.json` said "all 2 of its
+   bars are zero_price" of a month that set aside 6. NOW the one merge rule
+   adds them, and every entry carries every cause its month's acts named
+   (`store::quarantine::Causes`, slot byte 22 of index version 2, which has
+   not landed); `/bars.json`, `/bars/window.json`, `/store.json` (a new
+   `causes` array beside `cause`, the newest act's), the stored sweep, the
+   verb's plan and the doors' refusal name them all.
