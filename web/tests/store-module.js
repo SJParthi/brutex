@@ -80,7 +80,8 @@ export const TOO_MANY = { error: 'rows_too_many', why: 'the chain names more tha
 export function fakeServer({ feed = 'example', refuse = {} } = {}) {
   /** @type {string[]} */
   const asked = [];
-  const answer = (/** @type {string} */ url) => {
+  /** @type {(url: string) => [number, any]} */
+  const answer = (url) => {
     if (refuse[url]) return refuse[url];
     if (url === facetsUrl({ feed, segment: /** @type {any} */ (null) })) return [200, rootBody(feed)];
     const query = new URL(url, 'http://fake').searchParams;

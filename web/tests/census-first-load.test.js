@@ -295,6 +295,8 @@ test('extreme, concurrent: a scope read a newer selection replaced is never publ
     for (let i = 0; i < 50; i++) await new Promise((done) => setTimeout(done, 1));
     assert.equal(store.scope?.underlying, 'BETA');
     assert.equal(store.rows.every((/** @type {any} */ row) => row.instrument.includes('BETA')), true);
+    // AND BOTH READS ASKED ONLY THE SPOT SEGMENTS THEIR VIEW SHOWS (R3-12).
+    assert.deepEqual(server.asked.filter((url) => url.includes('segment=FNO')), []);
     assert.equal(store.state, 'ready');
   } finally {
     globalThis.fetch = real;
