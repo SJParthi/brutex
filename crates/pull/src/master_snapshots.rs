@@ -55,8 +55,11 @@
 //! delistings, symbol changes (the same token under a new symbol, or the same
 //! ISIN under a new symbol), ISIN changes, lot-size, expiry and token changes,
 //! and the NSE shares whose ISIN the same-date NSE file does not list
-//! (`isin_unknown`, never inferred). It is written once, `O_EXCL`, as a
-//! fixed-record `<yyyymmdd>.diff` ([`RECORD_LEN`] bytes a line), and the
+//! (`isin_unknown`, never inferred). It is written once, as a fixed-record
+//! `<yyyymmdd>.diff` ([`RECORD_LEN`] bytes a line): whole under an `O_EXCL`
+//! partial name, synced, and renamed into place (R4-28 repair 4), so a kill
+//! mid-write leaves a partial [`Catalog`] names and nothing reads, never a
+//! torn diff under its own name, and the next refresh makes it again. The
 //! refresh outcome and the [`EVENT_TARGET`] events carry its counts and name
 //! every symbol, ISIN, lot-size, expiry and token change.
 //!
@@ -246,25 +249,68 @@ fn parse_name(name: &str) -> Option<(Kind, Stamp, bool)> {
             .strip_suffix(".receipt")
             .map_or((rest, false), |rest| (rest, true));
         let rest = rest.strip_suffix(".csv.gz")?;
-        let (date, ordinal) = match rest.split_once('_') {
-            None => (rest, 1),
-            Some((date, n)) => {
-                // `_1` is never written and a leading zero is never written,
-                // so either is a name this module did not make.
-                if n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
-                    return None;
-                }
-                let n: u32 = n.parse().ok()?;
-                if n < 2 {
-                    return None;
-                }
-                (date, n)
-            }
-        };
-        let day = parse_compact(date)?;
-        return Some((kind, Stamp { day, ordinal }, receipt));
+        return parse_base(rest).map(|stamp| (kind, stamp, receipt));
     }
     None
+}
+
+/// A later ordinal as names carry it, `2` and up, or `None`.
+///
+/// `_1` is never written and a leading zero is never written, so either is a
+/// name this module did not make.
+fn parse_ordinal(n: &str) -> Option<u32> {
+    if n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u32 = n.parse().ok()?;
+    (n >= 2).then_some(n)
+}
+
+/// The stamp a name's `yyyymmdd` or `yyyymmdd_<n>` part carries, or `None`.
+fn parse_base(rest: &str) -> Option<Stamp> {
+    let (date, ordinal) = match rest.split_once('_') {
+        None => (rest, 1),
+        Some((date, n)) => (date, parse_ordinal(n)?),
+    };
+    let day = parse_compact(date)?;
+    Some(Stamp { day, ordinal })
+}
+
+/// The name a `.diff` is written under before its rename commits it: the
+/// diff's name and [`PARTIAL`], then `_2`, `_3`, ... past partials a killed
+/// writer left (R4-28 repair 4, the r4 check's follow-up).
+fn diff_partial_name(stamp: Stamp, attempt: u32) -> String {
+    if attempt <= 1 {
+        format!("{}{PARTIAL}", diff_name(stamp))
+    } else {
+        format!("{}{PARTIAL}_{attempt}", diff_name(stamp))
+    }
+}
+
+/// The Kite stamp a diff partial's name carries, or `None` for any other name.
+fn parse_diff_partial(name: &str) -> Option<Stamp> {
+    let (base, attempt) = name.split_once(".diff")?;
+    let attempt = attempt.strip_prefix(PARTIAL)?;
+    if !attempt.is_empty() {
+        parse_ordinal(attempt.strip_prefix('_')?)?;
+    }
+    parse_base(base)
+}
+
+/// What an entry whose name differs from a name this module makes only in
+/// case would have been, or `None` (R4-28 repair 4, the r4 check's
+/// follow-up).
+///
+/// On a case-insensitive volume, the default on macOS, such an entry holds the
+/// very name `create_new` would make, so a write at that ordinal is refused on
+/// every refresh while the listing, which compares bytes, saw nothing there.
+fn case_twin(name: &str) -> Option<(Kind, Stamp)> {
+    let lower = name.to_ascii_lowercase();
+    if lower == name {
+        return None;
+    }
+    let snapshot = |text: &str| parse_name(text).map(|(kind, stamp, _)| (kind, stamp));
+    snapshot(&lower).or_else(|| lower.strip_suffix(PARTIAL).and_then(snapshot))
 }
 
 /// Why a body with no receipt is not a snapshot.
@@ -275,6 +321,14 @@ const CUT_RECEIPT: &str = "a receipt cut before its rename committed it";
 
 /// Why a receipt with no body is not a snapshot.
 const LONE_RECEIPT: &str = "a receipt with no body";
+
+/// Why a diff partial is not a diff (R4-28 repair 4).
+const CUT_DIFF: &str = "a .diff cut before its rename committed it; the diff is made again \
+                        whole under its own name";
+
+/// Why a case twin is not a snapshot (R4-28 repair 4).
+const CASE_TWIN: &str = "a snapshot's name in another case; it holds its ordinal, since a \
+                         case-insensitive volume takes it for that name";
 
 /// The most incomplete entries one refresh outcome names, and the most Warn
 /// events one refresh emits for them, newest first. The rest are counted,
@@ -292,9 +346,11 @@ pub const DIFF_NAMED: usize = 256;
 
 /// One directory entry that is not a snapshot: named, never read.
 ///
-/// A kill between a body and its receipt, or inside the receipt's rename,
-/// leaves one. No reader opens it, and the code deletes nothing, so it stays
-/// until someone moves it aside. Every refresh names it (R4-28 repair 3).
+/// A kill between a body and its receipt, inside the receipt's rename, or
+/// inside a `.diff`'s write, leaves one; so does a name that is a snapshot's in
+/// another case (R4-28 repair 4). No reader opens it, and the code deletes
+/// nothing, so it stays until someone moves it aside. Every refresh names it
+/// (R4-28 repair 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Incomplete {
     /// The master it would have been a snapshot of.
@@ -321,7 +377,8 @@ pub struct Catalog {
     /// The highest ordinal any entry of a (kind, day) carries, complete or not.
     highest: HashMap<(Kind, Day), u32>,
     /// Entries that are not snapshots: a body with no receipt, a receipt with
-    /// no body, a receipt cut before its rename. Named, never read. By kind,
+    /// no body, a receipt cut before its rename, a `.diff` cut before its
+    /// rename, a snapshot's name in another case. Named, never read. By kind,
     /// then stamp, then name.
     incomplete: Vec<Incomplete>,
 }
@@ -340,6 +397,7 @@ impl Catalog {
         };
         let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::new();
         let mut partials = Vec::new();
+        let mut cut_diffs = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
@@ -354,7 +412,26 @@ impl Catalog {
                 });
                 continue;
             }
+            // A DIFF CUT BEFORE ITS RENAME, in any case (R4-28 repair 4):
+            // named, never read, and never a snapshot's ordinal.
+            if let Some(stamp) = parse_diff_partial(&name.to_ascii_lowercase()) {
+                cut_diffs.push(Incomplete {
+                    kind: Kind::Kite,
+                    stamp,
+                    file: name.to_owned(),
+                    why: CUT_DIFF,
+                });
+                continue;
+            }
             let Some((kind, stamp, receipt)) = parse_name(name) else {
+                if let Some((kind, stamp)) = case_twin(name) {
+                    partials.push(Incomplete {
+                        kind,
+                        stamp,
+                        file: name.to_owned(),
+                        why: CASE_TWIN,
+                    });
+                }
                 continue;
             };
             let slot = seen.entry((kind, stamp)).or_insert((false, false));
@@ -390,7 +467,8 @@ impl Catalog {
         // A RECEIPT CUT BEFORE ITS RENAME HOLDS ITS ORDINAL TOO (R4-28 repair
         // 4, the r4 check's follow-up): with its body gone, the next write
         // would otherwise take that ordinal and be refused at its own partial
-        // receipt name.
+        // receipt name. So does a case twin, whose name a case-insensitive
+        // volume takes for the one `create_new` would make.
         for one in &partials {
             let highest = catalog
                 .highest
@@ -399,6 +477,7 @@ impl Catalog {
             *highest = (*highest).max(one.stamp.ordinal);
         }
         catalog.incomplete.extend(partials);
+        catalog.incomplete.extend(cut_diffs);
         catalog
             .incomplete
             .sort_unstable_by(|a, b| (a.kind, a.stamp, &a.file).cmp(&(b.kind, b.stamp, &b.file)));
@@ -696,6 +775,35 @@ fn lock(root: &Path) -> Result<Flock<File>, String> {
         .map_err(|why| format!("{} could not be opened for locking: {why}", path.display()))?;
     Flock::lock(file, path.clone())
         .map_err(|why| format!("{} could not be locked: {why}", path.display()))
+}
+
+/// The catalog of `root`, listed under the writers' lock taken shared, so no
+/// write is in flight while it lists (R4-28 repair 4). A root that does not
+/// exist is an empty catalog, and is not created.
+///
+/// # Errors
+///
+/// A root that cannot be read, a lock that cannot be taken or released, or a
+/// listing that fails, named.
+fn read_quiesced(root: &Path) -> Result<Catalog, String> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => {}
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(Catalog::default()),
+        Err(why) => return Err(format!("{} could not be read: {why}", root.display())),
+    }
+    let path = root.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|why| format!("{} could not be opened for locking: {why}", path.display()))?;
+    let held = Flock::lock_shared(file, path.clone())
+        .map_err(|why| format!("{} could not be locked: {why}", path.display()))?;
+    let catalog = Catalog::read(root)?;
+    held.release().map_err(|why| why.to_string())?;
+    Ok(catalog)
 }
 
 /// What one snapshot write did.
@@ -1447,8 +1555,17 @@ impl Book {
     /// # Errors
     ///
     /// A listing that fails, or stamps spanning more than forty years.
+    ///
+    /// # Listed under the writers' lock, shared (R4-28 repair 4)
+    ///
+    /// A body a refresh is still writing has no receipt yet, and a listing
+    /// taken beside that write named it cut, a false alarm on the futures
+    /// receipt. The listing now holds the writers' lock shared, so it waits
+    /// for a write in flight to commit or fail and lets other readers list
+    /// beside it: an entry it names incomplete is one no live writer is
+    /// finishing.
     pub fn open(root: &Path) -> Result<Self, String> {
-        let catalog = Catalog::read(root)?;
+        let catalog = read_quiesced(root)?;
         let stamps = catalog.receipted(Kind::Kite).to_vec();
         let loaded = stamps.iter().map(|_| OnceLock::new()).collect();
         let mut book = Self::build(Some(root.to_path_buf()), stamps, loaded)?;
@@ -2290,20 +2407,8 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
     };
     let path = root.join(diff_name(current));
     let file = path.display().to_string();
-    match fs::read(&path) {
-        Ok(bytes) => {
-            let text = String::from_utf8(bytes).map_err(|_| format!("{file} is not UTF-8"))?;
-            let (head, items) = parse_diff(&text).map_err(|why| format!("{file}: {why}"))?;
-            return Ok(Some(DiffSummary::of(
-                previous,
-                current,
-                file,
-                &items,
-                head.isin_unknown_total,
-            )));
-        }
-        Err(why) if why.kind() == ErrorKind::NotFound => {}
-        Err(why) => return Err(format!("{file} could not be read: {why}")),
+    if let Some(summary) = held_diff(&path, &file, previous, current)? {
+        return Ok(Some(summary));
     }
     let old = Snapshot::parse(previous, &read_body(root, Kind::Kite, previous)?)?;
     let new = Snapshot::parse(current, &read_body(root, Kind::Kite, current)?)?;
@@ -2313,19 +2418,103 @@ pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, Stri
     let total = unknown_isins(&new, new_isins.as_ref());
     let rendered = render_diff(previous, current, &items, total)?;
     let held = lock(root)?;
-    match write_new(&path, rendered.as_bytes()) {
-        Ok(()) => sync_dir(root)?,
-        // ANOTHER WRITER FINISHED FIRST: its file is the diff, read it.
-        Err(_) if path.is_file() => {
-            held.release().map_err(|why| why.to_string())?;
-            return diff_for(root, current);
-        }
-        Err(why) => return Err(why),
+    // ANOTHER WRITER FINISHED FIRST: its file is the diff, read it. An entry
+    // at the name with nothing readable behind it is refused, never written
+    // over.
+    if fs::symlink_metadata(&path).is_ok() {
+        let summary = held_diff(&path, &file, previous, current);
+        held.release().map_err(|why| why.to_string())?;
+        return summary?.map(Some).ok_or_else(|| {
+            format!("{file} is a name with nothing readable behind it; the diff is not written over it")
+        });
     }
+    commit_diff(root, current, &path, rendered.as_bytes())?;
+    sync_dir(root)?;
     held.release().map_err(|why| why.to_string())?;
     Ok(Some(DiffSummary::of(
         previous, current, file, &items, total,
     )))
+}
+
+/// The diff already at `path`, read and parsed, or `None` when there is none.
+///
+/// # Errors
+///
+/// A file that cannot be read, is not UTF-8 or does not parse, named.
+fn held_diff(
+    path: &Path,
+    file: &str,
+    previous: Stamp,
+    current: Stamp,
+) -> Result<Option<DiffSummary>, String> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|_| format!("{file} is not UTF-8"))?;
+            let (head, items) = parse_diff(&text).map_err(|why| format!("{file}: {why}"))?;
+            Ok(Some(DiffSummary::of(
+                previous,
+                current,
+                file.to_owned(),
+                &items,
+                head.isin_unknown_total,
+            )))
+        }
+        Err(why) if why.kind() == ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(format!("{file} could not be read: {why}")),
+    }
+}
+
+/// Writes the diff of `current` whole under its first free partial name,
+/// synced, and renames it to `path`, under the writers' lock the caller holds
+/// (R4-28 repair 4, the r4 check's follow-up; open since r1).
+///
+/// A kill mid-write leaves a partial that [`Catalog`] names and no reader
+/// opens, never a torn `.diff` under the diff's own name, so the next refresh
+/// makes the diff again, whole. A partial already at a name is a killed
+/// writer's (the lock admits one writer at a time), so it is stepped past and
+/// left exactly as found: never opened, overwritten or deleted.
+///
+/// # Errors
+///
+/// A partial that cannot be created, written, synced or renamed, or every
+/// partial name up to [`MAX_ORDINAL`] already held, named.
+fn commit_diff(root: &Path, current: Stamp, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let (partial, mut file) = open_diff_partial(root, current)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|why| format!("{} is incomplete and retained: {why}", partial.display()))?;
+    fs::rename(&partial, path).map_err(|why| {
+        format!(
+            "{} could not be committed: {why}; the diff stays partial and is never read",
+            path.display()
+        )
+    })
+}
+
+/// Creates the first free partial name of `current`'s diff, `O_EXCL`.
+fn open_diff_partial(root: &Path, current: Stamp) -> Result<(PathBuf, File), String> {
+    for attempt in 1..=MAX_ORDINAL {
+        let partial = root.join(diff_partial_name(current, attempt));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+        {
+            Ok(file) => return Ok((partial, file)),
+            Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
+            Err(why) => {
+                return Err(format!(
+                    "{} could not be created; no existing file was touched: {why}",
+                    partial.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "{}: every partial name up to _{MAX_ORDINAL} is held by a cut write; the diff is not \
+         written, and every refresh names each of them",
+        root.join(diff_name(current)).display()
+    ))
 }
 
 // ──────────────────────────── the landing hook ────────────────────────────

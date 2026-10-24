@@ -1493,3 +1493,248 @@ fn named_diff_changes_past_the_bound_are_counted_and_all_kept_in_the_diff_file()
     assert_eq!((head.records, items.len()), (many, many));
     assert!(items.iter().all(|one| one.change == Change::LotSize));
 }
+
+/// R4-28 repair 4 (the r4 check's follow-up, open since r1): a kill inside a
+/// `.diff`'s write leaves a partial under the diff's partial name, never a
+/// torn file under the diff's own name. The partial is named, never read and
+/// left as found, and the next call makes the diff again, whole, under its own
+/// name, stepping past the partial.
+#[test]
+fn a_diff_cut_before_its_rename_is_named_never_read_and_made_again_whole() {
+    let root = scratch("cut-diff");
+    let (_, b) = diff_days(&root);
+    let cut = format!("{}.partial", diff_name(b));
+    let torn = b"brutex-master-diff-v1|cut";
+    fs::write(root.join(&cut), torn).unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert!(
+        catalog.incomplete().iter().any(|one| one.file == cut
+            && one.kind == Kind::Kite
+            && one.stamp == b
+            && one.why.contains(".diff cut before its rename")),
+        "a cut diff is named: {:?}",
+        catalog.incomplete()
+    );
+    assert_eq!(
+        catalog.newest(Kind::Kite),
+        Some(b),
+        "and is never a snapshot"
+    );
+    let summary = diff_for(&root, b)
+        .unwrap()
+        .expect("a previous snapshot exists");
+    assert_eq!(summary.counts, [2, 1, 2, 1, 1, 1, 1, 2]);
+    let text = fs::read_to_string(root.join(diff_name(b))).unwrap();
+    assert_eq!(parse_diff(&text).unwrap().1, expected_items());
+    assert_eq!(
+        fs::read(root.join(&cut)).unwrap(),
+        torn,
+        "the cut partial is left exactly as found"
+    );
+    let names: Vec<String> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".diff"))
+        .collect();
+    assert_eq!(
+        names.len(),
+        2,
+        "the diff and the one cut partial, and no partial of this write: {names:?}"
+    );
+    assert_eq!(diff_for(&root, b).unwrap().unwrap(), summary, "read back");
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up): a diff that is written whole
+/// leaves its own name and nothing else, and a torn file under that name is
+/// still refused by name, never written over.
+#[test]
+fn a_diff_is_committed_whole_by_its_rename_and_leaves_no_partial() {
+    let root = scratch("diff-rename");
+    let (_, b) = diff_days(&root);
+    diff_for(&root, b).unwrap().expect("a diff");
+    let names: Vec<String> = fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".diff"))
+        .collect();
+    assert_eq!(names, vec![diff_name(b)]);
+    assert!(
+        Catalog::read(&root).unwrap().incomplete().is_empty(),
+        "a committed diff leaves nothing incomplete"
+    );
+    let other = scratch("diff-rename-torn");
+    let (_, c) = diff_days(&other);
+    fs::write(other.join(diff_name(c)), b"brutex-master-diff-v1|cut").unwrap();
+    assert!(diff_for(&other, c).unwrap_err().contains("torn"));
+    assert_eq!(
+        fs::read(other.join(diff_name(c))).unwrap(),
+        b"brutex-master-diff-v1|cut",
+        "never written over"
+    );
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up): `Book::open` lists under the
+/// writers' lock, so a refresh that has written its body and not yet its
+/// receipt is waited for, never named cut. Before, the listing ran beside the
+/// write and the futures receipt named a live write "a body with no receipt".
+#[test]
+fn a_book_opened_beside_a_write_in_flight_waits_for_it_and_names_nothing_cut() {
+    let root = scratch("book-in-flight");
+    let (d1, d2) = (day(2026, 1, 5), day(2026, 1, 6));
+    let first = dump(&[fut(9_000_061, "ZQIDX26JANFUT", "2026-01-29", 75)]);
+    let second = dump(&[fut(9_000_062, "ZQIDX26FEBFUT", "2026-02-26", 75)]);
+    snapshot(&root, Kind::Kite, d1, URL, first.as_bytes()).unwrap();
+    let next = stamp(d2, 1);
+    let compressed = compress(second.as_bytes()).unwrap();
+    // A WRITE IN FLIGHT: the writers' lock held and the body written, its
+    // receipt not yet.
+    let held = lock(&root).unwrap();
+    write_new(&root.join(file_name(Kind::Kite, next)), &compressed).unwrap();
+    let opener = std::thread::spawn({
+        let root = root.clone();
+        move || Book::open(&root)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let finished_in_flight = opener.is_finished();
+    let receipt = Receipt {
+        url: URL.to_owned(),
+        compressed_bytes: compressed.len() as u64,
+        sha256: hex(&Sha256::digest(&compressed)),
+        body_bytes: second.len() as u64,
+        body_sha256: hex(&Sha256::digest(second.as_bytes())),
+    };
+    commit_receipt(
+        &root,
+        Kind::Kite,
+        next,
+        render_receipt(Kind::Kite, next, &receipt).as_bytes(),
+    )
+    .unwrap();
+    held.release().unwrap();
+    let book = opener.join().unwrap().unwrap();
+    assert!(
+        !finished_in_flight,
+        "the book waits for the write in flight"
+    );
+    assert_eq!(book.stamps(), &[stamp(d1, 1), next]);
+    assert!(
+        book.incomplete().is_empty(),
+        "a live write is never named cut: {:?}",
+        book.incomplete()
+    );
+    // A write that ends with no receipt IS cut, and is named once it ends.
+    let cut = stamp(day(2026, 1, 7), 1);
+    let held = lock(&root).unwrap();
+    write_new(&root.join(file_name(Kind::Kite, cut)), &compressed).unwrap();
+    held.release().unwrap();
+    let book = Book::open(&root).unwrap();
+    assert_eq!(book.stamps(), &[stamp(d1, 1), next]);
+    assert!(
+        book.incomplete()
+            .iter()
+            .any(|one| one.stamp == cut && one.why.contains("no receipt")),
+        "{:?}",
+        book.incomplete()
+    );
+    assert!(
+        Book::open(&root.join("never-made")).unwrap().stamps().is_empty(),
+        "a missing root is an empty book"
+    );
+    assert!(
+        !root.join("never-made").exists(),
+        "and opening it creates nothing"
+    );
+}
+
+/// R4-28 repair 4 (the r4 check's follow-up): a name that is a snapshot's in
+/// another case is named and holds its ordinal, so the next write steps past
+/// it. On a case-insensitive volume (macOS by default) it IS the name
+/// `create_new` would make, and the day was refused on every refresh while
+/// the listing, comparing bytes, saw nothing there.
+#[test]
+fn a_snapshot_name_in_another_case_is_named_and_holds_its_ordinal() {
+    let root = scratch("case-twin");
+    let on = day(2026, 1, 5);
+    let twin = file_name(Kind::Kite, stamp(on, 1)).to_ascii_uppercase();
+    fs::write(root.join(&twin), b"not a snapshot").unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert_eq!(catalog.highest(Kind::Kite, on), 1);
+    assert!(catalog.receipted(Kind::Kite).is_empty());
+    assert!(
+        catalog
+            .incomplete()
+            .iter()
+            .any(|one| one.file == twin && one.why.contains("another case")),
+        "the twin is named: {:?}",
+        catalog.incomplete()
+    );
+    let body = dump(&[fut(9_000_071, "ZQIDX26JANFUT", "2026-01-29", 75)]);
+    assert_eq!(
+        snapshot(&root, Kind::Kite, on, URL, body.as_bytes()),
+        Ok(Wrote::New(stamp(on, 2)))
+    );
+    assert_eq!(
+        fs::read(root.join(&twin)).unwrap(),
+        b"not a snapshot",
+        "the twin is left exactly as found"
+    );
+    assert_eq!(Book::open(&root).unwrap().stamps(), &[stamp(on, 2)]);
+}
+
+/// R4-28 repair 4: the names a diff's partials and a case twin carry round
+/// trip, and every other name is a stranger.
+#[test]
+fn diff_partial_and_case_twin_names_round_trip_and_strangers_are_ignored() {
+    let s = stamp(day(2026, 10, 22), 2);
+    assert_eq!(diff_partial_name(s, 1), "20261022_2.diff.partial");
+    assert_eq!(diff_partial_name(s, 3), "20261022_2.diff.partial_3");
+    for attempt in [1, 2, MAX_ORDINAL] {
+        assert_eq!(parse_diff_partial(&diff_partial_name(s, attempt)), Some(s));
+    }
+    for stranger in [
+        "20261022_2.diff",
+        "20261022_2.diff.partial_1",
+        "20261022_2.diff.partial_02",
+        "20261022_2.diff.partial_",
+        "20261022_2.diff.partialx",
+        "20261022_1.diff.partial",
+        "2026102.diff.partial",
+        "instruments_20261022.csv.gz.partial",
+    ] {
+        assert_eq!(parse_diff_partial(stranger), None, "{stranger}");
+    }
+    assert_eq!(
+        case_twin(&file_name(Kind::Kite, s).to_ascii_uppercase()),
+        Some((Kind::Kite, s))
+    );
+    assert_eq!(
+        case_twin("Nse_Total_Market_20261022_2.csv.gz.RECEIPT.partial"),
+        Some((Kind::NseTotalMarket, s))
+    );
+    for not_a_twin in [
+        file_name(Kind::Kite, s),
+        receipt_name(Kind::Kite, s),
+        "ZERODHA_INSTRUMENTS.CSV".to_owned(),
+        "INSTRUMENTS_20261022_1.CSV.GZ".to_owned(),
+        ".master-snapshots.lock".to_owned(),
+    ] {
+        assert_eq!(case_twin(&not_a_twin), None, "{not_a_twin}");
+    }
+    let root = scratch("twin-diff-partial");
+    let upper = diff_partial_name(s, 1).to_ascii_uppercase();
+    fs::write(root.join(&upper), b"cut").unwrap();
+    let catalog = Catalog::read(&root).unwrap();
+    assert!(
+        catalog
+            .incomplete()
+            .iter()
+            .any(|one| one.file == upper && one.why == CUT_DIFF),
+        "a diff partial in another case is still a cut diff: {:?}",
+        catalog.incomplete()
+    );
+    assert_eq!(
+        catalog.highest(Kind::Kite, s.day),
+        0,
+        "a cut diff holds no snapshot ordinal"
+    );
+}

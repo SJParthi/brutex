@@ -84443,3 +84443,23 @@ D-7185).
    (e) Each futures landing runs off the async workers (`block_in_place`
    on a multi-thread runtime, inline on a current-thread one), as the
    plan already did in the server (R428-22).
+7. **Three more of the r4 check's follow-ups, in the same file.** (f) The
+   `.diff` is written whole under an `O_EXCL` partial name
+   (`<diff>.partial`, then `_2`, `_3`, ... up to `MAX_ORDINAL`), synced and
+   renamed into place under the writers' lock (open since r1). A kill
+   mid-write leaves a partial that `Catalog` names (Kite, "a .diff cut
+   before its rename committed it") and no reader opens, never a torn diff
+   under the diff's own name. The next refresh makes the diff again, whole,
+   and steps past the partial, which is left exactly as found: the code
+   deletes and overwrites nothing. A torn file under the diff's own name
+   (damage from outside) is still refused by name and never written over
+   (R428-23). (g) `Book::open` lists under the writers' lock taken shared,
+   so a refresh that has written its body and not yet its receipt is waited
+   for and never named cut on the futures receipt. Readers list beside each
+   other, and a root that does not exist is still an empty book and is not
+   created (R428-24, `docs/06-limits.md` L-R428-12). (h) A name that is a
+   snapshot's, a receipt's or a partial receipt's in another case is named
+   incomplete and holds its ordinal. On a case-insensitive volume (macOS by
+   default) it is the very name `create_new` would make, so the next write
+   now steps past it instead of being refused on every refresh while the
+   listing, which compares bytes, saw nothing there (R428-25).
