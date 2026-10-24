@@ -3,9 +3,10 @@
 //! C-QU-01 times `store::quarantine::probe` against an index holding 1x, 10x
 //! and 100x quarantined months (12, 120 and 1,200 months of one share across
 //! ten rungs' worth of keys), probing a month that IS quarantined and one
-//! that is not: the probe is one open, one `fstat` and one 512-byte
-//! positional read, so its cost must not grow with the months held. Each
-//! line then prints p50, p99 and max of single calls, n = 300.
+//! that is not: the probe is one open, one `fstat`, one 64-byte read of the
+//! header, one `lstat` of the ledger and one 512-byte positional read of the
+//! key's bucket (R4-18 repair 2), so its cost must not grow with the months
+//! held. Each line then prints p50, p99 and max of single calls, n = 300.
 //!
 //! C-QU-02 prints, unratioed, `Snapshot::load` (one read of the whole index)
 //! at the same three sizes: it is O(index), once per cached body, never per
