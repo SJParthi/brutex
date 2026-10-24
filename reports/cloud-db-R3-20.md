@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -59,3 +59,8 @@ IA-16, R3-16, R3-36, SC-4.
   closes a torn tail when it loads, so it is not used by the plan).
 - `cargo test -p cli --lib --locked month_recover`: `test result: ok. 7 passed; 0 failed`.
 - NEXT: the store-step row, the bench, the D-7093 and L-IA-40 texts, then the full gates.
+
+### 2026-10-24 13:42 IST — HELD again
+
+- HOLD found again on the base branch at this save point. Commit `a6ab3775` pushed. Waiting.
+- NEXT (unchanged): the store-step row, the bench, the D-7093 and L-IA-40 texts, the full gates.
