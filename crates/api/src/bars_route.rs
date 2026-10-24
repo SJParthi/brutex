@@ -571,10 +571,13 @@ fn quarantine_answer(site: &Loaded, asked: &Addressed) -> Option<(axum::http::St
         Ok(store::quarantine::Probe::Quarantined(entry))
             if entry.scope == store::quarantine::Scope::WholeMonth =>
         {
+            // EVERY BAR AND EVERY CAUSE (R4-18 repair 2): a month dropped for
+            // one cause and then recorded whole for another sets aside the
+            // bars of both and names both.
             let why = format!(
                 "this month is quarantined: all {} of its bars are {} ({}), recorded in audit/{}.quarantine.ledger at byte {}; they are not served",
                 entry.bars,
-                entry.cause.code(),
+                entry.causes.said(),
                 store::quarantine::series_key(path),
                 asked.vendor.as_str(),
                 entry.ledger_at
@@ -610,15 +613,23 @@ fn quarantine_answer(site: &Loaded, asked: &Addressed) -> Option<(axum::http::St
     }
 }
 
-/// One month's quarantine as every JSON answer spells it (R4-18).
+/// One month's quarantine as every JSON answer spells it (R4-18): `cause` is
+/// the newest act's, `causes` every cause the month's acts named (R4-18
+/// repair 2), and `bars` every bar set aside over them.
 pub(crate) fn quarantine_json(
     entry: &store::quarantine::Entry,
     feed: brutex_core::vendor::Vendor,
 ) -> String {
     format!(
-        r#"{{"scope":{},"cause":{},"bars":{},"revision":{},"ledger":{},"ledger_at":{},"written_at_micros":{}}}"#,
+        r#"{{"scope":{},"cause":{},"causes":[{}],"bars":{},"revision":{},"ledger":{},"ledger_at":{},"written_at_micros":{}}}"#,
         render::json_string(entry.scope.code()),
         render::json_string(entry.cause.code()),
+        entry
+            .causes
+            .iter()
+            .map(|cause| render::json_string(cause.code()))
+            .collect::<Vec<_>>()
+            .join(","),
         entry.bars,
         entry.revision,
         render::json_string(&format!("audit/{}.quarantine.ledger", feed.as_str())),

@@ -1223,7 +1223,7 @@ impl SeriesPlan {
                 self.faults.push(format!(
                     "{month}: quarantined, not served: all {} bars are {} (audit/{}.quarantine.ledger at byte {})",
                     entry.bars,
-                    entry.cause.code(),
+                    entry.causes.said(),
                     self.vendor.as_str(),
                     entry.ledger_at
                 ));

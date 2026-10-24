@@ -2639,7 +2639,9 @@ fn refuse_quarantined(
              this instrument's own, so a sweep refuses the month rather than read around \
              them. Nothing was read.",
             entry.scope.code(),
-            entry.cause.code(),
+            // EVERY CAUSE THE MONTH'S ACTS NAMED, over every bar they set
+            // aside (R4-18 repair 2).
+            entry.causes.said(),
             entry.bars,
             // AN INTENT ONLY (R4-18 repair 2): a drop ledgered and not yet
             // finished is indexed as a drop of no bars.

@@ -18,8 +18,8 @@ use brutex_core::vendor::Vendor;
 
 use super::{
     Applied, ApplyError, BUCKET, CAPACITY, Cause, Entry, INDEX_LEN, LEDGER_HEAD, MAX_REASON, Probe,
-    QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month, check_reason, digest_of,
-    index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record,
+    QuarantineError, Record, Scope, Snapshot, Summary, Why, apply_month, catch_up, check_reason,
+    digest_of, index_path, ledger_path, ledger_stamps, merged, probe, read_ledger, rebuild, record,
     series_key,
 };
 use crate::file::BarFile;
@@ -1721,4 +1721,180 @@ fn a_drop_landing_inside_a_repair_refuses_its_promotion_and_the_retry_holds_the_
         named.iter().all(|at| !served.contains(at)),
         "never re-served: {served:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R4-18 repair 2, the resumed self-check (24 Oct). Each test below FAILED on
+// the code at 304c702f5 and names the defect it closes.
+// ---------------------------------------------------------------------------
+
+/// A HEAD TORN BY A KILLED FIRST WRITE never stops a later writer. A feed's
+/// first act writes the ledger's head and its line in ONE write, so a writer
+/// killed inside it (or refused by a full disk) leaves a strict prefix of the
+/// head; the next writer ends that fragment and writes the head again. Before,
+/// every writer after that read the ledger's first bytes, found no head there
+/// and refused `quarantine_ledger_damaged` at byte 0 for ever — the first
+/// apply's own `dropped` line among them, after its door had promoted — while
+/// every reader of the ledger read it whole and undamaged.
+#[test]
+fn a_head_torn_by_a_killed_first_write_never_stops_a_later_writer() {
+    for (tag, torn) in [
+        ("torn-in-the-head", b"brutex quar".to_vec()),
+        ("torn-before-its-newline", LEDGER_HEAD.as_bytes().to_vec()),
+        ("two-first-writes-killed", b"brut\ttorn\nbrutex q".to_vec()),
+    ] {
+        let store = Store::new(tag);
+        let path = minute("QFIXH3", march());
+        let rows: Vec<Bar> = (0..5).map(|i| bar(i, 1_847)).collect();
+        store.month(path, &rows);
+        fs::create_dir_all(store.root.join("audit")).expect("the audit directory");
+        let ledger = ledger_path(&store.root, Vendor::Zerodha);
+        fs::write(&ledger, &torn).expect("what the killed first write left");
+        for (round, stamp) in [rows[1].ts_micros, rows[3].ts_micros]
+            .into_iter()
+            .enumerate()
+        {
+            let done = apply_month(&store.root, path, SYMBOL, &[stamp], why(Cause::ZeroPrice));
+            assert!(
+                matches!(done, Ok(Applied::Dropped { .. })),
+                "{tag}: apply {round}: {done:?}"
+            );
+        }
+        let read = read_ledger(&store.root, Vendor::Zerodha).expect("reads");
+        assert!(read.damaged.is_empty(), "{tag}: {:?}", read.damaged);
+        assert_eq!(read.lines.len(), 4, "{tag}: two intents, two dropped lines");
+        assert!(!read.ended.is_empty(), "{tag}: the torn head is an ended append");
+        assert!(
+            fs::read(&ledger).expect("bytes").starts_with(&torn),
+            "{tag}: no byte the killed write left is changed"
+        );
+        assert!(
+            matches!(probe(&store.root, path), Ok(Probe::Quarantined(e)) if e.bars == 2),
+            "{tag}"
+        );
+        assert_eq!(store.served_bars(path).len(), 3, "{tag}");
+    }
+}
+
+/// A LEDGER CUT BELOW WHAT ITS INDEX DESCRIBES — put back from an older copy,
+/// or truncated — is refused by name and never rebuilt away: the index
+/// records acts the ledger no longer holds, and a rebuild from what is left
+/// would forget them. Before, the next writer of any month of the feed
+/// rebuilt the index from the shorter ledger and answered success, and the
+/// month the lost line had recorded whole read as clear and was served.
+#[test]
+fn a_ledger_cut_below_what_its_index_describes_is_refused_and_never_rebuilt_away() {
+    let store = Store::new("ledger-cut");
+    let rows: Vec<Bar> = (0..4).map(|i| bar(i, 3_407)).collect();
+    let first = minute("QFIXC3", march());
+    store.month(first, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("an earlier drop");
+    let ledger = ledger_path(&store.root, Vendor::Zerodha);
+    let older = fs::read(&ledger).expect("the copy a restore would put back");
+    let path = minute("QFIXD3", march());
+    store.month(path, &rows);
+    let every: Vec<i64> = rows.iter().map(|b| b.ts_micros).collect();
+    apply_month(&store.root, path, SYMBOL, &every, why(Cause::BeforeListing)).expect("whole");
+    // THE LEDGER PUT BACK FROM THE OLDER COPY: the whole line is gone.
+    fs::write(&ledger, &older).expect("restored from an older copy");
+    let index = index_path(&store.root, Vendor::Zerodha);
+    let files = || {
+        (
+            fs::read(&ledger).expect("ledger"),
+            fs::read(&index).expect("index"),
+        )
+    };
+    let before = files();
+    // Every reader names it, never "clear" ...
+    assert_eq!(
+        probe(&store.root, path).map_err(|why| why.code()),
+        Err("quarantine_index_stale")
+    );
+    // ... the next writer, of another month, refuses by name and writes
+    // nothing ...
+    let other = minute("QFIXE3", march());
+    store.month(other, &rows);
+    let next = apply_month(
+        &store.root,
+        other,
+        SYMBOL,
+        &[rows[1].ts_micros],
+        why(Cause::ZeroPrice),
+    );
+    assert_eq!(refusal_code(&next), "quarantine_ledger_cut");
+    let words = next.expect_err("refused").to_string();
+    assert!(
+        words.contains(&older.len().to_string()),
+        "the ledger's length is named: {words}"
+    );
+    assert_eq!(files(), before, "nothing was written");
+    assert_eq!(store.served_bars(other).len(), 4, "no generation published");
+    // ... and so does a catch-up: the month the lost line recorded whole is
+    // never read as clear.
+    assert_eq!(
+        catch_up(&store.root, Vendor::Zerodha).map_err(|why| why.code()),
+        Err("quarantine_ledger_cut")
+    );
+    assert!(probe(&store.root, path).is_err(), "never clear");
+    assert_eq!(files(), before, "still nothing written");
+}
+
+/// A MONTH DROPPED FOR ONE CAUSE AND THEN RECORDED WHOLE FOR ANOTHER counts
+/// every bar it set aside and names both causes — in the index, its rebuild,
+/// the snapshot and the summary (the second check's follow-up on `merged`).
+/// Before, the whole record kept only its own bars (the served generation's,
+/// after the drop) and its own cause: the reader said "all 2 of its bars are
+/// zero_price" of a month that set aside 6, and the listing under-counted.
+#[test]
+fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() {
+    let store = Store::new("drop-then-whole");
+    let path = minute("QFIXF3", march());
+    let rows: Vec<Bar> = (0..6).map(|i| bar(i, 2_633)).collect();
+    store.month(path, &rows);
+    let foreign: Vec<i64> = rows[..4].iter().map(|b| b.ts_micros).collect();
+    let dropped = apply_month(&store.root, path, SYMBOL, &foreign, why(Cause::ForeignLevel))
+        .expect("dropped");
+    assert!(matches!(dropped, Applied::Dropped { .. }), "{dropped:?}");
+    let rest: Vec<i64> = rows[4..].iter().map(|b| b.ts_micros).collect();
+    let whole = apply_month(&store.root, path, SYMBOL, &rest, why(Cause::ZeroPrice))
+        .expect("the rest recorded whole");
+    assert!(
+        matches!(whole, Applied::WholeMonth { bars: 2, .. }),
+        "{whole:?}"
+    );
+    let says = |what: &str, entry: Option<Entry>| {
+        let entry = entry.unwrap_or_else(|| panic!("{what}: the month is named"));
+        assert_eq!(
+            (entry.scope, entry.cause, entry.bars),
+            (Scope::WholeMonth, Cause::ZeroPrice, 6),
+            "{what}"
+        );
+    };
+    let probed = || match probe(&store.root, path) {
+        Ok(Probe::Quarantined(entry)) => Some(entry),
+        other => panic!("{other:?}"),
+    };
+    says("the index", probed());
+    rebuild(&store.root, Vendor::Zerodha).expect("rebuilt");
+    says("the index rebuilt from its ledger", probed());
+    says(
+        "the snapshot",
+        Snapshot::load(&store.root, Vendor::Zerodha)
+            .expect("loads")
+            .get(path),
+    );
+    let summary = Summary::load(&store.root, Vendor::Zerodha).expect("a summary");
+    says("the summary", summary.month(path));
+    let row = summary
+        .instrument("NSE", "CASH", "QFIXF3")
+        .expect("flagged");
+    assert_eq!((row.months, row.whole_months, row.bars), (1, 1, 6));
+    assert_eq!(row.causes, vec![Cause::ForeignLevel, Cause::ZeroPrice]);
 }

@@ -500,3 +500,87 @@ async fn bars_json_asks_again_while_a_quarantine_writer_brings_its_index_level()
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{stale}");
     assert_eq!(stale["code"], "quarantine_index_stale");
 }
+
+/// A MONTH DROPPED FOR ONE CAUSE AND THEN RECORDED WHOLE FOR ANOTHER (R4-18
+/// repair 2, the second check's follow-up on `merged`): `/bars.json` names
+/// every bar the two acts set aside and both causes, and the listing counts
+/// them all. Before, the whole record kept only its own bars and cause, so
+/// the answer said "all 2 of its bars are zero_price" of a month that set
+/// aside 6, and `/instruments.json` under-counted by the bars dropped first.
+#[tokio::test]
+async fn bars_json_names_every_bar_and_every_cause_a_month_set_aside() {
+    let fixture = Fixture::new("r418-every-cause");
+    let held = fixture.month(ym(2018, 3), 77_713, 6);
+    let id = pull::ingest::repair_plan::symbol_id(SYMBOL);
+    let why = |cause| store::quarantine::Why {
+        cause,
+        who: "test",
+        reason: "invented: two causes",
+    };
+    let foreign: Vec<i64> = held[..4].iter().map(|bar| bar.ts_micros).collect();
+    let dropped = store::quarantine::apply_month(
+        &fixture.root,
+        path(ym(2018, 3)),
+        id,
+        &foreign,
+        why(Cause::ForeignLevel),
+    )
+    .expect("four dropped");
+    assert!(
+        matches!(dropped, store::quarantine::Applied::Dropped { .. }),
+        "{dropped:?}"
+    );
+    let rest: Vec<i64> = held[4..].iter().map(|bar| bar.ts_micros).collect();
+    let whole = store::quarantine::apply_month(
+        &fixture.root,
+        path(ym(2018, 3)),
+        id,
+        &rest,
+        why(Cause::ZeroPrice),
+    )
+    .expect("the rest recorded whole");
+    assert!(
+        matches!(
+            whole,
+            store::quarantine::Applied::WholeMonth { bars: 2, .. }
+        ),
+        "{whole:?}"
+    );
+    let uri =
+        format!("/bars.json?feed=zerodha&exchange=NSE&segment=CASH&symbol={SYMBOL}&month=2018-03");
+    let (status, body) = get(&fixture.site, &uri).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["quarantine"]["scope"], "whole_month", "{body}");
+    assert_eq!(body["quarantine"]["bars"], 6, "{body}");
+    assert_eq!(body["quarantine"]["cause"], "zero_price", "{body}");
+    assert_eq!(
+        body["quarantine"]["causes"],
+        serde_json::json!(["foreign_level", "zero_price"]),
+        "{body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|said| said.contains("all 6 of its bars are foreign_level and zero_price")),
+        "{body}"
+    );
+    let key = brutex_core::instrument::InstrumentKey::cash(
+        brutex_core::instrument::Exchange::Nse,
+        SYMBOL,
+    )
+    .expect("a share");
+    let summary = store::quarantine::Summary::load(&fixture.root, Vendor::Zerodha);
+    let flag: Value = serde_json::from_str(&super::super::instruments_route::quarantine_of(
+        &summary, &key,
+    ))
+    .expect("JSON");
+    assert_eq!(
+        (&flag["months"], &flag["whole_months"], &flag["bars"]),
+        (&serde_json::json!(1), &serde_json::json!(1), &serde_json::json!(6)),
+        "{flag}"
+    );
+    assert_eq!(
+        flag["causes"],
+        serde_json::json!(["foreign_level", "zero_price"])
+    );
+}

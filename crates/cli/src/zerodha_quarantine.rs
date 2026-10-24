@@ -630,7 +630,7 @@ fn act(
             Ok(store::quarantine::Probe::Quarantined(entry)) => Some(format!(
                 "{} {}, {} bar(s)",
                 entry.scope.code(),
-                entry.cause.code(),
+                entry.causes.said(),
                 entry.bars
             )),
             Ok(store::quarantine::Probe::Clear) => None,
