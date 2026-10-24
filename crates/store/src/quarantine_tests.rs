@@ -1637,15 +1637,22 @@ fn an_image_behind_its_ledger_is_never_the_answer_while_a_writer_holds_the_lock(
         words.contains(crate::flock::BEING_WRITTEN),
         "the sentence asks again: {words}"
     );
-    // THE WRITER'S LEVEL IMAGE LANDS within a waiting reader's patience.
+    // THE WRITER'S LEVEL IMAGE LANDS within a waiting reader's patience, the
+    // lock still held: built from the ledger beforehand and renamed in while
+    // the reader waits, as `publish_image` renames (its syncs left out, so
+    // the landing is not at the mercy of a loaded disk).
+    let ledger = read_ledger(&store.root, Vendor::Zerodha).expect("the ledger");
+    let level = super::image_of(&ledger, &store.root, Vendor::Zerodha).expect("the level image");
+    let staged = store.root.join("audit").join(".level-image.test-staging");
+    fs::write(&staged, &level).expect("staged");
     let root = store.root.clone();
     let reader = std::thread::spawn(move || {
         crate::flock::with_patience(crate::flock::MAX_PATIENCE, || probe(&root, path))
     });
     std::thread::sleep(std::time::Duration::from_millis(20));
-    super::catch_up_locked(&store.root, Vendor::Zerodha).expect("the writer catches up");
-    held.release().expect("the lock let go");
+    fs::rename(&staged, index_path(&store.root, Vendor::Zerodha)).expect("the level image lands");
     let after = reader.join().expect("the reader ends");
+    held.release().expect("the lock let go");
     assert!(
         matches!(after, Ok(Probe::Quarantined(entry)) if entry.scope == Scope::WholeMonth && entry.bars == 2),
         "{after:?}"
