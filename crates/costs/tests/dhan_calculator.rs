@@ -36,7 +36,8 @@ use costs::charge_error::ChargeError;
 use costs::day::TradeDay;
 use costs::dhan_calc::{DhanQuote, quote};
 use costs::ledger::{DayLedger, ExecutedOrder};
-use costs::rate::OrderSide;
+use costs::rate::{BpsX100, OrderSide};
+use costs::regime::{exchange_charge_rate, ipft_rate};
 use costs::schedule::{Mode, Product, RateSelector, TradeKind};
 use costs::stack::{ClientSecurityDay, DayCharges, NetTrade, Order};
 
@@ -884,18 +885,44 @@ fn the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_wher
 
 /// The live option readings of 15-16 Oct 2026, priced precisely under the
 /// DATED selector, equal today's table line for line: the dated card is the
-/// regime row in force plus the IPFT, exactly as `costs::trip` reads them, so
-/// on and after 2026-03-01 it is FA64232's 0.03503% plus the 0.0005% IPFT —
-/// the 0.03553% FA73061 states as one total (sources row E-03). It was
-/// `#[ignore]`d while the dated card dropped the IPFT by date and waited for
-/// package CHG-0's FA73061 row; that drop under-charged every NSE options day
-/// from 2026-03-01 and is gone (D-5131), so this runs in the gate.
+/// regime row in force plus the regime's IPFT, exactly as `costs::trip` reads
+/// them, so on and after 2026-03-01 it is `FA73061`'s folded ₹3,553 row plus a
+/// zero IPFT line (CHG-0, D-5100) — the 0.03553% FA73061 states as one total
+/// (sources row E-03). Before that date it is FA64232's ₹3,503 plus the ₹50
+/// IPFT, the same total, so the line values alone cannot see which split is
+/// in force: the test reads it beside them (D-6742) — on every date here the
+/// regime's two rows are (3,553, 0) and the dated exchange line's source names
+/// FA73061 alone. The split's own boundaries and extremes are pinned in
+/// `tests/fa73061.rs` (CHG-0) and, at the stack, by
+/// `costs::stack::tests::a_dated_option_exchange_line_is_fa64232_plus_ipft_on_2026_02_27_and_fa73061_alone_on_2026_03_02`.
+/// It was `#[ignore]`d while the dated card dropped the IPFT by date and waited
+/// for package CHG-0's FA73061 row; that drop under-charged every NSE options
+/// day from 2026-03-01 and is gone (D-5131), so this runs in the gate.
+/// 2026-03-31 and 2026-04-01 bracket the Finance Act 2026 STT row: the dated
+/// STT is 0.10% through 2026-03-31 and today's 0.15% from 2026-04-01.
 #[test]
 fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases() {
     let options: Vec<&Case> = GOLDEN.iter().filter(|case| case.kind == OPT).collect();
     assert_eq!(options.len(), 11);
-    for (year, month, d) in [(2026, 10, 15), (2026, 10, 16), (2026, 3, 1)] {
+    let finance_act_2026 = TradeDay::new(2026, 4, 1).expect("a real date");
+    for (year, month, d) in [
+        (2026, 10, 15),
+        (2026, 10, 16),
+        (2026, 3, 1),
+        (2026, 3, 31),
+        (2026, 4, 1),
+    ] {
         let on = TradeDay::new(year, month, d).expect("a real date");
+        // The split no line value shows: FA73061's folded row and its zero
+        // IPFT line, not FA64232's row and the ₹50 IPFT.
+        assert_eq!(
+            (
+                exchange_charge_rate(NSE, on).map(BpsX100::get),
+                ipft_rate(NSE, on).map(BpsX100::get)
+            ),
+            (Ok(3_553), Ok(0)),
+            "the rows in force on {on}"
+        );
         for case in &options {
             let price = |selector| {
                 let mut day = ClientSecurityDay::open(OPT, NSE, on, selector).expect("priced");
@@ -908,16 +935,23 @@ fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases
             };
             let dated = price(RateSelector::Dated);
             let today = price(RateSelector::CurrentOnEveryDate);
-            if month == 10 {
+            let source = dated.rates_used()[0].expect("the exchange line").source();
+            assert!(
+                source.contains("NSE/FA/73061") && !source.contains("FA64232"),
+                "{} on {on}: {source}",
+                case.name
+            );
+            if !on.before(finance_act_2026) {
                 assert_eq!(dated.lines(), today.lines(), "{} on {on}", case.name);
                 assert_eq!(dated.total(), today.total(), "{} on {on}", case.name);
                 continue;
             }
-            // FA73061's own first day: the exchange charge, and every line
-            // but STT, agree. The dated STT is the 0.1% in force until the
-            // Finance Act 2026 rate of 2026-04-01 (crate::regime), today's
-            // table the 0.15% — so STT is the one line that differs, and
-            // only by that rate: 0.05% of the sell premium, to the rupee.
+            // From FA73061's own first day to the last day before the Finance
+            // Act 2026 rate: the exchange charge, and every line but STT,
+            // agree. The dated STT is the 0.1% in force until 2026-04-01
+            // (crate::regime), today's table the 0.15% — so STT is the one
+            // line that differs, and only by that rate: 0.05% of the sell
+            // premium, to the rupee.
             let (dated_lines, today_lines) = (dated.lines(), today.lines());
             for at in (0..dated_lines.len()).filter(|&at| at != 3) {
                 assert_eq!(

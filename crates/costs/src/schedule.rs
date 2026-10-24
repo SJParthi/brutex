@@ -1732,8 +1732,8 @@ mod tests {
     /// The code must bind the IPFT once from the regime and add it once; with
     /// those two removed, no `ipft` of any case may remain (an undated
     /// `rate::ipft`, `NSE_IPFT`, `BSE_IPFT`, a second binding, a match of its
-    /// own). A date may be read only to choose the NSE source line, and no
-    /// date may be written in the card at all.
+    /// own). No date may be written in the card at all, and the date is read
+    /// exactly once: the regime's own boundary, to choose the NSE source line.
     fn reads_the_ipft_from_the_regime_only(card: &str) -> Result<(), String> {
         let code = card
             .lines()
@@ -1759,19 +1759,29 @@ mod tests {
             return Err(format!("an IPFT outside the regime: `{}`", line.trim()));
         }
         for line in code.lines() {
+            if line.contains("boundary!(") || line.contains("TradeDay::new(") {
+                return Err(format!("a date written in the card: `{}`", line.trim()));
+            }
             let reads_a_date = line.contains(".before(") || line.contains("FA73061_EFFECTIVE");
-            if reads_a_date && !line.contains("=> REGIME_EXCHANGE_NSE,") {
+            if reads_a_date && !line.contains(REGIME_BOUNDARY_LABEL) {
                 return Err(format!(
                     "a date decides more than the label: `{}`",
                     line.trim()
                 ));
             }
-            if line.contains("boundary!(") || line.contains("TradeDay::new(") {
-                return Err(format!("a date written in the card: `{}`", line.trim()));
-            }
         }
-        Ok(())
+        match code.matches(REGIME_BOUNDARY_LABEL).count() {
+            1 => Ok(()),
+            labels => Err(format!(
+                "{labels} reads of the regime's boundary naming the row, not one: \
+                 `{REGIME_BOUNDARY_LABEL}`"
+            )),
+        }
     }
+
+    /// The one place the dated card may read a date: the regime's boundary,
+    /// choosing which row its NSE exchange line names.
+    const REGIME_BOUNDARY_LABEL: &str = "day.before(FA73061_EFFECTIVE) => REGIME_EXCHANGE_NSE,";
 
     /// `dated_option_card` at `e6d05d708` (CLOUD-CHG1 before D-5131): its own
     /// IPFT match on the venue and on `FA73061_EFFECTIVE`. Verbatim, kept so
@@ -1888,6 +1898,19 @@ mod tests {
             )
             .starts_with("a date written in the card")
         );
+        // A card that never reads the regime's boundary cannot say which row
+        // it is priced at: the head's shape before D-6741.
+        assert_eq!(
+            refused(
+                "Exchange::Nse if day.before(FA73061_EFFECTIVE) => REGIME_EXCHANGE_NSE,\n        \
+                 Exchange::Nse => REGIME_EXCHANGE_NSE_FA73061,",
+                "Exchange::Nse => REGIME_EXCHANGE_NSE,"
+            ),
+            format!(
+                "0 reads of the regime's boundary naming the row, not one: \
+                 `{REGIME_BOUNDARY_LABEL}`"
+            )
+        );
         // A comment may name what it likes: the check reads code.
         assert_eq!(
             reads_the_ipft_from_the_regime_only(&card.replacen(
@@ -1926,12 +1949,15 @@ mod tests {
         );
         // The last session under FA64232 and the first under FA73061: the
         // card's IPFT is its total less the regime row, and that is exactly
-        // regime::ipft_rate on the day — ₹50, then zero — in ₹3,553 both times.
-        for (on, row, its_ipft) in [(day(2026, 2, 27), 3_503, 50), (day(2026, 3, 2), 3_553, 0)] {
-            let total = dated(on)
-                .expect("a verified window")
-                .exchange_charge()
-                .rate();
+        // regime::ipft_rate on the day — ₹50, then zero — in ₹3,553 both times,
+        // under a source line that names the rows it is (D-6741).
+        for (on, row, its_ipft, source) in [
+            (day(2026, 2, 27), 3_503, 50, REGIME_EXCHANGE_NSE),
+            (day(2026, 3, 2), 3_553, 0, REGIME_EXCHANGE_NSE_FA73061),
+        ] {
+            let line = dated(on).expect("a verified window").exchange_charge();
+            assert_eq!(line.source(), source, "{on}");
+            let total = line.rate();
             assert_eq!(total.denominator(), RATE_SCALE, "{on}");
             let base = exchange_charge_rate(Exchange::Nse, on)
                 .expect("verified")

@@ -1729,7 +1729,7 @@ impl fmt::Display for NetTrade {
 )]
 mod tests {
     use super::*;
-    use crate::schedule::{BSE_EQUITY_EXCHANGE, CURRENT_AS_OF};
+    use crate::schedule::{BSE_EQUITY_EXCHANGE, CURRENT_AS_OF, FA73061_EFFECTIVE};
 
     fn day(year: u16, month: u8, d: u8) -> TradeDay {
         TradeDay::new(year, month, d).expect("a real date")
@@ -2431,6 +2431,193 @@ mod tests {
         assert_eq!(charges.basis().to_string(), "rates in force on 2026-02-27");
         assert_eq!(charges.exchange_charge(), rs(5_08));
         assert_eq!(charges.stt(), rs(8_00)); // 0.10% of 7,800 = 7.80 -> 8
+    }
+
+    /// The rows a dated NSE options day's exchange line is made of: the
+    /// regime's exchange row on `on`, what the card adds to it, and the
+    /// line's source — read from the rate the day was actually priced at.
+    fn exchange_rows(charges: &DayCharges, on: TradeDay) -> (i64, i64, &'static str) {
+        let line = charges.rates_used()[0].expect("the exchange line's rate");
+        assert_eq!(line.rate().denominator(), crate::rate::RATE_SCALE, "{on}");
+        let row = crate::regime::exchange_charge_rate(Exchange::Nse, on)
+            .expect("a verified row")
+            .get();
+        (row, line.rate().numerator() - row, line.source())
+    }
+
+    #[test]
+    fn a_dated_option_exchange_line_is_fa64232_plus_ipft_on_2026_02_27_and_fa73061_alone_on_2026_03_02()
+     {
+        // The same orders on the last session under FA64232 and the first
+        // under FA73061 (2026-03-01 is a Sunday): 65 bought at ₹100 and sold at
+        // ₹120, ₹14,300 of premium. The totals agree on both sides of the date
+        // and always did; what this pins is which rows make them (D-6741).
+        let orders = [buy(65, 100_00), sell(65, 120_00)];
+        let (last, first) = (day(2026, 2, 27), day(2026, 3, 2));
+        let dated = |on| {
+            priced_on(
+                TradeKind::Options,
+                Exchange::Nse,
+                &orders,
+                on,
+                RateSelector::Dated,
+            )
+        };
+        let (before, after) = (dated(last), dated(first));
+        let (row, ipft, source) = exchange_rows(&before, last);
+        assert_eq!((row, ipft), (3_503, 50), "FA64232 plus the FA56129 IPFT");
+        assert!(
+            source.contains("FA64232") && source.contains("FA56129"),
+            "{source}"
+        );
+        let (row, ipft, source) = exchange_rows(&after, first);
+        assert_eq!((row, ipft), (3_553, 0), "FA73061's folded row alone");
+        assert!(
+            source.contains("NSE/FA/73061") && !source.contains("FA64232"),
+            "{source}"
+        );
+        // What the card adds is the regime's IPFT on the day, and nothing else.
+        for (on, ipft) in [(last, 50), (first, 0)] {
+            assert_eq!(
+                crate::regime::ipft_rate(Exchange::Nse, on).map(crate::rate::BpsX100::get),
+                Ok(ipft),
+                "{on}"
+            );
+        }
+        // ₹3,553 per crore on both days — today's NSE_OPTIONS_EXCHANGE — so
+        // ₹14,300 × 0.03553% = ₹5.08079 -> ₹5.08 under either rate set.
+        let today = priced_on(TradeKind::Options, Exchange::Nse, &orders, first, TODAY);
+        let fa73061 = crate::schedule::NSE_OPTIONS_EXCHANGE.rate();
+        for (charges, on) in [(&before, last), (&after, first)] {
+            assert_eq!(charges.exchange_charge(), rs(5_08), "{on}");
+            let rate = charges.rates_used()[0].expect("the exchange line").rate();
+            assert_eq!(
+                i128::from(rate.numerator()) * i128::from(fa73061.denominator()),
+                i128::from(fa73061.numerator()) * i128::from(rate.denominator()),
+                "{on}"
+            );
+        }
+        assert_eq!(today.exchange_charge(), rs(5_08));
+        // Every other line is priced at the same rows on both days, so the two
+        // days' lines and totals are equal. STT is the 0.10% row on both
+        // (₹7,800 × 0.10% = ₹7.80 -> ₹8); today's table is 0.15% (₹11.70 -> ₹12).
+        assert_eq!(before.lines(), after.lines());
+        assert_eq!(before.total(), after.total());
+        assert_eq!(before.rates_used()[1..], after.rates_used()[1..]);
+        assert_eq!(
+            (before.stt(), after.stt(), today.stt()),
+            (rs(8_00), rs(8_00), rs(12_00))
+        );
+        assert_eq!(after.basis().to_string(), "rates in force on 2026-03-02");
+        // Neither NSE line is flagged: both sources are cited rows.
+        assert_eq!(before.unverified_sources().count(), 0);
+        assert_eq!(after.unverified_sources().count(), 0);
+    }
+
+    #[test]
+    fn a_position_carried_across_fa73061_prices_each_day_at_its_own_row() {
+        // Bought on the last session under FA64232, sold on the first under
+        // FA73061: two client-security-days, each priced on its own day's card.
+        let (last, first) = (day(2026, 2, 27), day(2026, 3, 2));
+        let options = TradeKind::Options;
+        let bought = priced_on(
+            options,
+            Exchange::Nse,
+            &[buy(65, 100_00)],
+            last,
+            RateSelector::Dated,
+        );
+        let sold = priced_on(
+            options,
+            Exchange::Nse,
+            &[sell(65, 120_00)],
+            first,
+            RateSelector::Dated,
+        );
+        // ₹6,500 × 0.03553% = ₹2.30945 -> ₹2.31; ₹7,800 × 0.03553% = ₹2.77134
+        // -> ₹2.77. Here the two days' lines add to the one day's ₹5.08.
+        assert_eq!(
+            (bought.exchange_charge(), sold.exchange_charge()),
+            (rs(2_31), rs(2_77))
+        );
+        assert_eq!(exchange_rows(&bought, last).0, 3_503);
+        assert_eq!(exchange_rows(&sold, first).0, 3_553);
+        assert!(exchange_rows(&bought, last).2.contains("FA64232"));
+        let sold_source = exchange_rows(&sold, first).2;
+        assert!(sold_source.contains("NSE/FA/73061") && !sold_source.contains("FA64232"));
+        // STT is the sell leg's alone, at its own day's 0.10% row.
+        assert_eq!((bought.stt(), sold.stt()), (rs(0), rs(8_00)));
+        assert_eq!(bought.basis().to_string(), "rates in force on 2026-02-27");
+        assert_eq!(sold.basis().to_string(), "rates in force on 2026-03-02");
+    }
+
+    #[test]
+    fn the_smallest_premium_and_a_crore_price_alike_on_both_sides_of_fa73061() {
+        // One paisa of premium each way costs no exchange charge on either side
+        // of the date; ₹1 crore of premium costs FA73061's ₹3,553 exactly on
+        // both, under the dated rows (3,503 + 50, then 3,553 + 0) and today's
+        // table alike — the sum is taken before the one rounding, so the split
+        // cannot show in the line.
+        for on in [day(2026, 2, 27), FA73061_EFFECTIVE, day(2026, 3, 2)] {
+            for selector in [RateSelector::Dated, TODAY] {
+                let tiny = priced_on(
+                    TradeKind::Options,
+                    Exchange::Nse,
+                    &[buy(1, 1), sell(1, 1)],
+                    on,
+                    selector,
+                );
+                assert_eq!(tiny.exchange_charge(), rs(0), "{on} {selector:?}");
+                let crore = priced_on(
+                    TradeKind::Options,
+                    Exchange::Nse,
+                    &[buy(100, 50_000_00), sell(100, 50_000_00)],
+                    on,
+                    selector,
+                );
+                assert_eq!(crore.exchange_charge(), rs(3_553_00), "{on} {selector:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fourteen_threads_open_the_dated_option_card_around_fa73061_and_get_one_card() {
+        // Out of the box: the card is a pure function of its inputs, so every
+        // thread asking about the days around the date at once gets the card,
+        // source line included, that one thread gets alone.
+        let days: Vec<TradeDay> = (0..10)
+            .map(|offset| day(2026, 2, 25).plus_days(offset).expect("in range"))
+            .collect();
+        let open = |on| {
+            ClientSecurityDay::open(TradeKind::Options, Exchange::Nse, on, RateSelector::Dated)
+                .map(|csd| *csd.card())
+        };
+        let alone: Vec<_> = days.iter().map(|&on| open(on)).collect();
+        let answers: Vec<Vec<_>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..14)
+                .map(|_| scope.spawn(|| days.iter().map(|&on| open(on)).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("no thread panics"))
+                .collect()
+        });
+        assert_eq!(answers.len(), 14);
+        for answer in answers {
+            assert_eq!(answer, alone);
+        }
+        // The window crosses the date: both sources are in it.
+        let sources: Vec<&str> = alone
+            .iter()
+            .map(|card| card.as_ref().expect("priced").exchange_charge().source())
+            .collect();
+        assert!(sources[..4].iter().all(|source| source.contains("FA64232")));
+        assert!(
+            sources[4..]
+                .iter()
+                .all(|source| !source.contains("FA64232"))
+        );
+        assert_eq!(days[4], FA73061_EFFECTIVE);
     }
 
     #[test]
