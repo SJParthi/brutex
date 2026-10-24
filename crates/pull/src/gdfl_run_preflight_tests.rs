@@ -279,10 +279,7 @@ fn v3_census(store: &Path, n_valid: u64, n_keys: u64) {
         n_keys,
         ..crate::manifest::ManifestHeader::genesis(Vendor::Gdfl)
     };
-    census_file(
-        &crate::manifest::manifest_path(store, Vendor::Gdfl),
-        header,
-    );
+    census_file(&crate::manifest::manifest_path(store, Vendor::Gdfl), header);
 }
 
 /// A v4 partition of `segment` on `store`, epoch 1, of `capacity` holding
@@ -395,7 +392,12 @@ fn at_most_four_near_misses_are_named_in_name_order() {
     assert_eq!(year, 2023);
     assert_eq!(
         near_miss,
-        ["2023 (1).zip", "2023 (2).zip", "2023 (3).zip", "2023 (4).zip"]
+        [
+            "2023 (1).zip",
+            "2023 (2).zip",
+            "2023 (3).zip",
+            "2023 (4).zip"
+        ]
     );
 }
 
@@ -489,7 +491,10 @@ fn an_empty_year_zip_is_refused_before_any_line() {
 #[test]
 fn a_range_across_new_year_needs_both_year_zips() {
     let root = scratch("ia3b-new-year");
-    let nfo = options_root(&root, &[("2023.zip", year_zip_of(&[(day(2023, 12, 29), None)]))]);
+    let nfo = options_root(
+        &root,
+        &[("2023.zip", year_zip_of(&[(day(2023, 12, 29), None)]))],
+    );
     let (_, refused) = options_plan(&root, &nfo, (day(2023, 12, 29), day(2024, 1, 2)));
     assert_eq!(
         refused.unwrap_err(),
@@ -576,7 +581,10 @@ fn an_empty_nested_day_zip_refuses_its_day_and_stays_open() {
     let nfo_root = scratch("ia3b-empty-nested-nfo");
     let nfo = options_root(
         &nfo_root,
-        &[("2024.zip", year_zip_of(&[(d1(), Some(zip(&[]))), (d2(), None)]))],
+        &[(
+            "2024.zip",
+            year_zip_of(&[(d1(), Some(zip(&[]))), (d2(), None)]),
+        )],
     );
     let zips = NfoZips::new(&nfo);
     assert_eq!(
@@ -645,7 +653,9 @@ impl Counting {
 
 impl crate::gdfl_archive::ReadAt for Counting {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        let _before = self.reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _before = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.bytes.read_at(offset, buf)
     }
 }
@@ -677,9 +687,8 @@ fn a_member_stating_more_than_the_cap_is_refused_before_any_read() {
         .remove(0);
     assert_eq!(entry.len, cap + 1);
     let source = Counting::new(bytes);
-    let refused =
-        crate::gdfl_archive::member_bytes(&source, entry.locator, &entry.name, entry.len)
-            .unwrap_err();
+    let refused = crate::gdfl_archive::member_bytes(&source, entry.locator, &entry.name, entry.len)
+        .unwrap_err();
     assert_eq!(
         refused,
         CmRefusal::MemberTooLarge {
@@ -866,7 +875,12 @@ fn a_year_zip_rewritten_between_listing_and_read_is_source_changing() {
         .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000))
         .unwrap();
     let refused = zips.fetch(file).unwrap_err();
-    let CmRefusal::SourceChanging { path, before, after } = &refused else {
+    let CmRefusal::SourceChanging {
+        path,
+        before,
+        after,
+    } = &refused
+    else {
         panic!("{refused:?}");
     };
     assert!(path.ends_with("2024.zip"), "{path}");
@@ -919,7 +933,12 @@ fn a_tick_store_day_file_replaced_by_rename_mid_read_is_source_changing() {
     let CmRefusal::SourceChanging { before, after, .. } = &refused else {
         panic!("{refused:?}");
     };
-    let ino = |text: &str| text.split(' ').find(|w| w.starts_with("ino=")).unwrap().to_owned();
+    let ino = |text: &str| {
+        text.split(' ')
+            .find(|w| w.starts_with("ino="))
+            .unwrap()
+            .to_owned()
+    };
     assert_ne!(ino(before), ino(after), "{before} / {after}");
     // A listing read after the rename reads the new file whole.
     let fresh = reader.day(CmKind::Indices, d1()).unwrap().unwrap();
@@ -1118,8 +1137,15 @@ fn a_compaction_the_disk_cannot_hold_is_refused_before_any_line() {
         }),
         ..Fake::local()
     };
-    let refused = room(&store, GdflLayout::V4, ImportKind::Indices, &looked, &request, &short)
-        .unwrap_err();
+    let refused = room(
+        &store,
+        GdflLayout::V4,
+        ImportKind::Indices,
+        &looked,
+        &request,
+        &short,
+    )
+    .unwrap_err();
     assert_eq!(
         refused,
         RunRefusal::CensusCompactionNoDisk {
@@ -1128,7 +1154,11 @@ fn a_compaction_the_disk_cannot_hold_is_refused_before_any_line() {
             floor: 1 << 20
         }
     );
-    assert!(refused.to_string().starts_with("census_compaction_no_disk: "));
+    assert!(
+        refused
+            .to_string()
+            .starts_with("census_compaction_no_disk: ")
+    );
     let enough = Fake {
         space: Ok(Space {
             total: 1 << 40,
@@ -1136,14 +1166,31 @@ fn a_compaction_the_disk_cannot_hold_is_refused_before_any_line() {
         }),
         ..Fake::local()
     };
-    assert!(room(&store, GdflLayout::V4, ImportKind::Indices, &looked, &request, &enough).is_ok());
+    assert!(
+        room(
+            &store,
+            GdflLayout::V4,
+            ImportKind::Indices,
+            &looked,
+            &request,
+            &enough
+        )
+        .is_ok()
+    );
     // A meter that answers what no disk has is refused too, never passed.
     let nonsense = Fake {
         space: Ok(Space { total: 0, free: 0 }),
         ..Fake::local()
     };
     assert!(matches!(
-        room(&store, GdflLayout::V4, ImportKind::Indices, &looked, &request, &nonsense),
+        room(
+            &store,
+            GdflLayout::V4,
+            ImportKind::Indices,
+            &looked,
+            &request,
+            &nonsense
+        ),
         Err(RunRefusal::CensusCompactionNoDisk { .. })
     ));
     nothing_written(&store);
@@ -1222,7 +1269,10 @@ fn the_first_claim_asks_about_a_legacy_run() {
         }
     );
     assert!(refused.to_string().contains("--legacy-run-not-live"));
-    assert_eq!(std::fs::read_to_string(journal_path(&store)).unwrap(), journal);
+    assert_eq!(
+        std::fs::read_to_string(journal_path(&store)).unwrap(),
+        journal
+    );
     let mut acked = request;
     acked.legacy_ack = true;
     let plan = planned(acked, &store, env()).unwrap();
@@ -1248,7 +1298,14 @@ fn the_first_claim_asks_about_a_legacy_run() {
     std::fs::create_dir_all(store.join("manifest/v4/gdfl")).unwrap();
     let ts = tick_store(&root, &[d1()]);
     let indices = asked(ImportKind::Indices, SourceWord::TickStore, (d1(), d1()));
-    assert!(planned(indices.clone(), &store, vec![(super::super::TICKSTORE_VAR, ts.clone())]).is_ok());
+    assert!(
+        planned(
+            indices.clone(),
+            &store,
+            vec![(super::super::TICKSTORE_VAR, ts.clone())]
+        )
+        .is_ok()
+    );
     // On v3 every kind shares the one claim, so it is.
     let v3 = legacy_store(&scratch("ia3b-legacy-v3"), journal);
     assert!(matches!(
@@ -1276,14 +1333,20 @@ fn the_legacy_probe_never_creates_a_lock_file() {
     ] {
         let held = legacy_store(&scratch("ia3b-legacy-held"), journal);
         std::fs::write(held.join(&name), b"").unwrap();
-        assert_eq!(legacy(&held, GdflLayout::V4, ImportKind::Options, false), Ok(()));
+        assert_eq!(
+            legacy(&held, GdflLayout::V4, ImportKind::Options, false),
+            Ok(())
+        );
     }
     let closed = legacy_store(
         &scratch("ia3b-legacy-closed"),
         "run 1700000000 source=zip\nbegin options 2024-04-01 *\n\
          refused options 2024-04-01 * definition=4 stage=vendor reason=day_not_held failures=0\n",
     );
-    assert_eq!(legacy(&closed, GdflLayout::V4, ImportKind::Options, false), Ok(()));
+    assert_eq!(
+        legacy(&closed, GdflLayout::V4, ImportKind::Options, false),
+        Ok(())
+    );
 }
 
 /// The store holds no lock file and no progress record; its journal is
@@ -1338,9 +1401,18 @@ fn a_read_only_store_is_refused_before_any_line() {
         eprintln!("NOT PROVED here: this process writes a mode-0444 file (it runs as root)");
         assert_eq!(answer, Ok(()));
     } else {
-        assert_eq!(answer, Err(RunRefusal::StoreReadOnly { root: store.clone() }));
+        assert_eq!(
+            answer,
+            Err(RunRefusal::StoreReadOnly {
+                root: store.clone()
+            })
+        );
     }
-    assert_eq!(std::fs::read(&lock).unwrap(), b"", "the lock file was never written");
+    assert_eq!(
+        std::fs::read(&lock).unwrap(),
+        b"",
+        "the lock file was never written"
+    );
 }
 
 fn writable_check(store: &Path, host: &dyn Host) -> Result<(), RunRefusal> {
@@ -1390,7 +1462,11 @@ fn a_network_store_is_refused_store_not_local() {
             fs: "smbfs".to_owned()
         }
     );
-    assert!(refused.to_string().contains("on a smbfs volume that is not local"));
+    assert!(
+        refused
+            .to_string()
+            .contains("on a smbfs volume that is not local")
+    );
     nothing_written(&store);
     let unknown = Fake {
         volume: Ok(Volume {
@@ -1401,13 +1477,21 @@ fn a_network_store_is_refused_store_not_local() {
         ..Fake::local()
     };
     let found = checked_under(&plan, &unknown).unwrap();
-    assert!(found[0].line().contains("store_local=unmeasured"), "{}", found[0].line());
+    assert!(
+        found[0].line().contains("store_local=unmeasured"),
+        "{}",
+        found[0].line()
+    );
     let unmeasured = Fake {
         volume: Err("statvfs refused".to_owned()),
         ..Fake::local()
     };
     let found = checked_under(&plan, &unmeasured).unwrap();
-    assert!(found[0].line().contains("store_volume=unmeasured (statvfs refused)"));
+    assert!(
+        found[0]
+            .line()
+            .contains("store_volume=unmeasured (statvfs refused)")
+    );
 }
 
 /// RA-306: under a soft open-file limit of 256 (macOS's default for a fresh
@@ -1445,10 +1529,18 @@ fn a_run_under_an_open_file_limit_of_256_is_refused_open_files_short() {
         );
         assert!(checked_under(&plan, &at(need)).is_ok(), "{workers}");
     }
-    let words = RunRefusal::OpenFilesShort { have: 256, need: 300 }.to_string();
+    let words = RunRefusal::OpenFilesShort {
+        have: 256,
+        need: 300,
+    }
+    .to_string();
     assert!(words.contains("ulimit -n 300") && words.contains("launchctl limit maxfiles 300"));
     assert!(checked_under(&plan, &Fake::local()).is_ok(), "unlimited");
-    assert!(files_needed(Workers::MAX) <= 256, "{}", files_needed(Workers::MAX));
+    assert!(
+        files_needed(Workers::MAX) <= 256,
+        "{}",
+        files_needed(Workers::MAX)
+    );
     nothing_written(&store);
     // The need never overflows, whatever is asked.
     assert!(files_needed(Workers::MAX) > files_needed(1));
@@ -1532,11 +1624,18 @@ fn refusals_come_in_their_stated_order_when_several_hold_at_once() {
     // The source before everything: a missing year zip.
     let nfo = options_root(&root, &[("2024.zip", year_zip_of(&[(d1(), None)]))]);
     let refused = planned(
-        asked(ImportKind::Options, SourceWord::Zip, (day(2023, 6, 1), d1())),
+        asked(
+            ImportKind::Options,
+            SourceWord::Zip,
+            (day(2023, 6, 1), d1()),
+        ),
         &legacy,
         vec![(super::super::NFO_ARCHIVES_VAR, nfo)],
     );
-    assert!(matches!(refused, Err(RunRefusal::YearZipMissing { year: 2023, .. })));
+    assert!(matches!(
+        refused,
+        Err(RunRefusal::YearZipMissing { year: 2023, .. })
+    ));
 }
 
 // ═══ 8: where each source begins (FM-133) ═══════════════════════════════════
@@ -1572,11 +1671,29 @@ fn days_before_a_sources_first_day_are_named_once() {
     assert!(before >= 5, "{before}");
     let ts = tick_store(&root, &[d1(), d2()]);
     let cm = cm_archive(&root, &[(d1(), None), (d2(), None)]);
-    let nfo = options_root(&root, &[("2024.zip", year_zip_of(&[(d1(), None), (d2(), None)]))]);
+    let nfo = options_root(
+        &root,
+        &[("2024.zip", year_zip_of(&[(d1(), None), (d2(), None)]))],
+    );
     let cases = [
-        (ImportKind::Indices, SourceWord::TickStore, super::super::TICKSTORE_VAR, ts.clone()),
-        (ImportKind::Indices, SourceWord::Zip, super::super::CM_ARCHIVE_VAR, cm),
-        (ImportKind::Options, SourceWord::Zip, super::super::NFO_ARCHIVES_VAR, nfo),
+        (
+            ImportKind::Indices,
+            SourceWord::TickStore,
+            super::super::TICKSTORE_VAR,
+            ts.clone(),
+        ),
+        (
+            ImportKind::Indices,
+            SourceWord::Zip,
+            super::super::CM_ARCHIVE_VAR,
+            cm,
+        ),
+        (
+            ImportKind::Options,
+            SourceWord::Zip,
+            super::super::NFO_ARCHIVES_VAR,
+            nfo,
+        ),
     ];
     for (kind, source, var, path) in cases {
         let mut request = asked(kind, source, (from, day(2024, 4, 5)));
@@ -1631,7 +1748,10 @@ fn an_unpinned_tick_store_format_digest_warns_and_marks_the_run_line() {
     assert_eq!(ends.len(), 1);
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
     let run = text.lines().find(|l| l.starts_with("run ")).unwrap();
-    assert!(run.contains(" format_digest_unpinned=1 definition="), "{run}");
+    assert!(
+        run.contains(" format_digest_unpinned=1 definition="),
+        "{run}"
+    );
     let mut pinned = plan.kinds[0].origin.clone();
     for digest in PINNED_FORMAT_DIGESTS {
         let bytes: Vec<u8> = (0..32)
@@ -1652,7 +1772,10 @@ fn an_unpinned_tick_store_format_digest_warns_and_marks_the_run_line() {
     let read = |rel: &str| {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
     };
-    let (charter, reader) = (read("../../docs/00-charter.md"), read("src/gdfl_tickstore.rs"));
+    let (charter, reader) = (
+        read("../../docs/00-charter.md"),
+        read("src/gdfl_tickstore.rs"),
+    );
     for digest in PINNED_FORMAT_DIGESTS {
         assert!(charter.contains(digest), "the charter lacks {digest}");
         assert!(reader.contains(digest), "gdfl_tickstore.rs lacks {digest}");
@@ -1668,7 +1791,10 @@ fn an_unpinned_tick_store_format_digest_warns_and_marks_the_run_line() {
 fn the_acknowledgement_crosses_the_request_line_only_when_given() {
     let mut request = asked(ImportKind::Options, SourceWord::Zip, (d1(), d1()));
     let plain = request.to_line().unwrap();
-    assert!(plain.ends_with(&format!(" free_floor={}", request.free_floor)), "{plain}");
+    assert!(
+        plain.ends_with(&format!(" free_floor={}", request.free_floor)),
+        "{plain}"
+    );
     request.legacy_ack = true;
     let line = request.to_line().unwrap();
     assert_eq!(line, format!("{plain} legacy_ack=1"));
@@ -1689,15 +1815,40 @@ fn the_acknowledgement_crosses_the_request_line_only_when_given() {
 #[test]
 fn every_preflight_code_is_named_once_and_is_not_a_misuse() {
     let refusals = [
-        RunRefusal::YearZipMissing { year: 1, near_miss: vec!["a".to_owned()] },
-        RunRefusal::SourceUnreadable { path: PathBuf::from("/x"), mode: "0600".to_owned() },
+        RunRefusal::YearZipMissing {
+            year: 1,
+            near_miss: vec!["a".to_owned()],
+        },
+        RunRefusal::SourceUnreadable {
+            path: PathBuf::from("/x"),
+            mode: "0600".to_owned(),
+        },
         RunRefusal::YearZipEmpty { year: 1 },
-        RunRefusal::SourceBusy { root: PathBuf::from("/t"), holder: "h".to_owned() },
-        RunRefusal::CensusRoomShort { layout: "v3", free_now: 0, free_after: 0, need_first_day: 1 },
-        RunRefusal::CensusCompactionNoDisk { need_bytes: 1, free_bytes: 0, floor: 0 },
-        RunRefusal::LegacyRunMayBeLive { key: "k".to_owned() },
-        RunRefusal::StoreReadOnly { root: PathBuf::from("/s") },
-        RunRefusal::StoreNotLocal { root: PathBuf::from("/s"), fs: "nfs".to_owned() },
+        RunRefusal::SourceBusy {
+            root: PathBuf::from("/t"),
+            holder: "h".to_owned(),
+        },
+        RunRefusal::CensusRoomShort {
+            layout: "v3",
+            free_now: 0,
+            free_after: 0,
+            need_first_day: 1,
+        },
+        RunRefusal::CensusCompactionNoDisk {
+            need_bytes: 1,
+            free_bytes: 0,
+            floor: 0,
+        },
+        RunRefusal::LegacyRunMayBeLive {
+            key: "k".to_owned(),
+        },
+        RunRefusal::StoreReadOnly {
+            root: PathBuf::from("/s"),
+        },
+        RunRefusal::StoreNotLocal {
+            root: PathBuf::from("/s"),
+            fs: "nfs".to_owned(),
+        },
         RunRefusal::OpenFilesShort { have: 1, need: 2 },
     ];
     let codes = RunRefusal::CODES;
@@ -1706,7 +1857,10 @@ fn every_preflight_code_is_named_once_and_is_not_a_misuse() {
         assert_eq!(refusal.code(), *code);
         assert!(!refusal.misuse(), "{code}");
         let words = refusal.to_string();
-        assert!(words.starts_with(&format!("{code}: ")) && words.len() > code.len() + 10, "{words}");
+        assert!(
+            words.starts_with(&format!("{code}: ")) && words.len() > code.len() + 10,
+            "{words}"
+        );
     }
     let unique: std::collections::BTreeSet<&str> = codes.iter().copied().collect();
     assert_eq!(unique.len(), codes.len());
@@ -1794,8 +1948,7 @@ fn peak_descriptors(workers: usize, files: usize) -> usize {
         free_floor: 0,
         ..crate::gdfl_import::RunOptions::default()
     };
-    let report =
-        crate::gdfl_import::run_nfo_from(&NfoTickStore::new(&ts), &run, options).unwrap();
+    let report = crate::gdfl_import::run_nfo_from(&NfoTickStore::new(&ts), &run, options).unwrap();
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let most = sampler.join().unwrap();
     assert_eq!(report.files, files, "{:?}", report.failures);

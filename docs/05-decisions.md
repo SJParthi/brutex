@@ -83398,3 +83398,208 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-4802 — The import preflight refuses, before any journal line, what IA-3 left — 2026-10-24
+
+**Implemented by** IA-3b (`crates/pull/src/gdfl_run_preflight.rs`, one call in
+`pull::gdfl_run::plan` after the scope is resolved and before any lock, claim or
+journal line; `cli gdfl-import` plans before AF-01's door takes its lock, and R4-11's
+import children are that verb). Re-grounded on `feat/db-fix` e851da1c: the design's
+entry also gave the preflight a source cache, `Origin` and day tables kept across runs and
+`plan.json`; all of that belonged to the unattended layer D-6900 dropped and is not built
+(D-4909's change key with it). What is built, each refused by name and each a new
+`RunRefusal` appended (codes never renamed or reused, design §5.8):
+
+- the year zips of an options run: `year_zip_missing{year, near_miss}`,
+  `source_unreadable{path, mode}`, `year_zip_empty{year}` (D-7000);
+- the tick store's writer lock: `source_busy{root, holder}` (D-7001);
+- the census room: `census_room_short{layout, free_now, free_after, need_first_day}` and
+  `census_compaction_no_disk{need_bytes, free_bytes, floor}` (D-4850, D-7002);
+- the legacy cutover: `legacy_run_may_be_live{key}` (D-4864, D-4908, D-7003);
+- the store the run writes: `store_read_only{root}`, `store_not_local{root, fs}`,
+  `open_files_short{have, need}` (D-7004).
+
+Its checks read headers, one `metadata` a name and one listing, never the census's entries;
+the full census decode stays on the refusal path (`gdfl_import_census::census_room`). The
+plan also states each kind's `source_span` and counts the asked calendar-open days outside it
+`outside_source`, never holes (FM-133); the journal is unchanged. Nothing caches across runs,
+watches a folder or runs on a timer. One event per preflight at `gdfl.run`: `preflight
+passed` (info, each kind's line) or `preflight refused` (error, the code and the words).
+**Proof.** `docs/04-invariants.md` IA-GR-07, IA-GR-15, IA-GR-20, IA-GR-26, IA-MX-A9 to
+IA-MX-B28a, IA3B-01 to IA3B-11; bench C-GR-05.
+
+### D-4819 — The tick store's FORMAT.md digest is compared with the two the charter records — 2026-10-24
+
+**Implemented by** IA-3b. Once per run, the sha256 of `FORMAT.md` (at most 1 MiB) is the one
+`Origin::measure` already takes, never a second read; it is compared with
+`preflight::PINNED_FORMAT_DIGESTS`: `6edc62a7…3259` (format version 1 as frozen) and
+`d21139f5…5be9` (its §6 as revised 2026-10-04), both in `docs/00-charter.md` and in
+`gdfl_tickstore.rs`'s module doc, the three copies held to one another by a test. Any other
+digest is not a refusal (the magic decides): the plan line says `format=unpinned`, the cli
+warns on its stderr line, and the journal's `run` line carries `format_digest_unpinned=1`
+before `definition=` (a field every earlier reader of the line skips by name). A pinned or
+unmeasured digest, or a zip source, writes no such field. **Proof.** IA3B-10.
+
+### D-4850 — The v4 census preflight models the compaction — 2026-10-24
+
+**Implemented by** IA-3b. From the census header alone (two slot reads of the kind's
+partition, or of the single file on v3; the newest slot whose count its file holds, else the
+older, the writer's own fall-back order): `free_now` = the header's limit − `n_valid`
+(`MAX_ENTRIES` − `n_valid` on v3); on v4 `free_after` = `manifest::epoch_capacity(segment,
+n_keys)` − `n_keys`, by the writer's own function, and on v3 `free_after` = `free_now`. The
+need is the first planned day's wanted files (D-7002). Refused `census_room_short` only when
+the need exceeds both rooms; a census not yet written is the whole capacity; a census whose
+slots both fail is `census_unreadable`, by name. **Proof.** IA-GR-15, IA-GR-26, IA-MX-A21.
+
+### D-4864 — The cutover is guarded: `legacy_run_may_be_live` — 2026-10-24
+
+**Implemented by** IA-3b, as D-4908 defines "has claimed". The first plan on a store where no
+claim lock file exists, whose loaded journal holds a key whose last line is `begin` (of the
+kind on v4, of any kind on v3, D-7003), is refused `legacy_run_may_be_live{key}` naming the
+least such key, unless the request carries `legacy_ack` (`cli gdfl-import ...
+--legacy-run-not-live`), which the claim records as `legacy_ack=1` through the existing
+`ClaimAsk.legacy_ack`. The acknowledgement crosses the request line only when given, so every
+line without it is byte for byte an earlier build's. The journal is read only on that path
+(the refusal path's cost, `docs/06-limits.md` L-IA3B-02). On the real journal measured on 24
+Oct the one such key is `options 2020-09-16 *`, so the first options run there needs the
+acknowledgement once; indices and stocks runs on that v4 store are not asked. Round 3's
+withdrawal stands: no rollback promise. **Proof.** IA-GR-20.
+
+### D-4908 — "Has claimed" is the lock file's existence: one `metadata` per name — 2026-10-24
+
+**Implemented by** IA-3b (critic IA-3-1, amending D-4864 before it was minted). A kind has
+claimed on a store when `imports/gdfl.lock` or `imports/gdfl.<kind>.lock` exists: one
+`symlink_metadata` per name, never an open with create (a probe that created one would erase
+the very evidence it reads, and lock files are never deleted). An answer other than "not
+found" counts as present. The runs ledger is never scanned for it. **Proof.**
+`the_legacy_probe_never_creates_a_lock_file` (IA-GR-20).
+
+### D-7000 — The year-zip rule beside IA-3-OPT's misfile check, and AF-01's root refusal first — 2026-10-24
+
+**Decided by** IA-3b (item 1). Every year of an options range has exactly `<yyyy>.zip`, a
+regular file, under the options root, else `year_zip_missing{year, near_miss}` naming at most
+four names of the directory, in name order, whose lower case begins with the year's digits and
+ends `.zip` (`2020.ZIP`, `2020 (1).zip`, a fiscal `2020-21.zip`, a directory at the exact
+name). A year whose days are held only inside another zip (another year's, a fiscal-year one)
+gets `year_zip_missing` at preflight, the run never starting; IA-3-OPT's
+`day_zip_misfiled{found, expected}` (FM-043) stays the refusal of a day found elsewhere while
+its own year's zip exists, per day. Each year zip present is opened, one positional byte of
+its end record read (`source_unreadable{path, mode}`, its permission bits in octal), and its
+end record's entry count asked by `gdfl_archive::stated_entries` (O(1)):
+zero, or a zero-length file, is `year_zip_empty{year}`. A year zip whose end record cannot be
+found (a copy still being written) is not refused here: the day reader refuses it per day,
+`archive_malformed`, and the day stays open. **A root that is no source of its kind at all**
+(it cannot be listed, or holds no `<yyyy>.zip`; no `FORMAT.md`; no day zip of its tree) is
+AF-01's `source_root_unknown`, said by the cli's door right after the plan: the preflight
+names what is wrong inside a root that is one and never says a second, worse-worded refusal of
+the root itself. **Proof.** IA-GR-07, IA-MX-A9, IA-MX-A11, IA-MX-A23.
+
+### D-7001 — One identity of a source file, checked after every read through its one handle — 2026-10-24
+
+**Decided by** IA-3b (item 4; RA-323, RA-304). `preflight::SourceIdentity` is the one
+identity: length, inode, modification and change times, never the device (which a remount
+changed for the same bytes, CC-2). CC-1's archive scrub calls this one. `preflight::Watch`
+takes it through the one handle a file is read through, when its listing is read (the CM outer
+archive and each year zip once per run, a tick-store day file once per day), and after every
+read of it (each day's listing and each member) compares the handle's identity and the path's
+with it: two `fstat`/`stat` calls a read, O(1). Any difference is
+`source_changing{path, before, after}` (the path's identity when the path moved, so a rename
+names the new inode; else the handle's), a per-day `CmRefusal` whose cause is open: the day
+read from the file is never closed, the run names the file among its failures and ends
+`FAILED`, and the next run reads the file again. A handle or path that cannot be measured is
+the reader's own "unavailable" refusal, which the loss probe asks (D-4852): a year zip moved
+away under a run is refused for its day, never read through its old handle as if it were still
+there (WP-16's indexed-once test now proves the one index by identity, D-7001's consequence).
+The tick store's root `.lock` is probed once at plan, shared and non-blocking through a handle
+opened read-only (never created): held exclusively is `source_busy{root, holder}`; a probe the
+host refuses is refused too. **Cost note:** the spec asked "two stats a file"; the reader
+traits give no end-of-day hook, so the check runs after each read: two stats per member read,
+measured in `docs/06-limits.md` L-IA3B-01. **Proof.** IA3B-01, IA3B-02, IA3B-03.
+
+### D-7002 — Census room from two slot reads and the first planned day; the compaction's disk at the run's own floor — 2026-10-24
+
+**Decided by** IA-3b (item 5, FM-096). The first planned day is the first calendar-open day of
+the range, inside the source's span, that the source holds; its listing is read once and its
+wanted files counted (capital market: every entry less those that name no ticker of the
+scope, at most one a name under a filter; options: every option file of the day folder, under
+a filter those whose ticker decodes to a named underlying). The journal is not consulted, so a
+first day already done is still counted: an over-count by at most one day's files. When the
+first day's listing refuses, the room is unmeasured and said so on the plan line (that day's
+refusal is the run's, by name). When only the compaction gives the room, the new epoch's bytes
+(`manifest::HEADER_LEN` + `ENTRY_STRIDE` × `epoch_capacity`) are put to R4-07's
+`disk_projection::floor_check` at the run's own floor, `Request.free_floor`, the one the run
+already checks before each day (IA-16): there is one floor, never a second number. A meter
+answer no disk gives is refused too; an unmeasurable volume is left to the run's own floor
+check before its first day, which refuses it by name. `census.projected_stop{day}` is named on
+the plan line when the range may need more than the room: the first planned day the room
+would not reach if every day wanted as many files as the first, an EXTRAPOLATION FROM THE
+FIRST DAY, labelled so. **Proof.** IA-MX-A21, IA-MX-A22.
+
+### D-7003 — The legacy check is per kind on v4 and across kinds on v3 — 2026-10-24
+
+**Decided by** IA-3b (item 6; spec M5's question). On a v4 store kinds run apart under their
+own claim locks, so a kind is asked only about its own open keys (`<kind> ...`); on v3 every
+kind shares the store's one claim, so any open key refuses. **Proof.**
+`the_first_claim_asks_about_a_legacy_run`.
+
+### D-7004 — How the store's volume flags and the open-file limit are read, and what a run needs — 2026-10-24
+
+**Decided by** IA-3b (item 7; RA-314, RA-340, RA-306). No child process, no shell, no
+interpreter (`vocab/tests/no_runtime_spawn.rs`; `/usr/bin/ulimit` is a shell script and is
+never called; the spec's `disk_route.rs` `/bin/df` precedent is false at the head, D-5240):
+the safe wrappers of `rustix`, whose `process` feature this part enables for one call (adds no
+crate). macOS: ONE `statfs(2)`: `f_flags` `MNT_RDONLY` (0x1) and `MNT_LOCAL` (0x1000), as
+`libc` 0.2.189 binds Apple's `<sys/mount.h>` (`src/unix/bsd/mod.rs`,
+`src/unix/bsd/apple/mod.rs`), and `f_fstypename`. Elsewhere: `statvfs(2)`'s POSIX `ST_RDONLY`;
+locality only where an exact read exists, Linux's `statfs(2)` `f_type` against `rustix`'s
+`NFS_SUPER_MAGIC`: an NFS store is `store_not_local`, every other filesystem's locality is
+unmeasured, said `store_local=unmeasured` on the plan line and NOT DONE by name in
+`docs/06-limits.md` L-IA3B-05, never guessed from a list of magics. The soft limit is
+`getrlimit(RLIMIT_NOFILE)`. `store_read_only`: the kind's claim lock file, when it exists,
+opened for writing without create (EROFS or EACCES), else the volume's own flag; never a file
+created to test it; its sentence ends in IA-16's `store_not_writable` fix
+(`preflight::NOT_WRITABLE_FIX`, one constant both say). `open_files_short{have, need}`: need =
+`FILES_PER_RUN` + workers × `FILES_PER_WORKER`; 32 measured (the one-worker peak of a sampled
+invented 400-file options day, which holds one worker's handles) and 5 cited (L-IA-35: one
+month handle's pointer, `.bin`, `.lock`, `.crc`, `.tix`), so twelve workers need 92 and macOS's
+256 refuses none: the cli's own descriptors are NOT MEASURED (NEEDS THE MAC M7). The order is
+the legacy cutover first (D-4864), then read-only, not local, the limit. R4-11's own preflight
+codes (`volume_not_mounted`, `started_inside_sandbox`, the `BRUTEX_READ_ONLY` writer gate) run
+before its children and stay distinct from these. **Proof.** IA3B-04, IA3B-05, IA3B-06,
+IA3B-08.
+
+### D-7005 — D-4815 amended: no `dayzips` source word in `cli gdfl-import` — 2026-10-24
+
+**Decided by** IA-3b (item 10), amending D-4815. R4-11 reads every configured loose-day-zip
+root through R4-08's `write_day` into the tick store (R4-11's Sources clause; FM-052 is
+R4-11's, through E2E-03), and the import reads them from there. A second import path for loose
+day zips would mean two places to verify one source, so `gdfl_run` keeps its two source words
+and its module doc names R4-11 where it said "`dayzips` is IA-3's". `gdfl_dayzips::DayZips`
+stays the `CmSource`/`NfoSource` D-4815 built. **Proof.** no code path: the
+`SourceWord::ALL` pin (`gdfl_run_tests.rs`) holds two words.
+
+### D-7006 — An empty container refuses its day, named by the vendor day zip; a member past the cap is refused before any read — 2026-10-24
+
+**Decided by** IA-3b (items 2 and 3; RA-322, RA-238; design §8 B28, B28a). A day zip nested in
+the capital-market archive or an options year zip whose directory lists zero entries, and a
+tick-store day file whose index lists zero entries, refuse the day `day_zip_empty{name}`,
+`Cause::open` (the day stays open, never "a day that holds no file"). The name is the vendor
+day zip's file name (`GFDLNFO_TICK_08042024.zip`), the same whichever source holds the day,
+so two sources report one run (D-2806); the r2/r3 attack tests' reference models are ADAPTED
+to it. A member whose record states an unpacked or packed size past
+`tickstore_write::MEMBER_CAP` (2 GiB, R4-08's one-member memory rule) is
+`member_too_large{name, size}` (R4-08's code and fields), `Cause::open`, before a byte of it is
+read: `gdfl_archive::member_bytes` for every zip, `gdfl_tickstore::rebuild` for the tick store
+(its rebuilt size or its block). No second cap: the import reader holds one member's packed
+bytes and its inflate, the multiple the cap's own rule states. The largest real members are
+NEEDS THE MAC M4 (`docs/06-limits.md` L-IA3B-06). **Proof.** IA-MX-B28, IA-MX-B28a.
+
+### D-7007 — EMFILE is named `open_files_exhausted` from the store's own error number — 2026-10-24
+
+**Decided by** IA-3b (item 7, RA-306's other half). `store::file::classify` already keeps the
+raw error number in `StoreError::Io { code }`, so IA-16's store-level classifier,
+`FailKind::of_store`, gives `StoreError::Io { code: Some(EMFILE) }` its own kind,
+`FailKind::OpenFilesExhausted`, code `open_files_exhausted`, held back, never a hole, never
+the general `store_io`, with the hand step in its words. EMFILE's number comes from
+`rustix::io::Errno::MFILE`, never typed and never read from the error's words (std gives
+EMFILE no kind of its own). **Proof.** IA3B-07.

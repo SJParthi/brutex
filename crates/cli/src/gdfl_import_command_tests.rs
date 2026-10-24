@@ -1214,3 +1214,89 @@ fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
     .unwrap();
     assert_eq!(request.free_floor, pull::gdfl_import::DEFAULT_FREE_FLOOR);
 }
+
+/// IA-3b (D-4864, D-4908): on a store no claim lock file ever held whose
+/// journal holds a key ending in `begin`, the run is refused
+/// `legacy_run_may_be_live` before any lock, naming the key, and no lock file
+/// is created; `--legacy-run-not-live` reaches the request (and from it the
+/// claim) and the run passes that check. The preflight's plan line and an
+/// unpinned FORMAT.md digest's warning are said on the stderr writer.
+#[test]
+fn the_legacy_flag_reaches_the_request_and_lets_the_run_past_the_cutover() {
+    let env = env_of(&[]);
+    let request = asked(
+        (
+            "indices",
+            "tickstore",
+            "2024-04-01",
+            "2024-04-01",
+            &["--legacy-run-not-live", "NIFTY"],
+        ),
+        &env,
+    )
+    .unwrap();
+    assert!(request.legacy_ack);
+    assert_eq!(request.only, ["NIFTY"]);
+    let root = scratch("legacy-flag");
+    let store = root.join("store");
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    let journal = pull::gdfl_import::journal_path(&store);
+    std::fs::write(
+        &journal,
+        "run 1700000000 source=zip\nbegin indices 2024-03-28 *\n",
+    )
+    .unwrap();
+    let ts = root.join("ts");
+    tick_store(&ts);
+    let env = env_of(&[(TICKSTORE_VAR, ts)]);
+    let said = std::sync::Mutex::new(Vec::new());
+    let say = |line: &str| said.lock().unwrap().push(line.to_owned());
+    let log = LogState::Installed(PathBuf::from("logs/test"));
+    let args = ["indices", "tickstore", "2024-04-01", "2024-04-01"];
+    let mut out = String::new();
+    let code = command_in(&args, (&env, &|| Ok(store.clone())), (&log, &say), &mut out);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains(
+            "GDFL IMPORT REFUSED: legacy_run_may_be_live: no claim lock file has ever been \
+             written on this store, and the journal's key indices 2024-03-28 * ends in begin"
+        ),
+        "{out}"
+    );
+    assert!(
+        !store.join("imports/gdfl.lock").exists(),
+        "no lock was created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&journal).unwrap(),
+        "run 1700000000 source=zip\nbegin indices 2024-03-28 *\n"
+    );
+    let mut out = String::new();
+    let acked = [
+        "indices",
+        "tickstore",
+        "2024-04-01",
+        "2024-04-01",
+        "--legacy-run-not-live",
+    ];
+    let _code = command_in(
+        &acked,
+        (&env, &|| Ok(store.clone())),
+        (&log, &say),
+        &mut out,
+    );
+    assert!(!out.contains("legacy_run_may_be_live"), "{out}");
+    let said = said.lock().unwrap();
+    assert!(
+        said.iter().any(
+            |line| line.starts_with("gdfl-import preflight indices: source_span=")
+                && line.contains(" legacy_ack=1")
+        ),
+        "{said:?}"
+    );
+    assert!(
+        said.iter()
+            .any(|line| line.contains("warning: format_digest_unpinned: FORMAT.md's sha256 ")),
+        "{said:?}"
+    );
+}

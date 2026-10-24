@@ -125,7 +125,10 @@ fn written_day(dir: &Path, root: &Path, name: &str, folder: &str, files: Vec<(St
     std::fs::write(&zip, zip_of(&members)).unwrap_or_else(|_| refuse("a day zip"));
     let run = write_day(&zip, root, &WriteOptions::new("bench-c-gr-05"));
     if !matches!(run.result, Ok(Outcome::Written(_))) {
-        refuse("the tick-store writer refused an invented day");
+        refuse(&format!(
+            "the tick-store writer refused an invented day: {:?}",
+            run.result
+        ));
     }
 }
 
@@ -163,7 +166,7 @@ fn store(base: &Path, entries: u64) -> PathBuf {
     std::fs::write(imports.join("gdfl.indices.lock"), b"").unwrap_or_else(|_| refuse("a lock"));
     let mut journal = String::from("run 1700000000 source=zip\n");
     for n in 0..entries / 10 {
-        let _infallible = writeln!(journal, "begin stocks 2019-01-{:02} INV{n} ", 1 + n % 28);
+        let _infallible = writeln!(journal, "begin indices 2019-01-{:02} INV{n}", 1 + n % 28);
     }
     std::fs::write(imports.join("gdfl.journal"), journal).unwrap_or_else(|_| refuse("a journal"));
     let header = ManifestHeader {
@@ -191,6 +194,7 @@ fn store(base: &Path, entries: u64) -> PathBuf {
 /// one-row files.
 fn largest_day(base: &Path) -> (PathBuf, Day) {
     let root = base.join("ts-options");
+    std::fs::create_dir_all(&root).unwrap_or_else(|_| refuse("an options tick store"));
     let folder = "GFDLNFO_TICK_29092026";
     let files = (0..LARGEST_DAY)
         .map(|i| {
@@ -201,7 +205,13 @@ fn largest_day(base: &Path) -> (PathBuf, Day) {
             )
         })
         .collect();
-    written_day(&base.join("zips-options"), &root, &format!("{folder}.zip"), folder, files);
+    written_day(
+        &base.join("zips-options"),
+        &root,
+        &format!("{folder}.zip"),
+        folder,
+        files,
+    );
     (root, the_day())
 }
 
@@ -218,7 +228,11 @@ pub(crate) fn preflight_is_flat() -> bool {
     let day = the_day();
     let request = || Request {
         free_floor: 0,
-        ..Request::new(Kinds::one(ImportKind::Indices), SourceWord::TickStore, (day, day))
+        ..Request::new(
+            Kinds::one(ImportKind::Indices),
+            SourceWord::TickStore,
+            (day, day),
+        )
     };
     let stores = [BASE, BASE * 10, BASE * 100].map(|n| (n, store(&base, n)));
     let mut plan_ps = Vec::new();
@@ -236,24 +250,32 @@ pub(crate) fn preflight_is_flat() -> bool {
             "  C-GR-05 first (cold) plan, {n} entries        {} ns, n=1",
             cold.elapsed().as_nanos()
         );
-        spread(&format!("C-GR-05 repeated plan, {n} entries"), SAMPLES, || {
-            let _planned = std::hint::black_box(plan(
-                request(),
-                &process,
-                &env,
-                &mut SourceCache::default(),
-            ));
-        });
+        spread(
+            &format!("C-GR-05 repeated plan, {n} entries"),
+            SAMPLES,
+            || {
+                let _planned = std::hint::black_box(plan(
+                    request(),
+                    &process,
+                    &env,
+                    &mut SourceCache::default(),
+                ));
+            },
+        );
         let checks = || {
-            preflight::check_with(&first.request, &process, &first.kinds, &preflight::Os)
-                .is_ok()
+            preflight::check_with(&first.request, &process, &first.kinds, &preflight::Os).is_ok()
         };
-        spread(&format!("C-GR-05 the checks alone, {n} entries"), SAMPLES, || {
-            let _checked = std::hint::black_box(checks());
-        });
+        spread(
+            &format!("C-GR-05 the checks alone, {n} entries"),
+            SAMPLES,
+            || {
+                let _checked = std::hint::black_box(checks());
+            },
+        );
         plan_ps.push(cost_ps(REPS, checks));
     }
-    let (Some(&one), Some(&ten), Some(&hundred)) = (plan_ps.first(), plan_ps.get(1), plan_ps.get(2))
+    let (Some(&one), Some(&ten), Some(&hundred)) =
+        (plan_ps.first(), plan_ps.get(1), plan_ps.get(2))
     else {
         refuse("three sizes measured");
     };
@@ -273,6 +295,43 @@ pub(crate) fn preflight_is_flat() -> bool {
         })
         .collect();
     spread_of("C-GR-05 the one listing read, 26,820 entries", ns);
+    // The per-read cost item 4 adds to every listing and member read: one
+    // `fstat` of the handle and one `stat` of the path.
+    let watched = options.join("FORMAT.md");
+    let _written = std::fs::write(&watched, b"watched\n");
+    let handle = std::fs::File::open(&watched)
+        .map(std::sync::Arc::new)
+        .unwrap_or_else(|_| refuse("a watched file"));
+    let watch = preflight::Watch::new(&watched, handle).unwrap_or_else(|_| refuse("a watch"));
+    spread(
+        "C-GR-05 the source_changing check, two stats",
+        SAMPLES * 10,
+        || {
+            if watch.check().is_err() {
+                refuse("an unchanged file read as changed");
+            }
+        },
+    );
+    // The legacy cutover's refusal path: a store no lock file ever held,
+    // whose journal of 100,000 lines is read once (O(lines), the only
+    // journal read the preflight makes).
+    let unclaimed = store(&base, BASE * 100);
+    let _unclaimed = std::fs::remove_file(unclaimed.join("imports/gdfl.indices.lock"));
+    let process = Process {
+        store_root: &unclaimed,
+        commit: None,
+        log: &log,
+        unstamped: None,
+    };
+    spread(
+        "C-GR-05 the legacy refusal path, 100,000 lines",
+        SAMPLES / 10,
+        || {
+            if plan(request(), &process, &env, &mut SourceCache::default()).is_ok() {
+                refuse("an unclaimed store with open keys planned");
+            }
+        },
+    );
     let _cleanup = std::fs::remove_dir_all(&base);
     a && b
 }

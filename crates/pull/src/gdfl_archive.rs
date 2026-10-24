@@ -720,8 +720,7 @@ impl<B: ReadAt> Archive<B> {
     /// its own place or refused for that day (IA-3b item 8, FM-133): the
     /// source's span, which a plan states so the days outside it read as
     /// `outside_source`, never as holes. `None` when the tree holds none.
-    /// O(days in the archive's span), once per run, over the table in
-    /// memory.
+    /// O(1): kept as the directory is read, two comparisons a day zip.
     #[must_use]
     pub fn span(&self, kind: CmKind) -> Option<(Day, Day)> {
         let (first, last) = (*self.spans.get(tree(kind))?)?;

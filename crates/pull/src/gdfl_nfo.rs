@@ -1085,8 +1085,10 @@ impl NfoSource for NfoTickStore {
         // device at a day's name is refused by name, never read as absent;
         // an index of zero entries refuses the day `day_zip_empty`, and the
         // file is watched to its last read (IA-3b items 2 and 4).
-        let Some((file, watch, entries)) =
-            crate::gdfl_tickstore::open_watched_day(&self.day_path(day), &format!("{}.zip", day_folder_name(day)))?
+        let Some((file, watch, entries)) = crate::gdfl_tickstore::open_watched_day(
+            &self.day_path(day),
+            &format!("{}.zip", day_folder_name(day)),
+        )?
         else {
             return table.absent(NFO_TREE, day).map(|()| None);
         };
@@ -1240,7 +1242,8 @@ impl NfoZips {
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(why) => return Err(year_zip_unavailable(&why)),
         };
-        let watch = Watch::new(&path, Arc::clone(&file)).map_err(|why| year_zip_unavailable(&why))?;
+        let watch =
+            Watch::new(&path, Arc::clone(&file)).map_err(|why| year_zip_unavailable(&why))?;
         let entries = year_zip_directory(&file)?;
         let mut days: HashMap<Day, Option<ZipEntry>> = HashMap::with_capacity(entries.len());
         let mut away: Vec<(Day, String)> = Vec::new();

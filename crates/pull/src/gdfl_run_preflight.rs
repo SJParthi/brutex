@@ -196,7 +196,6 @@ impl Watch {
     }
 }
 
-
 // ═══ The constants ══════════════════════════════════════════════════════════
 
 /// The most names beside a missing year zip that
@@ -392,9 +391,7 @@ fn volume_of(path: &Path) -> Result<Volume, String> {
 fn volume_of(path: &Path) -> Result<Volume, String> {
     let vfs = rustix::fs::statvfs(path)
         .map_err(|why| format!("statvfs({}) refused: {why}", path.display()))?;
-    let read_only = vfs
-        .f_flag
-        .contains(rustix::fs::StatVfsMountFlags::RDONLY);
+    let read_only = vfs.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY);
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let (local, fs) = {
         let fs = rustix::fs::statfs(path)
@@ -979,10 +976,7 @@ fn first_day(
 /// The files a capital-market day files: every entry less those that name
 /// no ticker of the scope; under a filter, at most one a name.
 fn cm_wanted<L>(listing: &DayListing<L>, only: &[String]) -> u64 {
-    let wanted = listing
-        .entries()
-        .len()
-        .saturating_sub(listing.unresolved());
+    let wanted = listing.entries().len().saturating_sub(listing.unresolved());
     let wanted = if only.is_empty() {
         wanted
     } else {
@@ -1062,8 +1056,9 @@ fn census_header(
             .and_then(|()| ManifestHeader::decode(&image).ok())
             .filter(|header| header.generation % manifest::SLOT_COUNT == at / SLOT_STRIDE)
             .filter(|header| {
-                len.checked_sub(manifest::HEADER_LEN)
-                    .is_some_and(|room| header.n_valid <= room / u64::from(header.entry_stride.max(1)))
+                len.checked_sub(manifest::HEADER_LEN).is_some_and(|room| {
+                    header.n_valid <= room / u64::from(header.entry_stride.max(1))
+                })
             })
     };
     match (slot(0), slot(SLOT_STRIDE)) {

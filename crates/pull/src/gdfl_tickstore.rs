@@ -646,9 +646,9 @@ impl DayTable {
                     Some((tree, day, expected)) if expected == path => {
                         table.held += 1;
                         if let Some(span) = table.spans.get_mut(usize::from(tree)) {
-                            *span = Some(span.map_or((day, day), |(lo, hi)| {
-                                (lo.min(day), hi.max(day))
-                            }));
+                            *span = Some(
+                                span.map_or((day, day), |(lo, hi)| (lo.min(day), hi.max(day))),
+                            );
                         }
                     }
                     Some((tree, day, expected)) => {
@@ -886,7 +886,8 @@ impl CmSource for TickStore {
         // The day's own place is opened by its exact path, so a day the
         // writer published after the walk is read whole (`FORMAT.md` §2).
         let zip = format!("{}.zip", crate::gdfl_cm::day_folder_name(kind, day));
-        let Some((file, watch, entries)) = open_watched_day(&self.day_path(kind, day), &zip)? else {
+        let Some((file, watch, entries)) = open_watched_day(&self.day_path(kind, day), &zip)?
+        else {
             return table.absent(tree_byte(kind), day).map(|()| None);
         };
         let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
