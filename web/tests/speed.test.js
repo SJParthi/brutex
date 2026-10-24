@@ -3930,7 +3930,8 @@ test('the end of a command waits for stdout to take its whole sheet, bounded: a 
     process.stderr.write = write;
   }
   assert.equal(ended, false, 'a stream that never takes it is let go at the bound');
-  assert.ok(Date.now() - t0 >= 45, 'at the bound, not before');
+  const took = Date.now() - t0;
+  assert.ok(took >= 45 && took < 5_000, `at the bound, not before and not long after (took ${took} ms)`);
   assert.deepEqual(said, ['speed-sheet: stdout did not take the whole sheet (10 B) within 50 ms; what it did not take is lost\n']);
   // Both commands exit through it.
   for (const file of ['ci/speed-sheet.mjs', 'ci/browser-harness.mjs']) assert.match(source(file), /const flushed = written\(process\.stdout, text, '[a-z-]+'\);[\s\S]*await flushed;\s*process\.exit\(code\);/, file);
