@@ -1032,3 +1032,11 @@ confirmed by two skeptics; their corrections are applied.
   print count, four literals, one search turned into two probes (D-7147 and
   D-7150 addenda, BRED-15). Same cause as F12: a merge that runs neither
   the shell gates nor the whole workspace suite cannot see either.
+- **BRED23-F15: an api test passed or failed by the commit hash.**
+  `api::server::tests::a_cross_origin_write_is_refused_and_this_page_s_own_is_not`
+  asserted `!response.contains("413")` over the whole response; at
+  77a635e2e the `x-brutex-build` header held `413` and gate 1e went red on a
+  right `403` (bred1023-full9). FIXED: status codes in that module are read
+  off the status line (`status_line`, five sites), the failing hash replayed
+  in a test (BRED-17, D-7152 addendum). Not load: the hash, so a rerun on the
+  same commit fails every time and a rerun on the next one hides it.

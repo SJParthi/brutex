@@ -83530,6 +83530,22 @@ None of the three was made to fail before its change on demand: the
 failures were load races seen by BASE-GATE11's and LEDGER-1023's runs
 (NOT PROVED failing first here).
 
+**Addendum, 24 Oct 2026 (a fourth flaky api test, and it was not load).**
+Gate 1e of the full run on 77a635e2e (state/fix/ci-gates-logs/bred1023-full9)
+failed `api::server::tests::a_cross_origin_write_is_refused_and_this_page_s_own_is_not`
+on a right answer: the refusal was `403 Forbidden`, and the test's
+`!response.contains("413")` read the whole response, whose
+`x-brutex-build: 77a635e2e7c8d61d746a2b993fc62cd4130b0102` holds `413`. The
+test passed or failed by the commit hash. Every status code that test module
+asserts against a raw response is now read off the status line alone
+(`status_line`, five sites: the 413 that failed, 405, 404 and two 503s, the
+four positive ones of which could pass on a hash holding their digits). The
+same defect was fixed once before for a process id in a scratch path; this is
+its general form. The hash that failed is replayed in
+`a_status_code_is_read_off_the_status_line_and_never_off_the_build_header`
+(BRED-17). No bound was loosened: the assertions are as strict, and now
+about the status alone.
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed
