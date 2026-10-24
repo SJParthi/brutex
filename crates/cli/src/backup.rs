@@ -509,10 +509,7 @@ impl Book {
     /// what is held could not be told, and copying past it could claim copies
     /// that are not there.
     pub(crate) fn load(path: &Path, keep_months: bool) -> Result<Self, String> {
-        let mut book = Self {
-            months: keep_months.then(HashMap::new),
-            ..Self::default()
-        };
+        let mut book = Self::default();
         let file = match store::open_flags::open_read_no_follow(path) {
             Ok(file) => file,
             Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(book),
@@ -523,6 +520,14 @@ impl Book {
             .map_err(|why| format!("{}: {why}", path.display()))?;
         if !meta.is_file() {
             return Err(format!("{} is not a regular file", path.display()));
+        }
+        // PRE-SIZED FROM THE FILE: no record is shorter than the shortest line
+        // `record_line` writes, so neither map rehashes while the book loads.
+        let shortest = record_line(0, "x", 0, 0, &[0; 32], b"x", None).len() + 1;
+        let most = usize::try_from(meta.len()).unwrap_or(usize::MAX) / shortest;
+        book.held.reserve(most);
+        if keep_months {
+            book.months = Some(HashMap::with_capacity(most));
         }
         let mut reader = io::BufReader::new(file);
         let mut line = Vec::new();
@@ -612,9 +617,6 @@ impl Book {
             if let Some(unit) = &record.unit {
                 out.entry(unit.clone()).or_default().push(record.clone());
             }
-        }
-        for records in out.values_mut() {
-            records.sort_by(|a, b| a.path.cmp(&b.path));
         }
         out
     }
@@ -743,35 +745,39 @@ fn path_of(vendor: Vendor, entry: &Entry) -> Option<StorePath<'_>> {
     .ok()
 }
 
-/// Every month every census names, once, in path order.
+/// Every month every census names, once, in the censuses' own order: the copy
+/// is a one-time pass whose order nothing reads, so no sort is paid.
 fn months(root: &Path, faults: &mut Faults) -> Vec<Month> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let mut listed: Vec<(Vendor, Entry)> = Vec::new();
     for vendor in Vendor::ALL {
-        let reads = match census_store::read_vendor(root, vendor) {
-            Ok(reads) => reads,
-            Err(why) => {
-                faults
-                    .unlisted
-                    .add(format!("{}: {}", vendor.as_str(), one_line(&why)));
-                continue;
-            }
-        };
-        for entry in reads.iter().flat_map(|read| read.census.newest()) {
-            let Some(unit) = path_of(vendor, &entry).map(|path| path.to_string()) else {
-                faults.unaddressed.add(format!("{:?}", entry.key));
-                continue;
-            };
-            if seen.insert(unit.clone()) {
-                out.push(Month {
-                    vendor,
-                    entry,
-                    unit,
-                });
-            }
+        match census_store::read_vendor(root, vendor) {
+            Ok(reads) => listed.extend(
+                reads
+                    .iter()
+                    .flat_map(|read| read.census.newest())
+                    .map(|entry| (vendor, entry)),
+            ),
+            Err(why) => faults
+                .unlisted
+                .add(format!("{}: {}", vendor.as_str(), one_line(&why))),
         }
     }
-    out.sort_by(|a, b| a.unit.cmp(&b.unit));
+    // PRE-SIZED FROM THE CENSUSES, so the set never grows mid-walk.
+    let mut seen = HashSet::with_capacity(listed.len());
+    let mut out = Vec::with_capacity(listed.len());
+    for (vendor, entry) in listed {
+        let Some(unit) = path_of(vendor, &entry).map(|path| path.to_string()) else {
+            faults.unaddressed.add(format!("{:?}", entry.key));
+            continue;
+        };
+        if seen.insert(unit.clone()) {
+            out.push(Month {
+                vendor,
+                entry,
+                unit,
+            });
+        }
+    }
     out
 }
 
@@ -926,8 +932,8 @@ fn walk(
                     .add(format!("{} ({why})", shown(&recorded(&at)))),
             }
         }
-        names.sort();
-        // Depth first in name order: folders are pushed in reverse.
+        // Depth first, in the order the folder lists them: folders are pushed
+        // in reverse. The copy reads no order, so none is sorted for.
         let mut folders = Vec::new();
         for path in names {
             if exclude.contains(&path) {
@@ -973,7 +979,6 @@ pub(crate) fn archives(root: &Path, faults: &mut Faults) -> Result<Vec<PathBuf>,
         Err(why) if why.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(why) => return Err(format!("{}: {why}", journal.display())),
     };
-    let mut seen = HashSet::new();
     let mut out = Vec::new();
     let mut reader = io::BufReader::new(file);
     let mut line = Vec::new();
@@ -1002,9 +1007,7 @@ pub(crate) fn archives(root: &Path, faults: &mut Faults) -> Result<Vec<PathBuf>,
             Some(value) => {
                 match decoded(value).map(|path| PathBuf::from(std::ffi::OsStr::from_bytes(&path))) {
                     Some(path) if path.is_absolute() => {
-                        if seen.insert(path.clone()) {
-                            out.push(path);
-                        }
+                        out.push(path);
                     }
                     _ => faults.unreadable.add(format!(
                         "{} line {number} (its archive= is no absolute path this build can decode)",
@@ -1018,6 +1021,9 @@ pub(crate) fn archives(root: &Path, faults: &mut Faults) -> Result<Vec<PathBuf>,
             )),
         }
     }
+    // ONCE EACH, by a set pre-sized from the lines that named one.
+    let mut seen = HashSet::with_capacity(out.len());
+    out.retain(|path| seen.insert(path.clone()));
     Ok(out)
 }
 
@@ -1066,9 +1072,10 @@ fn archive_found(archive: &Path, faults: &mut Faults) -> Vec<Found> {
     }
 }
 
-/// The top-level names of the store root this verb does not copy.
+/// The top-level names of the store root this verb does not copy, in the
+/// order the root lists them.
 fn not_covered(root: &Path) -> Vec<String> {
-    let mut out: Vec<String> = fs::read_dir(root)
+    fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
@@ -1076,9 +1083,7 @@ fn not_covered(root: &Path) -> Vec<String> {
         .filter(|name| {
             !BY_MONTH.contains(&name.as_str()) && !LISTED.iter().any(|(_, dir)| dir == name)
         })
-        .collect();
-    out.sort();
-    out
+        .collect()
 }
 
 // ---------------------------------------------------------------- the run
@@ -1630,11 +1635,18 @@ impl Copier<'_> {
         let tmp = PathBuf::from(name);
         let mut source = store::open_flags::open_read_no_follow(&found.source)
             .map_err(|why| Cut::Source(format!("{}: {why}", found.source.display())))?;
-        let mut out = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
+        // A STAGING NAME OF THIS RUN ALONE: run ids only grow, so no other run
+        // and no earlier one was ever handed it (`store::staging`, RA-290).
+        let staged = store::staging::create(&tmp)
             .map_err(|why| Cut::Target(format!("{}: {why}", tmp.display())))?;
+        let mut out = staged.file;
+        if let Some(bytes) = staged.cleared {
+            crate::note(
+                &telemetry::Event::warn(NOTES, "backup staging leftover cleared")
+                    .with("path", tmp.display().to_string().as_str())
+                    .with("bytes", bytes),
+            );
+        }
         let mut hasher = brutex_core::blake3::Hasher::new();
         let mut buffer = vec![0_u8; CHUNK];
         let mut left = found.len;
@@ -1743,7 +1755,7 @@ impl Copying<'_> {
     fn files(&mut self, found: &[Found]) -> Result<(), Refusal> {
         let run = self.copier.run;
         let mut records = Vec::new();
-        let mut folders = HashSet::new();
+        let mut folders = HashSet::with_capacity(found.len());
         for file in found {
             let verdict = verdict(&mut self.book, file);
             let counts = self.ran.classes.entry(file.class).or_default();
@@ -1970,7 +1982,12 @@ fn copy(
     })?;
     // UNDER THE LOCK THE BOOK IS READ AGAIN: a run that finished between the
     // plan and the lock is what this one builds on.
-    let book = Book::load(manifest, false).map_err(|why| refused("manifest_unreadable", why))?;
+    let mut book =
+        Book::load(manifest, false).map_err(|why| refused("manifest_unreadable", why))?;
+    // ROOM FOR EVERY FILE THE PLAN LISTED: an insert during the copy never
+    // rehashes the map, so no per-file step pays for the whole table (p99).
+    book.held
+        .reserve(usize::try_from(planned.total().listed).unwrap_or(usize::MAX));
     let run = now_s().max(book.newest_run.saturating_add(1));
     let ledger = Ledger::open(manifest, book.torn).map_err(|why| unwritable(why, manifest))?;
     let started = now_s();
@@ -1984,7 +2001,7 @@ fn copy(
             inject: env.inject,
             copied: 0,
             written: 0,
-            known: HashSet::new(),
+            known: HashSet::with_capacity(units.len()),
         },
         ran: Ran {
             run,
@@ -2302,7 +2319,7 @@ pub(crate) fn drill_order(units: &[Vec<u8>], seed: u64) -> Vec<Vec<u8>> {
 fn drill_locks(root: &Path, unit: &[u8], records: &[Record]) -> Vec<PathBuf> {
     let unit = Path::new(std::ffi::OsStr::from_bytes(unit)).with_extension("lock");
     let mut out = vec![root.join(&unit)];
-    let mut revisions = HashSet::new();
+    let mut revisions = HashSet::with_capacity(records.len());
     for record in records {
         let path = Path::new(std::ffi::OsStr::from_bytes(&record.path));
         let mut parts = path.components();
@@ -2671,7 +2688,7 @@ fn drill_target(root: &Path, asked: &Path) -> Result<(PathBuf, PathBuf), Refusal
 pub(crate) fn drill(
     root: &Path,
     ask: &DrillAsk,
-    scratch_parent: &Path,
+    (scratch_parent, process): (&Path, u32),
     commit: Option<&str>,
 ) -> Result<Drilled, Refusal> {
     let (from, store) = drill_target(root, &ask.from)?;
@@ -2716,7 +2733,7 @@ pub(crate) fn drill(
         ));
     }
     let id = now_s();
-    let scratch = parent.join(format!("brutex-backup-drill-{id}-{}", std::process::id()));
+    let scratch = parent.join(format!("brutex-backup-drill-{id}-{process}"));
     fs::create_dir(&scratch).map_err(|why| {
         refused(
             "scratch_unavailable",
@@ -2986,7 +3003,7 @@ pub(crate) fn command_with(
 pub(crate) fn drill_command_with(
     arguments: &[&str],
     store: &dyn Fn() -> Result<PathBuf, String>,
-    scratch_parent: &Path,
+    scratch: (&Path, u32),
     commit: Option<&str>,
     out: &mut String,
 ) -> u8 {
@@ -2999,7 +3016,7 @@ pub(crate) fn drill_command_with(
     };
     let drilled = store()
         .map_err(|why| refused("store_unavailable", why))
-        .and_then(|root| drill(&root, &ask, scratch_parent, commit).map(|d| (root, d)));
+        .and_then(|root| drill(&root, &ask, scratch, commit).map(|d| (root, d)));
     let (root, drilled) = match drilled {
         Ok(done) => done,
         Err(refusal) => {
@@ -3094,7 +3111,7 @@ pub(crate) fn drill_command(arguments: &[&str], out: &mut String) -> u8 {
     drill_command_with(
         arguments,
         &store,
-        &std::env::temp_dir(),
+        (&std::env::temp_dir(), std::process::id()),
         crate::commit_stamp(),
         out,
     )

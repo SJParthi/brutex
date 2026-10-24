@@ -1189,7 +1189,18 @@ pub(crate) fn backup_json(root: &Path, now: u64) -> String {
             );
         }
     }
-    let _ = write!(out, r#","stale_after_days":{STALE_COPY_DAYS},"drill":"#);
+    let _ = write!(
+        out,
+        r#","stale_after_days":{STALE_COPY_DAYS},"drill":{}}}"#,
+        drill_json(root)
+    );
+    out
+}
+
+/// The `backup.drill` object: the newest drill line's words, or why there is
+/// none.
+fn drill_json(root: &Path) -> String {
+    let mut out = String::new();
     match last_drill(root) {
         Ok(line) => {
             let _ = write!(
@@ -1218,7 +1229,6 @@ pub(crate) fn backup_json(root: &Path, now: u64) -> String {
             );
         }
     }
-    out.push('}');
     out
 }
 

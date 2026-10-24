@@ -230,7 +230,13 @@ impl Fixture {
         let root = self.root.clone();
         let store = move || Ok(root.clone());
         let mut out = String::new();
-        let code = drill_command_with(arguments, &store, &self.scratch, Some(COMMIT), &mut out);
+        let code = drill_command_with(
+            arguments,
+            &store,
+            (&self.scratch, std::process::id()),
+            Some(COMMIT),
+            &mut out,
+        );
         (code, out)
     }
 
@@ -300,10 +306,6 @@ impl Fixture {
                 shown(&record.path)
             );
         }
-    }
-
-    fn bin(&self, segment: &str, symbol: &'static str, option: bool, m: u8) -> String {
-        month_path(segment, symbol, option, m).to_string()
     }
 }
 
@@ -404,11 +406,11 @@ fn backup_decoded_str(value: &str) -> Option<String> {
 fn a_changed_file_gets_a_new_copy_and_the_old_copy_stays() {
     let fx = Fixture::standard("changed");
     let first = fx.backup();
-    let bin = fx.bin("INDEX", "NIFTY", false, 1);
+    let index = bin("INDEX", "NIFTY", false, 1);
     let old = fx
         .records()
         .into_iter()
-        .find(|r| r.path == bin.as_bytes())
+        .find(|r| r.path == index.as_bytes())
         .unwrap();
     let old_bytes = fs::read(fx.copy_of(&old)).unwrap();
 
@@ -426,13 +428,13 @@ fn a_changed_file_gets_a_new_copy_and_the_old_copy_stays() {
         .records()
         .into_iter()
         .rev()
-        .find(|r| r.path == bin.as_bytes())
+        .find(|r| r.path == index.as_bytes())
         .unwrap();
     assert_eq!(newest.run, second.run);
     assert_ne!(newest.digest, old.digest);
     assert_eq!(
         fs::read(fx.copy_of(&newest)).unwrap(),
-        fs::read(fx.root.join(&bin)).unwrap(),
+        fs::read(fx.root.join(&index)).unwrap(),
         "the new copy is the store's new bytes"
     );
     assert_eq!(
@@ -440,8 +442,8 @@ fn a_changed_file_gets_a_new_copy_and_the_old_copy_stays() {
         old_bytes,
         "the first run's copy is kept, never overwritten"
     );
-    assert!(fx.copy_of(&old) != fx.copy_of(&newest));
-    let share = fx.bin("CASH", "ZZSHARE", false, 2);
+    assert_ne!(fx.copy_of(&old), fx.copy_of(&newest));
+    let share = bin("CASH", "ZZSHARE", false, 2);
     assert!(
         !fx.copies().iter().any(|copy| copy.starts_with(
             fx.target
@@ -566,7 +568,7 @@ fn a_kill_mid_copy_resumes_without_a_torn_file() {
 #[test]
 fn a_writer_held_month_is_busy_and_retried() {
     let fx = Fixture::standard("busy");
-    let unit = fx.bin("FNO", "NIFTY", true, 3);
+    let unit = bin("FNO", "NIFTY", true, 3);
     let writer = BarFile::open_or_create(
         &fx.root,
         month_path("FNO", "NIFTY", true, 3),
@@ -622,13 +624,13 @@ fn the_drill_restores_three_months_byte_equal() {
     fx.backup();
     let before: Vec<Vec<u8>> = KINDS
         .iter()
-        .map(|(s, y, o, m, _)| fs::read(fx.root.join(fx.bin(s, *y, *o, *m))).unwrap())
+        .map(|(s, y, o, m, _)| fs::read(fx.root.join(bin(s, y, *o, *m))).unwrap())
         .collect();
     let (code, out) = fx.drill(&["--from", &fx.to()]);
     assert_eq!(code, OK, "{out}");
     assert!(out.contains(": PASS: 3 of 3 month(s) restored"), "{out}");
     for (segment, symbol, option, m, _) in KINDS {
-        let bin = fx.bin(segment, symbol, option, m);
+        let bin = bin(segment, symbol, option, m);
         assert!(out.contains(&bin), "{bin} restored: {out}");
     }
     let line = fs::read_to_string(fx.root.join(DRILLS)).unwrap();
@@ -656,7 +658,7 @@ fn the_drill_restores_three_months_byte_equal() {
     }
     let after: Vec<Vec<u8>> = KINDS
         .iter()
-        .map(|(s, y, o, m, _)| fs::read(fx.root.join(fx.bin(s, *y, *o, *m))).unwrap())
+        .map(|(s, y, o, m, _)| fs::read(fx.root.join(bin(s, y, *o, *m))).unwrap())
         .collect();
     assert_eq!(
         before, after,
@@ -853,9 +855,8 @@ fn an_older_generation_and_its_pointer_are_copied() {
         .collect();
     assert!(month.contains(&unit), "{month:?}");
     assert!(
-        month
-            .iter()
-            .any(|p| p.starts_with("bar-revisions-v1/1/") && p.ends_with(".bin")),
+        month.iter().any(|p| p.starts_with("bar-revisions-v1/1/")
+            && Path::new(p).extension().is_some_and(|e| e == "bin")),
         "{month:?}"
     );
     assert!(month.iter().any(|p| p.ends_with(".repair-v1")), "{month:?}");
@@ -982,7 +983,9 @@ fn the_plan_writes_nothing_on_either_side() {
         "{out}"
     );
     assert!(
-        out.contains("NOT COVERED") && out.contains("logs, results"),
+        out.lines().any(|line| line.contains("NOT COVERED")
+            && line.contains("logs")
+            && line.contains("results")),
         "what the copy leaves out is named: {out}"
     );
     assert_eq!(fs::read_dir(&fx.target).unwrap().count(), 0);
@@ -1038,7 +1041,13 @@ fn a_drill_asked_for_more_months_than_held_is_incomplete() {
     let root = fx.root.clone();
     let store = move || Ok(root.clone());
     let mut out = String::new();
-    let code = drill_command_with(&["--from", &fx.to()], &store, &fx.root, None, &mut out);
+    let code = drill_command_with(
+        &["--from", &fx.to()],
+        &store,
+        (&fx.root, std::process::id()),
+        None,
+        &mut out,
+    );
     assert_eq!(code, FAILED);
     assert!(
         out.contains("BACKUP DRILL REFUSED (scratch_inside)"),
@@ -1101,7 +1110,7 @@ fn a_target_path_with_a_space_and_a_percent_sign_is_one_receipt_word() {
 #[test]
 fn a_target_that_fills_up_mid_copy_while_a_month_is_writer_held_then_resumes() {
     let fx = Fixture::standard("full-and-busy");
-    let unit = fx.bin("CASH", "ZZSHARE", false, 2);
+    let unit = bin("CASH", "ZZSHARE", false, 2);
     let writer = BarFile::open_or_create(
         &fx.root,
         month_path("CASH", "ZZSHARE", false, 2),
@@ -1232,7 +1241,7 @@ fn a_drill_while_one_month_is_busy_and_another_moved() {
     assert!(
         out.contains(&format!(
             "BUSY            {}",
-            fx.bin("CASH", "ZZSHARE", false, 2)
+            bin("CASH", "ZZSHARE", false, 2)
         )),
         "{out}"
     );
@@ -1281,7 +1290,7 @@ fn every_backup_state_change_is_audited() {
 
 /// **THE PER-FILE STEP, MEASURED** (`docs/06-limits.md`): one probe of the
 /// book and one record formatted, n = 1,000 sequential calls each over books
-/// of 10,000 and 100,000 paths. Run with `--ignored --nocapture`; the numbers
+/// of 10,000 and 100,000 paths. Run with `--ignored` and `BRUTEX_MEASURE_OUT=<file>`; the numbers
 /// go to the report.
 #[test]
 #[ignore = "a measurement for the report, not a gate"]
@@ -1321,7 +1330,9 @@ fn measure_the_per_file_step() {
         }
         times.sort();
         let (p50, p99, max) = (times[499], times[989], times[999]);
-        println!("book={size} n=1000 p50={p50:?} p99={p99:?} max={max:?}");
+        measured(&format!(
+            "book={size} n=1000 p50={p50:?} p99={p99:?} max={max:?}"
+        ));
         p99s.push(p99);
     }
     assert!(
@@ -1452,7 +1463,7 @@ fn a_manifest_line_the_disk_did_not_finish_is_ended_before_the_next() {
 
 /// **THE ONE-TIME PASS'S RATE, SAMPLED** (`docs/06-limits.md`): one run over
 /// a store holding the three months and a 256 MiB invented archive, its
-/// wall time and bytes per second. Run with `--ignored --nocapture`; the
+/// wall time and bytes per second. Run with `--ignored` and `BRUTEX_MEASURE_OUT=<file>`; the
 /// rate goes to the report as a sample, and a full copy's time is an
 /// extrapolation from it.
 #[test]
@@ -1474,7 +1485,9 @@ fn measure_the_copy_rate() {
     let bytes = ran.total().copied_bytes;
     let files = ran.total().copied;
     let rate = u128::from(bytes) * 1_000 / took.as_millis().max(1) / (1024 * 1024);
-    println!("copied {files} files {bytes} bytes in {took:?}: {rate} MiB/s");
+    measured(&format!(
+        "copied {files} files {bytes} bytes in {took:?}: {rate} MiB/s"
+    ));
     assert!(bytes >= 256 * CHUNK as u64);
     fx.every_record_verifies();
 }
@@ -1544,4 +1557,22 @@ fn a_month_whose_pointer_cannot_be_read_is_copied_and_named() {
     assert!(copied.contains(&unit), "{copied:?}");
     assert!(copied.iter().any(|p| p.ends_with(".gen-v1")), "{copied:?}");
     fx.every_record_verifies();
+}
+
+/// The store path of a fixture month's bars.
+fn bin(segment: &str, symbol: &'static str, option: bool, m: u8) -> String {
+    month_path(segment, symbol, option, m).to_string()
+}
+
+/// Appends one measurement line to the file `BRUTEX_MEASURE_OUT` names, when
+/// it is set; a measurement prints nothing (gate 23: a print is not a log).
+fn measured(line: &str) {
+    if let Some(path) = std::env::var_os("BRUTEX_MEASURE_OUT") {
+        let mut file = File::options()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
+    }
 }
