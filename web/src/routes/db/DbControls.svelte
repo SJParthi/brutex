@@ -35,6 +35,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { feedPickerRow, offeredFeeds, excludedSentence } from '$lib/feed-row.js';
   import { SECONDS } from '$lib/db/selection-model.js';
+  import { ceilingText, monthSpan } from '$lib/db/bars-plan.js';
   import { survey } from '$lib/store.svelte.js';
   import DbSearch from './DbSearch.svelte';
   import DbMoneyness from './DbMoneyness.svelte';
@@ -440,6 +441,14 @@
          emptied one paints a bare `·` under the control. -->
     {#if db.tfRefusal}
       <span class="note warn" use:wholeTitle>No bar length — {db.tfRefusal}</span>
+    {/if}
+    <!-- THE REQUEST AGAINST THE SERVER'S CEILINGS, BEFORE IT IS SENT (R3-12;
+         RA-259): the series and months the next window request names, of the
+         most one request reads, as /settings.json serves them. -->
+    {#if db.barQueryPlan?.keys?.length && db.ceilings}
+      <span class="note" class:warn={Boolean(db.ceilings.why)} title={db.ceilings.why ?? undefined} use:wholeTitle data-ceilings
+        >{ceilingText(db.barQueryPlan.keys.length, monthSpan(db.barQueryPlan.from, db.barQueryPlan.to), db.ceilings)}</span
+      >
     {/if}
   </div>
   <!-- ==================================================================

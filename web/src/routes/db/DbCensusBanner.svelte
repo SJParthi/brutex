@@ -42,7 +42,9 @@
   import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes, scopeNeed, scopeWanted, scopeCovers, unknownViews, scopeUnderlyings } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
-  import { SKELETON } from '$lib/db/bars-plan.js';
+  import { SKELETON, adoptCeilings, ceilingsInForce } from '$lib/db/bars-plan.js';
+  import { ask } from '$lib/ask.js';
+  import { reasonOf } from '$lib/refusal.js';
   import { feedRung } from './DbControls.svelte';
   /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
   /** @typedef {import('$lib/db/decoration.js').DecoRow} DecoRow */
@@ -189,6 +191,24 @@
        rows that were not read for it. */
     const need = $derived(scopeNeed({ scope: shownScope, filter: db.filter, kind: db.kind, expiry: db.expiry }));
     const scopeMissing = $derived(shownScope !== null && need?.missing === true);
+
+    /* THE REQUEST CEILINGS ARE THE SERVER'S (R3-12; RA-259): `/settings.json`
+       (R3-05), read once when the page mounts — a fixed-size answer — and
+       adopted for every plan (`adoptCeilings`); a read that fails keeps this
+       build's copies and says so beside the figures. */
+    let ceilings = $state.raw(ceilingsInForce());
+    $effect(() => {
+      let live = true;
+      void ask('/settings.json', { cache: 'no-store' })
+        .then(async (response) => response.ok
+          ? adoptCeilings(await response.json())
+          : adoptCeilings(null, `HTTP ${response.status}: ${(await reasonOf(response)) ?? 'no reason named'}`))
+        .catch((why) => adoptCeilings(null, String(why?.message ?? why)))
+        .then((now) => {
+          if (live) ceilings = now;
+        });
+      return () => { live = false; };
+    });
 
     /* THE INSTRUMENT LIST IS THE SERVER'S (R3-12; RA-005, RA-027): the
        underlyings of the segments the scope on screen read, one facets
@@ -463,6 +483,7 @@
          still binds it, and an absent handler binds no listener. */
       censusReach: { get: () => undefined },
       censusUnderlyings: { get: () => underlyings },
+      ceilings: { get: () => ceilings },
       censusMoved: { get: () => moved },
       censusBanner: { get: () => banner },
       censusMovedSaid: { get: () => movedSaid },

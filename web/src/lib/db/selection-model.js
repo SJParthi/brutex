@@ -624,9 +624,11 @@ export function linkedSegment(seg, exp, today, archiveTo) {
   if (!seg) return { seg: undefined, why: null };
   if (!SEGMENT_KEYS.includes(seg)) {
     const shown = seg.length > 40 ? `${JSON.stringify(seg.slice(0, 24))}… (${seg.length} characters)` : JSON.stringify(seg);
+    /* REFUSED BY NAME, AND NOTHING IS READ FOR IT (R3-12): the census is
+       asked for the segment chosen in its place, never every segment. */
     return {
       seg: undefined,
-      why: `seg ${shown} is not one this page knows (it reads ${SEGMENT_KEYS.join(', ')}); the segment is chosen as if the link named none`
+      why: `seg ${shown} is refused: it is not one this page knows (it reads ${SEGMENT_KEYS.join(', ')}), so nothing is read for it and the segment is chosen as if the link named none`
     };
   }
   if (!contractRungsOf(seg).expiry || !exp) return { seg, why: null };

@@ -768,12 +768,12 @@ export function selectionState(db) {
    *  census on every change that reached it). */
   const heldUnderlyings = $derived.by(() => {
     const s = new Set();
-    /* UNDER A SCOPE, THE SERVER'S LIST (R3-12): the rows read are one
+    for (const r of db.deco) s.add(r.underlying);
+    /* UNDER A SCOPE, THE SERVER'S LIST TOO (R3-12): the rows read are one
        instrument's, and "is this name held" is the server's to answer for
        the segments the scope read (`censusUnderlyings`). */
     const listed = db.censusScope ? db.censusUnderlyings?.rows : null;
-    if (listed?.length) for (const r of listed) s.add(r.key);
-    else for (const r of db.deco) s.add(r.underlying);
+    if (listed) for (const r of listed) s.add(r.key);
     return s;
   });
   const universeCount = $derived.by(() => {
@@ -1069,13 +1069,15 @@ export function selectionState(db) {
 
   /**
    * HOW THIS FEED'S CONTRACTS GOT INTO THE STORE, in the descriptor's words
-   * (DB-050). A folder feed was imported from the vendor's archive files by
-   * `cli gdfl-import` (D-2804); a REST feed was pulled through its API.
+   * (DB-050). A folder feed was imported from the vendor's archive files, by
+   * the importer its archive's own `source` names (`/feeds.json`; R3-12: the
+   * importer was typed here against one feed word); a REST feed was pulled
+   * through its API.
    */
   const contractSource = $derived.by(() => {
     const f = /** @type {any} */ (activeFeed);
     if (!f) return '';
-    if (f.kind === 'folder') return `imported from ${f.display}'s archive files${f.wire === 'gdfl' ? ' by cli gdfl-import (D-2804)' : ''}`;
+    if (f.kind === 'folder') return `imported from ${f.display}'s archive files${typeof f.archive?.source === 'string' && f.archive.source ? ` (${f.archive.source})` : ''}`;
     return `pulled through ${f.display}'s API`;
   });
 
@@ -1129,16 +1131,25 @@ export function selectionState(db) {
             ? ` ${name} holds ${fmt(all)} such instrument-month(s), ${contractSource}.`
             : ` ${name} holds none${/** @type {any} */ (activeFeed)?.fno === 'none' ? ' — /feeds.json says it serves no expired F&O (fno: none)' : ''}.`;
       const off = hidden.bySegment.get(s.key) ?? 0;
-      const held = c > 0 ? `${fmt(c)} held` : e > 0 ? `${fmt(e)} expiries listed` : 'nothing stored';
+      /* EXPIRIES LISTED, NO ROW READ YET (R3-12): held, in the listing's own
+         unit, never "nothing stored". */
+      if (c === 0 && e > 0)
+        return {
+          key: s.key,
+          name: s.name,
+          detail: `${fmt(e)} expiries listed${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+          title: `${fmt(e)} expiries of this instrument listed by the server; a contract's rows are read once its expiry is chosen. ${s.note}.${feedSays}${hiddenText(off, /** @type {any} */ (activeFeed)?.window, fmt)}`,
+          why: undefined
+        };
       return {
         key: s.key,
         name: s.name,
-        detail: `${held}${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
-        title: `${c > 0 ? `${fmt(c)} instrument-month(s) held for this instrument.` : e > 0 ? `${fmt(e)} expiries of this instrument listed by the server; a contract's rows are read once its expiry is chosen.` : 'Nothing stored for this instrument.'} ${s.note}.${feedSays}${hiddenText(off, /** @type {any} */ (activeFeed)?.window, fmt)}`,
+        detail: `${c > 0 ? `${fmt(c)} held` : 'nothing stored'}${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+        title: `${c > 0 ? `${fmt(c)} instrument-month(s) held for this instrument.` : 'Nothing stored for this instrument.'} ${s.note}.${feedSays}${hiddenText(off, /** @type {any} */ (activeFeed)?.window, fmt)}`,
         /* NOT `disabled`. A segment with nothing stored is a legitimate thing to
            select — the answer is an empty table, which IS the answer to "do I
            hold any of these". Disabling it would refuse the question. */
-        why: c === 0 && e === 0 ? 'nothing stored under this segment for this instrument' : undefined
+        why: c === 0 ? 'nothing stored under this segment for this instrument' : undefined
       };
     });
   });
