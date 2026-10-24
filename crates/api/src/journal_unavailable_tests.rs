@@ -171,8 +171,10 @@ fn not_appended_at(from: u64, path: &Path) -> Vec<telemetry::Record> {
 /// runtime, answered whole.
 fn blocking_get(addr: std::net::SocketAddr, path: &str) -> String {
     let mut s = std::net::TcpStream::connect(addr).expect("connect");
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes())
-        .expect("write");
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .expect("write");
     let mut buf = String::new();
     s.read_to_string(&mut buf).expect("read");
     buf
@@ -376,7 +378,7 @@ fn a_contended_journal_append_never_stalls_the_http_surface() {
 /// `broker_run_by` reaches the journal only through `RunLedger`, whose every
 /// journal call sits inside `off_the_workers`; `fno_walk` reaches it through
 /// `fno_opened` and `FnoPage::say_counted`, each inside `off_the_workers`;
-/// and none of them adds a `spawn_blocking` (the stop's bounded wait, D-1848,
+/// and none of them adds a `spawn_blocking` (the stop's bounded wait, D-1582,
 /// is why: a `spawn_blocking` task can hold a stopping process).
 #[test]
 fn every_journal_call_on_the_pull_paths_goes_off_the_workers() {
@@ -403,12 +405,15 @@ fn every_journal_call_on_the_pull_paths_goes_off_the_workers() {
     );
 
     let ledger = code(&body_of("impl RunLedger {"));
-    for method in ledger.split("\n    fn ").chain(ledger.split("\n    pub(crate) fn ")) {
+    for method in ledger
+        .split("\n    fn ")
+        .chain(ledger.split("\n    pub(crate) fn "))
+    {
         let method = method.split("\n    fn ").next().unwrap_or(method);
         if let Some(call) = method.find("journal.") {
-            let off = method
-                .find("off_the_workers(")
-                .unwrap_or_else(|| panic!("a ledger method calls the journal on a worker:\n{method}"));
+            let off = method.find("off_the_workers(").unwrap_or_else(|| {
+                panic!("a ledger method calls the journal on a worker:\n{method}")
+            });
             assert!(off < call, "the journal call is inside it:\n{method}");
         }
     }
@@ -425,8 +430,14 @@ fn every_journal_call_on_the_pull_paths_goes_off_the_workers() {
     );
 
     let walk = code(&body_of("async fn fno_walk("));
-    assert!(!walk.contains("journal."), "no direct journal call:\n{walk}");
-    assert!(walk.contains("match fno_opened(journal, asked, now)"), "{walk}");
+    assert!(
+        !walk.contains("journal."),
+        "no direct journal call:\n{walk}"
+    );
+    assert!(
+        walk.contains("match fno_opened(journal, asked, now)"),
+        "{walk}"
+    );
     assert!(
         code(&body_of("fn fno_opened(")).contains("off_the_workers(|| journal.append(&head))"),
         "the walk's opening"
@@ -442,7 +453,10 @@ fn every_journal_call_on_the_pull_paths_goes_off_the_workers() {
         ("fno_walk", &walk),
         ("off_the_workers", &code(&body_of("fn off_the_workers<T>("))),
     ] {
-        assert!(!body.contains("spawn_blocking"), "{name} adds no spawn_blocking");
+        assert!(
+            !body.contains("spawn_blocking"),
+            "{name} adds no spawn_blocking"
+        );
     }
 }
 
@@ -469,7 +483,10 @@ async fn an_opening_refused_at_its_first_attempt_refuses_the_run_at_once_and_ask
         why.starts_with("journal_unavailable: ") && why.contains("cannot open the journal"),
         "{why}"
     );
-    assert!(took < SLACK, "refused at once, not after the bound: {took:?}");
+    assert!(
+        took < SLACK,
+        "refused at once, not after the bound: {took:?}"
+    );
     assert_eq!(vendor.asked(), 0);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -494,7 +511,8 @@ async fn a_run_refused_at_its_opening_and_asked_again_at_once_lands_when_the_hol
         "{second:?}"
     );
     assert!(vendor.asked() >= 1, "the second run asked the vendor");
-    let opening = journal.page(journal.look().records(), journal.look().records() - 1, 1)
+    let opening = journal
+        .page(journal.look().records(), journal.look().records() - 1, 1)
         .expect("a page")[0]
         .decoded
         .clone()
@@ -547,11 +565,8 @@ fn a_read_only_journal_refuses_the_run_by_name_and_asks_nothing() {
                     let vendor = CountingVendor::rejecting();
                     let (site, asked, root) = spot_site("read-only", &vendor);
                     let journal = site.journal();
-                    std::fs::set_permissions(
-                        &journal.path,
-                        std::fs::Permissions::from_mode(0o444),
-                    )
-                    .expect("chmod");
+                    std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o444))
+                        .expect("chmod");
                     let out = broker_run(&asked, &site, &[]).await;
                     let why = &out.blocked.as_ref().expect("refused").why;
                     assert!(
@@ -597,7 +612,10 @@ fn on_a_current_thread_runtime_the_ledger_runs_inline_and_a_refused_opening_stil
 
             let mut ledger = RunLedger::open(&journal, &asked, 2, crate::autopilot::Driver::Hand);
             assert!(ledger.opened(), "{ledger:?}");
-            let failure = [pull::ingest::Failure::new("NIFTY", "NIFTY: an invented gap")];
+            let failure = [pull::ingest::Failure::new(
+                "NIFTY",
+                "NIFTY: an invented gap",
+            )];
             ledger.flush(&journal, &failure);
             let record = audit::Record::of_run(
                 audit::Scope::Spot,
@@ -610,7 +628,11 @@ fn on_a_current_thread_runtime_the_ledger_runs_inline_and_a_refused_opening_stil
             ledger.close(&journal, &record).expect("the close lands");
             ledger.rest(&journal, std::time::SystemTime::now(), &failure);
             assert_eq!(
-                (journal.look().records(), ledger.written, ledger.refused.as_deref()),
+                (
+                    journal.look().records(),
+                    ledger.written,
+                    ledger.refused.as_deref()
+                ),
                 (3, 1, None),
                 "opening, failure, close"
             );
@@ -708,7 +730,9 @@ async fn the_autopilots_run_refused_at_its_opening_reads_as_a_journal_error_and_
         "{journal_error:?}"
     );
     assert!(
-        run.ledger.source().is_some_and(|s| s.contains("autopilot ")),
+        run.ledger
+            .source()
+            .is_some_and(|s| s.contains("autopilot ")),
         "{:?}",
         run.ledger
     );
@@ -768,7 +792,7 @@ async fn an_fno_walk_whose_opening_is_refused_asks_nothing_and_appends_nothing()
 /// neither the old file nor the new one gains a record.
 #[tokio::test]
 async fn a_journal_replaced_while_the_opening_waits_refuses_the_run_and_neither_file_gains_a_record()
-{
+ {
     let vendor = CountingVendor::rejecting();
     let (site, asked, root) = spot_site("replaced", &vendor);
     let journal = site.journal();
@@ -808,7 +832,10 @@ fn the_run_key_a_refused_run_claimed_is_released() {
     let id = u64::MAX - 0x0a06b;
     let deadline = Instant::now() + Duration::from_secs(30);
     while !sink.claim_run(id) {
-        assert!(Instant::now() < deadline, "the run key stayed claimed by another test");
+        assert!(
+            Instant::now() < deadline,
+            "the run key stayed claimed by another test"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(sink.run(), id, "the premise: this test holds the key");
@@ -873,4 +900,152 @@ async fn the_refusal_is_on_the_receipt_and_on_pull_run_json() {
     assert_eq!(vendor.asked(), 0);
     assert_eq!(journal.look().records(), 0, "nothing appended");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// -------------------------------------------------------------- measurements
+
+/// Nearest-rank percentile `p` of sorted microseconds.
+fn rank(sorted: &[u128], p: usize) -> u128 {
+    let n = sorted.len();
+    let at = (n * p).div_ceil(100).max(1) - 1;
+    sorted[at.min(n - 1)]
+}
+
+/// One line of p50 / p99 / max in microseconds over `micros`, sorted here.
+fn summary(name: &str, mut micros: Vec<u128>) -> String {
+    micros.sort_unstable();
+    format!(
+        "AG06B op={name} n={} p50_us={} p99_us={} max_us={}",
+        micros.len(),
+        rank(&micros, 50),
+        rank(&micros, 99),
+        micros.last().copied().unwrap_or(0)
+    )
+}
+
+/// **MEASURED, BY HAND: THE LEDGER'S JOURNAL CALLS, UNCONTENDED** (AG-06b,
+/// the ratio gate). `RunLedger::open`, `flush` of one failure and `close`,
+/// 200 runs each, timed with `Instant` per call, on a task of a multi-thread
+/// runtime (so `off_the_workers` takes its `block_in_place` arm) over a
+/// fresh temp journal that grows to 800 records. The same file runs on the
+/// build before AG-06b for the other column. Run:
+/// `cargo test -p api --locked --lib measure_the_ledger_calls_uncontended -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, run by hand with --ignored --nocapture"]
+fn measure_the_ledger_calls_uncontended() {
+    const N: usize = 200;
+    let vendor = CountingVendor::rejecting();
+    let (site, asked, root) = spot_site("measure-ledger", &vendor);
+    let journal = site.journal();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let measured = runtime.spawn(async move {
+        let (mut opens, mut flushes, mut closes) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..N {
+            let failure = [pull::ingest::Failure::new(
+                "NIFTY",
+                &format!("NIFTY: invented gap {i}"),
+            )];
+            let t = Instant::now();
+            let mut ledger = RunLedger::open(&journal, &asked, 2, crate::autopilot::Driver::Hand);
+            opens.push(t.elapsed().as_micros());
+            assert!(ledger.opened(), "{ledger:?}");
+            let t = Instant::now();
+            ledger.flush(&journal, &failure);
+            flushes.push(t.elapsed().as_micros());
+            let record = audit::Record::of_run(
+                audit::Scope::Spot,
+                std::time::SystemTime::now(),
+                1,
+                ledger.source().expect("opened"),
+                asked.window,
+                &pull::ingest::Ingested::default(),
+            );
+            let t = Instant::now();
+            ledger.close(&journal, &record).expect("the close lands");
+            closes.push(t.elapsed().as_micros());
+        }
+        assert_eq!(
+            journal.look().records(),
+            u64::try_from(N * 4).expect("small")
+        );
+        [
+            summary("RunLedger::open", opens),
+            summary("RunLedger::flush", flushes),
+            summary("RunLedger::close", closes),
+        ]
+    });
+    let lines = runtime.block_on(measured).expect("the measuring task");
+    for line in lines {
+        println!("{line}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **MEASURED, BY HAND: GET `/feeds.json` WHILE A HOLDER KEEPS THE APPEND
+/// LOCK** (AG-06b). On a one-worker multi-thread runtime (the failing-first
+/// test's shape), 200 sequential GETs from a plain thread with nobody holding
+/// the lock; then 200 more while a holder keeps the lock for good and spot
+/// runs open against it one after another (each waits the bound). The same
+/// file runs on the build before AG-06b for the other column. Run:
+/// `cargo test -p api --locked --lib measure_feeds_json_while_a_holder_keeps_the_append_lock -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, run by hand with --ignored --nocapture"]
+fn measure_feeds_json_while_a_holder_keeps_the_append_lock() {
+    const N: usize = 200;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a one-worker runtime")
+        .block_on(async {
+            let vendor = CountingVendor::rejecting();
+            let (site, asked, root) = spot_site("measure-feeds", &vendor);
+            let journal = site.journal();
+            let site: Loaded = Arc::new(site);
+            let (addr, _stop) = serving(&site, "ag06b-measure-feeds").await;
+            let sequential = move || {
+                std::thread::spawn(move || {
+                    (0..N)
+                        .map(|_| {
+                            let t = Instant::now();
+                            let answer = blocking_get(addr, "/feeds.json");
+                            assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+                            t.elapsed().as_micros()
+                        })
+                        .collect::<Vec<u128>>()
+                })
+                .join()
+                .expect("the client")
+            };
+            let free = sequential();
+            let holder = hold(&journal);
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let runs = {
+                let (site, done) = (Loaded::clone(&site), Arc::clone(&done));
+                tokio::spawn(async move {
+                    let mut runs = 0_usize;
+                    while !done.load(Ordering::SeqCst) {
+                        let _out =
+                            broker_run_by(&asked, &site, &[], crate::autopilot::Driver::Hand).await;
+                        runs += 1;
+                    }
+                    runs
+                })
+            };
+            std::thread::sleep(Duration::from_millis(150));
+            let held = sequential();
+            done.store(true, Ordering::SeqCst);
+            let runs = runs.await.expect("the runs");
+            holder.release().expect("released");
+            println!("{}", summary("GET /feeds.json, no holder", free));
+            println!(
+                "{} runs_opened_meanwhile={runs}",
+                summary("GET /feeds.json, holder and runs opening", held)
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        });
 }

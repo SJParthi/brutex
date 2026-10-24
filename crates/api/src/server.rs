@@ -4766,6 +4766,24 @@ impl BrokerRun {
         out
     }
 
+    /// Whether this run, just [`Self::opened`], was refused at its opening:
+    /// then its one `pull.run` `refused` event is written and the run key
+    /// `claimed` released ([`note_run_refused`]); `false` for a run that
+    /// opened (AG-06b, AG06B-1; D-7100).
+    fn refused_at_opening(&self, asked: &ingest::SpotRequest, claimed: Option<u64>) -> bool {
+        let Some(blocked) = self.blocked.as_ref() else {
+            return false;
+        };
+        note_run_refused(
+            "spot",
+            asked.feed.wire(),
+            asked.window,
+            &blocked.why,
+            claimed,
+        );
+        true
+    }
+
     /// Absorbs a landed member and answers the store breaker's streak after
     /// it (DB-B35). The store is asked only when the member landed nothing it
     /// was handed: a landing failure was only noted, and the loop went on to
@@ -6291,14 +6309,7 @@ pub(crate) async fn broker_run_by(
     // record is the run's refusal, here, before its first vendor request.
     // Its `started` event is already written (above); this is its one
     // `refused` event, and the run key is released with it.
-    if let Some(blocked) = out.blocked.as_ref() {
-        note_run_refused(
-            "spot",
-            asked.feed.wire(),
-            asked.window,
-            &blocked.why,
-            claimed_run,
-        );
+    if out.refused_at_opening(asked, claimed_run) {
         return out;
     }
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it

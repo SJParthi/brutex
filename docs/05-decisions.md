@@ -83398,3 +83398,137 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-7100 — The landed opening record is a precondition of a pull run: a spot run or an expired-F&O walk whose opening record the journal refuses is refused by name, `journal_unavailable`, before its first vendor request (AG-06b, AG06B-1; L-AG06-03, L-AG06-04, FM-629) — 2026-10-24
+
+**Number.** The first id of AG-06b's block, D-7100 to D-7109, in the
+decision-number registry. No `D-710x` heading existed on `feat/db-fix` or on
+any fetched branch when this entry was written.
+
+**Finding.** D-6244 (AG-06) made every pull audit journal append wait up to
+`api::audit::APPEND_LOCK_WAIT` (one second) for the append lock, and named one
+half NOT DONE by design (`docs/06-limits.md` L-AG06-03): an opening still
+refused after that bound. `RunLedger::open` kept `opened_refused` and the run
+went on to fetch and land; `fno_opened` wrote "NO" on the receipt and the
+walk went on. The restart scan (`pullrun::restart_scan`) reads only the
+journal, so such a run that then died read as clean (L-AG06-04).
+
+**Decided.**
+
+1. **The opening is a precondition.** `BrokerRun::opened` answers
+   `BrokerRun::blocked` with `503` and `server::journal_unavailable`'s
+   sentence when `RunLedger::open`'s `open_run` is refused, and
+   `broker_run_by` returns it before its stop generation, its lanes and its
+   first vendor request. `fno_walk` does the same through `fno_opened`, before
+   any arm, the credential read included. One sentence for both: the word
+   `journal_unavailable`, then the journal's own refusal, which names the
+   bound, the wait, the attempts, the record's kind and outcome, and the
+   holder in `store::flock::holder_note`'s words.
+2. **What is written.** The refused append's own `api.audit` Error event
+   ("record not appended", unchanged) and one `pull.run` `refused` event at
+   `Error`, which `telemetry::is_audited` takes, so `/logs` shows it. On the
+   spot path the `pull.run` `started` event that `note_run_started` writes
+   before the opening is still written: it carries the run's resolved
+   parameters and claims the run key under which the Error and the refusal
+   are filed (`/logs?run=`). It is counted, not removed, and `docs/06-limits.md`
+   L-AG06b-04 says so. Nothing is appended to the journal: `broker_answer` and
+   `recovery_spot` append no `Refused` record for such a run (a second append
+   would wait the bound again to say what the refusal says), and the walk
+   writes no outcome record.
+3. **Where it is seen.** `503`, because this side refused and the vendor was
+   never asked. The receipt carries "Refused because", a `Recorded` line that
+   says NO and why, and the retry class `transient`, so `/pull/run`'s
+   conductor asks the leg again and files the refusal as the feed's
+   `lastError` on `/pull/run.json`. A recovery unit returns it as its error.
+4. **The run key is released.** A refused run never reaches
+   `note_run_finished`, the only other release of the sink's run key, so
+   `note_run_refused` releases it with the refusal event; left held, every
+   later event of the process would carry a run that never ran.
+5. **`autopilot.rs` is unchanged and reads it right.** The blocked run keeps
+   its ledger, so `opened_refused` still reaches the tick's `journal_error`
+   and `/autopilot.json`; the tick appends its own `Refused` record (it closes
+   no run), and `autopilot::classify` files the reason as transport, so the
+   month backs off and retries rather than halting.
+6. **`RunLedger::open` keeps its report shape.**
+   `a_run_whose_opening_record_was_refused_closes_behind_it_written_late` is
+   unchanged and green. The last block of
+   `an_expired_fno_walk_cut_short_is_seen_at_the_next_start` asserted that a
+   walk the journal refused at its opening still answered with "Opened in the
+   journal: NO"; that is the behaviour this decision replaces, so it now
+   asserts the refusal, and keeps "nothing was appended".
+
+**Chosen over retrying the opening at the first flush** (L-AG06-03's other
+follow-on), because a run that fetches before its opening lands is
+unjournalled until then, and one that dies in that window still reads clean.
+A refusal costs one run that is asked again (the conductor does it by
+itself); a retry hides the window. And with the run refused, the restart
+scan's "clean" is true of it: it never ran. `pullrun.rs` is R3-27's and is
+called, not changed.
+
+**FM-162 (R4-11's).** This proves the run-open half on the api's pull paths
+(a hand spot run, a recovery unit, the autopilot and the F&O walk):
+`a_run_whose_opening_is_refused_after_the_bound_asks_the_vendor_nothing_and_lands_nothing`
+and `an_fno_walk_whose_opening_is_refused_asks_nothing_and_appends_nothing`.
+The single ingest command's half is R4-11's and is not built here.
+
+**IA-10c (a FILES_ONLY link: it merges first).** On IA-10c the run key is
+claimed inside `open_spot_landing`, before the journal opening, and returned
+with the landing as `(landing, claimed_run)`. The refusal here passes that
+`claimed_run` to `note_run_refused` and returns before the loop, so the
+`LandingRun` drops at that return and releases the vendor's landing claim.
+A merge keeps both sides.
+
+### D-7101 — Every journal call on the pull runs' ledger and the F&O walk runs off the tokio workers, through the one existing `off_the_workers`; no `spawn_blocking` is added (AG-06b, AG06B-2; L-AG06-07, the worker half of L-AG06-08, FM-630) — 2026-10-24
+
+**Number.** The second id of AG-06b's block.
+
+**Finding.** A contended journal append waits up to `APPEND_LOCK_WAIT` (one
+second; two with the notes lock behind it, L-AG06-08), and the pull runs call
+the journal from async code: `broker_run_by` reached `RunLedger::open` and its
+flushes on a tokio worker, and `fno_walk` its opening and its outcome record.
+That worker then ran nothing else for the wait, and on a runtime with one
+worker the whole HTTP surface stopped answering
+(`a_contended_journal_append_never_stalls_the_http_surface` measured GETs
+waiting 0.86 to 0.96 s behind one opening, on the build before this change).
+
+**Decided.**
+
+1. **Inside the ledger.** `RunLedger::open`, `close`, `flush` and `rest` put
+   their journal calls inside `server::off_the_workers`, so every caller is
+   covered without being edited: `broker_run_by`, `broker_answer` (through
+   `close_reaching_none` and `landed_answer`), `recovery_spot`, and
+   `autopilot.rs`'s close and rest, a file kept as merged. Every call text the
+   source-shape tests pin
+   (`the_sweep_withholds_per_instrument_probes_the_store_and_says_the_horizon_once`,
+   `every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`)
+   is unchanged.
+2. **The walk and the blocked arms.** `fno_opened`'s append and
+   `FnoPage::say_counted`'s record, the walk's opening and its close, go
+   through it too, as do the `Refused` appends of `broker_answer`'s and
+   `recovery_spot`'s blocked arms.
+3. **One mechanism, the one the landing already uses.** On the multi-thread
+   runtime `off_the_workers` is `tokio::task::block_in_place`, which hands
+   this worker's queue to another thread for the length of the call (with
+   one worker, the runtime starts a thread to carry it), so the HTTP surface
+   keeps answering; on a current-thread runtime, where `block_in_place`
+   panics and no other worker exists to starve, the call runs inline.
+4. **No `spawn_blocking`.** The stop's bounded wait (D-1582) records why: dropping the
+   runtime waits for every `spawn_blocking` task, so one could hold a stopping
+   process. `every_journal_call_on_the_pull_paths_goes_off_the_workers` pins
+   the four ledger sites, the walk's two, and the absence of
+   `spawn_blocking` in all of them.
+
+**Not covered, and named** (`docs/06-limits.md` L-AG06b-03): the journal
+appends on the pull routes outside AG-06b's region of `server.rs`
+(`spot_answer`'s and `fno_answer`'s request refusals, `landed_answer`'s arm
+with no ledger, `local_answer`), which are R4-02's, and `autopilot.rs`'s own
+`journal.append` of a blocked tick's record, a file kept as merged.
+
+**The measurement harness closes its runs** (AG06B-3, not a locked choice of
+its own, recorded here because it is this package's): `audit::lock_wait_measure`
+builds its close with `Record::of_run` and the opening's source and window,
+as `recovery_spot` does, so the restart scan pairs it and a cloned journal
+the harness ran on reads clean
+(`the_measure_harness_closes_every_run_it_opens`). Its windowless
+`Record::refused(.., Stored, ..)` close left 221 harness runs open on the
+checker's shadow.

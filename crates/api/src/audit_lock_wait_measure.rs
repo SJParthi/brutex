@@ -30,7 +30,12 @@ fn rank(sorted: &[u128], p: usize) -> u128 {
 
 /// One harness run: its opening, one member failure and its close, each
 /// timed, as `(operation, microseconds, landed)`.
-fn one_run(journal: &Journal, src: &str, at: SystemTime, window: Window) -> [(usize, u128, bool); 3] {
+fn one_run(
+    journal: &Journal,
+    src: &str,
+    at: SystemTime,
+    window: Window,
+) -> [(usize, u128, bool); 3] {
     let head = Record::opened(Scope::Spot, at, src, window, 1, 0xa5);
     let t = Instant::now();
     let thread = journal.open_run(&head);
