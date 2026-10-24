@@ -2,6 +2,19 @@ STATUS: IN PROGRESS
 
 # IA-17b: D-4875 remainder: the once-per-month gather and the CASH .auc writer
 
+**Where it stands (24 Oct 2026).** The part is built as the spec says and pushed. fmt, clippy,
+`cargo deny` (CI's pinned 0.19.0) and gate 6c are green. Every CI shell gate has the base's exit
+code, with no new finding. Every test this part adds passes. Every workspace test failure is this
+host's (root, 4 cores, 5.7 GB free) and shown red on the base or independent of the diff. **It is not
+`STATUS: DONE`**, because two of the README's gates are not green here:
+
+- line and branch coverage of the touched modules is not 100%: 95.0% of the added lines and 85.0% of
+  their branch arms run, and the rest is named below;
+- the mutant run is a sample, not the whole diff: 27 of 264 mutants (two round-robin shards of 20),
+  19 caught, 8 unviable, none missed.
+
+Both are under NEEDS THE MAC with what they need.
+
 Cloud session, branch `cloud/db-IA-17b-20261024`, cut from `origin/feat/db-fix` at `e851da1c`
 (Merge DATA-2). The newest `origin/feat/db-fix`, `d39e789e` (Merge IA-4, R4-27, CLOUD-MUTSTORE), is
 merged in as `af3746f8` before the final gates; the three ledgers conflicted only where both sides
@@ -56,6 +69,23 @@ printed all three: `Merge IA-16: ...`, `Merge IA-17: ...`, `Merge WP-12d: ...`. 
 7. **Audited (D-4893).** "gathered month repair finished" at `info` reaches the audit stream
    (`GATHERED_REPAIR_FINISHED`); a deferred close (`gather_deferred`) and a deferred day with no close
    (`gather_unclosed`, warn) are events.
+8. **The arms no first test reached, tested (coverage pass).** Fourteen more tests: the flush ending
+   `store_not_writable` and `store_lost`; a day that gathered and whose own pass ends the run; a repair
+   journal that takes no line; two readings of one gathered second; a mid-day stop after a gathered
+   file; a deferred close behind a later day's; the gather's helpers at the unit; the `.auc`'s
+   orphaned print and unreadable pointer (IA-RP-19 to IA-RP-26, IA-AUC-04, IA-AUC-05). The CASH step
+   lost a no-op arm: it now exists only for a share whose month is named. The inject seam gained
+   `plant_gathered_lost` (test-only).
+
+## What is left
+
+- The whole mutant run (264 mutants, about 14.5 hours of this host); a sample of 27 ran here, none
+  missed.
+- 100% coverage: 43 added lines stay unrun, 35 of them unreachable by construction and 8 with no seam
+  to time them. Closing them needs a seam (a source that vanishes between two files of one day; a
+  `set_len` that fails) or a ruling that a named defensive arm may stay unrun.
+- The runs this host cannot make: as a non-root user, on 8 or more cores, with more than 10 GiB free,
+  and the shadow-server and real-store checks of spec §6 (M0 to M2, (a) to (j)).
 
 Not built here (BACKTEST-FIRST, spec §4b): the plan's generation and byte count per month (FM-092's
 first sentence) and the "rewrites used of the 1,024" view (RA-266) are `plan.json`'s (IA-10a) and
@@ -89,9 +119,13 @@ The five compiled out, and the five `revision_tests`, call functions the base do
 the base they fail to compile. `gdfl_scope_tests`'s existing assertion of `months_repaired == 2`
 (base) measured the per-file repair, and is 1 under D-4899.
 
-**After.** On the branch, `cargo test -p pull --locked --lib gather`: `17 passed; 0 failed` (the 16
-gather tests and `calendar::record_tests::a_day_record_gathers_the_day`, which the filter also
-matches); the five `revision_tests` pass. The full pull suite is under Gates.
+**After.** On the branch head, `TMPDIR=<tmpfs> cargo test -p pull --locked --no-fail-fast`:
+**2,545 passed, 9 failed** (the 9 root and base failures, shown red on the base's own binary under
+Gates), 49 ignored. Of this part's tests: all 25 in `gdfl_import::tests::gather`, all 6 in
+`gdfl_cm::auction::revision_tests`, and all 4 in `gdfl_import::filing::gather_unit_tests` pass. The cli
+tests that drive the import (`cargo test -p cli --locked --no-fail-fast -- gdfl_import tick_second
+scrub_blocks watchdog_command gdfl_run`, `TMPDIR` on the tmpfs): 152 passed, 3 failed (the chmod
+tests root ignores).
 
 ## Gates
 
@@ -103,13 +137,13 @@ lines sorted, so a new finding inside a red gate cannot hide.
 |---|---|---|---|
 | fmt | `cargo fmt --all --check` | green | — |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | green (exit 0; the one `warning:` line is `cli`'s build-script notice that the git index cannot be proved mid-change, not a lint) | — |
-| tests | `cargo test --workspace --locked --no-fail-fast -- --skip server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` (49 min) | 10,974 passed, 57 failed, 90 ignored, 1 skipped by name, 1 stopped hung; every failure is this host's (below), none is this part's | each class shown red on the base or independent of the diff (below) |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` (49 min, at `178d9940`) | 10,974 passed, 57 failed, 90 ignored, 1 skipped by name, 1 stopped hung; every failure is this host's (below), none is this part's. After the coverage tests (`81319109`), `pull` (all of it) and the `cli` import tests ran again: 2,545 and 152 passed, the same root failures only | each class shown red on the base or independent of the diff (below) |
 | deny | `cargo deny check` with CI's pinned cargo-deny 0.19.0 | green: `advisories ok, bans ok, licenses ok, sources ok` | green, same |
 | deny (newer tool) | the same with cargo-deny 0.20.2 | red: RUSTSEC-2026-0386 (unsound, `tokio` 1.53.1 `AsyncFd::new`) | red, same advisory; `Cargo.lock` is identical on both, left alone (CONTEXT §4.10) |
 | CI shell gates | every `Gate` step of the `language-purity` job, run as written (`ci.yml`, through a script that extracts each step's `run:` body) | 23 green; 9 red | the same 9 red, nothing new in any |
 | gate 6c | `rustfmt --edition 2024 --check` over every tool `gates_jobs tools` lists; `clippy-driver --edition=2024 -D warnings .github/gates_tree.rs`, with and without `--test` | green | — |
 | coverage | `cargo llvm-cov` 0.8.4 `-p pull --lib --branch` (below) | **not 100%**: of the 1,110 executable lines this part adds, 56 never run (95.0%); of the 160 branch arms on them, 24 never taken (85.0%) | the base runs none of the 13 moved base lines either |
-| mutants | `cargo mutants` 26.2.0 `--in-diff` | PENDING | — |
+| mutants | `cargo mutants` 26.2.0 `--in-place --in-diff <diff against d39e789e> --shard 0/20` and `--shard 10/20 --sharding round-robin -- --lib -- gdfl_import:: gdfl_cm:: ingest::` (skipping the three root-only tests), `TMPDIR` on a tmpfs | **a sample only: 27 of 264 mutants, 19 caught, 8 unviable, 0 missed, 0 timeouts** (45 min a shard; baseline 10 s of tests); the full run is under NEEDS THE MAC | — |
 
 **The workspace test failures, every one, by cause.** This host runs as root (uid 0), has 4 cores,
 and by the end of the session had 5.7 GB free on its one disk against the import's 10 GiB
@@ -178,12 +212,31 @@ lines or on the whole files. The whole files were 78–94% (lines) on the base a
 of it: four rise, and `gdfl_import_day.rs`'s lines fall from 92.00% to 91.76% (its branches rise),
 the 25 unreachable or untimeable lines above. Listed under NEEDS THE MAC.
 
+**The mutant sample, each outcome** (`mutants.out/caught.txt`, `unviable.txt` of each shard):
+
+- shard 0/20, caught (10): `gdfl_cm_auction.rs:732` `==`→`!=` in `file_or_carry`; `:844`
+  `write_day` → `Ok((0, 1))`; `:1018` delete `!` in `write_revision`; `gdfl_import_day.rs:1934`
+  `Widened::tell` → `()`; `:2780` `==`→`!=` in `record_close` (caught by IA-RP-25, added today);
+  `gdfl_import_filing.rs:1668` `Gather::is_empty` → `false`; `:1743` `>`→`==` in `Gather::take`;
+  `:1808` the `<` guard → `false` in `merge_into`; `:2025` `<=`→`>` in `give_added` (caught by
+  IA-RP-26, added today); `:2070` `gathered_reason` → `String::new()`.
+- shard 10/20, caught (9): `gdfl_cm_auction.rs:753` `+`→`*` in `records_of_day`; `:895` `+`→`*` in
+  `write_day_held`; `:1038` `-=`→`+=` in `write_revision`; `gdfl_import_day.rs:2403` `defer_day` →
+  `Ok(())`; `:2777` `>`→`<` in `record_close`; `gdfl_import_filing.rs:1688` `Gather::defer_close` →
+  `true`; `:1775` `-`→`+` in `Gather::take`; `:1917` `+=`→`*=` in `repair_gathered_months`; `:2037`
+  `+=`→`*=` in `give_added`.
+- unviable, does not compile (8): `gdfl_import.rs:2639` `cm_read`; `ingest.rs:2814`
+  `successor_of_served`; `ingest.rs:3235` `judge_back_fill`; `gdfl_import_day.rs:2524` `&&`→`||` in a
+  `let` chain; `ingest.rs:1877` `rows_mode`; `ingest.rs:2949` `repair_after`; `ingest.rs:3290`
+  `gathered_repair`; `gdfl_import_filing.rs:840` `Filing::through` (each replaced by a `Default`
+  value its types do not have).
+
 **The 9 red CI shell gates are base reds** owned by BASE-REDS-1023 (CONTEXT §4.10), each red the same
 way on `d39e789e`:
 
 - **1c**: `zerodha_spool.rs` and `docs/02-store-format.md`'s lock path (IA-9).
-- **1d**: the base's undeclared literals. After `ia17b-census` was declared, the branch's set of
-  undeclared words equals the base's exactly. The rest of the difference is each word's sample of
+- **1d**: the base's undeclared literals. With this part's labels declared (`IA17B_LITERAL`), the
+  branch's set of undeclared words equals the base's exactly. The rest of the difference is each word's sample of
   occurrences, which now names this part's files for words already undeclared on the base
   (`repair_impossible`, `repair_refused`, and a session word in the bench's messages).
 - **10**: `R427-11` names no test.
@@ -256,7 +309,15 @@ run time; `gdfl_cm::tests::fixtures_are_built_not_pasted` walks both files.
 | 15 | A late day older than the sidecar holds: carried, never refused, nothing written to the original | `revision_tests::a_day_older_than_the_sidecar_holds_is_carried_never_refused` (IA-AUC-02) | out-of-order row |
 | 16 | A revision-served month is never appended to, and readers read the served sidecar | `revision_tests::a_revision_served_month_is_never_appended_to_and_its_readers_read_the_served_sidecar` (IA-AUC-02) | append-only history |
 | 17 | Two writers' copies disagree: a carried day the served sidecar holds differently is refused by name | `revision_tests::the_step_refuses_a_carried_day_the_served_sidecar_holds_differently` (IA-AUC-03) | two writers |
-| 18 | Repeat and nothing: the step is repeatable and writes nothing for nothing | `revision_tests::the_step_is_repeatable_and_writes_nothing_for_nothing` (IA-AUC-03) | empty, rerun |
+| 18 | Repeat and nothing: the step is repeatable and writes nothing for nothing; a carried day with no print carries nothing | `revision_tests::the_step_is_repeatable_and_writes_nothing_for_nothing` (IA-AUC-03, IA-AUC-05) | empty, rerun |
+| 19 | A store that takes no writes, and a store lost, at the gathered repair: the run ends by that name, nothing published, the next run converges | `a_store_that_takes_no_writes_at_the_gathered_repair_ends_the_run_with_its_days_begun`, `a_store_lost_at_the_gathered_repair_ends_the_run_and_the_next_converges` (IA-RP-19) | unwritable volume, unplugged volume |
+| 20 | **Combination**: a day that gathered one instrument's file while another's append met a full disk: the day stays begun | `a_day_that_gathered_and_whose_pass_ends_the_run_stays_begun` (IA-RP-20) | gather × full disk × two instruments |
+| 21 | A repair journal that takes no line (a directory at its name): refused before anything is published, every day `incomplete` | `a_repair_journal_that_takes_no_line_refuses_the_gathered_repair_by_name` (IA-RP-21) | torn or unwritable ledger |
+| 22 | **Combination**: two files of one instrument and day reading a second differently: the second refused by name, the first repaired | `a_second_file_reading_a_gathered_second_differently_is_refused_and_the_first_kept` (IA-RP-22) | duplicate rows × gather |
+| 23 | **Combination**: a stop mid-day after a gathered file: the day closes `incomplete reason=stopped`, the gathered month repaired | `a_stop_mid_day_after_a_gathered_file_closes_the_day_by_what_was_written` (IA-RP-24) | stop × mid-day × gather |
+| 24 | **Combination**: a later day closed before an earlier day waiting for its month, both incomplete: the report's day lists stay in order | `a_deferred_close_after_a_later_days_close_keeps_the_report_in_day_order` (IA-RP-25) | out of order × refusal |
+| 25 | **Out of the box**: a sidecar holding a later day whose bars never landed: the carried print is named, never dropped | `a_print_carried_for_a_generation_its_bars_never_needed_is_named_never_dropped` (IA-AUC-04) | inconsistent store |
+| 26 | A month whose served generation cannot be told (its pointer a directory): the print refused, nothing written | `revision_tests::a_month_whose_served_generation_cannot_be_told_takes_no_print` (IA-AUC-05) | garbage store state |
 
 ## Files outside ownership
 
@@ -355,5 +416,32 @@ untracked configuration and are never written into a file):
   nothing prunes the superseded generations already kept (66.22 GiB on 14 Oct): a deletion, the
   operator's.
 
-PENDING: the runs this session cannot make (deny, coverage, mutants), filled in when the tools are
-tried.
+**Gate runs this cloud session could not finish, or could not make honestly:**
+
+- **Mutants, the whole diff.** `cargo mutants --in-diff <git diff d39e789e -- crates/pull/src>`
+  (26.2.0, CI's pin) lists **264 mutants** in this part's code: 100 in `gdfl_import_filing.rs`, 62
+  in `gdfl_cm_auction.rs`, 51 in `ingest.rs`, 49 in `gdfl_import_day.rs`, 2 in `gdfl_import.rs`. The
+  sample here took 90 min for 27 (about 3.3 min a mutant: one incremental rebuild of pull's test
+  binary, then the tests), so the whole run is about 14.5 hours of this host. Only that sample ran
+  here (Gates, above): 19 caught, 8 unviable, 0 missed. Expected of the rest: no surviving mutant;
+  any `MISSED` is a missing test of this part's.
+- **Coverage to 100%.** The 43 added lines that are unreachable or have no timing seam (Gates,
+  above) need either a seam or a ruling that they stay as named defensive arms.
+  `cargo llvm-cov -p pull --lib --branch` on a nightly toolchain (this session used
+  `RUSTC_BOOTSTRAP=1` on stable 1.97.1).
+- **The tests root defeats**, run as a non-root user: `cargo test --workspace --locked`. Expected:
+  the 9 `pull`, 3 `cli`, 3 `store`, 4 `telemetry` and the 2 root-dependent `api` permission tests
+  green (they fail here because root reads and writes through 0o000, 0o444 and 0o555).
+- **The tests the free-space floor refused** (25 `cli` and 2 `gdfl_run_logs` and 3 `pull`), on a
+  volume with more than 10 GiB free: green here only with `TMPDIR` on a tmpfs.
+- **The 4-core pool tests**, on a host with at least 8 cores (`MAX_STORE_READ_CONCURRENT` and
+  `MAX_CALENDAR_CONCURRENT` are 8): `api` `detail::tests::a_refused_admission_names_what_its_bound_and_why`,
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+  (hung here, skipped by name), `tests/cloud_mutants_bars.rs`
+  `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (hung here, stopped). And
+  the five `head_deadline_body_tests` slow-reader timings, red here and on the base alike.
+- **`cargo deny check` with a newer cargo-deny.** CI's pinned 0.19.0 is green; 0.20.2 reports
+  RUSTSEC-2026-0386 (`tokio` 1.53.1, unsound `AsyncFd::new`; fixed in 1.53.3) on the base and the
+  branch alike. The lock is not this part's (CONTEXT §4.10): a base change, if the pin moves.
+- **The self-check's shadow re-runs** (README step 5b (iii)): every finding fixed here was proved
+  by a test, not on a shadow server; (a) to (j) above are those runs.
