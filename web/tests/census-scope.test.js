@@ -723,6 +723,10 @@ test('an_index_owes_its_months_to_the_feeds_span_end', () => {
   assert.equal(owedTo('2025-10', true, archived), '2026-09');
   assert.equal(absentMonths('2025-08', owedTo('2025-10', true, archived), new Set(['2025-08', '2025-09', '2025-10'])).length, 11);
   assert.equal(owedTo('2026-09', true, windowed), '2026-09', 'the window when there is no archive');
+  assert.equal(owedTo('2025-10', true, windowed), '2026-09', 'a window feed owes to its window end');
+  assert.equal(owedTo('2025-10', true, { ...archived, window: { to: '2026-10-31' } }), '2026-10', 'the wider of the archive and the window, as the route\'s served_end');
+  assert.equal(owedTo('2025-10', true, { archive: { to: '2026-11-02' }, window: { to: '2026-09-30' } }), '2026-11', 'the wider either way');
+  assert.equal(owedTo('2025-10', true, { archive: { to: 20260924 }, window: null }), '2025-10', 'a span that is not text claims nothing');
   assert.equal(owedTo('2026-10', true, archived), '2026-10', 'never moved back');
   assert.equal(owedTo('2023-07', false, archived), '2023-07', 'a share that stopped (HDFC) keeps its held life');
   assert.equal(owedTo('2025-10', true, {}), '2025-10', 'no span, no claim');
