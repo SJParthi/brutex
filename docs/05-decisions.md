@@ -83398,3 +83398,148 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-6800 — CC-20: one gate-8 bench per check primitive, its ids printed from the harness, and one rule for a cost that is O(n) once per run (FM-615) — 2026-10-24
+
+**Status: locked.** Part CC-20 of the ingest and /db plan, block D-6800 to
+D-6819, failure-matrix row FM-615: for most check primitives "O(1) per
+operation at p99" was structural, not measured.
+
+**Decision.**
+
+1. **One bench module per primitive, all new, each registered by one mount
+   and one `ok &= <module>::<fn>()` line** in its crate's gate-8 harness:
+   `crates/pull/benches/ratio/{archive_from_source,nfo_year,census_load,series_identity,strike_implausible,admit}.rs`
+   and `crates/api/benches/ratio/nse_identity.rs`. Ids C-CHK-01 to C-CHK-10.
+   Each id is printed as the first token of a string literal in
+   `crates/pull/benches/ratio.rs` or `crates/api/benches/ratio.rs` (C-PIT-01's
+   pattern), because `crates/core/tests/cost_invariants.rs` reads printed ids
+   from those files alone, and each is a cost row in `docs/04-invariants.md`, so
+   both reconciliation tests bind it.
+2. **An O(1) claim is held from its 1x baseline**: the cost per operation at
+   10x and at 100x within the shared 3x ceiling (`CEILING_PERMILLE`).
+3. **A cost that is O(n) once per run is never called O(1).** It is timed at
+   1x, 10x and 100x, its per-run time is printed and recorded in
+   `docs/06-limits.md`, and its cost PER UNIT is held to the same ceiling
+   across EACH TENFOLD STEP (1x to 10x, 10x to 100x), with the 1x-to-100x figure
+   printed beside it and not gated (`archive_from_source::linear_per_unit`).
+   Why not from 1x: the census cold load is one pass and its cost per entry
+   rose about 3.8x from 1,000 to 100,000 entries on the cloud host of 24 Oct
+   2026 (L-CHK-03), which a gate from 1x read as a breach of a bound the code
+   never claimed. What the per-step ceiling refuses is what the claim forbids:
+   a second pass or a walk per entry grows the cost per unit about tenfold per
+   tenfold step. The rows that use it: C-CHK-01, C-CHK-02, C-CHK-04, C-CHK-05,
+   C-CHK-06.
+4. **Every extreme a primitive meets is asked before it is timed**, and a wrong
+   answer stops the harness as a refusal, never as a skip (`refuse`): empty,
+   one-record and maximum inputs, month and year boundaries, duplicates,
+   misfiled copies, out-of-order records, a torn epoch, a linked epoch, a stale
+   or unread reference, saturating medians.
+5. **No bench module may sit unmounted or uncalled**:
+   `crates/core/tests/bench_modules.rs::every_bench_module_is_registered`
+   walks every `crates/*/benches/ratio/` folder and requires each file mounted
+   once and named as `<module>::` in its harness outside comments and its own
+   `mod` line, no mount without its file, and CC-20's seven present and folded
+   into the verdict. It was red before the seven modules existed.
+6. **A cloud figure is labelled a cloud host's**, never the operator's Mac's.
+   IA-13 re-runs these benches on the Mac.
+
+**Proof.** C-CHK-01 to C-CHK-10 in `docs/04-invariants.md`; L-CHK-01 to
+L-CHK-07 in `docs/06-limits.md`;
+`every_bench_module_is_registered`,
+`the_registration_rule_refuses_each_way_a_module_goes_missing`,
+`the_walk_finds_the_harnesses_it_exists_for`.
+
+### D-6801 — CC-20: the private `NfoZips::year` and `admit` are timed through their public callers on fixtures; no seam is added to `gdfl_nfo.rs` or `gdfl_import_day.rs` (FM-615) — 2026-10-24
+
+**Status: locked.** CC-20's package text: a `#[doc(hidden)]` seam goes into
+`crates/pull/src/gdfl_nfo.rs` only after PREC-6, IA-4 and R4-22 have all
+merged, and into `crates/pull/src/gdfl_import_day.rs` only after R4-09 and
+R3-26 have; none of the five had merged on 24 Oct 2026.
+
+**Decision.**
+
+1. `NfoZips::year` is timed through `<NfoZips as NfoSource>::day` on invented
+   zips written to a new temp folder (C-CHK-02 the run's first call, which
+   lists the folder and builds every year zip's index; C-CHK-03 every later
+   call). The index keeps an open `std::fs::File`, so the file's open,
+   `metadata` and positional reads are in the figure, from the page cache.
+2. `admit` is timed through `pull::gdfl_import::run_cm_from` on an invented
+   source that lists every day with no file in it, so a first run closes every
+   trading day `done` through the real journal path and a second run over the
+   same days reaches `admit`'s skip of a day done and its calendar gate's
+   `closed` (C-CHK-10, D-6802).
+3. Neither file is edited. When the owners merge, a seam may replace the
+   fixture path; the rows then say which they time.
+
+**Proof.** `pull::bench::year_index_is_flat`, `pull::bench::admit_step_is_flat`.
+
+### D-6802 — CC-20: the admit figure is the day step between the run observer's two calls, an UPPER BOUND on one admit decision (FM-615) — 2026-10-24
+
+**Status: locked.**
+
+**Decision.** C-CHK-10 times, for each calendar day of the run, the interval
+between the run observer's `day_begun` and `day_passed` (`pull::gdfl_import::Observer`,
+called on the run's coordinating thread). That interval holds the day's
+journal key formatted, `widen`'s probe for a wider scope and `admit` itself
+(`KeyState::of`'s hash probes, `admit_rule`'s table, then the calendar gate).
+The stop probe and the store root's `metadata` call come before `day_begun`, and
+the journal's load, O(lines), happens once before the first day: none of them
+is in the figure. The row in `docs/04-invariants.md` and `docs/06-limits.md`
+says "an upper bound on one admit decision", never "admit alone". The timed
+window is the same 25 days at every size (2018-12-17 into 2019), so every size
+times the same mix of skipped and closed days; the journal grows to 19, 171 and
+1,699 lines through the first runs over 25, 250 and 2,500 days.
+
+**Proof.** `pull::bench::admit_step_is_flat`; L-CHK-07.
+
+### D-6803 — CC-20: the census cold load is three rows, single file, version-4 partition and epochs; its cost per entry is stated as measured and its cause as not (FM-615) — 2026-10-24
+
+**Status: locked.**
+
+**Decision.**
+
+1. **C-CHK-04**: `census_store::Target::single(..).load()` of a single-file
+   census at 1,000, 10,000 and 100,000 entries; **C-CHK-05**: the same for
+   `Target::partition(..).load()` of one epoch; **C-CHK-06**: the epochs —
+   `current_epoch`, which lists the partition's folder, per epoch at 10, 100 and
+   1,000 epochs, and the whole load per entry-or-epoch with both grown together.
+   All three are O(n) once per run or cycle and use D-6800's per-step rule. The
+   files are written through `Manifest::image` into new temp folders, and every
+   load reads them from the page cache.
+2. **The cost per entry is not flat from 1x and the row says so.** On the cloud
+   host of 24 Oct 2026 it rose about 1.6x per tenfold step from 1,000 to 10,000
+   and about 2.1x to 2.3x from 10,000 to 100,000 entries, one pass throughout
+   (`Manifest::walk` decodes each entry once, pushes it to the log and inserts
+   it into an index sized once). Whether the rise is cache residency of the
+   larger index or the faulting-in of its fresh memory was NOT measured.
+3. **The real census is not measured here**: the cloud has no store. Its entry
+   and epoch counts and a read-only timing are NEEDS THE MAC for CC-20's report,
+   or NOT MEASURED ON REAL DATA.
+4. **The warm probe stays in `crates/api/benches/ratio/census.rs`**, unchanged:
+   its unasserted "census whole read" print is the api's cache, not this row.
+
+**Proof.** `pull::bench::cold_load_is_flat_per_entry`; L-CHK-03.
+
+### D-6804 — CC-20: the new rows supersede the 13 Oct "not timed" sentence by a new row, and two items stay on the no-proof list until their files' owners cite the benches (FM-615) — 2026-10-24
+
+**Status: locked.**
+
+**Decision.**
+
+1. `docs/06-limits.md`'s 13 Oct sentence "UNVERIFIED as a measured time: no
+   bench times `Archive::from_source`" is left as written. L-CHK-01, appended,
+   supersedes it with the first ratio-asserted, gate-8 figure, and cites the
+   one real-data timing before it (IA-3, 20 Oct: the directory read once in
+   2 ms for 4,209 entries, by the ignored test `ia3_lookup_costs`).
+2. `docs/06-limits.md`'s list "Cost claims of the /db fix round that name no
+   proof" names `crates/pull/src/gdfl_nfo.rs`: `strike_implausible` and
+   `crates/pull/src/series_identity.rs`: `count`, and an item leaves it when its
+   doc block names its proof. CC-20 edits neither file (D-6801; neither is its
+   own), so both stay listed. Follow-ups, each one doc line: `strike_implausible`'s
+   block may cite `pull::bench::strike_check_is_flat` (C-CHK-09) once PREC-6,
+   the owner of `gdfl_nfo.rs`, allows; `Tally::count`'s may cite
+   `pull::bench::audit_is_flat_per_bar` (C-CHK-08) by the next part that owns
+   `series_identity.rs`.
+
+**Proof.** L-CHK-01, L-CHK-05, L-CHK-06; C-CHK-08, C-CHK-09.

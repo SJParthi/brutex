@@ -60,3 +60,16 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
 - `cargo bench -p pull --bench ratio --locked` (run A): `all ratios within the ceiling`, exit 0.
 - NEXT: api bench run A (building `cli` in the bench profile at `-j 2`), then runs B and C of both
   harnesses by their built binaries, then the ledger rows.
+
+### 2026-10-24 13:00 IST: save point 4 (ledger rows docs/04 and docs/05; more extreme tests)
+
+- `docs/05-decisions.md`: D-6800 to D-6804 appended (one heading each).
+- `docs/04-invariants.md`: section "Check primitives, each with a ratio bench (CC-20; D-6800 to
+  D-6804)" appended, rows C-CHK-01 to C-CHK-10.
+- `crates/core/tests/bench_modules.rs`: `the_registration_rule_names_every_fault_at_once_and_skips_what_is_no_module`
+  (three faults in one harness at once, a fault in one crate of two, an empty folder, a CRLF
+  harness, a note and a nested folder beside the modules).
+- `cargo test -p core --test bench_modules --test cost_invariants --locked`: `4 passed` and
+  `5 passed` (`every_bench_module_is_registered` now green; every printed C-CHK id is declared and
+  every declared one is printed).
+- NEXT: api run A (still building `cli`), runs B and C of both harnesses, the docs/06 rows.

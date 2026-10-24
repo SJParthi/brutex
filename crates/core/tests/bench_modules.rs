@@ -271,6 +271,72 @@ fn the_registration_rule_refuses_each_way_a_module_goes_missing() {
     let _ignored = std::fs::remove_dir_all(&root);
 }
 
+/// A new scratch `crates/` tree of `(crate, harness, module files)`, under the
+/// system temp directory; the caller removes `root` when done.
+fn tree(root: &Path, crates: &[(&str, &str, &[&str])]) -> PathBuf {
+    let at = root.join("crates");
+    for (name, harness, files) in crates {
+        let folder = at.join(name).join("benches/ratio");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(at.join(name).join("benches/ratio.rs"), harness).unwrap();
+        for file in *files {
+            std::fs::write(folder.join(file), "").unwrap();
+        }
+    }
+    at
+}
+
+#[test]
+fn the_registration_rule_names_every_fault_at_once_and_skips_what_is_no_module() {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-bench-modules-many-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+
+    // THREE FAULTS IN ONE HARNESS AT ONCE, each named: a module file no mount
+    // names, a mount with no file, and a mounted module never called.
+    let three = "#[path = \"ratio/gone.rs\"]\nmod gone;\n#[path = \"ratio/idle.rs\"]\nmod idle;\n\
+                 fn main() { gone::x(); }\n";
+    let faults = orphans(&tree(
+        &root.join("three"),
+        &[("demo", three, &["idle.rs", "stray.rs"])],
+    ));
+    assert_eq!(faults.len(), 3, "{faults:#?}");
+    for words in [
+        "ratio/gone.rs` is mounted and is not a file",
+        "module `idle` (ratio/idle.rs) is mounted and the harness never calls into it",
+        "benches/ratio/stray.rs` is mounted by no",
+    ] {
+        assert!(faults.iter().any(|f| f.contains(words)), "{words}: {faults:#?}");
+    }
+
+    // A FAULT IN ONE CRATE OF TWO is named under that crate alone.
+    let good = "#[path = \"ratio/a.rs\"]\nmod a;\nfn main() { a::x(); }\n";
+    let faults = orphans(&tree(
+        &root.join("two"),
+        &[("left", good, &["a.rs"]), ("right", good, &["a.rs", "b.rs"])],
+    ));
+    assert_eq!(faults.len(), 1, "{faults:#?}");
+    assert!(faults[0].starts_with("right: "), "{faults:#?}");
+
+    // AN EMPTY FOLDER beside a harness that mounts nothing is no fault.
+    assert!(orphans(&tree(&root.join("empty"), &[("demo", "fn main() {}\n", &[])])).is_empty());
+
+    // WHAT IS NO MODULE: a harness written with CRLF line ends still mounts
+    // and calls its module, a note beside the modules is not one, and a
+    // folder under `ratio/` is not a file of its own.
+    let crlf = "#[path = \"ratio/a.rs\"]\r\nmod a;\r\nfn main() { a::x(); }\r\n";
+    let at = tree(&root.join("odd"), &[("demo", crlf, &["a.rs", "notes.md"])]);
+    std::fs::create_dir_all(at.join("demo/benches/ratio/nested.rs")).unwrap();
+    let faults = orphans(&at);
+    assert!(faults.is_empty(), "{faults:#?}");
+
+    let _ignored = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn the_walk_finds_the_harnesses_it_exists_for() {
     // A walk that found nothing passes the first test vacuously.
