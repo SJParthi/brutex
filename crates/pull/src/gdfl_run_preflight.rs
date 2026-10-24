@@ -228,7 +228,7 @@ pub const NOT_WRITABLE_FIX: &str = "clear the file's immutable flag (`chflags no
 /// through an invented 400-file options day and fails when a run holds more
 /// than [`files_needed`] says. Sampled on 24 Oct 2026 (Linux, three runs): 32
 /// at one and at four workers, 36 to 37 at twelve, beyond the 3 held before
-/// (`docs/06-limits.md` L-IA3B-04). A sample is a lower bound of the peak,
+/// (`docs/06-limits.md` L-IA-35). A sample is a lower bound of the peak,
 /// which is why the per-worker count is the structural one.
 pub const FILES_PER_WORKER: u64 = 5;
 
@@ -237,7 +237,7 @@ pub const FILES_PER_WORKER: u64 = 5;
 /// one-worker peak of the sample above, so it already holds one worker's
 /// handles. The cli's own (its event sink, the claim lock, the runs ledger,
 /// the progress record) are not in that sample: NOT MEASURED, NEEDS THE MAC
-/// M7, named in `docs/06-limits.md` L-IA3B-04.
+/// M7, named in `docs/06-limits.md` L-IA-35.
 pub const FILES_PER_RUN: u64 = 32;
 
 /// What a run of `workers` holds open at once (RA-306, L-IA-35): the run's

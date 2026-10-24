@@ -1,61 +1,179 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
-# IA-3b (cloud): ingest preflight refusals IA-3 left
+# IA-3b (cloud): the import preflight refusals IA-3 left
 
-Branch `cloud/db-IA-3b-20261024`, cut from `origin/feat/db-fix` e851da1c (Merge DATA-2).
-Spec `reports/db-specs-20261024/IA-3b.md` on `origin/cloud/db-base-20261024` (83b4d4e6, GO present,
-HOLD absent at start). HOLD appeared at 5dbfdf3f ("shared 5-hour usage window near its limit").
+Branch `cloud/db-IA-3b-20261024`, cut from `origin/feat/db-fix` e851da1c (Merge DATA-2). The
+newest `origin/feat/db-fix`, 1c094c90 (Merge IA-4, with Merge R4-27 before it), was merged in
+before the final gates (merge commit fa6aeef7). The spec is
+`reports/db-specs-20261024/IA-3b.md` on `origin/cloud/db-base-20261024`.
 
-Prerequisites (both merged on `origin/feat/db-fix`): `Merge IA-3-OPT: ...` and `Merge IA-16: ...`.
+HOLD appeared at 5dbfdf3f and the part was held (commit c1849952). It resumed under its own
+`GO-IA-3b` (f20c2d35). The per-part test in the README passed at every later save point.
 
-## Progress log
+## Why the status is not DONE
 
-### 2026-10-24 09:12 IST
+PENDING: filled when the final runs finish.
 
-- Read README.md, CONTEXT.md and IA-3b.md in full; branch created from e851da1c.
-- NEXT: preflight module skeleton, the new `RunRefusal` variants and the one call in `plan`.
+## What is done
 
-### 2026-10-24 09:48 IST (WIP commit, then HELD)
+Everything the spec's items (1) to (10) ask is built and tested.
+`pull::gdfl_run::plan` calls `preflight::run` once, after the scope is resolved and before any
+lock, claim or journal line, so `cli gdfl-import` and the api's child plan the same way.
 
-Done (code, compiles: `cargo build -p pull --locked` finished clean, no warning):
+| Item | Refusal or behaviour | Where |
+|---|---|---|
+| 1 | `year_zip_missing{year, near_miss}`: at most 4 near misses, in name order. `source_unreadable{path, mode}`. `year_zip_empty{year}`: the end record's count, read from the tail alone. A root with no year zip at all is left to AF-01's `source_root_unknown`. | `gdfl_run_preflight.rs` `year_zips`, `year_zip`; `gdfl_archive::stated_entries` |
+| 2 | An empty day zip nested in the CM archive or in an options year zip, and an empty tick-store day index, each refuse the day `day_zip_empty{name}` (`Cause::open`; the day stays open). `name` is the vendor day zip, e.g. `GFDLNFO_TICK_01042024.zip`. | `gdfl_archive.rs`, `gdfl_nfo.rs`, `gdfl_tickstore.rs` |
+| 3 | `member_too_large{name, size}` (R4-08's code and fields; the one cap, `MEMBER_CAP`) is refused before any byte is read: in `member_bytes` on `len.max(packed)`, and in `rebuild` on `size.max(len)` | `gdfl_archive.rs`, `gdfl_tickstore.rs` |
+| 4 | `source_changing{path, before, after}` is checked after every listing and member read: the identity is len, inode, mtime and ctime (never st_dev), from the held handle and from the path. `source_busy{root, holder}` is the tick-store writer's `.lock`, probed with a shared non-blocking flock and never created. | `Watch`, `SourceIdentity`, `writer_lock` |
+| 5 | `census_room_short{layout, free_now, free_after, need_first_day}`: two header slot reads, with the v4 compaction modelled by `epoch_capacity`. `census_compaction_no_disk{need_bytes, free_bytes, floor}` goes through R4-07's `floor_check` at the run's own floor. `census.projected_stop` is labelled an extrapolation. | `room`, `census_header`, `projected_stop` |
+| 6 | `legacy_run_may_be_live{key}`: on a store with no claim lock file, checked per kind on v4 and across kinds on v3. "Has claimed" is the lock's existence, one `metadata` per name (D-4908). `--legacy-run-not-live` gives the acknowledgement; it is recorded `legacy_ack=1` and written on the request line only when given. | `legacy`; cli `LEGACY_RUN_NOT_LIVE` |
+| 7 | `store_read_only{root}` (the sentence ends in IA-16's fix), `store_not_local{root, fs}` and `open_files_short{have, need}`. The volume is read with one `statfs`/`statvfs` and the limit with `getrlimit`, through rustix. `open_files_exhausted` comes from the store error's own EMFILE number. | `Os`, `writable`, `ingest_failkind.rs` |
+| 8 | Each source's span is stated on the plan line, and the asked days outside it are counted `outside_source`, never as holes | `Archive::span`, `TickStore::span`, `NfoZips::span`, `NfoTickStore::span` |
+| 9 | A `FORMAT.md` digest outside the charter's two is warned on stderr and marked `format_digest_unpinned=1` on the run line, never refused: the magic decides (D-4819) | `Format`, `gdfl_import_journal.rs` |
+| 10 | The module doc names R4-11 for loose day zips (D-7005, amending D-4815) | `gdfl_run.rs` |
 
-- `crates/pull/src/gdfl_run_preflight.rs` (new): `SourceIdentity` and `Watch` (item 4's one
-  identity: len, ino, mtime, ctime, never st_dev), the `Host` seam (`Os`: `statfs`/`statvfs`
-  and `getrlimit` through rustix), the checks in order (year zips, the tick-store writer lock,
-  the legacy cutover, the store's volume and open-file limit, census room with the v4
-  compaction model and the disk floor, source span and `outside_source`, the format digest),
-  the plan line and the refusal sentences.
-- `gdfl_run.rs`: 10 `RunRefusal` variants appended (codes `year_zip_missing`,
-  `source_unreadable`, `year_zip_empty`, `source_busy`, `census_room_short`,
-  `census_compaction_no_disk`, `legacy_run_may_be_live`, `store_read_only`, `store_not_local`,
-  `open_files_short`), the `#[path]` mod line, the one call in `plan`, `Request.legacy_ack`
-  (written on the request line only when set, so every earlier line is unchanged),
-  `Plan.checks`, the doc line 41 correction.
-- `gdfl_cm.rs` + `gdfl_import_causes.rs`: per-day `CmRefusal::DayZipEmpty`, `MemberTooLarge`,
-  `SourceChanging`, each `Cause::open` (exhaustive arms, no `_`).
-- `gdfl_archive.rs`: `member_bytes` cap check before any read; `stated_entries` (end record's
-  count, O(1)); empty nested day zip; the outer archive's `Watch`; `Archive::span`.
-- `gdfl_tickstore.rs`: `rebuild` cap check; `open_watched_day` (empty index refused, watch);
-  `DayTable` spans; `TickStore::span`.
-- `gdfl_nfo.rs`: year zips watched; empty nested day zip; `NfoZips::span`,
-  `NfoTickStore::span`.
-- `ingest_failkind.rs` + `gdfl_import_causes.rs`: `FailKind::OpenFilesExhausted` from
-  `StoreError::Io { code: Some(EMFILE) }` (the store already keeps the errno).
-- `gdfl_import_journal.rs`: `format_digest_unpinned=1` on the run line; `Journal::first_open`.
-- `gdfl_import_filing.rs`: the store_not_writable fix sentence shared through one constant.
-- cli `gdfl_import_command.rs`: `--legacy-run-not-live`, the claim's `legacy_ack` from it,
-  the plan line and the unpinned-digest warning on the stderr writer.
-- root `Cargo.toml`: rustix `process` feature (getrlimit).
+The plan says one `preflight <kind>: ...` line per kind on the cli's declared stderr writer.
 
-NOT DONE yet (next, after GO):
+Tests: 35 in `gdfl_run_preflight_tests.rs`, of which 31 run and 4 are ignored. The 4 ignored
+are the read-only-volume test (M8), the descriptor measurement and the two real-data tests (M1,
+M4). All 21 failing-first names from the spec's section 3.1 exist. One cli test
+(`the_legacy_flag_reaches_the_request_and_lets_the_run_past_the_cutover`) and the 10 new codes
+in IA-1's code-list test were added.
 
-- `FILES_PER_WORKER` / `FILES_PER_RUN` hold PLACEHOLDER numbers (8, 64): they must be
-  replaced by the measurement test before this part is done. Not a measurement.
-- No test written yet; the workspace build with tests was started and not read.
-- Bench C-GR-05, docs/04, docs/05, docs/06 rows, gates, NEEDS THE MAC list.
+## Gates
 
-Commands: `cargo build -p pull --locked` -> `Finished`.
+PENDING: filled when the final runs finish.
 
-NEXT: on GO, read the workspace build output, fix what broke, then write
-`gdfl_run_preflight_tests.rs` (the 21 named tests and the extreme cases), measure the
-descriptors per worker, then the bench and the ledgers.
+## Measurements (p50, p99, max)
+
+C-GR-05 (`cargo bench -p pull --locked --bench ratio`, release, 24 Oct, in this container: 4
+shared cores, Linux, root). The inputs are invented: day files written by the tick-store writer
+itself, and the census as a header over a sparse file. The bench passed: "all ratios within the
+ceiling", EXIT 0.
+
+| What | n | p50 | p99 | max |
+|---|---|---|---|---|
+| the checks alone, 10,000 entries | 200 | 31.9 µs | 53.6 µs | 62.3 µs |
+| the checks alone, 100,000 entries | 200 | 32.0 µs | 53.3 µs | 70.0 µs |
+| the checks alone, 1,000,000 entries | 200 | 32.1 µs | 73.4 µs | 99.1 µs |
+| repeated plan, 10,000 / 100,000 / 1,000,000 | 200 each | 1.03 / 1.02 / 1.01 ms | 3.31 / 1.21 / 1.16 ms | 4.97 / 1.44 / 1.24 ms |
+| first (cold) plan, timed once apart | 1 each | 1.49 / 1.30 / 1.25 ms | - | - |
+| ratio of the checks at 10x / 100x (ceiling 3x) | - | 0.999x / 1.002x | - | - |
+| the one listing read, 26,820-entry options day (O(entries), L-IA3B-03) | 200 | 11.8 ms | 15.2 ms | 18.9 ms |
+| the `source_changing` check, two stats (L-IA3B-01) | 2,000 | 721 ns | 939 ns | 23.3 µs |
+| the legacy refusal path, 100,000 journal lines (O(lines), L-IA3B-02) | 20 | 50.7 ms | 66.3 ms | 82.2 ms |
+
+Peak open descriptors (ignored test `the_descriptors_a_run_holds_are_measured_at_one_and_four_workers`,
+400 invented files, three runs): 32 at W=1, 32 at W=4 and 36 to 37 at W=12, beyond the 3 held
+before. Every peak is at or under `files_needed(W)` = 32 + 5W (92 at W=12).
+
+All of it is in `docs/06-limits.md`, in the new section "The import preflight IA-3 left": C-GR-05,
+L-IA-35 and L-IA3B-01 to L-IA3B-07.
+
+## Extreme cases (17; 3 combinations, 3 out of the box)
+
+1. A misspelt year zip next to a `.DS_Store` and other years' zips: only names that look like
+   that year are near misses (`a_missing_or_misspelt_year_zip_is_refused_with_its_near_misses`).
+2. Many look-alikes of one year: capped at 4, in name order
+   (`at_most_four_near_misses_are_named_in_name_order`).
+3. A range across New Year needs both years' zips (`a_range_across_new_year_needs_both_year_zips`).
+4. A year zip of zero bytes, or one whose end record states zero entries
+   (`an_empty_year_zip_is_refused_before_any_line`). Its count is read from the tail alone: 1 and
+   2,000 members cost the same reads (`the_stated_entry_count_reads_the_tail_alone`).
+5. An empty day zip nested in both vendor containers, and an empty tick-store index: the day is
+   refused and stays open, and the next day closes
+   (`an_empty_nested_day_zip_refuses_its_day_and_stays_open`,
+   `an_empty_tick_store_day_refuses_its_day_and_stays_open`).
+6. Members stating `MEMBER_CAP + 1`, `u64::MAX` packed and unpacked, and exactly the cap: zero
+   bytes are read before the refusal, and the cap itself passes
+   (`a_member_stating_more_than_the_cap_is_refused_before_any_read`,
+   `a_tick_store_entry_rebuilding_past_the_cap_is_refused`).
+7. **Combination**: a zip still being copied while two runs read it. No day read after it grew is
+   closed, and once the copy is whole the next run closes both days
+   (`a_zip_that_is_still_being_copied_is_never_closed`).
+8. A year zip rewritten in place between its listing and a read
+   (`a_year_zip_rewritten_between_listing_and_read_is_source_changing`).
+9. **Out of the box**: a tick-store day file replaced by rename mid-read, by a file of the same
+   length AND the same mtime. Only the inode and ctime tell it apart; the handle still reads the
+   old file (`a_tick_store_day_file_replaced_by_rename_mid_read_is_source_changing`,
+   `the_source_identity_is_length_inode_and_both_times_only`).
+10. A held tick-store writer lock is `source_busy`, and the probe never creates the lock
+    (`a_held_tick_store_lock_is_source_busy_and_never_created`).
+11. **Out of the box**: a torn census header (the newer slot made durable before its entries) is
+    read at its older slot; when neither slot decodes it is refused by name
+    (`a_torn_census_header_is_read_at_its_older_slot_or_refused_by_name`).
+12. **Combination**: census room and the disk at once. Only the compaction gives room and its
+    epoch does not fit above the floor; one byte more free and it plans
+    (`a_compaction_the_disk_cannot_hold_is_refused_before_any_line`).
+13. **Combination**: read-only AND network AND short of descriptors at once, and a missing year
+    zip on such a store. Each is refused in the stated order
+    (`refusals_come_in_their_stated_order_when_several_hold_at_once`).
+14. The open-file limit at its boundary for every worker count 1 to 12: `need - 1` is refused and
+    `need` passes (`a_run_under_an_open_file_limit_of_256_is_refused_open_files_short`).
+15. EMFILE from the store's own error number is `open_files_exhausted`, never a general I/O fault
+    (`an_emfile_during_a_run_is_named_open_files_exhausted`).
+16. The legacy cutover is checked per kind on v4: an indices run is not refused for an options
+    key. On v3, where kinds share one claim, it is refused
+    (`the_first_claim_asks_about_a_legacy_run`). The probe never creates a lock file, and a store
+    that holds one is never asked again (`the_legacy_probe_never_creates_a_lock_file`). The
+    acknowledgement crosses the request line only when given, so earlier lines are
+    byte-identical (`the_acknowledgement_crosses_the_request_line_only_when_given`).
+17. **Out of the box**: a tick store whose `FORMAT.md` digest is neither of the charter's two is
+    warned and marked on the run line, never refused
+    (`an_unpinned_tick_store_format_digest_warns_and_marks_the_run_line`).
+
+## Failing first
+
+- **Compile red.** Every new test calls this part's new surface: `preflight::*`, the 10
+  `RunRefusal` variants, the three `CmRefusal` variants, `Request.legacy_ack`, `Plan.checks`,
+  `FailKind::OpenFilesExhausted`, `stated_entries` and the spans. None of these exists at
+  e851da1c, so the tests do not compile there.
+- **Behaviour on the base.** These are the spec's own facts at e851da1c:
+  - An empty archive "holds no day" (`day()` answers `Ok(None)`, `an_empty_archive_holds_no_day`).
+  - An empty tick-store index fails as "no zstd frame", not by a code.
+  - `member_bytes` and `rebuild` have no size check.
+  - `ends_with` sees EMFILE only as an unnamed `Io`.
+  - `plan` has no preflight at all.
+- **Reds seen while building.** Each was fixed in the code, never in the test:
+  - the rename test, red while the watch reported the handle's identity as "after";
+  - the growing-zip test, red until the fixture held both indices;
+  - the R2 and R3 attack models, red until both sources named an empty day by the same vendor
+    file name.
+- **Kept unchanged.** AF-01's two FM-060 tests,
+  `a_wrong_source_root_is_refused_before_any_day_is_journalled` and
+  `a_run_that_read_no_file_never_exits_ok`, are unchanged: the preflight yields to AF-01's door.
+
+## Files outside ownership
+
+| File | Edit | Why |
+|---|---|---|
+| `crates/pull/src/gdfl_run.rs` | the 10 variants and codes, the `#[path]` mod line, the one call in `plan`, the doc line, `Request.legacy_ack` and `Plan.checks` | the spec's sequenced edit, plus item (6)'s field the spec names |
+| `crates/pull/src/gdfl_archive.rs` | `member_bytes` cap, empty nested day zip, `stated_entries`, `Watch`, `span` | sequenced edit (items 2, 3, 4, 8) |
+| `crates/pull/src/gdfl_tickstore.rs` | `rebuild` cap, empty index, `open_watched_day` (with its `WatchedDay` alias), spans | sequenced edit (items 2, 3, 4, 8) |
+| `crates/pull/src/gdfl_nfo.rs` | empty nested day zip, watches, spans; `read_index` import dropped after the merge | sequenced edit (items 2, 4, 8) |
+| `crates/pull/src/gdfl_cm.rs` | 3 `CmRefusal` variants and Display. `SymbolNotInUse`'s arm moved into a free function, word for word, because the new arms pushed `fmt` past `clippy::too_many_lines`; the file's own comment gives this remedy | sequenced edit |
+| `crates/pull/src/gdfl_import_causes.rs` | 3 `cm_cause` arms (exhaustive) and `door_said`'s `OpenFilesExhausted` arm | sequenced edit |
+| `crates/pull/src/ingest_failkind.rs` | `FailKind::OpenFilesExhausted` from `StoreError::Io { code: Some(EMFILE) }` | item (7); the spec's section 9 says the number must be carried |
+| `crates/pull/src/gdfl_import_filing.rs` | the fix sentence shared through `preflight::NOT_WRITABLE_FIX` | so `store_read_only` and `store_not_writable` say one sentence |
+| `crates/pull/src/gdfl_import_journal.rs` | `format_digest_unpinned=1` on the run line; `Journal::first_open` | item (9) and the legacy key; not in the spec's list |
+| `crates/cli/src/gdfl_import_command.rs` | `--legacy-run-not-live` and `ClaimAsk.legacy_ack` from it, as the spec says. Also `said`, which writes the plan line and the unpinned warning, and an `expect(struct_excessive_bools)` with its reason, as `Request` has | sequenced edit, plus clippy |
+| `crates/pull/benches/ratio.rs` | one `#[path]` mod pair and its `ok &=` call printing C-GR-05 | sequenced edit; gate 14's cover line unchanged |
+| root `Cargo.toml` | rustix `process` feature, with its reason | sequenced edit (`getrlimit`) |
+| `crates/pull/src/gdfl_run_tests.rs` | the 10 new variants in IA-1's code-list test | that test pins every code |
+| `crates/pull/src/gdfl_nfo_tests.rs` | WP-16's "indexed once" test proves the one index by `Arc::ptr_eq`. It used to move the zip mid-run, which item (4) now refuses by design | adapted, not weakened |
+| `crates/pull/src/gdfl_r2_attack_tests.rs`, `gdfl_r3_attack_tests.rs` | the reference models count an empty day as refused (RA-322) | marked ADAPTED (IA-3b, RA-322) in the files |
+| `crates/cli/src/gdfl_import_command_tests.rs` | one new test | the cli half of item (6) |
+
+## D-numbers used
+
+D-4802, D-4819, D-4850, D-4864, D-4908 (the design's), and D-7000 to D-7007 from the assigned
+D-7000..D-7009. D-7008 and D-7009 are unused.
+
+## NEEDS THE MAC
+
+PENDING: filled when the final runs finish.
+
+## Honesty notes
+
+PENDING: filled when the final runs finish.

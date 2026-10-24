@@ -84087,7 +84087,7 @@ crate). macOS: ONE `statfs(2)`: `f_flags` `MNT_RDONLY` (0x1) and `MNT_LOCAL` (0x
 locality only where an exact read exists, Linux's `statfs(2)` `f_type` against `rustix`'s
 `NFS_SUPER_MAGIC`: an NFS store is `store_not_local`, every other filesystem's locality is
 unmeasured, said `store_local=unmeasured` on the plan line and NOT DONE by name in
-`docs/06-limits.md` L-IA3B-05, never guessed from a list of magics. The soft limit is
+`docs/06-limits.md` L-IA3B-04, never guessed from a list of magics. The soft limit is
 `getrlimit(RLIMIT_NOFILE)`. `store_read_only`: the kind's claim lock file, when it exists,
 opened for writing without create (EROFS or EACCES), else the volume's own flag; never a file
 created to test it; its sentence ends in IA-16's `store_not_writable` fix
@@ -84125,7 +84125,7 @@ to it. A member whose record states an unpacked or packed size past
 read: `gdfl_archive::member_bytes` for every zip, `gdfl_tickstore::rebuild` for the tick store
 (its rebuilt size or its block). No second cap: the import reader holds one member's packed
 bytes and its inflate, the multiple the cap's own rule states. The largest real members are
-NEEDS THE MAC M4 (`docs/06-limits.md` L-IA3B-06). **Proof.** IA-MX-B28, IA-MX-B28a.
+NEEDS THE MAC M4 (`docs/06-limits.md` L-IA3B-05). **Proof.** IA-MX-B28, IA-MX-B28a.
 
 ### D-7007 — EMFILE is named `open_files_exhausted` from the store's own error number — 2026-10-24
 
