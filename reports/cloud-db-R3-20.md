@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -64,3 +64,21 @@ IA-16, R3-16, R3-36, SC-4.
 
 - HOLD found again on the base branch at this save point. Commit `a6ab3775` pushed. Waiting.
 - NEXT (unchanged): the store-step row, the bench, the D-7093 and L-IA-40 texts, the full gates.
+
+### 2026-10-24 18:26 IST — HOLD lifted; merge, store step, bench
+
+- HOLD lifted (base `f046635b`, "Lift HOLD after the 17:30 reset"). Resumed.
+- Merged the newest `origin/feat/db-fix` (`7b397bbe`, Merge CLOUD-MUTCLI; also R4-27, IA-4,
+  CLOUD-MUTSTORE): conflicts only in `crates/cli/src/lib.rs` (module list, `COMMANDS` 63), both
+  sides kept.
+- `config/store-steps.toml`: package R3-20 (merged = false), leftovers RA-280 and FM-062, step
+  S-52 (`cli month-recover … --plan` / `--yes`). Gate 30 (`.github/gates_store_steps.rs check`):
+  no refusal of S-52; the four refusals left (packages IA-1, IA-4, R4-27, R3-17 merged with
+  `merged = false`) are the unmodified base's own (BASE-REDS-1023), shown on a worktree of
+  `7b397bbe`.
+- `crates/store/benches/ratio/recover.rs`: C-RC-01 (recovery flat at 1x/10x/100x months stored,
+  p50/p99/max n = 20) and C-RC-02 (flat per kept bar at N and 4N); hooked into
+  `crates/store/benches/ratio.rs` (no new `ratio(` call in that file, so gate 14's store pin of 21
+  is unchanged).
+- `cargo clippy -p store --all-targets --locked -- -D warnings`: clean.
+- NEXT: run the bench, the D-7093 and L-IA-40 texts, then the full gates.

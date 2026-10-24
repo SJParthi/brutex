@@ -111,6 +111,9 @@ leftovers = [
   # 32,417,004 rows unindexed; 19 Oct: Zerodha 198,188 of 251,270 month files
   # lack one, and a whole-history NIFTY 1min sort by close reads 796,027 rows).
   "DB-N14",
+  # R3-20's store half (D-7093): a month a power cut left refused is brought
+  # back by its door on the operator's yes (RA-280, FM-062).
+  "RA-280", "FM-062",
 ]
 
 # ------------------------------------------------------------- environment --
@@ -327,6 +330,11 @@ title = "widened indices and non-F&O equities from GDFL"
 name = "R3-17"
 merged = false
 title = "one upkeep runner: the store's catch-up builders as tracked runs on workers, with progress, Stop and resume"
+
+[[package]]
+name = "R3-20"
+merged = false
+title = "month recovery after a power cut: a month left refused brought back at its last good commit, the unsafe tail cut off as a new file"
 
 # ------------------------------------------------------------------- rules --
 
@@ -1441,3 +1449,30 @@ closes = ["OWED-32"]
 not_rehearsed = "waits for R4-11: cli ingest-run and its --init-store are not built; then for operator: the yes this step records"
 disk = "one marker file (to be measured on the rehearsal)"
 note = "Added on 23 Oct 2026 from R4-11's text under D-7135: the existing root gets its marker only through the recorded config/store-steps.toml step with the operator's yes, and that step is a prerequisite of the first real run (proof 2). A role=production init into an EMPTY root is refused by name: a new empty production root is the fresh-scratch path D-7135 refuses. --init-store role=scratch runs only into an empty root, and neither form runs the chain. A fixture that needs a production-role root builds it through this same step with a fixture row, never by relaxing the refusal (R4-11's text). Tests: a_production_marker_is_written_only_by_its_recorded_store_step_on_the_existing_root and a_production_marker_into_an_empty_root_is_refused."
+
+[[step]]
+id = "S-52"
+title = "A month a power cut left refused, recovered at its last commit whose records check out: the kept bars written as a new revision, the dropped days named for the importer's re-read (R3-20, D-7093)"
+state = "pending"
+writes = "Per recovered month: a repair revision under bar-revisions-v1/<n>/ holding the kept bars (its bars, .crc, .lock, .reserved-v1 and .repair-v1, and the .tix, .srt or .sum its writer keeps at its size), one record appended to the month's generation pointer under bar-generations-v1/ (the promotion), one 256-byte record (two once the re-read is named) in bar-recoveries-v1/bars/.../<yyyy-mm>.recover-v1, for a GDFL month one incomplete line in imports/gdfl.journal per dropped day the journal shows done (reason store_damaged, which a plain Resume reads), and one line of audit/<vendor>.recoveries. The original month's .bin, .crc and every sibling are never opened for writing, truncated or renamed."
+command = [
+  "cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG YYYY-MM --yes (one line per month the plan named refused with a cut, NIFTY first, then BANKNIFTY, a stock, an option month with its contract as a fourth path segment and an illiquid strike, and never a month the plan did not name)",
+]
+dry_run = [
+  "cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG YYYY-MM --plan",
+  "the --yes line with BRUTEX_STORE on a private copy holding the month",
+]
+env = ["BRUTEX_STORE"]
+prerequisites = ["R3-20", "operator: the yes for each month the plan names (no month is recovered unasked, and nothing recovers at start: D-6900)", "operator: no GDFL import, census verb or upkeep run working on the store while it runs (R-01)"]
+check = [
+  "cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG YYYY-MM --plan answers 'recovered revision N is served ... the re-read is named' for each month recovered, and a second --yes says 'Already recovered; nothing was written'",
+  "shasum -a 256 of the original month's .bin and .crc equals the value taken before the run",
+  "GET /bars.json for the recovered month answers 200 with every bar up to the last good commit, served from the revision the record names (500 today)",
+  "audit/<vendor>.recoveries holds one 'recovered month=...' line per month, naming the dropped days, and logs/cli/audit.ndjson holds its cli.month_recover.lifecycle 'month recovered' event",
+  "after the next Resume of the importer over the dropped days (S-46's or the day's own gdfl-import line), imports/gdfl.journal closes each named day done again and no day loops incomplete reason=store_damaged",
+]
+closes = ["RA-280", "FM-062"]
+helps = ["RA-276", "RA-330"]
+not_rehearsed = "waits for R3-20: gate 30 refuses rehearsal figures beside an unmerged prerequisite; the merge sets merged = true and the Mac rehearses it on a private copy (the cloud build had no store, so no figure was taken)"
+disk = "One recovered month adds at most one copy of its kept bars (56 bytes a bar, plus 4 bytes a block of 73 and the sidecars its writer keeps at its size): a full GDFL NIFTY one-second month of about 409,000 bars is about 23 MB, before its .srt and .sum. A record is 256 bytes. NOT MEASURED on the operator's store: the Mac measures it on the rehearsal."
+note = "Added by R3-20 (cloud branch cloud/db-R3-20-20261024, 24 Oct 2026). The door recovers only a raw original month; it refuses by name a month held sealed, one served from a revision it did not promote, an unsealed month, one with an overlay or greeks sibling, one a writer holds, one with nothing a checksum proves (nothing_verifies: restore it from the backup, R4-09b), and damage inside a durable history (not_the_tail: scrub-blocks names the block). A cut by whole blocks (no slot's commit checks out) can drop bars a durable commit held; they are named among the dropped and read again, never kept on trust."

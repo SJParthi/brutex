@@ -1070,13 +1070,13 @@ fn a_cut_never_applies_to_other_bytes_another_thread_or_another_file() {
         &reserved.bin[..32_768]
     ));
     within(&cut, || {
-        assert!(store.served_bars().is_err(), "moved region")
+        assert!(store.served_bars().is_err(), "moved region");
     });
     let mut longer = torn_image;
     longer.bin.push(0);
     store.put(&longer);
     within(&cut, || {
-        assert!(store.served_bars().is_err(), "moved length")
+        assert!(store.served_bars().is_err(), "moved length");
     });
     assert_eq!(cut.bin_len(), u64::try_from(longer.bin.len()).unwrap() - 1);
     assert_ne!(cut.region_crc(), 0);

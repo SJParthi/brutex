@@ -56,6 +56,11 @@
 //! and the process's peak resident set is read where the host keeps one
 //! (D-4875 (1), D-4898; `docs/06-limits.md` L-IA-26).
 //!
+//! C-RC-01 and C-RC-02 time R3-20's month recovery door after a power cut,
+//! which is NOT O(1): flat in the months stored beside the month, and flat per
+//! kept bar between a month and one four times its size, in
+//! `ratio/recover.rs` (D-7093; `docs/06-limits.md` L-IA-40).
+//!
 //! C-SF-01 to C-SF-03 time R3-16's two shared file doors, the reading door
 //! and the staging create, in `ratio/safe_files.rs`.
 //!
@@ -67,6 +72,9 @@ use std::time::Instant;
 
 #[path = "ratio/safe_files.rs"]
 mod safe_files;
+
+#[path = "ratio/recover.rs"]
+mod recover;
 
 #[path = "ratio/months.rs"]
 mod months;
@@ -1537,6 +1545,7 @@ fn main() {
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
     ok &= safe_files::run();
     ok &= months::run();
+    ok &= recover::run();
     if ok {
         println!("all ratios within the ceiling");
     } else {
