@@ -77,10 +77,14 @@
 //!
 //! # What it hands on, and what it does not decide
 //!
-//! [`decode`] returns every row in FILE ORDER. It never sorts, never drops a
-//! row and never re-stamps one: placing a late row and dropping LTQ = 0 rows
-//! are the import's rules ([`crate::gdfl_import`], D-2802). It refuses, by
-//! name, bytes that are not the file they claim to be.
+//! [`decode`] returns every kept row in FILE ORDER. It never sorts, never drops a
+//! good row and never re-stamps one: placing a late row and dropping LTQ = 0 rows
+//! are the import's rules ([`crate::gdfl_import`], D-2802). A bad row is
+//! refused by name and the rest of its file read, with the capital-market
+//! reader's types and bounds (D-4816, bar definition 5; [`decode`] says
+//! which faults still refuse a file whole), and a header followed by empty
+//! fields is read when every row carries them (D-4829). It refuses, by name,
+//! bytes that are not the file they claim to be.
 //!
 //! # Cost
 //!
@@ -108,7 +112,10 @@ use crate::expiry_alias::{SettleRefusal, Settlement, settle};
 use crate::gdfl_archive::{
     MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
 };
-use crate::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile};
+use crate::gdfl_cm::{
+    BAD_ROWS_PER, CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile,
+    MAX_BAD_ROWS, RefusedRow, RowFault, RowsRefused,
+};
 use crate::gdfl_run::preflight::Watch;
 use crate::gdfl_tickstore::{IndexEntry, rebuild};
 use crate::session::Day;
@@ -293,6 +300,15 @@ pub enum NfoRefusal {
         /// The cap.
         cap: usize,
     },
+    /// More rows refused than a file may carry and still be the file
+    /// (D-4816, the capital-market reader's D-3318 bound): past both
+    /// [`MAX_BAD_ROWS`] and one row in every [`BAD_ROWS_PER`] of its rows.
+    TooManyBadRows {
+        /// The rows refused.
+        refused: u32,
+        /// Every row read, kept or refused.
+        rows: u32,
+    },
     /// The source or the byte checks refused, in the reader's own words.
     Source(CmRefusal),
 }
@@ -371,6 +387,11 @@ impl core::fmt::Display for NfoRefusal {
                 write!(f, "line {line}: the open interest does not fit an i64")
             }
             Self::RowsOverCap { cap } => write!(f, "more than {cap} rows"),
+            Self::TooManyBadRows { refused, rows } => write!(
+                f,
+                "{refused} of {rows} rows refused, more than {MAX_BAD_ROWS} and more than one \
+                 in every {BAD_ROWS_PER}: the file is refused whole"
+            ),
             Self::Source(why) => write!(f, "{why}"),
         }
     }
@@ -1566,15 +1587,25 @@ pub struct NfoRow {
     pub oi: i64,
 }
 
-/// A decoded options file: every row, in file order.
+/// A decoded options file: every kept row, in file order, and the rows it
+/// refused by name (D-4816).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfoFile {
-    /// Every row, none dropped, none moved.
+    /// Every kept row, none moved; a refused row is in [`Self::refused`],
+    /// never here.
     pub rows: Vec<NfoRow>,
-    /// Rows whose bid or ask is not zero. A file with rows and none of these
-    /// is D-3335's `zero_quote_files` (30 May 2019: 10,435 of 10,453 traded
-    /// files); counted, never a refusal.
+    /// Rows whose bid or ask is not zero, of the kept rows. A file with rows
+    /// and none of these is D-3335's `zero_quote_files` (30 May 2019: 10,435
+    /// of 10,453 traded files); counted, never a refusal.
     pub quoted_rows: u32,
+    /// The rows refused by name and not kept (D-4816, the capital-market
+    /// reader's D-3318 counts): D-3335's `rows_refused` from bar definition
+    /// 5 on.
+    pub refused: RowsRefused,
+    /// The exactly-empty fields after the ten known names of the header and
+    /// of every kept row, dropped (D-4829): 0 for either observed header as
+    /// it is; a file with more than 0 is D-4841's `trailing_empty_files`.
+    pub trailing_empty: u8,
 }
 
 /// Whether `text`, a plain decimal already checked, is zero: every digit `0`.
@@ -1611,116 +1642,276 @@ fn is_digits(text: &str) -> bool {
 /// Crate-private: outside this crate the only way from a source's bytes to
 /// rows is [`read_file`], which checks length and CRC-32 first.
 ///
+/// # A bad row is refused by name, and the rest of the file is read (D-4816)
+///
+/// Until bar definition 5 one bad row refused its whole file, and with it
+/// the whole contract-day (design §8 F8: 2018-11-09's one bad time in 4,353
+/// rows, 2018-11-06's one LTP with a letter in 13,991, the ten negative-LTQ
+/// rows of 2026-04-16). Now this reader refuses rows exactly as the
+/// capital-market reader has since D-3318, with its types and its bounds:
+/// a row that is not ten well-formed fields, whose Time is not `HH:MM:SS`,
+/// whose quote, quantity or open-interest field is not a plain number, or
+/// whose LTP is not a plain decimal is [`RowFault::Malformed`]; an LTP off
+/// the two-place grid or past what paisa hold is [`RowFault::OffGrid`]; a
+/// TRADED row (LTQ > 0) at zero is [`RowFault::ZeroLtp`]. Each is counted
+/// in [`NfoFile::refused`] by fault, its first [`crate::gdfl_cm::NAMED_ROWS`] named with
+/// their line, never kept and never repaired; the file's other rows are
+/// read. Four things still refuse the whole file, as they do for the
+/// capital market: a Ticker or Date that is not the file's (a row of
+/// another file is not a bad row of this one), a LAST line with no newline
+/// after it that is malformed or ends in a bare CR (that is where a cut file
+/// shows, design §8 F7, F9, F42: a bare CR is the first half of the CRLF the
+/// vendor wrote, so the file was cut between the two, whether the row
+/// before it is complete or not), more refused rows than [`MAX_BAD_ROWS`] AND one in every
+/// [`BAD_ROWS_PER`] of the rows read ([`NfoRefusal::TooManyBadRows`]), and a
+/// file that kept no row, which names its first refused row's own refusal
+/// (`MalformedRow`, `PriceRefused` or `OpenInterestRefused`).
+///
+/// # A header with empty trailing fields (D-4829)
+///
+/// A header of the ten known names followed by `k` exactly-empty fields,
+/// `1 <= k <=` [`MAX_TRAILING_EMPTY`], is admitted when its rows carry
+/// exactly `10 + k` fields whose last `k` are empty: the `k` fields are
+/// dropped and [`NfoFile::trailing_empty`] says `k` (2025-03-11's
+/// `BANKNIFTY26JUN2546500CE`, `k` = 4, design §8 F36). A row that breaks
+/// that shape is a malformed row; any other header is
+/// [`NfoRefusal::HeaderUnknown`].
+///
 /// # Errors
 ///
-/// Every row refusal of [`NfoRefusal`], naming the first line that failed.
+/// [`NfoRefusal::HeaderUnknown`]; [`NfoRefusal::TickerMismatch`] and
+/// [`NfoRefusal::DateMismatch`] at their line; a malformed last line with no
+/// newline after it ([`NfoRefusal::MalformedRow`]);
+/// [`NfoRefusal::RowsOverCap`]; [`NfoRefusal::TooManyBadRows`]; the first
+/// refused row's own refusal when no row was kept.
 pub(crate) fn decode(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile, NfoRefusal> {
     decode_capped(bytes, stem, day, crate::fetch::MAX_ROWS)
 }
 
-/// [`decode`] with the row bound as a parameter.
-fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFile, NfoRefusal> {
-    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-    let mut lines = body.split(|&b| b == b'\n');
-    match lines
-        .next()
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-    {
-        Some(h)
-            if h == HEADER_OPEN_INTEREST.as_bytes()
-                || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
-        _ => return Err(NfoRefusal::HeaderUnknown),
+/// The most exactly-empty fields a header may carry after the ten known
+/// names and still be read (D-4829). Chosen, not sourced: the one measured
+/// file carries 4 (design §8 F36), and the bound keeps a row's field array
+/// fixed.
+pub const MAX_TRAILING_EMPTY: usize = 8;
+
+/// The fields a row carries before any empty trailing ones.
+const FIELDS: usize = 10;
+
+/// How many exactly-empty fields follow the ten known names of `header`
+/// (its CR already stripped), or `None` for no header this reader reads
+/// (D-4829): `Some(0)` for either observed header as it is.
+fn header_trailing(header: &[u8]) -> Option<usize> {
+    [HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED]
+        .into_iter()
+        .find_map(|known| {
+            header
+                .strip_prefix(known.as_bytes())
+                .filter(|rest| rest.len() <= MAX_TRAILING_EMPTY && rest.iter().all(|&b| b == b','))
+                .map(<[u8]>::len)
+        })
+}
+
+/// Why [`parse_row`] did not keep a row (D-4816, the capital-market
+/// reader's `RowError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RowError {
+    /// The row is not this file's: the whole file refuses.
+    File(NfoRefusal),
+    /// The row is refused by name and the file read on; `refusal` is what
+    /// the file says when it keeps no row at all.
+    Row {
+        fault: RowFault,
+        sod: Option<u32>,
+        refusal: NfoRefusal,
+    },
+}
+
+/// One row's fields, checked in column order, under a header followed by
+/// `trailing` empty fields: the row and whether its bid or ask is not zero.
+fn parse_row(
+    bytes: &[u8],
+    line: u32,
+    (stem, date): (&str, &str),
+    trailing: usize,
+) -> Result<(NfoRow, bool), RowError> {
+    let malformed = |sod: Option<u32>| RowError::Row {
+        fault: RowFault::Malformed,
+        sod,
+        refusal: NfoRefusal::MalformedRow { line },
+    };
+    let text = core::str::from_utf8(bytes).map_err(|_| malformed(None))?;
+    // A FIXED ARRAY, NOT A VECTOR PER ROW: a field past the row's width is a
+    // malformed row the moment it is seen, so a line of a million commas
+    // costs `width + 1` steps, not a million-slot allocation.
+    let width = FIELDS.saturating_add(trailing);
+    let mut fields = [""; FIELDS + MAX_TRAILING_EMPTY];
+    let mut count = 0_usize;
+    for field in text.split(',') {
+        if count >= width {
+            return Err(malformed(None));
+        }
+        let Some(slot) = fields.get_mut(count) else {
+            return Err(malformed(None));
+        };
+        *slot = field;
+        count = count.saturating_add(1);
     }
-    let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
-    // RESERVED ONCE, FROM THE BODY, as `csv::decode_rows` is (D-1203): every
-    // row is one line after the header, so the body's newlines bound the
-    // rows, and `cap` bounds the reservation as it bounds the rows kept.
-    let bound = body.split(|&byte| byte == b'\n').count().min(cap);
-    let mut rows = Vec::with_capacity(bound);
-    let mut quoted_rows = 0_u32;
-    for (index, raw) in lines.enumerate() {
-        let line = u32::try_from(index.saturating_add(2)).unwrap_or(u32::MAX);
-        if rows.len() >= cap {
-            return Err(NfoRefusal::RowsOverCap { cap });
-        }
-        let malformed = NfoRefusal::MalformedRow { line };
-        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-        let text = core::str::from_utf8(raw).map_err(|_| malformed.clone())?;
-        // TEN FIELDS INTO A FIXED ARRAY, NOT A VECTOR PER ROW: the
-        // capital-market reader's `parse_row` shape. An eleventh field is a
-        // malformed row the moment it is seen, so a line of a million commas
-        // costs eleven steps, not a million-slot allocation.
-        let mut fields = [""; 10];
-        let mut count = 0_usize;
-        for field in text.split(',') {
-            let Some(slot) = fields.get_mut(count) else {
-                return Err(malformed);
-            };
-            *slot = field;
-            count = count.saturating_add(1);
-        }
-        if count != fields.len() {
-            return Err(malformed);
-        }
-        let [
-            ticker,
-            row_date,
-            time,
-            ltp,
-            bid,
-            bid_qty,
-            ask,
-            ask_qty,
-            ltq,
-            oi,
-        ] = fields;
-        if ticker != stem {
-            return Err(NfoRefusal::TickerMismatch { line });
-        }
-        if row_date != date {
-            return Err(NfoRefusal::DateMismatch { line });
-        }
-        let sod = second_of_day(time).ok_or_else(|| malformed.clone())?;
-        if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
-            return Err(malformed);
-        }
-        if !(is_zero_decimal(bid) && is_zero_decimal(ask)) {
-            quoted_rows = quoted_rows.saturating_add(1);
-        }
-        let ltq: u64 = if is_digits(ltq) {
-            ltq.parse().ok()
-        } else {
-            None
-        }
-        .ok_or_else(|| malformed.clone())?;
-        if !is_digits(oi) {
-            return Err(malformed);
-        }
-        let oi: i64 = oi
-            .parse()
-            .map_err(|_| NfoRefusal::OpenInterestRefused { line })?;
-        let paisa = if is_decimal(ltp) {
-            crate::csv::paisa(ltp)
-        } else {
-            None
-        }
-        .ok_or(NfoRefusal::PriceRefused { line })?;
-        // A TRADED ROW AT ZERO IS REFUSED; ONE PAISA IS A PRICE. Options of
-        // low-priced shares print at 0.01 to 0.04 (measured on 2026-08-03: 20
-        // files, IDEA, YESBANK, IRFC and others), so the capital-market
-        // reader's five-paisa floor is not this tree's (D-2806).
-        if ltq > 0 && paisa < 1 {
-            return Err(NfoRefusal::PriceRefused { line });
-        }
-        rows.push(NfoRow {
+    let tail_empty = fields
+        .get(FIELDS..width)
+        .is_some_and(|tail| tail.iter().all(|field| field.is_empty()));
+    if count != width || !tail_empty {
+        return Err(malformed(None));
+    }
+    let [
+        ticker,
+        row_date,
+        time,
+        ltp,
+        bid,
+        bid_qty,
+        ask,
+        ask_qty,
+        ltq,
+        oi,
+        ..,
+    ] = fields;
+    if ticker != stem {
+        return Err(RowError::File(NfoRefusal::TickerMismatch { line }));
+    }
+    if row_date != date {
+        return Err(RowError::File(NfoRefusal::DateMismatch { line }));
+    }
+    let sod = second_of_day(time).ok_or_else(|| malformed(None))?;
+    if !(is_decimal(bid) && is_decimal(ask) && is_digits(bid_qty) && is_digits(ask_qty)) {
+        return Err(malformed(Some(sod)));
+    }
+    let ltq: u64 = if is_digits(ltq) {
+        ltq.parse().ok()
+    } else {
+        None
+    }
+    .ok_or_else(|| malformed(Some(sod)))?;
+    if !is_digits(oi) {
+        return Err(malformed(Some(sod)));
+    }
+    let oi: i64 = oi.parse().map_err(|_| RowError::Row {
+        fault: RowFault::Malformed,
+        sod: Some(sod),
+        refusal: NfoRefusal::OpenInterestRefused { line },
+    })?;
+    let price = |fault: RowFault| RowError::Row {
+        fault,
+        sod: Some(sod),
+        refusal: NfoRefusal::PriceRefused { line },
+    };
+    if !is_decimal(ltp) {
+        return Err(price(RowFault::Malformed));
+    }
+    let paisa = crate::csv::paisa(ltp).ok_or_else(|| price(RowFault::OffGrid))?;
+    // A TRADED ROW AT ZERO IS REFUSED; ONE PAISA IS A PRICE. Options of
+    // low-priced shares print at 0.01 to 0.04 (measured on 2026-08-03: 20
+    // files, IDEA, YESBANK, IRFC and others), so the capital-market
+    // reader's five-paisa floor is not this tree's (D-2806).
+    if ltq > 0 && paisa < 1 {
+        return Err(price(RowFault::ZeroLtp));
+    }
+    let quoted = !(is_zero_decimal(bid) && is_zero_decimal(ask));
+    Ok((
+        NfoRow {
             line,
             sod,
             ltp: paisa,
             ltq,
             oi,
+        },
+        quoted,
+    ))
+}
+
+/// [`decode`] with the row bound as a parameter.
+fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFile, NfoRefusal> {
+    let final_newline = bytes.ends_with(b"\n");
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let mut lines = body.split(|&b| b == b'\n').peekable();
+    let trailing = lines
+        .next()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .and_then(header_trailing)
+        .ok_or(NfoRefusal::HeaderUnknown)?;
+    let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
+    // RESERVED ONCE, FROM THE BODY, as `csv::decode_rows` is (D-1203): every
+    // row is one line after the header, so the body's newlines bound the
+    // rows, and `cap` bounds the reservation as it bounds the rows read.
+    let bound = body.split(|&byte| byte == b'\n').count().min(cap);
+    let mut rows = Vec::with_capacity(bound);
+    let mut quoted_rows = 0_u32;
+    let mut refused = RowsRefused::default();
+    let mut first_refusal = None;
+    let mut read = 0_u32;
+    let mut index = 0_usize;
+    while let Some(raw) = lines.next() {
+        // Line 1 is the header, so the row at `index` 0 is line 2.
+        let line = u32::try_from(index.saturating_add(2)).unwrap_or(u32::MAX);
+        index = index.saturating_add(1);
+        let last_without_newline = !final_newline && lines.peek().is_none();
+        // A bare CR ending the last line is the first half of a CRLF the
+        // vendor wrote: the file was cut between the CR and its LF, whether
+        // the row is complete or not. Refused whole and by name, before the
+        // row bound, exactly as the capital-market reader refuses it (D-4816,
+        // design §8 F7), never read as a clean final row.
+        if last_without_newline && raw.ends_with(b"\r") {
+            return Err(NfoRefusal::MalformedRow { line });
+        }
+        // The bound counts every row READ, kept or refused, as the
+        // capital-market reader's does.
+        if usize::try_from(read).unwrap_or(usize::MAX) >= cap {
+            return Err(NfoRefusal::RowsOverCap { cap });
+        }
+        read = read.saturating_add(1);
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        match parse_row(raw, line, (stem, &date), trailing) {
+            Ok((row, quoted)) => {
+                quoted_rows = quoted_rows.saturating_add(u32::from(quoted));
+                rows.push(row);
+            }
+            Err(RowError::File(why)) => return Err(why),
+            // A malformed last line with no newline after it is where a cut
+            // file shows (design §8 F9, F42): the whole file.
+            Err(RowError::Row {
+                fault: RowFault::Malformed,
+                refusal,
+                ..
+            }) if last_without_newline => return Err(refusal),
+            Err(RowError::Row {
+                fault,
+                sod,
+                refusal,
+            }) => {
+                refused.note(RefusedRow { line, sod, fault });
+                if first_refusal.is_none() {
+                    first_refusal = Some(refusal);
+                }
+            }
+        }
+    }
+    let total = refused.total();
+    if total > MAX_BAD_ROWS && u64::from(total) * u64::from(BAD_ROWS_PER) > u64::from(read) {
+        return Err(NfoRefusal::TooManyBadRows {
+            refused: total,
+            rows: read,
         });
     }
-    Ok(NfoFile { rows, quoted_rows })
+    if rows.is_empty()
+        && let Some(first) = first_refusal
+    {
+        return Err(first);
+    }
+    Ok(NfoFile {
+        rows,
+        quoted_rows,
+        refused,
+        trailing_empty: u8::try_from(trailing).unwrap_or(u8::MAX),
+    })
 }
 
 /// One option file of a day, located, fetched, checked and decoded.

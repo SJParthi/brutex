@@ -983,6 +983,10 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         NfoRefusal::PriceRefused { .. } => Cause::vendor("price_refused"),
         NfoRefusal::OpenInterestRefused { .. } => Cause::vendor("open_interest_refused"),
         NfoRefusal::RowsOverCap { .. } => Cause::vendor("rows_over_cap"),
+        // D-4816 (bar definition 5): the vendor's own bytes past the
+        // capital-market reader's D-3318 bound, refused the same way by the
+        // same reader every time, under the same code as a CM file's.
+        NfoRefusal::TooManyBadRows { .. } => Cause::vendor("too_many_bad_rows"),
         // A strike past the day's plausible multiple of its underlying's
         // median (D-3331): the vendor's name, judged by a named rule over the
         // same day's listing, so the same member is refused the same way.
