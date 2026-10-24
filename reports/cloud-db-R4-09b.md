@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R4-09b — the store's backup verb and its restore drill (AUT-06), cloud build
 
@@ -43,3 +43,21 @@ Decision block: D-7175..D-7184 (D-7137 is LEDGER-1023's; no second one is writte
 - `HOLD` found on `origin/cloud/db-base-20261024` at this save point: stopped here, waiting for GO.
 - NEXT: write `crates/cli/src/backup_tests.rs` (the ten named tests and the extreme cases), run
   `cargo test -p cli --locked backup`, then the api read side.
+
+### 2026-10-24 ~12:40-13:30 IST — released (GO-R4-09b), save point 2
+
+- `GO-R4-09b` appeared at 12:33 IST (per-part GO overrides HOLD for this part, README "Per-part GO").
+- `backup.rs`: public `Receipt` and `DrillLine` (re-exported as `cli::BackupReceipt`, `cli::BackupDrillLine`,
+  with `cli::BACKUP_RECEIPTS`, `cli::BACKUP_DRILLS`, `cli::backup_decoded`) so api's tests feed the real
+  line through the existing parser; `nothing_listed` refusal; receipt-log refusal before any copy; the
+  target-path limit computed from the widest receipt instead of a typed 512.
+- `backup_tests.rs`: 34 tests + 1 ignored measurement. Bug found by `a_kill_mid_copy_resumes_without_a_torn_file`:
+  a `stopped` line appended after an unfinished write joined the fragment into one unreadable manifest
+  line; fixed (`Ledger.torn`: the next line ends the fragment as a void line first), with its own test.
+- `store_write.rs`: the linked-root table (`every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`) gains both verbs.
+- `cargo test -p cli --locked --lib -- backup:: store_write::` -> `test result: ok. 34 passed; 0 failed; 1 ignored` (backup) and the 5 store_write tests ok.
+- Per-file step (one book probe + one record formatted), `cargo test -p cli --lib -- backup::tests::measure_the_per_file_step --ignored --nocapture`,
+  n = 1,000 sequential calls, this cloud host (4 vCPU Intel Xeon 2.10 GHz):
+  book 10,000 paths: p50 1.29 µs, p99 5.73 µs, max 121.9 µs; book 100,000 paths: p50 1.39 µs, p99 5.33 µs, max 16.5 µs (flat at 10x).
+- Commit `dae8c0a7`, pushed.
+- NEXT: api `disk_route.rs` read side (receipt fields, target present/missing, last drill, staleness) and its three tests; then the web band.
