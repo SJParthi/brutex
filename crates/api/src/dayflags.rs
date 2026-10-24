@@ -632,11 +632,8 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
             ctx.record(*day, &held.day(at), bar, (flag, auc))
         })
         .collect();
-    // A SHARE'S CORPORATE ACTIONS ON THEIR OWN DAYS (R4-26): one note per
-    // row in the day's `notes` array, created when absent and kept when
-    // present; the table it came from, served or refused, beside them.
-    let corporate_actions = (inst.segment == Segment::Cash)
-        .then(|| corporate_action_notes(root, inst.symbol.as_str(), &days, &mut records));
+    // A SHARE'S CORPORATE ACTIONS ON THEIR OWN DAYS (R4-26).
+    let corporate_actions = share_corporate_actions(root, inst, &days, &mut records);
     if asked.newest_first {
         records.reverse();
     }
@@ -675,10 +672,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
             "zerodha_1day_start",
             start.map_or(Value::Null, SeriesStart::json),
         ),
-        (
-            "corporate_actions",
-            corporate_actions.unwrap_or(Value::Null),
-        ),
+        ("corporate_actions", corporate_actions),
         ("days", Value::Array(records)),
         ("sources", sources),
         ("derive", derive_json(gaps.as_ref().ok(), inst, first, last)),
@@ -703,6 +697,24 @@ fn asked_json(asked: &Asked, band: rules::Band) -> Value {
         "timeframe": band.rung.map(Timeframe::as_str),
         "expiry": band.expiry.map(|expiry| expiry.to_string()),
     })
+}
+
+/// A share's corporate actions on their own days (R4-26): one note per row
+/// in the day's `notes` array, created when absent and kept when present
+/// ([`corporate_action_notes`]), and the table they came from, served or
+/// refused, as the answer's `corporate_actions`; `null` for an index or a
+/// contract, which carries none.
+fn share_corporate_actions(
+    root: &Path,
+    inst: &Instrument,
+    days: &[Day],
+    records: &mut [Value],
+) -> Value {
+    if inst.segment == Segment::Cash {
+        corporate_action_notes(root, inst.symbol.as_str(), days, records)
+    } else {
+        Value::Null
+    }
 }
 
 /// Puts one `corporate_action` note per action row whose ex-date is the
