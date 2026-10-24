@@ -45,3 +45,17 @@ IA-16, R3-16, R3-36, SC-4.
   commit (inside a durable history) with a verified block after it.
 - `cargo test -p store --lib --locked recover`: `test result: ok. 18 passed; 0 failed`.
 - NEXT: the whole store suite, then the cli verb.
+
+### 2026-10-24 13:40 IST — the cli verb
+
+- `crates/cli/src/month_recover_command.rs` (`cli month-recover … --plan|--yes`) and its tests
+  `crates/cli/src/month_recover_command_tests.rs`: 7 tests, including
+  `the_days_dropped_by_recovery_are_read_again` and `a_power_cut_during_a_compaction_plans_and_resumes`.
+- Store side: `Record::reread_named` and `store::recover::note_reread` (a cli run cut off between
+  the recovery and its journal lines writes them on the next run; 19 store tests pass).
+- Touches outside ownership: `crates/cli/src/lib.rs` (module, usage, dispatch arm, `COMMANDS` 61),
+  `crates/cli/src/store_write.rs` (`WRITERS` 20, `--plan` is the read-only form, test rows).
+- The journal is read with `pull::gdfl_run::JournalReader` (writes nothing: `done_whole_days`
+  closes a torn tail when it loads, so it is not used by the plan).
+- `cargo test -p cli --lib --locked month_recover`: `test result: ok. 7 passed; 0 failed`.
+- NEXT: the store-step row, the bench, the D-7093 and L-IA-40 texts, then the full gates.

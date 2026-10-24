@@ -361,8 +361,13 @@ pub struct Record {
     pub bin_len: u64,
     /// The CRC-32C of the original's header region when planned.
     pub region_crc: u32,
-    /// When the record was written, UTC micros.
+    /// When the recovery was recorded, UTC micros.
     pub recovered_at_micros: i64,
+    /// Whether the caller has named the dropped days for the importer's
+    /// re-read ([`note_reread`]): `false` in the record the recovery writes,
+    /// `true` in the copy appended once the caller's lines are written, so a
+    /// caller cut off between the two writes its lines again on the next run.
+    pub reread_named: bool,
     /// Which record of the file this is.
     pub record: u64,
 }
@@ -378,12 +383,13 @@ impl Record {
             })?
             .bytes;
         let mut bytes = [0u8; RECORD];
-        let fields: [(usize, &[u8]); 16] = [
+        let fields: [(usize, &[u8]); 17] = [
             (0, &MAGIC),
             (8, &VERSION.to_le_bytes()),
             (10, &[self.basis.code()]),
             (11, &[self.dropped.first_day]),
             (12, &[self.dropped.last_day]),
+            (13, &[u8::from(self.reread_named)]),
             (16, &self.revision.ordinal().to_le_bytes()),
             (20, &self.region_crc.to_le_bytes()),
             (24, &self.bin_len.to_le_bytes()),
@@ -428,6 +434,11 @@ impl Record {
             _ => return None,
         };
         let kept = source.n_valid;
+        let reread_named = match *bytes.get(13)? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
         Some(Self {
             revision: Revision::new(u32::from_le_bytes(quad(16)?)).ok()?,
             basis,
@@ -445,8 +456,23 @@ impl Record {
             bin_len: u64::from_le_bytes(word(24)?),
             region_crc: u32::from_le_bytes(quad(20)?),
             recovered_at_micros: i64::from_le_bytes(word(144)?),
+            reread_named,
             record,
         })
+    }
+
+    /// Whether `other` records the same recovery, its flag and position
+    /// aside.
+    fn same_recovery(&self, other: &Self) -> bool {
+        Self {
+            reread_named: false,
+            record: 0,
+            ..*self
+        } == Self {
+            reread_named: false,
+            record: 0,
+            ..*other
+        }
     }
 }
 
@@ -1387,6 +1413,7 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
         bin_len: cut.len,
         region_crc: cut.region_crc,
         recovered_at_micros: now_micros(),
+        reread_named: false,
         record: 0,
     })?;
     records.release()?;
@@ -1399,6 +1426,40 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
         skipped,
         resumed,
     }))
+}
+
+/// Says the caller has named `record`'s dropped days for the importer's
+/// re-read: appends a copy of the month's last record with
+/// [`Record::reread_named`] set. Idempotent: a last record already flagged is
+/// returned and nothing is written.
+///
+/// # Errors
+///
+/// [`RecoverError::Record`] when the month's last record is not `record`'s
+/// recovery (another recovery, or none), and the record file's own refusals.
+pub fn note_reread(
+    root: &Path,
+    path: StorePath<'_>,
+    record: &Record,
+) -> Result<Record, RecoverError> {
+    let records = RecordFile::open(root, path)?;
+    let last = records.last()?;
+    let noted = match last {
+        Some(last) if last.same_recovery(record) && last.reread_named => last,
+        Some(last) if last.same_recovery(record) => records.append(Record {
+            reread_named: true,
+            ..last
+        })?,
+        _ => {
+            return Err(record_refused(
+                &records.path,
+                "its last record is not this recovery's, so the re-read cannot be noted against it"
+                    .to_owned(),
+            ));
+        }
+    };
+    records.release()?;
+    Ok(noted)
 }
 
 /// The revision the kept records were published at, and how.

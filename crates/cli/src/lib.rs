@@ -108,6 +108,9 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+/// `cli month-recover`: a month a power cut left refused, brought back at its
+/// last good commit as a new revision, on the operator's yes (R3-20, D-7093).
+mod month_recover_command;
 /// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
 mod msum_builder;
 /// `cli series-identity`: every stored bar of a series judged as a landing
@@ -646,6 +649,17 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and its totals are the last line of
                                    audit/scrub-blocks.VENDOR.cursor. Writes
                                    those two files and nothing else (DB-B74).
+       cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT] RUNG YYYY-MM --plan|--yes
+                                   bring back a month a power cut left refused:
+                                   --plan names its refusal, its last commit
+                                   whose records check out, and the bars and
+                                   days that cut drops, and writes nothing;
+                                   --yes (the operator's yes) writes the kept
+                                   bars as a new revision (the original never
+                                   changes), names the dropped days the import
+                                   journal shows done for the re-read, and
+                                   writes its end record to
+                                   audit/VENDOR.recoveries (R3-20, D-7093).
        cli msum-build VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT|/*] RUNG FROM TO [--dry-run]
                                    write the .sum month summary of every named
                                    month (FROM, TO are YYYY-MM) whole, in a new
@@ -3004,6 +3018,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["scrub-blocks", arguments @ ..] if !arguments.is_empty() => {
             scrub_blocks::command(arguments, out)
         }
+        ["month-recover", arguments @ ..] if !arguments.is_empty() => {
+            month_recover_command::command(arguments, out)
+        }
         ["msum-build", arguments @ ..] if !arguments.is_empty() => {
             msum_builder::command(arguments, out)
         }
@@ -3109,7 +3126,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 60] = [
+const COMMANDS: [&str; 61] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3143,6 +3160,7 @@ const COMMANDS: [&str; 60] = [
     "ledger-all",
     "ledger-v6",
     "ledger-v6-replay",
+    "month-recover",
     "msum-build",
     "policy-check",
     "pool",

@@ -93,7 +93,12 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 19] = [
+///
+/// `month-recover` (R3-20, D-7093) is one unless `--plan`: its `--yes` writes
+/// a month's recovered revision, its generation pointer, its recovery record,
+/// read-again lines in the import journal and a line of
+/// `audit/<vendor>.recoveries`.
+pub(crate) const WRITERS: [&str; 20] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -102,6 +107,7 @@ pub(crate) const WRITERS: [&str; 19] = [
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
+    "month-recover",
     "msum-build",
     "scrub-blocks",
     "series-identity",
@@ -131,10 +137,13 @@ pub(crate) const WRITERS: [&str; 19] = [
 /// parse refuses before a write, so the rule reads only the flag (IA-9).
 /// `upkeep` writes only as `upkeep run` and `upkeep resume` (R3-17): `plan`
 /// and `status` read, and `stop` writes a request naming a run, which carries
-/// no store data a commit answers for.
+/// no store data a commit answers for. `month-recover ... --plan` writes
+/// nothing (R3-20); every other form either writes or is a misuse its own
+/// parse refuses before a root is asked for.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
+        "month-recover" => !arguments.contains(&"--plan"),
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
         "fno-membership" => arguments.contains(&"build"),
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
@@ -317,6 +326,16 @@ mod tests {
             ),
             ("census-migrate", &["gdfl"], true),
             ("census-migrate", &["gdfl", "--seal"], true),
+            (
+                "month-recover",
+                &["gdfl", "NSE/INDEX/NIFTY", "1s", "2020-03", "--plan"],
+                false,
+            ),
+            (
+                "month-recover",
+                &["gdfl", "NSE/INDEX/NIFTY", "1s", "2020-03", "--yes"],
+                true,
+            ),
             ("fno-membership", &["build", "--out", "DIR"], true),
             (
                 "fno-membership",
@@ -469,7 +488,7 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 19] = [
+        let writing: [(&str, &[&str]); 20] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -478,6 +497,10 @@ mod tests {
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),
+            (
+                "month-recover",
+                &["gdfl", "NSE/INDEX/NIFTY", "1s", "2020-03", "--yes"],
+            ),
             ("msum-build", &[]),
             ("scrub-blocks", &[]),
             ("series-identity", &["ALL"]),
@@ -511,6 +534,7 @@ mod tests {
         for (verb, arguments) in [
             ("alerts", &[][..]),
             ("gdfl-rekey", &["--plan"][..]),
+            ("month-recover", &["--plan"][..]),
             ("msum-build", &["--dry-run"][..]),
             ("series-identity", &["ALL", "--dry-run"][..]),
             ("srt-build", &["--dry-run"][..]),

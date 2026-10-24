@@ -809,6 +809,7 @@ fn a_torn_record_file_is_stepped_over_and_garbage_is_refused() {
         bin_len: 43_968,
         region_crc: 0xDEAD_BEEF,
         recovered_at_micros: 1_790_000_000_000_000,
+        reread_named: true,
         record: 0,
     };
     let bytes = record.encode().unwrap();
@@ -825,6 +826,22 @@ fn a_torn_record_file_is_stepped_over_and_garbage_is_refused() {
     let crc = super::seal(&unknown_basis, 0);
     unknown_basis[252..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(super::Record::decode(&unknown_basis, 0), None, "basis 9");
+    let mut unknown_flag = bytes;
+    unknown_flag[13] = 2;
+    let crc = super::seal(&unknown_flag, 0);
+    unknown_flag[252..].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(super::Record::decode(&unknown_flag, 0), None, "flag 2");
+    let mut unflagged = bytes;
+    unflagged[13] = 0;
+    let crc = super::seal(&unflagged, 0);
+    unflagged[252..].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(
+        super::Record::decode(&unflagged, 0),
+        Some(Record {
+            reread_named: false,
+            ..record
+        })
+    );
 
     let at = record_path(&store.root, store.path());
     fs::create_dir_all(at.parent().unwrap()).unwrap();
@@ -1246,4 +1263,53 @@ fn the_record_lives_beside_the_month_under_its_own_root() {
         generation::served(&store.root, store.path()),
         Ok(Served::Original)
     ));
+}
+
+/// THE RE-READ IS NOTED ONCE, AGAINST ITS OWN RECOVERY: the copy with the
+/// flag is appended once, a second note writes nothing, a later run of the
+/// door answers with the flagged record, and a note against a recovery that
+/// is not the month's last is refused.
+#[test]
+fn the_re_read_is_noted_once_against_its_own_recovery() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 100));
+    let before = store.image();
+    store.commit(&store.day(3, 80));
+    let after = store.image();
+    let writes = writes(&before, &after);
+    let slot = writes
+        .iter()
+        .position(|write| matches!(write, Write::Slot(..)))
+        .unwrap();
+    store.put(&torn(&before, &writes, 1 << slot));
+    let foreign = Record {
+        revision: Revision::new(9).unwrap(),
+        ..read_record_or_recover(&store)
+    };
+    let Outcome::Already(recorded) = store.recover().unwrap() else {
+        panic!("already");
+    };
+    assert!(!recorded.reread_named);
+    let refused = super::note_reread(&store.root, store.path(), &foreign).unwrap_err();
+    assert_eq!(refused.word(), "record_refused");
+    let noted = super::note_reread(&store.root, store.path(), &recorded).unwrap();
+    assert!(noted.reread_named);
+    assert_eq!(noted.record, 1, "a copy, appended");
+    let tree = store.tree();
+    assert_eq!(
+        super::note_reread(&store.root, store.path(), &recorded).unwrap(),
+        noted
+    );
+    assert_eq!(store.tree(), tree, "a second note writes nothing");
+    assert_eq!(store.recover().unwrap(), Outcome::Already(noted));
+    assert_eq!(store.plan().unwrap(), Plan::Recovered(noted));
+}
+
+/// The record a first recovery of `store` writes.
+fn read_record_or_recover(store: &Store) -> Record {
+    match store.recover().unwrap() {
+        Outcome::Recovered(done) => done.record,
+        other => panic!("{other:?}"),
+    }
 }
