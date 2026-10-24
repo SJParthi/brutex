@@ -70646,8 +70646,9 @@ here. Each says where its citation resolves.
   closed list of `cli` verbs that write the store, `cli::store_write::WRITERS`,
   whose writing forms an unstamped build refuses (DB-B71, WP-81). D-4871 and
   D-4895 cite it; no entry heads it.
-* **D-4896.** A forward reference: the day band resolving a run through the
-  run-id index, which `docs/06-limits.md` says "lands with IA-10a". Not built.
+* **D-4896.** Headed below (IA-10a, 24 Oct 2026): the day band places a
+  refusal by its own run through the run-id index, and no request decodes
+  every `run` line. Until then this line was its forward reference.
 * **D-4906.** The design critic's round-7 resolution IA-2-2 (a lock held past
   a bound is refused `lock_stalled`). D-4924 adopts it for the verdict commit
   lock; the journal, runs-ledger, audit-ledger and alert locks wait for IA-2.
@@ -84081,3 +84082,107 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+
+### D-4896 — The day band places a refusal by its own run, through the run-id index, and by the clock only when the journal names no run of it; no request decodes every `run` line (IA-10a; L-IA-39 rewritten) — 2026-10-24
+
+**Number** of the ingest automation design's round-7 critic (resolution
+IA-11r-1, "the day band's run comes from the event's own field; the O(runs)
+decode is L-IA-39 until then", `state/design/critic-round7-20261011.md` on
+the operator's Mac, outside this repository), reserved by name in this
+ledger's forward reference and in D-6900 ("Landed by a kept half: D-4896 …
+by IA-10a, with L-IA-39 rewritten"). **Implemented by** IA-10a's read side
+(D-6900), on the cloud branch `cloud/db-IA-10a-20261024`.
+
+**The head is the fact.** The critic took it that from IA-16 on "every
+`refused` event carries its `run`". At `feat/db-fix` e851da1ca it carries
+no run FIELD of its own: `pull::gdfl_import::note_failure` writes kind, day,
+about, why, stage and code. The run is the record's own: while a run reads
+its days, `pull`'s `RunKey::claim` holds the process sink's run key (DB-A41's
+leftover), so every event the run writes carries its journal id as
+`telemetry::Record.run`, unless another run of the process held the key
+first (then the run says so once, `run key held by another run`, and its
+events carry the holder's: a `cli` attempt's id, which no `run` line names).
+So "the event's own run" is `Record.run`, and an event logged before that fix
+carries none.
+
+**Decided.**
+
+1. Every logged refusal `/imports.json` puts beside a row carries its
+   record's `run` (`null` for none).
+2. **One placement, used by both routes that place a refusal against a
+   close** (`/imports.json`'s log-only rows, AF-02's `Owners::owned`, and
+   `/dayflags.json`'s day band, `refusals_of`), `imports::placed_of`: when the
+   event's run is not zero, the journal holds a `run` line of it (one probe of
+   IA-11r's run-id index) and the close names its own run, the close's run is
+   the close's (`Within`), a run that started before it, by `(start, id)`, is
+   an earlier attempt's (`Before`: history, attributed to that run and its
+   commit), and any other run's is never this close's (`After`), whether that
+   run closed the day or left no line. Otherwise the refusal is placed by its
+   time exactly as AF-02 repair 2 placed it (`placed`). Two runs that started
+   in one second are told apart by their ids; the clock never could.
+3. **The day band asks for no `run` line.** `imports::RunsAsked::Every`, which
+   decoded, rendered and sorted every `run` line for each page of days of each
+   request, is removed; `RunsAsked::Unasked` counts and decodes none. A run's
+   start and commit are one probe of the id index (`Parsed::started_of`); for
+   a refusal with no run the journal names, the run that was running when it
+   was logged is one range probe of a start index the parse keeps beside the
+   id index (`Parsed::run_running_at`; one ordered insert per `run` line as
+   the tail is read, O(log runs)). The critic's alternative, the whole list
+   read once per api process into a cached map, is the same index kept
+   somewhere the tail does not keep current; it is not built.
+4. **The answer says how each was placed**: a superseded refusal's
+   `run_from` (`event` or `time`), and the record's `refusals.placed`
+   (`by_event_run`, `by_time`).
+
+**Cost.** Per logged refusal O(1) with a run the journal names (at most two
+id-index probes), O(log runs) without; per request no `run` line decoded,
+where before every one was, once per page of days (`docs/06-limits.md`
+L-IA-39, rewritten with this change).
+
+**What it changes on real data.** Nothing for a refusal the clock already
+placed with its own run; a refusal whose run and clock disagree is now its
+run's; a refusal of a later run that left no line for the day is no longer
+counted as the earlier close's. The operator's journal as of 14 Oct 2026 (read
+only on the Mac, 24 `run` lines) is re-checked at merge-back (the part's
+NEEDS THE MAC list).
+
+**Proved by** `api::server::imports::member_tests::a_day_bands_refusal_names_its_run_from_the_event_not_the_clock`,
+`api::server::imports::member_tests::a_refusal_is_placed_by_its_own_run_and_by_time_only_without_one`,
+`api::server::imports::member_tests::the_day_band_decodes_no_run_line_whatever_the_journal_holds`
+and `api::server::dayflags::tests::an_earlier_refusal_names_the_run_that_logged_it`
+(DB-B45's attribution, now through the parse) (IA10A-02, IA10A-03).
+
+### D-TBD-IA-10a-1 — Three rules the read side's specification left to its builder: an open member key, a member close's refusals, and the receipt's census read (IA-10a) — 2026-10-24
+
+**Number** to be assigned by the Mac at merge-back (the cloud rule: a part
+with no registry block writes `D-TBD-<NAME>-n`).
+
+1. **An open member key is one member's day, not the segment's**
+   (`feeds_route::imported_to`, the open-day scan, D-6900 item 4). The scan
+   keeps its answer for base keys: a `*` key begun and never closed is an
+   open day of the segment. A member key (`<filter>+<member>`, D-4878) begun
+   and never closed says that member's reopened day wrote nothing, while its
+   base key's close still stands for every other member; the reach is per
+   segment, so the day is not listed among the segment's open days, and the
+   reach's `from` counts the open member keys of the asked days and names the
+   first, so `/gaps.json`'s `imported_to_from` tells its reader a member's
+   day may be unimported rather than nothing.
+2. **A member key's close owns every refusal of its own window as its
+   member's** on the day band (`dayflags::refusals_of`): a member close read
+   only its member's files (D-4878, `admit` row 1), so a refusal it owns is
+   about that instrument, whatever `about_this` can decode of a stored
+   index's or share's file name (it decodes swept underlyings only). Without
+   this a stored index's hole read on `/db` as "incomplete for other files".
+3. **The receipt reads its source's census once more, read only, after the
+   run** (`cli gdfl-import`, D-4817 on the receipt, D-6900 item 7a): the
+   run's own reader lives inside `pull::gdfl_run`, whose files this part
+   does not edit, and hands no census back. The outer zip's central
+   directory or the tick store's tree walk is read again, O(entries) once a
+   run, never per day (`docs/06-limits.md` L-IA10A-2). The options zips keep
+   no census and no production code opens the day-zip source
+   (`pull::gdfl_dayzips`), so neither prints one, and the receipt says so.
+
+**Proved by** `api::server::imports::member_tests::an_open_member_key_is_named_and_is_not_the_segments_open_day`,
+`api::server::imports::member_tests::the_api_journal_reader_names_member_keys_and_holes`
+(the member's refusal counted as its own) and
+`cli::gdfl_import_command::tests::a_source_census_is_named_on_the_receipt`.

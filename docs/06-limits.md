@@ -16984,23 +16984,29 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   `/imports.json` has at most 200 rows. `run=<id>`'s lifecycle read is 5
   probes of the `run` posting under the same cap, shows the newest 64 events
   and says `capped` when a posting held more than one read takes.
-- **L-IA-39. `/dayflags.json`'s day band decodes every `run` line of the
-  import journal on every request: O(runs), not O(1).** `/imports.json`'s
-  route decodes at most 20 `run` lines and `run=<id>` the id's own (D-4813,
-  bench C-LG-02). The day band cannot take that page: it attributes a logged
-  refusal to the run that was running when it was logged, by time, over the
-  whole list (`dayflags::refusals_of`), and a page of 20 would silently drop
-  the runs older refusals belong to. So the crate-internal read it makes
-  (`imports::answer` with `RunsAsked::Every`) decodes, renders and sorts every
-  `run` line, once per page of days of every `/dayflags.json?feed=gdfl`
-  request. `/dayflags.json` is what `/db` draws its day band from. The bound
-  is the journal: 2 `run` lines on the operator's store on 11 Oct 2026, one
-  more per import run. It stops being a limit when the band resolves a run
-  from the refusal event's own `run` field through the run-id index, O(1),
-  which is D-4896 and lands with IA-10a (after IA-16 gives every `refused`
-  event that field); until then this row is IA-11r's. Nothing gates it: a
-  ratio gate would only restate the row.
-- **L-IA-39, measured.** Bench C-LG-02's day-band rows, the same run as
+- **L-IA-39 (rewritten by IA-10a, D-4896, 24 Oct 2026). `/dayflags.json`'s
+  day band decodes no `run` line: a refusal's run is one probe of the
+  journal's run-id index, and only a refusal with no run the journal names
+  costs one range probe of its start index, O(log runs).** Until IA-10a this
+  row said the band decoded every `run` line on every request, O(runs): it
+  attributed a logged refusal to the run running when it was logged, by
+  time, over the whole list, through `imports::answer` with
+  `RunsAsked::Every`, which decoded, rendered and sorted every `run` line once
+  per page of days. Now (`imports::placed_of`, `dayflags::refusals_of`):
+  a refusal whose record carries a run the journal names is placed by that
+  run (at most two id-index probes; `pull`'s `RunKey` stamps every event a
+  run writes while it reads its days, so every refusal logged since DB-A41's
+  fix carries one), and only a refusal with none (logged before that fix, or
+  under a `cli` attempt's key) is placed by its time and attributed through
+  `Parsed::run_running_at`, one range probe of a `BTreeMap` of the runs by
+  start the parse keeps (one ordered insert per `run` line as the tail is
+  read). `RunsAsked::Every` is removed; the band asks `RunsAsked::Unasked`,
+  which counts the `run` lines and decodes none (IA10A-03 counts zero over
+  10,000). What stays O(runs) is unchanged and not per request: the parse's
+  copy of itself once per new batch of journal lines while an answer is kept
+  against it (below). Measured: the paragraph after the next.
+- **L-IA-39, measured before D-4896** (kept as the record of the limit this
+  row was). Bench C-LG-02's day-band rows, the same run as
   above (`/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2019-10&to=2019-10`
   through `api::logs::dayflags_json_over`, single calls, n=100 each, so the
   p99 printed is the slowest call), over journals holding only `run` lines:
@@ -17015,6 +17021,7 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   and gated by nothing.
   The journal's `Parsed` is also copied once per new batch of journal lines
   while an answer is kept against it, the cost it had before this change.
+- **L-IA-39, measured after D-4896.** L-IA39-AFTER-PLACEHOLDER
 - **`/imports.json`'s day rows are still a walk of the asked range**
   (`imports::walk`), unchanged here: O(rows in range) per request.
 - **Measured on the operator's store (a shadow of it, GET only).** 200
@@ -21640,3 +21647,47 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-IA4-02 | An options file's refused rows are named in a `warn` log line (first 16) and counted on the day's D-3335 line, not yet in the durable audit stream with file and line | the durable naming is R4-22's (FM-077's audit half, IMPORT-BAD-ROW); IA-4 is the decode half | one log line per file, O(1) per row | R4-22 |
 | L-IA4-03 | NOT DONE: definition 5 has no sentence in R3-13's `definition_means` (`crates/api/src/dayflags_rules.rs`, the /db day band), which names 1 to 4 | R3-13 was not merged on feat/db-fix when IA-4 landed, so there was nothing to extend | the band shows no meaning for `definition=5` until it lands | R4-27-OPT |
 | L-IA4-04 | NOT DONE: a resume under another definition (RA-308, test IA-GR-06d) is read whole under the new one, but no journal line or page says "resumed under a new definition" | a day left open is read again file by file under the running definition, and the store answers `AlreadyPresent` or refuses by name, so no mix is filed silently; naming the previous definition needs a journal field and a page row the IA-4 change does not own | the warn line `importing again a day an earlier run did not finish under this bar definition` names the day and the running definition | IA-16, IA-12b |
+
+## The api's journal readers: member keys, holes and the day band's run from the event; the receipt's census — IA-10a's read side, D-4896, D-TBD-IA-10a-1, 24 October 2026
+
+Every lookup IA-10a adds to a reader of the GDFL import journal, with its
+cost (DB-A34: "named in 06-limits before WP-54 wires the client"). None
+scans the journal; each is bounded by the row, the key or the request it
+serves. UNVERIFIED as measurements on the operator's store: they are the
+part's NEEDS THE MAC list; the counts below are proved by tests.
+
+- **L-IA10A-1. A member key's split is paid once per row, at parse time.**
+  `import_journal::member_key` finds a key's `+` once, when its row is made,
+  and the row keeps where it is (`DayRow::member_at`), so `DayRow::base` and
+  `DayRow::member` are O(1) for every reader after it; the parse already
+  copies the filter's bytes once per row, so the split adds no pass of its
+  own. `member_symbol` is one prefix strip, one `rsplit_once` and one more
+  strip of the member, bounded by `pull`'s symbol capacity. `DayRow::hole` is
+  at most five compares of the row's `reason` against `pull`'s five-reason
+  list. `/imports.json`'s `Owners::names` reads a member key in O(1) (its
+  split already paid); the day band's `Names` memo splits a member key once
+  per distinct filter per request, as it splits a list; `provenance`'s
+  `symbol_rows` is O(rows in the month) plus, within one day, O(rows of the
+  day squared) to find the base row a member key reopened: a handful of keys
+  a day (the operator's journal holds at most five distinct filters a day,
+  `Names`'s own doc); the open-day scan is unchanged, O(rows in the asked
+  days), one more comparison a row.
+- **L-IA10A-2. `cli gdfl-import`'s receipt reads its source's census once
+  more, after the run: O(entries), once a run** (D-TBD-IA-10a-1 item 3). The
+  run's own reader lives inside `pull::gdfl_run` and hands no census back,
+  so the receipt opens the source read only: for the capital-market outer zip
+  its tail and central directory (`pull::gdfl_archive::Archive::open`, the
+  same read the run's open makes; at most `CENTRAL_DIRECTORY_CAP`), for the
+  tick store one walk of its tree (`DayTable::walk`, at most
+  `TICKSTORE_WALK_CAP` entries; about 18,400 on the operator's store,
+  design §10.2 L-IA-8). It prints at most three reasons of 16 names each.
+  Never per day, never on a page. UNVERIFIED as a measured time on WD_BLACK:
+  NEEDS THE MAC times one real receipt. Removing it needs `pull::gdfl_run`
+  to hand the census its own open read back, a change to files this part
+  does not own.
+- **L-IA10A-3. A refusal with no run the journal names is placed by the
+  clock, and attributed in O(log runs)** (D-4896): one `BTreeMap` range
+  probe of the start index the parse keeps (`Parsed::run_running_at`). Such
+  refusals are the ones logged before DB-A41's fix and the ones logged under
+  a `cli` attempt's key; every refusal a run logs while it holds the sink's
+  key costs O(1). The answer counts each kind (`refusals.placed`).
