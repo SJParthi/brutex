@@ -84948,12 +84948,15 @@ D-7185).
    the C-MS-01/02 bench note (no proof named) and gate 23's four undeclared
    test prints in R4-28's files (now five, with the catalog measurement) are
    answered: the note names its harness, `crates/pull/benches/ratio.rs`, and
-   `.github/workflows/ci.yml` declares the prints.
+   `.github/workflows/ci.yml` declares the prints. (g) Gate 1d's 135 new
+   segment-shaped literals in R4-28's `crates/pull` files (column names of
+   Kite's public dump, the snapshot store's own names, refusal words, fields,
+   invented fixtures and scratch tags) are declared, each read, as one group
+   in `.github/gates_tree.rs` (`R4_28_LITERAL`), so the gate's undeclared
+   list on R4-28's tree is feat/db-fix's own 466.
 7. **Not taken, and why.** A pull whose plan refused a contract for a reason
    the snapshots fix (`token_reused`, `contract_duplicated`) is still
    journalled `Failed`, so such an underlying's futures leg stays failed
    until the operator acts; making it complete needs an outcome the journal
    does not have (it has no partial outcome) or a rule that lets a known gap
-   read as a complete leg, and D-7190 point 3 chose `Failed`. Gate 1d's new
-   segment-shaped literals in R4-28's `crates/pull` files are not declared
-   (the gate is red on feat/db-fix with 466 of its own).
+   read as a complete leg, and D-7190 point 3 chose `Failed`.
