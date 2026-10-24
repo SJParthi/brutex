@@ -1432,9 +1432,10 @@ fn the_late_ledger_keeps_the_last_counting_close() {
 // ══ The bar definition that built a day ═════════════════════════════════════
 
 /// **AN OPTION DAY NAMES ITS BAR DEFINITION** (R3-13 goal 3). The journal's
-/// deciding line names 2 for one day and 4 for the next: the first is labelled
-/// until it is restated, the second holds this build's bars. Where the journal
-/// names none, the day ledger's line does, and says so.
+/// deciding line names 2, 4, 3 and 5 for four days: from IA-4 (D-4877) an
+/// options day holds this build's bars under 5 alone, so the first three are
+/// labelled until they are restated and the fourth is named as this build's.
+/// Where the journal names none, the day ledger's line does, and says so.
 #[test]
 fn an_option_day_names_its_bar_definition() {
     let root = root_of("r3-13-definition");
@@ -1442,7 +1443,8 @@ fn an_option_day_names_its_bar_definition() {
         &pull::gdfl_import::journal_path(&root),
         "done options 2024-10-01 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
          done options 2024-10-03 * definition=4 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
-         done options 2024-10-04 * definition=3 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+         done options 2024-10-04 * definition=3 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+         done options 2024-10-08 * definition=5 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
     );
     let ledger = super::super::tests::flags_line(
         "options",
@@ -1459,42 +1461,64 @@ fn an_option_day_names_its_bar_definition() {
         Vendor::Gdfl,
         "NSE-FNO-NIFTY-2024-10-31-2500000-CE",
         Timeframe::SECOND_1,
-        ["2024-10-01", "2024-10-03", "2024-10-04", "2024-10-07"]
-            .iter()
-            .map(|on| bar(on, 9 * 3_600 + 15 * 60, [5_000; 4], 1))
-            .collect(),
+        [
+            "2024-10-01",
+            "2024-10-03",
+            "2024-10-04",
+            "2024-10-07",
+            "2024-10-08",
+        ]
+        .iter()
+        .map(|on| bar(on, 9 * 3_600 + 15 * 60, [5_000; 4], 1))
+        .collect(),
     );
     let got = answer(
         &root,
         &ask(
-            "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-10-31-2500000-CE&from=2024-10-01&to=2024-10-07",
+            "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-10-31-2500000-CE&from=2024-10-01&to=2024-10-08",
         ),
     );
     let old = &record(&got, "2024-10-01")["bar_definition"];
     assert_eq!(old["value"], 2, "{old:#}");
     assert_eq!(old["from"], "import_journal");
     assert_eq!(old["current"], false);
-    assert_eq!(old["this_build"], 4);
+    assert_eq!(old["this_build"], 5);
     says_has(
         record(&got, "2024-10-01"),
         "bar definition 2 built this day: placement over every row; an option second's open \
-         interest is its last traded row's (D-2812); this build builds definition 4, so the day \
+         interest is its last traded row's (D-2812); this build builds definition 5, so the day \
          is labelled until it is restated",
     );
-    let new = &record(&got, "2024-10-03")["bar_definition"];
-    assert_eq!(new["value"], 4);
-    assert_eq!(new["current"], true);
+    // AN OPTIONS DAY UNDER 4 IS RESTATED FROM IA-4 (D-4877): 4 left option
+    // bars as 3 built them, and 5 changed what an options file builds.
+    let four = &record(&got, "2024-10-03")["bar_definition"];
+    assert_eq!(four["value"], 4);
+    assert_eq!(four["current"], false);
     assert!(
         says(record(&got, "2024-10-03")).iter().any(|said| said
             .starts_with("bar definition 4 built this day: from 2026-08-03")
-            && said.ends_with("(D-4878 item 10)")),
+            && said.ends_with(
+                "(D-4878 item 10); this build builds definition 5, so the day is labelled \
+                 until it is restated"
+            )),
         "{:#?}",
         says(record(&got, "2024-10-03"))
     );
     says_has(
         record(&got, "2024-10-04"),
         "bar definition 3 built this day: an option second's open interest is the last row \
-         placed in it, traded or not (D-3342); it holds the bars definition 4 builds",
+         placed in it, traded or not (D-3342); this build builds definition 5, so the day is \
+         labelled until it is restated",
+    );
+    // This build's own definition is named on an options day too, with no tail.
+    let new = &record(&got, "2024-10-08")["bar_definition"];
+    assert_eq!(new["value"], 5);
+    assert_eq!(new["current"], true);
+    says_has(
+        record(&got, "2024-10-08"),
+        "bar definition 5 built this day: an options file's bad row is refused by name and the \
+         rest of the file read, and a header followed by empty fields is read (D-4816, D-4829); \
+         every capital-market day holds the bars of 4 (D-4877)",
     );
     let ledgered = &record(&got, "2024-10-07")["bar_definition"];
     assert_eq!(ledgered["value"], 3);
@@ -1555,9 +1579,21 @@ fn a_spot_day_names_its_definition_only_when_it_is_not_current() {
         Value::Null
     );
     assert_eq!(definition_says(ImportKind::Options, &Value::Null), None);
-    for definition in 1..=4 {
-        assert_ne!(definition_means(definition), definition_means(9));
+    // EVERY DEFINITION THE IMPORT NAMES HAS ITS SENTENCE, up to the one this
+    // build builds (IA-4 made it 5 after this list was written): a definition
+    // the import comes to name fails here until the band names it too.
+    let this = u64::from(pull::gdfl_import::BAR_DEFINITION);
+    for definition in 1..=this {
+        assert_ne!(
+            definition_means(definition),
+            definition_means(this + 1),
+            "{definition}"
+        );
     }
+    assert_eq!(
+        definition_means(this + 1),
+        "a definition this build does not name"
+    );
     assert_eq!(definition_means(9), "a definition this build does not name");
 }
 

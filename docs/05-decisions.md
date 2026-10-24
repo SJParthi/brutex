@@ -84442,6 +84442,17 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     the run unbroken. Read arm by arm against the old guard, no answer
     changes for any input; a sub-minute step case is added to
     `a_frozen_run_is_three_unchanged_minutes_in_a_row`.
+29. **Bar definition 5 is named** (IA-4, merged into feat/db-fix on 24
+    October; D-4877). The import's `BAR_DEFINITION` became 5 and an options
+    day is current under 5 alone, while `definition_means` had no sentence
+    for 5: merged as it was, the band would have called this build's own
+    definition "a definition this build does not name". It now says what 5
+    changed, in the import's own terms (D-4816, D-4829, D-4877), and
+    `a_spot_day_names_its_definition_only_when_it_is_not_current` walks every
+    definition from 1 to `pull::gdfl_import::BAR_DEFINITION`, so the next
+    number the import names fails the build until the band names it too.
+    `current` and the label still follow `definition_is_current` alone: an
+    options day under 2, 3 or 4 is labelled until it is restated.
 
 **Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates

@@ -825,6 +825,11 @@ pub(super) const fn definition_means(definition: u64) -> &'static str {
         4 => {
             "from 2026-08-03 an eligible share's closing-auction band goes to the .auc sidecar, not the fold; every other day holds the bars of 3 (D-4878 item 10)"
         }
+        // IA-4 (merged into feat/db-fix on 24 Oct 2026, after this list was
+        // written): the import's list gained 5, so the band names it too.
+        5 => {
+            "an options file's bad row is refused by name and the rest of the file read, and a header followed by empty fields is read (D-4816, D-4829); every capital-market day holds the bars of 4 (D-4877)"
+        }
         _ => "a definition this build does not name",
     }
 }
