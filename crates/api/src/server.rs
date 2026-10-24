@@ -25310,7 +25310,7 @@ mod tests {
         for path in ["/pull/spot", "/pull/fno"] {
             let crawled = get(addr, path).await;
             assert!(
-                crawled.contains("405"),
+                status_line(&crawled).contains("405"),
                 "GET {path} must not be a route at all: {crawled}"
             );
             assert!(
@@ -25416,7 +25416,7 @@ mod tests {
 
         // 6. A MISSING ASSET IS A 404 AND NEVER HTML.
         let missing = get(addr, "/assets/missing.js").await;
-        assert!(missing.contains("404"), "{missing}");
+        assert!(status_line(&missing).contains("404"), "{missing}");
         assert!(
             !missing.contains("<!doctype"),
             "a missing script must not answer with a page: {missing}"
@@ -25459,6 +25459,37 @@ mod tests {
     /// One command line, owned.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The status line of one raw HTTP response, and nothing else.
+    ///
+    /// **A status code is asserted here, never against the whole response.**
+    /// Every response carries `x-brutex-build: <40 hex characters>`, and a
+    /// commit hash holds any three decimal digits often enough: at
+    /// `77a635e2e7c8d61d746a2b993fc62cd4130b0102` the header held `413`, and
+    /// `!response.contains("413")` failed gate 1e on a 403 answer that was
+    /// right (BASE-REDS-1023, BRED23-F15). The same defect was fixed once
+    /// before for a process id in a scratch path; this is the general cure.
+    fn status_line(response: &str) -> &str {
+        response.lines().next().unwrap_or_default()
+    }
+
+    /// The gate 1e failure of 24 Oct, replayed on the exact header it hit: the
+    /// whole response holds `413` and the status line does not. An empty
+    /// response has an empty status line, so no code is ever read off nothing.
+    #[test]
+    fn a_status_code_is_read_off_the_status_line_and_never_off_the_build_header() {
+        let response = "HTTP/1.1 403 Forbidden\r\n\
+             x-brutex-build: 77a635e2e7c8d61d746a2b993fc62cd4130b0102\r\n\
+             content-length: 553\r\n\r\nREFUSED";
+        assert!(
+            response.contains("413"),
+            "the hazard is real: the hash holds the digits"
+        );
+        assert_eq!(status_line(response), "HTTP/1.1 403 Forbidden");
+        assert!(!status_line(response).contains("413"));
+        assert_eq!(status_line(""), "");
+        assert_eq!(status_line("HTTP/1.1 404 Not Found"), "HTTP/1.1 404 Not Found");
     }
 
     /// Sends one form POST and reads the whole response.
@@ -25570,8 +25601,14 @@ mod tests {
                 &format!("{local_origin}Sec-Fetch-Site: cross-site\r\n"),
             )
             .await;
-            assert!(hostile_huge.contains("403 Forbidden"), "{hostile_huge}");
-            assert!(!hostile_huge.contains("413"), "{hostile_huge}");
+            assert!(
+                status_line(&hostile_huge).contains("403 Forbidden"),
+                "{hostile_huge}"
+            );
+            assert!(
+                !status_line(&hostile_huge).contains("413"),
+                "{hostile_huge}"
+            );
             assert!(!hostile_huge.contains("NOT STARTED"), "{hostile_huge}");
 
             // AND THE OLDER SIGNAL, for a client that sends no fetch metadata.
@@ -26128,7 +26165,7 @@ mod tests {
                 "target=equities&granularity=1day&from=2022-01-08&to=2022-01-08",
             )
             .await;
-            assert!(one.contains("503"), "{one}");
+            assert!(status_line(&one).contains("503"), "{one}");
             assert!(one.contains("<td>1</td>"), "one calendar day: {one}");
             assert!(one.contains("2022-01-09"), "and the wire date: {one}");
 
@@ -26200,7 +26237,10 @@ mod tests {
                  &vendor=truedata",
             )
             .await;
-            assert!(expired.contains("503"), "expired is acceptable: {expired}");
+            assert!(
+                status_line(&expired).contains("503"),
+                "expired is acceptable: {expired}"
+            );
             assert!(expired.contains("NIFTY"), "canonicalised: {expired}");
             assert!(expired.contains("2020-01-31"), "the wire date: {expired}");
 
