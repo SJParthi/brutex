@@ -83723,7 +83723,12 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     line holding `flat_max_s` (the 36 of 2026-09-25..30, read 2026-10-24)
     lies inside 09:15:00-15:30:00, its latest end 15:29:24, so no served
     answer changes. At most four window comparisons and one calendar lookup a
-    day. **Rejected:** refusing the whole record, because the day's other
+    day; measured through a read-only shadow of the real store, warm, n = 200
+    each, three interleaved restarts of each build: GDFL NIFTY
+    2026-09-24..30 p50 1.32, 2.43 and 2.14 ms against 1.35, 2.36 and 2.23 ms
+    before (load 28 to 43, so the p99 and max of both move with the load:
+    4.98 to 20.62 and 6.94 to 51.99 ms here, 2.88 to 15.40 and 5.11 to 24.23
+    before). **Rejected:** refusing the whole record, because the day's other
     flags do not depend on the run; and `session_s`, the line's own session
     length, as the bound, because it places no stamp.
 
