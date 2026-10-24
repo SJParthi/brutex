@@ -118,3 +118,77 @@ Not measured here (NEEDS THE MAC item 7): the socket's share, the shadow server,
   on its own while I wait.
   NEXT: read the workspace test result; coverage (`cargo llvm-cov --branch`) and `cargo mutants
   --in-diff` on the touched modules; the shell gates once more; then STATUS: DONE.
+- 2026-10-24 ~20:00 IST (still HELD): the detached `cargo test --workspace --locked --no-fail-fast` ended
+  `EXIT 101`, 7 targets failing, 60 tests (list below). Two tests hung at 0% CPU and I stopped them so
+  the run could finish, each named: `api` lib
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+  (its child process idle 46 min) and `api --test cloud_mutants_bars`
+  `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (idle 18 min; stopping it
+  ended that binary, so its later tests did not run). Of the 60, one is in a file this part touched:
+  the root-only `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`
+  (a test of the base, unchanged). The rest are in files this part does not touch; most are refusals a
+  0555 directory gives a non-root user (this container runs as uid 0) and slow-reader deadline tests.
+  NEXT (when released): run the 60 by name on the unmodified base `7b397bbe` to show each red there
+  too, re-run the rest of `cloud_mutants_bars` with the hung one skipped by name, coverage and
+  mutants on the touched modules, the shell gates once more, then STATUS: DONE.
+  Failing tests:
+  `a_run_whose_sink_is_held_refuses_before_any_lock`
+  `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`
+  `detail::tests::a_refused_admission_names_what_its_bound_and_why`
+  `gdfl_cm::tests::fixtures_are_built_not_pasted`
+  `gdfl_dropbox::tests::repair_r1::a_journal_that_cannot_be_written_stops_the_press_before_any_byte`
+  `gdfl_dropbox::tests::repair_r1::a_read_only_store_root_is_not_writable_not_lost`
+  `gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name`
+  `gdfl_import_command::cloud_mutant_tests::the_receipt_names_the_workers_and_durability_it_filed_with`
+  `gdfl_import_command::guard::tests::a_change_is_never_accepted_by_a_run_that_skipped_no_day`
+  `gdfl_import_command::guard::tests::a_changed_archive_with_every_day_done_is_named_not_ok`
+  `gdfl_import_command::guard::tests::a_run_that_read_no_file_is_not_accepted_by_running_it_again`
+  `gdfl_import_command::guard::tests::a_source_root_that_vanishes_after_files_were_read_is_named_source_lost`
+  `gdfl_import_command::guard::tests::an_empty_range_owes_nothing_and_exits_ok`
+  `gdfl_import_command::guard::tests::every_day_already_refused_identically_still_fails_when_the_root_is_gone`
+  `gdfl_import_command::guard::tests::one_archive_reached_by_another_spelling_is_the_same_key`
+  `gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`
+  `gdfl_import_command::tests::a_named_failure_or_a_refused_run_exits_failed`
+  `gdfl_import_command::tests::a_run_says_a_line_a_day_and_leaves_its_progress_record`
+  `gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`
+  `gdfl_import_command::tests::an_unstamped_build_is_refused_a_store_write_unless_allowed`
+  `gdfl_import_command::tests::the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source`
+  `gdfl_import_command::tests::the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds`
+  `gdfl_run::tests::a_clock_step_back_never_aborts_a_run`
+  `gdfl_run::tests::a_progress_file_that_cannot_be_written_is_named_and_the_run_goes_on`
+  `gdfl_run::tests::the_kinds_run_in_order_on_the_calling_thread`
+  `ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words`
+  `ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing`
+  `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`
+  `pullrun::restart_tests::the_journals_own_extremes`
+  `scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger`
+  `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+  `server::head_deadline_body_tests::a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole`
+  `server::head_deadline_body_tests::a_chunked_body_reaches_a_slow_reader_whole`
+  `server::head_deadline_body_tests::a_request_pipelined_mid_body_waits_its_turn_and_both_arrive_whole`
+  `server::head_deadline_body_tests::pauses_under_the_stall_deadline_are_never_cut_and_one_over_it_is`
+  `server::head_deadline_body_tests::slow_readers_at_the_cap_are_served_whole_and_the_next_waits`
+  `settings::tests::a_directory_that_stops_being_readable_is_a_fault_not_nothing_new`
+  `settings::tests::a_disk_that_refuses_the_write_is_refused_with_nothing_visible`
+  `settings::tests::a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason`
+  `sink::tests::a_coverage_file_is_read_line_by_line_and_extended_where_it_stands`
+  `sink::tests::a_failed_delete_is_counted_named_and_left_for_the_next_start`
+  `sink::tests::a_rename_aside_that_cannot_happen_fails_the_roll_by_name`
+  `sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`
+  `tick_second_check::tests::a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothing_goes_through_it`
+  `tick_second_check::tests::a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was`
+  `tick_second_check::tests::a_new_landing_of_a_checked_day_is_checked_again`
+  `tick_second_check::tests::a_pipe_or_a_link_at_one_of_the_checks_own_names_and_a_pipe_archive_are_refused_at_once`
+  `tick_second_check::tests::a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice`
+  `tick_second_check::tests::a_share_whose_months_cannot_be_listed_is_filed_month_by_month_with_or_without_a_year`
+  `tick_second_check::tests::a_tick_store_landing_is_checked_against_that_tick_store_day_and_a_changed_day_is_refused`
+  `tick_second_check::tests::a_version_whose_rows_are_not_the_ones_its_index_names_is_refused`
+  `tick_second_check::tests::an_extra_archive_is_compared_beside_the_landing_and_labelled_not_the_landing_source`
+  `tick_second_check::tests::every_status_and_source_is_named_against_the_landing_the_store_recorded`
+  `tick_second_check::tests::no_worker_count_and_no_resumption_changes_a_byte_of_the_version`
+  `two_cli_kinds_at_once_both_log`
+  `watchdog_command::tests::a_read_only_state_directory_sends_no_notice_at_all_rather_than_many`
+  `watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`
+  `zerodha_verify::tests::a_refused_open_keeps_the_hosts_words`
+  `zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named`
