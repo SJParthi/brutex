@@ -448,9 +448,24 @@ fn a_payload_that_is_not_its_geometry_is_refused_by_name() {
     }
     let payload = summary.payload();
     let shape = |bytes: &[u8]| MonthSummary::decode(VERSION, bytes).unwrap_err();
-    assert_eq!(
-        MonthSummary::decode(2, &payload).unwrap_err(),
-        Refused::Version(2)
+    for unknown in [0, 3, u16::MAX] {
+        assert_eq!(
+            MonthSummary::decode(unknown, &payload).unwrap_err(),
+            Refused::Version(unknown)
+        );
+    }
+    // VERSION 1 does not know the flat-carry flag a version 2 minute month
+    // sets: those bytes are not a version 1 payload.
+    assert!(matches!(
+        MonthSummary::decode(VERSION_1, &payload).unwrap_err(),
+        Refused::Shape(why) if why.contains("flag")
+    ));
+    // At version 2 the carry flag is set exactly on a one-minute month.
+    let mut unflagged = payload.clone();
+    unflagged[12] &= !0b10;
+    assert!(
+        matches!(shape(&unflagged), Refused::Shape(why) if why.contains("rung")),
+        "a minute month without its carries"
     );
     assert!(matches!(shape(&payload[..HEAD_LEN - 1]), Refused::Shape(_)));
     assert!(matches!(
@@ -461,7 +476,7 @@ fn a_payload_that_is_not_its_geometry_is_refused_by_name() {
     longer.push(0);
     assert!(matches!(shape(&longer), Refused::Shape(_)));
     let mut flag = payload.clone();
-    flag[12] |= 0b10;
+    flag[12] |= 0b100;
     assert!(matches!(shape(&flag), Refused::Shape(why) if why.contains("flag")));
     let mut reserved = payload.clone();
     reserved[150] = 1;
@@ -550,4 +565,238 @@ fn a_bitmap_at_any_offset_round_trips_and_lists_exactly_its_bits() {
                 .sum::<u64>()
         );
     }
+}
+
+// ═══════════════ version 2: flat carries and padded minutes (R4-27) ═══════════════
+
+/// A flat carry of `before` at `ts_micros`: no volume, all four prices its
+/// close.
+fn carry_of(before: &Bar, ts_micros: i64) -> Bar {
+    Bar {
+        ts_micros,
+        open: before.close,
+        high: before.close,
+        low: before.close,
+        close: before.close,
+        volume: 0,
+        open_interest: OI_NULL,
+    }
+}
+
+/// The version 1 bytes of a version 2 one-minute summary: everything before
+/// the carry bitmaps, with version 1's flags.
+fn v1_of(summary: &MonthSummary) -> Vec<u8> {
+    let mut payload = summary.payload();
+    let carries: usize = summary
+        .days
+        .iter()
+        .filter(|day| day.held())
+        .map(|day| bits_len(day.first / 60, day.last / 60))
+        .sum();
+    payload.truncate(payload.len() - carries);
+    payload[12] &= !0b10;
+    payload
+}
+
+/// A whole `.sum` image of `payload` at `version`, with a true CRC.
+fn image_at(version: u16, payload: &[u8]) -> Vec<u8> {
+    let mut section = version.to_le_bytes().to_vec();
+    section.extend_from_slice(&[0, 0]);
+    section.extend_from_slice(payload);
+    let crc = crc32c(&section);
+    section.extend_from_slice(&crc.to_le_bytes());
+    let mut image = MAGIC.to_vec();
+    image.extend_from_slice(&section);
+    image
+}
+
+/// Days 5 to 7 of May 2031 at one minute, every tenth minute of each a flat
+/// carry of the minute before: 1,125 rows, over the summary threshold.
+fn carried_days() -> Vec<Bar> {
+    let mut rows = Vec::new();
+    for day in 5..=7 {
+        let mut session = session(day, 375, 60, 0);
+        for k in (10..375).step_by(10) {
+            session[k] = carry_of(&session[k - 1], session[k].ts_micros);
+        }
+        rows.extend(session);
+    }
+    rows
+}
+
+#[test]
+fn a_flat_carry_is_judged_against_the_row_before_on_its_own_day() {
+    let mut summary = MonthSummary::new(SYMBOL, 60, may());
+    let open = bar(at(3, 33_300), 70_000);
+    summary.fold(&open);
+    summary.fold(&carry_of(&open, at(3, 33_360)));
+    // Flat at one price WITH volume: somebody traded.
+    summary.fold(&Bar {
+        volume: 1,
+        ..carry_of(&open, at(3, 33_420))
+    });
+    let traded = bar(at(3, 33_480), 70_100);
+    summary.fold(&traded);
+    // Silent, but its close moved: not a carry.
+    summary.fold(&Bar {
+        close: traded.close + 5,
+        ..carry_of(&traded, at(3, 33_540))
+    });
+    // The next day's first row repeats the day before's close: never.
+    let last = bar(at(3, 55_740), 70_200);
+    summary.fold(&last);
+    summary.fold(&carry_of(&last, at(4, 33_300)));
+    let day = first_day_of(may()) + 2;
+    assert_eq!(summary.carry_minutes_on(day), Some(vec![556]));
+    assert_eq!(summary.carry_minutes_on(day + 1), Some(vec![]));
+    assert_eq!(summary.carry_minutes_on(day + 7), Some(vec![]), "no bar");
+    let round = MonthSummary::from_section(&summary.section()).unwrap();
+    assert_eq!(round, summary, "version 2 round trip");
+    assert!(round.tracks_carries() && !round.wants_carries());
+    // A one-second month tracks none, and says so.
+    let seconds = MonthSummary::new(SYMBOL, 1, may());
+    assert!(!seconds.tracks_carries() && !seconds.wants_carries());
+    assert_eq!(seconds.carry_minutes_on(day), None);
+}
+
+#[test]
+fn padded_minutes_are_carries_inside_a_window_after_its_first_held_minute() {
+    let mut summary = MonthSummary::new(SYMBOL, 60, may());
+    let day = first_day_of(may()) + 4;
+    let open = bar(at(5, 33_300), 70_000);
+    summary.fold(&open);
+    for k in 1..=4 {
+        summary.fold(&carry_of(&open, at(5, 33_300 + 60 * k)));
+    }
+    // After a halt the next window opens at 11:30 on a carry of 09:19.
+    for k in 0..3 {
+        summary.fold(&carry_of(&open, at(5, 41_400 + 60 * k)));
+    }
+    assert_eq!(summary.padded_on(day, &[(555, 929)]), Ok(7), "one window");
+    let two = [(555, 599), (690, 749)];
+    assert_eq!(
+        summary.padded_on(day, &two),
+        Ok(6),
+        "11:30 opens its window"
+    );
+    assert_eq!(
+        summary.padded_on(day, &[]),
+        Ok(0),
+        "no window, nothing padded"
+    );
+    assert_eq!(
+        summary.padded_on(day, &[(600, 689)]),
+        Ok(0),
+        "no minute held"
+    );
+    assert_eq!(
+        summary.padded_on(day, &[(559, 559)]),
+        Ok(0),
+        "its own opener"
+    );
+    assert_eq!(
+        summary.padded_on(day, &[(929, 555), (555, 2_000)]),
+        Ok(0),
+        "a window off the day holds nothing"
+    );
+    assert_eq!(
+        summary.padded_on(day + 1, &two),
+        Ok(0),
+        "a day without bars"
+    );
+    assert_eq!(
+        summary.padded_on(day + 40, &two),
+        Ok(0),
+        "outside the month"
+    );
+    let round = MonthSummary::from_section(&summary.section()).unwrap();
+    assert_eq!(round.padded_on(day, &two), Ok(6));
+    // NOT COUNTED, by name, never zero.
+    let mut seconds = MonthSummary::new(SYMBOL, 1, may());
+    seconds.fold(&open);
+    assert_eq!(seconds.padded_on(day, &two), Err(NotCounted::NotMinutes));
+    let mut backwards = summary.clone();
+    backwards.fold(&open);
+    assert_eq!(
+        backwards.padded_on(day, &two),
+        Err(NotCounted::InvalidStamps)
+    );
+    for why in [
+        NotCounted::Version1,
+        NotCounted::NotMinutes,
+        NotCounted::InvalidStamps,
+    ] {
+        assert!(why.to_string().starts_with(why.reason()), "{why}");
+        assert!(why.to_string().contains("not counted"), "{why}");
+    }
+    // A carry bit on a minute the day does not hold, inside the day's span
+    // (10:00, in the halt), is no encoding of this.
+    let mut stray = summary.clone();
+    let entry = stray.days.get_mut(4).unwrap();
+    set(&mut entry.carry, 600);
+    assert!(matches!(
+        MonthSummary::decode(VERSION, &stray.payload()),
+        Err(Refused::Shape(why)) if why.contains("not a held minute")
+    ));
+}
+
+#[test]
+fn a_v1_summary_reads_padded_as_not_counted() {
+    let root = root("v1");
+    let day = first_day_of(may()) + 4;
+    let mut writer = BarFile::open_or_create(&root, path(Timeframe::MINUTE_1), SYMBOL).unwrap();
+    writer.append(&carried_days()).unwrap();
+    let kept = read_beside(writer.path(), &writer.header(), may()).unwrap();
+    assert!(kept.tracks_carries(), "written at version 2");
+    assert_eq!(kept.padded_on(day, &[(555, 929)]), Ok(37));
+    let beside = path_beside(writer.path());
+    // A VERSION 1 SUMMARY OF THE SAME BARS, as a build before R4-27 left it.
+    let old = image_at(VERSION_1, &v1_of(&kept));
+    fs::write(&beside, &old).unwrap();
+    let read = read_beside(writer.path(), &writer.header(), may()).unwrap();
+    assert!(!read.tracks_carries() && read.wants_carries());
+    assert_eq!(
+        read.padded_on(day, &[(555, 929)]),
+        Err(NotCounted::Version1),
+        "not counted, never zero"
+    );
+    assert_eq!(read.carry_minutes_on(day), None);
+    // Everything version 1 said, it still says.
+    assert_eq!(read.minute_stamps(), kept.minute_stamps());
+    assert_eq!(read.counts, kept.counts);
+    assert_eq!(read.extremes, kept.extremes);
+    // THE WRITER NEVER REWRITES IT WHILE IT DESCRIBES THE MONTH ...
+    drop(writer);
+    let mut writer = BarFile::open_or_create(&root, path(Timeframe::MINUTE_1), SYMBOL).unwrap();
+    assert_eq!(fs::read(&beside).unwrap(), old, "kept as it is");
+    // ... and never extends it: the next commit builds it whole at version 2.
+    let mut more = session(8, 375, 60, 0);
+    more[50] = carry_of(&more[49], more[50].ts_micros);
+    writer.append(&more).unwrap();
+    let upgraded = read_beside(writer.path(), &writer.header(), may()).unwrap();
+    assert!(upgraded.tracks_carries());
+    assert_eq!(upgraded.padded_on(day, &[(555, 929)]), Ok(37));
+    assert_eq!(upgraded.padded_on(day + 3, &[(555, 929)]), Ok(1));
+    assert_eq!(
+        upgraded,
+        MonthSummary::build(&writer.header(), may(), &committed(&writer))
+    );
+    // THE REBUILD DOOR upgrades a version 1 summary it finds, and names why.
+    let image = upgraded.file_image();
+    let v1 = image_at(VERSION_1, &v1_of(&upgraded));
+    fs::write(&beside, &v1).unwrap();
+    drop(writer);
+    match BarFile::month_summary_existing(&root, path(Timeframe::MINUTE_1), SYMBOL).unwrap() {
+        Summarized::Built(why) => assert!(why.starts_with("summary_v1"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        fs::read(&beside).unwrap(),
+        image,
+        "the same bytes a build writes"
+    );
+    assert_eq!(
+        BarFile::month_summary_existing(&root, path(Timeframe::MINUTE_1), SYMBOL).unwrap(),
+        Summarized::Kept
+    );
 }
