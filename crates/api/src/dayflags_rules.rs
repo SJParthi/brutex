@@ -1237,31 +1237,44 @@ pub(super) fn fold_minutes(
                 ))
             }
         };
-        through = match through {
-            Some(going) if open && goes_on(going.value, going.last) => Some(Through {
+        // A run through starts at a flat bar on a minute not set aside.
+        let starts = || {
+            (flat && open).then_some(Through {
+                first: bar.ts_micros,
                 last: bar.ts_micros,
-                ..going
-            }),
-            other => {
-                // A RUN AN ABSENT MINUTE ENDED, where the next minute held
-                // prints the same value still, is counted (the check's
-                // follow-up: BANKNIFTY 2022-03-07 09:54-09:57), so a run
-                // measured as its parts says why.
-                if let Some(ended) = other
-                    && open
-                    && flat
-                    && ended.value == bar.close
-                    && bar.ts_micros - ended.last > MINUTE
-                {
-                    scan.broken = scan.broken.saturating_add(1);
+                value: bar.close,
+                judged: 0,
+            })
+        };
+        through = match through {
+            // THE SAME UNCHANGED VALUE ON A MINUTE NOT SET ASIDE: ONE
+            // COMPARISON OF THE STEP WITH A MINUTE DECIDES IT. One minute on,
+            // the run goes on. Past one or more absent minutes, the run before
+            // them ended there and is counted (the check's follow-up:
+            // BANKNIFTY 2022-03-07 09:54-09:57), so a run measured as its
+            // parts says why. Less than a minute on, the bar is no next minute
+            // of a one-minute rung: the run ends there, unbroken. (R3-13
+            // repair 2: a `>` of a step the guard had already found not to be
+            // a minute had an equivalent `>=` mutant, so it is restructured
+            // away, never excluded: D-0192.)
+            Some(going) if open && flat && going.value == bar.close => {
+                match (bar.ts_micros - going.last).cmp(&MINUTE) {
+                    std::cmp::Ordering::Equal => Some(Through {
+                        last: bar.ts_micros,
+                        ..going
+                    }),
+                    step => {
+                        if step == std::cmp::Ordering::Greater {
+                            scan.broken = scan.broken.saturating_add(1);
+                        }
+                        close_through(Some(going), &mut scan);
+                        starts()
+                    }
                 }
+            }
+            other => {
                 close_through(other, &mut scan);
-                (flat && open).then_some(Through {
-                    first: bar.ts_micros,
-                    last: bar.ts_micros,
-                    value: bar.close,
-                    judged: 0,
-                })
+                starts()
             }
         };
     }

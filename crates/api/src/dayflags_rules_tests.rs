@@ -1667,6 +1667,20 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
     assert_eq!(not_broken(flat(3, 1_000), Minute::Judged), 1);
     // A run through a window not judged is broken by an absent minute too.
     assert_eq!(not_broken(flat(3, 1_000), Minute::Unjudged), 1);
+    // LESS THAN A MINUTE ON (a bar no one-minute rung stores, R3-13 repair 2):
+    // the same value neither goes on nor is broken; the run ends there and
+    // the bar starts its own, so three such bars are no run of 180 s.
+    let early = |seconds: i64| bar("2022-03-07", at(1) + seconds, [1_000; 4], 0);
+    assert_eq!(not_broken(early(30), Minute::Judged), 0);
+    assert_eq!(not_broken(early(30), Minute::Unjudged), 0);
+    let crowded = fold_minutes(
+        vec![flat(1, 1_000), early(20), early(40), flat(2, 1_000)].into_iter(),
+        |_| Minute::Unjudged,
+    );
+    assert_eq!(
+        (crowded.broken, crowded.frozen_runs, crowded.unjudged),
+        (0, 0, None)
+    );
     let (json, says) = IndexDay {
         feed: Vendor::Zerodha,
         midnight: 0,
