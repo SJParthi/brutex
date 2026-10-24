@@ -77,6 +77,22 @@ mod fno_membership;
 #[path = "ratio/day_table.rs"]
 mod day_table;
 
+/// C-CHK-01, C-CHK-02 to C-CHK-06 and C-CHK-08 to C-CHK-10 (CC-20, FM-615,
+/// D-6800 to D-6804): one bench per check primitive, each held to the ceiling
+/// by this harness, `crates/pull/benches/ratio.rs`; C-CHK-07 is `api`'s.
+#[path = "ratio/archive_from_source.rs"]
+mod archive_from_source;
+#[path = "ratio/nfo_year.rs"]
+mod nfo_year;
+#[path = "ratio/census_load.rs"]
+mod census_load;
+#[path = "ratio/series_identity.rs"]
+mod series_identity;
+#[path = "ratio/strike_implausible.rs"]
+mod strike_implausible;
+#[path = "ratio/admit.rs"]
+mod admit;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1871,6 +1887,22 @@ fn main() {
     // `benches/ratio.rs` alone; the module prints each ratio and spread.
     println!("C-PIT-01 F&O membership lookups at 1x, 10x, 100x the held days (PIT-1, D-5164)");
     ok &= fno_membership::fno_membership_lookup_is_flat();
+    // CC-20's ids are printed here for the same reason as C-PIT-01's.
+    println!("C-CHK-01 cm archive directory read per entry, once per run (CC-20, D-6800)");
+    ok &= archive_from_source::directory_read_is_flat_per_entry();
+    println!("C-CHK-02 options year index, the run's first day() per entry (CC-20, D-6801)");
+    println!("C-CHK-03 options year index, every later day() (CC-20, D-6801)");
+    ok &= nfo_year::year_index_is_flat();
+    println!("C-CHK-04 census cold load, single file, per entry (CC-20, D-6803)");
+    println!("C-CHK-05 census cold load, version-4 partition, per entry (CC-20, D-6803)");
+    println!("C-CHK-06 census epochs, the listing per epoch and the load (CC-20, D-6803)");
+    ok &= census_load::cold_load_is_flat_per_entry();
+    println!("C-CHK-08 series identity audit per bar (CC-20, D-6804)");
+    ok &= series_identity::audit_is_flat_per_bar();
+    println!("C-CHK-09 strike_implausible per call (CC-20, D-6804)");
+    ok &= strike_implausible::strike_check_is_flat();
+    println!("C-CHK-10 the day step that holds admit, an upper bound (CC-20, D-6802)");
+    ok &= admit::admit_step_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {

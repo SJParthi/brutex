@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -25,3 +25,23 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   api half at `-j 1`.
 - NEXT: write the six pull modules and the api module, register them, print their ids from the
   harnesses.
+
+### 2026-10-24 09:35 IST: save point 2 (seven modules written; HELD)
+
+- Done: the seven bench modules, all new, and their registration:
+  `crates/pull/benches/ratio/{archive_from_source,nfo_year,census_load,series_identity,strike_implausible,admit}.rs`
+  and `crates/api/benches/ratio/nse_identity.rs`; each mounted by `#[path]` in its crate's
+  `benches/ratio.rs`, its ids printed from that harness file (C-PIT-01's pattern) and its result
+  folded into the verdict with `ok &= <module>::<fn>()`. Ids: C-CHK-01 (archive directory read per
+  entry), C-CHK-02/03 (options year index first and later `day()`), C-CHK-04/05/06 (census cold
+  load: single file, v4 partition, epochs), C-CHK-07 (api `Reference::confirm`), C-CHK-08
+  (`series_identity::audit` per bar), C-CHK-09 (`strike_implausible`), C-CHK-10 (the day step that
+  holds `admit`, an upper bound).
+- `cargo check -p pull -p api --benches --locked`: `Finished`.
+- `cargo clippy -p pull -p api -p core --benches --tests --locked -- -D warnings`: `Finished`, no
+  warning.
+- Not yet run: the benches themselves (release build in progress), the docs rows, the gates.
+- HOLD found on `origin/cloud/db-base-20261024` at 09:34 IST: this step is finished, committed and
+  pushed; waiting for GO without HOLD before the next step.
+- NEXT: run `cargo bench -p pull --bench ratio` and `cargo bench -p api --bench ratio`, fix any
+  fixture the harness refuses, then three release runs, then the docs/04, docs/05 and docs/06 rows.

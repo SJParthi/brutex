@@ -85,6 +85,10 @@ mod greeks;
 mod logs_dirs;
 #[path = "ratio/months.rs"]
 mod months;
+/// C-CHK-07 (CC-20, FM-615, D-6800): one identity check per symbol, held to
+/// the ceiling by this harness, `crates/api/benches/ratio.rs`.
+#[path = "ratio/nse_identity.rs"]
+mod nse_identity;
 #[path = "ratio/options.rs"]
 mod options;
 #[path = "ratio/provenance.rs"]
@@ -792,6 +796,10 @@ fn main() {
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));
     ok &= months::rows_are_measured();
+    // CC-20's id is printed here because `crates/core/tests/cost_invariants.rs`
+    // reads printed ids from this file alone; the module prints each ratio.
+    println!("C-CHK-07 nse identity confirm per symbol (CC-20, D-6800)");
+    ok &= nse_identity::confirm_is_flat();
     if ok {
         println!("all ratios within the ceiling");
     } else {

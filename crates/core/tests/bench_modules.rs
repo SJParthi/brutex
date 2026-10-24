@@ -201,11 +201,12 @@ fn every_bench_module_is_registered() {
             "crates/{krate}/benches/ratio/{stem}.rs is missing: CC-20 (FM-615) owes one \
              bench per check primitive"
         );
-        let module = mounts(&harness.source)
+        let Some((_, module)) = mounts(&harness.source)
             .into_iter()
             .find(|(file, _)| file == stem)
-            .map(|(_, module)| module)
-            .unwrap_or_else(|| panic!("crates/{krate}: `ratio/{stem}.rs` is not mounted"));
+        else {
+            panic!("crates/{krate}: `ratio/{stem}.rs` is not mounted");
+        };
         assert!(
             code(&harness.source).contains(&format!("ok &= {module}::")),
             "crates/{krate}: `{module}`'s result is not folded into the harness's verdict \
