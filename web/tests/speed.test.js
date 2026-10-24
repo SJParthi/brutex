@@ -1121,10 +1121,12 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
   const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
   assert.ok(chrome, 'the browser harness test needs Chrome or Chromium: set BRUTEX_CHROME');
   const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
-  const site = await browserStandIn({});
+  // `/speed` throws once a load: only the shared reporter check loads it here (repair 6).
+  const site = await browserStandIn({ speedThrows: true });
   const dir = mkdtempSync(join(tmpdir(), 'r315-harness-'));
   const hook = join(dir, 'hook.mjs');
-  writeFileSync(hook, 'export default async (h) => ({ rows: [`hook saw ${h.base}`], failures: [`hook failure`] });\n');
+  // The hook loads /gaps, which throws, in a tab of its own (repair 6: a hook's tabs were not heard).
+  writeFileSync(hook, 'export default async (h) => { const tab = await h.openTab(h.cdp, undefined); try { await h.loadOnce(tab, h.cdp, `${h.base}/gaps`, h.settleMs); } finally { await tab.close(); } return { rows: [`hook saw ${h.base}`], failures: [`hook failure`] }; };\n');
   const silent = join(dir, 'silent.mjs');
   writeFileSync(silent, 'export default async () => undefined;\n');
   const capture = join(dir, 'capture.json');
@@ -1147,6 +1149,9 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     assert.ok(r.failures.some((f) => f.startsWith('/gaps warm: an uncaught error, thrown 3 times: Uncaught')), 'a thrown string is named by its text');
     assert.ok(r.failures.some((f) => f.startsWith('/gaps cold: an uncaught error, thrown 2 times: Error: boom')), 'a cold load\'s error is heard too, once a load');
     assert.ok(r.failures.some((f) => f.startsWith('2 idle tabs: an uncaught error: Error: boom')), 'and an idle tab\'s');
+    // Repair 6 (verify r6 follow-up): the shared reporter check's tab and a hook's tabs are the run's tabs too.
+    assert.ok(r.failures.some((f) => f.startsWith('the shared reporter check: an uncaught error: Error: speed boom')), r.failures.join('\n'));
+    assert.ok(r.failures.some((f) => f.startsWith(`hook ${hook}: an uncaught error: Error: boom`)), 'a hook\'s tab is heard');
     assert.ok(!r.failures.some((f) => f.startsWith('/db') && f.includes('an uncaught error')), 'a page that throws nothing is said to throw nothing');
     assert.ok(r.failures.some((f) => f.startsWith('/blank cold: 2 of 2 loads painted no first content')));
     assert.ok(r.failures.includes('hook failure'));
@@ -1909,10 +1914,12 @@ test('a stop signals a group only while it is the browser\'s: a group that has g
  * and never ends, `/hang` never answers. `stop()` ends every connection.
  *
  * `hangSources` never answers `/sources.json`; `onFirstPage` is called once,
- * when the first page is asked for.
+ * when the first page is asked for; `speedThrows` makes `/speed` throw an
+ * uncaught error once a load (repair 6: the shared reporter check loads it).
  *
  * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean, bareDb?: boolean, fallback?: boolean,
- *   noEntry?: boolean, build?: string | null | ((path: string) => string), hangSources?: boolean, onFirstPage?: () => void}} o
+ *   noEntry?: boolean, build?: string | null | ((path: string) => string), hangSources?: boolean, onFirstPage?: () => void,
+ *   speedThrows?: boolean}} o
  */
 async function browserStandIn(o) {
   const reporter = source('src/lib/page-report.js');
@@ -1952,7 +1959,7 @@ async function browserStandIn(o) {
       `<script>function menu(at, names, held, then) { const m = document.createElement('div'); m.className = 'pmenu'; for (const [i, n] of names.entries()) { const l = document.createElement('label'); const r = document.createElement('input'); r.type = 'radio'; r.name = 'pk'; r.checked = i === held; r.onchange = () => { m.remove(); then(); }; l.append(r, n); m.append(l); } at.after(m); }` +
       `document.querySelector('input').addEventListener('input', () => { document.querySelector('#db-search-list').innerHTML = '<div role="option" onclick="fetch(\\'/feeds.json\\')">NIFTY</div>'; }); setInterval(() => fetch('/inspection.json', { method: 'HEAD' }), 300);</script>`),
     '/gaps': page('gaps', `<script>fetch('/feeds.json'); fetch('/broken').catch(() => null); setInterval(() => fetch('/feeds.json'), 300); setTimeout(() => { throw new Error('boom'); }, 0); setTimeout(() => { throw 'plain'; }, 0);</script>`),
-    '/speed': page('speed', `<script>new Worker('/lib/worker.js');</script>`),
+    '/speed': page('speed', `<script>new Worker('/lib/worker.js');${o.speedThrows ? " setTimeout(() => { throw new Error('speed boom'); }, 0);" : ''}</script>`),
     '/blank': `<!doctype html><title>blank</title>${preload}<body>${script}`,
     // THE SPEED PAGE'S OWN LINE, drawn by the REAL `$lib/speed.js` as the
     // page draws it: client-rendered (nothing to paint until the module has
@@ -3586,4 +3593,299 @@ test('a capture is read only as a regular file a capture could be: a named pipe 
   const ok = join(dir, 'ok.json');
   writeFileSync(ok, JSON.stringify({ requests: [] }));
   assert.equal(sheet.readCapturedFile(ok), '{"requests":[]}', 'a regular file is read whole');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 6 (24 Oct): verify r6's two blocking findings — the restart
+// rows named the run's build, never their own, and an answer was held whole
+// in memory with no bound in bytes — and its cheap follow-ups, each failing
+// on 2db88da6d by name.
+// ---------------------------------------------------------------------------
+
+/**
+ * The strict stand-in with each answer's build chosen by its route and by
+ * how many restarts have run; its `restart` counts one and exits 0.
+ *
+ * @param {(path: string, restarts: number) => string | null} buildOf
+ */
+function switching(buildOf) {
+  const strict = standIn({ ignore: new Set() });
+  const state = { restarts: 0 };
+  return {
+    state,
+    /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+    send: async (b, path, o = {}) => ({ ...(await strict.send(b, path, o)), build: buildOf(new URL(path, 'http://x').pathname, state.restarts) }),
+    restart: async () => ((state.restarts += 1), 0)
+  };
+}
+
+test('a restart that brings the server back as another build fails by name: the up check names the build it found, each restart row is stamped with the builds its own answers named and their largest bytes, and one row answered by two builds fails', async () => {
+  // Before (verify r6, 24 Oct): every 'first after restart' row was stamped
+  // with the run's commit and 0 bytes, and the up check after a restart read
+  // only the status, so a restart that brought back another build passed.
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  // (1) The verifier's case: after the restart everything answers B.
+  const back = switching((_p, n) => (n === 0 ? A : B));
+  /** @type {string[]} */
+  const logged = [];
+  const r1 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send: back.send, log: (l) => logged.push(l), restart: back.restart });
+  assert.equal(r1.ok, false);
+  assert.ok(r1.failures.includes(`restart 1: the server came back as ${B}, not ${A} (its HEAD /inspection.json said so)`), r1.failures.join('\n'));
+  assert.ok(r1.notMeasured.includes("first after restart: timed after 0 of the 2 restarts asked: the server came back as another build than the run's at restart 1"), r1.notMeasured.join('\n'));
+  assert.ok(!r1.rows.some((x) => x.phase === 'first after restart'), 'no row is stamped for a build the run did not measure');
+  assert.equal(back.state.restarts, 1, 'the pass ended at the restart that came back as another build');
+  assert.ok(logged.some((l) => new RegExp(`^speed sheet: restart 1: up \\d+ ms after the command, answered by ${B}$`).test(l)), logged.join('\n'));
+  // (2) The up check answers the run's build and the requests another: each answer named, each row its own answers'.
+  const split = switching((p, n) => (n === 0 || p === UP_ROUTE ? A : B));
+  const r2 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: split.send, log: () => {}, restart: split.restart });
+  const after = r2.rows.filter((x) => x.phase === 'first after restart');
+  assert.equal(after.length, sheet.requestsFor(r2.ctx ?? CTX).requests.length);
+  const feeds = after.find((x) => x.url === '/feeds.json');
+  assert.deepEqual(feeds?.builds, [B], 'the row is stamped with the build its answers named');
+  assert.equal(feeds?.bytes, (await standIn({ ignore: new Set() }).send('', '/feeds.json')).bytes, "and its bytes are its largest answer's");
+  assert.deepEqual(after.find((x) => x.url === UP_ROUTE)?.builds, [A]);
+  assert.ok(r2.failures.includes(`restart 1: GET /feeds.json was answered by ${B}, not ${A}`), r2.failures.join('\n'));
+  assert.ok(r2.notMeasured.includes("first after restart: timed after 1 of the 3 restarts asked: an answer after restart 1 came from another build than the run's"), r2.notMeasured.join('\n'));
+  assert.equal(split.state.restarts, 1);
+  assert.match(sheet.renderSheet(r2, argsFor()), new RegExp(`^\\| ${'b'.repeat(12)} \\| \\(every page\\) \\| \`/feeds\\.json\` \\| \\(no query\\) \\| first after restart \\| 1 \\| 1 \\|`, 'm'));
+  // (3) One row answered by two builds: restart 1 all A, restart 2's /aliases.json B.
+  const late = switching((p, n) => (n === 2 && p === '/aliases.json' ? B : A));
+  const r3 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send: late.send, log: () => {}, restart: late.restart });
+  const aliases = r3.rows.find((x) => x.url === '/aliases.json' && x.phase === 'first after restart');
+  assert.deepEqual(aliases?.builds, [A, B]);
+  assert.ok(r3.failures.includes(`/aliases.json (first after restart, 1 clients) was answered by 2 builds: ${A}, ${B}`), r3.failures.join('\n'));
+  assert.ok(r3.failures.includes(`restart 2: GET /aliases.json was answered by ${B}, not ${A}`), r3.failures.join('\n'));
+  assert.match(sheet.renderSheet(r3, argsFor()), /^\| MIXED \| \/db \| `\/aliases\.json` \| \(no query\) \| first after restart \|/m);
+  // (4) An answer that names no build after a restart, the run stamped: named too.
+  const bare = switching((p, n) => (n > 0 && p === '/aliases.json' ? null : A));
+  const r4 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1 }, { send: bare.send, log: () => {}, restart: bare.restart });
+  assert.ok(r4.failures.includes(`restart 1: GET /aliases.json was answered by no named build, not ${A}`), r4.failures.join('\n'));
+  assert.deepEqual(r4.rows.find((x) => x.url === '/aliases.json' && x.phase === 'first after restart')?.unnamed, 1);
+  // (5) A clean pass: every restart row its own answers', all A, and nothing failed.
+  const same = switching(() => A);
+  const r5 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send: same.send, log: () => {}, restart: same.restart });
+  assert.equal(r5.ok, true, r5.failures.join('\n'));
+  const clean = r5.rows.filter((x) => x.phase === 'first after restart');
+  assert.ok(clean.length > 0 && clean.every((x) => x.builds.length === 1 && x.builds[0] === A && x.unnamed === 0 && x.n === 2 && (x.url === UP_ROUTE || x.bytes > 0)), JSON.stringify(clean.map((x) => [x.url, x.builds, x.bytes])));
+});
+
+test('a row whose answers named no build beside answers that named one is answered by two builds, and a run whose server named none fails a row another build answered', async () => {
+  // Before (verify r6): an answer with no build header was dropped from a row's builds, so a server swapped for one that stamps nothing passed.
+  let k = 0;
+  const flip = await sheet.runSheet(argsFor(), { send: standIn({ ignore: new Set(), build: () => ((k += 1) % 3 === 0 ? null : 'c'.repeat(40)) }).send, log: () => {} });
+  assert.ok(flip.failures.some((f) => /^\/\S+ \(cold, 1 clients\) was answered by 2 builds: c{40}, no named build \(\d+ of its answers\)$/.test(f)), flip.failures.join('\n'));
+  assert.match(sheet.renderSheet(flip, argsFor()), /^\| MIXED \|/m);
+  // The up check names no build (allowed), and the rows' answers name one: another build than the run's.
+  let first = true;
+  const later = await sheet.runSheet({ ...argsFor(), allowUnstamped: true }, { send: standIn({ ignore: new Set(), build: () => (first ? ((first = false), null) : 'c'.repeat(40)) }).send, log: () => {} });
+  assert.ok(later.failures.some((f) => /^\/\S+ \(cold\) was answered by c{40}, not the run's, whose server named no build$/.test(f)), later.failures.join('\n'));
+  assert.equal(sheet.otherBuild('x', 'x'), null);
+  assert.equal(sheet.otherBuild(null, 'x'), 'no named build, not x');
+});
+
+test('as a command over the network: a --restart that brings the server back as another build ends the restart pass by name and exits 1, never PASS', { timeout: 60_000 }, async () => {
+  // The verifier's stand-in run, in one process: the --restart command writes another build for the server to stamp.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-switch-'));
+  const buildFile = join(dir, 'build');
+  writeFileSync(buildFile, 'c'.repeat(40));
+  const strict = standIn({ ignore: new Set() });
+  const server = http.createServer(async (req, res) => {
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', 'x-brutex-build': readFileSync(buildFile, 'utf8').trim() });
+    res.end(req.method === 'HEAD' ? undefined : a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  try {
+    const ctx = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
+    const cmd = await sheetCommand(['--base', base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '5000', '--up-wait-ms', '5000', '--restart', `printf %s ${'d'.repeat(40)} > '${buildFile}'`, '--restarts', '2']);
+    assert.equal(cmd.code, 1, cmd.stderr);
+    assert.match(cmd.stdout, /^# Speed sheet — FAIL/);
+    assert.ok(cmd.stdout.includes(`- FAILED: restart 1: the server came back as ${'d'.repeat(40)}, not ${'c'.repeat(40)} (its HEAD /inspection.json said so)`), cmd.stdout);
+    assert.doesNotMatch(cmd.stdout, /\| first after restart \|/, 'no restart row is printed for a build the run did not measure');
+    assert.match(cmd.stderr, new RegExp(`speed sheet: restart 1: up \\d+ ms after the command, answered by ${'d'.repeat(40)}`));
+  } finally {
+    server.close();
+  }
+});
+
+/**
+ * A server whose answers are `size` bytes of `a`, sent in 1 MiB writes as
+ * fast as the socket drains; `sized(path)` names the size of a path's answer,
+ * or `null` to answer as the strict stand-in does.
+ *
+ * @param {(path: string, query: URLSearchParams) => number | null} sized
+ */
+async function sizedServer(sized) {
+  const strict = standIn({ ignore: new Set() });
+  const chunk = Buffer.alloc(1 << 20, 0x61);
+  const server = http.createServer(async (req, res) => {
+    const u = new URL(String(req.url), 'http://x');
+    const size = [...u.searchParams.values()].includes(GARBLED) ? null : sized(u.pathname, u.searchParams);
+    if (size === null) {
+      const a = await strict.send('', String(req.url), { method: req.method });
+      res.writeHead(a.status, { 'content-type': 'application/json', 'x-brutex-build': 'c'.repeat(40) });
+      return void res.end(req.method === 'HEAD' ? undefined : a.body);
+    }
+    res.writeHead(200, { 'content-type': 'application/json', 'x-brutex-build': 'c'.repeat(40) });
+    let left = size;
+    let open = true;
+    res.on('close', () => (open = false));
+    const pump = () => {
+      while (open && left > 0) {
+        const n = Math.min(left, chunk.length);
+        left -= n;
+        if (!res.write(n === chunk.length ? chunk : chunk.subarray(0, n))) return void res.once('drain', pump);
+      }
+      if (open) res.end();
+    };
+    pump();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  return { base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`, close: () => server.close() };
+}
+
+test('an answer is held to a bound in bytes as well as in time: a timed row keeps its first HEAD_BYTES, discovery and the field check at most MAX_TEXT_BYTES, past which the bytes are hashed as they come; a run against answers far past every bound stays under its stated memory bound', { timeout: 300_000 }, async () => {
+  // Before (verify r6, 24 Oct): timed() kept every chunk until the answer
+  // ended, so an answer that streamed fast grew the sheet to 4.78 GB within
+  // a 5 s --timeout-ms, and Buffer.concat then made a second copy.
+  assert.equal(sheet.HEAD_BYTES, 4_096);
+  const site = await sizedServer((_p, q) => (q.has('size') ? Number(q.get('size')) : null));
+  try {
+    const exact = /** @type {any} */ (await sheet.timed(site.base, `/x?size=${sheet.MAX_TEXT_BYTES}`, { timeoutMs: 120_000 }));
+    assert.deepEqual([exact.status, exact.bytes, exact.body.length, exact.kept], [200, sheet.MAX_TEXT_BYTES, sheet.MAX_TEXT_BYTES, 'text'], 'exactly the bound is still text');
+    const past = /** @type {any} */ (await sheet.timed(site.base, `/x?size=${sheet.MAX_TEXT_BYTES + 1}`, { timeoutMs: 120_000 }));
+    assert.deepEqual([past.status, past.bytes, past.kept], [200, sheet.MAX_TEXT_BYTES + 1, 'digest']);
+    assert.equal(past.body, sheet.answerText(Buffer.alloc(sheet.MAX_TEXT_BYTES + 1, 0x61)), 'one byte past it: the digest of the very bytes, hashed as they came, as answerText hashes them in hand');
+    const head = /** @type {any} */ (await sheet.timed(site.base, '/x?size=1048576', { keep: 'head', timeoutMs: 60_000 }));
+    assert.deepEqual([head.status, head.bytes, head.body, head.kept], [200, 1_048_576, 'a'.repeat(sheet.HEAD_BYTES), 'head'], 'a timed row keeps the start and counts every byte');
+    const small = /** @type {any} */ (await sheet.timed(site.base, '/x?size=10', { keep: 'head' }));
+    assert.deepEqual([small.body, small.kept], ['a'.repeat(10), 'text']);
+  } finally {
+    site.close();
+  }
+  // A discovery answer past the text bound, or not JSON, is refused by name.
+  const args = sheet.parseArgs(['--base', 'http://h:1']);
+  await assert.rejects(sheet.discover(async () => ({ ...answer(200, '(an answer of 9 bytes, sha256 x)'), bytes: 9, kept: 'digest' }), args), /^Error: discovering the selection: \/feeds\.json answered 9 bytes, past the 64000000 the sheet keeps as text$/);
+  await assert.rejects(sheet.discover(async () => answer(200, 'not json'), args), /^Error: discovering the selection: \/feeds\.json answered HTTP 200 with a body that is not JSON \(/);
+  // A whole run, in a process of its own, against answers of 1.2 GB on a timed route and on a field-checked one.
+  const FLOOD = 1_200_000_000;
+  const flood = await sizedServer((p) => (p === '/speed.json' || p === '/dayflags.json' ? FLOOD : null));
+  try {
+    const code = [
+      `const sheet = await import(${JSON.stringify(new URL('ci/speed-sheet.mjs', web).href)});`,
+      `const args = { ...sheet.parseArgs(['--base', ${JSON.stringify(flood.base)}, '--n', '1', '--clients', '1', '--timeout-ms', '120000']), feed: 'zerodha', timeframe: '1min', month: '2026-09', day: '2026-09-30' };`,
+      'const r = await sheet.runSheet(args, { log: () => {} });',
+      "process.stdout.write(JSON.stringify({ peak: process.resourceUsage().maxRSS * 1024, ok: r.ok, failures: r.failures, rows: r.rows.map((x) => ({ url: x.url, phase: x.phase, bytes: x.bytes })) }));"
+    ].join('\n');
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise((resolve, reject) => execFile(process.execPath, ['--input-type=module', '-e', code], { maxBuffer: 1 << 24, timeout: 240_000 }, (error, stdout, stderr) => (error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(JSON.parse(stdout)))));
+    const ran = /** @type {{peak: number, ok: boolean, failures: string[], rows: {url: string, phase: string, bytes: number}[]}} */ (out);
+    assert.equal(ran.ok, true, ran.failures.join('\n'));
+    const speed = ran.rows.find((x) => x.url === '/speed.json' && x.phase === 'cold');
+    const dayflags = ran.rows.find((x) => x.url.startsWith('/dayflags.json') && x.phase === 'cold');
+    assert.deepEqual([speed?.bytes, dayflags?.bytes], [FLOOD, FLOOD], 'every byte of each answer was counted');
+    // The stated bound (docs/06-limits.md L-R315-26): under 1,000,000,000 B at its peak, every answer far past it.
+    assert.ok(ran.peak < 1_000_000_000, `the sheet's peak memory was ${ran.peak} B while it read answers of ${FLOOD} B`);
+  } finally {
+    flood.close();
+  }
+});
+
+test('the sheet\'s follow-ups: one file by its device and inode, a day and a month the calendar has, --out checked before the run, a sheet past 64 KB reaches a pipe whole, and a writer killed is said in the sheet', { timeout: 120_000 }, async () => {
+  const { symlinkSync, realpathSync } = await import('node:fs');
+  const base = ['--base', 'http://h:1'];
+  // Two spellings of one file (verify r6 follow-up): a link to it, and the real path of a linked directory.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-same-'));
+  const cap = join(dir, 'cap.json');
+  writeFileSync(cap, '{"requests":[]}');
+  symlinkSync(cap, join(dir, 'link.json'));
+  assert.ok(sheet.sameFile(cap, join(dir, 'link.json')));
+  assert.throws(() => sheet.parseArgs([...base, '--from-pages', cap, '--out', join(dir, 'link.json')]), /^Error: --out and --from-pages name one file/);
+  assert.throws(() => harness.parseArgs([...base, '--capture', cap, '--out', join(dir, 'link.json')]), /^Error: --out and --capture name one file/);
+  const real = realpathSync(cap);
+  if (real !== cap) assert.throws(() => sheet.parseArgs([...base, '--from-pages', cap, '--out', real]), /name one file/, 'a linked directory and its real path are one');
+  const upper = join(dir, 'CAP.json');
+  if (existsSync(upper)) assert.throws(() => sheet.parseArgs([...base, '--from-pages', cap, '--out', upper]), /name one file/, 'on a volume that folds case, another case is the same file');
+  assert.equal(sheet.sameFile(cap, join(dir, 'other.json')), false, 'a path that names nothing yet is not the file');
+  assert.equal(sheet.parseArgs([...base, '--from-pages', cap, '--out', join(dir, 'sheet.md')]).out, join(dir, 'sheet.md'));
+  // A day and a month the calendar has (verify r6 follow-up: 2024-13 and 2024-02-30 were taken).
+  assert.equal(sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-12']).day, '2024-02-29');
+  for (const [flag, v] of [['--day', '2024-02-30'], ['--day', '2023-02-29'], ['--day', '2024-13-01'], ['--day', '2024-00-10'], ['--day', '2024-04-31'], ['--month', '2024-13'], ['--month', '2024-00']]) {
+    assert.throws(() => sheet.parseArgs([...base, flag, v]), flag === '--day' ? /^Error: --day is YYYY-MM-DD, a day the calendar has$/ : /^Error: --month is YYYY-MM, a month the calendar has$/, `${flag} ${v}`);
+  }
+  assert.equal(sheet.calendarHas('0020-01-31'), true, 'a year is read as written, never as 1920');
+  // --out is checked before the server is asked anything (verify r6 follow-up: only at the end).
+  let asked = 0;
+  const quiet = http.createServer((_req, res) => {
+    asked += 1;
+    res.end();
+  });
+  await new Promise((resolve) => quiet.listen(0, '127.0.0.1', () => resolve(undefined)));
+  try {
+    const qbase = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (quiet.address()).port}`;
+    const refused = await sheetCommand(['--base', qbase, '--out', join(dir, 'missing', 'sheet.md')]);
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /^speed-sheet: --out .*\/missing\/sheet\.md: .*\/missing cannot take a new file: ENOENT/);
+    assert.equal(refused.stdout, '');
+    assert.equal(asked, 0, 'the server was asked nothing');
+  } finally {
+    quiet.close();
+  }
+  // A sheet past 64 KB reaches a pipe whole (verify r6 follow-up: 73,728 of 101,986 B, the FAILED lines lost).
+  const many = { requests: Array.from({ length: 300 }, (_, i) => ({ page: '/gaps', method: 'GET', url: `/missing-${i}.json` })) };
+  const capture = join(dir, 'many.json');
+  writeFileSync(capture, JSON.stringify(many));
+  const strict = standIn({ ignore: new Set(), status: Object.fromEntries(many.requests.map((r) => [r.url, 404])) });
+  const site = http.createServer(async (req, res) => {
+    const a = await strict.send('', String(req.url), { method: req.method });
+    res.writeHead(a.status, { 'content-type': 'application/json', 'x-brutex-build': 'c'.repeat(40) });
+    res.end(req.method === 'HEAD' ? undefined : a.body);
+  });
+  await new Promise((resolve) => site.listen(0, '127.0.0.1', () => resolve(undefined)));
+  try {
+    const sbase = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (site.address()).port}`;
+    const out = join(dir, 'many.md');
+    const big = await sheetCommand(['--base', sbase, '--n', '1', '--clients', '1', '--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day, '--from-pages', capture, '--out', out]);
+    assert.equal(big.code, 1, big.stderr);
+    const file = readFileSync(out, 'utf8');
+    assert.ok(file.length > 65_536, `the sheet is past 64 KB (${file.length} B)`);
+    assert.equal(big.stdout.length, file.length, 'stdout took the whole sheet');
+    assert.equal(big.stdout, file);
+    assert.match(big.stdout, /- FAILED: \/gaps \/missing-299\.json \(warm, 1 clients\): 1 refused — HTTP 404/);
+  } finally {
+    site.close();
+  }
+  assert.equal(sheet.STDOUT_WAIT_MS, 60_000);
+  // A writer the sheet had to kill is a failure in the sheet (verify r6 follow-up: said on stderr only).
+  assert.equal(sheet.KILLED, `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
+  const killed = await sheet.runSheet({ ...argsFor(), clients: [1], writer: "trap '' TERM; while :; do sleep 1; done" }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {} });
+  assert.ok(killed.failures.includes(`the --writer command's process group ${sheet.KILLED}: what it was writing was ended by force, not asked to stop`), killed.failures.join('\n'));
+});
+
+test('a browser\'s stderr is kept as its last lines only and read no more once its address is found, and an address cut between two writes is taken whole', { timeout: 60_000 }, async () => {
+  // Before (verify r6 follow-up): the whole of the browser's stderr was kept for the run and searched again on every chunk.
+  assert.equal(harness.STDERR_TAIL, 8_192);
+  const net = await import('node:net');
+  /** @type {import('node:net').Socket[]} */
+  const sockets = [];
+  const silent = net.createServer((s) => sockets.push(s));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const port = /** @type {import('node:net').AddressInfo} */ (silent.address()).port;
+  const fake = mkdtempSync(join(tmpdir(), 'r315-tail-'));
+  const chatty = join(fake, 'chatty');
+  // 200 KB of other lines first, the address in two writes, then more lines while the launch waits.
+  writeFileSync(chatty, `#!/bin/sh\ni=0; while [ $i -lt 2000 ]; do echo "noise line $i ................................................................................................." >&2; i=$((i+1)); done\nprintf 'DevTools listening on ws://127.0.0.1:${port}/devtools/' >&2\nsleep 0.2\nprintf 'browser/whole\\n' >&2\nwhile :; do echo "after the address" >&2; sleep 0.01; done\n`, { mode: 0o755 });
+  const root = mkdtempSync(join(tmpdir(), 'r315-tail-root-'));
+  try {
+    await assert.rejects(harness.launch(chatty, false, 1_500, root), new RegExp(`^Error: could not connect to ws://127\\.0\\.0\\.1:${port}/devtools/browser/whole: no handshake within 1500 ms$`), 'the address is the whole line, never the half the first write held');
+    assert.deepEqual(readdirSync(root), [], 'the browser was stopped and its profile removed');
+  } finally {
+    for (const s of sockets) s.destroy();
+    silent.close();
+  }
+  // The source keeps a tail, never the whole.
+  assert.match(source('ci/browser-harness.mjs'), /text = \(text \+ c\)\.slice\(-STDERR_TAIL\);/);
 });
