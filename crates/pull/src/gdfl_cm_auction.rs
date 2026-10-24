@@ -1495,3 +1495,7 @@ mod cloud_mutant_tests {
 #[cfg(test)]
 #[path = "gdfl_cm_auction_v2_tests.rs"]
 mod v2_tests;
+
+#[cfg(test)]
+#[path = "gdfl_cm_auction_revision_tests.rs"]
+mod revision_tests;

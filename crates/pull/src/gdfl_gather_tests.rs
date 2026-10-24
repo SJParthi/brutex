@@ -968,3 +968,225 @@ fn the_gather_refuses_past_the_most_a_month_holds_and_a_second_read_twice_differ
     assert_eq!(import_cause(&differs).code, "bars_differ_held", "{differs}");
     assert_eq!(gather.offered(&key), Some(6), "nothing of it gathered");
 }
+
+// ── IA-RP-02 at the import: the CASH `.auc` of a repaired month ────────────
+
+/// The share these tests file in the closing auction's era.
+const SHARE: &str = "RELIANCE";
+
+/// The four days of September 2026 the CASH tests read.
+fn cas_days() -> [Day; 4] {
+    [
+        day(2026, 9, 22),
+        day(2026, 9, 23),
+        day(2026, 9, 24),
+        day(2026, 9, 25),
+    ]
+}
+
+/// Writes [`SHARE`]'s file of every one of `days` (six continuous trades
+/// from 15:05 and one closing-auction print at 15:28:07, every price
+/// invented) and its masters, marking it auction-eligible, and answers the
+/// tick store over them.
+fn cas_world(root: &Path, days: &[Day]) -> TickStore {
+    use std::fmt::Write as _;
+    let stem = format!("{SHARE}.NSE");
+    let plan: Vec<DayPlan> = days
+        .iter()
+        .zip(0_u32..)
+        .map(|(&on, n)| {
+            let mut rows: Vec<String> = (0..6)
+                .map(|i| {
+                    quoted_row(
+                        &stem,
+                        on,
+                        hms_at(15, 5, 0) + i * 50,
+                        &format!("{}.{i}5", 6_200 + n),
+                        ("6000.00", "6999.90"),
+                        (3, 0),
+                    )
+                })
+                .collect();
+            rows.push(quoted_row(
+                &stem,
+                on,
+                hms_at(15, 28, 7),
+                &format!("{}.65", 6_201 + n),
+                ("0", "0.00"),
+                (54_321, 0),
+            ));
+            (
+                on,
+                Tree::Stocks,
+                vec![(entry_of(Tree::Stocks, on, &stem), csv(&rows))],
+            )
+        })
+        .collect();
+    world_of(root, &plan);
+    let at = brutex_core::universe::FNO_INDEX.position(SHARE).unwrap();
+    let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+    let mut master = String::from("FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n");
+    writeln!(master, "2000,{SHARE},EQ,{isin},1").unwrap();
+    let masters = root.join("masters");
+    for &on in days {
+        crate::cash_session_cache::install(&masters, on, &gzip(&master)).unwrap();
+    }
+    let scope = std::sync::Arc::new(
+        crate::gdfl_cm::CmScope::stored(std::iter::empty::<&str>())
+            .unwrap()
+            .with_masters(masters),
+    );
+    TickStore::new(&root.join("ts")).with_scope(scope)
+}
+
+/// A stocks run of `source` over `(from, to)` into `store`, carrying the
+/// reason when `asked`.
+fn stocks(source: &TickStore, (from, to): (Day, Day), store: &Path, asked: bool) -> Report {
+    let run = Run {
+        kind: ImportKind::Stocks,
+        from,
+        to,
+        only: &[],
+        store_root: store,
+    };
+    let options = RunOptions {
+        repair_reason: asked.then_some(REASON),
+        ..RunOptions::default()
+    };
+    run_cm_from(source, &run, options).unwrap()
+}
+
+/// [`SHARE`]'s key.
+fn share_key() -> brutex_core::instrument::InstrumentKey {
+    brutex_core::instrument::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, SHARE)
+        .unwrap()
+}
+
+/// The bytes of the `.auc` every reader of `on`'s month opens.
+fn served_auction(store: &Path, on: Day) -> Vec<u8> {
+    std::fs::read(crate::gdfl_cm::auction::path(store, &share_key(), on).unwrap()).unwrap()
+}
+
+/// **IA-RP-02 AT THE IMPORT (D-4875 (5), D-4898, spec §8 items 2 and 3).**
+/// [`SHARE`]'s September 2026 holds only the 24th, its `.auc` that day's
+/// print. A repair-reason run over the 22nd and 23rd: the sidecar can take
+/// those days only as an insertion, so their prints are CARRIED with the
+/// gathered bars (never refused, never written in place), and the month's
+/// one repair writes the new generation's whole `.auc` before it is served:
+/// the 22nd, 23rd and 24th, byte for byte the sidecar of a store that
+/// imported the three days in order. Every reader's path resolves the
+/// served generation; the original month's `.auc` and bars are untouched;
+/// no auction print is a one-second bar. Then a run with NO reason over the
+/// 25th, a day after the revision's last: its print is not appended into
+/// the served revision; it goes with the month's next successor, whose
+/// `.auc` is the in-order store's of all four days, revision 1's left as it
+/// was. An append into the revision-served month is refused and writes no
+/// byte anywhere; and the whole range again writes nothing.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one month through a gathered repair and a successor, read back at each step"
+)]
+fn a_cash_months_gathered_repair_writes_its_auction_file_before_it_is_served() {
+    let root = scratch("ia17b-cas");
+    let [d22, d23, d24, d25] = cas_days();
+    let source = cas_world(&root, &cas_days());
+    let (sparse, upto, whole) = (root.join("sparse"), root.join("upto"), root.join("whole"));
+    assert!(
+        stocks(&source, (d22, d24), &upto, false)
+            .failures
+            .is_empty()
+    );
+    assert!(
+        stocks(&source, (d22, d25), &whole, false)
+            .failures
+            .is_empty()
+    );
+    assert!(
+        stocks(&source, (d24, d24), &sparse, false)
+            .failures
+            .is_empty()
+    );
+    let month = month_of("CASH", SHARE, d22);
+    let original = month.to_path_buf(&sparse).with_extension("auc");
+    let original_bytes = std::fs::read(&original).unwrap();
+    let originals = tree(&sparse.join("bars"));
+
+    let got = stocks(&source, (d22, d23), &sparse, true);
+
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert_eq!(got.months_repaired, 1, "{got:?}");
+    assert_eq!(generation(&sparse, month), 1);
+    let revision_one =
+        store::repair::revision_root(&sparse, store::repair::Revision::new(1).unwrap());
+    assert_eq!(
+        crate::gdfl_cm::auction::path(&sparse, &share_key(), d22).unwrap(),
+        month.to_path_buf(&revision_one).with_extension("auc"),
+        "a reader of the month reads the served generation's sidecar"
+    );
+    assert_eq!(
+        crate::gdfl_cm::auction::path(&upto, &share_key(), d22).unwrap(),
+        month.to_path_buf(&upto).with_extension("auc"),
+        "an original month's sidecar is where it always was"
+    );
+    assert_eq!(
+        served_auction(&sparse, d22),
+        served_auction(&upto, d22),
+        "the 22nd, 23rd and 24th, as an in-order import files them"
+    );
+    assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+    assert_eq!(tree(&sparse.join("bars")), originals, "never in place");
+    let served_bars = served(&sparse, month, SHARE);
+    assert_eq!(served_bars, served(&upto, month, SHARE));
+    for on in [d22, d23, d24] {
+        let print = i64::from(on.days_from_epoch()) * 86_400 + i64::from(hms_at(15, 28, 7))
+            - crate::session::IST_OFFSET_SECS;
+        assert!(
+            served_bars
+                .iter()
+                .all(|bar| bar.ts_micros != print * 1_000_000),
+            "{on}: the auction's print is no one-second bar"
+        );
+    }
+    assert!(begun_not_closed(&journal(&sparse)).is_empty());
+    let revision_one_auc = served_auction(&sparse, d22);
+
+    // THE 25TH, WITH NO REASON: the month's next successor carries it.
+    let later = stocks(&source, (d25, d25), &sparse, false);
+    assert!(later.failures.is_empty(), "{:?}", later.failures);
+    assert_eq!(later.months_repaired, 1);
+    assert_eq!(generation(&sparse, month), 2);
+    assert_eq!(served_auction(&sparse, d22), served_auction(&whole, d22));
+    assert_eq!(served(&sparse, month, SHARE), served(&whole, month, SHARE));
+    assert_eq!(
+        std::fs::read(month.to_path_buf(&revision_one).with_extension("auc")).unwrap(),
+        revision_one_auc,
+        "revision 1's sidecar is left as it was published"
+    );
+    assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+
+    // NEVER APPENDED INTO A SERVED REVISION: refused, no byte written.
+    let before = tree(&sparse);
+    let print = crate::gdfl_cm::auction::Print {
+        sod: hms_at(15, 28, 7),
+        price: 630_065,
+        quantity: 12,
+        rows: 1,
+        line: 1,
+    };
+    let refused =
+        crate::gdfl_cm::auction::append(&sparse, &share_key(), day(2026, 9, 28), &[print])
+            .unwrap_err();
+    assert!(
+        refused.to_string().contains("served from revision 2"),
+        "{refused}"
+    );
+    assert_eq!(tree(&sparse), before, "no byte anywhere");
+
+    // THE WHOLE RANGE AGAIN: held everywhere, nothing written.
+    let again = stocks(&source, (d22, d25), &sparse, true);
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(again.months_repaired, 0);
+    assert_eq!(tree(&sparse), before);
+    std::fs::remove_dir_all(root).unwrap();
+}
