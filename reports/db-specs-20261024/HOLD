@@ -1,0 +1,2 @@
+HOLD 2026-10-24 09:16 IST
+The shared 5-hour usage window is near its limit (65% at 09:15 IST, resets 12:30 IST). At your NEXT save point: commit, push, write STATUS: HELD in your report, then wait (poll as README says) until this file is gone. Do not start a new step while it exists. Expected lift: soon after 12:30 IST.
