@@ -71,8 +71,13 @@ pub const FLAG_TEXT_CUT: u8 = 1;
 ///
 /// 1 to 12 are the design's; 13 to 20 are the kinds the rules audit of
 /// 11 Oct 2026 asked for before the format was pinned (D-4883); 21 was
-/// appended by IA-9 for RA-318 (D-4811).
-pub const KINDS: [(u8, &str); 21] = [
+/// appended by IA-9 for RA-318 (D-4811); 22 to 25 by R4-05, each with its key
+/// built by its own function below ([`vendor_format_changed`],
+/// [`vendor_restated`], [`scrub_stale`], [`credential_dead`];
+/// D-TBD-R4-05-4). The one-command cut (D-6900) appends no kind whose only
+/// producer was dropped: there is no `network_down`, `feed_behind`,
+/// `gdfl_day_late` or `ingest_chain_failed`.
+pub const KINDS: [(u8, &str); 25] = [
     (1, "interrupted_twice"),
     (2, "store_lost"),
     (3, "build_skew"),
@@ -96,6 +101,14 @@ pub const KINDS: [(u8, &str); 21] = [
     // RA-318 (IA-9): a kept Zerodha answer carries fields its documented
     // shape does not name, so the pull and its checker both read past them.
     (21, "vendor_shape_changed"),
+    // R4-05 (round 3, kept by the one-command cut D-6900). Producers:
+    // R4-22's GDFL half and R4-13's Zerodha half put 22; R4-23 puts 23. No
+    // kept package names a producer of 24 or 25 yet (R4-09 computes scrub
+    // staleness on its page instead of alerting); see D-TBD-R4-05-4.
+    (22, "vendor_format_changed"),
+    (23, "vendor_restated"),
+    (24, "scrub_stale"),
+    (25, "credential_dead"),
 ];
 
 /// Kind 12, the first record of a queue that replaced a damaged one.
@@ -126,6 +139,151 @@ pub fn kind_label(kind: u8) -> Cow<'static, str> {
     kind_word(kind).map_or_else(|| Cow::Owned(format!("kind_{kind}")), Cow::Borrowed)
 }
 
+// ── The kinds R4-05 appended: each key built in one place ───────────────────
+
+/// Kind 22: a vendor answers in a format its reader does not know.
+pub const KIND_VENDOR_FORMAT_CHANGED: u8 = 22;
+/// Kind 23: a vendor restated a share's history by a factor.
+pub const KIND_VENDOR_RESTATED: u8 = 23;
+/// Kind 24: a vendor's full scrub is older than it should be.
+pub const KIND_SCRUB_STALE: u8 = 24;
+/// Kind 25: a feed's credential was dead on its re-read too.
+pub const KIND_CREDENTIAL_DEAD: u8 = 25;
+
+/// An alert whose key and text this module built: put it with
+/// [`Keyed::alert`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keyed {
+    /// A kind of [`KINDS`].
+    pub kind: u8,
+    /// `<word>:<part>:<part>...`, each part checked by [`key_part`].
+    pub key: String,
+    /// What happened, built from the same parts.
+    pub text: String,
+}
+
+impl Keyed {
+    /// The alert a put takes.
+    #[must_use]
+    pub fn alert(&self, day: u32, run: u64) -> NewAlert<'_> {
+        NewAlert {
+            kind: self.kind,
+            key: &self.key,
+            day,
+            run,
+            text: &self.text,
+        }
+    }
+}
+
+/// Checks one part of a key: not empty, only ASCII letters, digits and
+/// `.` `-` `_` `&` (a share like `M&M` has one; `:` would forge another key's
+/// parts, `/` a parameter path's), and without the shape of a token
+/// (`brutex_core::secret_shape`). A key reaches the log whole (`alert put`
+/// carries it), so a credential in it would be logged; the alphabet keeps a
+/// path out and the shape test a token.
+///
+/// # Errors
+///
+/// [`AlertError::KeyPartRefused`], naming the part and never its value.
+pub fn key_part(kind: u8, part: &'static str, value: &str) -> Result<(), AlertError> {
+    let why = if value.is_empty() {
+        Some("is empty")
+    } else if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'&'))
+    {
+        Some("holds a character outside letters, digits, '.', '-', '_' and '&'")
+    } else if brutex_core::secret_shape::value_looks_like_a_token(value) {
+        Some("has the shape of a credential")
+    } else {
+        None
+    };
+    why.map_or(Ok(()), |why| {
+        Err(AlertError::KeyPartRefused { kind, part, why })
+    })
+}
+
+fn keyed(kind: u8, parts: &[(&'static str, &str)], text: String) -> Result<Keyed, AlertError> {
+    let mut key = kind_label(kind).into_owned();
+    for (part, value) in parts {
+        key_part(kind, part, value)?;
+        key.push(':');
+        key.push_str(value);
+    }
+    Ok(Keyed { kind, key, text })
+}
+
+/// Kind 22, `vendor_format_changed:<vendor>:<digest>`: one alert per format a
+/// vendor changed to, whatever the number of files in it. `digest` names the
+/// new format: the first 16 hex digits of its digest (a longer run has a
+/// token's shape and is refused).
+///
+/// # Errors
+///
+/// [`AlertError::KeyPartRefused`].
+pub fn vendor_format_changed(vendor: &str, digest: &str) -> Result<Keyed, AlertError> {
+    keyed(
+        KIND_VENDOR_FORMAT_CHANGED,
+        &[("vendor", vendor), ("digest", digest)],
+        format!("{vendor} changed its file format (digest {digest})"),
+    )
+}
+
+/// Kind 23, `vendor_restated:<vendor>:<symbol>:<factor>:<as_of>`: one alert
+/// per restatement, a second factor or day for the same share being a new one.
+///
+/// # Errors
+///
+/// [`AlertError::KeyPartRefused`].
+pub fn vendor_restated(
+    vendor: &str,
+    symbol: &str,
+    factor: &str,
+    as_of: &str,
+) -> Result<Keyed, AlertError> {
+    keyed(
+        KIND_VENDOR_RESTATED,
+        &[
+            ("vendor", vendor),
+            ("symbol", symbol),
+            ("factor", factor),
+            ("as_of", as_of),
+        ],
+        format!("{vendor} restated {symbol} by {factor} as of {as_of}"),
+    )
+}
+
+/// Kind 24, `scrub_stale:<vendor>:<last pass>`: one alert per last full pass
+/// found stale; a newer pass that goes stale in its turn is a new one.
+///
+/// # Errors
+///
+/// [`AlertError::KeyPartRefused`].
+pub fn scrub_stale(vendor: &str, last_pass: &str) -> Result<Keyed, AlertError> {
+    keyed(
+        KIND_SCRUB_STALE,
+        &[("vendor", vendor), ("last_pass", last_pass)],
+        format!("{vendor} scrub is stale: its last full pass was {last_pass}"),
+    )
+}
+
+/// Kind 25, `credential_dead:<feed>:<day>`: one alert per feed per day whose
+/// credential was dead on its re-read too (`CLAUDE.md` §8: the pull halts).
+/// The key names the feed and the day, never a credential, a field or a
+/// parameter path.
+///
+/// # Errors
+///
+/// [`AlertError::KeyPartRefused`].
+pub fn credential_dead(feed: &str, day: &str) -> Result<Keyed, AlertError> {
+    keyed(
+        KIND_CREDENTIAL_DEAD,
+        &[("feed", feed), ("day", day)],
+        format!("{feed} credential dead on {day} after its re-read; the pull halted"),
+    )
+}
+
 /// Why the queue refused, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlertError {
@@ -141,6 +299,17 @@ pub enum AlertError {
     },
     /// `alert_key_empty`: an alert with no de-duplication key.
     KeyEmpty,
+    /// `alert_key_part_refused`: a part of a key this module builds is empty,
+    /// holds a character outside its alphabet, or has a credential's shape.
+    /// The value is never repeated: it may be the credential.
+    KeyPartRefused {
+        /// The kind whose key it was.
+        kind: u8,
+        /// Which part: `vendor`, `digest`, `symbol`, ...
+        part: &'static str,
+        /// Why, in words.
+        why: &'static str,
+    },
     /// `alerts_damaged`: the header, or two records at the tail, fail. Every
     /// put refuses such a queue; the operator replaces it.
     Damaged {
@@ -205,6 +374,7 @@ impl AlertError {
             Self::Unavailable { .. } => "alerts_unavailable",
             Self::KindUnknown { .. } => "alert_kind_unknown",
             Self::KeyEmpty => "alert_key_empty",
+            Self::KeyPartRefused { .. } => "alert_key_part_refused",
             Self::Damaged { .. } => "alerts_damaged",
             Self::RecordDamaged { .. } => "alert_record_damaged",
             Self::VersionUnknown { .. } => "alerts_version_unknown",
@@ -236,6 +406,11 @@ impl fmt::Display for AlertError {
             }
             Self::KindUnknown { kind } => write!(f, "{code}: kind {kind} is not in the table"),
             Self::KeyEmpty => write!(f, "{code}: an alert needs a key"),
+            Self::KeyPartRefused { kind, part, why } => write!(
+                f,
+                "{code}: the {part} of a {} key {why}; its value is not repeated",
+                kind_label(*kind)
+            ),
             Self::Damaged { offset } => write!(
                 f,
                 "{code}{{offset: {offset}}}: run `cli alerts --replace-damaged`"

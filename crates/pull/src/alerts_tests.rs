@@ -610,6 +610,10 @@ fn the_alert_queue_format_is_v1_byte_for_byte() {
             (19, "month_damaged"),
             (20, "index_refused"),
             (21, "vendor_shape_changed"),
+            (22, "vendor_format_changed"),
+            (23, "vendor_restated"),
+            (24, "scrub_stale"),
+            (25, "credential_dead"),
         ]
     );
     for (kind, word) in KINDS {
@@ -617,7 +621,7 @@ fn the_alert_queue_format_is_v1_byte_for_byte() {
         assert_eq!(kind_of(word), Some(kind));
     }
     assert_eq!(
-        (kind_word(0), kind_word(22), kind_of("nothing")),
+        (kind_word(0), kind_word(26), kind_of("nothing")),
         (None, None, None)
     );
 
@@ -916,7 +920,7 @@ fn a_first_put_creates_the_queue_and_its_directory() {
 fn garbage_alert_parameters_are_refused_by_name() {
     let scratch = Scratch::new("garbage");
     // (b) A kind outside the table; an empty key. Nothing is created.
-    for kind in [0_u8, 22, 255] {
+    for kind in [0_u8, 26, 255] {
         let refused = put_at(scratch.root(), &alert(kind, "k", "t"), NOW);
         assert_eq!(refused, Err(AlertError::KindUnknown { kind }));
         assert_eq!(refused.unwrap_err().code(), "alert_kind_unknown");
@@ -2600,4 +2604,285 @@ fn a_queue_with_one_link_is_kept_without_listing_audit() {
     let name = names.dir.join(format!("alerts.damaged-{NOW}"));
     assert_eq!(kept, Ok(name.clone()));
     assert_eq!(fs::read(&name).unwrap(), fs::read(&names.queue).unwrap());
+}
+
+// ── R4-05: the kinds appended after 21, each key built in one place ─────────
+
+/// The four kinds R4-05 appended, each built from invented parts.
+fn appended() -> [Keyed; 4] {
+    [
+        vendor_format_changed("gdfl", "0a1b2c3d4e5f6a7b").unwrap(),
+        vendor_restated("zerodha", "ZZFAKE", "0.5", "2099-01-02").unwrap(),
+        scrub_stale("gdfl", "2099-01-03").unwrap(),
+        credential_dead("zerodha", "2099-01-04").unwrap(),
+    ]
+}
+
+#[test]
+fn each_new_alert_kind_dedupes_by_its_key() {
+    let built = appended();
+    assert_eq!(
+        built.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+        [
+            "vendor_format_changed:gdfl:0a1b2c3d4e5f6a7b",
+            "vendor_restated:zerodha:ZZFAKE:0.5:2099-01-02",
+            "scrub_stale:gdfl:2099-01-03",
+            "credential_dead:zerodha:2099-01-04",
+        ]
+    );
+    assert_eq!(
+        built.iter().map(|k| k.kind).collect::<Vec<_>>(),
+        [22, 23, 24, 25]
+    );
+    for keyed in &built {
+        assert!(
+            keyed
+                .key
+                .starts_with(&format!("{}:", kind_word(keyed.kind).unwrap()))
+        );
+    }
+    let scratch = Scratch::new("R405-DEDUP");
+    for (at, keyed) in built.iter().enumerate() {
+        let first = written(put_at(scratch.root(), &keyed.alert(18_682, 7), NOW).unwrap());
+        assert_eq!(first, u32::try_from(at).unwrap() + 1);
+        // The same key again, from another run and day: one alert, not two.
+        assert_eq!(
+            put_at(scratch.root(), &keyed.alert(18_683, 8), NOW + 1),
+            Ok(Put::Duplicate { ordinal: first })
+        );
+    }
+    // One part changed is another fact: a new record.
+    let next = [
+        vendor_format_changed("gdfl", "0a1b2c3d4e5f6a7c").unwrap(),
+        vendor_restated("zerodha", "ZZFAKE", "0.5", "2099-01-03").unwrap(),
+        scrub_stale("zerodha", "2099-01-03").unwrap(),
+        credential_dead("zerodha", "2099-01-05").unwrap(),
+    ];
+    for keyed in &next {
+        assert_eq!(
+            written(put_at(scratch.root(), &keyed.alert(0, 0), NOW).unwrap()) > 4,
+            true
+        );
+    }
+    let page = window(scratch.root()).unwrap();
+    assert_eq!(page.alerts.len(), 8);
+    let words: Vec<String> = page.alerts.iter().map(|a| a.word().into_owned()).collect();
+    for word in [
+        "vendor_format_changed",
+        "vendor_restated",
+        "scrub_stale",
+        "credential_dead",
+    ] {
+        assert_eq!(words.iter().filter(|w| *w == word).count(), 2, "{word}");
+    }
+}
+
+#[test]
+fn no_alert_text_carries_a_secret_shape() {
+    let fields = ["access-token", "api-key", "client-id", "totp-secret"];
+    let shaped = |text: &str| brutex_core::secret_shape::shape_of(text, &fields).is_some();
+    // What the four build is free of a credential's shape and of a path.
+    for keyed in appended() {
+        assert!(!shaped(&keyed.key), "{}", keyed.key);
+        assert!(!shaped(&keyed.text), "{}", keyed.text);
+        assert!(
+            !keyed.key.contains('/') && !keyed.text.contains('/'),
+            "{keyed:?}"
+        );
+    }
+    // A part with a token's shape, or a parameter path, is refused by name,
+    // and the refusal never repeats the value.
+    let token = "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2";
+    let path = "/zzorg/zzenv/zzvendor/api-key";
+    let refusals = [
+        (vendor_format_changed("gdfl", token), 22, "digest"),
+        (vendor_format_changed(path, "0a1b"), 22, "vendor"),
+        (
+            vendor_restated("zerodha", token, "0.5", "2099-01-02"),
+            23,
+            "symbol",
+        ),
+        (
+            vendor_restated("zerodha", "ZZFAKE", path, "2099-01-02"),
+            23,
+            "factor",
+        ),
+        (scrub_stale("gdfl", token), 24, "last_pass"),
+        (credential_dead(token, "2099-01-04"), 25, "feed"),
+        (credential_dead("zerodha", path), 25, "day"),
+    ];
+    for (built, kind, part) in refusals {
+        let why = built.unwrap_err();
+        assert!(
+            matches!(why, AlertError::KeyPartRefused { kind: k, part: p, .. } if k == kind && p == part),
+            "{why:?}"
+        );
+        assert_eq!(why.code(), "alert_key_part_refused");
+        let said = why.to_string();
+        assert!(!said.contains(token) && !said.contains("zzorg"), "{said}");
+        assert!(said.contains(part), "{said}");
+    }
+    // The shape test is the part's, not a coincidence of the alphabet: a
+    // token of only letters and digits passes the alphabet and fails here.
+    assert_eq!(
+        key_part(25, "feed", token),
+        Err(AlertError::KeyPartRefused {
+            kind: 25,
+            part: "feed",
+            why: "has the shape of a credential"
+        })
+    );
+    assert_eq!(
+        credential_dead(token, "2099-01-04")
+            .unwrap_err()
+            .to_string(),
+        "alert_key_part_refused: the feed of a credential_dead key has the shape of a \
+         credential; its value is not repeated"
+    );
+}
+
+#[test]
+fn a_key_part_cannot_forge_another_key() {
+    // OUT OF THE BOX: a part that smuggles the separator would let
+    // `restated(a, "B:C", ...)` and `restated("a:B", "C", ...)` share a key,
+    // and the second fact would be swallowed as a duplicate of the first.
+    for bad in [
+        "B:C",
+        "",
+        "NIFTY 50",
+        "ZZ\u{200B}FAKE",
+        "ZZ\nFAKE",
+        "ZZFAKÉ",
+        "a/b",
+    ] {
+        assert!(
+            matches!(
+                vendor_restated("zerodha", bad, "0.5", "2099-01-02"),
+                Err(AlertError::KeyPartRefused { part: "symbol", .. })
+            ),
+            "{bad:?}"
+        );
+    }
+    let empty = vendor_restated("zerodha", "", "0.5", "2099-01-02").unwrap_err();
+    assert_eq!(
+        empty,
+        AlertError::KeyPartRefused {
+            kind: 23,
+            part: "symbol",
+            why: "is empty"
+        }
+    );
+    // A share with an ampersand is a symbol, not a forgery.
+    assert_eq!(
+        vendor_restated("zerodha", "Z&Z", "1-2", "2099-01-02")
+            .unwrap()
+            .key,
+        "vendor_restated:zerodha:Z&Z:1-2:2099-01-02"
+    );
+    // The kind word leads every key: the same parts under two kinds are two
+    // keys, so one kind never silences another.
+    let stale = scrub_stale("gdfl", "2099-01-03").unwrap();
+    let dead = credential_dead("gdfl", "2099-01-03").unwrap();
+    assert_ne!(key_hash(&stale.key), key_hash(&dead.key));
+    let scratch = Scratch::new("R405-FORGE");
+    written(put_at(scratch.root(), &stale.alert(0, 0), NOW).unwrap());
+    written(put_at(scratch.root(), &dead.alert(0, 0), NOW).unwrap());
+}
+
+#[test]
+fn a_long_restated_symbol_cuts_the_text_never_the_key() {
+    // MAXIMUM: the text is cut at its 75 bytes and flagged; the key is whole,
+    // so a second share that shares the first 75 bytes of text is a second
+    // alert.
+    let long_a = format!("ZZ{}-A", "-XY".repeat(30));
+    let long_b = format!("ZZ{}-B", "-XY".repeat(30));
+    let a = vendor_restated("zerodha", &long_a, "0.5", "2099-01-02").unwrap();
+    let b = vendor_restated("zerodha", &long_b, "0.5", "2099-01-02").unwrap();
+    assert!(a.text.len() > TEXT_MAX);
+    let scratch = Scratch::new("R405-LONG");
+    let first = put_at(scratch.root(), &a.alert(0, 0), NOW).unwrap();
+    assert!(
+        matches!(first, Put::Written { text_cut: true, .. }),
+        "{first:?}"
+    );
+    let second = put_at(scratch.root(), &b.alert(0, 0), NOW).unwrap();
+    assert!(
+        matches!(second, Put::Written { ordinal: 2, .. }),
+        "{second:?}"
+    );
+    let page = window(scratch.root()).unwrap();
+    assert_eq!(page.alerts[0].record.text, page.alerts[1].record.text);
+    assert_eq!(page.alerts[0].record.flags & FLAG_TEXT_CUT, FLAG_TEXT_CUT);
+}
+
+#[test]
+fn an_acknowledged_dead_credential_is_put_again_and_another_day_beside_an_open_one() {
+    // COMBINATION: an acknowledgement, the same key again, and a second day
+    // while the first day's alert is open.
+    let scratch = Scratch::new("R405-ACK");
+    let today = credential_dead("zerodha", "2099-01-04").unwrap();
+    let first = written(put_at(scratch.root(), &today.alert(0, 0), NOW).unwrap());
+    ack_at(scratch.root(), first, "cli", Scope::Window, NOW + 1).unwrap();
+    let again = written(put_at(scratch.root(), &today.alert(0, 0), NOW + 2).unwrap());
+    assert!(again > first, "an acknowledged key is put again (D-4895)");
+    let tomorrow = credential_dead("zerodha", "2099-01-05").unwrap();
+    let other = written(put_at(scratch.root(), &tomorrow.alert(0, 0), NOW + 3).unwrap());
+    assert_eq!(
+        put_at(scratch.root(), &today.alert(0, 0), NOW + 4),
+        Ok(Put::Duplicate { ordinal: again })
+    );
+    assert_ne!(other, again);
+}
+
+#[test]
+fn a_refused_part_writes_nothing_beside_an_open_alert_of_its_kind() {
+    // COMBINATION: a garbage part, after a good put of the same kind, on a
+    // queue that exists: the refusal is before the lock, the bytes unchanged.
+    let scratch = Scratch::new("R405-REFUSED");
+    let good = scrub_stale("gdfl", "2099-01-03").unwrap();
+    written(put_at(scratch.root(), &good.alert(0, 0), NOW).unwrap());
+    let before = fs::read(scratch.names().queue).unwrap();
+    assert!(scrub_stale("gdfl", "2099:01:03").is_err());
+    assert!(scrub_stale("", "2099-01-03").is_err());
+    assert_eq!(fs::read(scratch.names().queue).unwrap(), before);
+}
+
+#[test]
+fn a_queue_holding_a_kind_past_this_build_reads_every_record_by_name() {
+    // An older build's queue holds kinds 1..=21; a later build's may hold a
+    // kind this one cannot name. Every record reads, the new kinds by word
+    // and the unknown one as `kind_26`, never dropped and never a crash.
+    let scratch = Scratch::new("R405-OLDER");
+    let records: Vec<Record> = (20_u8..=26)
+        .zip(1_u32..)
+        .map(|(kind, open_after)| Record {
+            kind,
+            ..raw_alert(&format!("k{kind}"), open_after)
+        })
+        .collect();
+    raw_queue(&scratch, &records);
+    let page = window(scratch.root()).unwrap();
+    let words: Vec<String> = page.alerts.iter().map(|a| a.word().into_owned()).collect();
+    // Newest first, as every page lists them.
+    assert_eq!(
+        words,
+        [
+            "kind_26",
+            "credential_dead",
+            "scrub_stale",
+            "vendor_restated",
+            "vendor_format_changed",
+            "vendor_shape_changed",
+            "index_refused",
+        ]
+    );
+    // A kind this build cannot name is still an alert, listed with the rest;
+    // `unknown` is for record TYPES a later build adds.
+    assert!(page.unknown.is_empty());
+    assert_eq!(page.alerts[0].record.kind, 26);
+    // This build refuses to WRITE the kind it cannot name.
+    assert_eq!(
+        put_at(scratch.root(), &alert(26, "k", "t"), NOW),
+        Err(AlertError::KindUnknown { kind: 26 })
+    );
 }

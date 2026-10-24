@@ -226,6 +226,10 @@ pub mod nse;
 pub mod nseindex;
 pub mod pricing;
 pub mod rate;
+/// One dictionary of reason codes, each with a plain sentence, an action and
+/// the button or step that does it, and the gate that no code lacks a row
+/// (READ-02, R4-05).
+pub mod reasons;
 /// Reference tables as store data, through ONE loader (R3-30): the calendar
 /// of record, index identity rows, symbol changes, the F&O list, moved
 /// expiries, lot sizes and the risk-free rate, each with source, checksum
