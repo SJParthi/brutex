@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-12: /db reads its lists from the server: no whole-list download, no typed lists, rows kept as columns
 
@@ -39,12 +39,35 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
   (read-pools, ingest, gap-verdict, database-pages and settings-ceilings tests): base reds to be
   confirmed on the unmodified base before the final gates.
 
+## Done after the first hold (commits f98a30a9, 785ec646, 5a93cc1e)
+
+- No /db view reads the whole census: `no_db_view_downloads_the_whole_census`
+  (web/tests/census-first-load.test.js) compiles `store.svelte.js` and drives `syncStore` over a fake
+  server for every view, a refresh, a feed switch, a failing scope and `seg=index`: no `/store.json`;
+  a failed scope is the page's error with its reason.
+- Coverage (NEW-07, RA-029): the server's roll-up (`/census/rollup.json`, `readRollups`) for the
+  instrument and for its segment, drawn under the Coverage summary, refusals named. The re-basable
+  check reads the row's own `corporate_action_unverified` verdict (an options view reads FNO only, so
+  the old INDEX lookup in the rows read would have called every index option a share's).
+- Lists and limits (RA-258, RA-259): ceilings from `/settings.json` (`adoptCeilings`), plans refused by
+  them, "x of 1,024 series · y of 240 months" shown before a request (`ceilingText`); the import source
+  read from the feed's archive `source`; `derived_rungs` from `/feeds.json` with no typed fallback;
+  the imports journal asked for a `folder` feed with no fixed probe day; the dead `FLOOR_YEAR` /
+  `spanFloor` removed; `seg=index` refused by name. Build check
+  `no_typed_feed_kind_or_date_in_page_logic` (web/tests/no-typed-lists.test.js) over R3-12's page
+  files, feed names read from the descriptor table, segment words from `Segment::as_str`; one named
+  exception, `CLOSE_CHANGE_DAY` (sourced exchange rule; no route serves the session schedule yet).
+- `a_silent_worker_is_dropped_and_the_page_says_so` (census-worker.test.js): dropped at 10 s, rows
+  decoded on the page and published, the banner's worker line and the refresh log say why (RA-043).
+- `db_loads_at_ten_times_the_list_without_a_long_task` (web/tests/db-ten-times.test.js).
+- `yieldTask` refs its MessagePort while a yield waits: census-worker tests 9-10 pass in Node 22.22.
+
 ## Left (NEXT)
 
-- NEXT: on GO, task 2 rest: `no_db_view_downloads_the_whole_census` test; Coverage grid store-wide
-  figures from `/census/rollup.json` (NEW-07) and its typed words; then task 3 (ceilings, opening
-  instrument and floor year from the server, `no_typed_feed_kind_or_date_in_page_logic`), task 4
-  (silent worker, ten-times gate, `yieldTask` ref fix), task 5 (gates, extreme cases, report).
+- NEXT: on GO: extreme-case tests (one-record listing, today/archive-end/year boundaries, out-of-order
+  listing, mixed garbage views, a superseded read never published, two combinations), fails-before
+  proof of every new named test against the base, merge the newest `origin/feat/db-fix`, the gates
+  (cargo fmt/clippy/test/deny, web test/build, svelte-check, CI shell gates), final report.
 
 ## Log
 
@@ -59,6 +82,23 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
 
 - HOLD present on `origin/cloud/db-base-20261024`. Finished the step in progress (FM-621 wiring and
   its svelte-check), committed `1655f44b`, pushed, waiting for GO without HOLD.
+
+### 2026-10-24 12:38 IST resumed (worker restarted; HOLD lifted at 55dfb044)
+
+- `f98a30a9`: no-whole-census test, Coverage roll-up, typed words out of DbCoverageGrid.
+  `npm test` before it: 1576 tests, 1567 pass, 4 fail (source-shape pins of other owners'
+  tests and proxy.test.js's missing `/census/rollup.json`), 5 cancelled (ask.test.js 2-4,
+  census-worker 9-10). The four were fixed: two shapes kept in R3-12's code, two pins updated
+  minimally (database-preparation.test.js, the proxy line in vite.config.js); then
+  `node --test` of those files plus census-scope and census-first-load: 78 pass, 0 fail.
+- `785ec646`: ceilings from `/settings.json`, the build check, `seg=index` sentence, DbSearch
+  placeholder. `node --test tests/no-typed-lists.test.js`: 3 pass.
+- `5a93cc1e`: silent worker, ten-times gate (5 runs green), `yieldTask` ref fix.
+  `node --test tests/census-worker.test.js`: 11 pass, 0 cancelled.
+
+### 2026-10-24 12:56 IST save point, HOLD found again
+
+- HOLD present again. Step finished (task 4), committed `5a93cc1e`, pushed; waiting for GO.
 
 ## Decision numbers
 
