@@ -84134,6 +84134,12 @@ was served from a revision every later day it lacked was one more
 8. **Bounded.** An offer past `store::repair::MAX_ROWS` is refused by name
    (`repair_refused`), never cut; a second gathered twice differently is
    refused (`bars_differ_held`), and alike is kept once.
+9. **A census refusal at the flush** (the month published and served, the
+   census refusing its rows) ends the run `stage=census`: the first waiting
+   day closes `incomplete stage=census`, the others stay begun, none `done`;
+   with no day waiting the run is refused by name all the same. The next run
+   finds every bar served, repairs nothing and closes every day, with no
+   second generation.
 
 **Proof.** `pull::gdfl_import::tests::gather` (IA-RP-03, IA-RP-04, IA-RP-05,
 FM-092, FM-098 and the extreme cases; `docs/04-invariants.md`), bench C-RP-02

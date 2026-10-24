@@ -21566,8 +21566,12 @@ above are left as they were written.
   of the file)); a file gathered out of order is merged with the offer
   (O(offer + file)), which no run in day order meets. The month's leave test
   before each day: one compare. The flush: one repair per month gathered,
-  O(held + offered) bars (above), plus, per gathered file, one binary search
-  of the stamps the repair added. Nothing O(month) per day.
+  O(held + offered) bars (above), plus one cursor walk of the stamps the
+  repair added in step with the offer's files (`give_added`): O(stamps +
+  files) for the month while the files are in day order; a file whose span
+  begins at or before the previous file's end restarts the walk, so an
+  offer gathered out of order costs up to O(files × stamps), which no run
+  in day order meets. Nothing O(month) per day.
 - **The `.auc` reads one pointer more.** `gdfl_cm::auction::path` (every
   reader, `GET /sources/day.json` among them) and the import's
   `file_or_carry` resolve the served generation first: one pointer probe, an
