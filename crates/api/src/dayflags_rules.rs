@@ -1809,7 +1809,7 @@ impl OutsideSession {
 pub(super) fn session_span(session: pull::calendar::Session) -> u64 {
     let mut used = session.windows.iter().take(usize::from(session.count));
     let first = used.next();
-    match (first, used.last().or(first)) {
+    match (first, used.next_back().or(first)) {
         (Some(first), Some(last)) => {
             u64::from(last.to.saturating_add(1).saturating_sub(first.from)).saturating_mul(60)
         }

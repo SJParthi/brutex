@@ -4643,10 +4643,11 @@ fn a_ledger_run_the_session_cannot_hold_is_refused_by_name() {
     // 11:30-12:29: a run across the gap has both ends in session and is the
     // import's; one that starts or ends in the gap is refused; unstamped, the
     // session spans 09:15 to 12:30.
-    let drill = Some(Session {
+    let two = Session {
         windows: [Window { from: 555, to: 599 }, Window { from: 690, to: 749 }],
         count: 2,
-    });
+    };
+    let drill = Some(two);
     let (json, _) = ledger(7_200, Some(clock(9, 50, 0)), drill).json();
     assert_eq!(json["frozen"]["flagged"], true);
     assert_eq!(refused(&json), Value::Null);
@@ -4664,7 +4665,14 @@ fn a_ledger_run_the_session_cannot_hold_is_refused_by_name() {
     assert_eq!(refused(&json), "longer_than_session");
     // The spans themselves; a session with no window spans nothing.
     assert_eq!(session_span(Session::full()), 22_500);
-    assert_eq!(session_span(drill.expect("a session")), 11_700);
+    assert_eq!(session_span(two), 11_700);
+    // One window: its first is its last.
+    let one = Session {
+        windows: [Window { from: 600, to: 659 }, Window { from: 0, to: 0 }],
+        count: 1,
+    };
+    assert_eq!(session_span(one), 3_600);
+    assert_eq!(session_words(one), "10:00:00-11:00:00");
     let none = Session {
         windows: [Window { from: 555, to: 929 }; 2],
         count: 0,
