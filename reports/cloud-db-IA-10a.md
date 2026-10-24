@@ -104,3 +104,32 @@ To be written at the end (spec section 13).
 - A new HOLD (12:56 IST, `a8dcfea6`) names no GO-IA-10a: committed, pushed, held.
 - NEXT: when HOLD is gone (or GO-IA-10a appears): the docs/04, docs/05 and docs/06 entries,
   then the base runs of the new tests, then every gate once, then the report as DONE.
+
+### 2026-10-24 18:35 IST
+
+- The 12:56 hold lifted at 17:34 IST (`f046635b`); resumed. Merged the newest `origin/feat/db-fix`
+  (`7b397bbe`: IA-4, CLOUD-MUTSTORE, CLOUD-MUTCLI, R4-27) into the branch, no conflict
+  (`bbd315fe`).
+- Ledgers: D-4896 headed and its forward reference pointed at it; `D-TBD-IA-10a-1` (three rules
+  the spec left to the builder); docs/04 rows IA-JR-01, IA-GR-34 (reworded), IA-RS-01..06 (gate
+  12 reads a row id only as `XX-YY-NN`, so not `IA10A-nn`); IA1-01 and IA-LG-03 amended where
+  this change made their last clause false; docs/06 L-IA-39 rewritten (its after-measurement
+  still a placeholder for bench C-LG-02's rows), L-IA10A-1..3.
+- Found and fixed my own defect: a member close counted every refusal of its window as its
+  member's, but one run that reopens two members logs both members' refusals in one window.
+  Now a refusal is the member's only when `pull`'s `CmScope::member_of` names its file that
+  member; IA-JR-01 holds that case.
+- CI shell gates of the language-purity job (gates 0 to 29b, all but 1e) run through the
+  repository's own step scripts on this tree and on the unmodified base worktree: the same exit
+  for every gate; red on both: 1c, 1d, 10, 11, 12, 19, 23, 27b, 30 (BASE-REDS-1023's). No new
+  refusal of mine in any of them after the fixes (gate 12: the six cost-claiming doc blocks
+  now cite rows; gate 23: the printed timing test removed, bench C-LG-02 measures it). Gate 11
+  says three of its allowlist entries are now loose (dayflags rule 4 and rule 6, imports rule 6:
+  constructs this change removed); `.github/` is not this part's, so they are left for the
+  allowlist's owner.
+- `cargo fmt --all --check`: clean after `cargo fmt --all` (my files only). Commit `8170414c`.
+- HOLD again (18:16 IST, no GO-IA-10a): committed, pushed, held.
+- NEXT: when HOLD is gone: `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+  `cargo test --workspace --locked`, the before-change run of the new tests in the base
+  worktree, `cargo deny check` and the coverage and mutation tools (to install, pinned as CI
+  pins them), bench C-LG-02 in release for L-IA-39, then the final report.
