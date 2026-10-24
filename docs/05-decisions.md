@@ -83628,8 +83628,11 @@ R418-24..R418-26):
    and was served again. NOW an image whose checked header describes MORE of
    the ledger than it holds is refused by every writer, `quarantine_ledger_cut`
    (both lengths named, one `store.quarantine` error event), with nothing
-   written; every reader answers `quarantine_index_stale` meanwhile, its
-   sentence saying the ledger must be restored. An image that cannot be
+   written; the listings (`Summary::load`, so `/store.json` and
+   `/instruments.json`) refuse it by name too, reading the index header
+   before the ledger so an append between the two reads never looks like a
+   cut; every reader of the index answers `quarantine_index_stale`
+   meanwhile, its sentence saying the ledger must be restored. An image that cannot be
    trusted at all (a wrong length, a header that does not check) still says
    nothing of the ledger and is rebuilt from it; `store::quarantine::rebuild`,
    asked for by name, still rebuilds from the ledger as it is.
