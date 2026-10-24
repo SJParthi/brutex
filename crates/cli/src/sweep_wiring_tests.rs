@@ -149,6 +149,10 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
             word,
             // The alert queue (D-4883, IA-11a): a store verb, never a sweep.
             "alerts"
+                // The store's backup and its restore drill (R4-09b, D-7137):
+                // store verbs, never a sweep.
+                | "backup"
+                | "backup-drill"
                 | "census-migrate"
                 | "census-recount"
                 | "checksum-audit-stored"
