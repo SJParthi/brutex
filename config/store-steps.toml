@@ -1347,19 +1347,22 @@ disk = "a few MB of reference tables (to be measured on the rehearsal)"
 
 [[step]]
 id = "S-47"
-title = "The derived months the padded-minute decision changes, refolded as new generations, and what AUT-10's decisions choose"
+title = "The derived Zerodha cash months the padded-minute decision (D-7270) changes, refolded as new generations, and the rate table's documented gap rows (D-7272)"
 state = "pending"
-writes = "New generations of the derived-rung months the decision changes, audit/zerodha.repairs, census."
-command = ["planned: cli zerodha-repair ALL 2018-01-01 2026-09-30 --segment INDEX --rung 1min --from-store $BRUTEX_STORE --reason 'R4-27 padded-minute decision' (the range form R4-20 builds, over the months the decision changes)"]
-dry_run = ["planned: the decision's own plan, which lists the months it changes"]
+writes = "New generations of the Zerodha CASH derived-rung months whose fold the decision changes, audit/zerodha.repairs, census; and the 8 documented RBI gap rows in the rate table, as a new generation or a new file beside the old."
+command = [
+  "planned: cli zerodha-refold ALL 2018-01-01 2026-09-30 --segment CASH --rule D-7270 --reason 'R4-27 D-7270 padded-minute fold' (BLOCKED: no package builds the derived-rung restate door; the operator prerequisite names the missing owner, as S-25's does for the capital-market and Zerodha rebuild. The door would refold the Zerodha CASH derived rung-months stored under the fold before D-7270 that the rule changes, over the share-months cli padded-measure lists as changed, as new generations. Not cli zerodha-repair --from-store: that door keeps the held derived bars (D-3350) and refuses such a rung-month by the name 'stored under the fold before D-7270', verify-R4-27-r1 B1, so it cannot close this step)",
+  "planned: cli rate-table-append TABLE GAP_ROWS (no verb builds it yet: the 8 documented gap rows D-7272 lists go into R3-30's risk_free_rate reference table, or the file BRUTEX_TBILL91_SERIES names while the greeks route reads it, L-R330-04, kept beside the old)",
+]
+dry_run = ["cli padded-measure zerodha LIST with BRUTEX_STORE on a private copy", "cli rate-replay TABLE 2018-09-03 2026-09-24"]
 env = ["BRUTEX_STORE"]
-prerequisites = ["R4-27", "R4-20"]
+prerequisites = ["R4-27", "operator: an owner for the derived-rung restate door (a held derived rung-month a fold rule changed, restated as a new generation under its decision, with a revision form that may drop a held stamp; no package builds it)", "R4-20"]
 after = ["S-38"]
-check = ["cli fold-audit zerodha NIFTY 2018 1 2026 9 exits 0 under the decision, and the same for the series it changes"]
+check = ["cli fold-audit zerodha SYMBOL 2018 1 2026 9 exits 0 for every refolded share, and cli padded-measure zerodha LIST shows diff_absent 0 for its months", "a re-ingest of a refolded month no longer refuses a rung as 'stored under the fold before D-7270'", "cli rate-replay TABLE 2018-09-03 2026-09-24 says bound 14 days refused 0 and carried 33"]
 closes = ["OWED-27"]
-not_rehearsed = "waits for R4-27: the padded-minute decision is not made"
-disk = "unknown until the decision lists its months"
-note = "AUT-10's four decisions (a riskfree row type, the definition-2 restate through R3-22's door, an OI rewrite or none) each become their own step on the operator's yes."
+not_rehearsed = "waits for operator: an owner of the derived-rung restate door (no package builds it, and R3-22's restate door is for option days and keeps every original stamp). No door restates a held derived bar (the repair door keeps every one, D-3350, and store::repair::publish keeps every original stamp, where D-7270 drops each bucket of only padded minutes); until it lands the stored months stay on the rule before and every later ingest of a changed month refuses that rung by name (L-R427-08). Then R4-20's cash-schedule authority for 2026-08 and 09. The decision is made and measured (D-7270): 978 of 6,538 rung-months of the five sample months fold differently, 479 of them stored exactly under the rule before (381 differ only in values, 98 hold a bucket of only padded minutes); 12,487 of the 20,321 rung-months of Z7's 2,903 share-months, 114 of them stored exactly under the rule before"
+disk = "projected from the measured store (find + stat of every Zerodha CASH derived rung-month on 22 Oct 2026: 142,573 .bin files, 15,416,105,520 bytes over 2-60 min) and the measured change rates: likely 7.33% (the five sample months, the 479 of 6,538 rung-months stored exactly under the rule before, if the 499 that disagree anyway are refolded by S-38, whose repair door cannot restate a held derived bar either, so that needs the same restate door) = about 10,400 new generations, about 1.13 GB of .bin plus their .crc and .tix siblings; if this step refolds those 499 too, every changed rung-month is this step's, 14.96% (978 of 6,538) = about 21,300 generations, about 2.3 GB; worst 61.45% (Z7's thin shares, 12,487 of 20,321) = about 87,600 new generations, about 9.5 GB; the store-wide list is the dry run's. The rate table a few kB"
+note = "AUT-10: decision 3 (D-7273) rewrites nothing, so no step; decision 4 (D-7274) writes nothing; decision 1 (DB-A23, definition-2 option days) is R4-27-OPT's own step."
 
 [[step]]
 id = "S-48"
