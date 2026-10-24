@@ -60,3 +60,19 @@ priority = 100
 [[profile.default.overrides]]
 filter = 'test(an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not) | test(the_monthly_walk_back_over_a_holiday_answers_within_a_bound) | test(a_sidecar_lock_held_past_the_bound_is_refused_in_time)'
 priority = 100
+
+# The cloud mutation pass over crates/store (D-6017), merged back by
+# CLOUD-MUTSTORE. Three mutants stop a loop ending: `first_at_or_after`'s
+# `low < high` made `<=` and its midpoint's `/` made `%`, and the sealed
+# audit's `chunk < n_blocks` made `<=`. Every test that bisects an unindexed
+# month or audits a sealed month then never returns, and Gate 18 never
+# credits a timeout as a catch. The first fails in milliseconds under both
+# lookup mutants; the second runs its audit of an empty month under a
+# one-minute deadline. Measured on the merged tree before this entry: the
+# audit mutant timed out at 900 s on SC-3's
+# `the_audited_door_audits_both_forms_and_compares_them`, the 67th test in
+# the default order, which has no deadline. This changes order only: nothing
+# is filtered, skipped, retried or ignored.
+[[profile.default.overrides]]
+filter = 'test(first_at_or_after_never_probes_more_than_the_bisection_height) | test(an_empty_month_is_a_head_alone)'
+priority = 100

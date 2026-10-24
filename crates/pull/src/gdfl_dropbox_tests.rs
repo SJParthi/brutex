@@ -1835,7 +1835,10 @@ fn a_held_import_day_is_not_fetched_and_a_writer_refusal_is_named() {
     std::fs::create_dir_all(roots.store.join("imports")).unwrap();
     std::fs::write(
         crate::gdfl_import::journal_path(&roots.store),
-        "run 1 definition=4\nbegin options 2019-08-01 *\ndone options 2019-08-01 * definition=4 run=1\n",
+        format!(
+            "run 1 definition={d}\nbegin options 2019-08-01 *\ndone options 2019-08-01 * definition={d} run=1\n",
+            d = crate::gdfl_import::BAR_DEFINITION
+        ),
     )
     .unwrap();
     let mut handoff = Recorder {

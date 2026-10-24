@@ -77,6 +77,11 @@ mod fno_membership;
 #[path = "ratio/day_table.rs"]
 mod day_table;
 
+/// C-PD-01 and C-PD-02: the cash derive fold, which judges every minute for
+/// vendor padding, and the padded count per day, flat per minute (R4-27).
+#[path = "ratio/padded.rs"]
+mod padded;
+
 /// C-CHK-01, C-CHK-02 to C-CHK-06 and C-CHK-08 to C-CHK-10 (CC-20, FM-615,
 /// D-6800 to D-6804): one bench per check primitive, each held to the ceiling
 /// by this harness, `crates/pull/benches/ratio.rs`; C-CHK-07 is `api`'s.
@@ -1881,6 +1886,7 @@ fn main() {
     ok &= zerodha_merge_per_record_is_flat();
     ok &= zerodha_merge_log_step_is_flat();
     ok &= fold_is_flat_per_bar();
+    ok &= padded::padded_fold_is_flat_per_minute();
     ok &= nfo_read_is_flat_per_row();
     // C-PIT-01's id is printed from this file because
     // `crates/core/tests/cost_invariants.rs` reads the ids a bench prints from
