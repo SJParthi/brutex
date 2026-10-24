@@ -25,10 +25,12 @@
 //!    month and on its grid, and agrees with the slot's own first and last
 //!    stamp is the cut ([`Basis::Commit`]). When no slot does, the longest
 //!    prefix of whole blocks whose checksums verify is the cut
-//!    ([`Basis::Blocks`]), but only when no whole block past the first one
-//!    that fails verifies: a power cut tears the tail, and a verified block
-//!    past a failed one is damage inside the month's history, which no cut
-//!    answers ([`RecoverError::NotTheTail`]).
+//!    ([`Basis::Blocks`]). A power cut tears what the batch wrote, which
+//!    starts at the tail block of the month's last durable commit, and in
+//!    any order between two flushes; so a failed block below the tail block
+//!    of the oldest surviving commit, with a whole block after it that
+//!    verifies, is damage inside the month's history, which no cut answers
+//!    ([`RecoverError::NotTheTail`]).
 //! 2. **Writes the safe part as a new file** ([`recover`]): the kept records
 //!    are published as a repair revision under `bar-revisions-v1/<n>/` by
 //!    [`crate::repair::publish`] and made the served generation by
@@ -525,8 +527,9 @@ pub enum RecoverError {
         /// Every commit tried, and why.
         tried: Vec<Tried>,
     },
-    /// The first block that fails is followed by whole blocks that verify:
-    /// damage inside the month's history, not the tail a power cut tears.
+    /// The first block that fails lies below the tail block of the oldest
+    /// surviving commit and whole blocks past it verify: damage inside the
+    /// month's history, not the tail a power cut tears.
     NotTheTail {
         /// The month's own refusal.
         refused: String,
@@ -1074,8 +1077,8 @@ impl Month<'_> {
     }
 
     /// NO COMMIT CHECKS OUT: the longest prefix of whole blocks that does,
-    /// never past what a surviving slot published, and only when no whole
-    /// block past the first that fails verifies.
+    /// never past what a surviving slot published, and refused when the first
+    /// block that fails is inside a durable history and a later one verifies.
     fn blocks_cut(&mut self) -> Result<(Cut, Vec<Bar>), RecoverError> {
         let Some(claimed) = self.claim else {
             return Err(self.nothing());
@@ -1104,7 +1107,19 @@ impl Month<'_> {
         let (rows, failed) = within(&probe, || {
             blocks_prefix(root, path, symbol_id, whole, per_block)
         })?;
-        if let Some(block) = failed {
+        // WHAT THE OLDEST SURVIVING COMMIT PUBLISHED, no later append touched
+        // below its tail block: when that commit was durable, a block below
+        // that fails while a later whole block verifies is damage, not a
+        // write the batch lost. At or past it the batch's own writes (its
+        // records and the entries it re-sealed) reach the drive in any order,
+        // so a verified block past a failed one is a power cut's state.
+        let history = self
+            .raw
+            .slots
+            .iter()
+            .min_by_key(|slot| slot.header.generation)
+            .map_or(0, |slot| slot.header.n_valid / per_block);
+        if let Some(block) = failed.filter(|&block| block < history) {
             let verified_after = within(&probe, || {
                 verified_blocks_after(root, path, symbol_id, block, whole, per_block)
             })?;

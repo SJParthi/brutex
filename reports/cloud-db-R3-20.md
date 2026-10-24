@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -33,3 +33,15 @@ IA-16, R3-16, R3-36, SC-4.
   near its limit, expected lift soon after 12:30 IST). Waiting as README step 1 says.
 - NEXT: when HOLD is gone, write `crates/store/src/recover_tests.rs` (the every-synced-write walk,
   FM-062's test, the extreme cases), then the cli verb.
+
+### 2026-10-24 12:55 IST — HOLD lifted; store tests
+
+- HOLD removed on the base branch (55dfb044, "Lift HOLD"); GO present. Resumed.
+- `crates/store/src/recover_tests.rs`: 18 tests, including
+  `a_month_cut_at_every_synced_write_recovers_to_its_last_good_commit` (every subset of a day's
+  writes, three scenarios) and FM-062's `a_power_cut_inside_a_batch_is_named_and_repaired`.
+- The walk found a real case the first rule refused: block 1 torn while block 2 of the same batch
+  landed. `NotTheTail` now refuses only a failed block below the tail block of the oldest surviving
+  commit (inside a durable history) with a verified block after it.
+- `cargo test -p store --lib --locked recover`: `test result: ok. 18 passed; 0 failed`.
+- NEXT: the whole store suite, then the cli verb.
