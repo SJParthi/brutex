@@ -71,13 +71,32 @@
  * # Two bounds, each said where it applies (found on the Mac, 20 Oct)
  *
  * `/gaps`, `/ingest` and `/markets` each ask a 184 MB census on their first
- * load, and the page capture replays it. Sixty clients at once would hold
- * 60 × 184 MB in this process, so a request whose cold answer is past
- * `--max-answer-bytes` is timed warm at ONE client only; every client count
- * it skips is a NOT MEASURED line naming the bytes. And an answer past
- * {@link MAX_TEXT_BYTES} is never made a string (a 591 MB `/store.json` is past
- * what one string may hold): it is kept as its length and its sha256, so the
- * ignored-field check still compares it exactly.
+ * load, and the page capture replays it. Sixty clients at once would ask
+ * 60 × 184 MB of the server under test at once, so a request whose cold
+ * answer is past `--max-answer-bytes` is timed warm at ONE client only;
+ * every client count it skips is a NOT MEASURED line naming the bytes. And
+ * an answer past {@link MAX_TEXT_BYTES} is never made a string (a 591 MB
+ * `/store.json` is past what one string may hold): it is kept as its length
+ * and its sha256, so the ignored-field check still compares it exactly.
+ *
+ * # Every answer's memory is bounded too (verify r6, 24 Oct)
+ *
+ * Every chunk of an answer was kept until the answer ended, so an answer that
+ * streamed fast and never ended held 4.78 GB of this process within a 5 s
+ * `--timeout-ms`. Now {@link timed} counts the bytes as they come and keeps
+ * at most a bound of them: a timed row its first {@link HEAD_BYTES} (it reads
+ * only the start of a refusal), discovery and the field check at most
+ * {@link MAX_TEXT_BYTES}, past which what was kept is hashed once and dropped
+ * and every later byte is hashed as it comes. So no answer is ever held
+ * whole, and docs/06-limits.md (L-R315-26) states the run's bound.
+ *
+ * # The build that answered is every row's own (verify r6, 24 Oct)
+ *
+ * The `first after restart` rows were stamped with the run's commit and 0
+ * bytes, never with the answers they timed, so a restart that brought the
+ * server back as another build passed. Each restart row is now built from
+ * its own answers; the up check after each restart names the build it
+ * found, and another build than the run's ends the restart pass by name.
  *
  * Exit 0 when every row was answered, stamped by one build and no field was
  * ignored; 1 with every reason printed otherwise; 2 for a misused command.
@@ -87,7 +106,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -266,6 +285,42 @@ export const MAX_N = 10_000;
 export const DECIMAL = /^[0-9]+(?:[eE][0-9]+)?$/;
 
 /**
+ * Whether `YYYY-MM-DD` is a day the calendar has: its month 01 to 12 and its
+ * day in that month (2024-02-29 is, 2024-02-30 and 2024-13-01 are not).
+ * `setUTCFullYear` takes the year as written, where `Date.UTC` would read 20
+ * as 1920.
+ *
+ * @param {string} day digits in the YYYY-MM-DD shape
+ */
+export function calendarHas(day) {
+  const [y, m, d] = day.split('-').map(Number);
+  const t = new Date(0);
+  t.setUTCFullYear(y, m - 1, d);
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+/**
+ * Whether two paths name one file: one device and one inode, so two
+ * spellings of a file are one — a link to it, `/tmp` beside `/private/tmp`,
+ * another case on a volume that folds case (verify r6 follow-up, 24 Oct: the
+ * paths were compared as strings, resolved, and each of those got through).
+ * Where either cannot be read the resolved spellings decide, as before: a
+ * path that names nothing yet cannot be the file the other names.
+ *
+ * @param {string} a
+ * @param {string} b
+ */
+export function sameFile(a, b) {
+  try {
+    const x = statSync(a);
+    const y = statSync(b);
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return resolvePath(a) === resolvePath(b);
+  }
+}
+
+/**
  * The command line, read: every value checked, a misuse named.
  *
  * @param {string[]} argv
@@ -300,14 +355,16 @@ export function parseArgs(argv) {
   // One count, one pass (verify r4 follow-up: `10,10` timed every request twice at 10).
   const twice = clients.find((c, i) => clients.indexOf(c) !== i);
   if (twice !== undefined) throw new Error(`--clients names ${twice} twice: each client count is measured once a run`);
+  // A DAY AND A MONTH THE CALENDAR HAS (verify r6 follow-up, 24 Oct: the
+  // format alone took 2024-13 and 2024-02-30, and the run then asked for them).
   const day = o.day === undefined ? null : String(o.day);
-  if (day !== null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--day is YYYY-MM-DD');
+  if (day !== null && !(/^\d{4}-\d{2}-\d{2}$/.test(day) && calendarHas(day))) throw new Error('--day is YYYY-MM-DD, a day the calendar has');
   const month = o.month === undefined ? null : String(o.month);
-  if (month !== null && !/^\d{4}-\d{2}$/.test(month)) throw new Error('--month is YYYY-MM');
+  if (month !== null && !(/^\d{4}-\d{2}$/.test(month) && calendarHas(`${month}-01`))) throw new Error('--month is YYYY-MM, a month the calendar has');
   // ONE FILE IS NOT BOTH (verify r5 follow-up, 23 Oct: the harness wrote its
   // sheet over its own capture and exited 0): the sheet read here would be
-  // replaced by the one written at the end.
-  if (o.out !== undefined && o['from-pages'] !== undefined && resolvePath(String(o.out)) === resolvePath(String(o['from-pages']))) {
+  // replaced by the one written at the end. By the file, not its spelling.
+  if (o.out !== undefined && o['from-pages'] !== undefined && sameFile(String(o.out), String(o['from-pages']))) {
     throw new Error(`--out and --from-pages name one file (${String(o.out)}): the sheet would be written over the capture it reads`);
   }
   return {
@@ -340,7 +397,9 @@ export function parseArgs(argv) {
 
 /**
  * @typedef {{status: number, headers: Record<string, string | string[] | undefined>, body: string,
- *   ms: number, bytes: number, build: string | null}} Answer
+ *   ms: number, bytes: number, build: string | null, kept?: 'text' | 'digest' | 'head'}} Answer
+ *   `bytes` every byte of its body, counted as it came; `kept` what `body` holds of them
+ *   ({@link timed}): the text, the length and sha256, or the first {@link HEAD_BYTES} as text
  * @typedef {{status: 0, error: string, ms: number, build: string | null, body: '', bytes: 0, headers: {}, timedOut?: true}} NoAnswer
  *   `timedOut` when its whole answer did not come within its bound ({@link timed}); `build` the
  *   build its headers named, when they came before it was cut
@@ -349,7 +408,8 @@ export function parseArgs(argv) {
 /**
  * The largest answer kept as text, bytes. A longer one is kept as
  * `(an answer of N bytes, sha256 H)`: exact for comparing two answers, and
- * never a string longer than one may be.
+ * never a string longer than one may be. It is also the most of an answer
+ * {@link timed} ever holds (verify r6, 24 Oct).
  */
 export const MAX_TEXT_BYTES = 64_000_000;
 
@@ -357,14 +417,25 @@ export const MAX_TEXT_BYTES = 64_000_000;
 export const MAX_ANSWER_BYTES = 16_000_000;
 
 /**
+ * How much of an answer a timed row keeps, bytes: its start, as text, for
+ * the reason line of an answer that is not one (`measure` reads 300
+ * characters of it, at most 1,200 bytes of UTF-8). A timed row compares no
+ * body, so every later byte is counted and dropped (verify r6, 24 Oct).
+ */
+export const HEAD_BYTES = 4_096;
+
+/** An answer kept as its length and digest. @param {number} bytes @param {string} hex */
+const digestText = (bytes, hex) => `(an answer of ${bytes} bytes, sha256 ${hex})`;
+
+/**
  * An answer's bytes as the sheet keeps them: the text, or past `limit`
- * its length and digest.
+ * its length and digest — the form {@link timed} keeps, for bytes in hand.
  *
  * @param {Buffer} body
  * @param {number} [limit]
  */
 export function answerText(body, limit = MAX_TEXT_BYTES) {
-  return body.length <= limit ? body.toString('utf8') : `(an answer of ${body.length} bytes, sha256 ${createHash('sha256').update(body).digest('hex')})`;
+  return body.length <= limit ? body.toString('utf8') : digestText(body.length, createHash('sha256').update(body).digest('hex'));
 }
 
 /**
@@ -379,9 +450,21 @@ export function answerText(body, limit = MAX_TEXT_BYTES) {
  * nothing. A request whose whole answer has not come within `timeoutMs` is
  * ended here and answered `timedOut`, saying how much of it had come.
  *
+ * AND SO IS WHAT IT HOLDS (verify r6, 24 Oct): every chunk was kept until
+ * the answer ended, so an answer that streamed fast and never ended grew the
+ * sheet to 4.78 GB within a 5 s bound, and Buffer.concat then made a second
+ * copy. Now every byte is counted as it comes and copied into ONE buffer
+ * that never grows past its bound: `keep: 'whole'` (the default; discovery
+ * and the field check, which read or compare bodies) keeps up to
+ * {@link MAX_TEXT_BYTES} as text, and past it hashes what it kept once,
+ * drops it and hashes every later chunk as it comes, so the answer is its
+ * length and sha256 without ever being held whole; `keep: 'head'` (a timed
+ * row) keeps its first {@link HEAD_BYTES} and counts the rest. The time is
+ * read at the last byte, before the text is decoded.
+ *
  * @param {string} base
  * @param {string} path
- * @param {{method?: string, agent?: http.Agent | false, timeoutMs?: number}} [o]
+ * @param {{method?: string, agent?: http.Agent | false, timeoutMs?: number, keep?: 'whole' | 'head'}} [o]
  * @returns {Promise<Answer | NoAnswer>}
  */
 export function timed(base, path, o = {}) {
@@ -393,6 +476,8 @@ export function timed(base, path, o = {}) {
   const url = new URL(path, base);
   const lib = url.protocol === 'https:' ? https : http;
   const limit = o.timeoutMs ?? 60_000;
+  const head = o.keep === 'head';
+  const textLimit = head ? HEAD_BYTES : MAX_TEXT_BYTES;
   return new Promise((resolve) => {
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
@@ -415,15 +500,36 @@ export function timed(base, path, o = {}) {
     const req = lib.request(url, { method: o.method ?? 'GET', agent: o.agent ?? false, headers: { accept: 'application/json' } }, (res) => {
       const raw = res.headers[BUILD_HEADER];
       headedBy = typeof raw === 'string' ? raw : null;
-      /** @type {Buffer[]} */
-      const parts = [];
-      res.on('data', (c) => {
-        parts.push(c);
+      // The bytes kept: one buffer, grown by doubling, never past textLimit.
+      let kept = Buffer.alloc(0);
+      let used = 0;
+      /** @type {import('node:crypto').Hash | null} the whole answer's digest, once it is past MAX_TEXT_BYTES */
+      let hash = null;
+      res.on('data', (/** @type {Buffer} */ c) => {
         got += c.length;
+        if (hash !== null) return void hash.update(c);
+        const room = textLimit - used;
+        if (c.length > room && !head) {
+          // Past the text bound: from here on the answer is its length and digest.
+          hash = createHash('sha256').update(kept.subarray(0, used)).update(c);
+          kept = Buffer.alloc(0);
+          used = 0;
+          return;
+        }
+        const take = Math.min(c.length, room);
+        if (take === 0) return;
+        if (used + take > kept.length) {
+          const grown = Buffer.allocUnsafe(Math.min(textLimit, Math.max(used + take, 2 * kept.length, 1_024)));
+          kept.copy(grown, 0, 0, used);
+          kept = grown;
+        }
+        c.copy(kept, used, 0, take);
+        used += take;
       });
       res.on('end', () => {
-        const body = Buffer.concat(parts);
-        settle({ status: Number(res.statusCode), headers: res.headers, body: answerText(body), ms: ms(), bytes: body.length, build: headedBy ?? null });
+        const took = ms();
+        const body = hash !== null ? digestText(got, hash.digest('hex')) : kept.toString('utf8', 0, used);
+        settle({ status: Number(res.statusCode), headers: res.headers, body, ms: took, bytes: got, build: headedBy ?? null, kept: hash !== null ? 'digest' : used < got ? 'head' : 'text' });
       });
       // A body cut off mid-answer is no answer: the headers alone are not one.
       res.on('error', (e) => none(`the answer was cut off: ${e.message}`));
@@ -458,10 +564,25 @@ export function classOf(a) {
 /**
  * @typedef {{page: string, route: string, label: string, url: string, builder: string, phase: string,
  *   clients: number, n: number, p50: number, p99: number, max: number,
- *   classes: Record<string, number>, builds: string[], bytes: number, said: string | null,
- *   cut: string | null, notAsked: number}} SheetRow `cut` is the reason of the answer that ran its
- *   whole bound and ended the row; `notAsked` the requests of the row never sent after it
+ *   classes: Record<string, number>, builds: string[], unnamed: number, bytes: number, said: string | null,
+ *   cut: string | null, notAsked: number}} SheetRow `builds` the builds its answers named, `unnamed`
+ *   how many of its answers came with no build named (one build more, when others named one); `bytes`
+ *   its largest answer's; `cut` is the reason of the answer that ran its whole bound and ended the row;
+ *   `notAsked` the requests of the row never sent after it
  */
+
+/**
+ * How an answer's build differs from the run's, said for a failure line, or
+ * `null` when it is the run's: the build, or "no named build", then the
+ * run's commit, or what the run's own up check named when it named none.
+ *
+ * @param {string | null} build
+ * @param {string | null} commit the run's
+ */
+export function otherBuild(build, commit) {
+  if (build === commit) return null;
+  return `${build ?? 'no named build'}, not ${commit ?? "the run's, whose server named no build"}`;
+}
 
 /**
  * `n` requests over `clients` concurrent clients, each sample one request;
@@ -484,6 +605,7 @@ export async function measure(send, request, o) {
   /** @type {Record<string, number>} */
   const classes = {};
   const builds = new Set();
+  let unnamed = 0;
   let bytes = 0;
   /** @type {string | null} */
   let said = null;
@@ -497,11 +619,13 @@ export async function measure(send, request, o) {
     if (agent) agents.add(agent);
     while (left > 0 && cut === null) {
       left -= 1;
-      const a = await send(request.url, { method: request.method, agent, timeoutMs: o.timeoutMs });
+      // A TIMED ROW KEEPS ONLY THE START OF EACH ANSWER (verify r6): it reads no body but a refusal's first words.
+      const a = await send(request.url, { method: request.method, agent, timeoutMs: o.timeoutMs, keep: 'head' });
       times.push(a.ms);
       const k = classOf(a);
       classes[k] = (classes[k] ?? 0) + 1;
       if (a.build !== null) builds.add(a.build);
+      else if (a.status !== 0) unnamed += 1;
       bytes = Math.max(bytes, a.bytes);
       if (said === null && k !== 'answered') said = 'error' in a ? a.error : `HTTP ${a.status}: ${a.body.slice(0, 300)}`;
       if ('timedOut' in a && a.timedOut && cut === null) cut = a.error;
@@ -513,7 +637,7 @@ export async function measure(send, request, o) {
   // it, and the sheet counted its own hang-up as the server's "no answer".
   for (const agent of agents) agent.destroy();
   const s = summary(times);
-  return { page: request.page, route: request.route, label: request.label, url: request.url, builder: request.builder, phase: o.phase, clients: o.clients, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes, builds: [...builds], bytes, said, cut, notAsked: left };
+  return { page: request.page, route: request.route, label: request.label, url: request.url, builder: request.builder, phase: o.phase, clients: o.clients, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes, builds: [...builds], unnamed, bytes, said, cut, notAsked: left };
 }
 
 /**
@@ -532,7 +656,13 @@ export async function discover(get, args) {
   const json = async (path) => {
     const a = await get(path);
     if (a.status !== 200) throw new Error(`discovering the selection: ${path} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
-    return JSON.parse(a.body);
+    // AN ANSWER NOT KEPT AS TEXT, OR NOT JSON, IS REFUSED BY NAME (verify r6): it was a bare SyntaxError.
+    if ('kept' in a && a.kept !== undefined && a.kept !== 'text') throw new Error(`discovering the selection: ${path} answered ${a.bytes} bytes, past the ${MAX_TEXT_BYTES} the sheet keeps as text`);
+    try {
+      return JSON.parse(a.body);
+    } catch (why) {
+      throw new Error(`discovering the selection: ${path} answered HTTP 200 with a body that is not JSON (${/** @type {Error} */ (why).message})`);
+    }
   };
   let feed = args.feed;
   if (feed === null) {
@@ -622,7 +752,12 @@ export async function fieldCheck(send, requests) {
         out.unchecked.push(`the field ${field} of ${method} ${r.url} (${r.page}): its garbled value was answered busy (HTTP ${probe.status}), which tells neither a read nor an ignore`);
         continue;
       }
-      garbled[field] = { status: probe.status, body: probe.body };
+      // KEPT ONLY IF IT COULD SHOW AN IGNORE (verify r6, 24 Oct): a garbled
+      // answer says a field was ignored only when it is 2xx with the very
+      // bytes of the original, so it is kept as the original's own text, and
+      // any other is dropped here. The check holds the original and one
+      // answer at a time, never one answer a field.
+      if (ok(probe.status) && probe.body === first.body) garbled[field] = { status: probe.status, body: first.body };
     }
     if (unasked.length > 0) out.unchecked.push(`the fields ${unasked.join(', ')} of ${method} ${r.url} (${r.page}): not asked garbled, after an earlier garbled ask of it had ${cut}`);
     if (method === 'HEAD') {
@@ -699,6 +834,9 @@ export function signalGroup(child, signal) {
 
 /** How long a command the sheet ends has to leave after SIGTERM before its group is sent SIGKILL, ms: the harness's wait for a browser. */
 export const COMMAND_STOP_MS = 5_000;
+
+/** What {@link run}'s stop says of a group that SIGTERM did not end: it was killed. */
+export const KILLED = `was sent SIGTERM and, still running ${COMMAND_STOP_MS} ms later, SIGKILL`;
 
 /**
  * Every command this process started that has not exited yet. If the sheet
@@ -798,7 +936,7 @@ export function run(command) {
       signalGroup(child, 'SIGKILL');
       await exitsWithin(COMMAND_STOP_MS);
       await groupLeft(COMMAND_STOP_MS);
-      return `was sent SIGTERM and, still running ${COMMAND_STOP_MS} ms later, SIGKILL`;
+      return KILLED;
     }
   };
 }
@@ -957,7 +1095,9 @@ export async function runSheet(args, deps = {}) {
   /** @type {SheetRow[]} */
   const rows = [];
   // A LARGE ANSWER IS TIMED BY ONE CLIENT AT A TIME, and every client count
-  // it skips is said: its cold row's largest answer decides.
+  // it skips is said: its cold row's largest answer decides. A timed row no
+  // longer holds its answers (verify r6), so what many at once would cost is
+  // the server's and the wire's: the bytes asked of the server at once.
   /** @type {Map<SheetRequest, number>} */
   const large = new Map();
   /** @param {number} clients @param {string} phase */
@@ -968,7 +1108,7 @@ export async function runSheet(args, deps = {}) {
     }
     const bytes = large.get(r);
     if (clients === 1 || bytes === undefined) return true;
-    notMeasured.push(`${phase} at ${clients} clients: ${r.method} ${r.url} answered ${bytes} bytes, past --max-answer-bytes ${args.maxAnswerBytes}; ${clients} at once would hold ${clients * bytes} bytes in this process, so it is timed at one client only`);
+    notMeasured.push(`${phase} at ${clients} clients: ${r.method} ${r.url} answered ${bytes} bytes, past --max-answer-bytes ${args.maxAnswerBytes}; ${clients} at once would ask ${clients * bytes} bytes of the server at once, so it is timed at one client only`);
     return false;
   });
   /** One row, timed; a row its request ended is said, and the request asked no more. @param {SheetRequest} r @param {{n: number, clients: number, phase: string, agentOf: () => http.Agent | false, timeoutMs: number}} o */
@@ -1003,14 +1143,20 @@ export async function runSheet(args, deps = {}) {
     if (exited) failures.push('the --writer command ended before the warm+writer pass did: part of that pass ran with nothing writing');
     // ITS WHOLE GROUP, BOUNDED: a SIGTERM to its shell alone left what the
     // shell started still writing after the sheet ended (verify r5 follow-up).
-    log(`speed sheet: the --writer command's process group ${await writer.stop()}`);
+    const how = await writer.stop();
+    log(`speed sheet: the --writer command's process group ${how}`);
+    // A WRITER KILLED IS SAID IN THE SHEET (verify r6 follow-up, 24 Oct): it was said on stderr only.
+    if (how === KILLED) failures.push(`the --writer command's process group ${how}: what it was writing was ended by force, not asked to stop`);
   }
   if (args.restart === null) notMeasured.push(`first after restart: no --restart command was given (${args.restarts} restarts asked)`);
   else {
-    /** @type {Map<string, number[]>} */
+    /**
+     * Each request's answers after the restarts, kept as a timed row keeps
+     * its own: times, classes, the builds they named, the bytes.
+     *
+     * @type {Map<string, {times: number[], classes: Record<string, number>, builds: Set<string>, unnamed: number, bytes: number, said: string | null}>}
+     */
     const firsts = new Map();
-    /** @type {Map<string, Record<string, number>>} each request's answers after the restarts, by class */
-    const firstClasses = new Map();
     let ran = 0;
     /** @type {string | null} why the pass ended before its last restart */
     let ended = null;
@@ -1025,47 +1171,87 @@ export async function runSheet(args, deps = {}) {
       // THE UP WAIT IS --up-wait-ms IN ALL, on a clock that never steps
       // back: each check within it waits at most the time left.
       const t0 = performance.now();
-      let up = false;
-      for (let left = args.upWaitMs; left > 0 && !up; left = args.upWaitMs - (performance.now() - t0)) {
-        up = (await send(UP_ROUTE, { method: UP_METHOD, timeoutMs: Math.max(1, Math.min(args.timeoutMs, Math.ceil(left))) })).status === 200;
-        if (!up) await sleep(Math.max(0, Math.min(250, args.upWaitMs - (performance.now() - t0))));
+      /** @type {Answer | NoAnswer | null} the up check that found the server up */
+      let up = null;
+      for (let left = args.upWaitMs; left > 0 && up === null; left = args.upWaitMs - (performance.now() - t0)) {
+        const a = await send(UP_ROUTE, { method: UP_METHOD, timeoutMs: Math.max(1, Math.min(args.timeoutMs, Math.ceil(left))) });
+        if (a.status === 200) up = a;
+        else await sleep(Math.max(0, Math.min(250, args.upWaitMs - (performance.now() - t0))));
       }
-      if (!up) {
+      if (up === null) {
         failures.push(`restart ${i + 1}: the server was not up ${args.upWaitMs} ms after the restart`);
         ended = `the server was not up after restart ${i + 1}`;
         break;
       }
+      // THE BUILD THAT CAME BACK IS NAMED (verify r6, 24 Oct): the up check
+      // read only the status, so a restart that brought the server back as
+      // another build passed, every row stamped with the run's commit. A
+      // server back as another build ends the pass: what it would time is not
+      // the run's build.
+      log(`speed sheet: restart ${i + 1}: up ${Math.round(performance.now() - t0)} ms after the command, answered by ${up.build ?? 'no named build'}`);
+      const back = otherBuild(up.build, commit);
+      if (back !== null) {
+        failures.push(`restart ${i + 1}: the server came back as ${back} (its ${UP_METHOD} ${UP_ROUTE} said so)`);
+        ended = `the server came back as another build than the run's at restart ${i + 1}`;
+        break;
+      }
       ran += 1;
+      let switched = false;
       for (const r of requests) {
         if (stalled.has(keyOf(r))) continue;
-        const a = await send(r.url, { method: r.method });
+        const a = await send(r.url, { method: r.method, keep: 'head' });
         const key = keyOf(r);
-        firsts.set(key, [...(firsts.get(key) ?? []), a.ms]);
-        const counted = firstClasses.get(key) ?? {};
-        counted[classOf(a)] = (counted[classOf(a)] ?? 0) + 1;
-        firstClasses.set(key, counted);
-        if (classOf(a) !== 'answered') failures.push(`restart ${i + 1}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
+        const f = firsts.get(key) ?? { times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
+        firsts.set(key, f);
+        f.times.push(a.ms);
+        const k = classOf(a);
+        f.classes[k] = (f.classes[k] ?? 0) + 1;
+        if (a.build !== null) f.builds.add(a.build);
+        else if (a.status !== 0) f.unnamed += 1;
+        f.bytes = Math.max(f.bytes, a.bytes);
+        if (k !== 'answered') {
+          failures.push(`restart ${i + 1}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
+          f.said ??= 'error' in a ? a.error : `HTTP ${a.status}: ${a.body.slice(0, 300)}`;
+        }
+        // EACH ANSWER NAMES ITS BUILD: one whose headers came from another
+        // build than the run's fails by name, the restart with it.
+        const by = a.status === 0 && a.build === null ? null : otherBuild(a.build, commit);
+        if (by !== null) {
+          failures.push(`restart ${i + 1}: ${r.method} ${r.url} was answered by ${by}`);
+          switched = true;
+        }
         if ('timedOut' in a && a.timedOut) stall(r, `the first ask after restart ${i + 1}`, a.error);
+      }
+      if (switched) {
+        ended = `an answer after restart ${i + 1} came from another build than the run's`;
+        break;
       }
     }
     if (ended !== null) notMeasured.push(`first after restart: timed after ${ran} of the ${args.restarts} restarts asked: ${ended}`);
     for (const r of requests) {
       const key = keyOf(r);
-      const times = firsts.get(key);
-      if (times === undefined) {
+      const f = firsts.get(key);
+      if (f === undefined) {
         if (ran > 0) notMeasured.push(skipLine('first after restart', r));
         continue;
       }
-      const s = summary(times);
+      const s = summary(f.times);
       if (s.n < ran) notMeasured.push(`first after restart: ${r.method} ${r.url} was asked after ${s.n} of the ${ran} restarts run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(key)}, and is asked no more`);
-      // The classes are counted here as in every other row, so a restart row
-      // never prints "0 answered" for twenty answers.
-      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: firstClasses.get(key) ?? {}, builds: commit ? [commit] : [], bytes: 0, said: null, cut: null, notAsked: 0 });
+      // EACH RESTART ROW IS ITS OWN ANSWERS' (verify r6, 24 Oct): it was
+      // stamped with the run's commit and 0 bytes whatever answered it. Its
+      // classes, builds and bytes are counted as every other row's are.
+      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: f.classes, builds: [...f.builds], unnamed: f.unnamed, bytes: f.bytes, said: f.said, cut: null, notAsked: 0 });
     }
   }
   for (const row of rows) {
-    if (row.builds.length > 1) failures.push(`${row.url} (${row.phase}, ${row.clients} clients) was answered by ${row.builds.length} builds: ${row.builds.join(', ')}`);
-    else if (row.phase !== 'first after restart' && commit !== null && row.builds[0] !== commit) failures.push(`${row.url} (${row.phase}) was answered by ${row.builds[0] ?? 'no named build'}, not ${commit}`);
+    // AN ANSWER THAT NAMED NO BUILD IS ONE BUILD MORE beside those that named
+    // one (verify r6): a server swapped for one that stamps nothing passed.
+    const named = row.unnamed > 0 && row.builds.length > 0 ? [...row.builds, `no named build (${row.unnamed} of its answers)`] : row.builds;
+    if (named.length > 1) failures.push(`${row.url} (${row.phase}, ${row.clients} clients) was answered by ${named.length} builds: ${named.join(', ')}`);
+    else if (row.phase !== 'first after restart') {
+      const by = otherBuild(row.builds[0] ?? null, commit);
+      if (by !== null) failures.push(`${row.url} (${row.phase}) was answered by ${by}`);
+    }
     // A restart row's answers were each failed by name, restart by restart, above.
     if (row.phase === 'first after restart') continue;
     for (const k of ['failed', 'no answer', 'refused']) {
@@ -1096,7 +1282,9 @@ export function renderSheet(result, args) {
   ];
   for (const r of result.rows) {
     const c = (/** @type {string} */ k) => String(r.classes[k] ?? 0);
-    const commit = r.builds.length === 1 ? r.builds[0].slice(0, 12) : r.builds.length === 0 ? 'not named' : 'MIXED';
+    // Answers that named no build beside some that named one are a second build (verify r6).
+    const named = r.builds.length + (r.unnamed > 0 && r.builds.length > 0 ? 1 : 0);
+    const commit = named === 1 ? r.builds[0].slice(0, 12) : named === 0 ? 'not named' : 'MIXED';
     lines.push(`| ${commit} | ${r.page} | \`${r.route}\` | ${r.label || r.builder} | ${r.phase} | ${r.clients} | ${r.n} | ${msText(r.p50)} | ${msText(r.p99)} | ${msText(r.max)} | ${c('answered')} | ${c('refused')} | ${c('busy')} | ${c('failed')} | ${c('no answer')} | ${r.bytes} |`);
   }
   lines.push('');
@@ -1153,27 +1341,91 @@ export function writeWhole(path, text) {
   }
 }
 
+/**
+ * Why a file the run will write at its end cannot be written, or `''`: its
+ * directory must exist, be a directory and take a new file, and the path
+ * must not be a directory itself. Asked before the run starts, so a run is
+ * never thrown away at its end for a path it could have refused at once
+ * (verify r4 follow-up: a `--capture` that could not be written ended the
+ * harness's run with exit 2 and no sheet, after the whole run; verify r6
+ * follow-up: the sheet's `--out` was looked at only at the end). The
+ * harness reads it from here.
+ *
+ * @param {string} option `--out` or `--capture`
+ * @param {string} path
+ */
+export function unwritable(option, path) {
+  const dir = dirname(path);
+  try {
+    if (!statSync(dir).isDirectory()) return `${option} ${path}: ${dir} is not a directory`;
+    accessSync(dir, constants.W_OK);
+  } catch (why) {
+    return `${option} ${path}: ${dir} cannot take a new file: ${/** @type {Error} */ (why).message}`;
+  }
+  try {
+    if (statSync(path).isDirectory()) return `${option} ${path} is a directory`;
+  } catch {
+    // Not there yet: the file is made whole at the end (writeWhole).
+  }
+  return '';
+}
+
+/** How long a command's end waits for stdout to take its whole sheet, ms. */
+export const STDOUT_WAIT_MS = 60_000;
+
+/**
+ * Writes `text` to `stream` and resolves once the stream has taken it, so
+ * the process may then exit (verify r6 follow-up, 24 Oct: `process.exit`
+ * right after `process.stdout.write` cut a piped sheet past 64 KB on macOS,
+ * 73,728 of 101,986 B, and the FAILED lines, printed last, were the ones
+ * lost). Bounded: a reader that has not taken it within `ms` is said on
+ * stderr, by name, and the promise resolves `false`.
+ *
+ * @param {NodeJS.WritableStream} stream
+ * @param {string} text
+ * @param {string} name the command, for the line on stderr
+ * @param {number} [ms]
+ * @returns {Promise<boolean>}
+ */
+export function written(stream, text, name, ms = STDOUT_WAIT_MS) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      process.stderr.write(`${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost\n`);
+      resolve(false);
+    }, ms);
+    stream.write(text, () => {
+      clearTimeout(t);
+      resolve(true);
+    });
+  });
+}
+
 async function main() {
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
+    // CHECKED BEFORE THE RUN, as the harness checks its outputs (verify r6 follow-up).
+    const why = args.out === null ? '' : unwritable('--out', args.out);
+    if (why !== '') throw new Error(why);
   } catch (why) {
     console.error(`speed-sheet: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
   const result = await runSheet(args);
   const text = renderSheet(result, args);
-  process.stdout.write(text);
+  const flushed = written(process.stdout, text, 'speed-sheet');
+  let code = result.ok ? 0 : 1;
   if (args.out) {
     try {
       writeWhole(args.out, text);
     } catch (why) {
       // The sheet is on stdout already; the file that could not be written is named, never a stack.
       console.error(`speed-sheet: ${/** @type {Error} */ (why).message}`);
-      process.exit(2);
+      code = 2;
     }
   }
-  process.exit(result.ok ? 0 : 1);
+  await flushed;
+  process.exit(code);
 }
 
 if (import.meta.url === pathToFileURL(String(process.argv[1])).href) await main();

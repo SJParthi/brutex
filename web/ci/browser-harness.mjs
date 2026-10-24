@@ -93,9 +93,9 @@
  * or no browser.
  */
 import { spawn } from 'node:child_process';
-import { accessSync, constants as fsConstants, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve as resolvePath } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { PAGE_TARGETS, MEASURED_PAGES, summary, routePath } from '../src/lib/speed.js';
@@ -105,12 +105,14 @@ import { BUILD_HEADER } from '../src/lib/runtime-inspection.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
 import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
 import { linkOfKey } from '../src/lib/db/selection-model.js';
-import { writeWhole, MAX_WAIT_MS, DECIMAL, GROUP_POLL_MS, groupRunning, signalGroup } from './speed-sheet.mjs';
+import { writeWhole, MAX_WAIT_MS, DECIMAL, GROUP_POLL_MS, groupRunning, signalGroup, sameFile, unwritable, written } from './speed-sheet.mjs';
 
 // The longest wait a Node timer holds, and the sheet's own reading of a whole
 // number: one rule for both commands (`speed-sheet.mjs` says why). The
-// process-group stop is one rule too: the browser here, a command there.
-export { MAX_WAIT_MS, GROUP_POLL_MS, groupRunning, signalGroup };
+// process-group stop is one rule too: the browser here, a command there; and
+// so are the output checks, one file by its device and inode, and the end's
+// bounded wait for stdout.
+export { MAX_WAIT_MS, GROUP_POLL_MS, groupRunning, signalGroup, sameFile, unwritable };
 
 /** Where a browser is looked for when `--chrome` and `BRUTEX_CHROME` say nothing. */
 export const CHROME_PATHS = Object.freeze([
@@ -504,8 +506,9 @@ export function parseArgs(argv) {
   const instrument = String(o.instrument ?? EDGE_INSTRUMENT);
   if (rungsUrl(instrument) === null || linkOfKey(instrument) === null) throw new Error(`--instrument ${JSON.stringify(instrument)} is not an instrument key (NSE-INDEX-NIFTY, NSE-EQ-RELIANCE, ...)`);
   // ONE FILE IS NOT BOTH (verify r5 follow-up, 23 Oct: --out and --capture
-  // naming one path left the sheet where the capture was, and exit 0).
-  if (o.out !== undefined && o.capture !== undefined && resolvePath(String(o.out)) === resolvePath(String(o.capture))) {
+  // naming one path left the sheet where the capture was, and exit 0). By
+  // the file, not its spelling (verify r6 follow-up): `sameFile`.
+  if (o.out !== undefined && o.capture !== undefined && sameFile(String(o.out), String(o.capture))) {
     throw new Error(`--out and --capture name one file (${String(o.out)}): the sheet would be written over the capture`);
   }
   return {
@@ -859,6 +862,12 @@ function tracked(child, profile) {
 }
 
 /**
+ * The most of the browser's stderr a launch keeps, characters: its last
+ * lines, searched for the DevTools address and quoted when it never comes.
+ */
+export const STDERR_TAIL = 8_192;
+
+/**
  * Starts the browser headless on a debugging port it picks, in a new
  * profile directory under `root`, and connects. `close()` stops the browser
  * and waits for it to leave, then removes the profile; a launch that fails
@@ -886,16 +895,27 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = 
   let ws;
   try {
     const url = await new Promise((resolve, reject) => {
+      // ONLY ITS LAST STDERR_TAIL CHARACTERS ARE KEPT AND SEARCHED, and none
+      // once the address is found (verify r6 follow-up, 24 Oct: the whole of
+      // the browser's stderr was kept for the run and searched again on every
+      // chunk). The line must be whole, so an address cut between two chunks
+      // is never taken.
       let text = '';
       const timer = setTimeout(() => reject(new Error(`the browser printed no DevTools address in ${waitMs} ms: ${text.slice(-400)}`)), waitMs);
-      child.stderr?.on('data', (c) => {
-        text += c;
-        const m = /DevTools listening on (ws:\/\/\S+)/.exec(text);
+      /** @param {Buffer | string} c */
+      const heard = (c) => {
+        text = (text + c).slice(-STDERR_TAIL);
+        const m = /DevTools listening on (ws:\/\/\S+)\r?\n/.exec(text);
         if (m) {
           clearTimeout(timer);
+          // Read on and keep nothing: a browser that writes to a pipe nobody reads blocks once it is full.
+          child.stderr?.removeListener('data', heard);
+          child.stderr?.resume();
+          text = '';
           resolve(m[1]);
         }
-      });
+      };
+      child.stderr?.on('data', heard);
       child.on('error', (why) => {
         clearTimeout(timer);
         reject(new Error(`the browser could not be started: ${why.message}`));
@@ -1364,8 +1384,9 @@ export function captured(page, requests, base) {
  * @param {string} base
  * @param {number} settleMs
  * @param {number} [loadWaitMs]
+ * @param {(tab: {errors: string[]}) => void} [hear] given the tab before it closes, so its uncaught errors are heard
  */
-async function reportCheck(cdp, base, settleMs, loadWaitMs = LOAD_WAIT_MS) {
+async function reportCheck(cdp, base, settleMs, loadWaitMs = LOAD_WAIT_MS, hear = () => undefined) {
   const tab = await openTab(cdp, undefined);
   try {
     const opened = await loadOnce(tab, cdp, `${base}/speed`, settleMs, loadWaitMs);
@@ -1390,6 +1411,7 @@ async function reportCheck(cdp, base, settleMs, loadWaitMs = LOAD_WAIT_MS) {
       ? { row: `a failed ${marker} was reported (202) and found in /logs.json`, failures: [] }
       : { row: 'the report was written and not found in the log', failures: [`the report of the failed ${marker} was answered 202 and is not in /logs.json?target=api.page.access`] };
   } finally {
+    hear(tab);
     await tab.close();
   }
 }
@@ -1699,19 +1721,30 @@ export async function runHarness(args) {
       }
     }
     if (args.reportCheck) {
-      const r = await reportCheck(cdp, args.base, args.settleMs, args.loadWaitMs);
+      // Its tab is one the run opens, so its uncaught errors are heard (verify r6 follow-up, R315-30).
+      const r = await reportCheck(cdp, args.base, args.settleMs, args.loadWaitMs, (tab) => heard('the shared reporter check', tab));
       lines.push('', `Shared reporter: ${r.row}.`);
       failures.push(...r.failures);
     }
     for (const hook of args.hooks) {
       const mod = await import(pathToFileURL(hook).href);
-      // A hook's tabs are the run's tabs: `--read-only` holds for them too.
+      /** @type {{errors: string[]}[]} every tab the hook opened, heard once it has returned */
+      const hookTabs = [];
+      // A hook's tabs are the run's tabs: `--read-only` holds for them too, and their uncaught errors are heard.
       /** @type {typeof openTab} */
-      const hookTab = (c, context, options = {}) => openTab(c, context, { readOnly: args.readOnly, base: args.base, writes, ...options });
-      /** @type {{rows?: string[], failures?: string[]}} */
-      const out = (await mod.default({ cdp, base: args.base, settleMs: args.settleMs, openTab: hookTab, loadOnce })) ?? {};
-      lines.push('', `Hook ${hook}:`, ...(out.rows ?? []));
-      failures.push(...(out.failures ?? []));
+      const hookTab = async (c, context, options = {}) => {
+        const tab = await openTab(c, context, { readOnly: args.readOnly, base: args.base, writes, ...options });
+        hookTabs.push(tab);
+        return tab;
+      };
+      try {
+        /** @type {{rows?: string[], failures?: string[]}} */
+        const out = (await mod.default({ cdp, base: args.base, settleMs: args.settleMs, openTab: hookTab, loadOnce })) ?? {};
+        lines.push('', `Hook ${hook}:`, ...(out.rows ?? []));
+        failures.push(...(out.failures ?? []));
+      } finally {
+        for (const tab of hookTabs) heard(`hook ${hook}`, tab);
+      }
     }
   } catch (why) {
     // A RUN THAT COULD NOT FINISH IS SAID, AND ITS SHEET IS STILL WRITTEN: the
@@ -1789,33 +1822,6 @@ export function renderHarness(result, args) {
   return [`# Browser harness — ${result.ok ? 'PASS' : 'FAIL'}`, '', `n = ${args.n} cold and ${args.n} warm loads a page against ${args.base}, ${by}.`, '', ...result.lines, '', ...result.notes.map((n) => `- ${n}`), ...result.failures.map((f) => `- FAILED: ${f}`), ''].join('\n');
 }
 
-/**
- * Why a file the run will write at its end cannot be written, or `''`: its
- * directory must exist, be a directory and take a new file, and the path
- * must not be a directory itself. Asked before the browser starts, so a run
- * is never thrown away at its end for a path it could have refused at once
- * (verify r4 follow-up: a `--capture` that could not be written ended the
- * run with exit 2 and no sheet, after the whole run).
- *
- * @param {string} option `--out` or `--capture`
- * @param {string} path
- */
-export function unwritable(option, path) {
-  const dir = dirname(path);
-  try {
-    if (!statSync(dir).isDirectory()) return `${option} ${path}: ${dir} is not a directory`;
-    accessSync(dir, fsConstants.W_OK);
-  } catch (why) {
-    return `${option} ${path}: ${dir} cannot take a new file: ${/** @type {Error} */ (why).message}`;
-  }
-  try {
-    if (statSync(path).isDirectory()) return `${option} ${path} is a directory`;
-  } catch {
-    // Not there yet: the file is made whole at the end (writeWhole).
-  }
-  return '';
-}
-
 async function main() {
   let args;
   try {
@@ -1836,17 +1842,20 @@ async function main() {
     process.exit(2);
   }
   const text = renderHarness(result, args);
-  process.stdout.write(text);
+  // EXIT ONLY ONCE STDOUT HAS THE WHOLE SHEET (verify r6 follow-up): a piped sheet past 64 KB was cut at the exit.
+  const flushed = written(process.stdout, text, 'browser-harness');
+  let code = result.ok ? 0 : 1;
   if (args.out) {
     try {
       writeWhole(args.out, text);
     } catch (why) {
       // The sheet is on stdout already; the file that could not be written is named.
       console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
-      process.exit(2);
+      code = 2;
     }
   }
-  process.exit(result.ok ? 0 : 1);
+  await flushed;
+  process.exit(code);
 }
 
 if (import.meta.url === pathToFileURL(String(process.argv[1])).href) await main();

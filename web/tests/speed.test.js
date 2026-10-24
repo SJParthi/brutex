@@ -881,9 +881,10 @@ test('a large answer is timed by one client at a time and kept as its digest, ea
   assert.equal(run.rows.filter((r) => r.phase === 'warm' && r.clients === 1).length, cold.length, 'one client times every request');
   assert.deepEqual(run.rows.filter((r) => r.phase === 'warm' && r.clients === 2).map((r) => r.url), cold.filter((r) => r.bytes <= 40).map((r) => r.url), 'two at once time only what is inside the bound');
   for (const r of big) {
-    assert.ok(run.notMeasured.includes(`warm at 2 clients: ${r.url.startsWith('/inspection') ? 'HEAD' : 'GET'} ${r.url} answered ${r.bytes} bytes, past --max-answer-bytes 40; 2 at once would hold ${2 * r.bytes} bytes in this process, so it is timed at one client only`), r.url);
+    // Repair 6: a timed row holds no answer, so the reason is what many at once would ask of the server.
+    assert.ok(run.notMeasured.includes(`warm at 2 clients: ${r.url.startsWith('/inspection') ? 'HEAD' : 'GET'} ${r.url} answered ${r.bytes} bytes, past --max-answer-bytes 40; 2 at once would ask ${2 * r.bytes} bytes of the server at once, so it is timed at one client only`), r.url);
   }
-  assert.match(sheet.renderSheet(run, argsFor()), /NOT MEASURED: warm at 2 clients: GET \/census\/facets\.json\?feed=zerodha answered 59 bytes, past --max-answer-bytes 40; 2 at once would hold 118 bytes in this process/);
+  assert.match(sheet.renderSheet(run, argsFor()), /NOT MEASURED: warm at 2 clients: GET \/census\/facets\.json\?feed=zerodha answered 59 bytes, past --max-answer-bytes 40; 2 at once would ask 118 bytes of the server at once/);
   // Inside the bound (the default), nothing is skipped.
   const all = await sheet.runSheet(argsFor(), { send: server.send, log: () => {}, capture: JSON.stringify({ requests: [] }) });
   assert.equal(all.rows.filter((r) => r.phase === 'warm' && r.clients === 2).length, cold.length);
