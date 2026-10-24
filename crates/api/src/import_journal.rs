@@ -574,7 +574,8 @@ impl Parsed {
                 match u32::try_from(self.runs.len()) {
                     Ok(at) => {
                         self.runs_by_id.entry(id).or_default().push(at);
-                        let _first_kept = self.runs_by_start.entry((run.started(), id)).or_insert(at);
+                        let _first_kept =
+                            self.runs_by_start.entry((run.started(), id)).or_insert(at);
                     }
                     Err(_) => self.runs_unindexed = self.runs_unindexed.saturating_add(1),
                 }

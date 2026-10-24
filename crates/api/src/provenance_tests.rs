@@ -1193,7 +1193,10 @@ fn ascending_merges_two_ordered_lists() {
 /// makes it.
 fn key_row(filter: &str) -> DayRow {
     let root = super::super::import_journal::tests::journal(
-        &format!("provenance-key-{}", filter.replace(['*', ',', '+', '.'], "_")),
+        &format!(
+            "provenance-key-{}",
+            filter.replace(['*', ',', '+', '.'], "_")
+        ),
         &format!("begin indices 2019-03-01 {filter}\n"),
     );
     let snapshot = super::super::import_journal::snapshot(&root).expect("reads");
@@ -1217,9 +1220,15 @@ fn a_filter_takes_a_symbol_by_its_exact_name() {
     assert!(!filter_holds(&key_row("BANKNIFTY"), "NIFTY"));
     let member = key_row("*+NSE-INDEX-NIFTYIT");
     assert!(filter_holds(&member, "NIFTYIT"));
-    assert!(!filter_holds(&member, "NIFTY"), "the member's, not the base's");
+    assert!(
+        !filter_holds(&member, "NIFTY"),
+        "the member's, not the base's"
+    );
     let share = key_row("*+NSE-CASH-ZZSHARE.BE");
-    assert!(filter_holds(&share, "ZZSHARE"), "its series is its share's day");
+    assert!(
+        filter_holds(&share, "ZZSHARE"),
+        "its series is its share's day"
+    );
     assert!(!filter_holds(&share, "ZZSHARE.BE"));
 }
 

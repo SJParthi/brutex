@@ -607,7 +607,9 @@ impl Census {
                 reason: "ignored",
                 count: census.ignored,
                 named: Vec::new(),
-                unnamed: Some("the archive counts an entry that is not a day zip and keeps no name"),
+                unnamed: Some(
+                    "the archive counts an entry that is not a day zip and keeps no name",
+                ),
             },
             Counted {
                 reason: "misfiled",
@@ -666,7 +668,9 @@ impl Census {
         match (kind.source, kind.kind) {
             (gdfl_run::SourceId::CmZip, _) => match pull::gdfl_archive::Archive::open(&kind.root) {
                 Ok(archive) => Self::of_archive(archive.census()),
-                Err(why) => Self::None(format!("the archive could not be opened to count it: {why}")),
+                Err(why) => Self::None(format!(
+                    "the archive could not be opened to count it: {why}"
+                )),
             },
             (gdfl_run::SourceId::TickStore, ImportKind::Options) => {
                 Self::of_ticks(pull::gdfl_nfo::NfoTickStore::new(&kind.root).table())

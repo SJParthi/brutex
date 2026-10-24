@@ -84167,12 +84167,16 @@ with no registry block writes `D-TBD-<NAME>-n`).
    reach's `from` counts the open member keys of the asked days and names the
    first, so `/gaps.json`'s `imported_to_from` tells its reader a member's
    day may be unimported rather than nothing.
-2. **A member key's close owns every refusal of its own window as its
-   member's** on the day band (`dayflags::refusals_of`): a member close read
-   only its member's files (D-4878, `admit` row 1), so a refusal it owns is
-   about that instrument, whatever `about_this` can decode of a stored
-   index's or share's file name (it decodes swept underlyings only). Without
-   this a stored index's hole read on `/db` as "incomplete for other files".
+2. **A member key's refusal is its member's when `pull` names the refused
+   file that member** on the day band (`dayflags::refusals_of`): beside
+   `about_this`, which decodes swept underlyings only, a refusal on a day
+   that stands on this instrument's member key is this instrument's when
+   `pull::gdfl_cm::CmScope::member_of` (the stored scope `provenance` uses,
+   built once a request and only when such a day is shown) maps its file to
+   that very member. The run's window alone never decides it: one run that
+   reopened two members of a day logs both members' refusals in one window.
+   Without this a stored index's hole read on `/db` as "incomplete for other
+   files".
 3. **The receipt reads its source's census once more, read only, after the
    run** (`cli gdfl-import`, D-4817 on the receipt, D-6900 item 7a): the
    run's own reader lives inside `pull::gdfl_run`, whose files this part

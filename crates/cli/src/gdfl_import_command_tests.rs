@@ -1249,12 +1249,18 @@ fn a_source_census_is_named_on_the_receipt() {
         lines[0],
         "  source census       cm_zip: ignored 2, misfiled 17, invalid 1 (D-4817)"
     );
-    assert!(lines[1].starts_with("    ignored           2 (the archive counts"), "{out}");
+    assert!(
+        lines[1].starts_with("    ignored           2 (the archive counts"),
+        "{out}"
+    );
     assert!(
         lines[2].starts_with("    misfiled          17: ZZ/zz00.zip ZZ/zz01.zip"),
         "{out}"
     );
-    assert!(lines[2].ends_with("ZZ/zz15.zip and 1 more, counted"), "{out}");
+    assert!(
+        lines[2].ends_with("ZZ/zz15.zip and 1 more, counted"),
+        "{out}"
+    );
     assert_eq!(lines[3], "    invalid           1: ZZ_IDX_31022019.zip");
     assert_eq!(lines.len(), 4, "{out}");
 
@@ -1278,7 +1284,10 @@ fn a_source_census_is_named_on_the_receipt() {
         "{out}"
     );
     assert!(out.contains("    misfiled          3 (each is named on its own day's refusal"));
-    assert!(out.contains("    stray             1: cm/zz-stray.txt\n"), "{out}");
+    assert!(
+        out.contains("    stray             1: cm/zz-stray.txt\n"),
+        "{out}"
+    );
     assert!(out.contains("    walk stopped      1: "), "{out}");
 
     let mut out = String::new();
@@ -1287,13 +1296,15 @@ fn a_source_census_is_named_on_the_receipt() {
         gdfl_run::SourceId::NfoZips,
         &Census::None("zz no census kept".to_owned()),
     );
-    assert_eq!(out, "  source census       nfo_zips: none (zz no census kept)\n");
+    assert_eq!(
+        out,
+        "  source census       nfo_zips: none (zz no census kept)\n"
+    );
     let empty = Census::of_archive(&pull::gdfl_archive::ArchiveCensus::default());
     let mut out = String::new();
     render_census(&mut out, gdfl_run::SourceId::CmZip, &empty);
     assert_eq!(
-        out,
-        "  source census       cm_zip: ignored 0, misfiled 0, invalid 0 (D-4817)\n",
+        out, "  source census       cm_zip: ignored 0, misfiled 0, invalid 0 (D-4817)\n",
         "a reason with none prints its count alone"
     );
 
@@ -1317,7 +1328,10 @@ fn a_source_census_is_named_on_the_receipt() {
         out.contains("  source census       tickstore: misfiled 0, stray 1 (D-4817)\n"),
         "{out}"
     );
-    assert!(out.contains("    stray             1: cm/zz-stray.txt"), "{out}");
+    assert!(
+        out.contains("    stray             1: cm/zz-stray.txt"),
+        "{out}"
+    );
     // The receipt also carries the horizon as today's clock sees it.
     let mut horizon = String::new();
     render_horizon(&mut horizon, today_ist());

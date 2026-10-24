@@ -156,7 +156,7 @@ fn member_day_journal() -> String {
         key(
             "incomplete",
             "2019-03-01",
-            "*+NSE-INDEX-NIFTYNXT50",
+            "*+NSE-INDEX-NIFTYNEXT50",
             &format!("stage=file reason=bars_differ_held run={RUN_MEMBER}"),
         ),
         key(
@@ -210,6 +210,17 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
             "NIFTY IT.NSE_IDX.csv",
             "zz the month already passed",
         ),
+        // The other member's, logged by the same run in the same window:
+        // the window alone cannot say whose it is; `pull`'s member of the
+        // file does.
+        refused(
+            3,
+            RUN_MEMBER * 1_000 + 6_000,
+            Some(RUN_MEMBER),
+            "2019-03-01",
+            "NIFTY NEXT 50.NSE_IDX.csv",
+            "zz a held bar differs",
+        ),
     ]
     .concat();
     let root = store("jr01", &member_day_journal(), &ring);
@@ -248,9 +259,9 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
             ),
             (
                 "2019-03-01",
-                "*+NSE-INDEX-NIFTYNXT50",
+                "*+NSE-INDEX-NIFTYNEXT50",
                 "*",
-                json!("NSE-INDEX-NIFTYNXT50"),
+                json!("NSE-INDEX-NIFTYNEXT50"),
                 json!({ "reason": "bars_differ_held", "repairable": false }),
             ),
             (
@@ -265,7 +276,10 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
     );
     assert_eq!(rows(&got)[1]["member_symbol"], "NIFTYIT");
     assert_eq!(got["counts"]["done"], 2, "{}", got["counts"]);
-    assert_eq!(got["counts"]["incomplete"], 0, "a hole is not a plain incomplete");
+    assert_eq!(
+        got["counts"]["incomplete"], 0,
+        "a hole is not a plain incomplete"
+    );
     assert_eq!(got["counts"]["refused"], 0, "{}", got["counts"]);
     assert_eq!(
         holes(&got),
@@ -279,21 +293,19 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
     );
     assert_eq!(got["holes_unrepairable"], 1);
     assert!(
-        got["notes"]
-            .as_array()
+        got["notes"].as_array().unwrap().iter().any(|note| note
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|note| note.as_str().unwrap().starts_with("2 row(s) closed `incomplete` are store holes")),
+            .starts_with("2 row(s) closed `incomplete` are store holes")),
         "{:#}",
         got["notes"]
     );
     // `outcome=incomplete` lists the plain ones; `reason=` finds a hole.
     let plain = answer(&root, &ask("feed=gdfl&kind=indices&outcome=incomplete")).expect("reads");
     assert!(rows(&plain).is_empty(), "{plain:#}");
-    let by_reason =
-        answer(&root, &ask("feed=gdfl&reason=bars_differ_held")).expect("reads");
+    let by_reason = answer(&root, &ask("feed=gdfl&reason=bars_differ_held")).expect("reads");
     assert_eq!(rows(&by_reason).len(), 1);
-    assert_eq!(rows(&by_reason)[0]["member"], "NSE-INDEX-NIFTYNXT50");
+    assert_eq!(rows(&by_reason)[0]["member"], "NSE-INDEX-NIFTYNEXT50");
 
     // /audit.json?feed=gdfl, through the summary
     let brief = summary(&root);
@@ -316,9 +328,29 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
     assert_eq!(member["run"], RUN_MEMBER);
     assert_eq!(
         member["refusals"]["this_count"], 1,
-        "the member close's refusal is its member's: {member:#}"
+        "the member's own file's refusal is its own: {member:#}"
+    );
+    assert_eq!(
+        member["refusals"]["this"][0]["why"],
+        "zz the month already passed"
+    );
+    assert_eq!(
+        member["refusals"]["other_count"], 1,
+        "the other member's, in the same run's window, is not: {member:#}"
     );
     assert_eq!(band_day(&band, "2019-03-04")["import"]["outcome"], "done");
+    let next50 = day_band(
+        &root,
+        "feed=gdfl&instrument=NSE-INDEX-NIFTYNEXT50&from=2019-03-01&to=2019-03-01",
+    );
+    let other = &band_day(&next50, "2019-03-01")["import"];
+    assert_eq!(
+        other["hole"],
+        json!({ "reason": "bars_differ_held", "repairable": false }),
+        "{other:#}"
+    );
+    assert_eq!(other["refusals"]["this"][0]["why"], "zz a held bar differs");
+    assert_eq!(other["refusals"]["other_count"], 1);
     let base = day_band(
         &root,
         "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2019-03-01&to=2019-03-04",
@@ -339,7 +371,12 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
         crate::server::provenance::answer(&root, &asked)
     };
     let rebuilt = provenance("feed=gdfl&instrument=NSE-INDEX-NIFTYIT&timeframe=1s&month=2019-03");
-    assert_eq!(rebuilt.status, axum::http::StatusCode::OK, "{:#}", rebuilt.body);
+    assert_eq!(
+        rebuilt.status,
+        axum::http::StatusCode::OK,
+        "{:#}",
+        rebuilt.body
+    );
     let gdfl = &rebuilt.body["reconstruction"];
     let days: Vec<(&str, &str, Value)> = gdfl["days"]
         .as_array()
@@ -372,7 +409,11 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
         .iter()
         .map(|run| run["id"].as_u64().unwrap_or_else(|| panic!("{run:#}")))
         .collect();
-    assert_eq!(runs, [RUN_MEMBER], "no bar is credited to the `*` close's run");
+    assert_eq!(
+        runs,
+        [RUN_MEMBER],
+        "no bar is credited to the `*` close's run"
+    );
     let nifty = provenance("feed=gdfl&instrument=NSE-INDEX-NIFTY&timeframe=1s&month=2019-03");
     let nifty_days = nifty.body["reconstruction"]["days"].as_array().unwrap();
     assert_eq!(nifty_days.len(), 1, "{:#}", nifty.body);
@@ -418,10 +459,24 @@ fn a_day_bands_refusal_names_its_run_from_the_event_not_the_clock() {
     let file = "NIFTY 50.NSE_IDX.csv";
     let ring = [
         refused(1, in_b, Some(A), "2019-03-05", file, "zz said by A"),
-        refused(2, A * 1_000 - 60_000, Some(B), "2019-03-05", file, "zz said by B"),
+        refused(
+            2,
+            A * 1_000 - 60_000,
+            Some(B),
+            "2019-03-05",
+            file,
+            "zz said by B",
+        ),
         refused(3, in_b, Some(C), "2019-03-05", file, "zz said by C"),
         refused(4, in_b, None, "2019-03-05", file, "zz said by no run"),
-        refused(5, A * 1_000 + 1_000, Some(777), "2019-03-05", file, "zz said by an attempt"),
+        refused(
+            5,
+            A * 1_000 + 1_000,
+            Some(777),
+            "2019-03-05",
+            file,
+            "zz said by an attempt",
+        ),
     ]
     .concat();
     let root = store("band-run", &journal, &ring);
@@ -528,12 +583,18 @@ fn a_refusal_is_placed_by_its_own_run_and_by_time_only_without_one() {
         (Placed::Before, PlacedBy::Run),
         "the same second, told apart by the id"
     );
-    assert_eq!(by(Some(SAME + 1), Some(SAME)), (Placed::After, PlacedBy::Run));
+    assert_eq!(
+        by(Some(SAME + 1), Some(SAME)),
+        (Placed::After, PlacedBy::Run)
+    );
     assert_eq!(
         by(Some(SAME + 600), Some(SAME)),
         (Placed::After, PlacedBy::Run)
     );
-    assert_eq!(by(Some(0), Some(SAME + 1)), (Placed::Within, PlacedBy::Time));
+    assert_eq!(
+        by(Some(0), Some(SAME + 1)),
+        (Placed::Within, PlacedBy::Time)
+    );
     assert_eq!(by(None, Some(SAME + 1)), (Placed::Within, PlacedBy::Time));
     assert_eq!(
         by(Some(42), Some(SAME + 600)),
@@ -543,7 +604,10 @@ fn a_refusal_is_placed_by_its_own_run_and_by_time_only_without_one() {
     assert_eq!(by(Some(SAME), None), (Placed::Within, PlacedBy::Time));
     // The start index: the latest start at or before a moment, ties to the
     // larger id; nothing before the first run.
-    assert_eq!(parsed.run_running_at(SAME * 1_000).map(|run| run.id), Some(SAME + 1));
+    assert_eq!(
+        parsed.run_running_at(SAME * 1_000).map(|run| run.id),
+        Some(SAME + 1)
+    );
     assert_eq!(
         parsed
             .run_running_at((SAME + 600) * 1_000 + 999)
@@ -552,7 +616,11 @@ fn a_refusal_is_placed_by_its_own_run_and_by_time_only_without_one() {
     );
     assert!(parsed.run_running_at(SAME * 1_000 - 1).is_none());
     assert_eq!(parsed.started_of(SAME + 1), SAME, "its own started=");
-    assert_eq!(parsed.started_of(5), 5, "an id no line names is its own second");
+    assert_eq!(
+        parsed.started_of(5),
+        5,
+        "an id no line names is its own second"
+    );
     assert!(!parsed.holds_run(5) && parsed.holds_run(SAME));
     assert_eq!(PlacedBy::Run.as_str(), "event");
     assert_eq!(PlacedBy::Time.as_str(), "time");
@@ -575,9 +643,19 @@ fn every_hole_reason_is_a_hole_and_nothing_else_is() {
             &format!("stage=file reason={reason}"),
         ));
     }
-    journal.push_str(&key("incomplete", "2019-04-08", "*", "stage=file reason=filing"));
+    journal.push_str(&key(
+        "incomplete",
+        "2019-04-08",
+        "*",
+        "stage=file reason=filing",
+    ));
     journal.push_str(&key("incomplete", "2019-04-09", "*", ""));
-    journal.push_str(&key("refused", "2019-04-10", "*", "stage=file reason=needs_month_generation"));
+    journal.push_str(&key(
+        "refused",
+        "2019-04-10",
+        "*",
+        "stage=file reason=needs_month_generation",
+    ));
     journal.push_str(&key(
         "done",
         "2019-04-11",
@@ -586,7 +664,11 @@ fn every_hole_reason_is_a_hole_and_nothing_else_is() {
     ));
     let root = store("five", &journal, "");
     let got = answer(&root, &ask("feed=gdfl&order=asc")).expect("reads");
-    assert!(holes(&got).iter().all(|(_, n)| *n == 1), "{:#}", got["holes"]);
+    assert!(
+        holes(&got).iter().all(|(_, n)| *n == 1),
+        "{:#}",
+        got["holes"]
+    );
     assert_eq!(holes(&got).len(), 5);
     assert_eq!(got["holes_unrepairable"], 2);
     assert_eq!(got["counts"]["incomplete"], 2, "{}", got["counts"]);
@@ -594,7 +676,12 @@ fn every_hole_reason_is_a_hole_and_nothing_else_is() {
     assert_eq!(got["counts"]["done_with_refusals"], 1);
     let repairable: Vec<(Value, Value)> = rows(&got)
         .iter()
-        .map(|row| (row["hole"]["reason"].clone(), row["hole"]["repairable"].clone()))
+        .map(|row| {
+            (
+                row["hole"]["reason"].clone(),
+                row["hole"]["repairable"].clone(),
+            )
+        })
         .filter(|(reason, _)| !reason.is_null())
         .collect();
     assert_eq!(
@@ -672,7 +759,12 @@ fn a_plus_with_nothing_on_one_side_names_no_member() {
         Some(("*", "NSE-INDEX-NIFTYIT+X"))
     );
     let journal = [
-        key("incomplete", "2019-06-03", "*+", "stage=file reason=needs_month_generation"),
+        key(
+            "incomplete",
+            "2019-06-03",
+            "*+",
+            "stage=file reason=needs_month_generation",
+        ),
         key("done", "2019-06-03", "+NSE-INDEX-NIFTYIT", ""),
         key("done", "2019-06-03", "*+NSE-INDEX-NIFTYIT+X", ""),
     ]
@@ -691,7 +783,10 @@ fn a_plus_with_nothing_on_one_side_names_no_member() {
             (json!("+NSE-INDEX-NIFTYIT"), Value::Null),
         ]
     );
-    assert_eq!(got["holes"]["needs_month_generation"], 1, "a hole of a key of nobody");
+    assert_eq!(
+        got["holes"]["needs_month_generation"], 1,
+        "a hole of a key of nobody"
+    );
     let band = day_band(
         &root,
         "feed=gdfl&instrument=NSE-INDEX-NIFTYIT&from=2019-06-03&to=2019-06-03",
@@ -713,7 +808,11 @@ fn a_plus_with_nothing_on_one_side_names_no_member() {
 fn a_member_names_its_symbol_by_pulls_one_rule() {
     let scope = pull::gdfl_cm::CmScope::stored(["RUCHI", "KPIT"]).expect("a scope");
     for (kind, stem, symbol) in [
-        (pull::gdfl_cm::CmKind::Indices, "NIFTY IT.NSE_IDX", "NIFTYIT"),
+        (
+            pull::gdfl_cm::CmKind::Indices,
+            "NIFTY IT.NSE_IDX",
+            "NIFTYIT",
+        ),
         (pull::gdfl_cm::CmKind::Stocks, "KPIT.NSE", "KPIT"),
         (pull::gdfl_cm::CmKind::Stocks, "RUCHI.BE.NSE", "RUCHI"),
     ] {
@@ -783,7 +882,7 @@ fn an_open_member_key_is_named_and_is_not_the_segments_open_day() {
         key("done", "2019-07-10", "*", ""),
         "begin indices 2019-07-02 *\n".to_owned(),
         "begin indices 2019-07-03 *+NSE-INDEX-NIFTYIT\n".to_owned(),
-        "begin indices 2019-07-04 *+NSE-INDEX-NIFTYNXT50\n".to_owned(),
+        "begin indices 2019-07-04 *+NSE-INDEX-NIFTYNEXT50\n".to_owned(),
     ]
     .concat();
     let root = store("open-member", &journal, "");

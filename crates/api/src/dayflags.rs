@@ -866,6 +866,11 @@ struct JournalRows {
     /// close's only before the next of these started (AF-02 repair 2): a later
     /// list close's refusal is never an earlier close's.
     closers: HashMap<String, Vec<u64>>,
+    /// The scope `pull` names a capital-market file's member by
+    /// (`CmScope::member_of`), built once a request and only when a day of
+    /// the page stands on one of this instrument's member keys (IA-10a):
+    /// how a member close's refusal is known to be about its member.
+    member_scope: Option<pull::gdfl_cm::CmScope>,
 }
 
 /// The journal rows of `first..=last` for `inst`'s kind, read by
@@ -964,12 +969,25 @@ fn journal_rows(
             break;
         }
     }
+    // ONE SCOPE A REQUEST, AND ONLY WHEN A DAY STANDS ON A MEMBER KEY: the
+    // stored scope `provenance` names a file's member by, for this
+    // instrument's segment (an option is never a member).
+    let member_scope = by_day
+        .values()
+        .any(|row| row.get("member").is_some_and(|member| !member.is_null()))
+        .then(|| match inst.segment {
+            Segment::Index => pull::gdfl_cm::CmScope::stored(std::iter::empty::<&str>()).ok(),
+            Segment::Cash => pull::gdfl_cm::CmScope::stored([inst.symbol.as_str()]).ok(),
+            Segment::Fno => None,
+        })
+        .flatten();
     Ok(JournalRows {
         by_day,
         last_day,
         journal,
         parsed,
         closers,
+        member_scope,
     })
 }
 
@@ -1170,17 +1188,24 @@ struct Superseded {
 /// `/imports.json`'s own ([`super::imports::placed_of`]), so the two routes
 /// cannot disagree about whose a refusal is.
 ///
-/// # A member key's refusals are its member's (IA-10a)
+/// # A member key's refusals: those about its member's files (IA-10a)
 ///
-/// A member key's close (`member_own`, its member being this instrument)
-/// read only its member's files (D-4878, `admit` row 1), so every refusal
-/// of its own is about this instrument, whatever `about_this` can decode
-/// of a stored index's or share's file name.
+/// `about_this` decodes a swept underlying's file only, so a stored index's
+/// or share's file (NIFTYIT's, a renamed share's) is about no instrument to
+/// it. On a member key's row (`member_scope`: this instrument's member key,
+/// and the scope `pull` names a file's member by), a refusal is also this
+/// instrument's when `pull::gdfl_cm::CmScope::member_of` names its file this
+/// very member: one name split and one resolve. One run that reopened two
+/// members of a day logs both members' refusals in one window, so the window
+/// alone never says which member a refusal is about.
 fn refusals_of(
     row: &Value,
     inst: &Instrument,
     day: Day,
-    parsed: &super::import_journal::Parsed,
+    (parsed, member_scope): (
+        &super::import_journal::Parsed,
+        Option<&pull::gdfl_cm::CmScope>,
+    ),
     next_s: Option<u64>,
 ) -> Refusals {
     let mut distinct: std::collections::BTreeSet<(String, String)> =
@@ -1190,10 +1215,23 @@ fn refusals_of(
     let mut later: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let mut out = Refusals::default();
     let close_run = row.get("run").and_then(Value::as_u64);
-    let member_own = row
+    // THIS INSTRUMENT'S MEMBER KEY, AND THE TREE ITS FILES ARE IN.
+    let own_member = row
         .get("member")
         .and_then(Value::as_str)
-        .is_some_and(|member| super::import_journal::member_symbol(member) == inst.symbol);
+        .filter(|member| super::import_journal::member_symbol(member) == inst.symbol)
+        .zip(member_scope)
+        .zip(match inst.segment {
+            Segment::Index => Some(pull::gdfl_cm::CmKind::Indices),
+            Segment::Cash => Some(pull::gdfl_cm::CmKind::Stocks),
+            Segment::Fno => None,
+        });
+    let of_member = |about: &str| {
+        own_member.is_some_and(|((member, scope), tree)| {
+            let stem = pull::gdfl_cm::split_name(about).map_or(about, |(stem, _)| stem);
+            scope.member_of(tree, stem).as_deref() == Some(member)
+        })
+    };
     for logged in row
         .get("logged")
         .and_then(Value::as_array)
@@ -1212,7 +1250,9 @@ fn refusals_of(
         let event_run = logged.get("run").and_then(Value::as_u64);
         let (placed, by) = super::imports::placed_of(parsed, event_run, at_ms, close_run, next_s);
         match by {
-            super::imports::PlacedBy::Run => out.placed_by_run = out.placed_by_run.saturating_add(1),
+            super::imports::PlacedBy::Run => {
+                out.placed_by_run = out.placed_by_run.saturating_add(1)
+            }
             super::imports::PlacedBy::Time => {
                 out.placed_by_time = out.placed_by_time.saturating_add(1);
             }
@@ -1265,7 +1305,7 @@ fn refusals_of(
         if !distinct.insert(pair.clone()) {
             continue;
         }
-        if member_own || about_this(&pair.0, inst, day) {
+        if about_this(&pair.0, inst, day) || of_member(&pair.0) {
             out.this_count = out.this_count.saturating_add(1);
             if out.this.len() < MAX_REFUSALS_NAMED {
                 out.this.push(pair);
@@ -1311,7 +1351,13 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             ids.iter().map(|other| rows.parsed.started_of(*other)),
         )
     });
-    let refusals = refusals_of(row, inst, day, &rows.parsed, next_s);
+    let refusals = refusals_of(
+        row,
+        inst,
+        day,
+        (&rows.parsed, rows.member_scope.as_ref()),
+        next_s,
+    );
     // A DAY THE LOG ALONE NAMES, AND NOTHING IN IT ABOUT THIS INSTRUMENT:
     // a run refused other files of the day and left no journal line (DB-025's
     // shape), and nothing says this instrument's day was refused. It reads
@@ -5937,14 +5983,14 @@ mod tests {
             ],
         });
         let inst = instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
-        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs, None);
+        let split = refusals_of(&row, &inst, day("2024-03-02"), (&runs, None), None);
         assert_eq!(split.this, vec![("calendar".to_owned(), "new".to_owned())]);
         assert_eq!(split.superseded.len(), 1);
         assert_eq!(split.superseded[0].run, Some(10));
         assert_eq!(split.superseded[0].commit.as_deref(), Some("aaa"));
         // A row with no `run=` keeps every refusal current: nothing says which run logged it.
         let unrun = json!({ "logged": [{ "about": "calendar", "why": "old", "at_ms": 15_000 }] });
-        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs, None);
+        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), (&runs, None), None);
         assert_eq!(kept.this_count, 1);
         assert_eq!(kept.superseded_count, 0);
     }

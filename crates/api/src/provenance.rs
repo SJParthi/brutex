@@ -958,10 +958,11 @@ fn journal_of_record(record: &Record, journals: &Journals, asked: &Asked) -> Val
             }),
             (Ok(snapshot), Some(day)) => {
                 let kind = import_kind(asked.segment);
-                let rows: Vec<Value> = symbol_rows(&snapshot.parsed, (day, day), kind, &asked.symbol)
-                    .into_iter()
-                    .map(|row| day_json(row, asked, None, None))
-                    .collect();
+                let rows: Vec<Value> =
+                    symbol_rows(&snapshot.parsed, (day, day), kind, &asked.symbol)
+                        .into_iter()
+                        .map(|row| day_json(row, asked, None, None))
+                        .collect();
                 json!({
                     "source": "imports/gdfl.journal",
                     "line_named": record.journal_ordinal,
