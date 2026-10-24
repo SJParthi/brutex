@@ -1288,26 +1288,57 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
             _ => None,
         })
         .collect();
-    // EVERY OTHER ROOT IS SKIPPED WHERE IT IS MET, by its `(st_dev, st_ino)`,
-    // so each root is walked as itself only and no file is two roots'.
-    let skip_for = |own: usize| -> HashSet<(u64, u64)> {
-        let mine = ids.get(own).copied().flatten();
-        let mut skip = HashSet::with_capacity(ids.len());
-        for (at, id) in ids.iter().enumerate() {
-            if let Some(id) = id
-                && at != own
-                && Some(*id) != mine
-            {
-                skip.insert(*id);
-            }
-        }
-        skip
-    };
     let copies = config.copy_roots.len();
-    // ONE JOB PER WALKED ROOT, on as many threads as the host has cores
-    // (`available_parallelism`), never one thread per root: the roots are
-    // as many as the setting's bytes allow. Each job's answer lands in its
-    // own slot, so the merge below reads them in the setting's order.
+    let (copy_walks, live_walks) = walk_all(fs, config, &ids);
+    let (live, mut links) = live_side(config, live_walks);
+    links.index_copies(&copy_walks);
+    let mut hazards: BTreeSet<Hazard> = BTreeSet::new();
+    let mut roots = Vec::with_capacity(copies);
+    let mut extra_bytes = 0_u64;
+    for (at, (path, walk)) in config.copy_roots.iter().zip(copy_walks).enumerate() {
+        let root = copy_root_of(fs, config, &links, at, path, walk, &mut hazards);
+        extra_bytes = extra_bytes.saturating_add(root.extra_bytes);
+        roots.push(root);
+    }
+    Register {
+        walked_at_micros,
+        walk_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        roots,
+        live,
+        unset_live: config.unset_live.clone(),
+        hazards,
+        extra_bytes,
+    }
+}
+
+/// Every root other than `own` that is a folder, by its `(st_dev, st_ino)`:
+/// what `own`'s walk skips where it meets one, so each root is walked as
+/// itself only and no file is two roots'.
+fn skip_for(ids: &[Option<(u64, u64)>], own: usize) -> HashSet<(u64, u64)> {
+    let mine = ids.get(own).copied().flatten();
+    let mut skip = HashSet::with_capacity(ids.len());
+    for (at, id) in ids.iter().enumerate() {
+        if let Some(id) = id
+            && at != own
+            && Some(*id) != mine
+        {
+            skip.insert(*id);
+        }
+    }
+    skip
+}
+
+/// Walks every copy root and every walked live root: ONE JOB PER ROOT, on
+/// as many threads as the host has cores (`available_parallelism`), never
+/// one thread per root, since the roots are as many as the setting's bytes
+/// allow. Each job's answer lands in its own slot, so the merge reads them
+/// in the setting's order whichever finished first.
+fn walk_all(
+    fs: &dyn Fs,
+    config: &Config,
+    ids: &[Option<(u64, u64)>],
+) -> (Vec<Result<Walked, String>>, Vec<Option<LiveWalk>>) {
+    let copies = config.copy_roots.len();
     let jobs: Vec<(usize, &Path, bool)> = config
         .copy_roots
         .iter()
@@ -1340,7 +1371,7 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
                 while let Some(&(at, path, keep)) =
                     jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                 {
-                    let walked = walk_root(fs, path, &skip_for(at), keep);
+                    let walked = walk_root(fs, path, &skip_for(ids, at), keep);
                     if let Some(slot) = slots.get(at) {
                         *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(walked);
                     }
@@ -1348,43 +1379,22 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
             });
         }
     });
+    let ended = || Err("the walk's thread ended before this root".to_owned());
     let mut slots = slots
         .into_iter()
         .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner));
     let copy_walks: Vec<Result<Walked, String>> = slots
         .by_ref()
         .take(copies)
-        .map(|walked| walked.unwrap_or_else(|| Err("the walk's thread ended early".to_owned())))
+        .map(|walked| walked.unwrap_or_else(ended))
         .collect();
     let live_walks: Vec<Option<LiveWalk>> = config
         .live
         .iter()
         .zip(slots)
-        .map(|(root, walked)| {
-            root.kind
-                .walked()
-                .then(|| walked.unwrap_or_else(|| Err("the walk's thread ended early".to_owned())))
-        })
+        .map(|(root, walked)| root.kind.walked().then(|| walked.unwrap_or_else(ended)))
         .collect();
-    let (live, mut links) = live_side(config, live_walks);
-    links.index_copies(&copy_walks);
-    let mut hazards: BTreeSet<Hazard> = BTreeSet::new();
-    let mut roots = Vec::with_capacity(copies);
-    let mut extra_bytes = 0_u64;
-    for (at, (path, walk)) in config.copy_roots.iter().zip(copy_walks).enumerate() {
-        let root = copy_root_of(fs, config, &links, at, path, walk, &mut hazards);
-        extra_bytes = extra_bytes.saturating_add(root.extra_bytes);
-        roots.push(root);
-    }
-    Register {
-        walked_at_micros,
-        walk_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        roots,
-        live,
-        unset_live: config.unset_live.clone(),
-        hazards,
-        extra_bytes,
-    }
+    (copy_walks, live_walks)
 }
 
 /// What the merge knows of every shared file: its live names, every name

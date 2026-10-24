@@ -9,31 +9,29 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 ## Done so far
 
 - `crates/store/src/settings.rs`: key 12 `disk.extra_copy_roots` (`Key::ExtraCopyRoots`, slot 11,
-  `KEYS` 11 -> 12), `COPY_ROOT_SEPARATOR` `|`, `MAX_COPY_ROOTS` 16, `MAX_COPY_ROOTS_BYTES` (the
-  settings route's own 4,096-byte ceiling), `copy_roots()` (shape-only reader: absolute, no `..`,
-  no empty piece, none twice, none nested); `check` adds that each folder exists; `check_stored`
+  `KEYS` 11 -> 12), `COPY_ROOT_SEPARATOR` `|`, `MAX_COPY_ROOTS_BYTES` (= the settings route's own
+  4,096-byte `secret_shape` ceiling, an existing project number; no count of roots is typed).
+  `copy_roots()` is the one reader: absolute, no `..`, no empty piece, none twice, none nested,
+  checked with an ordered set (O(r log r)). `check` adds that each folder exists; `check_stored`
   holds a stored value to its shape only. Test
-  `the_extra_copy_roots_key_is_checked_and_stored_canonically` (not yet run).
-- `crates/api/src/settings_route.rs`: the two required arms (`default_of`: `(None, UNSET_WAIT)`,
-  a named wait; `reader_of`: `Ok(...)` naming `pull::copies_register`, `GET /disk/copies.json`,
-  `cli disk-copies`).
-- `crates/pull/src/copies_register.rs` (new): the read-only `Fs` seam (`lstat`, `list`, bounded
-  `read` through `store::safe_open`; no writing method exists), `config()` (copy roots from the
-  setting; live roots through `gdfl_run::source_root`, the v3 ledger variable, `source.gdfl`,
-  `source.masters`, the store root; unset named), `reader_of()` (D-7044), parallel bounded walk
-  (`MAX_WALK_ENTRIES` 2,000,000 per root, `MAX_DEPTH` 64; over a bound the root is refused by
-  name), `(st_dev, st_ino)` hazards within one walk, receipts (`ALL_VERIFIED.txt`, `VERIFIED.tsv`
-  with `source_identity` matched by inode, size, mtime, ctime and never dev, `*.prove.out` with
-  `ALL-PROVED`), twins, the retirement list and its text, the events, the cache (`answer`,
-  re-walk only when the roots or a root's own stat change; a request never waits on another's
-  walk), `total()` for R4-29. `cargo clippy -p pull -p store` clean.
-- Commit `cca93bc4` pushed.
+  `the_extra_copy_roots_key_is_checked_and_stored_canonically`: passes.
+- `crates/api/src/settings_route.rs`: the two required arms (`default_of`: `(None, UNSET_WAIT)`;
+  `reader_of`: `Ok(...)` naming `pull::copies_register`, `GET /disk/copies.json`, `cli disk-copies`).
+- `crates/pull/src/copies_register.rs` (new) and `copies_register_tests.rs` (new, 24 tests, all
+  pass): the read-only `Fs` seam (`lstat`, `list`, `lines` through `store::safe_open`; no writing
+  method exists), `config()`, `reader_of()` (D-7044), a walk that enters every directory once by
+  `(st_dev, st_ino)` on `available_parallelism` workers (no typed entry, depth, list or thread
+  count: the operator's 24 Oct rule), `(st_dev, st_ino)` hazards within one walk, streamed receipts
+  (`ALL_VERIFIED.txt`, `VERIFIED.tsv` matched by inode, size, mtime and ctime, never `st_dev`;
+  `*.prove.out` with `ALL-PROVED`), twins, the retirement list and its text, the events, the cache
+  (`answer`: re-walk only when the roots or a root's own stat change; no request waits on
+  another's walk), `total()` for R4-29.
 
 ## Left
 
-- `copies_register_tests.rs` (the 8 named tests + extreme cases), the api route and its wiring,
-  the cli verb and its wiring, the R4-06 no-delete list, the /ingest panel and the web bundle,
-  the bench, the docs ledgers (02 §42, 04, 05 D-7040.., 06), every gate.
+- The api route `GET /disk/copies.json` and its wiring, the cli verb `disk-copies` and its wiring,
+  the R4-06 no-delete list, the /ingest panel and the web bundle, the bench, the docs ledgers
+  (02 §42, 04, 05 D-7040.., 06), every gate.
 
 ## Log
 
@@ -54,3 +52,22 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   `GO` with no `HOLD`.
 - NEXT: write `crates/pull/src/copies_register_tests.rs` (the eight named tests first, failing
   before the module, then the extreme cases), run `cargo test -p pull -p store --locked`.
+
+### 2026-10-24 — resumed, save points 2 and 3, then HELD again
+
+- 12:37 IST the Mac lifted HOLD ("activate all the sessions"); work resumed from NEXT.
+- The README's new section (the operator's words of 24 Oct, "no typed number outside the Winner
+  Gate") was applied: removed `MAX_COPY_ROOTS`, the walk's entry and depth caps, the list caps, the
+  receipt read cap and the statement cap. Commit `ad16891c`.
+- Wrote `crates/pull/src/copies_register_tests.rs`: the eight named tests and 16 extreme cases.
+- `cargo test -p pull --lib --locked copies_register`: `test result: ok. 24 passed; 0 failed`.
+- `cargo test -p store --lib --locked settings`: `22 passed; 3 failed`. The three
+  (`a_directory_that_stops_being_readable_is_a_fault_not_nothing_new`,
+  `a_disk_that_refuses_the_write_is_refused_with_nothing_visible`,
+  `a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason`) are permission-bit tests;
+  this container runs as root, which ignores permission bits. To be shown red on the unmodified
+  base in the final gate run (not yet shown).
+- `cargo clippy -p pull -p store --all-targets --locked`: no warning.
+- `HOLD` back on the base at 12:55 IST ("HOLD for parts without GO-<NAME>"); no `GO-CC-5`. Stopped.
+- NEXT: the api route `crates/api/src/copies_route.rs` + `copies_route_tests.rs`, its two
+  `server.rs` lines, its rows in `operation_audit_tests.rs` and `pool_table_tests.rs`.
