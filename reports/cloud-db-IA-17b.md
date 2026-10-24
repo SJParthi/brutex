@@ -108,7 +108,7 @@ lines sorted, so a new finding inside a red gate cannot hide.
 | deny (newer tool) | the same with cargo-deny 0.20.2 | red: RUSTSEC-2026-0386 (unsound, `tokio` 1.53.1 `AsyncFd::new`) | red, same advisory; `Cargo.lock` is identical on both, left alone (CONTEXT §4.10) |
 | CI shell gates | every `Gate` step of the `language-purity` job, run as written (`ci.yml`, through a script that extracts each step's `run:` body) | 23 green; 9 red | the same 9 red, nothing new in any |
 | gate 6c | `rustfmt --edition 2024 --check` over every tool `gates_jobs tools` lists; `clippy-driver --edition=2024 -D warnings .github/gates_tree.rs`, with and without `--test` | green | — |
-| coverage | `cargo llvm-cov` 0.8.4 | PENDING | — |
+| coverage | `cargo llvm-cov` 0.8.4 `-p pull --lib --branch` (below) | **not 100%**: of the 1,110 executable lines this part adds, 56 never run (95.0%); of the 160 branch arms on them, 24 never taken (85.0%) | the base runs none of the 13 moved base lines either |
 | mutants | `cargo mutants` 26.2.0 `--in-diff` | PENDING | — |
 
 **The workspace test failures, every one, by cause.** This host runs as root (uid 0), has 4 cores,
@@ -129,6 +129,54 @@ and by the end of the session had 5.7 GB free on its one disk against the import
 
 This part's own tests all passed inside the run: the 16 `gather` tests, the 5 `revision_tests`, and
 77 of 78 `backfill`/`sealed`/`ia16`/`scope_reopen` tests (the 78th is the root test above).
+
+**Coverage, measured, and what is left.** Command, on the branch head, with `TMPDIR` and the
+coverage target on a fresh world-writable tmpfs directory (the uid-65534 child tests write there):
+`TMPDIR=<tmpfs> CARGO_LLVM_COV_TARGET_DIR=<tmpfs> RUSTC_BOOTSTRAP=1 cargo llvm-cov -p pull --lib
+--branch --locked --no-report --ignore-run-fail`, then `cargo llvm-cov report --branch --lcov`.
+`--branch` is unstable on the stable 1.97.1 toolchain and no nightly is installed, so
+`RUSTC_BOOTSTRAP=1` let the stable compiler take it, **for this measurement only**: nothing of it
+is committed. The lines this part adds are read from `git diff -U0 d39e789e` and matched to the
+lcov's `DA` and `BRDA` records (`ingest.rs`, `gdfl_import_filing.rs`, `gdfl_import_day.rs`,
+`gdfl_cm_auction.rs`, `gdfl_import.rs`; the test files are test code).
+
+The first measurement found 124 of the 1,095 added executable lines never run and 39 of 160 arms
+never taken. Fourteen tests were added for them (IA-RP-19 to IA-RP-26, IA-AUC-04, IA-AUC-05), and
+the CASH step's no-op arm was removed (the step now exists only for a share whose month is named).
+The final run:
+
+| File | Added lines | Never run | Branch arms | Never taken | Whole file on the branch, lines (branches) | The same on the base `d39e789e` |
+|---|---|---|---|---|---|---|
+| `gdfl_import_filing.rs` | 441 | 15 | 68 | 11 | 94.98% (86.87%) | 94.11% (86.76%) |
+| `gdfl_import_day.rs` | 241 | 25 | 58 | 11 | 91.76% (82.31%) | 92.00% (82.11%) |
+| `gdfl_cm_auction.rs` | 232 | 3 | 26 | 0 | 95.01% (96.23%) | 94.38% (95.12%) |
+| `ingest.rs` | 180 | 13 | 8 | 2 | 78.88% (63.39%) | 78.11% (62.98%) |
+| `gdfl_import.rs` | 16 | 0 | 0 | 0 | 91.91% (87.74%) | 91.85% (87.74%) |
+
+The 56 lines never run, by why:
+
+- **Base code moved or touched, never run on the base either (13, `ingest.rs`).** The judgement split
+  out of `back_fill_or_append` (the journal refusal, the unread month, the busy overlap guard,
+  `Filed::Appended` on no stamps), the guard after `bars.is_empty()` in `rows_mode`, and the `None`
+  argument added to `repair_or_append`'s `repair_after` call (the Zerodha door, which pull's own
+  tests do not reach). A base coverage run of `d39e789e` shows the same statements at 0 hits.
+- **Unreachable by construction, named rather than silent (35).**
+  - `gdfl_import_filing.rs`: a gathered file whose day has no month (8; the door already addressed
+    its month); `get_mut` on an offer just inserted (1); `defer_close` with no waiting day (1);
+    repair failures the door did not type, for an offer whose address the gather already took (5).
+  - `gdfl_import_day.rs`: a census refusal at the flush with no waiting day (6; an offer always has
+    one); a waiting day with no close, and its `gather_unclosed` warning (13; a pass that takes a
+    file always writes its close or ends the run).
+  - `gdfl_cm_auction.rs`: the sidecar's other host errors (1).
+- **Reachable, no seam to time them (8).** A source lost between two files of a day that gathered
+  (`gdfl_import_day.rs`, 6: `DayRead` cannot say "source gone", and nothing times a vanishing tick
+  store between two files); `set_len` failing on a regular file while a torn `.auc` tail is cut back
+  (`gdfl_cm_auction.rs`, 2).
+
+The README asks for 100% line and branch on the touched modules; that is **not met**, on the added
+lines or on the whole files. The whole files were 78–94% (lines) on the base and stay within a point
+of it: four rise, and `gdfl_import_day.rs`'s lines fall from 92.00% to 91.76% (its branches rise),
+the 25 unreachable or untimeable lines above. Listed under NEEDS THE MAC.
 
 **The 9 red CI shell gates are base reds** owned by BASE-REDS-1023 (CONTEXT §4.10), each red the same
 way on `d39e789e`:
@@ -154,7 +202,34 @@ engine; the tests above build with no front-end toolchain) and 7 (skips permanen
 
 ## Measurements
 
-PENDING
+**C-RP-02** (`crates/pull/benches/ratio.rs`, `gathered_repair_is_flat_per_day`). Method: `cargo bench
+-p pull --locked --bench ratio` (the bench profile, release with debuginfo), this cloud host (Linux,
+4 cores; `TMPDIR` on a tmpfs), on the branch after merging `d39e789e`. Each run is one repair-reason
+import over January 2025 into a fresh store that holds only the 31st, 22,500 one-second NIFTY bars a
+day, the store built outside the clock; every run must end with the month at generation 1 or the
+bench refuses.
+
+| Measured | n | p50 | p99 | max |
+|---|---|---|---|---|
+| 2 gathered days, one run | 5 | 72,294,034 ns | 73,745,634 ns | 74,948,032 ns |
+| 22 gathered days, one run (495,000 bars offered) | 5 | 671,221,335 ns | 674,782,842 ns | 680,043,187 ns |
+
+- Per gathered day, the fastest run: 34,624,487,500 ps at 2 days, 30,357,345,272 ps at 22: **ratio
+  0.876**, gate 8's ceiling 3.0. The cost per day does not grow with the month's days.
+- Peak resident set of the five 22-day runs, restarted before them (`VmHWM` after `clear_refs` 5):
+  **274,386,944 B**. Printed, never gated.
+- With n = 5, the p99 is the slowest sample but one. The pre-merge run (`docs/06-limits.md`, the
+  numbers written there) gave 0.774, p50 749,859,448 ns at 22 days and 261,095,424 B: the same shape,
+  this host's run-to-run spread.
+- Every other ratio of the pull bench stayed within the ceiling (`all ratios within the ceiling`,
+  exit 0).
+
+**Per operation** (`docs/06-limits.md`, the 24 Oct section): one gathered file is one hash probe for
+its month's offer plus an append of its bars (a file out of order merges, O(offer + file)); the
+month's leave test is one compare a day; the flush is one repair per month gathered plus one cursor
+walk of the stamps it added; the `.auc` path adds one generation pointer probe per read. **Not
+measured here**: the `/sources/day.json` p50/p99/max over n ≥ 200 GETs with and without the pointer
+probe (NEEDS THE MAC (c)); the cloud has no store or server to time it against.
 
 ## Extreme cases
 
