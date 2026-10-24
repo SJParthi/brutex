@@ -36,6 +36,7 @@
     dayflagsUrl,
     emptyWindowWhy,
     tally,
+    alsoTally,
     sessionCount,
     DAYFLAGS_PAGE_DAYS
   } from '$lib/db/dayflags.js';
@@ -214,6 +215,10 @@
   let openDay = $state('');
 
   const legend = $derived(tally(db.dayBandCells));
+  /* THE FLAGS BEHIND EACH DAY'S LEAD (verify-R3-13-r2's follow-up): the
+     legend counts lead kinds alone, so "frozen run not judged" behind a
+     day's import fault was only in that day's line. */
+  const also = $derived(alsoTally(db.dayBandCells));
   const flagged = $derived(db.dayBandCells.filter((/** @type {any} */ c) => c.flagged));
   /* AN AUCTION DAY IS ONE LINE FOR THE WHOLE RUN: every session of a
      CAS-eligible share from 2026-08-03 is one, and listing each would bury
@@ -304,6 +309,14 @@
             <span class="dbkey" data-tone={k.tone}><i aria-hidden="true"></i>{k.word} {k.n}</span>
           {/each}
         </span>
+        {#if also.length > 0}
+          <span class="dblegend" aria-label="Flags behind each day's lead kind">
+            <span>also on these days, behind each day's lead:</span>
+            {#each also as k (k.kind)}
+              <span class="dbkey" data-tone={k.tone}><i aria-hidden="true"></i>{k.word} {k.n}</span>
+            {/each}
+          </span>
+        {/if}
       {:else if db.dayBandLoading}
         <span class="dbsum">reading /dayflags.json…</span>
       {/if}

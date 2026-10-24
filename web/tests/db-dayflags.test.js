@@ -27,7 +27,8 @@ import {
   kindsOf,
   lineageOf,
   deriveOf,
-  tally
+  tally,
+  alsoTally
 } from '../src/lib/db/dayflags.js';
 
 /** One record, every key present as the route sends it. */
@@ -558,4 +559,39 @@ test('R3-13: a key that names no family is no band key, and a row with no rung i
   // The legend counts each kind once per word, in the fixed order, and leaves out a kind no cell has.
   const cells = [cellOf(rec({ degraded: ['x'] })), cellOf(rec()), cellOf(rec({ degraded: ['y'] }))];
   assert.deepEqual(tally(cells).map((k) => [k.kind, k.n]), [['degraded', 2], ['session', 1]]);
+});
+
+test("verify-R3-13-r2 follow-up: a flag behind each day's lead is in the legend's also line, never a fact kind or cas", () => {
+  // GDFL NIFTY 24-30 Sep 2026's shape: each day leads with an import fact,
+  // and its ledger run is not judged, so the lead legend never names it.
+  const unjudged = { basis: 'day_ledger', flagged: null, longest_s: 838, judged_s: 0 };
+  const late = { outcome: 'done', reached: true, late: 3, max_back_s: 2, refusals: { this: [], this_count: 0 } };
+  const cells = [
+    cellOf(rec({ day: '2026-09-25', import: late, index: { frozen: unjudged, outside_day_range: null } })),
+    cellOf(rec({ day: '2026-09-28', import: late, index: { frozen: unjudged, outside_day_range: null } })),
+    cellOf(rec({ day: '2026-09-29', import: late, index: { frozen: { flagged: false }, outside_day_range: null } })),
+    cellOf(rec({ day: '2026-09-30', index: { frozen: unjudged, outside_day_range: null } }))
+  ];
+  assert.deepEqual(cells.map((c) => c.kind), ['late', 'late', 'late', 'frozen_unjudged']);
+  assert.deepEqual(tally(cells).map((k) => [k.kind, k.n]), [['late', 3], ['frozen_unjudged', 1]]);
+  // Counted once per cell behind its lead, with its word and tone.
+  assert.deepEqual(alsoTally(cells).map((k) => [k.kind, k.word, k.tone, k.n]), [['frozen_unjudged', 'frozen run not judged', 'info', 2]]);
+  // In the fixed order, every flag behind the lead.
+  const both = cellOf(rec({ degraded: ['x'], import: late, index: { frozen: { flagged: true }, outside_day_range: { flagged: true } } }));
+  assert.deepEqual(both.kinds, ['degraded', 'frozen', 'outside_range', 'late']);
+  assert.deepEqual(alsoTally([both]).map((k) => [k.kind, k.n]), [['frozen', 1], ['outside_range', 1], ['late', 1]]);
+  // Never a fact kind (a closed day behind the peer's trades) and never cas,
+  // which the closing-auction line counts over every cell showing it.
+  const closed = cellOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 21594 } }));
+  assert.deepEqual(closed.kinds, ['peer_on_closed', 'closed']);
+  const auction = cellOf(rec({ instrument: 'NSE-CASH-RELIANCE', import: late, calendar: { code: 'X', cas: { eligible: true } } }));
+  assert.deepEqual(auction.kinds, ['late', 'cas']);
+  assert.deepEqual(alsoTally([closed, auction]), []);
+  // A lone kind is a lead, never "also".
+  assert.deepEqual(alsoTally([cellOf(rec())]), []);
+  assert.deepEqual(alsoTally([]), []);
+  // The band draws it under the legend, from the function.
+  const svelte = readFileSync(new URL('../src/routes/db/DbDayFlags.svelte', import.meta.url), 'utf8');
+  assert.match(svelte, /const also = \$derived\(alsoTally\(db\.dayBandCells\)\);/);
+  assert.match(svelte, /\{#each also as k \(k\.kind\)\}/);
 });

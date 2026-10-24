@@ -83731,7 +83731,21 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
     before). **Rejected:** refusing the whole record, because the day's other
     flags do not depend on the run; and `session_s`, the line's own session
     length, as the bound, because it places no stamp.
+27. **The band's legend names the flags behind each day's lead** (the check
+    of 23 October, verify-R3-13-r2, a follow-up). A cell is coloured by its
+    most severe kind and the legend counted that lead alone, so a flag that
+    is never a day's lead was in no legend: "frozen run not judged" on GDFL
+    NIFTY 2026-09-24..30 was said only in each day's line. `alsoTally`
+    (`web/src/lib/db/dayflags.js`) counts every kind a cell holds after its
+    lead, once per cell, in `DAY_KINDS`'s order, and the band draws it under
+    the legend as "also on these days, behind each day's lead". Never a fact
+    kind (a closed day, a day outside a span), which is no flag, and never
+    `cas`, which the band's closing-auction line already counts over every
+    cell that shows it. One pass over at most one page of cells, each cell's
+    kinds bounded by `DAY_KINDS`; no request. **Rejected:** colouring a cell
+    by more than one kind, which would change every day's colour for one
+    legend line.
 
-**Proof:** R313-01 to R313-40 (`docs/04-invariants.md`); the limits are
+**Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
 10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.

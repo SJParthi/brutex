@@ -605,6 +605,31 @@ export function tally(cells) {
 }
 
 /**
+ * THE FLAGS A DAY CARRIES BEHIND ITS LEAD, counted: the legend's "also" line
+ * (verify-R3-13-r2's follow-up). A cell is coloured by its most severe kind
+ * and `tally` counts that lead alone, so a flag that is never a day's lead —
+ * "frozen run not judged" on GDFL NIFTY 24-30 Sep 2026, behind each day's
+ * own lead — was in no legend, only in each day's line. Every kind a cell
+ * holds after its first is counted here once per cell, in the fixed order,
+ * never a fact kind (`QUIET`: a closed day, a day outside a span) and never
+ * `cas`, which the band's closing-auction line counts over every cell that
+ * shows it. A kind no cell holds behind its lead is left out. O(cells), each
+ * cell's kinds bounded by `DAY_KINDS`.
+ *
+ * @param {ReturnType<typeof cellOf>[]} cells
+ */
+export function alsoTally(cells) {
+  /** @type {Map<string, number>} */
+  const by = new Map();
+  for (const c of cells) {
+    for (const k of c.kinds.slice(1)) {
+      if (k !== 'cas' && !QUIET.has(k)) by.set(k, (by.get(k) ?? 0) + 1);
+    }
+  }
+  return DAY_KINDS.filter((k) => by.has(k.kind)).map((k) => ({ ...k, n: by.get(k.kind) ?? 0 }));
+}
+
+/**
  * The band's closing-auction line, counted (SC-CLOSE-8, SC-CLOSE-9): of the
  * cells whose only kind is `cas`, the days the share's dated flag is 1
  * (`days`), the rest, whose flag no master holds (`unheld`), and of the
