@@ -404,7 +404,10 @@ fn at_most_four_near_misses_are_named_in_name_order() {
 
 /// A root holding no `<yyyy>.zip` at all is AF-01's `source_root_unknown`,
 /// said by the cli's door: the preflight leaves it alone rather than say a
-/// second, worse-worded refusal (D-7000).
+/// second, worse-worded refusal (D-7000). So is a root holding only other
+/// years' zips, none of the range's and nothing named like one: the door
+/// lists the range's days as not in the source and ends `no_file_read`
+/// (FM-060). One name like the range's year is enough to refuse it here.
 #[test]
 fn a_root_with_no_year_zip_at_all_is_left_to_the_door() {
     let root = scratch("ia3b-no-year");
@@ -414,6 +417,21 @@ fn a_root_with_no_year_zip_at_all_is_left_to_the_door() {
     assert!(passed.is_ok(), "{passed:?}");
     let (_, absent) = options_plan(&root, &root.join("typo"), (d1(), d1()));
     assert!(absent.is_ok(), "{absent:?}");
+    let other = scratch("ia3b-other-years");
+    let held = year_zip_of(&[(day(2019, 4, 1), None)]);
+    let nfo = options_root(&other, &[("2019.zip", held.clone())]);
+    let (store, door) = options_plan(&other, &nfo, (d1(), d2()));
+    assert!(door.is_ok(), "{door:?}");
+    nothing_written(&store);
+    let _named = put(&nfo, "2024 (1).zip", &held);
+    let (_, refused) = options_plan(&other, &nfo, (d1(), d2()));
+    assert_eq!(
+        refused.unwrap_err(),
+        RunRefusal::YearZipMissing {
+            year: 2024,
+            near_miss: vec!["2024 (1).zip".to_owned()],
+        }
+    );
 }
 
 /// A11: a year zip this process cannot open is refused before the run,

@@ -450,25 +450,6 @@ fn progress_of(store: &Path, plan: &Plan, kind: &KindPlan) -> Option<ProgressFil
     ))
 }
 
-/// WHAT THE PREFLIGHT FOUND (IA-3b): the source's span and the asked days
-/// outside it, the census room, the digest, the store, said once per kind on
-/// the declared stderr writer; an unpinned `FORMAT.md` digest is warned,
-/// never refused (D-4819: the magic decides). The plan is handed back.
-fn said(plan: gdfl_run::Plan, say: &(dyn Fn(&str) + Sync)) -> gdfl_run::Plan {
-    for checked in &plan.checks {
-        say(&format!("gdfl-import {}", checked.line()));
-        if let gdfl_run::preflight::Format::Unpinned(digest) = &checked.format {
-            say(&format!(
-                "gdfl-import {}: warning: format_digest_unpinned: FORMAT.md's sha256 {digest} is \
-                 neither digest the charter records; the run line says format_digest_unpinned=1 \
-                 and every day file is still read by its magic (D-4819)",
-                checked.kind.as_str()
-            ));
-        }
-    }
-    plan
-}
-
 /// Where a run reads its environment: a variable's value, or `None`.
 type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 /// Where a run finds its store root, proved, or why not.
@@ -527,7 +508,7 @@ pub(crate) fn command_in(
         unstamped: unstamped.as_deref(),
     };
     let plan = match gdfl_run::plan(request, &process, env, &mut SourceCache::default()) {
-        Ok(plan) => said(plan, say),
+        Ok(plan) => plan,
         Err(refused) => {
             let code = if refused.misuse() { MISUSED } else { FAILED };
             // A HELD LOCK FOUND BEFORE THE SINK (IA-2 repair 1; FM-064) is

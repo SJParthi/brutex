@@ -1219,8 +1219,7 @@ fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
 /// journal holds a key ending in `begin`, the run is refused
 /// `legacy_run_may_be_live` before any lock, naming the key, and no lock file
 /// is created; `--legacy-run-not-live` reaches the request (and from it the
-/// claim) and the run passes that check. The preflight's plan line and an
-/// unpinned FORMAT.md digest's warning are said on the stderr writer.
+/// claim) and the run passes that check.
 #[test]
 fn the_legacy_flag_reaches_the_request_and_lets_the_run_past_the_cutover() {
     let env = env_of(&[]);
@@ -1249,8 +1248,7 @@ fn the_legacy_flag_reaches_the_request_and_lets_the_run_past_the_cutover() {
     let ts = root.join("ts");
     tick_store(&ts);
     let env = env_of(&[(TICKSTORE_VAR, ts)]);
-    let said = std::sync::Mutex::new(Vec::new());
-    let say = |line: &str| said.lock().unwrap().push(line.to_owned());
+    let say = |_: &str| {};
     let log = LogState::Installed(PathBuf::from("logs/test"));
     let args = ["indices", "tickstore", "2024-04-01", "2024-04-01"];
     let mut out = String::new();
@@ -1285,18 +1283,6 @@ fn the_legacy_flag_reaches_the_request_and_lets_the_run_past_the_cutover() {
         (&log, &say),
         &mut out,
     );
-    assert!(!out.contains("legacy_run_may_be_live"), "{out}");
-    let said = said.lock().unwrap();
-    assert!(
-        said.iter().any(
-            |line| line.starts_with("gdfl-import preflight indices: source_span=")
-                && line.contains(" legacy_ack=1")
-        ),
-        "{said:?}"
-    );
-    assert!(
-        said.iter()
-            .any(|line| line.contains("warning: format_digest_unpinned: FORMAT.md's sha256 ")),
-        "{said:?}"
-    );
+    // Past the plan: no refusal before the door, the cutover's or another.
+    assert!(!out.contains("GDFL IMPORT REFUSED"), "{out}");
 }

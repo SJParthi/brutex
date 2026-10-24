@@ -556,6 +556,17 @@ pub fn check_with(
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let _dropped_when_filtered = match &checked {
         Ok(found) => {
+            // Item 9: an unpinned digest is warned on the log, never refused
+            // (D-4819: the magic decides); the run line marks it too.
+            for checked in found {
+                if let Format::Unpinned(digest) = &checked.format {
+                    let _warned = telemetry::emit(
+                        &telemetry::Event::warn(super::TARGET, "format_digest_unpinned")
+                            .with("kind", checked.kind.as_str())
+                            .with("digest", digest.as_str()),
+                    );
+                }
+            }
             let lines: Vec<String> = found.iter().map(Checked::line).collect();
             telemetry::emit(
                 &telemetry::Event::info(super::TARGET, "preflight passed")
@@ -652,7 +663,9 @@ fn year_of(name: &str) -> Option<u16> {
 /// least one entry (items 1 and 2). One listing of the directory (O(names in
 /// it), once per run), then per year one open, one byte and the end record
 /// (O(1) each). A root that cannot be listed or holds no `<yyyy>.zip` at all
-/// is AF-01's `source_root_unknown`, said by the door: nothing here.
+/// is AF-01's `source_root_unknown`, said by the door: nothing here; nor is
+/// one whose zips are all of other years with no name like the range's,
+/// which the door ends `no_file_read` (FM-060, D-7000).
 fn year_zips(root: &Path, (from, to): (Day, Day)) -> Result<(), RunRefusal> {
     let Ok(listing) = std::fs::read_dir(root) else {
         return Ok(());
@@ -676,21 +689,36 @@ fn year_zips(root: &Path, (from, to): (Day, Day)) -> Result<(), RunRefusal> {
     if years.is_empty() {
         return Ok(());
     }
-    for year in from.year()..=to.year() {
+    let near_misses = |year: u16| -> Vec<String> {
+        let digits = format!("{year:04}");
+        others
+            .iter()
+            .filter(|name| {
+                name.starts_with(&digits)
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            })
+            .take(NEAR_MISS_MAX)
+            .cloned()
+            .collect()
+    };
+    let range = from.year()..=to.year();
+    // A root holding only other years' zips, none of the range's and nothing
+    // named like one, is AF-01's to answer: the door lists the range's days
+    // as not in the source and ends `no_file_read` (FM-060), never OK.
+    if range
+        .clone()
+        .all(|year| !years.contains_key(&year) && near_misses(year).is_empty())
+    {
+        return Ok(());
+    }
+    for year in range {
         let Some(path) = years.get(&year) else {
-            let digits = format!("{year:04}");
-            let near_miss = others
-                .iter()
-                .filter(|name| {
-                    name.starts_with(&digits)
-                        && Path::new(name)
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-                })
-                .take(NEAR_MISS_MAX)
-                .cloned()
-                .collect();
-            return Err(RunRefusal::YearZipMissing { year, near_miss });
+            return Err(RunRefusal::YearZipMissing {
+                year,
+                near_miss: near_misses(year),
+            });
         };
         year_zip(year, path)?;
     }
