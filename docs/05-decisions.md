@@ -82718,3 +82718,323 @@ through it"). Under D-7135 no root A is ever built.
 4. PROVEN-GATE rule (c) keeps the definition-3 shares' 2026-08 and 2026-09
    months out of the backtest until R3-22's S-32 or PREC-5's apply runs.
    Placing that step is an ordering decision left to the main session.
+
+### D-7270 — INT-15: a vendor-padded minute is defined, counted per day, and never read as a trade; a derived bucket of only padded minutes has no bar (measured both ways) — 2026-10-22
+
+The numbers D-7270 to D-7274 were taken from an unused block above the
+in-flight claims (D-6892, D-7010..D-7018, D-7120) and are re-taken from the
+ledger's head at landing if another package lands first (amendment A6).
+
+**Implemented by** R4-27. **Items** INT-15 (checklist, priority 3), the fold
+rule FIB-8's FM-F095 waits on, FM-181 (related). The `/db` label is R4-04's;
+`/bars/window.json` `flags:["padded"]` is R4-27's sequenced edit after R4-03,
+and R3-29's server fold path reads the same `pull::fold` when it lands.
+
+**What was observed.** Zerodha fills a quiet minute of a cash share with a
+candle of its own: volume zero, open, high, low and close all the close of
+the minute before. Stored as bars like any other, the derived 2-60 minute
+rungs read them as trades: a bucket that begins with one opens at a price
+nobody paid in it, its high or low can be that stale price, and it counts
+as complete when nothing traded in it.
+
+**The definition.** A VENDOR-PADDED MINUTE is a cash-equity one-minute bar
+with volume zero whose open, high, low and close all equal the close of the
+bar before it in the SAME SESSION WINDOW of the same IST day
+(`pull::padded::is_padded`, one comparison of four prices and a volume).
+Therefore the first bar of a day (the 09:15 open) is never padded, the first
+bar after a halt is never padded (a halt ends one `calendar::Session`
+window), a bar outside every window is never padded, and an index minute is
+never padded (an index does not trade, so its flat minute is a level that
+did not move). The rule is applied by segment, cash, not by vendor name; no
+GDFL month is derived (`ingest::derives_for`), so in the derive path today
+it reaches Zerodha's cash minutes only. A padded minute is kept in the store
+exactly as the vendor sent it.
+
+**Measured both ways** — `cli padded-measure zerodha LIST`, release build of
+this branch, over a private shadow of the operator's store, 22 Oct 2026,
+lists and outputs in `state/fix/round2/R4-27-evidence`
+(`sample_months.list`, `padded-sample.tsv`, `z7_months.list`,
+`z7_large_rungs.tsv`, `padded-z7.tsv`). Treatment (a) `keep_flat`: a bucket
+opens on its first unpadded minute and a bucket of only padded minutes keeps
+the bar the fold wrote before (flat at the carried price, volume zero).
+Treatment (b) `absent`: the same, and a bucket of only padded minutes has no
+bar. The two agree on every bucket that traded at all.
+
+| set | share-months | padded minutes | buckets (2-60 min) | open moved | high or low moved | padded-only buckets: kept by (a), absent under (b) |
+|---|---|---|---|---|---|---|
+| the five sample months (2019-03, 2021-09, 2023-06, 2025-03, 2026-08), every share | 934 | 75,451 | 8,802,501 | 15,705 (0.18%) | 8,436 | 23,297 (0.26%) |
+| Z7's large disagreements (16,505 rung-months, mostly thin shares) | 2,903 | 2,322,630 | 17,507,209 | 384,127 (2.19%) | 222,738 | 726,709 (4.15%) |
+
+The count agrees with the offline cross-check that judged each minute
+against GDFL's ticks (`only_z_flat`: flat, zero volume AND no GDFL trade in
+the minute): 2019-03 45,579 against 45,573, 2021-09 13,272 against 13,250,
+2023-06 13,391 against 13,327, 2025-03 1,030 against 1,028, 2026-08 2,179
+against 2,176 — within 0.5% each month. So a padded minute is, measured, a
+minute in which the exchange recorded no trade; the few more this rule
+counts are flat carries in minutes where GDFL printed a trade.
+
+Against the derived months already stored, the rule before INT-15 agrees
+best (whole rung-months equal: sample 5,964 of 6,538 as before, 5,497 under
+(a), 5,485 under (b); Z7 1,435 of 16,505, 1,329, 1,326), because those
+months were folded under it. Z7's disagreement is therefore not padding:
+the padding rule is closer to the stored month on 540 Z7 rung-months and
+farther on 8,392. The stored months decide nothing here; the trades do.
+
+**Decision.** Treatment (b), `pull::fold::PADDED_FOLD = PaddedFold::Absent`,
+in the one fold every derive and every completeness audit reads
+(`fold_month`): a cash bucket opens on its first unpadded minute, its high
+and low come from its unpadded minutes, its volume is unchanged (volume
+conditions see zero for a padded minute), it is `partial` when it holds
+fewer unpadded minutes than scheduled, and a bucket of only padded minutes
+has no bar, neither written nor withheld — exactly a share's bucket with no
+minute at all (D-3321 item 2). Treatment (a) would keep 726,709 bars on Z7's
+months, and 23,297 on the sample months, that GDFL's ticks show nobody
+traded. The other two readings stay callable through
+`fold::derive_minutes_with` so the measurement can be repeated.
+
+**Logged.** The fold is a pure function and logs nothing per bar; the
+derive's ledger line counts what it wrote (`partial` now counts a bucket
+with a padded minute). The rule's identity is the constant and this entry;
+the rule before it is `pull::fold::PADDED_FOLD_BEFORE`, read only to name a
+month stored under it (below). A refused rung-month is a receipt failure and
+a `pull.derive` "not derived" event, each in the words below.
+
+**The months already stored stay on the rule before, and every door says so
+(corrected in repair 1; verify-R4-27-r1 B1, B2).** An earlier draft of this
+entry said the existing repair door refolds them. Measured, it does not: the
+repair door (`cli zerodha-repair ... --from-store`, `pull::ingest::
+repair_window`) keeps every held derived bar by contract (D-3350:
+`store::repair::repair_month` never changes or drops one), and
+`store::repair::publish` keeps every original stamp, while (b) changes held
+values and drops the bar of every bucket of only padded minutes. Over a 5min
+month stored under the rule before, the door answered "committed 0, failures
+[]" and left every old bar in place. So, as built now:
+
+- the APPEND door refuses the rung-month of a later ingest whose every held
+  bar is the fold before and which (b) folds differently, by the name
+  "stored under the fold before D-7270" and the step that owes the refold,
+  S-47; it no longer says "restore complete minute source", which was a
+  wrong remedy (the source is not what changed). It takes no new day of such
+  a month, since two fold rules in one month would read as one. The minutes
+  land; the held bytes are kept; a month under (b) and a disagreement that is
+  not the rule change are unaffected;
+- the REPAIR door refuses the same month by the same name, and a held bar
+  its fold would drop by name, instead of reporting the rung repaired, and
+  journals each refusal as it journals a refusal of its versioned repair (a
+  `refused` line with the run's reason in `audit/<vendor>.repairs` and a
+  `pull.repair` event); a held bar its fold changes that is not the rule
+  change stays the append door's own refusal ("batch record N restates the
+  record held at T", IA-16), filed and logged and, as before, not journaled;
+- "every held bar is the fold before" is asked as the repair door compares
+  (`store::repair::same_bar`): a share's open interest written `0` by an
+  earlier build and null by this one is one absence (D-3322). Asked byte for
+  byte it never held on real data: on new private roots holding SIEMENS
+  2019-03's seven real derived rung-months with the minutes landed again,
+  every rung differed from its refold at its first bar in that field alone,
+  and all seven were refused as a restated record, unnamed. Asked as the door
+  does, all seven are refused by this name, on a first run and on a second,
+  bytes kept and no generation written. The append door's reconcile itself
+  stays byte for byte, so a month that differs in that absence alone keeps
+  its conflict and is never named the rule change (invariant R427-14);
+- measured on the sample months (`padded-sample-final2.tsv`): of 6,538
+  rung-months, 978 fold differently under (b); 479 of them are stored exactly
+  under the rule before, so a re-ingest refuses them by this name (381 differ
+  only in values, 98 hold a bucket of only padded minutes); 499 already
+  disagree with the stored month under the rule before too and keep their
+  own refusal (S-38 plans their refold, through the same repair door, which
+  cannot restate a held derived bar for them either: it refuses them by
+  name, so they wait for the same restate door); on Z7's months 114 of
+  20,321 are stored exactly under the rule before. `docs/06-limits.md`
+  L-R427-04, L-R427-08.
+
+**Not done here (named).** The refold of the derived months already stored:
+it needs a door that restates a held derived bar as a new generation under
+this decision's name, and, for the 98 sample rung-months with a bucket of
+only padded minutes, a revision form that may drop a held stamp, which
+`store::repair::publish` refuses today. No package builds it (R3-22's
+restate door is for option days and keeps every original stamp); S-47 plans
+it as `cli zerodha-refold` and waits for it by an operator prerequisite
+naming the missing owner, as S-25 does for the capital-market and Zerodha
+rebuild, then for the operator's yes. Until then the stored months stay on
+the rule before. A cash month
+begun under an earlier build and in flight when this lands stops gaining
+derived days until the refold, so this lands at a month boundary. The
+`/db` label (R4-04), the window flag (after R4-03) and R3-29's server
+fold (when it lands).
+
+**Proof.** `pull::padded::tests::a_bucket_opens_on_its_first_unpadded_minute`,
+`a_padded_minute_is_counted_and_not_a_trade`,
+`a_bucket_of_only_padded_minutes_follows_its_rule`,
+`a_whole_padded_session_is_counted_and_folds_to_its_one_trade`,
+`a_padded_looking_open_is_never_padded`,
+`a_padded_minute_after_a_halt_is_not_padded`,
+`a_minute_outside_every_window_is_never_padded`,
+`an_index_or_a_future_is_never_judged`,
+`every_extreme_of_the_walk_is_counted_not_smoothed`; the bench rows
+C-PD-01 and C-PD-02 (`crates/pull/benches/ratio/padded.rs`); for the months
+already stored (repair 1), `crates/pull/tests/padded_refold.rs`:
+`a_month_stored_under_the_fold_before_is_refused_by_that_name_at_the_append_door`,
+`a_month_under_the_rule_in_force_appends_and_another_disagreement_keeps_its_name`,
+`the_repair_door_refuses_a_month_stored_under_the_fold_before_and_never_reports_it_repaired`,
+`the_repair_door_refuses_a_held_bar_its_fold_drops`,
+`the_repair_door_refuses_a_held_bar_its_fold_changes_in_the_append_doors_words`,
+`an_open_interest_absence_written_zero_never_hides_the_rule_change`
+(invariants R427-12, R427-13, R427-14).
+
+### D-7271 — The month summary's version 2 carries each day's flat carries; a version 1 summary reads padded minutes as NOT COUNTED, never as zero — 2026-10-22
+
+**Implemented by** R4-27 (`store::month_summary`, its writer step). **Item**
+INT-15's counts.
+
+1. **Version 2 is version 1 plus one bitmap a held day of a one-minute
+   month** (`FLAG_PADDED`): its FLAT CARRIES, the minutes whose row has no
+   volume and repeats the close of the row before on the same IST day. That
+   is the calendar-free half of a padded minute; the store crate holds no
+   calendar, so a reader applies the day's session windows
+   (`MonthSummary::padded_on(day, windows)`): a padded minute is a flat
+   carry inside a window that is not that window's first held minute. For a
+   month whose stamps strictly increase this is exactly the bar-by-bar rule
+   of D-7270, held equal to a full read by
+   `pull::padded::tests::padded_minutes_per_day_match_a_full_read` on a
+   month with a padded-looking open, padded runs, a whole padded afternoon
+   and the 2024-03-02 two-window session.
+2. **Readers branch on the version.** Version 1 is still decoded and means
+   what it meant; its padded minutes are `NotCounted::Version1`, as is a
+   month that is not one minute (`NotMinutes`) or holds an invalid stamp
+   (`InvalidStamps`) — each a named not-counted, never a zero.
+3. **A version 1 summary is never rewritten in place and never extended.**
+   While it describes the month it is kept as it is; the next commit, or the
+   rebuild door (`BarFile::month_summary_existing`, `cli msum-build`),
+   builds it whole as version 2, a new file renamed over the old, and the
+   `store.sum` line names `summary_v1`. Measured on 22 Oct 2026: the
+   operator's store holds no `.sum` yet (`find bars/zerodha -name '*.sum'`
+   finds none), so the first walk of R3-06's builder writes version 2.
+4. **Cost.** The fold judges a row with one comparison of four prices,
+   O(1); a one-minute month's payload grows by at most 31 x 180 bytes
+   (its longest is 11,692 bytes), under `MAX_PAYLOAD_LEN`. `/gaps.json`,
+   which builds the summary of a month that keeps none, measured on the
+   shadow (n=200 sequential GETs): NIFTY 1min 2024-09 p50 1.10 ms, p99
+   1.37 ms, max 1.44 ms; PGEL CASH 1min 2019-03 p50 0.94, p99 1.25, max
+   1.33 ms.
+5. **A sealed month** carries whatever version its summary bytes had
+   (amendment A4); a month sealed before its summary was version 2 reads as
+   `Version1` until it is rebuilt.
+
+**Proof.** `store::month_summary::tests::a_v1_summary_reads_padded_as_not_counted`,
+`a_flat_carry_is_judged_against_the_row_before_on_its_own_day`,
+`padded_minutes_are_carries_inside_a_window_after_its_first_held_minute`,
+`a_payload_that_is_not_its_geometry_is_refused_by_name`;
+`pull::padded::tests::padded_minutes_per_day_match_a_full_read`,
+`a_v1_summary_is_read_as_not_counted_never_as_zero`.
+
+### D-7272 — AUT-10 decision 2 (DB-B44): the staleness bound stays 14 days; a documented RBI gap is a gap row, carried and labelled (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (the measurement, `pull::riskfree::replay` and
+`cli rate-replay`); the gap row type and its labels are R3-30's (D-6246,
+D-6247). **Findings** DB-B44. **Checklist** OPT-04.
+
+**Measured both ways** — `cli rate-replay TABLE 2018-09-03 2026-09-24`
+over the calendar's 1,990 sessions of GDFL's window, release build of this
+branch, 22 Oct 2026 (`state/fix/round2/R4-27-evidence/rate-replay-*.txt`):
+
+| table | bound 14 days | bound 21 days | bound 28 days |
+|---|---|---|---|
+| the operator's table as it is (419 results, sha256 `cf81d3fc…`) | 10 sessions refused: 2024-09-26, 09-27, 09-30, 10-01, 10-03, 2025-02-27, 2026-04-02, 04-06, 04-07, 04-08 | 1 refused: 2024-10-03 | 0 refused, nothing labelled |
+| the same plus 8 documented gap rows (README "Gaps": 2020-09-30 NOT_HELD, 2023-03-29 NA, 2024-09-18 and 09-25 CANCELLED, 2025-02-20 NA, 2025-12-31 NOT_HELD, 2026-03-25 NA, 2026-04-01 NOT_HELD) | 0 refused, 33 sessions carried and labelled `rate_carried` | the same | the same |
+
+The IV a carried rate gives, against the IV the next published result would
+give (a counterfactual table, `rbi-with-counterfactual.tsv`, NOT data:
+each gap row replaced by the next result's price and yield), on the shadow's
+`/greeks.json` for the ATM NIFTY CE and PE at 10:00, 12:00 and 14:00 IST of
+the ten sessions (expiries 2024-10-03, 2025-02-27, 2026-04-07 and
+2026-04-13): 42 cells priced each way (16 instants hold no option bar, 2
+are `below_zero_carry_bound` both ways); |ΔIV| median 0.0061, p90 0.0302,
+max 0.0316 volatility points, the carried rate differing by at most 0.17
+percentage points. Under the bare 14-day rule those 44 cells are
+`rate_stale`: no IV at all.
+
+**Decision.** `MAX_AGE_DAYS` stays 14 and the documented gaps are gap rows.
+Widening to 21 days still refuses 2024-10-03, an expiry; 28 days refuses
+nothing but would also carry over any UNDOCUMENTED hole of up to four weeks
+without a word, which is the invented value D-2810 refuses. A gap row
+carries exactly the weeks RBI documented, labels every cell, costs at most
+0.032 volatility points measured, and leaves an unexplained hole refused.
+`a_cancelled_auction_week_is_not_stale` and
+`r_missing_for_a_week_is_refused_by_the_chosen_bound` hold both halves.
+
+**Store write (on the operator's yes).** The 8 gap rows go into the
+operator's table — as the next generation of R3-30's `risk_free_rate`
+reference table, or the `BRUTEX_TBILL91_SERIES` file while `/greeks.json`
+still reads it (L-R330-04) — exactly as `gap-rows.tsv` in the evidence
+folder states them; the three NOT_HELD rows cite the monthly listing page,
+the only RBI source the README names for them.
+
+### D-7273 — AUT-10 decision 3 (DB-A08, DB-A14): the stored zero open-interest cells are not rewritten; the read-time `not_a_derivative` rule of D-3322 stands (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (the measurement); the read rule is D-3322 item 2's
+(WP-31), already served. **Findings** DB-A08, DB-A14. **Checklist** CON-10.
+
+**Measured both ways**, read only, 22 Oct 2026
+(`state/fix/round2/R4-27-evidence/oi-census.tsv`, `index_sizes.txt`):
+
+* **Rewrite.** Every Zerodha `INDEX` month holds open interest 0, never the
+  null: every NIFTY, BANKNIFTY and INDIAVIX month file (2,943 files,
+  5,383,723 records; NIFTY 1day is 141 files and exactly DB-A08's 2,911
+  records) and every one of a 1-in-20 sample of the other 65,014 (3,250
+  files), first and last record each. A rewrite is therefore one new
+  generation for each of the 67,957 Zerodha `INDEX` month files, 8.30 GB
+  (8,300,642,344 bytes, 108,461,203 records) written again with their
+  checksums, time indexes and summaries.
+* **Read-time rule.** Already served: `/bars/window.json`, `/bars.json`, the
+  export and All sources answer `"oi": null` with `"oichg_why":
+  "not_a_derivative"` for an `INDEX` or `CASH` bar whatever was stored, and
+  no condition in the vocabulary reads open interest. Its cost, measured on
+  the shadow (n=200 sequential GETs of 200 rows): NIFTY Zerodha 1min p50
+  0.67 ms, p99 0.90 ms, max 0.93 ms, against an option's 1s window that
+  carries no such rule, p50 0.66, p99 0.89, max 1.09 ms: not measurable.
+
+**Decision.** No rewrite. Nothing a reader is shown or a sweep computes
+changes, and 67,957 generations would be written to change it. New
+landings already write the null (D-3322 item 1). No store write, and no
+change to `bars_route` (the sequenced edit is not needed).
+
+### D-7274 — AUT-10 decision 4 (D-3323): a percentage of price on a vendor-adjusted share run is labelled where one factor holds across the stock-day and refused where it does not (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (`cli::research_policy::percentage_statistic`, and
+the policy report's last section). **Decides** what D-3323 left open.
+**Checklist** COR-03.
+
+**Measured both ways** — `cli feed-reconcile` (DATA-1, the one
+per-stock-day authority) over the five sample months on a private root of
+APFS clones of the needed month files (15,219 files), 22 Oct 2026; the
+CSVs, `pct-basis.awk` and `pct-basis-days.txt` are in
+`state/fix/round2/R4-27-evidence`. Of 18,663 matched stock-days:
+
+| stock-day class | days | percentage-of-price bound (the factor interval every matched minute's range admits): p50 / p99 / max | paisa figure off by \|median z/g - 1\|: p50 / p99 / max |
+|---|---|---|---|
+| unadjusted | 12,981 | 0.023% / 0.58% / 2.62% | 0 |
+| vendor-adjusted, one factor across the day, exchange grid | 3,513 | 0.033% / 0.85% / 2.28% | 33% / 90% / 94% |
+| vendor-adjusted, quantised (grid 10, 50 or 100 paisa against 5; 5 against 1), one factor | 1,455 | 0.023% / 0.13% / 0.19% | 50% / 95% / 95% |
+| factor moved within the day (`range_not_constant`) | 480 + 175 quantised + 59 unadjusted | no common factor | — |
+
+A percentage of price on a vendor-adjusted stock-day whose one factor holds
+is within the same bound an unadjusted day carries, while an absolute paisa
+figure is off by the factor itself; on a day whose factor moves, no factor
+relates the feeds.
+
+**Decision.** By the stock-day's measured shape, the same rule for every
+share and feed: on vendor-adjusted prices a percentage of price is
+LABELLED where one factor holds (a quantised day with its own words: a
+tick-level distance there is not the exchange's tick) and REFUSED by name
+where the factor moved; raw prints and published index levels are exact; a
+day with no reconcile row is labelled "not measured", never exact. Switching
+research to GDFL raw prices is the operator's existing design for fills and
+is not decided here. The policy report (`cli policy-check`) states the rule
+after the thresholds.
+
+**Not done here (named).** No research verb computes a percentage of price
+today; the Winner Gate work that will (FIB) calls `percentage_statistic`
+with the day's shape, which needs DATA-1's per-stock-day verdicts kept as
+store data rather than CSVs under `--out` (owner: DATA-1 / R4-26).
+
+**Proof.** `cli::research_policy::tests::a_percentage_statistic_on_a_quantised_run_is_refused_or_labelled`.
