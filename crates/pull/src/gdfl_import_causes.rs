@@ -738,6 +738,11 @@ const fn door_said(kind: FailKind) -> &'static str {
              read again by the next run"
         }
         FailKind::Other => "the store refused the file",
+        FailKind::OpenFilesExhausted => {
+            "this process holds every descriptor its open-file limit allows (EMFILE); the file is \
+             held back: raise the limit (`ulimit -n` in the shell that runs the import, or \
+             `launchctl limit maxfiles` on macOS) and resume"
+        }
     }
 }
 
@@ -921,6 +926,13 @@ pub const fn cm_cause(why: &CmRefusal) -> Cause {
         CmRefusal::ArchivePrefixed { .. } => Cause::open(Stage::Vendor, "archive_prefixed"),
         CmRefusal::DayZipMisfiled { .. } => Cause::open(Stage::Vendor, "day_zip_misfiled"),
         CmRefusal::DayFileMisfiled { .. } => Cause::open(Stage::Vendor, "day_file_misfiled"),
+        // IA-3b (RA-322, RA-238, RA-323): an empty container, a member past
+        // the one-member memory cap and a file that changed under the run are
+        // faults of the copy as read; a corrected copy, a reader that streams
+        // or a finished copy fills the day, so each leaves it open.
+        CmRefusal::DayZipEmpty { .. } => Cause::open(Stage::Vendor, "day_zip_empty"),
+        CmRefusal::MemberTooLarge { .. } => Cause::open(Stage::Vendor, "member_too_large"),
+        CmRefusal::SourceChanging { .. } => Cause::open(Stage::Vendor, "source_changing"),
         CmRefusal::CalendarNotRegular { .. } => {
             Cause::open(Stage::Calendar, "calendar_not_regular")
         }

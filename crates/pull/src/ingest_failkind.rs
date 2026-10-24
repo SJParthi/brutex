@@ -95,7 +95,19 @@ pub enum FailKind {
     /// A refusal of a store variant added after this table. Never reached by
     /// a variant this build knows (IA-GR-39); `filing`, held back.
     Other,
+    /// The host refused a store file because this process holds every
+    /// descriptor its open-file limit allows (`EMFILE`, IA-3b item 7,
+    /// RA-306): `open_files_exhausted`, held back, never a general
+    /// `store_io`. Told by the error number the store keeps
+    /// ([`StoreError::Io`]'s `code`), never by the error's words, since std
+    /// gives `EMFILE` no kind of its own.
+    OpenFilesExhausted,
 }
+
+/// `EMFILE`'s number on this host, from `rustix` (POSIX names it; its value
+/// is the host's): the one number [`FailKind::of_store`] tells
+/// [`FailKind::OpenFilesExhausted`] by.
+const EMFILE: i32 = rustix::io::Errno::MFILE.raw_os_error();
 
 impl FailKind {
     /// The kind of a store refusal (design §5.8's table, one row per variant).
@@ -110,6 +122,12 @@ impl FailKind {
             // row, and `Follows` its successor generation.
             StoreError::Sealed { offer, .. } => Self::of_offer(*offer),
             StoreError::Superseded { .. } => Self::Superseded,
+            // ONE ARM FOR EMFILE (IA-3b item 7, RA-306): the store keeps the
+            // error number its classifier was handed, so a process out of
+            // descriptors is named by it, never filed as a general `store_io`.
+            StoreError::Io {
+                code: Some(EMFILE), ..
+            } => Self::OpenFilesExhausted,
             StoreError::Io { kind, .. } => Self::io(*kind),
             StoreError::BarrierFailed { .. } => Self::io(ErrorKind::Other),
             StoreError::ShortWrite { .. } => Self::io(ErrorKind::WriteZero),
@@ -244,6 +262,7 @@ impl FailKind {
             Self::BatchRefused => "batch_refused",
             Self::Sealed => "month_sealed",
             Self::Other => "filing",
+            Self::OpenFilesExhausted => "open_files_exhausted",
         }
     }
 

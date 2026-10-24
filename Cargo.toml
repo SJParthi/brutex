@@ -145,7 +145,10 @@ governor = "0.7"
 # point on macOS. Rust only: raw system calls on Linux, `libc` on macOS; no C
 # and no `cc`. Its `build.rs` runs `rustc` feature probes, the same kind the
 # thirteen packages `docs/06-limits.md` §96 lists already run.
-rustix   = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
+# `process` (IA-3b, D-7004): `getrlimit(2)` for the import preflight's soft
+# open-file limit (`open_files_short`), the same safe wrapper in place of
+# `/usr/bin/ulimit`, which is a shell script and is never called. Adds no crate.
+rustix   = { version = "1.1.4", default-features = false, features = ["std", "fs", "process"] }
 aws-config  = "1"
 aws-sdk-ssm = "1"
 

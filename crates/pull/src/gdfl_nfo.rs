@@ -109,7 +109,8 @@ use crate::gdfl_archive::{
     MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
 };
 use crate::gdfl_cm::{CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile};
-use crate::gdfl_tickstore::{IndexEntry, read_index, rebuild};
+use crate::gdfl_run::preflight::Watch;
+use crate::gdfl_tickstore::{IndexEntry, rebuild};
 use crate::session::Day;
 
 /// The day folder's prefix, before its `ddmmyyyy`.
@@ -1011,6 +1012,13 @@ impl NfoTickStore {
         }
     }
 
+    /// The first and last day the `options` tree holds a day file for at its
+    /// own place (IA-3b item 8), from the one walk.
+    #[must_use]
+    pub fn span(&self) -> Option<(Day, Day)> {
+        self.table().span(NFO_TREE)
+    }
+
     /// Where the day file of `day` lies.
     #[must_use]
     pub fn day_path(&self, day: Day) -> PathBuf {
@@ -1055,6 +1063,8 @@ fn nfo_day_file(name: &str) -> Option<(u8, Day, String)> {
 #[derive(Debug, Clone)]
 pub struct StoreLocator {
     file: Arc<std::fs::File>,
+    /// The day file watched to its last read (IA-3b item 4).
+    watch: Arc<crate::gdfl_run::preflight::Watch>,
     entry: IndexEntry,
 }
 
@@ -1072,12 +1082,14 @@ impl NfoSource for NfoTickStore {
             });
         }
         // THE STORE'S ONE READING DOOR (R3-16, FM-046): a link, a pipe or a
-        // device at a day's name is refused by name, never read as absent.
-        let Some((file, len)) = crate::gdfl_tickstore::open_day(&self.day_path(day))? else {
+        // device at a day's name is refused by name, never read as absent;
+        // an index of zero entries refuses the day `day_zip_empty`, and the
+        // file is watched to its last read (IA-3b items 2 and 4).
+        let Some((file, watch, entries)) =
+            crate::gdfl_tickstore::open_watched_day(&self.root, &self.day_path(day))?
+        else {
             return table.absent(NFO_TREE, day).map(|()| None);
         };
-        let entries = read_index(&file, len)?;
-        let file = Arc::new(file);
         let mut listing = NfoDay::new(day, entries.len());
         for entry in entries {
             let (name, size, crc) = (entry.name.clone(), entry.size, entry.crc);
@@ -1087,6 +1099,7 @@ impl NfoSource for NfoTickStore {
                 crc,
                 StoreLocator {
                     file: Arc::clone(&file),
+                    watch: Arc::clone(&watch),
                     entry,
                 },
             );
@@ -1095,7 +1108,9 @@ impl NfoSource for NfoTickStore {
     }
 
     fn fetch(&self, file: &ListedFile<StoreLocator>) -> Result<Vec<u8>, CmRefusal> {
-        rebuild(&*file.locator.file, &file.locator.entry)
+        let rebuilt = rebuild(&*file.locator.file, &file.locator.entry)?;
+        crate::gdfl_tickstore::tick_unchanged(&file.locator.watch)?;
+        Ok(rebuilt)
     }
 }
 
@@ -1166,7 +1181,12 @@ struct Years {
 #[derive(Debug)]
 struct YearIndex {
     file: Arc<std::fs::File>,
+    /// The year zip watched from its directory's read to every later read
+    /// (IA-3b item 4, RA-323): once per run per file.
+    watch: Arc<Watch>,
     days: HashMap<Day, Option<ZipEntry>>,
+    /// The first and last day zip day filed at its own place (IA-3b item 8).
+    span: Option<(Day, Day)>,
 }
 
 /// A failed open or measure of a zip, by its kind.
@@ -1214,14 +1234,17 @@ impl NfoZips {
             return Ok(Some(Arc::clone(index)));
         }
         let name = format!("{year:04}.zip");
-        let file = match std::fs::File::open(self.dir.join(&name)) {
-            Ok(file) => file,
+        let path = self.dir.join(&name);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => Arc::new(file),
             Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(why) => return Err(year_zip_unavailable(&why)),
         };
+        let watch = Watch::new(&path, Arc::clone(&file)).map_err(|why| year_zip_unavailable(&why))?;
         let entries = year_zip_directory(&file)?;
         let mut days: HashMap<Day, Option<ZipEntry>> = HashMap::with_capacity(entries.len());
         let mut away: Vec<(Day, String)> = Vec::new();
+        let mut span: Option<(Day, Day)> = None;
         for entry in entries {
             let Some(day) = named_day_zip(&entry.name) else {
                 continue;
@@ -1230,6 +1253,7 @@ impl NfoZips {
                 away.push((day, format!("{name}:{}", entry.name)));
                 continue;
             }
+            span = Some(span.map_or((day, day), |(lo, hi)| (lo.min(day), hi.max(day))));
             match days.entry(day) {
                 std::collections::hash_map::Entry::Occupied(mut twice) => {
                     twice.insert(None);
@@ -1242,8 +1266,10 @@ impl NfoZips {
         // Filed whole, after the walk: a poisoned lock still holds a whole
         // index and every note of it, or neither.
         let index = Arc::new(YearIndex {
-            file: Arc::new(file),
+            file,
+            watch: Arc::new(watch),
             days,
+            span,
         });
         for (day, found) in away {
             years.away.entry(day).or_default().push(found);
@@ -1350,6 +1376,9 @@ fn named_day_zip(entry: &str) -> Option<Day> {
 pub struct ZipFileLocator<B = std::fs::File> {
     file: Arc<B>,
     at: ZipLocator,
+    /// The year zip watched to its last read (IA-3b item 4); `None` for a
+    /// loose day zip, which reaches the store through R4-11's own door.
+    watch: Option<Arc<Watch>>,
 }
 
 impl<B: ReadAt> ZipFileLocator<B> {
@@ -1357,7 +1386,11 @@ impl<B: ReadAt> ZipFileLocator<B> {
     /// day zip ([`crate::gdfl_dayzips`]).
     #[must_use]
     pub(crate) const fn new(file: Arc<B>, at: ZipLocator) -> Self {
-        Self { file, at }
+        Self {
+            file,
+            at,
+            watch: None,
+        }
     }
 
     /// The member's bytes, as [`member_bytes`] reads them, unverified:
@@ -1388,8 +1421,12 @@ impl NfoSource for NfoZips {
             .as_ref()
             .and_then(|index| index.days.get(&day).map(|slot| (index, slot)));
         // D-4818's one rule, as `gdfl_archive::file_copy` files a copy.
-        let (file, inner) = match (here, away) {
-            (Some((index, Some(inner))), []) => (Arc::clone(&index.file), inner.clone()),
+        let (file, watch, inner) = match (here, away) {
+            (Some((index, Some(inner))), []) => (
+                Arc::clone(&index.file),
+                Arc::clone(&index.watch),
+                inner.clone(),
+            ),
             (None, [found]) => {
                 return Err(CmRefusal::DayZipMisfiled {
                     found: found.clone(),
@@ -1407,11 +1444,39 @@ impl NfoSource for NfoZips {
             _ => return Err(CmRefusal::ArchiveDuplicateDay { day }),
         };
         drop(years);
-        day_listing(&file, &inner, day).map(Some)
+        day_listing(&file, &inner, day, Some(&watch)).map(Some)
     }
 
     fn fetch(&self, file: &ListedFile<ZipFileLocator>) -> Result<Vec<u8>, CmRefusal> {
-        member_bytes(&*file.locator.file, file.locator.at, &file.entry, file.len)
+        let bytes = member_bytes(&*file.locator.file, file.locator.at, &file.entry, file.len)?;
+        // The year zip is still the one listed (IA-3b item 4, RA-323).
+        crate::gdfl_archive::unchanged(file.locator.watch.as_deref())?;
+        Ok(bytes)
+    }
+}
+
+impl NfoZips {
+    /// The first and last day zip day the readable year zips of the
+    /// directory file at their own place (IA-3b item 8, FM-133): the
+    /// source's span, `None` when none holds one. Lists the directory and
+    /// walks each zip once, as the first day asked does (O(names) plus
+    /// O(entries) a zip, once per run), then one comparison a year.
+    ///
+    /// # Errors
+    ///
+    /// [`CmRefusal::ArchiveUnavailable`] for a directory that cannot be
+    /// listed.
+    pub fn span(&self) -> Result<Option<(Day, Day)>, CmRefusal> {
+        let mut years = self
+            .years
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.list(&mut years)?;
+        Ok(years
+            .zips
+            .values()
+            .filter_map(|index| index.span)
+            .reduce(|(lo, hi), (first, last)| (lo.min(first), hi.max(last))))
     }
 }
 
@@ -1441,7 +1506,7 @@ pub fn listing_in<B: ReadAt>(
     let Some(inner) = inner else {
         return Ok(None);
     };
-    day_listing(file, &inner, day).map(Some)
+    day_listing(file, &inner, day, None).map(Some)
 }
 
 /// The listing of `day` from its stored day zip `inner`, a record of the year
@@ -1454,9 +1519,18 @@ fn day_listing<B: ReadAt>(
     file: &Arc<B>,
     inner: &ZipEntry,
     day: Day,
+    watch: Option<&Arc<Watch>>,
 ) -> Result<NfoDay<ZipFileLocator<B>>, CmRefusal> {
     let (base, span) = stored_span(&**file, inner)?;
     let members = zip_entries(&**file, base, span)?;
+    crate::gdfl_archive::unchanged(watch.map(|watch| &**watch))?;
+    // AN EMPTY NESTED DAY ZIP IS NAMED, NEVER A DAY OF NO FILE (IA-3b,
+    // RA-322, design §8 B28a): the day stays open.
+    if members.is_empty() {
+        return Err(CmRefusal::DayZipEmpty {
+            name: inner.name.clone(),
+        });
+    }
     let mut listing = NfoDay::new(day, members.len()).with_member_bytes(span);
     for entry in members {
         listing.push(
@@ -1466,6 +1540,7 @@ fn day_listing<B: ReadAt>(
             ZipFileLocator {
                 file: Arc::clone(file),
                 at: entry.locator,
+                watch: watch.map(Arc::clone),
             },
         );
     }

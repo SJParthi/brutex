@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use crate::gdfl_archive::{ReadAt, crc32, day_zip_name};
 use crate::gdfl_cm::{CmKind, CmRefusal, CmScope, CmSource, DayListing, ListedFile};
+use crate::gdfl_run::preflight::{Watch, WatchFault};
 use crate::session::Day;
 
 /// The first eight bytes of a day file (§3).
@@ -85,6 +86,9 @@ const PAST_SIZE: &str = "a columnar block rebuilds past its entry's stated size"
 pub struct TickLocator {
     /// The day file, opened once per listing and shared by its entries.
     file: Arc<std::fs::File>,
+    /// The day file watched from its index's read to each block read
+    /// (IA-3b item 4, RA-304): shared by the listing's entries.
+    watch: Arc<Watch>,
     /// The entry's kind (§3): 0 directory, 1 columnar, 2 raw.
     kind: u8,
     /// The block's absolute offset.
@@ -298,6 +302,17 @@ pub fn read_index<B: ReadAt>(src: &B, len: u64) -> Result<Vec<IndexEntry>, CmRef
 pub fn rebuild<B: ReadAt>(src: &B, entry: &IndexEntry) -> Result<Vec<u8>, CmRefusal> {
     if entry.kind == 0 {
         return Ok(Vec::new());
+    }
+    // THE ONE-MEMBER CAP BEFORE THE BLOCK IS READ (IA-3b, RA-238): the
+    // rebuilt file and its block are held in memory by one worker, so an
+    // index stating either past `MEMBER_CAP` refuses the entry by name, its
+    // day open, before a byte of the block is read or a frame inflated.
+    let size = entry.size.max(entry.len);
+    if size > crate::tickstore_write::MEMBER_CAP {
+        return Err(CmRefusal::MemberTooLarge {
+            name: entry.name.clone(),
+            size,
+        });
     }
     let block = read(src, entry.off, entry.len)?;
     let (&kind, body) = block.split_first().ok_or(bad(BLOCK_KIND))?;
@@ -563,9 +578,20 @@ pub struct DayTable {
     /// tree lacks at its own place is then refused with it, never read as
     /// absent.
     pub fault: Option<CmRefusal>,
+    /// The first and last day held at its own place, by tree byte (0
+    /// indices, 1 stocks, 2 options): the source's span (IA-3b item 8,
+    /// FM-133), two comparisons a held file.
+    spans: [Option<(Day, Day)>; 3],
 }
 
 impl DayTable {
+    /// The first and last day tree `tree` holds a day file for at its own
+    /// place (IA-3b item 8, FM-133); `None` when it holds none. One index.
+    #[must_use]
+    pub fn span(&self, tree: u8) -> Option<(Day, Day)> {
+        self.spans.get(usize::from(tree)).copied().flatten()
+    }
+
     /// The misfiled day file of `tree` on `day`, as `(found, expected)`.
     #[must_use]
     pub fn misfiled(&self, tree: u8, day: Day) -> Option<&(String, String)> {
@@ -617,7 +643,14 @@ impl DayTable {
                     continue;
                 }
                 match own(&name).filter(|_| kind.is_file()) {
-                    Some((_, _, expected)) if expected == path => table.held += 1,
+                    Some((tree, day, expected)) if expected == path => {
+                        table.held += 1;
+                        if let Some(span) = table.spans.get_mut(usize::from(tree)) {
+                            *span = Some(span.map_or((day, day), |(lo, hi)| {
+                                (lo.min(day), hi.max(day))
+                            }));
+                        }
+                    }
                     Some((tree, day, expected)) => {
                         table.misfiled_count += 1;
                         let _first = table
@@ -718,6 +751,13 @@ impl TickStore {
             .get_or_init(|| DayTable::walk(&self.root, "cm", &cm_day_file))
     }
 
+    /// The first and last day tree `kind` holds a day file for at its own
+    /// place (IA-3b item 8), from the one walk.
+    #[must_use]
+    pub fn span(&self, kind: CmKind) -> Option<(Day, Day)> {
+        self.table().span(tree_byte(kind))
+    }
+
     /// Where the day file of tree `kind` on `day` lies (§2).
     #[must_use]
     pub fn day_path(&self, kind: CmKind, day: Day) -> PathBuf {
@@ -770,6 +810,56 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
     }
 }
 
+/// A day file opened through [`open_day`], its identity taken through that
+/// one handle, its index read and held to at least one entry (IA-3b, RA-322:
+/// an index of zero entries refuses the day [`CmRefusal::DayZipEmpty`] naming
+/// the file under `root`, the day open), and the file checked unchanged after
+/// the index read (item 4). `Ok(None)` only when no file has the name. Shared
+/// by the capital-market and the options day readers.
+///
+/// # Errors
+///
+/// [`open_day`]'s and [`read_index`]'s refusals, [`CmRefusal::DayZipEmpty`]
+/// and [`tick_unchanged`]'s.
+pub(crate) fn open_watched_day(
+    root: &Path,
+    path: &Path,
+) -> Result<Option<(Arc<std::fs::File>, Arc<Watch>, Vec<IndexEntry>)>, CmRefusal> {
+    let Some((file, file_len)) = open_day(path)? else {
+        return Ok(None);
+    };
+    let file = Arc::new(file);
+    let watch = Watch::new(path, Arc::clone(&file))
+        .map_err(|why| CmRefusal::TickStoreUnavailable { kind: why.kind() })?;
+    let entries = read_index(&*file, file_len)?;
+    tick_unchanged(&watch)?;
+    if entries.is_empty() {
+        return Err(CmRefusal::DayZipEmpty {
+            name: path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string(),
+        });
+    }
+    Ok(Some((file, Arc::new(watch), entries)))
+}
+
+/// [`Watch::check`] as the tick store's refusal: a changed day file is
+/// [`CmRefusal::SourceChanging`] (IA-3b item 4, RA-304), an unmeasurable one
+/// [`CmRefusal::TickStoreUnavailable`], which the run's loss probe asks about.
+///
+/// # Errors
+///
+/// As above.
+pub(crate) fn tick_unchanged(watch: &Watch) -> Result<(), CmRefusal> {
+    match watch.check() {
+        Ok(()) => Ok(()),
+        Err(WatchFault::Changed(why)) => Err(why),
+        Err(WatchFault::Unreachable(kind)) => Err(CmRefusal::TickStoreUnavailable { kind }),
+    }
+}
+
 impl CmSource for TickStore {
     type Locator = TickLocator;
 
@@ -799,15 +889,16 @@ impl CmSource for TickStore {
         }
         // The day's own place is opened by its exact path, so a day the
         // writer published after the walk is read whole (`FORMAT.md` §2).
-        let Some((file, file_len)) = open_day(&self.day_path(kind, day))? else {
+        let Some((file, watch, entries)) =
+            open_watched_day(&self.root, &self.day_path(kind, day))?
+        else {
             return table.absent(tree_byte(kind), day).map(|()| None);
         };
-        let entries = read_index(&file, file_len)?;
-        let file = Arc::new(file);
         let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
         for entry in entries {
             let locator = TickLocator {
                 file: Arc::clone(&file),
+                watch: Arc::clone(&watch),
                 kind: entry.kind,
                 off: entry.off,
                 len: entry.len,
@@ -842,7 +933,11 @@ impl CmSource for TickStore {
         // The block was checked inside the file when the day was listed; a
         // file that shrank since is a failed positional read, never a short
         // buffer.
-        rebuild(&*at.file, &entry)
+        let rebuilt = rebuild(&*at.file, &entry)?;
+        // THE DAY FILE IS STILL THE ONE LISTED (IA-3b item 4, RA-304): a
+        // file replaced by rename mid-read refuses the day, never closes it.
+        tick_unchanged(&at.watch)?;
+        Ok(rebuilt)
     }
 }
 

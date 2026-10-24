@@ -38,7 +38,9 @@
 //! No lock, claim, runs ledger, stop file or resume point: those are IA-2's
 //! (round 4, SF-11), and the lock a cli run takes is still AF-01's door
 //! (`cli/src/gdfl_import_guard.rs`). No source but the two the cli has
-//! (`zip`, `tickstore`): `dayzips` is IA-3's. No verification mode: only
+//! (`zip`, `tickstore`): loose day zips reach the tick store through R4-11's
+//! `write_day` stage and are read from there (IA-3b, D-7005 amending D-4815),
+//! never through a third source word here. No verification mode: only
 //! [`Mode::Import`] is built, and a request line naming another is refused.
 
 use std::ffi::OsString;
@@ -77,6 +79,11 @@ pub mod stop;
 /// The child's half of the two-phase start (IA-2; round 4, BL-A).
 #[path = "gdfl_run_start.rs"]
 pub mod start;
+
+/// The preflight refusals IA-3 left (IA-3b; D-4802, D-4819, D-4850, D-4864,
+/// D-4908, D-7000 to D-7009).
+#[path = "gdfl_run_preflight.rs"]
+pub mod preflight;
 
 /// The telemetry target of this module's events.
 pub const TARGET: &str = "gdfl.run";
@@ -426,6 +433,11 @@ pub struct Request {
     /// [`crate::gdfl_import::DEFAULT_FREE_FLOOR`] unless the operator sets
     /// one; `0` checks nothing).
     pub free_floor: u64,
+    /// `--legacy-run-not-live` (IA-3b item 6; D-4864, D-4908): the operator
+    /// says no import of a build before the locks is still running the
+    /// store's open `begin` key, so [`preflight`] does not refuse
+    /// `legacy_run_may_be_live`; the claim records it (`legacy_ack=1`).
+    pub legacy_ack: bool,
 }
 
 impl Request {
@@ -451,6 +463,7 @@ impl Request {
             skip_restated: false,
             accept_open_month: false,
             free_floor: crate::gdfl_import::DEFAULT_FREE_FLOOR,
+            legacy_ack: false,
         }
     }
 
@@ -547,6 +560,15 @@ impl Request {
             u8::from(self.accept_open_month),
             self.free_floor,
         );
+        // IA-3b'S ACKNOWLEDGEMENT IS WRITTEN ONLY WHEN GIVEN (item 6): every
+        // line without it is byte for byte the line an earlier build wrote
+        // and reads, and an earlier build refuses a line carrying it by name
+        // (a field after `free_floor`) rather than run without it.
+        let line = if self.legacy_ack {
+            format!("{line} legacy_ack=1")
+        } else {
+            line
+        };
         if line.len() > REQUEST_LINE_MAX {
             return Err(RunRefusal::RequestLineInvalid {
                 why: format!(
@@ -668,6 +690,10 @@ impl Request {
                     })?;
                 (repair_reason, skip_restated, accept_open_month, free_floor)
             };
+        let legacy_ack = fields.clone().next() == Some("legacy_ack=1");
+        if legacy_ack {
+            let _ack = fields.next();
+        }
         if let Some(extra) = fields.next() {
             return Err(invalid(format!(
                 "a field after free_floor: {}",
@@ -691,6 +717,7 @@ impl Request {
             skip_restated,
             accept_open_month,
             free_floor,
+            legacy_ack,
         };
         request.misuse().map_or(Ok(request), Err)
     }
@@ -987,6 +1014,91 @@ pub enum RunRefusal {
         /// The first such month, `yyyy-mm`.
         month: String,
     },
+    /// A year of the range with no `<yyyy>.zip` under the options root
+    /// (IA-3b item 1, FM-060, design §8 A9): named with at most
+    /// [`preflight::NEAR_MISS_MAX`] names beside it that look like that
+    /// year's zip (`2020.ZIP`, `2020 (1).zip`).
+    YearZipMissing {
+        /// The year.
+        year: u16,
+        /// The near misses, in name order.
+        near_miss: Vec<String>,
+    },
+    /// A source file that cannot be opened or read (IA-3b item 1, design §8
+    /// A11): one positional byte of a year zip's end record refused.
+    SourceUnreadable {
+        /// The file.
+        path: PathBuf,
+        /// Its mode as the host states it (octal), or why it could not be
+        /// measured.
+        mode: String,
+    },
+    /// A year zip whose end record states zero entries (IA-3b item 2,
+    /// RA-322, design §8 A23): every day of the year would read as one the
+    /// source lacks.
+    YearZipEmpty {
+        /// The year.
+        year: u16,
+    },
+    /// The tick store's writer holds its root's lock (IA-3b item 4,
+    /// RA-323): it is replacing day files, so no day is read under it.
+    SourceBusy {
+        /// The tick store's root.
+        root: PathBuf,
+        /// Who holds it, as far as the lock says.
+        holder: String,
+    },
+    /// The census cannot take the first planned day's wanted files, now or
+    /// after the one compaction a version-4 partition makes (IA-3b item 5;
+    /// D-4802, D-4850, IA-GR-15, IA-GR-26).
+    CensusRoomShort {
+        /// `v3` or `v4`.
+        layout: &'static str,
+        /// The entries free now.
+        free_now: u64,
+        /// The entries free after a compaction (on v3, `free_now`).
+        free_after: u64,
+        /// The wanted files of the first planned day.
+        need_first_day: u64,
+    },
+    /// Only a compaction makes room, and the new epoch would not fit above
+    /// the run's disk floor (IA-3b item 5, FM-096's disk half).
+    CensusCompactionNoDisk {
+        /// The new epoch's bytes.
+        need_bytes: u64,
+        /// The store volume's free bytes.
+        free_bytes: u64,
+        /// The floor in bytes.
+        floor: u64,
+    },
+    /// A store no claim lock file ever held, whose journal has a key of the
+    /// kind whose last line is `begin` (IA-3b item 6; D-4864, D-4908): an
+    /// import by a build before the locks may still be running it.
+    LegacyRunMayBeLive {
+        /// The key.
+        key: String,
+    },
+    /// The store's volume takes no write (IA-3b item 7, RA-314).
+    StoreReadOnly {
+        /// The store's root.
+        root: PathBuf,
+    },
+    /// The store's volume is not local (IA-3b item 7, RA-340): a file lock
+    /// on a network share does not exclude a second machine.
+    StoreNotLocal {
+        /// The store's root.
+        root: PathBuf,
+        /// The volume's filesystem, as it names itself.
+        fs: String,
+    },
+    /// The process's soft open-file limit is below what the run's workers
+    /// hold at once (IA-3b item 7, RA-306; L-IA-35).
+    OpenFilesShort {
+        /// The soft limit.
+        have: u64,
+        /// What the run needs.
+        need: u64,
+    },
 }
 
 impl From<locks::LockFault> for RunRefusal {
@@ -1050,6 +1162,16 @@ impl RunRefusal {
             Self::ClaimUnwritten { .. } => "claim_unwritten",
             Self::RepairReasonInvalid { .. } => "repair_reason_invalid",
             Self::RepairInOpenMonth { .. } => "repair_in_open_month",
+            Self::YearZipMissing { .. } => "year_zip_missing",
+            Self::SourceUnreadable { .. } => "source_unreadable",
+            Self::YearZipEmpty { .. } => "year_zip_empty",
+            Self::SourceBusy { .. } => "source_busy",
+            Self::CensusRoomShort { .. } => "census_room_short",
+            Self::CensusCompactionNoDisk { .. } => "census_compaction_no_disk",
+            Self::LegacyRunMayBeLive { .. } => "legacy_run_may_be_live",
+            Self::StoreReadOnly { .. } => "store_read_only",
+            Self::StoreNotLocal { .. } => "store_not_local",
+            Self::OpenFilesShort { .. } => "open_files_short",
         }
     }
 
@@ -1072,7 +1194,7 @@ impl RunRefusal {
 
     /// Every code, in the order of the enum: the table a reader names a code
     /// by, and the test that no two variants share one.
-    pub const CODES: [&'static str; 24] = [
+    pub const CODES: [&'static str; 34] = [
         "request_line_invalid",
         "stored_with_options",
         "range_backwards",
@@ -1097,6 +1219,16 @@ impl RunRefusal {
         "claim_unwritten",
         "repair_reason_invalid",
         "repair_in_open_month",
+        "year_zip_missing",
+        "source_unreadable",
+        "year_zip_empty",
+        "source_busy",
+        "census_room_short",
+        "census_compaction_no_disk",
+        "legacy_run_may_be_live",
+        "store_read_only",
+        "store_not_local",
+        "open_files_short",
     ];
 }
 
@@ -1183,6 +1315,7 @@ impl core::fmt::Display for RunRefusal {
                  run starts until the operator has looked",
                 ledger::LEDGER
             ),
+            preflight_refusal => preflight::say(preflight_refusal, f),
         }
     }
 }
@@ -1255,6 +1388,10 @@ pub struct Plan {
     pub store_root: PathBuf,
     /// Each kind, in run order.
     pub kinds: Vec<KindPlan>,
+    /// What the preflight found of each kind, in the order of `kinds`
+    /// (IA-3b): the source's span and the asked days outside it, the census
+    /// room, the format digest.
+    pub checks: Vec<preflight::Checked>,
 }
 
 /// Plans `request` in `process` (IA-1): every refusal before any lock, in
@@ -1322,10 +1459,14 @@ pub fn plan(
             origin,
         });
     }
+    // THE PREFLIGHT (IA-3b): every refusal IA-3 left, once per run, after
+    // the scope is resolved and before any lock, claim or journal line.
+    let checks = preflight::run(&request, process, &kinds)?;
     Ok(Plan {
         request,
         store_root: process.store_root.to_path_buf(),
         kinds,
+        checks,
     })
 }
 

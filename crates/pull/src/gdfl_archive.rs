@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::gdfl_cm::{CmKind, CmRefusal, CmScope, CmSource, DayListing, ListedFile};
+use crate::gdfl_run::preflight::{Watch, WatchFault};
 use crate::session::Day;
 
 /// CRC-32 of `bytes` with the zip polynomial.
@@ -308,6 +309,20 @@ fn directory_bounds<B: ReadAt>(span: &Span<'_, B>) -> Result<(u64, u64, u64), Cm
     Ok((count, size, offset))
 }
 
+/// How many entries the end record of the zip of `len` bytes in `source`
+/// states its central directory holds (the ZIP64 count when a locator
+/// precedes it), without reading the directory: the tail read and at most
+/// two ZIP64 reads of [`directory_bounds`], O(1). IA-3b's year-zip check
+/// (`year_zip_empty`, RA-322) asks it.
+///
+/// # Errors
+///
+/// [`directory_bounds`]' refusals: no end record, a saturated end record with
+/// no locator, a prefix, a failed read.
+pub fn stated_entries<B: ReadAt>(source: &B, len: u64) -> Result<u64, CmRefusal> {
+    directory_bounds(&Span::of(source, len)).map(|(count, _, _)| count)
+}
+
 /// Every central-directory record of the zip in `span`, in order, from the
 /// bounds [`directory_bounds`] reads. The walked records must end exactly
 /// at the declared directory size.
@@ -535,10 +550,18 @@ pub struct Archive<B> {
     /// What every day listing files (D-3333): the swept surface unless
     /// [`Archive::with_scope`] names another.
     scope: Arc<CmScope>,
+    /// Each tree's first and last day zip day, days since the epoch
+    /// ([`Archive::span`], IA-3b item 8).
+    spans: [Option<(u32, u32)>; 2],
+    /// The outer file watched from its directory's read to every later read
+    /// (IA-3b item 4, RA-323): `None` for bytes that are not a file.
+    watch: Option<Watch>,
 }
 
 impl Archive<std::fs::File> {
-    /// Opens and indexes the archive at `path`.
+    /// Opens and indexes the archive at `path`, through one handle every
+    /// later read uses, its identity taken as the directory is read and
+    /// checked after each day's listing and each member read (IA-3b item 4).
     ///
     /// # Errors
     ///
@@ -547,8 +570,26 @@ impl Archive<std::fs::File> {
     pub fn open(path: &Path) -> Result<Self, CmRefusal> {
         let unavailable = |why: std::io::Error| CmRefusal::ArchiveUnavailable { kind: why.kind() };
         let file = std::fs::File::open(path).map_err(unavailable)?;
-        let len = file.metadata().map_err(unavailable)?.len();
-        Self::from_source(file, len)
+        let watch = Watch::new(path, Arc::new(file.try_clone().map_err(unavailable)?))
+            .map_err(unavailable)?;
+        let len = watch.listed().len;
+        let archive = Self::from_source(file, len)?;
+        Ok(Self {
+            watch: Some(watch),
+            ..archive
+        })
+    }
+}
+
+/// [`Watch::check`] as an archive's refusal: a changed file is
+/// [`CmRefusal::SourceChanging`], an unmeasurable one
+/// [`CmRefusal::ArchiveUnavailable`], which the run's loss probe asks about.
+/// Nothing when there is no file to watch.
+pub(crate) fn unchanged(watch: Option<&Watch>) -> Result<(), CmRefusal> {
+    match watch.map(Watch::check) {
+        None | Some(Ok(())) => Ok(()),
+        Some(Err(WatchFault::Changed(why))) => Err(why),
+        Some(Err(WatchFault::Unreachable(kind))) => Err(CmRefusal::ArchiveUnavailable { kind }),
     }
 }
 
@@ -608,6 +649,7 @@ impl<B: ReadAt> Archive<B> {
         let first = span.map_or(0, |(lo, _)| lo);
         let width = span.map_or(0, |(lo, hi)| index(u64::from(hi - lo)) + 1);
         let mut days = [vec![None; width], vec![None; width]];
+        let mut spans: [Option<(u32, u32)>; 2] = [None, None];
         let mut census = ArchiveCensus::default();
         for entry in entries {
             let name = String::from_utf8_lossy(&entry.name);
@@ -656,6 +698,11 @@ impl<B: ReadAt> Archive<B> {
             {
                 file_copy(cell, day, copy);
             }
+            // Each tree's span, two comparisons a day zip (IA-3b item 8).
+            if let Some(span) = spans.get_mut(tree(kind)) {
+                let at = day.days_from_epoch();
+                *span = Some(span.map_or((at, at), |(lo, hi)| (lo.min(at), hi.max(at))));
+            }
         }
         Ok(Self {
             source,
@@ -664,7 +711,21 @@ impl<B: ReadAt> Archive<B> {
             days,
             census,
             scope: CmScope::swept_shared(),
+            spans,
+            watch: None,
         })
+    }
+
+    /// The first and last day the tree of `kind` holds a day zip for, at
+    /// its own place or refused for that day (IA-3b item 8, FM-133): the
+    /// source's span, which a plan states so the days outside it read as
+    /// `outside_source`, never as holes. `None` when the tree holds none.
+    /// O(days in the archive's span), once per run, over the table in
+    /// memory.
+    #[must_use]
+    pub fn span(&self, kind: CmKind) -> Option<(Day, Day)> {
+        let (first, last) = (*self.spans.get(tree(kind))?)?;
+        Some((Day::from_days(first).ok()?, Day::from_days(last).ok()?))
     }
 
     /// This archive, its day listings filing what `scope` files (D-3333).
@@ -776,7 +837,16 @@ impl<B: ReadAt> CmSource for Archive<B> {
         };
         let mut listing =
             DayListing::scoped(kind, day, Arc::clone(&self.scope)).with_member_bytes(inner.len);
-        for entry in central_directory(&span)? {
+        let entries = central_directory(&span)?;
+        unchanged(self.watch.as_ref())?;
+        // AN EMPTY DAY ZIP IS NAMED, NEVER A DAY OF NO FILE (IA-3b, RA-322,
+        // design §8 B28a): the day stays open.
+        if entries.is_empty() {
+            return Err(CmRefusal::DayZipEmpty {
+                name: day_zip_name(kind, day),
+            });
+        }
+        for entry in entries {
             let locator = ZipLocator {
                 base: inner.header,
                 span: inner.len,
@@ -813,7 +883,12 @@ impl<B: ReadAt> CmSource for Archive<B> {
         _listing: &DayListing<ZipLocator>,
         file: &ListedFile<ZipLocator>,
     ) -> Result<Vec<u8>, CmRefusal> {
-        member_bytes(&self.source, file.locator, &file.entry, file.len)
+        let bytes = member_bytes(&self.source, file.locator, &file.entry, file.len)?;
+        // AFTER EACH READ, THE FILE IS STILL THE ONE LISTED (IA-3b item 4):
+        // so the last read of a day is always followed by a check, and a day
+        // read from a file that changed under it is never closed.
+        unchanged(self.watch.as_ref())?;
+        Ok(bytes)
     }
 }
 
@@ -842,6 +917,17 @@ pub fn member_bytes<B: ReadAt>(
     if at.flags & ENCRYPTED != 0 {
         return Err(CmRefusal::ArchiveMemberEncrypted {
             member: entry.to_owned(),
+        });
+    }
+    // THE ONE-MEMBER CAP BEFORE ANY READ (IA-3b, RA-238, design §8 B28): a
+    // worker holds one member's packed bytes and their inflate in memory, so a
+    // record stating either past `MEMBER_CAP` refuses the member, and its day
+    // stays open, before a byte of it is read.
+    let size = len.max(at.packed);
+    if size > crate::tickstore_write::MEMBER_CAP {
+        return Err(CmRefusal::MemberTooLarge {
+            name: entry.to_owned(),
+            size,
         });
     }
     let span = Span {

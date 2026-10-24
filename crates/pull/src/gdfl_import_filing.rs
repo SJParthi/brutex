@@ -515,9 +515,8 @@ pub(super) fn store_root_lost(store_root: &Path, at_start: Option<StoreId>) -> O
 pub(super) fn not_writable_said(why: &str) -> String {
     format!(
         "{why}; the store does not take writes (permission or a read-only volume), so the run \
-         ends here: clear the file's immutable flag (`chflags nouchg <file>`; `ls -lO` shows \
-         it), remove a restrictive ACL (`chmod -N <file>`; `ls -le` shows it), or remount the \
-         volume read-write, then resume"
+         ends here: {}",
+        crate::gdfl_run::preflight::NOT_WRITABLE_FIX
     )
 }
 

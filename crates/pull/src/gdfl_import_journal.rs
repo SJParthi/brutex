@@ -981,6 +981,19 @@ impl Journal {
         (self.runs.len(), self.open.len())
     }
 
+    /// The least key whose last line is `begin` and which `wanted` takes
+    /// (IA-3b's legacy cutover check, D-4864): O(keys begun and not closed),
+    /// which a run closes as it goes (one, `options 2020-09-16 *`, on the
+    /// real journal on 24 Oct 2026). Asked only on a store no claim lock file
+    /// ever held.
+    pub(crate) fn first_open(&self, wanted: &dyn Fn(&str) -> bool) -> Option<&str> {
+        self.open
+            .iter()
+            .map(String::as_str)
+            .filter(|key| wanted(key))
+            .min()
+    }
+
     /// Notes that a key under `only` of a share's day of the auction era may
     /// have left a bar definition 4 no longer builds in that day's months
     /// (D-4878 item 10).
@@ -1527,8 +1540,16 @@ pub(super) fn run_line(id: u64, started: u64, origin: Option<&Origin>) -> String
              commit=unrecorded started={started} definition={BAR_DEFINITION}"
         );
     };
+    // A FORMAT DIGEST THE CHARTER DOES NOT RECORD IS MARKED (IA-3b item 9,
+    // D-4819): never a refusal, since the magic decides; a line without the
+    // field is a pinned or an unmeasured digest, or not a tick store.
+    let unpinned = if crate::gdfl_run::preflight::unpinned(origin) {
+        " format_digest_unpinned=1"
+    } else {
+        ""
+    };
     format!(
-        "run {id} source={} archive={} archive_bytes={} commit={} started={started} {}={} \
+        "run {id} source={} archive={} archive_bytes={} commit={} started={started} {}={}{unpinned} \
          definition={BAR_DEFINITION}",
         origin.source.as_str(),
         encoded(origin.path.as_os_str().as_encoded_bytes()),

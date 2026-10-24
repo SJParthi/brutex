@@ -111,6 +111,11 @@ pub(crate) const REPAIR_REASON: &str = "--repair-reason";
 /// The flag that accepts a repair in a month still being traded (IA-16,
 /// D-4876 (2), D-6900 keep item 3).
 pub(crate) const ACCEPT_OPEN_MONTH: &str = "--accept-open-month";
+/// The flag that says no import of a build before the locks still runs the
+/// store's open `begin` key (IA-3b; D-4864, D-4908): without it the first
+/// run on a store no claim lock ever held is refused
+/// `legacy_run_may_be_live`; with it the claim records `legacy_ack=1`.
+pub(crate) const LEGACY_RUN_NOT_LIVE: &str = "--legacy-run-not-live";
 /// How many workers read and file one day's files (WP-16): optional, 1 to
 /// `pull::gdfl_import::Workers::MAX`; absent is the import's default for
 /// this host's cores (`Workers::for_host`). The bytes a run leaves do not
@@ -147,6 +152,7 @@ fn flags_of(words: &[&str]) -> Result<Flags, String> {
             RETRY_REFUSED => flags.retry = true,
             STORED => flags.stored = true,
             ACCEPT_OPEN_MONTH => flags.accept_open_month = true,
+            LEGACY_RUN_NOT_LIVE => flags.legacy_ack = true,
             SNAPSHOT => {
                 flags.snapshot = Some(value_of(
                     SNAPSHOT,
@@ -166,7 +172,8 @@ fn flags_of(words: &[&str]) -> Result<Flags, String> {
             flag if flag.starts_with('-') => {
                 return Err(format!(
                     "{} is not a flag of gdfl-import; its flags are {RETRY_REFUSED}, {STORED}, \
-                     {SNAPSHOT} NAME, {REPAIR_REASON} TEXT and {ACCEPT_OPEN_MONTH}",
+                     {SNAPSHOT} NAME, {REPAIR_REASON} TEXT, {ACCEPT_OPEN_MONTH} and \
+                     {LEGACY_RUN_NOT_LIVE}",
                     shown_word(flag)
                 ));
             }
@@ -206,6 +213,8 @@ struct Flags {
     repair_reason: Option<String>,
     /// `--accept-open-month` (IA-16, D-4876 (2), D-6900 keep item 3).
     accept_open_month: bool,
+    /// `--legacy-run-not-live` (IA-3b; D-4864, D-4908).
+    legacy_ack: bool,
     symbols: Vec<String>,
 }
 
@@ -337,6 +346,7 @@ fn asked(
         repair_reason: flags.repair_reason,
         accept_open_month: flags.accept_open_month,
         free_floor,
+        legacy_ack: flags.legacy_ack,
         ..Request::new(Kinds::one(kind), source, (from, to))
     })
 }
@@ -510,6 +520,21 @@ pub(crate) fn command_in(
         let _ = writeln!(out, "GDFL IMPORT REFUSED: the plan holds no kind");
         return FAILED;
     };
+    // WHAT THE PREFLIGHT FOUND (IA-3b): the source's span and the asked days
+    // outside it, the census room, the digest, the store, said once on the
+    // declared stderr writer; an unpinned FORMAT.md digest is warned, never
+    // refused (D-4819: the magic decides).
+    for checked in &plan.checks {
+        say(&format!("gdfl-import {}", checked.line()));
+        if let gdfl_run::preflight::Format::Unpinned(digest) = &checked.format {
+            say(&format!(
+                "gdfl-import {}: warning: format_digest_unpinned: FORMAT.md's sha256 {digest} is \
+                 neither digest the charter records; the run line says format_digest_unpinned=1 \
+                 and every day file is still read by its magic (D-4819)",
+                checked.kind.as_str()
+            ));
+        }
+    }
     // THE DOOR (AF-01, D-4977; FM-060, FM-064, FM-086, FM-290): refused
     // here, before the importer writes a journal line, or held until the
     // run returns. Its lock is the authority's claim (IA-2, D-4804): the
@@ -526,7 +551,7 @@ pub(crate) fn command_in(
             resumes: 0,
             resume_day: None,
             auto_resume: false,
-            legacy_ack: false,
+            legacy_ack: plan.request.legacy_ack,
             unstamped: crate::commit_stamp().is_none(),
             retry: pull::gdfl_run::locks::PROBE_RETRY,
         },

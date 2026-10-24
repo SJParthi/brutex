@@ -469,6 +469,38 @@ pub enum CmRefusal {
         /// Where its name says it belongs, under the store's root.
         expected: String,
     },
+    /// A day's container that lists zero entries (IA-3b, RA-322, design §8
+    /// B28a): a day zip nested in the capital-market archive or in an options
+    /// year zip whose central directory names nothing, or a tick-store day
+    /// file whose index names nothing. Its day is refused by name and stays
+    /// open, never read as a day that holds no wanted file.
+    DayZipEmpty {
+        /// The day zip's name inside its archive, or the day file's path.
+        name: String,
+    },
+    /// A member whose stated size is past `tickstore_write::MEMBER_CAP`, the
+    /// one member a worker holds in memory (IA-3b, RA-238, design §8 B28):
+    /// refused before any of its bytes is read or rebuilt, the day open. The
+    /// code and fields are R4-08's `member_too_large{name, size}`.
+    MemberTooLarge {
+        /// The member's name, folder included.
+        name: String,
+        /// The size its record states, in bytes.
+        size: u64,
+    },
+    /// A source file whose identity (length, inode, modification and change
+    /// times) is not what it was when its listing was read (IA-3b, RA-323,
+    /// RA-304): still being copied, rewritten, or replaced by rename. The
+    /// day read from it stays open and the run ends failed naming the file;
+    /// the next run reads it again.
+    SourceChanging {
+        /// The file.
+        path: String,
+        /// Its identity when its listing was read.
+        before: String,
+        /// Its identity after the read that found it changed.
+        after: String,
+    },
 }
 
 impl core::fmt::Display for CmRefusal {
@@ -569,6 +601,25 @@ impl core::fmt::Display for CmRefusal {
             Self::ArchiveMemberEncrypted { member } => write!(f, "{member} is encrypted"),
             Self::DayZipMisfiled { found, expected } => misfiled(f, ZIP_WORD, (found, expected)),
             Self::DayFileMisfiled { found, expected } => misfiled(f, BTS_WORD, (found, expected)),
+            Self::DayZipEmpty { name } => write!(
+                f,
+                "{name} lists zero entries: an empty container is never a day that holds no \
+                 file, so the day stays open"
+            ),
+            Self::MemberTooLarge { name, size } => write!(
+                f,
+                "`{name}` states {size} bytes, over {}",
+                crate::tickstore_write::MEMBER_CAP
+            ),
+            Self::SourceChanging {
+                path,
+                before,
+                after,
+            } => write!(
+                f,
+                "{path} changed under the run (before {before}, after {after}): it is still \
+                 being copied or was replaced, so no day read from it is closed"
+            ),
         }
     }
 }
