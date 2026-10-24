@@ -2375,6 +2375,16 @@ where
     Ok(Some(outcome))
 }
 
+/// What of a day ends the run once it is closed: a lost source, a full disk,
+/// a store that takes no writes, the held-back set at its cap (each `None`
+/// when it did not happen).
+type DayEnds = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<(String, usize)>,
+);
+
 /// A day whose files wait in the gather, its close kept for when its
 /// months are repaired (IA-17b, D-4899), and said at `info`.
 ///
@@ -2387,12 +2397,7 @@ fn defer_day(
     ctx: &Ctx<'_>,
     (key, day, gathered): (&str, Day, usize),
     close: super::filing::DeferredClose,
-    (source_gone, disk_full, not_writable, held_back_cap): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<(String, usize)>,
-    ),
+    (source_gone, disk_full, not_writable, held_back_cap): DayEnds,
     report: &mut Report,
 ) -> Result<(), ImportRefusal> {
     let kind = ctx.run.kind;

@@ -1932,54 +1932,24 @@ fn rows_mode(
         timeframe,
         month: ym,
     };
-    // THE ONE DIFFERENCE BETWEEN THE TWO DOORS (D-3350; DB-N26). The
-    // back-fill door tries the append door first, and repairs only a month
-    // that lacks the whole batch where no append can ever land it.
-    let held = match door {
-        // THE WORKER'S DOOR FILES NOTHING AS A GENERATION (D-3353): a sealed
-        // month's refusal commits nothing, and the GDFL coordinator files the
-        // batch again through the back-fill door, which routes it (SC-4).
-        RowsDoor::Append => write_and_count(bars, store_root, symbol_id, parts, key)
-            .map(|(one, committed)| (one, committed, Filed::Appended, Vec::new()))
-            .map_err(|unwritten| judged(unwritten.why, bars, store_root, symbol_id, parts)),
-        RowsDoor::BackFill { reason } => back_fill_or_append(
-            bars,
-            store_root,
-            symbol_id,
-            (parts, key),
-            (repair_policy(plan), reason),
-        )
-        .map(|(one, committed, filed)| (one, committed, filed, Vec::new())),
-        // JUDGED, NOTHING PUBLISHED (IA-17b, D-4899): a batch the back-fill
-        // door would file as a new generation is answered `Gathered`, with
-        // the bars it offered and no census row, for the caller's one repair
-        // of the month.
-        RowsDoor::Judge => match judge_back_fill(bars, store_root, symbol_id, (parts, key)) {
-            Ok(BackFill::Landed(held, committed)) => {
-                Ok((held, committed, Filed::Appended, Vec::new()))
-            }
-            Ok(BackFill::Successor(appended, _) | BackFill::Lacked(appended, _)) => {
-                done.bars_stored = bars.len();
-                let filed = Filed::Gathered {
-                    appended: appended.kind,
-                };
-                return (done, filed, Vec::new());
-            }
-            Err(refusal) => Err(refusal),
-        },
-        RowsDoor::Gathered { appended, reason } => gathered_repair(
-            bars,
-            (store_root, symbol_id),
-            (parts, key),
-            (repair_policy(plan), appended, reason),
-            step,
-        ),
-    };
-    let (one, filed, added_at) = match held {
-        Ok((one, committed, filed, added_at)) => {
+    let wrote = door_write(
+        door,
+        bars,
+        (store_root, symbol_id),
+        (parts, key),
+        (plan, step),
+    );
+    let (one, filed, added_at) = match wrote {
+        Ok(Wrote::Held(one, committed, filed, added_at)) => {
             done.bars_stored = bars.len();
             done.bars_committed = committed;
             (one, filed, added_at)
+        }
+        // JUDGED, NOTHING PUBLISHED (IA-17b, D-4899): the bars it offered
+        // and no census row, for the caller's one repair of the month.
+        Ok(Wrote::Gathered(appended)) => {
+            done.bars_stored = bars.len();
+            return (done, Filed::Gathered { appended }, Vec::new());
         }
         Err(refusal) => {
             note_not_filed(instrument, "bars", &refusal.why);
@@ -2030,6 +2000,66 @@ fn rows_mode(
     }
     name_the_origin(&mut done, origin);
     (done, filed, added_at)
+}
+
+/// What [`door_write`] did with a batch.
+enum Wrote {
+    /// The census row of the month as served, the bars committed, how they
+    /// landed, and the stamps a gathered repair added (empty for any other
+    /// door).
+    Held(Held, usize, Filed, Vec<i64>),
+    /// [`RowsDoor::Judge`] only: nothing written, the month takes the batch
+    /// only as a new generation; the append door's kind.
+    Gathered(FailKind),
+}
+
+/// THE ONE DIFFERENCE BETWEEN THE DOORS (D-3350; DB-N26; IA-17b, D-4899):
+/// what each writes, for [`rows_mode`]. The back-fill door tries the append
+/// door first, and repairs only a month that lacks the whole batch where no
+/// append can ever land it; the judge asks the same and publishes nothing;
+/// the gathered repair repairs a gathered offer once.
+fn door_write(
+    door: RowsDoor<'_>,
+    bars: &[store::format::Bar],
+    (store_root, symbol_id): (&Path, u32),
+    (parts, key): (PathParts<'_>, EntryKey),
+    (plan, step): (Plan<'_>, Option<store::repair::BeforePromote<'_>>),
+) -> Result<Wrote, DoorRefusal> {
+    let held = |(one, committed, filed): (Held, usize, Filed)| {
+        Wrote::Held(one, committed, filed, Vec::new())
+    };
+    match door {
+        // THE WORKER'S DOOR FILES NOTHING AS A GENERATION (D-3353): a sealed
+        // month's refusal commits nothing, and the GDFL coordinator files the
+        // batch again through the back-fill door, which routes it (SC-4).
+        RowsDoor::Append => write_and_count(bars, store_root, symbol_id, parts, key)
+            .map(|(one, committed)| held((one, committed, Filed::Appended)))
+            .map_err(|unwritten| judged(unwritten.why, bars, store_root, symbol_id, parts)),
+        RowsDoor::BackFill { reason } => back_fill_or_append(
+            bars,
+            store_root,
+            symbol_id,
+            (parts, key),
+            (repair_policy(plan), reason),
+        )
+        .map(held),
+        // JUDGED, NOTHING PUBLISHED (IA-17b, D-4899): a batch the back-fill
+        // door would file as a new generation is answered `Gathered`.
+        RowsDoor::Judge => match judge_back_fill(bars, store_root, symbol_id, (parts, key))? {
+            BackFill::Landed(one, committed) => Ok(held((one, committed, Filed::Appended))),
+            BackFill::Successor(appended, _) | BackFill::Lacked(appended, _) => {
+                Ok(Wrote::Gathered(appended.kind))
+            }
+        },
+        RowsDoor::Gathered { appended, reason } => gathered_repair(
+            bars,
+            (store_root, symbol_id),
+            (parts, key),
+            (repair_policy(plan), appended, reason),
+            step,
+        )
+        .map(|(one, committed, filed, added_at)| Wrote::Held(one, committed, filed, added_at)),
+    }
 }
 
 /// Drops the bars this engine declines, and counts why.

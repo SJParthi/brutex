@@ -731,7 +731,7 @@ impl Filing<'_> {
                 Err(refusal) => {
                     filed
                         .failures
-                        .push(note_staged(run, self.day, &handed.file.name, &refusal))
+                        .push(note_staged(run, self.day, &handed.file.name, &refusal));
                 }
             }
         }
@@ -1388,7 +1388,7 @@ impl DayFiler<'_> {
                 Ok(()) => self.gathered += 1,
                 Err(refusal) => {
                     self.failures
-                        .push(note_staged(self.ctx.run, self.day, &name, &refusal))
+                        .push(note_staged(self.ctx.run, self.day, &name, &refusal));
                 }
             }
         }
@@ -1705,21 +1705,20 @@ impl Gather {
             return Ok(());
         };
         let span = (first.ts_micros, last.ts_micros);
-        let place = match self.index.get(&month_key) {
-            Some(&place) => place,
-            None => {
-                self.offers.push(Offer {
-                    key: month_key.clone(),
-                    bars: Vec::with_capacity(seconds.len()),
-                    appended,
-                    files: Vec::new(),
-                    auction: Vec::new(),
-                    request: request.clone(),
-                });
-                let place = self.offers.len() - 1;
-                let _first = self.index.insert(month_key.clone(), place);
-                place
-            }
+        let place = if let Some(&place) = self.index.get(&month_key) {
+            place
+        } else {
+            self.offers.push(Offer {
+                key: month_key.clone(),
+                bars: Vec::with_capacity(seconds.len()),
+                appended,
+                files: Vec::new(),
+                auction: Vec::new(),
+                request: request.clone(),
+            });
+            let place = self.offers.len() - 1;
+            let _first = self.index.insert(month_key.clone(), place);
+            place
         };
         let Some(offer) = self.offers.get_mut(place) else {
             return Ok(());
@@ -1791,7 +1790,7 @@ fn merge_into(bars: &mut Vec<Bar>, more: Vec<Bar>) -> Result<(), i64> {
                 held.next()
             }
             (Some(a), Some(b)) if a.ts_micros < b.ts_micros => held.next(),
-            (Some(_), Some(_)) | (None, Some(_)) => new.next(),
+            (Some(_) | None, Some(_)) => new.next(),
             (Some(_), None) => held.next(),
             (None, None) => break,
         };
@@ -1849,8 +1848,8 @@ pub(super) struct Repaired {
 /// # Cost
 ///
 /// One repair per (instrument, month) gathered: O(held + offered) bars each
-/// (L-IA-26), never per day; per file one binary search of the stamps the
-/// repair added.
+/// (L-IA-26), never per day; per offer one walk of the stamps the repair
+/// added.
 pub(super) fn repair_gathered_months(
     ctx: &Ctx<'_>,
     gather: Gather,
@@ -1864,138 +1863,45 @@ pub(super) fn repair_gathered_months(
     } = gather;
     let mut held = Vec::with_capacity(offers.len());
     for offer in offers {
-        let (symbol, contract, month) = offer.key.clone();
-        let reason = gathered_reason(ctx, &offer, &deferred);
-        let origin = format!(
-            "gdfl {} gathered {}",
-            run.kind.as_str(),
-            held_key_text(&offer.key)
-        );
-        let month_of = Day::new(month.year(), month.month(), 1).ok();
-        // A CASH MONTH'S `.auc` FOLLOWS THE GENERATION THROUGH ONE STEP
-        // (D-4875 (5)): the served sidecar's records and the carried days'
-        // prints, written into the revision before it is served. No other
-        // kind has a sidecar of `pull`'s.
-        let share = (run.kind == ImportKind::Stocks)
-            .then(|| {
-                offer
-                    .auction
-                    .first()
-                    .map(|carried| carried.key)
-                    .or_else(|| {
-                        brutex_core::instrument::InstrumentKey::cash(
-                            brutex_core::instrument::Exchange::Nse,
-                            &symbol,
-                        )
-                        .ok()
-                    })
-            })
-            .flatten();
-        let carried: Vec<(Day, &[crate::gdfl_cm::auction::Print])> = offer
-            .auction
-            .iter()
-            .map(|one| (one.day, one.prints.as_slice()))
-            .collect();
-        let mut write_auction = |revision_root: &Path| -> Result<(), String> {
-            match (share.as_ref(), month_of) {
-                (Some(share), Some(month_of)) => crate::gdfl_cm::auction::write_revision(
-                    run.store_root,
-                    revision_root,
-                    share,
-                    month_of,
-                    &carried,
-                )
-                .map(|_| ()),
-                _ => Ok(()),
-            }
-        };
-        let step: Option<store::repair::BeforePromote<'_>> = if share.is_some() {
-            Some(&mut write_auction)
-        } else {
-            None
-        };
-        #[cfg(test)]
-        let planted = inject::gathered(run.store_root, &symbol);
-        #[cfg(not(test))]
-        let planted: Option<Ingested> = None;
-        let (done, landed, added_at) = match planted {
-            Some(done) => (done, Landed::Appended, Vec::new()),
-            None => crate::ingest::repair_gathered(
-                &offer.bars,
-                (&symbol, &origin),
-                run.store_root,
-                plan(run.kind, &offer.request, contract),
-                (offer.appended, &reason),
-                step,
-            ),
-        };
-        let last_day = offer
-            .files
-            .last()
-            .and_then(|file| deferred.get(file.at))
-            .map(|one| one.day);
+        let (done, landed, added_at) = repair_offer(ctx, &offer, &deferred);
         if let Some(kind) = done.door_kind {
             let why = done
                 .failures
                 .last()
                 .map_or_else(|| kind.code().to_owned(), |failure| failure.why.clone());
             if let Some((code, words)) = ends_run(kind, &why, run.store_root, ctx.store_id.get()) {
+                let last_day = offer
+                    .files
+                    .last()
+                    .and_then(|file| deferred.get(file.at))
+                    .map(|one| one.day);
                 return Repaired {
                     held,
                     deferred,
                     ended: last_day.map(|day| (code, day, words)),
                 };
             }
-            for file in &offer.files {
-                if let Some(one) = deferred.get_mut(file.at) {
-                    let refusal = ImportRefusal::Store {
-                        kind,
-                        why: why.clone(),
-                    };
-                    one.failures
-                        .push(note_staged(run, one.day, &file.name, &refusal));
-                }
-            }
+            name_on_each_file(
+                run,
+                &offer,
+                &mut deferred,
+                &ImportRefusal::Store { kind, why },
+            );
             continue;
         }
         // FAILURES NO DOOR NAMED (an address the store cannot take): each
         // gathered day names them as its file's.
         for failure in &done.failures {
-            for file in &offer.files {
-                if let Some(one) = deferred.get_mut(file.at) {
-                    let refusal = ImportRefusal::Filing {
-                        why: failure.why.clone(),
-                    };
-                    one.failures
-                        .push(note_staged(run, one.day, &file.name, &refusal));
-                }
-            }
+            let refusal = ImportRefusal::Filing {
+                why: failure.why.clone(),
+            };
+            name_on_each_file(run, &offer, &mut deferred, &refusal);
         }
         if landed == Landed::NewGeneration {
             report.months_repaired += 1;
         }
         report.seconds_committed += done.bars_committed;
-        // EACH FILE'S OWN ADDED BARS, in one walk of the stamps the repair
-        // added (ascending), the files' spans being in day order; a file
-        // gathered out of order walks from the start again.
-        let (mut cursor, mut last_end) = (0_usize, i64::MIN);
-        for file in &offer.files {
-            let (first, last) = file.span;
-            if first <= last_end {
-                cursor = 0;
-            }
-            while added_at.get(cursor).is_some_and(|&at| at < first) {
-                cursor += 1;
-            }
-            let from = cursor;
-            while added_at.get(cursor).is_some_and(|&at| at <= last) {
-                cursor += 1;
-            }
-            last_end = last;
-            if let Some(one) = deferred.get_mut(file.at) {
-                one.committed += cursor - from;
-            }
-        }
+        give_added(&offer, &added_at, &mut deferred);
         note_gathered_repair(ctx, &offer, &deferred, (done.bars_committed, landed));
         held.extend(done.pending);
     }
@@ -2003,6 +1909,117 @@ pub(super) fn repair_gathered_months(
         held,
         deferred,
         ended: None,
+    }
+}
+
+/// `offer`'s one repair (`ingest::repair_gathered`), journaled with
+/// [`gathered_reason`]; for a CASH month with the step that writes the new
+/// generation's whole `.auc` (D-4875 (5)): the served sidecar's records and
+/// the carried days' prints, written into the revision before it is served.
+/// No other kind has a sidecar of `pull`'s, so no other passes a step.
+fn repair_offer(
+    ctx: &Ctx<'_>,
+    offer: &Offer,
+    deferred: &[Deferred],
+) -> (Ingested, Landed, Vec<i64>) {
+    let run = ctx.run;
+    let (symbol, contract, month) = offer.key.clone();
+    let reason = gathered_reason(ctx, offer, deferred);
+    let origin = format!(
+        "gdfl {} gathered {}",
+        run.kind.as_str(),
+        held_key_text(&offer.key)
+    );
+    let month_of = Day::new(month.year(), month.month(), 1).ok();
+    let share = (run.kind == ImportKind::Stocks)
+        .then(|| {
+            offer
+                .auction
+                .first()
+                .map(|carried| carried.key)
+                .or_else(|| {
+                    brutex_core::instrument::InstrumentKey::cash(
+                        brutex_core::instrument::Exchange::Nse,
+                        &symbol,
+                    )
+                    .ok()
+                })
+        })
+        .flatten();
+    let carried: Vec<(Day, &[crate::gdfl_cm::auction::Print])> = offer
+        .auction
+        .iter()
+        .map(|one| (one.day, one.prints.as_slice()))
+        .collect();
+    let mut write_auction = |revision_root: &Path| -> Result<(), String> {
+        match (share.as_ref(), month_of) {
+            (Some(share), Some(month_of)) => crate::gdfl_cm::auction::write_revision(
+                run.store_root,
+                revision_root,
+                share,
+                month_of,
+                &carried,
+            )
+            .map(|_| ()),
+            _ => Ok(()),
+        }
+    };
+    let step: Option<store::repair::BeforePromote<'_>> = if share.is_some() {
+        Some(&mut write_auction)
+    } else {
+        None
+    };
+    #[cfg(test)]
+    if let Some(done) = inject::gathered(run.store_root, &symbol) {
+        return (done, Landed::Appended, Vec::new());
+    }
+    crate::ingest::repair_gathered(
+        &offer.bars,
+        (&symbol, &origin),
+        run.store_root,
+        plan(run.kind, &offer.request, contract),
+        (offer.appended, &reason),
+        step,
+    )
+}
+
+/// `refusal`, named once on every file `offer` gathered, under its own day:
+/// each such day then closes by it.
+fn name_on_each_file(
+    run: &Run<'_>,
+    offer: &Offer,
+    deferred: &mut [Deferred],
+    refusal: &ImportRefusal,
+) {
+    for file in &offer.files {
+        if let Some(one) = deferred.get_mut(file.at) {
+            one.failures
+                .push(note_staged(run, one.day, &file.name, refusal));
+        }
+    }
+}
+
+/// EACH FILE'S OWN ADDED BARS, in one walk of the stamps the repair added
+/// (ascending), given to its day: the files' spans are in day order, and a
+/// file gathered out of order walks from the start again.
+fn give_added(offer: &Offer, added_at: &[i64], deferred: &mut [Deferred]) {
+    let (mut cursor, mut last_end) = (0_usize, i64::MIN);
+    for file in &offer.files {
+        let (first, last) = file.span;
+        if first <= last_end {
+            cursor = 0;
+        }
+        while added_at.get(cursor).is_some_and(|&at| at < first) {
+            cursor += 1;
+        }
+        let from = cursor;
+        while added_at.get(cursor).is_some_and(|&at| at <= last) {
+            cursor += 1;
+        }
+        last_end = last;
+        if let Some(one) = deferred.get_mut(file.at) {
+            one.committed += cursor - from;
+        }
     }
 }
 
