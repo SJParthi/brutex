@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R4-05 (cloud): one reasons dictionary with its gate and route, and the kept alert kinds
 
@@ -52,3 +52,15 @@ Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R4-05.md`.
   save point: committed and pushed, waiting for GO without HOLD.
   NEXT: `crates/api/src/reasons_route.rs` (route, server.rs lines, pool_table_tests and
   operation_audit_tests rows, bench), then the web half, docs rows, final gates.
+- 2026-10-24 12:37 IST: HOLD lifted on the base (`55dfb044`); README now carries a per-part GO rule
+  and "no typed number outside the Winner Gate" (the title cut is therefore served as `title_cut`,
+  the table's own longest title). Built `crates/api/src/reasons_route.rs` (OnceLock body, ETag,
+  `no-cache`, 304), its `server.rs` mod and route lines, the `pool_table_tests` and
+  `operation_audit_tests` rows, `/reasons.json` in `.github/gates_routes.rs`'s compiled-table owed list;
+  `web/src/lib/reasons.js`, `import-panel.js` (`outcomeWord`, `reasonOf`, `cells`), `ImportPanel.svelte`
+  (titles, control chip, unknown states); `web/tests/reasons.test.js` and two tests in
+  `import-panel.test.js`; `docs/02` §38 rows and key rules; `docs/05` D-TBD-R4-05-1..5.
+  `node --test tests/reasons.test.js tests/import-panel.test.js tests/import-panel-archive.test.js`
+  -> 19 pass, 0 fail.
+  NEXT: run the api tests (route, pool table, audit table), docs/04 and docs/06 rows with the measured
+  numbers, then the final merge of feat/db-fix and every gate.

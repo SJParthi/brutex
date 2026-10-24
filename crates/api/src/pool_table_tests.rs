@@ -115,6 +115,7 @@ const ROUTES: &[(&str, Runs)] = &[
         ),
     ),
     ("/vocab.json", Runs::Memory("the compiled vocabulary table")),
+    ("/reasons.json", Runs::Memory("the compiled reasons table")),
     (
         "/indexmap.json",
         pool(Named::StoreRead, "server.rs", "indexmap_json", STORE_READ),

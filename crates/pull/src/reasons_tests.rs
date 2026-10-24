@@ -926,6 +926,12 @@ fn the_body_is_the_whole_table_under_its_build_and_digest() {
     assert_eq!(doc["build"], "0123456789abcdef0123456789abcdef01234567");
     assert_eq!(doc["count"], TABLE.len());
     assert_eq!(served.rows, TABLE.len());
+    // The cut is the table's own longest title: no title it holds is cut.
+    let longest = TABLE.iter().map(|r| title(r).chars().count()).max().unwrap();
+    assert_eq!(doc["title_cut"], longest);
+    assert_eq!(title_cut(), longest);
+    assert!(TABLE.iter().all(|r| title(r).chars().count() <= title_cut()));
+    assert!(TABLE.iter().any(|r| title(r).chars().count() == title_cut()));
     let rows = doc["rows"].as_array().unwrap();
     assert_eq!(rows.len(), TABLE.len());
     for (got, reason) in rows.iter().zip(TABLE) {

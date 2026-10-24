@@ -146,6 +146,7 @@ pub const BENCHES_OWED: &[Owed] = &[
             "/inspection.json",
             "/masters.js",
             "/pools.json",
+            "/reasons.json",
             "/speed.json",
             "/typeahead.js",
             "/vocab.json",

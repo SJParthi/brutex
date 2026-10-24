@@ -4427,6 +4427,29 @@ number it cannot name as `kind_<n>` and a record type it cannot name as
 | 9 | `mismatch` | | 19 | `month_damaged` |
 | 10 | `spool_damaged` | | 20 | `index_refused` |
 | | | | 21 | `vendor_shape_changed` (IA-9, RA-318: a kept Zerodha answer carries a field its documented shape does not name) |
+| | | | 22 | `vendor_format_changed` (R4-05) |
+| | | | 23 | `vendor_restated` (R4-05) |
+| | | | 24 | `scrub_stale` (R4-05) |
+| | | | 25 | `credential_dead` (R4-05) |
+
+**Key rules of kinds 22 to 25** (R4-05, D-TBD-R4-05-4). Each key is built by
+its own function in `pull::alerts`, never spelled at a call site, as
+`<word>:<part>:<part>...`. Every part is refused (`alert_key_part_refused`,
+naming the part and never its value) when it is empty, holds a character
+outside ASCII letters, digits and `.` `-` `_` `&`, or has a token's shape
+(`brutex_core::secret_shape`): a key reaches the log whole, so no credential
+and no parameter path can be in one, and no part can forge another's `:`.
+
+| Kind | Key | One alert per | Producer |
+|---|---|---|---|
+| 22 | `vendor_format_changed:<vendor>:<digest>` (`digest` the first 16 hex of the new format's digest) | format a vendor changed to | R4-22 (GDFL), R4-13 (Zerodha) |
+| 23 | `vendor_restated:<vendor>:<symbol>:<factor>:<as_of>` | restatement of one share by one factor as of one day | R4-23 |
+| 24 | `scrub_stale:<vendor>:<last pass>` | last full pass found stale | none named yet (R4-09 shows staleness on its page instead) |
+| 25 | `credential_dead:<feed>:<day>` | feed and day whose credential was dead on its re-read too | none named yet |
+
+The one-command cut (D-6900) appends no kind whose only producer it dropped:
+there is no `network_down`, `feed_behind`, `gdfl_day_late` or
+`ingest_chain_failed`.
 
 **Sibling names in `<store>/audit/`.**
 

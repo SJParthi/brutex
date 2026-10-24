@@ -1292,6 +1292,19 @@ pub fn title(reason: &Reason) -> String {
     )
 }
 
+/// The longest [`title`] the table holds, in characters: the served
+/// `title_cut`. A page cuts a title only past it (at a word, with an
+/// ellipsis), so no title of the table is ever cut and the bound moves with
+/// the table rather than being a number typed into a page (D-TBD-R4-05-5).
+#[must_use]
+pub fn title_cut() -> usize {
+    TABLE
+        .iter()
+        .map(|reason| title(reason).chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 /// The served table: its bytes, and the tag that names them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
@@ -1328,6 +1341,7 @@ pub fn body(build: &str) -> Body {
         "schema": SCHEMA,
         "build": build,
         "count": TABLE.len(),
+        "title_cut": title_cut(),
         "rows": rows,
     });
     let bytes = document.to_string().into_bytes();

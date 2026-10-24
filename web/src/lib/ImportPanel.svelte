@@ -9,7 +9,8 @@
    * and left, and the import runs. Every figure is the server's: the fold is
    * `$lib/import-panel.js`, and this file only lays it out.
    */
-  import { censusRefusedSentence, importPanel, notDoneRows, span } from '$lib/import-panel.js';
+  import { censusRefusedSentence, importPanel, notDoneRows, reasonOf, span } from '$lib/import-panel.js';
+  import { loadReasons } from '$lib/reasons.js';
   import { group } from '$lib/money.js';
   import { stampLabel } from '$lib/dates.js';
 
@@ -34,7 +35,21 @@
     now = Date.now()
   } = $props();
 
-  const panel = $derived(importPanel(summary, store, { now, archiveTo, optionsLeft }));
+  // THE REASONS TABLE, fetched once per page (READ-02, R4-05): until it lands
+  // a reason is its code alone, and no placeholder word is shown.
+  /** @type {import('$lib/reasons.js').ReasonTable | null} */
+  let reasons = $state(null);
+  $effect(() => {
+    let live = true;
+    loadReasons(fetch).then((table) => {
+      if (live) reasons = table;
+    });
+    return () => {
+      live = false;
+    };
+  });
+
+  const panel = $derived(importPanel(summary, store, { now, archiveTo, optionsLeft, reasons }));
   const days = $derived(notDoneRows(notDone));
 </script>
 
@@ -106,8 +121,8 @@
   {/if}
 
   <div class="cells">
-    {#each Object.entries(panel.counts ?? {}) as [outcome, n] (outcome)}
-      <span class="cell" class:bad={outcome !== 'done' && n > 0}><b>{group(Number(n))}</b> {outcome.replace(/_/g, ' ')}</span>
+    {#each panel.cells as c (c.word)}
+      <span class="cell" class:bad={c.bad} data-outcome-known={c.known}><b>{group(c.n)}</b> {c.text}</span>
     {/each}
   </div>
 
@@ -127,10 +142,12 @@
   {#if panel.newestNotDone}
     <p class="line bad">
       <b>Newest day not done:</b> {panel.newestNotDone.kind} {panel.newestNotDone.day} —
-      {panel.newestNotDone.outcome}{panel.newestNotDone.stage ? `, at stage ${panel.newestNotDone.stage}` : ''}{panel
-        .newestNotDone.reason
-        ? `, reason ${panel.newestNotDone.reason}`
-        : ''}.
+      {panel.newestNotDoneOutcome?.text}{panel.newestNotDone.stage ? `, at stage ${panel.newestNotDone.stage}` : ''}{#if panel.newestNotDoneReason}, reason <span
+          class="code"
+          title={panel.newestNotDoneReason.title}>{panel.newestNotDoneReason.code}</span
+        >{#if panel.newestNotDoneReason.action}&nbsp;<span class="act" title={panel.newestNotDoneReason.words ?? ''}
+            >{panel.newestNotDoneReason.action}</span
+          >{/if}{/if}.
     </p>
   {/if}
 
@@ -141,10 +158,12 @@
       <summary>{group(days.length)} day(s) not done, with the importer's reasons</summary>
       <ul class="days">
         {#each days as d (d.id)}
+          {@const why = d.reason === null ? null : reasonOf(d.reason, reasons)}
           <li>
-            <span class="mono">{d.day}</span> {d.kind} · <b>{d.outcome}</b>{d.filter && d.filter !== '*' ? ` · filter ${d.filter}` : ''}{d.line !== null ? ` · line ${d.line}` : ''}{d.stage ? ` · stage ${d.stage}` : ''}{d.reason
-              ? ` · ${d.reason}`
-              : ''}{d.unsettled ? ' · stage unrecorded (a line written before D-3317)' : ''}
+            <span class="mono">{d.day}</span> {d.kind} · <b class:bad={!d.outcomeInfo.known}>{d.outcomeInfo.known ? d.outcome : d.outcomeInfo.text}</b>{d.filter && d.filter !== '*' ? ` · filter ${d.filter}` : ''}{d.line !== null ? ` · line ${d.line}` : ''}{d.stage ? ` · stage ${d.stage}` : ''}{#if why}&nbsp;· <span
+                class="code"
+                title={why.title}>{why.code}</span
+              >{#if why.action}&nbsp;<span class="act" title={why.words ?? ''}>{why.action}</span>{/if}{/if}{d.unsettled ? ' · stage unrecorded (a line written before D-3317)' : ''}
             {#each d.words as w, i (i)}
               <div class="said">{w}</div>
             {/each}
@@ -268,5 +287,17 @@
   .said {
     color: var(--faint);
     word-break: break-word;
+  }
+  .code {
+    font-family: var(--mono);
+    text-decoration: underline dotted;
+    cursor: help;
+  }
+  .act {
+    font-size: var(--fs-xs, 11px);
+    padding: 0 6px;
+    border-radius: var(--r-full, 999px);
+    border: 1px solid var(--line);
+    white-space: nowrap;
   }
 </style>

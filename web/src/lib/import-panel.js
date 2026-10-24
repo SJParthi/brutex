@@ -21,12 +21,68 @@
 
 import { stampLabel } from './dates.js';
 import { feedSpan } from './ingest-months.js';
+import { actionFor, actionWordsFor, titleText } from './reasons.js';
 
 /** How recent the importer's newest `day imported` event must be for the page to say an import is active: a stocks day takes ~3 s, an options day ~45-60 s (p50/p90 measured), so ten minutes without one is not a slow day. */
 export const ACTIVE_WITHIN_MS = 10 * 60 * 1000;
 
 /** The kinds the journal knows, in the order the importer runs them. */
 export const KINDS = ['indices', 'stocks', 'options'];
+
+/**
+ * The outcomes `/imports.json` names, in its order (`DayOutcome::ALL` in
+ * `crates/api/src/import_journal.rs`). `done` alone is OK.
+ */
+export const OUTCOMES = ['done', 'done_with_refusals', 'incomplete', 'refused', 'open'];
+
+/**
+ * ONE OUTCOME AS THE PANEL SHOWS IT (FM-280, R4-05).
+ *
+ * The bundle and the server are built apart, so the server can name an
+ * outcome this page was built before (a later part adds `month_superseded` or
+ * `awaiting_evidence` to its states). Such a word was drawn plainly, as if it
+ * were one of the page's own, and a count of it next to `done` read as
+ * nothing wrong. An outcome outside {@link OUTCOMES} reads
+ * `unknown state <word>, page older than server` and is never OK.
+ *
+ * @param {unknown} outcome
+ * @returns {{ word: string, known: boolean, ok: boolean, text: string }}
+ */
+export function outcomeWord(outcome) {
+  const word = typeof outcome === 'string' ? outcome : String(outcome ?? '');
+  const known = OUTCOMES.includes(word);
+  return {
+    word,
+    known,
+    ok: word === 'done',
+    text: known ? word.replace(/_/g, ' ') : `unknown state ${word === '' ? '(none)' : word}, page older than server`
+  };
+}
+
+/**
+ * ONE REASON CODE AS THE PANEL TITLES IT (READ-02, R4-05).
+ *
+ * The code is shown as the journal wrote it; its hover text is the reasons
+ * table's `code: sentence; control` and the control's label sits beside it,
+ * titled with what a person does. No sentence is written here: before the
+ * table has loaded the title is the code alone (nothing is claimed), and a
+ * code the loaded table has no row for says so.
+ *
+ * @param {string} code
+ * @param {import('./reasons.js').ReasonTable | null} [table] the loaded `/reasons.json`, or null before it lands
+ * @returns {{ code: string, known: boolean, title: string, action: string | null, words: string | null }}
+ */
+export function reasonOf(code, table = null) {
+  if (table === null) return { code, known: false, title: code, action: null, words: null };
+  const title = titleText(code, table);
+  if (title === null) {
+    const why = table.error === null
+      ? 'no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it'
+      : `the reasons table could not be read (${table.error}), so the code is shown as the server sent it`;
+    return { code, known: false, title: `${code}: ${why}`, action: null, words: null };
+  }
+  return { code, known: true, title, action: actionFor(code, table), words: actionWordsFor(code, table) };
+}
 
 /**
  * A duration in the largest two units, for a sentence.
@@ -93,9 +149,10 @@ export function extrapolated(days, p50) {
  *
  * @param {any} summary
  * @param {any} store the `store` block of `/audit.json?feed=gdfl`, or null
- * @param {{ now: number, archiveTo?: string | null, optionsLeft?: number | null }} at
+ * @param {{ now: number, archiveTo?: string | null, optionsLeft?: number | null, reasons?: import('./reasons.js').ReasonTable | null }} at
  *   `optionsLeft` is the archive days after the options' last day, measured
- *   off the indices' journal (`rows_in_range`), or null when not read.
+ *   off the indices' journal (`rows_in_range`), or null when not read;
+ *   `reasons` the loaded `/reasons.json`, or null before it lands.
  */
 export function importPanel(summary, store, at) {
   if (!summary || typeof summary !== 'object') {
@@ -143,6 +200,13 @@ export function importPanel(summary, store, at) {
     optionsLeft: at.optionsLeft ?? null,
     eta,
     counts,
+    // One cell per outcome the server counted, each said by `outcomeWord`:
+    // an outcome this page does not know is never drawn as OK (FM-280).
+    cells: Object.entries(counts && typeof counts === 'object' ? counts : {}).map(([outcome, n]) => {
+      const said = outcomeWord(outcome);
+      const count = Number(n);
+      return { ...said, n: count, bad: !said.known || (!said.ok && count > 0) };
+    }),
     notDone,
     censusRefused: {
       count: Number.isSafeInteger(summary.census_refused?.count) ? summary.census_refused.count : 0,
@@ -154,6 +218,10 @@ export function importPanel(summary, store, at) {
           : 0
     },
     newestNotDone: summary.newest_not_done ?? null,
+    newestNotDoneOutcome: summary.newest_not_done ? outcomeWord(summary.newest_not_done.outcome) : null,
+    newestNotDoneReason: typeof summary.newest_not_done?.reason === 'string'
+      ? reasonOf(summary.newest_not_done.reason, at.reasons ?? null)
+      : null,
     runs: Array.isArray(summary.runs) ? summary.runs : [],
     runsTotal: Number.isSafeInteger(summary.runs_total) ? summary.runs_total : 0,
     capacity: capacity && Number.isSafeInteger(capacity.limit)
@@ -229,12 +297,13 @@ export function reach(journalTo, archiveTo) {
  * id, numbered, so no answer the server sends can blank the list.
  *
  * @param {any[] | null | undefined} rows `/imports.json` `rows`, any outcome
+ * @param {import('./reasons.js').ReasonTable | null} [reasons] the loaded `/reasons.json`, or null before it lands
  */
-export function notDoneRows(rows) {
+export function notDoneRows(rows, reasons = null) {
   /** @type {Map<string, number>} */
   const seen = new Map();
   return (Array.isArray(rows) ? rows : []).map((row) => {
-    const r = dayRow(row);
+    const r = dayRow(row, reasons);
     const n = seen.get(r.id) ?? 0;
     seen.set(r.id, n + 1);
     return n === 0 ? r : { ...r, id: `${r.id}#${n + 1}` };
@@ -247,14 +316,16 @@ export function notDoneRows(rows) {
  * own words for it when the log has them.
  *
  * @param {any} row one of `/imports.json`'s `rows`
+ * @param {import('./reasons.js').ReasonTable | null} [reasons] the loaded `/reasons.json`, or null before it lands
  */
-export function dayRow(row) {
+export function dayRow(row, reasons = null) {
   const logged = Array.isArray(row?.logged) ? row.logged : [];
   const words = logged
     .map((/** @type {any} */ l) => (typeof l?.why === 'string' ? `${l.about ? `${l.about}: ` : ''}${l.why}` : null))
     .filter(Boolean);
   const filter = typeof row?.filter === 'string' ? row.filter : null;
   const line = Number.isSafeInteger(row?.line) ? row.line : null;
+  const reason = typeof row?.reason === 'string' ? row.reason : null;
   return {
     // The DAY's identity: the same for every row that names the day. A list
     // keys by `id`, which tells those rows apart (`notDoneRows`).
@@ -265,8 +336,12 @@ export function dayRow(row) {
     kind: String(row?.kind ?? ''),
     day: String(row?.day ?? ''),
     outcome: String(row?.outcome ?? ''),
+    // The outcome as the panel says it: an unknown one is never OK (FM-280).
+    outcomeInfo: outcomeWord(row?.outcome),
     stage: typeof row?.stage === 'string' ? row.stage : null,
-    reason: typeof row?.reason === 'string' ? row.reason : null,
+    reason,
+    // The reason's hover text and control, from /reasons.json (READ-02).
+    reasonInfo: reason === null ? null : reasonOf(reason, reasons),
     files: Number.isSafeInteger(row?.files) ? row.files : null,
     failures: Number.isSafeInteger(row?.failures) ? row.failures : null,
     words: /** @type {string[]} */ (words),

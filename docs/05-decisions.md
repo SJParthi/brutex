@@ -83398,3 +83398,144 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-TBD-R4-05-1 — One reasons dictionary: a row is (code, sentence, action, control) — 2026-10-24
+
+**Status: locked by R4-05 (READ-02), cloud build; the Mac assigns the number.**
+
+**Decision.** `pull::reasons::TABLE` holds one row per reason code any page
+shows: the code exactly as its source writes it, a `sentence` saying what
+happened in plain words, an `action` saying what a person does, and a
+`control` naming the button or step that does it. The control is one of five
+kinds, each with a fixed label: `Repair` ("press Repair": an import run with a
+repair reason), `RetryRefused` ("Retry refused": a run with
+`--retry-refused`), `StoreStep(id)` ("store step <id>": a step of
+`config/store-steps.toml`, refused by the gate when the file lacks it or holds
+it withdrawn), `Operator(what)` ("operator: <what>") and `Nothing` ("no
+action", for a code that states a fact, not a fault). The fifth kind is added
+to the four the fix plan named because a code such as `match` or
+`before_listing` has nothing to do, and an invented operator step would be the
+invention `CLAUDE.md` §3 rule 1 forbids.
+
+A sentence and an action start lower-case and end with no stop, so a page
+writes a row as `code: sentence; control` — the acceptance's
+`needs_month_generation: the month already passed this day; press Repair`.
+A code two sources share (`disk_full`, `filing`, `range_backwards`,
+`month_busy`) has one row whose words fit both.
+
+**Shared rows.** A package that adds a code adds its row in the same change;
+IA-16's codes are in (it merged first); IA-6, R4-11 and R4-13 add theirs when
+they land.
+
+**Why.** READ-02: a page showed a code and only someone who had read the code
+could act on it; the operator removed glossary paragraphs from /ingest, so the
+words are hover text from one table, never prose on the page.
+
+### D-TBD-R4-05-2 — The reasons gate reads every code from its own source — 2026-10-24
+
+**Status: locked by R4-05.**
+
+**Decision.** `pull::reasons::tests` fails on a code a source names with no
+row (naming the code and every source file that names it) and on a row whose
+code no source names. Its sources, and how each is read:
+
+| Source | Read by |
+|---|---|
+| `ImportRefusal::code` (`gdfl_import_causes.rs`) | its match, through `include_str!`; the `kind.code()` arm hands off to `FailKind` |
+| `cm_cause`, `nfo_cause`, `import_cause` | every `Cause::vendor` / `Cause::open` call in the three bodies, through `include_str!` |
+| `FailKind::code` (`ingest_failkind.rs`, IA-16) | its match, through `include_str!`; the store's repair refusals reach a page only through `FailKind::of_repair`, so this covers them (`RepairError` has no code of its own) |
+| `RunRefusal::CODES` (`gdfl_run.rs`, IA-16) | called, and checked equal to its parsed `code()` match |
+| `store::verdict::Code::ALL` | called, `word()` of each |
+| `store::verdict::flags::ALL` | called: R4-04 titles a day's flags as chips from this table |
+| `RowCause::code`, `HistoryEnds::CODE` (`fetch.rs`, R4-17) | the match through `include_str!`, a `crate::listing::` constant read from `listing.rs`; the constant called |
+| `verdict_words::REASONS` (IA-9; IA-6 appends) | called: a merged source of words a page shows |
+
+The reader refuses by name an arm it cannot read, a wildcard arm, a hand-off
+other than `kind.code()`, a cause argument that is neither a literal nor
+`code`, and any string literal in a read body it did not take as a code: it
+can never pass by reading fewer codes than the file holds. A commented-out arm
+is not a code. Not collected, by name: `/dayflags.json`'s `notes` (sentences
+already, not codes) and R4-01's month codes other than `before_listing`
+(`instrument_inactive`, `after_delisting`, `unread`, `vendor_publishes_none`,
+`complete`, `checking`, `unreachable`), which no Rust source names yet: the
+part that first serves one adds its row, and the gate refuses a row no source
+names.
+
+### D-TBD-R4-05-3 — `/reasons.json` is served once per build, from memory — 2026-10-24
+
+**Status: locked by R4-05.**
+
+**Decision.** The first request builds the document
+(`pull::reasons::body`, schema `reasons-v1`: `build`, `count`, `title_cut`
+and one row per code with `code`, `sentence`, `action`, `control`,
+`control_kind`, `step` and `title`) and logs it once (`pull.reasons`,
+`reasons table built`, with the row count, the bytes and the build); every
+later request answers the same bytes from a `OnceLock`, logging nothing of
+its own. The `ETag` is `"<build>.<first 16 hex of the BLAKE3 of the
+bytes>"`: it names the build (`x-brutex-build`'s label) and changes whenever
+the bytes do, an unstamped build's included, so an unstamped build is still
+answered `304` only for the bytes it is serving. `Cache-Control: no-cache`:
+the browser revalidates every time, so a new build's table is never hidden
+behind an old one. `If-None-Match` is compared as `/store.json` compares it
+(`*` not honoured). A tag that is not a header value is not sent, and then no
+reader is answered `304`.
+
+**Why.** The table is compiled in, so its answer cannot change while the
+process runs: reading or building it per request would be work for nothing,
+and logging it per request would be noise in `/logs`.
+
+### D-TBD-R4-05-4 — Alert kinds 22 to 25, each key built in one place — 2026-10-24
+
+**Status: locked by R4-05 for the numbers it appends; the producers of 24 and
+25 are the Mac's open question (below).**
+
+**Decision.** `pull::alerts::KINDS` gains 22 `vendor_format_changed`, 23
+`vendor_restated`, 24 `scrub_stale` and 25 `credential_dead`, after the last
+kind merged at the head (21, IA-9's `vendor_shape_changed`; the fix plan's
+"after 20" was stale). Each key is built by one function
+(`vendor_format_changed(vendor, digest)`,
+`vendor_restated(vendor, symbol, factor, as_of)`,
+`scrub_stale(vendor, last_pass)`, `credential_dead(feed, day)`), so no
+producer spells a key two ways; every part passes `key_part` or is refused
+`alert_key_part_refused`, naming the part and never its value. The key rules
+are `docs/02-store-format.md` §38's.
+
+**Not appended (D-6900 item 5 (j)):** `network_down`, `feed_behind`,
+`gdfl_day_late`, `ingest_chain_failed`: their only producers were dropped.
+
+**Producers.** 22: R4-22's GDFL half and R4-13's Zerodha half. 23: R4-23
+(its `alerts::put` line is one sequenced edit carried by whichever of R4-05
+and R4-23 merges second). **24 and 25 have no producer named anywhere.**
+R4-05's own amendment says "scrub_stale and credential_dead stay as written",
+while R4-09's says "no scrub_stale alert is put, because R4-05 appends no kind
+without a producer"; the api's dead-credential stop is a run-loop marker, not
+an alert put. They are appended as R4-05's amendment says; since a kind is
+never removed once merged, the Mac decides at merge-back, before `KINDS` is
+fixed for ever, whether to keep them.
+
+**File order.** R3-21 owns the same table and merges first: if it appends
+kinds, this part's four are renumbered to follow its last at merge-back and
+the pin in `alerts_tests.rs` moves with them.
+
+### D-TBD-R4-05-5 — An unknown state is never OK; a long title is cut past the table's own longest — 2026-10-24
+
+**Status: locked by R4-05 (FM-280's web half).**
+
+**Decision.** `web/src/lib/import-panel.js` names the outcomes
+`/imports.json` serves (`done`, `done_with_refusals`, `incomplete`,
+`refused`, `open`, from `DayOutcome::ALL`); any other word is shown as
+`unknown state <word>, page older than server` and is never drawn as OK, its
+count cell bad even at 0. `done` alone is OK.
+
+A title is cut (at a word, with an ellipsis) only past `title_cut`, which
+`/reasons.json` serves as the longest title the table holds: no title of the
+table is ever cut, and the bound moves with the table rather than being a
+number typed into a page. `/reasons.json` always carries every sentence whole.
+
+**Not done here (FM-280's remainder, with the files it needs):** a `schema`
+and the api commit on every status JSON (each status route's builder in
+`crates/api/src/`), the banner when the bundle's build differs from the api's
+(the bundle carries no commit, only SvelteKit's source digest from
+`web/svelte.config.js`, and the api sends none to compare: it needs the web
+build config, `web/src/routes/+layout.svelte` and an api field), and
+`Cache-Control: no-store` on the status routes (`crates/api/src/server.rs`).

@@ -3,9 +3,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { compile } from 'svelte/compiler';
+import { render } from 'svelte/server';
+import { readReasons, REASONS_SCHEMA } from '../src/lib/reasons.js';
 import {
   ACTIVE_WITHIN_MS, censusRefusedSentence, dayRow, extrapolated, importPanel, importRoute,
-  journalStep, kindLine, newestImportAt, nextDay, readImportExtras, span
+  journalStep, kindLine, newestImportAt, nextDay, notDoneRows, OUTCOMES, outcomeWord, readImportExtras, reasonOf, span
 } from '../src/lib/import-panel.js';
 
 const NOW = 1_800_000_000_000;
@@ -182,4 +185,130 @@ test('the not-done days are read from the route the summary names, bounded, and 
   assert.equal(calls, 0);
   assert.equal(none.notDone, null);
   assert.match(none.notDoneError ?? '', /names no \/imports\.json route/);
+});
+
+// ── R4-05: the reasons table titles the panel (READ-02), and an unknown state
+//    is never OK (FM-280). The table body is invented in /reasons.json's shape.
+
+const panelSrc = readFileSync(new URL('../src/lib/ImportPanel.svelte', import.meta.url), 'utf8');
+
+/** The panel compiled for the server, its `$lib` imports pointed at the files. @param {string} src */
+async function serverPanel(src) {
+  const lib = new URL('../src/lib/', import.meta.url).href;
+  const code = compile(src, { generate: 'server', filename: 'ImportPanel.svelte' }).js.code
+    .replace(/from '(svelte[^']*)'/g, (_, spec) => `from '${import.meta.resolve(spec)}'`)
+    .replace(/from '\$lib\/([^']+)'/g, (_, file) => `from '${lib}${file}'`);
+  return (await import(`data:text/javascript,${encodeURIComponent(code)}`)).default;
+}
+
+const reasonsTable = (/** @type {Record<string, unknown>} */ over = {}) => readReasons({
+  schema: REASONS_SCHEMA,
+  build: 'unstamped',
+  count: 2,
+  title_cut: 200,
+  rows: [
+    {
+      code: 'needs_month_generation', sentence: 'the month already passed this day', control: 'press Repair',
+      control_kind: 'repair', step: null, action: 'run the import with a repair reason for this month',
+      title: 'needs_month_generation: the month already passed this day; press Repair'
+    },
+    {
+      code: 'stopped', sentence: 'the run was asked to stop, and stopped between two files', control: 'operator: run again to resume',
+      control_kind: 'operator', step: null, action: 'run the import again; it resumes from this day',
+      title: 'stopped: the run was asked to stop, and stopped between two files; operator: run again to resume'
+    }
+  ],
+  ...over
+});
+
+test('the_import_panel_titles_a_reason_from_the_table', () => {
+  const table = reasonsTable();
+  const row = dayRow({ kind: 'options', day: '2020-09-16', outcome: 'incomplete', stage: 'file', reason: 'needs_month_generation' }, table);
+  // The acceptance: the sentence on hover beside the code, the action as the control's label.
+  assert.deepEqual(row.reasonInfo, {
+    code: 'needs_month_generation',
+    known: true,
+    title: 'needs_month_generation: the month already passed this day; press Repair',
+    action: 'press Repair',
+    words: 'run the import with a repair reason for this month'
+  });
+  assert.equal(row.reason, 'needs_month_generation', 'the code itself is kept as the journal wrote it');
+  // Before the table lands: the code alone, nothing claimed, no "loading".
+  assert.deepEqual(reasonOf('needs_month_generation', null), {
+    code: 'needs_month_generation', known: false, title: 'needs_month_generation', action: null, words: null
+  });
+  assert.equal(dayRow({ reason: 'stopped' }).reasonInfo?.title, 'stopped');
+  // A code the loaded table has no row for says so (the gate in pull fails on
+  // the server side for such a code).
+  assert.equal(
+    reasonOf('zz_unnamed', table).title,
+    'zz_unnamed: no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it'
+  );
+  // A table that could not be read names why, beside the code.
+  const broken = readReasons({ schema: 'reasons-v9' });
+  assert.equal(
+    reasonOf('stopped', broken).title,
+    'stopped: the reasons table could not be read (unknown reasons schema "reasons-v9", page older than server), so the code is shown as the server sent it'
+  );
+  // No reason, no info; the newest not-done day is titled the same way.
+  assert.equal(dayRow({ kind: 'indices', day: '2025-10-21', outcome: 'refused' }).reasonInfo, null);
+  const panel = importPanel(summary({ newest_not_done: { kind: 'options', day: '2020-09-16', outcome: 'incomplete', reason: 'stopped' } }), store, { now: NOW, reasons: table });
+  assert.equal(panel.newestNotDoneReason?.action, 'operator: run again to resume');
+  assert.equal(importPanel(summary(), store, { now: NOW }).newestNotDoneReason, null, 'a newest day with no reason');
+  // notDoneRows passes the table to every row.
+  assert.equal(notDoneRows([{ reason: 'stopped' }, { reason: 'zz_unnamed' }], table).map((r) => r.reasonInfo?.known).join(), 'true,false');
+  // The panel draws the code with its title and the control beside it, and
+  // adds no paragraph: the reason sits inside its day's list item.
+  assert.match(panelSrc, /<span\s+class="code"\s+title=\{why\.title\}>\{why\.code\}<\/span/);
+  assert.match(panelSrc, /<span class="act" title=\{why\.words \?\? ''\}>\{why\.action\}<\/span>/);
+  assert.match(panelSrc, /loadReasons\(fetch\)/);
+  assert.doesNotMatch(panelSrc, /loading/i);
+});
+
+test('an_unknown_stage_state_is_shown_as_unknown_never_as_ok', async () => {
+  assert.deepEqual(OUTCOMES, ['done', 'done_with_refusals', 'incomplete', 'refused', 'open']);
+  for (const known of OUTCOMES) assert.equal(outcomeWord(known).known, true, known);
+  assert.deepEqual(outcomeWord('done'), { word: 'done', known: true, ok: true, text: 'done' });
+  assert.deepEqual(outcomeWord('done_with_refusals'), { word: 'done_with_refusals', known: true, ok: false, text: 'done with refusals' });
+  // A state a later server names: said as unknown, never OK, whatever its count.
+  for (const later of ['month_superseded', 'awaiting_evidence', 'waiting_on_sign_in', 'partial_press', 'DONE', 'done ']) {
+    const said = outcomeWord(later);
+    assert.deepEqual(said, { word: later, known: false, ok: false, text: `unknown state ${later}, page older than server` });
+  }
+  // Garbage: an absent or a non-string outcome.
+  assert.equal(outcomeWord(undefined).text, 'unknown state (none), page older than server');
+  assert.equal(outcomeWord(null).ok, false);
+  assert.equal(outcomeWord(7).text, 'unknown state 7, page older than server');
+  // COMBINATION: a later server's counts beside the known ones, one of them
+  // at zero: the unknown cell is bad even at 0; `done` is the only OK one.
+  const panel = importPanel(summary({ counts: { done: 5, month_superseded: 0, awaiting_evidence: 3, open: 0 } }), store, { now: NOW });
+  assert.deepEqual(panel.cells.map((c) => [c.word, c.n, c.bad, c.text]), [
+    ['done', 5, false, 'done'],
+    ['month_superseded', 0, true, 'unknown state month_superseded, page older than server'],
+    ['awaiting_evidence', 3, true, 'unknown state awaiting_evidence, page older than server'],
+    ['open', 0, false, 'open']
+  ]);
+  assert.deepEqual(importPanel(summary({ counts: null }), store, { now: NOW }).cells, []);
+  // A row and the newest not-done day in such a state.
+  const row = dayRow({ kind: 'options', day: '2020-09-16', outcome: 'month_superseded', reason: 'needs_month_generation' });
+  assert.equal(row.outcomeInfo.known, false);
+  assert.equal(row.outcomeInfo.text, 'unknown state month_superseded, page older than server');
+  const newest = importPanel(summary({ newest_not_done: { kind: 'options', day: '2020-09-16', outcome: 'awaiting_evidence' } }), store, { now: NOW });
+  assert.equal(newest.newestNotDoneOutcome?.text, 'unknown state awaiting_evidence, page older than server');
+  // The page as the server renders it: the words are on the page, in red.
+  const Panel = await serverPanel(panelSrc);
+  const html = render(Panel, {
+    props: {
+      summary: summary({ counts: { done: 5, month_superseded: 2 }, newest_not_done: { kind: 'options', day: '2020-09-16', outcome: 'awaiting_evidence' } }),
+      notDone: [{ kind: 'options', day: '2020-09-16', outcome: 'partial_press', reason: 'stopped' }],
+      now: 0
+    }
+  }).body;
+  assert.match(html, /<span class="cell[^"]*\bbad\b[^"]*" data-outcome-known="false"><b>2<\/b> unknown state month_superseded, page older than server<\/span>/);
+  assert.match(html, /<span class="cell[^"]*" data-outcome-known="true"><b>5<\/b> done<\/span>/);
+  assert.doesNotMatch(html, /<span class="cell[^"]*\bbad\b[^"]*" data-outcome-known="true">/);
+  assert.match(html, /unknown state awaiting_evidence, page older than server/);
+  assert.match(html, /<b class="[^"]*\bbad\b[^"]*">unknown state partial_press, page older than server<\/b>/);
+  // Server-side there is no table yet: the reason is its code, titled by itself.
+  assert.match(html, /<span class="code[^"]*" title="stopped">stopped<\/span>/);
 });
