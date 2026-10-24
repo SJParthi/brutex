@@ -551,15 +551,10 @@ fn hold<'a>(
     }
 }
 
-/// The sidecar beside `key`'s one-second month file of `day`'s month.
-///
-/// # Errors
-///
-/// What the store's path builder refuses (an instrument or a month it cannot
-/// file), named.
-pub fn path(store_root: &Path, key: &InstrumentKey, day: Day) -> Result<PathBuf, String> {
+/// `key`'s one-second bar month of `day`'s month, as the store names it.
+fn month_bars(key: &InstrumentKey, day: Day) -> Result<StorePath<'_>, String> {
     let month = YearMonth::new(day.year(), day.month()).map_err(|why| why.to_string())?;
-    let bars = StorePath::new(PathParts {
+    StorePath::new(PathParts {
         vendor: Vendor::Gdfl,
         exchange: key.exchange.as_str(),
         segment: key.segment.as_str(),
@@ -569,8 +564,46 @@ pub fn path(store_root: &Path, key: &InstrumentKey, day: Day) -> Result<PathBuf,
         month,
         file: FileKind::Bars,
     })
-    .map_err(|why| why.to_string())?;
-    Ok(bars.to_path_buf(store_root).with_extension(EXTENSION))
+    .map_err(|why| why.to_string())
+}
+
+/// The sidecar beside `key`'s one-second month file of `day`'s month, in the
+/// GENERATION EVERY READER OPENS (IA-17b, D-4875 (5)): beside the original's
+/// `.bin` while the month is served as the original, and beside the served
+/// revision's (`bar-revisions-v1/<n>/...`) once a repair is promoted, the
+/// way `BarFile::open_existing` resolves the bars
+/// (`store::generation::served`). So a reader of a repaired CASH month reads
+/// the `.auc` its generation was promoted with, never the original's, which
+/// the repair left byte-identical.
+///
+/// For an original month the path is exactly the one this function always
+/// answered: `bars/gdfl/NSE/CASH/<SYM>/1s/<YYYY-MM>.auc`.
+///
+/// # Errors
+///
+/// What the store's path builder refuses (an instrument or a month it cannot
+/// file), and a generation pointer the store refuses
+/// (`StoreError::Generation`: the served generation cannot be told, and the
+/// original is not read in its place), named.
+///
+/// # Cost
+///
+/// One pointer probe: an `open` that answers not-found for a month never
+/// repaired, else one read of the pointer's last record. O(1).
+pub fn path(store_root: &Path, key: &InstrumentKey, day: Day) -> Result<PathBuf, String> {
+    let bars = month_bars(key, day)?;
+    let served = store::generation::served(store_root, bars).map_err(|why| why.to_string())?;
+    Ok(bars
+        .to_path_buf(&served.root(store_root))
+        .with_extension(EXTENSION))
+}
+
+/// The ORIGINAL month's sidecar, the only one an append ever writes
+/// ([`append`]): never inside a revision root.
+fn original_path(store_root: &Path, key: &InstrumentKey, day: Day) -> Result<PathBuf, String> {
+    Ok(month_bars(key, day)?
+        .to_path_buf(store_root)
+        .with_extension(EXTENSION))
 }
 
 /// What one append did.
@@ -582,22 +615,157 @@ pub struct Appended {
     pub written: usize,
 }
 
+/// Why an append wrote nothing, typed so the import can tell a day the
+/// month takes only with a new generation from a sidecar it must refuse
+/// (IA-17b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotFiled {
+    /// The sidecar holds a day after this one: an insertion, which only the
+    /// month's next generation can carry.
+    Older(String),
+    /// The month is served from a repair revision, whose files are never
+    /// appended to (D-3350, append-only history).
+    Revision(String),
+    /// Anything else: the path, the file, its lock or its bytes; a day whose
+    /// records differ; a write that failed (undone).
+    Other(String),
+}
+
+impl NotFiled {
+    fn words(self) -> String {
+        match self {
+            Self::Older(why) | Self::Revision(why) | Self::Other(why) => why,
+        }
+    }
+}
+
 /// Files `day`'s `prints` of `key` in the month's sidecar (see the module
 /// header for the bytes and the rules).
+///
+/// **NEVER INTO A SERVED REVISION (IA-17b; CLAUDE.md §3 rule 8, D-3350).** A
+/// month served from a repair revision is refused by name: its `.auc` is the
+/// one its generation was promoted with ([`path`]), and the prints of a day
+/// it lacks go with the month's next generation ([`write_revision`]), never
+/// into the published revision's root and never into the original's, which
+/// no reader of that month opens.
 ///
 /// # Errors
 ///
 /// [`CmRefusal::AuctionSidecar`] naming why: the path, the file, its lock or
 /// its bytes; a day older than one the month holds; a day whose records
-/// differ from those held for it; a write that failed (undone) or a
-/// directory that could not be synced.
+/// differ from those held for it; a month served from a revision; a write
+/// that failed (undone) or a directory that could not be synced.
 pub fn append(
     store_root: &Path,
     key: &InstrumentKey,
     day: Day,
     prints: &[Print],
 ) -> Result<Appended, CmRefusal> {
+    append_typed(store_root, key, day, prints)
+        .map_err(|why| CmRefusal::AuctionSidecar { why: why.words() })
+}
+
+/// One day's prints the import did not write, carried with the day's bars to
+/// the month's next generation ([`DayPrints::WithGeneration`], IA-17b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    /// The share.
+    pub key: InstrumentKey,
+    /// The day the prints are of.
+    pub day: Day,
+    /// The prints, as the reader diverted them.
+    pub prints: Vec<Print>,
+    /// Why they were not written to the month's sidecar.
+    pub why: String,
+}
+
+/// Where the import's prints of one day went ([`file_or_carry`], IA-17b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DayPrints {
+    /// Filed in the month's sidecar, or held there already byte for byte
+    /// (`written` 0).
+    Appended(Appended),
+    /// NOT WRITTEN ANYWHERE: the month takes this day's prints only with its
+    /// next generation, so they travel with the day's bars to the gathered
+    /// repair, whose step writes the new generation's whole `.auc`
+    /// ([`write_revision`]). Why, in words.
+    WithGeneration(String),
+}
+
+/// [`append`] for the import (IA-17b, D-4875 (5)): a day the month's sidecar
+/// can only take as an insertion (it holds a later day), or a day of a month
+/// served from a revision that its served `.auc` does not already hold, is
+/// [`DayPrints::WithGeneration`] instead of a refusal, so the prints go with
+/// the bars and are never dropped and never written in place. A served
+/// revision that already holds the day's records byte for byte answers
+/// `written` 0, as the original does.
+///
+/// # Errors
+///
+/// [`append`]'s, but for the two cases above; a served `.auc` that cannot be
+/// read, and one holding different records for the day.
+///
+/// # Cost
+///
+/// [`append`]'s: one pointer probe and one read of the month's sidecar
+/// (records in the month), and one write for an append.
+pub fn file_or_carry(
+    store_root: &Path,
+    key: &InstrumentKey,
+    day: Day,
+    prints: &[Print],
+) -> Result<DayPrints, CmRefusal> {
     let refuse = |why: String| CmRefusal::AuctionSidecar { why };
+    match append_typed(store_root, key, day, prints) {
+        Ok(appended) => Ok(DayPrints::Appended(appended)),
+        Err(NotFiled::Older(why)) => Ok(DayPrints::WithGeneration(why)),
+        Err(NotFiled::Revision(why)) => {
+            let served = path(store_root, key, day).map_err(refuse)?;
+            let held = read(&served).map_err(|refused| refuse(refused.why))?;
+            let offered: Vec<Record> = prints.iter().map(|p| Record::of(day, p)).collect();
+            let held_day = held
+                .map(|sidecar| records_of_day(&sidecar.records, day))
+                .unwrap_or_default();
+            if held_day.is_empty() {
+                return Ok(DayPrints::WithGeneration(why));
+            }
+            if held_day == offered {
+                return Ok(DayPrints::Appended(Appended {
+                    offered: offered.len(),
+                    written: 0,
+                }));
+            }
+            Err(refuse(format!(
+                "{}: {day} holds {} records and {} different ones were offered; a new \
+                 generation, never an in-place change",
+                served.display(),
+                held_day.len(),
+                offered.len()
+            )))
+        }
+        Err(other) => Err(refuse(other.words())),
+    }
+}
+
+/// The records of `records` stamped on `day`'s IST date, in file order.
+fn records_of_day(records: &[Record], day: Day) -> Vec<Record> {
+    let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
+    let end = start + 86_400 * 1_000_000;
+    records
+        .iter()
+        .filter(|r| r.t_micros >= start && r.t_micros < end)
+        .copied()
+        .collect()
+}
+
+/// [`append`], its refusal typed.
+fn append_typed(
+    store_root: &Path,
+    key: &InstrumentKey,
+    day: Day,
+    prints: &[Print],
+) -> Result<Appended, NotFiled> {
+    let refuse = NotFiled::Other;
     let offered: Vec<Record> = prints.iter().map(|p| Record::of(day, p)).collect();
     let appended = Appended {
         offered: offered.len(),
@@ -606,7 +774,25 @@ pub fn append(
     if offered.is_empty() {
         return Ok(appended);
     }
-    let path = path(store_root, key, day).map_err(refuse)?;
+    let bars = month_bars(key, day).map_err(refuse)?;
+    match store::generation::served(store_root, bars) {
+        Ok(store::generation::Served::Original) => {}
+        Ok(served) => {
+            return Err(NotFiled::Revision(format!(
+                "{} {day}: the month is served from revision {}, whose files are never appended \
+                 to; the day's prints go with the month's next generation",
+                key.underlying,
+                served.ordinal()
+            )));
+        }
+        Err(why) => {
+            return Err(refuse(format!(
+                "{} {day}: the month's served generation cannot be told: {why}",
+                key.underlying
+            )));
+        }
+    }
+    let path = original_path(store_root, key, day).map_err(refuse)?;
     // THE DIRECTORIES THIS APPEND MAKES, so their entries are synced with
     // the file's: the parent of each holds its entry.
     let mut made: Vec<PathBuf> = Vec::new();
@@ -631,7 +817,7 @@ pub fn append(
             path.display()
         ))
     })?;
-    let written = write_day(&lock, &path, day, &offered, &made).map_err(refuse);
+    let written = write_day(&lock, &path, day, &offered, &made);
     lock.release().map_err(|why| {
         refuse(format!(
             "{}: the lock was not released: {why}",
@@ -654,12 +840,31 @@ fn write_day(
     day: Day,
     offered: &[Record],
     made: &[PathBuf],
-) -> Result<(usize, u16), String> {
+) -> Result<(usize, u16), NotFiled> {
+    write_day_held(file, path, day, offered, made).map_err(|(older, why)| {
+        if older {
+            NotFiled::Older(why)
+        } else {
+            NotFiled::Other(why)
+        }
+    })
+}
+
+/// The body of [`write_day`]: every refusal is `(false, words)` but the
+/// older-day one, `(true, words)`.
+fn write_day_held(
+    file: &File,
+    path: &Path,
+    day: Day,
+    offered: &[Record],
+    made: &[PathBuf],
+) -> Result<(usize, u16), (bool, String)> {
+    let other = |why: String| (false, why);
     let mut bytes = Vec::new();
     let mut reader = file;
     reader
         .read_to_end(&mut bytes)
-        .map_err(|why| format!("{}: {why}", path.display()))?;
+        .map_err(|why| other(format!("{}: {why}", path.display())))?;
     // A TORN TAIL A KILLED APPEND LEFT IS CUT BACK BY THE NEXT (IA-16,
     // IA-AUC-01, FM-099): every reader refused it, so no reader ever saw it;
     // only bytes after the last whole record that verifies are cut, under
@@ -669,11 +874,11 @@ fn write_day(
         file.set_len(u64::try_from(keep).unwrap_or(u64::MAX))
             .and_then(|()| file.sync_data())
             .map_err(|why| {
-                format!(
+                other(format!(
                     "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
                     path.display(),
                     had - keep
-                )
+                ))
             })?;
         bytes.truncate(keep);
         note_torn_cut(path, had, keep);
@@ -685,33 +890,30 @@ fn write_day(
             records: Vec::new(),
         }
     } else {
-        parse(&bytes).map_err(|why| format!("{}: {why}", path.display()))?
+        parse(&bytes).map_err(|why| other(format!("{}: {why}", path.display())))?
     };
-    let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
-    let end = start + 86_400 * 1_000_000;
-    let held_day: Vec<Record> = held
-        .records
-        .iter()
-        .filter(|r| r.t_micros >= start && r.t_micros < end)
-        .copied()
-        .collect();
+    let end = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 86_400) * 1_000_000;
+    let held_day = records_of_day(&held.records, day);
     if !held_day.is_empty() {
         if held_day == offered {
             return Ok((0, held.version));
         }
-        return Err(format!(
+        return Err(other(format!(
             "{}: {day} holds {} records and {} different ones were offered; a new generation, \
              never an in-place change",
             path.display(),
             held_day.len(),
             offered.len()
-        ));
+        )));
     }
     if held.records.last().is_some_and(|last| last.t_micros >= end) {
-        return Err(format!(
-            "{}: the month holds a day after {day}; {day} is a new generation, never an \
-             insertion",
-            path.display()
+        return Err((
+            true,
+            format!(
+                "{}: the month holds a day after {day}; {day} is a new generation, never an \
+                 insertion",
+                path.display()
+            ),
         ));
     }
     let mut out = Vec::with_capacity(HEADER_LEN + offered.len() * RECORD_LEN);
@@ -726,7 +928,7 @@ fn write_day(
     if let Err(why) = put_bytes(file, &out).and_then(|()| file.sync_data()) {
         let before = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let undone = file.set_len(before).and_then(|()| file.sync_data());
-        return Err(match undone {
+        return Err(other(match undone {
             Ok(()) => format!(
                 "{}: {why}; the append was undone, the file is its {before} bytes again and \
                  nothing is half-written",
@@ -737,22 +939,165 @@ fn write_day(
                  may end in a torn tail every reader refuses",
                 path.display()
             ),
-        });
+        }));
     }
     if fresh {
         let mut dirs: Vec<&Path> = path.parent().into_iter().collect();
         dirs.extend(made.iter().filter_map(|dir| dir.parent()));
         for dir in dirs {
             sync_dir(dir).map_err(|why| {
-                format!(
+                other(format!(
                     "{}: written and synced, but its directory {} was not synced: {why}",
                     path.display(),
                     dir.display()
-                )
+                ))
             })?;
         }
     }
     Ok((offered.len(), held.version))
+}
+
+/// THE NEW GENERATION'S WHOLE `.auc` (IA-17b; D-4875 (5), D-4898): the step
+/// a CASH month's gathered repair hands `store::repair::repair_month_with`,
+/// run with the new revision's root after it is published and before it is
+/// promoted.
+///
+/// It writes `<revision_root>/bars/gdfl/NSE/CASH/<SYM>/1s/<YYYY-MM>.auc`:
+/// every record of the sidecar of the generation served NOW ([`path`], the
+/// original or the revision being replaced), and the `carried` days' prints
+/// ([`DayPrints::WithGeneration`]), in IST day order, in format [`VERSION`]
+/// (a new generation is a new file; records of a version-1 sidecar are
+/// carried and checked from here on). A carried day the served sidecar
+/// already holds byte for byte is kept once; one it holds differently is
+/// refused, so the repair stops before the promotion and nothing is served
+/// with two readings of one day. No served sidecar and nothing carried is no
+/// file: a month before the closing auction's era writes none.
+///
+/// **Repeatable, and only where it is handed.** The file is written whole
+/// beside itself (`.tmp`), synced, renamed over the target and its directory
+/// synced, so an attempt a crash tore is replaced whole by the retry, and a
+/// target already holding exactly these bytes is left alone. Nothing is
+/// written outside `revision_root`: the served generation's sidecar and the
+/// original's are only read, and a revision another repair published beside
+/// this one is never assumed to be the one served (verify-IA-17-r1
+/// follow-up 4).
+///
+/// Returns the records written, or `None` when there was nothing to write.
+///
+/// # Errors
+///
+/// The served sidecar's refusal ([`read`]), a carried day that differs from
+/// the one held, and any host refusal of the write, each in words naming the
+/// path.
+///
+/// # Cost
+///
+/// O(records of the month): one read of the served sidecar, one write and two
+/// syncs. Runs once per repaired CASH month, never on a read path.
+pub fn write_revision(
+    store_root: &Path,
+    revision_root: &Path,
+    key: &InstrumentKey,
+    month_of: Day,
+    carried: &[(Day, &[Print])],
+) -> Result<Option<usize>, String> {
+    let served = path(store_root, key, month_of)?;
+    let held = read(&served).map_err(|refused| refused.why)?;
+    let (held_version, mut records) = held.map_or((VERSION, Vec::new()), |sidecar| {
+        (sidecar.version, sidecar.records)
+    });
+    for &(day, prints) in carried {
+        let offered: Vec<Record> = prints.iter().map(|p| Record::of(day, p)).collect();
+        if offered.is_empty() {
+            continue;
+        }
+        let held_day = records_of_day(&records, day);
+        if held_day == offered {
+            continue;
+        }
+        if !held_day.is_empty() {
+            return Err(format!(
+                "{}: {day} holds {} records and {} different ones were carried with the new \
+                 generation; one day is never served with two readings",
+                served.display(),
+                held_day.len(),
+                offered.len()
+            ));
+        }
+        records.extend(offered);
+    }
+    if records.is_empty() {
+        return Ok(None);
+    }
+    // IN IST DAY ORDER, each day's records in the order they were stated: a
+    // stable sort by day keeps every day's own order.
+    records.sort_by_key(|record| ist_day(record.t_micros));
+    let mut out = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
+    out.extend_from_slice(&header());
+    for (at, record) in records.iter().enumerate() {
+        out.extend_from_slice(&record.encode(VERSION, u64::try_from(at).unwrap_or(u64::MAX)));
+    }
+    let target = month_bars(key, month_of)?
+        .to_path_buf(revision_root)
+        .with_extension(EXTENSION);
+    let named = |why: io::Error| format!("{}: {why}", target.display());
+    if std::fs::read(&target).is_ok_and(|bytes| bytes == out) {
+        return Ok(Some(records.len()));
+    }
+    let dir = target
+        .parent()
+        .ok_or_else(|| format!("{}: no directory", target.display()))?;
+    std::fs::create_dir_all(dir).map_err(named)?;
+    let tmp = target.with_extension(format!("{EXTENSION}.tmp"));
+    {
+        let mut file = File::create(&tmp).map_err(named)?;
+        put_whole(&mut file, &out)
+            .and_then(|()| file.sync_all())
+            .map_err(named)?;
+    }
+    std::fs::rename(&tmp, &target).map_err(named)?;
+    sync_dir(dir).map_err(named)?;
+    note_revision_written(key, month_of, &target, records.len(), held_version);
+    Ok(Some(records.len()))
+}
+
+/// Writes `bytes` whole into a fresh file.
+fn put_whole(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(after) = seam::FAIL_AFTER.with(std::cell::Cell::take) {
+        file.write_all(bytes.get(..after).unwrap_or(bytes))?;
+        return Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "no space left on device (injected)",
+        ));
+    }
+    file.write_all(bytes)
+}
+
+/// One `info` line per written revision sidecar (IA-17b): the share, the
+/// month, the records and the version the served one was in.
+fn note_revision_written(
+    key: &InstrumentKey,
+    month_of: Day,
+    path: &Path,
+    records: usize,
+    from_version: u16,
+) {
+    let month = format!("{:04}-{:02}", month_of.year(), month_of.month());
+    let path_text = path.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(
+            crate::gdfl_import::TARGET,
+            "auction file written for a new generation",
+        )
+        .with("symbol", key.underlying.as_str())
+        .with("month", month.as_str())
+        .with("records", records)
+        .with("from_version", usize::from(from_version))
+        .with("version", usize::from(VERSION))
+        .with("sidecar", path_text.as_str())
+        .with("code", "auction_revision_written"),
+    );
 }
 
 /// Writes `bytes` at the file's end in one call.

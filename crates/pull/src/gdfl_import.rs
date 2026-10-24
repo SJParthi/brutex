@@ -1929,6 +1929,10 @@ struct Member {
 struct FileFacts {
     member: Option<Member>,
     reader: quality::ReaderCounts,
+    /// A CASH day's closing-auction prints its month's sidecar could take
+    /// only with the month's next generation (IA-17b, D-4875 (5)): never
+    /// written by the read, carried with the bars to the gathered repair.
+    auction: Option<crate::gdfl_cm::auction::Carried>,
 }
 
 /// One file as the runtime receives it.
@@ -2619,6 +2623,12 @@ fn note_unattributed(day: Day, symbol: &str, name: &str, booked: u32) {
 /// refuses is refused whole, so every entry stays one file, skip or refusal.
 /// A rescan files nothing, so it never writes a sidecar. Runs on the worker
 /// that files the share (WP-16), so one share's `.auc` has one writer.
+///
+/// PRINTS THE MONTH TAKES ONLY WITH A NEW GENERATION ARE CARRIED, never
+/// refused and never written (IA-17b, D-4875 (5)): a day older than one the
+/// sidecar holds, or a day of a month served from a revision, goes to the
+/// filing with its bars ([`FileFacts::auction`]), and the gathered repair's
+/// step writes it into the new generation's `.auc`.
 fn cm_read<S: CmSource>(
     source: &S,
     run: &Run<'_>,
@@ -2629,16 +2639,27 @@ fn cm_read<S: CmSource>(
     let read_file = read_listed(source, listing, &job.key)
         .and_then(|f| f.ok_or(CmRefusal::NotSwept))
         .and_then(|day_file| match mode {
-            Mode::Import => crate::gdfl_cm::auction::append(
+            Mode::Import => crate::gdfl_cm::auction::file_or_carry(
                 run.store_root,
                 &job.key,
                 day,
                 &day_file.file.auction,
             )
-            .map(|_| day_file),
-            Mode::Rescan => Ok(day_file),
+            .map(|filed| match filed {
+                crate::gdfl_cm::auction::DayPrints::Appended(_) => (day_file, None),
+                crate::gdfl_cm::auction::DayPrints::WithGeneration(why) => {
+                    let carried = crate::gdfl_cm::auction::Carried {
+                        key: job.key,
+                        day,
+                        prints: day_file.file.auction.clone(),
+                        why,
+                    };
+                    (day_file, Some(carried))
+                }
+            }),
+            Mode::Rescan => Ok((day_file, None)),
         });
-    let day_file = read_file.map_err(|why| Refused::cm(job.file.name(), &why))?;
+    let (day_file, carried) = read_file.map_err(|why| Refused::cm(job.file.name(), &why))?;
     if mode == Mode::Import {
         note_series(day, &job.symbol, &day_file.name);
         note_unattributed(
@@ -2680,6 +2701,7 @@ fn cm_read<S: CmSource>(
                 crc32: job.file.crc32,
             }),
             reader,
+            auction: carried,
         },
     })
 }
@@ -2994,6 +3016,7 @@ fn option_handed<L>(
                 crc32: file.crc32,
             }),
             reader,
+            auction: None,
         },
     }
 }

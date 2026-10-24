@@ -258,6 +258,13 @@ pub(super) struct Ctx<'a> {
     /// itself made, when the first day after it was asked. The loss probe
     /// names a root that is another directory now as lost.
     pub(super) store_id: std::cell::Cell<Option<super::filing::StoreId>>,
+    /// THE ONCE-PER-MONTH GATHER (IA-17b, D-4875 (3), D-4899): the files of
+    /// the month the run is in that its months take only as a new
+    /// generation, and the days whose closes wait for them. Repaired once
+    /// per (instrument, month) when the run leaves the month, ends or is
+    /// stopped ([`flush_gather`]). Ends with the run; a run that ends any
+    /// other way leaves those days begun, for the next run to read again.
+    pub(super) gather: std::cell::RefCell<super::filing::Gather>,
 }
 
 /// How many distinct scopes, and distinct other filters, a run's maps are
@@ -1379,6 +1386,7 @@ where
         scoped,
         held_back: std::cell::RefCell::new(HashMap::new()),
         store_id: std::cell::Cell::new(super::filing::store_identity(run.store_root)),
+        gather: std::cell::RefCell::new(super::filing::Gather::default()),
     };
     let _key = RunKey::claim(ctx.id);
     if let Some(observer) = options.observer {
@@ -1482,7 +1490,7 @@ where
     F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
 {
     let (run, options) = (ctx.run, ctx.options);
-    if let Some(refusal) = stopped(ctx, None, report) {
+    if let Some(refusal) = stop_after_gather(ctx, None, report, &mut *census)? {
         return Err(refusal);
     }
     // THE FLOOR BEFORE THE FIRST DAY (IA-16, CONC-031): a full disk is named
@@ -1493,7 +1501,7 @@ where
     let range = days(run.from, run.to);
     let total = range.len();
     for (index, day) in range.into_iter().enumerate() {
-        if let Some(refusal) = stopped(ctx, None, report) {
+        if let Some(refusal) = stop_after_gather(ctx, None, report, &mut *census)? {
             return Err(refusal);
         }
         root_check(ctx, day, report)?;
@@ -1530,12 +1538,35 @@ where
         if let Some(observer) = options.observer {
             observer.day_passed(run.kind, day, report);
         }
-        if let Some(refusal) = stopped(ctx, Some(day), report) {
+        if let Some(refusal) = stop_after_gather(ctx, Some(day), report, &mut *census)? {
             return Err(refusal);
         }
     }
+    // THE RUN ENDS: what it gathered is repaired, once per (instrument,
+    // month), and its days closed (IA-17b, D-4899).
+    flush_gather(ctx, report, census)?;
     note_finished(ctx, report);
     Ok(())
+}
+
+/// [`stopped`], after the gather (IA-17b, D-4899 and the critic's IA-17-3):
+/// a stop offers what is gathered and closes those days before the run
+/// ends, so a stop never leaves a gathered day begun. Nothing is done when
+/// no stop was asked.
+fn stop_after_gather(
+    ctx: &Ctx<'_>,
+    day: Option<Day>,
+    report: &mut Report,
+    census: &mut dyn Census,
+) -> Result<Option<ImportRefusal>, ImportRefusal> {
+    if ctx
+        .options
+        .stop
+        .is_some_and(crate::gdfl_run::stop::StopControl::requested)
+    {
+        flush_gather(ctx, report, census)?;
+    }
+    Ok(stopped(ctx, day, report))
 }
 
 /// A FRESH STORE IS MADE ONCE, BY THE RUN, BEFORE ANYTHING IS READ OR
@@ -1885,19 +1916,29 @@ struct Widened {
     /// The members read this day, under whichever key: a member two keys owe
     /// is read once.
     taken: HashSet<String>,
+    /// A member key of the day waits for its month's gathered repair
+    /// (IA-17b, D-4899): the day is counted now, and that key's close is
+    /// told when it is written.
+    deferred: bool,
 }
 
 impl Widened {
     /// One "day imported" (or "day incomplete", "day refused") and one more
     /// in `days_imported`, when the run closed a member key on the day after
     /// reading it; one more in `days_refused` when a member key was refused
-    /// unread as restated.
+    /// unread as restated. A day whose member keys all wait for a gathered
+    /// repair is counted, and told by each member's own close.
     fn tell(&self, ctx: &Ctx<'_>, day: Day, report: &mut Report) {
         if self.restated {
             report.days_refused += 1;
         }
-        if let (Some(before), Some(worst)) = (self.before, self.worst) {
+        let Some(before) = self.before else {
+            return;
+        };
+        if self.worst.is_some() || self.deferred {
             report.days_imported += 1;
+        }
+        if let Some(worst) = self.worst {
             let told = (
                 worst,
                 Closed::Widened {
@@ -1970,6 +2011,8 @@ where
         if let Some(outcome) = day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
             widened.closed += 1;
             widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
+        } else if ctx.gather.borrow().waits(&member_key, day) {
+            widened.deferred = true;
         }
     }
     if examined {
@@ -2109,6 +2152,12 @@ where
         request.window.contains(day),
         "{day} is read under a request that does not hold it"
     );
+    // THE RUN LEAVES THE MONTH IT GATHERED (IA-17b, D-4899): its months are
+    // repaired, once each, and their days closed before this day is read.
+    // One compare when nothing is gathered.
+    if ctx.gather.borrow().leaves(day) {
+        flush_gather(ctx, report, census)?;
+    }
     if pass.member.is_some() {
         // A member key was asked whether the auction era restated its share
         // where it was made ([`widen_key`], the one maker of a member
@@ -2136,6 +2185,7 @@ where
         store_lost,
         not_writable,
         held_back_cap,
+        gathered,
         ..
     } = files_of_day;
     // THE STORE'S ROOT WENT AWAY (D-4852, FM-086): nothing more is written,
@@ -2260,6 +2310,31 @@ where
         failures.push(note_stopped_day(run.kind, day));
     }
     let census_ms = u64::try_from(census_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // THE DAY'S CLOSE WAITS FOR ITS MONTH'S GATHERED REPAIR (IA-17b,
+    // D-4899): some of its files' bars are in no month yet, so closing the
+    // day now would let a crash before the repair lose them for good (a
+    // `done` day is never read again). Its close is written once the repair
+    // is done ([`flush_gather`]).
+    if gathered > 0 && ctx.gather.borrow().waits(key, day) {
+        let close = super::filing::DeferredClose {
+            member: pass.member.cloned(),
+            stopped,
+            before,
+            after: Mark::of(report),
+            max_back_s: day_back,
+            listing,
+            failures,
+            census_ms,
+        };
+        return defer_day(
+            ctx,
+            (key, day, gathered),
+            close,
+            (source_gone, disk_full, not_writable, held_back_cap),
+            report,
+        )
+        .map(|()| None);
+    }
     let closed = match pass.member {
         None if stopped => Closed::Day,
         None => {
@@ -2296,6 +2371,245 @@ where
         report,
     )?;
     Ok(Some(outcome))
+}
+
+/// A day whose files wait in the gather, its close kept for when its
+/// months are repaired (IA-17b, D-4899), and said at `info`.
+///
+/// A DAY THAT ENDS THE RUN IS LEFT BEGUN instead (a lost source, a full
+/// disk, a store that takes no writes, the held-back set at its cap): its
+/// gathered bars are in no month, so it is not closed at all, and the next
+/// run reads it again (D-2821), as after a crash. Its failures are named in
+/// the report; the run ends as it would have.
+fn defer_day(
+    ctx: &Ctx<'_>,
+    (key, day, gathered): (&str, Day, usize),
+    close: super::filing::DeferredClose,
+    (source_gone, disk_full, not_writable, held_back_cap): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<(String, usize)>,
+    ),
+    report: &mut Report,
+) -> Result<(), ImportRefusal> {
+    let kind = ctx.run.kind;
+    if source_gone.is_some()
+        || disk_full.is_some()
+        || not_writable.is_some()
+        || held_back_cap.is_some()
+    {
+        name_staged(report, close.failures);
+        if let Some(why) = source_gone {
+            return Err(ImportRefusal::SourceLost {
+                kind,
+                day,
+                why,
+                done: Box::new(std::mem::take(report)),
+            });
+        }
+        return run_end(
+            (kind, day),
+            (disk_full, not_writable, held_back_cap),
+            report,
+        );
+    }
+    let _kept = ctx.gather.borrow_mut().defer_close((key, day), close);
+    let day_text = day.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(TARGET, "day's close waits for its month's gathered repair")
+            .with("kind", kind.as_str())
+            .with("day", day_text.as_str())
+            .with("key", key)
+            .with("files_gathered", gathered)
+            .with("run", ctx.id)
+            .with("code", "gather_deferred"),
+    );
+    Ok(())
+}
+
+/// `before` moved on by everything the report took after the day's pass
+/// (`after`) and before its close (`now`), less the `committed` bars the
+/// day's own repairs added: the mark whose difference from `now` is the
+/// day's own counts (D-4899's deferred close; [`Counts::of_day`]).
+const fn rebased(before: Mark, after: Mark, now: Mark, committed: usize) -> Mark {
+    const fn shift(before: usize, after: usize, now: usize) -> usize {
+        now.saturating_sub(after.saturating_sub(before))
+    }
+    Mark {
+        files: shift(before.files, after.files, now.files),
+        files_skipped: shift(before.files_skipped, after.files_skipped, now.files_skipped),
+        rows: shift(before.rows, after.rows, now.rows),
+        seconds: shift(before.seconds, after.seconds, now.seconds),
+        seconds_committed: shift(
+            before.seconds_committed,
+            after.seconds_committed,
+            now.seconds_committed,
+        )
+        .saturating_sub(committed),
+        late_rows: shift(before.late_rows, after.late_rows, now.late_rows),
+        late_unresolved: shift(
+            before.late_unresolved,
+            after.late_unresolved,
+            now.late_unresolved,
+        ),
+        failures: shift(before.failures, after.failures, now.failures),
+    }
+}
+
+/// THE GATHER, REPAIRED AND ITS DAYS CLOSED (IA-17b; D-4875 (3), D-4899):
+/// when the run leaves the month, ends, or is stopped. Every (instrument,
+/// month) gathered is repaired once ([`super::filing::repair_gathered_months`]),
+/// the census rows of the months repaired are published together, and only
+/// then is each waiting day closed, in day order, by its own failures and
+/// those its months' repairs gave it.
+///
+/// A repair that ends the run (a full disk at publication, a store gone,
+/// one that takes no writes) ends it here, no waiting day closed; a census
+/// that refuses the rows closes the first waiting day `incomplete` with the
+/// census's reason and ends the run, the others left begun. Either way the
+/// next run reads every day not closed again (D-2821).
+fn flush_gather(
+    ctx: &Ctx<'_>,
+    report: &mut Report,
+    census: &mut dyn Census,
+) -> Result<(), ImportRefusal> {
+    let gather = std::mem::take(&mut *ctx.gather.borrow_mut());
+    if gather.is_empty() {
+        return Ok(());
+    }
+    let super::filing::Repaired {
+        held,
+        deferred,
+        ended,
+    } = super::filing::repair_gathered_months(ctx, gather, report);
+    let kind = ctx.run.kind;
+    if let Some((code, day, why)) = ended {
+        for one in deferred {
+            name_staged(report, one.failures);
+            if let Some(close) = one.close {
+                name_staged(report, close.failures);
+            }
+        }
+        let done = Box::new(std::mem::take(report));
+        return Err(match code {
+            1 => ImportRefusal::DiskFull {
+                kind,
+                day,
+                why,
+                done,
+            },
+            2 => ImportRefusal::StoreLost {
+                kind,
+                day,
+                why,
+                done,
+            },
+            _ => ImportRefusal::StoreNotWritable {
+                kind,
+                day,
+                why,
+                done,
+            },
+        });
+    }
+    if !held.is_empty()
+        && let Some(why) = census.publish(ctx.run.store_root, &held)
+    {
+        let room = census.room(ctx.run.store_root, &held);
+        let mut waiting = deferred.into_iter();
+        let (key, day, before, max_back_s, failures) = match waiting.next() {
+            Some(first) => {
+                let (before, max_back_s, mut failures) = match first.close {
+                    Some(close) => (
+                        rebased(close.before, close.after, Mark::of(report), first.committed),
+                        close.max_back_s,
+                        close.failures,
+                    ),
+                    None => (Mark::of(report), 0, Vec::new()),
+                };
+                failures.extend(first.failures);
+                (first.key, first.day, before, max_back_s, failures)
+            }
+            None => (String::new(), ctx.run.to, Mark::of(report), 0, Vec::new()),
+        };
+        return Err(stop_at_census(
+            ctx,
+            (&key, day),
+            (before, std::mem::take(report), max_back_s),
+            failures,
+            (why, room),
+        ));
+    }
+    for one in deferred {
+        close_deferred(ctx, one, report);
+    }
+    Ok(())
+}
+
+/// One waiting day's close, once its months are repaired (IA-17b): exactly
+/// the close its pass would have written, with its own counts, and the
+/// failures its months' repairs gave its files beside its own.
+fn close_deferred(ctx: &Ctx<'_>, one: super::filing::Deferred, report: &mut Report) {
+    let super::filing::Deferred {
+        key,
+        day,
+        close,
+        failures: repaired,
+        committed,
+    } = one;
+    let Some(close) = close else {
+        // A PASS THAT GATHERED AND NEVER REACHED ITS CLOSE (it returned
+        // before it, and the run went on): the day stays begun, and is read
+        // again by the next run. Said, never silent.
+        name_staged(report, repaired);
+        let day_text = day.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                TARGET,
+                "a gathered day has no close to write; it stays begun and is read again",
+            )
+            .with("kind", ctx.run.kind.as_str())
+            .with("day", day_text.as_str())
+            .with("key", key.as_str())
+            .with("code", "gather_unclosed"),
+        );
+        return;
+    };
+    let super::filing::DeferredClose {
+        member,
+        stopped,
+        before,
+        after,
+        max_back_s,
+        listing,
+        mut failures,
+        census_ms,
+    } = close;
+    failures.extend(repaired);
+    let before = rebased(before, after, Mark::of(report), committed);
+    let closed = match member.as_deref() {
+        None if stopped => Closed::Day,
+        None => {
+            report.days_imported += 1;
+            Closed::Day
+        }
+        Some(member) => Closed::Member { member, key: &key },
+    };
+    let outcome = close_day(
+        ctx,
+        (&key, day),
+        (before, report, max_back_s),
+        listing,
+        &mut failures,
+    );
+    record_close(
+        ctx.run.kind,
+        (day, outcome, closed),
+        (before, report),
+        failures,
+        Some(census_ms),
+    );
 }
 
 /// The source refusal codes that ask whether the source's root is still
@@ -2443,11 +2757,17 @@ fn record_close(
     census_ms: Option<u64>,
 ) {
     // A DAY IS NAMED ONCE however many of its member keys closed that way
-    // (D-4878): the days of a run ascend, so the day is the list's last.
-    let named = |days: &mut Vec<Day>| {
-        if days.last() != Some(&day) {
-            days.push(day);
+    // (D-4878): the days of a run ascend, so the day is the list's last. A
+    // close a gathered repair deferred (IA-17b, D-4899) can follow a later
+    // day's: it goes in at its place, so every list stays in day order.
+    let named = |days: &mut Vec<Day>| match days.last() {
+        Some(last) if *last == day => {}
+        Some(last) if *last > day => {
+            if let Err(at) = days.binary_search(&day) {
+                days.insert(at, day);
+            }
         }
+        _ => days.push(day),
     };
     match outcome {
         Outcome::Done => {}

@@ -8,7 +8,7 @@ use brutex_core::vendor::Vendor;
 use store::format::Bar;
 
 use crate::fetch::BarRequest;
-use crate::ingest::{FailKind, Filed as Landed, Ingested, from_rows, repair_rows};
+use crate::ingest::{FailKind, Filed as Landed, Ingested, from_rows, gather_rows};
 use crate::manifest::Held;
 use crate::session::Day;
 
@@ -376,8 +376,6 @@ pub(super) struct Filing<'a> {
     /// it, so what that run wrote and never made durable is flushed for
     /// itself before this run closes the day.
     pub(super) confirm: Option<&'a store::file::DurableBatch>,
-    /// The run's id, which a back-fill's reason and event name (D-3350).
-    pub(super) id: u64,
     /// The operator's repair reason (D-4874, D-4889): only a run that
     /// carries one hands a refused month to the back-fill door.
     pub(super) repair_reason: Option<&'a str>,
@@ -398,10 +396,6 @@ enum Receipt {
     /// The provenance record of its append (D-3334): counted in
     /// [`Report::provenance_records`].
     Provenance,
-    /// A new generation of its month (D-3350; DB-N26, WP-12d), journaled in
-    /// `<store>/audit/gdfl.repairs`: counted in [`Report::months_repaired`].
-    /// A revision carries no provenance record.
-    NewGeneration,
 }
 
 /// One file as a worker filed it, folded into its day in listing order by
@@ -444,6 +438,10 @@ pub(super) struct Filed {
     /// volume with the root still there (FM-129): the run ends
     /// `store_not_writable` once the day is closed. What failed and the fix.
     pub(super) not_writable: Option<String>,
+    /// Its bars, which its month takes only as a new generation, gathered
+    /// for the month's one repair of the run (IA-17b, D-4899): the day then
+    /// closes only once that repair is done.
+    pub(super) gathered: Option<Box<GatheredFile>>,
 }
 
 impl Filed {
@@ -683,27 +681,57 @@ impl Filing<'_> {
         filed.outside_session = usize::try_from(done.census.total()).unwrap_or(0);
         filed.seconds = done.bars_stored;
         filed.committed = done.bars_committed;
+        let month = self.day.year_month().ok();
+        // THE MONTH TAKES THE FILE ONLY AS A NEW GENERATION (IA-17b, D-4875
+        // (3), D-4899): nothing was written, and its bars, with its prints a
+        // CASH month's sidecar could not take, are gathered for the month's
+        // one repair of the run. Its day closes once that repair is done.
+        if let (Landed::Gathered { appended }, Some(month)) = (landed, month) {
+            filed.held_key = Some((file.symbol.clone(), file.contract, month));
+            filed.gathered = Some(Box::new(GatheredFile {
+                key: (file.symbol.clone(), file.contract, month),
+                name: file.name.clone(),
+                seconds: converted.seconds,
+                appended,
+                auction: handed.facts.auction.clone(),
+                request: self.request.clone(),
+            }));
+            return (filed, false);
+        }
+        // PRINTS CARRIED FOR A GENERATION THE FILE DID NOT NEED (IA-17b): its
+        // bars landed in the month as served, so the prints its sidecar
+        // could not take would be dropped. Named, never silent; a file whose
+        // bars the door refused keeps its prints for the read that lands
+        // them (a hole's repair, or the next run after an open cause).
+        if let Some(carried) = handed.facts.auction.as_ref()
+            && done.door_kind.is_none()
+        {
+            let refusal = ImportRefusal::Filing {
+                why: format!(
+                    "{} closing-auction print(s) of {} were not filed: {}; and its bars were \
+                     filed as the month is served, so no new generation carries them",
+                    carried.prints.len(),
+                    file.name,
+                    carried.why
+                ),
+            };
+            filed
+                .failures
+                .push(note_staged(run, self.day, &file.name, &refusal));
+        }
         if done.bars_committed > 0
+            && landed == Landed::Appended
             && let Some(held) = done.pending.as_ref()
         {
-            match landed {
-                Landed::Appended => {
-                    match self.provenance(handed, held, done.bars_committed, begin_line) {
-                        Ok(true) => filed.receipt = Receipt::Provenance,
-                        Ok(false) => {}
-                        // Logged here, beside the failure it files (gate 19):
-                        // `note_staged` emits the day's `Error` event.
-                        Err(refusal) => filed.failures.push(note_staged(
-                            run,
-                            self.day,
-                            &handed.file.name,
-                            &refusal,
-                        )),
-                    }
-                }
-                Landed::NewGeneration => {
-                    filed.receipt = Receipt::NewGeneration;
-                    self.repaired(handed, held, done.bars_committed);
+            match self.provenance(handed, held, done.bars_committed, begin_line) {
+                Ok(true) => filed.receipt = Receipt::Provenance,
+                Ok(false) => {}
+                // Logged here, beside the failure it files (gate 19):
+                // `note_staged` emits the day's `Error` event.
+                Err(refusal) => {
+                    filed
+                        .failures
+                        .push(note_staged(run, self.day, &handed.file.name, &refusal))
                 }
             }
         }
@@ -848,33 +876,20 @@ impl Filing<'_> {
                 }
             }
             Door::BackFill => {
-                // The operator's text first, the import's own sentence after
-                // it (D-4889): the repair journal says who asked and why. A
-                // sealed month's successor is filed with no repair reason
-                // (D-7131): the import's sentence alone, after the door's
-                // own `sealed-month successor` head.
-                let own = format!(
-                    "gdfl-import {} {} {} run:{}: a day the month lacks where no append can land it",
-                    run.kind.as_str(),
-                    self.day,
-                    file.name,
-                    self.id
-                );
-                let reason = match self.repair_reason {
-                    Some(asked) => format!("{asked} | {own}"),
-                    None => own,
-                };
-                // OUTSIDE THE DAY'S BATCH, whichever thread this is: the
-                // repair's flushes are its own (D-3350), and so are those of
-                // an append the door takes this second time.
+                // JUDGED, NEVER REPAIRED HERE (IA-17b, D-4899): a file its
+                // month takes only as a new generation is answered
+                // `Gathered`, and the month's one repair of the run is
+                // [`repair_gathered_months`]'s, with every day of it the run
+                // reads. OUTSIDE THE DAY'S BATCH, whichever thread this is:
+                // an append the door takes this second time flushes for
+                // itself.
                 let _outside_the_batch = store::file::DurableBatch::suspend();
-                Some(repair_rows(
+                Some(gather_rows(
                     seconds,
                     &file.symbol,
                     origin,
                     run.store_root,
                     month(),
-                    &reason,
                 ))
             }
         }
@@ -929,46 +944,6 @@ impl Filing<'_> {
             record_provenance(run.store_root, held, committed, &landing)
         });
         recorded.map_err(|why| ImportRefusal::Provenance { why })
-    }
-
-    /// A file whose day its month lacked inside what it holds, landed as a
-    /// NEW GENERATION of the month (D-3350; DB-N26): logged with the month's
-    /// rows now served, and counted in [`Report::months_repaired`] when the
-    /// file is folded into its day. The repair door journaled it in `<store>/audit/gdfl.repairs`
-    /// with this run's id.
-    ///
-    /// **No `.prv` record is written, and the event says so.** A sidecar
-    /// record covers the bars ONE append committed at the end of its file,
-    /// at that file's commit generation (`store::provenance::record`); the
-    /// added bars sit inside the new generation, and its records would index
-    /// bars the original never held, so a revision carries no `.prv`
-    /// (`crates/store/REPAIR.md`). `/provenance.json` reads beside the
-    /// generation every reader opens and rebuilds the month's answer from
-    /// this journal's day lines, labelled reconstructed; the original's
-    /// `.prv`, if any, is left byte-identical. When the run names its origin
-    /// — so an append would have been recorded — the event is a `warn`.
-    fn repaired(&self, handed: &Handed, held: &Held, added: usize) {
-        let unrecorded =
-            self.origin.is_some() && handed.facts.member.is_some() && self.source.is_some();
-        let (day, month) = (self.day.to_string(), held.entry.key.month.to_string());
-        let event = if unrecorded {
-            telemetry::Event::warn(
-                TARGET,
-                "day back-filled as a new generation of its month; no .prv record: a revision \
-                 carries none (D-3350), the repair journal and this journal's day line name it",
-            )
-        } else {
-            telemetry::Event::info(TARGET, "day back-filled as a new generation of its month")
-        };
-        let _dropped_when_filtered = telemetry::emit(
-            &event
-                .with("file", handed.file.name.as_str())
-                .with("day", day.as_str())
-                .with("month", month.as_str())
-                .with("added", added)
-                .with("rows", held.entry.rows)
-                .with("run", self.id),
-        );
     }
 }
 
@@ -1081,6 +1056,9 @@ pub(super) struct DayFiler<'a> {
     /// `held_back_cap` once the day is closed, naming the first pair it
     /// could not hold and the count.
     pub(super) held_back_cap: Option<(String, usize)>,
+    /// Files of the day whose bars wait in the run's gather for their
+    /// month's one repair (IA-17b, D-4899): the day's close waits with them.
+    pub(super) gathered: usize,
 }
 
 impl<'a> DayFiler<'a> {
@@ -1127,6 +1105,7 @@ impl<'a> DayFiler<'a> {
             store_lost: None,
             not_writable: None,
             held_back_cap: None,
+            gathered: 0,
         }
     }
 }
@@ -1260,7 +1239,6 @@ impl DayFiler<'_> {
             origin: self.ctx.options.origin,
             source: self.source.as_ref(),
             confirm: self.batch.as_ref().filter(|_| self.confirm),
-            id: self.ctx.id,
             repair_reason: self.ctx.options.repair_reason,
             retries: std::sync::atomic::AtomicUsize::new(0),
             store_id: self.ctx.store_id.get(),
@@ -1373,7 +1351,7 @@ impl DayFiler<'_> {
     /// Folds one filed file into the day: exactly what filing it did to the
     /// report, the ledger, the census batch and the failures when the day ran
     /// on one thread.
-    pub(super) fn fold(&mut self, filed: Filed) {
+    pub(super) fn fold(&mut self, mut filed: Filed) {
         if filed.refused {
             self.report.files_refused += 1;
         } else {
@@ -1396,7 +1374,23 @@ impl DayFiler<'_> {
         match filed.receipt {
             Receipt::None => {}
             Receipt::Provenance => self.report.provenance_records += 1,
-            Receipt::NewGeneration => self.report.months_repaired += 1,
+        }
+        // ITS BARS WAIT FOR THE MONTH'S ONE REPAIR (IA-17b, D-4899): the day
+        // is begun and closes once the gathered repair is done.
+        if let Some(gathered) = filed.gathered.take() {
+            let name = gathered.name.clone();
+            let taken = self
+                .ctx
+                .gather
+                .borrow_mut()
+                .take(*gathered, (self.key, self.day));
+            match taken {
+                Ok(()) => self.gathered += 1,
+                Err(refusal) => {
+                    self.failures
+                        .push(note_staged(self.ctx.run, self.day, &name, &refusal))
+                }
+            }
         }
         self.confirmed += usize::from(filed.confirmed);
         self.held.extend(filed.held);
@@ -1521,6 +1515,551 @@ pub(super) fn stop_at_durability(
         done: Box::new(report),
     }
 }
+
+// ═══ The once-per-month gather (IA-17b; D-4875 (3), D-4899) ══════════════
+//
+// A month repair keeps a whole copy of the month for ever (D-3350,
+// `docs/06-limits.md` L-IA-26), and the back-fill door repaired one FILE at a
+// time: a month that held only a later day (the six alias indices' special
+// sessions, 67 months) took one generation for every other day of it, and
+// the store held 2,843 GDFL months repaired up to generation 21 on 14 Oct.
+// So no file is repaired alone any more. A file its month takes only as a
+// new generation is GATHERED (`ingest::gather_rows` judged it, nothing was
+// written), and every day of the same (instrument, month) the run reads goes
+// into one offer, repaired once (`ingest::repair_gathered`) when the run
+// leaves the month, ends, or is stopped. Its day stays begun until then:
+// its close is deferred ([`Deferred`]) and written once the repair is done,
+// in day order, so a crash before it leaves the days begun and the next run
+// reads them again (D-2821), meeting the published revision `Reused` or
+// publishing it. A full disk at the repair ends the run `disk_full` with
+// the gathered days still begun.
+
+/// One file's bars its month takes only as a new generation (IA-17b), as the
+/// filing hands it to the run's [`Gather`].
+#[derive(Debug)]
+pub(super) struct GatheredFile {
+    /// Its instrument-month.
+    key: super::HeldKey,
+    /// The vendor's file name.
+    name: String,
+    /// Its bars, ascending, as converted.
+    seconds: Vec<Bar>,
+    /// The append door's kind it was gathered under.
+    appended: FailKind,
+    /// Its closing-auction prints the month's sidecar could take only with
+    /// a new generation (a CASH day, D-3320).
+    auction: Option<crate::gdfl_cm::auction::Carried>,
+    /// The request its day was read under: its window is the range the
+    /// repair's session check keeps.
+    request: BarRequest,
+}
+
+/// One gathered file inside its month's offer.
+#[derive(Debug)]
+struct OfferedFile {
+    /// Its day's place in [`Gather::deferred`].
+    at: usize,
+    /// The vendor's file name.
+    name: String,
+    /// The first and last stamp of its bars.
+    span: (i64, i64),
+}
+
+/// One (instrument, month)'s offer: every gathered day of it, ascending.
+#[derive(Debug)]
+struct Offer {
+    key: super::HeldKey,
+    bars: Vec<Bar>,
+    /// The append door's kind of the first file gathered.
+    appended: FailKind,
+    files: Vec<OfferedFile>,
+    auction: Vec<crate::gdfl_cm::auction::Carried>,
+    /// The first file's request, its window widened to every gathered day.
+    request: BarRequest,
+}
+
+/// A day whose close waits for its month's gathered repair (IA-17b).
+#[derive(Debug)]
+pub(super) struct Deferred {
+    /// The journal key it closes.
+    pub(super) key: String,
+    pub(super) day: Day,
+    /// What its close needs, written once its pass has filed every file:
+    /// `None` until then.
+    pub(super) close: Option<DeferredClose>,
+    /// The failures the repair of one of its months gave its files.
+    pub(super) failures: Vec<Staged>,
+    /// Bars the repairs added for its files.
+    pub(super) committed: usize,
+}
+
+/// A deferred day's close as its pass left it.
+#[derive(Debug)]
+pub(super) struct DeferredClose {
+    /// The member a member key closes (WP-12f), `None` for a base key.
+    pub(super) member: Option<String>,
+    /// A stop cut the day short (D-4853).
+    pub(super) stopped: bool,
+    /// The report's counters when the day began and when its pass ended:
+    /// the day's own counts are their difference, whatever later days add.
+    pub(super) before: Mark,
+    pub(super) after: Mark,
+    pub(super) max_back_s: u32,
+    pub(super) listing: Option<crate::gdfl_cm::ListingSum>,
+    pub(super) failures: Vec<Staged>,
+    pub(super) census_ms: u64,
+}
+
+/// THE RUN'S GATHER (IA-17b, D-4899): the offers of the one calendar month
+/// the run is in, and the days whose closes wait for them.
+#[derive(Debug, Default)]
+pub(super) struct Gather {
+    month: Option<store::path::YearMonth>,
+    offers: Vec<Offer>,
+    /// Each offer's place by its instrument-month: one probe a file.
+    index: std::collections::HashMap<super::HeldKey, usize>,
+    deferred: Vec<Deferred>,
+}
+
+impl Gather {
+    /// Whether nothing is gathered and no close waits.
+    pub(super) fn is_empty(&self) -> bool {
+        self.offers.is_empty() && self.deferred.is_empty()
+    }
+
+    /// Whether filing `day` leaves the month gathered: its offers are then
+    /// repaired first. One compare.
+    pub(super) fn leaves(&self, day: Day) -> bool {
+        self.month
+            .is_some_and(|month| day.year_month().ok() != Some(month))
+    }
+
+    /// Whether `key`'s `day` is the day whose close waits last.
+    pub(super) fn waits(&self, key: &str, day: Day) -> bool {
+        self.deferred
+            .last()
+            .is_some_and(|last| last.key == key && last.day == day)
+    }
+
+    /// The close of `key`'s `day`, left for when its gathered months are
+    /// repaired; `false` when no file of the day was gathered.
+    pub(super) fn defer_close(&mut self, (key, day): (&str, Day), close: DeferredClose) -> bool {
+        match self.deferred.last_mut() {
+            Some(last) if last.key == key && last.day == day => {
+                last.close = Some(close);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Gathers `file` of `key`'s `day` into its month's offer: one probe,
+    /// and an append of its bars after the offer's last (an ordered merge
+    /// only when a day is gathered out of order).
+    ///
+    /// # Errors
+    ///
+    /// The offer would pass `store::repair::MAX_ROWS` (the most a month of
+    /// any rung holds: refused by name, never cut), or holds another
+    /// reading of a second the file offers (two reads of one day in one run
+    /// that disagree): the file is not gathered.
+    pub(super) fn take(
+        &mut self,
+        file: GatheredFile,
+        (key, day): (&str, Day),
+    ) -> Result<(), ImportRefusal> {
+        let GatheredFile {
+            key: month_key,
+            name,
+            seconds,
+            appended,
+            auction,
+            request,
+        } = file;
+        let (Some(first), Some(last)) = (seconds.first(), seconds.last()) else {
+            return Ok(());
+        };
+        let span = (first.ts_micros, last.ts_micros);
+        let place = match self.index.get(&month_key) {
+            Some(&place) => place,
+            None => {
+                self.offers.push(Offer {
+                    key: month_key.clone(),
+                    bars: Vec::with_capacity(seconds.len()),
+                    appended,
+                    files: Vec::new(),
+                    auction: Vec::new(),
+                    request: request.clone(),
+                });
+                let place = self.offers.len() - 1;
+                let _first = self.index.insert(month_key.clone(), place);
+                place
+            }
+        };
+        let Some(offer) = self.offers.get_mut(place) else {
+            return Ok(());
+        };
+        let held = offer.bars.len();
+        if held.saturating_add(seconds.len()) > store::repair::MAX_ROWS {
+            return Err(ImportRefusal::Store {
+                kind: FailKind::RepairRefused,
+                why: format!(
+                    "{name}: its {} bars would take the gathered repair of {} past the {} rows \
+                     a month holds at most; refused, never cut",
+                    seconds.len(),
+                    held_key_text(&month_key),
+                    store::repair::MAX_ROWS
+                ),
+            });
+        }
+        merge_into(&mut offer.bars, seconds).map_err(|at| ImportRefusal::Store {
+            kind: FailKind::Differs,
+            why: format!(
+                "{name}: the run gathered another reading of the second at {at} for {}; one \
+                 second is never offered twice",
+                held_key_text(&month_key)
+            ),
+        })?;
+        widen_window(&mut offer.request, &request, day);
+        offer.auction.extend(auction);
+        let at = match self.deferred.last() {
+            Some(last) if last.key == key && last.day == day => self.deferred.len() - 1,
+            _ => {
+                self.deferred.push(Deferred {
+                    key: key.to_owned(),
+                    day,
+                    close: None,
+                    failures: Vec::new(),
+                    committed: 0,
+                });
+                self.deferred.len() - 1
+            }
+        };
+        offer.files.push(OfferedFile { at, name, span });
+        self.month = Some(month_key.2);
+        Ok(())
+    }
+}
+
+/// `more`'s bars into `bars`, ascending: appended when they follow its last,
+/// else merged in order, a second offered twice kept once when the two are
+/// the same bar. `Err` with the stamp of a second offered twice differently.
+fn merge_into(bars: &mut Vec<Bar>, more: Vec<Bar>) -> Result<(), i64> {
+    let follows = match (bars.last(), more.first()) {
+        (Some(last), Some(first)) => first.ts_micros > last.ts_micros,
+        _ => true,
+    };
+    if follows {
+        bars.extend(more);
+        return Ok(());
+    }
+    let mut merged = Vec::with_capacity(bars.len() + more.len());
+    let (mut held, mut new) = (
+        std::mem::take(bars).into_iter().peekable(),
+        more.into_iter().peekable(),
+    );
+    loop {
+        let next = match (held.peek(), new.peek()) {
+            (Some(a), Some(b)) if a.ts_micros == b.ts_micros => {
+                if a != b {
+                    return Err(a.ts_micros);
+                }
+                let _same = new.next();
+                held.next()
+            }
+            (Some(a), Some(b)) if a.ts_micros < b.ts_micros => held.next(),
+            (Some(_), Some(_)) | (None, Some(_)) => new.next(),
+            (Some(_), None) => held.next(),
+            (None, None) => break,
+        };
+        merged.extend(next);
+    }
+    *bars = merged;
+    Ok(())
+}
+
+/// Widens `offer`'s window to hold `day`, so the repair's session check
+/// keeps every gathered day's bars (a day read before the range, D-4878,
+/// is read under a request of its own).
+fn widen_window(offer: &mut BarRequest, request: &BarRequest, day: Day) {
+    let window = offer.window;
+    if window.contains(day) {
+        return;
+    }
+    let (from, to) = (
+        window.from().min(request.window.from()).min(day),
+        window.to().max(request.window.to()).max(day),
+    );
+    if let Ok(wider) = crate::session::Window::new(from, to) {
+        offer.window = wider;
+    }
+}
+
+/// What repairing the gathered months came to (IA-17b).
+#[derive(Debug)]
+pub(super) struct Repaired {
+    /// The census row of every month repaired, as now served.
+    pub(super) held: Vec<Held>,
+    /// The days whose closes waited, in day order, with what their files'
+    /// repairs added and refused.
+    pub(super) deferred: Vec<Deferred>,
+    /// The run ends here, the gathered days left begun: `1` a full disk,
+    /// `2` a lost store, `3` a store that takes no writes (D-4851, D-4852,
+    /// FM-129), the day of the repair's last file, and the words.
+    pub(super) ended: Option<(u8, Day, String)>,
+}
+
+/// THE GATHERED REPAIRS (IA-17b, D-4875 (3), D-4899): every offer of the
+/// run's gather, one repair each, in the order the months were first
+/// gathered, each through `ingest::repair_gathered` with, for a CASH month,
+/// the step that writes the new generation's whole `.auc`
+/// (`gdfl_cm::auction::write_revision`). Each repair's outcome is given to
+/// every day that offered a file to it: the bars it added, or its refusal
+/// by kind on each such file. The census rows of the months repaired are
+/// handed back for one publish.
+///
+/// A refusal that ends the run (a full disk, a store gone, a store that
+/// takes no writes) stops here: the months not yet repaired are not
+/// offered, and NO gathered day is closed, so the next run reads them all
+/// again (D-2821).
+///
+/// # Cost
+///
+/// One repair per (instrument, month) gathered: O(held + offered) bars each
+/// (L-IA-26), never per day; per file one binary search of the stamps the
+/// repair added.
+pub(super) fn repair_gathered_months(
+    ctx: &Ctx<'_>,
+    gather: Gather,
+    report: &mut Report,
+) -> Repaired {
+    let run = ctx.run;
+    let Gather {
+        offers,
+        mut deferred,
+        ..
+    } = gather;
+    let mut held = Vec::with_capacity(offers.len());
+    for offer in offers {
+        let (symbol, contract, month) = offer.key.clone();
+        let reason = gathered_reason(ctx, &offer, &deferred);
+        let origin = format!(
+            "gdfl {} gathered {}",
+            run.kind.as_str(),
+            held_key_text(&offer.key)
+        );
+        let month_of = Day::new(month.year(), month.month(), 1).ok();
+        // A CASH MONTH'S `.auc` FOLLOWS THE GENERATION THROUGH ONE STEP
+        // (D-4875 (5)): the served sidecar's records and the carried days'
+        // prints, written into the revision before it is served. No other
+        // kind has a sidecar of `pull`'s.
+        let share = (run.kind == ImportKind::Stocks)
+            .then(|| {
+                offer
+                    .auction
+                    .first()
+                    .map(|carried| carried.key)
+                    .or_else(|| {
+                        brutex_core::instrument::InstrumentKey::cash(
+                            brutex_core::instrument::Exchange::Nse,
+                            &symbol,
+                        )
+                        .ok()
+                    })
+            })
+            .flatten();
+        let carried: Vec<(Day, &[crate::gdfl_cm::auction::Print])> = offer
+            .auction
+            .iter()
+            .map(|one| (one.day, one.prints.as_slice()))
+            .collect();
+        let mut write_auction = |revision_root: &Path| -> Result<(), String> {
+            match (share.as_ref(), month_of) {
+                (Some(share), Some(month_of)) => crate::gdfl_cm::auction::write_revision(
+                    run.store_root,
+                    revision_root,
+                    share,
+                    month_of,
+                    &carried,
+                )
+                .map(|_| ()),
+                _ => Ok(()),
+            }
+        };
+        let step: Option<store::repair::BeforePromote<'_>> = if share.is_some() {
+            Some(&mut write_auction)
+        } else {
+            None
+        };
+        let (done, landed, added_at) = crate::ingest::repair_gathered(
+            &offer.bars,
+            (&symbol, &origin),
+            run.store_root,
+            plan(run.kind, &offer.request, contract),
+            (offer.appended, &reason),
+            step,
+        );
+        let last_day = offer
+            .files
+            .last()
+            .and_then(|file| deferred.get(file.at))
+            .map(|one| one.day);
+        if let Some(kind) = done.door_kind {
+            let why = done
+                .failures
+                .last()
+                .map_or_else(|| kind.code().to_owned(), |failure| failure.why.clone());
+            if let Some((code, words)) = ends_run(kind, &why, run.store_root, ctx.store_id.get()) {
+                return Repaired {
+                    held,
+                    deferred,
+                    ended: last_day.map(|day| (code, day, words)),
+                };
+            }
+            for file in &offer.files {
+                if let Some(one) = deferred.get_mut(file.at) {
+                    let refusal = ImportRefusal::Store {
+                        kind,
+                        why: why.clone(),
+                    };
+                    one.failures
+                        .push(note_staged(run, one.day, &file.name, &refusal));
+                }
+            }
+            continue;
+        }
+        // FAILURES NO DOOR NAMED (an address the store cannot take): each
+        // gathered day names them as its file's.
+        for failure in &done.failures {
+            for file in &offer.files {
+                if let Some(one) = deferred.get_mut(file.at) {
+                    let refusal = ImportRefusal::Filing {
+                        why: failure.why.clone(),
+                    };
+                    one.failures
+                        .push(note_staged(run, one.day, &file.name, &refusal));
+                }
+            }
+        }
+        if landed == Landed::NewGeneration {
+            report.months_repaired += 1;
+        }
+        report.seconds_committed += done.bars_committed;
+        for file in &offer.files {
+            let (first, last) = file.span;
+            let added = added_at.partition_point(|&at| at <= last)
+                - added_at.partition_point(|&at| at < first);
+            if let Some(one) = deferred.get_mut(file.at) {
+                one.committed += added;
+            }
+        }
+        note_gathered_repair(ctx, &offer, &deferred, (done.bars_committed, landed));
+        held.extend(done.pending);
+    }
+    Repaired {
+        held,
+        deferred,
+        ended: None,
+    }
+}
+
+/// Whether a gathered repair's refusal of `kind` ends the run, and the
+/// words it ends with: [`Filing::ends_with`]'s rule, for the repair the
+/// coordinating thread makes at the month's end (D-4851, D-4852, FM-129).
+fn ends_run(
+    kind: FailKind,
+    why: &str,
+    store_root: &Path,
+    store_id: Option<StoreId>,
+) -> Option<(u8, String)> {
+    if kind == FailKind::DiskFull {
+        return Some((1, why.to_owned()));
+    }
+    if let Some(gone) = store_root_lost(store_root, store_id) {
+        return Some((2, format!("{why}; {gone}")));
+    }
+    match kind {
+        FailKind::Io {
+            kind: std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem,
+            ..
+        } => Some((3, not_writable_said(why))),
+        _ => None,
+    }
+}
+
+/// The reason a gathered repair is journaled with: the operator's text first
+/// and the import's own sentence after it (D-4889), the one file's words
+/// exactly as a lone back-fill named them, or the days and files gathered.
+fn gathered_reason(ctx: &Ctx<'_>, offer: &Offer, deferred: &[Deferred]) -> String {
+    let kind = ctx.run.kind.as_str();
+    let day_of = |file: &OfferedFile| deferred.get(file.at).map(|one| one.day);
+    let own = match offer.files.as_slice() {
+        [one] => format!(
+            "gdfl-import {kind} {} {} run:{}: a day the month lacks where no append can land it",
+            day_of(one).map_or_else(String::new, |day| day.to_string()),
+            one.name,
+            ctx.id
+        ),
+        files => format!(
+            "gdfl-import {kind} {}..{} {} files run:{}: the days the month lacks where no append \
+             can land them, gathered into one repair (D-4899)",
+            files
+                .first()
+                .and_then(day_of)
+                .map_or_else(String::new, |day| day.to_string()),
+            files
+                .last()
+                .and_then(day_of)
+                .map_or_else(String::new, |day| day.to_string()),
+            files.len(),
+            ctx.id
+        ),
+    };
+    match ctx.options.repair_reason {
+        Some(asked) => format!("{asked} | {own}"),
+        None => own,
+    }
+}
+
+/// "gathered month repair finished" (IA-17b): one audited `info` line per
+/// (instrument, month) the run repaired once, with the days and files it
+/// gathered, the bars offered and added, and the run. A revision carries no
+/// `.prv` record (D-3350): the repair journal and the days' closing lines
+/// name it.
+fn note_gathered_repair(
+    ctx: &Ctx<'_>,
+    offer: &Offer,
+    deferred: &[Deferred],
+    (added, landed): (usize, Landed),
+) {
+    let days = {
+        let mut seen: Vec<Day> = offer
+            .files
+            .iter()
+            .filter_map(|file| deferred.get(file.at).map(|one| one.day))
+            .collect();
+        seen.dedup();
+        seen.len()
+    };
+    let month = held_key_text(&offer.key);
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(TARGET, GATHERED_REPAIR_FINISHED)
+            .with("kind", ctx.run.kind.as_str())
+            .with("month", month.as_str())
+            .with("days", days)
+            .with("files", offer.files.len())
+            .with("offered", offer.bars.len())
+            .with("added", added)
+            .with("new_generation", landed == Landed::NewGeneration)
+            .with("prints_carried", offer.auction.len())
+            .with("run", ctx.id)
+            .with("code", "gather_repaired"),
+    );
+}
+
+/// The message of [`note_gathered_repair`]'s event: a lifecycle word
+/// (`finished`) puts it in the audit stream (`telemetry::is_audited`).
+pub(super) const GATHERED_REPAIR_FINISHED: &str = "gathered month repair finished";
 
 /// The words an instrument-month of the held-back set is named by:
 /// `<symbol>[ <contract>] <yyyy-mm>`.

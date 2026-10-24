@@ -2096,6 +2096,7 @@ fn an_option_file_with_rows_refused_one_by_one_is_admitted_not_failed_whole() {
                     facts: FileFacts {
                         member: None,
                         reader,
+                        auction: None,
                     },
                 }));
                 let jobs = [handed];

@@ -1608,6 +1608,7 @@ fn ctx_of<'a>(
         }),
         held_back: std::cell::RefCell::new(HashMap::new()),
         store_id: std::cell::Cell::new(None),
+        gather: std::cell::RefCell::new(filing::Gather::default()),
     }
 }
 
