@@ -290,6 +290,10 @@ const ROUTES = [
 	// HTML fallback and the band reports a JSON error for a routing gap.
 	'/dayflags.json',
 	'/imports.json',
+	// THE REASONS DICTIONARY the import panel titles a reason code from
+	// (READ-02, R4-05; `web/src/lib/reasons.js`). Without it `npm run dev`
+	// answers the HTML fallback and every reason reads as an unreadable table.
+	'/reasons.json',
 	'/vocab.json',
 	'/universes.json',
 	// THE OPTION BAR'S SPOT AND GREEKS `/db` reads per page of rows

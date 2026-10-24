@@ -101,3 +101,20 @@ Not measured here (NEEDS THE MAC item 7): the socket's share, the shadow server,
   NEXT: merge `origin/feat/db-fix` (`1c094c90` or newer), then the final gate pass: fmt, workspace
   clippy, workspace test, deny (installed: cargo-deny 0.20.2), llvm-cov and mutants on the touched
   modules, the web gates W1 to W5 (web/build rebuilt), the shell gates again; then STATUS: DONE.
+- 2026-10-24 17:34 IST: HOLD lifted. Merged `origin/feat/db-fix` at `7b397bbe` (R4-27, IA-4,
+  CLOUD-MUTSTORE, CLOUD-MUTCLI; merge `eb1de065`): the three ledgers conflicted textually only and
+  were resolved "both, in merge order" (the base's sections, then R4-05's); KINDS at the head still
+  ends at 21 and R3-21 is still not merged. After the merge: the reasons gate 20/20 and alerts 49/51
+  (one ignored, the root-only failure). `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  -> EXIT 0. `cargo deny check` -> advisories FAILED on RUSTSEC-2026-0386 (tokio `AsyncFd`, unsound),
+  red the same on the unmodified base `7b397bbe`; this branch touches no manifest and no lock: NEEDS
+  THE MAC. Web: W1 passes once `web/build` is rebuilt and committed (it is, here; a second build
+  reproduces it); W2 found one failure of mine, `proxy.test.js` (the dev proxy did not name
+  `/reasons.json`: fixed in `web/vite.config.js`), and 5 cancelled timer tests in `ask.test.js` and
+  `census-worker.test.js` that are cancelled identically on the base under this container's Node 22
+  (CI runs Node 24): NEEDS THE MAC; W3 32 svelte-check errors, the base's own 32 (my one extra, in my
+  test, fixed); W4 0 unused selectors; W5 clean. HOLD set again at 18:16 IST: this save point is
+  pushed; the detached workspace test run (`cargo test --workspace --locked --no-fail-fast`) finishes
+  on its own while I wait.
+  NEXT: read the workspace test result; coverage (`cargo llvm-cov --branch`) and `cargo mutants
+  --in-diff` on the touched modules; the shell gates once more; then STATUS: DONE.

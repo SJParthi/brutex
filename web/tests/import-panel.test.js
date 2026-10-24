@@ -282,7 +282,7 @@ test('an_unknown_stage_state_is_shown_as_unknown_never_as_ok', async () => {
   // COMBINATION: a later server's counts beside the known ones, one of them
   // at zero: the unknown cell is bad even at 0; `done` is the only OK one.
   const panel = importPanel(summary({ counts: { done: 5, month_superseded: 0, awaiting_evidence: 3, open: 0 } }), store, { now: NOW });
-  assert.deepEqual(panel.cells.map((c) => [c.word, c.n, c.bad, c.text]), [
+  assert.deepEqual((panel.cells ?? []).map((c) => [c.word, c.n, c.bad, c.text]), [
     ['done', 5, false, 'done'],
     ['month_superseded', 0, true, 'unknown state month_superseded, page older than server'],
     ['awaiting_evidence', 3, true, 'unknown state awaiting_evidence, page older than server'],
