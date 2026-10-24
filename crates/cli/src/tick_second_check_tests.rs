@@ -2829,8 +2829,8 @@ fn the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes() {
     assert_eq!(why, "2025-01-01 is not a day of 2024");
 }
 
-/// BASE-REDS-1023 (D-7150 addendum), the proof gate 12 asks of the claim that
-/// `status_of` is O(1): a lookup in an index of 4,096 symbols costs what one
+/// BASE-REDS-1023 (D-7150 addendum), the proof gate 12 asks of the cost claim
+/// the module makes of `status_of`: a lookup in an index of 4,096 symbols costs what one
 /// in an index of one symbol costs, within a factor a search could never
 /// meet (a scan of the large table would be thousands of times dearer). The
 /// two are timed interleaved in one loop, so a loaded machine slows both
@@ -2838,6 +2838,8 @@ fn the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes() {
 /// it.
 #[test]
 fn a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand() {
+    const BATCH: usize = 256;
+    const SAMPLES: usize = 400;
     let on = day(2025, 7, 1);
     let a = SecondStatus {
         status: Status::ExactA,
@@ -2855,8 +2857,6 @@ fn a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand() {
     let large_image = index::encode(2025, &cells, 0, [0; 32]).unwrap();
     let large = index::YearIndex::decode(&large_image, path, 1).unwrap();
     assert_eq!(large.symbols().len(), 4_096);
-    const BATCH: usize = 256;
-    const SAMPLES: usize = 400;
     let mut small_ns: Vec<u128> = Vec::with_capacity(SAMPLES);
     let mut large_ns: Vec<u128> = Vec::with_capacity(SAMPLES);
     for s in 0..SAMPLES {

@@ -224,18 +224,22 @@ impl Source {
 
 /// `Status::from_code` and `Source::from_code` read `ALL[code - 1]`: that is
 /// right only while each table is in code order, 1 first. A reordered or
-/// renumbered table fails the build here, never a lookup at run time.
+/// renumbered table fails the build here, never a lookup at run time; a
+/// table that gains or loses an entry fails it too, at the destructuring.
 const _: () = {
-    let (mut i, mut code) = (0, 1_u8);
-    while i < Status::ALL.len() {
-        assert!(Status::ALL[i].code() == code);
-        (i, code) = (i + 1, code + 1);
-    }
-    let (mut j, mut code) = (0, 1_u8);
-    while j < Source::ALL.len() {
-        assert!(Source::ALL[j].code() == code);
-        (j, code) = (j + 1, code + 1);
-    }
+    let [a, b, c, d, e, f, g, h] = Status::ALL;
+    assert!(
+        a.code() == 1
+            && b.code() == 2
+            && c.code() == 3
+            && d.code() == 4
+            && e.code() == 5
+            && f.code() == 6
+            && g.code() == 7
+            && h.code() == 8
+    );
+    let [p, q, r, s] = Source::ALL;
+    assert!(p.code() == 1 && q.code() == 2 && r.code() == 3 && s.code() == 4);
 };
 
 /// One share-day's answer.

@@ -83170,6 +83170,14 @@ at e0668a4bd printed `RED 1c 1d 23 27b 30 19 10 11 12`
    credential or a parameter-path field, and none is one of gate 1c's ten
    environment words.
 
+**Addendum, 24 Oct 2026 (DATA-2; see D-7150's addendum for why it is here).**
+Gate 23 refused the print surface again: DATA-2's
+`crates/cli/src/tick_second_check_tests.rs` prints three n = 1,000
+p50 / p99 / max lines, and BASE-REDS-1023's lookup-cost test adds a fourth.
+The file is mounted `#[cfg(test)] #[path]` by `cli::tick_second_check`, so
+no production path reaches it; it is declared in `ci.yml` beside the 23 Oct
+block as `cli/src/tick_second_check_tests.rs:println!:4`.
+
 ### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
 
 Gate 1c refused `pull::zerodha_spool`'s documented lock path
@@ -83204,6 +83212,16 @@ production claims had a test that times them and now name it
 no test times, and now say UNVERIFIED with docs/06-limits.md L-BRED23-01.
 None was re-measured by this package.
 
+**Addendum, 24 Oct 2026 (DATA-2; see D-7150's addendum for why it is here).**
+Two more blocks claimed `status_of` is O(1) with no proof gate 12 resolves:
+the `tick_second_check` line of `crates/cli/src/lib.rs` and the module header
+of `crates/cli/src/tick_second_index.rs`. Both now name
+`cli::tick_second_check::tests::a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand`,
+a new test that times 400 samples of 256 lookups each in a one-symbol and a
+4,096-symbol index, interleaved in one loop, and refuses a large-index median
+more than 16 times the small one's (a scan would be thousands of times
+dearer). The real-store lookups stay as L-T2S-09 measured them.
+
 ### D-7150 — Gate 11: the IA-16, IA-9 and IA-2 sites fixed at their cause or declared with their bound (BASE-REDS-1023) — 2026-10-23
 
 Gate 11 was red after the IA-16 merge on five files. Fixed in code: the
@@ -83221,6 +83239,28 @@ BASE-REDS-1023"): the compile-time tables `REPAIRABLE_HOLES` (3),
 `HOLE_REASONS` (5), `SOURCE_UNREACHED` (2), `FLAGS_VERSIONS` (2); a day's
 index files against `SWEPT`; the rescan's `HashSet<Day>` probe;
 `keep_nearest`'s walk of at most `UNKNOWN_SHOWN` = 4.
+
+**Addendum, 24 Oct 2026 (DATA-2, merged after the 23 Oct run; this block's
+ten numbers are spent, so the three gate reds DATA-2 brought are recorded
+here, in D-7149 and in D-7147 rather than under a number outside the block).**
+`ci-shell-gates.sh --jobs language-purity --fast` on the merge 1ec6471a2
+printed `RED 23 11 12` (state/fix/ci-gates-logs/bred1023-lp10), every site
+in `crates/cli/src/tick_second_check.rs` and `tick_second_index.rs`. Gate 11
+had 20 sites. Fixed in code, 9: the index writer finds a cell's row by one
+probe of a pre-sized `HashMap` of the distinct symbols (it binary-searched the
+table), and the unknown `--symbols` report probes a pre-sized `HashSet` of the
+held names (rule 1, 2 -> 0); the two per-day `seen` sets and the `--archive`
+same-path set are sized (rule 3, 4 -> 1); `Status::from_code` and
+`Source::from_code` read `ALL[code - 1]`, a const item proving each table is
+in code order, `Source::of_word` is a match, and the writer's symbol check
+runs in the loop that fills its row map (rule 6, 4 -> 0). Declared, 11, with
+docs/06-limits.md "Gate 11 — BASE-REDS-1023: DATA-2": `Sources::open`'s map of
+distinct archive paths (rule 3); seven sorts, each once per folder listing,
+per report, per file written or per index written (rule 4); a
+`RangeInclusive` and three `HashSet` probes (rule 7). No route reaches the
+check. Tests:
+`cli::tick_second_check::tests::every_code_and_word_of_the_index_reads_back_in_one_step`,
+`cli::tick_second_check::tests::the_index_writer_places_every_cell_by_its_symbols_row_at_the_extremes`.
 
 ### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
 

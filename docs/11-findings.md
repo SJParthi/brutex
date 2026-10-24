@@ -1008,3 +1008,10 @@ confirmed by two skeptics; their corrections are applied.
 - **BRED23-F11: two api timing tests and one web test failed under load.**
   FIXED by a same-run baseline or an event order (D-7152, BRED-06, BRED-07);
   NOT PROVED failing first on demand.
+- **BRED23-F12: DATA-2, merged after the 23 Oct run, turned gates 11, 12 and
+  23 red again** (`RED 23 11 12` on the merge 1ec6471a2,
+  state/fix/ci-gates-logs/bred1023-lp10). FIXED: 9 gate-11 sites in code and
+  11 declared with their bound (D-7150 addendum, BRED-10, BRED-11), two cost
+  claims name a new timing test (D-7149 addendum, BRED-12), four test prints
+  declared (D-7147 addendum). The cause is the one D-7147 names: a merge that
+  does not run the shell gates cannot see what it turns red.
