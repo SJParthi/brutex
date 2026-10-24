@@ -129,3 +129,10 @@ saved and audited with a searchable record, every failure, refusal and extreme v
 incremental, scalable code path with no typed number outside the Winner Gate; at least 8 extreme cases
 with at least 2 combinations and 1 out-of-the-box case, each test failing before and passing after.
 The independent check (see your effort message) treats any miss as BLOCKING.
+
+## Per-part GO (24 Oct, 12:3x IST; overrides HOLD for one part)
+
+The Mac releases parts one by one to fit the shared 5-hour window. If `reports/db-specs-20261024/GO-<NAME>`
+exists for YOUR part, the general `HOLD` does not apply to you: build. If it does not exist, `HOLD` applies as above.
+If `GO-<NAME>` is later removed while `HOLD` exists, hold again at your next save point. Test:
+`git fetch -q origin cloud/db-base-20261024 && ( git cat-file -e FETCH_HEAD:reports/db-specs-20261024/GO-<NAME> 2>/dev/null || ! git cat-file -e FETCH_HEAD:reports/db-specs-20261024/HOLD 2>/dev/null )`
