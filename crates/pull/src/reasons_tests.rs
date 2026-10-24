@@ -360,9 +360,22 @@ fn not_plain(text: &str) -> Option<&'static str> {
     }
 }
 
-/// The credential field names a text must not carry the shape of: the
-/// charter's credential rows, as `api`'s settings route passes them.
-const CREDENTIAL_FIELDS: [&str; 4] = ["access-token", "api-key", "client-id", "totp-secret"];
+/// The credential field names a text must not carry the shape of, as this
+/// crate names them: the token field every feed reads, and the second field of
+/// each two-secret feed (`vendor::Auth::key_field`). The charter's other field
+/// names are `api`'s, which passes them to the same detector.
+fn credential_fields() -> Vec<&'static str> {
+    let mut fields = vec!["access-token"];
+    for feed in crate::vendor::Feed::ALL {
+        if let crate::vendor::Transport::Http(spec) = &feed.descriptor().transport
+            && let Some(field) = spec.auth.key_field
+            && !fields.contains(&field)
+        {
+            fields.push(field);
+        }
+    }
+    fields
+}
 
 /// Every way `table` fails the gate against `sources`, each naming the code
 /// and, for a missing row, every source file that names the code.
@@ -403,7 +416,7 @@ fn problems(table: &[Reason], sources: &[Source]) -> Vec<String> {
             if let Some(why) = not_plain(text) {
                 out.push(format!("row `{code}`: its {what} {why}"));
             }
-            if brutex_core::secret_shape::shape_of(text, &CREDENTIAL_FIELDS).is_some() {
+            if brutex_core::secret_shape::shape_of(text, &credential_fields()).is_some() {
                 out.push(format!("row `{code}`: its {what} has a credential's shape"));
             }
         }
@@ -887,7 +900,11 @@ fn each_control_has_its_label_kind_and_step() {
 fn of_finds_every_row_and_nothing_else_in_one_probe() {
     for (at, reason) in TABLE.iter().enumerate() {
         let found = of(reason.code).unwrap();
-        assert!(std::ptr::eq(found, &TABLE[at]), "{}", reason.code);
+        assert!(
+            std::ptr::eq(found, TABLE.get(at).unwrap()),
+            "{}",
+            reason.code
+        );
     }
     for unknown in [
         "",
@@ -927,11 +944,23 @@ fn the_body_is_the_whole_table_under_its_build_and_digest() {
     assert_eq!(doc["count"], TABLE.len());
     assert_eq!(served.rows, TABLE.len());
     // The cut is the table's own longest title: no title it holds is cut.
-    let longest = TABLE.iter().map(|r| title(r).chars().count()).max().unwrap();
+    let longest = TABLE
+        .iter()
+        .map(|r| title(r).chars().count())
+        .max()
+        .unwrap();
     assert_eq!(doc["title_cut"], longest);
     assert_eq!(title_cut(), longest);
-    assert!(TABLE.iter().all(|r| title(r).chars().count() <= title_cut()));
-    assert!(TABLE.iter().any(|r| title(r).chars().count() == title_cut()));
+    assert!(
+        TABLE
+            .iter()
+            .all(|r| title(r).chars().count() <= title_cut())
+    );
+    assert!(
+        TABLE
+            .iter()
+            .any(|r| title(r).chars().count() == title_cut())
+    );
     let rows = doc["rows"].as_array().unwrap();
     assert_eq!(rows.len(), TABLE.len());
     for (got, reason) in rows.iter().zip(TABLE) {
@@ -944,7 +973,13 @@ fn the_body_is_the_whole_table_under_its_build_and_digest() {
         assert_eq!(got["title"], title(reason));
     }
     let digest = brutex_core::blake3::hash(&served.bytes);
-    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let digits = b"0123456789abcdef";
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .flat_map(|b| [digits[usize::from(b >> 4)], digits[usize::from(b & 15)]])
+        .map(char::from)
+        .collect();
     assert_eq!(
         served.etag,
         format!("\"0123456789abcdef0123456789abcdef01234567.{hex}\"")
@@ -982,4 +1017,25 @@ fn a_long_sentence_is_served_whole() {
         .find(|r| r["code"] == longest.code)
         .unwrap();
     assert_eq!(found["sentence"], longest.sentence);
+}
+
+#[test]
+fn building_the_body_is_one_pass_over_the_table() {
+    // The cold half of the route: what the first request pays, once per
+    // process. p50/p99/max over n = 200 sequential builds.
+    let mut took = Vec::with_capacity(200);
+    let mut bytes = 0;
+    for _ in 0..200 {
+        let start = Instant::now();
+        let served = body("0123456789abcdef0123456789abcdef01234567");
+        took.push(start.elapsed().as_nanos());
+        bytes = served.bytes.len();
+    }
+    took.sort_unstable();
+    let (p50, p99, max) = (took[99], took[197], took[199]);
+    eprintln!(
+        "reasons::body n=200 rows={} bytes={bytes} p50={p50}ns p99={p99}ns max={max}ns",
+        TABLE.len()
+    );
+    assert!(p99 < 50_000_000, "building the body took {p99} ns at p99");
 }

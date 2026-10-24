@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R4-05 (cloud): one reasons dictionary with its gate and route, and the kept alert kinds
 
@@ -13,7 +13,7 @@ Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R4-05.md`.
 
 ## Done so far
 
-- `crates/pull/src/reasons.rs` (new): `TABLE`, 187 rows `(code, sentence, action, control)`; `Control`
+- `crates/pull/src/reasons.rs` (new): `TABLE` (a `static`), 184 rows `(code, sentence, action, control)`; `Control`
   = `Repair` ("press Repair"), `RetryRefused` ("Retry refused"), `StoreStep(id)` ("store step <id>"),
   `Operator(what)` ("operator: <what>"), `Nothing` ("no action"); `of(code)` one hash probe; `title(row)`
   = `code: sentence; control`; `body(build)` the `/reasons.json` document and its ETag
@@ -33,20 +33,48 @@ Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R4-05.md`.
   to 26 (`kind_word(26)`, `garbage_alert_parameters_are_refused_by_name`); 7 new tests.
 - `crates/pull/src/lib.rs`: one `pub mod reasons;` line (shared line).
 
-## Measured so far
+## Measured so far (in process, this container: 4 cores, `test` profile; n and method per row)
 
-- `pull::reasons::of`: n=200 sequential lookups (half known, half unknown), `Instant` per call, debug
-  build in this container: p50=60 ns, p99=101 ns, max=157 ns.
+| What | n | p50 | p99 | max | Method |
+|---|---|---|---|---|---|
+| `GET /reasons.json`, 1 client, sequential | 200 | 5.2 µs | 24.8 µs | 54.6 µs | handler in process, `Instant` per request (first sample 18.9 µs) |
+| `GET /reasons.json`, 60 clients, half revalidating (304) | 12,000 | 2.8 µs | 7.2 µs | 925 µs | 60 tokio tasks x 200 requests, 4 worker threads |
+| `pull::reasons::body` (the cold build, once per process) | 200 | 1.03 ms | 1.45 ms | 1.70 ms | 184 rows, 68,971 bytes |
+| `pull::reasons::of` | 200 | 64 ns | 183 ns | 445 ns | half known, half unknown codes |
+| `titleFor` (browser, Node 22) | 200 | 0.0019 ms | 0.0109 ms | 4.1 ms | 100,000-row table, `performance.now` |
 
-## Gates so far (partial; the final run comes after the last edit)
+Not measured here (NEEDS THE MAC item 7): the socket's share, the shadow server, an import writing.
 
-- `cargo test -p pull --lib --locked -- reasons:: alerts::` -> 87 pass, 1 FAIL:
+## Gates so far (the final run comes after the last edit and the final merge)
+
+- `cargo fmt --all --check`: clean.
+- `cargo clippy -p pull -p api --all-targets --locked -- -D warnings`: clean (after fixing 4 findings
+  of mine: `format_collect` twice, `bool_assert_comparison`, `borrow_as_ptr`). The workspace run comes
+  in the final pass.
+- `cargo test -p pull --lib --locked -- reasons:: alerts::`: all pass but one root-only test,
   `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`
-  expects `PermissionDenied` from a 0555 directory; this container runs as root (uid 0), which the mode
-  does not stop. Not caused by this change; to be confirmed red on the unmodified base.
+  (expects `PermissionDenied` from a 0555 directory; this container runs as uid 0, which the mode does
+  not stop). Not caused by this change; to be shown red on the unmodified base in the final pass.
+- `cargo test -p api --lib --locked -- reasons_route pool_table operation_audit`: all pass.
+- Web: `node --test tests/reasons.test.js tests/import-panel.test.js tests/import-panel-archive.test.js`
+  -> 19 pass.
+- CI shell gates (run from `ci.yml`'s own `run:` blocks by a local extractor, on this branch and on a
+  clean worktree of the base `e851da1c`): PASS on both: 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16,
+  17, 21, 22, 24, 28, 25, 27, 26, 14, 29, 29b; 6c on the two `.github/*.rs` tools I edited (rustfmt and
+  clippy-driver, lib and test). RED on both, the base reds CONTEXT §4.10 names (BASE-REDS-1023):
+  1c, 1d, 10, 11, 12, 19, 23, 27b, 30. Inside them this change adds nothing: 1c, 27b, 30 identical;
+  1d identical once R4-05's words are declared (`R4_05_LITERAL` in `.github/gates_tree.rs`); 12 the
+  same 48 refusals once my cost claims name their tests; 23 lists my two measurement prints as declared
+  (in `ci.yml`) and measured; 10, 11, 19 differ only in counts. Not run here: 1e (a whole-workspace
+  build and test with `web/` moved aside: the workspace test gate covers its test half).
+
+## Process slips, said plainly
+
+- Three shell commands in this session named or ran the Py-language interpreter by mistake: a version
+  probe, an empty no-op script, and a throwaway shell variable whose name held the word. None ran any
+  code of that language, nothing it printed was used, and nothing of it is in any file.
 
 ## Log
-
 - 2026-10-24 (IST morning): GO seen, spec read, branch cut.
 - 2026-10-24: table, gate and alert kinds built; tests green but the root-only one. HOLD seen at this
   save point: committed and pushed, waiting for GO without HOLD.
@@ -64,3 +92,12 @@ Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R4-05.md`.
   -> 19 pass, 0 fail.
   NEXT: run the api tests (route, pool table, audit table), docs/04 and docs/06 rows with the measured
   numbers, then the final merge of feat/db-fix and every gate.
+- 2026-10-24 ~13:30 IST: api tests green (route, pool table, audit table); docs/04 rows R405-01..12,
+  docs/06 rows L-R405-01..06 with the measurements above; workspace clippy found 4 findings of mine
+  (fixed); CI shell gates run on branch and base (results above); `.github/gates_tree.rs` gains
+  `R4_05_LITERAL` (gate 1d), `ci.yml` gate 23 declares my two measurement prints, cost claims name
+  their tests (gate 12). The base was re-HELD at 12:56 IST for parts without `GO-R4-05`: this save
+  point is committed and pushed, and I wait. `origin/feat/db-fix` moved to `1c094c90` (Merge IA-4).
+  NEXT: merge `origin/feat/db-fix` (`1c094c90` or newer), then the final gate pass: fmt, workspace
+  clippy, workspace test, deny (installed: cargo-deny 0.20.2), llvm-cov and mutants on the touched
+  modules, the web gates W1 to W5 (web/build rebuilt), the shell gates again; then STATUS: DONE.

@@ -2659,10 +2659,7 @@ fn each_new_alert_kind_dedupes_by_its_key() {
         credential_dead("zerodha", "2099-01-05").unwrap(),
     ];
     for keyed in &next {
-        assert_eq!(
-            written(put_at(scratch.root(), &keyed.alert(0, 0), NOW).unwrap()) > 4,
-            true
-        );
+        assert!(written(put_at(scratch.root(), &keyed.alert(0, 0), NOW).unwrap()) > 4);
     }
     let page = window(scratch.root()).unwrap();
     assert_eq!(page.alerts.len(), 8);
@@ -2679,7 +2676,17 @@ fn each_new_alert_kind_dedupes_by_its_key() {
 
 #[test]
 fn no_alert_text_carries_a_secret_shape() {
-    let fields = ["access-token", "api-key", "client-id", "totp-secret"];
+    // The field names as this crate names them: the token every feed reads
+    // and each two-secret feed's second field (`vendor::Auth::key_field`).
+    let mut fields = vec!["access-token"];
+    for feed in crate::vendor::Feed::ALL {
+        if let crate::vendor::Transport::Http(spec) = &feed.descriptor().transport
+            && let Some(field) = spec.auth.key_field
+        {
+            fields.push(field);
+        }
+    }
+    assert!(fields.contains(&"api-key"), "{fields:?}");
     let shaped = |text: &str| brutex_core::secret_shape::shape_of(text, &fields).is_some();
     // What the four build is free of a credential's shape and of a path.
     for keyed in appended() {

@@ -1954,6 +1954,16 @@ jobs:
           #     parent gave it.
           declared="$declared api/src/bars_sort.rs:println!:1
           api/src/render.rs:println!:2"
+          # TWO MORE FILES, from R4-05 (24 Oct 2026), each print inside a
+          # `#[cfg(test)]` module; no production path reaches either.
+          #   api/src/reasons_route.rs eprintln! 2: the p50, p99 and max of
+          #     `GET /reasons.json` at n=200 with one client and n=12,000
+          #     with 60 (L-R405-01).
+          #   pull/src/reasons_tests.rs eprintln! 2: the n=200 p50, p99 and
+          #     max of `reasons::of` and of building the body (L-R405-03,
+          #     L-R405-02).
+          declared="$declared api/src/reasons_route.rs:eprintln!:2
+          pull/src/reasons_tests.rs:eprintln!:2"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

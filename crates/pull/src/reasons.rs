@@ -38,13 +38,17 @@
 //!
 //! # Cost
 //!
-//! [`of`] is one hash probe into an index built once per process: O(1).
+//! [`of`] is one hash probe into an index built once per process: O(1),
+//! measured by `pull::reasons::tests::of_finds_every_row_and_nothing_else_in_one_probe`
+//! (`docs/06-limits.md` L-R405-03). [`body`] is O(rows), measured by
+//! `pull::reasons::tests::building_the_body_is_one_pass_over_the_table` (L-R405-02).
 //! [`body`] serialises the whole table and is called once per process by the
 //! route that serves it (`/reasons.json`), which keeps the bytes; it is the
 //! one event this module emits ([`TARGET`], `reasons table built`), so the
 //! table is logged once per build and nothing is logged per request.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 /// The target of the one event this module emits.
@@ -144,7 +148,7 @@ const PULL_AGAIN: &str = "pull the day again";
 
 /// Every row, grouped by the source that first names its code. A code two
 /// sources share has one row, whose words fit both.
-pub const TABLE: &[Reason] = &[
+pub static TABLE: &[Reason] = &[
     // ── The GDFL importer's refusals (`ImportRefusal::code`) ──────────────
     row(
         "kind_unknown",
@@ -1274,7 +1278,8 @@ fn index() -> &'static HashMap<&'static str, usize> {
 }
 
 /// The row of a code, or `None` for a code this build has no row for. One
-/// hash probe: O(1).
+/// hash probe: O(1), measured by
+/// `pull::reasons::tests::of_finds_every_row_and_nothing_else_in_one_probe`.
 #[must_use]
 pub fn of(code: &str) -> Option<&'static Reason> {
     index().get(code).and_then(|at| TABLE.get(*at))
@@ -1346,12 +1351,11 @@ pub fn body(build: &str) -> Body {
     });
     let bytes = document.to_string().into_bytes();
     let digest = brutex_core::blake3::hash(&bytes);
-    let hex: String = digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let etag = format!("\"{build}.{hex}\"");
+    let mut etag = format!("\"{build}.");
+    for byte in digest.iter().take(8) {
+        let _infallible_into_a_string = write!(etag, "{byte:02x}");
+    }
+    etag.push('"');
     note_built(TABLE.len(), bytes.len(), build);
     Body {
         bytes,

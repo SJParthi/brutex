@@ -13,6 +13,9 @@
 //! answers the same bytes from a `OnceLock`: no file is read, no pool is taken,
 //! nothing is logged per request. O(1) per request at any table size; the
 //! bytes are copied by no one (a `&'static` slice into the response).
+//! Measured by
+//! `api::server::reasons_route::tests::reasons_json_p99_is_under_five_ms_cold_warm_and_with_sixty_clients`
+//! (`docs/06-limits.md` L-R405-01).
 //!
 //! The `ETag` is `"<build>.<16 hex of the bytes' BLAKE3>"`, so it names the
 //! build that serves the table and changes whenever the bytes do, an
@@ -143,7 +146,10 @@ mod tests {
         assert_eq!(headers.get(header::ETAG).unwrap(), tag.as_str());
         // Among several tags, the one held is enough.
         let several = format!("\"older.0000000000000000\", {tag}");
-        assert_eq!(read(reasons_json(asking(&several)).await).await.0, StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            read(reasons_json(asking(&several)).await).await.0,
+            StatusCode::NOT_MODIFIED
+        );
         // Another build's tag, a bare word, `*` and garbage: the whole body.
         for other in ["\"older.0000000000000000\"", "*", "garbage", ""] {
             let (status, _, bytes) = read(reasons_json(asking(other)).await).await;
@@ -152,7 +158,10 @@ mod tests {
         }
         // A header that is not text is no tag.
         let mut odd = HeaderMap::new();
-        odd.insert(header::IF_NONE_MATCH, HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap());
+        odd.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_bytes(&[0xFF, 0xFE]).unwrap(),
+        );
         assert_eq!(read(reasons_json(odd).await).await.0, StatusCode::OK);
     }
 
@@ -162,7 +171,8 @@ mod tests {
         // the table: whole, without a tag, so no reader is answered 304.
         let odd: &'static pull::reasons::Body =
             Box::leak(Box::new(pull::reasons::body("bad\nlabel")));
-        let (status, headers, bytes) = read(answer(odd, &asking(&odd.etag.replace('\n', " ")))).await;
+        let (status, headers, bytes) =
+            read(answer(odd, &asking(&odd.etag.replace('\n', " ")))).await;
         assert_eq!(status, StatusCode::OK);
         assert!(headers.get(header::ETAG).is_none());
         assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-cache");
@@ -197,7 +207,11 @@ mod tests {
                     let mut took = Vec::with_capacity(200);
                     for n in 0..200 {
                         // Half the clients revalidate, as a page does.
-                        let asked = if client % 2 == 0 { asking(&tag) } else { HeaderMap::new() };
+                        let asked = if client % 2 == 0 {
+                            asking(&tag)
+                        } else {
+                            HeaderMap::new()
+                        };
                         let start = Instant::now();
                         let (status, _, _) = read(reasons_json(asked).await).await;
                         took.push(start.elapsed());

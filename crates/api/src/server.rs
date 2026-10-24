@@ -1637,6 +1637,9 @@ mod gaps_route;
 mod instruments_route;
 #[path = "month_change.rs"]
 mod month_change;
+/// `/reasons.json`: the reasons dictionary, served once per build (READ-02, R4-05).
+#[path = "reasons_route.rs"]
+mod reasons_route;
 /// `/scrub.json`: what the full-block scrub found in the series a page shows
 /// (DB-B74, DB-B65; WP-81).
 #[path = "scrub_route.rs"]
@@ -1650,9 +1653,6 @@ pub mod settings_route;
 mod repair_route;
 #[path = "store_route.rs"]
 mod store_route;
-/// `/reasons.json`: the reasons dictionary, served once per build (READ-02, R4-05).
-#[path = "reasons_route.rs"]
-mod reasons_route;
 #[cfg(test)]
 use bars_route::{WindowAsk, bars_array, day_window_bounds, render_window};
 use bars_route::{bars_json, bars_window_json};
@@ -16072,7 +16072,10 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         .route("/vocab.json", axum::routing::get(vocab_json))
         // THE REASONS DICTIONARY: every code a page shows, its sentence and
         // what to do, from memory once per build (READ-02, R4-05).
-        .route("/reasons.json", axum::routing::get(reasons_route::reasons_json))
+        .route(
+            "/reasons.json",
+            axum::routing::get(reasons_route::reasons_json),
+        )
         .route("/indexmap.json", axum::routing::get(indexmap_json))
         // HOW FAR A FOLDER FEED REACHES — the files present, and nothing else.
         // Its own route rather than a field on `/feeds.json` because answering
