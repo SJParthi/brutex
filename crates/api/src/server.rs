@@ -30538,6 +30538,36 @@ mod tests {
         );
     }
 
+    /// R4-28 repair 5 (D-7191): A ZERODHA FUTURES BODY GETS PAST BOTH GUARDS.
+    /// `ingest::parse_fno` refused every rung but `1min` and this route's
+    /// guard refuses every rung but its own `1day`, so no body could be
+    /// asked: the receipt tests above build the request by hand. The body
+    /// D-7186 names (series `fut`, the wire word) now parses to what the guard
+    /// admits, with the rung named or left out; options are still refused by
+    /// the route, by name.
+    #[test]
+    fn a_zerodha_futures_body_is_admitted_by_the_parse_and_the_route_alike() {
+        let today = Day::new(2026, 8, 7).expect("a real day");
+        let route = pull::vendor::ZERODHA_CONTINUOUS;
+        for body in [
+            "underlying=NIFTY&series=fut&vendor=zerodha&granularity=1day&from=2026-07-01\
+             &to=2026-07-30",
+            "underlying=NIFTY&series=fut&vendor=zerodha&from=2026-07-01&to=2026-07-30",
+        ] {
+            let asked = ingest::parse_fno(body, today).expect("a Zerodha futures ask parses");
+            assert_eq!(futures_refusal(&asked, route), None, "{body}");
+        }
+        let options = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=zerodha&from=2026-07-01&to=2026-07-30",
+            today,
+        )
+        .expect("an options ask parses");
+        assert!(
+            futures_refusal(&options, route).is_some_and(|why| why.contains("FUTURES day candles")),
+            "options are refused by the route"
+        );
+    }
+
     /// R4-28 repair 4 (D-7190): drops are named by reason on the receipt and
     /// kept by reason in the record, beside the rows folded.
     #[test]
