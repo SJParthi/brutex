@@ -79067,7 +79067,9 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     command still running when it ends first, and the writer is ended with
     its group. `groupRunning`, `signalGroup` and `GROUP_POLL_MS` move to
     the sheet, the module the harness already imports, so one rule stops a
-    browser and a command.
+    browser and a command. A capture is read only as a regular file
+    (`readCapturedFile`, opened without blocking): a named pipe that nobody
+    writes blocked the whole process for good, the same class of wait.
 31. **A garbled ask that tells nothing is said, never passed** (R315-29,
     repair 5; verify r5 follow-up). A garbled field answered 5xx, or not
     answered, fails the run by name: the server failed on a value it should

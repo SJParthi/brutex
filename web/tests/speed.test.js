@@ -3558,3 +3558,31 @@ test('a browser that prints its DevTools address and never finishes the WebSocke
     silent.close();
   }
 });
+
+test('a capture is read only as a regular file a capture could be: a named pipe nobody writes, a directory and a file past MAX_TEXT_BYTES are refused by name before the server is asked', { timeout: 60_000 }, async () => {
+  // Before: --from-pages was read with readFileSync, so a named pipe with no
+  // writer blocked the whole process for good, a wait with no bound.
+  const { spawnSync } = await import('node:child_process');
+  const { truncateSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'r315-pipe-'));
+  const pipe = join(dir, 'capture.json');
+  assert.equal(spawnSync('mkfifo', [pipe]).status, 0, 'mkfifo made the pipe');
+  const cmd = await sheetCommand(['--base', 'http://127.0.0.1:1', '--from-pages', pipe], 30_000);
+  assert.equal(cmd.signal, null, 'the command ended by itself, not by its timeout');
+  assert.equal(cmd.code, 1, cmd.stderr);
+  assert.ok(cmd.ms < 20_000, `it ended at once (took ${cmd.ms} ms)`);
+  assert.match(cmd.stdout, /- FAILED: the capture of the pages' own requests could not be read: --from-pages .*capture\.json: not a regular file, and only a regular file is read/);
+  let calls = 0;
+  const send = async () => ((calls += 1), answer(200));
+  const asDir = await sheet.runSheet({ ...argsFor(), fromPages: dir }, { send, log: () => {} });
+  assert.match(asDir.failures[0], /: not a regular file, and only a regular file is read$/);
+  const big = join(dir, 'big.json');
+  writeFileSync(big, '');
+  truncateSync(big, sheet.MAX_TEXT_BYTES + 1);
+  const tooBig = await sheet.runSheet({ ...argsFor(), fromPages: big }, { send, log: () => {} });
+  assert.match(tooBig.failures[0], new RegExp(`: ${sheet.MAX_TEXT_BYTES + 1} bytes, past the ${sheet.MAX_TEXT_BYTES} a capture may be$`));
+  assert.equal(calls, 0, 'the server was asked nothing');
+  const ok = join(dir, 'ok.json');
+  writeFileSync(ok, JSON.stringify({ requests: [] }));
+  assert.equal(sheet.readCapturedFile(ok), '{"requests":[]}', 'a regular file is read whole');
+});

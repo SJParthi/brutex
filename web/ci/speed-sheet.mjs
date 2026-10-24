@@ -87,7 +87,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -825,6 +825,28 @@ export async function restartWithin(command, ms) {
 }
 
 /**
+ * The text of a capture file, read only if it is a regular file a capture
+ * could be (verify r5's class, 24 Oct: reading a named pipe that nobody
+ * writes blocks the whole process for good, a wait with no bound and nothing
+ * said). Opened without blocking and checked through the open file, so the
+ * file read is the file checked; one past {@link MAX_TEXT_BYTES} is refused
+ * too (a capture the harness writes is a few kilobytes). Throws by name.
+ *
+ * @param {string} path
+ */
+export function readCapturedFile(path) {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('not a regular file, and only a regular file is read');
+    if (st.size > MAX_TEXT_BYTES) throw new Error(`${st.size} bytes, past the ${MAX_TEXT_BYTES} a capture may be`);
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * The whole run: discover, check every field, time every phase, and say
  * every failure. `send` is the network, injected so a test drives the run
  * against a stand-in server.
@@ -857,7 +879,7 @@ export async function runSheet(args, deps = {}) {
   let captureText = deps.capture ?? null;
   if (captureText === null && args.fromPages !== null) {
     try {
-      captureText = readFileSync(args.fromPages, 'utf8');
+      captureText = readCapturedFile(args.fromPages);
     } catch (why) {
       return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: --from-pages ${args.fromPages}: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx: null, commit: null };
     }
