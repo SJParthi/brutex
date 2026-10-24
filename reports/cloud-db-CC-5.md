@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-5 — Copies register (cloud build report)
 
@@ -42,11 +42,20 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - `crates/pull/tests/no_scheduler_delete.rs` (R4-06): `DECLARED` 12 -> 15 and `LISTED` 4 -> 7 with
   `copies_register.rs`, `copies_route.rs` and `disk_copies_command.rs`; its 5 tests pass.
 
+- The /ingest panel (written by a parallel subagent, reviewed): `web/src/routes/ingest/panels/Copies.svelte`
+  (order 95, through R4-01's registry; hazards red; the retirement list downloadable as text),
+  `web/src/lib/copies.js`, `web/tests/copies.test.js` (10 tests), and one dev-proxy line in
+  `web/vite.config.js` (`web/tests/proxy.test.js` requires every fetched route to have one).
+- The bench `crates/api/benches/ratio/copies.rs` (`/disk/copies.json` at 1x/10x/100x files, n = 200,
+  after the settings rows) and its three lines in `crates/api/benches/ratio.rs`.
+- `docs/02-store-format.md` §42 row, `docs/04-invariants.md` CC5-01..CC5-16,
+  `docs/05-decisions.md` D-7040..D-7048.
+
 ## Left
 
 -
-  the R4-06 no-delete list, the /ingest panel and the web bundle, the bench, the docs ledgers
-  (02 §42, 04, 05 D-7040.., 06), every gate.
+- `docs/06-limits.md` L-CC5 rows with the measured figures; the final merge of `origin/feat/db-fix`;
+  every gate (fmt, clippy, the workspace tests, deny, coverage, mutants, the CI shell gates).
 
 ## Log
 
@@ -117,3 +126,34 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - `cargo clippy -p cli -p pull --all-targets --locked`: no warning.
 - NEXT: the /ingest panel (`web/src/routes/ingest/panels/Copies.svelte`, `web/src/lib/copies.js`,
   `web/tests/copies.test.js`, the rebuilt `web/build`), then the bench `crates/api/benches/ratio/copies.rs`.
+
+### 2026-10-24 — save point 6, then HELD (every GO-<NAME> removed, 20:20 IST)
+
+- The /ingest panel by a parallel subagent: `npm ci --prefix web` ok; `npm --prefix web run build`
+  exit 0 (the panel compiles); `node --test web/tests/*.test.js` on Node 24 (CI's):
+  `tests 1578, pass 1578, fail 0`; on this container's Node 22: `pass 1573, cancelled 5`
+  (`ask.test.js` 3, `census-worker.test.js` 2; files the panel does not touch). W4 `0 (ceiling 0)`,
+  W5 `No comment swallows a rule`. W3: `svelte-check errors: 32 (ceiling 0)`, all 32 in files this
+  part does not touch (0 in the panel's): red before this part.
+- **BASE RED, W1: the committed `web/build` is stale on the unmodified base.** Committed
+  `version.json` `80659b2a3b706360`; the base's own source builds `fe2953bf00677395` (eight `/db`
+  sources changed since R3-03's rebuild of 19 Oct with no rebuild: R3-04 `f68b710f`, R3-30
+  `a258ca1c`, among them). The build is reproducible (two builds byte-identical). This part does
+  NOT commit `web/build` (rebuilding it would rewrite other parts' output); with the panel the
+  bundle builds as `858702fad398a0d9`. NEEDS THE MAC: rebuild `web/build` at merge-back.
+- Shell gates (the extracted `run:` blocks of ci.yml's first job, run on this branch and on an
+  unmodified worktree of `origin/feat/db-fix` `7b397bbe`): red on BOTH, base reds owned by
+  BASE-REDS-1023: 1c, 1d, 10, 11, 12, 19, 23, 27b, 30. On this branch, gates 10, 11, 12, 19, 27b and
+  30 add no finding of this part. Gate 1d adds 55 literals of this part's files to the base's 466
+  undeclared (declaring them is an edit of `.github/gates_tree.rs`, left with the gate's owner).
+  Gate 23: the `println!` of the timing test was removed (no new finding). Gate 28 was red on this
+  branch (`"tmp"` in `is_partial`): fixed by reading partial names from the data. Gate 1 was red only
+  while the subagent's rebuild had removed tracked bundle files; `git checkout -- web/build`
+  restored them. Not yet re-run after these fixes.
+- Bench `cargo bench -p api --bench ratio --locked --no-run -j 1`: `Finished bench profile ... in
+  19m 58s` (with 4 jobs the release link of `cli` was killed for memory, SIGKILL).
+- Commit `da57ae23`, pushed.
+- NEXT: read the served bench's copies rows (`cargo bench -p api --bench ratio --locked --
+  --served-only`, started before the hold) and write `docs/06-limits.md` L-CC5 rows; re-run the
+  shell gates; merge the newest `origin/feat/db-fix`; then fmt, clippy, the workspace tests, deny,
+  coverage (nightly installed for `--branch`) and mutants on the touched modules.
