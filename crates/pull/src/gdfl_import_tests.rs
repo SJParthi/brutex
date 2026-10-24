@@ -5915,6 +5915,11 @@ mod ia16;
 #[path = "gdfl_sealed_tests.rs"]
 mod sealed;
 
+/// IA-17b: the once-per-month gather and the CASH `.auc` of a repaired month
+/// (D-4875 (3), (5), D-4899).
+#[path = "gdfl_gather_tests.rs"]
+mod gather;
+
 /// The scope a close records and the days a wider scope reads again
 /// (WP-12f, D-4878), over this module's invented worlds.
 #[path = "gdfl_scope_tests.rs"]

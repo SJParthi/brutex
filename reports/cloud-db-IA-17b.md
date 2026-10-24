@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # IA-17b: D-4875 remainder: the once-per-month gather and the CASH .auc writer
 

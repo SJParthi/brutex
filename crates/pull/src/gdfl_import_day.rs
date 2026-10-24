@@ -1457,14 +1457,18 @@ fn end_line(ctx: &Ctx<'_>, ended: &Result<Report, ImportRefusal>) {
     }
 }
 
-/// The run's stop, when one was asked: the refusal that ends the run, with
-/// who asked and when, and its "run stopped" event (D-4893).
-fn stopped(ctx: &Ctx<'_>, day: Option<Day>, report: &mut Report) -> Option<ImportRefusal> {
-    let stop = ctx.options.stop.filter(|stop| stop.requested())?;
+/// The run's stop, once `stop` was asked: the refusal that ends the run,
+/// with who asked and when, and its "run stopped" event (D-4893).
+fn stopped(
+    ctx: &Ctx<'_>,
+    stop: &crate::gdfl_run::stop::StopControl,
+    day: Option<Day>,
+    report: &mut Report,
+) -> ImportRefusal {
     let shown = day.map(|day| day.to_string());
     stop.note_stopped(ctx.run.kind.as_str(), shown.as_deref());
     let request = stop.request();
-    Some(ImportRefusal::Stopped {
+    ImportRefusal::Stopped {
         kind: ctx.run.kind,
         day,
         by: request
@@ -1472,7 +1476,7 @@ fn stopped(ctx: &Ctx<'_>, day: Option<Day>, report: &mut Report) -> Option<Impor
             .map_or_else(|| "-".to_owned(), |r| r.by.clone()),
         requested: request.map_or(0, |r| r.requested),
         done: Box::new(std::mem::take(report)),
-    })
+    }
 }
 
 /// [`drive_days`]' days once its context is built: the reach back, then each
@@ -1549,24 +1553,22 @@ where
     Ok(())
 }
 
-/// [`stopped`], after the gather (IA-17b, D-4899 and the critic's IA-17-3):
-/// a stop offers what is gathered and closes those days before the run
-/// ends, so a stop never leaves a gathered day begun. Nothing is done when
-/// no stop was asked.
+/// The run's stop, when one was asked ([`stopped`]), AFTER THE GATHER
+/// (IA-17b, D-4899 and the critic's IA-17-3): a stop offers what is
+/// gathered and closes those days before the run ends, so a stop never
+/// leaves a gathered day begun. The stop is asked once; nothing is done
+/// when none was asked.
 fn stop_after_gather(
     ctx: &Ctx<'_>,
     day: Option<Day>,
     report: &mut Report,
     census: &mut dyn Census,
 ) -> Result<Option<ImportRefusal>, ImportRefusal> {
-    if ctx
-        .options
-        .stop
-        .is_some_and(crate::gdfl_run::stop::StopControl::requested)
-    {
-        flush_gather(ctx, report, census)?;
-    }
-    Ok(stopped(ctx, day, report))
+    let Some(stop) = ctx.options.stop.filter(|stop| stop.requested()) else {
+        return Ok(None);
+    };
+    flush_gather(ctx, report, census)?;
+    Ok(Some(stopped(ctx, stop, day, report)))
 }
 
 /// A FRESH STORE IS MADE ONCE, BY THE RUN, BEFORE ANYTHING IS READ OR

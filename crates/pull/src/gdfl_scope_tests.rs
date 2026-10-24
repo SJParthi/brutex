@@ -335,9 +335,11 @@ fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
         (2, 2, 1),
         "the two narrow days are read again; the wide day is done"
     );
+    // ONE GENERATION FOR BOTH DAYS (IA-17b, D-4899): the run gathers every
+    // day of the month it reads and repairs the month once.
     assert_eq!(
-        wide.months_repaired, 2,
-        "each landed as a generation of the month"
+        wide.months_repaired, 1,
+        "both days landed in one generation of the month"
     );
     let in_order = run_on(&root, ImportKind::Indices, range, &whole, Some(stored())).unwrap();
     assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);

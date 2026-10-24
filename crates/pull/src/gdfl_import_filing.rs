@@ -1554,6 +1554,22 @@ pub(super) struct GatheredFile {
     request: BarRequest,
 }
 
+#[cfg(test)]
+impl GatheredFile {
+    /// A gathered file of `key`'s month made of `seconds`, for the gather's
+    /// own tests.
+    pub(super) fn for_test(key: &super::HeldKey, seconds: Vec<Bar>, request: BarRequest) -> Self {
+        Self {
+            key: key.clone(),
+            name: format!("{}.invented", key.0),
+            seconds,
+            appended: FailKind::NotHeld,
+            auction: None,
+            request,
+        }
+    }
+}
+
 /// One gathered file inside its month's offer.
 #[derive(Debug)]
 struct OfferedFile {
@@ -1622,6 +1638,15 @@ pub(super) struct Gather {
 }
 
 impl Gather {
+    /// The bars `key`'s offer holds, for the gather's own tests.
+    #[cfg(test)]
+    pub(super) fn offered(&self, key: &super::HeldKey) -> Option<usize> {
+        self.index
+            .get(key)
+            .and_then(|&at| self.offers.get(at))
+            .map(|offer| offer.bars.len())
+    }
+
     /// Whether nothing is gathered and no close waits.
     pub(super) fn is_empty(&self) -> bool {
         self.offers.is_empty() && self.deferred.is_empty()
@@ -1743,7 +1768,8 @@ impl Gather {
 
 /// `more`'s bars into `bars`, ascending: appended when they follow its last,
 /// else merged in order, a second offered twice kept once when the two are
-/// the same bar. `Err` with the stamp of a second offered twice differently.
+/// the same bar. `Err` with the stamp of a second offered twice differently,
+/// `bars` then left exactly as it was.
 fn merge_into(bars: &mut Vec<Bar>, more: Vec<Bar>) -> Result<(), i64> {
     let follows = match (bars.last(), more.first()) {
         (Some(last), Some(first)) => first.ts_micros > last.ts_micros,
@@ -1754,10 +1780,7 @@ fn merge_into(bars: &mut Vec<Bar>, more: Vec<Bar>) -> Result<(), i64> {
         return Ok(());
     }
     let mut merged = Vec::with_capacity(bars.len() + more.len());
-    let (mut held, mut new) = (
-        std::mem::take(bars).into_iter().peekable(),
-        more.into_iter().peekable(),
-    );
+    let (mut held, mut new) = (bars.iter().copied().peekable(), more.into_iter().peekable());
     loop {
         let next = match (held.peek(), new.peek()) {
             (Some(a), Some(b)) if a.ts_micros == b.ts_micros => {
@@ -1891,14 +1914,21 @@ pub(super) fn repair_gathered_months(
         } else {
             None
         };
-        let (done, landed, added_at) = crate::ingest::repair_gathered(
-            &offer.bars,
-            (&symbol, &origin),
-            run.store_root,
-            plan(run.kind, &offer.request, contract),
-            (offer.appended, &reason),
-            step,
-        );
+        #[cfg(test)]
+        let planted = inject::gathered(run.store_root, &symbol);
+        #[cfg(not(test))]
+        let planted: Option<Ingested> = None;
+        let (done, landed, added_at) = match planted {
+            Some(done) => (done, Landed::Appended, Vec::new()),
+            None => crate::ingest::repair_gathered(
+                &offer.bars,
+                (&symbol, &origin),
+                run.store_root,
+                plan(run.kind, &offer.request, contract),
+                (offer.appended, &reason),
+                step,
+            ),
+        };
         let last_day = offer
             .files
             .last()
@@ -2160,6 +2190,40 @@ pub(super) mod inject {
         if std::fs::rename(root, &gone).is_ok() {
             let _made = std::fs::create_dir(root);
         }
+    }
+
+    /// The answers planted for a GATHERED REPAIR (IA-17b): the store root,
+    /// the instrument and the kind its repair answers with.
+    static GATHERED: Mutex<Vec<(PathBuf, String, FailKind)>> = Mutex::new(Vec::new());
+
+    /// Plants `kind` as the answer of `symbol`'s next gathered repair under
+    /// `root`: a full disk at publication, which a test cannot make on
+    /// demand (IA-RP-05).
+    pub(in crate::gdfl_import) fn plant_gathered(root: &Path, symbol: &str, kind: FailKind) {
+        GATHERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), symbol.to_owned(), kind));
+    }
+
+    /// The answer planted for `symbol`'s gathered repair under `root`,
+    /// taken once.
+    pub(super) fn gathered(root: &Path, symbol: &str) -> Option<Ingested> {
+        let mut planted = GATHERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = planted
+            .iter()
+            .position(|(r, name, _)| r == root && name == symbol)?;
+        let (_, _, kind) = planted.remove(at);
+        Some(Ingested {
+            failures: vec![Failure::new(
+                symbol,
+                format!("{}: planted by the test", kind.code()),
+            )],
+            door_kind: Some(kind),
+            ..Ingested::default()
+        })
     }
 
     /// The planted answer for `file` under `root`, taken once.

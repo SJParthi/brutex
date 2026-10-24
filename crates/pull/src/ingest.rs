@@ -3270,6 +3270,21 @@ fn gathered_repair(
             why: format!("{gathered}; the generation served could not be read: {why}"),
         })?
         .ordinal();
+    // A MONTH THE WRITER DOOR NEVER APPENDS TO is journaled with its
+    // successor's head first, as `successor_of_served` journals it (SC-4
+    // D-5904, D-6247): sealed while served as the original, else a revision.
+    let reason = if appended.files_as_successor() {
+        let head = if served == 0 {
+            Follows::Sealed
+        } else {
+            Follows::Revision
+        }
+        .reason();
+        format!("{head}: {reason}")
+    } else {
+        reason.to_owned()
+    };
+    let reason = reason.as_str();
     journal_intent(store_root, &parts, served, bars, reason).map_err(|why| DoorRefusal {
         kind: appended,
         why: format!(
