@@ -27,9 +27,16 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   (`answer`: re-walk only when the roots or a root's own stat change; no request waits on
   another's walk), `total()` for R4-29.
 
+- `crates/api/src/copies_route.rs` (new) and `copies_route_tests.rs` (new, 5 tests, all pass):
+  `GET /disk/copies.json` in the ops-read pool; unset key = `200 waiting` naming the key; the first
+  walk since start = `503 walking` to any other request, never a wait; the register body rendered
+  once per walk and joined to each request's own head (`age_ms`, `fresh`, `why`, `rewalking`).
+  Wired in `server.rs` (one `mod` line, one `.route`), `operation_audit_tests.rs` (EXEMPT, DATA)
+  and `pool_table_tests.rs` (OpsRead row).
+
 ## Left
 
-- The api route `GET /disk/copies.json` and its wiring, the cli verb `disk-copies` and its wiring,
+- The cli verb `disk-copies` and its wiring,
   the R4-06 no-delete list, the /ingest panel and the web bundle, the bench, the docs ledgers
   (02 §42, 04, 05 D-7040.., 06), every gate.
 
@@ -71,3 +78,20 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - `HOLD` back on the base at 12:55 IST ("HOLD for parts without GO-<NAME>"); no `GO-CC-5`. Stopped.
 - NEXT: the api route `crates/api/src/copies_route.rs` + `copies_route_tests.rs`, its two
   `server.rs` lines, its rows in `operation_audit_tests.rs` and `pool_table_tests.rs`.
+
+### 2026-10-24 — resumed after the 17:30 reset, save point 4, then HELD again
+
+- 17:30 IST HOLD lifted ("every cloud part builds"). Merged the newest `origin/feat/db-fix`
+  (`7b397bbe`, Merge CLOUD-MUTCLI) into the branch: clean, merge commit `c03ceb09`.
+- Wrote `crates/api/src/copies_route.rs` and `copies_route_tests.rs`; wired `server.rs`,
+  `operation_audit_tests.rs`, `pool_table_tests.rs`.
+- `cargo test -p api --lib --locked copies_route`: `test result: ok. 5 passed; 0 failed`.
+- `cargo test -p api --lib --locked -- pool_table operation_audit settings_route`:
+  `test result: ok. 55 passed; 0 failed`.
+- `cargo clippy -p api --all-targets --locked`: one test warning (`manual_assert_eq`), fixed.
+- `HOLD` back at 18:15 IST ("HOLD for parts without GO-<NAME>"); no `GO-CC-5`. Stopped.
+- NEXT: the cli verb `crates/cli/src/disk_copies_command.rs` (zero arguments; a fresh walk; exit 1
+  on a hazard, a wait or a root not walked whole), its dispatch arm, `COMMANDS` 60 -> 61, its usage
+  line, `store_write.rs` reader list, `sweep_wiring_tests.rs` non-sweep list, the zero-argument
+  exemption in `a_known_command_with_the_wrong_arity_is_not_called_unknown`; then R4-06's
+  `no_scheduler_delete.rs` rows.

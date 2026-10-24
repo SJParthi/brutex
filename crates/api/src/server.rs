@@ -1625,6 +1625,11 @@ mod bars_route;
 mod calendar_route;
 #[path = "census_cache.rs"]
 mod census_cache;
+/// `/disk/copies.json`: the copies register, every extra copy with its bytes,
+/// reader and proof, second names of live archives in red, and the
+/// retirement list (CC-5, FM-607).
+#[path = "copies_route.rs"]
+mod copies_route;
 /// `/disk.json`: free space, store size, census retention and the backup
 /// receipt (DB-B73, DB-B59; WP-81).
 #[path = "disk_route.rs"]
@@ -16120,6 +16125,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // RECORDED: nothing said any of it while one drive held everything
         // (DB-B73, DB-B59; WP-81).
         .route("/disk.json", axum::routing::get(disk_route::disk_json))
+        // EVERY EXTRA COPY, ITS READER AND PROOF, AND EVERY SECOND NAME OF A
+        // LIVE ARCHIVE: a third of the drive was on no page (CC-5, FM-607).
+        .route(
+            "/disk/copies.json",
+            axum::routing::get(copies_route::copies_json),
+        )
         // WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES A PAGE SHOWS (DB-B74).
         .route("/scrub.json", axum::routing::get(scrub_route::scrub_json))
         // EACH ROW'S PULL REFUSALS, so /ingest says a month was requested and

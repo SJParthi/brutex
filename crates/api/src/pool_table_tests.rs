@@ -217,6 +217,15 @@ const ROUTES: &[(&str, Runs)] = &[
         ),
     ),
     (
+        "/disk/copies.json",
+        pool(
+            Named::OpsRead,
+            "copies_route.rs",
+            "copies_json",
+            "crate::detail::run_ops_read(",
+        ),
+    ),
+    (
         "/scrub.json",
         pool(
             Named::OpsRead,
