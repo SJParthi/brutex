@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -45,3 +45,18 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   pushed; waiting for GO without HOLD before the next step.
 - NEXT: run `cargo bench -p pull --bench ratio` and `cargo bench -p api --bench ratio`, fix any
   fixture the harness refuses, then three release runs, then the docs/04, docs/05 and docs/06 rows.
+
+### 2026-10-24 12:55 IST: save point 3 (GO again; pull bench green, run A)
+
+- GO without HOLD at about 12:40 IST; resumed.
+- First pull run (before this save point's change): every new row passed except the census cold
+  load, whose cost PER ENTRY rose 3.8x (single file) and 3.0x (partition) from 1,000 to 100,000
+  entries. The load is one pass (`Manifest::walk`: decode, push, insert into an index sized once);
+  it claims O(entries), never O(1). Changed (D-6800): every O(n)-once-per-run row (C-CHK-01,
+  C-CHK-02, C-CHK-04, C-CHK-05, C-CHK-06) is now held to the ceiling across EACH TENFOLD STEP
+  (`archive_from_source::linear_per_unit`), with the 1x-to-100x figure printed beside it, not
+  gated; an O(1) row stays held from its 1x baseline. The cause of the rise is NOT measured.
+- `cargo clippy -p pull --benches --locked -- -D warnings`: `Finished`.
+- `cargo bench -p pull --bench ratio --locked` (run A): `all ratios within the ceiling`, exit 0.
+- NEXT: api bench run A (building `cli` in the bench profile at `-j 2`), then runs B and C of both
+  harnesses by their built binaries, then the ledger rows.

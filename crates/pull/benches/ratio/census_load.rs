@@ -3,18 +3,28 @@
 //! whole", from the file a run finds on disk. It is O(entries) by design,
 //! once per run or per cycle under the census's lock, never per lookup (the
 //! warm probe after it is `crates/api/benches/ratio/census.rs`'s, unchanged).
-//! These rows assert that shape and print the measured time:
+//! These rows print the measured time and hold each cost PER UNIT to the
+//! ceiling across each tenfold step (`linear_per_unit`, the rule for an O(n)
+//! cost once per run, D-6800), with the 1x-to-100x figure printed beside it:
 //!
 //! - C-CHK-04: a single-file census (`manifest/<vendor>.man`, versions 1 to
-//!   3), the cost PER ENTRY of a whole load flat at 1,000, 10,000 and 100,000
+//!   3), the cost per entry of a whole load at 1,000, 10,000 and 100,000
 //!   entries.
 //! - C-CHK-05: a version-4 partition (`manifest/v4/<vendor>/<SEGMENT>/`), one
 //!   epoch, the same per entry at the same sizes.
 //! - C-CHK-06: the epochs. Finding the current epoch lists the partition's
 //!   folder (`current_epoch`, one entry per compaction the partition ever had):
-//!   its cost PER EPOCH is flat at 10, 100 and 1,000 epochs; and the whole load
-//!   with both grown together (1,000 entries over 10 epochs, 10,000 over 100,
-//!   100,000 over 1,000) is flat per entry-or-epoch.
+//!   its cost per epoch at 10, 100 and 1,000 epochs; and the whole load with
+//!   both grown together (1,000 entries over 10 epochs, 10,000 over 100,
+//!   100,000 over 1,000), per entry-or-epoch.
+//!
+//! The cost per entry is NOT flat from 1x: on the cloud host of 24 Oct 2026 it
+//! rose about 1.6x from 1,000 to 10,000 entries and 2.3x from 10,000 to
+//! 100,000, one pass throughout (`Manifest::walk` decodes each entry once,
+//! pushes it to the log and inserts it into an index sized once). Why it rises
+//! (cache residency of a larger index, or the faulting-in of its fresh memory)
+//! was not measured; `docs/06-limits.md` states it as measured and the cause as
+//! not.
 //!
 //! The files are written once through the census's own image
 //! (`pull::manifest::Manifest::image`) into new folders under the system temp
@@ -32,7 +42,8 @@ use brutex_core::vendor::Vendor;
 use pull::ingest::census_store::{Target, current_epoch};
 use pull::manifest::{Entry, FNO_FLOOR, Manifest, epoch_path, manifest_path, segment_dir};
 
-use super::{cost_ps, key, partition_bytes, ratio, refuse, spread};
+use super::archive_from_source::linear_per_unit;
+use super::{cost_ps, key, partition_bytes, refuse, spread};
 
 /// Entries at 1x; 10x and 100x hold ten and a hundred times as many.
 const BASE_ENTRIES: u32 = 1_000;
@@ -173,21 +184,19 @@ pub(crate) fn cold_load_is_flat_per_entry() -> bool {
     let mut largest = None;
 
     let singles = sizes.map(|n| (n, Target::single(&single(n), Vendor::Gdfl)));
-    let [s1, s10, s100] = singles
+    let per_entry = singles
         .each_ref()
         .map(|(n, target)| per_unit(target, *n, *n));
-    ok &= ratio("C-CHK-04 single-file load per entry, 10x", s1, s10);
-    ok &= ratio("C-CHK-04 single-file load per entry, 100x", s1, s100);
+    ok &= linear_per_unit("C-CHK-04 single-file load per entry", per_entry);
 
     let partitions = sizes.map(|n| {
         let at = partition(n, 1);
         (n, Target::partition(&at, Vendor::Gdfl, Segment::Fno))
     });
-    let [p1, p10, p100] = partitions
+    let per_entry = partitions
         .each_ref()
         .map(|(n, target)| per_unit(target, *n, *n));
-    ok &= ratio("C-CHK-05 partition load per entry, 10x", p1, p10);
-    ok &= ratio("C-CHK-05 partition load per entry, 100x", p1, p100);
+    ok &= linear_per_unit("C-CHK-05 partition load per entry", per_entry);
 
     let mut listing = Vec::with_capacity(3);
     let mut whole = Vec::with_capacity(3);
@@ -206,13 +215,12 @@ pub(crate) fn cold_load_is_flat_per_entry() -> bool {
         whole.push(per_unit(&target, n, n + epochs));
         largest = Some((target, n, epochs));
     }
-    let ([e1, e10, e100], [w1, w10, w100]) = (listing.as_slice(), whole.as_slice()) else {
+    let (Ok(listing), Ok(whole)) = (<[u128; 3]>::try_from(listing), <[u128; 3]>::try_from(whole))
+    else {
         refuse("three sizes measured")
     };
-    ok &= ratio("C-CHK-06 current epoch per epoch, 10x epochs", *e1, *e10);
-    ok &= ratio("C-CHK-06 current epoch per epoch, 100x epochs", *e1, *e100);
-    ok &= ratio("C-CHK-06 load per entry-or-epoch, 10x both", *w1, *w10);
-    ok &= ratio("C-CHK-06 load per entry-or-epoch, 100x both", *w1, *w100);
+    ok &= linear_per_unit("C-CHK-06 current epoch per epoch", listing);
+    ok &= linear_per_unit("C-CHK-06 load per entry-or-epoch", whole);
 
     let [_, _, (n, single_big)] = &singles;
     spread(

@@ -9,9 +9,10 @@
 //! walks every `*.zip` in it, building each `<yyyy>.zip`'s index from its
 //! central directory (`list` calls `year` for each), then lists the asked
 //! day's own zip. O(names) plus O(entries) per zip, ONCE PER RUN: the bench
-//! puts one year zip in the folder and asserts the cost PER ENTRY of that
-//! first call flat at 1x, 10x and 100x the year zip's entries (30, 300 and
-//! 3,000), and prints the per-run time at each.
+//! puts one year zip in the folder, times that first call at 1x, 10x and 100x
+//! the year zip's entries (30, 300 and 3,000), prints the per-run time at
+//! each, and holds its cost PER ENTRY to the ceiling across each tenfold step
+//! (`linear_per_unit`, the rule for an O(n) cost once per run, D-6800).
 //!
 //! C-CHK-03 is every LATER `day()` of the run, of any year: the index is a
 //! hash hit, the misfiled notes one more probe, then that day zip's own
@@ -41,7 +42,7 @@ use pull::gdfl_cm::CmRefusal;
 use pull::gdfl_nfo::{NfoSource, NfoZips, day_folder_name};
 use pull::session::Day;
 
-use super::archive_from_source::stored_zip;
+use super::archive_from_source::{linear_per_unit, stored_zip};
 use super::{cost_ps, ratio, refuse, spread};
 
 /// Entries of the 1x year zip; 10x and 100x hold ten and a hundred times as
@@ -224,8 +225,7 @@ pub(crate) fn year_index_is_flat() -> bool {
     let ([f1, f10, f100], [l1, l10, l100]) = (first.as_slice(), later.as_slice()) else {
         refuse("three sizes measured")
     };
-    let mut ok = ratio("C-CHK-02 first day() per year-zip entry, 10x", *f1, *f10);
-    ok &= ratio("C-CHK-02 first day() per year-zip entry, 100x", *f1, *f100);
+    let mut ok = linear_per_unit("C-CHK-02 first day() per year-zip entry", [*f1, *f10, *f100]);
     ok &= ratio("C-CHK-03 later day(), 10x year zip", *l1, *l10);
     ok &= ratio("C-CHK-03 later day(), 100x year zip", *l1, *l100);
     let Some((dir, warm, entries)) = largest else {

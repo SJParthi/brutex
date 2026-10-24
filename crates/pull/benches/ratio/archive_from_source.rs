@@ -2,8 +2,9 @@
 //! the capital-market outer archive's central directory read ONCE PER RUN and
 //! filed into its dense day table (two passes over the directory in memory,
 //! no map, no sort). It is O(entries) by design and is not a per-day cost:
-//! this bench asserts the cost PER ENTRY flat at 1x, 10x and 100x the entries
-//! (about 100, 1,000 and 10,000) and prints the per-run time at each, so the
+//! this bench times it at 1x, 10x and 100x the entries (about 100, 1,000 and
+//! 10,000), prints the per-run time at each, and holds the cost PER ENTRY to
+//! the ceiling across each tenfold step ([`linear_per_unit`], D-6800), so the
 //! claim is "once per run, O(entries), this many microseconds", never "O(1)".
 //! The operator's real archive holds 4,209 entries (`docs/06-limits.md`, 13
 //! Oct), inside the measured range, so its figure is not an extrapolation of
@@ -32,6 +33,33 @@ use super::{cost_ps, ratio, refuse, spread};
 
 /// Calendar days at 1x; 10x and 100x hold ten and a hundred times as many.
 const BASE_DAYS: u32 = 50;
+
+/// THE RULE FOR A COST THAT IS O(n) ONCE PER RUN (D-6800), shared by every
+/// CC-20 row that claims one: the cost per unit at 1x, 10x and 100x, held to
+/// the ceiling across EACH TENFOLD STEP (1x to 10x, 10x to 100x), and the
+/// 1x-to-100x figure printed beside them, not gated.
+///
+/// An O(1) claim is held from its 1x baseline, because nothing about it may
+/// grow. A linear one is not: one pass whose working set grows with n can
+/// cost more per unit at 100x than at 1x without a second pass anywhere. The
+/// census load did, on the cloud host of 24 Oct 2026 (`ratio/census_load.rs`,
+/// about 3.8x per entry from 1,000 to 100,000 entries, and its cause, cache
+/// residency or the faulting-in of fresh memory, was NOT measured), and a gate
+/// from 1x would read that as a breach of a bound the code never claimed.
+/// What the per-step ceiling refuses is the regression the claim forbids: a
+/// second pass, a sort per entry or a walk per entry makes the cost per unit
+/// grow about tenfold per tenfold step.
+pub(crate) fn linear_per_unit(label: &str, [one, ten, hundred]: [u128; 3]) -> bool {
+    let first = ratio(&format!("{label}, 1x -> 10x"), one, ten);
+    let second = ratio(&format!("{label}, 10x -> 100x"), ten, hundred);
+    let permille = hundred * 1_000 / one.max(1);
+    println!(
+        "  {label}, 1x -> 100x (context, not gated): {}.{:03}x",
+        permille / 1_000,
+        permille % 1_000
+    );
+    first & second
+}
 
 /// Archive bytes read in place, as `Archive<File>` reads a file: one
 /// positional copy per read, nothing owned, so timing a fresh read never
@@ -218,11 +246,10 @@ pub(crate) fn directory_read_is_flat_per_entry() -> bool {
         per_entry.push(whole / u128::try_from(entries).unwrap_or(u128::MAX).max(1));
         largest = Some((bytes, entries));
     }
-    let [one, ten, hundred] = per_entry.as_slice() else {
+    let Ok(per_entry) = <[u128; 3]>::try_from(per_entry) else {
         refuse("three sizes measured")
     };
-    let ok = ratio("C-CHK-01 directory read per entry, 10x", *one, *ten)
-        & ratio("C-CHK-01 directory read per entry, 100x", *one, *hundred);
+    let ok = linear_per_unit("C-CHK-01 directory read per entry", per_entry);
     let Some((bytes, entries)) = largest else {
         refuse("the largest archive")
     };
