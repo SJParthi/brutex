@@ -515,3 +515,74 @@ test('the store segments a view reads come from the root\'s own list, and an unk
   assert.equal(viewFamily('options-live'), 'options');
   assert.equal(viewFamily(undefined), '');
 });
+
+/* ----------------------------------------------------------------------
+   R3-12 (NEW-07, RA-029): THE COVERAGE ROLL-UP COMES FROM THE SERVER
+   ---------------------------------------------------------------------- */
+import { readRollups, rollupUrl, rollupFault, scopeUnderlyings, scopeFailure } from '../src/lib/store-census.js';
+
+const rollupBody = (/** @type {string} */ segment, /** @type {string | null} */ underlying, /** @type {any} */ over = {}) => ({ schema: 1, feed: 'example',
+  segment, exchange: underlying ? 'NSE' : null, underlying, state: 'held', degraded: null, generation: 7, order: 'months ascending',
+  basis: { days_owed: 'sessions in the calendar of record', days_held: 'first to last bar' },
+  rungs: [{ timeframe: '1min', months_held: 2, instrument_months: underlying ? 2 : 40, rows: underlying ? 115 : 4000, first_ts: 1, last_ts: 2, days_held: 40, days_owed: 41 }],
+  months: [{ month: '2019-02', timeframe: '1min' }, { month: '2019-03', timeframe: '1min' }], ...over });
+
+test('the Coverage roll-up is the server\'s, per segment read: the instrument\'s and the whole segment\'s, a refusal kept by name', async () => {
+  const scope = /** @type {any} */ ({ underlying: 'ALPHA', segments: ['INDEX', 'FNO'] });
+  const R = (/** @type {string} */ segment, /** @type {string | null} */ underlying) => rollupUrl({ feed: 'example', segment, underlying });
+  assert.equal(R('INDEX', 'ALPHA'), '/census/rollup.json?feed=example&segment=INDEX&underlying=ALPHA');
+  assert.equal(R('INDEX', null), '/census/rollup.json?feed=example&segment=INDEX');
+  const { request, asked } = server({
+    [R('INDEX', 'ALPHA')]: [200, rollupBody('INDEX', 'ALPHA')],
+    [R('INDEX', null)]: [200, rollupBody('INDEX', null)],
+    [R('FNO', 'ALPHA')]: [200, rollupBody('FNO', 'ALPHA')],
+    [R('FNO', null)]: [400, { error: 'rollup_too_many', why: 'FNO names more than 4096 (month, rung) cells' }]
+  });
+  const list = await readRollups(request, 'example', scope);
+  assert.deepEqual(asked.sort(), [R('FNO', 'ALPHA'), R('FNO', null), R('INDEX', 'ALPHA'), R('INDEX', null)].sort());
+  assert.equal(asked.some((url) => url.includes('/store.json')), false);
+  assert.deepEqual(list.map((roll) => `${roll.segment}|${roll.underlying}|${roll.ok}|${roll.months}`),
+    ['INDEX|ALPHA|true|2', 'INDEX|null|true|2', 'FNO|ALPHA|true|2', 'FNO|null|false|0']);
+  assert.equal(list[1].rungs[0].instrument_months, 40);
+  assert.match(String(list[3].why), /answered HTTP 400: rollup_too_many: FNO names more than 4096 \(month, rung\) cells/);
+  // A body that is not the answer asked is refused, field by field.
+  const query = { feed: 'example', segment: 'INDEX', underlying: 'ALPHA' };
+  assert.equal(rollupFault(rollupBody('INDEX', 'ALPHA'), query), null);
+  assert.match(String(rollupFault(null, query)), /not a schema-1 roll-up/);
+  assert.match(String(rollupFault(rollupBody('CASH', 'ALPHA'), query)), /answers example\/CASH/);
+  assert.match(String(rollupFault(rollupBody('INDEX', 'BETA'), query)), /another underlying/);
+  assert.match(String(rollupFault(rollupBody('INDEX', 'ALPHA', { rungs: null }), query)), /not lists/);
+  assert.match(String(rollupFault(rollupBody('INDEX', 'ALPHA', { rungs: [{ timeframe: '1min' }] }), query)), /does not count/);
+  const torn = await readRollups(server({ [R('INDEX', 'ALPHA')]: [200, { schema: 1 }], [R('INDEX', null)]: [200, rollupBody('INDEX', null)] }).request,
+    'example', /** @type {any} */ ({ underlying: 'ALPHA', segments: ['INDEX'] }));
+  assert.match(String(torn[0].why), /^\/census\/rollup\.json: it answers undefined\/undefined/);
+  // SOURCE SHAPE: the grid reads it while Coverage is open, and draws its refusals.
+  const grid = readFileSync(new URL('../src/routes/db/DbCoverageGrid.svelte', import.meta.url), 'utf8');
+  assert.match(grid, /if \(db\.view !== 'census' \|\| !scope \|\| !feed\) return;/);
+  assert.match(grid, /const list = await readRollups\(ask, feed, scope\);/);
+  assert.match(grid, /<span class="risk">not counted: \{roll\.why\}<\/span>/);
+});
+
+test('the instrument list is the server\'s underlyings of the segments read, and a list that failed is named', () => {
+  const scope = /** @type {any} */ ({ underlying: 'ALPHA', segments: ['INDEX', 'CASH', 'FNO'], listed: root().segments });
+  const under = (/** @type {string} */ symbol, /** @type {number} */ months, /** @type {any} */ more = {}) =>
+    ({ exchange: 'NSE', symbol, months, expiries: 0, contracts: 0, rows: { '1min': 10 * months }, ...more });
+  const { rows, why } = scopeUnderlyings(scope, [
+    { ok: true, body: { underlyings: [under('ALPHA', 3), under('GAMMA', 1)] } },
+    { ok: true, body: { underlyings: [under('BETA', 2)] } },
+    { ok: true, body: { underlyings: [under('ALPHA', 2, { expiries: 5, contracts: 40, rows: { '1s': 7 } }), under('DELTA', 1, { expiries: 1, contracts: 2 })] } }
+  ]);
+  assert.equal(why, null);
+  assert.deepEqual(rows.map((row) => `${row.key} ${row.spotMonths}/${row.contractMonths} ${row.expiries} ${row.bars}`),
+    ['ALPHA 3/2 5 37', 'BETA 2/0 0 20', 'DELTA 0/1 1 10', 'GAMMA 1/0 0 10']);
+  // A SEGMENT WHOSE LIST COULD NOT BE READ: the others are offered, and the gap is named.
+  const partial = scopeUnderlyings(scope, [{ ok: true, body: { underlyings: [under('ALPHA', 1)] } }, { ok: false, reason: 'HTTP 503', body: null },
+    { ok: true, body: {} }]);
+  assert.deepEqual(partial.rows.map((row) => row.key), ['ALPHA']);
+  assert.equal(partial.why, 'the server\'s instrument list could not be read whole (CASH: HTTP 503; FNO: its answer lists no underlyings)');
+  // An empty list is an empty list, said as none.
+  assert.deepEqual(scopeUnderlyings({ ...scope, segments: [] }, []), { rows: [], why: null });
+  assert.equal(scopeFailure({ underlying: 'ALPHA', expiry: '2019-03-28', segments: ['options-live'] }, 'HTTP 503'),
+    'the census rows of ALPHA (options at 2019-03-28) could not be read from /census/facets.json: HTTP 503. This page never reads the whole census in their place; Refresh asks again');
+  assert.match(scopeFailure({ underlying: 'ALPHA' }, 'x'), /^the census rows of ALPHA \(every segment\) could not/);
+});

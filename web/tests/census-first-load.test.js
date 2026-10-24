@@ -206,3 +206,66 @@ test('a refresh log that cannot be saved or read says so and still holds this ta
   blocked.note(refreshEntry({ feed: 'gdfl', at: 8, error: 'w' }));
   assert.equal(blocked.list().length, 1);
 });
+
+/* ----------------------------------------------------------------------
+   R3-12: NO /db VIEW DOWNLOADS THE WHOLE CENSUS
+   ---------------------------------------------------------------------- */
+import { storeModule, fakeServer, settled } from './store-module.js';
+
+test('no_db_view_downloads_the_whole_census', async () => {
+  // THE STORE MODULE ITSELF, compiled and driven: every selection /db can
+  // ask (`syncStore(feed, wanted)` with an instrument named) over a fake
+  // server that answers the scope's routes and RECORDS everything asked.
+  const { store, syncStore, refreshStore } = await storeModule();
+  const server = fakeServer();
+  const real = globalThis.fetch;
+  globalThis.fetch = /** @type {any} */ (server.fetch);
+  try {
+    /** @type {Array<[string, any]>} */
+    const views = [
+      ['the opening view, no segment named', { underlying: 'ALPHA', expiry: null, segments: [] }],
+      ['spot', { underlying: 'ALPHA', expiry: null, segments: ['spot'] }],
+      ['options with no expiry (the 12 Oct acceptance case)', { underlying: 'ALPHA', expiry: null, segments: ['options'] }],
+      ['options at an expiry', { underlying: 'ALPHA', expiry: '2019-03-28', segments: ['options'] }],
+      ['futures, cut', { underlying: 'ALPHA', expiry: null, segments: ['futures-cut'] }],
+      ['another instrument', { underlying: 'BETA', expiry: null, segments: ['spot'] }],
+      ['the Coverage grid of the same selection', { underlying: 'BETA', expiry: null, segments: ['spot'] }]
+    ];
+    for (const [name, wanted] of views) {
+      syncStore('example', wanted);
+      assert.equal(await settled(store), 'ready', `${name}: ${store.error}`);
+      assert.equal(store.scope?.underlying, wanted.underlying, name);
+    }
+    // A REFRESH re-reads the scope, never the whole census.
+    void refreshStore();
+    assert.equal(await settled(store), 'ready');
+    assert.equal(store.how?.kind, 'scoped');
+    // A FEED SWITCH is a first load of the other feed's scope.
+    syncStore('other', { underlying: 'ALPHA', expiry: null, segments: ['spot'] });
+    await settled(store);
+    // A SCOPE THAT FAILS IS THE PAGE'S ERROR, WITH ITS REASON, AND NOTHING
+    // ELSE IS READ IN ITS PLACE (it read the whole census in the same flight).
+    syncStore('broken', { underlying: 'ALPHA', expiry: null, segments: ['spot'] });
+    assert.equal(await settled(store), 'error');
+    assert.match(String(store.error), /^the census rows of ALPHA \(spot\) could not be read from \/census\/facets\.json: \/census\/facets\.json\?feed=broken answered HTTP 503: the fake server answers no \/census\/facets\.json\. This page never reads the whole census in their place; Refresh asks again$/);
+    assert.equal(store.refreshes.at(-1)?.kind, 'failed');
+    // AN UNKNOWN VIEW (seg=index) is refused before any request.
+    const before = server.asked.length;
+    syncStore('example', { underlying: 'ALPHA', expiry: null, segments: ['index'] });
+    assert.equal(await settled(store), 'error');
+    assert.match(String(store.error), /segment "index" is not one this page knows/);
+    assert.equal(server.asked.length, before, 'nothing asked for it');
+    assert.deepEqual(server.asked.filter((url) => url.startsWith('/store.json')), [], 'no /db view asked /store.json');
+    assert.equal(server.asked.some((url) => url.includes('segment=FNO') && url.includes('rows=') && !url.includes('expiry=')), false,
+      'no contract chain unnarrowed');
+    // THE HARNESS SEES A WHOLE READ WHEN ONE IS MADE: another page (no
+    // instrument named) reads /store.json, and the instrument's rows are
+    // never handed to it.
+    syncStore('example', null);
+    await settled(store);
+    assert.equal(server.asked.filter((url) => url.startsWith('/store.json')).length, 1);
+    assert.equal(store.scope, null);
+  } finally {
+    globalThis.fetch = real;
+  }
+});

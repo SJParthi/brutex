@@ -768,7 +768,12 @@ export function selectionState(db) {
    *  census on every change that reached it). */
   const heldUnderlyings = $derived.by(() => {
     const s = new Set();
-    for (const r of db.deco) s.add(r.underlying);
+    /* UNDER A SCOPE, THE SERVER'S LIST (R3-12): the rows read are one
+       instrument's, and "is this name held" is the server's to answer for
+       the segments the scope read (`censusUnderlyings`). */
+    const listed = db.censusScope ? db.censusUnderlyings?.rows : null;
+    if (listed?.length) for (const r of listed) s.add(r.key);
+    else for (const r of db.deco) s.add(r.underlying);
     return s;
   });
   const universeCount = $derived.by(() => {
@@ -1646,7 +1651,7 @@ export function selectionState(db) {
     if (sidesAll.length > 0) return null;
     if (db.deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
-    return `${feedDisplay(feeds.active)} holds no option. A side is the last two characters of an option's name — crates/core/src/instrument.rs ends one “-CE” or “-PE” — and not one of the ${fmt(db.deco.length)} instrument-month(s) here ends either way. /store.json sends no side field, so a side can only ever be READ OFF A NAME.`;
+    return `${feedDisplay(feeds.active)} holds no option. A side is the last two characters of an option's name — crates/core/src/instrument.rs ends one “-CE” or “-PE” — and not one of the ${fmt(db.deco.length)} instrument-month(s) here ends either way. the census sends no side field, so a side can only ever be READ OFF A NAME.`;
   });
 
   /**
@@ -2371,12 +2376,12 @@ export function selectionState(db) {
            that cannot be the cause when it is already at its widest. */
         why:
           universe === ''
-            ? `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them survives the rungs below the universe — which is already at Everything, so it is not the universe narrowing this. Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+            ? `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them survives the rungs below the universe — which is already at Everything, so it is not the universe narrowing this. Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question the census can answer.`
             : `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}. ${
                 universeCount.get(universe)
                   ? `${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) are held.`
                   : 'Membership was not counted — see the note beside the universe row.'
-              } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+              } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question the census can answer.`
       };
     /* THE GATE GETS ITS OWN BRANCH, ABOVE THE GENERIC ONE, for the same
        reason the universe does: "none of them match the current selection" is

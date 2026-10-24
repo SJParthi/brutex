@@ -63,13 +63,12 @@
   import { fetchAdmitted } from '$lib/admitted-fetch.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { dayflagsUrl } from '$lib/db/dayflags.js';
+  import { segmentOf } from '$lib/db/selection-model.js';
+  import { readRollups } from '$lib/store-census.js';
   import DbCalendar from './DbCalendar.svelte';
   /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
   /** @typedef {import('$lib/db/decoration.js').DecoRow} DecoRow */
   /** @typedef {import('$lib/completeness.js').Cover} Cover */
-
-  /** The rungs Zerodha folds from its 1min bars when `/feeds.json` names none. */
-  const DERIVED_FALLBACK = ['2min', '3min', '5min', '10min', '15min', '30min', '60min'];
 
   /**
    * One absent month of a series, shaped like a decorated row so the grid,
@@ -125,10 +124,32 @@
     let ledgersFor = $state(0);
     const ledgerReads = createPageRequests();
 
-    /** The rungs this feed folds from its 1min bars (D-3000). */
-    const derivedRungs = $derived(
-      new Set(/** @type {any} */ (db.activeFeed)?.derived_rungs ?? (feeds.active === 'zerodha' ? DERIVED_FALLBACK : []))
-    );
+    /** The rungs this feed folds from its 1min bars (D-3000), as `/feeds.json`
+        names them. R3-12 (RA-258): it named a fallback list for one feed
+        word when the answer had none; every served descriptor carries the
+        list, so an API too old to send it folds none here. */
+    const derivedRungs = $derived(new Set(/** @type {any} */ (db.activeFeed)?.derived_rungs ?? []));
+
+    /* THE SERVER'S ROLL-UP OF THE SCOPE (R3-12; NEW-07, RA-029): per rung,
+       the months, instrument-months, bars and days held and owed, for the
+       instrument on screen and for the whole of each segment it was read in,
+       from `/census/rollup.json`. Read when Coverage is open, once per census
+       read; it replaced the whole-census fold the grid's first mount made. */
+    let rollups = $state.raw(/** @type {{key: string, list: import('$lib/store-census.js').ScopeRollup[]} | null} */ (null));
+    const rollupReads = createPageRequests();
+    $effect(() => {
+      const scope = db.censusScope;
+      const feed = feeds.active;
+      if (db.view !== 'census' || !scope || !feed) return;
+      const key = `${feed}|${scope.underlying}|${scope.segments.join(',')}|${db.fetchedAt}`;
+      if (untrack(() => rollups)?.key === key) return;
+      rollupReads.cancel();
+      void rollupReads.run(async (ticket) => {
+        const list = await readRollups(ask, feed, scope);
+        if (ticket.current()) rollups = { key, list };
+      });
+    });
+    $effect(() => () => rollupReads.dispose());
 
     /**
      * THE ONE SERIES THE SELECTION IS ABOUT, when it is one: spot (an index
@@ -140,8 +161,10 @@
       /** @type {{ symbol: string, segment: string } | null} */
       let one = null;
       for (const r of db.matched) {
+        // A CONTRACT carries an expiry; its days are no series' (R3-12: read
+        // off the row, never a store segment word).
+        if (r.expiry !== null && r.expiry !== undefined) return null;
         const seg = segmentOfKey(r.instrument);
-        if (seg === 'FNO') return null;
         const symbol = r.underlying ?? '';
         if (one === null) one = { symbol, segment: seg };
         else if (one.symbol !== symbol || one.segment !== seg) return null;
@@ -577,7 +600,7 @@
       },
       {
         k: 'No corporate-action threshold is sourced. That is why most share cells are a dash.',
-        v: `${fmt(refusedForSplits)} of ${fmt(db.deco.length)} rows are refused for this reason, and it is the only refusal no pull fixes. docs/00-charter.md names no verified split-and-bonus feed, and docs/05-decisions.md D-0018 both requires a suspected corporate action to be refused loudly and rejects back-adjusting from an unverified source. So every instrument that can be re-based — a cash share, and an option on a share — is marked rather than numbered. An index, and an option on an index, can never be re-based and both carry a number (D-3325, DB-G66); ${fmt(kindCount.get('INDEX') ?? 0)} INDEX row(s) are in this census.`
+        v: `${fmt(refusedForSplits)} of ${fmt(db.deco.length)} rows are refused for this reason, and it is the only refusal no pull fixes. docs/00-charter.md names no verified split-and-bonus feed, and docs/05-decisions.md D-0018 both requires a suspected corporate action to be refused loudly and rejects back-adjusting from an unverified source. So every instrument that can be re-based — a cash share, and an option on a share — is marked rather than numbered. An index, and an option on an index, can never be re-based and both carry a number (D-3325, DB-G66); ${fmt(numbered)} of these rows carry a number in % in month.${db.censusScopeNote}`
       },
       {
         k: 'A month-level field can flag a month. It cannot name the day.',
@@ -864,20 +887,23 @@
         return;
       }
       if (untrack(() => vsPrev)?.key === o.key) return;
-      const seg = segmentOfKey(o.instrument);
-      const exch = String(o.instrument).split('-')[0];
-      // AN OPTION ON AN INDEX is one whose underlying the census holds as an
-      // INDEX series: read from the store, never from a list of names here.
-      const indexy = seg === 'INDEX' || (seg === 'FNO' && untrack(() => byInstrument).has(`${exch}-INDEX-${o.underlying}`));
-      if (!indexy) {
+      // WHAT CAN BE RE-BASED IS THE SERVER'S VERDICT ON THE MONTH (D-3325,
+      // DB-G66; `month_change.rs` `can_be_rebased`): a share, and an option
+      // on a share, carry `corporate_action_unverified`; an index and an
+      // option on an index do not. R3-12: this looked for an INDEX series of
+      // the underlying in the rows read, and an options view reads its
+      // contract segment alone, so every index option would have read as a
+      // share's. The row's own verdict holds whatever was read beside it.
+      const rebased = o.chgWhy === 'corporate_action_unverified';
+      if (rebased) {
         vsPrev = {
           key: o.key,
           bps: null,
           base: null,
           last: null,
           why:
-            seg === 'FNO'
-              ? `no INDEX series named ${o.underlying} is stored, so this option's underlying may be a share, which can be re-based: no change across months is shown (D-0018)`
+            o.expiry !== null && o.expiry !== undefined
+              ? `this option's underlying ${o.underlying} can be re-based (the census refused its month change as corporate_action_unverified), so no change across months is shown (D-0018)`
               : 'a share can be re-based (split, bonus, consolidation): no change across months is shown (D-0018)'
         };
         return;
@@ -974,13 +1000,25 @@
     const importReads = createPageRequests();
     $effect(() => {
       const o = openRowData;
-      if (!o?.expiry || feeds.active !== 'gdfl' || untrack(() => importedTo) !== null) return;
+      const feed = feeds.active;
+      /* AN IMPORTED FEED'S JOURNAL, NAMED BY ITS DESCRIPTOR (R3-12, RA-258):
+         this asked one feed word's journal with a fixed probe day typed into
+         the page. A feed whose `/feeds.json` kind is `folder` is imported
+         from archive files; its journal's `kinds` summary is the same
+         whatever days are asked, so no day is named, and the contract's
+         kind is its own segment family. */
+      if (!o?.expiry || !feed || /** @type {any} */ (db.activeFeed)?.kind !== 'folder' || untrack(() => importedTo) !== null) return;
+      const family = segmentOf({ expiry: o.expiry, instrument: o.instrument }, '', null);
       void importReads.run(async (ticket) => {
         try {
-          const r = await ask('/imports.json?feed=gdfl&kind=options&from=2018-09-03&to=2018-09-03', { cache: 'no-store', signal: ticket.signal });
-          if (!r.ok || !ticket.current()) return;
+          const r = await ask(`/imports.json?feed=${encodeURIComponent(feed)}`, { cache: 'no-store', signal: ticket.signal });
+          if (!ticket.current()) return;
+          if (!r.ok) {
+            importedTo = '';
+            return;
+          }
           const b = await r.json();
-          const k = (b?.kinds ?? []).find((/** @type {any} */ x) => x?.kind === 'options');
+          const k = (b?.kinds ?? []).find((/** @type {any} */ x) => x?.kind === family);
           if (ticket.current()) importedTo = typeof k?.last_day === 'string' ? k.last_day : '';
         } catch {
           if (ticket.current()) importedTo = '';
@@ -998,7 +1036,7 @@
     $effect(() => {
       const o = openRowData;
       const feed = feeds.active;
-      if (!o?.expiry || feed !== 'gdfl' || o.absent) return;
+      if (!o?.expiry || !feed || /** @type {any} */ (db.activeFeed)?.kind !== 'folder' || o.absent) return;
       if (untrack(() => lineage)?.key === o.instrument) return;
       const s = untrack(() => seriesIndex).get(`${o.instrument}\u0000${o.timeframe}`);
       const on = s?.lastDay ?? null;
@@ -1008,7 +1046,7 @@
       void lineageReads.run(async (ticket) => {
         try {
           const day = isoOfEpochDay(on);
-          const r = await ask(dayflagsUrl('gdfl', o.instrument, day, day), { cache: 'no-store', signal: ticket.signal });
+          const r = await ask(dayflagsUrl(feed, o.instrument, day, day), { cache: 'no-store', signal: ticket.signal });
           if (!r.ok || !ticket.current()) return;
           const b = await r.json();
           const l = b?.lineage;
@@ -1071,6 +1109,7 @@
       sortKey: { get: () => sortKey, set: (v) => (sortKey = v) },
       desc: { get: () => desc, set: (v) => (desc = v) },
       covLedgers: { get: () => ledgers },
+      covRollups: { get: () => rollups?.list ?? null },
       covOneSeries: { get: () => oneSeries },
       covJudged: { get: () => judged },
       covTradeRows: { get: () => tradeRows },
@@ -1540,6 +1579,25 @@
   {/if}
 </section>
 
+<!-- THE SERVER'S ROLL-UP (R3-12; NEW-07, RA-029): the months, instrument-months,
+     bars and days held and owed, per rung, for the instrument on screen and for
+     the whole segment it was read in, from /census/rollup.json. No whole census
+     is read for it; a refusal is said with the server's sentence. -->
+{#if db.covRollups}
+  <section class="covsum covroll" aria-label="Roll-up from the server" data-census-rollup>
+    {#each db.covRollups as roll (`${roll.segment}|${roll.underlying ?? ''}`)}
+      <p class="cs">
+        <b>{roll.underlying ?? `all of ${roll.segment}`}</b>{roll.underlying ? ` in ${roll.segment}` : ''}:
+        {#if roll.ok}
+          {#each roll.rungs as rung, i (rung.timeframe)}{i > 0 ? ' · ' : ''}<span title={roll.basis ? `days held: ${roll.basis.days_held}; days owed: ${roll.basis.days_owed}` : undefined}>{rung.timeframe} {fmt(rung.months_held)} month(s), {fmt(rung.instrument_months)} instrument-month(s), {fmt(rung.rows)} bar(s), days held {rung.days_held === null ? '—' : fmt(rung.days_held)} of {rung.days_owed === null ? '— (outside the calendar of record)' : fmt(rung.days_owed)} owed</span>{/each}{#if roll.rungs.length === 0}nothing held{/if}
+        {:else}
+          <span class="risk">not counted: {roll.why}</span>
+        {/if}
+      </p>
+    {/each}
+  </section>
+{/if}
+
 <!-- ==================================================================
      THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
      ================================================================== -->
@@ -1809,12 +1867,12 @@
       <p class="dspan">
         <span class="k">Days held</span>
         {#if heldWindow(o)}
-          <span class="v" title="first_ts → last_ts from /store.json, microseconds, rendered IST"
+          <span class="v" title="first_ts → last_ts from the census row, microseconds, rendered IST"
             >{heldWindow(o)}</span
           >
         {:else}
           <span class="v">—</span>
-          <span class="n">{o.absent ? 'no file for this month' : '/store.json carried no first/last stamp for this row'}</span>
+          <span class="n">{o.absent ? 'no file for this month' : 'the census row carried no first/last stamp'}</span>
         {/if}
       </p>
 

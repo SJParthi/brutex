@@ -1317,6 +1317,75 @@ export function scopeUnderlyings(scope, answers) {
     why: faults.length ? `the server's instrument list could not be read whole (${faults.join('; ')})` : null };
 }
 
+/* ======================================================================
+   THE COVERAGE ROLL-UP OF A SCOPE (R3-12; NEW-07, RA-029, DB-G59)
+   ----------------------------------------------------------------------
+   The Coverage grid's months, held and owed, per rung, as the server keeps
+   them (`/census/rollup.json`, R3-09: read off the facet index the census
+   moves forward, capped at 4,096 cells and refused by name past it). For
+   each segment the scope read, two answers: the instrument's own, and the
+   whole segment's, so "how much of the store holds this month" is the
+   server's count and never a fold of the whole census in the browser.
+   ====================================================================== */
+
+/** @param {{feed: string, segment: string, underlying?: string | null}} query */
+export const rollupUrl = ({ feed, segment, underlying = null }) =>
+  `/census/rollup.json?feed=${encodeURIComponent(feed)}&segment=${encodeURIComponent(segment)}${underlying ? `&underlying=${encodeURIComponent(underlying)}` : ''}`;
+
+/**
+ * Why a body is not the roll-up answer for `query`, or null.
+ * @param {any} body @param {{feed: string, segment: string, underlying?: string | null}} query @returns {string | null}
+ */
+export function rollupFault(body, query) {
+  if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 roll-up answer';
+  if (body.feed !== query.feed || body.segment !== query.segment) return `it answers ${body.feed}/${body.segment}, not ${query.feed}/${query.segment}`;
+  if ((body.underlying ?? null) !== (query.underlying ?? null)) return 'it answers another underlying';
+  if (!Array.isArray(body.rungs) || !Array.isArray(body.months)) return 'its rungs or months are not lists';
+  for (const rung of body.rungs) {
+    if (typeof rung?.timeframe !== 'string' || !Number.isSafeInteger(rung.months_held) || !Number.isSafeInteger(rung.instrument_months) ||
+        !Number.isSafeInteger(rung.rows)) return 'a rung does not count its months, instrument-months and rows';
+  }
+  return null;
+}
+
+/**
+ * @typedef {{segment: string, underlying: string | null, ok: boolean, why: string | null, rungs: any[], months: number,
+ *   basis: {days_owed: string, days_held: string} | null}} ScopeRollup
+ */
+
+/**
+ * The roll-ups of a scope: per segment read, the instrument's and the whole
+ * segment's, all asked at once. A refusal (`rollup_too_many` past its cap,
+ * a census that cannot be read) is kept beside the others with the server's
+ * sentence, never dropped.
+ * @param {typeof ask} request @param {string} feed @param {CensusScope} scope
+ * @param {{ms?: number}} [options]
+ * @returns {Promise<ScopeRollup[]>}
+ */
+export async function readRollups(request, feed, scope, { ms = SCOPE_MS } = {}) {
+  const queries = scope.segments.flatMap((segment) => [{ feed, segment, underlying: scope.underlying }, { feed, segment, underlying: null }]);
+  return Promise.all(queries.map(async (query) => {
+    const base = { segment: query.segment, underlying: query.underlying, rungs: [], months: 0, basis: null };
+    try {
+      const response = await request(rollupUrl(query), { cache: 'no-store', ms });
+      if (!response.ok) {
+        /** @type {any} */
+        let refusal = null;
+        try { refusal = await response.json(); } catch { refusal = null; }
+        const code = typeof refusal?.error === 'string' ? refusal.error : null;
+        const why = typeof refusal?.why === 'string' && refusal.why !== '' ? `${code ?? 'refused'}: ${refusal.why}` : code ?? `no reason named`;
+        return { ...base, ok: false, why: `/census/rollup.json answered HTTP ${response.status}: ${why}` };
+      }
+      const body = await response.json();
+      const fault = rollupFault(body, query);
+      if (fault) return { ...base, ok: false, why: `/census/rollup.json: ${fault}` };
+      return { ...base, ok: true, why: null, rungs: body.rungs, months: body.months.length, basis: body.basis ?? null };
+    } catch (thrown) {
+      return { ...base, ok: false, why: String(/** @type {any} */ (thrown)?.message ?? thrown) };
+    }
+  }));
+}
+
 /**
  * A scope that could not be read, as the page's error (R3-12): what was asked,
  * the scope's own reason, and that no whole census was read in its place.

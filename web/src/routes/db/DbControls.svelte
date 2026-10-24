@@ -140,10 +140,17 @@
       rows={UNIVERSES.map((u) => ({
         key: u.key,
         name: u.label,
-        detail: db.censusScope
+        detail: db.censusScope && !db.censusUnderlyings?.rows?.length
           /* ONE INSTRUMENT WAS READ, NOT THE STORE (WP-56b): a count of names
-             held from its rows alone would be a statement about the store. */
-          ? `only ${db.censusScope.underlying} read so far; counted when the whole census is read`
+             held from its rows alone would be a statement about the store.
+             R3-12: the count is the server's list's, once it has answered. */
+          ? `counted from the server's list of names once it answers (only ${db.censusScope.underlying} read so far)`
+          : db.censusScope && u.key
+          ? db.universeCount.get(u.key)
+            ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held in ${db.censusScope.segments.join(', ')} (the server's list)`
+            : 'not counted'
+          : db.censusScope
+          ? `${fmt(db.censusUnderlyings.rows.length)} held in ${db.censusScope.segments.join(', ')} (the server's list)`
           : u.key
           ? db.universeCount.get(u.key)
             ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held`
@@ -669,11 +676,11 @@
         {#if db.oow}
           Showing months <b>outside your window</b> ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}): {fmt(db.oowHere)} of this selection's, {fmt(db.oowMonths)}
-          instrument-month(s) across {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}.
+          instrument-month(s) across {db.censusScope ? `${db.censusScope.underlying}, the instrument read` : 'the feed'}.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = false)}>Hide them</button>
         {:else}
           {fmt(db.oowHere)} of this selection's months ({fmt(db.oowHidden)} instrument-month(s) across
-          {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}) lie outside your window ({db.activeFeed?.window?.from} to
+          {db.censusScope ? `${db.censusScope.underlying}, the instrument read` : 'the feed'}) lie outside your window ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}); they are held and hidden.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = true)}>Show them, labelled</button>
         {/if}
@@ -1233,7 +1240,7 @@
       single
       filter
       label="feeds"
-      title={`${db.feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
+      title={`${db.feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from its census (/census/facets.json?feed=${feeds.active ?? ''}, the instrument on screen) and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
       summary={feeds.error
         ? 'Feed list unread'
         : feeds.all.length === 0

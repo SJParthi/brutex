@@ -616,7 +616,7 @@
       </div>
     </div>
   </div>
-  <p class="loadnote" role="status">Reading <code>/store.json?feed={feeds.active ?? ''}</code>…</p>
+  <p class="loadnote" role="status">Reading <code>/census/facets.json?feed={feeds.active ?? ''}</code>…</p>
   </div>
 {/snippet}
 
