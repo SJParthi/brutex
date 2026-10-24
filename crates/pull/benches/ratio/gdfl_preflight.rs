@@ -281,7 +281,21 @@ pub(crate) fn preflight_is_flat() -> bool {
     };
     let a = ratio("C-GR-05 preflight checks, 10x census", one, ten);
     let b = ratio("C-GR-05 preflight checks, 100x census", one, hundred);
-    let (options, day) = largest_day(&base);
+    spreads(&base, &request, &env, &log);
+    let _cleanup = std::fs::remove_dir_all(&base);
+    a && b
+}
+
+/// C-GR-05's three spreads beside its ratios: the one listing read at the
+/// largest day, the per-read `source_changing` check, and the legacy
+/// cutover's refusal path over a journal of 100,000 lines.
+fn spreads(
+    base: &Path,
+    request: &dyn Fn() -> Request,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    log: &LogState,
+) {
+    let (options, day) = largest_day(base);
     let reader = NfoTickStore::new(&options);
     let ns: Vec<u128> = (0..SAMPLES)
         .map(|_| {
@@ -300,8 +314,7 @@ pub(crate) fn preflight_is_flat() -> bool {
     let watched = options.join("FORMAT.md");
     let _written = std::fs::write(&watched, b"watched\n");
     let handle = std::fs::File::open(&watched)
-        .map(std::sync::Arc::new)
-        .unwrap_or_else(|_| refuse("a watched file"));
+        .map_or_else(|_| refuse("a watched file"), std::sync::Arc::new);
     let watch = preflight::Watch::new(&watched, handle).unwrap_or_else(|_| refuse("a watch"));
     spread(
         "C-GR-05 the source_changing check, two stats",
@@ -315,23 +328,21 @@ pub(crate) fn preflight_is_flat() -> bool {
     // The legacy cutover's refusal path: a store no lock file ever held,
     // whose journal of 100,000 lines is read once (O(lines), the only
     // journal read the preflight makes).
-    let unclaimed = store(&base, BASE * 100);
+    let unclaimed = store(base, BASE * 100);
     let _unclaimed = std::fs::remove_file(unclaimed.join("imports/gdfl.indices.lock"));
     let process = Process {
         store_root: &unclaimed,
         commit: None,
-        log: &log,
+        log,
         unstamped: None,
     };
     spread(
         "C-GR-05 the legacy refusal path, 100,000 lines",
         SAMPLES / 10,
         || {
-            if plan(request(), &process, &env, &mut SourceCache::default()).is_ok() {
+            if plan(request(), &process, env, &mut SourceCache::default()).is_ok() {
                 refuse("an unclaimed store with open keys planned");
             }
         },
     );
-    let _cleanup = std::fs::remove_dir_all(&base);
-    a && b
 }

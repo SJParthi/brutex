@@ -170,7 +170,8 @@ impl Watch {
     /// Whether the file is still the one listed: the handle's identity (a
     /// file grown or rewritten in place) and the path's (a file replaced by
     /// rename, even with its length and modification time kept) both equal
-    /// the listing's. Two stats, O(1).
+    /// the listing's. Two stats, O(1), timed beside C-GR-05
+    /// (`crates/pull/benches/ratio/gdfl_preflight.rs`).
     ///
     /// # Errors
     ///
@@ -681,8 +682,10 @@ fn year_zips(root: &Path, (from, to): (Day, Day)) -> Result<(), RunRefusal> {
             let near_miss = others
                 .iter()
                 .filter(|name| {
-                    let lower = name.to_ascii_lowercase();
-                    lower.starts_with(&digits) && lower.ends_with(".zip")
+                    name.starts_with(&digits)
+                        && Path::new(name)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
                 })
                 .take(NEAR_MISS_MAX)
                 .cloned()
@@ -809,23 +812,20 @@ fn writable(
         root: store.to_path_buf(),
     };
     let lock = store.join(locks::claim_lock(kind.as_str(), layout));
-    match std::fs::OpenOptions::new().write(true).open(&lock) {
-        Ok(_) => Ok(()),
-        Err(why)
-            if matches!(
-                why.kind(),
-                std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
+    let Err(why) = std::fs::OpenOptions::new().write(true).open(&lock) else {
+        return Ok(());
+    };
+    match why.kind() {
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied => {
             Err(refused())
         }
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => match volume {
-            Some(volume) if volume.read_only => Err(refused()),
-            _ => Ok(()),
-        },
-        // Anything else at the lock's name (a directory, a link) is the
+        std::io::ErrorKind::NotFound if volume.is_some_and(|volume| volume.read_only) => {
+            Err(refused())
+        }
+        // A lock not yet written on a writable volume is the claim's to
+        // create; anything else at its name (a directory, a link) is the
         // claim's to refuse by name a moment later.
-        Err(_) => Ok(()),
+        _ => Ok(()),
     }
 }
 
@@ -950,8 +950,11 @@ fn look(kind: &KindPlan, range: (Day, Day)) -> Looked {
 /// The first calendar-open day of `range` inside `span` the source holds,
 /// with its wanted files: one probe a day from the later of the range's and
 /// the span's first day (a day table's O(1) probe, or a day file's open)
-/// until one is held, so normally one listing read. A listing that refuses
-/// ends the search with `None` files: that day's refusal is the run's.
+/// until one is held, so normally one listing read (timed in the plan C-GR-05
+/// measures, `crates/pull/benches/ratio/gdfl_preflight.rs`); a range that
+/// opens on many unheld days costs one probe each, `docs/06-limits.md`
+/// L-IA3B-07. A listing that refuses ends the search with `None` files: that
+/// day's refusal is the run's.
 fn first_day(
     span: Option<(Day, Day)>,
     (from, to): (Day, Day),
@@ -1079,7 +1082,9 @@ fn census_header(
 /// the new epoch's bytes (`HEADER_LEN` + `ENTRY_STRIDE` × its capacity, the
 /// writer's constants) are put to R4-07's `floor_check` at the run's own
 /// floor, the one the run checks before each day (D-7002). O(1): two slot
-/// reads, arithmetic; the projected stop is O(days in range).
+/// reads, arithmetic, flat at 10x and 100x the census by C-GR-05
+/// (`crates/pull/benches/ratio/gdfl_preflight.rs`); the projected stop is
+/// O(days in range), `docs/06-limits.md` L-IA3B-07.
 fn room(
     store: &Path,
     layout: GdflLayout,

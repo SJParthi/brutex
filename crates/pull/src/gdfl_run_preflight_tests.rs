@@ -12,6 +12,7 @@
 )]
 
 use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -166,9 +167,9 @@ fn nothing_written(store: &Path) {
         })
         .unwrap_or_default();
     assert!(
-        names
-            .iter()
-            .all(|name| !name.ends_with(".lock") && !name.ends_with(".progress")),
+        names.iter().all(|name| !Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "lock" || ext == "progress")),
         "{names:?}"
     );
 }
@@ -421,7 +422,6 @@ fn a_root_with_no_year_zip_at_all_is_left_to_the_door() {
 /// says so; the refusal itself is proved on a name that cannot be opened.
 #[test]
 fn an_unreadable_year_zip_is_refused_before_the_run() {
-    use std::os::unix::fs::PermissionsExt as _;
     let root = scratch("ia3b-unreadable");
     let nfo = options_root(&root, &[("2024.zip", year_zip_of(&[(d1(), None)]))]);
     let zip_path = nfo.join("2024.zip");
@@ -430,7 +430,6 @@ fn an_unreadable_year_zip_is_refused_before_the_run() {
     let readable = std::fs::File::open(&zip_path).is_ok();
     std::fs::set_permissions(&zip_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     if readable {
-        eprintln!("NOT PROVED here: this process reads a mode-0000 file (it runs as root)");
         assert!(answer.is_ok(), "{answer:?}");
     } else {
         assert_eq!(
@@ -757,6 +756,29 @@ fn a_tick_store_entry_rebuilding_past_the_cap_is_refused() {
         }),
         crate::gdfl_import::Cause::open(crate::gdfl_import::Stage::Vendor, "member_too_large")
     );
+}
+
+/// The year-zip check's entry count reads the zip's tail and never its
+/// directory: one zip of one member and one of 2,000 cost the same reads,
+/// and each states its own count.
+#[test]
+fn the_stated_entry_count_reads_the_tail_alone() {
+    let reads_for = |members: usize| {
+        let names: Vec<String> = (0..members).map(|n| format!("F/{n}.csv")).collect();
+        let bytes = zip(&names
+            .iter()
+            .map(|name| (name.as_str(), &b"x"[..], Method::Stored))
+            .collect::<Vec<_>>());
+        let len = len_of(&bytes);
+        let source = Counting::new(bytes);
+        let stated = crate::gdfl_archive::stated_entries(&source, len).unwrap();
+        (stated, source.reads())
+    };
+    let (one, one_reads) = reads_for(1);
+    let (many, many_reads) = reads_for(2_000);
+    assert_eq!((one, many), (1, 2_000));
+    assert_eq!(one_reads, many_reads);
+    assert!(one_reads <= 3, "{one_reads}");
 }
 
 // ═══ 4: source_changing and source_busy (RA-323, RA-304) ═══════════════════
@@ -1390,7 +1412,6 @@ fn a_read_only_store_is_refused_before_any_line() {
     nothing_written(&store);
     // A lock file the process may not write: EACCES, refused the same way
     // (as root a mode-0444 file still opens for writing: NOT PROVED there).
-    use std::os::unix::fs::PermissionsExt as _;
     let lock = store.join(super::super::locks::STORE_LOCK);
     std::fs::write(&lock, b"").unwrap();
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
@@ -1398,7 +1419,6 @@ fn a_read_only_store_is_refused_before_any_line() {
     let answer = writable_check(&store, &Fake::local());
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
     if writable {
-        eprintln!("NOT PROVED here: this process writes a mode-0444 file (it runs as root)");
         assert_eq!(answer, Ok(()));
     } else {
         assert_eq!(
@@ -1814,6 +1834,12 @@ fn the_acknowledgement_crosses_the_request_line_only_when_given() {
 /// words of its own for.
 #[test]
 fn every_preflight_code_is_named_once_and_is_not_a_misuse() {
+    struct Bare<'a>(&'a RunRefusal);
+    impl core::fmt::Display for Bare<'_> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            say(self.0, f)
+        }
+    }
     let refusals = [
         RunRefusal::YearZipMissing {
             year: 1,
@@ -1868,12 +1894,6 @@ fn every_preflight_code_is_named_once_and_is_not_a_misuse() {
         lock: "l".to_owned(),
         holder: "h".to_owned(),
     };
-    struct Bare<'a>(&'a RunRefusal);
-    impl core::fmt::Display for Bare<'_> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            say(self.0, f)
-        }
-    }
     assert_eq!(Bare(&busy).to_string(), "run_busy");
 }
 
@@ -1967,7 +1987,7 @@ fn the_descriptors_a_run_holds_are_measured_at_one_and_four_workers() {
     let one = peak_descriptors(1, files);
     let four = peak_descriptors(4, files);
     let twelve = peak_descriptors(Workers::MAX, files);
-    eprintln!(
+    println!(
         "IA3B-FDS files={files} peak_w1={one} peak_w4={four} peak_w{}={twelve} \
          (descriptors beyond the {} held before)",
         Workers::MAX,
@@ -1979,5 +1999,188 @@ fn the_descriptors_a_run_holds_are_measured_at_one_and_four_workers() {
             "{workers} workers held {peak}, the model says {}",
             files_needed(workers)
         );
+    }
+}
+
+// ═══ NEEDS THE MAC: the real roots, read only ═══════════════════════════════
+
+/// The operator's roots from the three source variables, each `None` when
+/// unset.
+fn real_roots() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    (
+        var(crate::gdfl_run::TICKSTORE_VAR),
+        var(crate::gdfl_run::CM_ARCHIVE_VAR),
+        var(crate::gdfl_run::NFO_ARCHIVES_VAR),
+    )
+}
+
+/// M1 and M6: every preflight check's answer and its time on the real roots,
+/// for indices, stocks and options from each source set, over
+/// 2018-09-03..2026-09-24. Read only: the store is `BRUTEX_IA3B_REAL_STORE`
+/// when set (the preflight writes nothing on it, IA-GR-07; the log goes to a
+/// scratch folder) or a fresh scratch store. The legacy acknowledgement is
+/// given because the real journal's key `options 2020-09-16` ends in `begin`;
+/// M5 proves that refusal apart. A source variable left unset is a source not
+/// measured, said on its own line.
+#[test]
+#[ignore = "real data, NEEDS THE MAC M1: the three source variables and BRUTEX_IA3B_REAL_STORE"]
+fn ia3b_real_preflight_prints_every_check_and_its_time() {
+    let (ts, cm, nfo) = real_roots();
+    let store = std::env::var_os("BRUTEX_IA3B_REAL_STORE")
+        .map_or_else(|| store_at(&scratch("ia3b-real")), PathBuf::from);
+    let log = LogState::Installed(scratch("ia3b-real-logs").join("logs"));
+    let process = Process {
+        store_root: &store,
+        commit: None,
+        log: &log,
+        unstamped: None,
+    };
+    let range = (day(2018, 9, 3), day(2026, 9, 24));
+    let mut env: Vec<(&'static str, PathBuf)> = Vec::new();
+    for (name, root) in [
+        (crate::gdfl_run::TICKSTORE_VAR, &ts),
+        (crate::gdfl_run::CM_ARCHIVE_VAR, &cm),
+        (crate::gdfl_run::NFO_ARCHIVES_VAR, &nfo),
+    ] {
+        match root {
+            Some(root) => env.push((name, root.clone())),
+            None => println!("IA3B-REAL {name} unset: its source is not measured"),
+        }
+    }
+    let env = env_of(env);
+    let mut planned_kinds = 0;
+    for source in SourceWord::ALL {
+        for kind in [ImportKind::Indices, ImportKind::Stocks, ImportKind::Options] {
+            let held = match (source, kind) {
+                (SourceWord::TickStore, _) => ts.is_some(),
+                (SourceWord::Zip, ImportKind::Options) => nfo.is_some(),
+                (SourceWord::Zip, _) => cm.is_some(),
+            };
+            if !held {
+                continue;
+            }
+            let request = Request {
+                legacy_ack: true,
+                ..asked(kind, source, range)
+            };
+            let start = std::time::Instant::now();
+            let answer = plan(request, &process, &env, &mut SourceCache::default());
+            let took = start.elapsed();
+            match &answer {
+                Ok(plan) => {
+                    for checked in &plan.checks {
+                        println!(
+                            "IA3B-REAL {} {:?}: {}",
+                            source.as_str(),
+                            took,
+                            checked.line()
+                        );
+                    }
+                }
+                Err(why) => println!("IA3B-REAL {} {kind:?} {took:?}: {why}", source.as_str()),
+            }
+            assert!(
+                answer.is_ok(),
+                "{kind:?} from {}: {answer:?}",
+                source.as_str()
+            );
+            planned_kinds += 1;
+        }
+    }
+    println!("IA3B-REAL planned {planned_kinds} kind-source pairs");
+}
+
+/// A listing's stated lengths and entry names, as M4 reads them.
+fn listed<L>(entries: &[crate::gdfl_cm::ListedFile<L>]) -> Vec<(u64, String)> {
+    entries
+        .iter()
+        .map(|file| (file.len, file.entry.to_string()))
+        .collect()
+}
+
+/// One container's day listings, as M4 reads them: each day's stated
+/// lengths and entry names, `Ok(None)` for a day it holds no zip for.
+type Lens<'a> = dyn FnMut(Day) -> Result<Option<Vec<(u64, String)>>, CmRefusal> + 'a;
+
+/// M4: the largest member each real container states, beside the cap item 3
+/// sets (`tickstore_write::MEMBER_CAP`): every day of 2018-09-03..2026-09-24
+/// listed from the capital-market archive (both trees), the options year
+/// zips and the tick store (all three trees), read only. Prints the largest
+/// stated length and its entry per container and every day a listing refused
+/// (counted and the first named, never skipped silently); fails if a member
+/// is at or past the cap, since then a real day would be refused
+/// `member_too_large`.
+#[test]
+#[ignore = "real data, NEEDS THE MAC M4: the three source variables"]
+fn ia3b_real_largest_member_of_each_container() {
+    use crate::gdfl_cm::CmSource as _;
+    use crate::gdfl_nfo::NfoSource as _;
+    let (ts, cm, nfo) = real_roots();
+    let cap = crate::tickstore_write::MEMBER_CAP;
+    let (from, to) = (day(2018, 9, 3), day(2026, 9, 24));
+    let largest = |name: &str, lens: &mut Lens<'_>| {
+        let (mut top, mut entry) = (0_u64, String::new());
+        let (mut held, mut refused, mut first_refusal) = (0_u32, 0_u32, None);
+        let mut d = from;
+        while d <= to {
+            match lens(d) {
+                Ok(Some(files)) => {
+                    held += 1;
+                    for (len, at) in files {
+                        if len > top {
+                            (top, entry) = (len, at);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    refused += 1;
+                    first_refusal.get_or_insert(format!("{d}: {why}"));
+                }
+            }
+            d = d.succ().unwrap();
+        }
+        println!(
+            "IA3B-MEMBER {name}: largest {top} B ({entry}), cap {cap} B, {held} days held, \
+             {refused} refused (first: {first_refusal:?})"
+        );
+        assert!(
+            top < cap,
+            "{name}: {entry} states {top} B, at or past the cap"
+        );
+    };
+    if let Some(cm) = &cm {
+        let archive = crate::gdfl_archive::Archive::open(cm).unwrap();
+        for kind in [CmKind::Indices, CmKind::Stocks] {
+            largest(&format!("cm archive {kind:?}"), &mut |d| {
+                archive
+                    .day(kind, d)
+                    .map(|listing| listing.map(|listing| listed(listing.entries())))
+            });
+        }
+    }
+    if let Some(nfo) = &nfo {
+        let zips = crate::gdfl_nfo::NfoZips::new(nfo);
+        largest("options year zips", &mut |d| {
+            zips.day(d)
+                .map(|listing| listing.map(|listing| listed(listing.entries())))
+        });
+    }
+    if let Some(ts) = &ts {
+        let store = crate::gdfl_tickstore::TickStore::new(ts);
+        for kind in [CmKind::Indices, CmKind::Stocks] {
+            largest(&format!("tick store {kind:?}"), &mut |d| {
+                store
+                    .day(kind, d)
+                    .map(|listing| listing.map(|listing| listed(listing.entries())))
+            });
+        }
+        let options = crate::gdfl_nfo::NfoTickStore::new(ts);
+        largest("tick store options", &mut |d| {
+            options
+                .day(d)
+                .map(|listing| listing.map(|listing| listed(listing.entries())))
+        });
     }
 }

@@ -574,18 +574,7 @@ impl core::fmt::Display for CmRefusal {
                 "{refused} of {rows} rows refused, more than {MAX_BAD_ROWS} and more than one \
                  in every {BAD_ROWS_PER}: the file is refused whole"
             ),
-            Self::SymbolNotInUse { stale } => match stale {
-                Stale::AfterChange(change) => write!(
-                    f,
-                    "{} was not the exchange's symbol that day: it became {} on {}",
-                    change.old, change.new, change.effective
-                ),
-                Stale::BeforeChange(change) => write!(
-                    f,
-                    "{} was not the exchange's symbol that day: it replaced {} only on {}",
-                    change.new, change.old, change.effective
-                ),
-            },
+            Self::SymbolNotInUse { stale } => not_in_use(f, stale),
             Self::CalendarWindowNotLanded { kind } => write!(
                 f,
                 "the calendar records {kind:?}, but the store's session authority keeps no bar \
@@ -602,28 +591,65 @@ impl core::fmt::Display for CmRefusal {
             Self::ArchiveMemberEncrypted { member } => write!(f, "{member} is encrypted"),
             Self::DayZipMisfiled { found, expected } => misfiled(f, ZIP_WORD, (found, expected)),
             Self::DayFileMisfiled { found, expected } => misfiled(f, BTS_WORD, (found, expected)),
-            Self::DayZipEmpty { name } => write!(
-                f,
-                "the day zip {name} lists zero entries, as its source holds it (the archive, the \
-                 year zip or the tick store's day file of it): an empty container is never a day \
-                 that holds no file, so the day stays open"
-            ),
-            Self::MemberTooLarge { name, size } => write!(
-                f,
-                "`{name}` states {size} bytes, over {}",
-                crate::tickstore_write::MEMBER_CAP
-            ),
+            Self::DayZipEmpty { name } => day_zip_empty(f, name),
+            Self::MemberTooLarge { name, size } => member_too_large(f, name, *size),
             Self::SourceChanging {
                 path,
                 before,
                 after,
-            } => write!(
-                f,
-                "{path} changed under the run (before {before}, after {after}): it is still \
-                 being copied or was replaced, so no day read from it is closed"
-            ),
+            } => source_changing(f, path, before, after),
         }
     }
+}
+
+/// [`CmRefusal::SymbolNotInUse`]'s words (a free function since IA-3b's three
+/// arms, below, took the match past `clippy::too_many_lines` again).
+fn not_in_use(f: &mut core::fmt::Formatter<'_>, stale: &Stale) -> core::fmt::Result {
+    match stale {
+        Stale::AfterChange(change) => write!(
+            f,
+            "{} was not the exchange's symbol that day: it became {} on {}",
+            change.old, change.new, change.effective
+        ),
+        Stale::BeforeChange(change) => write!(
+            f,
+            "{} was not the exchange's symbol that day: it replaced {} only on {}",
+            change.new, change.old, change.effective
+        ),
+    }
+}
+
+/// [`CmRefusal::DayZipEmpty`]'s sentence (IA-3b item 2).
+fn day_zip_empty(f: &mut core::fmt::Formatter<'_>, name: &str) -> core::fmt::Result {
+    write!(
+        f,
+        "the day zip {name} lists zero entries, as its source holds it (the archive, the \
+         year zip or the tick store's day file of it): an empty container is never a day \
+         that holds no file, so the day stays open"
+    )
+}
+
+/// [`CmRefusal::MemberTooLarge`]'s sentence (IA-3b item 3).
+fn member_too_large(f: &mut core::fmt::Formatter<'_>, name: &str, size: u64) -> core::fmt::Result {
+    write!(
+        f,
+        "`{name}` states {size} bytes, over {}",
+        crate::tickstore_write::MEMBER_CAP
+    )
+}
+
+/// [`CmRefusal::SourceChanging`]'s sentence (IA-3b item 4).
+fn source_changing(
+    f: &mut core::fmt::Formatter<'_>,
+    path: &str,
+    before: &str,
+    after: &str,
+) -> core::fmt::Result {
+    write!(
+        f,
+        "{path} changed under the run (before {before}, after {after}): it is still \
+         being copied or was replaced, so no day read from it is closed"
+    )
 }
 
 /// What a misfiled day zip is called in its refusal.

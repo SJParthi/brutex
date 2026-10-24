@@ -810,6 +810,10 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
     }
 }
 
+/// [`open_watched_day`]'s answer: the day file's one handle, the watch on
+/// it, and its index.
+pub(crate) type WatchedDay = (Arc<std::fs::File>, Arc<Watch>, Vec<IndexEntry>);
+
 /// A day file opened through [`open_day`], its identity taken through that
 /// one handle, its index read and held to at least one entry (IA-3b, RA-322:
 /// an index of zero entries refuses the day [`CmRefusal::DayZipEmpty`] naming
@@ -821,10 +825,7 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
 ///
 /// [`open_day`]'s and [`read_index`]'s refusals, [`CmRefusal::DayZipEmpty`]
 /// and [`tick_unchanged`]'s.
-pub(crate) fn open_watched_day(
-    path: &Path,
-    zip: &str,
-) -> Result<Option<(Arc<std::fs::File>, Arc<Watch>, Vec<IndexEntry>)>, CmRefusal> {
+pub(crate) fn open_watched_day(path: &Path, zip: &str) -> Result<Option<WatchedDay>, CmRefusal> {
     let Some((file, file_len)) = open_day(path)? else {
         return Ok(None);
     };

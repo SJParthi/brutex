@@ -312,8 +312,9 @@ fn directory_bounds<B: ReadAt>(span: &Span<'_, B>) -> Result<(u64, u64, u64), Cm
 /// How many entries the end record of the zip of `len` bytes in `source`
 /// states its central directory holds (the ZIP64 count when a locator
 /// precedes it), without reading the directory: the tail read and at most
-/// two ZIP64 reads of [`directory_bounds`], O(1). IA-3b's year-zip check
-/// (`year_zip_empty`, RA-322) asks it.
+/// two ZIP64 reads of [`directory_bounds`], O(1)
+/// (`pull::gdfl_run::preflight::tests::the_stated_entry_count_reads_the_tail_alone`).
+/// IA-3b's year-zip check (`year_zip_empty`, RA-322) asks it.
 ///
 /// # Errors
 ///
@@ -720,7 +721,8 @@ impl<B: ReadAt> Archive<B> {
     /// its own place or refused for that day (IA-3b item 8, FM-133): the
     /// source's span, which a plan states so the days outside it read as
     /// `outside_source`, never as holes. `None` when the tree holds none.
-    /// O(1): kept as the directory is read, two comparisons a day zip.
+    /// O(1): kept as the directory is read, two comparisons a day zip;
+    /// UNVERIFIED as a timing, `docs/06-limits.md` L-IA3B-07.
     #[must_use]
     pub fn span(&self, kind: CmKind) -> Option<(Day, Day)> {
         let (first, last) = (*self.spans.get(tree(kind))?)?;
