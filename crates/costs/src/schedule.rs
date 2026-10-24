@@ -1977,8 +1977,11 @@ mod tests {
         // own constant, and on every representable day the only days the NSE
         // rows move are FA56129's, FA64232's and that one — where the card's
         // source moves too, and nowhere else (D-6741). BSE moves once.
+        /// A day a venue's rows or source moved: the venue, the day, the
+        /// (exchange row, IPFT) pair where both answer, and the card's source.
+        type Move = (Exchange, TradeDay, Option<(i64, i64)>, Option<&'static str>);
         assert_eq!(FA73061_EFFECTIVE, crate::regime::MAR_2026);
-        let mut moves: Vec<(Exchange, TradeDay, Option<(i64, i64)>, Option<&str>)> = Vec::new();
+        let mut moves: Vec<Move> = Vec::new();
         for exchange in [Exchange::Nse, Exchange::Bse] {
             let mut last = None;
             for on in crate::day::every_representable_day() {
