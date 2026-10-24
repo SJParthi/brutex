@@ -392,7 +392,10 @@ impl Catalog {
         // would otherwise take that ordinal and be refused at its own partial
         // receipt name.
         for one in &partials {
-            let highest = catalog.highest.entry((one.kind, one.stamp.day)).or_insert(0);
+            let highest = catalog
+                .highest
+                .entry((one.kind, one.stamp.day))
+                .or_insert(0);
             *highest = (*highest).max(one.stamp.ordinal);
         }
         catalog.incomplete.extend(partials);

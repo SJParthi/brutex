@@ -14062,7 +14062,10 @@ fn futures_answer(
 ) -> (axum::http::StatusCode, String) {
     facts.push(("Rows read", landed.rows_read.to_string()));
     facts.push(("Bars offered to the store", landed.bars_offered.to_string()));
-    facts.push(("Bars written to the file", landed.bars_committed.to_string()));
+    facts.push((
+        "Bars written to the file",
+        landed.bars_committed.to_string(),
+    ));
     facts.push((
         "Rows folded into an open bar",
         landed.rows_folded.to_string(),
@@ -30486,9 +30489,19 @@ mod tests {
         assert_eq!(record.outcome, audit::Outcome::Empty);
         assert_eq!((record.rows_read, record.bars_stored), (5, 0));
         assert!(record.note.contains("already held"), "{}", record.note);
-        assert_eq!(futures_fact(&body, "Bars written to the file").as_deref(), Some("0"));
-        assert_eq!(futures_fact(&body, "Bars offered to the store").as_deref(), Some("5"));
-        assert_eq!(futures_fact(&body, "Bars stored"), None, "no offered count under it");
+        assert_eq!(
+            futures_fact(&body, "Bars written to the file").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            futures_fact(&body, "Bars offered to the store").as_deref(),
+            Some("5")
+        );
+        assert_eq!(
+            futures_fact(&body, "Bars stored"),
+            None,
+            "no offered count under it"
+        );
         assert_eq!(
             futures_fact(&body, "Balances").as_deref(),
             Some("yes — 5 read = 5 offered + 0 folded + 0 dropped")
@@ -30500,7 +30513,10 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(record.outcome, audit::Outcome::Stored);
         assert_eq!(record.bars_stored, 5);
-        assert_eq!(futures_fact(&body, "Bars written to the file").as_deref(), Some("5"));
+        assert_eq!(
+            futures_fact(&body, "Bars written to the file").as_deref(),
+            Some("5")
+        );
 
         // DROPS, BY REASON, ON THE PAGE AND IN THE RECORD; one folded row.
         let mut census = pull::session::DropCensus::new();
@@ -30540,7 +30556,11 @@ mod tests {
         });
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(record.outcome, audit::Outcome::Empty);
-        assert!(record.note.contains("no futures bar was left"), "{}", record.note);
+        assert!(
+            record.note.contains("no futures bar was left"),
+            "{}",
+            record.note
+        );
 
         // A SERIES THAT STOPPED.
         let (code, body, record) = answered(&pull::fnowork::FuturesLanded {
@@ -30548,7 +30568,10 @@ mod tests {
             ..landed(5, 5)
         });
         assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!((record.outcome, record.failures, record.bars_stored), (audit::Outcome::Failed, 1, 5));
+        assert_eq!(
+            (record.outcome, record.failures, record.bars_stored),
+            (audit::Outcome::Failed, 1, 5)
+        );
         assert!(
             futures_fact(&body, "Balances").is_some_and(|line| line.starts_with("NO — ")),
             "{body}"

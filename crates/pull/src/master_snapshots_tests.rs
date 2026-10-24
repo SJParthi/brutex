@@ -1465,18 +1465,26 @@ fn named_diff_changes_past_the_bound_are_counted_and_all_kept_in_the_diff_file()
             })
             .collect()
     };
-    after_land(&dir, kite_source(), &dump(&rows(75)), &written(), Ok(a)).unwrap();
+    let first = after_land(&dir, kite_source(), &dump(&rows(75)), &written(), Ok(a)).unwrap();
+    assert_eq!(first.wrote, Ok(Wrote::New(stamp(a, 1))));
     let outcome = after_land(&dir, kite_source(), &dump(&rows(30)), &written(), Ok(b)).unwrap();
     let Some(Ok(Some(ref summary))) = outcome.diff else {
         panic!("a diff against the day before: {:?}", outcome.diff);
     };
-    assert_eq!(summary.named.len(), many, "every lot change is in the summary");
+    assert_eq!(
+        summary.named.len(),
+        many,
+        "every lot change is in the summary"
+    );
     let (named, unnamed) = summary.named_bounded();
     assert_eq!((named.len(), unnamed), (DIFF_NAMED, 3));
     assert_eq!(named, &summary.named[..DIFF_NAMED], "the diff's own order");
     let json = outcome.json();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["diff"]["named"].as_array().map(Vec::len), Some(DIFF_NAMED));
+    assert_eq!(
+        value["diff"]["named"].as_array().map(Vec::len),
+        Some(DIFF_NAMED)
+    );
     assert_eq!(value["diff"]["named_total"], many);
     assert_eq!(value["diff"]["unnamed"], 3);
     assert_eq!(value["diff"]["counts"]["lot_size"], many);

@@ -1275,14 +1275,24 @@ fn late_and_early_reply(_url: &str) -> Result<String, Refusal> {
 #[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
 fn twice_alike_reply(_url: &str) -> Result<String, Refusal> {
     let one = |d, price| candle(day(2023, 11, d), price, u64::from(price) * 10);
-    Ok(answer(&[one(28, 150), one(28, 150), one(29, 151), one(30, 152)]))
+    Ok(answer(&[
+        one(28, 150),
+        one(28, 150),
+        one(29, 151),
+        one(30, 152),
+    ]))
 }
 
 /// Three sessions with 11-28 answered twice, the copies disagreeing.
 #[allow(clippy::unnecessary_wraps, reason = "the transport's own signature")]
 fn twice_unlike_reply(_url: &str) -> Result<String, Refusal> {
     let one = |d, price| candle(day(2023, 11, d), price, u64::from(price) * 10);
-    Ok(answer(&[one(28, 150), one(28, 159), one(29, 151), one(30, 152)]))
+    Ok(answer(&[
+        one(28, 150),
+        one(28, 159),
+        one(29, 151),
+        one(30, 152),
+    ]))
 }
 
 /// R4-28 repair 4 (D-7190): THE SAME WINDOW PULLED TWICE WRITES NOTHING THE
@@ -1302,7 +1312,13 @@ fn a_futures_window_pulled_twice_writes_nothing_the_second_time_and_says_so() {
         ],
     );
     let asked = window(day(2026, 1, 1), day(2026, 1, 9));
-    let (_, first) = plan_and_pull(&masters, &store_root, asked, day(2026, 1, 12), january_reply);
+    let (_, first) = plan_and_pull(
+        &masters,
+        &store_root,
+        asked,
+        day(2026, 1, 12),
+        january_reply,
+    );
     let month = YearMonth::new(2026, 1).unwrap();
     let held = bars_of(&store_root, "ZQIDX", Some(contract(2026, 1, 27)), month);
     assert_eq!(
@@ -1315,7 +1331,13 @@ fn a_futures_window_pulled_twice_writes_nothing_the_second_time_and_says_so() {
          2026-01-02..2026-01-09; 0 folded into an open bar; 0 dropped"
     );
 
-    let (_, again) = plan_and_pull(&masters, &store_root, asked, day(2026, 1, 12), january_reply);
+    let (_, again) = plan_and_pull(
+        &masters,
+        &store_root,
+        asked,
+        day(2026, 1, 12),
+        january_reply,
+    );
     assert!(again.failed.is_empty(), "{:?}", again.failed);
     assert_eq!(
         (
@@ -1385,10 +1407,12 @@ fn a_closed_day_or_out_of_window_candle_is_counted_as_dropped_on_the_receipt() {
     );
     assert_eq!(
         landed.series,
-        ["ZQIDX 2023-11-30-FUT: 3 bars written, 3 offered from 6 rows over \
+        [
+            "ZQIDX 2023-11-30-FUT: 3 bars written, 3 offered from 6 rows over \
           2023-11-27..2023-11-30; 0 folded into an open bar; 3 dropped (before the \
           requested window 1 · after the requested window 1 · on a day the exchange \
-          calendar records closed 1)"]
+          calendar records closed 1)"
+        ]
     );
     // NOTHING OF A DROPPED DAY IS ON DISK.
     let held: Vec<i64> = november_bars(&store_root, 11)
@@ -1479,7 +1503,11 @@ fn a_futures_plan_refuses_a_newest_snapshot_dated_after_today() {
     snapshot_on(&today, day(2026, 1, 7), &rows);
     let planned = plan(&today).unwrap();
     assert!(planned.refused.is_empty(), "{:?}", planned.refused);
-    assert_eq!(planned.asks.len(), 2, "the contract and the continuous series");
+    assert_eq!(
+        planned.asks.len(),
+        2,
+        "the contract and the continuous series"
+    );
 }
 
 /// R4-28 repair 4 (the r4 check's follow-up): on a multi-thread runtime, as
