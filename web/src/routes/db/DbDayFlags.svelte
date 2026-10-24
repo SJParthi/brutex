@@ -29,9 +29,14 @@
   import {
     bandOf,
     bandSpan,
+    bandInstrument,
+    bandExpiry,
+    casCounts,
+    casSidecarWords,
     dayflagsUrl,
     emptyWindowWhy,
     tally,
+    alsoTally,
     sessionCount,
     DAYFLAGS_PAGE_DAYS
   } from '$lib/db/dayflags.js';
@@ -72,6 +77,10 @@
     return asked;
   }
 
+  /* `bandInstrument` lives in the plain module so `node --test` reaches it;
+     `DbCalendar` imports it from here, as before. */
+  export { bandInstrument };
+
   /**
    * `YYYY-MM-DD` moved by `n` days, on the calendar (no time zone).
    *
@@ -81,30 +90,6 @@
   const addDays = (iso, n) =>
     new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
-  /**
-   * THE ONE INSTRUMENT A DAY FLAG IS ABOUT, from the rows the selection
-   * matches: the exact key when there is one series (a spot series, or one
-   * contract), else the underlying's options as a kind (`NSE-FNO-NIFTY`),
-   * whose calendar and import days still answer though no one contract's
-   * bars can be counted. `''` when the selection spans instruments.
-   *
-   * @param {any[]} rows
-   */
-  export function bandInstrument(rows) {
-    let one = '';
-    let base = '';
-    for (const r of rows) {
-      if (r.absent) continue;
-      if (one === '') one = r.instrument;
-      else if (one !== r.instrument) one = '\u0000';
-      const parts = String(r.instrument).split('-');
-      const kind = parts.length > 2 ? `${parts[0]}-${parts[1]}-${r.underlying ?? parts.slice(2).join('-')}` : '';
-      if (base === '') base = kind;
-      else if (base !== kind) base = '\u0000';
-    }
-    if (one !== '' && one !== '\u0000') return one;
-    return base !== '' && base !== '\u0000' ? base : '';
-  }
 
   /**
    * The vendor archive's span of `feed`, from `/feeds.json` (D-3338): GDFL's
@@ -133,7 +118,11 @@
     let bandWhy = $state('');
     let bandFor = $state('');
     let bandLoading = $state(false);
-    const instrument = $derived(bandInstrument(db.matched ?? []));
+    /* THE GRID'S RUNG (R3-13 goal 1): the band counts what the grid shows. */
+    const timeframe = $derived(typeof db.timeframe === 'string' ? db.timeframe : '');
+    const instrument = $derived(bandInstrument(db.matched ?? [], timeframe));
+    /* A FAMILY'S ONE EXPIRY, sent only where the band asks the family. */
+    const expiry = $derived(bandExpiry(db.matched ?? [], instrument, timeframe));
     const span = $derived(bandSpan(db.fromDay ?? '', db.toDay ?? '', addDays));
     const reads = createPageRequests();
 
@@ -149,7 +138,7 @@
         bandLoading = false;
         return;
       }
-      const url = dayflagsUrl(feed, inst, s.from, s.to);
+      const url = dayflagsUrl(feed, inst, s.from, s.to, 0, { timeframe, expiry });
       if (untrack(() => bandFor) === url) return;
       bandFor = url;
       bandLoading = true;
@@ -226,6 +215,10 @@
   let openDay = $state('');
 
   const legend = $derived(tally(db.dayBandCells));
+  /* THE FLAGS BEHIND EACH DAY'S LEAD (verify-R3-13-r2's follow-up): the
+     legend counts lead kinds alone, so "frozen run not judged" behind a
+     day's import fault was only in that day's line. */
+  const also = $derived(alsoTally(db.dayBandCells));
   const flagged = $derived(db.dayBandCells.filter((/** @type {any} */ c) => c.flagged));
   /* AN AUCTION DAY IS ONE LINE FOR THE WHOLE RUN: every session of a
      CAS-eligible share from 2026-08-03 is one, and listing each would bury
@@ -233,7 +226,13 @@
   const listed = $derived(
     flagged.filter((/** @type {any} */ c) => !(c.kind === 'cas' && c.kinds.length === 1))
   );
-  const casDays = $derived(flagged.length - listed.length);
+  /** The closing-auction days, counted (SC-CLOSE-8, SC-CLOSE-9): the lone
+      ones split by whether the share's dated flag is 1 or no master holds it,
+      and over every flag-1 day of the band, whose month keeps the print apart
+      in its sidecar. */
+  const cas = $derived(casCounts(flagged));
+  const casDays = $derived(cas.days);
+  const casUnheld = $derived(cas.unheld);
   /* SESSIONS ARE THE CALENDAR'S (AH-03, g-ui-dom-vs-json-6): counted from
      each day's calendar code, never from its lead kind, so a closed day
      outside the archive is not a session. */
@@ -247,8 +246,12 @@
      handling is each day's record; opening a closing-auction day of a share
      reads that day's `/sources/day.json` once and words it. */
   const feed = $derived(feeds.all.find((f) => f.wire === feeds.active) ?? null);
-  const casAll = $derived(db.dayBandCells.filter((/** @type {any} */ c) => c.kinds.includes('cas')).length);
+  /* ONLY A DAY THE SHARE'S DATED FLAG IS 1 IS A CLOSING-AUCTION DAY
+     (SC-CLOSE-9): a flag-0 day is an ordinary session, and a day whose flag
+     no master holds has its own line below. */
+  const casAll = $derived(cas.sessions);
   const runAuction = $derived(auctionBandSentence(feed, null, { sessions: casAll }));
+  const runSidecar = $derived(casSidecarWords(feed, cas));
   const auctionUrl = $derived.by(() => {
     if (!openDay || /** @type {any} */ (feed)?.closing_auction?.handling !== 'print_kept_apart') return null;
     const c = db.dayBandCells.find((/** @type {any} */ x) => x.day === openDay);
@@ -302,10 +305,18 @@
       {#if db.dayBand}
         <span class="dbsum">{sessions} session day(s) · {flagged.length} flagged</span>
         <span class="dblegend">
-          {#each legend as k (k.kind)}
+          {#each legend as k (`${k.kind}|${k.word}`)}
             <span class="dbkey" data-tone={k.tone}><i aria-hidden="true"></i>{k.word} {k.n}</span>
           {/each}
         </span>
+        {#if also.length > 0}
+          <span class="dblegend" aria-label="Flags behind each day's lead kind">
+            <span>also on these days, behind each day's lead:</span>
+            {#each also as k (k.kind)}
+              <span class="dbkey" data-tone={k.tone}><i aria-hidden="true"></i>{k.word} {k.n}</span>
+            {/each}
+          </span>
+        {/if}
       {:else if db.dayBandLoading}
         <span class="dbsum">reading /dayflags.json…</span>
       {/if}
@@ -351,7 +362,7 @@
         {/each}
       </div>
 
-      {#if listed.length || casDays}
+      {#if listed.length || casDays || casUnheld}
         <ul class="dlist">
           {#each listed.slice(0, 12) as c (c.day)}
             <li data-tone={c.tone} class:open={openDay === c.day}>
@@ -364,9 +375,23 @@
             <li class="more">and {listed.length - 12} more flagged day(s) — each is a cell above; hover it for its reason</li>
           {/if}
           {#if casDays}
+            <!-- ONLY DAYS THE SHARE'S DATED FLAG IS 1 (SC-CLOSE-9); the
+                 handling is each day's own record (AH-03), and "kept apart"
+                 is said only of a month whose sidecar the server found. -->
             <li data-tone={runAuction.tone} data-auction={runAuction.state}>
               <span class="kw">closing auction</span>
-              <span class="says">{runAuction.text}</span>
+              <span class="says">{runAuction.text}{runSidecar ? ` ${runSidecar}` : ''}</span>
+            </li>
+          {/if}
+          {#if casUnheld}
+            <!-- A FLAG NO MASTER HOLDS IS NEVER AN AUCTION (SC-CLOSE-8). -->
+            <li data-tone="info">
+              <span class="kw">closing-auction flag not held</span>
+              <span class="says"
+                >{casUnheld} session(s) of this share have no dated closing-auction flag held, so their
+                15:15–15:29 is unverified, neither an auction nor continuous trading (D-3320); the
+                notes below say why each master was not read.</span
+              >
             </li>
           {/if}
         </ul>
@@ -381,14 +406,32 @@
               >{c.held === null ? `this feed holds no file (${c.heldWhy ?? 'not held'})` : `${c.held} bar(s) here`}
               · {c.peer === null ? `${feedWord(c.peerFeed)} holds none` : `${feedWord(c.peerFeed)} holds ${c.peer}`}</span
             >
+            {#if c.finest !== null}
+              <!-- THE GRID'S RUNG IS NOT THE FINEST (R3-13 goal 1): both counts. -->
+              <span class="counts">· {c.finest} {c.finestRung} bar(s) beside the {c.rung} count</span>
+            {/if}
             {#if c.fills !== null}
               <span class="counts">· {c.fills} zero-volume bar(s), held but not traded</span>
+            {/if}
+            {#if c.definition}
+              <!-- WHICH BAR DEFINITION BUILT THE DAY (R3-13 goal 3). -->
+              <span class="counts" class:stale={!c.definition.current}
+                >· bar definition {c.definition.value}{c.definition.current ? '' : ` — this build builds ${c.definition.thisBuild ?? 'another'}, labelled until restated`}</span
+              >
             {/if}
             <ul>
               {#each c.says as s, i (i)}<li>{s}</li>{/each}
             </ul>
             {#if dayAuction}
               <p class="dauction" data-tone={dayAuction.tone} data-auction={dayAuction.state} role="status">{dayAuction.text}</p>
+            {/if}
+            {#if c.unknown.length}
+              <!-- A DAY FIELD THIS PAGE HAS NO NAME FOR (R3-13 goal 5), drawn
+                   under the name the ledger wrote it with. -->
+              <p class="hist">Day-ledger fields this page does not name yet, as served:</p>
+              <ul class="unknown">
+                {#each c.unknown as f (`${f.kind}.${f.name}`)}<li><code>{f.kind}.{f.name}</code> = {f.value}</li>{/each}
+              </ul>
             {/if}
             {#if c.superseded.length}
               <p class="hist">History — refusals an earlier run logged for this day, superseded by the run that closed it:</p>
@@ -546,6 +589,12 @@
   .dopen .counts {
     color: var(--dim);
     margin-left: var(--s3);
+  }
+  .dopen .counts.stale {
+    color: var(--warn);
+  }
+  .unknown code {
+    font-family: var(--mono);
   }
   .dopen ul,
   .dnotes ul {

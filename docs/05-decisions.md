@@ -72186,6 +72186,7 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
 ### D-5170 — Volume is GDFL's, never Zerodha's minutes; decisions are taken on Zerodha minutes, GDFL only at the seconds level, and the per-stock-day factor converts at the fill boundary — 2026-10-16
 
 **Context** (DATA-1; hand-over FINDING 2, FINDING 3, FINDING 4 and the DATA
@@ -72705,6 +72706,155 @@ rule and a test:
    name and never picks a factor of its own. `Ok` alone is not enough
    either: a close intersection can survive off the median, and then the
    range intersection, or nothing, is the basis.
+
+### D-6017 — The store's host refusals a disk cannot stage are driven by `#[cfg(test)]` seams; a look that catches a staging file mid-unlink is a free name; a refused checksum write names the sidecar; a durable batch's refused barrier deferral is remembered as a failed barrier — 2026-10-17
+
+**Implemented by** the store mutation and coverage pass of 17 October 2026
+(`reports/cloud-mut-store-20261017.md`, branch `cloud/mut-store-20261017`),
+which continues the 16 October pass. **Number** chosen above every number in
+use or reserved on any branch on 17 October 2026 (D-5619 the highest, on
+`cloud/fib1-20261016`), so no package landing beside this one meets it.
+
+**What was observed.** `CLAUDE.md` §9 asks for 100% line and branch
+coverage and no surviving mutant on every touched module. The 16 October
+pass left 34 mutants and about 110 production lines in `crates/store` and
+`crates/telemetry/src/sink.rs` it argued no test could reach. Fifteen of
+the mutants, and most of the lines, sit on arms that only a host refusal
+reaches, on a file the same function has just opened, measured or written,
+or only a race between two calls of one function. No test can stage those
+on a real disk. Three of the arms answered wrongly when they were driven:
+
+1. `store::staging::create` refused a file whose last name went between
+   the host's lookup of the name and its read of the file's status as
+   `staging_linked`, "one of 0 names of a file". A file with no name has none
+   to protect. The 16 October pass observed this under a real race.
+2. `BarFile::seal_committed` named the BAR file when the host refused the
+   write of the checksum sidecar. The bar file had not been refused.
+3. **Inside a `DurableBatch`, a refused append barrier was forgotten.** A
+   plain writer remembers a failed barrier for the month, so no later
+   append in the process confirms the commit it guarded (D-1907). Under a
+   batch, `barrier_in` defers the flush instead, and when the deferral was
+   refused (the device's `fstat`) it returned the refusal without
+   remembering it. The same process then reopened the month and appended
+   past the refused commit: 1,100 bars the caller was told were refused
+   became the first 1,100 rows of a month confirmed at 1,101.
+
+**Decided.**
+
+1. **Seams, `#[cfg(test)]` only, in the codebase's existing shape.** Each
+   seam adds a branch under test, so the call that ships is the call every
+   test runs (`file::sync_hooked`, D-2740; `flock::unlock`'s refusal; the
+   verdict crash seam, D-4865). There are nine:
+   - `file::fault` and `impl Positional for File`: one per-thread host
+     refusal, armed for one `Action` on one file. The file is matched by
+     path, or by device and inode for an open handle. `fault` replaces the
+     answer after the call; a read or write is refused before it, so a
+     refused write writes nothing. The same refusal also reaches
+     `index_on_open`'s look at the `.tix` name.
+   - `file::initialise`: an actor before the genesis' flush. It is the one
+     place a batch can be sealed between an open's capture of it and that
+     open's first deferral, so `defer_file`'s sealed answer is reached at
+     every writer call site.
+   - `staging`: a stand-in for the look, and an open refusal, so the Nth
+     open can be refused.
+   - `sort_index_writer`: the index's looks and positional reads go through
+     the file seam (`look`, `read_index_at`).
+   - `verdict`: an interference seam, which runs another actor's step before
+     a host call. It sits before the removal of a refused temporary,
+     `remove_tmp`, the year index's link, the image's link, and a reader's
+     second look for a year index.
+   - `flock::Flock::try_lock`: a one-shot refusal, in the shape of its
+     unlock seam.
+   - `safe_open::name_the_refusal`: a per-thread look counter, so the cost
+     its doc states (no look on any other path) is measured.
+   - `telemetry::sink::Audit::retire`: an actor between making the
+     roll-aside folder and looking at it.
+   - `telemetry::sink::Sink::open`: the clock its "ahead of the clock" check
+     reads, pinned once on a thread, because only a pinned clock can equal a
+     resumed stamp on request
+     (`a_resumed_floor_equal_to_the_clock_is_not_ahead_of_it`). This ninth
+     seam came later on 17 October than the list above was first written;
+     the merge-back (CLOUD-MUTSTORE) counted it.
+2. **A staging look that sees 0 links is a free name.** The create is tried
+   once more and nothing is cleared, exactly as for a name gone by the look
+   (`staging.rs`'s table gains the row).
+3. **A refused sidecar write names the sidecar**, which is the path the
+   host refused.
+4. **`sort_index_writer::write_whole` loses its `n_valid == 0` guard.** Its
+   only route (`keep_sort_index`) returns first for an empty month, so no
+   input reached the guard. It now returns `()`.
+5. **A refused deferral is a failed barrier.** `barrier_in` remembers the
+   month when the batch refuses to defer its flush, exactly as `barrier`
+   remembers a failed sync, so the next append in the process is refused
+   `barrier_failed`. The deferral was refused, so the file is in no flush
+   the batch will make; the commit it guarded is no more durable than one
+   whose sync failed.
+
+**Rejected.**
+- *Restructuring production paths so a test could reach these arms from
+  data.* That changes production control flow to serve a test (D-0696
+  item 6 rejected the same for `cli`'s two seams).
+- *Declaring every such arm unreachable.* The two defects above were on
+  such arms.
+
+**What is still not reached**, each with its reason, is listed in the
+report's "Coverage" and "Equivalent mutants" sections. Two kinds remain.
+Defensive re-borrows (`let Some(tix) = self.tix.as_ref() else`) after a
+caller has checked the same value. And `cfg` arms for targets that are not
+built here (`safe_open`'s and `file`'s unverified-flag arms).
+
+**Merged back** onto `feat/db-fix` by CLOUD-MUTSTORE on 21 October 2026, and
+measured there again on macOS (uid 501; cargo-mutants 26.2.0 with nextest
+0.9.145 under Gate 18's flags; line numbers are the merged tree's):
+
+- Gate 18's own plan for this change (`--in-diff` against `feat/db-fix`
+  over `crates/store/src` and `crates/telemetry/src`): 38 mutants, 22
+  caught, 16 unviable, none missed, none timed out.
+- The 12 mutants argued equivalent each survive the whole suite, every
+  argument re-read at its current line: `file.rs` `MAX_ROW_LEN` (215:32
+  `>` made `==` and `>=`, 220:15 `>` made `>=`), `DurableBatch::defer_file`'s
+  guard `O_SYNC.is_none()` made `false` (5322:42; `O_SYNC` is `Some` on
+  macOS as on Linux), `flush_all`'s `<` made `<=` (5533:67),
+  `writer_flags`' guard `through` made `true` or `false` (5747:27, an arm
+  compiled on no verified target), `verdict.rs` `Code::worse`'s `<` made
+  `<=` (410:29), `sealed.rs` `Fold::push`'s `<` made `<=` (1504:32),
+  `last_before`'s guard `block > 0` made `true` and its `>` made `>=`
+  (2352:35, 2352:41), and `sink.rs` `Audit::mark_coverage`'s `>` made `>=`
+  (3272:32).
+- Of the three mutants that stop a loop ending, `first_at_or_after`'s two
+  were caught where 18 October caught them, by the agreeing-overlap test at
+  its 20 s deadline (the 33rd of 875 tests). The sealed audit's
+  `chunk < n_blocks` made `<=` TIMED OUT at 900 s: SC-3 (D-4965), merged
+  after this pass, added
+  `the_audited_door_audits_both_forms_and_compares_them`, which audits with
+  no deadline and is now the 67th test in the default order, ahead of every
+  deadline. So `.config/nextest.toml` runs
+  `first_at_or_after_never_probes_more_than_the_bisection_height` and
+  `an_empty_month_is_a_head_alone` first, as the 18 October report
+  proposed; order only, nothing skipped. Measured with that order, all
+  three are caught: the two lookup mutants by the first in 0.015 s, the
+  2nd of 875 tests, and the audit mutant by the second at its 60 s
+  deadline, the 7th.
+- `crates/telemetry/tests/cloud_mutants_sink.rs` imported, at file level,
+  what only its Linux-only `fsync` test uses: an unused import on macOS,
+  which `-D warnings` refuses (clippy, and Gate 31's macOS test run under
+  the workflow's `RUSTFLAGS`). The import moved into that test. On macOS
+  that test does not run, so there `FileTarget::sync` made `Ok(())` has no
+  catch; Gate 18 runs on Linux.
+- Coverage, by the 16 to 18 October passes' per-binary union
+  (`cargo llvm-cov` 0.8.4 with `--branch` builds; each of the 43 test
+  binaries run alone): `path`, `safe_open`, `sealed`, `sealed_codec`,
+  `sort_index_writer`, `staging`, `time_index`, `verdict` and `sink` give
+  the 18 October figures line for line and branch for branch. `file`,
+  `flock` and `emits` give those figures plus lines `feat/db-fix` added
+  after the cut, each uncovered by its own package's tests: in `file.rs`,
+  24 lines of PREC-1's `#[ignore]`d full-volume test and 1 line and 1
+  branch of SC-3's `write_sealed_refused`; in `flock.rs`, 15 lines and 8
+  branches of R3-08's and AG-06's bounded waits; in `emits.rs`, 1 branch of
+  an R4-09a test helper. No line or branch this change adds to production
+  code is uncovered.
+
+Invariants: `docs/04-invariants.md` CMS-01 to CMS-09.
 
 ### D-4990 — The macOS rows run on macOS: a CI job on a macOS runner runs the workspace's tests, and gate 31 refuses a workflow without it and a run whose own log lacks a macOS row — 2026-10-16
 
@@ -83476,6 +83626,915 @@ or in the package report.
   (`the_d_5189_steps_are_timed`).
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
+
+### D-7270 — INT-15: a vendor-padded minute is defined, counted per day, and never read as a trade; a derived bucket of only padded minutes has no bar (measured both ways) — 2026-10-22
+
+The numbers D-7270 to D-7274 were taken from an unused block above the
+in-flight claims (D-6892, D-7010..D-7018, D-7120) and are re-taken from the
+ledger's head at landing if another package lands first (amendment A6).
+
+**Implemented by** R4-27. **Items** INT-15 (checklist, priority 3), the fold
+rule FIB-8's FM-F095 waits on, FM-181 (related). The `/db` label is R4-04's;
+`/bars/window.json` `flags:["padded"]` is R4-27's sequenced edit after R4-03,
+and R3-29's server fold path reads the same `pull::fold` when it lands.
+
+**What was observed.** Zerodha fills a quiet minute of a cash share with a
+candle of its own: volume zero, open, high, low and close all the close of
+the minute before. Stored as bars like any other, the derived 2-60 minute
+rungs read them as trades: a bucket that begins with one opens at a price
+nobody paid in it, its high or low can be that stale price, and it counts
+as complete when nothing traded in it.
+
+**The definition.** A VENDOR-PADDED MINUTE is a cash-equity one-minute bar
+with volume zero whose open, high, low and close all equal the close of the
+bar before it in the SAME SESSION WINDOW of the same IST day
+(`pull::padded::is_padded`, one comparison of four prices and a volume).
+Therefore the first bar of a day (the 09:15 open) is never padded, the first
+bar after a halt is never padded (a halt ends one `calendar::Session`
+window), a bar outside every window is never padded, and an index minute is
+never padded (an index does not trade, so its flat minute is a level that
+did not move). The rule is applied by segment, cash, not by vendor name; no
+GDFL month is derived (`ingest::derives_for`), so in the derive path today
+it reaches Zerodha's cash minutes only. A padded minute is kept in the store
+exactly as the vendor sent it.
+
+**Measured both ways** — `cli padded-measure zerodha LIST`, release build of
+this branch, over a private shadow of the operator's store, 22 Oct 2026,
+lists and outputs in `state/fix/round2/R4-27-evidence`
+(`sample_months.list`, `padded-sample.tsv`, `z7_months.list`,
+`z7_large_rungs.tsv`, `padded-z7.tsv`). Treatment (a) `keep_flat`: a bucket
+opens on its first unpadded minute and a bucket of only padded minutes keeps
+the bar the fold wrote before (flat at the carried price, volume zero).
+Treatment (b) `absent`: the same, and a bucket of only padded minutes has no
+bar. The two agree on every bucket that traded at all.
+
+| set | share-months | padded minutes | buckets (2-60 min) | open moved | high or low moved | padded-only buckets: kept by (a), absent under (b) |
+|---|---|---|---|---|---|---|
+| the five sample months (2019-03, 2021-09, 2023-06, 2025-03, 2026-08), every share | 934 | 75,451 | 8,802,501 | 15,705 (0.18%) | 8,436 | 23,297 (0.26%) |
+| Z7's large disagreements (16,505 rung-months, mostly thin shares) | 2,903 | 2,322,630 | 17,507,209 | 384,127 (2.19%) | 222,738 | 726,709 (4.15%) |
+
+The count agrees with the offline cross-check that judged each minute
+against GDFL's ticks (`only_z_flat`: flat, zero volume AND no GDFL trade in
+the minute): 2019-03 45,579 against 45,573, 2021-09 13,272 against 13,250,
+2023-06 13,391 against 13,327, 2025-03 1,030 against 1,028, 2026-08 2,179
+against 2,176 — within 0.5% each month. So a padded minute is, measured, a
+minute in which the exchange recorded no trade; the few more this rule
+counts are flat carries in minutes where GDFL printed a trade.
+
+Against the derived months already stored, the rule before INT-15 agrees
+best (whole rung-months equal: sample 5,964 of 6,538 as before, 5,497 under
+(a), 5,485 under (b); Z7 1,435 of 16,505, 1,329, 1,326), because those
+months were folded under it. Z7's disagreement is therefore not padding:
+the padding rule is closer to the stored month on 540 Z7 rung-months and
+farther on 8,392. The stored months decide nothing here; the trades do.
+
+**Decision.** Treatment (b), `pull::fold::PADDED_FOLD = PaddedFold::Absent`,
+in the one fold every derive and every completeness audit reads
+(`fold_month`): a cash bucket opens on its first unpadded minute, its high
+and low come from its unpadded minutes, its volume is unchanged (volume
+conditions see zero for a padded minute), it is `partial` when it holds
+fewer unpadded minutes than scheduled, and a bucket of only padded minutes
+has no bar, neither written nor withheld — exactly a share's bucket with no
+minute at all (D-3321 item 2). Treatment (a) would keep 726,709 bars on Z7's
+months, and 23,297 on the sample months, that GDFL's ticks show nobody
+traded. The other two readings stay callable through
+`fold::derive_minutes_with` so the measurement can be repeated.
+
+**Logged.** The fold is a pure function and logs nothing per bar; the
+derive's ledger line counts what it wrote (`partial` now counts a bucket
+with a padded minute). The rule's identity is the constant and this entry;
+the rule before it is `pull::fold::PADDED_FOLD_BEFORE`, read only to name a
+month stored under it (below). A refused rung-month is a receipt failure and
+a `pull.derive` "not derived" event, each in the words below.
+
+**The months already stored stay on the rule before, and every door says so
+(corrected in repair 1; verify-R4-27-r1 B1, B2).** An earlier draft of this
+entry said the existing repair door refolds them. Measured, it does not: the
+repair door (`cli zerodha-repair ... --from-store`, `pull::ingest::
+repair_window`) keeps every held derived bar by contract (D-3350:
+`store::repair::repair_month` never changes or drops one), and
+`store::repair::publish` keeps every original stamp, while (b) changes held
+values and drops the bar of every bucket of only padded minutes. Over a 5min
+month stored under the rule before, the door answered "committed 0, failures
+[]" and left every old bar in place. So, as built now:
+
+- the APPEND door refuses the rung-month of a later ingest whose every held
+  bar is the fold before and which (b) folds differently, by the name
+  "stored under the fold before D-7270" and the step that owes the refold,
+  S-47; it no longer says "restore complete minute source", which was a
+  wrong remedy (the source is not what changed). It takes no new day of such
+  a month, since two fold rules in one month would read as one. The minutes
+  land; the held bytes are kept; a month under (b) and a disagreement that is
+  not the rule change are unaffected;
+- the REPAIR door refuses the same month by the same name, and a held bar
+  its fold would drop by name, instead of reporting the rung repaired, and
+  journals each refusal as it journals a refusal of its versioned repair (a
+  `refused` line with the run's reason in `audit/<vendor>.repairs` and a
+  `pull.repair` event); a held bar its fold changes that is not the rule
+  change stays the append door's own refusal ("batch record N restates the
+  record held at T", IA-16), filed and logged and, as before, not journaled;
+- "every held bar is the fold before" is asked as the repair door compares
+  (`store::repair::same_bar`): a share's open interest written `0` by an
+  earlier build and null by this one is one absence (D-3322). Asked byte for
+  byte it never held on real data: on new private roots holding SIEMENS
+  2019-03's seven real derived rung-months with the minutes landed again,
+  every rung differed from its refold at its first bar in that field alone,
+  and all seven were refused as a restated record, unnamed. Asked as the door
+  does, all seven are refused by this name, on a first run and on a second,
+  bytes kept and no generation written. The append door's reconcile itself
+  stays byte for byte, so a month that differs in that absence alone keeps
+  its conflict and is never named the rule change (invariant R427-14);
+- measured on the sample months (`padded-sample-final2.tsv`): of 6,538
+  rung-months, 978 fold differently under (b); 479 of them are stored exactly
+  under the rule before, so a re-ingest refuses them by this name (381 differ
+  only in values, 98 hold a bucket of only padded minutes); 499 already
+  disagree with the stored month under the rule before too and keep their
+  own refusal (S-38 plans their refold, through the same repair door, which
+  cannot restate a held derived bar for them either: it refuses them by
+  name, so they wait for the same restate door); on Z7's months 114 of
+  20,321 are stored exactly under the rule before. `docs/06-limits.md`
+  L-R427-04, L-R427-08.
+
+**Not done here (named).** The refold of the derived months already stored:
+it needs a door that restates a held derived bar as a new generation under
+this decision's name, and, for the 98 sample rung-months with a bucket of
+only padded minutes, a revision form that may drop a held stamp, which
+`store::repair::publish` refuses today. No package builds it (R3-22's
+restate door is for option days and keeps every original stamp); S-47 plans
+it as `cli zerodha-refold` and waits for it by an operator prerequisite
+naming the missing owner, as S-25 does for the capital-market and Zerodha
+rebuild, then for the operator's yes. Until then the stored months stay on
+the rule before. A cash month
+begun under an earlier build and in flight when this lands stops gaining
+derived days until the refold, so this lands at a month boundary. The
+`/db` label (R4-04), the window flag (after R4-03) and R3-29's server
+fold (when it lands).
+
+**Proof.** `pull::padded::tests::a_bucket_opens_on_its_first_unpadded_minute`,
+`a_padded_minute_is_counted_and_not_a_trade`,
+`a_bucket_of_only_padded_minutes_follows_its_rule`,
+`a_whole_padded_session_is_counted_and_folds_to_its_one_trade`,
+`a_padded_looking_open_is_never_padded`,
+`a_padded_minute_after_a_halt_is_not_padded`,
+`a_minute_outside_every_window_is_never_padded`,
+`an_index_or_a_future_is_never_judged`,
+`every_extreme_of_the_walk_is_counted_not_smoothed`; the bench rows
+C-PD-01 and C-PD-02 (`crates/pull/benches/ratio/padded.rs`); for the months
+already stored (repair 1), `crates/pull/tests/padded_refold.rs`:
+`a_month_stored_under_the_fold_before_is_refused_by_that_name_at_the_append_door`,
+`a_month_under_the_rule_in_force_appends_and_another_disagreement_keeps_its_name`,
+`the_repair_door_refuses_a_month_stored_under_the_fold_before_and_never_reports_it_repaired`,
+`the_repair_door_refuses_a_held_bar_its_fold_drops`,
+`the_repair_door_refuses_a_held_bar_its_fold_changes_in_the_append_doors_words`,
+`an_open_interest_absence_written_zero_never_hides_the_rule_change`
+(invariants R427-12, R427-13, R427-14).
+
+### D-7271 — The month summary's version 2 carries each day's flat carries; a version 1 summary reads padded minutes as NOT COUNTED, never as zero — 2026-10-22
+
+**Implemented by** R4-27 (`store::month_summary`, its writer step). **Item**
+INT-15's counts.
+
+1. **Version 2 is version 1 plus one bitmap a held day of a one-minute
+   month** (`FLAG_PADDED`): its FLAT CARRIES, the minutes whose row has no
+   volume and repeats the close of the row before on the same IST day. That
+   is the calendar-free half of a padded minute; the store crate holds no
+   calendar, so a reader applies the day's session windows
+   (`MonthSummary::padded_on(day, windows)`): a padded minute is a flat
+   carry inside a window that is not that window's first held minute. For a
+   month whose stamps strictly increase this is exactly the bar-by-bar rule
+   of D-7270, held equal to a full read by
+   `pull::padded::tests::padded_minutes_per_day_match_a_full_read` on a
+   month with a padded-looking open, padded runs, a whole padded afternoon
+   and the 2024-03-02 two-window session.
+2. **Readers branch on the version.** Version 1 is still decoded and means
+   what it meant; its padded minutes are `NotCounted::Version1`, as is a
+   month that is not one minute (`NotMinutes`) or holds an invalid stamp
+   (`InvalidStamps`) — each a named not-counted, never a zero.
+3. **A version 1 summary is never rewritten in place and never extended.**
+   While it describes the month it is kept as it is; the next commit, or the
+   rebuild door (`BarFile::month_summary_existing`, `cli msum-build`),
+   builds it whole as version 2, a new file renamed over the old, and the
+   `store.sum` line names `summary_v1`. Measured on 22 Oct 2026: the
+   operator's store holds no `.sum` yet (`find bars/zerodha -name '*.sum'`
+   finds none), so the first walk of R3-06's builder writes version 2.
+4. **Cost.** The fold judges a row with one comparison of four prices,
+   O(1); a one-minute month's payload grows by at most 31 x 180 bytes
+   (its longest is 11,692 bytes), under `MAX_PAYLOAD_LEN`. `/gaps.json`,
+   which builds the summary of a month that keeps none, measured on the
+   shadow (n=200 sequential GETs): NIFTY 1min 2024-09 p50 1.10 ms, p99
+   1.37 ms, max 1.44 ms; PGEL CASH 1min 2019-03 p50 0.94, p99 1.25, max
+   1.33 ms.
+5. **A sealed month** carries whatever version its summary bytes had
+   (amendment A4); a month sealed before its summary was version 2 reads as
+   `Version1` until it is rebuilt.
+
+**Proof.** `store::month_summary::tests::a_v1_summary_reads_padded_as_not_counted`,
+`a_flat_carry_is_judged_against_the_row_before_on_its_own_day`,
+`padded_minutes_are_carries_inside_a_window_after_its_first_held_minute`,
+`a_payload_that_is_not_its_geometry_is_refused_by_name`;
+`pull::padded::tests::padded_minutes_per_day_match_a_full_read`,
+`a_v1_summary_is_read_as_not_counted_never_as_zero`.
+
+### D-7272 — AUT-10 decision 2 (DB-B44): the staleness bound stays 14 days; a documented RBI gap is a gap row, carried and labelled (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (the measurement, `pull::riskfree::replay` and
+`cli rate-replay`); the gap row type and its labels are R3-30's (D-6246,
+D-6247). **Findings** DB-B44. **Checklist** OPT-04.
+
+**Measured both ways** — `cli rate-replay TABLE 2018-09-03 2026-09-24`
+over the calendar's 1,990 sessions of GDFL's window, release build of this
+branch, 22 Oct 2026 (`state/fix/round2/R4-27-evidence/rate-replay-*.txt`):
+
+| table | bound 14 days | bound 21 days | bound 28 days |
+|---|---|---|---|
+| the operator's table as it is (419 results, sha256 `cf81d3fc…`) | 10 sessions refused: 2024-09-26, 09-27, 09-30, 10-01, 10-03, 2025-02-27, 2026-04-02, 04-06, 04-07, 04-08 | 1 refused: 2024-10-03 | 0 refused, nothing labelled |
+| the same plus 8 documented gap rows (README "Gaps": 2020-09-30 NOT_HELD, 2023-03-29 NA, 2024-09-18 and 09-25 CANCELLED, 2025-02-20 NA, 2025-12-31 NOT_HELD, 2026-03-25 NA, 2026-04-01 NOT_HELD) | 0 refused, 33 sessions carried and labelled `rate_carried` | the same | the same |
+
+The IV a carried rate gives, against the IV the next published result would
+give (a counterfactual table, `rbi-with-counterfactual.tsv`, NOT data:
+each gap row replaced by the next result's price and yield), on the shadow's
+`/greeks.json` for the ATM NIFTY CE and PE at 10:00, 12:00 and 14:00 IST of
+the ten sessions (expiries 2024-10-03, 2025-02-27, 2026-04-07 and
+2026-04-13): 42 cells priced each way (16 instants hold no option bar, 2
+are `below_zero_carry_bound` both ways); |ΔIV| median 0.0061, p90 0.0302,
+max 0.0316 volatility points, the carried rate differing by at most 0.17
+percentage points. Under the bare 14-day rule those 44 cells are
+`rate_stale`: no IV at all.
+
+**Decision.** `MAX_AGE_DAYS` stays 14 and the documented gaps are gap rows.
+Widening to 21 days still refuses 2024-10-03, an expiry; 28 days refuses
+nothing but would also carry over any UNDOCUMENTED hole of up to four weeks
+without a word, which is the invented value D-2810 refuses. A gap row
+carries exactly the weeks RBI documented, labels every cell, costs at most
+0.032 volatility points measured, and leaves an unexplained hole refused.
+`a_cancelled_auction_week_is_not_stale` and
+`r_missing_for_a_week_is_refused_by_the_chosen_bound` hold both halves.
+
+**Store write (on the operator's yes).** The 8 gap rows go into the
+operator's table — as the next generation of R3-30's `risk_free_rate`
+reference table, or the `BRUTEX_TBILL91_SERIES` file while `/greeks.json`
+still reads it (L-R330-04) — exactly as `gap-rows.tsv` in the evidence
+folder states them; the three NOT_HELD rows cite the monthly listing page,
+the only RBI source the README names for them.
+
+### D-7273 — AUT-10 decision 3 (DB-A08, DB-A14): the stored zero open-interest cells are not rewritten; the read-time `not_a_derivative` rule of D-3322 stands (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (the measurement); the read rule is D-3322 item 2's
+(WP-31), already served. **Findings** DB-A08, DB-A14. **Checklist** CON-10.
+
+**Measured both ways**, read only, 22 Oct 2026
+(`state/fix/round2/R4-27-evidence/oi-census.tsv`, `index_sizes.txt`):
+
+* **Rewrite.** Every Zerodha `INDEX` month holds open interest 0, never the
+  null: every NIFTY, BANKNIFTY and INDIAVIX month file (2,943 files,
+  5,383,723 records; NIFTY 1day is 141 files and exactly DB-A08's 2,911
+  records) and every one of a 1-in-20 sample of the other 65,014 (3,250
+  files), first and last record each. A rewrite is therefore one new
+  generation for each of the 67,957 Zerodha `INDEX` month files, 8.30 GB
+  (8,300,642,344 bytes, 108,461,203 records) written again with their
+  checksums, time indexes and summaries.
+* **Read-time rule.** Already served: `/bars/window.json`, `/bars.json`, the
+  export and All sources answer `"oi": null` with `"oichg_why":
+  "not_a_derivative"` for an `INDEX` or `CASH` bar whatever was stored, and
+  no condition in the vocabulary reads open interest. Its cost, measured on
+  the shadow (n=200 sequential GETs of 200 rows): NIFTY Zerodha 1min p50
+  0.67 ms, p99 0.90 ms, max 0.93 ms, against an option's 1s window that
+  carries no such rule, p50 0.66, p99 0.89, max 1.09 ms: not measurable.
+
+**Decision.** No rewrite. Nothing a reader is shown or a sweep computes
+changes, and 67,957 generations would be written to change it. New
+landings already write the null (D-3322 item 1). No store write, and no
+change to `bars_route` (the sequenced edit is not needed).
+
+### D-7274 — AUT-10 decision 4 (D-3323): a percentage of price on a vendor-adjusted share run is labelled where one factor holds across the stock-day and refused where it does not (measured both ways) — 2026-10-22
+
+**Implemented by** R4-27 (`cli::research_policy::percentage_statistic`, and
+the policy report's last section). **Decides** what D-3323 left open.
+**Checklist** COR-03.
+
+**Measured both ways** — `cli feed-reconcile` (DATA-1, the one
+per-stock-day authority) over the five sample months on a private root of
+APFS clones of the needed month files (15,219 files), 22 Oct 2026; the
+CSVs, `pct-basis.awk` and `pct-basis-days.txt` are in
+`state/fix/round2/R4-27-evidence`. Of 18,663 matched stock-days:
+
+| stock-day class | days | percentage-of-price bound (the factor interval every matched minute's range admits): p50 / p99 / max | paisa figure off by \|median z/g - 1\|: p50 / p99 / max |
+|---|---|---|---|
+| unadjusted | 12,981 | 0.023% / 0.58% / 2.62% | 0 |
+| vendor-adjusted, one factor across the day, exchange grid | 3,513 | 0.033% / 0.85% / 2.28% | 33% / 90% / 94% |
+| vendor-adjusted, quantised (grid 10, 50 or 100 paisa against 5; 5 against 1), one factor | 1,455 | 0.023% / 0.13% / 0.19% | 50% / 95% / 95% |
+| factor moved within the day (`range_not_constant`) | 480 + 175 quantised + 59 unadjusted | no common factor | — |
+
+A percentage of price on a vendor-adjusted stock-day whose one factor holds
+is within the same bound an unadjusted day carries, while an absolute paisa
+figure is off by the factor itself; on a day whose factor moves, no factor
+relates the feeds.
+
+**Decision.** By the stock-day's measured shape, the same rule for every
+share and feed: on vendor-adjusted prices a percentage of price is
+LABELLED where one factor holds (a quantised day with its own words: a
+tick-level distance there is not the exchange's tick) and REFUSED by name
+where the factor moved; raw prints and published index levels are exact; a
+day with no reconcile row is labelled "not measured", never exact. Switching
+research to GDFL raw prices is the operator's existing design for fills and
+is not decided here. The policy report (`cli policy-check`) states the rule
+after the thresholds.
+
+**Not done here (named).** No research verb computes a percentage of price
+today; the Winner Gate work that will (FIB) calls `percentage_statistic`
+with the day's shape, which needs DATA-1's per-stock-day verdicts kept as
+store data rather than CSVs under `--out` (owner: DATA-1 / R4-26).
+
+**Proof.** `cli::research_policy::tests::a_percentage_statistic_on_a_quantised_run_is_refused_or_labelled`.
+
+### D-4816 — The options reader refuses per row, with the capital-market reader's D-3318 types and bounds (IA-4; design §8 F8, FM-077's decode half) — 2026-10-23
+
+**Number** of the ingest automation design (§15); landed by IA-4, the
+package its "Lands with" column names.
+
+**Decided.** `gdfl_nfo::decode` refuses a bad row by name and reads the rest
+of its file, exactly as `gdfl_cm` has since D-3318 and with its own types:
+`RowFault` (`malformed`, `off_grid`, `zero_ltp`), `RefusedRow`,
+`RowsRefused` (every row counted by fault, the first `NAMED_ROWS` = 16
+named with their line) and the bound `MAX_BAD_ROWS` = 64 AND one in every
+`BAD_ROWS_PER` = 1,000 rows read, past both of which the file is
+`NfoRefusal::TooManyBadRows { refused, rows }`, whose cause is the capital
+market's `too_many_bad_rows` (vendor, closes). No second, looser rule
+exists: the options reader imports the capital-market reader's constants,
+and `RowsRefused::note` is the one counter both readers call. A row that is
+not ten well-formed fields, not UTF-8, whose Time is not `HH:MM:SS`, whose
+quote, quantity or open-interest field is not a plain number (a negative LTQ
+included), or whose LTP is not a plain decimal is `malformed`; an LTP off
+the two-place grid or past what paisa hold is `off_grid`; a TRADED row at
+zero is `zero_ltp` (an untraded row at zero is still kept; one paisa is a
+price, D-2806). Whole-file refusals stay: a Ticker or Date that is not the
+file's (a row of another file), a LAST line with no newline after it that
+is malformed (where a cut or NUL-padded file shows, §8 F9, F42) or ends in a
+bare CR (a file cut between the CR and its LF, complete row or not, §8 F7:
+the capital-market reader's rule for the same bytes; until this change the
+options reader stripped that CR and read a cut file as a whole one; 0 such
+files on every options day of 2018-09-03 to 2018-12-31, the newline-less
+days of §8 F8 included, `no_real_option_file_of_2018_ends_in_a_bare_cr`,
+measured read-only on the tick store on 23 Oct 2026: 79 days, 482,538
+files, 446,963 ending in LF, 35,575 in a row's last field, 0 in a bare CR), the row bound (which
+now counts every row READ, kept or refused, as the capital market's does),
+and a file that kept no row, which names its first refused row's own
+refusal (`MalformedRow`, `PriceRefused`, `OpenInterestRefused`), so a lone
+bad row is refused exactly as before. The import says one `warn` line per
+file with refused rows (`gdfl_cm::note_refused_rows`, D-3341), and
+`option_handed` passes the count into the D-3335 ledger (§8 F44).
+
+**Why.** One bad row lost whole contract-days: 2018-11-09 (a time
+`99:a9:99` at line 451 of 4,353 rows), 2018-11-06 (an LTP with a letter at
+line 13,668 of 13,991) and 2026-04-16's ten negative-LTQ files. The capital
+market's rule was already decided (D-3318); two rules for one vendor's one
+row shape would be the special case the operator's standing rule refuses.
+
+**Changes the bars an options file builds,** so it lands with bar
+definition 5 in the same change (D-4877, D-2822).
+
+**Proved by** `pull::gdfl_nfo::tests::every_row_fault_is_refused_by_name_at_its_line`,
+`an_option_row_with_eleven_fields_is_refused_and_the_file_read` (IA-MX-F6),
+`an_option_row_that_is_not_utf8_is_refused_and_the_file_read` (F10),
+`an_option_row_with_a_bad_time_is_refused_by_line_and_the_rest_read` (F13),
+`an_option_row_with_letters_in_its_price_is_refused_by_line_and_the_rest_read` (F38),
+`a_traded_option_row_at_zero_is_refused_and_the_file_read` (F20),
+`one_zero_priced_traded_row_is_refused_and_the_file_kept` (FM-077's decode
+half; R4-22, IMPORT-BAD-ROW, names the row in the audit stream and closes it),
+`an_option_price_with_a_third_decimal_refuses_its_row` (F21),
+`a_negative_option_quantity_refuses_its_row_and_the_file_lands` (F23),
+`a_malformed_quote_field_refuses_its_row_in_both_readers` (F33),
+`a_blank_line_is_a_malformed_row` (F39), `a_repeated_header_line_is_a_malformed_row`
+(F40), `a_quoted_field_is_refused_by_its_rule` (F41),
+`a_nul_tail_is_read_as_a_cut_last_line` (F42),
+`an_option_file_cut_between_cr_and_lf_is_refused_whole` (F7), `an_overlong_line_is_a_malformed_row`
+(F43), `too_many_bad_rows_refuse_an_options_file_at_the_capital_markets_bound`,
+`the_row_bound_counts_refused_rows_too`,
+`per_row_refusal_keeps_every_good_row_in_file_order_at_the_extremes`,
+`the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files`
+(the definition-4 reader as an oracle: 5 differs from it only where 4
+refused a file), `pull::gdfl_nfo::attack_tests::dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line`
+and `pull::gdfl_import::tests::ia4::too_many_bad_option_rows_have_the_capital_markets_cause`
+(docs/04-invariants.md IA4-01 to IA4-04). D-5800's allocation test
+(`crates/pull/tests/allocation.rs`
+`gdfl_nfo::a_row_of_half_a_million_fields_is_refused_without_holding_them`)
+pinned the whole-file refusal of a wide row in the MIDDLE of a file, which
+this decision ends: it now proves the row refused by name at line 3 with the
+good rows kept, a read file bounded at two copies of its bytes plus 16 KiB
+(the day file keeps one shared copy, `NfoDayFile::bytes`; 1,442 bytes over
+two copies measured), and the cut last line still refused whole under twice
+the file (docs/04-invariants.md AO1-02, amended).
+
+**Cost.** Unchanged class: O(bytes) per file, O(1) per row (a fixed
+18-slot field array, no allocation per row); one counter increment and at
+most 16 named rows per file. Measured on 23 Oct 2026
+(`per_row_refusal_costs_what_a_clean_file_costs`, a debug test build of
+this reader on the loaded shared machine, n = 200 decodes each of one
+invented 4,353-row file): clean p50 0.650 ms, p99 0.806 ms, max 1.005 ms;
+one refused row p50 0.653 ms, p99 0.756 ms, max 0.784 ms; 64 refused (the
+bound) p50 0.652 ms, p99 0.791 ms, max 0.828 ms, so refusing rows costs
+what reading them does. Taken again on the merged tree (the same test, same
+n, 23 Oct 2026 20:58 IST): clean p50 0.645 ms, p99 0.695 ms, max 0.708 ms;
+one refused p50 0.651 ms, p99 0.684 ms, max 0.694 ms; 64 refused p50
+0.653 ms, p99 0.690 ms, max 0.706 ms.
+
+**F40 differs from the design's wording.** A repeated header line is
+`Ticker,…`: both readers check the Ticker field first, so it is a row of
+another file and refuses the whole file in both, as D-4816's first
+whole-file rule says (0 such lines measured, `FMT-12`); a header-shaped
+line carrying the file's own Ticker and Date (its time `Time`) is the
+malformed row the design means.
+
+### D-4829 — An options header followed by empty fields is read when every row carries them (IA-4; design §8 F36) — 2026-10-23
+
+**Number** of the ingest automation design; landed by IA-4.
+
+**Decided.** A header of the ten known names (either observed header)
+followed by `k` exactly-empty fields, `1 <= k <= MAX_TRAILING_EMPTY` = 8
+(chosen, not sourced: the one measured file carries 4), is admitted: each
+data row must carry exactly `10 + k` fields whose last `k` are empty, the
+`k` fields are dropped, and `NfoFile::trailing_empty` says `k`. A row that
+breaks the shape is a malformed row under D-4816; a header with `k` past 8,
+a non-empty field, a space or anything else is `HeaderUnknown`, as before.
+The day ledger counts such files as D-4841's `trailing_empty_files` on the
+options `v=2` line (before `max_defer_s`), which `/dayflags.json` already
+reads; L-IA16-10's `trailing_empty_files` is counted from this change.
+
+**Why.** 2025-03-11's `BANKNIFTY26JUN2546500CE` (1,446 rows) carries four
+empty fields on its header and every row and was refused whole at its header
+(`header_unknown`); per-row refusal alone would refuse every row and end in
+`too_many_bad_rows`.
+
+**Proved by** `pull::gdfl_nfo::tests::a_header_with_empty_trailing_fields_is_read_when_every_row_matches`,
+`pull::gdfl_nfo::attack_tests::dpn_17_exactly_the_two_measured_headers_read`,
+`pull::gdfl_import::tests::ia4::an_options_days_refused_rows_reach_the_day_ledger`
+and `the_options_line_counts_trailing_empty_files_and_refused_rows`
+(IA4-05, IA4-06).
+
+### D-4877 — Bar definition 5: the options reader's per-row rule; options days under 2, 3 or 4 restate, every capital-market day stays current (IA-4) — 2026-10-23
+
+**Number** of the ingest automation design, which numbers this rule 4. **The
+design's `4` was taken first** by the cash closing auction's band through
+matching (SC-CLOSE-5, SC-CLOSE-6, D-3320, D-4878 item 10; merged with WP-12f
+repair 4, bd0da3c27, 13 Oct), so this rule is **5**; 1 to 4 keep their
+meanings (append-only).
+
+**Decided.** `BAR_DEFINITION` is 5, set in the same change as D-4816's and
+D-4829's decode (D-2822), and its doc's numbered list gains `5`. Currency
+stays per kind (`definition_is_current`): 5 is current for every kind; an
+OPTIONS day is current only under 5, so its days closed under 2, 3 or 4
+restate (4 left option bars exactly as 3 built them); a share's day from
+2026-08-03 is current under 4 or 5; an index day, and a share's day before
+2026-08-03, under 2, 3, 4 or 5, since 5 changes nothing a capital-market file
+builds. 0, 1 and any number past 5 are never current. `AUCTION_PREVIOUS`
+stays 3; `OPTION_ROWS_PREVIOUS` = 4 names what 5 replaced.
+
+**The restate (L-IA-28).** On the real journal as of 14 Oct 2026 (read only,
+`imports/gdfl.journal`, 23,270 lines), 3,490 options keys whose last close is
+`done` or `recounted` were closed under 2 (498) or 3 (2,992) and none under
+4: they cover **1,996 distinct options days, 2018-09-03 to 2026-09-30**, and
+every one restates under 5 (before this change only the 498 keys under 2
+did). At WP-16's measured 9.8 s wall for one options day (2020-09-15, empty
+scratch store) that is about **5.4 hours**, an EXTRAPOLATION that IA-13's
+measurement replaces. A restated file whose bars equal the held ones is
+answered `AlreadyPresent`; one whose bars differ is the hole
+`bars_differ_held` (D-4873), whose door is R3-22 (the critic's IA-18), not
+this change.
+
+**No fresh root (the no-fresh-root cut of 23 Oct 2026, D-7135, recorded by
+the cut, not here).** The store is never rebuilt from scratch: a new GDFL
+link, or any vendor's re-delivery, is an incremental, append-only patch into
+the existing store. So an options day first imported, or re-delivered and
+patched, by a build that holds this change closes under 5 and is current;
+every options day already held under 2, 3 or 4 is re-read in place through
+R3-22's restate door; only a day whose rebuilt bars differ
+(`bars_differ_held`) is filed as a new generation of its month, for
+example a contract-day refused whole by one bad row that now lands its good
+rows; an unchanged day writes no generation (R3-22's
+`a_restate_of_an_unchanged_day_writes_nothing`) and older generations stay
+byte-identical. There is no fresh-root alternative. Where the journal can
+tell (the same read-only journal), the days expected to differ are four:
+2026-04-16 (its members key, `done` under 3 with `vendor_refused=10
+reason=malformed_row`: the ten negative-LTQ files), 2025-03-11 (its
+`BANKNIFTY,NIFTY` key, `done` under 3 with `vendor_refused=1
+reason=header_unknown`: the trailing-empty header of D-4829), and 2018-11-06
+and 2018-11-09 (`*`, still `incomplete` under 2 with `failures=1`, so
+every run reads them again anyway), each of which now lands the file it
+lost with one row refused: 13 contract-days in all (measured by
+`the_measured_bad_option_files_are_read_row_by_row`). The 498 keys under 2
+may also differ in a second's open interest (D-3342 measured 235 of 545,134
+bars on its sample), which the journal cannot tell day by day. **PREC-6's
+options bar rules (GO-01, GO-02, GO-15) take the next definition number
+after 5**, so the held options days can be restated once, after the last
+pending options bar rule, rather than once per bump. No door sets
+`skip_restated` yet (`gdfl_import::RunOptions`, `admit`'s row 3, D-4885: a
+day done under a definition no longer current is skipped and counted in
+`restated_skipped`, never dropped silently; `cli gdfl-import` passes
+`false`, and IA-10a's `restate` flag is not built), so until one does every
+options run whose range holds such a day reads it again: restating once
+means running no options range over held days before then, or accepting a
+second re-read. `plan.json` (`/gdfl/plan.json`, IA-10a's, not built at
+feat/db-fix e0668a4bd) is to show these counts and costs; until it exists
+docs/06-limits.md L-IA-28 carries them.
+
+**Rule sets.** The oracle's rule-set table (`pull::gdfl_verify`, IA-6, not
+merged) gains row `5` (options per row plus the trailing-empty header) and
+IA-GV-11 pins it; IA-6 merges after IA-4 and builds both. R3-13's
+`definition_means` (the /db day band) gains its `5 =>` sentence with
+R4-27-OPT (docs/06-limits.md L-IA4-03).
+
+**PIT-1 is untouched.** Its membership reads only each day's ticker NAMES
+(`fno_membership.rs` → `gdfl_nfo::decode_ticker` →
+`gdfl_lineage::filed_underlying` and the expiry settlement); this change
+alters the file reader (`decode`, `parse_row`, the header), never that path,
+so no membership file version or run-identity term moves.
+
+**Proved by** `pull::gdfl_import::tests::ia4::every_kind_era_and_definition_has_its_currency`
+(every kind × closing-auction era × definition 0..7 and `u32::MAX`, through
+`definition_is_current` and through the journal's own reader),
+`pull::gdfl_import::tests::an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not`
+(the pin, 4 → 5) and `pull::gdfl_import::tests::scope_reopen::a_share_day_of_the_auction_era_under_an_older_definition_is_restated`
+(WP-12f's cells, options under 3 and 4 now restated) and
+`api::import_journal::tests::a_recounted_close_is_restated_where_the_importer_restates_it`
+(`/imports.json` reads a `recounted` close by the definition it carries, as
+the importer's journal does; until IA-4 the page called every recounted
+row current, among them the 210 options keys recounted under 2) (IA4-07).
+
+### D-7300 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
+
+**Number** taken at landing from the ledger's head (amendment A6): first
+D-5903, then D-5904 when IA-3 landed D-5903 first, then D-7135 on 2026-10-23
+when SC-4 landed D-5904 first, and D-7300 the same day when LEDGER-1023
+landed D-7135 first (the no-fresh-root cut's block D-7135..D-7144, recorded
+after R3-13 had taken D-7135 without recording it). D-7300..D-7304 is R3-13's
+block in the decision-block registry, clear of every block recorded for
+another package (R4-18's D-7290..D-7294 the highest). Built in
+the cloud (branch `cloud/db-R3-13-20261017`, 17 Oct) and finished on the Mac
+(20 Oct; repair round 1, 21-23 Oct).
+**Findings:** DB-029, DB-031, DB-053, DB-A15, DB-B20, DB-G38, DB-G40,
+SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
+
+1. `/dayflags.json` takes `timeframe=` (a rung `store::path::Timeframe::KNOWN`
+   names) and counts `held` at it; the feed's finest rung is counted beside it
+   as `finest` where the two differ. Absent, the finest is counted, so every
+   existing caller is unchanged. `Asked` gains no field (`sources.rs` builds it
+   by name); the rung travels as `dayflags_rules::Band`. Every caller of the
+   band, the L-IA-39 bench's `imports::day_band_json` included, parses its
+   query with one function, `dayflags::query_of`.
+2. `expiry=` narrows an option family key (`NSE-FNO-NIFTY`) to one expiry; a
+   contract's own key names its expiry and a disagreeing `expiry=` is refused,
+   as is one on a spot key. A day after the expiry is `expired`:
+   `owed_minutes` and `unverified_minutes` 0, as `/gaps.json`.
+3. A share's phases are built with its dated master flag
+   (`pull::cash_session_cache`, read as `bars_change::Rules::eligibility` reads
+   it): flag 1 owes 360 continuous minutes, flag 0 375, no master 360 and 15
+   unverified, with the reader's reason in `calendar.cas.why` and the notes. A
+   failed load is kept by the request only (AF-03's rule). Nothing is read for
+   a closed day; a session after today (IST) is `basis: "not_yet"`, never a
+   refusal. A loaded master is kept for the process (one per session day read).
+4. **"Kept apart from trades" is decided PER DAY, never per month** (closes
+   `docs/06-limits.md` L-AH03-2 for the band; `sources.rs` stays AG-04's): a
+   GDFL share month's `.auc` sidecar is read once a request a month, and a day
+   is `auction_sidecar: true` only where a record is stamped on it. A month
+   whose sidecar files nothing that day says so; a sidecar that will not read
+   is named in the notes and never said absent. An index record says the
+   prints are "counted by the import". The page calls the session's last print
+   the auction's only where it equals the official day close (0 bps), and never
+   claims the print's book.
+5. FROZEN: an index value unchanged for **180 s or more** in session, outside
+   any recorded halt and, from 2026-08-03, outside the cash closing auction's
+   window (item 15), which is set aside on NIFTY and BANKNIFTY and not judged
+   on any other index (item 25). Chosen, not sourced
+   (DB-B20's detector); the cause of a frozen dissemination is UNVERIFIED. Zerodha: from the day's one-minute bars
+   (`O = H = L = C`, equal minute to minute, no minute missing), scanned once
+   per (month file's device and inode, day's first row) and kept with the end
+   row it was read to; a page's first scans run on one scoped thread a month,
+   each on the month's own handle. GDFL: from the day ledger's `flat_max_s`,
+   counting only the run's seconds outside the recorded halt and the auction's
+   window (`judged_s`; 2020-03-13's run from 09:21:09 is the halt's), and a
+   run with no stamp on a halt or auction day is not flagged. OUTSIDE THE DAY RANGE: a minute's high above the
+   Zerodha `1day` bar's high, or its low below its low; not judged on GDFL at
+   read time (its seconds are up to 22,500 reads a day). Flags only; the bars
+   are served unchanged.
+6. A `recounted` day keeps the `late=` and `max_back_s=` of the last `done`,
+   `incomplete` or `refused` close of its kind, day and filter, named by
+   `late_line`. The count is said over all of the kind-day's files for a `*`
+   run, and over the files its run read, named by its filter, otherwise.
+7. `bar_definition`: the import journal's deciding line, else the day ledger's
+   line; current by `pull::gdfl_import::definition_is_current`. Said on every
+   option day and on any day not current.
+8. A day-ledger field this reader has no name for is served under its own name
+   on the line's object and listed in `unknown`; the names `scope`, `line` and
+   `unknown` are the object's own and refuse the line, as does a field written
+   twice.
+9. A share's peer count is looked up under its other names from
+   `brutex_core::alias::LINEAGE` (D-3333) where its own name holds no month
+   (`peer.as`).
+10. A GDFL share's `sampled` names the market index `NIFTY` (`of: "market"`)
+    and the share's own first held second (CMP-06).
+11. The previous held `1day` bar is looked for up to 12 opens back and then up
+    to 144 more months by probe, one open (DB-031); a history found empty there
+    is not probed again by `series_start`. **A month is held in either form and
+    in the generation the read door serves** (`store::generation::served_bars_path`,
+    D-5899): a month held only as `.sbar`, or served from a repair generation,
+    is never looked past, and a name the door would refuse is held, so the open
+    that follows names the refusal instead of an older month standing in.
+12. The band's peer feed and each feed's finest rung come from one function,
+    `dayflags_rules::feed_rungs` (R3-34 points it at the feed table).
+13. **Every count the band adds is a month fault** (R3-08's `month_faults`):
+    the grid's rung, a renamed share's other name and every failed read in a
+    month that opened, so damage beside a writer-held month is answered as
+    damage, never as "being written, ask again".
+14. On the page, a share is trade-driven, and its zero-volume minutes are
+    counted, by the feed's finest rung, whatever rung the grid counts; the
+    closing-auction line counts "kept apart" only on days whose dated flag is 1
+    (`casCounts`). Goal 4 reads `/sources/day.json`'s `basis`; a day whose
+    `basis.factor` is not a number is unmeasured and neither joins nor breaks a
+    run. Whether a percentage statistic on an adjusted run is refused stays
+    D-3323's and is not built here.
+15. **THE CASH CLOSING AUCTION'S WINDOW IS SET ASIDE ON AN INDEX DAY, AS A
+    HALT IS** (the Mac finish, found on the real store on 2026-10-20): from
+    2026-08-03 every NIFTY and BANKNIFTY session read "index value frozen in
+    session" from 15:15 on both feeds, because the index holds still while
+    its constituents are in the cash closing auction. The window is
+    `[the CAS-eligible share close, the index's close)` from the session
+    tables (`Venue::share_hours_on`, `Venue::hours_on`; 15:15:00-15:30:00),
+    on the index venue only and only from 2026-08-03
+    (`dayflags_rules::auction_window`). A Zerodha minute inside it never
+    starts or extends a frozen run; a GDFL ledger run counts only its seconds
+    outside the halt and the window, the two counted once where they meet.
+    The window is served as `index.frozen.auction_window` and named in the
+    phrase. Where either session row carries no verified hours nothing is set
+    aside, so a run there is flagged, never hidden. The stillness itself is a
+    MEASURED fact (`docs/00-charter.md`, "An NSE index through the cash
+    closing auction"), not the cause: why the index holds still there is
+    UNVERIFIED. **Narrowed by item 25:** "on the index venue only" set the
+    window aside on every NSE index; it is set aside on NIFTY and BANKNIFTY
+    alone, and a run inside it on any other index is not judged.
+16. **A day after expiry names no bar definition** (the Mac finish of
+    SC-CLOSE-12 and goal 3, found on the real store: the family narrowed to
+    2019-03-28 read "bar definition 3 built this day" beside "expired" over
+    2024-10). The kind-day's import built nothing of an expired contract, so
+    `bar_definition` is `null` there and no phrase is said; the band never
+    marks a day that owes nothing as built under an older definition.
+
+17. **A value outside the day's range inside a recorded halt is still
+    flagged, and says where it is** (the Mac's second re-check on the real
+    store: Zerodha NIFTY 2020-03-13 read "intraday low 79.00 points below the
+    day bar's low, at 10:07" beside "halt (suspected) 09:22-10:20" with
+    nothing joining the two). `outside_day_range` gains `above_in_halt` and
+    `below_in_halt` (`null` where that side is not flagged), true where the
+    extreme's stamp lies inside the calendar's recorded halt `[from, resume)`,
+    and the phrase ends ", inside the recorded halt". No cause is claimed for
+    the value: why the index printed there is UNVERIFIED.
+
+18. **A share whose dated closing-auction flag is 0 is never said to have an
+    auction print** (the Mac's third re-check on the real store, 20 October:
+    GDFL DALBHARAT, flag 0 from 2026-08-27, read "192 closing-auction
+    print(s) in the day's share files; this share's month holds no auction
+    sidecar, so its print is not kept apart from trades" on 2026-09-25, naming
+    a print a share outside the auction has no part in). Where
+    `calendar.cas.eligible` is `false` and the month's `.auc` files no print
+    for the day, the phrase says the flag is 0, that the share takes no part
+    in the auction and has no print to keep apart, and what the month's
+    sidecar holds. A day whose sidecar files a print says the file whatever
+    the flag: the record is the evidence. A flag of 1, or one no master holds,
+    keeps the words of item 4.
+
+19. **A GDFL index day the day ledger cannot judge is `null`, never "not
+    frozen"** (the check of 20-21 October, verify-R3-13-r1 blocking 1; amends
+    item 15's GDFL clause). The ledger keeps only the day's LONGEST unchanged
+    run (`flat_max_s`, `flat_max_at`), so where that run lies in the recorded
+    halt or the cash closing auction's window, or carries no stamp on a day
+    that has either, a shorter run of 180 s or more elsewhere in the session
+    cannot be seen. On every auction-era day the ledger has measured
+    (2026-09-25..30) the run is the auction's, from 15:15:00, and the record
+    answered `flagged: false`: every later GDFL index day would have read
+    "not frozen" whatever happened before 15:15. Now `index.frozen.flagged`
+    is `false` only where the longest run is under 180 s; `true` where its
+    longest single stretch outside the two windows reaches 180 s; and `null`
+    otherwise, with the phrase "index frozen not judged: the day ledger
+    measures only the day's longest unchanged run, ..., a shorter run of 180
+    s or more elsewhere in the session is not measured (UNVERIFIED)".
+    `judged_s` is that longest stretch, no longer the run less its set-aside
+    seconds: a run on both sides of a halt is two runs, as a Zerodha minute
+    inside a window ends a run (`dayflags_rules::outside_of`). A GDFL index
+    day holding bars and no `flat_max_s` says it is not measured, and why
+    (no indices line, or a line written before the measure). The band draws
+    `flagged: null` as its own kind, `frozen_unjudged`, "frozen run not
+    judged" (info), never as "frozen" and never as an ordinary session.
+    Chosen, not sourced: the ledger's measure is the import's (D-7300
+    item 15); what it does not measure is said, not guessed.
+
+20. **A share's flag is kept for the process, never its master; a day asked
+    at once is read once; a page's cold days are read together, a few at a
+    time** (verify-R3-13-r1 blocking 2). The memo of whole parsed masters
+    this package added (`MASTERS`) had no bound and held each auction-era
+    day's master beside `bars_change`'s own copy: 18-25 MB of resident memory
+    a day, never freed (+744 MB for 42 days, measured by the check), and the
+    first auction-era share page of a process took 2.6-3.15 s (4.5 s at ten
+    concurrent cold asks, +1.39 GB). Now `dayflags_rules::FLAGS` keeps only
+    `(masters directory, day, symbol) -> the master's answer` (the flag, or
+    its refusal to name the share), in two generations of at most
+    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A master read keeps
+    the flag of every F&O underlying on its day
+    (`brutex_core::universe::FNO_UNDERLYINGS`, CLAUDE.md §1's 213 shares,
+    each under its universe ISIN, as `CasFlags::of` asks), not only the
+    asking share's: with only that one kept, each further share's first
+    auction-era page parsed the same masters again. That is 213 hash probes
+    against a parse already made, and 213 flags a day, at most 153
+    auction-era sessions in one generation; a share outside the list keeps
+    only its own flag, as it asks. A load in flight is
+    shared by every reader that asks while it runs (`FLIGHTS`) and ended when
+    its first reader is done, so a master lives only as long as the requests
+    reading it. At most `LOADS_AT_ONCE` = 4 masters are parsed at once in the
+    process, so concurrent cold pages cannot multiply the parse's memory; a
+    page's cold days are read on up to that many scoped threads
+    (`CasFlags::on_sessions`), each day once per request. A load's refusal
+    is still never kept beyond the readers that met it (AF-03). The parse
+    itself is `pull`'s and is unchanged: `DailyEligibility::parse` reserving
+    its map for every CSV line (37,237) rather than the EQ rows it keeps
+    (4,428) is named for `pull`'s owner, as is one bounded master memo shared
+    by `bars_change` and `sources` (L-R3-13-4). Measured cold and warm in
+    L-R3-13-4. Chosen, not tuned: 4 slots of the Mac's 14 cores, leaving the
+    rest to the route's other work and to imports; the bound is the choice,
+    its number is not sourced or measured to be best.
+
+21. **An unchanged index value that goes on past absent minutes is counted
+    and said** (the check's follow-up: Zerodha BANKNIFTY 2022-03-07 09:54-09:57
+    was reported as shorter runs, without saying why). A minute the file does
+    not hold still ends a run, so each part is measured alone, as before; the
+    times a flat minute after the gap prints the run's value are counted
+    (`DayScan::broken`, served as `index.frozen.broken_by_absent`) and the
+    phrase says "index value unchanged across absent minutes N time(s): a
+    minute the file does not hold ends a run, so each part is measured
+    alone". No value is assumed for the absent minutes.
+
+22. **A series with no file for the month names no bar definition** (the
+    check's follow-up: a contract the store holds no file of read "bar
+    definition 2 built this day" from the options kind-day). The kind-day's
+    import built nothing of it, so `bar_definition` is `null` and no phrase
+    is said, as after expiry (item 16). A file that holds no bar that day
+    keeps its definition: the import read the day.
+
+23. **Two words of the band say what they count** (the check's follow-ups).
+    On a coarser grid the zero-volume phrase names the finest rung it counts
+    ("300 of 375 Zerodha 1min bar(s) carry zero volume"); and a Zerodha
+    share's run label asks `/sources/day.json` for the route's whole 31-day
+    page laid around the rows' days (`basisWindowOf`; their newest 31 where
+    they span more), so a page showing one day names the run as far as that
+    page reaches rather than "2019-06-07 → 2019-06-07", and an open edge reads
+    "the run may go on both ways past the days read".
+
+24. **The CI shell gates are run on R3-13's files, and what they refuse is
+    rewritten or declared** (repair 1, after BASE-GATE11 put those gates in
+    the Mac run, D-6620). On this branch, compared step by step with
+    feat/db-fix's head, gates 10, 11, 12 and 23 refused R3-13's files and
+    nothing new besides. Rewritten: a month's auction sidecar is a set sized
+    once by its records, so a day is one hash probe, never a sort and a
+    binary search; the frozen run's two set-aside windows are ordered as
+    their min and max, never a sort (a `second < first` swap was tried first
+    and its `<=` mutant was equivalent, so it was restructured away, as
+    D-0192 directs); every map is sized once (`PAGE_DAYS`,
+    `PAGE_MONTHS` = 5, `LOADS_AT_ONCE`). Declared, each with its bound in
+    `docs/06-limits.md` ("Gate 11 — R3-13"): one request's refused days put
+    in day order (at most 92), the `timeframe=` word found in the ten-rung
+    `Timeframe::KNOWN`, the sidecar set's probe, and in `dayflags.rs` two
+    compile-time tables (IA-16's `FLAGS_VERSIONS` among them, merged
+    undeclared) and one page's peer days. The ignored timings' seven prints
+    are declared for gate 23; two cost claims name their timing tests (gate
+    12); five rows name their test file or timing tests (gate 10). The
+    bounds are unchanged: these are the same reads in O(1) shapes or with
+    their bound stated, and the band's answers are byte-identical before and
+    after on the shadow's 50 checks.
+
+25. **The cash closing auction's window is set aside on NIFTY and BANKNIFTY
+    alone; a run inside it on any other index is not judged, never "not
+    frozen"** (the check of 23 October, verify-R3-13-r2 X1; amends items 5,
+    15 and 19). Item 15 set the window aside on the index venue, so on every
+    NSE index, on the reason that every share an index is computed from
+    leaves continuous trading at 15:15. That is what `pull::vendor`'s
+    `CAS_INDEX_CIRCULAR`, the index session row's citation, argues for NIFTY
+    50 and NIFTY BANK and for no other index, and it is measured false for
+    others (`docs/00-charter.md`, "An NSE index through the cash closing
+    auction"): of the 135 Zerodha index series, 70 never hold one value for
+    180 s in 15:15-15:30 on any of the 42 auction-era sessions (INDIA VIX,
+    NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150, whose
+    longest unchanged run there is 60 s or none, among them), so a
+    frozen feed there went unjudged and the record read `flagged: false`
+    with no phrase, the hidden verdict item 19 refused for GDFL. Now
+    `dayflags_rules::auction_of` reads the window for each index. It is SET
+    ASIDE, as before, where `still_through_auction` holds: the exchange is
+    NSE and the sourced index table's row for the symbol
+    (`brutex_core::alias::INDICES`, D-3332) is named "NIFTY 50" or "NIFTY
+    BANK", the citation's own words, which a test pins to the session row's
+    citation. On every other index its minutes are `Minute::Unjudged`: they
+    end a judged run, and a run through them that reaches 180 s while no
+    judged run inside it does is the day's unjudged run (`DayScan::unjudged`,
+    folded beside the judged run in one pass): `index.frozen.flagged` is
+    `null`, `unjudged_s` and `unjudged_from` name it, and the phrase is
+    "index frozen not judged: unchanged for N minute(s) from HH:MM to HH:MM
+    (1min), all of it inside the cash closing auction's window, where an
+    index holding still is sourced for NIFTY 50 and NIFTY BANK alone;
+    whether this run is the auction's or a frozen feed's is not known
+    (UNVERIFIED)" (or "only N minute(s) of it in one stretch outside" the
+    window). A judged run anywhere else still flags the day `true`, the
+    window's run said beside it; a day with neither is `false`. GDFL's
+    ledger answers as item 19 had it (a run inside the window is `null`) and
+    its phrase now says that on such an index the run itself is not judged.
+    Both feeds serve `auction_aside`: `true`, `false`, or `null` on a day
+    with no window. Where no minute is not judged the fold is the one it
+    was, so a day before 2026-08-03 and a NIFTY or BANKNIFTY day keep every
+    verdict, run and phrase they had, the new fields beside them; so does
+    every other index's auction-era day that holds no run of 180 s in the
+    window (INDIA VIX's, measured). **Rejected:** judging
+    the window like any other minute on every other index, because 35 more
+    indices hold still there on every auction-era session (measured) and
+    would read "frozen in session" every day, a claim no source supports
+    either; and deciding per index and day from its constituents' dated
+    flags, because the store holds no constituent list (only undated
+    snapshots of five broad indices, none of NIFTY BANK) and it would add a
+    master read to every index day (L-R3-13-4). Chosen, not tuned: the two
+    indices are the source's, not a measurement's, and a third is added only
+    by a cited source and a new row here.
+26. **A GDFL ledger run the day's session cannot hold is refused by name,
+    never judged** (the check of 23 October, verify-R3-13-r2 attack E6, a
+    follow-up). Lines appended only to a shadow's clone of
+    `imports/gdfl.dayflags` (999999 s from 23:59:59, `u64::MAX` s from
+    09:15:00, 600 s from 15:29:59) were each served "index value frozen in
+    session", the second with `judged_s` 18446744073709495815. The import
+    measures `flat_max_s` over the session's own rows only
+    (`pull::gdfl_import_quality`, `FlatRun`: "the longest run of in-session
+    rows"), so its first and its last second each lie inside a window of the
+    day's session. `IndexDay` now carries that session, as the import reads
+    it (`pull::gdfl_cm::session_of`: the full session or a special one's
+    windows), and `IndexDay::outside_session` refuses a run that starts
+    outside every window, ends outside every window, has no stamp and is
+    longer than the session spans (first open to last close, gaps between
+    windows included), or falls on a day the calendar holds no session for:
+    `flagged` and `judged_s` are `null`, `frozen.refused` names why
+    (`starts_outside_session`, `ends_outside_session`,
+    `longer_than_session`, `no_session`), and the phrase is "index frozen
+    refused: the day ledger's longest unchanged run, N s from HH:MM:SS,
+    <why> (<the session's windows>); the import measures a run over the
+    session's own rows only, so the line is not that measure and the day's
+    frozen run is not judged (UNVERIFIED)". A short run is refused as a long
+    one is, since neither is the import's measure. A run across the gap of a
+    two-window day has both its ends in session and is judged. Every real
+    line holding `flat_max_s` (the 36 of 2026-09-25..30, read 2026-10-24)
+    lies inside 09:15:00-15:30:00, its latest end 15:29:24, so no served
+    answer changes. At most four window comparisons and one calendar lookup a
+    day; measured through a read-only shadow of the real store, warm, n = 200
+    each, three interleaved restarts of each build: GDFL NIFTY
+    2026-09-24..30 p50 1.32, 2.43 and 2.14 ms against 1.35, 2.36 and 2.23 ms
+    before (load 28 to 43, so the p99 and max of both move with the load:
+    4.98 to 20.62 and 6.94 to 51.99 ms here, 2.88 to 15.40 and 5.11 to 24.23
+    before). **Rejected:** refusing the whole record, because the day's other
+    flags do not depend on the run; and `session_s`, the line's own session
+    length, as the bound, because it places no stamp.
+27. **The band's legend names the flags behind each day's lead** (the check
+    of 23 October, verify-R3-13-r2, a follow-up). A cell is coloured by its
+    most severe kind and the legend counted that lead alone, so a flag that
+    is never a day's lead was in no legend: "frozen run not judged" on GDFL
+    NIFTY 2026-09-24..30 was said only in each day's line. `alsoTally`
+    (`web/src/lib/db/dayflags.js`) counts every kind a cell holds after its
+    lead, once per cell, in `DAY_KINDS`'s order, and the band draws it under
+    the legend as "also on these days, behind each day's lead". Never a fact
+    kind (a closed day, a day outside a span), which is no flag, and never
+    `cas`, which the band's closing-auction line already counts over every
+    cell that shows it. One pass over at most one page of cells, each cell's
+    kinds bounded by `DAY_KINDS`; no request. **Rejected:** colouring a cell
+    by more than one kind, which would change every day's colour for one
+    legend line.
+28. **The run through is decided by one comparison of its step with a
+    minute** (repair 2's mutation run on the lines it changed). The fold
+    counted a run broken by absent minutes with `step > MINUTE` in the match
+    arm whose guard had already found the same value's step not to be one
+    minute, so `>` and `>=` could not differ there: the `>=` mutant
+    (`dayflags_rules.rs:1254:51` at 312923190) survived as an equivalent,
+    and its `-` to `+` twin was equivalent on every stored, minute-aligned
+    input. As D-0192 directs it is restructured, never excluded: the same
+    unchanged value on a minute not set aside compares its step with a
+    minute once (`std::cmp::Ordering`): equal goes on, greater counts the run
+    broken and starts anew, less (no next minute of a one-minute rung) ends
+    the run unbroken. Read arm by arm against the old guard, no answer
+    changes for any input; a sub-minute step case is added to
+    `a_frozen_run_is_three_unchanged_minutes_in_a_row`.
+29. **Bar definition 5 is named** (IA-4, merged into feat/db-fix on 24
+    October; D-4877). The import's `BAR_DEFINITION` became 5 and an options
+    day is current under 5 alone, while `definition_means` had no sentence
+    for 5: merged as it was, the band would have called this build's own
+    definition "a definition this build does not name". It now says what 5
+    changed, in the import's own terms (D-4816, D-4829, D-4877), and
+    `a_spot_day_names_its_definition_only_when_it_is_not_current` walks every
+    definition from 1 to `pull::gdfl_import::BAR_DEFINITION`, so the next
+    number the import names fails the build until the band names it too.
+    `current` and the label still follow `definition_is_current` alone: an
+    options day under 2, 3 or 4 is labelled until it is restated.
+
+**Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
+L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
+10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
 
 ### D-7195 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
 
