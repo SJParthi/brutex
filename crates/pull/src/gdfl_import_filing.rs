@@ -1975,12 +1975,25 @@ pub(super) fn repair_gathered_months(
             report.months_repaired += 1;
         }
         report.seconds_committed += done.bars_committed;
+        // EACH FILE'S OWN ADDED BARS, in one walk of the stamps the repair
+        // added (ascending), the files' spans being in day order; a file
+        // gathered out of order walks from the start again.
+        let (mut cursor, mut last_end) = (0_usize, i64::MIN);
         for file in &offer.files {
             let (first, last) = file.span;
-            let added = added_at.partition_point(|&at| at <= last)
-                - added_at.partition_point(|&at| at < first);
+            if first <= last_end {
+                cursor = 0;
+            }
+            while added_at.get(cursor).is_some_and(|&at| at < first) {
+                cursor += 1;
+            }
+            let from = cursor;
+            while added_at.get(cursor).is_some_and(|&at| at <= last) {
+                cursor += 1;
+            }
+            last_end = last;
             if let Some(one) = deferred.get_mut(file.at) {
-                one.committed += added;
+                one.committed += cursor - from;
             }
         }
         note_gathered_repair(ctx, &offer, &deferred, (done.bars_committed, landed));

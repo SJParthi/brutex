@@ -1024,14 +1024,24 @@ pub fn write_revision(
                 offered.len()
             ));
         }
-        records.extend(offered);
+        // IN IST DAY ORDER, each day's records in the order they were
+        // stated: the held records are in day order (`parse` refuses any
+        // other), so the carried day goes in after the last record of an
+        // earlier day, walking back from the end past the later days (at
+        // most a month of records).
+        let mut at = records.len();
+        while at > 0
+            && records
+                .get(at - 1)
+                .is_some_and(|record| ist_day(record.t_micros) > i64::from(day.days_from_epoch()))
+        {
+            at -= 1;
+        }
+        let _replaced: Vec<Record> = records.splice(at..at, offered).collect();
     }
     if records.is_empty() {
         return Ok(None);
     }
-    // IN IST DAY ORDER, each day's records in the order they were stated: a
-    // stable sort by day keeps every day's own order.
-    records.sort_by_key(|record| ist_day(record.t_micros));
     let mut out = Vec::with_capacity(HEADER_LEN + records.len() * RECORD_LEN);
     out.extend_from_slice(&header());
     for (at, record) in records.iter().enumerate() {
@@ -1048,16 +1058,29 @@ pub fn write_revision(
         .parent()
         .ok_or_else(|| format!("{}: no directory", target.display()))?;
     std::fs::create_dir_all(dir).map_err(named)?;
-    let tmp = target.with_extension(format!("{EXTENSION}.tmp"));
-    {
-        let mut file = File::create(&tmp).map_err(named)?;
-        put_whole(&mut file, &out)
-            .and_then(|()| file.sync_all())
-            .map_err(named)?;
+    // THE ONE DOOR FOR A TEMPORARY (gate 28, RA-290): never a name already
+    // there opened and cut, which could be a hard link of another file. This
+    // process's own name, so two writers never share one; a dead writer's
+    // leftover under it is cleared by the door and said.
+    let tmp = target.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
+    let mut staged = store::staging::create(&tmp).map_err(|why| why.to_string())?;
+    let written = put_whole(&mut staged.file, &out)
+        .and_then(|()| staged.file.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, &target));
+    drop(staged.file);
+    if let Err(why) = written {
+        // Nothing half-written is left behind a refusal that says so.
+        let _removed = std::fs::remove_file(&tmp);
+        return Err(named(why));
     }
-    std::fs::rename(&tmp, &target).map_err(named)?;
     sync_dir(dir).map_err(named)?;
-    note_revision_written(key, month_of, &target, records.len(), held_version);
+    note_revision_written(
+        key,
+        month_of,
+        (&target, staged.cleared),
+        records.len(),
+        held_version,
+    );
     Ok(Some(records.len()))
 }
 
@@ -1075,11 +1098,12 @@ fn put_whole(file: &mut File, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// One `info` line per written revision sidecar (IA-17b): the share, the
-/// month, the records and the version the served one was in.
+/// month, the records, the version the served one was in, and the bytes of
+/// a dead writer's leftover the staging door cleared (0 for none).
 fn note_revision_written(
     key: &InstrumentKey,
     month_of: Day,
-    path: &Path,
+    (path, cleared): (&Path, Option<u64>),
     records: usize,
     from_version: u16,
 ) {
@@ -1096,6 +1120,7 @@ fn note_revision_written(
         .with("from_version", usize::from(from_version))
         .with("version", usize::from(VERSION))
         .with("sidecar", path_text.as_str())
+        .with("leftover_cleared_bytes", cleared.unwrap_or(0))
         .with("code", "auction_revision_written"),
     );
 }

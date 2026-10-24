@@ -2762,14 +2762,16 @@ fn record_close(
     // (D-4878): the days of a run ascend, so the day is the list's last. A
     // close a gathered repair deferred (IA-17b, D-4899) can follow a later
     // day's: it goes in at its place, so every list stays in day order.
-    let named = |days: &mut Vec<Day>| match days.last() {
-        Some(last) if *last == day => {}
-        Some(last) if *last > day => {
-            if let Err(at) = days.binary_search(&day) {
-                days.insert(at, day);
-            }
+    let named = |days: &mut Vec<Day>| {
+        // Back from the end past the later days: at most the days of one
+        // month a deferred close waited behind, none on a close in order.
+        let mut at = days.len();
+        while at > 0 && days.get(at - 1).is_some_and(|later| *later > day) {
+            at -= 1;
         }
-        _ => days.push(day),
+        if at == 0 || days.get(at - 1) != Some(&day) {
+            days.insert(at, day);
+        }
     };
     match outcome {
         Outcome::Done => {}

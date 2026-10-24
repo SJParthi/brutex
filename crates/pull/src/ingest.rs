@@ -1818,7 +1818,8 @@ pub fn gather_rows(
 /// O(held + offered) bars, bounded by `store::repair::row_ceiling` (refused
 /// `RowLimit` by name past it, never cut), plus the step's own cost; two
 /// journal lines and one pointer record. Not O(1), not on a read path,
-/// and once per (instrument, month) per run.
+/// and once per (instrument, month) per run: bench C-RP-02 holds its cost per
+/// gathered day flat (`docs/06-limits.md` L-IA-26).
 #[must_use]
 pub fn repair_gathered(
     bars: &[store::format::Bar],
