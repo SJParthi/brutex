@@ -31,7 +31,9 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use pull::gdfl_cm::{CmKind, CmRefusal, CmSource, DayListing, ListedFile};
-use pull::gdfl_import::{ImportKind, ImportRefusal, Observer, Report, Run, RunOptions, run_cm_from};
+use pull::gdfl_import::{
+    ImportKind, ImportRefusal, Observer, Report, Run, RunOptions, run_cm_from,
+};
 use pull::session::Day;
 
 use super::{ratio, refuse, spread_of};

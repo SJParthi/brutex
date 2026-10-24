@@ -145,7 +145,10 @@ fn check(dir: &Path, entries: u32) {
     }
     // A day of the year before, held only inside this year's zip, refuses
     // as misfiled, naming where it was found (the year boundary crossed).
-    if !matches!(source.day(away_day(0)), Err(CmRefusal::DayZipMisfiled { .. })) {
+    if !matches!(
+        source.day(away_day(0)),
+        Err(CmRefusal::DayZipMisfiled { .. })
+    ) {
         refuse("a day packed into the next year's zip refuses as misfiled");
     }
     // A day of the year no zip holds is no day.
@@ -225,7 +228,10 @@ pub(crate) fn year_index_is_flat() -> bool {
     let ([f1, f10, f100], [l1, l10, l100]) = (first.as_slice(), later.as_slice()) else {
         refuse("three sizes measured")
     };
-    let mut ok = linear_per_unit("C-CHK-02 first day() per year-zip entry", [*f1, *f10, *f100]);
+    let mut ok = linear_per_unit(
+        "C-CHK-02 first day() per year-zip entry",
+        [*f1, *f10, *f100],
+    );
     ok &= ratio("C-CHK-03 later day(), 10x year zip", *l1, *l10);
     ok &= ratio("C-CHK-03 later day(), 100x year zip", *l1, *l100);
     let Some((dir, warm, entries)) = largest else {

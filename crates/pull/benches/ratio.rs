@@ -85,18 +85,18 @@ mod padded;
 /// C-CHK-01, C-CHK-02 to C-CHK-06 and C-CHK-08 to C-CHK-10 (CC-20, FM-615,
 /// D-6800 to D-6804): one bench per check primitive, each held to the ceiling
 /// by this harness, `crates/pull/benches/ratio.rs`; C-CHK-07 is `api`'s.
+#[path = "ratio/admit.rs"]
+mod admit;
 #[path = "ratio/archive_from_source.rs"]
 mod archive_from_source;
-#[path = "ratio/nfo_year.rs"]
-mod nfo_year;
 #[path = "ratio/census_load.rs"]
 mod census_load;
+#[path = "ratio/nfo_year.rs"]
+mod nfo_year;
 #[path = "ratio/series_identity.rs"]
 mod series_identity;
 #[path = "ratio/strike_implausible.rs"]
 mod strike_implausible;
-#[path = "ratio/admit.rs"]
-mod admit;
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;

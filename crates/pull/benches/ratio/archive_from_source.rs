@@ -212,13 +212,14 @@ fn check(days: u32, bytes: &[u8], folders: usize) {
 fn the_extremes_open() {
     let empty = stored_zip(&[]);
     let archive = open(&empty);
-    if archive.ignored() != 0
-        || !matches!(archive.day(CmKind::Indices, nth_day(0)), Ok(None))
-    {
+    if archive.ignored() != 0 || !matches!(archive.day(CmKind::Indices, nth_day(0)), Ok(None)) {
         refuse("an archive of no entries opens empty");
     }
     let day = nth_day(0);
-    let one = stored_zip(&[(day_zip_name(CmKind::Indices, day), day_zip(CmKind::Indices, day))]);
+    let one = stored_zip(&[(
+        day_zip_name(CmKind::Indices, day),
+        day_zip(CmKind::Indices, day),
+    )]);
     if !matches!(open(&one).day(CmKind::Indices, day), Ok(Some(l)) if l.entries().len() == 2) {
         refuse("an archive of one day zip files it");
     }
@@ -237,9 +238,7 @@ pub(crate) fn directory_read_is_flat_per_entry() -> bool {
         let (bytes, entries, folders) = archive_bytes(days);
         check(days, &bytes, folders);
         let reps = (BASE_DAYS * 100 / days).max(1);
-        let whole = cost_ps(reps, || {
-            open(black_box(&bytes)).ignored()
-        });
+        let whole = cost_ps(reps, || open(black_box(&bytes)).ignored());
         println!(
             "  C-CHK-01 directory read once at {entries:>6} entries ({} bytes): {} us per run",
             bytes.len(),

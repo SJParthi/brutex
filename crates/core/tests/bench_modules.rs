@@ -61,7 +61,10 @@ struct Harness {
 /// Every crate that carries a `benches/ratio/` folder, by crate directory.
 fn harnesses(crates: &Path) -> BTreeMap<String, Harness> {
     let mut out = BTreeMap::new();
-    for entry in std::fs::read_dir(crates).expect("crates/ is readable").flatten() {
+    for entry in std::fs::read_dir(crates)
+        .expect("crates/ is readable")
+        .flatten()
+    {
         let folder = entry.path().join("benches/ratio");
         let Ok(listing) = std::fs::read_dir(&folder) else {
             continue;
@@ -236,7 +239,8 @@ fn the_registration_rule_refuses_each_way_a_module_goes_missing() {
         }
         orphans(&crates)
     };
-    let good = "#[path = \"ratio/a.rs\"]\nmod a;\nfn main() { let mut ok = true; ok &= a::run(); }\n";
+    let good =
+        "#[path = \"ratio/a.rs\"]\nmod a;\nfn main() { let mut ok = true; ok &= a::run(); }\n";
     assert!(case("good", good, &["a"]).is_empty());
 
     let unmounted = case("unmounted", good, &["a", "b"]);
@@ -247,7 +251,8 @@ fn the_registration_rule_refuses_each_way_a_module_goes_missing() {
     assert_eq!(dangling.len(), 1, "{dangling:?}");
     assert!(dangling[0].contains("is mounted and is not a file"));
 
-    let uncalled = "#[path = \"ratio/a.rs\"]\nmod a;\n/// a::run is named in a comment only\nfn main() {}\n";
+    let uncalled =
+        "#[path = \"ratio/a.rs\"]\nmod a;\n/// a::run is named in a comment only\nfn main() {}\n";
     let never = case("uncalled", uncalled, &["a"]);
     assert_eq!(never.len(), 1, "{never:?}");
     assert!(never[0].contains("never calls into it"));
@@ -310,20 +315,32 @@ fn the_registration_rule_names_every_fault_at_once_and_skips_what_is_no_module()
         "module `idle` (ratio/idle.rs) is mounted and the harness never calls into it",
         "benches/ratio/stray.rs` is mounted by no",
     ] {
-        assert!(faults.iter().any(|f| f.contains(words)), "{words}: {faults:#?}");
+        assert!(
+            faults.iter().any(|f| f.contains(words)),
+            "{words}: {faults:#?}"
+        );
     }
 
     // A FAULT IN ONE CRATE OF TWO is named under that crate alone.
     let good = "#[path = \"ratio/a.rs\"]\nmod a;\nfn main() { a::x(); }\n";
     let faults = orphans(&tree(
         &root.join("two"),
-        &[("left", good, &["a.rs"]), ("right", good, &["a.rs", "b.rs"])],
+        &[
+            ("left", good, &["a.rs"]),
+            ("right", good, &["a.rs", "b.rs"]),
+        ],
     ));
     assert_eq!(faults.len(), 1, "{faults:#?}");
     assert!(faults[0].starts_with("right: "), "{faults:#?}");
 
     // AN EMPTY FOLDER beside a harness that mounts nothing is no fault.
-    assert!(orphans(&tree(&root.join("empty"), &[("demo", "fn main() {}\n", &[])])).is_empty());
+    assert!(
+        orphans(&tree(
+            &root.join("empty"),
+            &[("demo", "fn main() {}\n", &[])]
+        ))
+        .is_empty()
+    );
 
     // WHAT IS NO MODULE: a harness written with CRLF line ends still mounts
     // and calls its module, a note beside the modules is not one, and a

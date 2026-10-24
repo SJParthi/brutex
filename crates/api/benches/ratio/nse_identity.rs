@@ -129,8 +129,7 @@ fn check(reference: &Reference, merged: &Merged, shares: &[(&str, String)]) {
             refuse("a share both lists hold confirms");
         }
     }
-    let (Some((absent, _)), Some((wrong, _))) = (shares.get(PROBED), shares.get(PROBED + 1))
-    else {
+    let (Some((absent, _)), Some((wrong, _))) = (shares.get(PROBED), shares.get(PROBED + 1)) else {
         refuse("the two refused shares")
     };
     let refusals = [
@@ -162,13 +161,14 @@ fn the_extremes_refuse(shares: &[(&str, String)]) {
         refuse("one row past MAX_CONSTITUENTS is refused");
     }
     let merged = zerodha(BASE_ROWS, shares);
-    let (first, _) = shares
-        .first()
-        .unwrap_or_else(|| refuse("a probed share"));
+    let (first, _) = shares.first().unwrap_or_else(|| refuse("a probed share"));
     let earlier = Day::new(2026, 10, 5).unwrap_or_else(|_| refuse("a real day"));
     let stale = Reference::from_body(&body(BASE_ROWS, shares, wrong), earlier, landed())
         .unwrap_or_else(|why| refuse(&why));
-    if !matches!(stale.confirm(&merged, first), Err(Refusal::FileStale { .. })) {
+    if !matches!(
+        stale.confirm(&merged, first),
+        Err(Refusal::FileStale { .. })
+    ) {
         refuse("files landed on two days refuse as stale");
     }
     if !matches!(

@@ -40,7 +40,11 @@ use pull::session::Day;
 /// p50, p99 and max of `ns`, sorted in place.
 fn spread(ns: &mut [u128]) -> (u128, u128, u128) {
     ns.sort_unstable();
-    let at = |q: usize| ns.get(ns.len().saturating_sub(1) * q / 100).copied().unwrap_or(0);
+    let at = |q: usize| {
+        ns.get(ns.len().saturating_sub(1) * q / 100)
+            .copied()
+            .unwrap_or(0)
+    };
     (at(50), at(99), ns.last().copied().unwrap_or(0))
 }
 
@@ -64,7 +68,9 @@ fn year_index(dir: &Path) {
         println!(
             "CC-20 nfo first day() ({run}: lists the folder, indexes every year zip): {} us, {:?}",
             at.elapsed().as_micros(),
-            first.as_ref().map(|d| d.as_ref().map(|l| l.entries().len()))
+            first
+                .as_ref()
+                .map(|d| d.as_ref().map(|l| l.entries().len()))
         );
         held = Some(source);
     }
@@ -83,7 +89,10 @@ fn year_index(dir: &Path) {
         "CC-20 nfo later day() (index hit plus the day zip's own listing): n={n} \
          p50={p50} ns p99={p99} ns max={max} ns, {listed} days listed"
     );
-    assert!(listed > 0, "the real year zips list no day of 2018-09..2026-09");
+    assert!(
+        listed > 0,
+        "the real year zips list no day of 2018-09..2026-09"
+    );
 }
 
 /// The census cold load of the real store, every vendor, five samples each.
@@ -120,7 +129,10 @@ fn census(root: &Path) {
             vendor.as_str()
         );
     }
-    assert!(read_any, "the store root holds no census of GDFL or Zerodha");
+    assert!(
+        read_any,
+        "the store root holds no census of GDFL or Zerodha"
+    );
 }
 
 #[test]

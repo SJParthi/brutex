@@ -41,7 +41,12 @@ fn the_extremes_answer_as_d3331_says() {
         ("exactly k times the median", 12_345 * k, 12_345, false),
         ("one paisa past k times", 12_345 * k + 1, 12_345, true),
         ("i64::MAX median saturates", i64::MAX, i64::MAX, false),
-        ("i64::MAX strike, i64::MAX median", i64::MAX, i64::MAX / k + 1, false),
+        (
+            "i64::MAX strike, i64::MAX median",
+            i64::MAX,
+            i64::MAX / k + 1,
+            false,
+        ),
         ("i64::MAX strike past a real median", i64::MAX, 12_345, true),
         ("zero median, positive strike", 1, 0, true),
         ("zero median, zero strike", 0, 0, false),
