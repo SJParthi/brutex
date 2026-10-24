@@ -936,7 +936,7 @@ fn walk(
         // in reverse. The copy reads no order, so none is sorted for.
         let mut folders = Vec::new();
         for path in names {
-            if exclude.is_some_and(|own| own.iter().any(|log| *log == path)) {
+            if exclude.is_some_and(|[receipts, drills]| *receipts == path || *drills == path) {
                 continue;
             }
             match fs::symlink_metadata(&path) {
