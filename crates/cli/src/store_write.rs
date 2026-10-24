@@ -93,8 +93,17 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 19] = [
+///
+/// `backup` (R4-09b, D-7177) is one unless `--plan`: it writes no bar, but it
+/// appends its receipt to `ops/backups.log`, which `/disk.json` and every page
+/// serve as "the last copy", so the line must name the code that copied.
+/// `backup-drill` (D-7178) is one in every form: it restores into a scratch
+/// folder outside the store and appends its one line to
+/// `ops/backup-drills.log`, which `/disk.json` serves as the last drill.
+pub(crate) const WRITERS: [&str; 21] = [
     "alerts",
+    "backup",
+    "backup-drill",
     "census-migrate",
     "census-recount",
     "feed-reconcile",
@@ -131,11 +140,13 @@ pub(crate) const WRITERS: [&str; 19] = [
 /// parse refuses before a write, so the rule reads only the flag (IA-9).
 /// `upkeep` writes only as `upkeep run` and `upkeep resume` (R3-17): `plan`
 /// and `status` read, and `stop` writes a request naming a run, which carries
-/// no store data a commit answers for.
+/// no store data a commit answers for. `backup --plan` counts and measures
+/// and writes nothing on either side (R4-09b).
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
+        "backup" => !arguments.contains(&"--plan"),
         "fno-membership" => arguments.contains(&"build"),
         "msum-build" | "series-identity" | "srt-build" | "tix-rebuild" => {
             !arguments.contains(&"--dry-run")
@@ -404,6 +415,17 @@ mod tests {
                 true,
             ),
             ("scrub-blocks", &["gdfl"], true),
+            // R4-09b: the plan writes nothing; the copy appends its receipt,
+            // and the drill its line, to the store's ops/ logs.
+            ("backup", &["--to", "/Volumes/B", "--plan"], false),
+            ("backup", &["--to", "/Volumes/B"], true),
+            ("backup", &["--to", "/Volumes/B", "--mib-per-s", "64"], true),
+            ("backup-drill", &["--from", "/Volumes/B"], true),
+            (
+                "backup-drill",
+                &["--from", "/Volumes/B", "--months", "3"],
+                true,
+            ),
             ("verify-merge", &[], true),
             ("verify-merge", &["--list"], false),
             // `--list` beside anything else is a misuse, refused before any

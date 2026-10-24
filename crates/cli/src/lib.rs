@@ -61,6 +61,9 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// `cli backup` and `cli backup-drill`: the store's second copy with its
+/// manifest, and its restore drill (AUT-06, D-7137, D-7175..D-7181).
+mod backup;
 /// `cli calendar-days`: the days the tradable-day rule excludes, per year, and
 /// the calendar held against the store (D-5153, D-5158).
 mod calendar_days;
@@ -646,6 +649,26 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and its totals are the last line of
                                    audit/scrub-blocks.VENDOR.cursor. Writes
                                    those two files and nothing else (DB-B74).
+       cli backup --to DIR [--plan] [--mib-per-s N]
+                                   copy every month the census names (every
+                                   generation), the census, journals, ledgers,
+                                   ops/ files and the GDFL source archives the
+                                   journal names to a second drive, each new or
+                                   changed file under a new name with its
+                                   BLAKE3 in DIR/brutex-backup-v1/manifest.log;
+                                   never deletes or overwrites on DIR; a month a
+                                   writer holds is busy and retried. Refuses a
+                                   DIR on the store's device, inside the store,
+                                   not a directory, or too small. --plan counts
+                                   and writes nothing; a run appends its receipt
+                                   to ops/backups.log (AUT-06, D-7137).
+       cli backup-drill --from DIR [--months N]
+                                   restore N months (3) chosen across kinds from
+                                   DIR's manifest into a new scratch folder,
+                                   compare each file with its digest and the
+                                   store byte for byte, and append one line to
+                                   ops/backup-drills.log; restores nothing into
+                                   the store (AUT-06, D-7137).
        cli msum-build VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT|/*] RUNG FROM TO [--dry-run]
                                    write the .sum month summary of every named
                                    month (FROM, TO are YYYY-MM) whole, in a new
@@ -3004,6 +3027,10 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["scrub-blocks", arguments @ ..] if !arguments.is_empty() => {
             scrub_blocks::command(arguments, out)
         }
+        ["backup", arguments @ ..] if !arguments.is_empty() => backup::command(arguments, out),
+        ["backup-drill", arguments @ ..] if !arguments.is_empty() => {
+            backup::drill_command(arguments, out)
+        }
         ["msum-build", arguments @ ..] if !arguments.is_empty() => {
             msum_builder::command(arguments, out)
         }
@@ -3109,7 +3136,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 60] = [
+const COMMANDS: [&str; 62] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3117,6 +3144,8 @@ const COMMANDS: [&str; 60] = [
     "audit-stored",
     "auto",
     "auto-stored",
+    "backup",
+    "backup-drill",
     "boolean-campaign-stored",
     "boolean-catalog-stored",
     "boolean-grammar-campaign-stored",
