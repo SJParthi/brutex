@@ -3889,3 +3889,29 @@ test('a browser\'s stderr is kept as its last lines only and read no more once i
   // The source keeps a tail, never the whole.
   assert.match(source('ci/browser-harness.mjs'), /text = \(text \+ c\)\.slice\(-STDERR_TAIL\);/);
 });
+
+test('the end of a command waits for stdout to take its whole sheet, bounded: a stream that takes nothing is said on stderr and let go', async () => {
+  // Before (verify r6 follow-up): process.exit right after the write cut a piped sheet past 64 KB.
+  const { Writable } = await import('node:stream');
+  /** @type {string[]} */
+  const taken = [];
+  const sink = new Writable({ write(chunk, _encoding, done) { taken.push(String(chunk)); done(); } });
+  assert.equal(await sheet.written(sink, 'the sheet\n', 'speed-sheet', 1_000), true);
+  assert.deepEqual(taken, ['the sheet\n']);
+  /** @type {string[]} */
+  const said = [];
+  const write = process.stderr.write;
+  process.stderr.write = /** @type {any} */ ((/** @type {any} */ s) => (said.push(String(s)), true));
+  let ended;
+  const t0 = Date.now();
+  try {
+    ended = await sheet.written(/** @type {any} */ ({ write: () => true }), 'x'.repeat(10), 'speed-sheet', 50);
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(ended, false, 'a stream that never takes it is let go at the bound');
+  assert.ok(Date.now() - t0 >= 45, 'at the bound, not before');
+  assert.deepEqual(said, ['speed-sheet: stdout did not take the whole sheet (10 B) within 50 ms; what it did not take is lost\n']);
+  // Both commands exit through it.
+  for (const file of ['ci/speed-sheet.mjs', 'ci/browser-harness.mjs']) assert.match(source(file), /const flushed = written\(process\.stdout, text, '[a-z-]+'\);[\s\S]*await flushed;\s*process\.exit\(code\);/, file);
+});
