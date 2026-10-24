@@ -34,7 +34,7 @@ IA-16, R3-16, R3-36, SC-4.
 - NEXT: when HOLD is gone, write `crates/store/src/recover_tests.rs` (the every-synced-write walk,
   FM-062's test, the extreme cases), then the cli verb.
 
-### 2026-10-24 12:55 IST — HOLD lifted; store tests
+### 2026-10-24 12:46 IST — HOLD lifted; store tests
 
 - HOLD removed on the base branch (55dfb044, "Lift HOLD"); GO present. Resumed.
 - `crates/store/src/recover_tests.rs`: 18 tests, including
@@ -46,7 +46,7 @@ IA-16, R3-16, R3-36, SC-4.
 - `cargo test -p store --lib --locked recover`: `test result: ok. 18 passed; 0 failed`.
 - NEXT: the whole store suite, then the cli verb.
 
-### 2026-10-24 13:40 IST — the cli verb
+### 2026-10-24 13:12 IST — the cli verb
 
 - `crates/cli/src/month_recover_command.rs` (`cli month-recover … --plan|--yes`) and its tests
   `crates/cli/src/month_recover_command_tests.rs`: 7 tests, including
@@ -60,7 +60,7 @@ IA-16, R3-16, R3-36, SC-4.
 - `cargo test -p cli --lib --locked month_recover`: `test result: ok. 7 passed; 0 failed`.
 - NEXT: the store-step row, the bench, the D-7093 and L-IA-40 texts, then the full gates.
 
-### 2026-10-24 13:42 IST — HELD again
+### 2026-10-24 13:12 IST — HELD again (times above corrected to the commit times)
 
 - HOLD found again on the base branch at this save point. Commit `a6ab3775` pushed. Waiting.
 - NEXT (unchanged): the store-step row, the bench, the D-7093 and L-IA-40 texts, the full gates.
