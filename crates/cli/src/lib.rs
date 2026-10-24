@@ -64,6 +64,10 @@ mod audited_stored;
 /// `cli backup` and `cli backup-drill`: the store's second copy with its
 /// manifest, and its restore drill (AUT-06, D-7137, D-7175..D-7181).
 mod backup;
+pub use backup::{
+    DRILLS as BACKUP_DRILLS, DrillLine as BackupDrillLine, RECEIPTS as BACKUP_RECEIPTS,
+    Receipt as BackupReceipt, decoded as backup_decoded,
+};
 /// `cli calendar-days`: the days the tradable-day rule excludes, per year, and
 /// the calendar held against the store (D-5153, D-5158).
 mod calendar_days;

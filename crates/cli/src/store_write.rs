@@ -491,8 +491,10 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 19] = [
+        let writing: [(&str, &[&str]); 21] = [
             ("alerts", &["--ack", "1"]),
+            ("backup", &["--to", "DIR"]),
+            ("backup-drill", &["--from", "DIR"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
             ("feed-reconcile", &["2025-03", "--out", "audit"]),

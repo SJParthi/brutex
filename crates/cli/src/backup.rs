@@ -181,10 +181,10 @@ const LOCK: &str = "backup.lock";
 const RUNS: &str = "runs";
 
 /// The receipt log, relative to the store root: `api`'s `BACKUP_RECEIPTS`.
-pub(crate) const RECEIPTS: &str = "ops/backups.log";
+pub const RECEIPTS: &str = "ops/backups.log";
 
 /// The drill log, relative to the store root (D-7178).
-pub(crate) const DRILLS: &str = "ops/backup-drills.log";
+pub const DRILLS: &str = "ops/backup-drills.log";
 
 /// The directories the store keeps, each copied whole: `(class, directory)`.
 pub(crate) const LISTED: [(&str, &str); 7] = [
@@ -206,11 +206,9 @@ const MONTH: &str = "month";
 /// The class of every source archive file.
 const ARCHIVE: &str = "archive";
 
-/// The longest encoded target path a receipt carries: the rest of the line is
-/// under 400 bytes, so the line stays inside `api`'s 1,024-byte receipt.
-const MAX_DEST: usize = 512;
-
-/// The longest line this module appends to a store log, `api`'s receipt cap.
+/// The longest line this module appends to a store log: `api`'s
+/// `MAX_RECEIPT_LINE`, past which `last_backup` takes a line for no receipt
+/// (`api::disk_route` holds both equal in a test).
 pub(crate) const MAX_LINE: usize = 1_024;
 
 /// The words that end a torn tail: no reader reads a line that ends in them.
@@ -254,7 +252,8 @@ const fn is_plain(byte: u8) -> bool {
 
 /// `text` decoded, or `None` for a byte [`encoded`] never leaves plain or a
 /// broken escape.
-pub(crate) fn decoded(text: &str) -> Option<Vec<u8>> {
+#[must_use]
+pub fn decoded(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -624,6 +623,9 @@ struct Ledger {
     path: PathBuf,
     unsynced: u64,
     synced_at: Instant,
+    /// A write that did not finish (a full disk mid-line): the next line ends
+    /// it as a void line first, so the two are never joined into one.
+    torn: bool,
 }
 
 impl Ledger {
@@ -646,14 +648,21 @@ impl Ledger {
             path: path.to_path_buf(),
             unsynced: 0,
             synced_at: Instant::now(),
+            torn: false,
         })
     }
 
     fn line(&mut self, text: &str) -> io::Result<()> {
-        let mut bytes = Vec::with_capacity(text.len() + 1);
+        let mut bytes = Vec::with_capacity(VOID.len() + text.len() + 2);
+        if self.torn {
+            bytes.extend_from_slice(VOID.as_bytes());
+            bytes.push(b'\n');
+        }
         bytes.extend_from_slice(text.as_bytes());
         bytes.push(b'\n');
+        self.torn = true;
         self.file.write_all(&bytes)?;
+        self.torn = false;
         self.unsynced += 1;
         if self.unsynced >= SYNC_RECORDS || self.synced_at.elapsed() >= SYNC_EVERY {
             self.sync()?;
@@ -1293,16 +1302,59 @@ fn check_target(root: &Path, to: &Path, env: &Env<'_>) -> Result<PathBuf, Refusa
             ));
         }
     }
-    if encoded(dest.as_os_str().as_bytes()).len() > MAX_DEST {
+    check_receipt(&store, &dest)?;
+    Ok(dest)
+}
+
+/// Refuses a target whose receipt `api` could not read, or a receipt log
+/// that is no regular file: both before anything is copied.
+fn check_receipt(store: &Path, dest: &Path) -> Result<(), Refusal> {
+    // THE LONGEST RECEIPT THIS TARGET COULD GET, every number at its widest:
+    // a line `api` would refuse as no receipt is refused here, before a copy.
+    let widest = Receipt {
+        copied_at: now_s(),
+        dest: dest.to_path_buf(),
+        raw_bytes: u64::MAX,
+        store_bytes: u64::MAX,
+        run: u64::MAX,
+        complete: false,
+        files: u64::MAX,
+        bytes: u64::MAX,
+        copied_files: u64::MAX,
+        copied_bytes: u64::MAX,
+        unchanged: u64::MAX,
+        busy: u64::MAX,
+        missing: u64::MAX,
+        unreadable: u64::MAX,
+        commit: Some("0".repeat(40)),
+    }
+    .line()
+    .len();
+    if widest > MAX_LINE {
         return Err(refused(
             "target_path_too_long",
             format!(
-                "{} is longer than the {MAX_DEST} bytes a receipt line carries",
+                "{} makes a receipt of up to {widest} bytes, past the {MAX_LINE} a receipt line \
+                 carries (docs/36-ops-runbook.md §4)",
                 dest.display()
             ),
         ));
     }
-    Ok(dest)
+    let log = store.join(RECEIPTS);
+    match fs::symlink_metadata(&log) {
+        Ok(meta) if !meta.is_file() => {
+            return Err(refused(
+                "receipt_unwritable",
+                format!(
+                    "{} is not a regular file, so no receipt could be appended; nothing was \
+                     copied",
+                    log.display()
+                ),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A listed unit: a month (its locks and found files) or one file.
@@ -1342,6 +1394,26 @@ pub(crate) fn backup(root: &Path, ask: &Ask, env: &Env<'_>) -> Result<Ran, Refus
     let manifest = home.join(MANIFEST);
     let mut faults = Faults::default();
     let (units, archive_roots) = units(root, &mut faults)?;
+    // A STORE THAT LISTS NOTHING IS NOT BACKED UP AS "0 FILES": that is a root
+    // pointed at the wrong folder, and a receipt would say a copy exists.
+    if units.is_empty() {
+        return Err(refused(
+            "nothing_listed",
+            format!(
+                "{} lists nothing to copy: no census names a month, no listed folder holds a \
+                 file and the journal names no archive{}; nothing was written",
+                root.display(),
+                if faults.unlisted.count > 0 {
+                    format!(
+                        " (censuses that would not load: {})",
+                        faults.unlisted.text()
+                    )
+                } else {
+                    String::new()
+                }
+            ),
+        ));
+    }
     if let Some(archive) = archive_roots
         .iter()
         .find(|archive| dest.starts_with(archive))
@@ -1682,6 +1754,7 @@ impl Copying<'_> {
                         );
                         let torn = line.get(..line.len() / 2).unwrap_or("");
                         let _ = self.ledger.file.write_all(torn.as_bytes());
+                        self.ledger.torn = true;
                         return Err(refused("killed", "killed by a test".to_owned()));
                     }
                 }
@@ -1910,17 +1983,93 @@ fn copy(
             encoded(name.as_bytes())
         ))?;
     }
-    if let Err(stop) = state.every(&units) {
+    if let Err(mut stop) = state.every(&units) {
         // THE TARGET STOPPED THE RUN: what was copied is durable and recorded,
-        // and the next run finishes the rest. No receipt: this was no copy.
-        let _ = state.ledger.line(&format!(
-            "stopped {run} why={}",
-            encoded(stop.why.as_bytes())
-        ));
-        let _ = state.ledger.sync();
+        // and the next run finishes the rest. No receipt: this was no copy. A
+        // test's kill writes nothing after the cut, as a dead process would.
+        if stop.word != "killed" {
+            let line = format!("stopped {run} why={}", encoded(stop.why.as_bytes()));
+            if let Err(why) = state.ledger.line(&line).and_then(|()| state.ledger.sync()) {
+                let _ = write!(
+                    stop.why,
+                    "; its `stopped` line could not be appended to {} either ({why})",
+                    state.ledger.path.display()
+                );
+            }
+        }
         return Err(stop);
     }
     finish(root, env, state)
+}
+
+/// One receipt: the line a finished run appends to `ops/backups.log`
+/// (D-7177). Its first two words are the runbook's `copied=` and `dest=`,
+/// which `api`'s `last_backup` requires; every other word is `key=value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipt {
+    /// When the run finished, Unix seconds (written as a UTC instant).
+    pub copied_at: u64,
+    /// The target folder, canonical (written percent-encoded).
+    pub dest: PathBuf,
+    /// Bytes of the source archives the target holds.
+    pub raw_bytes: u64,
+    /// Bytes of the store files the target holds.
+    pub store_bytes: u64,
+    /// The run's id.
+    pub run: u64,
+    /// Whether every listed unit was copied or found unchanged.
+    pub complete: bool,
+    /// Paths the target holds a copy of (the manifest's file count).
+    pub files: u64,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Files this run copied.
+    pub copied_files: u64,
+    /// Their bytes.
+    pub copied_bytes: u64,
+    /// Files found unchanged.
+    pub unchanged: u64,
+    /// Months a writer held at the end of the run.
+    pub busy: u64,
+    /// Months and archives named and not on disk.
+    pub missing: u64,
+    /// Files, folders and censuses that could not be read.
+    pub unreadable: u64,
+    /// The build's commit, or `None` for an unstamped build.
+    pub commit: Option<String>,
+}
+
+impl Receipt {
+    /// The line, without its newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "copied={} dest={} raw_bytes={} store_bytes={} by=cli-backup run={} {} commit={}",
+            utc(self.copied_at),
+            encoded(self.dest.as_os_str().as_bytes()),
+            self.raw_bytes,
+            self.store_bytes,
+            self.run,
+            self.words(),
+            self.commit.as_deref().unwrap_or("unstamped"),
+        )
+    }
+
+    /// The words the manifest's `end` line shares with the receipt.
+    fn words(&self) -> String {
+        format!(
+            "state={} files={} bytes={} copied_files={} copied_bytes={} unchanged={} busy={} missing={} unreadable={}",
+            if self.complete { "complete" } else { "partial" },
+            self.files,
+            self.bytes,
+            self.copied_files,
+            self.copied_bytes,
+            self.unchanged,
+            self.busy,
+            self.missing,
+            self.unreadable,
+        )
+    }
 }
 
 fn finish(root: &Path, env: &Env<'_>, mut state: Copying<'_>) -> Result<Ran, Refusal> {
@@ -1928,33 +2077,32 @@ fn finish(root: &Path, env: &Env<'_>, mut state: Copying<'_>) -> Result<Ran, Ref
     let total = state.ran.total();
     let faults = &state.ran.faults;
     let complete = state.ran.complete();
-    let words = format!(
-        "state={} files={} bytes={} copied_files={} copied_bytes={} unchanged={} busy={} missing={} unreadable={}",
-        if complete { "complete" } else { "partial" },
-        state.book.files,
-        state.book.bytes,
-        total.copied,
-        total.copied_bytes,
-        total.unchanged + total.recorded_only,
-        faults.busy.count,
-        faults.missing.count,
-        faults.unreadable.count + faults.unlisted.count,
-    );
-    state.note_line(&format!("end {run} {words}"))?;
+    let mut receipt = Receipt {
+        copied_at: 0,
+        dest: state.ran.dest.clone(),
+        raw_bytes: state.book.raw_bytes,
+        store_bytes: state.book.store_bytes,
+        run,
+        complete,
+        files: state.book.files,
+        bytes: state.book.bytes,
+        copied_files: total.copied,
+        copied_bytes: total.copied_bytes,
+        unchanged: total.unchanged + total.recorded_only,
+        busy: faults.busy.count,
+        missing: faults.missing.count,
+        unreadable: faults.unreadable.count + faults.unlisted.count,
+        commit: env.commit.map(str::to_owned),
+    };
+    state.note_line(&format!("end {run} {}", receipt.words()))?;
     state.ledger.sync().map_err(|why| {
         refused(
             "target_unwritable",
             format!("{}: {why}", state.ledger.path.display()),
         )
     })?;
-    let receipt = format!(
-        "copied={} dest={} raw_bytes={} store_bytes={} by=cli-backup run={run} {words} commit={}",
-        utc(now_s()),
-        encoded(state.ran.dest.as_os_str().as_bytes()),
-        state.book.raw_bytes,
-        state.book.store_bytes,
-        env.commit.unwrap_or("unstamped"),
-    );
+    receipt.copied_at = now_s();
+    let receipt = receipt.line();
     append_line(root, RECEIPTS, &receipt).map_err(|why| refused("receipt_unwritable", why))?;
     state.ran.files = state.book.files;
     state.ran.bytes = state.book.bytes;
@@ -2337,43 +2485,107 @@ fn restore_months(
     };
 }
 
-/// The drill's one line: date, target, result, counts, and the months by
-/// name as far as [`MAX_LINE`] allows (the rest counted as `more=`).
+/// One drill line: what `backup-drill` appends to `ops/backup-drills.log`
+/// (D-7178), which `/disk.json` serves as the last drill. Its first word is
+/// `drilled=<UTC>`; every word is `key=value`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrillLine {
+    /// When the drill finished, Unix seconds (written as a UTC instant).
+    pub drilled_at: u64,
+    /// The target folder, canonical.
+    pub from: PathBuf,
+    /// The drill's id.
+    pub drill: u64,
+    /// `pass`, `fail` or `incomplete`.
+    pub result: String,
+    /// Months restored and compared.
+    pub months: u64,
+    /// Months asked for.
+    pub asked: u64,
+    /// Months the manifest holds.
+    pub held: u64,
+    /// Files restored.
+    pub files: u64,
+    /// Their bytes.
+    pub bytes: u64,
+    /// Files the store changed since the copy: compared with the digest only.
+    pub moved: u64,
+    /// Files that did not compare.
+    pub failed: u64,
+    /// Months a writer held, skipped.
+    pub busy: u64,
+    /// The scratch folder the months were restored into.
+    pub scratch: PathBuf,
+    /// The build's commit, or `None` for an unstamped build.
+    pub commit: Option<String>,
+    /// The months restored, by store path.
+    pub units: Vec<String>,
+}
+
+impl DrillLine {
+    /// The line, without its newline: the months by name as far as
+    /// [`MAX_LINE`] allows, the rest counted as `more=`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mut line = format!(
+            "drilled={} from={} drill={} result={} months={} asked={} held={} files={} bytes={} moved={} failed={} busy={} scratch={} commit={}",
+            utc(self.drilled_at),
+            encoded(self.from.as_os_str().as_bytes()),
+            self.drill,
+            self.result,
+            self.months,
+            self.asked,
+            self.held,
+            self.files,
+            self.bytes,
+            self.moved,
+            self.failed,
+            self.busy,
+            encoded(self.scratch.as_os_str().as_bytes()),
+            self.commit.as_deref().unwrap_or("unstamped"),
+        );
+        let mut listed = 0;
+        for (n, unit) in self.units.iter().enumerate() {
+            let word = format!(
+                "{}{}",
+                if n == 0 { " month=" } else { "," },
+                encoded(unit.as_bytes())
+            );
+            // ROOM IS KEPT FOR ` more=<n>`, at most 26 bytes.
+            if line.len() + word.len() + 26 > MAX_LINE {
+                break;
+            }
+            line.push_str(&word);
+            listed += 1;
+        }
+        if listed < self.units.len() {
+            let _ = write!(line, " more={}", self.units.len() - listed);
+        }
+        line
+    }
+}
+
+/// The drill line of `drilled`.
 fn drill_line(drilled: &Drilled, from: &Path, asked: u64, commit: Option<&str>) -> String {
     let sum = |of: fn(&Restored) -> u64| drilled.months.iter().map(of).sum::<u64>();
-    let mut line = format!(
-        "drilled={} from={} drill={} result={} months={} asked={asked} held={} files={} bytes={} moved={} failed={} busy={} scratch={} commit={}",
-        utc(now_s()),
-        encoded(from.as_os_str().as_bytes()),
-        drilled.id,
-        drilled.result,
-        drilled.months.len(),
-        drilled.held,
-        sum(|m| m.files),
-        sum(|m| m.bytes),
-        sum(|m| m.moved),
-        sum(|m| m.failures.len() as u64),
-        drilled.busy.len(),
-        encoded(drilled.scratch.as_os_str().as_bytes()),
-        commit.unwrap_or("unstamped"),
-    );
-    let mut listed = 0;
-    for (n, month) in drilled.months.iter().enumerate() {
-        let word = format!(
-            "{}{}",
-            if n == 0 { " month=" } else { "," },
-            encoded(month.unit.as_bytes())
-        );
-        if line.len() + word.len() + 16 > MAX_LINE {
-            break;
-        }
-        line.push_str(&word);
-        listed += 1;
+    DrillLine {
+        drilled_at: now_s(),
+        from: from.to_path_buf(),
+        drill: drilled.id,
+        result: drilled.result.to_owned(),
+        months: drilled.months.len() as u64,
+        asked,
+        held: drilled.held,
+        files: sum(|m| m.files),
+        bytes: sum(|m| m.bytes),
+        moved: sum(|m| m.moved),
+        failed: sum(|m| m.failures.len() as u64),
+        busy: drilled.busy.len() as u64,
+        scratch: drilled.scratch.clone(),
+        commit: commit.map(str::to_owned),
+        units: drilled.months.iter().map(|m| m.unit.clone()).collect(),
     }
-    if listed < drilled.months.len() {
-        let _ = write!(line, " more={}", drilled.months.len() - listed);
-    }
-    line
+    .line()
 }
 
 /// The drill's target and store root, canonical, once the target is a folder
