@@ -95,7 +95,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { PAGE_TARGETS, MEASURED_PAGES, summary, routePath } from '../src/lib/speed.js';
@@ -105,11 +105,12 @@ import { BUILD_HEADER } from '../src/lib/runtime-inspection.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
 import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
 import { linkOfKey } from '../src/lib/db/selection-model.js';
-import { writeWhole, MAX_WAIT_MS, DECIMAL } from './speed-sheet.mjs';
+import { writeWhole, MAX_WAIT_MS, DECIMAL, GROUP_POLL_MS, groupRunning, signalGroup } from './speed-sheet.mjs';
 
 // The longest wait a Node timer holds, and the sheet's own reading of a whole
-// number: one rule for both commands (`speed-sheet.mjs` says why).
-export { MAX_WAIT_MS };
+// number: one rule for both commands (`speed-sheet.mjs` says why). The
+// process-group stop is one rule too: the browser here, a command there.
+export { MAX_WAIT_MS, GROUP_POLL_MS, groupRunning, signalGroup };
 
 /** Where a browser is looked for when `--chrome` and `BRUTEX_CHROME` say nothing. */
 export const CHROME_PATHS = Object.freeze([
@@ -502,6 +503,11 @@ export function parseArgs(argv) {
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
   const instrument = String(o.instrument ?? EDGE_INSTRUMENT);
   if (rungsUrl(instrument) === null || linkOfKey(instrument) === null) throw new Error(`--instrument ${JSON.stringify(instrument)} is not an instrument key (NSE-INDEX-NIFTY, NSE-EQ-RELIANCE, ...)`);
+  // ONE FILE IS NOT BOTH (verify r5 follow-up, 23 Oct: --out and --capture
+  // naming one path left the sheet where the capture was, and exit 0).
+  if (o.out !== undefined && o.capture !== undefined && resolvePath(String(o.out)) === resolvePath(String(o.capture))) {
+    throw new Error(`--out and --capture name one file (${String(o.out)}): the sheet would be written over the capture`);
+  }
   return {
     base,
     chrome,
@@ -766,58 +772,11 @@ function guardProcess() {
   }
 }
 
-/** How often a stop looks again for a helper of the browser still running, ms. */
-export const GROUP_POLL_MS = 25;
-
-/**
- * Whether any process of the browser's process group is still running, asked
- * with signal 0, which signals nothing. The browser is started detached, so
- * it leads a process group of its own, and every helper it starts is in that
- * group: all ten processes of a headless Chrome on this Mac on 22 Oct (each
- * renderer, the GPU and network services, the rest), none in another group.
- * A group whose id is now someone else's cannot be signalled (EPERM) and is
- * not ours: it reads as gone.
- *
- * @param {number | undefined} pid the browser's pid, which is its group's id
- */
-export function groupRunning(pid) {
-  if (pid === undefined) return false;
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Sends `signal` to the browser and every helper in its process group. Sent
- * only while the group is known to be the browser's — the browser not yet
- * reaped (its pid, so its group's id, cannot have passed to another
- * process), or {@link groupRunning} having just found the group's processes
- * still there (an id in use by a group is given to no new one). Never
- * throws: where the group cannot be signalled the browser alone is, through
- * its own process handle, which reaches nothing once the browser has been
- * reaped — so a stop never waits on a browser no signal reached.
- *
- * WHY THE GROUP, AND NOT THE BROWSER ALONE (the R3-15 repair 2 run, 22 Oct,
- * at a load average near 140): a harness sent SIGTERM killed the browser,
- * removed its profile at once, and Chrome's network service, still running,
- * wrote `Default/Reporting and NEL` into the profile again, so the profile
- * was left. Probed the same day: after a SIGTERM to the browser alone, the
- * browser left in 35 ms with a renderer still running; to its group, every
- * process was gone within 300 ms.
- *
- * @param {{pid?: number, kill: (signal: NodeJS.Signals | 0) => boolean}} child the browser's process
- * @param {NodeJS.Signals | 0} signal
- */
-export function signalGroup(child, signal) {
-  try {
-    process.kill(-(/** @type {number} */ (child.pid)), signal);
-  } catch {
-    child.kill(signal);
-  }
-}
+// The browser's process group is asked after and signalled by the sheet's
+// `groupRunning` and `signalGroup` (imported above), whose comments carry the
+// 22 Oct measurement that made the stop a group's: the browser is started
+// detached, so it leads a group of its own, and every helper it starts is in
+// that group.
 
 /**
  * A started browser's stop: SIGTERM to its process group, then SIGKILL to
@@ -946,10 +905,24 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = 
         reject(new Error(`the browser exited ${code} before it listened: ${text.slice(-400)}`));
       });
     });
-    ws = new WebSocket(String(url));
+    const socket = new WebSocket(String(url));
+    ws = socket;
     await new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', () => reject(new Error(`could not connect to ${url}`)), { once: true });
+      // BOUNDED by the same wait as the address (verify r5 follow-up, 23 Oct):
+      // a browser that never finished the handshake held the run for Node's
+      // own 300 s.
+      const timer = setTimeout(() => {
+        reject(new Error(`could not connect to ${url}: no handshake within ${waitMs} ms`));
+        socket.close();
+      }, waitMs);
+      socket.addEventListener('open', () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      }, { once: true });
+      socket.addEventListener('error', () => {
+        clearTimeout(timer);
+        reject(new Error(`could not connect to ${url}`));
+      }, { once: true });
     });
   } catch (why) {
     await browser.stop();
@@ -1483,6 +1456,22 @@ export async function runHarness(args) {
     if (l.build === null) unstamped += 1;
     else builds.add(l.build);
   };
+  /**
+   * EVERY TAB'S UNCAUGHT ERRORS, by where and text, counted (verify r5
+   * follow-up, 23 Oct: only the warm tab's were read, so an error a cold load,
+   * an interaction or an idle tab threw was never reported). Failed by name
+   * once the run has ended.
+   *
+   * @type {Map<string, Map<string, number>>}
+   */
+  const thrown = new Map();
+  /** @param {string} where @param {{errors: string[]}} tab */
+  const heard = (where, tab) => {
+    if (tab.errors.length === 0) return;
+    const by = thrown.get(where) ?? new Map();
+    for (const e of tab.errors) by.set(e, (by.get(e) ?? 0) + 1);
+    thrown.set(where, by);
+  };
   /** One load of `page`, bounded. @param {Awaited<ReturnType<typeof openTab>>} tab @param {string} page */
   const load = async (tab, page) => {
     const l = await loadOnce(tab, cdp, `${args.base}${page}`, args.settleMs, args.loadWaitMs);
@@ -1516,6 +1505,7 @@ export async function runHarness(args) {
             cold.push(l);
           }
         } finally {
+          heard(`${page} cold`, tab);
           await tab.close();
           await cdp.send('Target.disposeBrowserContext', { browserContextId });
         }
@@ -1533,8 +1523,8 @@ export async function runHarness(args) {
             if (l.ended) warm.push(l);
             else stop = l.why;
           }
-          for (const e of tab.errors) failures.push(`${page}: an uncaught error: ${e}`);
         } finally {
+          heard(`${page} warm`, tab);
           await tab.close();
         }
       }
@@ -1647,6 +1637,7 @@ export async function runHarness(args) {
             if (!(why instanceof CdpTimeout)) throw why;
             broke = `${at}: the page stopped answering: ${why.message}`;
           } finally {
+            heard(it.name, tab);
             await tab.close();
             await cdp.send('Target.disposeBrowserContext', { browserContextId });
           }
@@ -1700,7 +1691,10 @@ export async function runHarness(args) {
         lines.push(idle.row);
         failures.push(...idle.failures);
         notes.push(...idle.notes);
-        for (const t of tabs) await t.close();
+        for (const t of tabs) {
+          heard(`${count} idle tabs`, t);
+          await t.close();
+        }
         for (const c of contexts) await cdp.send('Target.disposeBrowserContext', { browserContextId: c });
       }
     }
@@ -1728,6 +1722,9 @@ export async function runHarness(args) {
     failures.push(`the run stopped before it finished: ${said}`);
   } finally {
     await browser.close();
+  }
+  for (const [where, by] of thrown) {
+    for (const [e, count] of by) failures.push(`${where}: an uncaught error: ${e}${count > 1 ? ` (${count} times)` : ''}`);
   }
   if (args.readOnly) {
     const v = readOnlyVerdict(writes, args.base);

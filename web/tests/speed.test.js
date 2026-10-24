@@ -797,7 +797,9 @@ test('the sheet times over the network, and a request with no answer is said, ne
     assert.ok(a.ms > 0);
     const late = await sheet.timed(base, '/slow', { timeoutMs: 20 });
     assert.equal(late.status, 0);
-    assert.match(/** @type {any} */ (late).error, /no answer within 20 ms/);
+    // The whole answer is bounded (repair 5): no headers came within it, and that is said.
+    assert.equal(/** @type {any} */ (late).error, 'no whole answer within 20 ms (not even its headers came)');
+    assert.equal(/** @type {any} */ (late).timedOut, true);
     assert.equal((await sheet.timed(base, '/broken')).status, 0);
     const cut = await sheet.timed(base, '/partial');
     assert.equal(cut.status, 0, 'headers with a body cut off are no answer');
@@ -1139,8 +1141,12 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     assert.match(text, /Shared reporter: a failed \/feeds\.json\?harness=\d+ was reported \(202\) and found in \/logs\.json\./);
     assert.match(text, /hook saw http:\/\/127\.0\.0\.1:\d+/);
     assert.ok(r.failures.includes('2 idle tabs asked for more than the header-only up check: GET /feeds.json'), r.failures.join('\n'));
-    assert.ok(r.failures.some((f) => f.startsWith('/gaps: an uncaught error: Error: boom')), r.failures.join('\n'));
-    assert.ok(r.failures.some((f) => f.startsWith('/gaps: an uncaught error: Uncaught')), 'a thrown string is named by its text');
+    // Every tab's uncaught errors, by where, counted (repair 5: only the warm tab's were read).
+    assert.ok(r.failures.includes('/gaps warm: an uncaught error: Error: boom (3 times)'), r.failures.join('\n'));
+    assert.ok(r.failures.some((f) => f.startsWith('/gaps warm: an uncaught error: Uncaught')), 'a thrown string is named by its text');
+    assert.ok(r.failures.includes('/gaps cold: an uncaught error: Error: boom (2 times)'), 'a cold load\'s error is heard too');
+    assert.ok(r.failures.some((f) => f.startsWith('2 idle tabs: an uncaught error: Error: boom')), 'and an idle tab\'s');
+    assert.ok(!r.failures.some((f) => f.startsWith('/db') && f.includes('an uncaught error')), 'a page that throws nothing is said to throw nothing');
     assert.ok(r.failures.some((f) => f.startsWith('/blank cold: 2 of 2 loads painted no first content')));
     assert.ok(r.failures.includes('hook failure'));
     assert.ok(r.failures.includes('/missing cold: 2 of 2 loads were not the page (HTTP 404)'), 'a page the server does not serve is not timed as one');
@@ -3179,4 +3185,359 @@ test('a sheet that cannot be written at the end of a run is named on stderr, aft
     server.close();
   }
   assert.equal(sheet.onOrigin('/x', 'not a base'), false, 'a base no URL reader reads holds no path');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 5 (24 Oct): verify r5's blocking finding — the speed sheet
+// waited with no bound and printed nothing — and its cheap follow-ups, each
+// failing on 23ec9bf0f by name.
+// ---------------------------------------------------------------------------
+
+/** @param {number} ms */
+const nap = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Whether a process is still running, asked with signal 0. @param {number} pid */
+const running = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** Waits, at most `ms`, for a process to end; whether it did. @param {number} pid @param {number} [ms] */
+const endsWithin = async (pid, ms = 10_000) => {
+  const end = Date.now() + ms;
+  while (running(pid) && Date.now() < end) await nap(20);
+  return !running(pid);
+};
+
+/** The pid a command wrote into `file`, once it is there. @param {string} file */
+const pidIn = async (file) => {
+  const end = Date.now() + 10_000;
+  while (Date.now() < end) {
+    try {
+      const text = readFileSync(file, 'utf8').trim();
+      if (/^\d+$/.test(text)) return Number(text);
+    } catch {
+      // not written yet
+    }
+    await nap(20);
+  }
+  throw new Error(`no pid was written into ${file}`);
+};
+
+/**
+ * A real server for the sheet: every route answers as the strict stand-in
+ * does, except `trickle`, whose answer starts and never ends — one byte every
+ * 100 ms, so its socket is never idle long.
+ *
+ * @param {string} trickle
+ */
+async function tricklingServer(trickle) {
+  const strict = standIn({ ignore: new Set() });
+  const asks = { trickle: 0 };
+  /** @type {import('node:http').ServerResponse[]} */
+  const open = [];
+  const server = http.createServer(async (req, res) => {
+    if (new URL(String(req.url), 'http://x').pathname === trickle) {
+      asks.trickle += 1;
+      res.writeHead(200, { 'content-type': 'application/json', 'x-brutex-build': 'c'.repeat(40) });
+      res.write('{');
+      const t = setInterval(() => res.write(' '), 100);
+      res.on('close', () => clearInterval(t));
+      open.push(res);
+      return;
+    }
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  return {
+    base,
+    asks,
+    stop: () => {
+      for (const res of open) res.destroy();
+      server.close();
+    }
+  };
+}
+
+/** @param {string[]} argv @param {number} [killAfterMs] */
+const sheetCommand = (argv, killAfterMs = 60_000) => /** @type {Promise<{code: number | null, signal: string | null, stdout: string, stderr: string, ms: number}>} */ (new Promise((resolve) => {
+  const t0 = Date.now();
+  import('node:child_process').then(({ execFile }) => execFile(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, ...argv], { timeout: killAfterMs }, (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, signal: error?.signal ?? null, stdout, stderr, ms: Date.now() - t0 })));
+}));
+
+test('an answer that never ends is ended at --timeout-ms from its send and named; its row ends there and the request is asked no more, so the sheet ends in seconds with exit 1', { timeout: 120_000 }, async () => {
+  // Before (verify r5, 23 Oct): timed() bounded a request only by its
+  // socket's idle time, so an answer sending a byte every 500 ms was never
+  // ended, and the sheet with --timeout-ms 2000 was still waiting after 90 s
+  // with nothing printed but its first line.
+  const site = await tricklingServer('/speed.json');
+  try {
+    // One request: the idle gaps (100 ms) are inside the bound; the whole answer is not.
+    const t0 = Date.now();
+    const a = /** @type {any} */ (await sheet.timed(site.base, '/speed.json', { timeoutMs: 400 }));
+    const took = Date.now() - t0;
+    assert.equal(a.status, 0);
+    assert.equal(a.timedOut, true);
+    assert.match(a.error, /^no whole answer within 400 ms \(its headers came, then \d+ bytes of its body\)$/);
+    assert.equal(a.build, 'c'.repeat(40), 'the headers came and named their build: it is kept');
+    assert.ok(took >= 390 && took < 5_000, `ended at its whole bound, not by idle time (took ${took} ms)`);
+    // A whole run: n = 5, two client counts.
+    site.asks.trickle = 0;
+    const args = { ...sheet.parseArgs(['--base', site.base, '--n', '5', '--clients', '1,2', '--timeout-ms', '400']), feed: CTX.feed, timeframe: CTX.timeframe, month: CTX.month, day: CTX.day };
+    /** @type {string[]} */
+    const logged = [];
+    const r0 = Date.now();
+    const run = await sheet.runSheet(args, { log: (l) => logged.push(l) });
+    const ran = Date.now() - r0;
+    assert.ok(ran < 30_000, `the run ended (took ${ran} ms)`);
+    assert.equal(site.asks.trickle, 1, 'the request that ran its whole bound was sent once, and no more');
+    const cut = /** @type {any} */ (run.rows.find((x) => x.url === '/speed.json' && x.phase === 'cold'));
+    assert.deepEqual([cut.n, cut.classes, cut.builds, cut.notAsked], [1, { 'no answer': 1 }, ['c'.repeat(40)], 4]);
+    assert.ok(run.failures.some((f) => /^\/speed \/speed\.json \(cold, 1 clients\): 1 no answer — no whole answer within 400 ms \(its headers came, then \d+ bytes of its body\)$/.test(f)), run.failures.join('\n'));
+    assert.ok(!run.failures.some((f) => f.includes('/speed.json') && f.includes('no named build')), 'a cut answer that named its build raises no second failure');
+    assert.ok(run.notMeasured.some((l) => /^cold at 1 clients: GET \/speed\.json: 4 of its 5 requests were not sent, after one had no whole answer within 400 ms/.test(l)), run.notMeasured.join('\n'));
+    for (const clients of [1, 2]) {
+      assert.ok(run.notMeasured.includes(`warm at ${clients} clients: GET /speed.json was not asked: it had no whole answer within --timeout-ms 400 in the cold pass at 1 clients, and each ask would wait as long`), run.notMeasured.join('\n'));
+    }
+    assert.ok(run.rows.filter((x) => x.url !== '/speed.json').every((x) => x.classes.answered === x.n && x.n === 5), 'every other request was timed in full');
+    assert.ok(logged.some((l) => /^speed sheet: GET \/speed\.json had no whole answer within 400 ms .* in the cold pass at 1 clients; it is asked no more this run$/.test(l)), logged.join('\n'));
+    assert.ok(logged.includes('speed sheet: warm at 2 clients'), 'each pass is said as it starts');
+    // As a command, the verifier's own case: the sheet on stdout, the request named, exit 1.
+    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', '--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day, '--timeout-ms', '2000']);
+    assert.equal(cmd.code, 1, cmd.stderr);
+    assert.ok(cmd.ms < 30_000, `the command ended (took ${cmd.ms} ms)`);
+    assert.match(cmd.stdout, /^# Speed sheet — FAIL/);
+    assert.match(cmd.stdout, /- FAILED: \/speed \/speed\.json \(cold, 1 clients\): 1 no answer — no whole answer within 2000 ms \(its headers came, then \d+ bytes of its body\)/);
+    assert.match(cmd.stdout, /- NOT MEASURED: warm at 1 clients: GET \/speed\.json was not asked/);
+  } finally {
+    site.stop();
+  }
+});
+
+test('a garbled ask the server fails on, gives no answer to or answers busy is said by name; one that runs its whole bound ends the check of its request; a request whose own ask runs out is asked no more this run', async () => {
+  // Before (verify r5 follow-up, 23 Oct): a garbled field answered 5xx, GET
+  // or HEAD, was reported neither as ignored nor as a failure.
+  /** @type {string[]} */
+  const asked = [];
+  /** @param {string} error */
+  const late = (error) => ({ status: 0, error, ms: 9, build: null, body: '', bytes: 0, headers: {}, timedOut: true });
+  /** @param {string} path @param {{method?: string}} [o] */
+  const send = async (path, o = {}) => {
+    asked.push(`${o.method} ${path}`);
+    const u = new URL(path, 'http://x');
+    const g = (/** @type {string} */ k) => u.searchParams.get(k) === GARBLED;
+    if (u.pathname === '/slow.json') return late('no whole answer within 9 ms (not even its headers came)');
+    if (u.pathname === '/down.json') return answer(503);
+    if (g('a')) return answer(500, 'boom');
+    if (g('b')) return answer(429);
+    if (g('c')) return late('no whole answer within 9 ms (its headers came, then 1 bytes of its body)');
+    if (g('d')) return answer(400, '{"error":"d must be a day"}');
+    return answer(200, o.method === 'HEAD' ? '' : '{"same":true}');
+  };
+  /** @param {string} url @param {string} [method] */
+  const req = (url, method = 'GET') => ({ page: '/p', route: new URL(url, 'http://x').pathname, label: '', method, url, builder: 'b' });
+  const x = '/x.json?a=1&b=1&c=1&d=1&e=1';
+  const checked = /** @type {any} */ (await sheet.fieldCheck(send, [req(x), req('/h.json?a=1', 'HEAD'), req('/slow.json?a=1'), req('/down.json?a=1&b=1')]));
+  assert.deepEqual(checked.failed, [
+    `/p GET ${garbledUrl(x, 'a')}: the field a, garbled, was answered HTTP 500, so whether the server reads it is not known`,
+    `/p GET ${garbledUrl(x, 'c')}: the field c, garbled, was answered no whole answer within 9 ms (its headers came, then 1 bytes of its body), so whether the server reads it is not known`,
+    `/p HEAD ${garbledUrl('/h.json?a=1', 'a')}: the field a, garbled, was answered HTTP 500, so whether the server reads it is not known`
+  ]);
+  assert.deepEqual(checked.unchecked, [
+    `the field b of GET ${x} (/p): its garbled value was answered busy (HTTP 429), which tells neither a read nor an ignore`,
+    `the fields d, e of GET ${x} (/p): not asked garbled, after an earlier garbled ask of it had no whole answer within 9 ms (its headers came, then 1 bytes of its body)`
+  ]);
+  assert.deepEqual(checked.map((/** @type {any} */ i) => i.field), [], 'nothing it could not compare is called ignored');
+  assert.deepEqual(checked.stalled.map((/** @type {any} */ s) => [s.request.url, s.said]), [['/slow.json?a=1', 'no whole answer within 9 ms (not even its headers came)']]);
+  assert.deepEqual(asked.filter((a) => a.includes('/slow.json') || a.includes('/down.json')), ['GET /slow.json?a=1', 'GET /down.json?a=1&b=1'], 'no garbled ask of a request whose own ask ran out, or was not answered 2xx');
+  assert.ok(!asked.some((a) => a.includes(garbledUrl(x, 'd')) || a.includes(garbledUrl(x, 'e'))), 'nor of a field after a garbled ask ran out');
+  // In a run: a request whose field-check ask ran out fails by name and is timed in no pass.
+  const strict = standIn({ ignore: new Set() });
+  let dayflags = 0;
+  /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+  const runSend = async (b, path, o = {}) => {
+    if (new URL(path, 'http://x').pathname === '/dayflags.json') {
+      dayflags += 1;
+      return late('no whole answer within 60000 ms (not even its headers came)');
+    }
+    return strict.send(b, path, o);
+  };
+  const run = await sheet.runSheet(argsFor(), { send: runSend, log: () => {} });
+  const url = String(dayflagsUrl(CTX.feed, CTX.instrument, CTX.from, CTX.to));
+  assert.equal(dayflags, 1, 'asked once, in the field check, and no more');
+  assert.ok(run.failures.includes(`/db GET ${url} (the field check): no whole answer within 60000 ms (not even its headers came)`), run.failures.join('\n'));
+  for (const pass of ['cold at 1 clients', 'warm at 1 clients', 'warm at 2 clients']) {
+    assert.ok(run.notMeasured.includes(`${pass}: GET ${url} was not asked: it had no whole answer within --timeout-ms 60000 in the field check, and each ask would wait as long`), pass);
+  }
+  assert.ok(!run.rows.some((r) => r.url === url));
+  // A garbled ask the server fails on fails the run.
+  const failing = await sheet.runSheet(argsFor(), { send: async (b, path, o = {}) => (path.includes(new URLSearchParams({ feed: GARBLED }).toString()) && path.startsWith('/census') ? answer(502) : strict.send(b, path, o)), log: () => {} });
+  assert.equal(failing.ok, false);
+  assert.ok(failing.failures.includes(`/db GET ${garbledUrl(String(sheet.requestsFor(CTX).requests.find((q) => q.route === '/census/facets.json')?.url), 'feed')}: the field feed, garbled, was answered HTTP 502, so whether the server reads it is not known`), failing.failures.join('\n'));
+});
+
+test('a --restart command that does not exit within --restart-wait-ms is ended with its whole process group, and the run fails by name and goes on to its sheet; a writer ends with its group; a sheet sent a signal leaves no command running', { timeout: 180_000 }, async () => {
+  // Before (verify r5, 23 Oct): the restart pass waited for the command's
+  // exit with no bound (--restart 'sleep 1000' printed nothing in 60 s), and
+  // the writer was ended by a SIGTERM to its shell alone.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-commands-'));
+  // One run, bounded: a command that never exits, with a child of its own in the background.
+  const bg = join(dir, 'bg.pid');
+  const t0 = Date.now();
+  const said = await sheet.restartWithin(`sleep 1000 & echo $! > '${bg}'; sleep 1000`, 300);
+  const took = Date.now() - t0;
+  assert.equal(said, 'did not exit within 300 ms (--restart-wait-ms), so its process group was sent SIGTERM and left');
+  assert.ok(took >= 290 && took < 300 + sheet.COMMAND_STOP_MS, `ended at its bound (took ${took} ms)`);
+  assert.ok(await endsWithin(await pidIn(bg)), 'its background child was ended with it: the whole group');
+  // In time, a command is its exit code, or what ended it.
+  assert.equal(await sheet.restartWithin('exit 3', 30_000), 3);
+  assert.equal(await sheet.restartWithin('kill -TERM $$', 30_000), 'was ended by SIGTERM');
+  // What a restart that exited in time started in the background (a server) is left running.
+  const served = join(dir, 'served.pid');
+  assert.equal(await sheet.restartWithin(`sleep 1000 & echo $! > '${served}'`, 30_000), 0);
+  const server = await pidIn(served);
+  try {
+    assert.ok(running(server), 'a command that exited in time is not followed into its group');
+  } finally {
+    process.kill(server, 'SIGKILL');
+  }
+  // A command that ignores SIGTERM is killed past COMMAND_STOP_MS, with its group.
+  assert.equal(sheet.COMMAND_STOP_MS, 5_000);
+  const stubborn = sheet.run("trap '' TERM; sleep 1000");
+  await nap(300);
+  const t1 = Date.now();
+  assert.equal(await stubborn.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
+  assert.ok(Date.now() - t1 >= sheet.COMMAND_STOP_MS - 50);
+  assert.equal(sheet.groupRunning(stubborn.child.pid), false, 'no process of its group is left');
+  assert.equal(await stubborn.stop(), 'had already left', 'a second stop signals nothing');
+  // In a run: the restart pass ends by name, and the sheet is still made.
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'sleep 1000', restarts: 2, restartWaitMs: 300 }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.ok(r.failures.includes('restart 1: the --restart command did not exit within 300 ms (--restart-wait-ms), so its process group was sent SIGTERM and left'), r.failures.join('\n'));
+  assert.ok(r.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the --restart command failed at restart 1'), r.notMeasured.join('\n'));
+  assert.ok(!r.rows.some((x) => x.phase === 'first after restart'), 'no restart row for a pass that timed nothing');
+  // A writer: its whole group ends with its pass, and one --clients count is one pass.
+  const wbg = join(dir, 'writer-bg.pid');
+  /** @type {string[]} */
+  const logged = [];
+  // Its pass is slowed (25 ms an answer) so the writer's shell has started its child before the pass ends.
+  const w = await sheet.runSheet({ ...argsFor(), clients: [1], writer: `sleep 1000 & echo $! > '${wbg}'; sleep 1000` }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: (l) => logged.push(l) });
+  assert.equal(w.rows.filter((x) => x.phase === 'warm+writer').length, w.rows.filter((x) => x.phase === 'cold').length, 'one --clients count, one warm+writer pass');
+  assert.ok(await endsWithin(await pidIn(wbg)), 'the writer\'s background child ended with its group');
+  assert.ok(logged.includes('speed sheet: the --writer command\'s process group was sent SIGTERM and left'), logged.join('\n'));
+  // As a command, the verifier's own case: --restart 'sleep 1000', bounded by the up wait when no --restart-wait-ms is given.
+  const site = await tricklingServer('/never-asked');
+  try {
+    const ctx = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
+    const pid = join(dir, 'restart.pid');
+    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '2000', '--up-wait-ms', '2000', '--restart', `echo $$ > '${pid}'; exec sleep 1000`, '--restarts', '1']);
+    assert.equal(cmd.code, 1, cmd.stderr);
+    assert.ok(cmd.ms < 30_000, `the command ended (took ${cmd.ms} ms)`);
+    assert.match(cmd.stdout, /- FAILED: restart 1: the --restart command did not exit within 2000 ms \(--restart-wait-ms\), so its process group was sent SIGTERM and left/);
+    assert.ok(await endsWithin(await pidIn(pid)), 'nothing of the restart command is left');
+    // A sheet sent SIGTERM while its --restart command runs ends that command's group too.
+    const pid2 = join(dir, 'restart-2.pid');
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--restart', `echo $$ > '${pid2}'; exec sleep 1000`, '--restarts', '1', '--restart-wait-ms', '600000'], { stdio: 'ignore' });
+    const sleeper = await pidIn(pid2);
+    const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+    child.kill('SIGTERM');
+    assert.deepEqual(await exited, { code: null, signal: 'SIGTERM' }, 'the sheet still ends by the signal it was sent');
+    assert.ok(await endsWithin(sleeper), 'and the command it was waiting on was ended with it');
+  } finally {
+    site.stop();
+  }
+});
+
+test('the up wait after a restart is --up-wait-ms in all: each check within it waits at most the time left, and a server not up ends the restart pass by name; a first ask that runs out after a restart is asked no more', { timeout: 60_000 }, async () => {
+  // Before: each up check was bounded by --timeout-ms (60 s by default), so
+  // an up check that was never answered held the wait 60 s past its 400 ms,
+  // and a server not up was asked every request all the same.
+  const strict = standIn({ ignore: new Set() });
+  let restarted = false;
+  /** @type {number[]} */
+  const limits = [];
+  /** @param {string} b @param {string} path @param {{method?: string, timeoutMs?: number}} [o] */
+  const send = async (b, path, o = {}) => {
+    if (restarted && new URL(path, 'http://x').pathname === UP_ROUTE) {
+      const ms = Number(o.timeoutMs);
+      limits.push(ms);
+      await nap(ms);
+      return { status: 0, error: `no whole answer within ${ms} ms (not even its headers came)`, ms, build: null, body: '', bytes: 0, headers: {}, timedOut: true };
+    }
+    return strict.send(b, path, o);
+  };
+  const t0 = Date.now();
+  const r = await sheet.runSheet({ ...argsFor(), timeoutMs: 60_000, upWaitMs: 400, restart: 'x', restarts: 3 }, { send, log: () => {}, restart: async () => ((restarted = true), 0) });
+  const took = Date.now() - t0;
+  assert.ok(limits.length >= 1 && limits.every((l) => l >= 1 && l <= 400), `each up check waited at most the time left: ${limits.join(', ')}`);
+  assert.ok(took < 15_000, `the run ended (took ${took} ms)`);
+  assert.ok(r.failures.includes('restart 1: the server was not up 400 ms after the restart'), r.failures.join('\n'));
+  assert.ok(r.notMeasured.includes('first after restart: timed after 0 of the 3 restarts asked: the server was not up after restart 1'), r.notMeasured.join('\n'));
+  assert.ok(!r.failures.some((f) => f.startsWith('restart 2')), 'restarts 2 and 3 were not run');
+  // A first ask that runs its whole bound after a restart is asked no more after the next ones.
+  let after = false;
+  let aliases = 0;
+  /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+  const send2 = async (b, path, o = {}) => {
+    if (after && new URL(path, 'http://x').pathname === '/aliases.json') {
+      aliases += 1;
+      return { status: 0, error: 'no whole answer within 60000 ms (its headers came, then 0 bytes of its body)', ms: 60_000, build: 'c'.repeat(40), body: '', bytes: 0, headers: {}, timedOut: true };
+    }
+    return strict.send(b, path, o);
+  };
+  const r2 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: send2, log: () => {}, restart: async () => ((after = true), 0) });
+  assert.equal(aliases, 1, 'asked after the first restart, and no more');
+  assert.ok(r2.failures.includes('restart 1: the first /aliases.json answered no whole answer within 60000 ms (its headers came, then 0 bytes of its body)'), r2.failures.join('\n'));
+  assert.ok(r2.notMeasured.includes('first after restart: GET /aliases.json was asked after 1 of the 3 restarts run: it had no whole answer within --timeout-ms 60000 in the first ask after restart 1, and is asked no more'), r2.notMeasured.join('\n'));
+  assert.equal(r2.rows.find((x) => x.url === '/aliases.json' && x.phase === 'first after restart')?.n, 1);
+  assert.equal(r2.rows.find((x) => x.url === '/feeds.json' && x.phase === 'first after restart')?.n, 3, 'every other request is asked after every restart');
+});
+
+test('the sheet\'s and the harness\'s command lines: --restart-wait-ms is the up wait unless given and has a ceiling, and an output that names the input it replaces is refused', () => {
+  const base = ['--base', 'http://h:1'];
+  assert.equal(sheet.parseArgs(base).restartWaitMs, 120_000, 'the up wait\'s default');
+  assert.equal(sheet.parseArgs([...base, '--up-wait-ms', '2000']).restartWaitMs, 2_000, 'the up wait given');
+  assert.equal(sheet.parseArgs([...base, '--up-wait-ms', '2000', '--restart-wait-ms', '9000']).restartWaitMs, 9_000);
+  assert.throws(() => sheet.parseArgs([...base, '--restart-wait-ms', '0']), /^Error: --restart-wait-ms must be a whole number of at least 1, in decimal digits$/);
+  assert.throws(() => sheet.parseArgs([...base, '--restart-wait-ms', String(sheet.MAX_WAIT_MS + 1)]), /^Error: --restart-wait-ms must be at most 2147483647$/);
+  assert.throws(() => sheet.parseArgs([...base, '--restart-wait-ms', '0x10']), /in decimal digits/);
+  // Before (verify r5 follow-up): --out over the capture it read, and the harness's --out over its own --capture, were taken.
+  assert.throws(() => sheet.parseArgs([...base, '--from-pages', 'cap.json', '--out', './cap.json']), /^Error: --out and --from-pages name one file \(\.\/cap\.json\): the sheet would be written over the capture it reads$/);
+  assert.equal(sheet.parseArgs([...base, '--from-pages', 'cap.json', '--out', 'sheet.md']).out, 'sheet.md');
+  assert.throws(() => harness.parseArgs([...base, '--capture', 'c.json', '--out', `${process.cwd()}/c.json`]), /^Error: --out and --capture name one file \(.*c\.json\): the sheet would be written over the capture$/);
+  assert.equal(harness.parseArgs([...base, '--capture', 'c.json', '--out', 'o.md']).out, 'o.md');
+});
+
+test('a browser that prints its DevTools address and never finishes the WebSocket handshake is refused within the launch\'s wait, and stopped', { timeout: 60_000 }, async () => {
+  // Before (verify r5 follow-up): the handshake had no timer of its own, so
+  // such a browser held the run for Node's own 300 s.
+  const net = await import('node:net');
+  /** @type {import('node:net').Socket[]} */
+  const sockets = [];
+  const silent = net.createServer((s) => sockets.push(s));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const port = /** @type {import('node:net').AddressInfo} */ (silent.address()).port;
+  const fake = mkdtempSync(join(tmpdir(), 'r315-mute-'));
+  const mute = join(fake, 'mute');
+  writeFileSync(mute, `#!/bin/sh\necho "DevTools listening on ws://127.0.0.1:${port}/devtools/browser/x" >&2\nexec sleep 60\n`, { mode: 0o755 });
+  const root = mkdtempSync(join(tmpdir(), 'r315-mute-root-'));
+  try {
+    const t = Date.now();
+    await assert.rejects(harness.launch(mute, false, 1_000, root), new RegExp(`^Error: could not connect to ws://127\\.0\\.0\\.1:${port}/devtools/browser/x: no handshake within 1000 ms$`));
+    const took = Date.now() - t;
+    assert.ok(took >= 990 && took < 1_000 + 2 * harness.STOP_WAIT_MS, `refused at its wait (took ${took} ms)`);
+    assert.ok(sockets.length >= 1, 'it did connect, and was never answered');
+    assert.deepEqual(readdirSync(root), [], 'the browser was stopped and its profile removed');
+  } finally {
+    for (const s of sockets) s.destroy();
+    silent.close();
+  }
 });

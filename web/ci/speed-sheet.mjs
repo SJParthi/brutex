@@ -45,7 +45,28 @@
  *     [--restart '<command>' --restarts 20] [--from-pages <capture.json>] \
  *     [--feed <wire>] [--instrument NSE-INDEX-NIFTY] [--timeframe <rung>] \
  *     [--month YYYY-MM] [--day YYYY-MM-DD] [--out <sheet.md>] [--allow-unstamped] \
- *     [--timeout-ms 60000] [--up-wait-ms 120000] [--max-answer-bytes 16000000]
+ *     [--timeout-ms 60000] [--up-wait-ms 120000] [--restart-wait-ms <the up wait>] \
+ *     [--max-answer-bytes 16000000]
+ *
+ * # Every wait is bounded, and each bound is said (verify r5, 23 Oct)
+ *
+ * The bound on a request was the socket's idle time, so an answer that sent
+ * one byte every 500 ms was never ended, and the `--restart` command was
+ * waited on until it exited: either way the deploy step's last command hung
+ * with nothing printed. Now a request waits at most `--timeout-ms` from its
+ * send to the last byte of its answer — the WHOLE answer — and is then ended
+ * and counted `no answer`, its reason saying how much had come. A request
+ * that ran that whole bound is asked no more this run: the rest of its row,
+ * and each later pass of it, is a NOT MEASURED line by name, because each ask
+ * would wait as long and a warm row's kept connection ended with it (the
+ * harness's rule for a load that does not end). The `--restart` command may
+ * run `--restart-wait-ms` (by default `--up-wait-ms`: one budget for the
+ * server to come back); past it its process group is sent SIGTERM, and
+ * SIGKILL {@link COMMAND_STOP_MS} later, and the run fails by name. The up
+ * check after a restart waits `--up-wait-ms` in all, each check within it at
+ * most the time left; a server not up ends the restart pass. A command the
+ * sheet started is ended with the sheet if the sheet ends first. So a run
+ * ends, and docs/06-limits.md (L-R315-24) states the sum it ends within.
  *
  * # Two bounds, each said where it applies (found on the Mac, 20 Oct)
  *
@@ -67,7 +88,7 @@ import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { windowQuery } from '../src/lib/db/bars-plan.js';
@@ -253,7 +274,7 @@ export function parseArgs(argv) {
   /** @type {Record<string, string | boolean>} */
   const o = {};
   const flags = new Set(['allow-unstamped', 'help']);
-  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms', 'up-wait-ms', 'max-answer-bytes']);
+  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms', 'up-wait-ms', 'restart-wait-ms', 'max-answer-bytes']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
@@ -283,6 +304,12 @@ export function parseArgs(argv) {
   if (day !== null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('--day is YYYY-MM-DD');
   const month = o.month === undefined ? null : String(o.month);
   if (month !== null && !/^\d{4}-\d{2}$/.test(month)) throw new Error('--month is YYYY-MM');
+  // ONE FILE IS NOT BOTH (verify r5 follow-up, 23 Oct: the harness wrote its
+  // sheet over its own capture and exited 0): the sheet read here would be
+  // replaced by the one written at the end.
+  if (o.out !== undefined && o['from-pages'] !== undefined && resolvePath(String(o.out)) === resolvePath(String(o['from-pages']))) {
+    throw new Error(`--out and --from-pages name one file (${String(o.out)}): the sheet would be written over the capture it reads`);
+  }
   return {
     base,
     n: whole('n', 200, 1, MAX_N),
@@ -300,6 +327,10 @@ export function parseArgs(argv) {
     allowUnstamped: o['allow-unstamped'] === true,
     timeoutMs: whole('timeout-ms', 60_000, 1, MAX_WAIT_MS),
     upWaitMs: whole('up-wait-ms', 120_000, 1, MAX_WAIT_MS),
+    // How long one run of the --restart command may take before its process
+    // group is ended (verify r5, 23 Oct: it was waited on with no bound). Not
+    // given, it is the up wait's: one budget for the server to come back.
+    restartWaitMs: whole('restart-wait-ms', whole('up-wait-ms', 120_000, 1, MAX_WAIT_MS), 1, MAX_WAIT_MS),
     // At most the largest answer kept as text: past it an answer is a digest,
     // and no answer that large is timed by many clients at once (verify r4
     // follow-up: 9,007,199,254,740,991 was taken).
@@ -310,7 +341,9 @@ export function parseArgs(argv) {
 /**
  * @typedef {{status: number, headers: Record<string, string | string[] | undefined>, body: string,
  *   ms: number, bytes: number, build: string | null}} Answer
- * @typedef {{status: 0, error: string, ms: number, build: null, body: '', bytes: 0, headers: {}}} NoAnswer
+ * @typedef {{status: 0, error: string, ms: number, build: string | null, body: '', bytes: 0, headers: {}, timedOut?: true}} NoAnswer
+ *   `timedOut` when its whole answer did not come within its bound ({@link timed}); `build` the
+ *   build its headers named, when they came before it was cut
  */
 
 /**
@@ -339,6 +372,13 @@ export function answerText(body, limit = MAX_TEXT_BYTES) {
  * answer. Never throws: a request that got no answer is `status: 0` with the
  * reason.
  *
+ * THE WHOLE ANSWER IS BOUNDED, from the send to its last byte (verify r5,
+ * 23 Oct): the only bound was the socket's idle time (`req.setTimeout`), so
+ * an answer that sent one byte every 500 ms was never ended, and a sheet run
+ * with `--timeout-ms 2000` was still waiting 90 s later, having printed
+ * nothing. A request whose whole answer has not come within `timeoutMs` is
+ * ended here and answered `timedOut`, saying how much of it had come.
+ *
  * @param {string} base
  * @param {string} path
  * @param {{method?: string, agent?: http.Agent | false, timeoutMs?: number}} [o]
@@ -354,20 +394,45 @@ export function timed(base, path, o = {}) {
   const lib = url.protocol === 'https:' ? https : http;
   const limit = o.timeoutMs ?? 60_000;
   return new Promise((resolve) => {
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timer;
+    let settled = false;
+    /** @type {string | null | undefined} the build the headers named, once they came */
+    let headedBy;
+    let got = 0;
+    // The first ending wins: an error the ending itself causes is dropped.
+    /** @param {Answer | NoAnswer} a */
+    const settle = (a) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(a);
+    };
+    // A cut answer whose headers came keeps the build they named: the server
+    // that answered them is known, though its answer is not one.
+    /** @param {string} error @param {boolean} [late] */
+    const none = (error, late = false) => settle({ status: 0, error, ms: ms(), build: headedBy ?? null, body: '', bytes: 0, headers: {}, ...(late ? { timedOut: /** @type {const} */ (true) } : {}) });
     const req = lib.request(url, { method: o.method ?? 'GET', agent: o.agent ?? false, headers: { accept: 'application/json' } }, (res) => {
+      const raw = res.headers[BUILD_HEADER];
+      headedBy = typeof raw === 'string' ? raw : null;
       /** @type {Buffer[]} */
       const parts = [];
-      res.on('data', (c) => parts.push(c));
+      res.on('data', (c) => {
+        parts.push(c);
+        got += c.length;
+      });
       res.on('end', () => {
         const body = Buffer.concat(parts);
-        const raw = res.headers[BUILD_HEADER];
-        resolve({ status: Number(res.statusCode), headers: res.headers, body: answerText(body), ms: ms(), bytes: body.length, build: typeof raw === 'string' ? raw : null });
+        settle({ status: Number(res.statusCode), headers: res.headers, body: answerText(body), ms: ms(), bytes: body.length, build: headedBy ?? null });
       });
       // A body cut off mid-answer is no answer: the headers alone are not one.
-      res.on('error', (e) => resolve({ status: 0, error: `the answer was cut off: ${e.message}`, ms: ms(), build: null, body: '', bytes: 0, headers: {} }));
+      res.on('error', (e) => none(`the answer was cut off: ${e.message}`));
     });
-    req.setTimeout(limit, () => req.destroy(new Error(`no answer within ${limit} ms`)));
-    req.on('error', (e) => resolve({ status: 0, error: e.message, ms: ms(), build: null, body: '', bytes: 0, headers: {} }));
+    timer = setTimeout(() => {
+      none(`no whole answer within ${limit} ms (${headedBy !== undefined ? `its headers came, then ${got} bytes of its body` : 'not even its headers came'})`, true);
+      req.destroy();
+    }, limit);
+    req.on('error', (e) => none(e.message));
     req.end();
   });
 }
@@ -375,7 +440,13 @@ export function timed(base, path, o = {}) {
 /** A warm client's connection: one, kept alive across its requests. */
 export const warmAgent = () => new http.Agent({ keepAlive: true, maxSockets: 1 });
 
-/** An answer's class, the server's five words less `cancelled` (the sheet never leaves early). @param {Answer | NoAnswer} a */
+/**
+ * An answer's class, the server's five words less `cancelled`: the sheet
+ * leaves a request only at its whole bound ({@link timed}), and that is `no
+ * answer`.
+ *
+ * @param {Answer | NoAnswer} a
+ */
 export function classOf(a) {
   if (a.status === 0) return 'no answer';
   if (a.status < 400) return 'answered';
@@ -387,12 +458,20 @@ export function classOf(a) {
 /**
  * @typedef {{page: string, route: string, label: string, url: string, builder: string, phase: string,
  *   clients: number, n: number, p50: number, p99: number, max: number,
- *   classes: Record<string, number>, builds: string[], bytes: number, said: string | null}} SheetRow
+ *   classes: Record<string, number>, builds: string[], bytes: number, said: string | null,
+ *   cut: string | null, notAsked: number}} SheetRow `cut` is the reason of the answer that ran its
+ *   whole bound and ended the row; `notAsked` the requests of the row never sent after it
  */
 
 /**
  * `n` requests over `clients` concurrent clients, each sample one request;
  * `agentOf` gives each client its connection policy.
+ *
+ * A REQUEST THAT RAN ITS WHOLE BOUND ENDS ITS ROW (verify r5, 23 Oct): every
+ * later sample would wait as long — `n` of them — and a warm client's kept
+ * connection ended with it, so what follows would not be warm. The clients
+ * take no further request; the row says why (`cut`) and how many were never
+ * sent (`notAsked`).
  *
  * @param {(path: string, o: object) => Promise<Answer | NoAnswer>} send
  * @param {SheetRequest} request
@@ -408,13 +487,15 @@ export async function measure(send, request, o) {
   let bytes = 0;
   /** @type {string | null} */
   let said = null;
+  /** @type {string | null} */
+  let cut = null;
   let left = o.n;
   /** @type {Set<http.Agent>} */
   const agents = new Set();
   const client = async () => {
     const agent = o.agentOf();
     if (agent) agents.add(agent);
-    while (left > 0) {
+    while (left > 0 && cut === null) {
       left -= 1;
       const a = await send(request.url, { method: request.method, agent, timeoutMs: o.timeoutMs });
       times.push(a.ms);
@@ -423,6 +504,7 @@ export async function measure(send, request, o) {
       if (a.build !== null) builds.add(a.build);
       bytes = Math.max(bytes, a.bytes);
       if (said === null && k !== 'answered') said = 'error' in a ? a.error : `HTTP ${a.status}: ${a.body.slice(0, 300)}`;
+      if ('timedOut' in a && a.timedOut && cut === null) cut = a.error;
     }
   };
   await Promise.all(Array.from({ length: Math.min(o.clients, o.n) }, client));
@@ -431,7 +513,7 @@ export async function measure(send, request, o) {
   // it, and the sheet counted its own hang-up as the server's "no answer".
   for (const agent of agents) agent.destroy();
   const s = summary(times);
-  return { page: request.page, route: request.route, label: request.label, url: request.url, builder: request.builder, phase: o.phase, clients: o.clients, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes, builds: [...builds], bytes, said };
+  return { page: request.page, route: request.route, label: request.label, url: request.url, builder: request.builder, phase: o.phase, clients: o.clients, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes, builds: [...builds], bytes, said, cut, notAsked: left };
 }
 
 /**
@@ -489,26 +571,61 @@ export async function discover(get, args) {
  * 2xx like the original cannot be told from an ignored one, and is said in
  * `unchecked` (a NOT MEASURED line), never passed and never failed.
  *
+ * A GARBLED ASK THE SERVER FAILED ON, OR GAVE NO ANSWER TO, tells neither a
+ * read nor an ignore, and is a failure by name in `failed` (verify r5
+ * follow-up, 23 Oct: a 5xx was said nowhere, neither ignored nor failed); one
+ * answered busy is `unchecked`. One that ran its whole bound ends the check
+ * of its request: its other fields are `unchecked`, not asked. A request
+ * whose own first ask ran its whole bound is in `stalled`, asked no more this
+ * run; one answered other than 2xx has no garbled asks at all, since only a
+ * 2xx original can be compared (its own body is still read for a field it
+ * names).
+ *
  * @param {(path: string, o?: object) => Promise<Answer | NoAnswer>} send
  * @param {SheetRequest[]} requests
- * @returns {Promise<{request: SheetRequest, field: string, how: string, said: string}[] & {unchecked: string[]}>}
+ * @returns {Promise<FieldCheck>}
  */
 export async function fieldCheck(send, requests) {
-  /** @type {{request: SheetRequest, field: string, how: string, said: string}[] & {unchecked: string[]}} */
-  const out = Object.assign([], { unchecked: /** @type {string[]} */ ([]) });
+  /** @type {FieldCheck} */
+  const out = Object.assign([], { unchecked: /** @type {string[]} */ ([]), failed: /** @type {string[]} */ ([]), stalled: /** @type {{request: SheetRequest, said: string}[]} */ ([]) });
+  const ok = (/** @type {number} */ s) => s >= 200 && s < 300;
   for (const r of requests) {
     if (!r.url.includes('?')) continue;
     const method = r.method === 'HEAD' ? 'HEAD' : 'GET';
     const first = await send(r.url, { method });
-    if (first.status === 0) continue; // timed below, and failed there by name
+    if (first.status === 0) {
+      // Timed below, and failed there by name; one that ran its whole bound is asked no more.
+      if ('timedOut' in first && first.timedOut) out.stalled.push({ request: r, said: first.error });
+      continue;
+    }
     /** @type {Record<string, {status: number, body: string}>} */
     const garbled = {};
-    for (const field of new Set(new URL(r.url, 'http://speed.sheet').searchParams.keys())) {
+    /** @type {string[]} */
+    const unasked = [];
+    /** @type {string | null} */
+    let cut = null;
+    // Only a 2xx original can be compared with a garbled ask, so only its fields are asked.
+    const fields = ok(first.status) ? new Set(new URL(r.url, 'http://speed.sheet').searchParams.keys()) : new Set();
+    for (const field of fields) {
+      if (cut !== null) {
+        unasked.push(field);
+        continue;
+      }
       const probe = await send(garbledUrl(r.url, field), { method });
+      const k = classOf(probe);
+      if (k === 'failed' || k === 'no answer') {
+        out.failed.push(`${r.page} ${method} ${garbledUrl(r.url, field)}: the field ${field}, garbled, was answered ${'error' in probe ? probe.error : `HTTP ${probe.status}`}, so whether the server reads it is not known`);
+        if ('timedOut' in probe && probe.timedOut) cut = probe.error;
+        continue;
+      }
+      if (k === 'busy') {
+        out.unchecked.push(`the field ${field} of ${method} ${r.url} (${r.page}): its garbled value was answered busy (HTTP ${probe.status}), which tells neither a read nor an ignore`);
+        continue;
+      }
       garbled[field] = { status: probe.status, body: probe.body };
     }
+    if (unasked.length > 0) out.unchecked.push(`the fields ${unasked.join(', ')} of ${method} ${r.url} (${r.page}): not asked garbled, after an earlier garbled ask of it had ${cut}`);
     if (method === 'HEAD') {
-      const ok = (/** @type {number} */ s) => s >= 200 && s < 300;
       const untold = Object.entries(garbled).filter(([, p]) => ok(first.status) && ok(p.status)).map(([field]) => field);
       if (untold.length > 0) out.unchecked.push(`the fields ${untold.join(', ')} of HEAD ${r.url} (${r.page}): each garbled value was answered ${first.status} like the original, and a HEAD answer has no body to tell a field read from one ignored`);
       continue;
@@ -521,14 +638,188 @@ export async function fieldCheck(send, requests) {
 }
 
 /**
- * Runs `command` through the shell. `wait` resolves with its exit code.
+ * @typedef {{request: SheetRequest, field: string, how: string, said: string}[] & {unchecked: string[],
+ *   failed: string[], stalled: {request: SheetRequest, said: string}[]}} FieldCheck
+ */
+
+/** How often a stop looks again for a process of a group still running, ms. */
+export const GROUP_POLL_MS = 25;
+
+/**
+ * Whether any process of a process group is still running, asked with
+ * signal 0, which signals nothing. A process started detached leads a group
+ * of its own, and every process it starts is in that group unless it leaves
+ * it: all ten processes of a headless Chrome on this Mac on 22 Oct (each
+ * renderer, the GPU and network services, the rest), none in another group.
+ * A group whose id is now someone else's cannot be signalled (EPERM) and is
+ * not ours: it reads as gone. The browser harness stops its browser by this
+ * rule, and the sheet its commands.
+ *
+ * @param {number | undefined} pid the leader's pid, which is its group's id
+ */
+export function groupRunning(pid) {
+  if (pid === undefined) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends `signal` to a detached process and every process in its group. Sent
+ * only while the group is known to be that process's — the process not yet
+ * reaped (its pid, so its group's id, cannot have passed to another
+ * process), or {@link groupRunning} having just found the group's processes
+ * still there (an id in use by a group is given to no new one). Never
+ * throws: where the group cannot be signalled the process alone is, through
+ * its own handle, which reaches nothing once it has been reaped — so a stop
+ * never waits on a process no signal reached.
+ *
+ * WHY THE GROUP, AND NOT THE PROCESS ALONE (the R3-15 repair 2 run, 22 Oct,
+ * at a load average near 140): a harness sent SIGTERM killed the browser,
+ * removed its profile at once, and Chrome's network service, still running,
+ * wrote `Default/Reporting and NEL` into the profile again, so the profile
+ * was left. Probed the same day: after a SIGTERM to the browser alone, the
+ * browser left in 35 ms with a renderer still running; to its group, every
+ * process was gone within 300 ms. A command run through the shell is the
+ * same: a SIGTERM to the shell alone leaves what it started running.
+ *
+ * @param {{pid?: number, kill: (signal: NodeJS.Signals | 0) => boolean}} child the process's handle
+ * @param {NodeJS.Signals | 0} signal
+ */
+export function signalGroup(child, signal) {
+  try {
+    process.kill(-(/** @type {number} */ (child.pid)), signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+/** How long a command the sheet ends has to leave after SIGTERM before its group is sent SIGKILL, ms: the harness's wait for a browser. */
+export const COMMAND_STOP_MS = 5_000;
+
+/**
+ * Every command this process started that has not exited yet. If the sheet
+ * ends first — it exits, throws, or is sent SIGINT, SIGTERM or SIGHUP — each
+ * one's process group is sent that signal (SIGTERM on an exit), as a command
+ * in the sheet's own group would have been by the terminal: a command is
+ * started in a group of its own ({@link run}), so the terminal's signal no
+ * longer reaches it. A command that has exited is not signalled, so a server
+ * a `--restart` command started in the background is left running. A SIGKILL
+ * of the sheet runs nothing, so a command can outlive it then
+ * (docs/06-limits.md).
+ *
+ * @type {Set<import('node:child_process').ChildProcess>}
+ */
+const COMMANDS = new Set();
+let guarded = false;
+
+/** Installs the exit and signal guards for {@link COMMANDS}, once a process. */
+function guardCommands() {
+  if (guarded) return;
+  guarded = true;
+  process.on('exit', () => {
+    for (const child of COMMANDS) signalGroup(child, 'SIGTERM');
+  });
+  for (const signal of /** @type {const} */ (['SIGINT', 'SIGTERM', 'SIGHUP'])) {
+    const on = () => {
+      for (const child of COMMANDS) signalGroup(child, signal);
+      process.removeListener(signal, on);
+      // The signal keeps its meaning: with no other listener, the process
+      // ends as it would have without this guard.
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    process.on(signal, on);
+  }
+}
+
+/** @param {number} ms */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Runs `command` through the shell, DETACHED, so it leads a process group of
+ * its own and a stop reaches every process it starts (verify r5, 23 Oct: a
+ * `--restart` command was waited on with no bound, and the `--writer` was
+ * stopped by a SIGTERM to its shell alone). `wait` resolves with its exit
+ * code, or with what ended it instead, said after "the command": `was ended
+ * by SIGTERM`, `could not be started: ...`. `stop()` ends its group — SIGTERM,
+ * then SIGKILL past {@link COMMAND_STOP_MS}, each wait bounded — and says how,
+ * after "its process group".
  *
  * @param {string} command
+ * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<string>}}
  */
-function run(command) {
-  const child = spawn(command, { shell: true, stdio: ['ignore', 'inherit', 'inherit'] });
-  const wait = new Promise((resolve) => child.on('exit', (code) => resolve(code ?? 1)));
-  return { child, wait };
+export function run(command) {
+  const child = spawn(command, { shell: true, stdio: ['ignore', 'inherit', 'inherit'], detached: true });
+  COMMANDS.add(child);
+  guardCommands();
+  let exited = false;
+  /** @type {Promise<number | string>} */
+  const wait = new Promise((resolve) => {
+    /** @param {number | string} how */
+    const done = (how) => {
+      exited = true;
+      COMMANDS.delete(child);
+      resolve(how);
+    };
+    child.once('exit', (code, signal) => done(code ?? `was ended by ${signal}`));
+    child.once('error', (why) => done(`could not be started: ${why.message}`));
+  });
+  /** Whether the command exited within `ms`. @param {number} ms */
+  const exitsWithin = async (ms) => {
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let t;
+    const ended = await Promise.race([wait.then(() => true), new Promise((resolve) => (t = setTimeout(() => resolve(false), ms)))]);
+    clearTimeout(t);
+    return ended;
+  };
+  /** Whether every process of its group left within `ms`. @param {number} ms */
+  const groupLeft = async (ms) => {
+    const until = performance.now() + ms;
+    while (groupRunning(child.pid)) {
+      if (performance.now() >= until) return false;
+      await sleep(GROUP_POLL_MS);
+    }
+    return true;
+  };
+  return {
+    child,
+    wait,
+    async stop() {
+      const running = !exited && child.pid !== undefined;
+      if (!running && !groupRunning(child.pid)) return 'had already left';
+      signalGroup(child, 'SIGTERM');
+      if ((!running || (await exitsWithin(COMMAND_STOP_MS))) && (await groupLeft(COMMAND_STOP_MS))) return 'was sent SIGTERM and left';
+      // Bounded too: a process the kernel cannot end yet is waited on no longer than the rest.
+      signalGroup(child, 'SIGKILL');
+      await exitsWithin(COMMAND_STOP_MS);
+      await groupLeft(COMMAND_STOP_MS);
+      return `was sent SIGTERM and, still running ${COMMAND_STOP_MS} ms later, SIGKILL`;
+    }
+  };
+}
+
+/**
+ * One run of the `--restart` command, BOUNDED (verify r5, 23 Oct: `--restart
+ * 'sleep 1000'` held the run 60 s with nothing printed): its exit code, or
+ * what happened instead, said after "the --restart command". Past `ms` its
+ * process group is ended ({@link run}'s stop), and the run fails by name.
+ *
+ * @param {string} command
+ * @param {number} ms `--restart-wait-ms`
+ * @returns {Promise<number | string>}
+ */
+export async function restartWithin(command, ms) {
+  const cmd = run(command);
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let t;
+  const late = Symbol('late');
+  const got = await Promise.race([cmd.wait, new Promise((resolve) => (t = setTimeout(() => resolve(late), ms)))]);
+  clearTimeout(t);
+  if (got !== late) return /** @type {number | string} */ (got);
+  return `did not exit within ${ms} ms (--restart-wait-ms), so its process group ${await cmd.stop()}`;
 }
 
 /**
@@ -542,13 +833,14 @@ function run(command) {
  *
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
- *   restart?: (command: string) => Promise<unknown>}} [deps] `restart` runs one restart and
- *   resolves with its exit code (the shell command, by default)
+ *   restart?: (command: string, waitMs: number) => Promise<number | string>}} [deps] `restart` runs one
+ *   restart within `waitMs` and resolves with its exit code, or with what happened instead
+ *   ({@link restartWithin}, the shell command, by default)
  * @returns {Promise<SheetResult>}
  */
 export async function runSheet(args, deps = {}) {
   const sendTo = deps.send ?? timed;
-  const restartOnce = deps.restart ?? ((/** @type {string} */ command) => run(command).wait);
+  const restartOnce = deps.restart ?? restartWithin;
   const log = deps.log ?? ((line) => console.error(line));
   /** @param {string} path @param {object} [o] */
   const send = (path, o = {}) => sendTo(args.base, path, { timeoutMs: args.timeoutMs, ...o });
@@ -608,38 +900,86 @@ export async function runSheet(args, deps = {}) {
   }
   log(`speed sheet: ${requests.length} requests for ${ctx.feed} ${ctx.instrument} ${ctx.timeframe} ${ctx.month}, build ${commit ?? 'not named'}`);
 
+  /**
+   * A REQUEST THAT RAN ITS WHOLE `--timeout-ms` IS ASKED NO MORE THIS RUN
+   * (verify r5, 23 Oct; the harness's rule for a load that does not end):
+   * each later ask would wait as long, n of them a row, so a route that
+   * never ends its answer held the deploy step for hours. By method and URL,
+   * where it ran out; each pass that skips it says so by name.
+   *
+   * @type {Map<string, string>}
+   */
+  const stalled = new Map();
+  const keyOf = (/** @type {{method: string, url: string}} */ r) => `${r.method} ${r.url}`;
+  /** @param {SheetRequest} r @param {string} where @param {string} said */
+  const stall = (r, where, said) => {
+    if (stalled.has(keyOf(r))) return;
+    stalled.set(keyOf(r), where);
+    log(`speed sheet: ${r.method} ${r.url} had ${said} in ${where}; it is asked no more this run`);
+  };
+  /** The line a pass prints for a request it does not ask. @param {string} pass @param {SheetRequest} r */
+  const skipLine = (pass, r) => `${pass}: ${r.method} ${r.url} was not asked: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(keyOf(r))}, and each ask would wait as long`;
+
+  log(`speed sheet: the field check of ${requests.filter((r) => r.url.includes('?')).length} requests with a query`);
   const ignored = await fieldCheck(send, requests);
   for (const i of ignored) failures.push(`${i.request.page} ${i.request.url}: field ${i.field} was ignored (${i.how}: ${i.said})`);
   for (const u of ignored.unchecked) notMeasured.push(u);
+  failures.push(...ignored.failed);
+  for (const s of ignored.stalled) {
+    failures.push(`${s.request.page} ${s.request.method} ${s.request.url} (the field check): ${s.said}`);
+    stall(s.request, 'the field check', s.said);
+  }
 
   /** @type {SheetRow[]} */
   const rows = [];
-  for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients: 1, phase: 'cold', agentOf: () => false, timeoutMs: args.timeoutMs }));
   // A LARGE ANSWER IS TIMED BY ONE CLIENT AT A TIME, and every client count
   // it skips is said: its cold row's largest answer decides.
   /** @type {Map<SheetRequest, number>} */
   const large = new Map();
-  for (const [i, r] of requests.entries()) if (rows[i].bytes > args.maxAnswerBytes) large.set(r, rows[i].bytes);
   /** @param {number} clients @param {string} phase */
   const asked = (clients, phase) => requests.filter((r) => {
+    if (stalled.has(keyOf(r))) {
+      notMeasured.push(skipLine(`${phase} at ${clients} clients`, r));
+      return false;
+    }
     const bytes = large.get(r);
     if (clients === 1 || bytes === undefined) return true;
     notMeasured.push(`${phase} at ${clients} clients: ${r.method} ${r.url} answered ${bytes} bytes, past --max-answer-bytes ${args.maxAnswerBytes}; ${clients} at once would hold ${clients * bytes} bytes in this process, so it is timed at one client only`);
     return false;
   });
+  /** One row, timed; a row its request ended is said, and the request asked no more. @param {SheetRequest} r @param {{n: number, clients: number, phase: string, agentOf: () => http.Agent | false, timeoutMs: number}} o */
+  const timedRow = async (r, o) => {
+    const row = await measure(send, r, o);
+    rows.push(row);
+    if (row.cut !== null) {
+      if (row.notAsked > 0) notMeasured.push(`${o.phase} at ${o.clients} clients: ${r.method} ${r.url}: ${row.notAsked} of its ${o.n} requests were not sent, after one had ${row.cut}`);
+      stall(r, `the ${o.phase} pass at ${o.clients} clients`, row.cut);
+    }
+    return row;
+  };
+  log(`speed sheet: cold, n = ${args.n} a request`);
+  for (const r of asked(1, 'cold')) {
+    const row = await timedRow(r, { n: args.n, clients: 1, phase: 'cold', agentOf: () => false, timeoutMs: args.timeoutMs });
+    if (row.bytes > args.maxAnswerBytes) large.set(r, row.bytes);
+  }
   for (const clients of args.clients) {
-    for (const r of asked(clients, 'warm')) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm', agentOf: warmAgent, timeoutMs: args.timeoutMs }));
+    log(`speed sheet: warm at ${clients} clients`);
+    for (const r of asked(clients, 'warm')) await timedRow(r, { n: args.n, clients, phase: 'warm', agentOf: warmAgent, timeoutMs: args.timeoutMs });
   }
   if (args.writer === null) notMeasured.push('warm+writer: no --writer command was given (an import or a pull writing)');
   else {
     const writer = run(args.writer);
     let exited = false;
     void writer.wait.then(() => (exited = true));
-    for (const clients of [Math.min(...args.clients), Math.max(...args.clients)]) {
-      for (const r of asked(clients, 'warm+writer')) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm+writer', agentOf: warmAgent, timeoutMs: args.timeoutMs }));
+    // One pass a client count: a single --clients count is not timed twice.
+    for (const clients of new Set([Math.min(...args.clients), Math.max(...args.clients)])) {
+      log(`speed sheet: warm+writer at ${clients} clients`);
+      for (const r of asked(clients, 'warm+writer')) await timedRow(r, { n: args.n, clients, phase: 'warm+writer', agentOf: warmAgent, timeoutMs: args.timeoutMs });
     }
     if (exited) failures.push('the --writer command ended before the warm+writer pass did: part of that pass ran with nothing writing');
-    writer.child.kill('SIGTERM');
+    // ITS WHOLE GROUP, BOUNDED: a SIGTERM to its shell alone left what the
+    // shell started still writing after the sheet ended (verify r5 follow-up).
+    log(`speed sheet: the --writer command's process group ${await writer.stop()}`);
   }
   if (args.restart === null) notMeasured.push(`first after restart: no --restart command was given (${args.restarts} restarts asked)`);
   else {
@@ -647,36 +987,56 @@ export async function runSheet(args, deps = {}) {
     const firsts = new Map();
     /** @type {Map<string, Record<string, number>>} each request's answers after the restarts, by class */
     const firstClasses = new Map();
+    let ran = 0;
+    /** @type {string | null} why the pass ended before its last restart */
+    let ended = null;
     for (let i = 0; i < args.restarts; i += 1) {
-      const code = await restartOnce(args.restart);
+      log(`speed sheet: restart ${i + 1} of ${args.restarts}`);
+      const code = await restartOnce(args.restart, args.restartWaitMs);
       if (code !== 0) {
-        failures.push(`restart ${i + 1}: the --restart command exited ${code}`);
+        failures.push(`restart ${i + 1}: the --restart command ${typeof code === 'number' ? `exited ${code}` : code}`);
+        ended = `the --restart command failed at restart ${i + 1}`;
         break;
       }
-      const deadline = Date.now() + args.upWaitMs;
-      while ((await send(UP_ROUTE, { method: UP_METHOD })).status !== 200) {
-        if (Date.now() > deadline) {
-          failures.push(`restart ${i + 1}: the server was not up ${args.upWaitMs} ms after the restart`);
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
+      // THE UP WAIT IS --up-wait-ms IN ALL, on a clock that never steps
+      // back: each check within it waits at most the time left.
+      const t0 = performance.now();
+      let up = false;
+      for (let left = args.upWaitMs; left > 0 && !up; left = args.upWaitMs - (performance.now() - t0)) {
+        up = (await send(UP_ROUTE, { method: UP_METHOD, timeoutMs: Math.max(1, Math.min(args.timeoutMs, Math.ceil(left))) })).status === 200;
+        if (!up) await sleep(Math.max(0, Math.min(250, args.upWaitMs - (performance.now() - t0))));
       }
+      if (!up) {
+        failures.push(`restart ${i + 1}: the server was not up ${args.upWaitMs} ms after the restart`);
+        ended = `the server was not up after restart ${i + 1}`;
+        break;
+      }
+      ran += 1;
       for (const r of requests) {
+        if (stalled.has(keyOf(r))) continue;
         const a = await send(r.url, { method: r.method });
-        const key = `${r.method} ${r.url}`;
+        const key = keyOf(r);
         firsts.set(key, [...(firsts.get(key) ?? []), a.ms]);
         const counted = firstClasses.get(key) ?? {};
         counted[classOf(a)] = (counted[classOf(a)] ?? 0) + 1;
         firstClasses.set(key, counted);
         if (classOf(a) !== 'answered') failures.push(`restart ${i + 1}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
+        if ('timedOut' in a && a.timedOut) stall(r, `the first ask after restart ${i + 1}`, a.error);
       }
     }
+    if (ended !== null) notMeasured.push(`first after restart: timed after ${ran} of the ${args.restarts} restarts asked: ${ended}`);
     for (const r of requests) {
-      const key = `${r.method} ${r.url}`;
-      const s = summary(firsts.get(key) ?? []);
+      const key = keyOf(r);
+      const times = firsts.get(key);
+      if (times === undefined) {
+        if (ran > 0) notMeasured.push(skipLine('first after restart', r));
+        continue;
+      }
+      const s = summary(times);
+      if (s.n < ran) notMeasured.push(`first after restart: ${r.method} ${r.url} was asked after ${s.n} of the ${ran} restarts run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(key)}, and is asked no more`);
       // The classes are counted here as in every other row, so a restart row
       // never prints "0 answered" for twenty answers.
-      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: firstClasses.get(key) ?? {}, builds: commit ? [commit] : [], bytes: 0, said: null });
+      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: firstClasses.get(key) ?? {}, builds: commit ? [commit] : [], bytes: 0, said: null, cut: null, notAsked: 0 });
     }
   }
   for (const row of rows) {
