@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -90,3 +90,22 @@ IA-16, R3-16, R3-36, SC-4.
 - NEXT: when HOLD is gone, run `cargo bench -p store --bench ratio` (C-RC-01, C-RC-02), write the
   D-7093 and L-IA-40 texts, then the full gates (fmt, clippy, workspace tests, deny, CI shell gates,
   llvm-cov branch coverage and cargo-mutants on the touched modules).
+
+### 2026-10-24 19:51 IST — GO-R3-20; bench and ledgers
+
+- `GO-R3-20` on the base branch (57078c40, 19:47 IST): this part builds while HOLD stands for others.
+- `cargo bench -p store --bench ratio --locked`: `all ratios within the ceiling`, EXIT 0. New rows:
+  C-RC-01 recover a torn month (22,500 kept bars, 100 torn) beside 1, 10, 100 months: p50 49.2 /
+  46.2 / 48.2 ms, p99 64.5 / 55.7 / 60.6 ms, max 73.5 / 57.8 / 71.4 ms, n = 20 each; min-of-5
+  ratio 0.991x (10x) and 1.039x (100x), ok. C-RC-02 a kept bar: 1,894,661 ps at 22,500 bars,
+  1,503,131 ps at 90,000 bars, ratio 0.793x, ok. Method: `Instant` around one `recover` call, a
+  fresh copy of the torn month put back outside the timer, invented fixtures on the cloud runner's
+  disk (not the operator's drive).
+- Docs written for the Mac to land (outside ownership): `docs/05-decisions.md` D-7093,
+  `docs/06-limits.md` L-IA-40 and L-R320-01..05, `docs/02-store-format.md` §44 (the recovery
+  record), `docs/04-invariants.md` R320-01..10.
+- Ledger gates (`.github/gates_ledger.rs`): `invariant-ids` OK, 3209 rows unique;
+  `decision-numbers` output identical to the base's except one more heading (its one refusal,
+  D-6247 heading two entries, is the base's own, gate 27b, BASE-REDS-1023).
+- NEXT: full gates (fmt, clippy workspace, workspace tests, deny, CI shell gates), then coverage
+  and mutants on the touched modules.

@@ -5264,3 +5264,48 @@ take no further item. Written whole to `<name>.new` (`store::staging::create`,
 `O_CREAT | O_EXCL`), flushed and renamed over the name. A run reads it between
 items; a request naming another id stops nothing, so the file is never
 removed.
+
+## §44 — The month recovery record, format v1 (R3-20, D-7093)
+
+`<store>/bar-recoveries-v1/bars/<vendor>/…/<yyyy-mm>.recover-v1`: the month's
+own `StorePath` rendered under a separate root, like a generation pointer, so
+it is never under `<store>/bars` (a test server's shadow links that directory
+to the real store). Written by `store::recover` alone, after the promotion
+that serves the recovered revision (§ "Explicit bar repair V1" and
+`crates/store/REPAIR.md`); read by `store::recover::read_record` and by the
+door's next run. (The section number is the next free one on 24 October 2026;
+the merge renumbers it if another lands first.)
+
+Append-only fixed records of 256 bytes, little-endian. The LAST record that
+verifies is the month's recovery; a torn tail is stepped over, never
+overwritten (the next record is written at the next aligned offset), and a
+file of which no whole record verifies is refused by name, never read as "not
+recovered". At most 64 records. The writer holds an exclusive `flock` on the
+file, opened `O_NOFOLLOW`, for its whole write; every link below the store root
+is refused before anything is created.
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0 | 8 | magic `BRXRCV01` |
+| 8 | 2 | version, `1` |
+| 10 | 1 | basis: `1` a slot's commit, `2` whole blocks |
+| 11 | 1 | the IST day of the month of the last kept bar (the first day that may have lost bars) |
+| 12 | 1 | the IST day of the month of the last bar a surviving slot published |
+| 13 | 1 | `reread_named`: `0` as the recovery writes it, `1` in the copy appended once the caller named the dropped days for the importer's re-read; any other value does not decode |
+| 14 | 2 | zero |
+| 16 | 4 | the revision ordinal served, `1..=1024` |
+| 20 | 4 | CRC-32C of the original bar file's header region when planned |
+| 24 | 8 | the original bar file's length when planned |
+| 32 | 8 | the basis's value: the commit's generation, or the whole blocks kept |
+| 40 | 64 | the header the kept bars were cut from (the revision's source header), encoded as a header slot with its own CRC (§2) |
+| 104 | 8 | the stamp of the last kept bar |
+| 112 | 8 | the most bars any surviving slot published |
+| 120 | 8 | that slot's generation |
+| 128 | 8 | that slot's last stamp |
+| 136 | 8 | bars dropped |
+| 144 | 8 | when the recovery was recorded, UTC micros |
+| 152 | 100 | zero |
+| 252 | 4 | CRC-32C of bytes 0..252 followed by the record's index, `u64` LE |
+
+The original month's files are never written by the recovery; the kept bars
+live in the revision the record names, and the generation pointer serves it.

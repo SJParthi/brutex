@@ -84081,3 +84081,90 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+
+### D-7093 — R3-20: a month a power cut left refused is recovered at its last commit whose records check out, its kept bars written as a new revision on the operator's yes, and its dropped days named for the importer's re-read — 2026-10-24
+
+**Status: locked by R3-20** (built on the cloud branch `cloud/db-R3-20-20261024`;
+its number is the one the 20 Oct follow-ups' block D-7090..D-7099 gives
+R3-20's recovery rule). Answers NEW-23 (RA-280, with RA-276 and RA-330),
+FM-062 and the store door critic D-4911 (c) proposed to WP-16's owner. Cites
+D-3353 (the durable batch whose power cut leaves the month refused), D-3350
+(generations, promotion), D-5904 (SC-4's write door), D-6900 (one command,
+attended), D-0790 and D-0792 (a slot that outran its records is refused, never
+opened short).
+
+**Decision.**
+
+1. **The cut.** `store::recover` plans the ORIGINAL month whatever generation
+   is served. A month that opens and whose every committed record verifies is
+   clean and nothing is written. A refused one is cut at its last commit whose
+   records check out: each header slot that still decodes where its
+   generation puts it is tried as the month's header, newest first, and the
+   first whose records all verify against the block checksums through the
+   read path (D-0688's tail proof included), are strictly in order, inside the
+   month and on its grid, and run from the slot's first stamp to its last, is
+   the cut (`Basis::Commit`). When none does, the cut is the longest prefix of
+   whole blocks whose checksums verify, never past what a surviving slot
+   published (`Basis::Blocks`), and it is refused (`not_the_tail`) when the
+   first block that fails lies below the tail block of the oldest surviving
+   commit and a later whole block verifies: that is damage inside a durable
+   history, which no cut answers. Nothing kept is ever unproven: a block whose
+   checksum the batch re-sealed over records that never reached the disk is
+   dropped, even when a durable commit held its bars, and those bars are
+   named among the dropped.
+2. **A new file, never a change in place.** The kept bars are published as a
+   repair revision (`repair::publish`) and made the served generation
+   (`generation::promote`), the two doors every repair takes; the original's
+   `.bin`, `.crc` and siblings are never opened for writing, truncated or
+   renamed (`CLAUDE.md` §3 rule 8). A recovered month is a raw month and is
+   sealed like any other (SC-4). Those doors check their source by opening
+   it, and no door opens a refused month, so `BarFile`'s read door opens it at
+   the cut for them on the recovery door's own thread only
+   (`recover::within`), and only for the exact bytes the plan read (the bar
+   file's length and the CRC-32C of its header region): every other reader,
+   on every other thread, keeps the month's refusal until the promotion makes
+   the revision what it opens. No reader is ever served the original short
+   (D-0790 stands).
+3. **What it dropped is recorded.** One 256-byte record is appended to
+   `bar-recoveries-v1/bars/…/<yyyy-mm>.recover-v1` after the promotion
+   (`docs/02-store-format.md` §44): the revision, the cut's header and basis,
+   the most bars a surviving slot published, the bars dropped, and the IST
+   days from the last kept bar's (which may have lost later bars) to the last
+   claimed bar's. A run cut off between promotion and record finds its own
+   promotion (the served revision's receipt names the cut's header as its
+   source) and writes only the record.
+4. **The importer reads those days again.** The cli's `month-recover --yes`
+   gives each dropped day the import journal shows done one `incomplete`
+   line in the journal's own grammar, with reason `store_damaged` (the
+   importer's own word for a month refused for a fault of its own, which is no
+   hole reason, so `admit` reads it on a plain Resume); a day the journal does
+   not show done is read again by any Resume already. The run's end record is
+   one line of `audit/<vendor>.recoveries`, and one `cli.month_recover.lifecycle`
+   event names the month, the cut and the days. The recovery's record is then
+   marked (`reread_named`), so a run cut off before the lines writes them on
+   its next run and a run after writes nothing.
+5. **Attended, named, and never automatic** (D-6900). The door runs only as
+   `cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT] RUNG YYYY-MM
+   --yes`, store step S-52 of `config/store-steps.toml`, on the operator's yes;
+   `--plan` writes nothing. There is no button, no route and no recovery at
+   start. `month-recover` is a writer of `cli::store_write::WRITERS`, refused
+   to an unstamped build. This is the stable name a refusal of another part
+   (PREC-16's fallen-back-header refusal, FM-435) may print as the way back.
+6. **Refused by name, nothing written:** a month held sealed, one served from
+   a revision this door did not promote, an unsealed month (no checksum can
+   prove a record), one with an overlay or greeks sibling (indexed by record,
+   as `repair_month` refuses them), one a writer holds, one with no lock
+   beside it, and one with nothing a checksum proves (`nothing_verifies`: its
+   way back is the backup, R4-09b).
+
+**Proven by** `store`'s `recover_tests.rs`
+(`a_month_cut_at_every_synced_write_recovers_to_its_last_good_commit`, every
+subset of a day's writes in three shapes;
+`a_power_cut_inside_a_batch_is_named_and_repaired`, FM-062;
+`two_commits_torn_in_one_batch_at_a_year_end_keep_the_whole_blocks`;
+`damage_inside_the_months_history_is_not_a_torn_tail`;
+`a_cut_never_applies_to_other_bytes_another_thread_or_another_file`) and
+`cli`'s `month_recover_command_tests.rs`
+(`the_days_dropped_by_recovery_are_read_again`,
+`a_power_cut_during_a_compaction_plans_and_resumes`). Limits:
+`docs/06-limits.md` L-IA-40 and L-R320-01 to L-R320-05.
