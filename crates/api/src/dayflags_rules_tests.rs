@@ -1675,6 +1675,7 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
         ledger: None,
         halt: None,
         auction: None,
+        session: None,
     }
     .json();
     assert_eq!(json["frozen"]["broken_by_absent"], 1);
@@ -1874,6 +1875,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
         ledger: Some((2_700, Some(halt.from), 4)),
         halt: Some((halt.from, halt.resume)),
         auction: None,
+        session: Some(pull::calendar::Session::full()),
     };
     let (json, says) = inside.json();
     assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
@@ -2006,6 +2008,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
         ledger: Some((600, None, 4)),
         halt: None,
         auction: None,
+        session: Some(pull::calendar::Session::full()),
     };
     let (json, says) = unknown.json();
     assert_eq!(json["frozen"]["longest_from"], Value::Null);
@@ -2018,6 +2021,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
         ledger: None,
         halt: None,
         auction: None,
+        session: None,
     };
     assert_eq!(
         nothing.json().0,
@@ -2040,6 +2044,7 @@ fn a_ledger_run_inside_the_halt_is_never_said_not_frozen() {
         ledger: None,
         halt: None,
         auction: None,
+        session: None,
     };
     let (json, says) = low.json();
     assert_eq!(json["outside_day_range"]["below_by"], 4);
@@ -3512,6 +3517,7 @@ fn the_scans_edges_are_where_they_are_named() {
         ledger: None,
         halt: None,
         auction: None,
+        session: None,
     };
     let (json, says) = edge.json();
     assert_eq!(json["outside_day_range"]["flagged"], false, "{json:#}");
@@ -3922,6 +3928,7 @@ fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
         ledger: Some((seconds, at, 109)),
         halt: None,
         auction: window,
+        session: Some(pull::calendar::Session::full()),
     };
     let (json, says) = ledger(838, Some(15 * 3_600 + 15 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
@@ -4431,6 +4438,7 @@ fn a_ledger_run_in_the_window_of_an_index_not_sourced_is_not_judged() {
         ledger: Some((seconds, at, 108)),
         halt: None,
         auction: window,
+        session: Some(pull::calendar::Session::full()),
     };
     let (json, says) = ledger(838, Some(15 * 3_600 + 15 * 60)).json();
     assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
@@ -4505,6 +4513,187 @@ fn a_ledger_run_in_the_window_of_an_index_not_sourced_is_not_judged() {
         said.iter()
             .any(|said| said.contains("where an index holding still is sourced for NIFTY 50")),
         "{said:#?}"
+    );
+}
+
+/// **A LEDGER RUN THE DAY'S SESSION CANNOT HOLD IS REFUSED BY NAME, NEVER
+/// JUDGED** (verify-R3-13-r2 E6, the check's out-of-the-box lines, which were
+/// served "frozen in session"): the import measures a run over the session's
+/// own rows only, so a run that starts or ends outside every window of the
+/// day's session, a run with no stamp longer than the session spans, and any
+/// run on a day the calendar holds no session for are `flagged: null`,
+/// `judged_s: null`, `refused` naming why, with a phrase that says so, short
+/// runs as much as long ones. A run at the session's first and last seconds
+/// is judged as before, and on a two-window day a run across the gap, both
+/// ends in session, is the import's and is judged.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "every refusal, each edge of the session and the two-window day, read together"
+)]
+fn a_ledger_run_the_session_cannot_hold_is_refused_by_name() {
+    use pull::calendar::{Session, Window};
+    let ledger = |seconds: u64, at: Option<u32>, session: Option<Session>| IndexDay {
+        feed: Vendor::Gdfl,
+        midnight: 0,
+        scan: None,
+        day_bar: None,
+        ledger: Some((seconds, at, 7)),
+        halt: None,
+        auction: None,
+        session,
+    };
+    let full = Some(Session::full());
+    let clock = |h: u32, m: u32, s: u32| h * 3_600 + m * 60 + s;
+    let refused = |json: &Value| json["frozen"]["refused"].clone();
+    // THE CHECK'S THREE LINES: 999999 s from 23:59:59, u64::MAX s from
+    // 09:15:00 and 600 s from 15:29:59, each served as frozen before.
+    for (seconds, at, code) in [
+        (999_999, clock(23, 59, 59), "starts_outside_session"),
+        (u64::MAX, clock(9, 15, 0), "ends_outside_session"),
+        (600, clock(15, 29, 59), "ends_outside_session"),
+    ] {
+        let (json, says) = ledger(seconds, Some(at), full).json();
+        let frozen = &json["frozen"];
+        assert_eq!(frozen["flagged"], Value::Null, "{frozen:#}");
+        assert_eq!(frozen["judged_s"], Value::Null, "{frozen:#}");
+        assert_eq!(frozen["refused"], code, "{frozen:#}");
+        assert_eq!(frozen["longest_s"], seconds);
+        assert_eq!(says.len(), 1, "{says:?}");
+        assert!(
+            says[0].starts_with("index frozen refused: the day ledger's longest unchanged run, "),
+            "{says:?}"
+        );
+    }
+    let (_, says) = ledger(600, Some(clock(15, 29, 59)), full).json();
+    assert_eq!(
+        says,
+        vec![
+            "index frozen refused: the day ledger's longest unchanged run, 600 s from 15:29:59, \
+             ends outside every window of the day's session (09:15:00-15:30:00); the import \
+             measures a run over the session's own rows only, so the line is not that measure \
+             and the day's frozen run is not judged (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
+    let (_, says) = ledger(999_999, Some(clock(23, 59, 59)), full).json();
+    assert!(
+        says[0].contains(
+            "999999 s from 23:59:59, starts outside the day's session (09:15:00-15:30:00); "
+        ),
+        "{says:?}"
+    );
+    // A SHORT RUN OUTSIDE IS REFUSED TOO, never "not frozen": it is not the
+    // import's measure either.
+    let (json, _) = ledger(85, Some(clock(23, 0, 0)), full).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert_eq!(refused(&json), "starts_outside_session");
+    // THE EDGES: 09:14:59 is outside, 09:15:00 the first second inside.
+    let (json, _) = ledger(600, Some(clock(9, 14, 59)), full).json();
+    assert_eq!(refused(&json), "starts_outside_session");
+    let (json, says) = ledger(600, Some(clock(9, 15, 0)), full).json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(json["frozen"]["judged_s"], 600);
+    assert_eq!(refused(&json), Value::Null);
+    assert!(
+        says[0].starts_with("index value frozen in session"),
+        "{says:?}"
+    );
+    // 60 s from 15:29:00 ends at 15:29:59, the session's last second, and 1 s
+    // at 15:29:59 is that second alone; 61 s from 15:29:00 ends past it.
+    let (json, says) = ledger(60, Some(clock(15, 29, 0)), full).json();
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert_eq!(refused(&json), Value::Null);
+    assert!(says.is_empty(), "{says:?}");
+    let (json, _) = ledger(1, Some(clock(15, 29, 59)), full).json();
+    assert_eq!(json["frozen"]["flagged"], false);
+    assert_eq!(refused(&json), Value::Null);
+    let (json, _) = ledger(61, Some(clock(15, 29, 0)), full).json();
+    assert_eq!(refused(&json), "ends_outside_session");
+    // UNSTAMPED: up to the session's span (22,500 s) it is judged as before,
+    // one second more is refused.
+    let (json, _) = ledger(22_500, None, full).json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(refused(&json), Value::Null);
+    let (json, says) = ledger(22_501, None, full).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert_eq!(json["frozen"]["judged_s"], Value::Null);
+    assert_eq!(refused(&json), "longer_than_session");
+    assert!(
+        says[0].contains(
+            "run, 22501 s, with no stamp, is longer than the day's session spans (22500 s, \
+             09:15:00-15:30:00); "
+        ),
+        "{says:?}"
+    );
+    // NO SESSION: nothing can place the run, however short.
+    let (json, says) = ledger(600, Some(clock(11, 0, 0)), None).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert_eq!(refused(&json), "no_session");
+    assert!(
+        says[0].contains(
+            "600 s from 11:00:00, cannot be placed: the calendar holds no session for the day; "
+        ),
+        "{says:?}"
+    );
+    let (json, _) = ledger(40, None, None).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null);
+    assert_eq!(refused(&json), "no_session");
+    // A TWO-WINDOW DAY, the disaster-recovery Saturdays' 09:15-09:59 and
+    // 11:30-12:29: a run across the gap has both ends in session and is the
+    // import's; one that starts or ends in the gap is refused; unstamped, the
+    // session spans 09:15 to 12:30.
+    let drill = Some(Session {
+        windows: [Window { from: 555, to: 599 }, Window { from: 690, to: 749 }],
+        count: 2,
+    });
+    let (json, _) = ledger(7_200, Some(clock(9, 50, 0)), drill).json();
+    assert_eq!(json["frozen"]["flagged"], true);
+    assert_eq!(refused(&json), Value::Null);
+    let (json, says) = ledger(600, Some(clock(10, 30, 0)), drill).json();
+    assert_eq!(refused(&json), "starts_outside_session");
+    assert!(
+        says[0].contains("(09:15:00-10:00:00 and 11:30:00-12:30:00)"),
+        "{says:?}"
+    );
+    let (json, _) = ledger(600, Some(clock(9, 55, 0)), drill).json();
+    assert_eq!(refused(&json), "ends_outside_session");
+    let (json, _) = ledger(11_700, None, drill).json();
+    assert_eq!(refused(&json), Value::Null);
+    let (json, _) = ledger(11_701, None, drill).json();
+    assert_eq!(refused(&json), "longer_than_session");
+    // The spans themselves; a session with no window spans nothing.
+    assert_eq!(session_span(Session::full()), 22_500);
+    assert_eq!(session_span(drill.expect("a session")), 11_700);
+    let none = Session {
+        windows: [Window { from: 555, to: 929 }; 2],
+        count: 0,
+    };
+    assert_eq!(session_span(none), 0);
+    assert_eq!(session_words(none), "");
+    // THROUGH THE ROUTE, as the check appended it to a shadow's ledger: the
+    // regular session of 2026-09-18 cannot hold 999999 s from 23:59:59.
+    let root = root_of("r3-13-ledger-outside-session");
+    write(
+        &super::super::quality_path(&root),
+        &super::super::tests::index_flags("2026-09-18", "NIFTY", &[])
+            .replace('\n', " flat_max_s=999999 flat_max_at=23:59:59\n"),
+    );
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2026-09-18&to=2026-09-18"),
+    );
+    let day_of = record(&got, "2026-09-18");
+    let frozen = &day_of["index"]["frozen"];
+    assert_eq!(frozen["flagged"], Value::Null, "{day_of:#}");
+    assert_eq!(frozen["refused"], "starts_outside_session", "{day_of:#}");
+    assert_eq!(frozen["longest_s"], 999_999);
+    says_has(
+        day_of,
+        "index frozen refused: the day ledger's longest unchanged run, 999999 s from 23:59:59, \
+         starts outside the day's session (09:15:00-15:30:00); the import measures a run over \
+         the session's own rows only, so the line is not that measure and the day's frozen run \
+         is not judged (UNVERIFIED)",
     );
 }
 

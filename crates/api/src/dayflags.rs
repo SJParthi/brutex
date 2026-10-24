@@ -5242,6 +5242,10 @@ impl Context<'_> {
             ledger,
             halt,
             auction: rules::auction_of((inst.exchange, &inst.symbol), inst.venue(), day),
+            // The session the GDFL import read the day inside, which its
+            // ledger's run must lie in (verify-R3-13-r2 E6); one calendar
+            // lookup a day.
+            session: pull::gdfl_cm::session_of(day).ok(),
         }
         .json();
         // A GDFL INDEX DAY THE LEDGER DID NOT MEASURE IS SAID (the check's
@@ -6399,7 +6403,7 @@ fn rules_json() -> Value {
         "bar_definition": "the bar definition that built the day, from the import journal's deciding line or else the day ledger's: named on every option day, and on any day whose definition this build would not build (R3-13 goal 3); null after a contract's expiry and where the series has no file for the month, whose import built nothing of it",
         "index": {
             "frozen": format!(
-                "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; the ledger keeps only the day's longest unchanged run, so on GDFL flagged is false only where that run is under {} s, true where its longest stretch outside the recorded halt and the cash closing auction's window reaches it, and null (never false) where it reaches it inside those windows or has no stamp to place it against them: a shorter run elsewhere is then not measured, and the phrase says so (UNVERIFIED); judged_s is that longest stretch; frozen is null where neither measured the day",
+                "an index's value unchanged for {} s or more in session, outside any recorded halt: from Zerodha's one-minute bars (O = H = L = C, minute to minute), or from GDFL's day ledger flat_max_s, the import's measure of the vendor's rows; the ledger keeps only the day's longest unchanged run, so on GDFL flagged is false only where that run is under {} s, true where its longest stretch outside the recorded halt and the cash closing auction's window reaches it, and null (never false) where it reaches it inside those windows or has no stamp to place it against them: a shorter run elsewhere is then not measured, and the phrase says so (UNVERIFIED); judged_s is that longest stretch; refused names a ledger run the day's session cannot hold (starts_outside_session, ends_outside_session, longer_than_session, no_session), flagged and judged_s then null; on Zerodha flagged is null (never false) where the day's only such run reaches it only inside the cash closing auction's window of an index whose stillness there is not sourced (any but NIFTY 50 and NIFTY BANK), named by unjudged_s and unjudged_from; auction_aside says whether the window is set aside, null on a day with none; frozen is null where neither measured the day",
                 rules::FROZEN_MIN_S, rules::FROZEN_MIN_S
             ),
             "outside_day_range": "a minute's high above the day's Zerodha 1day bar's high, or its low below its low, flagged inside a recorded halt too (above_in_halt, below_in_halt say where); null on GDFL, whose seconds this route does not read whole (up to 22,500 reads a day)",

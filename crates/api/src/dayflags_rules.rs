@@ -1369,6 +1369,12 @@ pub(super) struct IndexDay {
     /// The cash closing auction's window of the day and how a run inside it
     /// is read ([`auction_of`]), where the day has one.
     pub(super) auction: Option<Auction>,
+    /// The day's session as the GDFL import reads it
+    /// (`pull::gdfl_cm::session_of`: a full session, or a special one's
+    /// windows), where the calendar holds one. The ledger's run is placed
+    /// against it ([`Self::outside_session`]); the minutes' scan never reads
+    /// it.
+    pub(super) session: Option<pull::calendar::Session>,
 }
 
 /// `HH:MM` of an epoch-microsecond stamp on the day opening at `midnight`.
@@ -1529,12 +1535,17 @@ impl IndexDay {
     /// whose stillness there is not sourced ([`still_through_auction`]) a run
     /// inside the window is not judged either, and the phrase says that too
     /// (verify-R3-13-r2 X1).
+    ///
+    /// A RUN THE DAY'S SESSION CANNOT HOLD IS REFUSED BY NAME, never judged
+    /// (verify-R3-13-r2 E6): `refused` names why ([`OutsideSession`]),
+    /// `flagged` and `judged_s` are `null`, and the phrase says so.
     fn ledger_frozen(
         &self,
         (seconds, at, line): (u64, Option<u32>, u64),
         says: &mut Vec<String>,
     ) -> serde_json::Value {
         let rung = finest_of(self.feed).as_str();
+        let refused = self.outside_session(seconds, at);
         // ONLY THE RUN'S SECONDS OUTSIDE THE RECORDED HALT AND THE CASH
         // CLOSING AUCTION'S WINDOW ARE JUDGED (the R3-13 review; the Mac
         // finish): 2020-03-13's run starts at 09:21:09, a second before the
@@ -1545,6 +1556,7 @@ impl IndexDay {
         // stretch outside them ([`outside_of`]).
         let windowed = self.halt.is_some() || self.auction.is_some();
         let outside = match at {
+            _ if refused.is_some() => None,
             Some(at) => {
                 let start = u64::from(at);
                 let run = (start, start.saturating_add(seconds));
@@ -1559,12 +1571,14 @@ impl IndexDay {
         let judged_s = outside.map(|(longest, _)| longest);
         let flagged = match judged_s {
             Some(judged) if judged >= FROZEN_MIN_S => Some(true),
+            _ if refused.is_some() => None,
             _ if seconds < FROZEN_MIN_S => Some(false),
             _ => None,
         };
         let clock = |at: u32| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60);
-        match (flagged, outside) {
-            (Some(true), Some((judged, total))) => {
+        match (flagged, outside, refused) {
+            (_, _, Some(why)) => says.push(self.refusal(seconds, at.map(clock), why)),
+            (Some(true), Some((judged, total)), None) => {
                 let stretch = if judged < total {
                     " in one stretch"
                 } else {
@@ -1586,7 +1600,7 @@ impl IndexDay {
                     at.map_or_else(|| "-".to_owned(), clock)
                 ));
             }
-            (None, _) => says.push(self.unjudged(seconds, at.map(clock), judged_s)),
+            (None, _, None) => says.push(self.unjudged(seconds, at.map(clock), judged_s)),
             _ => {}
         }
         serde_json::json!({
@@ -1599,8 +1613,67 @@ impl IndexDay {
             "longest_from": at.map(clock),
             "auction_window": self.auction_json(),
             "auction_aside": self.auction.map(|auction| auction.aside),
+            "refused": refused.map(OutsideSession::code),
             "line": line,
         })
+    }
+
+    /// WHY THE LEDGER'S RUN CANNOT BE THE IMPORT'S MEASURE, where it cannot
+    /// (verify-R3-13-r2 E6). The import measures a run over the session's own
+    /// rows only, its first and its last second each inside a window of the
+    /// day's session (`pull::gdfl_import_quality`, `FlatRun`: "the longest
+    /// run of in-session rows"), so a run that starts or ends outside every
+    /// window, or that has no stamp and is longer than the session spans, is
+    /// not that measure: the check's 999999 s from 23:59:59, `u64::MAX` s from
+    /// 09:15:00 and 600 s from 15:29:59. A day the calendar holds no session
+    /// for cannot place the run at all. Every real line lies inside its
+    /// session (the 36 of 2026-09-25..30, read 2026-10-24). At most four
+    /// window comparisons, once a day.
+    fn outside_session(&self, seconds: u64, at: Option<u32>) -> Option<OutsideSession> {
+        let Some(session) = self.session else {
+            return Some(OutsideSession::NoSession);
+        };
+        let held =
+            |second: u64| u16::try_from(second / 60).is_ok_and(|minute| session.expects(minute));
+        match at.map(u64::from) {
+            Some(first) if !held(first) => Some(OutsideSession::StartsOutside),
+            Some(first) if !held(first.saturating_add(seconds.saturating_sub(1))) => {
+                Some(OutsideSession::EndsOutside)
+            }
+            Some(_) => None,
+            None => (seconds > session_span(session)).then_some(OutsideSession::Longer),
+        }
+    }
+
+    /// The phrase of a ledger run refused ([`Self::outside_session`]): the
+    /// run as the line gives it, why the session cannot hold it, and that
+    /// nothing is judged.
+    fn refusal(&self, seconds: u64, from: Option<String>, why: OutsideSession) -> String {
+        let run = from.map_or_else(
+            || format!("{seconds} s, with no stamp"),
+            |from| format!("{seconds} s from {from}"),
+        );
+        let windows = self.session.map(session_words).unwrap_or_default();
+        let reason = match why {
+            OutsideSession::NoSession => {
+                "cannot be placed: the calendar holds no session for the day".to_owned()
+            }
+            OutsideSession::StartsOutside => {
+                format!("starts outside the day's session ({windows})")
+            }
+            OutsideSession::EndsOutside => {
+                format!("ends outside every window of the day's session ({windows})")
+            }
+            OutsideSession::Longer => format!(
+                "is longer than the day's session spans ({} s, {windows})",
+                self.session.map_or(0, session_span)
+            ),
+        };
+        format!(
+            "index frozen refused: the day ledger's longest unchanged run, {run}, {reason}; the \
+             import measures a run over the session's own rows only, so the line is not that \
+             measure and the day's frozen run is not judged (UNVERIFIED)"
+        )
     }
 
     /// The phrase of a ledger run that cannot judge the day (`flagged` null):
@@ -1700,6 +1773,68 @@ impl IndexDay {
 /// it.
 const UNSOURCED: &str =
     ", where an index holding still is sourced for NIFTY 50 and NIFTY BANK alone";
+
+/// Why a day ledger's run cannot be the import's measure
+/// ([`IndexDay::outside_session`]; verify-R3-13-r2 E6), and its word on the
+/// wire, `frozen.refused`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutsideSession {
+    /// The calendar holds no session for the day (`pull::gdfl_cm::session_of`
+    /// refuses it), so nothing can place the run.
+    NoSession,
+    /// Its first second lies outside every window of the day's session.
+    StartsOutside,
+    /// Its last second lies outside every window of the day's session.
+    EndsOutside,
+    /// It has no stamp and is longer than the day's session spans.
+    Longer,
+}
+
+impl OutsideSession {
+    /// The word `frozen.refused` serves.
+    pub(super) const fn code(self) -> &'static str {
+        match self {
+            Self::NoSession => "no_session",
+            Self::StartsOutside => "starts_outside_session",
+            Self::EndsOutside => "ends_outside_session",
+            Self::Longer => "longer_than_session",
+        }
+    }
+}
+
+/// The seconds a session spans, from its first window's open to its last
+/// window's close, gaps between windows included: the longest run of
+/// in-session rows the import can measure on the day. A session with no
+/// window spans nothing.
+pub(super) fn session_span(session: pull::calendar::Session) -> u64 {
+    let mut used = session.windows.iter().take(usize::from(session.count));
+    let first = used.next();
+    match (first, used.last().or(first)) {
+        (Some(first), Some(last)) => {
+            u64::from(last.to.saturating_add(1).saturating_sub(first.from)).saturating_mul(60)
+        }
+        _ => 0,
+    }
+}
+
+/// A session's windows as the phrase names them, `HH:MM:SS-HH:MM:SS` each,
+/// the close being the last minute's end.
+pub(super) fn session_words(session: pull::calendar::Session) -> String {
+    let clock = |minute: u16| format!("{:02}:{:02}:00", minute / 60, minute % 60);
+    session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .map(|window| {
+            format!(
+                "{}-{}",
+                clock(window.from),
+                clock(window.to.saturating_add(1))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
 
 /// Paisa as index points, two decimals: `22985` is `229.85`.
 pub(super) fn points(paisa: i64) -> String {
