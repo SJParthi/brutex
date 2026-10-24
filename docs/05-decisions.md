@@ -84851,7 +84851,7 @@ D-7185).
    field counted away past `telemetry::MAX_FIELDS` (the event carries 11 of
    the 12).
 
-### D-7191 — R4-28 repair 5: the snapshot catalog, the book and the diff answer from indices built once; gate 11's six remaining lines are declared with their bounds — 2026-10-24
+### D-7191 — R4-28 repair 5: the snapshot catalog, the book and the diff answer from indices built once; gate 11's six remaining lines are declared with their bounds; a Zerodha futures ask reaches its route — 2026-10-24
 
 The number follows D-7190 in R4-28's own block D-7185..D-7194 (see
 D-7185).
@@ -84900,9 +84900,53 @@ D-7185).
    per diff: hash probes, the shape the rule permits. The reasons are in
    `docs/06-limits.md`, "Gate 11 — R4-28, declared at its merge", and
    L-R428-13 records the listing's cost.
-4. **Proof.** `docs/04-invariants.md` R428-26..R428-30. The gate run on the
+4. **Proof.** `docs/04-invariants.md` R428-26..R428-33. The gate run on the
    edited tree refuses no R4-28 file, and its REFUSED lines equal those of
    feat/db-fix's own run. The tests that change behaviour (a predecessor for
    a stamp no file holds, `diff_for` of such a stamp, `Book::of` given its
    snapshots newest first) fail on the unfixed code: each asserts the
    refusal or the `None` that code did not give.
+5. **A defect found in the self-check: the futures route could not be
+   asked.** `ingest::parse_fno` refused every rung but `1min` for every
+   expired-series ask (the operator's rule of 2026-08-19), and the futures
+   route's own guard refuses every rung but its route's `1day`, so no body
+   reached `fnowork::futures_plan`: D-7186 point 5's own request was refused
+   at the parse, and its `series=futures` is not a word the parse knows (the
+   wire word is `fut`). The receipt tests built `FnoRequest` by hand, at
+   `1day`, so nothing exercised the parse. Now `ingest::expired_rung` parses
+   an expired FUTURE of a feed whose descriptor routes futures through a
+   token (`FnoAccess::ByToken`, Zerodha alone) at that route's rung: an
+   absent granularity is that rung, as an absent one is `1min` for every
+   other ask, and any other rung is refused at the parse by name
+   (`Refusal::ExpiredFutureAtItsRouteRungOnly`, field `granularity`).
+   Options, and every other feed's futures, keep the one-minute rule. The
+   store step is therefore `POST /pull/fno` with
+   `vendor=zerodha&series=fut&underlying=<UND>&from=..&to=..` and
+   `granularity=1day` or none.
+6. **The r5 check's follow-ups taken.** (a) A whole-plan refusal of
+   `futures_plan` (`no_snapshot`, `snapshot_from_the_future`,
+   `futures_index`) is one Error `pull.futures` event naming the underlying
+   and the refusal; it reached the receipt and `/audit` only. (b) The
+   futures receipt's line of incomplete entries is "Incomplete
+   master-snapshot entries": a cut `.diff` and a name in another case are
+   listed there too, and each line says which it is. (c) The failure note no
+   longer says a pull's landed series "may not be read as held": what each
+   series line says it wrote is held. (d) The `fno` handler's note no longer
+   says Zerodha declares `FnoAccess::None`. (e) `/ingest` knew four `fno`
+   words and declined Zerodha's `by_token` as "states no expired-derivative
+   history"; the five words now live in one table (`web/src/lib/fno-modes.js`,
+   pinned to the server's match by its test), Zerodha is asked for futures
+   and named as served for futures only, and a word the table does not know
+   is declined as unknown, never read as `none`. (f) Gate 12's refusal of
+   the C-MS-01/02 bench note (no proof named) and gate 23's four undeclared
+   test prints in R4-28's files (now five, with the catalog measurement) are
+   answered: the note names its harness, `crates/pull/benches/ratio.rs`, and
+   `.github/workflows/ci.yml` declares the prints.
+7. **Not taken, and why.** A pull whose plan refused a contract for a reason
+   the snapshots fix (`token_reused`, `contract_duplicated`) is still
+   journalled `Failed`, so such an underlying's futures leg stays failed
+   until the operator acts; making it complete needs an outcome the journal
+   does not have (it has no partial outcome) or a rule that lets a known gap
+   read as a complete leg, and D-7190 point 3 chose `Failed`. Gate 1d's new
+   segment-shaped literals in R4-28's `crates/pull` files are not declared
+   (the gate is red on feat/db-fix with 466 of its own).
