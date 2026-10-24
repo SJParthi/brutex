@@ -49,15 +49,19 @@
 //! volume's `st_dev` is not stable across mounts, so neither is ever
 //! compared across walks or alone (D-7042, amendment (e)).
 //!
-//! # Bounded, refused by name past the bound
+//! # Bounded by the tree itself, with no typed count
 //!
-//! Each root's walk stops at [`MAX_WALK_ENTRIES`] directory entries or a
-//! directory deeper than [`MAX_DEPTH`], and the root is then answered
-//! REFUSED by name with no figure, never as a silent partial. A subfolder
-//! that cannot be listed, or a name that vanishes mid-walk, is a named fault
-//! of the root, which is then not walked whole and is kept off the
-//! retirement list (D-7043). The walk is O(entries under the roots): it is
-//! NOT O(1) and is named in `docs/06-limits.md` L-CC5-1.
+//! Every directory is entered at most once, by its `(st_dev, st_ino)`, and
+//! links are never followed, so a walk ends after exactly the entries under
+//! its roots: a loop through a second mount or a directory met twice is
+//! counted and named, never walked again. No entry count, depth or list
+//! length is typed here (the operator's rule of 24 Oct: no number outside
+//! the Winner Gate); every list an answer carries is whole, in path order. A
+//! subfolder that cannot be listed, or a name that vanishes mid-walk, is a
+//! named fault of the root, which is then not walked whole and is kept off
+//! the retirement list (D-7043). The walk is O(entries under the roots),
+//! run on as many threads as the host has cores: it is NOT O(1) and is
+//! named in `docs/06-limits.md` L-CC5-1, with its time on every answer.
 //!
 //! # Served from memory, re-walked only when a root's own stat changes
 //!
@@ -81,7 +85,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
-use std::io::{self, Read as _};
+use std::io::{self, BufRead as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
@@ -101,33 +105,6 @@ pub const UNSET_WAIT: &str = "not set: no copy root is named until one is saved 
 
 /// The fixed sentence of every retirement list (D-7047).
 pub const RETIREMENT_SENTENCE: &str = "the operator removes these by hand; the app never does";
-
-/// The most directory entries one root's walk visits before it stops and
-/// the root is refused by name (D-7043). A resource bound, not a data
-/// threshold: about 24 times the largest copy root measured on 13 Oct
-/// (82,073 files), and one walk of it is one `lstat` per entry.
-pub const MAX_WALK_ENTRIES: u64 = 2_000_000;
-
-/// The deepest directory one root's walk descends to, counted from the root
-/// as 0 (D-7043).
-pub const MAX_DEPTH: usize = 64;
-
-/// The most rows of one list an answer carries (hazards, faults, receipts,
-/// second names elsewhere): the first by path, with the whole count beside
-/// them, so a list is never cut silently (D-7043).
-pub const MAX_LISTED: usize = 64;
-
-/// The most receipts one root has read; the rest are counted, not read
-/// (D-7045).
-pub const MAX_RECEIPTS_READ: usize = 64;
-
-/// The largest receipt read whole; a larger one is named `too_big` and is
-/// no proof (D-7045). About 16 times a `VERIFIED.tsv` of every options day
-/// zip of a year at a few hundred bytes a row.
-pub const MAX_RECEIPT_BYTES: u64 = 16 * 1_024 * 1_024;
-
-/// The longest statement kept from a receipt's first line, in characters.
-pub const MAX_STATEMENT_CHARS: usize = 200;
 
 /// The tops of the tick store its readers open: `gdfl_tickstore`'s
 /// `DayTable::walk(&self.root, "cm", ..)` and `gdfl_nfo`'s
@@ -200,15 +177,15 @@ impl Meta {
     }
 }
 
-/// What one bounded read of a regular file answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Bytes {
-    /// The whole file.
-    Whole(Vec<u8>),
-    /// The file is longer than the bound and was not read.
-    TooBig(u64),
-    /// It could not be read: not a regular file, gone, or the host refused.
-    Refused(String),
+/// How a file read line by line ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    /// It holds no byte.
+    Empty,
+    /// Its last byte is a line break.
+    LineBreak,
+    /// Its last byte is not a line break: a write cut short.
+    Torn,
 }
 
 /// Every way the register touches the disk, and nothing that writes: a
@@ -222,15 +199,21 @@ pub trait Fs: Sync {
     /// The host's refusal.
     fn lstat(&self, path: &Path) -> io::Result<Meta>;
 
-    /// Calls `each` with every name in `dir` until it answers `false`.
+    /// Calls `each` with every name in `dir`.
     ///
     /// # Errors
     ///
     /// The host's refusal to list `dir`, or to read one of its entries.
-    fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString) -> bool) -> io::Result<()>;
+    fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString)) -> io::Result<()>;
 
-    /// The bytes of the regular file `path`, at most `max` of them.
-    fn read(&self, path: &Path, max: u64) -> Bytes;
+    /// Calls `each` with every line of the regular file `path`, its line
+    /// break removed, one line held at a time; only a regular file is read,
+    /// never through a link and never waiting on a pipe.
+    ///
+    /// # Errors
+    ///
+    /// Why the file could not be opened or read.
+    fn lines(&self, path: &Path, each: &mut dyn FnMut(&[u8])) -> Result<Ending, String>;
 }
 
 /// The host's filesystem, read only.
@@ -263,30 +246,33 @@ impl Fs for Host {
         })
     }
 
-    fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString) -> bool) -> io::Result<()> {
+    fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString)) -> io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
-            if !each(entry?.file_name()) {
-                break;
-            }
+            each(entry?.file_name());
         }
         Ok(())
     }
 
-    fn read(&self, path: &Path, max: u64) -> Bytes {
-        let (file, len) = match store::safe_open::open_read_len(path) {
-            Ok(opened) => opened,
-            Err(refusal) => return Bytes::Refused(refusal.to_string()),
-        };
-        if len > max {
-            return Bytes::TooBig(len);
-        }
-        let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-        match file.take(max.saturating_add(1)).read_to_end(&mut bytes) {
-            Ok(_) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max => {
-                Bytes::TooBig(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+    fn lines(&self, path: &Path, each: &mut dyn FnMut(&[u8])) -> Result<Ending, String> {
+        let file = store::safe_open::open_read(path).map_err(|refusal| refusal.to_string())?;
+        let mut reader = io::BufReader::new(file);
+        let mut line = Vec::new();
+        let mut ending = Ending::Empty;
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => return Ok(ending),
+                Ok(_) => {
+                    ending = if line.last() == Some(&b'\n') {
+                        line.pop();
+                        Ending::LineBreak
+                    } else {
+                        Ending::Torn
+                    };
+                    each(&line);
+                }
+                Err(why) => return Err(why.to_string()),
             }
-            Ok(_) => Bytes::Whole(bytes),
-            Err(why) => Bytes::Refused(why.to_string()),
         }
     }
 }
@@ -372,7 +358,9 @@ impl LiveKind {
                 let year = parts.next().is_some_and(|year| {
                     year.len() == 4 && year.as_encoded_bytes().iter().all(u8::is_ascii_digit)
                 });
-                year && parts.next().is_none_or(|folder| folder == OsStr::new(V3_FOLDER))
+                year && parts
+                    .next()
+                    .is_none_or(|folder| folder == OsStr::new(V3_FOLDER))
             }
             Self::CmArchive
             | Self::NfoArchives
@@ -631,35 +619,6 @@ pub fn stamps(fs: &dyn Fs, config: &Config) -> Vec<RootStat> {
         .collect()
 }
 
-/// The first [`MAX_LISTED`] items by order, and the whole count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listed<T: Ord> {
-    /// The first items.
-    pub first: BTreeSet<T>,
-    /// How many were offered.
-    pub count: u64,
-}
-
-impl<T: Ord> Default for Listed<T> {
-    fn default() -> Self {
-        Self {
-            first: BTreeSet::new(),
-            count: 0,
-        }
-    }
-}
-
-impl<T: Ord> Listed<T> {
-    /// Offer one: O(log [`MAX_LISTED`]).
-    pub fn offer(&mut self, item: T) {
-        self.count = self.count.saturating_add(1);
-        self.first.insert(item);
-        if self.first.len() > MAX_LISTED {
-            self.first.pop_last();
-        }
-    }
-}
-
 /// One regular file the walk met, as the merge needs it.
 #[derive(Debug, Clone)]
 struct Named {
@@ -670,29 +629,30 @@ struct Named {
 /// One root's walk, before the roots are compared.
 #[derive(Debug, Default)]
 struct Walked {
-    entries: u64,
     files: u64,
     dirs: u64,
     links: u64,
     others: u64,
-    vanished: u64,
     newest_mtime_s: Option<i64>,
     /// Bytes of the files with one name.
     single_bytes: u64,
     /// Every file with more than one name: its names in this root.
     shared: HashMap<(u64, u64), Vec<Named>>,
-    /// Receipt names, the first by path.
-    receipts: Listed<PathBuf>,
-    /// Faults, the first by path: `(path, why)`.
-    faults: Listed<(PathBuf, String)>,
-    /// Other roots met inside this one and not walked here, in order.
+    /// Receipt names, in path order.
+    receipts: BTreeSet<PathBuf>,
+    /// Faults, in path order: `(path, why)`.
+    faults: BTreeSet<(PathBuf, String)>,
+    /// Other roots met inside this one and not walked here, in path order.
     skipped: BTreeSet<PathBuf>,
-    /// For a live archive: every file, by `(ino, size)`, for receipts.
+    /// Folders met a second time (a second mount, a loop) and not walked
+    /// again, in path order.
+    revisited: BTreeSet<PathBuf>,
+    /// For a live archive: every file, for receipts.
     identities: Vec<(PathBuf, Meta)>,
 }
 
-/// Walks `root` (D-7043): `Err` names why the root is refused, never a
-/// partial count.
+/// Walks `root` (D-7043): every directory once by its `(st_dev, st_ino)`,
+/// links never followed. `Err` names why the root is not walked at all.
 fn walk_root(
     fs: &dyn Fs,
     root: &Path,
@@ -704,77 +664,62 @@ fn walk_root(
         .map_err(|why| format!("cannot be read: {why}"))?;
     if top.kind != Kind::Dir {
         return Err(match top.kind {
-            Kind::Link => "a symbolic link: never followed; name the folder it points to".to_owned(),
+            Kind::Link => {
+                "a symbolic link: never followed; name the folder it points to".to_owned()
+            }
             _ => "not a directory".to_owned(),
         });
     }
     let mut walked = Walked::default();
-    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        walked.dirs = walked.dirs.saturating_add(1);
-        let mut names: Vec<OsString> = Vec::new();
-        let mut over = false;
-        let listed = fs.list(&dir, &mut |name| {
-            walked.entries = walked.entries.saturating_add(1);
-            if walked.entries > MAX_WALK_ENTRIES {
-                over = true;
-                return false;
-            }
-            names.push(name);
-            true
-        });
-        if over {
-            return Err(format!(
-                "refused: more than {MAX_WALK_ENTRIES} entries (the walk's bound, D-7043); \
-                 nothing of this root is counted. Name a smaller folder"
-            ));
-        }
-        if let Err(why) = listed {
+    let mut entered: HashSet<(u64, u64)> = HashSet::with_capacity(1);
+    entered.insert(top.id());
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut names: Vec<OsString> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        names.clear();
+        if let Err(why) = fs.list(&dir, &mut |name| names.push(name)) {
             if dir.as_path() == root {
                 return Err(format!("cannot be listed: {why}"));
             }
             walked
                 .faults
-                .offer((dir.clone(), format!("a folder that cannot be listed: {why}")));
+                .insert((dir, format!("a folder that cannot be listed: {why}")));
             continue;
         }
-        for name in names {
+        for name in names.drain(..) {
             let path = dir.join(&name);
             let meta = match fs.lstat(&path) {
                 Ok(meta) => meta,
                 Err(why) if why.kind() == io::ErrorKind::NotFound => {
-                    walked.vanished = walked.vanished.saturating_add(1);
                     walked
                         .faults
-                        .offer((path, "vanished while the walk ran".to_owned()));
+                        .insert((path, "vanished while the walk ran".to_owned()));
                     continue;
                 }
                 Err(why) => {
                     walked
                         .faults
-                        .offer((path, format!("cannot be read: {why}")));
+                        .insert((path, format!("cannot be read: {why}")));
                     continue;
                 }
             };
             match meta.kind {
-                Kind::Dir if skip.get(&meta.id()).is_some() => {
+                Kind::Dir if HashSet::contains(skip, &meta.id()) => {
                     walked.skipped.insert(path);
                 }
-                Kind::Dir if depth + 1 > MAX_DEPTH => {
-                    return Err(format!(
-                        "refused: a folder deeper than {MAX_DEPTH} levels ({}) (the walk's \
-                         bound, D-7043); nothing of this root is counted",
-                        quoted(&path)
-                    ));
+                Kind::Dir if !entered.insert(meta.id()) => {
+                    walked.revisited.insert(path);
                 }
-                Kind::Dir => stack.push((path, depth + 1)),
+                Kind::Dir => {
+                    walked.dirs = walked.dirs.saturating_add(1);
+                    stack.push(path);
+                }
                 Kind::File => file_met(&mut walked, path, meta, &name, keep_identities),
                 Kind::Link => walked.links = walked.links.saturating_add(1),
                 Kind::Other => walked.others = walked.others.saturating_add(1),
             }
         }
     }
-    walked.dirs = walked.dirs.saturating_sub(1);
     Ok(walked)
 }
 
@@ -787,7 +732,7 @@ fn file_met(walked: &mut Walked, path: PathBuf, meta: Meta, name: &OsStr, keep: 
             .map_or(meta.mtime_s, |newest| newest.max(meta.mtime_s)),
     );
     if receipt_kind(name).is_some() {
-        walked.receipts.offer(path.clone());
+        walked.receipts.insert(path.clone());
     }
     if keep {
         walked.identities.push((path.clone(), meta));
@@ -796,7 +741,7 @@ fn file_met(walked: &mut Walked, path: PathBuf, meta: Meta, name: &OsStr, keep: 
         walked
             .shared
             .entry(meta.id())
-            .or_default()
+            .or_insert_with(|| Vec::with_capacity(2))
             .push(Named { path, meta });
     } else {
         walked.single_bytes = walked.single_bytes.saturating_add(meta.size);
@@ -856,9 +801,7 @@ pub enum Verdict {
     Torn,
     /// It is whole and says no proof (`.prove.out` without `ALL-PROVED`).
     NoClaim,
-    /// Longer than [`MAX_RECEIPT_BYTES`]: not read.
-    TooBig(u64),
-    /// It could not be read, or is not UTF-8 text.
+    /// It could not be read, or a line is not UTF-8 text.
     Unreadable(String),
 }
 
@@ -871,7 +814,6 @@ impl Verdict {
             Self::Empty => "empty",
             Self::Torn => "torn",
             Self::NoClaim => "no_claim",
-            Self::TooBig(_) => "too_big",
             Self::Unreadable(_) => "unreadable",
         }
     }
@@ -940,7 +882,7 @@ pub struct Receipt {
     pub verdict: &'static str,
     /// Why, for a verdict that is not `states`.
     pub why: Option<String>,
-    /// Its statement: the first line, at most [`MAX_STATEMENT_CHARS`].
+    /// Its statement: its first non-empty line, whole.
     pub statement: String,
     /// For `VERIFIED.tsv`: rows naming a source.
     pub sources: u64,
@@ -950,124 +892,128 @@ pub struct Receipt {
     pub first_unmatched: Option<String>,
 }
 
-/// Reads one receipt (D-7045). A receipt states what it proves when it is
-/// UTF-8 text ending in a line break whose first non-empty line is its
-/// statement; a `.prove.out` must also hold the line `ALL-PROVED`. Each
-/// `VERIFIED.tsv` row's `source_identity` is matched against `archives`, the
-/// walked live archive files, by [`SourceIdentity::matches`].
-#[must_use]
-pub fn read_receipt(
-    fs: &dyn Fs,
-    path: &Path,
+/// What a receipt's lines have said so far.
+struct Reading<'a> {
     kind: ReceiptKind,
-    archives: &Archives,
-) -> Receipt {
-    let mut receipt = Receipt {
-        path: path.to_path_buf(),
+    archives: &'a Archives,
+    receipt: Receipt,
+    /// Lines read.
+    rows: u64,
+    /// A line that held more than white space.
+    said: bool,
+    /// `.prove.out`: a line `ALL-PROVED`.
+    proved: bool,
+    /// `VERIFIED.tsv`: the `source_identity` column.
+    column: Option<usize>,
+    /// The first line that is not UTF-8.
+    not_text: Option<u64>,
+}
+
+impl Reading<'_> {
+    /// One line of the receipt, its line break removed.
+    fn line(&mut self, bytes: &[u8]) {
+        self.rows = self.rows.saturating_add(1);
+        let Ok(line) = std::str::from_utf8(bytes) else {
+            self.not_text.get_or_insert(self.rows);
+            return;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if !self.said {
+            self.said = true;
+            trimmed.clone_into(&mut self.receipt.statement);
+        }
+        match self.kind {
+            ReceiptKind::ProveOut => self.proved |= trimmed == "ALL-PROVED",
+            ReceiptKind::VerifiedTsv if self.rows == 1 => {
+                self.column = line
+                    .split('\t')
+                    .position(|name| name.trim() == "source_identity");
+            }
+            ReceiptKind::VerifiedTsv => {
+                if let Some(column) = self.column {
+                    self.source(line, column);
+                }
+            }
+            ReceiptKind::AllVerified => {}
+        }
+    }
+
+    /// One `VERIFIED.tsv` row's source, matched against the live archives.
+    fn source(&mut self, line: &str, column: usize) {
+        let receipt = &mut self.receipt;
+        receipt.sources = receipt.sources.saturating_add(1);
+        let field = line.split('\t').nth(column).unwrap_or("");
+        match SourceIdentity::parse(field).map(|identity| self.archives.find(&identity)) {
+            Some(Some(_)) => receipt.matched = receipt.matched.saturating_add(1),
+            found => {
+                let row = self.rows;
+                receipt.first_unmatched.get_or_insert_with(|| {
+                    if found.is_none() {
+                        format!(
+                            "row {row}: {field:?} is not dev:inode:size:mtime_s:mtime_ns:ctime_s:\
+                             ctime_ns"
+                        )
+                    } else {
+                        format!(
+                            "row {row}: {field:?} matches no walked live archive file by inode, \
+                             size and times (dev not compared)"
+                        )
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Reads one receipt, line by line (D-7045). A receipt states what it proves
+/// when it is UTF-8 text ending in a line break whose first non-empty line is
+/// its statement; a `.prove.out` must also hold the line `ALL-PROVED`. Each
+/// `VERIFIED.tsv` row's `source_identity` is matched against `archives`, the
+/// walked live archive files, by [`SourceIdentity::matches`]. O(the
+/// receipt's bytes), one line held at a time.
+#[must_use]
+pub fn read_receipt(fs: &dyn Fs, path: &Path, kind: ReceiptKind, archives: &Archives) -> Receipt {
+    let mut reading = Reading {
         kind,
-        verdict: "states",
-        why: None,
-        statement: String::new(),
-        sources: 0,
-        matched: 0,
-        first_unmatched: None,
-    };
-    let verdict = match fs.read(path, MAX_RECEIPT_BYTES) {
-        Bytes::TooBig(len) => Verdict::TooBig(len),
-        Bytes::Refused(why) => Verdict::Unreadable(why),
-        Bytes::Whole(bytes) => match String::from_utf8(bytes) {
-            Err(_) => Verdict::Unreadable("not UTF-8 text".to_owned()),
-            Ok(text) => judge(&text, kind, archives, &mut receipt),
+        archives,
+        receipt: Receipt {
+            path: path.to_path_buf(),
+            kind,
+            verdict: "states",
+            why: None,
+            statement: String::new(),
+            sources: 0,
+            matched: 0,
+            first_unmatched: None,
         },
+        rows: 0,
+        said: false,
+        proved: false,
+        column: None,
+        not_text: None,
     };
+    let ending = fs.lines(path, &mut |line| reading.line(line));
+    let verdict = match (ending, reading.not_text) {
+        (Err(why), _) => Verdict::Unreadable(why),
+        (Ok(_), Some(row)) => Verdict::Unreadable(format!("line {row} is not UTF-8 text")),
+        (Ok(_), None) if !reading.said => Verdict::Empty,
+        (Ok(Ending::Torn), None) => Verdict::Torn,
+        (Ok(_), None) if kind == ReceiptKind::ProveOut && !reading.proved => Verdict::NoClaim,
+        (Ok(_), None) => Verdict::States,
+    };
+    let mut receipt = reading.receipt;
     receipt.verdict = verdict.word();
     receipt.why = match verdict {
         Verdict::States => None,
         Verdict::Empty => Some("it states nothing".to_owned()),
         Verdict::Torn => Some("it does not end in a line break: a write cut short".to_owned()),
-        Verdict::NoClaim => Some(match kind {
-            ReceiptKind::ProveOut => "no line ALL-PROVED".to_owned(),
-            _ => "no proof stated".to_owned(),
-        }),
-        Verdict::TooBig(len) => Some(format!(
-            "{len} bytes, past the {MAX_RECEIPT_BYTES} a receipt is read to"
-        )),
+        Verdict::NoClaim => Some("no line ALL-PROVED".to_owned()),
         Verdict::Unreadable(why) => Some(why),
     };
     receipt
-}
-
-/// The verdict on a receipt's whole text.
-fn judge(
-    text: &str,
-    kind: ReceiptKind,
-    archives: &Archives,
-    receipt: &mut Receipt,
-) -> Verdict {
-    if text.trim().is_empty() {
-        return Verdict::Empty;
-    }
-    if !text.ends_with('\n') {
-        return Verdict::Torn;
-    }
-    receipt.statement = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(MAX_STATEMENT_CHARS)
-        .collect();
-    match kind {
-        ReceiptKind::ProveOut if !text.lines().any(|line| line.trim() == "ALL-PROVED") => {
-            Verdict::NoClaim
-        }
-        ReceiptKind::VerifiedTsv => {
-            sources_of(text, archives, receipt);
-            Verdict::States
-        }
-        _ => Verdict::States,
-    }
-}
-
-/// Counts a `VERIFIED.tsv`'s rows that name a source and the ones that match
-/// a walked live archive file today.
-fn sources_of(
-    text: &str,
-    archives: &Archives,
-    receipt: &mut Receipt,
-) {
-    let mut lines = text.lines();
-    let Some(column) = lines
-        .next()
-        .and_then(|header| header.split('\t').position(|name| name.trim() == "source_identity"))
-    else {
-        return;
-    };
-    for (row, line) in lines.enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        receipt.sources = receipt.sources.saturating_add(1);
-        let field = line.split('\t').nth(column).unwrap_or("");
-        let found = SourceIdentity::parse(field).map(|identity| archives.find(&identity));
-        match found {
-            Some(Some(_)) => receipt.matched = receipt.matched.saturating_add(1),
-            other => {
-                receipt.first_unmatched.get_or_insert_with(|| {
-                    let why = if other.is_none() {
-                        format!("{field:?} is not dev:inode:size:mtime_s:mtime_ns:ctime_s:ctime_ns")
-                    } else {
-                        format!(
-                            "{field:?} matches no walked live archive file by inode, size and \
-                             times (dev not compared)"
-                        )
-                    };
-                    format!("row {}: {why}", row + 2)
-                });
-            }
-        }
-    }
 }
 
 /// Whether a copy root's bytes have a proven twin (D-7045).
@@ -1111,11 +1057,7 @@ fn twin_of(receipts: &[Receipt]) -> Twin {
     let mut sources = 0_u64;
     for receipt in &tsv {
         if receipt.verdict != "states" {
-            return Twin::NotProven(format!(
-                "{} is {}",
-                quoted(&receipt.path),
-                receipt.verdict
-            ));
+            return Twin::NotProven(format!("{} is {}", quoted(&receipt.path), receipt.verdict));
         }
         if receipt.sources == 0 {
             return Twin::NotProven(format!(
@@ -1211,12 +1153,15 @@ pub struct CopyRoot {
     pub twin: Twin,
     /// Names here that are second names of walked live files (each a hazard).
     pub linked_live: u64,
-    /// Files with more names than the walk found: the first by path.
-    pub linked_elsewhere: Listed<PathBuf>,
-    /// Faults: the first by path, `(path, why)`.
-    pub faults: Listed<(PathBuf, String)>,
+    /// Files with more names than the walk found, in path order.
+    pub linked_elsewhere: BTreeSet<PathBuf>,
+    /// Faults, in path order: `(path, why)`.
+    pub faults: BTreeSet<(PathBuf, String)>,
     /// Other roots met inside it and not walked as part of it, in order.
     pub skipped: BTreeSet<PathBuf>,
+    /// Folders met a second time (a second mount, a loop) and not walked
+    /// again, in path order.
+    pub revisited: BTreeSet<PathBuf>,
 }
 
 impl CopyRoot {
@@ -1254,8 +1199,8 @@ pub struct Register {
     pub live: Vec<LiveReport>,
     /// The live roots that are not configured, named.
     pub unset_live: Vec<String>,
-    /// Second names of live files under the copy roots: the first by path.
-    pub hazards: Listed<Hazard>,
+    /// Second names of live files under the copy roots, in path order.
+    pub hazards: BTreeSet<Hazard>,
     /// The copy roots' own bytes, every root walked whole or not (a lower
     /// bound when one was not).
     pub extra_bytes: u64,
@@ -1269,7 +1214,10 @@ impl Register {
         self.roots
             .iter()
             .all(|root| matches!(root.state, State::Walked { whole: true }))
-            && self.live.iter().all(|live| !live.walked || live.why.is_none())
+            && self
+                .live
+                .iter()
+                .all(|live| !live.walked || live.why.is_none())
     }
 }
 
@@ -1278,8 +1226,9 @@ impl Register {
 pub fn now_micros() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_micros()).unwrap_or(i64::MAX),
-        Err(before) => i64::try_from(before.duration().as_micros())
-            .map_or(i64::MIN, i64::saturating_neg),
+        Err(before) => {
+            i64::try_from(before.duration().as_micros()).map_or(i64::MIN, i64::saturating_neg)
+        }
     }
 }
 
@@ -1355,45 +1304,71 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
         skip
     };
     let copies = config.copy_roots.len();
-    let joined = |handle: std::thread::ScopedJoinHandle<'_, Result<Walked, String>>| {
-        handle
-            .join()
-            .unwrap_or_else(|_| Err("the walk's thread panicked".to_owned()))
-    };
-    let (copy_walks, live_walks): (Vec<Result<Walked, String>>, Vec<Option<LiveWalk>>) =
-        std::thread::scope(|scope| {
-            let copy_handles: Vec<_> = config
-                .copy_roots
-                .iter()
-                .enumerate()
-                .map(|(at, path)| {
-                    let skip = skip_for(at);
-                    scope.spawn(move || walk_root(fs, path, &skip, false))
-                })
-                .collect();
-            let live_handles: Vec<_> = config
+    // ONE JOB PER WALKED ROOT, on as many threads as the host has cores
+    // (`available_parallelism`), never one thread per root: the roots are
+    // as many as the setting's bytes allow. Each job's answer lands in its
+    // own slot, so the merge below reads them in the setting's order.
+    let jobs: Vec<(usize, &Path, bool)> = config
+        .copy_roots
+        .iter()
+        .enumerate()
+        .map(|(at, path)| (at, path.as_path(), false))
+        .chain(
+            config
                 .live
                 .iter()
                 .enumerate()
+                .filter(|(_, root)| root.kind.walked())
                 .map(|(at, root)| {
-                    let skip = skip_for(copies + at);
-                    let keep = root.kind != LiveKind::TickStore;
-                    root.kind
-                        .walked()
-                        .then(|| scope.spawn(move || walk_root(fs, &root.path, &skip, keep)))
-                })
-                .collect();
-            (
-                copy_handles.into_iter().map(joined).collect(),
-                live_handles
-                    .into_iter()
-                    .map(|handle| handle.map(joined))
-                    .collect(),
-            )
-        });
+                    (
+                        copies + at,
+                        root.path.as_path(),
+                        root.kind != LiveKind::TickStore,
+                    )
+                }),
+        )
+        .collect();
+    let slots: Vec<Mutex<Option<Result<Walked, String>>>> =
+        (0..ids.len()).map(|_| Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(jobs.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some(&(at, path, keep)) =
+                    jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                {
+                    let walked = walk_root(fs, path, &skip_for(at), keep);
+                    if let Some(slot) = slots.get(at) {
+                        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(walked);
+                    }
+                }
+            });
+        }
+    });
+    let mut slots = slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner));
+    let copy_walks: Vec<Result<Walked, String>> = slots
+        .by_ref()
+        .take(copies)
+        .map(|walked| walked.unwrap_or_else(|| Err("the walk's thread ended early".to_owned())))
+        .collect();
+    let live_walks: Vec<Option<LiveWalk>> = config
+        .live
+        .iter()
+        .zip(slots)
+        .map(|(root, walked)| {
+            root.kind
+                .walked()
+                .then(|| walked.unwrap_or_else(|| Err("the walk's thread ended early".to_owned())))
+        })
+        .collect();
     let (live, mut links) = live_side(config, live_walks);
     links.index_copies(&copy_walks);
-    let mut hazards: Listed<Hazard> = Listed::default();
+    let mut hazards: BTreeSet<Hazard> = BTreeSet::new();
     let mut roots = Vec::with_capacity(copies);
     let mut extra_bytes = 0_u64;
     for (at, (path, walk)) in config.copy_roots.iter().zip(copy_walks).enumerate() {
@@ -1493,10 +1468,10 @@ fn live_side(config: &Config, live_walks: Vec<Option<LiveWalk>>) -> (Vec<LiveRep
                         links.archives.add(path, meta);
                     }
                 }
-                let why = walked.faults.first.first().map(|(path, why)| {
+                let why = walked.faults.first().map(|(path, why)| {
                     format!(
-                        "{} fault(s) while walked, the first: {}: {why}",
-                        walked.faults.count,
+                        "{} fault(s) while walked, the first by path: {}: {why}",
+                        walked.faults.len(),
                         quoted(path)
                     )
                 });
@@ -1521,7 +1496,7 @@ fn copy_root_of(
     at: usize,
     path: &Path,
     walk: Result<Walked, String>,
-    hazards: &mut Listed<Hazard>,
+    hazards: &mut BTreeSet<Hazard>,
 ) -> CopyRoot {
     let (reader, inside) = reader_of(path, &config.live);
     let walked = match walk {
@@ -1531,7 +1506,7 @@ fn copy_root_of(
     let mut bytes = walked.single_bytes;
     let mut extra = walked.single_bytes;
     let mut linked_live = 0_u64;
-    let mut linked_elsewhere: Listed<PathBuf> = Listed::default();
+    let mut linked_elsewhere: BTreeSet<PathBuf> = BTreeSet::new();
     for (id, names) in &walked.shared {
         let Some(first) = names.first() else {
             continue;
@@ -1540,7 +1515,7 @@ fn copy_root_of(
         let seen = links.all_names.get(id).map_or(0, HashSet::len);
         if u64::try_from(seen).unwrap_or(u64::MAX) < first.meta.nlink {
             let smallest = names.iter().map(|n| &n.path).min().unwrap_or(&first.path);
-            linked_elsewhere.offer(smallest.clone());
+            linked_elsewhere.insert(smallest.clone());
         }
         let Some(lives) = links.live_names.get(id) else {
             if links.counted_in.get(id) == Some(&at) {
@@ -1558,7 +1533,7 @@ fn copy_root_of(
                 continue;
             }
             linked_live = linked_live.saturating_add(1);
-            hazards.offer(Hazard {
+            hazards.insert(Hazard {
                 path: named.path.clone(),
                 live: live_path.clone(),
                 kind: *kind,
@@ -1572,9 +1547,7 @@ fn copy_root_of(
     }
     let receipts: Vec<Receipt> = walked
         .receipts
-        .first
         .iter()
-        .take(MAX_RECEIPTS_READ)
         .filter_map(|receipt| {
             let kind = receipt_kind(receipt.file_name()?)?;
             Some(read_receipt(fs, receipt, kind, &links.archives))
@@ -1589,7 +1562,7 @@ fn copy_root_of(
     CopyRoot {
         path: path.to_path_buf(),
         state: State::Walked {
-            whole: walked.faults.count == 0,
+            whole: walked.faults.is_empty(),
         },
         files: walked.files,
         dirs: walked.dirs,
@@ -1601,13 +1574,14 @@ fn copy_root_of(
         reader,
         inside,
         receipts,
-        receipt_count: walked.receipts.count,
+        receipt_count: u64::try_from(walked.receipts.len()).unwrap_or(u64::MAX),
         proof,
         twin,
         linked_live,
         linked_elsewhere,
         faults: walked.faults,
         skipped: walked.skipped,
+        revisited: walked.revisited,
     }
 }
 
@@ -1635,9 +1609,10 @@ fn refused_root(
         proof: None,
         twin: Twin::NotProven("the root was not walked".to_owned()),
         linked_live: 0,
-        linked_elsewhere: Listed::default(),
-        faults: Listed::default(),
+        linked_elsewhere: BTreeSet::new(),
+        faults: BTreeSet::new(),
         skipped: BTreeSet::new(),
+        revisited: BTreeSet::new(),
     }
 }
 
@@ -1702,25 +1677,27 @@ pub fn retirement(register: &Register) -> Vec<Retire> {
             hazard: false,
         })
         .collect();
-    list.extend(register.hazards.first.iter().map(|hazard| Retire {
-        path: hazard.path.clone(),
-        bytes: 0,
-        files: 1,
-        why: format!(
-            "a second name of the live {} file {} (st_dev {}, st_ino {}, nlink {})",
-            hazard.kind.word(),
-            quoted(&hazard.live),
-            hazard.dev,
-            hazard.ino,
-            hazard.nlink
-        ),
-        twin: "frees no byte: the data stays at the live name".to_owned(),
-        caution: Some(
-            "removing this NAME removes the in-place-change hazard and leaves the live file's \
+    list.extend(register.hazards.iter().map(|hazard| {
+        Retire {
+            path: hazard.path.clone(),
+            bytes: 0,
+            files: 1,
+            why: format!(
+                "a second name of the live {} file {} (st_dev {}, st_ino {}, nlink {})",
+                hazard.kind.word(),
+                quoted(&hazard.live),
+                hazard.dev,
+                hazard.ino,
+                hazard.nlink
+            ),
+            twin: "frees no byte: the data stays at the live name".to_owned(),
+            caution: Some(
+                "removing this NAME removes the in-place-change hazard and leaves the live file's \
              data intact"
-                .to_owned(),
-        ),
-        hazard: true,
+                    .to_owned(),
+            ),
+            hazard: true,
+        }
     }));
     list
 }
@@ -1742,10 +1719,10 @@ fn retire_caution(root: &CopyRoot) -> Option<String> {
             root.linked_live
         ));
     }
-    if root.linked_elsewhere.count > 0 {
+    if !root.linked_elsewhere.is_empty() {
         words.push(format!(
             "{} file(s) in it have another name outside every walked root",
-            root.linked_elsewhere.count
+            root.linked_elsewhere.len()
         ));
     }
     (!words.is_empty()).then(|| words.join("; "))
@@ -1762,7 +1739,9 @@ pub fn retirement_text(register: &Register) -> String {
         ist_text(register.walked_at_micros)
     );
     if list.is_empty() {
-        text.push_str("Nothing to retire: every copy root walked has a reader or was not walked whole.\n");
+        text.push_str(
+            "Nothing to retire: every copy root walked has a reader or was not walked whole.\n",
+        );
     }
     for (n, retire) in list.iter().enumerate() {
         let _ = writeln!(
@@ -1779,14 +1758,6 @@ pub fn retirement_text(register: &Register) -> String {
         if let Some(caution) = &retire.caution {
             let _ = writeln!(text, "   take care: {caution}");
         }
-    }
-    if register.hazards.count > u64::try_from(register.hazards.first.len()).unwrap_or(0) {
-        let _ = writeln!(
-            text,
-            "... and {} more hazard name(s); the register lists the first {MAX_LISTED} by path.",
-            register.hazards.count
-                - u64::try_from(register.hazards.first.len()).unwrap_or(0)
-        );
     }
     text
 }
@@ -1822,8 +1793,9 @@ pub struct Note {
 /// one `info` summary.
 #[must_use]
 pub fn notes(register: &Register) -> Vec<Note> {
-    let mut notes = Vec::with_capacity(register.hazards.first.len() + register.roots.len() + 1);
-    for hazard in &register.hazards.first {
+    let mut notes =
+        Vec::with_capacity(register.hazards.len() + register.roots.len() + register.live.len() + 1);
+    for hazard in &register.hazards {
         notes.push(Note {
             level: telemetry::Level::Error,
             message: "live archive file hard-linked under another name",
@@ -1840,7 +1812,9 @@ pub fn notes(register: &Register) -> Vec<Note> {
     for root in &register.roots {
         let why = match &root.state {
             State::Refused(why) => why.clone(),
-            State::Walked { whole: false } => format!("{} fault(s) while walked", root.faults.count),
+            State::Walked { whole: false } => {
+                format!("{} fault(s) while walked", root.faults.len())
+            }
             State::Walked { whole: true } => continue,
         };
         notes.push(Note {
@@ -1868,7 +1842,7 @@ pub fn notes(register: &Register) -> Vec<Note> {
         fields: vec![
             ("roots", register.roots.len().to_string()),
             ("extra_bytes", register.extra_bytes.to_string()),
-            ("hazards", register.hazards.count.to_string()),
+            ("hazards", register.hazards.len().to_string()),
             ("walk_us", register.walk_micros.to_string()),
             ("whole", register.whole().to_string()),
         ],
@@ -1991,13 +1965,15 @@ pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64
     };
     let Ok(_walking) = cache.walking.try_lock() else {
         let held = cache.held.lock().unwrap_or_else(PoisonError::into_inner);
-        return held.as_ref().map_or(Served::Walking, |held| Served::Register {
-            register: Arc::clone(&held.register),
-            age_ms: u64::try_from(held.at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            fresh: false,
-            why: format!("being re-walked by another request ({why}); this is the last walk"),
-            rewalking: true,
-        });
+        return held
+            .as_ref()
+            .map_or(Served::Walking, |held| Served::Register {
+                register: Arc::clone(&held.register),
+                age_ms: u64::try_from(held.at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                fresh: false,
+                why: format!("being re-walked by another request ({why}); this is the last walk"),
+                rewalking: true,
+            });
     };
     // LOOK AGAIN UNDER THE WALK'S LOCK: a request that walked while this one
     // compared may have held exactly this answer already, and a second walk
@@ -2013,8 +1989,7 @@ pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64
             register: Arc::clone(&held.register),
             age_ms: u64::try_from(held.at.elapsed().as_millis()).unwrap_or(u64::MAX),
             fresh: false,
-            why: "served from memory: another request walked these roots a moment ago"
-                .to_owned(),
+            why: "served from memory: another request walked these roots a moment ago".to_owned(),
             rewalking: false,
         };
     }

@@ -1242,7 +1242,7 @@ fn the_disk_floor_is_checked_and_stored_canonically() {
 /// report, not a damaged generation.
 #[test]
 fn the_extra_copy_roots_key_is_checked_and_stored_canonically() {
-    use super::{COPY_ROOT_SEPARATOR, MAX_COPY_ROOTS, check_stored, copy_roots};
+    use super::{COPY_ROOT_SEPARATOR, check_stored, copy_roots};
     assert_eq!(
         Key::of_name("disk.extra_copy_roots"),
         Some(Key::ExtraCopyRoots)
@@ -1255,7 +1255,10 @@ fn the_extra_copy_roots_key_is_checked_and_stored_canonically() {
     std::fs::create_dir_all(&one).unwrap();
     std::fs::create_dir_all(&two).unwrap();
     let value = format!("{}{COPY_ROOT_SEPARATOR}{}", one.display(), two.display());
-    assert_eq!(check(Key::ExtraCopyRoots, &format!(" {value} ")).unwrap(), value);
+    assert_eq!(
+        check(Key::ExtraCopyRoots, &format!(" {value} ")).unwrap(),
+        value
+    );
     assert_eq!(copy_roots(&value).unwrap(), vec![one.clone(), two.clone()]);
     assert!(check_stored(Key::ExtraCopyRoots, &value).is_ok());
     let gone = base.join("moved-away");
@@ -1279,15 +1282,41 @@ fn the_extra_copy_roots_key_is_checked_and_stored_canonically() {
     std::fs::create_dir_all(&inner).unwrap();
     assert!(refused(&format!("{}|{}", two.display(), inner.display())).contains("overlap"));
     assert!(refused(&format!("{}|{}", inner.display(), two.display())).contains("overlap"));
-    let many: Vec<String> = (0..=MAX_COPY_ROOTS)
+    // OVERLAP IS FOUND IN EITHER ORDER, past siblings that sort between:
+    // `two/a` and `two/b` lie between `two` and `two/inner` component-wise.
+    for sibling in ["a", "b"] {
+        std::fs::create_dir_all(two.join(sibling)).unwrap();
+    }
+    let between = format!(
+        "{}|{}|{}",
+        two.join("a").display(),
+        two.join("inner").display(),
+        two.display()
+    );
+    assert!(refused(&between).contains("overlap"), "{between}");
+    // A LOOK-ALIKE IS NOT A PARENT: `two b` sorts beside `two` and holds
+    // nothing of it, and `tw` is a prefix of the text, not of the path.
+    for lookalike in ["two b", "tw"] {
+        std::fs::create_dir_all(base.join(lookalike)).unwrap();
+        let pair = format!("{}|{}", two.display(), base.join(lookalike).display());
+        assert!(check(Key::ExtraCopyRoots, &pair).is_ok(), "{pair}");
+    }
+    // NO COUNT OF ITS OWN: as many folders as the value's bytes can hold.
+    let many: Vec<String> = (0..60)
         .map(|n| {
-            let folder = base.join(format!("many-{n}"));
+            let folder = base.join(format!("m{n}"));
             std::fs::create_dir_all(&folder).unwrap();
             folder.display().to_string()
         })
         .collect();
-    assert!(refused(&many.join("|")).contains(&format!("more than {MAX_COPY_ROOTS}")));
-    assert!(check(Key::ExtraCopyRoots, &many[..MAX_COPY_ROOTS].join("|")).is_ok());
+    let joined = many.join("|");
+    assert!(
+        joined.len() <= super::MAX_COPY_ROOTS_BYTES,
+        "{}",
+        joined.len()
+    );
+    assert_eq!(copy_roots(&joined).unwrap().len(), 60);
+    assert!(check(Key::ExtraCopyRoots, &joined).is_ok());
     let long = format!("/{}", "a".repeat(super::MAX_COPY_ROOTS_BYTES));
     assert!(refused(&long).contains("bytes, past the"));
     assert!(check_stored(Key::ExtraCopyRoots, "relative").is_err());

@@ -142,12 +142,11 @@ pub const KEYS: usize = 12;
 /// there, and is refused by name, never split silently (D-7040).
 pub const COPY_ROOT_SEPARATOR: char = '|';
 
-/// The most folders [`Key::ExtraCopyRoots`] may name (D-7040).
-pub const MAX_COPY_ROOTS: usize = 16;
-
 /// The longest [`Key::ExtraCopyRoots`] value, in bytes: the settings route's
 /// own ceiling on a value it will look at (`brutex_core::secret_shape`), so a
-/// value this check passes is never refused there as over that cap (D-7040).
+/// value this check passes is never refused there as over that cap. It is
+/// also the only bound on how many folders the value names: this part types
+/// no count of its own (D-7040).
 pub const MAX_COPY_ROOTS_BYTES: usize = brutex_core::secret_shape::MAX_VALUE_BYTES;
 
 impl Key {
@@ -528,12 +527,18 @@ fn directory(text: &str) -> Result<(), String> {
 
 /// The folders a [`Key::ExtraCopyRoots`] value names, in the order written,
 /// checked for SHAPE only: each absolute, at most [`MAX_PATH_BYTES`], free
-/// of `..` and of [`COPY_ROOT_SEPARATOR`]'s empty pieces; at most
-/// [`MAX_COPY_ROOTS`] of them in at most [`MAX_COPY_ROOTS_BYTES`]; none
-/// named twice and none inside another, so no byte is a file of two roots.
-/// O(roots²) with roots at most [`MAX_COPY_ROOTS`]: bounded, never by the
-/// tree. The one reader of the value: [`check`] adds that each exists, and
-/// `pull::copies_register` reads a stored value through this (D-7040).
+/// of `..` and of [`COPY_ROOT_SEPARATOR`]'s empty pieces, in at most
+/// [`MAX_COPY_ROOTS_BYTES`]; none named twice and none inside another, so no
+/// byte is a file of two roots. The one reader of the value: [`check`] adds
+/// that each exists, and `pull::copies_register` reads a stored value
+/// through this (D-7040).
+///
+/// # Cost
+///
+/// O(r log r) for r folders, r bounded by the value's bytes: a [`Path`]
+/// orders by component, so every folder inside another sorts directly after
+/// it, and the overlap test is the one neighbour on each side of a new
+/// folder in an ordered set, never a pass over the others.
 ///
 /// # Errors
 ///
@@ -545,13 +550,10 @@ pub fn copy_roots(value: &str) -> Result<Vec<PathBuf>, String> {
             value.len()
         ));
     }
-    let mut roots: Vec<PathBuf> = Vec::with_capacity(MAX_COPY_ROOTS);
+    let mut roots: Vec<PathBuf> =
+        Vec::with_capacity(value.matches(COPY_ROOT_SEPARATOR).count() + 1);
+    let mut ordered: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
     for (at, piece) in value.split(COPY_ROOT_SEPARATOR).enumerate() {
-        if roots.len() == MAX_COPY_ROOTS {
-            return Err(format!(
-                "more than {MAX_COPY_ROOTS} folders; name at most {MAX_COPY_ROOTS}"
-            ));
-        }
         if piece.is_empty() {
             return Err(format!(
                 "folder {} is empty: two '{COPY_ROOT_SEPARATOR}' with nothing between, or one \
@@ -561,19 +563,22 @@ pub fn copy_roots(value: &str) -> Result<Vec<PathBuf>, String> {
         }
         path_shape(piece)?;
         let root = PathBuf::from(piece);
-        // AT MOST `MAX_COPY_ROOTS` EARLIER ROOTS, the loop above's bound.
-        for other in &roots {
-            if other.as_path() == root.as_path() {
-                return Err(format!("{piece:?} is named twice"));
-            }
-            if other.starts_with(&root) || root.starts_with(other) {
-                return Err(format!(
-                    "{piece:?} and {:?} overlap, one inside the other; name each folder once, \
-                     and never a folder inside another",
-                    other.display()
-                ));
-            }
+        let before = ordered.range(..root.clone()).next_back();
+        let after = ordered.range(root.clone()..).next();
+        if after == Some(&root) {
+            return Err(format!("{piece:?} is named twice"));
         }
+        let overlap = before
+            .filter(|before| root.starts_with(before))
+            .or_else(|| after.filter(|after| after.starts_with(&root)));
+        if let Some(other) = overlap {
+            return Err(format!(
+                "{piece:?} and {:?} overlap, one inside the other; name each folder once, and \
+                 never a folder inside another",
+                other.display()
+            ));
+        }
+        ordered.insert(root.clone());
         roots.push(root);
     }
     Ok(roots)
