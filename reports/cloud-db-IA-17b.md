@@ -95,7 +95,62 @@ matches); the five `revision_tests` pass. The full pull suite is under Gates.
 
 ## Gates
 
-PENDING
+Run on the branch after merging `d39e789e`. Where a gate is red, the same command was run on a
+worktree of the unmodified base `d39e789e` and the outputs compared with line numbers stripped and
+lines sorted, so a new finding inside a red gate cannot hide.
+
+| Gate | Command | Branch | Base `d39e789e` |
+|---|---|---|---|
+| fmt | `cargo fmt --all --check` | green | — |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | green (exit 0; the one `warning:` line is `cli`'s build-script notice that the git index cannot be proved mid-change, not a lint) | — |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` (49 min) | 10,974 passed, 57 failed, 90 ignored, 1 skipped by name, 1 stopped hung; every failure is this host's (below), none is this part's | each class shown red on the base or independent of the diff (below) |
+| deny | `cargo deny check` with CI's pinned cargo-deny 0.19.0 | green: `advisories ok, bans ok, licenses ok, sources ok` | green, same |
+| deny (newer tool) | the same with cargo-deny 0.20.2 | red: RUSTSEC-2026-0386 (unsound, `tokio` 1.53.1 `AsyncFd::new`) | red, same advisory; `Cargo.lock` is identical on both, left alone (CONTEXT §4.10) |
+| CI shell gates | every `Gate` step of the `language-purity` job, run as written (`ci.yml`, through a script that extracts each step's `run:` body) | 23 green; 9 red | the same 9 red, nothing new in any |
+| gate 6c | `rustfmt --edition 2024 --check` over every tool `gates_jobs tools` lists; `clippy-driver --edition=2024 -D warnings .github/gates_tree.rs`, with and without `--test` | green | — |
+| coverage | `cargo llvm-cov` 0.8.4 | PENDING | — |
+| mutants | `cargo mutants` 26.2.0 `--in-diff` | PENDING | — |
+
+**The workspace test failures, every one, by cause.** This host runs as root (uid 0), has 4 cores,
+and by the end of the session had 5.7 GB free on its one disk against the import's 10 GiB
+`DEFAULT_FREE_FLOOR`. Nothing was deleted to make room (CONTEXT: delete nothing).
+
+| Where | Failed | Cause | Shown how |
+|---|---|---|---|
+| `cli` lib | 25 of 28 (`gdfl_import_command::*` 14, `tick_second_check::*` 11) | the host's free space under the 10 GiB floor: each run is refused `disk_full` ("run ... refused disk_full") | rerun with `TMPDIR` on a 16 GB tmpfs (`/dev/shm`): **25 passed** |
+| `cli` `tests/gdfl_run_logs.rs` | 2 | the same floor | rerun on the tmpfs: 4 of 4 passed |
+| `pull` lib | 3 of 12 | the same floor | rerun on the tmpfs: passed |
+| `pull` lib | 9 of 12 (`alerts` 1, `gdfl_dropbox::repair_r1` 2, `ia16::an_immutable_month_stops_the_run_by_name`, `census_store::link_tests` 2, `zerodha_verify` 2: permissions root ignores; `gdfl_cm::tests::fixtures_are_built_not_pasted`: flags `crates/cli/src/tick_second_check_tests.rs`, not this part's) | root, and one base finding | the same 9 run on the base's own binary (built from `d39e789e`): **0 passed, 9 failed** |
+| `cli` lib | 3 of 28 (`scrub_blocks` 1, `watchdog_command` 2) | each test makes a file or directory unwritable with `set_permissions` (0o444, 0o200, 0o555); root writes anyway | still red on the tmpfs; the tests' own code; `crates/cli` is not touched by this part |
+| `store` lib 3, `telemetry` lib 4 | 7 | permissions root ignores (`settings::tests`, `sink::tests`) | neither crate is touched and neither depends on `pull`: their code is the base's byte for byte |
+| `api` lib | 8 | 4 cores (`slots_under` clamps a cap of 8 to 4: "at most 4"); root (a 000 journal read anyway: "interrupted", not "not_known"; "this host reads a 000 directory (root?)"); 5 `head_deadline_body_tests` slow-reader timings | the same 8 on the base's own `api` binary: **0 passed, 8 failed**, with the same messages |
+| `api` lib `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` | hangs (child idle at 0% CPU, 22 min in the first run) | a full calendar pool held by `MAX_CALENDAR_CONCURRENT` barrier holders against a pool the 4-core clamp makes smaller | on the base's binary and the branch's, each stopped by a 300 s timeout, still running; skipped by name in the run above, **not silently** |
+| `api` `tests/cloud_mutants_bars.rs` `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` | hangs (0.1% CPU, 10 min), stopped by hand | a `Barrier::new(MAX_STORE_READ_CONCURRENT + 1)` with `MAX_STORE_READ_CONCURRENT = 8`, while the pool admits `slots_under(8)` = 4 holders on this host: the barrier never fills | the file is unchanged since CLOUD-MUTAPIA and `crates/api` is not touched; the other 58 tests of the binary passed |
+
+This part's own tests all passed inside the run: the 16 `gather` tests, the 5 `revision_tests`, and
+77 of 78 `backfill`/`sealed`/`ia16`/`scope_reopen` tests (the 78th is the root test above).
+
+**The 9 red CI shell gates are base reds** owned by BASE-REDS-1023 (CONTEXT §4.10), each red the same
+way on `d39e789e`:
+
+- **1c**: `zerodha_spool.rs` and `docs/02-store-format.md`'s lock path (IA-9).
+- **1d**: the base's undeclared literals. After `ia17b-census` was declared, the branch's set of
+  undeclared words equals the base's exactly. The rest of the difference is each word's sample of
+  occurrences, which now names this part's files for words already undeclared on the base
+  (`repair_impossible`, `repair_refused`, and a session word in the bench's messages).
+- **10**: `R427-11` names no test.
+- **11**: `tick_second_check.rs` and `tick_second_index.rs`.
+- **12**: cost claims in `api`/`cli` that name no proof. Every claim this part adds names one: 764
+  blocks make a cost claim on the branch against 762 on the base; 163 name a test that exists (162 on
+  the base) and 41 an invariant row whose test exists (40 on the base); the refused set is the same.
+- **19**: the base's three `ingest.rs` sites (the same three, shifted by this part's lines).
+- **23**: the print surface.
+- **27b**: D-6247 heads two entries.
+- **30**: 20 steps whose command a package has not built yet.
+
+Green on both: 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 13, 15, 16, 17, 21, 22, 24, 25, 26, 27, 28, 29, 29b,
+14 (the gate 14 `pull` pin 39 with `C-RP-02`). Not run here: 1e (moves `web/` aside and builds the
+engine; the tests above build with no front-end toolchain) and 7 (skips permanently, CLAUDE.md §5).
 
 ## Measurements
 
