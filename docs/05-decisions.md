@@ -83546,6 +83546,21 @@ month); the tests call `judge` and `day_known`, which that code lacks, so
 they were not compiled against it. NOT PROVED as a run of the new tests on
 the old code.
 
+**Measured, before and after (24 Oct 2026, release builds, one run each).**
+The check's own build of the D-6892 code (`tgt/bin-R4-26-v`, tip 27078d23)
+printed `steps 979, proven 770` over DATA-1's full input and ledgered 770
+rows. This rule's build over the same files prints `steps 979, lasting 179
+(a ledger row each), basis anomalies 591 (reversed 509, short 60,
+within_wobble 22) on 17 share(s), within_noise 209` and ledgers 179 rows;
+the share the check named keeps 2 rows of its 121 (28/27 on 2025-07-25,
+31/30 on 2026-07-03, each with runs of hundreds of days a side). With the
+input's 2019-09 file removed, the 2:1 row of the share split that month
+keeps ex-date 2019-10-01 after 2019-08-30, says its ex-date is UNKNOWN
+inside the window and names 2019-09 as missing; served on a shadow,
+`/dayflags.json` says "on one session between 2019-08-30 (excluded) and
+2019-10-01 (included)" and never "at this session". A rerun over the same
+files lands nothing (`already held these bytes`).
+
 **Cost.** `judge` is O(steps) per share: one pass each way for the nearest
 step the other way and one monotone window maximum each way for the wobble.
 `session_between` is at most 14 calendar lookups. L-R426-08.
