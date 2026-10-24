@@ -1214,7 +1214,9 @@ fn a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row() {
         .to_string();
     assert!(
         said.contains("basis_anomaly SEGCO (2022-01-28, 2022-01-31]")
-            && said.contains("basis_reversed: the ratio crosses this step the other way on 2022-02-28"),
+            && said.contains(
+                "basis_reversed: the ratio crosses this step the other way on 2022-02-28"
+            ),
         "{said}"
     );
 }
@@ -1436,7 +1438,10 @@ fn wobbling(
 fn tenfold_levels() -> ((String, String), (String, String)) {
     (
         (scaled("47/500", "1993/2000"), scaled("47/500", "2007/2000")),
-        (scaled("118/125", "1993/2000"), scaled("118/125", "2007/2000")),
+        (
+            scaled("118/125", "1993/2000"),
+            scaled("118/125", "2007/2000"),
+        ),
     )
 }
 
@@ -1487,11 +1492,7 @@ fn a_tenfold_step_beside_a_small_opposite_wobble_is_ledgered() {
     assert!(tenfold.step.low <= row.ratio && row.ratio <= tenfold.step.high);
     assert_eq!((row.tag, row.kind), (Tag::Measured, Kind::Unclassed));
     assert!(row.day_known(), "the day is as measured: {row:#?}");
-    assert!(
-        row.evidence.contains("6 and 6 counted"),
-        "{}",
-        row.evidence
-    );
+    assert!(row.evidence.contains("6 and 6 counted"), "{}", row.evidence);
     // The checker asks this one row, and names the 28 others by reason.
     let found = check(&runs, &no_actions("cor-tenfold-ca"));
     assert_eq!(found.iter().filter(|f| f.word() == "no_row").count(), 1);
@@ -1532,7 +1533,13 @@ fn a_lasting_large_step_never_becomes_the_shares_wobble() {
     let own = judged
         .iter()
         .filter(|j| matches!(j.verdict, Verdict::Anomaly(Anomaly::Reversed { .. })))
-        .filter(|j| j.step.ex_date.days_from_epoch().abs_diff(june.days_from_epoch()) <= 365)
+        .filter(|j| {
+            j.step
+                .ex_date
+                .days_from_epoch()
+                .abs_diff(june.days_from_epoch())
+                <= 365
+        })
         .map(|j| j.step.far())
         .max()
         .unwrap();
@@ -1631,7 +1638,10 @@ fn a_step_whose_factor_would_pass_the_bound_is_counted_never_dropped_silently() 
     // interval exists, so no step and no verdict: the count says so.
     let huge = Ratio::new(999_999_999_999_999_989, 2).unwrap();
     let tiny = Ratio::new(3, 999_999_999_999_999_877).unwrap();
-    assert!(huge.over(tiny).is_none(), "the factor's terms pass the bound");
+    assert!(
+        huge.over(tiny).is_none(),
+        "the factor's terms pass the bound"
+    );
     let old = Run {
         symbol: "BIGCO".to_owned(),
         first: day(2024, 1, 1),
@@ -1677,8 +1687,7 @@ fn a_generation_is_read_back_at_its_own_name_never_the_newest() {
     let written = write(&store, &runs_draft(&mine)).unwrap();
     let other = write(&store, &runs_draft(&theirs)).unwrap();
     assert_eq!((written.generation, other.generation), (1, 2));
-    let (receipt, table) =
-        crate::reference_data::load_written(&written, BasisRuns::build).unwrap();
+    let (receipt, table) = crate::reference_data::load_written(&written, BasisRuns::build).unwrap();
     assert_eq!(
         (receipt.generation, receipt.sha256.as_str()),
         (1, written.sha256.as_str())

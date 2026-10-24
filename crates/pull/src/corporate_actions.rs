@@ -1755,8 +1755,10 @@ fn hold<'a>(side: impl Iterator<Item = &'a Run>, on_basis: impl Fn(&Run) -> bool
 /// [`HOLD_DAYS`]. A side of short runs that stay on their basis holds; a
 /// side whose ratio comes back within the wobble stops there.
 fn held(runs: &[Run], at: usize, up: bool, wobble: Ratio) -> (u32, u32) {
-    let (Some(old), Some(new)) = (runs.get(at), at.checked_add(1).and_then(|next| runs.get(next)))
-    else {
+    let (Some(old), Some(new)) = (
+        runs.get(at),
+        at.checked_add(1).and_then(|next| runs.get(next)),
+    ) else {
         return (0, 0);
     };
     let old_side = hold(runs.get(..=at).unwrap_or_default().iter().rev(), |run| {
