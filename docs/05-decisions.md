@@ -84717,7 +84717,15 @@ wobble of 10. 20 steps became lasting (among them those four, UNIONBANK
 2023-12-12) and 3 small ones stopped being lasting (HEROMOTOCO 152/151 and
 TECHM 206/205 within their wobble, TECHM 300/301 crossed back). The
 alternating shares stay anomalies: UNIONBANK 4 rows and 117 anomalies (was
-2 and 119), BANKBARODA 4 and 97 (unchanged).
+2 and 119), BANKBARODA 4 and 97 (unchanged). The final build's run lands
+basis_runs generation 1 (SHA-256 ccce733c..., the same bytes as before: the
+runs did not change) and corporate_actions generation 1 with 196 rows; a
+rerun lands nothing, and over a store holding the earlier ledger it lands
+generation 2. Served from a shadow of that store (n = 300 sequential GETs
+each, load about 60 on 14 cores): `/basis.json?symbol=TATASTEEL` p50 0.72
+ms, p99 6.40 ms, max 9.63 ms; `/dayflags.json` for TATASTEEL over 8 days p50
+1.79 ms, p99 6.04 ms, max 10.53 ms; `/sources/day.json` for its day p50 1.64
+ms, p99 4.50 ms, max 4.81 ms. The routes read the tables; none runs `judge`.
 
 **Cost.** `judge` is O(steps) per share with a constant per step: rule 1
 reads at most the runs starting within 90 days either side (fewer than 92 a
