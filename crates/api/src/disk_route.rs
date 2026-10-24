@@ -55,10 +55,18 @@
 //!   (`standing_busy`) — or `"recorded": false` with the reason when no
 //!   scrub of that feed ever ran. The series a
 //!   page shows asks `/scrub.json` for its own findings.
-//! * `backup` — the last line of `<store>/ops/backups.log`, the receipt the
-//!   runbook's copy procedure appends (`docs/36-ops-runbook.md`), or
-//!   `"recorded": false` said loudly. This build cannot see a backup it was
-//!   not told about, and says so rather than guess.
+//! * `backup` — the last line of `<store>/ops/backups.log`, the receipt `cli
+//!   backup` appends (`docs/36-ops-runbook.md` §4), or `"recorded": false`
+//!   said loudly. This build cannot see a backup it was not told about, and
+//!   says so rather than guess. With a receipt: its words (`receipt`: the
+//!   date, the target, the manifest's file count and bytes, the run's
+//!   counts; `null` for a word a hand-written receipt does not carry),
+//!   whether the target is there now (`target`, one `stat` of `dest=`), the
+//!   copy's age, and `stale` with `stale_why` by name ("backup stale: last
+//!   copy <date>; target missing") — computed when the page is read, within
+//!   [`DISK_TTL`], with no alert put (D-6900). And `drill`, the newest line of
+//!   `<store>/ops/backup-drills.log` (`cli backup-drill`): its date, result
+//!   and counts, or `"recorded": false` (R4-09b, D-7178, D-7179).
 //!
 //! # Cost
 //!
@@ -66,7 +74,8 @@
 //! one `stat` per directory from the store root up to its mount point, bounded
 //! by the path's depth. Then one `lstat` per census file and one directory
 //! listing per migrated segment — O(epochs), which compaction alone grows, a
-//! handful today — a 4 KiB tail read of the receipt log, and per feed one
+//! handful today — a 4 KiB tail read of the receipt log and one of the drill
+//! log, one `stat` of the receipt's target, and per feed one
 //! 8 KiB tail read of its scrub cursor (the findings index behind it is
 //! rebuilt only when its ledger moves, `scrub_route::with_index`). The answer is
 //! kept for [`DISK_TTL`] per store root, so a page polling it costs one
@@ -968,11 +977,7 @@ pub(crate) fn last_backup(root: &Path) -> Result<String, String> {
     let line = lines
         .rfind(|line| !line.trim().is_empty())
         .ok_or_else(|| format!("{} holds no whole receipt line", path.display()))?;
-    let value = |key: &str| {
-        line.split(' ')
-            .find_map(|word| word.strip_prefix(key)?.strip_prefix('='))
-            .filter(|value| !value.is_empty())
-    };
+    let value = |key: &str| word(line, key);
     // `copied=` IS A UTC INSTANT, NOT ANY WORD: `copied=banana` was served as
     // a recorded copy, and only the page refused to date it.
     if line.len() > MAX_RECEIPT_LINE
@@ -989,6 +994,232 @@ pub(crate) fn last_backup(root: &Path) -> Result<String, String> {
         ));
     }
     Ok(line.to_owned())
+}
+
+/// The value of the first `key=value` word of `line` that has one: how every
+/// field of a receipt and a drill line is read, so the two logs have one
+/// reader.
+fn word<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split(' ')
+        .find_map(|word| word.strip_prefix(key)?.strip_prefix('='))
+        .filter(|value| !value.is_empty())
+}
+
+/// A recorded copy older than this many days is stale: the page's own rule
+/// (`STALE_COPY_DAYS` in `web/src/lib/disk.js`, rules audit RA-163), served as
+/// `backup.stale_after_days` so the page reads the number from here.
+pub(crate) const STALE_COPY_DAYS: u64 = 7;
+
+/// `word`, a UTC instant [`is_utc_instant`] takes, in Unix seconds; `None` for
+/// any other word or a day before 1970.
+fn instant_secs(word: &str) -> Option<u64> {
+    if !is_utc_instant(word) {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| word.get(range)?.parse::<u64>().ok();
+    let year = u16::try_from(number(0..4)?).ok()?;
+    let month = u8::try_from(number(5..7)?).ok()?;
+    let day = u8::try_from(number(8..10)?).ok()?;
+    let days = pull::session::Day::new(year, month, day)
+        .ok()?
+        .days_from_epoch();
+    let seconds = if word.len() == 20 { number(17..19)? } else { 0 };
+    Some(u64::from(days) * 86_400 + number(11..13)? * 3_600 + number(14..16)? * 60 + seconds)
+}
+
+/// The newest whole line of the drill log (`cli backup-drill`, D-7178), read
+/// from its last [`RECEIPT_TAIL_BYTES`] as the receipt is, or why there is
+/// none. A drill line carries `drilled=<UTC instant>` and `result=<word>`.
+///
+/// # Errors
+///
+/// A sentence: no log (no drill ever ran), one that cannot be read or is no
+/// regular file, or one whose newest whole line is no drill line.
+pub(crate) fn last_drill(root: &Path) -> Result<String, String> {
+    let path = root.join(cli::BACKUP_DRILLS);
+    let (tail, cut) = super::scrub_route::tail_of(&path, RECEIPT_TAIL_BYTES).map_err(|why| {
+        if why.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{} cannot be read ({why}): no restore drill is recorded; `cli backup-drill \
+                 --from <dir>` restores three months and records one",
+                path.display()
+            )
+        } else {
+            format!(
+                "{} cannot be read ({why}): whether a drill is recorded cannot be told",
+                path.display()
+            )
+        }
+    })?;
+    let whole = tail
+        .rfind('\n')
+        .map_or("", |end| tail.get(..end).unwrap_or(""));
+    let mut lines = whole.split('\n');
+    if cut {
+        let _fragment = lines.next();
+    }
+    let line = lines
+        .rfind(|line| !line.trim().is_empty())
+        .ok_or_else(|| format!("{} holds no whole drill line", path.display()))?;
+    if line.len() > MAX_RECEIPT_LINE
+        || !word(line, "drilled").is_some_and(is_utc_instant)
+        || word(line, "result").is_none()
+    {
+        return Err(format!(
+            "{}'s newest line is no drill line (one line of at most {MAX_RECEIPT_LINE} bytes \
+             carrying drilled=<YYYY-MM-DDTHH:MM[:SS]Z> and result=<word>); it reads {:?}",
+            path.display(),
+            crate::fault_log::capped(line.to_owned())
+        ));
+    }
+    Ok(line.to_owned())
+}
+
+/// A number word of `line` as JSON: the number, or `null` when the line does
+/// not carry it (a receipt written by hand carries only the runbook's words).
+fn number_json(line: &str, key: &str) -> String {
+    word(line, key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| "null".to_owned(), |n| n.to_string())
+}
+
+/// A path word of `line`, percent-decoded as `cli backup` encodes it; a word
+/// that does not decode (a hand-written receipt) is the path as written.
+fn path_word(line: &str, key: &str) -> Option<String> {
+    let value = word(line, key)?;
+    Some(
+        cli::backup_decoded(value)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_else(|| value.to_owned()),
+    )
+}
+
+/// Whether the receipt's target is there now: one `stat` of its `dest=`.
+fn target_state(dest: &str) -> (&'static str, Option<String>) {
+    match std::fs::metadata(dest) {
+        Ok(meta) if meta.is_dir() => ("present", None),
+        Ok(_) => (
+            "not_a_directory",
+            Some(format!("{dest} is not a directory")),
+        ),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            ("missing", Some(format!("{dest} does not exist ({why})")))
+        }
+        Err(why) => ("unreadable", Some(format!("{dest} cannot be read ({why})"))),
+    }
+}
+
+/// The `backup` object (DB-B73, R4-09b): the receipt and its words, whether
+/// the target is there, the copy's age, its staleness by name, and the last
+/// drill — all computed now, when the page is read (within [`DISK_TTL`]).
+/// One tail read of each log and one `stat` of the target.
+pub(crate) fn backup_json(root: &Path, now: u64) -> String {
+    let mut out = String::from("{");
+    let mut stale_why: Vec<String> = Vec::new();
+    match last_backup(root) {
+        Ok(line) => {
+            let copied = word(&line, "copied").unwrap_or("");
+            let dest = path_word(&line, "dest").unwrap_or_default();
+            let (target, target_why) = target_state(&dest);
+            let age = instant_secs(copied).map(|at| (at, now));
+            let _ = write!(
+                out,
+                r#""recorded":true,"last":{},"receipt":{{"copied":{},"dest":{},"by":{},"run":{},"state":{},"files":{},"bytes":{},"raw_bytes":{},"store_bytes":{},"copied_files":{},"copied_bytes":{},"unchanged":{},"busy":{},"missing":{},"unreadable":{}}},"target":{},"target_why":{},"age_days":{}"#,
+                render::json_string(&line),
+                render::json_string(copied),
+                render::json_string(&dest),
+                word(&line, "by").map_or_else(|| "null".to_owned(), render::json_string),
+                number_json(&line, "run"),
+                word(&line, "state").map_or_else(|| "null".to_owned(), render::json_string),
+                number_json(&line, "files"),
+                number_json(&line, "bytes"),
+                number_json(&line, "raw_bytes"),
+                number_json(&line, "store_bytes"),
+                number_json(&line, "copied_files"),
+                number_json(&line, "copied_bytes"),
+                number_json(&line, "unchanged"),
+                number_json(&line, "busy"),
+                number_json(&line, "missing"),
+                number_json(&line, "unreadable"),
+                render::json_string(target),
+                target_why
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), render::json_string),
+                age.and_then(|(at, now)| now.checked_sub(at))
+                    .map_or_else(|| "null".to_owned(), |secs| (secs / 86_400).to_string()),
+            );
+            match age {
+                Some((at, now)) if at > now => {
+                    stale_why.push("the copy is dated after now".to_owned());
+                }
+                Some((at, now)) if (now - at) / 86_400 > STALE_COPY_DAYS => {
+                    stale_why.push(format!(
+                        "{} days old (more than {STALE_COPY_DAYS})",
+                        (now - at) / 86_400
+                    ));
+                }
+                Some(_) | None => {}
+            }
+            if target != "present" {
+                stale_why.push(format!("target {}", target.replace('_', " ")));
+            }
+            if word(&line, "state") == Some("partial") {
+                stale_why.push("the last run was partial".to_owned());
+            }
+            let _ = write!(
+                out,
+                r#","stale":{},"stale_why":{}"#,
+                !stale_why.is_empty(),
+                if stale_why.is_empty() {
+                    "null".to_owned()
+                } else {
+                    render::json_string(&format!(
+                        "backup stale: last copy {copied}; {}",
+                        stale_why.join("; ")
+                    ))
+                }
+            );
+        }
+        Err(why) => {
+            let _ = write!(
+                out,
+                r#""recorded":false,"why":{},"stale":true,"stale_why":{}"#,
+                render::json_string(&why),
+                render::json_string("backup stale: no copy of this store is recorded")
+            );
+        }
+    }
+    let _ = write!(out, r#","stale_after_days":{STALE_COPY_DAYS},"drill":"#);
+    match last_drill(root) {
+        Ok(line) => {
+            let _ = write!(
+                out,
+                r#"{{"recorded":true,"last":{},"drilled":{},"from":{},"result":{},"months":{},"asked":{},"files":{},"bytes":{},"moved":{},"failed":{},"busy":{}}}"#,
+                render::json_string(&line),
+                render::json_string(word(&line, "drilled").unwrap_or("")),
+                path_word(&line, "from")
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), render::json_string),
+                render::json_string(word(&line, "result").unwrap_or("")),
+                number_json(&line, "months"),
+                number_json(&line, "asked"),
+                number_json(&line, "files"),
+                number_json(&line, "bytes"),
+                number_json(&line, "moved"),
+                number_json(&line, "failed"),
+                number_json(&line, "busy"),
+            );
+        }
+        Err(why) => {
+            let _ = write!(
+                out,
+                r#"{{"recorded":false,"why":{}}}"#,
+                render::json_string(&why)
+            );
+        }
+    }
+    out.push('}');
+    out
 }
 
 /// Whether `word` is a UTC instant as a receipt writes it:
@@ -1192,22 +1423,10 @@ pub(crate) fn measured(root: &Path, site: Option<&Site>) -> String {
              compaction adds one epoch of the partition's size (DB-B59)"
         )
     );
-    match last_backup(root) {
-        Ok(line) => {
-            let _ = write!(
-                out,
-                r#"{{"recorded":true,"last":{}}}"#,
-                render::json_string(&line)
-            );
-        }
-        Err(why) => {
-            let _ = write!(
-                out,
-                r#"{{"recorded":false,"why":{}}}"#,
-                render::json_string(&why)
-            );
-        }
-    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    out.push_str(&backup_json(root, now));
     let _ = write!(
         out,
         r#","projection":null,"projection_why":{},"measured_ttl_secs":{}}}"#,
@@ -1297,6 +1516,11 @@ pub(super) async fn disk_json(
 #[cfg(test)]
 #[path = "disk_route_seal_tests.rs"]
 mod seal_tests;
+
+/// The backup receipt `cli backup` writes, its target and its drill (R4-09b).
+#[cfg(test)]
+#[path = "disk_route_backup_tests.rs"]
+mod backup_tests;
 
 #[cfg(test)]
 #[allow(
