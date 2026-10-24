@@ -21640,3 +21640,19 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-IA4-02 | An options file's refused rows are named in a `warn` log line (first 16) and counted on the day's D-3335 line, not yet in the durable audit stream with file and line | the durable naming is R4-22's (FM-077's audit half, IMPORT-BAD-ROW); IA-4 is the decode half | one log line per file, O(1) per row | R4-22 |
 | L-IA4-03 | NOT DONE: definition 5 has no sentence in R3-13's `definition_means` (`crates/api/src/dayflags_rules.rs`, the /db day band), which names 1 to 4 | R3-13 was not merged on feat/db-fix when IA-4 landed, so there was nothing to extend | the band shows no meaning for `definition=5` until it lands | R4-27-OPT |
 | L-IA4-04 | NOT DONE: a resume under another definition (RA-308, test IA-GR-06d) is read whole under the new one, but no journal line or page says "resumed under a new definition" | a day left open is read again file by file under the running definition, and the store answers `AlreadyPresent` or refuses by name, so no mix is filed silently; naming the previous definition needs a journal field and a page row the IA-4 change does not own | the warn line `importing again a day an earlier run did not finish under this bar definition` names the day and the running definition | IA-16, IA-12b |
+
+## /db reads only what its view shows: what R3-12 leaves bounded, unmeasured or open (R3-12, D-7111)
+
+Measured 24 October 2026 in a cloud container (4 cores, Node 22.22.0), in
+node over an in-process fake server with invented answers: no network, no
+real store, no browser. The real-route and browser figures are the Mac's
+(R3-12 report, NEEDS THE MAC M16, M17) and are NOT MEASURED here.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R312-01 | A contract view's listing grows with the underlying's expiries | the facets answer lists every expiry of the underlying so the picker can offer them; at 404 expiries a read moved 53,376 B (p50 0.79 ms, p99 2.60 ms, n = 200, node, fake server), at ten times (4,040) 526,057 B (p50 4.13 ms, p99 8.68 ms): past the fix plan's 400 KB on the wire at ten times | O(expiries of one underlying), never of the store; a spot open is the same 51,979 B at one and ten times | R3-12 |
+| L-R312-02 | The instrument list is one facets answer per segment read | the picker offers every held underlying of those segments | O(underlyings of the segments read), once per census generation, moved forward by deltas; 2,000 a segment folded inside one turn under 50 ms (`db-ten-times`) | R3-12 |
+| L-R312-03 | `scopeNeed`, `scopeWanted` and `planRead` cost microseconds, measured | pure, a constant amount of work per call | p99 2.1 / 3.1 / 4.0 µs, n = 2,000 each, node (max 0.35 / 0.11 / 1.53 ms: a collection pause) | R3-12 |
+| L-R312-04 | The first call of the compiled store module held the loop 40 to 75 ms in node | the module's code is compiled on its first call, the page script's own parse in a browser, at any list size | named for NEW-08 (page shell); the gate times only warmed opens | NEW-08 |
+| L-R312-05 | `CLOSE_CHANGE_DAY` is typed in `selection-model.js` | the session schedule's dated change is held by the server's tables and served by no route | the build check allows this one line by name (`no-typed-lists.test.js`) | the calendar route's owner |
+| L-R312-06 | Typed lists outside R3-12's files stay | `DbCalendar.svelte`'s feed list, `notes-coverage.js`'s dates, the store segment words in `notes-labels.js`, `completeness.js`, `dayflags.js` and other pages | named in the R3-12 report with their owners | WP-54, R3-04, R4-05 and others |

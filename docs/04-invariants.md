@@ -8724,3 +8724,28 @@ Proofs in `pull::gdfl_nfo::tests`, `pull::gdfl_nfo::attack_tests` and
 | IA4-06 | **An options day's refused rows reach its D-3335 line** (§8 F44): an imported options day with one refused row closes `done` under `definition=5` with both files filed and `rows_refused=1`, never a silent 0; a file read under a trailing-empty header is `trailing_empty_files=1` | `an_options_days_refused_rows_reach_the_day_ledger`, `the_options_line_counts_trailing_empty_files_and_refused_rows`, `the_day_ledger_counts_zero_quote_files_and_leading_marker_rows` | ✓ |
 | IA4-07 | **Bar definition 5's currency, every cell** (D-4877): 5 current for every kind; options only under 5; a share's auction-era day under 4 or 5; an index day and an earlier share day under 2 to 5; 0, 1 and past 5 never; `definition_is_current`, the importer's journal and `/imports.json` agree, a `recounted` close included (by the definition it carries) | `every_kind_era_and_definition_has_its_currency`, `a_share_day_of_the_auction_era_under_an_older_definition_is_restated`, `api::import_journal::tests::a_recounted_close_is_restated_where_the_importer_restates_it`, `an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not` | ✓ |
 | IA4-08 | **An options day a run of definition 4 began and never closed is read again whole under 5** (RA-308, IA-GR-06d, the half that holds): every file of the day goes through the per-row reader, the day is named among the resumed days and closes `done` under `definition=5`, so no day is left a mix of the two rules; naming "resumed under a new definition" in the journal and on a page is docs/06-limits.md L-IA4-04 | `a_day_begun_under_definition_4_is_read_whole_under_5` | ✓ |
+
+## /db reads only what its view shows (R3-12; D-7111)
+
+`web/src/lib/store-census.js` (`readScope`, `viewSegments`, `scopeNeed`,
+`scopeWanted`, `scopeCovers`, `planRead`, `scopeUnderlyings`, `readRollups`),
+`web/src/lib/store.svelte.js` (`read`), `web/src/lib/db/bars-plan.js`
+(`adoptCeilings`), wired by `web/src/routes/db/DbCensusBanner.svelte`,
+`DbCoverageGrid.svelte`, `DbControls.svelte` and `web/src/lib/db/selection.svelte.js`.
+Proofs run by `npm test` in `web/`; the store's own read path is compiled and
+driven over a fake server (`web/tests/store-module.js`). Every fixture is
+invented. Built in the cloud; the real-store checks are the Mac's (R3-12
+report, NEEDS THE MAC).
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R312-01 | **A spot view never asks a contract segment anything**: its scope reads the spot segments' rows only, reports nothing unread, and keeps the root's counts of every segment on its chips | `web/tests/census-scope.test.js`: `a_spot_view_never_requests_fno_facet_rows` | ✓ |
+| R312-02 | **A contract view with no expiry offers exactly the facets answer's expiries and asks no contract row** | `web/tests/census-scope.test.js`: `an_options_view_with_no_expiry_offers_expiries_from_the_facets_answer` | ✓ |
+| R312-03 | **A segment switch reads the new segment's scope as one request after the root, and the old rows are never drawn as it** (`scopeNeed` missing until it lands) | `web/tests/census-scope.test.js`: `a_segment_switch_reads_the_new_segments_scope` | ✓ |
+| R312-04 | **No /db view reads `/store.json`**: every view, a refresh, a feed switch, a failing scope and an unknown view, through the store module itself; a failed scope is the page's error with its reason | `web/tests/census-first-load.test.js`: `no_db_view_downloads_the_whole_census` | ✓ |
+| R312-05 | **A read a newer selection replaced is never published**, alone or beside a failing newer read | `web/tests/census-first-load.test.js` (the two concurrent extreme cases) | ✓ |
+| R312-06 | **A scope keeps only its underlying's rows by the key's grammar** (a longer name sharing its prefix, `BAJAJ-AUTO` for BAJAJ, is refused), a chain's rows carry its expiry, and a torn body is named | `web/tests/census-scope.test.js` (the extreme cases) | ✓ |
+| R312-07 | **The ceilings a plan is refused by are the server's once it answers**, the build's copies named until then | `web/tests/no-typed-lists.test.js` (the ceilings test) | ✓ |
+| R312-08 | **R3-12's page logic types no feed, store segment or date**, but one named exception | `web/tests/no-typed-lists.test.js`: `no_typed_feed_kind_or_date_in_page_logic` | ✓ |
+| R312-09 | **At ten times the 12 Oct list no turn of the event loop passes 50 ms**, the whole census is never asked, and a spot open moves under 400 KB | `web/tests/db-ten-times.test.js`: `db_loads_at_ten_times_the_list_without_a_long_task` | ✓ |
+| R312-10 | **A worker that never answers is dropped at its ceiling and the page still shows rows and says why**; a yield never lets Node end the loop under it | `web/tests/census-worker.test.js`: `a_silent_worker_is_dropped_and_the_page_says_so` | ✓ |

@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-12: /db reads its lists from the server: no whole-list download, no typed lists, rows kept as columns
 
