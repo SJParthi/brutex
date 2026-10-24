@@ -1741,3 +1741,358 @@ fn diff_partial_and_case_twin_names_round_trip_and_strangers_are_ignored() {
         "a cut diff holds no snapshot ordinal"
     );
 }
+
+// ──────────── R4-28 repair 5: gate 11's constructs replaced by indices ────────────
+
+/// R4-28 repair 5 (the r5 check's blocking item, gate 11 rule 1): the catalog
+/// answers a day's snapshot and a snapshot's predecessor from the two indices
+/// its listing builds, never by a search of the stamps, and a stamp no receipt
+/// commits is not receipted and has no predecessor. Before the repair
+/// `before` searched the stamps and answered the receipted stamp just below a
+/// stamp no file holds.
+#[test]
+fn the_catalog_answers_a_day_and_a_predecessor_by_probe_and_never_for_an_unheld_stamp() {
+    let root = scratch("catalog-index");
+    let (d1, d2, d3) = (day(2026, 4, 6), day(2026, 4, 7), day(2026, 4, 9));
+    let body = |symbol: &str| dump(&[fut(9_950_001, symbol, "2026-04-28", 75)]);
+    // Written out of day order, two of them on one day: the listing orders
+    // them whatever order the directory lists them in.
+    for (on, symbol) in [
+        (d3, "ZQIDX26APRFUTC"),
+        (d1, "ZQIDX26APRFUTA"),
+        (d2, "ZQIDX26APRFUTB"),
+        (d2, "ZQIDX26APRFUTD"),
+    ] {
+        snapshot(&root, Kind::Kite, on, URL, body(symbol).as_bytes()).unwrap();
+    }
+    let catalog = Catalog::read(&root).unwrap();
+    assert_eq!(
+        catalog.receipted(Kind::Kite),
+        &[stamp(d1, 1), stamp(d2, 1), stamp(d2, 2), stamp(d3, 1)]
+    );
+    assert_eq!(
+        catalog.of_day(Kind::Kite, d2),
+        Some(stamp(d2, 2)),
+        "the day's newest ordinal"
+    );
+    assert_eq!(catalog.of_day(Kind::Kite, d1), Some(stamp(d1, 1)));
+    assert_eq!(catalog.of_day(Kind::Kite, d3), Some(stamp(d3, 1)));
+    assert_eq!(
+        catalog.of_day(Kind::Kite, day(2026, 4, 8)),
+        None,
+        "a day between two snapshots has none of its own"
+    );
+    assert_eq!(
+        catalog.of_day(Kind::NseTotalMarket, d2),
+        None,
+        "the kinds are kept apart"
+    );
+    assert_eq!(catalog.before(Kind::Kite, stamp(d1, 1)), None, "the first");
+    assert_eq!(catalog.before(Kind::Kite, stamp(d2, 1)), Some(stamp(d1, 1)));
+    assert_eq!(
+        catalog.before(Kind::Kite, stamp(d2, 2)),
+        Some(stamp(d2, 1)),
+        "the same day's lower ordinal"
+    );
+    assert_eq!(catalog.before(Kind::Kite, stamp(d3, 1)), Some(stamp(d2, 2)));
+    // A STAMP NO RECEIPT COMMITS: before the first, between two, a day's next
+    // ordinal, past the newest. Not receipted, and no predecessor.
+    for unheld in [
+        stamp(day(2026, 4, 1), 1),
+        stamp(day(2026, 4, 8), 1),
+        stamp(d2, 3),
+        stamp(day(2026, 5, 1), 1),
+    ] {
+        assert!(!catalog.is_receipted(Kind::Kite, unheld), "{unheld}");
+        assert_eq!(catalog.before(Kind::Kite, unheld), None, "{unheld}");
+    }
+    assert!(catalog.is_receipted(Kind::Kite, stamp(d2, 2)));
+    assert!(
+        !catalog.is_receipted(Kind::NseTotalMarket, stamp(d2, 2)),
+        "the kinds are kept apart"
+    );
+    // An empty directory, and one that does not exist, answer nothing.
+    for empty in [
+        Catalog::read(&scratch("catalog-empty")).unwrap(),
+        Catalog::read(&root.join("absent")).unwrap(),
+    ] {
+        assert_eq!(empty.of_day(Kind::Kite, d1), None);
+        assert_eq!(empty.before(Kind::Kite, stamp(d1, 1)), None);
+        assert!(!empty.is_receipted(Kind::Kite, stamp(d1, 1)));
+    }
+}
+
+/// R4-28 repair 5: a diff is asked only of a receipted Kite snapshot. A stamp
+/// no receipt commits was answered `Ok(None)`, the first snapshot's "nothing
+/// to compare", whenever no receipted snapshot came before it, and failed on a
+/// read naming something else otherwise; it is refused by name now, and
+/// nothing is written for it.
+#[test]
+fn a_diff_asked_of_a_stamp_no_receipt_commits_is_refused_by_name() {
+    let root = scratch("diff-unheld");
+    let (a, b) = diff_days(&root);
+    for unheld in [
+        stamp(day(2026, 3, 1), 1),
+        stamp(a.day, 2),
+        stamp(day(2026, 3, 4), 1),
+    ] {
+        let why = diff_for(&root, unheld).unwrap_err();
+        assert!(
+            why.contains(&format!("{unheld} is not a receipted Kite snapshot")),
+            "{why}"
+        );
+        assert!(
+            fs::symlink_metadata(root.join(diff_name(unheld))).is_err(),
+            "nothing is written for {unheld}"
+        );
+    }
+    assert_eq!(diff_for(&root, a), Ok(None), "the first held one");
+    assert!(diff_for(&root, b).unwrap().is_some(), "the second held one");
+}
+
+/// R4-28 repair 5 (gate 11 rule 4): `Book::of` checks the order it is given in
+/// one pass and never sorts it. Before the repair a book given newest first
+/// was sorted and built.
+#[test]
+fn a_book_given_its_snapshots_out_of_order_is_refused_never_sorted() {
+    let body = |symbol: &str| dump(&[fut(9_960_001, symbol, "2026-06-30", 75)]);
+    let (d1, d2) = (day(2026, 6, 1), day(2026, 6, 2));
+    let parse =
+        |on: Day, ordinal: u32, symbol: &str| Snapshot::parse(stamp(on, ordinal), &body(symbol));
+    let why = Book::of(vec![
+        parse(d2, 1, "ZQB").unwrap(),
+        parse(d1, 1, "ZQA").unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        why.contains("not oldest first: 2026-06-02 is given before 2026-06-01"),
+        "{why}"
+    );
+    let why = Book::of(vec![
+        parse(d1, 2, "ZQB").unwrap(),
+        parse(d1, 1, "ZQA").unwrap(),
+    ])
+    .unwrap_err();
+    assert!(why.contains("not oldest first"), "ordinals too: {why}");
+    let why = Book::of(vec![
+        parse(d1, 1, "ZQA").unwrap(),
+        parse(d1, 1, "ZQB").unwrap(),
+    ])
+    .unwrap_err();
+    assert!(why.contains("two snapshots carry one stamp"), "{why}");
+    let book = Book::of(vec![
+        parse(d1, 1, "ZQA").unwrap(),
+        parse(d1, 2, "ZQB").unwrap(),
+        parse(d2, 1, "ZQC").unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(book.stamps(), &[stamp(d1, 1), stamp(d1, 2), stamp(d2, 1)]);
+    assert!(
+        Book::of(Vec::new()).unwrap().stamps().is_empty(),
+        "an empty book builds"
+    );
+}
+
+/// R4-28 repair 5 (gate 11 rule 1): the stamps through a day come from the
+/// book's day table: the same slice the search they replace cut, on every
+/// shape of day (before the first, a snapshot day with two ordinals, a day
+/// between two snapshots, the newest day and past it), and none from an empty
+/// book.
+#[test]
+fn the_book_cuts_its_stamps_through_a_day_by_its_day_table() {
+    let body = |symbol: &str| dump(&[fut(9_970_001, symbol, "2026-12-29", 75)]);
+    let held = [
+        (day(2026, 7, 1), 1, "ZQA"),
+        (day(2026, 7, 1), 2, "ZQB"),
+        (day(2026, 7, 3), 1, "ZQC"),
+        (day(2026, 7, 10), 1, "ZQD"),
+    ];
+    let book = Book::of(
+        held.iter()
+            .map(|&(on, ordinal, symbol)| {
+                Snapshot::parse(stamp(on, ordinal), &body(symbol)).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let stamps = book.stamps().to_vec();
+    let (first, last) = (day(2026, 6, 25), day(2026, 7, 20));
+    let mut asked = 0;
+    for number in first.days_from_epoch()..=last.days_from_epoch() {
+        let on = Day::from_days(number).unwrap();
+        let searched = stamps.partition_point(|held| held.day <= on);
+        assert_eq!(book.through(on), &stamps[..searched], "{on}");
+        asked += 1;
+    }
+    assert_eq!(asked, 26, "every day from 2026-06-25 to 2026-07-20");
+    assert!(
+        book.through(day(2026, 6, 30)).is_empty(),
+        "before the first"
+    );
+    assert_eq!(book.through(day(2026, 7, 1)).len(), 2, "both ordinals");
+    assert_eq!(book.through(day(2026, 7, 9)).len(), 3, "between two");
+    assert_eq!(
+        book.through(day(9999, 12, 31)).len(),
+        4,
+        "far past the newest"
+    );
+    assert!(
+        Book::of(Vec::new())
+            .unwrap()
+            .through(day(2026, 7, 1))
+            .is_empty(),
+        "an empty book cuts nothing"
+    );
+}
+
+/// R4-28 repair 5 (gate 11 rule 6): the header is indexed once. Its columns
+/// may come in any order, beside columns no snapshot reads, and of two columns
+/// with one name the first is read, as the search it replaces read it.
+#[test]
+fn a_header_is_indexed_once_in_any_order_and_the_first_of_two_names_is_read() {
+    let s = stamp(day(2026, 5, 4), 1);
+    let reordered = "exchange,segment,instrument_type,lot_size,tick_size,strike,expiry,name,\
+                     tradingsymbol,instrument_token,unread\n\
+                     NFO,NFO-FUT,FUT,75,0.05,0,2026-05-26,\"ZQIDX\",ZQIDX26MAYFUT,9800101,x\n";
+    let one = Snapshot::parse(s, reordered).unwrap();
+    let Lookup::Listed(listed) = one.lookup("NFO", 9_800_101) else {
+        panic!("read in any column order");
+    };
+    assert_eq!(listed.tradingsymbol(), "ZQIDX26MAYFUT");
+    assert_eq!(listed.lot_size(), 75);
+    assert_eq!(listed.expiry(), Some(day(2026, 5, 26)));
+    let twice = format!(
+        "{HEAD},tradingsymbol\n\
+         9800102,1,ZQIDX26JUNFUT,\"ZQIDX\",0,2026-06-30,0,0.05,75,FUT,NFO-FUT,NFO,ZQSECOND\n"
+    );
+    let parsed = Snapshot::parse(s, &twice).unwrap();
+    let Lookup::Listed(first) = parsed.lookup("NFO", 9_800_102) else {
+        panic!("found");
+    };
+    assert_eq!(
+        first.tradingsymbol(),
+        "ZQIDX26JUNFUT",
+        "the first of two columns named alike"
+    );
+    let short = Snapshot::parse(s, "instrument_token,tradingsymbol,name\n1,ZQ,ZQ\n").unwrap_err();
+    assert!(short.contains("no column \"expiry\""), "{short}");
+}
+
+/// R4-28 repair 5 (gate 11 rule 7): a token's duplication is held in its one
+/// index slot. A third row for it leaves it duplicated, and the row beside it
+/// still answers.
+#[test]
+fn a_token_listed_three_times_stays_duplicated_in_its_one_slot() {
+    let parsed = Snapshot::parse(
+        stamp(day(2026, 5, 4), 1),
+        &dump(&[
+            fut(9_900_101, "ZQIDX26MAYFUT", "2026-05-26", 75),
+            fut(9_900_101, "ZQIDX26JUNFUT", "2026-06-30", 75),
+            fut(9_900_102, "ZQIDX26JULFUT", "2026-07-28", 75),
+            fut(9_900_101, "ZQIDX26AUGFUT", "2026-08-25", 75),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(parsed.len(), 4, "every row is kept");
+    assert!(matches!(
+        parsed.lookup("NFO", 9_900_101),
+        Lookup::Duplicated
+    ));
+    let Lookup::Listed(other) = parsed.lookup("NFO", 9_900_102) else {
+        panic!("the row beside it answers");
+    };
+    assert_eq!(other.tradingsymbol(), "ZQIDX26JULFUT");
+    assert!(matches!(parsed.lookup("NFO", 9_900_103), Lookup::Absent));
+    assert!(matches!(parsed.lookup("BFO", 9_900_101), Lookup::Absent));
+}
+
+/// R4-28 repair 5 (gate 11 rule 6): each change kind is counted in the slot of
+/// its place in `Change::ALL`, found by match, never by a search of the list.
+#[test]
+fn every_change_kind_counts_in_its_own_slot() {
+    for (at, change) in Change::ALL.into_iter().enumerate() {
+        assert_eq!(change.index(), at, "{change:?}");
+    }
+    let mut items = Vec::new();
+    for (at, change) in Change::ALL.into_iter().enumerate() {
+        for token in 0..=u64::try_from(at).unwrap() {
+            items.push(Item {
+                change,
+                exchange: "NFO".to_owned(),
+                token,
+                key: "ZQ".to_owned(),
+                old: String::new(),
+                new: String::new(),
+            });
+        }
+    }
+    let summary = DiffSummary::of(
+        stamp(day(2026, 1, 1), 1),
+        stamp(day(2026, 1, 2), 1),
+        "20260102.diff".to_owned(),
+        &items,
+        0,
+    );
+    assert_eq!(summary.counts, [1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+/// R4-28 repair 5, a measurement printed on demand (`docs/06-limits.md`
+/// L-R428-13): one `Catalog::read` of a snapshots directory holding 1, 100 and
+/// 1,000 receipted Kite snapshots (a body name and a receipt name each, two
+/// per day: the listing reads names, never a body), and then one probe of each
+/// of its three indices. n = 200 calls a size. Run with `--ignored --nocapture
+/// --exact master_snapshots::tests::measure_the_catalog_listing_and_its_probes`.
+#[test]
+#[ignore = "a measurement, printed: run on demand"]
+fn measure_the_catalog_listing_and_its_probes() {
+    const N: usize = 200;
+    let first = day(2020, 1, 1).days_from_epoch();
+    for held in [1_u32, 100, 1_000] {
+        let root = scratch(&format!("measure-catalog-{held}"));
+        for n in 0..held {
+            let on = Day::from_days(first + n / 2).unwrap();
+            let s = stamp(on, 1 + n % 2);
+            fs::write(root.join(file_name(Kind::Kite, s)), b"").unwrap();
+            fs::write(root.join(receipt_name(Kind::Kite, s)), b"").unwrap();
+        }
+        let newest = stamp(
+            Day::from_days(first + (held - 1) / 2).unwrap(),
+            1 + (held - 1) % 2,
+        );
+        let (mut listing, mut probes): (Vec<u128>, Vec<u128>) = (0..N)
+            .map(|_| {
+                let began = std::time::Instant::now();
+                let catalog = Catalog::read(&root).unwrap();
+                let listed = began.elapsed().as_nanos();
+                let began = std::time::Instant::now();
+                let answers = (
+                    std::hint::black_box(catalog.of_day(Kind::Kite, newest.day)),
+                    std::hint::black_box(catalog.before(Kind::Kite, newest)),
+                    std::hint::black_box(catalog.is_receipted(Kind::Kite, newest)),
+                );
+                let probed = began.elapsed().as_nanos();
+                assert_eq!(answers.0, Some(newest));
+                assert_eq!(answers.1.is_some(), held > 1);
+                assert!(answers.2);
+                assert_eq!(
+                    catalog.receipted(Kind::Kite).len(),
+                    usize::try_from(held).unwrap()
+                );
+                (listed, probed)
+            })
+            .unzip();
+        listing.sort_unstable();
+        probes.sort_unstable();
+        println!(
+            "R4-28 r5 Catalog::read, {held} receipted snapshots ({} names), n={N}: p50 {} us, \
+             p99 {} us, max {} us; of_day + before + is_receipted: p50 {} ns, p99 {} ns, max {} ns",
+            held * 2,
+            listing[N / 2] / 1_000,
+            listing[N * 99 / 100 - 1] / 1_000,
+            listing[N - 1] / 1_000,
+            probes[N / 2],
+            probes[N * 99 / 100 - 1],
+            probes[N - 1]
+        );
+    }
+}

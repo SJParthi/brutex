@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{
-    Catalog, EVENT_TARGET, Kind, Snapshot, Stamp, base, lock, parse_compact, parse_dashed,
+    Book, Catalog, EVENT_TARGET, Kind, Snapshot, Stamp, base, lock, parse_compact, parse_dashed,
     read_body, read_limited, sync_dir,
 };
 use crate::session::Day;
@@ -482,10 +482,10 @@ fn absorbed_line(
 fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, Fault> {
     let path = dir.join(ABSORBED);
     let (lines, mut torn) = read_lines(&path)?;
-    let mut log = Log {
-        taken: HashMap::with_capacity(lines.len()),
-        committed: HashMap::new(),
-    };
+    let mut taken_in: HashMap<Stamp, Taken> = HashMap::with_capacity(lines.len());
+    // EVERY `name=count` PAIR FIRST, so the committed map is sized to them
+    // (docs/07 law 2; R4-28 repair 5): it holds at most one entry a pair.
+    let mut pairs: Vec<(String, u64)> = Vec::new();
     for line in &lines {
         let fields: Vec<&str> = line.split('|').collect();
         let [
@@ -529,12 +529,9 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, Fault> {
                 continue;
             }
         };
-        for (name, count) in counts {
-            let held = log.committed.entry(name).or_insert(count);
-            *held = (*held).max(count);
-        }
+        pairs.extend(counts);
         if let Some(taken) = taken {
-            log.taken.insert(stamp, taken);
+            taken_in.insert(stamp, taken);
         }
     }
     if torn > 0 {
@@ -543,7 +540,15 @@ fn read_log(dir: &Path, route: ContinuousSpec) -> Result<Log, Fault> {
             path.display()
         )));
     }
-    Ok(log)
+    let mut committed: HashMap<String, u64> = HashMap::with_capacity(pairs.len());
+    for (name, count) in pairs {
+        let held = committed.entry(name).or_insert(count);
+        *held = (*held).max(count);
+    }
+    Ok(Log {
+        taken: taken_in,
+        committed,
+    })
 }
 
 // ─────────────────────────────── the underlying files ───────────────────────────────
@@ -774,7 +779,11 @@ fn absorb_in(
     let dir = &generation.dir;
     let mut log = read_log(dir, route)?;
     let mut out = Absorbed::default();
-    let mut cache: HashMap<String, Held> = HashMap::new();
+    // ONE ENTRY PER UNDERLYING NAME, sized to the names the commit log
+    // already records (docs/07 law 2; R4-28 repair 5): exact once the
+    // generation holds a snapshot, so it grows only while a generation takes
+    // its first snapshot in, or when a name is listed for the first time.
+    let mut cache: HashMap<String, Held> = HashMap::with_capacity(log.committed.len());
     for &stamp in catalog.receipted(Kind::Kite) {
         if log.taken.contains_key(&stamp) {
             continue;
@@ -882,27 +891,30 @@ pub struct Listing {
 }
 
 /// What the index holds for `underlying`'s futures on `route`'s exchange,
-/// first listed on or before `through`, checked against `stamps` (the
-/// receipted snapshots a book was opened over). Any of them on or before
-/// `through` not yet taken in is taken in first, once, under the writers'
-/// lock; one that cannot be is named in [`Listing::refused`]. An index that
-/// does not match its commit log is rebuilt as a new generation first
-/// ([`Listing::rebuilt`]); one that does not match after that is refused by
-/// name (`futures_index_damaged`) with nothing listed.
+/// first listed on or before `through`, checked against the receipted
+/// snapshots `book` was opened over that are on or before `through`, which
+/// the book's day table finds with one index (R4-28 repair 5: they were found
+/// by a search of its stamps). Any of them not yet taken in is taken in
+/// first, once, under the writers' lock; one that cannot be is named in
+/// [`Listing::refused`]. An index that does not match its commit log is
+/// rebuilt as a new generation first ([`Listing::rebuilt`]); one that does
+/// not match after that is refused by name (`futures_index_damaged`) with
+/// nothing listed.
 ///
 /// # Errors
 ///
 /// A lock, a listing or an index file that fails, named.
 pub fn listing(
     root: &Path,
-    stamps: &[Stamp],
+    book: &Book,
     route: ContinuousSpec,
     underlying: &str,
     through: Day,
 ) -> Result<Listing, String> {
+    let needed = book.through(through);
     let held = lock(root)?;
     let outcome = with_rebuild(root, route, |generation| {
-        list_in(root, generation, stamps, route, underlying, through)
+        list_in(root, generation, needed, route, underlying, through)
     })?;
     held.release().map_err(|why| why.to_string())?;
     Ok(match outcome {
@@ -919,24 +931,25 @@ pub fn listing(
     })
 }
 
-/// [`listing`] in one generation.
+/// [`listing`] in one generation, over `needed`: the receipted snapshots on
+/// or before `through`, oldest first.
 fn list_in(
     root: &Path,
     generation: &Generation,
-    stamps: &[Stamp],
+    needed: &[Stamp],
     route: ContinuousSpec,
     underlying: &str,
     through: Day,
 ) -> Result<Listing, Fault> {
     let dir = &generation.dir;
-    let upto = stamps.partition_point(|stamp| stamp.day <= through);
-    let needed = stamps.get(..upto).unwrap_or_default();
     let mut log = read_log(dir, route)?;
-    let mut why_not: HashMap<Stamp, String> = HashMap::new();
+    // WHY A SNAPSHOT IS NOT IN THE INDEX, known only when this call took
+    // snapshots in, and so made only then (R4-28 repair 5).
+    let mut why_not: Option<HashMap<Stamp, String>> = None;
     if needed.iter().any(|stamp| !log.taken.contains_key(stamp)) {
         let absorbed = absorb_in(root, generation, route)?;
         note(&Ok(absorbed.clone()));
-        why_not.extend(absorbed.unreadable);
+        why_not = Some(absorbed.unreadable.into_iter().collect());
         log = read_log(dir, route)?;
     }
     let mut out = Listing::default();
@@ -950,7 +963,8 @@ fn list_in(
             None => out.refused.push(format!(
                 "snapshot_unreadable: {stamp}: {}; its futures were not planned",
                 why_not
-                    .get(stamp)
+                    .as_ref()
+                    .and_then(|why_not| why_not.get(stamp))
                     .map_or("it is not in the futures index", String::as_str)
             )),
         }

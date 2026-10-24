@@ -83,6 +83,11 @@ fn stamps(root: &Path) -> Vec<Stamp> {
     Catalog::read(root).unwrap().receipted(Kind::Kite).to_vec()
 }
 
+/// The book a plan opens over `root`: what [`listing`] cuts by its day table.
+fn book(root: &Path) -> Book {
+    Book::open(root).unwrap()
+}
+
 #[test]
 fn a_name_a_file_cannot_carry_is_encoded_or_refused_never_trusted() {
     assert_eq!(encoded("ZQIDX").as_deref(), Some("ZQIDX"));
@@ -182,7 +187,7 @@ fn each_contract_is_written_once_and_the_earliest_listing_day_wins() {
     assert!(!file.contains("8100001"), "an option is never taken in");
     // OUT OF ORDER: a snapshot dated before the others, written after them.
     write(&root, day(2026, 1, 2), &[feb, jan]);
-    let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
     assert_eq!(
         listed.first,
         BTreeMap::from([
@@ -194,7 +199,7 @@ fn each_contract_is_written_once_and_the_earliest_listing_day_wins() {
         listed.refused.is_empty() && listed.rebuilt.is_none(),
         "{listed:?}"
     );
-    let early = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 1)).unwrap();
+    let early = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 1)).unwrap();
     assert!(
         early.first.is_empty(),
         "nothing first listed after the day asked"
@@ -219,13 +224,13 @@ fn another_underlying_or_a_name_sharing_its_file_never_answers() {
             fut(8_000_003, "ZQOTHER", "2026-01-27"),
         ],
     );
-    let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
     assert_eq!(
         listed.first.keys().copied().collect::<Vec<_>>(),
         vec![(day(2026, 1, 27), 8_000_001)],
         "only the exact name, whichever file a case-insensitive volume shares"
     );
-    let none = listing(&root, &stamps(&root), route(), "ZQNONE", day(2026, 1, 31)).unwrap();
+    let none = listing(&root, &book(&root), route(), "ZQNONE", day(2026, 1, 31)).unwrap();
     assert!(none.first.is_empty() && none.refused.is_empty() && none.rebuilt.is_none());
 }
 
@@ -267,7 +272,7 @@ fn an_unparseable_snapshot_is_recorded_once_and_named_by_every_listing() {
     )
     .unwrap();
     for _ in 0..2 {
-        let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+        let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
         assert_eq!(listed.first.len(), 1, "the readable snapshot still answers");
         assert_eq!(listed.refused.len(), 1, "{listed:?}");
         assert!(
@@ -287,7 +292,7 @@ fn an_unparseable_snapshot_is_recorded_once_and_named_by_every_listing() {
         absorbed.contains("|unparseable@1|0|0||the dump has no column"),
         "{absorbed}"
     );
-    let before = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 8)).unwrap();
+    let before = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 8)).unwrap();
     assert!(
         before.refused.is_empty(),
         "a snapshot after the day asked is not needed"
@@ -310,7 +315,7 @@ fn a_snapshot_that_does_not_check_is_named_and_retried_never_recorded() {
     // ROT ON DISK: the body no longer matches its receipt.
     fs::write(root.join(file_name(Kind::Kite, held)), b"garbled").unwrap();
     for _ in 0..2 {
-        let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+        let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
         assert!(listed.first.is_empty());
         assert_eq!(listed.refused.len(), 1, "{listed:?}");
         assert!(
@@ -369,7 +374,7 @@ fn index_lines_that_landed_without_their_commit_line_are_taken_in_again_and_comm
     let file = generation_dir(&root).unwrap().join("NFO/ZQIDX.idx");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, &lines).unwrap();
-    let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
     assert_eq!(listed.first, both_contracts());
     assert!(
         listed.refused.is_empty() && listed.rebuilt.is_none(),
@@ -435,7 +440,7 @@ fn a_file_missing_cut_or_garbled_against_its_commit_log_is_rebuilt_as_a_new_gene
             None => fs::remove_file(&file).unwrap(),
         }
         let log_before = fs::read_to_string(first.join(ABSORBED)).unwrap();
-        let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+        let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
         assert_eq!(listed.first, both_contracts(), "{name}");
         assert!(listed.refused.is_empty(), "{name}: {listed:?}");
         let said = listed.rebuilt.clone().unwrap_or_default();
@@ -463,7 +468,7 @@ fn a_file_missing_cut_or_garbled_against_its_commit_log_is_rebuilt_as_a_new_gene
             "{name}: {record}"
         );
         // THE NEW GENERATION MATCHES ITS LOG: the next listing reads it as is.
-        let again = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+        let again = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
         assert_eq!(
             (again.first, again.rebuilt),
             (both_contracts(), None),
@@ -482,7 +487,7 @@ fn a_commit_log_line_that_does_not_check_rebuilds_the_generation() {
         log.replacen("|indexed|", "|indexes|", 1),
     )
     .unwrap();
-    let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
     assert_eq!(listed.first, both_contracts());
     assert!(
         listed
@@ -567,7 +572,7 @@ fn a_snapshot_refused_under_other_parse_rules_is_taken_in_again() {
     let first = generation_dir(&root).unwrap();
     fs::create_dir_all(&first).unwrap();
     fs::write(first.join(ABSORBED), &line).unwrap();
-    let listed = listing(&root, &stamps(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), route(), "ZQIDX", day(2026, 1, 31)).unwrap();
     assert_eq!(
         listed.first,
         BTreeMap::from([((day(2026, 1, 27), 8_000_001), day(2026, 1, 2))])
@@ -607,6 +612,6 @@ fn absorbing_with_nothing_pending_writes_nothing_and_a_route_no_line_can_carry_i
     };
     let taken = absorb_pending(&root, other).unwrap();
     assert_eq!(taken.indexed, vec![stamp(day(2026, 1, 2))]);
-    let listed = listing(&root, &stamps(&root), other, "ZQIDX", day(2026, 1, 31)).unwrap();
+    let listed = listing(&root, &book(&root), other, "ZQIDX", day(2026, 1, 31)).unwrap();
     assert!(listed.first.is_empty());
 }

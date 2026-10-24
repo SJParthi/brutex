@@ -78,9 +78,9 @@ mod fno_membership;
 mod day_table;
 
 /// C-MS-01: `master_snapshots::Book::token_on` flat at 1, 10 and 100 dated
-/// snapshots (R4-28, DLY-09), held to the ceiling by this harness. C-MS-02:
-/// `fnowork::futures_plan` flat at 1, 10 and 100 snapshots on disk (R4-28
-/// repair 1).
+/// snapshots (R4-28, DLY-09). C-MS-02: `fnowork::futures_plan` flat at 1, 10
+/// and 100 snapshots on disk (R4-28 repair 1). Both held to the ceiling by
+/// this harness, `crates/pull/benches/ratio.rs`.
 #[path = "ratio/master_snapshots.rs"]
 mod master_snapshots;
 

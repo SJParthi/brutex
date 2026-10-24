@@ -1703,6 +1703,17 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
     // its unmeasured days was rewritten instead.
     ("crates/costs/src/lot.rs", 1),
+    // R4-28 repair 5, 24 Oct 2026 (D-7191): `Catalog::read` orders the
+    // receipted snapshot stamps and the entries named incomplete, once per
+    // listing of the snapshots directory, which is already linear in its
+    // entries (one body and one receipt per attended refresh); every answer
+    // after it is a hash probe (of_day, before, is_receipted). `diff` orders
+    // its own records once per attended refresh, over the changes only,
+    // inside a comparison of two whole dumps (L-R428-03), so one pair of
+    // dumps writes one `.diff` byte for byte. Reason in docs/06-limits.md,
+    // "Gate 11 — R4-28, declared at its merge", and L-R428-13. `Book::of`'s
+    // sort was removed instead: it checks the order it is given.
+    ("crates/pull/src/master_snapshots.rs", 3),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -2065,6 +2076,13 @@ const ALLOW_MEMBER: Allow = &[
     // two comparisons, the shape rule 7 permits. Reason in
     // docs/06-limits.md, "Gate 11 — BASE-GATE11".
     ("crates/pull/src/reference_data.rs", 1),
+    // R4-28 repair 5, 24 Oct 2026 (D-7191): `diff` asks the new dump's key
+    // set, a `HashSet` built once per diff, whether an old row's key is still
+    // listed, at its three places (the gone shares, the same-token arm, the
+    // delistings): one hash probe each. The duplicated-token set's probe was
+    // removed instead: the token index's own slot answers it. Reason in
+    // docs/06-limits.md, "Gate 11 — R4-28, declared at its merge".
+    ("crates/pull/src/master_snapshots.rs", 3),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

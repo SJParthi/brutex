@@ -84474,3 +84474,59 @@ D-7185).
    `history_ends`. Every line is whole: nothing cut at its ceiling and no
    field counted away past `telemetry::MAX_FIELDS` (the event carries 11 of
    the 12).
+
+### D-7191 — R4-28 repair 5: the snapshot catalog, the book and the diff answer from indices built once; gate 11's six remaining lines are declared with their bounds — 2026-10-24
+
+The number follows D-7190 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** CI gate 11 (banned constructs on the O(1) paths) refused
+   seven entries, 22 occurrences, in R4-28's two new production files,
+   `crates/pull/src/master_snapshots.rs` and
+   `crates/pull/src/master_snapshots_first_listed.rs`: three searches
+   (`partition_point`) where the law is "never binary_search" (docs/07
+   layer 4), nine maps made unsized where it is "pre-size every map"
+   (docs/07 law 2), four sorts, two searches of a list the data sent and
+   four membership tests. None was in the gate's allowlists and none had a
+   gate-11 reason in `docs/06-limits.md`; the gate's other 16 refusals on
+   that run are feat/db-fix's own, in other packages' files.
+2. **What was removed (16).** `Catalog::read` lists the directory's names
+   first, sizes its maps from them, and builds two indices with its one
+   ordering: each (kind, day)'s newest receipted ordinal, and each receipted
+   stamp's place in its kind's list. `Catalog::of_day`, `Catalog::before`
+   and the new `Catalog::is_receipted` are one probe each. `before` of a
+   stamp no receipt commits is now `None` (the search answered the
+   receipted stamp below any stamp), and `diff_for` refuses such a stamp by
+   name, where it answered `Ok(None)`, "the first snapshot", whenever none
+   came before it. `first_listed::listing` takes the `Book` and reads the
+   stamps on or before the plan's last day from `Book::through`, one
+   day-table index. `Snapshot::parse` indexes the header once (the first of
+   two columns with one name is read, as before), sizes its rows and token
+   index from the dump's line count and its word map from `WORDS_HINT`
+   (64), and keeps a token's duplication in its one index slot (`Slot`), so
+   a lookup is one probe for the word and one for the token. The diff sizes
+   its token map from the old rows and its gone-share map from the gone
+   shares; the first-listed log sizes its committed map from its pairs and
+   the take-in cache from the names the log commits, and a plan makes its
+   why-not map only when it took snapshots in. A change kind's count slot is
+   `Change::index`, a match. `Book::of` (the tests and the bench) no longer
+   sorts what it is given: it checks the order in one pass and refuses
+   snapshots not given oldest first.
+3. **What is declared (6), each bounded.** In `.github/gates_ledger.rs`,
+   `crates/pull/src/master_snapshots.rs` takes rule 4 = 3 and rule 7 = 3.
+   Rule 4: `Catalog::read` orders the receipted stamps of each kind and the
+   entries named incomplete once per listing, which is already linear in
+   the directory's entries (L-R428-10), and nothing after it sorts; `diff`
+   orders its records once per attended refresh, over its changes only,
+   inside a comparison of two whole dumps (L-R428-03), so one pair of dumps
+   writes one `.diff` byte for byte (CLAUDE.md section 3 rule 5). Rule 7:
+   `diff`'s three probes of the new dump's key set, a `HashSet` built once
+   per diff: hash probes, the shape the rule permits. The reasons are in
+   `docs/06-limits.md`, "Gate 11 — R4-28, declared at its merge", and
+   L-R428-13 records the listing's cost.
+4. **Proof.** `docs/04-invariants.md` R428-26..R428-30. The gate run on the
+   edited tree refuses no R4-28 file, and its REFUSED lines equal those of
+   feat/db-fix's own run. The tests that change behaviour (a predecessor for
+   a stamp no file holds, `diff_for` of such a stamp, `Book::of` given its
+   snapshots newest first) fail on the unfixed code: each asserts the
+   refusal or the `None` that code did not give.

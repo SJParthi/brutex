@@ -21351,6 +21351,62 @@ without R4-17 and not R4-17's files: rule 3 at
 pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ~~~~
 
+### Gate 11 — R4-28, declared at its merge (R4-28 repair 5, 24 October 2026)
+
+~~~~text
+Gate 11 run on R4-28's tip (c01ee84aa, feat/db-fix 7b397bbe7 merged)
+refused seven entries, 22 occurrences, every one in R4-28's two new
+production files (the r5 check's blocking item). Each was read before it
+was counted or removed: 16 are removed, 6 are declared (D-7191).
+
+RULE 1 (`ALLOW_SEARCH`) -- 3 removed, none declared. `Catalog::of_day` and
+  `Catalog::before` searched the receipted stamps. They are now one probe
+  each of two indices `Catalog::read` builds from its one listing:
+  `newest_on`, each (kind, day)'s newest receipted ordinal, and `place`,
+  each receipted stamp's place in its kind's ascending list. `before` of a
+  stamp no receipt commits is `None` (it answered the stamp below it), and
+  `diff_for` refuses that stamp by name. `first_listed::list_in` searched
+  the book's stamps for those on or before the plan's last day; `listing`
+  now takes the book, and `Book::through` cuts them with one day-table
+  index.
+RULE 3 (`ALLOW_UNSIZED`) -- 9 removed, none declared. `Catalog::read`
+  lists the names first and sizes its map from them. `Snapshot::parse`
+  sizes its rows and its token index from the dump's line count and its
+  word map from a stated hint (64; a dump carries a few dozen exchange,
+  segment and type words), and its duplicated-token set is gone: the
+  token's index slot answers `Duplicated`. The diff sizes its token map
+  from the old rows and its gone-share map from the gone shares, found
+  first. The first-listed log sizes its committed map from its name=count
+  pairs, collected first; the take-in cache is sized to the names the log
+  already commits; a plan's why-not map is made only when the plan took
+  snapshots in.
+RULE 4 (`ALLOW_SORT`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `Catalog::read` orders the receipted stamps of each kind and the
+  entries named incomplete, once per listing. The listing is already linear
+  in the snapshots directory's entries, a body and a receipt per attended
+  refresh and whatever a kill left (L-R428-10), and nothing after it sorts
+  (L-R428-13). `diff` orders its records once per attended refresh, over
+  the changes only, inside a comparison of two whole dumps (L-R428-03), so
+  one pair of dumps writes one `.diff` byte for byte (CLAUDE.md section 3
+  rule 5). `Book::of` (the tests and the bench) sorted the snapshots it was
+  given; it now checks their order in one pass and refuses another.
+RULE 6 (`ALLOW_SCAN`) -- 2 removed, none declared. The dump's header is
+  indexed once into a map (of two columns with one name the first is read,
+  as before), and a change kind's count slot is `Change::index`, a match.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `diff` asks the new dump's key set, a `HashSet` built once per
+  diff, whether an old row's key is still listed, at its three places (the
+  gone shares, the same-token arm, the delistings): one hash probe each.
+  The duplicated-token set's probe went with the set.
+
+pull/src/master_snapshots_first_listed.rs needs no line. The run's other
+16 refusals are feat/db-fix's own, present there without R4-28 and in other
+packages' files (cli/src/tick_second_check.rs and tick_second_index.rs;
+pull/src/gdfl_import.rs, gdfl_import_causes.rs, gdfl_import_day.rs and
+gdfl_import_quality.rs; api/src/dayflags.rs): the REFUSED lines of the two
+runs are the same lines.
+~~~~
+
 ## The upkeep runner (R3-17, D-6270)
 
 `pull::upkeep` and `cli upkeep`. None of it is on a request path: a page reads
@@ -21494,6 +21550,7 @@ nothing.
 | L-R428-10 | Every refresh names every incomplete snapshot entry of its kind, and it costs one directory listing (R4-28 repair 3) | the code deletes nothing, so a write cut by a kill stays on disk until someone moves it aside by hand, and every later refresh names it again: in the `/masters/refresh` outcome (`snapshot.incomplete`), in one Warn `pull.masters.snapshot` event each, and in the facts of every futures pull over the book. A refresh that writes nothing (a refused landing, an empty body) lists the directory once to name them; a write already lists it under the writers' lock and names them from that listing | at most `master_snapshots::INCOMPLETE_NAMED` (64) entries are named per refresh outcome, per refresh's events and per plan, newest first; the rest are counted (`unnamed`, one more Warn event, one more plan line), never dropped unseen. The listing itself is O(entries in the snapshots directory), as every write already was (L-R428-08) | R4-28 |
 | L-R428-11 | A refresh names at most `DIFF_NAMED` (256) of the diff's symbol, ISIN, lot-size, expiry and token changes (R4-28 repair 4) | an exchange-wide revision (a lot-size change for every contract) changes one row per contract, tens of thousands in one dump, and one Warn event and one outcome object each would be that many | the first 256 in the diff's own order are named in the `/masters/refresh` outcome (`diff.named`) and in one Warn `pull.masters.snapshot` event each; the rest are counted (`diff.unnamed`, `diff.named_total`, one more Warn event naming the `.diff` file), and every change of every kind is in the fixed-record `.diff` file, never dropped | R4-28 |
 | L-R428-12 | `Book::open` waits for a master write in flight (R4-28 repair 4) | the listing takes the writers' lock shared, so a body whose receipt is still being written is never named cut; it waits for that writer and no other reader | the wait is the writer's own hold, which is measured: a snapshot write with its futures take-in p50 337 ms, p99 851 ms, max 7,076 ms (L-R428-08), and, only after damage is found, a first-listed rebuild at 0.43 to 0.66 s a snapshot held (6,580 ms over 10 and 12,993 ms over 30 measured; about 43 to 66 s at 100, EXTRAPOLATED: L-R428-09); a diff is computed outside the lock and holds it only for one write, sync and rename. The wait itself is NOT MEASURED apart from those holds | R4-28 |
+| L-R428-13 | `Catalog::read` orders what its one listing found, and the diff orders its own records (R4-28 repair 5; D-7191; gate 11 rule 4, declared) | a directory lists its names in no order, and the listing is the only place the receipted stamps of a kind and the entries named incomplete are put in order; the diff's records are put in one order so one pair of dumps writes one `.diff` byte for byte | the listing is O(entries in the snapshots directory) (L-R428-10) and its orderings O(n log n) in the receipted snapshots of a kind and in the incomplete entries, once per listing; every answer after it (`of_day`, `before`, `is_receipted`) is one hash probe, and nothing else in the module sorts or searches the stamps. The diff's ordering is O(c log c) in its c changes, once per attended refresh, inside its O(rows) comparison (L-R428-03). MEASUREMENT: PENDING | R4-28 |
 
 ## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
 

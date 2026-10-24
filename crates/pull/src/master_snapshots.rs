@@ -71,13 +71,15 @@
 //! | first probe into a snapshot not yet loaded | one read, one decompression and one parse of that snapshot, O(rows), once |
 //! | [`snapshot`] | one compression, one directory listing, at most one receipt check, and for a Kite snapshot one parse to take its futures into [`first_listed`] |
 //! | [`diff`] | O(rows of both snapshots), once per refresh |
-//! | [`first_listed::listing`] | no snapshot opened: the absorbed log and one underlying's index file |
+//! | [`Catalog::read`] | one directory listing and one ordering of what it found (`docs/06-limits.md` L-R428-13); then [`Catalog::of_day`], [`Catalog::before`] and [`Catalog::is_receipted`] are one hash probe each |
+//! | [`first_listed::listing`] | no snapshot opened: the stamps through the day by one day-table index ([`Book::through`]), the absorbed log and one underlying's index file |
 //!
 //! The day table makes the snapshot lookup an index rather than a search: it
 //! holds one entry per calendar day the snapshots span. Measured by
 //! `crates/pull/benches/ratio/master_snapshots.rs` (C-MS-01) at 1, 10 and 100
 //! snapshots; `docs/06-limits.md` L-R428-01..06 record the bounds.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -371,10 +373,26 @@ impl core::fmt::Display for Incomplete {
 }
 
 /// Every snapshot on disk, by name: one directory listing.
+///
+/// # Cost (R4-28 repair 5)
+///
+/// [`Catalog::read`] is one directory listing, linear in the entries the
+/// snapshots directory holds (a body and a receipt per attended refresh, and
+/// whatever a kill left), and one ordering of the receipted stamps and of the
+/// entries named incomplete. Every answer after it is one hash probe or one
+/// slice: [`Catalog::of_day`], [`Catalog::before`] and
+/// [`Catalog::is_receipted`] answer from indices built once by that listing,
+/// never by a search of the stamps (`docs/07-o1-architecture.md` layer 4).
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
     /// Receipted stamps per kind, ascending.
     receipted: HashMap<Kind, Vec<Stamp>>,
+    /// Each receipted stamp's place in its kind's ascending list: what
+    /// [`Catalog::before`] and [`Catalog::is_receipted`] answer from.
+    place: HashMap<(Kind, Stamp), usize>,
+    /// The newest receipted ordinal of each (kind, day): what
+    /// [`Catalog::of_day`] answers from.
+    newest_on: HashMap<(Kind, Day), u32>,
     /// The highest ordinal any entry of a (kind, day) carries, complete or not.
     highest: HashMap<(Kind, Day), u32>,
     /// Entries that are not snapshots: a body with no receipt, a receipt with
@@ -396,14 +414,22 @@ impl Catalog {
             Err(why) if why.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(why) => return Err(format!("{} could not be listed: {why}", root.display())),
         };
-        let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::new();
-        let mut partials = Vec::new();
-        let mut cut_diffs = Vec::new();
+        // THE NAMES FIRST, so every map below is sized from a count in hand
+        // (docs/07 law 2; R4-28 repair 5). A name that is not UTF-8 is no
+        // snapshot's, and is passed over as before.
+        let mut names = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
+            if let Ok(name) = entry.file_name().into_string() {
+                names.push(name);
+            }
+        }
+        let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::with_capacity(names.len());
+        let mut partials = Vec::new();
+        let mut cut_diffs = Vec::new();
+        for name in &names {
+            let name = name.as_str();
             if let Some((kind, stamp, true)) = name.strip_suffix(PARTIAL).and_then(parse_name) {
                 partials.push(Incomplete {
                     kind,
@@ -442,7 +468,13 @@ impl Catalog {
                 slot.0 = true;
             }
         }
-        let mut catalog = Self::default();
+        let mut catalog = Self {
+            receipted: HashMap::with_capacity(Kind::ALL.len()),
+            place: HashMap::with_capacity(seen.len()),
+            newest_on: HashMap::with_capacity(seen.len()),
+            highest: HashMap::with_capacity(seen.len().saturating_add(partials.len())),
+            incomplete: Vec::new(),
+        };
         for (&(kind, stamp), &(body, receipt)) in &seen {
             let highest = catalog.highest.entry((kind, stamp.day)).or_insert(0);
             *highest = (*highest).max(stamp.ordinal);
@@ -462,8 +494,18 @@ impl Catalog {
                 }),
             }
         }
-        for stamps in catalog.receipted.values_mut() {
+        // ONE ORDERING PER LISTING, and the two indices every later answer
+        // reads (R4-28 repair 5): a directory lists in no order, and the
+        // listing is the only place the stamps are put in order. Its cost is
+        // the listing's own, in the snapshots held; `docs/06-limits.md`
+        // L-R428-13 and gate 11's allowlist carry the reason.
+        for (&kind, stamps) in &mut catalog.receipted {
             stamps.sort_unstable();
+            for (at, &stamp) in stamps.iter().enumerate() {
+                catalog.place.insert((kind, stamp), at);
+                // Ascending, so the last write of a day is its newest ordinal.
+                catalog.newest_on.insert((kind, stamp.day), stamp.ordinal);
+            }
         }
         // A RECEIPT CUT BEFORE ITS RENAME HOLDS ITS ORDINAL TOO (R4-28 repair
         // 4, the r4 check's follow-up): with its body gone, the next write
@@ -479,6 +521,8 @@ impl Catalog {
         }
         catalog.incomplete.extend(partials);
         catalog.incomplete.extend(cut_diffs);
+        // The entries named incomplete, in the order every outcome names them:
+        // the listing's second ordering, over what kills left (normally none).
         catalog
             .incomplete
             .sort_unstable_by(|a, b| (a.kind, a.stamp, &a.file).cmp(&(b.kind, b.stamp, &b.file)));
@@ -513,24 +557,29 @@ impl Catalog {
             .collect()
     }
 
-    /// The day's snapshot of `kind`: its newest receipted ordinal.
+    /// The day's snapshot of `kind`: its newest receipted ordinal. One probe.
     #[must_use]
     pub fn of_day(&self, kind: Kind, day: Day) -> Option<Stamp> {
-        let stamps = self.receipted(kind);
-        let after = stamps.partition_point(|stamp| stamp.day <= day);
-        after
-            .checked_sub(1)
-            .and_then(|at| stamps.get(at))
-            .copied()
-            .filter(|stamp| stamp.day == day)
+        self.newest_on
+            .get(&(kind, day))
+            .map(|&ordinal| Stamp { day, ordinal })
     }
 
-    /// The receipted stamp of `kind` just before `stamp`.
+    /// Whether `stamp` is a receipted snapshot of `kind`. One probe.
+    #[must_use]
+    pub fn is_receipted(&self, kind: Kind, stamp: Stamp) -> bool {
+        self.place.contains_key(&(kind, stamp))
+    }
+
+    /// The receipted stamp of `kind` just before the receipted `stamp`: one
+    /// probe and one slice index. `None` when `stamp` is the first receipted
+    /// one, and also when it is not receipted at all, which
+    /// [`Catalog::is_receipted`] tells apart (R4-28 repair 5: it was a search
+    /// of the stamps, and answered a predecessor for a stamp no file holds).
     #[must_use]
     pub fn before(&self, kind: Kind, stamp: Stamp) -> Option<Stamp> {
-        let stamps = self.receipted(kind);
-        let at = stamps.partition_point(|held| *held < stamp);
-        at.checked_sub(1).and_then(|at| stamps.get(at)).copied()
+        let at = self.place.get(&(kind, stamp))?.checked_sub(1)?;
+        self.receipted(kind).get(at).copied()
     }
 
     /// The highest ordinal any entry of (kind, day) carries, 0 for none.
@@ -1194,6 +1243,23 @@ fn decimal(text: &str) -> Option<Box<str>> {
     })
 }
 
+/// What the token index holds for one `(exchange, token)`: its row, or that
+/// the dump lists the token more than once (R4-28 repair 5: one probe answers
+/// both, where a second set of the duplicated tokens was probed first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// The one row listing the token.
+    Row(u32),
+    /// Two or more rows list the token: neither is believed.
+    Duplicated,
+}
+
+/// The distinct exchange, segment and instrument-type words one Kite dump
+/// carries number a few dozen; the word map is sized for this many and grows
+/// past it only for a dump that carries more, which [`Snapshot::intern`]
+/// refuses past a `u16`.
+const WORDS_HINT: usize = 64;
+
 /// One parsed Kite dump with its per-snapshot hash index.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -1201,8 +1267,7 @@ pub struct Snapshot {
     words: Vec<Box<str>>,
     word_ids: HashMap<Box<str>, u16>,
     rows: Vec<Row>,
-    by_token: HashMap<(u16, u64), u32>,
-    duplicated: HashSet<(u16, u64)>,
+    by_token: HashMap<(u16, u64), Slot>,
 }
 
 impl Snapshot {
@@ -1219,11 +1284,17 @@ impl Snapshot {
         let mut lines = csv.lines();
         let header = lines.next().ok_or_else(|| "the dump is empty".to_owned())?;
         let header = split_line(header.trim_start_matches('\u{feff}'))?;
+        // THE HEADER, INDEXED ONCE (R4-28 repair 5): each required column is
+        // one probe, never a search of the header the dump sent, and of two
+        // columns with one name the first is the one read, as before.
+        let mut columns: HashMap<&str, usize> = HashMap::with_capacity(header.len());
+        for (index, name) in header.iter().enumerate() {
+            columns.entry(name.trim()).or_insert(index);
+        }
         let mut at = [0_usize; KITE_COLUMNS.len()];
         for (slot, column) in at.iter_mut().zip(KITE_COLUMNS) {
-            *slot = header
-                .iter()
-                .position(|name| name.trim() == column)
+            *slot = *columns
+                .get(column)
                 .ok_or_else(|| format!("the dump has no column {column:?}"))?;
         }
         let [
@@ -1238,13 +1309,20 @@ impl Snapshot {
             segment_at,
             exchange_at,
         ] = at;
+        // SIZED FROM THE DUMP ITSELF (docs/07 law 2; R4-28 repair 5): one row
+        // a line, so the dump's line count bounds its rows and its tokens, and
+        // neither the rows nor the index grows while the dump is read.
+        let held = csv
+            .bytes()
+            .filter(|&byte| byte == b'\n')
+            .count()
+            .saturating_add(1);
         let mut snapshot = Self {
             stamp,
-            words: Vec::new(),
-            word_ids: HashMap::new(),
-            rows: Vec::new(),
-            by_token: HashMap::new(),
-            duplicated: HashSet::new(),
+            words: Vec::with_capacity(WORDS_HINT),
+            word_ids: HashMap::with_capacity(WORDS_HINT),
+            rows: Vec::with_capacity(held),
+            by_token: HashMap::with_capacity(held),
         };
         for (number, line) in lines.enumerate() {
             let line = line.trim_end_matches('\r');
@@ -1274,11 +1352,16 @@ impl Snapshot {
             let kind = snapshot.intern(cell(kind_at).trim())?;
             let row = u32::try_from(snapshot.rows.len())
                 .map_err(|_| "the dump holds more rows than a u32 counts".to_owned())?;
-            if snapshot.by_token.insert((exchange, token), row).is_some() {
-                // TWO ROWS FOR ONE TOKEN: neither is believed. The later row
-                // takes the slot (`insert` replaces), and the token answers
-                // `Duplicated`, so neither row is ever answered for it.
-                snapshot.duplicated.insert((exchange, token));
+            match snapshot.by_token.entry((exchange, token)) {
+                Entry::Vacant(slot) => {
+                    slot.insert(Slot::Row(row));
+                }
+                // TWO ROWS FOR ONE TOKEN: neither is believed. The token's
+                // slot answers `Duplicated` from here on, so neither row is
+                // ever answered for it.
+                Entry::Occupied(mut slot) => {
+                    slot.insert(Slot::Duplicated);
+                }
             }
             snapshot.rows.push(Row {
                 token,
@@ -1341,18 +1424,16 @@ impl Snapshot {
         let Some(&exchange) = self.word_ids.get(exchange) else {
             return Lookup::Absent;
         };
-        if self.duplicated.contains(&(exchange, token)) {
-            return Lookup::Duplicated;
-        }
-        self.by_token
-            .get(&(exchange, token))
-            .and_then(|&row| self.rows.get(row as usize))
-            .map_or(Lookup::Absent, |row| {
+        match self.by_token.get(&(exchange, token)) {
+            Some(Slot::Duplicated) => Lookup::Duplicated,
+            Some(&Slot::Row(row)) => self.rows.get(row as usize).map_or(Lookup::Absent, |row| {
                 Lookup::Listed(Listed {
                     snapshot: self,
                     row,
                 })
-            })
+            }),
+            None => Lookup::Absent,
+        }
     }
 
     fn word(&self, id: u16) -> &str {
@@ -1574,16 +1655,28 @@ impl Book {
         Ok(book)
     }
 
-    /// A book over snapshots already parsed (tests and the bench).
+    /// A book over snapshots already parsed (tests and the bench), given
+    /// oldest first.
     ///
     /// # Errors
     ///
-    /// Stamps spanning more than forty years, or two snapshots with one stamp.
-    pub fn of(mut snapshots: Vec<Snapshot>) -> Result<Self, String> {
-        snapshots.sort_unstable_by_key(Snapshot::stamp);
+    /// Stamps spanning more than forty years, two snapshots with one stamp, or
+    /// snapshots not given oldest first. R4-28 repair 5: they were sorted here,
+    /// an ordering beside the one [`Catalog::read`] makes; their order is now
+    /// checked in one pass and never made.
+    pub fn of(snapshots: Vec<Snapshot>) -> Result<Self, String> {
         let stamps: Vec<Stamp> = snapshots.iter().map(Snapshot::stamp).collect();
-        if stamps.windows(2).any(|pair| pair.first() == pair.get(1)) {
-            return Err("two snapshots carry one stamp".to_owned());
+        for pair in stamps.windows(2) {
+            if let [older, newer] = pair {
+                if older == newer {
+                    return Err(format!("two snapshots carry one stamp, {older}"));
+                }
+                if older > newer {
+                    return Err(format!(
+                        "the snapshots are not oldest first: {older} is given before {newer}"
+                    ));
+                }
+            }
         }
         let loaded = snapshots
             .into_iter()
@@ -1655,6 +1748,18 @@ impl Book {
     #[must_use]
     pub fn stamps(&self) -> &[Stamp] {
         &self.stamps
+    }
+
+    /// The stamps on or before `day`, oldest first: one day-table index and
+    /// one slice, never a search of the stamps (R4-28 repair 5). Empty when
+    /// `day` is before the first snapshot, and when the book holds none (its
+    /// `usize::MAX` index is past every slice).
+    #[must_use]
+    pub fn through(&self, day: Day) -> &[Stamp] {
+        let Ok(at) = self.governing(day) else {
+            return &[];
+        };
+        self.stamps.get(..=at).unwrap_or_default()
     }
 
     /// The newest stamp.
@@ -1898,6 +2003,22 @@ impl Change {
         Self::ALL.into_iter().find(|change| change.word() == word)
     }
 
+    /// Its place in [`Change::ALL`], and so in [`DiffSummary::counts`]: one
+    /// match, never a search of the list (R4-28 repair 5).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Listing => 0,
+            Self::Delisting => 1,
+            Self::Symbol => 2,
+            Self::Isin => 3,
+            Self::LotSize => 4,
+            Self::Expiry => 5,
+            Self::Token => 6,
+            Self::IsinUnknown => 7,
+        }
+    }
+
     /// Whether every change of this kind is named in the refresh outcome and
     /// on `/logs` (listings, delistings and unknown ISINs are counted there
     /// and named in the `.diff`).
@@ -1978,7 +2099,8 @@ pub fn diff(
         .map(|(at, listed)| (key(listed), at))
         .collect();
     let new_keys: HashSet<Key<'_>> = new_rows.iter().map(key).collect();
-    let mut old_tokens: HashMap<(&str, u64), usize> = HashMap::new();
+    // SIZED FROM THE ROWS IN HAND (docs/07 law 2; R4-28 repair 5).
+    let mut old_tokens: HashMap<(&str, u64), usize> = HashMap::with_capacity(old_rows.len());
     for (at, listed) in old_rows.iter().enumerate() {
         old_tokens
             .entry((listed.exchange(), listed.token()))
@@ -1990,15 +2112,17 @@ pub fn diff(
             .map(str::to_owned)
     };
     // OLD SHARES THAT ARE GONE, BY THEIR OWN DATE'S ISIN: the other half of a
-    // rename that kept the ISIN and changed the token.
-    let mut gone_by_isin: HashMap<String, usize> = HashMap::new();
-    for (at, listed) in old_rows.iter().enumerate() {
-        if listed.is_nse_share()
-            && !new_keys.contains(&key(listed))
-            && let Some(isin) = isin_of(old_isins, listed)
-        {
-            gone_by_isin.entry(isin).or_insert(at);
-        }
+    // rename that kept the ISIN and changed the token. Found first, so their
+    // map is sized to them; the first old row of an ISIN is the one kept.
+    let gone: Vec<(String, usize)> = old_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, listed)| listed.is_nse_share() && !new_keys.contains(&key(listed)))
+        .filter_map(|(at, listed)| isin_of(old_isins, listed).map(|isin| (isin, at)))
+        .collect();
+    let mut gone_by_isin: HashMap<String, usize> = HashMap::with_capacity(gone.len());
+    for (isin, at) in gone {
+        gone_by_isin.entry(isin).or_insert(at);
     }
     let mut matched = vec![false; old_rows.len()];
     let mut out = Vec::new();
@@ -2122,6 +2246,10 @@ pub fn diff(
             ));
         }
     }
+    // THE RECORDS IN ONE ORDER, so one pair of dumps writes one `.diff`, byte
+    // for byte (CLAUDE.md section 3 rule 5). Once per attended refresh, over
+    // the changes only, inside a diff that reads both whole dumps by design:
+    // `docs/06-limits.md` L-R428-13 and gate 11's allowlist carry the reason.
     out.sort_unstable();
     out
 }
@@ -2344,9 +2472,7 @@ impl DiffSummary {
     ) -> Self {
         let mut counts = [0_u64; 8];
         for one in items {
-            if let Some(at) = Change::ALL.iter().position(|change| *change == one.change)
-                && let Some(count) = counts.get_mut(at)
-            {
+            if let Some(count) = counts.get_mut(one.change.index()) {
                 *count = count.saturating_add(1);
             }
         }
@@ -2399,10 +2525,21 @@ impl DiffSummary {
 ///
 /// # Errors
 ///
-/// A snapshot or NSE file that does not check or parse, a value that does not
-/// fit a record, and a file that cannot be written or read, each named.
+/// A `current` that is not a receipted Kite snapshot, a snapshot or NSE file
+/// that does not check or parse, a value that does not fit a record, and a
+/// file that cannot be written or read, each named.
 pub fn diff_for(root: &Path, current: Stamp) -> Result<Option<DiffSummary>, String> {
     let catalog = Catalog::read(root)?;
+    // A STAMP NO RECEIPT COMMITS IS REFUSED BY NAME (R4-28 repair 5): it was
+    // answered `Ok(None)`, "the first snapshot, nothing to compare", whenever
+    // no receipted snapshot came before it, which a stamp that names no
+    // snapshot at all is not.
+    if !catalog.is_receipted(Kind::Kite, current) {
+        return Err(format!(
+            "{}: {current} is not a receipted Kite snapshot, so no diff is made or read for it",
+            root.join(diff_name(current)).display()
+        ));
+    }
     let Some(previous) = catalog.before(Kind::Kite, current) else {
         return Ok(None);
     };

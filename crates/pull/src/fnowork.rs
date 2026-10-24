@@ -771,7 +771,7 @@ pub fn futures_plan(
     let listing = book
         .root()
         .ok_or_else(|| "a book built in memory has no snapshots directory".to_owned())
-        .and_then(|root| first_listed::listing(root, book.stamps(), route, underlying, through))
+        .and_then(|root| first_listed::listing(root, book, route, underlying, through))
         .map_err(|why| format!("futures_index: {why}; no future of {underlying} was planned"))?;
     if let Some(ref why) = listing.rebuilt {
         let _ = telemetry::emit_if!(
