@@ -1431,16 +1431,13 @@ fn the_late_ledger_keeps_the_last_counting_close() {
 
 // ══ The bar definition that built a day ═════════════════════════════════════
 
-/// **AN OPTION DAY NAMES ITS BAR DEFINITION** (R3-13 goal 3). The journal's
-/// deciding line names 2, 4, 3 and 5 for four days: from IA-4 (D-4877) an
-/// options day holds this build's bars under 5 alone, so the first three are
-/// labelled until they are restated and the fourth is named as this build's.
-/// Where the journal names none, the day ledger's line does, and says so.
-#[test]
-fn an_option_day_names_its_bar_definition() {
-    let root = root_of("r3-13-definition");
+/// The store [`an_option_day_names_its_bar_definition`] reads: the import
+/// journal names definitions 2, 4, 3 and 5 for four options days, the day
+/// ledger names 3 for a fifth, and the contract's month file holds one
+/// invented trade a session.
+fn definition_store(root: &std::path::Path) {
     write(
-        &pull::gdfl_import::journal_path(&root),
+        &pull::gdfl_import::journal_path(root),
         "done options 2024-10-01 * definition=2 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
          done options 2024-10-03 * definition=4 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
          done options 2024-10-04 * definition=3 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
@@ -1454,10 +1451,9 @@ fn an_option_day_names_its_bar_definition() {
         &[],
     )
     .replace("definition=2", "definition=3");
-    write(&super::super::quality_path(&root), &ledger);
-    // The contract's month file holds one invented trade a session.
+    write(&super::super::quality_path(root), &ledger);
     file_bars(
-        &root,
+        root,
         Vendor::Gdfl,
         "NSE-FNO-NIFTY-2024-10-31-2500000-CE",
         Timeframe::SECOND_1,
@@ -1472,6 +1468,17 @@ fn an_option_day_names_its_bar_definition() {
         .map(|on| bar(on, 9 * 3_600 + 15 * 60, [5_000; 4], 1))
         .collect(),
     );
+}
+
+/// **AN OPTION DAY NAMES ITS BAR DEFINITION** (R3-13 goal 3). The journal's
+/// deciding line names 2, 4, 3 and 5 for four days: from IA-4 (D-4877) an
+/// options day holds this build's bars under 5 alone, so the first three are
+/// labelled until they are restated and the fourth is named as this build's.
+/// Where the journal names none, the day ledger's line does, and says so.
+#[test]
+fn an_option_day_names_its_bar_definition() {
+    let root = root_of("r3-13-definition");
+    definition_store(&root);
     let got = answer(
         &root,
         &ask(
