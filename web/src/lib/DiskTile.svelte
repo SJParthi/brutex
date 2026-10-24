@@ -29,7 +29,7 @@
 {:else if summary}
   <span class="disk" class:bad={summary.alarm} role="status" title={summary.detail}>
     <span>{summary.free}</span> · <span>{summary.store}</span> · <span>{summary.kept}</span> ·
-    <span class="backup">{summary.backup}</span> · <span>{summary.scrub}</span>
+    <span class="backup">{summary.backup}</span> · <span class="drill">{summary.drill}</span> · <span>{summary.scrub}</span>
     <button class="btn ghost" onclick={() => { void read(); }}>Refresh</button>
   </span>
 {/if}

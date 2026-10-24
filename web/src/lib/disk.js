@@ -21,7 +21,7 @@ export function bytesText(bytes) {
  * recorded or the free space could not be measured: those are said in the
  * tile's own colour, never hidden behind a tooltip.
  * @param {any} body
- * @returns {{free:string, store:string, kept:string, backup:string, scrub:string, alarm:boolean, detail:string}}
+ * @returns {{free:string, store:string, kept:string, backup:string, drill:string, scrub:string, alarm:boolean, detail:string}}
  */
 export function diskSummary(body) {
   const fs = body?.filesystem ?? {};
@@ -30,16 +30,50 @@ export function diskSummary(body) {
     sum + (typeof feed?.bar_bytes_lower_bound === 'number' ? feed.bar_bytes_lower_bound : 0), 0);
   const measured = typeof fs.free_bytes === 'number';
   const recorded = body?.backup?.recorded === true;
+  // THE SERVER'S STALENESS BY NAME (R4-09b): target missing, too old, partial.
+  const stale = recorded && body.backup.stale === true;
   return {
     free: measured ? `${bytesText(fs.free_bytes)} free of ${bytesText(fs.total_bytes)}` : `free space unknown: ${fs.error ?? 'not measured'}`,
     store: `bars ≥ ${bytesText(bars)}`,
     kept: `census kept ${bytesText(body?.census_kept_bytes)}`,
-    backup: recorded ? `last copy: ${String(body.backup.last)}` : 'NO COPY of this store is recorded',
+    backup: recorded ? `${stale ? `${String(body.backup.stale_why)} · ` : ''}last copy: ${copyText(body.backup)}`
+      : 'NO COPY of this store is recorded',
+    drill: drillText(body?.backup?.drill),
     scrub: scrubText(feeds),
-    alarm: !recorded || !measured || scrubAlarm(feeds),
+    alarm: !recorded || stale || !measured || scrubAlarm(feeds) || drillFailed(body?.backup?.drill),
     detail: [recorded ? '' : String(body?.backup?.why ?? ''), String(body?.retention ?? ''),
       String(body?.projection_why ?? '')].filter(Boolean).join(' · ')
   };
+}
+
+/**
+ * The last copy as the operator reads it: the receipt's date, the target, and
+ * the manifest's file count and bytes when `cli backup` wrote them (R4-09b);
+ * the receipt line itself when a hand-written receipt carries no such words.
+ * @param {any} backup @returns {string}
+ */
+export function copyText(backup) {
+  const receipt = backup?.receipt;
+  if (!receipt || typeof receipt.files !== 'number') return String(backup?.last ?? '');
+  const target = backup.target === 'present' ? '' : ` (target ${String(backup.target ?? 'unknown').replace('_', ' ')})`;
+  return `${String(receipt.copied)} to ${String(receipt.dest)}${target}, ${receipt.files} files, ${bytesText(receipt.bytes)}`;
+}
+
+/**
+ * The last restore drill (`cli backup-drill`, R4-09b): its date, result and
+ * months, or that none is recorded. A drill never run is said, not hidden.
+ * @param {any} drill @returns {string}
+ */
+export function drillText(drill) {
+  if (!drill || drill.recorded !== true) return 'no restore drill recorded';
+  const months = typeof drill.months === 'number' ? `${drill.months} of ${drill.asked ?? '?'} months` : '? months';
+  return `last drill ${String(drill.drilled)}: ${String(drill.result).toUpperCase()} (${months} restored and compared)`;
+}
+
+/** Whether the last drill is recorded and did not pass.
+ * @param {any} drill @returns {boolean} */
+export function drillFailed(drill) {
+  return drill?.recorded === true && drill.result !== 'pass';
 }
 
 /** A recorded copy older than this many days is said on every page. */
@@ -69,6 +103,11 @@ export function backupAlert(body, nowMs) {
     return { text: 'NO COPY of this store is recorded.', detail: String(backup.why ?? '') };
   }
   const last = String(backup.last ?? '');
+  // THE SERVER NAMES WHY A RECORDED COPY IS STALE (R4-09b): the target
+  // missing, too old, dated after now, a partial run — computed when read.
+  if (backup.stale === true && typeof backup.stale_why === 'string' && backup.stale_why) {
+    return { text: backup.stale_why, detail: last };
+  }
   const word = last.split(' ').find((part) => part.startsWith('copied='))?.slice('copied='.length) ?? '';
   const at = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?Z$/.test(word) ? Date.parse(word) : NaN;
   if (!Number.isFinite(at) || !Number.isFinite(nowMs)) {
@@ -78,8 +117,14 @@ export function backupAlert(body, nowMs) {
     return { text: 'The last copy of this store is dated after now.', detail: last };
   }
   const days = Math.floor((nowMs - at) / 86_400_000);
-  if (days > STALE_COPY_DAYS) {
+  // The server's number when it serves one, so the two cannot disagree.
+  const limit = typeof backup.stale_after_days === 'number' ? backup.stale_after_days : STALE_COPY_DAYS;
+  if (days > limit) {
     return { text: `The last copy of this store is ${days} days old.`, detail: last };
+  }
+  if (drillFailed(backup.drill)) {
+    return { text: `The last restore drill of the copy did not pass: ${String(backup.drill.result)}.`,
+      detail: String(backup.drill.last ?? '') };
   }
   return null;
 }

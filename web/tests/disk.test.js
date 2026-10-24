@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { STALE_COPY_DAYS, backupAlert, bytesText, diskSummary, scrubAlarm, scrubText } from '../src/lib/disk.js';
+import { STALE_COPY_DAYS, backupAlert, bytesText, copyText, diskSummary, drillFailed, drillText, scrubAlarm, scrubText } from '../src/lib/disk.js';
 
 test('the disk line names free space, the store, the census kept and the missing copy (DB-B73)', () => {
   assert.equal(bytesText(0), '0 B');
@@ -154,4 +154,49 @@ test('the layout mounts the standing copy line on every page, and a failed read 
   assert.match(tile, /Whether a copy of this store exists was not read\./);
   assert.match(tile, /return \(\) => stop\.abort\(\)/);
   assert.match(tile, /role="alert" data-copy-alert/);
+});
+
+test('the band shows the last backup with its manifest count and bytes, the last drill, and staleness by name (R4-09b)', () => {
+  const backup = {
+    recorded: true,
+    last: 'copied=2026-10-23T00:00:00Z dest=/Volumes/second raw_bytes=600 store_bytes=913 by=cli-backup run=7 state=complete files=12 bytes=1513',
+    receipt: { copied: '2026-10-23T00:00:00Z', dest: '/Volumes/second', files: 12, bytes: 1513 },
+    target: 'present', stale: false, stale_why: null, stale_after_days: 7,
+    drill: { recorded: true, last: 'drilled=2026-10-23T01:00:00Z result=pass', drilled: '2026-10-23T01:00:00Z',
+      result: 'pass', months: 3, asked: 3 }
+  };
+  const now = Date.parse('2026-10-24T00:00:00Z');
+  const fresh = diskSummary({ filesystem: { free_bytes: 1, total_bytes: 2 }, feeds: [], backup });
+  assert.equal(fresh.backup, 'last copy: 2026-10-23T00:00:00Z to /Volumes/second, 12 files, 1.5 KiB');
+  assert.equal(fresh.drill, 'last drill 2026-10-23T01:00:00Z: PASS (3 of 3 months restored and compared)');
+  assert.equal(fresh.alarm, false);
+  assert.equal(backupAlert({ backup }, now), null);
+  // THE SECOND DRIVE UNPLUGGED: the server's sentence, on every page and on the tile.
+  const missing = { ...backup, target: 'missing', stale: true,
+    stale_why: 'backup stale: last copy 2026-10-23T00:00:00Z; target missing' };
+  assert.deepEqual(backupAlert({ backup: missing }, now),
+    { text: 'backup stale: last copy 2026-10-23T00:00:00Z; target missing', detail: backup.last });
+  const tile = diskSummary({ filesystem: { free_bytes: 1, total_bytes: 2 }, feeds: [], backup: missing });
+  assert.equal(tile.alarm, true);
+  assert.ok(tile.backup.startsWith('backup stale: last copy 2026-10-23T00:00:00Z; target missing · last copy: '), tile.backup);
+  assert.ok(tile.backup.endsWith('(target missing), 12 files, 1.5 KiB'), tile.backup);
+  // A DRILL THAT DID NOT PASS is said, and raises the tile.
+  const failed = { ...backup, drill: { ...backup.drill, result: 'fail' } };
+  assert.equal(drillFailed(failed.drill), true);
+  assert.equal(backupAlert({ backup: failed }, now)?.text, 'The last restore drill of the copy did not pass: fail.');
+  assert.equal(diskSummary({ filesystem: { free_bytes: 1 }, backup: failed }).alarm, true);
+  // NO DRILL is said; an older server's answer still reads.
+  assert.equal(drillText(undefined), 'no restore drill recorded');
+  assert.equal(drillText({ recorded: false, why: 'never' }), 'no restore drill recorded');
+  assert.equal(drillFailed({ recorded: false }), false);
+  assert.equal(copyText({ last: 'copied=2026-10-23T00:00Z dest=/x by=op' }), 'copied=2026-10-23T00:00Z dest=/x by=op');
+  // THE SERVER'S THRESHOLD WINS over the page's when it serves one.
+  assert.equal(backupAlert({ backup: { ...backup, stale_after_days: 0 } }, now)?.text,
+    'The last copy of this store is 1 days old.');
+  assert.equal(STALE_COPY_DAYS, 7);
+});
+
+test('the disk tile renders the drill beside the copy (R4-09b)', () => {
+  const tile = readFileSync(new URL('../src/lib/DiskTile.svelte', import.meta.url), 'utf8');
+  assert.match(tile, /<span class="drill">\{summary\.drill\}<\/span>/);
 });
