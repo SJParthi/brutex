@@ -158,6 +158,10 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "gdfl-rekey"
                 | "gdfl-stop"
                 | "msum-build"
+                // The padded-minute measurement and the rate-table replay
+                // (R4-27): measurements, never a sweep.
+                | "padded-measure"
+                | "rate-replay"
                 | "srt-build"
                 | "tix-rebuild"
                 | "research-plan"

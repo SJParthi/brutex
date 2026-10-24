@@ -36,7 +36,13 @@
 //!   first to its last minute;
 //! * for a month finer than a minute whose held seconds are at least half the
 //!   seconds its days span (the density rule, below): a bitmap of the seconds
-//!   held, from each day's first to its last.
+//!   held, from each day's first to its last;
+//! * for a one-minute month, from version 2 (R4-27, INT-15): per day with
+//!   bars, a bitmap of its FLAT CARRIES, the minutes whose row has no volume
+//!   and repeats the close of the row before on its day. A reader turns them
+//!   into the day's vendor-padded minutes with the day's session windows
+//!   ([`MonthSummary::padded_on`]), which is the calendar half this crate
+//!   does not hold.
 //!
 //! # The density rule for seconds
 //!
@@ -109,8 +115,21 @@ use crate::header::Header;
 use crate::path::YearMonth;
 
 /// The summary's own format version: the number the `.sbar` section and the
-/// `.sum` sibling carry before the payload.
-pub const VERSION: u16 = 1;
+/// `.sum` sibling carry before the payload, and the one every summary is
+/// written at.
+///
+/// **Version 2 (R4-27, INT-15) is version 1 plus one bitmap a held day of a
+/// one-minute month:** the minutes that repeat the previous row of their IST
+/// day flat with no volume (`FLAG_PADDED`, below). Nothing in version 1
+/// changes meaning, and a version 1 summary is never rewritten in place: it
+/// is still decoded, its padded minutes read as NOT COUNTED rather than as
+/// zero ([`MonthSummary::padded_on`]), and the writer replaces it whole, as
+/// a new file, the next time the month is appended to or the rebuild door is
+/// walked over it. Readers branch on the version a summary carries.
+pub const VERSION: u16 = 2;
+
+/// The first version, still decoded: no padded-minute bitmaps.
+pub const VERSION_1: u16 = 1;
 
 /// The `.sum` sibling's magic. Not in use anywhere else in the store.
 pub const MAGIC: [u8; 8] = *b"BRUTEXU1";
@@ -124,12 +143,32 @@ pub const DAY_LEN: usize = 12;
 /// Payload flag: the seconds bitmaps are present.
 pub const FLAG_SECONDS: u32 = 0b1;
 
+/// Payload flag, version 2 only: the flat-carry bitmaps are present, one a
+/// held day, over the same minutes as the day's minute bitmap. Set exactly
+/// when the month is a one-minute month.
+///
+/// A FLAT CARRY is a row with volume zero whose open, high, low and close all
+/// equal the close of the row before it on the same IST day. It is the
+/// calendar-free half of the vendor-padded minute (INT-15): the other half,
+/// "in the same session window", needs the exchange calendar, which this
+/// crate does not hold, so a reader applies it ([`MonthSummary::padded_on`]
+/// takes the day's windows). Whether the definition applies to a series at
+/// all (a cash share's minutes: an index never trades, so its flat minute is
+/// not padding) is the reader's question too, answered from the series' key.
+pub const FLAG_PADDED: u32 = 0b10;
+
+/// Every payload flag version 2 knows. Any other bit is refused.
+pub const KNOWN_FLAGS: u32 = FLAG_SECONDS | FLAG_PADDED;
+
 /// Every payload flag version 1 knows. Any other bit is refused.
-pub const KNOWN_FLAGS: u32 = FLAG_SECONDS;
+pub const KNOWN_FLAGS_V1: u32 = FLAG_SECONDS;
 
 /// The longest payload: the head, 31 days, every minute and every second of
 /// every day held. 31 × (180 + 10,800) + 160 + 372 = 340,912 bytes, under the
-/// sealed section's [`crate::sealed::MAX_SUMMARY_LEN`].
+/// sealed section's [`crate::sealed::MAX_SUMMARY_LEN`]. Version 2's flat-carry
+/// bitmaps do not raise it: they exist only for a one-minute month, which
+/// keeps no seconds, so its longest payload is 31 × (12 + 180 + 180) + 160 =
+/// 11,692 bytes.
 pub const MAX_PAYLOAD_LEN: usize = HEAD_LEN + 31 * (DAY_LEN + 180 + 10_800);
 
 /// Bytes the section wraps around a payload: version, two zero bytes, CRC.
@@ -160,6 +199,9 @@ struct DayBits {
     last: u32,
     /// Minutes of the day held.
     minutes: [u64; MINUTE_WORDS],
+    /// Minutes of the day held by a flat carry ([`FLAG_PADDED`]); all zero
+    /// while the month does not track them.
+    carry: [u64; MINUTE_WORDS],
     /// Seconds of the day held, while they are tracked.
     seconds: Option<Box<[u64; SECOND_WORDS]>>,
 }
@@ -171,6 +213,7 @@ impl DayBits {
             first: NO_SECOND,
             last: NO_SECOND,
             minutes: [0; MINUTE_WORDS],
+            carry: [0; MINUTE_WORDS],
             seconds: track_seconds.then(|| Box::new([0; SECOND_WORDS])),
         }
     }
@@ -198,12 +241,11 @@ fn set(words: &mut [u64], bit: u32) {
     }
 }
 
-/// The set bits of `words` in `first..=last`, ascending: one step a word and
-/// one a set bit, never one a clear bit.
-fn set_bits(words: &[u64], first: u32, last: u32) -> Vec<u32> {
-    let mut out = Vec::new();
+/// The words of `words` covering bits `first..=last`, each with the bits
+/// outside the range cleared, as `(word index, bits)`: one step a word.
+fn masked_words(words: &[u64], first: u32, last: u32) -> impl Iterator<Item = (u32, u64)> + '_ {
     let (from, to) = (first / 64, last / 64);
-    for index in from..=to {
+    (from..=to).map(move |index| {
         let word = usize::try_from(index).unwrap_or(usize::MAX);
         let mut bits = words.get(word).copied().unwrap_or(0);
         if index == from {
@@ -212,6 +254,15 @@ fn set_bits(words: &[u64], first: u32, last: u32) -> Vec<u32> {
         if index == to && last % 64 < 63 {
             bits &= (1_u64 << (last % 64 + 1)) - 1;
         }
+        (index, bits)
+    })
+}
+
+/// The set bits of `words` in `first..=last`, ascending: one step a word and
+/// one a set bit, never one a clear bit.
+fn set_bits(words: &[u64], first: u32, last: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (index, mut bits) in masked_words(words, first, last) {
         while bits != 0 {
             out.push(index * 64 + bits.trailing_zeros());
             bits &= bits - 1;
@@ -292,6 +343,60 @@ pub struct MonthSummary {
     days: Vec<DayBits>,
     /// Whether seconds are tracked (and, encoded, kept).
     seconds: bool,
+    /// Whether flat carries are tracked ([`FLAG_PADDED`]): a one-minute
+    /// month built or decoded at version 2. A version 1 summary does not.
+    carry: bool,
+}
+
+/// Why a summary cannot say how many padded minutes a day held. Each is a
+/// NOT COUNTED, never a zero: a reader that shows a count shows these words
+/// instead (INT-15, R4-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotCounted {
+    /// A version 1 summary: it predates the flat-carry bitmaps.
+    Version1,
+    /// The month is not a one-minute month: a padded minute is defined on
+    /// one-minute bars only.
+    NotMinutes,
+    /// The month holds a stamp off its grid or not strictly after the row
+    /// before, so "the row before" is not one minute's row and the carry is
+    /// not defined.
+    InvalidStamps,
+}
+
+impl NotCounted {
+    /// A stable one-word name.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Version1 => "summary_v1",
+            Self::NotMinutes => "not_one_minute",
+            Self::InvalidStamps => "invalid_stamps",
+        }
+    }
+}
+
+impl fmt::Display for NotCounted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = self.reason();
+        match self {
+            Self::Version1 => write!(
+                f,
+                "{reason}: padded minutes not counted; a version 1 summary holds no flat-carry \
+                 bitmaps, and it is rebuilt whole as version 2 by the next append or the \
+                 rebuild door"
+            ),
+            Self::NotMinutes => write!(
+                f,
+                "{reason}: padded minutes not counted; they are defined on one-minute bars only"
+            ),
+            Self::InvalidStamps => write!(
+                f,
+                "{reason}: padded minutes not counted; the month holds a stamp off its grid or \
+                 not strictly after the row before, so a minute's previous row is not one row"
+            ),
+        }
+    }
 }
 
 /// Why a kept summary was not used, each with its own name.
@@ -429,6 +534,7 @@ impl MonthSummary {
     #[must_use]
     pub fn new(symbol_id: u32, timeframe_secs: u32, month: YearMonth) -> Self {
         let seconds = timeframe_secs < 60;
+        let carry = timeframe_secs == 60;
         Self {
             symbol_id,
             timeframe_secs,
@@ -444,6 +550,7 @@ impl MonthSummary {
                 .map(|_| DayBits::empty(seconds))
                 .collect(),
             seconds,
+            carry,
         }
     }
 
@@ -490,6 +597,18 @@ impl MonthSummary {
         {
             self.counts.held_minutes = self.counts.held_minutes.saturating_add(1);
         }
+        // A FLAT CARRY (version 2, INT-15): no volume, and all four prices
+        // the close of the row before on the same IST day. Judged HERE,
+        // before `fold_extremes` moves `extremes.close` to this row's close:
+        // until then it is the row before's. One comparison of four prices,
+        // O(1); the day's first row has no row before it on its day and is
+        // never one.
+        let carry = self.carry
+            && bar.volume == 0
+            && previous.is_some_and(|before| ist(before).0 == ist(ts).0)
+            && [bar.open, bar.high, bar.low, bar.close]
+                .iter()
+                .all(|price| *price == self.extremes.close);
         self.fold_extremes(bar, previous.is_none());
         if previous.is_none() {
             self.first_ts_micros = ts;
@@ -516,6 +635,9 @@ impl MonthSummary {
             entry.last.max(second)
         };
         set(&mut entry.minutes, second / 60);
+        if carry {
+            set(&mut entry.carry, second / 60);
+        }
         if let Some(seconds) = entry.seconds.as_mut() {
             set(seconds.as_mut_slice(), second);
         }
@@ -663,6 +785,98 @@ impl MonthSummary {
         Some(set_bits(words, entry.first, entry.last))
     }
 
+    /// Whether flat carries are tracked: a one-minute month built or decoded
+    /// at version 2.
+    #[must_use]
+    pub const fn tracks_carries(&self) -> bool {
+        self.carry
+    }
+
+    /// A one-minute month whose summary does not track flat carries: one
+    /// decoded from version 1. The writer builds it whole as version 2 rather
+    /// than extending it, because the rows it already folded were never
+    /// judged ([`crate::month_summary`]'s version note).
+    #[must_use]
+    pub const fn wants_carries(&self) -> bool {
+        self.timeframe_secs == 60 && !self.carry
+    }
+
+    /// The minutes of epoch day `day` held by a flat carry ([`FLAG_PADDED`]),
+    /// ascending, or `None` when this summary does not track them. Empty for
+    /// a day without bars. The calendar-free fact: a reader applies the
+    /// session windows with [`Self::padded_on`].
+    #[must_use]
+    pub fn carry_minutes_on(&self, day: i64) -> Option<Vec<u32>> {
+        if !self.carry {
+            return None;
+        }
+        let Some(entry) = self.day(day).filter(|entry| entry.held()) else {
+            return Some(Vec::new());
+        };
+        Some(set_bits(&entry.carry, entry.first / 60, entry.last / 60))
+    }
+
+    /// How many VENDOR-PADDED minutes epoch day `day` held (INT-15), given
+    /// the day's session windows as `(first minute, last minute)` of the day,
+    /// inclusive, in the order the calendar states them.
+    ///
+    /// A padded minute is a flat carry whose row before is in the SAME
+    /// window. For a month whose stamps strictly increase that is exactly a
+    /// flat carry inside a window that is not the window's first held minute:
+    /// the row before a later minute of a window is the window's previous held
+    /// minute, and the row before its first held minute lies in an earlier
+    /// window, an earlier day or outside every window. So the 09:15 open, and
+    /// the first minute after a halt, are never padded, and a minute outside
+    /// every window is never padded. The pull crate's full read
+    /// (`pull::padded::per_day`) is the same rule bar by bar, and
+    /// `padded_minutes_per_day_match_a_full_read` holds the two equal.
+    ///
+    /// # Errors
+    ///
+    /// [`NotCounted`], by name: never a zero for a day that was not counted.
+    ///
+    /// # Cost
+    ///
+    /// No bar is read. Per window, one scan of at most 23 words for its first
+    /// held minute and one popcount over at most 23: O(1) for a day, whatever
+    /// the month holds.
+    pub fn padded_on(&self, day: i64, windows: &[(u16, u16)]) -> Result<u32, NotCounted> {
+        if self.timeframe_secs != 60 {
+            return Err(NotCounted::NotMinutes);
+        }
+        if !self.carry {
+            return Err(NotCounted::Version1);
+        }
+        if self.counts.invalid > 0 || self.counts.decreasing > 0 {
+            return Err(NotCounted::InvalidStamps);
+        }
+        let Some(entry) = self.day(day).filter(|entry| entry.held()) else {
+            return Ok(0);
+        };
+        let mut padded = 0_u32;
+        for (from, to) in windows
+            .iter()
+            .map(|(from, to)| (u32::from(*from), u32::from(*to)))
+        {
+            if from > to || to >= 1_440 {
+                continue;
+            }
+            let Some(opens) = masked_words(&entry.minutes, from, to)
+                .find(|(_, bits)| *bits != 0)
+                .map(|(index, bits)| index * 64 + bits.trailing_zeros())
+            else {
+                continue;
+            };
+            if opens < to {
+                let carried: u32 = masked_words(&entry.carry, opens + 1, to)
+                    .map(|(_, bits)| bits.count_ones())
+                    .sum();
+                padded = padded.saturating_add(carried);
+            }
+        }
+        Ok(padded)
+    }
+
     /// The payload a `.sbar` summary section and a `.sum` sibling carry with
     /// [`VERSION`]. The density rule decides, at this write, whether the
     /// seconds go in; a summary decoded with them tracks them
@@ -677,7 +891,9 @@ impl MonthSummary {
         out.extend_from_slice(&self.month.year().to_le_bytes());
         out.push(self.month.month());
         out.push(u8::try_from(self.days.len()).unwrap_or(0));
-        out.extend_from_slice(&(if seconds { FLAG_SECONDS } else { 0 }).to_le_bytes());
+        let flags =
+            (if seconds { FLAG_SECONDS } else { 0 }) | (if self.carry { FLAG_PADDED } else { 0 });
+        out.extend_from_slice(&flags.to_le_bytes());
         for word in [self.generation, self.n_valid] {
             out.extend_from_slice(&word.to_le_bytes());
         }
@@ -725,6 +941,13 @@ impl MonthSummary {
                 }
             }
         }
+        // VERSION 2: the flat carries, over the same minutes as each held
+        // day's minute bitmap, after everything version 1 wrote.
+        if self.carry {
+            for entry in self.days.iter().filter(|entry| entry.held()) {
+                put_bits(&mut out, &entry.carry, entry.first / 60, entry.last / 60);
+            }
+        }
         out
     }
 
@@ -757,9 +980,14 @@ impl MonthSummary {
     ///
     /// [`Refused::Version`], [`Refused::Shape`] naming the field.
     pub fn decode(version: u16, payload: &[u8]) -> Result<Self, Refused> {
-        if version != VERSION {
-            return Err(Refused::Version(version));
-        }
+        // READERS BRANCH ON THE VERSION (R4-27): version 1 is read as it was
+        // written and tracks no flat carries; version 2 adds them. Nothing
+        // else is read.
+        let known = match version {
+            VERSION_1 => KNOWN_FLAGS_V1,
+            VERSION => KNOWN_FLAGS,
+            other => return Err(Refused::Version(other)),
+        };
         if payload.len() < HEAD_LEN || payload.len() > MAX_PAYLOAD_LEN {
             return Err(Refused::Shape("the payload is not a head and its days"));
         }
@@ -779,10 +1007,18 @@ impl MonthSummary {
             return Err(Refused::Shape("the day count is not the month's"));
         }
         let flags = at.u32();
-        if flags & !KNOWN_FLAGS != 0 {
+        if flags & !known != 0 {
             return Err(Refused::Shape("a flag this version does not define"));
         }
+        // ONE ENCODING: at version 2 the carry bitmaps are present exactly
+        // when the month is a one-minute month.
+        if version == VERSION && (flags & FLAG_PADDED != 0) != (timeframe_secs == 60) {
+            return Err(Refused::Shape(
+                "the flat-carry flag disagrees with the month's rung",
+            ));
+        }
         let mut summary = Self::new(symbol_id, timeframe_secs, month);
+        summary.carry = flags & FLAG_PADDED != 0;
         summary.generation = at.u64();
         summary.n_valid = at.u64();
         summary.first_ts_micros = at.i64();
@@ -815,8 +1051,21 @@ impl MonthSummary {
         }
         at.at = HEAD_LEN;
         summary.seconds = flags & FLAG_SECONDS != 0;
-        let tracked = summary.seconds;
-        for entry in &mut summary.days {
+        summary.decode_days(&mut at)?;
+        if at.short || at.at != payload.len() {
+            return Err(Refused::Shape(
+                "the payload's length is not its days' geometry",
+            ));
+        }
+        Ok(summary)
+    }
+
+    /// The day entries and the bitmaps after the head, in the order
+    /// [`Self::payload`] wrote them: minutes, seconds while kept, flat
+    /// carries while tracked (version 2).
+    fn decode_days(&mut self, at: &mut Cursor<'_>) -> Result<(), Refused> {
+        let tracked = self.seconds;
+        for entry in &mut self.days {
             *entry = DayBits::empty(tracked);
             entry.bars = at.u32();
             entry.first = at.u32();
@@ -827,23 +1076,33 @@ impl MonthSummary {
                 return Err(Refused::Shape("a day's first and last second disagree"));
             }
         }
-        for entry in summary.days.iter_mut().filter(|entry| entry.held()) {
+        for entry in self.days.iter_mut().filter(|entry| entry.held()) {
             at.bits(&mut entry.minutes, entry.first / 60, entry.last / 60)?;
         }
         if tracked {
-            for entry in summary.days.iter_mut().filter(|entry| entry.held()) {
+            for entry in self.days.iter_mut().filter(|entry| entry.held()) {
                 let (first, last) = (entry.first, entry.last);
                 if let Some(words) = entry.seconds.as_deref_mut() {
                     at.bits(words, first, last)?;
                 }
             }
         }
-        if at.short || at.at != payload.len() {
-            return Err(Refused::Shape(
-                "the payload's length is not its days' geometry",
-            ));
+        if self.carry {
+            for entry in self.days.iter_mut().filter(|entry| entry.held()) {
+                at.bits(&mut entry.carry, entry.first / 60, entry.last / 60)?;
+                // A carry is a held minute: one outside the minute bitmap is
+                // no minute this month holds.
+                if entry
+                    .carry
+                    .iter()
+                    .zip(&entry.minutes)
+                    .any(|(carry, held)| carry & !held != 0)
+                {
+                    return Err(Refused::Shape("a flat carry is not a held minute"));
+                }
+            }
         }
-        Ok(summary)
+        Ok(())
     }
 
     /// A `.sbar` summary section or a `.sum` body after its magic, checked
