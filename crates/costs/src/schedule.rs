@@ -243,10 +243,18 @@ impl Cited {
 /// figures is dated 16 Oct 2026.
 pub const CURRENT_AS_OF: TradeDay = boundary!(2026 - 10 - 16);
 
-/// NSE circular `FA73061`'s effective date: from 2026-03-01 the investor
-/// protection fund contribution is ₹0.01 per crore, folded into the dated
-/// options row package CHG-0 adds to `crate::regime`.
-pub const FA73061_EFFECTIVE: TradeDay = boundary!(2026 - 3 - 1);
+/// NSE circular `FA73061`'s effective date, 2026-03-01: from it the regime
+/// carries the folded ₹3,553 options exchange-charge row
+/// ([`crate::regime::NSE_EXCHANGE_CHARGE_FA73061`]) and a zero IPFT line
+/// beside it ([`crate::regime::ipft_rate`]), where FA73061's ₹0.01 IPFT
+/// rides inside the row.
+///
+/// The regime's own boundary, not a second copy of it (D-6740): the date the
+/// regime's two rows turn on exists once, in `crate::regime`, and this name
+/// is kept because `costs` is a shared crate (`docs/10-shared-core.md`). The
+/// dated options card reads it only to name which row its exchange line is
+/// from; every figure on the card comes from the regime's tables.
+pub const FA73061_EFFECTIVE: TradeDay = crate::regime::MAR_2026;
 
 // ---------------------------------------------------------------------------
 // Today's rates — statutory
@@ -1028,6 +1036,18 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
     .into())
 }
 
+/// The source line a dated NSE options exchange charge carries from
+/// [`FA73061_EFFECTIVE`] on: the `FA73061` rows alone (D-6741). Before that
+/// day the card carries [`REGIME_EXCHANGE_NSE`], which names `FA64232`'s row
+/// and the `FA56129` IPFT it is priced at.
+const REGIME_EXCHANGE_NSE_FA73061: &str = "crate::regime::exchange_charge_rate plus \
+     crate::regime::ipft_rate on the trade day, exactly as crate::trip::Rates::resolve adds them \
+     (D-5100, D-6741): from 2026-03-01 NSE circular NSE/FA/73061 dated 2026-02-27 - the options \
+     transaction charge Rs 3,552.99 plus the IPFT Rs 0.01 per crore of premium, each side, \
+     carried as the one Rs 3,553 row crate::regime::NSE_EXCHANGE_CHARGE_FA73061 plus a zero IPFT \
+     line, because the regime's unit is one rupee per crore (sources row E-03; \
+     docs/00-charter.md, NSE charge circulars).";
+
 /// The dated options card: the regime's rows on `day`, the fixed rates from
 /// `crate::rate`, exactly as `crate::trip::Rates::resolve` reads them — the
 /// exchange charge is the regime row in force **plus the IPFT `trip` adds**,
@@ -1052,18 +1072,29 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
 /// figure of this card and the `dated-regime/r2` fingerprint are unchanged.
 /// The undated `crate::rate::ipft` it read before is gone: kept beside the
 /// ₹3,553 row it would have charged 0.03603% (D-5101).
+///
+/// **One dated IPFT authority** (D-6740): the IPFT figure is
+/// [`crate::regime::ipft_rate`] and nothing else — no match of this card's own
+/// on the venue or the date decides it, which
+/// `the_dated_option_card_reads_the_ipft_from_the_regime_only` holds by the
+/// text of this function. The date is read once, for the label: on and after
+/// [`FA73061_EFFECTIVE`], the regime's own boundary, the NSE line's source
+/// names the `FA73061` row it is priced at, and before it the `FA64232` row
+/// and its IPFT (D-6741). A source moves no figure: the rates are the
+/// regime's on both sides of the date.
 fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
     let base = exchange_charge_rate(exchange, day)?;
     let stt_sell = stt_options_rate(day)?;
     let stt_exercise = stt_exercise_rate(day)?;
     let ipft_bps = crate::regime::ipft_rate(exchange, day)?.get();
-    // The BSE IPFT is a zero no source states (crate::rate::BSE_IPFT).
+    // A BSE card is flagged: its IPFT line is a zero no source states.
     let exchange_charge = match exchange {
         Exchange::Nse => Status::Cited,
         Exchange::Bse => Status::Unverified,
     };
     let source = match exchange {
-        Exchange::Nse => REGIME_EXCHANGE_NSE,
+        Exchange::Nse if day.before(FA73061_EFFECTIVE) => REGIME_EXCHANGE_NSE,
+        Exchange::Nse => REGIME_EXCHANGE_NSE_FA73061,
         Exchange::Bse => REGIME_EXCHANGE_BSE,
     };
     Ok(RateCard {
@@ -1675,6 +1706,378 @@ mod tests {
             card.basis().to_string(),
             "today's rates applied to 2024-09-30"
         );
+    }
+
+    /// The one statement through which the dated card may read an IPFT.
+    const REGIME_IPFT_READ: &str = "let ipft_bps = crate::regime::ipft_rate(exchange, day)?.get();";
+
+    /// The one expression in which the dated card may add it.
+    const REGIME_IPFT_SUM: &str = "Ratio::new(base.get() + ipft_bps, RATE_SCALE)";
+
+    /// The text of `fn dated_option_card` in `source`, from its signature at
+    /// the start of a line to its closing brace at the start of a line.
+    fn dated_option_card_text(source: &str) -> &str {
+        let start = source
+            .find("\nfn dated_option_card(")
+            .expect("the dated card is a free function at the module's top level");
+        let body = &source[start + 1..];
+        let end = body.find("\n}\n").expect("the function closes") + 3;
+        &body[..end]
+    }
+
+    /// Why `card` (the text of a `dated_option_card`) decides an IPFT figure
+    /// anywhere but `crate::regime::ipft_rate`, or `Ok` when it does not.
+    ///
+    /// Line comments are dropped first, so the check reads code, not prose.
+    /// The code must bind the IPFT once from the regime and add it once; with
+    /// those two removed, no `ipft` of any case may remain (an undated
+    /// `rate::ipft`, `NSE_IPFT`, `BSE_IPFT`, a second binding, a match of its
+    /// own). A date may be read only to choose the NSE source line, and no
+    /// date may be written in the card at all.
+    fn reads_the_ipft_from_the_regime_only(card: &str) -> Result<(), String> {
+        let code = card
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (needle, what) in [
+            (REGIME_IPFT_READ, "binding of the regime's IPFT"),
+            (REGIME_IPFT_SUM, "sum of the regime row and the IPFT"),
+        ] {
+            let found = code.matches(needle).count();
+            if found != 1 {
+                return Err(format!("{found} copies of the {what} `{needle}`, not one"));
+            }
+        }
+        let rest = code
+            .replacen(REGIME_IPFT_READ, "", 1)
+            .replacen(REGIME_IPFT_SUM, "", 1);
+        if let Some(line) = rest
+            .lines()
+            .find(|line| line.to_ascii_lowercase().contains("ipft"))
+        {
+            return Err(format!("an IPFT outside the regime: `{}`", line.trim()));
+        }
+        for line in code.lines() {
+            let reads_a_date = line.contains(".before(") || line.contains("FA73061_EFFECTIVE");
+            if reads_a_date && !line.contains("=> REGIME_EXCHANGE_NSE,") {
+                return Err(format!(
+                    "a date decides more than the label: `{}`",
+                    line.trim()
+                ));
+            }
+            if line.contains("boundary!(") || line.contains("TradeDay::new(") {
+                return Err(format!("a date written in the card: `{}`", line.trim()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `dated_option_card` at `e6d05d708` (CLOUD-CHG1 before D-5131): its own
+    /// IPFT match on the venue and on `FA73061_EFFECTIVE`. Verbatim, kept so
+    /// the check above is shown refusing the shape it exists to refuse.
+    const CARD_AT_E6D05D708: &str = "\
+        fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {\n\
+            let base = exchange_charge_rate(exchange, day)?;\n\
+            let stt_sell = stt_options_rate(day)?;\n\
+            let stt_exercise = stt_exercise_rate(day)?;\n\
+            // FA73061 folds the IPFT into the NSE row from its effective date; before\n\
+            // it, and on BSE always, the IPFT is its own figure added on top.\n\
+            let (ipft_bps, exchange_charge) = match exchange {\n\
+                Exchange::Nse if !day.before(FA73061_EFFECTIVE) => (0, Status::Cited),\n\
+                Exchange::Nse => (NSE_IPFT.get(), Status::Cited),\n\
+                Exchange::Bse => (BSE_IPFT.get(), Status::Unverified),\n\
+            };\n\
+            let source = match exchange {\n\
+                Exchange::Nse => REGIME_EXCHANGE_NSE,\n\
+                Exchange::Bse => REGIME_EXCHANGE_BSE,\n\
+            };\n\
+            Ok(RateCard {\n\
+                basis: RateBasis::InForceOn(day),\n\
+                exchange,\n\
+                exchange_charge: Cited {\n\
+                    rate: Ratio::new(base.get() + ipft_bps, RATE_SCALE),\n\
+                    source,\n\
+                    status: exchange_charge,\n\
+                },\n\
+        ";
+
+    /// `dated_option_card` at `0dc8361c3` (CHG-0's merge first parent, after
+    /// D-5131): the undated `crate::rate::ipft` added on every day. Verbatim.
+    const CARD_AT_0DC8361C3: &str = "\
+        fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {\n\
+            let base = exchange_charge_rate(exchange, day)?;\n\
+            let stt_sell = stt_options_rate(day)?;\n\
+            let stt_exercise = stt_exercise_rate(day)?;\n\
+            let ipft_bps = crate::rate::ipft(exchange).get();\n\
+            // The BSE IPFT is a zero no source states (crate::rate::BSE_IPFT).\n\
+            let exchange_charge = match exchange {\n\
+                Exchange::Nse => Status::Cited,\n\
+                Exchange::Bse => Status::Unverified,\n\
+            };\n\
+            let source = match exchange {\n\
+                Exchange::Nse => REGIME_EXCHANGE_NSE,\n\
+                Exchange::Bse => REGIME_EXCHANGE_BSE,\n\
+            };\n\
+            Ok(RateCard {\n\
+                basis: RateBasis::InForceOn(day),\n\
+                exchange,\n\
+                exchange_charge: Cited {\n\
+                    rate: Ratio::new(base.get() + ipft_bps, RATE_SCALE),\n\
+                    source,\n\
+                    status: exchange_charge,\n\
+                },\n\
+        ";
+
+    #[test]
+    fn the_dated_option_card_reads_the_ipft_from_the_regime_only() {
+        // One dated IPFT authority (D-6740): the card in this file binds the
+        // IPFT from crate::regime::ipft_rate once, adds it once, and reads the
+        // date only to name its source line.
+        let card = dated_option_card_text(include_str!("schedule.rs"));
+        assert!(card.starts_with("fn dated_option_card(exchange: Exchange, day: TradeDay)"));
+        assert!(card.ends_with("    })\n}\n"), "{card}");
+        assert_eq!(reads_the_ipft_from_the_regime_only(card), Ok(()));
+        // The two shapes it replaced are refused, each by its own reason: the
+        // card's own IPFT match (e6d05d708) and the undated crate::rate::ipft
+        // (0dc8361c3) bind no regime IPFT at all.
+        for old in [CARD_AT_E6D05D708, CARD_AT_0DC8361C3] {
+            assert_eq!(
+                reads_the_ipft_from_the_regime_only(old),
+                Err(format!(
+                    "0 copies of the binding of the regime's IPFT `{REGIME_IPFT_READ}`, not one"
+                ))
+            );
+        }
+        // The regime's IPFT read and then overridden by a match of the card's
+        // own, an IPFT added twice, a date deciding a figure and a date
+        // written in: each is named, on the head's own text.
+        let refused = |from: &str, to: &str| {
+            assert!(card.contains(from), "{from}");
+            reads_the_ipft_from_the_regime_only(&card.replacen(from, to, 1))
+                .expect_err("a second IPFT authority")
+        };
+        let overridden = refused(
+            "    // A BSE card",
+            "    let ipft_bps = if day.before(FA73061_EFFECTIVE) { NSE_IPFT.get() } else { 0 };\n    // A BSE card",
+        );
+        assert_eq!(
+            overridden,
+            "an IPFT outside the regime: \
+             `let ipft_bps = if day.before(FA73061_EFFECTIVE) { NSE_IPFT.get() } else { 0 };`"
+        );
+        assert!(
+            refused(
+                REGIME_IPFT_SUM,
+                "Ratio::new(base.get() + ipft_bps + ipft_bps, RATE_SCALE)"
+            )
+            .starts_with("0 copies of the sum")
+        );
+        assert_eq!(
+            refused(
+                "let base = exchange_charge_rate(exchange, day)?;",
+                "let base = exchange_charge_rate(exchange, day.max(FA73061_EFFECTIVE))?;"
+            ),
+            "a date decides more than the label: \
+             `let base = exchange_charge_rate(exchange, day.max(FA73061_EFFECTIVE))?;`"
+        );
+        assert!(
+            refused(
+                "Exchange::Nse if day.before(FA73061_EFFECTIVE)",
+                "Exchange::Nse if day.before(boundary!(2026 - 3 - 1))"
+            )
+            .starts_with("a date written in the card")
+        );
+        // A comment may name what it likes: the check reads code.
+        assert_eq!(
+            reads_the_ipft_from_the_regime_only(&card.replacen(
+                "    // A BSE card",
+                "    // NSE_IPFT, rate::ipft\n    // A BSE card",
+                1
+            )),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_dated_option_cards_ipft_is_the_regimes_on_2023_04_01_2026_02_27_and_2026_03_02() {
+        let ipft = |on| crate::regime::ipft_rate(Exchange::Nse, on).map(crate::rate::BpsX100::get);
+        let dated =
+            |on| RateCard::resolve(TradeKind::Options, Exchange::Nse, on, RateSelector::Dated);
+        // 2023-04-01, FA56129's first day: the IPFT table answers ₹50, but the
+        // card cannot be read there — the exchange charge's refusal row covers
+        // every day before 2024-10-01 and is reached first (CHG0-04).
+        let first = day(2023, 4, 1);
+        assert_eq!(ipft(first), Ok(50));
+        let regime = exchange_charge_rate(Exchange::Nse, first).expect_err("the slab ladder");
+        assert_eq!(
+            dated(first),
+            Err(ChargeError::Cost(CostError::Unverified(regime)))
+        );
+        // The day before, both tables refuse with two different refusals, and
+        // the card carries the exchange charge's: the IPFT's is never reached.
+        let eve = day(2023, 3, 31);
+        let ipft_refusal = crate::regime::ipft_rate(Exchange::Nse, eve).expect_err("unread");
+        let exchange_refusal = exchange_charge_rate(Exchange::Nse, eve).expect_err("unread");
+        assert_ne!(ipft_refusal, exchange_refusal);
+        assert_eq!(
+            dated(eve),
+            Err(ChargeError::Cost(CostError::Unverified(exchange_refusal)))
+        );
+        // The last session under FA64232 and the first under FA73061: the
+        // card's IPFT is its total less the regime row, and that is exactly
+        // regime::ipft_rate on the day — ₹50, then zero — in ₹3,553 both times.
+        for (on, row, its_ipft) in [(day(2026, 2, 27), 3_503, 50), (day(2026, 3, 2), 3_553, 0)] {
+            let total = dated(on)
+                .expect("a verified window")
+                .exchange_charge()
+                .rate();
+            assert_eq!(total.denominator(), RATE_SCALE, "{on}");
+            let base = exchange_charge_rate(Exchange::Nse, on)
+                .expect("verified")
+                .get();
+            assert_eq!(
+                (base, total.numerator() - base, ipft(on)),
+                (row, its_ipft, Ok(its_ipft)),
+                "{on}"
+            );
+            assert_eq!(total.numerator(), 3_553, "{on}");
+        }
+    }
+
+    #[test]
+    fn fa73061_effective_is_the_one_day_the_nse_option_rows_and_the_cards_source_turn_on() {
+        // The boundary exists once (D-6740): FA73061_EFFECTIVE is the regime's
+        // own constant, and on every representable day the only days the NSE
+        // rows move are FA56129's, FA64232's and that one — where the card's
+        // source moves too, and nowhere else (D-6741). BSE moves once.
+        assert_eq!(FA73061_EFFECTIVE, crate::regime::MAR_2026);
+        let mut moves: Vec<(Exchange, TradeDay, Option<(i64, i64)>, Option<&str>)> = Vec::new();
+        for exchange in [Exchange::Nse, Exchange::Bse] {
+            let mut last = None;
+            for on in crate::day::every_representable_day() {
+                let rows = (
+                    exchange_charge_rate(exchange, on)
+                        .map(crate::rate::BpsX100::get)
+                        .ok(),
+                    crate::regime::ipft_rate(exchange, on)
+                        .map(crate::rate::BpsX100::get)
+                        .ok(),
+                );
+                let card = RateCard::resolve(TradeKind::Options, exchange, on, RateSelector::Dated);
+                let source = card
+                    .as_ref()
+                    .ok()
+                    .map(|card| card.exchange_charge().source());
+                if let Ok(card) = card {
+                    // Where it prices, the card is the two rows of the day.
+                    let (Some(row), Some(ipft)) = rows else {
+                        panic!("{exchange:?} on {on}: a card without both rows");
+                    };
+                    assert_eq!(
+                        card.exchange_charge().rate(),
+                        Ratio::new(row + ipft, RATE_SCALE)
+                    );
+                }
+                if last.is_some_and(|last| last != (rows, source)) {
+                    moves.push((exchange, on, rows.0.zip(rows.1), source));
+                }
+                last = Some((rows, source));
+            }
+        }
+        assert_eq!(
+            moves,
+            [
+                (Exchange::Nse, day(2023, 4, 1), None, None),
+                (
+                    Exchange::Nse,
+                    day(2024, 10, 1),
+                    Some((3_503, 50)),
+                    Some(REGIME_EXCHANGE_NSE)
+                ),
+                (
+                    Exchange::Nse,
+                    FA73061_EFFECTIVE,
+                    Some((3_553, 0)),
+                    Some(REGIME_EXCHANGE_NSE_FA73061)
+                ),
+                (
+                    Exchange::Bse,
+                    day(2024, 10, 1),
+                    Some((3_250, 0)),
+                    Some(REGIME_EXCHANGE_BSE)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_dated_option_cards_source_names_its_own_row_on_each_side_of_fa73061() {
+        let card = |exchange, on| {
+            RateCard::resolve(TradeKind::Options, exchange, on, RateSelector::Dated)
+                .expect("a verified window")
+        };
+        // To 2026-02-28 (a Saturday after the last session under FA64232) the
+        // NSE line names FA64232's row and FA56129's ₹50 IPFT.
+        for on in [day(2024, 10, 1), day(2026, 2, 27), day(2026, 2, 28)] {
+            let source = card(Exchange::Nse, on).exchange_charge().source();
+            assert_eq!(source, REGIME_EXCHANGE_NSE, "{on}");
+            assert!(
+                source.contains("FA64232") && source.contains("FA56129"),
+                "{on}"
+            );
+        }
+        // From FA73061's own day — a Sunday the card prices as the regime does,
+        // because this crate is no session calendar — through a leap day and
+        // the last representable day, it names FA73061's row alone.
+        let leap = day(2028, 2, 29);
+        for on in [
+            FA73061_EFFECTIVE,
+            day(2026, 3, 2),
+            day(2026, 10, 15),
+            CURRENT_AS_OF,
+            leap,
+            TradeDay::MAX,
+        ] {
+            let line = card(Exchange::Nse, on).exchange_charge();
+            assert_eq!(line.source(), REGIME_EXCHANGE_NSE_FA73061, "{on}");
+            assert_eq!(line.rate(), Ratio::new(3_553, RATE_SCALE), "{on}");
+            assert_eq!(line.status(), Status::Cited, "{on}");
+            assert!(line.is_well_shaped(), "{on}");
+        }
+        assert_eq!(FA73061_EFFECTIVE.to_string(), "2026-03-01");
+        assert_eq!(
+            FA73061_EFFECTIVE.weekday(),
+            crate::day::Weekday::Sunday,
+            "FA73061 takes effect on a day with no session"
+        );
+        let fa73061 = REGIME_EXCHANGE_NSE_FA73061;
+        for names in [
+            "NSE/FA/73061",
+            "2026-03-01",
+            "NSE_EXCHANGE_CHARGE_FA73061",
+            "E-03",
+        ] {
+            assert!(fa73061.contains(names), "{names}");
+        }
+        for never in ["FA64232", "FA56129", "UNVERIFIED", "\n"] {
+            assert!(!fa73061.contains(never), "{never:?}");
+        }
+        assert_ne!(fa73061, REGIME_EXCHANGE_NSE);
+        // BSE has one row from 2024-10-01 and keeps its one flagged line.
+        for on in [day(2026, 2, 27), FA73061_EFFECTIVE, day(2026, 3, 2)] {
+            let line = card(Exchange::Bse, on).exchange_charge();
+            assert_eq!(line.source(), REGIME_EXCHANGE_BSE, "{on}");
+            assert_eq!(line.status(), Status::Unverified, "{on}");
+        }
+        // The label is not a rate: every figure the two NSE days carry, the
+        // exchange line's included, is the same.
+        let (before, after) = (
+            card(Exchange::Nse, day(2026, 2, 28)),
+            card(Exchange::Nse, FA73061_EFFECTIVE),
+        );
+        let figures = |card: RateCard| card.rates().map(|rate| rate.map(Cited::rate));
+        assert_eq!(figures(before), figures(after));
     }
 
     #[test]

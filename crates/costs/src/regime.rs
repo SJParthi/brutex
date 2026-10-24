@@ -343,7 +343,10 @@ const APR_2026: TradeDay = boundary!(2026 - 4 - 1);
 /// The day NSE circular `FA73061` takes effect: "The above revision will be
 /// applicable with effect from March 1, 2026." A Sunday; the first session
 /// it prices is 2026-03-02. D-5100.
-const MAR_2026: TradeDay = boundary!(2026 - 3 - 1);
+///
+/// The one copy of the date: `crate::schedule::FA73061_EFFECTIVE` is this
+/// constant, not a second literal of it (D-6740).
+pub(crate) const MAR_2026: TradeDay = boundary!(2026 - 3 - 1);
 
 /// The day NSE circular `FA56129` set the options IPFT at ₹50 per crore of
 /// premium, the figure in force until `FA73061`. D-5100.
