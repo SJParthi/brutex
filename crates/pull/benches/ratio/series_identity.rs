@@ -123,7 +123,7 @@ fn per_bar(sessions: i64, flagged: bool, reversed: bool) -> u128 {
 /// flagged, and the flagged answer out of order.
 pub(crate) fn audit_is_flat_per_bar() -> bool {
     let mut ok = true;
-    for (label, flagged) in [("held", false), ("flagged", true)] {
+    for (label, flagged) in [("held minutes", false), ("flagged minutes", true)] {
         let [one, ten, hundred] = [1, 10, 100].map(|s| per_bar(s, flagged, false));
         ok &= ratio(
             &format!("C-CHK-08 audit per bar, {label}, 10x minutes"),

@@ -73,3 +73,18 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   `5 passed` (`every_bench_module_is_registered` now green; every printed C-CHK id is declared and
   every declared one is printed).
 - NEXT: api run A (still building `cli`), runs B and C of both harnesses, the docs/06 rows.
+
+### 2026-10-24 13:25 IST: save point 5 (CI shell gates compared with the base)
+
+- Ran every `run:` step of ci.yml's language-purity job locally, on this branch and on an
+  unmodified `origin/feat/db-fix` worktree (gate 1e skipped in both: it is a whole-workspace
+  `cargo build` and `cargo test` in a copied tree, which the test gate covers). Verdicts identical:
+  green 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29, 29b;
+  red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12 on BOTH (the base reds `CONTEXT.md` 4.10 names, owned by
+  BASE-REDS-1023).
+- Inside those reds, this branch added two findings and fixed both: gate 1d named two
+  segment-shaped literals in the new bench files (`"epoch_not_regular"`, `"flagged"`), now
+  `"epoch_not_regular ("` and `"flagged minutes"`; gate 12 named `linear_per_unit`'s doc block
+  (a cost claim naming no proof), which now names `crates/pull/benches/ratio.rs`. Re-run: gate 1d's
+  undeclared set and gate 12's refusals are now identical to the base's.
+- NEXT: api run A, rebuild pull bench with this save point, runs B and C, docs/06 rows.

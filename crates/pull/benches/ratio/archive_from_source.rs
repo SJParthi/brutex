@@ -48,7 +48,9 @@ const BASE_DAYS: u32 = 50;
 /// from 1x would read that as a breach of a bound the code never claimed.
 /// What the per-step ceiling refuses is the regression the claim forbids: a
 /// second pass, a sort per entry or a walk per entry makes the cost per unit
-/// grow about tenfold per tenfold step.
+/// grow about tenfold per tenfold step. Proof: this harness,
+/// `crates/pull/benches/ratio.rs`, runs every row that uses it (C-CHK-01,
+/// C-CHK-02, C-CHK-04, C-CHK-05, C-CHK-06) and fails on a breach.
 pub(crate) fn linear_per_unit(label: &str, [one, ten, hundred]: [u128; 3]) -> bool {
     let first = ratio(&format!("{label}, 1x -> 10x"), one, ten);
     let second = ratio(&format!("{label}, 10x -> 100x"), ten, hundred);

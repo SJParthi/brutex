@@ -156,7 +156,7 @@ fn the_extremes_answer() {
         refuse("a symbolic link at an epoch's name");
     }
     match Target::partition(&linked, Vendor::Gdfl, Segment::Fno).load() {
-        Err(why) if why.contains("epoch_not_regular") => {}
+        Err(why) if why.contains("epoch_not_regular (") => {}
         _ => refuse("a symbolic link at an epoch's name is refused by name"),
     }
 }
