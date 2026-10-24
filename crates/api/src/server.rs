@@ -11534,14 +11534,18 @@ async fn fno_walk(
     // `FnoAccess::serves` with no caller anywhere in shipped code. A predicate
     // nothing asks is a rule nothing enforces.
     //
-    // THE OPERATOR'S RULE OF 19 AUG 2026 RESTS ON THIS ARM: Zerodha is spot
-    // only, and an expired future or option must never be attempted for it
-    // even if it is ticked by mistake. Its descriptor declares
-    // `FnoAccess::None`, so this refuses BEFORE any vendor request is built --
-    // and `Vendor::segment_of` declines `NFO-FUT`, `NFO-OPT`, `MCX` and `BSE`
-    // for it besides, so no derivative row of its master exists to be asked
-    // about in the first place. Two independent refusals, neither relying on
-    // the other.
+    // A FEED THAT DECLARES NO EXPIRED-DERIVATIVE HISTORY AT ALL stops here,
+    // BEFORE any vendor request is built. Zerodha no longer reaches this arm
+    // (R4-28 repair 5, the r5 check's follow-up: this note still said it
+    // declared `FnoAccess::None`): since D-7186 its descriptor declares
+    // `FnoAccess::ByToken`, futures day candles through a token resolved by
+    // date, answered by `fno_futures` above, which refuses options by name.
+    // The operator's rule of 19 Aug 2026 (Zerodha spot only) stands for
+    // options and for the sweep: a future is stored and never swept.
+    // `Vendor::segment_of` still declines `NFO-FUT`, `NFO-OPT`, `MCX` and
+    // `BSE` for it, so the universe's master decode holds no derivative row;
+    // the futures leg reads its tokens from the dated master snapshots
+    // (`pull::master_snapshots`) instead.
     if !spec.fno.serves() {
         return page.say(
             facts,
@@ -14015,9 +14019,14 @@ async fn fno_futures(
     }
     // NAMED WHERE THE PULL IS READ (R4-28 repair 3): a Kite snapshot cut
     // before its receipt is never read, so a day it would have dated resolves
-    // from its neighbours.
+    // from its neighbours. ENTRIES, not snapshots (R4-28 repair 5, the r5
+    // check's follow-up): a cut `.diff` and a name in another case are listed
+    // here too, and each line says which it is.
     if !plan.incomplete.is_empty() {
-        facts.push(("Incomplete master snapshots", plan.incomplete.join(" · ")));
+        facts.push((
+            "Incomplete master-snapshot entries",
+            plan.incomplete.join(" · "),
+        ));
     }
     if !plan.refused.is_empty() {
         facts.push(("Not asked", plan.refused.join(" · ")));
@@ -14119,8 +14128,9 @@ fn futures_answer(
             "the futures rows read do not balance against the bars offered, folded and \
              dropped; see the Balances line, and read nothing of this pull as held"
         } else {
-            "some futures series were not asked or did not land whole; each is named above \
-             and none may be read as held"
+            "some futures series were not asked or did not land whole; each is named above. \
+             What each series line says it wrote is held, a stopped series' too; a contract \
+             not asked holds nothing from this pull"
         },
         counted,
     )

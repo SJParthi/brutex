@@ -737,10 +737,33 @@ fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
 /// # Errors
 ///
 /// No receipted snapshot at all (`no_snapshot`): nothing is planned from an
-/// undated master. A book built in memory, or an index that cannot be locked,
-/// read or appended to (`futures_index`): nothing is planned from a partial
-/// answer.
+/// undated master. A newest snapshot dated after `today`
+/// (`snapshot_from_the_future`). A book built in memory, or an index that
+/// cannot be locked, read or appended to (`futures_index`): nothing is
+/// planned from a partial answer. Each is one Error [`FUTURES_EVENT`] event
+/// too, naming the underlying and the refusal (R4-28 repair 5, the r5
+/// check's follow-up: they reached the receipt and `/audit` only).
 pub fn futures_plan(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    window: Window,
+    today: Day,
+    last_settled: Day,
+) -> Result<FuturesPlan, String> {
+    plan_whole(book, route, underlying, window, today, last_settled).inspect_err(|why| {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Error,
+            FUTURES_EVENT,
+            "no future of the underlying was planned",
+            "underlying" => telemetry::Value::Str(underlying),
+            "why" => telemetry::Value::Str(why),
+        );
+    })
+}
+
+/// [`futures_plan`], before its refusal is emitted.
+fn plan_whole(
     book: &Book,
     route: ContinuousSpec,
     underlying: &str,
