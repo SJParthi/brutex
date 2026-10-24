@@ -606,7 +606,12 @@ fn checks(
         }
     }
     let store = process.store_root;
-    let layout = locks::layout_at(store)?;
+    // A census layout that cannot be read is AF-01's door's to refuse, by the
+    // run lock's code and in its words (GD-11), right after the plan: the run
+    // never starts, and the preflight says no second refusal of it (D-7000).
+    let Ok(layout) = locks::layout_at(store) else {
+        return Ok(Vec::new());
+    };
     for kind in kinds {
         legacy(store, layout, kind.kind, request.legacy_ack)?;
     }

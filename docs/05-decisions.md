@@ -84025,7 +84025,9 @@ found (a copy still being written) is not refused here: the day reader refuses i
 (it cannot be listed, or holds no `<yyyy>.zip`; no `FORMAT.md`; no day zip of its tree) is
 AF-01's `source_root_unknown`, said by the cli's door right after the plan: the preflight
 names what is wrong inside a root that is one and never says a second, worse-worded refusal of
-the root itself. **So is a root whose zips are all of other years**, none of the range's and
+the root itself. Likewise a store whose census layout cannot be read (its `manifest/v4/gdfl`
+a file) is the door's run-lock refusal in AF-01's words (GD-11): the preflight answers no check
+of it. **So is a root whose zips are all of other years**, none of the range's and
 no name like one (a root holding only `2019.zip`, asked for 2024): the door lists the range's
 days as not in the source and ends `no_file_read` (AF-01, FM-060), never OK, and AF-01's two
 FM-060 tests stay unchanged. One year of the range held, or one name like a range year's, and

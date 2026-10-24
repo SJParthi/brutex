@@ -83,6 +83,14 @@ fn nothing_read(days: &[&str]) -> Report {
 /// The two done days of the change tests.
 const TWO: [&str; 2] = ["2024-04-01", "2024-04-02"];
 
+/// ADAPTED (IA-3b, RA-322): a zip holding one invented member no reader
+/// wants. Since IA-3b an empty day zip refuses its day `day_zip_empty` and an
+/// empty year zip refuses the run `year_zip_empty`, so a fixture whose
+/// subject is the door, not the day, holds one file where it held none.
+fn held_zip() -> Vec<u8> {
+    stored_zip(&[("notes.txt", b"invented, no vendor byte")])
+}
+
 /// A capital-market outer zip holding a day zip of `kind` on each of `days`,
 /// each one's bytes `inner` (invented). Since WP-12f (D-4878) a done day
 /// whose close did not cover the run's whole scope has its listing probed,
@@ -647,7 +655,7 @@ fn nothing_a_roots_name_carries_forges_a_receipt_line() {
                     TICKSTORE_VAR => tick_store(&data),
                     NFO_ARCHIVES_VAR => {
                         fs::create_dir_all(&data).unwrap();
-                        fs::write(data.join("2024.zip"), empty_zip()).unwrap();
+                        fs::write(data.join("2024.zip"), held_zip()).unwrap();
                     }
                     _ => fs::write(&data, cm_archive(CmKind::Stocks, &empty_zip())).unwrap(),
                 }
@@ -1189,7 +1197,7 @@ fn a_changed_archive_with_every_day_done_is_named_not_ok() {
     let cm = root.join("cm.zip");
     let env = env_of(&[(CM_ARCHIVE_VAR, cm.clone())]);
     let args = ["stocks", "zip", "2024-04-01", "2024-04-02"];
-    fs::write(&cm, cm_days(CmKind::Stocks, &TWO, &empty_zip())).unwrap();
+    fs::write(&cm, cm_days(CmKind::Stocks, &TWO, &held_zip())).unwrap();
     let (code, out) = run(&args, &env, &store);
     assert_eq!(code, OK, "{out}");
     // Both done days were not read again: skipped as done, or (WP-12f) only
@@ -1203,8 +1211,9 @@ fn a_changed_archive_with_every_day_done_is_named_not_ok() {
         .map(|d| hex(&d))
         .unwrap();
 
-    let mut changed = empty_zip();
-    changed[20] = 1;
+    let mut changed = held_zip();
+    let comment_len = changed.len() - 2;
+    changed[comment_len] = 1;
     changed.push(b'B');
     fs::write(&cm, cm_days(CmKind::Stocks, &TWO, &changed)).unwrap();
     let b = Origin::measure(SourceKind::Zip, &cm, None)
@@ -1235,7 +1244,7 @@ fn a_changed_archive_with_every_day_done_is_named_not_ok() {
         "{out}"
     );
     // A restored at the same path: the same as the baseline, OK.
-    fs::write(&cm, cm_days(CmKind::Stocks, &TWO, &empty_zip())).unwrap();
+    fs::write(&cm, cm_days(CmKind::Stocks, &TWO, &held_zip())).unwrap();
     let (code, out) = run(&args, &env, &store);
     assert_eq!(code, OK, "{out}");
     assert!(
@@ -1279,14 +1288,14 @@ fn a_change_is_never_accepted_by_a_run_that_skipped_no_day() {
     let env = env_of(&[(CM_ARCHIVE_VAR, cm.clone())]);
     let done = ["stocks", "zip", "2024-04-01", "2024-04-01"];
     let weekend = ["stocks", "zip", "2024-04-06", "2024-04-07"];
-    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &empty_zip())).unwrap();
+    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &held_zip())).unwrap();
     let (code, out) = run(&done, &env, &store);
     assert_eq!(code, OK, "{out}");
     let a = Origin::measure(SourceKind::Zip, &cm, None)
         .digest
         .map(|d| hex(&d))
         .unwrap();
-    let mut changed = empty_zip();
+    let mut changed = held_zip();
     changed.push(b'B');
     fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &changed)).unwrap();
     for round in 1..=2 {
@@ -1319,7 +1328,7 @@ fn a_change_is_never_accepted_by_a_run_that_skipped_no_day() {
         assert!(!out.contains("(the same as the run of"), "{out}");
     }
     // A restored: the same as the baseline, OK.
-    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &empty_zip())).unwrap();
+    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &held_zip())).unwrap();
     let (code, out) = run(&done, &env, &store);
     assert_eq!(code, OK, "{out}");
     assert!(
@@ -1349,7 +1358,7 @@ fn one_archive_reached_by_another_spelling_is_the_same_key() {
     .unwrap();
     let cm = root.join("cm.zip");
     let done = ["stocks", "zip", "2024-04-01", "2024-04-01"];
-    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &empty_zip())).unwrap();
+    fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &held_zip())).unwrap();
     let (code, out) = run(&done, &env_of(&[(CM_ARCHIVE_VAR, cm.clone())]), &store);
     assert_eq!(code, OK, "{out}");
     let canonical = fs::canonicalize(&cm).unwrap();
@@ -1358,7 +1367,7 @@ fn one_archive_reached_by_another_spelling_is_the_same_key() {
     assert_eq!(first.path, escape(canonical.as_os_str().as_bytes()));
     let a = first.digest;
 
-    let mut changed = empty_zip();
+    let mut changed = held_zip();
     changed.push(b'B');
     fs::write(&cm, cm_days(CmKind::Stocks, &["2024-04-01"], &changed)).unwrap();
     let link = root.join("link-to-cm.zip");
