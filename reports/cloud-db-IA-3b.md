@@ -181,7 +181,7 @@ L-IA-35 and L-IA3B-01 to L-IA3B-07.
   - the growing-zip test, until its fixture held both indices;
   - the R2 and R3 attack models, until both sources named an empty day alike.
 - **The cli suite, first run in full late** (my miss: it had been compiled, never run before).
-  Fourteen `gdfl_import_command` tests went red on this part's changes. All are green now:
+  Twelve `gdfl_import_command` tests (10 of the guard's, 2 of the command's) went red on this part's changes, and later `core::decision_citations` did too. All are green now:
   - The year-zip rule had refused AF-01's FM-060 fixture, a root with only `2019.zip` asked for
     2024. D-7000 now leaves that root to the door.
   - The cli printed the plan's lines, beyond the spec's allowed edit. Removed.
