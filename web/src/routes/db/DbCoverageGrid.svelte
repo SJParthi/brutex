@@ -31,7 +31,8 @@
     segmentOfKey,
     istDayOf,
     isTradeDriven,
-    peersAtMost
+    peersAtMost,
+    owedKind
   } from '$lib/completeness.js';
   import { calendarUrl, readLedger, ledgerSpan, ledgerDay, monthSpan, epochDayOfIso, isoOfEpochDay } from '$lib/calendar-owed.js';
   import { OVER, heldWindow, contractLife } from '$lib/db/decoration.js';
@@ -63,7 +64,7 @@
   import { fetchAdmitted } from '$lib/admitted-fetch.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { dayflagsUrl } from '$lib/db/dayflags.js';
-  import { segmentOf } from '$lib/db/selection-model.js';
+  import { segmentOf, owedTo } from '$lib/db/selection-model.js';
   import { readRollups } from '$lib/store-census.js';
   import DbCalendar from './DbCalendar.svelte';
   /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
@@ -473,6 +474,10 @@
           if (one.last > last) last = one.last;
         }
       }
+      /* AN INDEX NEVER EXPIRES (DB-B47, R3-12): its months after the newest
+         file, inside the feed's span, are holes drawn as absent rows, as the
+         window route counts them (`owedTo`, `owedKind`). */
+      last = owedTo(last, s.like?.expiry == null && owedKind(segmentOfKey(instrument) ?? '', false, null).owed === 'index', db.activeFeed);
       const win = /** @type {any} */ (db.activeFeed)?.window ?? null;
       return absentMonths(first, last, s.months).filter(
         (m) => db.oow || !win || (m >= win.from.slice(0, 7) && m <= win.to.slice(0, 7))

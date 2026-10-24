@@ -245,6 +245,27 @@ export function eraOf(feed, oow = false) {
 }
 
 /**
+ * THE LAST MONTH A SERIES IS OWED IN (DB-B47, the page half of the window
+ * route's `life_of`, `crates/api/src/bars_series.rs`). A series that never
+ * expires (an index) is owed every month to the end of the feed's own span,
+ * its archive, else the operator's window (D-3338): a month after its newest
+ * file is a month not yet pulled or imported, a hole, never "outside its
+ * life". Every other series keeps its newest held month (a share's delisting
+ * looks like a missing pull from the store, and a contract ends at expiry),
+ * as on the route. The start is never moved.
+ *
+ * @param {string} last the newest month the series holds, `YYYY-MM`
+ * @param {boolean} neverExpires whether the series is owed as an index
+ * @param {any} feed the `/feeds.json` row
+ * @returns {string}
+ */
+export function owedTo(last, neverExpires, feed) {
+  if (!neverExpires) return last;
+  const end = String(feed?.archive?.to ?? feed?.window?.to ?? '').slice(0, 7);
+  return /^\d{4}-\d{2}$/.test(end) && end > last ? end : last;
+}
+
+/**
  * Whether a census month lies outside a feed's operator window (D-3338).
  *
  * @param {string} month `YYYY-MM`

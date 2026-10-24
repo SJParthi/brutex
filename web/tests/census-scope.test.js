@@ -709,3 +709,27 @@ test('extreme, combined: ten times the expiries AND the chosen chain past the ca
   // The page then refuses that chain by name rather than drawing it empty.
   assert.equal(scopeNeed({ scope: answer.scope, filter: 'ALPHA', kind: 'options', expiry: chosen }), null, 'not missing: read and refused');
 });
+
+/* ----------------------------------------------------------------------
+   R3-12, DB-B47 (the page half): AN INDEX'S MISSING NEWEST MONTHS ARE HOLES
+   ---------------------------------------------------------------------- */
+import { owedTo } from '../src/lib/db/selection-model.js';
+import { owedKind, absentMonths } from '../src/lib/completeness.js';
+
+test('an_index_owes_its_months_to_the_feeds_span_end', () => {
+  const archived = { archive: { from: '2018-09-03', to: '2026-09-24' } };
+  const windowed = { window: { from: '2018-01-01', to: '2026-09-30' } };
+  // GDFL INDIAVIX 1s held to 2025-10 inside an archive to 2026-09: eleven holes, never "outside life".
+  assert.equal(owedTo('2025-10', true, archived), '2026-09');
+  assert.equal(absentMonths('2025-08', owedTo('2025-10', true, archived), new Set(['2025-08', '2025-09', '2025-10'])).length, 11);
+  assert.equal(owedTo('2026-09', true, windowed), '2026-09', 'the window when there is no archive');
+  assert.equal(owedTo('2026-10', true, archived), '2026-10', 'never moved back');
+  assert.equal(owedTo('2023-07', false, archived), '2023-07', 'a share that stopped (HDFC) keeps its held life');
+  assert.equal(owedTo('2025-10', true, {}), '2025-10', 'no span, no claim');
+  assert.equal(owedTo('2025-10', true, { archive: { to: 'garbage' } }), '2025-10', 'a span that is not a day claims nothing');
+  // WHICH SERIES NEVER EXPIRES is the owed-kind rule's, not a word typed in the grid.
+  assert.equal(owedKind('INDEX', false, null).owed, 'index');
+  assert.notEqual(owedKind('CASH', false, null).owed, 'index');
+  const grid = readFileSync(new URL('../src/routes/db/DbCoverageGrid.svelte', import.meta.url), 'utf8');
+  assert.match(grid, /last = owedTo\(last, s\.like\?\.expiry == null && owedKind\(segmentOfKey\(instrument\) \?\? '', false, null\)\.owed === 'index', db\.activeFeed\);/);
+});
