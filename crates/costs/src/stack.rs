@@ -2466,16 +2466,12 @@ mod tests {
         let (before, after) = (dated(last), dated(first));
         let (row, ipft, source) = exchange_rows(&before, last);
         assert_eq!((row, ipft), (3_503, 50), "FA64232 plus the FA56129 IPFT");
-        assert!(
-            source.contains("FA64232") && source.contains("FA56129"),
-            "{source}"
-        );
+        assert!(source.contains("FA64232"), "{source}");
+        assert!(source.contains("FA56129"), "{source}");
         let (row, ipft, source) = exchange_rows(&after, first);
         assert_eq!((row, ipft), (3_553, 0), "FA73061's folded row alone");
-        assert!(
-            source.contains("NSE/FA/73061") && !source.contains("FA64232"),
-            "{source}"
-        );
+        assert!(source.contains("NSE/FA/73061"), "{source}");
+        assert!(!source.contains("FA64232"), "{source}");
         // What the card adds is the regime's IPFT on the day, and nothing else.
         for (on, ipft) in [(last, 50), (first, 0)] {
             assert_eq!(
@@ -2544,7 +2540,8 @@ mod tests {
         assert_eq!(exchange_rows(&sold, first).0, 3_553);
         assert!(exchange_rows(&bought, last).2.contains("FA64232"));
         let sold_source = exchange_rows(&sold, first).2;
-        assert!(sold_source.contains("NSE/FA/73061") && !sold_source.contains("FA64232"));
+        assert!(sold_source.contains("NSE/FA/73061"), "{sold_source}");
+        assert!(!sold_source.contains("FA64232"), "{sold_source}");
         // STT is the sell leg's alone, at its own day's 0.10% row.
         assert_eq!((bought.stt(), sold.stt()), (rs(0), rs(8_00)));
         assert_eq!(bought.basis().to_string(), "rates in force on 2026-02-27");

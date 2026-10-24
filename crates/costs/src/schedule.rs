@@ -1891,13 +1891,16 @@ mod tests {
             "a date decides more than the label: \
              `let base = exchange_charge_rate(exchange, day.max(FA73061_EFFECTIVE))?;`"
         );
-        assert!(
-            refused(
-                "Exchange::Nse if day.before(FA73061_EFFECTIVE)",
-                "Exchange::Nse if day.before(boundary!(2026 - 3 - 1))"
-            )
-            .starts_with("a date written in the card")
-        );
+        for written in [
+            "Exchange::Nse if day.before(boundary!(2026 - 3 - 1))",
+            "Exchange::Nse if day.before(TradeDay::new(2026, 3, 1)?)",
+        ] {
+            assert!(
+                refused("Exchange::Nse if day.before(FA73061_EFFECTIVE)", written)
+                    .starts_with("a date written in the card"),
+                "{written}"
+            );
+        }
         // A card that never reads the regime's boundary cannot say which row
         // it is priced at: the head's shape before D-6741.
         assert_eq!(
@@ -1999,13 +2002,16 @@ mod tests {
                     .ok()
                     .map(|card| card.exchange_charge().source());
                 if let Ok(card) = card {
-                    // Where it prices, the card is the two rows of the day.
-                    let (Some(row), Some(ipft)) = rows else {
-                        panic!("{exchange:?} on {on}: a card without both rows");
-                    };
+                    // Where it prices, the card is the two rows of the day,
+                    // and both rows answer: a missing one is `None` here.
+                    let both = rows
+                        .0
+                        .zip(rows.1)
+                        .map(|(row, ipft)| Ratio::new(row + ipft, RATE_SCALE));
                     assert_eq!(
-                        card.exchange_charge().rate(),
-                        Ratio::new(row + ipft, RATE_SCALE)
+                        Some(card.exchange_charge().rate()),
+                        both,
+                        "{exchange:?} on {on}"
                     );
                 }
                 if last.is_some_and(|last| last != (rows, source)) {
@@ -2051,10 +2057,8 @@ mod tests {
         for on in [day(2024, 10, 1), day(2026, 2, 27), day(2026, 2, 28)] {
             let source = card(Exchange::Nse, on).exchange_charge().source();
             assert_eq!(source, REGIME_EXCHANGE_NSE, "{on}");
-            assert!(
-                source.contains("FA64232") && source.contains("FA56129"),
-                "{on}"
-            );
+            assert!(source.contains("FA64232"), "{on}");
+            assert!(source.contains("FA56129"), "{on}");
         }
         // From FA73061's own day — a Sunday the card prices as the regime does,
         // because this crate is no session calendar — through a leap day and

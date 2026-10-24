@@ -937,7 +937,12 @@ fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases
             let today = price(RateSelector::CurrentOnEveryDate);
             let source = dated.rates_used()[0].expect("the exchange line").source();
             assert!(
-                source.contains("NSE/FA/73061") && !source.contains("FA64232"),
+                source.contains("NSE/FA/73061"),
+                "{} on {on}: {source}",
+                case.name
+            );
+            assert!(
+                !source.contains("FA64232"),
                 "{} on {on}: {source}",
                 case.name
             );
