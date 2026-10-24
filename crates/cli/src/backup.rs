@@ -1373,19 +1373,27 @@ fn check_receipt(store: &Path, dest: &Path) -> Result<(), Refusal> {
             ),
         ));
     }
+    // THE RECEIPT'S FOLDER AND FILE, looked at before a byte is copied: an
+    // `ops` that is no folder, or a log that is no regular file, would leave
+    // a whole copy that no receipt could record.
     let log = store.join(RECEIPTS);
-    match fs::symlink_metadata(&log) {
-        Ok(meta) if !meta.is_file() => {
-            return Err(refused(
-                "receipt_unwritable",
-                format!(
-                    "{} is not a regular file, so no receipt could be appended; nothing was \
-                     copied",
-                    log.display()
-                ),
-            ));
+    for (path, want_dir) in [
+        (log.parent().unwrap_or(store), true),
+        (log.as_path(), false),
+    ] {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if (want_dir && !meta.is_dir()) || (!want_dir && !meta.is_file()) => {
+                return Err(refused(
+                    "receipt_unwritable",
+                    format!(
+                        "{} is not a {}, so no receipt could be appended; nothing was copied",
+                        path.display(),
+                        if want_dir { "folder" } else { "regular file" }
+                    ),
+                ));
+            }
+            _ => {}
         }
-        _ => {}
     }
     Ok(())
 }

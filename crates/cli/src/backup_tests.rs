@@ -1576,3 +1576,166 @@ fn measured(line: &str) {
         writeln!(file, "{line}").unwrap();
     }
 }
+
+/// **A MONTH THE CENSUS NAMES AND THE DISK LACKS IS NAMED `missing`**: no
+/// file is copied for it, the manifest says so, and the run is partial.
+#[test]
+fn a_month_the_census_names_and_the_disk_lacks_is_named_missing() {
+    let fx = Fixture::standard("month-gone");
+    let path = month_path("CASH", "ZZSHARE", false, 2);
+    for kind in FileKind::ALL {
+        let _ = fs::remove_file(path.with_file(kind).to_path_buf(&fx.root));
+    }
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    let unit = path.to_string();
+    assert!(out.contains("MISSING") && out.contains(&unit), "{out}");
+    assert!(
+        fx.manifest()
+            .contains(&format!("missing {} run=", encoded(unit.as_bytes()))),
+        "{}",
+        fx.manifest()
+    );
+    assert!(
+        fx.receipts()[0].contains(" missing=1 "),
+        "{:?}",
+        fx.receipts()
+    );
+}
+
+/// **A STORE WITH NO `ops/` FOLDER GETS ONE FOR ITS RECEIPT** (the operator's
+/// store has none today); an `ops` that is a file is refused before a copy.
+#[test]
+fn a_store_with_no_ops_folder_gets_one_and_an_ops_file_is_refused() {
+    let fx = Fixture::standard("no-ops");
+    fs::remove_dir_all(fx.root.join("ops")).unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(fx.receipts().len(), 1);
+    assert!(fx.root.join("ops").is_dir());
+
+    let other = Fixture::standard("ops-file");
+    fs::remove_dir_all(other.root.join("ops")).unwrap();
+    fs::write(other.root.join("ops"), "not a folder").unwrap();
+    let refused = other
+        .backup_with(false, Inject::default(), u64::MAX)
+        .expect_err("refused");
+    assert_eq!(refused.word, "receipt_unwritable", "{refused:?}");
+    assert!(refused.why.contains("is not a folder"), "{}", refused.why);
+    assert_eq!(
+        fs::read_dir(&other.target).unwrap().count(),
+        0,
+        "nothing copied"
+    );
+}
+
+/// **A CENSUS THAT WILL NOT LOAD IS NAMED, ITS MONTHS UNLISTED**: the other
+/// listed files are still copied, the run is partial, and the manifest
+/// carries an `unlisted` line.
+#[test]
+fn a_census_that_will_not_load_is_named_and_the_run_is_partial() {
+    let fx = Fixture::standard("bad-census");
+    let census = pull::manifest::manifest_path(&fx.root, Vendor::Gdfl);
+    fs::write(&census, b"this is no census").unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("UNLISTED") && out.contains("gdfl: "), "{out}");
+    assert!(
+        fx.manifest().contains("\nunlisted gdfl"),
+        "{}",
+        fx.manifest()
+    );
+    assert!(
+        fx.receipts()[0].contains(" state=partial "),
+        "{:?}",
+        fx.receipts()
+    );
+    assert!(
+        fx.records().iter().any(|r| r.class == "census"),
+        "the census file itself is still copied"
+    );
+}
+
+/// **THE RATE LIMIT IS PAID**: at 1 MiB/s a run over these few hundred
+/// kilobytes takes at least the time the bytes owe, and copies them whole.
+#[test]
+fn the_rate_limit_is_paid_after_each_unit() {
+    let fx = Fixture::standard("rate-limit");
+    let device = fx.device();
+    let free = |_: &Path| -> Result<u64, String> { Ok(u64::MAX) };
+    let env = Env {
+        commit: Some(COMMIT),
+        device: &device,
+        free: &free,
+        inject: Inject::default(),
+    };
+    let ask = Ask {
+        to: fx.target.clone(),
+        plan: false,
+        bytes_per_s: 1024 * 1024,
+    };
+    let started = Instant::now();
+    let ran = backup(&fx.root, &ask, &env).expect("a backup");
+    let owed = Duration::from_micros(ran.total().copied_bytes * 1_000_000 / (1024 * 1024));
+    assert!(
+        started.elapsed() >= owed,
+        "{:?} < {owed:?}",
+        started.elapsed()
+    );
+    fx.every_record_verifies();
+}
+
+/// **A DEVICE THAT CANNOT BE TOLD IS REFUSED**, never taken for "another".
+#[test]
+fn a_device_that_cannot_be_told_is_refused() {
+    let fx = Fixture::standard("no-device");
+    let device = |_: &Path| -> io::Result<u64> { Err(io::Error::other("stat refused")) };
+    let free = |_: &Path| -> Result<u64, String> { Ok(u64::MAX) };
+    let env = Env {
+        commit: None,
+        device: &device,
+        free: &free,
+        inject: Inject::default(),
+    };
+    let ask = Ask {
+        to: fx.target.clone(),
+        plan: true,
+        bytes_per_s: 0,
+    };
+    let refused = backup(&fx.root, &ask, &env).expect_err("refused");
+    assert_eq!(refused.word, "same_device");
+    assert!(
+        refused.why.contains("cannot be told: stat refused"),
+        "{}",
+        refused.why
+    );
+}
+
+/// **A DRILL NAMES A COPY GONE FROM THE TARGET AND A FILE GONE FROM THE
+/// STORE**, each a failure by path; the result is `fail`.
+#[test]
+fn a_drill_names_a_copy_gone_from_the_target_and_a_file_gone_from_the_store() {
+    let fx = Fixture::standard("drill-gone");
+    fx.backup();
+    let records = fx.records();
+    let crc = records
+        .iter()
+        .find(|r| r.class == MONTH && r.path.ends_with(b".crc"))
+        .unwrap();
+    fs::remove_file(fx.copy_of(crc)).unwrap();
+    let bin = records
+        .iter()
+        .find(|r| r.class == MONTH && r.path.ends_with(b".bin") && r.unit != crc.unit)
+        .unwrap();
+    fs::remove_file(
+        fx.root
+            .join(Path::new(std::ffi::OsStr::from_bytes(&bin.path))),
+    )
+    .unwrap();
+    let (code, out) = fx.drill(&["--from", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("is absent from the target"), "{out}");
+    assert!(out.contains("absent from the store"), "{out}");
+    let line = fs::read_to_string(fx.root.join(DRILLS)).unwrap();
+    assert_eq!(words_of(line.trim_end(), "result"), Some("fail"));
+}
