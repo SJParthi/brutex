@@ -84922,7 +84922,14 @@ D-7185).
    Options, and every other feed's futures, keep the one-minute rule. The
    store step is therefore `POST /pull/fno` with
    `vendor=zerodha&series=fut&underlying=<UND>&from=..&to=..` and
-   `granularity=1day` or none.
+   `granularity=1day` or none. R4-06's
+   `crates/api/tests/store_step_forms.rs` pinned the old refusal of S-48's
+   planned body at `1day` and asked R4-28 to reconcile the two; it now pins
+   that the body parses at `1day` once an underlying is named and refuses
+   `1min` by name, and still refuses the body without an underlying, so
+   S-48 (`config/store-steps.toml`) stays planned, its text saying why: the
+   route takes one underlying a request, and no form names all the F&O
+   underlyings at once.
 6. **The r5 check's follow-ups taken.** (a) A whole-plan refusal of
    `futures_plan` (`no_snapshot`, `snapshot_from_the_future`,
    `futures_index`) is one Error `pull.futures` event naming the underlying
