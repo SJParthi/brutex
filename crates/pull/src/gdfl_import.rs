@@ -2662,6 +2662,7 @@ fn cm_read<S: CmSource>(
         dual: decoded.dual_spread,
         auction_prints: u64::try_from(decoded.auction.len()).unwrap_or(u64::MAX),
         quoted_rows: None,
+        trailing_empty: 0,
     };
     let ticks = decoded
         .rows
@@ -2950,11 +2951,9 @@ fn contract_day_of(day_file: &crate::gdfl_nfo::NfoDayFile, file: usize) -> linea
     }
 }
 
-/// One read option file as the runtime receives it: its rows, its member
-/// and its quote count (D-3334, D-3335).
 /// An option file's reader counts (D-3335): its quoted rows, and the rows
-/// its reader refused one by one while keeping the rest (CMP-13; `0` until
-/// IA-4's decoder refuses rows singly). A row refusal is a count of the day
+/// its reader refused one by one while keeping the rest (CMP-13; D-4816,
+/// from bar definition 5). A row refusal is a count of the day
 /// ledger and NEVER a failure of the file or its day: an option file and a
 /// CASH file are judged by one rule.
 pub(super) fn option_reader_counts(quoted_rows: u32, rows_refused: u64) -> quality::ReaderCounts {
@@ -2969,13 +2968,20 @@ fn option_handed<L>(
     day_file: crate::gdfl_nfo::NfoDayFile,
     file: &crate::gdfl_cm::ListedFile<L>,
 ) -> Handed {
-    // THE SEAM IA-4'S PER-ROW OPTIONS DECODER FILLS (CMP-13): today the
-    // options reader refuses a file whole, so it hands on no row refusal;
-    // once it keeps a file's good rows and refuses others one by one, it
-    // passes their count here, and the file is filed and its day closes
-    // exactly as a CASH day with D-3318 row refusals does (IA-16's share,
-    // `an_option_file_with_rows_refused_one_by_one_is_admitted_not_failed_whole`).
-    let reader = option_reader_counts(day_file.file.quoted_rows, 0);
+    // THE SEAM IA-16 LEFT, FILLED (CMP-13, D-4816): the options reader keeps
+    // a file's good rows and refuses others one by one, and their count is
+    // passed here, so the file is filed and its day closes exactly as a CASH
+    // day with D-3318 row refusals does
+    // (`an_option_file_with_rows_refused_one_by_one_is_admitted_not_failed_whole`),
+    // and the day ledger's `rows_refused` counts them (design §8 F44, never a
+    // silent zero, D-4841). A header with empty trailing fields is counted
+    // as D-4841's `trailing_empty_files` (D-4829).
+    let decoded = &day_file.file;
+    let reader = quality::ReaderCounts {
+        zero_ltp_rows: u64::from(decoded.refused.zero_ltp),
+        trailing_empty: decoded.trailing_empty,
+        ..option_reader_counts(decoded.quoted_rows, u64::from(decoded.refused.total()))
+    };
     let ticks = day_file
         .file
         .rows
@@ -3276,6 +3282,13 @@ fn nfo_read<S: NfoSource>(
 ) -> ReadJob {
     match read_file(source, listing, job.file) {
         Ok(day_file) => {
+            // One `warn` line for a file with rows refused, never one per row
+            // (D-3341), the line the capital-market reader says (D-4816).
+            crate::gdfl_cm::note_refused_rows(
+                listing.day(),
+                &job.file.entry,
+                &day_file.file.refused,
+            );
             let contract = lineage.then(|| contract_day_of(&day_file, job.index));
             Ok((option_handed(day_file, job.file), contract))
         }
