@@ -869,6 +869,35 @@ impl Refusal {
             _ => write!(f, "REFUSED · a member field this build cannot describe"),
         }
     }
+
+    /// The two refusals of an expired series' rung (split out of the
+    /// formatter for its line ceiling when the second arrived, R4-28 repair 5).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the formatter refuses.
+    fn write_rung_refusal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
+                f,
+                "REFUSED · an expired series is pulled at ONE MINUTE only, and \
+                 {got:?} was asked for. Nothing was sent: no discovery walk, no \
+                 credential read and no vendor contacted. Ask again with \
+                 granularity={}.",
+                pull::vendor::Granularity::Minute1.dir()
+            ),
+            Self::ExpiredFutureAtItsRouteRungOnly { ref got, rung } => write!(
+                f,
+                "REFUSED · this feed serves an expired future at {rung} only, through \
+                 its token (minute candles of an expired future are UNVERIFIED, \
+                 docs/00-charter.md §4z), and {got:?} was asked for. Nothing was \
+                 sent: no plan, no credential read and no vendor contacted. Ask \
+                 again with granularity={rung}, or leave it empty."
+            ),
+            // UNREACHABLE BY CONSTRUCTION, as in `write_member_refusal`.
+            _ => write!(f, "REFUSED · a rung this build cannot describe"),
+        }
+    }
 }
 
 /// The refusal an expired series gives for a date inside the current month.
@@ -968,22 +997,8 @@ impl fmt::Display for Refusal {
             ),
             Self::UnknownVendor { ref got } => f.write_str(&unknown_vendor_refusal(got)),
             Self::InvalidCashIdentity { ref got } => f.write_str(&cash_identity_refusal(got)),
-            Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
-                f,
-                "REFUSED · an expired series is pulled at ONE MINUTE only, and \
-                 {got:?} was asked for. Nothing was sent: no discovery walk, no \
-                 credential read and no vendor contacted. Ask again with \
-                 granularity={}.",
-                pull::vendor::Granularity::Minute1.dir()
-            ),
-            Self::ExpiredFutureAtItsRouteRungOnly { ref got, rung } => write!(
-                f,
-                "REFUSED · this feed serves an expired future at {rung} only, through \
-                 its token (minute candles of an expired future are UNVERIFIED, \
-                 docs/00-charter.md §4z), and {got:?} was asked for. Nothing was \
-                 sent: no plan, no credential read and no vendor contacted. Ask \
-                 again with granularity={rung}, or leave it empty."
-            ),
+            Self::ExpiredSeriesIsOneMinuteOnly { .. }
+            | Self::ExpiredFutureAtItsRouteRungOnly { .. } => self.write_rung_refusal(f),
             Self::UnknownGranularity { ref got } => write!(
                 f,
                 "REFUSED · {got:?} is not a bar length on this ladder. Nothing \
