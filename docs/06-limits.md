@@ -21450,6 +21450,134 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-BREDS-2 | `cargo deny check` can turn red with no change to the tree | the advisory database is fetched when the check runs; both advisories were dated 19 and 20 Oct 2026, after DENY-1's green of 17 Oct, and turned an unchanged tree red. Green is a statement about the tree AND the database revision it was checked against | D-7120 names the database revision its green was taken at; only a gate that runs the check again can see a newer advisory | BASE-REDS-1021 |
 | L-BREDS-3 | The offline advisory floor in `cargo test` covers two advisories and no pre-release | `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` (BREDS-01 to BREDS-04) holds RUSTSEC-2026-0382's and RUSTSEC-2026-0381's own ranges, copied by hand from the files `docs/00-charter.md` digests; it knows no other advisory, does not fetch the database, and does not model cargo's rule that a pre-release matches only a comparator on its own `MAJOR.MINOR.PATCH`, so a locked pre-release of either package is refused by name rather than judged | `cargo deny check` (gate 3) remains the authority and the only check on any other advisory; a row is added to `FLOORS` by the decision that bumps for a new advisory and never edited to fit a lock; the check is one parse of the lock and one pass over its about 195 stanzas per floor, test-time only | BASE-REDS-1021 |
 
+## The cli import verbs: the mutants no test can kill, and the arms the store's contract makes unreachable — cloud pass of 16 October 2026, merged on the Mac 22 to 23 October 2026
+
+Scope: `crates/cli/src/gdfl_import_command.rs`, `readonly_file.rs`,
+`srt_builder.rs` and `tix_rebuilder.rs`. The cloud pass added tests only (one
+`cloud_mutant_tests` module at the end of each file); its merge adds three
+production seams, each a parameter every caller passes exactly as before: the
+walk's bound (`Ask::series_within`) and the read-back after the step
+(`srt_builder::build_reading`, `tix_rebuilder::rebuild_reading`), below. The cloud pass's counts were measured by the cloud session on branch
+`cloud/mut-cli-20261016` (cargo-mutants 27.1.0, Linux x86_64, an opt-level 0
+override for the mutation build only, each file's own module tests as the
+filter): **160 mutants, 131 caught, 4 missed, 0 timeouts, 25 unviable**,
+against 112 caught and 23 missed before the pass. Every unviable mutant fails
+to compile (a `Default::default()` of a type with no `Default`, an
+uninferable type, or a non-`const` call in a `const fn`). The figures of a
+re-run on another host belong to the change that re-ran them; where they
+differ from these, that difference is a finding.
+
+**The four that survived the cloud pass, and why no test could kill them
+there** (three are killed on this merge through the read-back seam, below):
+
+| Mutant | Why |
+|---|---|
+| `readonly_file.rs` `regular` → `Ok(Default::default())` (the stub) | The stub compiles only off macOS and Linux x86_64/aarch64; on those hosts the mutation changes no compiled byte, and where the stub does compile `std::fs::File` has no `Default`, so it would be unviable there. |
+| `tix_rebuilder.rs` `rebuild`, guard `matches!(line, Line::Small { .. })` → `true` | It differs only when the read-back finds `Bisection(BelowThreshold)` after the index step said `Kept` or `Built`. Writer and reader both say `BelowThreshold` iff the month is under `INDEX_MIN_ROWS` **and** no `.tix` name exists, and `Kept`/`Built` leave a `.tix`. Only another process changing the `.tix` between the step releasing the month's lock and the read-back taking it reaches it; no deterministic test can place that race and there is no seam between the two calls. |
+| `tix_rebuilder.rs` `rebuild`, guard `!matches!(line, Line::Small { .. })` → `true` | The mirror: a `Small` line read back as `Indexed`, which needs a valid `.tix` to appear in the same unlocked window. |
+| `srt_builder.rs` `build`, delete `!` in `read_back_body` | It swaps which outcome gets the body re-check (`SortIndex::verify`): `Kept` instead of `Built`. The store returns `Kept` only after making that check under the month's exclusive lock, and `Built` only after writing the run from the verified bars, so the two differ only if the body changes between the store's step and the read-back. |
+
+Killing the three race-only ones needed a fault-injection seam between the
+index step and its read-back in `tix_rebuilder::rebuild` and
+`srt_builder::build`. This merge made it (22 Oct 2026): `rebuild` and `build`
+call `rebuild_reading` and `build_reading` with `reader_view`, the one read
+door every caller used before, and a test hands the step a reader that
+disagrees with it and sees the disagreement named, never trusted (MCL-08,
+`docs/04-invariants.md`). The arms where the read-back finds the month not
+indexed, or is refused, after the step, which no test reached in the cloud
+pass, are reached the same way. Of the four, only the `readonly_file.rs`
+stub survives on the operator's Mac. Counts reproduced there (23 Oct 2026,
+`cargo mutants -p cli --file <file>`, opt-level 0, each file's own tests;
+each file's production source unchanged since its run, every later change
+test-only; the WIP heads the runs took are folded by the merge and not cited):
+`tix_rebuilder.rs`, 34 tested: 25 caught, 0 missed, 9 unviable;
+`srt_builder.rs`, 74 tested: 63 caught, 0 missed, 11 unviable;
+`readonly_file.rs`, 3 tested: 1 missed (the stub above),
+2 unviable; `gdfl_import_command.rs`, 79 tested: 71 caught,
+2 missed, 6 unviable, and both survivors (`symbols` in `flags_of`,
+`free_floor` in `asked`) caught when re-run alone after MCL-12's
+two tests (`--re`, 2 tested: 2 caught).
+
+**Production lines no test reaches, and why** (so line coverage on these three
+files is not 100%, `CLAUDE.md` §9):
+
+- `srt_builder.rs`, the `|row| file.read_record(row)` closure given to
+  `store::sort_index::bind`: `bind` calls it only for a run boundary that is
+  neither row 0 nor `n_valid`, and the guard admits exactly one run over
+  `0..n_valid`.
+- `srt_builder.rs` and `tix_rebuilder.rs`, every `other =>` arm over the
+  `#[non_exhaustive]` `Resorted`, `Reindexed` and `TimeLookup`: every variant
+  the store has today is matched above it.
+- Both files, `Err(why) => Line::Refused` for a store path inside the month
+  loop: every path is proved before the loop, and a `*` walk's names come
+  from `Contract::parse`, whose alphabet and 24-byte bound `check_segment`
+  always accepts.
+- `srt_builder.rs`, `symlink_metadata(.srt)` failing with a kind other than
+  `NotFound`: only an I/O fault or a permission refusal produces one.
+- `gdfl_import_command.rs`, the receipt's `KindEnd::Unopened` arm: the plan
+  opens a capital-market archive before the door and refuses one that is
+  not a readable zip as `source_root_unknown`, with no receipt and no lock,
+  so the run's own open fails only for an archive replaced between the two.
+  Its words (`refused_words`) are pinned on the function instead (MCL-11).
+
+**Host-dependent, and moved:** the options-tree listing the cloud pass
+tested from `gdfl_import_command.rs` is no longer in that file. IA-1 (D-4800)
+moved the import's scope into the one run authority, so the listing is
+`pull::gdfl_run::scope::option_underlyings` in `crates/pull/src/gdfl_run_scope.rs`,
+and its `NotFound` guard and its "is not a symbol" refusal are mutants of
+the `pull` crate now, not of this file; `an_options_tree_that_cannot_be_listed_or_named_is_refused`
+still pins both from the verb's side. The "is not a symbol" refusal answers
+an entry whose name is not UTF-8. APFS and HFS+ refuse such a name at
+creation (`EILSEQ`, "Illegal byte sequence"), so on macOS no listing can
+return one and the arm is unreachable through the filesystem there: on Linux
+the test proves the arm, on macOS it proves the host refused the name and the
+tree still reads as holding no underlying.
+
+**The bound test's cost, what a kill leaves, and why it is opt-in (21 Oct
+2026):** `a_star_walks_exactly_the_contract_bound_and_refuses_one_more` makes
+`MAX_CONTRACTS` (100,000) empty directories, walks them through the verb, adds
+one and walks again. The tree is the test's own, under a name that carries
+`process::id()` as gate 23 clause C requires, and is removed when the test
+ends. Round 1 of this merge made the tree shared and kept under a fixed name
+instead, so a kill could not leak it; that is the fixed temporary path clause
+C refuses (two checkouts on one machine would share it), and it was put back.
+**Measured on the operator's Mac, it was the wrong default:** in this merge's
+own `srt_builder.rs` mutation run (opt-level 0, a loaded machine, 21 Oct
+2026) the unmutated run of the file's 24 tests took 323 s, the other 23
+finishing inside the first 60 s, and one mutant's run took 19 minutes; and a
+test process KILLED inside it (a mutation run's timeout, an interrupted
+`cargo test`) never runs that removal and leaves up to 100,001 empty
+directories in the temporary directory under `brutex-cli-srt-cloud-<pid>-<n>`.
+Fourteen such trees, 628 to 95,521 directories each, were in the operator's
+temporary directory on 21 Oct 2026: twelve made between 04:35 and 05:59 IST,
+one at 10:50 and one at 15:40 (the last two from this package's own
+interrupted mutation runs). None was removed here; they are listed for the
+main session. **So the test is `#[ignore]`d**, and the bound is proved by
+`a_star_walks_exactly_its_bound_and_refuses_one_more` in five directories:
+`Ask::series` passes `MAX_CONTRACTS` to `Ask::series_within`, the one walk
+every caller uses (`srt-build` and `msum-build`; `tix-rebuild` takes a spot
+series only), and the test
+walks exactly a bound of 3 with a link and a stray entry beside it (counted,
+never against the bound), refuses a fourth contract by name, and pins
+`MAX_CONTRACTS` at 100,000. That seam and the two read-back seams (`build_reading`, `rebuild_reading`) are this merge's only production changes; each keeps the one read door every caller used before.
+The opt-in test still proves the real bound end to end:
+`cargo test -p cli --lib -- --ignored --exact
+srt_builder::cloud_mutant_tests::a_star_walks_exactly_the_contract_bound_and_refuses_one_more`.
+Measured alone from the opt-level 3 test binary on the operator's Mac (23 Oct 2026, the test binary of the branch before MCL-12, `TMPDIR` inside a scratch folder, a loaded machine): three runs, each exit 0, 432.6 s, 226.1 s and 52.5 s, no tree left behind. Wall time on a shared machine, not a bench.
+
+
+**The bound against the real tree** (read-only listing of the real store,
+21 Oct 2026; no file opened): `bars/gdfl/NSE/FNO/NIFTY` holds 70,458 contract
+directories and `bars/gdfl/NSE/FNO/BANKNIFTY` 63,286, no link and no other
+entry in either. A `cli srt-build gdfl NSE/FNO/NIFTY/* ...` therefore walks
+70% of `MAX_CONTRACTS` today. NIFTY's directories by expiry year were 8,214
+(2023), 10,044 (2024) and 10,196 (2025). **Extrapolation, not a
+measurement:** at about 10,000 a year the NIFTY tree passes 100,000 in about
+three years, after which a `*` over it is refused by name ("holds more than
+100000 contract directories; name fewer"), never cut short; a run then names
+contracts or a narrower span. Raising the bound is an owner's decision, since
+the walk holds every name in memory before the sort.
+
 ## The Py-language gate (NOPY-1, merged back by CLOUD-NOPY1; D-5250, D-5251, D-5258)
 
 `crates/vocab/tests/no_py_language.rs` is a test, never on a request path. Measured on the operator's machine on 21 Oct 2026 under a load average of 13 to 15 on 14 cores: the gate test alone, its debug binary run 200 times in sequence, one process per run (start, `git ls-files`, every tracked file read and scanned, 1,453 files and 68,144,292 bytes): p50 0.136 s, p99 0.170 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200.txt`). Re-measured on 22 Oct 2026 by the same method on the tree after the third merge of `feat/db-fix` (1,464 files, 69,134,919 bytes) under a load average of 19 to 26: p50 0.142 s, p99 0.187 s, max 0.222 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r3.txt`). Re-measured again on 22 Oct 2026 by the same method on the tree after the fourth merge of `feat/db-fix` (1,469 files, 69,452,277 bytes) under a load average of 13 to 18: p50 0.120 s, p99 0.142 s, max 0.186 s, all 200 green (`state/fix/round2/logs-CLOUD-NOPY1/gate-timing-n200-r4.txt`).
