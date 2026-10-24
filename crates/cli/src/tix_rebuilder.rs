@@ -267,8 +267,27 @@ fn reader_view(
     Ok((file.header().n_valid, file.time_lookup()))
 }
 
+/// The read door [`rebuild`] checks a month through after its step: the
+/// arguments of [`reader_view`], and its answer.
+type ReadBack<'a> = &'a dyn Fn(&Path, StorePath<'_>, u32) -> Result<(u64, TimeLookup), StoreError>;
+
 /// One month, built or confirmed, then checked through the read door.
 fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
+    rebuild_reading(root, path, symbol_id, &reader_view)
+}
+
+/// [`rebuild`] with its read-back named. Every caller reads back through
+/// [`reader_view`]; the read-back is a parameter only so a test can hand the
+/// step a reader that disagrees with it, which no deterministic store state
+/// reaches (the store's step and its reader decide from one header and one
+/// set of names under the month's lock), and see each disagreement named
+/// rather than trusted (`docs/06-limits.md`, "The cli import verbs").
+fn rebuild_reading(
+    root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    read_back: ReadBack<'_>,
+) -> Line {
     let done = match BarFile::index_existing(root, path, symbol_id) {
         Ok(done) => done,
         Err(StoreError::Missing { .. }) => return Line::NotHeld,
@@ -313,7 +332,7 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
             };
         }
     };
-    match reader_view(root, path, symbol_id) {
+    match read_back(root, path, symbol_id) {
         // A SMALL MONTH IS READ BACK TOO: a reader must give the rule as its
         // reason, so the receipt's `small` is what a reader sees.
         Ok((_, TimeLookup::Bisection(Why::BelowThreshold)))
@@ -544,3 +563,236 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 #[cfg(test)]
 #[path = "tix_rebuilder_tests.rs"]
 mod tests;
+
+/// THE CLOUD MUTATION PASS of 2026-10-16 (`docs/06-limits.md`, "The cli
+/// import verbs"): each test pins the behaviour a mutant of this file broke
+/// while every other test stayed green, or runs a line no test reached.
+/// Invented stores only.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use store::format::{Bar, OI_NULL};
+
+    use super::*;
+
+    /// The dispatched verb refuses a misuse with its usage, before the store
+    /// root is asked for.
+    #[test]
+    fn the_dispatched_verb_refuses_a_misuse_with_its_usage() {
+        let mut out = String::new();
+        assert_eq!(command(&["gdfl"], &mut out), MISUSED);
+        assert!(out.starts_with("refused: "), "{out}");
+        assert!(out.contains(USAGE), "{out}");
+    }
+
+    /// A month filed under another symbol's header id is refused by the
+    /// store, dry or not, and no index is written for it.
+    #[test]
+    fn a_month_under_another_symbols_id_is_refused_dry_or_not() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "brutex-cli-tix-cloud-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let month = YearMonth::new(2019, 1).unwrap();
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .unwrap();
+        let other =
+            u32::try_from(brutex_core::universe::fnv1a("BANKNIFTY") & u64::from(u32::MAX)).unwrap();
+        let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+        let bars: Vec<Bar> = (0..1_100_i64)
+            .map(|k| Bar {
+                ts_micros: open + k * 1_000_000,
+                open: 424_200,
+                high: 424_300,
+                low: 424_100,
+                close: 424_250,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let mut writer = BarFile::open_or_create(&root, path, other).unwrap();
+        writer.append(&bars).unwrap();
+        drop(writer);
+        let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root);
+        fs::remove_file(&tix).unwrap();
+        for dry in [true, false] {
+            let mut arguments = vec!["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-01", "2019-01"];
+            if dry {
+                arguments.push("--dry-run");
+            }
+            let mut out = String::new();
+            let at = root.clone();
+            let code = command_with(&arguments, &move || Ok(at.clone()), &mut out);
+            assert_eq!(code, FAILED, "{out}");
+            assert!(out.contains("  2019-01  REFUSED       "), "{out}");
+            assert!(out.contains("refused 1"), "{out}");
+        }
+        assert!(!tix.exists(), "no index is written for a refused month");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The receipt line for a month a reader does not find indexed after the
+    /// step, which no store state in a test reaches, word for word.
+    #[test]
+    fn the_receipt_line_for_a_month_a_reader_does_not_find_indexed() {
+        let mut out = String::new();
+        render_line(
+            &mut out,
+            YearMonth::new(2019, 7).unwrap(),
+            &Line::NotIndexed {
+                n_valid: 1_100,
+                reader: "Bisection(Stale)".to_owned(),
+            },
+        );
+        assert_eq!(
+            out,
+            "  2019-07  NOT INDEXED        1100 bars  the step finished and a reader still \
+             answers Bisection(Stale)\n"
+        );
+        assert!(
+            !Line::NotIndexed {
+                n_valid: 0,
+                reader: String::new()
+            }
+            .clean()
+        );
+    }
+
+    /// A store root of one invented NIFTY spot month of `count` bars, filed
+    /// under the id the verb opens it with, its `.tix` taken away when
+    /// `untimed`; the root, the month's path and that id.
+    fn month_of(tag: u8, count: i64, untimed: bool) -> (PathBuf, StorePath<'static>, u32) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "brutex-cli-tix-cloud-read-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let month = YearMonth::new(2019, 8).unwrap();
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .unwrap();
+        let id = ask(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-08", "2019-08"])
+            .unwrap()
+            .symbol_id();
+        let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+        let bars: Vec<Bar> = (0..count)
+            .map(|k| Bar {
+                ts_micros: open + k * 1_000_000,
+                open: 424_200,
+                high: 424_300,
+                low: 424_100,
+                close: 424_250,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let mut writer = BarFile::open_or_create(&root, path, id).unwrap();
+        writer.append(&bars).unwrap();
+        drop(writer);
+        let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root);
+        if untimed && tix.exists() {
+            fs::remove_file(&tix).unwrap();
+        }
+        (root, path, id)
+    }
+
+    /// **A READ-BACK THAT DISAGREES WITH THE STEP IS SAID, NEVER TRUSTED.**
+    /// The step indexed the month (1,100 bars, so over `INDEX_MIN_ROWS`); a
+    /// reader that answers the small-month bisection, or a sealed month's
+    /// table, makes it `NOT INDEXED` with the reader's words, and a refused
+    /// reader (one that opens it under another symbol's id) makes it
+    /// `REFUSED` naming the read-back. Through the verb the step and the
+    /// reader decide from one header and one set of names under the month's
+    /// lock, so no store state a test can make reaches these: only the
+    /// read-back handed in does (the cloud pass's two equivalent mutants of
+    /// the small-month guard, and the sealed one's).
+    #[test]
+    fn a_read_back_that_disagrees_with_an_indexed_month_is_not_indexed_or_refused() {
+        let (root, path, id) = month_of(1, 1_100, true);
+        let built = rebuild(&root, path, id);
+        assert!(
+            matches!(built, Line::Built { n_valid: 1_100, .. }),
+            "the verb's own read-back agrees with the step: {built:?}"
+        );
+        for reader in [
+            TimeLookup::Bisection(Why::BelowThreshold),
+            TimeLookup::Sealed,
+        ] {
+            assert_eq!(
+                rebuild_reading(&root, path, id, &|_, _, _| Ok((1_100, reader.clone()))),
+                Line::NotIndexed {
+                    n_valid: 1_100,
+                    reader: format!("{reader:?}")
+                },
+                "a kept month read back as {reader:?}"
+            );
+        }
+        let refused = rebuild_reading(&root, path, id, &|at, path, id| {
+            reader_view(at, path, id ^ 1)
+        });
+        assert!(
+            matches!(&refused, Line::Refused { why }
+                if why.starts_with("the index step finished and the read-back was refused: ")),
+            "{refused:?}"
+        );
+        assert_eq!(rebuild(&root, path, id), Line::Kept { n_valid: 1_100 });
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **A SMALL MONTH READ BACK AS INDEXED IS SAID, NEVER CALLED SMALL.** A
+    /// month under `INDEX_MIN_ROWS` with no `.tix` is given none by the step
+    /// (`small`); a reader that answers `Indexed` for it makes it `NOT
+    /// INDEXED` (the cloud pass's mirror equivalent mutant, at the guard of
+    /// the indexed arm).
+    #[test]
+    fn a_small_month_read_back_as_indexed_is_not_indexed() {
+        let (root, path, id) = month_of(2, 100, true);
+        assert_eq!(rebuild(&root, path, id), Line::Small { n_valid: 100 });
+        assert_eq!(
+            rebuild_reading(&root, path, id, &|_, _, _| Ok((100, TimeLookup::Indexed))),
+            Line::NotIndexed {
+                n_valid: 100,
+                reader: format!("{:?}", TimeLookup::Indexed)
+            }
+        );
+        assert!(
+            !path
+                .with_file(FileKind::TimeIndex)
+                .to_path_buf(&root)
+                .exists(),
+            "the step wrote no index for a small month"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
