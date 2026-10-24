@@ -105,3 +105,25 @@ files on `origin/cloud/db-base-20261024`, in this folder:
   list, files outside ownership, the D-numbers used, and the NEEDS THE MAC list.
 - When you are done, push, then end your turn. The Mac merges your branch back under the subject
   `Merge <NAME>: ...`.
+
+## The operator's own words (24 Oct 2026, pasted again; binding on every step)
+
+```text
+Always achieve O(1) even with p99 everywhere.
+Always work on everything parallely.
+Always ensure saving into db and auditing logging tracking capturing debugging finding searching
+monitoring dashboard visualising extremes analyzing covering, easily accessible everything, by
+covering entirely each and every nook and corner, but always ensure to achieve O(1) always.
+Make everything a 100 percent common runtime dynamic incremental scalable approach.
+Always achieve O(1) everywhere.
+Especially cover all kinds of extreme permutations, combinations of exceptions, errors, situations,
+conditions, bugs, scenarios, ideas, etc., including out of the box.
+```
+
+How each line is checked in your part (the same as on the Mac): O(1) per operation with p50/p99/max
+measured and reported; steps run as parallel subagents where they are independent; every state change
+saved and audited with a searchable record, every failure, refusal and extreme value visible on
+`/logs`, `/db` or the part's own page through an O(1) p99 read; one common runtime-dynamic,
+incremental, scalable code path with no typed number outside the Winner Gate; at least 8 extreme cases
+with at least 2 combinations and 1 out-of-the-box case, each test failing before and passing after.
+The independent check (see your effort message) treats any miss as BLOCKING.
