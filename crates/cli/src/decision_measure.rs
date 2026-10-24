@@ -581,8 +581,8 @@ mod tests {
             "{out}"
         );
         let mut out = String::new();
-        let missing = std::env::temp_dir()
-            .join(format!("brutex-no-such-rate-table-{}", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("brutex-no-such-rate-table-{}", std::process::id()));
         assert_eq!(
             rate_replay(
                 missing.to_str().unwrap(),

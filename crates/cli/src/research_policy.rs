@@ -560,7 +560,7 @@ pub(crate) const PERCENT_ON_NON_PROPORTIONAL: &str = "refused: the vendor's pric
 /// non-proportional stock-day, labelled on every other vendor-adjusted one
 /// (a quantised one with its own words), exact on raw prints and published
 /// index levels. O(1) UNVERIFIED: one `match` on two small enums, not timed
-/// (docs/06-limits.md L-BRED23-01).
+/// (docs/06-limits.md L-BRED23-07).
 pub(crate) const fn percentage_statistic(
     basis: pull::vendor::PriceBasis,
     shape: Option<DayShape>,

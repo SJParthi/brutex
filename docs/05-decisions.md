@@ -83178,6 +83178,35 @@ The file is mounted `#[cfg(test)] #[path]` by `cli::tick_second_check`, so
 no production path reaches it; it is declared in `ci.yml` beside the 23 Oct
 block as `cli/src/tick_second_check_tests.rs:println!:4`.
 
+**Addendum, 24 Oct 2026 (R4-27, merged at 12:34 IST after this package's
+gates had gone green on the DATA-2 merge; recorded here for the reason D-7150's
+first addendum gives).** `ci-shell-gates.sh --jobs language-purity --fast` on
+the merge 561741719 printed `RED 1d 23 30 19 10 12`
+(state/fix/ci-gates-logs/bred1023-lp13). Each read at its cause:
+
+1. **Gate 30**: R4-27 is merged and `config/store-steps.toml` said
+   `merged = false`; set true. Its one step, S-47, still waits for the
+   operator's owner of the derived-rung restate door and for R4-20, so its
+   `not_rehearsed` stands.
+2. **Gate 23**: `cli::decision_measure`'s rate-replay test named a missing
+   table `temp_dir()/brutex-no-such-rate-table`, a fixed path two test
+   processes share; it now names its process
+   (`brutex-no-such-rate-table-<pid>`).
+3. **Gate 19**: the repair door's derive filed three refusals through
+   `rung_refused` and `held_refused`, which DO log (`note_not_derived`, one
+   `pull.derive` Warn each), under names gate 19 cannot read as an event. They
+   are `note_rung_refused` and `note_held_refused` now, the `note_*` form
+   gate 19 names; no behaviour changed.
+4. **Gate 10**: invariant R427-11's proof cell named its bench file alone;
+   it now says the file is run by gate 8, as ZI-09's does.
+5. **Gate 1d**: seven segment-shaped literals R4-27 brought are declared in
+   `.github/gates_tree.rs` `R4_27_LITERAL` (`as_trade`, `keep_flat`, the
+   four rate refusal codes, and the fixture root `match`), each read at its
+   first site; none is a parameter-path field or a gate-1c environment word.
+
+Gate 12 is D-7149's addendum. After both, `--only "1d 1c 0"` and gate 12
+printed `RED none` (state/fix/ci-gates-logs/bred1023-lp15).
+
 ### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
 
 Gate 1c refused `pull::zerodha_spool`'s documented lock path
@@ -83221,6 +83250,29 @@ a new test that times 400 samples of 256 lookups each in a one-symbol and a
 4,096-symbol index, interleaved in one loop, and refuses a large-index median
 more than 16 times the small one's (a scan would be thousands of times
 dearer). The real-store lookups stay as L-T2S-09 measured them.
+
+**Addendum, 24 Oct 2026 (R4-27; see D-7147's second addendum).** Gate 12
+refused 25 doc blocks R4-27 brought. 18 made no cost claim: the word `flat`
+in R4-27's price-shape sense, a FLAT CARRY (a zero-volume minute whose four
+prices are the close before it, INT-15, D-7270), which gate 12's trigger read
+as "the cost is flat". The gate's own rule for this is its scrub of the
+non-cost senses of `flat` (`flat bar`, `flat file`, ... the `NOTCLAIM`
+nouns, D-1930, D-1939); seven price-shape nouns join it (`carry`, `carries`,
+`minute`, `zero-volume`, `at the close`, `at the carried price`, `with no
+volume`), and `flat-<noun>` reads as `flat <noun>` (one hyphen, never two).
+The cost sense keeps triggering beside them, on one line and alone ("flat
+per minute", "flat at 1x", "flat-time", "a flat carry, and the walk is
+flat"): `.github/gates_bounds.rs`
+`tests::the_scrub_removes_the_price_shape_sense_of_a_flat_carry`, which
+failed before the change. Four blocks were re-wrapped so the noun sits on
+the line of its `flat`, and a doc test's variable `flat` is `carry`. The
+other seven ARE claims: four name their proof (`pull::riskfree::replay`
+names `pull::riskfree::tests::a_carried_lookup_is_flat_in_the_table`;
+`pull::padded`'s module, `Walk::step` and the bench registration name
+C-PD-01 and C-PD-02, run by `crates/pull/benches/ratio.rs`), three say
+UNVERIFIED with docs/06-limits.md L-BRED23-07
+(`cli::research_policy::percentage_statistic`,
+`store::month_summary::MonthSummary::padded_on`, `store::repair::same_bar`).
 
 ### D-7150 — Gate 11: the IA-16, IA-9 and IA-2 sites fixed at their cause or declared with their bound (BASE-REDS-1023) — 2026-10-23
 

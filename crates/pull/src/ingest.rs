@@ -4008,7 +4008,12 @@ fn derive_repair(
         } = match folded {
             Ok(folded) => folded,
             Err(why) => {
-                failures.push(note_rung_refused(instrument, rung, into.month, &why.to_string()));
+                failures.push(note_rung_refused(
+                    instrument,
+                    rung,
+                    into.month,
+                    &why.to_string(),
+                ));
                 continue;
             }
         };
@@ -4025,7 +4030,11 @@ fn derive_repair(
         let asked = (bars.as_slice(), policy.open_interest_applies);
         if let Err(why) = held_against_repair((store_root, symbol_id), parts, asked, before) {
             let journal = (store_root, &parts, reason);
-            failures.push(note_held_refused(journal, (instrument, rung, into.month), &why));
+            failures.push(note_held_refused(
+                journal,
+                (instrument, rung, into.month),
+                &why,
+            ));
             continue;
         }
         if bars.is_empty() {

@@ -1015,3 +1015,13 @@ confirmed by two skeptics; their corrections are applied.
   claims name a new timing test (D-7149 addendum, BRED-12), four test prints
   declared (D-7147 addendum). The cause is the one D-7147 names: a merge that
   does not run the shell gates cannot see what it turns red.
+- **BRED23-F13: R4-27, merged at 12:34 IST on 24 Oct after this package's
+  gates had gone green on the DATA-2 merge, turned gates 1d, 10, 12, 19, 23
+  and 30 red** (`RED 1d 23 30 19 10 12` on the merge 561741719,
+  state/fix/ci-gates-logs/bred1023-lp13). FIXED: R4-27 marked merged, a
+  test path names its process, two derive-refusal helpers carry the `note_`
+  name gate 19 reads (they always logged), R427-11 names gate 8, seven
+  literals declared (D-7147 addendum, BRED-14); gate 12's scrub learns the
+  price-shape sense of a flat carry with a test that failed first, four
+  claims name their proof and three say UNVERIFIED (D-7149 addendum,
+  BRED-13, L-BRED23-07). Same cause as F12.
