@@ -2145,7 +2145,10 @@ impl BarFile {
     /// (`sealed_door`). At most three opens and no listing. Both forms hold
     /// the same records bit for bit, so a reader may be handed either at any
     /// instant. Overlay and greeks files have no sealed form.
-    fn open_existing_at(
+    ///
+    /// Crate-visible for the recovery door (R3-20, D-7093), which plans the
+    /// ORIGINAL month's bytes whatever generation is served.
+    pub(crate) fn open_existing_at(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
@@ -2489,7 +2492,8 @@ impl BarFile {
         // the batch's too. `None` for every other door.
         batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
-        let (header, claimed, slot_audit) = read_header(&bars, &bars_path, len)?;
+        let (header, claimed, slot_audit) =
+            read_header(&bars, &bars_path, len, access == Access::Read)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
 
         // A TORN TAIL PAST THE COUNTER BRICKED THE WHOLE MONTH, PERMANENTLY.
@@ -5103,10 +5107,40 @@ fn initialise(
 /// It costs a second decode of at most two 64-byte slots, once per open. It is
 /// not a second *search*: no generation ordering, no slot-position rule and no
 /// fallback are reproduced here — see [`highest_claim`].
-fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64, SlotAudit), StoreError> {
+///
+/// **The recovery door's cut, and only on its own thread** (R3-20, D-7093).
+/// A month a power cut left refused is opened at its last good commit by
+/// `crate::recover` alone: inside that door's scope (`recover::scoped`, asked
+/// only when `scoped` is set, which is the read door's), and only for the
+/// bytes it was planned against: the same length and the same region
+/// (`crate::recover::Cut::fits`). The cut's header then replaces the
+/// selection, its claim is its own counter (the commits it drops are named by
+/// the door that planned it, never here), and the audit is the region's own.
+/// A read door on any other thread, every writer door, and a cut that does
+/// not fit read the header as always, so a month whose bytes moved since its
+/// plan refuses exactly as it did.
+fn read_header(
+    src: &File,
+    path: &Path,
+    len: u64,
+    scoped: bool,
+) -> Result<(Header, u64, SlotAudit), StoreError> {
     let want = len.min(REGION_LEN_U64);
     let mut region = vec![0u8; usize::try_from(want).unwrap_or(REGION_LEN)];
     read_fully(src, path, 0, &mut region)?;
+    let cut = if scoped {
+        crate::recover::scoped(path)
+    } else {
+        None
+    };
+    if let Some(cut) = cut.filter(|cut| cut.fits(len, &region)) {
+        let header = cut.header();
+        return Ok((
+            header,
+            header.n_valid,
+            crate::header::slot_audit(&region, len),
+        ));
+    }
     // The path rides on `store.header.slot_damaged`, and the audit is kept by
     // the handle (D-6240): the same region, decoded once more per slot.
     let (header, audit) = refused(Header::read_region_at(&region, len, path), path)?;

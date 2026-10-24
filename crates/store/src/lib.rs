@@ -86,6 +86,10 @@ pub mod path;
 /// written after the bars it names are committed and never touching them
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
+/// Month recovery after a power cut: a month left refused is brought back at
+/// its last commit whose records check out, the safe part written as a new
+/// revision and what it dropped recorded (R3-20, D-7093).
+pub mod recover;
 pub mod repair;
 /// One way to open a file for reading (no link followed, never a wait,
 /// regular files only) and the writer's refusal of a store whose `bars` is a
