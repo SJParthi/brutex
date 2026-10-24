@@ -1739,3 +1739,141 @@ fn a_drill_names_a_copy_gone_from_the_target_and_a_file_gone_from_the_store() {
     let line = fs::read_to_string(fx.root.join(DRILLS)).unwrap();
     assert_eq!(words_of(line.trim_end(), "result"), Some("fail"));
 }
+
+/// **A CHANGED ARCHIVE IS A NEW COPY BY NAME AND SIZE**: a zip that grew is
+/// copied again under the new run, the old copy kept, and the book's raw bytes
+/// are the new size's (D-7175, "by name and size").
+#[test]
+fn a_changed_archive_is_a_new_copy_by_name_and_size() {
+    let fx = Fixture::standard("archive-grew");
+    let first = fx.backup();
+    let zip = fx.base.join("archives/outer.zip");
+    let mut file = File::options().append(true).open(&zip).unwrap();
+    file.write_all(b" and more").unwrap();
+    drop(file);
+    let second = fx.backup();
+    assert_eq!(second.classes[ARCHIVE].changed, 1, "{second:?}");
+    assert_eq!(second.classes[ARCHIVE].copied, 1);
+    let copies: Vec<Record> = fx
+        .records()
+        .into_iter()
+        .filter(|r| r.path == zip.as_os_str().as_bytes())
+        .collect();
+    assert_eq!(copies.len(), 2);
+    assert_eq!(copies[0].run, first.run);
+    assert_eq!(copies[1].run, second.run);
+    assert_eq!(
+        fs::read(fx.copy_of(&copies[0])).unwrap(),
+        b"invented zip bytes"
+    );
+    let receipt = fx.receipts().pop().unwrap();
+    assert!(
+        receipt.contains(" raw_bytes=52 "),
+        "18 + 9 + 25 bytes: {receipt}"
+    );
+}
+
+/// **A RUN OF MORE THAN ONE SYNC'S RECORDS SYNCS AS IT GOES** and every record
+/// still names a whole copy; a symbolic link standing for a month's sibling is
+/// skipped by name, never followed.
+#[test]
+fn many_files_sync_as_they_go_and_a_linked_sibling_is_skipped() {
+    let fx = Fixture::standard("many");
+    fs::create_dir_all(fx.root.join("audit/many")).unwrap();
+    for n in 0..300 {
+        fs::write(
+            fx.root.join(format!("audit/many/{n:03}.log")),
+            format!("{n}\n"),
+        )
+        .unwrap();
+    }
+    let sibling = month_path("INDEX", "NIFTY", false, 1)
+        .with_file(FileKind::MonthSummary)
+        .to_path_buf(&fx.root);
+    std::os::unix::fs::symlink(fx.base.join("elsewhere"), &sibling).unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("SKIPPED") && out.contains(".sum (link)"),
+        "{out}"
+    );
+    assert!(fx.records().len() >= 300);
+    fx.every_record_verifies();
+}
+
+/// **AN ARCHIVE PATH THAT IS A LINK, OR CLIMBS WITH `..`, IS NOT COPIED**, each
+/// named.
+#[test]
+fn an_archive_that_is_a_link_or_climbs_is_named_and_not_copied() {
+    let fx = Fixture::standard("archive-odd");
+    let link = fx.base.join("archives/link.zip");
+    std::os::unix::fs::symlink(fx.base.join("archives/outer.zip"), &link).unwrap();
+    let climbs = fx.base.join("archives/ticks/../outer.zip");
+    fx.journal(&[&link, &climbs]);
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("link.zip (not a regular file or folder)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(an archive path with `..` is not copied)"),
+        "{out}"
+    );
+    assert!(!fx.records().iter().any(|r| r.class == ARCHIVE));
+}
+
+/// **A JOURNAL RUN LINE THAT IS NOT UTF-8 IS NAMED**, a manifest that is a
+/// folder is refused, the names of a long list are capped with the count, and
+/// the machine's own free-space call answers.
+#[test]
+fn small_refusals_and_the_machines_own_answers() {
+    let fx = Fixture::standard("small");
+    let journal = pull::gdfl_import::journal_path(&fx.root);
+    fs::write(
+        &journal,
+        b"run 1 source=zip archive=\xff\xfe archive_bytes=1\n",
+    )
+    .unwrap();
+    let (code, out) = fx.verb(&["--to", &fx.to()]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("gdfl.journal line 1 (a run line with no readable archive=)"),
+        "{out}"
+    );
+    let folder = fx.base.join("a-folder");
+    fs::create_dir_all(&folder).unwrap();
+    assert!(
+        Book::load(&folder, false)
+            .unwrap_err()
+            .contains("is not a regular file")
+    );
+    let mut named = Named::default();
+    for n in 0..20 {
+        named.add(format!("m{n}"));
+    }
+    assert_eq!(named.count, 20);
+    assert!(
+        named
+            .text()
+            .ends_with(" and 4 more (every one is a manifest line)"),
+        "{}",
+        named.text()
+    );
+    assert!(super::free(&fx.base).unwrap() > 0);
+    assert!(super::free(&fx.base.join("absent")).is_err());
+}
+
+/// **THE BINARY'S ENTRY POINTS REFUSE A MISUSE BEFORE THEY READ ANY ROOT.**
+#[test]
+fn the_binary_entry_points_refuse_a_misuse_before_reading_any_root() {
+    let mut out = String::new();
+    assert_eq!(command(&["--plan"], &mut out), MISUSED);
+    assert!(out.contains("--to is required"), "{out}");
+    let mut out = String::new();
+    assert_eq!(
+        drill_command(&["--from", "x", "--months", "0"], &mut out),
+        MISUSED
+    );
+    assert!(out.contains("above 0"), "{out}");
+}
