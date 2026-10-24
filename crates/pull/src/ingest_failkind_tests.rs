@@ -428,6 +428,7 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
             RepairError::Quarantined(store::quarantine::Entry {
                 scope: store::quarantine::Scope::WholeMonth,
                 cause: store::quarantine::Cause::BeforeListing,
+                causes: store::quarantine::Causes::of(store::quarantine::Cause::BeforeListing),
                 bars: 4,
                 ledger_at: 28,
                 revision: 0,

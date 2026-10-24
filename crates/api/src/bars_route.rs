@@ -626,7 +626,7 @@ pub(crate) fn quarantine_json(
         render::json_string(entry.cause.code()),
         entry
             .causes
-            .iter()
+            .each()
             .map(|cause| render::json_string(cause.code()))
             .collect::<Vec<_>>()
             .join(","),
