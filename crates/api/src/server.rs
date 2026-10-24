@@ -30419,13 +30419,29 @@ mod tests {
         rest.split_once("</td>").map(|(cell, _)| cell.to_owned())
     }
 
-    /// R4-28 repair 4 (D-7190): THE FUTURES RECEIPT AND ITS JOURNAL RECORD
-    /// COUNT BARS WRITTEN, BESIDE BARS OFFERED. A re-pull that wrote nothing
-    /// is `Empty` with nothing written, never `Stored` with the offered count;
-    /// drops are named by reason on the page and kept by reason in the record;
-    /// a series that stopped, or rows that do not balance, are `Failed`.
-    #[test]
-    fn the_futures_receipt_and_record_count_bars_written_beside_offered() {
+    /// What the futures route answered for one landing: the status, the
+    /// receipt and the record it journalled.
+    struct FuturesAnswered {
+        code: axum::http::StatusCode,
+        body: String,
+        record: audit::Record,
+    }
+
+    /// A futures pull of the continuous series over 2026-01-01..09 that read
+    /// five rows, offered `offered` and wrote `committed`.
+    fn futures_landed(offered: usize, committed: usize) -> pull::fnowork::FuturesLanded {
+        pull::fnowork::FuturesLanded {
+            requests: 1,
+            rows_read: 5,
+            bars_offered: offered,
+            bars_committed: committed,
+            series: vec!["NIFTY-FUT-C1: one line".to_owned()],
+            ..pull::fnowork::FuturesLanded::default()
+        }
+    }
+
+    /// `landed`, answered by the futures route into a fresh journal.
+    fn futures_answered(landed: &pull::fnowork::FuturesLanded) -> FuturesAnswered {
         let day = |y, m, d| Day::new(y, m, d).expect("a real day");
         let window =
             pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 9)).expect("a window");
@@ -30449,7 +30465,7 @@ mod tests {
         };
         let page = FnoPage {
             asked: &asked,
-            now: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_768_200_000),
+            now: std::time::UNIX_EPOCH + std::time::Duration::from_mins(29_470_000),
             today: day(2026, 1, 12),
             journal: &journal,
             broker: Broker::Live,
@@ -30469,122 +30485,125 @@ mod tests {
             rebuilt: None,
             incomplete: Vec::new(),
         };
-        let landed = |offered, committed| pull::fnowork::FuturesLanded {
-            requests: 1,
-            rows_read: 5,
-            bars_offered: offered,
-            bars_committed: committed,
-            series: vec!["NIFTY-FUT-C1: one line".to_owned()],
-            ..pull::fnowork::FuturesLanded::default()
-        };
-        let answered = |landed: &pull::fnowork::FuturesLanded| {
-            let (code, body) = futures_answer(&page, Vec::new(), &plan, landed);
-            let record = newest_record(&journal, &journal.look()).expect("journalled");
-            (code, body, record)
-        };
+        let (code, body) = futures_answer(&page, Vec::new(), &plan, landed);
+        let record = newest_record(&journal, &journal.look()).expect("journalled");
+        FuturesAnswered { code, body, record }
+    }
 
-        // A RE-PULL: five offered, none written.
-        let (code, body, record) = answered(&landed(5, 0));
-        assert_eq!(code, axum::http::StatusCode::OK);
-        assert_eq!(record.outcome, audit::Outcome::Empty);
-        assert_eq!((record.rows_read, record.bars_stored), (5, 0));
-        assert!(record.note.contains("already held"), "{}", record.note);
-        assert_eq!(
-            futures_fact(&body, "Bars written to the file").as_deref(),
-            Some("0")
+    /// R4-28 repair 4 (D-7190): THE FUTURES RECEIPT AND ITS JOURNAL RECORD
+    /// COUNT BARS WRITTEN, BESIDE BARS OFFERED. A re-pull that wrote nothing
+    /// is `Empty` with nothing written, never `Stored` with the offered count
+    /// under "Bars stored" (the pull ladder would have summed it as written).
+    #[test]
+    fn the_futures_receipt_and_record_count_bars_written_beside_offered() {
+        let repull = futures_answered(&futures_landed(5, 0));
+        assert_eq!(repull.code, axum::http::StatusCode::OK);
+        assert_eq!(repull.record.outcome, audit::Outcome::Empty);
+        assert_eq!((repull.record.rows_read, repull.record.bars_stored), (5, 0));
+        assert!(
+            repull.record.note.contains("already held"),
+            "{}",
+            repull.record.note
         );
+        let fact = |label| futures_fact(&repull.body, label);
+        assert_eq!(fact("Bars written to the file").as_deref(), Some("0"));
+        assert_eq!(fact("Bars offered to the store").as_deref(), Some("5"));
+        assert_eq!(fact("Bars stored"), None, "no offered count under it");
         assert_eq!(
-            futures_fact(&body, "Bars offered to the store").as_deref(),
-            Some("5")
-        );
-        assert_eq!(
-            futures_fact(&body, "Bars stored"),
-            None,
-            "no offered count under it"
-        );
-        assert_eq!(
-            futures_fact(&body, "Balances").as_deref(),
+            fact("Balances").as_deref(),
             Some("yes — 5 read = 5 offered + 0 folded + 0 dropped")
         );
-        assert_eq!(futures_fact(&body, "Dropped, by reason"), None);
+        assert_eq!(fact("Dropped, by reason"), None);
 
-        // A FIRST PULL: five written.
-        let (code, body, record) = answered(&landed(5, 5));
-        assert_eq!(code, axum::http::StatusCode::OK);
-        assert_eq!(record.outcome, audit::Outcome::Stored);
-        assert_eq!(record.bars_stored, 5);
+        let first = futures_answered(&futures_landed(5, 5));
+        assert_eq!(first.code, axum::http::StatusCode::OK);
+        assert_eq!(first.record.outcome, audit::Outcome::Stored);
+        assert_eq!(first.record.bars_stored, 5);
         assert_eq!(
-            futures_fact(&body, "Bars written to the file").as_deref(),
+            futures_fact(&first.body, "Bars written to the file").as_deref(),
             Some("5")
         );
+    }
 
-        // DROPS, BY REASON, ON THE PAGE AND IN THE RECORD; one folded row.
+    /// R4-28 repair 4 (D-7190): drops are named by reason on the receipt and
+    /// kept by reason in the record, beside the rows folded.
+    #[test]
+    fn a_futures_receipt_names_its_drops_and_the_record_keeps_them() {
         let mut census = pull::session::DropCensus::new();
         census.count(pull::session::DropReason::OnClosedDay);
         census.count(pull::session::DropReason::AfterWindow);
-        let dropped = pull::fnowork::FuturesLanded {
+        let answered = futures_answered(&pull::fnowork::FuturesLanded {
             rows_read: 6,
-            bars_offered: 3,
-            bars_committed: 3,
             rows_folded: 1,
             census,
-            ..landed(3, 3)
-        };
-        let (code, body, record) = answered(&dropped);
-        assert_eq!(code, axum::http::StatusCode::OK);
-        assert_eq!(record.outcome, audit::Outcome::Stored);
-        assert_eq!(record.rows_folded, 1);
-        assert_eq!(record.drops, audit::Drops::of_census(census));
-        assert_eq!(record.drops.total(), 2);
-        assert_eq!(futures_fact(&body, "Rows dropped").as_deref(), Some("2"));
+            ..futures_landed(3, 3)
+        });
+        assert_eq!(answered.code, axum::http::StatusCode::OK);
+        assert_eq!(answered.record.outcome, audit::Outcome::Stored);
+        assert_eq!(answered.record.rows_folded, 1);
+        assert_eq!(answered.record.drops, audit::Drops::of_census(census));
+        assert_eq!(answered.record.drops.total(), 2);
+        let fact = |label| futures_fact(&answered.body, label);
+        assert_eq!(fact("Rows dropped").as_deref(), Some("2"));
         assert_eq!(
-            futures_fact(&body, "Dropped, by reason").as_deref(),
+            fact("Dropped, by reason").as_deref(),
             Some(
                 "after the requested window 1 · on a day the exchange calendar records \
                  closed 1"
             )
         );
         assert_eq!(
-            futures_fact(&body, "Balances").as_deref(),
+            fact("Balances").as_deref(),
             Some("yes — 6 read = 3 offered + 1 folded + 2 dropped")
         );
+    }
 
-        // NOTHING TO FILE: no row read, nothing offered.
-        let (code, _, record) = answered(&pull::fnowork::FuturesLanded {
+    /// R4-28 repair 4 (D-7190): nothing to file is `Empty` and says so; a
+    /// series that stopped, or rows that do not balance, are `Failed`.
+    #[test]
+    fn a_futures_pull_with_nothing_to_file_or_that_does_not_balance_says_which() {
+        let nothing = futures_answered(&pull::fnowork::FuturesLanded {
             rows_read: 0,
-            ..landed(0, 0)
+            ..futures_landed(0, 0)
         });
-        assert_eq!(code, axum::http::StatusCode::OK);
-        assert_eq!(record.outcome, audit::Outcome::Empty);
+        assert_eq!(nothing.code, axum::http::StatusCode::OK);
+        assert_eq!(nothing.record.outcome, audit::Outcome::Empty);
         assert!(
-            record.note.contains("no futures bar was left"),
+            nothing.record.note.contains("no futures bar was left"),
             "{}",
-            record.note
+            nothing.record.note
         );
 
-        // A SERIES THAT STOPPED.
-        let (code, body, record) = answered(&pull::fnowork::FuturesLanded {
+        let stopped = futures_answered(&pull::fnowork::FuturesLanded {
             failed: vec!["NIFTY-FUT-C1: vendor_refused".to_owned()],
-            ..landed(5, 5)
+            ..futures_landed(5, 5)
         });
-        assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(stopped.code, axum::http::StatusCode::BAD_GATEWAY);
         assert_eq!(
-            (record.outcome, record.failures, record.bars_stored),
+            (
+                stopped.record.outcome,
+                stopped.record.failures,
+                stopped.record.bars_stored
+            ),
             (audit::Outcome::Failed, 1, 5)
         );
         assert!(
-            futures_fact(&body, "Balances").is_some_and(|line| line.starts_with("NO — ")),
-            "{body}"
+            futures_fact(&stopped.body, "Balances").is_some_and(|line| line.starts_with("NO — ")),
+            "{}",
+            stopped.body
         );
 
-        // ROWS THAT DO NOT BALANCE, with no series stopped.
-        let (code, _, record) = answered(&pull::fnowork::FuturesLanded {
+        let unbalanced = futures_answered(&pull::fnowork::FuturesLanded {
             rows_read: 7,
-            ..landed(5, 5)
+            ..futures_landed(5, 5)
         });
-        assert_eq!(code, axum::http::StatusCode::BAD_GATEWAY);
-        assert_eq!(record.outcome, audit::Outcome::Failed);
-        assert!(record.note.contains("do not balance"), "{}", record.note);
+        assert_eq!(unbalanced.code, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(unbalanced.record.outcome, audit::Outcome::Failed);
+        assert!(
+            unbalanced.record.note.contains("do not balance"),
+            "{}",
+            unbalanced.record.note
+        );
     }
 
     /// This is the operator's requirement stated plainly — *press Pull and the
