@@ -21486,3 +21486,66 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-T2S-10 | A run reads the year's newest version and every segment since, and a fold writes the year's whole next version | resumption needs the rows already answered, and a version is the whole year so a reader needs one file; nothing is replaced or deleted (append-only), so a year's folder grows by one version per run that learns something | O(rows of the year) at a run's start and at its fold, never per row checked: 37,958,020 (2019), 40,962,920 (2025) and 31,078,057 (2026) bytes of CSV a version, and the day segments are kept beside it (the three years' folder holds 218 MB). **Measured** fold phase: 2019 1,673 ms, 2025 2,948 ms, 2026 1,318 ms | DATA-2 |
 | L-T2S-11 | The `--out` containment check (D-5187, D-5189) asks the host where each component of `--out` and of each root is, and follows a root's links outward only at the root's top | a path is placed only by the host: each component that exists is resolved with `canonicalize`, which walks the path again from its root, so one check is O(c^2) host lookups for c components, bounded by the path's depth and paid once per run, never per row or per day; a link INSIDE the store is refused by the written form. An `--out` written as the physical target of a link at the TOP of the store or of the tick store (`/data/bars/r` where `<store>/bars -> /data/bars`) was not refused until D-5189 (amended 23 Oct 2026, verify-DATA-2-r3 ATK-16): `link_around` lists each root's top once and reads each link there once (a relative target taken against the root, a dangling one included), O(entries at the root's top) once per run. The target of a link DEEPER in a root is still not followed, and a link swapped in between the check and `create_dir_all` is not seen. Its lock name is opened once per run by `pull::gdfl_run::locks::open_lock_path` (D-5188, amended 23 Oct 2026: `O_NOFOLLOW \| O_NONBLOCK`, then a regular file with exactly one name); the name is not checked again after the lock is taken, so a lock file removed or replaced under a live run is not seen (no command of this repository deletes one) | `take_lock` (open and lock of a name a run left), n = 1,000 calls in the host's temp directory on the internal disk (dev profile at opt-level 3, `the_lock_name_is_timed_once_per_run`, 23 Oct 2026, machine loaded by other builds): p50 21,584 ns p99 33,333 ns max 517,208 ns, **measured**, once per run; on WD_BLACK not measured (UNVERIFIED). `inside`, n = 1,000 calls for each of four shapes on WD_BLACK under a loaded machine (dev profile at opt-level 3, `the_out_containment_check_is_timed_once_per_shape`, 21 Oct 2026): through `..` p50 130,291 ns p99 276,459 ns max 392,875 ns; a bare relative name p50 113,166 p99 152,375 max 537,041 ns; through a link p50 101,291 p99 159,542 max 320,125 ns; outside p50 73,792 p99 144,125 max 470,417 ns. **Measured**, once per run. Re-measured 23 Oct 2026 at 19:12 IST in the host's temp directory on the internal disk (dev profile at opt-level 3 with debuginfo, all six of the machine's cargo slots busy, n = 1,000 each): `take_lock` p50 14,042 ns p99 47,083 ns max 91,500 ns; `inside` through `..` p50 124,958 p99 505,791 max 19,915,000 ns, a bare relative name p50 105,042 p99 364,375 max 7,965,667 ns, through a link p50 97,625 p99 309,667 max 17,083,750 ns, outside p50 69,042 p99 203,334 max 12,909,166 ns; `link_around` (D-5189) on a root of eight entries, two of them links, `--out` outside both, p50 129,500 ns p99 450,292 ns max 16,975,292 ns (`the_d_5189_steps_are_timed`). **Measured**, once per run each; the maxima of several milliseconds are single calls on a machine that busy, and p99 stays under 0.51 ms. The real store and the tick store hold no link at their top (`ls -la` and `find -maxdepth 1 -type l`, read-only, 23 Oct 2026), so on them `link_around` refuses nothing; a shadow store holds its `bars` link there. Deeper levels were not walked (UNVERIFIED) | DATA-2 |
 | L-T2S-12 | Each file the check reads back, each archive it opens and each row's symbol cell costs one more bounded step (D-5189) | a version CSV, index or day segment is opened `O_NOFOLLOW \| O_NONBLOCK` and `fstat`ed before its one read (`index::read_regular`, once per file a run reads; the read itself is O(file bytes), as L-T2S-10 says); an archive is opened `O_NONBLOCK` and `fstat`ed before the importer's reader indexes it (`open_archive`, once per archive a run reads); a row's symbol cell is one pass over the share's name, at most the host's file-name length (255 bytes), so O(1) per row; a share whose months cannot be listed in a run with no YEAR is planned by every month of the years in play, 12 opens a year at most, as L-T2S-03 counts | n = 1,000 calls each, the host's temp directory on the internal disk, dev profile at opt-level 3 with debuginfo, all six cargo slots busy (`the_d_5189_steps_are_timed`, 23 Oct 2026 19:12 IST): `read_regular` of a 64 KiB file p50 11,958 ns p99 34,625 ns max 82,708 ns; `open_archive` of a small invented archive p50 12,958 ns p99 57,083 ns max 321,625 ns (the open, the `fstat` and the reader's central directory); `symbol_cell` of a name the store admits p50 0 ns (below the clock's step) p99 42 ns max 292 ns, of a name it escapes p50 42 ns p99 84 ns max 38,583 ns. **Measured**. On WD_BLACK and on the 128 GB vendor archive not measured by this test (UNVERIFIED); the real-data runs time whole share-days (L-T2S-04) | DATA-2 |
+
+## Pull runs never start unjournalled, and no tokio worker waits on the journal lock (AG-06b, D-7100, D-7101)
+
+**What AG-06b closes.** L-AG06-03 and L-AG06-04 are closed by D-7100: a run
+whose opening record is refused after the bound is refused by name,
+`journal_unavailable`, before its first vendor request, so no run runs
+unjournalled and the restart scan's "clean" is true of a refused run (it
+never ran). Proved by
+`a_run_whose_opening_is_refused_after_the_bound_asks_the_vendor_nothing_and_lands_nothing`
+and `an_fno_walk_whose_opening_is_refused_asks_nothing_and_appends_nothing`.
+L-AG06-07 and the worker half of L-AG06-08 are closed by D-7101: the pull
+runs' ledger and the F&O walk call the journal through `off_the_workers`, so
+a contended append blocks its own thread, never a tokio worker's queue.
+Proved by `a_contended_journal_append_never_stalls_the_http_surface` and
+`every_journal_call_on_the_pull_paths_goes_off_the_workers`. AG-06's rows
+are not edited; the rows below are this package's.
+
+**Measured 24 October 2026, in the cloud container** (4 cores, no other
+build running, load average 0.0 to 0.2 for the ledger rows), with test
+builds (the workspace test profile, optimised with debug info) of
+`feat/db-fix` as of its DATA-2 merge with only this package's test file
+added ("before"), and of this branch ("after"). Every journal is a fresh
+temp journal of invented records, never a clone of the operator's; figures
+are p50 / p99 / max in milliseconds, n = 200 per row.
+
+| Measurement | Method | Before p50 / p99 / max | After p50 / p99 / max |
+|---|---|---|---|
+| `RunLedger::open`, uncontended | `measure_the_ledger_calls_uncontended` (`--ignored`): one task of a two-worker multi-thread runtime, 200 runs in a row, `Instant` per call; three quiet pairs | 0.302-0.318 / 0.783-0.864 / 1.36-3.18 | 0.244-0.359 / 0.551-1.127 / 1.61-5.73 |
+| `RunLedger::flush` of one failure, uncontended | the same | 0.153-0.165 / 0.465-0.516 / 0.51-0.65 | 0.128-0.182 / 0.335-0.678 / 0.41-1.45 |
+| `RunLedger::close`, uncontended | the same | 0.298-0.328 / 0.534-1.178 / 0.71-1.22 | 0.245-0.360 / 0.575-1.074 / 0.90-6.73 |
+| `Journal::open_run`, 1 writer | `audit::lock_wait_measure` (`--ignored`) on an empty temp root | 0.319 / 0.871 / 2.20 | 0.353 / 0.660 / 1.44 |
+| `Journal::append_member`, 1 writer | the same | 0.149 / 0.308 / 0.34 | 0.175 / 0.294 / 0.40 |
+| `Journal::close_run`, 1 writer | the same | 0.288 / 0.596 / 0.97 | 0.349 / 0.697 / 1.09 |
+| `Journal::open_run`, 8 writers | the same | 4.87 / 5.73 / 5.85, 0 refused | 4.28 / 5.57 / 5.86, 0 refused |
+| GET `/feeds.json`, no holder | `measure_feeds_json_while_a_holder_keeps_the_append_lock` (`--ignored`): one-worker multi-thread runtime, 200 sequential GETs from a plain thread; load average 3 | 1.24 / 177.7 / 326.4 | 1.57 / 169.2 / 348.5 |
+| GET `/feeds.json`, a holder keeps the append lock and spot runs open against it one after another | the same | **2,002.5 / 3,110.6 / 3,132.1** (405 runs opened during the 200 GETs) | **1.27 / 48.6 / 126.0** (all 200 inside the first run's one-second wait) |
+
+Within the ratio gate: after against before, the uncontended ledger calls
+and journal appends differ by less than the spread between quiet pairs of
+the same build (after p50 0.77 to 1.18 times before), so `off_the_workers`'
+own cost (one runtime-handle lookup and, on the multi-thread runtime, one
+`block_in_place` hand-off) is not separable from `fsync` noise here (L-AG06b-02).
+The first pair, taken while two builds were finishing (load average 4 to 6),
+read after/before p50 1.2 to 1.8 and is not used. The GET tails with no
+holder (p99 near 170 ms on both builds) were taken at load average 3 and
+include the first requests that warm the census caches; they are the same
+before and after. The held-lock row is the change: before, every run's
+opening blocked the runtime's only worker for its one-second wait, and a GET
+needs more than one turn of that worker (the accept, then the answer), so
+each GET waited out about two openings (p50 2.0 s; not split further,
+UNVERIFIED by step); after, nothing waited on the worker.
+`docs/06` figures for the real store and a shadow server are NOT MEASURED
+here (no store, no shadow in the cloud): the merge-back takes them.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG06b-01 | A run refused at its opening still costs the bound | the opening waits `APPEND_LOCK_WAIT` for the append lock before it is refused (AG-06's wait, L-AG06-01); a stuck holder costs every run that bound, as L-AG06-06 says of every append | 1 s plus one pause (16 ms) per run, on the run's own thread, never a worker's queue (D-7101); each refusal an `api.audit` Error and a `pull.run` `refused` event; `/pull/run` asks the leg again after `RETRY_WAIT` (20 s), up to `MAX_PASSES` | AG-06b |
+| L-AG06b-02 | Each journal call on the pull runs' ledger and the walk pays `off_the_workers` | one `Handle::try_current` and a flavour check, and on the multi-thread runtime one `block_in_place`, which moves this worker's queue to another thread for the call (with one worker the runtime starts a thread to carry it) | measured inside the ledger rows above (after p50 0.77 to 1.18 times before, n = 200, three quiet pairs); not timed apart (UNVERIFIED alone) | AG-06b |
+| L-AG06b-03 | **Some journal appends on the pull routes still run on a worker** | outside this package's region of `server.rs` (R4-02's): `spot_answer`'s two request refusals and `fno_answer`'s one (records of requests refused before any run), `landed_answer`'s arm with no ledger, and `local_answer`; and `autopilot.rs`'s own `journal.append` of a blocked tick's `Refused` record, a file kept as merged (the one-command cut) | up to `APPEND_LOCK_WAIT` (1 s) of one worker per contended append; none of them opens a run, so none runs unjournalled. Moving them is R4-02's `server.rs` and the autopilot file's owner's | AG-06b, R4-02 |
+| L-AG06b-04 | A spot run refused at its opening has a `pull.run` `started` event on the log | `note_run_started` writes it before the journal opening, and claims the run key under which the refusal is filed (`/logs?run=`); on IA-10c it is written inside `open_spot_landing`, also before the opening | one `started` and one `refused` event per refused run, both stamped with its run id; the refusal releases the run key (`the_run_key_a_refused_run_claimed_is_released`). Counted, not removed: an opening before the start would split the run's story on the log, and on IA-10c would open the journal before the landing claim | AG-06b |
+| L-AG06b-05 | A zero lock bound cannot be driven through a run | a run's bound is the constant `APPEND_LOCK_WAIT` in `audit.rs`, which is not this package's file | proved apart: the journal's zero bound by `a_zero_bound_refuses_at_once` (AG-06), and a run refused at its first attempt, at once, by `an_opening_refused_at_its_first_attempt_refuses_the_run_at_once_and_asks_nothing` | AG-06b |
+| L-AG06b-06 | A run that ran unjournalled under an older build and died still reads clean | the restart scan reads only the journal (`pullrun.rs`, R3-27's), and an opening refused before AG-06b left nothing there | history only: no build with AG-06b runs a run whose opening was refused | AG-06b, R3-27 |
+| L-AG06b-07 | The calling thread still waits up to 2 s when a cut note's notes lock is met behind a holder outside this protocol | L-AG06-08's thread half: the wait is moved off the worker, not shortened | at most 2 s of the run's own thread (L-AG06-08) | AG-06 |

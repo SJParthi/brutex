@@ -83488,8 +83488,9 @@ the journal from async code: `broker_run_by` reached `RunLedger::open` and its
 flushes on a tokio worker, and `fno_walk` its opening and its outcome record.
 That worker then ran nothing else for the wait, and on a runtime with one
 worker the whole HTTP surface stopped answering
-(`a_contended_journal_append_never_stalls_the_http_surface` measured GETs
-waiting 0.86 to 0.96 s behind one opening, on the build before this change).
+(`a_contended_journal_append_never_stalls_the_http_surface` and its
+past-the-bound twin, on the build before this change, each failed on a GET that
+waited 0.96 s and 0.86 s behind one opening, against a bound of 100 ms).
 
 **Decided.**
 

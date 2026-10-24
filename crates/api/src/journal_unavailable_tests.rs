@@ -947,7 +947,7 @@ fn measure_the_ledger_calls_uncontended() {
         for i in 0..N {
             let failure = [pull::ingest::Failure::new(
                 "NIFTY",
-                &format!("NIFTY: invented gap {i}"),
+                format!("NIFTY: invented gap {i}"),
             )];
             let t = Instant::now();
             let mut ledger = RunLedger::open(&journal, &asked, 2, crate::autopilot::Driver::Hand);
@@ -970,7 +970,8 @@ fn measure_the_ledger_calls_uncontended() {
         }
         assert_eq!(
             journal.look().records(),
-            u64::try_from(N * 4).expect("small")
+            u64::try_from(N * 3).expect("small"),
+            "opening, failure, close"
         );
         [
             summary("RunLedger::open", opens),
