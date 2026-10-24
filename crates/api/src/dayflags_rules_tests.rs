@@ -1234,6 +1234,27 @@ fn a_far_month_held_only_sealed_is_found() {
     let odd_path = month_path(&root, Vendor::Zerodha, key, Timeframe::DAY_1, odd);
     std::fs::create_dir_all(&odd_path).expect("a directory at the month's name");
     assert!(day_month_held_of(&root, &inst, odd));
+    // SO IS A GENERATION POINTER THE DOOR WOULD REFUSE (the coverage run of
+    // R3-13 repair 2): a directory where the month's pointer file goes.
+    let refused = YearMonth::new(2017, 11).expect("a month");
+    let refused_path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: inst.exchange.as_str(),
+        segment: inst.segment.as_str(),
+        symbol: &inst.symbol,
+        contract: None,
+        timeframe: Timeframe::DAY_1,
+        month: refused,
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    std::fs::create_dir_all(store::generation::pointer_path(&root, refused_path))
+        .expect("a directory at the month's pointer");
+    assert!(
+        store::generation::served_bars_path(&root, refused_path).is_err(),
+        "the door refuses the pointer"
+    );
+    assert!(day_month_held_of(&root, &inst, refused));
 }
 
 /// `dayflags::day_month_held`, by the name the tests above read it.
@@ -1580,6 +1601,24 @@ fn a_spot_day_names_its_definition_only_when_it_is_not_current() {
     assert!(
         definition_says(ImportKind::Stocks, &share)
             .is_some_and(|said| said.ends_with("so the day is labelled until it is restated"))
+    );
+    // A CURRENT DEFINITION OTHER THAN THIS BUILD'S, on a kind the band names
+    // whatever its definition (an option day), says it holds the bars this
+    // build builds. The import holds an option day current under this build's
+    // definition alone (`definition_is_current`), so only a served definition
+    // reaches the sentence today (the coverage run of R3-13 repair 2).
+    let this_build = u64::from(pull::gdfl_import::BAR_DEFINITION);
+    let earlier = this_build - 1;
+    assert_eq!(
+        definition_says(
+            ImportKind::Options,
+            &serde_json::json!({ "value": earlier, "current": true })
+        ),
+        Some(format!(
+            "bar definition {earlier} built this day: {}; it holds the bars definition \
+             {this_build} builds",
+            definition_means(earlier)
+        ))
     );
     assert_eq!(
         definition_json(ImportKind::Options, day("2024-10-01"), None),
@@ -4068,6 +4107,60 @@ fn a_ledger_run_in_the_auction_window_is_never_said_not_frozen() {
         ..ledger(1_200, Some(15 * 3_600))
     };
     assert_eq!(met.json().0["frozen"]["judged_s"], 600);
+}
+
+/// **A LEDGER RUN NOT JUDGED ON A DAY WITH A RECORDED HALT AND THE AUCTION'S
+/// WINDOW NAMES BOTH** (the coverage run of R3-13 repair 2): the calendar's
+/// three recorded halts (`pull::calendar::HALTS`, 2020 and 2021) all fall
+/// before 2026-08-03, so only a built day reaches the phrase today. A run
+/// whose longest stretch outside the two windows is under [`FROZEN_MIN_S`] is
+/// `null` and says it lies in both; one with no stamp cannot be placed
+/// against either.
+#[test]
+fn a_ledger_run_in_a_halt_and_the_window_names_both_where_not_judged() {
+    let auction = auction_of(
+        (Exchange::Nse, "NIFTY"),
+        pull::vendor::Venue::NseIndex,
+        day("2026-09-25"),
+    );
+    let ledger = |seconds: u64, at: Option<u32>| IndexDay {
+        feed: Vendor::Gdfl,
+        midnight: 0,
+        scan: None,
+        day_bar: None,
+        ledger: Some((seconds, at, 109)),
+        halt: Some((15 * 3_600 + 12 * 60, 15 * 3_600 + 14 * 60)),
+        auction,
+        session: Some(pull::calendar::Session::full()),
+    };
+    // From 15:10:00 for 600 s: 120 s before the halt and 60 s between it and
+    // the window, so its longest stretch outside them is 120 s.
+    let (json, says) = ledger(600, Some(15 * 3_600 + 10 * 60)).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert_eq!(json["frozen"]["judged_s"], 120, "{json:#}");
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 600 s from 15:10:00, only 120 s of it in one stretch outside the recorded halt \
+             and the cash closing auction's window; a shorter run of 180 s or more elsewhere in \
+             the session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
+    let (json, says) = ledger(600, None).json();
+    assert_eq!(json["frozen"]["flagged"], Value::Null, "{json:#}");
+    assert_eq!(json["frozen"]["judged_s"], Value::Null, "{json:#}");
+    assert_eq!(
+        says,
+        vec![
+            "index frozen not judged: the day ledger measures only the day's longest unchanged \
+             run, 600 s, with no stamp, so it cannot be placed against the recorded halt and the \
+             cash closing auction's window; a shorter run of 180 s or more elsewhere in the \
+             session is not measured (UNVERIFIED)"
+                .to_owned()
+        ]
+    );
 }
 
 /// **THROUGH THE ROUTE, AS THE CHECK REPRODUCED IT ON THE REAL STORE**
