@@ -1,4 +1,13 @@
-STATUS: IN PROGRESS
+STATUS: HELD
+
+NEXT: when `HOLD` is gone (or `GO-IA-17b` is back) on `cloud/db-base-20261024`: merge the newest
+`origin/feat/db-fix` if it moved, rerun fmt, clippy, deny, the CI shell gates and the pull and cli
+import tests; continue the mutant sample shard by shard (`--shard k/20 --sharding round-robin`,
+k = 1..9, 11..19). The rest is NEEDS THE MAC.
+
+Held at this save point by `HOLD` on `cloud/db-base-20261024` (`604b8f20`, "Remove every GO-<NAME>:
+all cloud parts hold at their next save point", 24 Oct 2026), after `GO-IA-17b` was removed. Until
+that commit this part ran under its own `GO-IA-17b`.
 
 # IA-17b: D-4875 remainder: the once-per-month gather and the CASH .auc writer
 
@@ -16,9 +25,17 @@ host's (root, 4 cores, 5.7 GB free) and shown red on the base or independent of 
 Both are under NEEDS THE MAC with what they need.
 
 Cloud session, branch `cloud/db-IA-17b-20261024`, cut from `origin/feat/db-fix` at `e851da1c`
-(Merge DATA-2). The newest `origin/feat/db-fix`, `d39e789e` (Merge IA-4, R4-27, CLOUD-MUTSTORE), is
-merged in as `af3746f8` before the final gates; the three ledgers conflicted only where both sides
-appended at the end, and both sides are kept whole, the base's first.
+(Merge DATA-2). `origin/feat/db-fix` moved twice during the session, and both were merged in:
+
+- `d39e789e` (Merge IA-4, R4-27, CLOUD-MUTSTORE) as `af3746f8`. The three ledgers conflicted only
+  where both sides appended at the end; both sides are kept whole, the base's first.
+- `7b397bbe` (Merge CLOUD-MUTCLI: `crates/cli` and two ledgers) as `3a22e4b5`, cleanly.
+
+After the second merge these ran again: fmt, clippy, deny, every CI shell gate (against a worktree of
+`7b397bbe`: the same 23 green and 9 red, the same findings), and the cli tests that drive the import
+(`TMPDIR` on the tmpfs, including CLOUD-MUTCLI's `srt`, `tix` and `readonly` tests): 211 passed, the 3
+chmod tests failed as before. The tables below give `d39e789e` as the base where they were measured
+against it; `7b397bbe` changes nothing under `crates/pull`.
 
 Per-part switch: `GO-IA-17b` exists on `cloud/db-base-20261024` at every save point checked, so the
 base branch's `HOLD` does not apply to this part (README, per-part GO).
