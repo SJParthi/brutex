@@ -30452,6 +30452,9 @@ mod tests {
             "brutex-r428-futures-receipt-{}-{nanos}",
             std::process::id()
         ));
+        // The journal never recreates a missing store root, so the scratch
+        // root is made here and the journal makes only its `audit/`.
+        std::fs::create_dir_all(&root).expect("a scratch store root");
         let journal = audit::Journal::at(&root);
         let asked = ingest::FnoRequest {
             underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
