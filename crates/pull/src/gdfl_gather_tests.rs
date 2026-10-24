@@ -1190,3 +1190,85 @@ fn a_cash_months_gathered_repair_writes_its_auction_file_before_it_is_served() {
     assert_eq!(tree(&sparse), before);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// The store's census, refusing the first batch it is handed that holds a
+/// row: the repaired months' rows a flush publishes, in a run whose days
+/// each gathered every file.
+struct RefusesFirst {
+    inner: census::StoreCensus,
+    refused: bool,
+}
+
+impl census::Census for RefusesFirst {
+    fn publish(&mut self, store_root: &Path, held: &[Held]) -> Option<String> {
+        if !held.is_empty() && !self.refused {
+            self.refused = true;
+            return Some("the census will not take the rows (planted by the test)".to_owned());
+        }
+        self.inner.publish(store_root, held)
+    }
+
+    fn room(&self, store_root: &Path, held: &[Held]) -> Result<CensusRoom, String> {
+        self.inner.room(store_root, held)
+    }
+}
+
+/// **A CENSUS THAT REFUSES THE REPAIRED MONTHS' ROWS** (D-4899, the flush's
+/// census): the month is repaired and served, its rows are not published,
+/// so the run ends by the census's refusal; the first waiting day closes
+/// `incomplete stage=census` and the others stay begun. The next run reads
+/// them all again, finds every bar already served, publishes the rows and
+/// closes every day, with no second generation.
+#[test]
+fn a_census_that_refuses_the_repaired_rows_ends_the_run_and_the_next_converges() {
+    let days = (day(2024, 4, 1), day(2024, 4, 3));
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-census", &[later]);
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: days.0,
+        to: days.1,
+        only: &[],
+        store_root: &store,
+    };
+    let mut census = RefusesFirst {
+        inner: census::StoreCensus::default(),
+        refused: false,
+    };
+
+    let ended = day::drive_with(&run, asked(), &mut census, |on, sink| {
+        for file in both(on) {
+            sink(file);
+        }
+        DayRead {
+            held: true,
+            ..DayRead::default()
+        }
+    })
+    .unwrap_err();
+
+    assert_eq!(import_cause(&ended).stage, Stage::Census, "{ended}");
+    let text = journal(&store);
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("incomplete indices 2024-04-01 * ")
+                && line.contains(" stage=census")),
+        "{text}"
+    );
+    assert_eq!(
+        begun_not_closed(&text),
+        vec![
+            "indices 2024-04-02 *".to_owned(),
+            "indices 2024-04-03 *".to_owned()
+        ]
+    );
+    let nifty = month_of("INDEX", "NIFTY", later);
+    assert_eq!(generation(&store, nifty), 1, "repaired and served");
+
+    let resumed = drive_over(&store, days, asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(resumed.months_repaired, 0, "every bar already served");
+    assert_eq!(generation(&store, nifty), 1);
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}

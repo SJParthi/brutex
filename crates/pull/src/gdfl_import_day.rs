@@ -2524,25 +2524,28 @@ fn flush_gather(
         && let Some(why) = census.publish(ctx.run.store_root, &held)
     {
         let room = census.room(ctx.run.store_root, &held);
-        let mut waiting = deferred.into_iter();
-        let (key, day, before, max_back_s, failures) = match waiting.next() {
-            Some(first) => {
-                let (before, max_back_s, mut failures) = match first.close {
-                    Some(close) => (
-                        rebased(close.before, close.after, Mark::of(report), first.committed),
-                        close.max_back_s,
-                        close.failures,
-                    ),
-                    None => (Mark::of(report), 0, Vec::new()),
-                };
-                failures.extend(first.failures);
-                (first.key, first.day, before, max_back_s, failures)
-            }
-            None => (String::new(), ctx.run.to, Mark::of(report), 0, Vec::new()),
+        let Some(first) = deferred.into_iter().next() else {
+            // No day waits to carry the refusal: the run ends by it alone,
+            // no line written under a key no day has.
+            return Err(super::census::census_refusal(
+                (kind, ctx.run.to),
+                why,
+                room,
+                std::mem::take(report),
+            ));
         };
+        let (before, max_back_s, mut failures) = match first.close {
+            Some(close) => (
+                rebased(close.before, close.after, Mark::of(report), first.committed),
+                close.max_back_s,
+                close.failures,
+            ),
+            None => (Mark::of(report), 0, Vec::new()),
+        };
+        failures.extend(first.failures);
         return Err(stop_at_census(
             ctx,
-            (&key, day),
+            (&first.key, first.day),
             (before, std::mem::take(report), max_back_s),
             failures,
             (why, room),

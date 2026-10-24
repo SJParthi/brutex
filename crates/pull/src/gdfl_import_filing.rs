@@ -583,8 +583,10 @@ pub(super) fn take_quality(
 pub(super) enum Door {
     /// `ingest::from_rows`: a tail, a new month, a day already held.
     Append,
-    /// `ingest::repair_rows`: the append door again, then the repair for a
-    /// day its month lacks where no append can land it.
+    /// `ingest::gather_rows`: the append door again, then, for a day its
+    /// month lacks where no append can land it (or a late day of a month
+    /// the writer never appends to), the run's gather: the month is repaired
+    /// once for every such day of it the run reads (IA-17b, D-4899).
     BackFill,
 }
 
@@ -681,21 +683,34 @@ impl Filing<'_> {
         filed.outside_session = usize::try_from(done.census.total()).unwrap_or(0);
         filed.seconds = done.bars_stored;
         filed.committed = done.bars_committed;
-        let month = self.day.year_month().ok();
         // THE MONTH TAKES THE FILE ONLY AS A NEW GENERATION (IA-17b, D-4875
         // (3), D-4899): nothing was written, and its bars, with its prints a
         // CASH month's sidecar could not take, are gathered for the month's
         // one repair of the run. Its day closes once that repair is done.
-        if let (Landed::Gathered { appended }, Some(month)) = (landed, month) {
-            filed.held_key = Some((file.symbol.clone(), file.contract, month));
-            filed.gathered = Some(Box::new(GatheredFile {
-                key: (file.symbol.clone(), file.contract, month),
-                name: file.name.clone(),
-                seconds: converted.seconds,
-                appended,
-                auction: handed.facts.auction.clone(),
-                request: self.request.clone(),
-            }));
+        if let Landed::Gathered { appended } = landed {
+            match self.day.year_month() {
+                Ok(month) => {
+                    filed.held_key = Some((file.symbol.clone(), file.contract, month));
+                    filed.gathered = Some(Box::new(GatheredFile {
+                        key: (file.symbol.clone(), file.contract, month),
+                        name: file.name.clone(),
+                        seconds: converted.seconds,
+                        appended,
+                        auction: handed.facts.auction.clone(),
+                        request: self.request.clone(),
+                    }));
+                }
+                // A day with no month cannot be gathered: named, never a
+                // file silently left out of every month.
+                Err(why) => {
+                    let refusal = ImportRefusal::Filing {
+                        why: format!("{} was not gathered: {}", file.name, why),
+                    };
+                    filed
+                        .failures
+                        .push(note_staged(run, self.day, &file.name, &refusal));
+                }
+            }
             return (filed, false);
         }
         // PRINTS CARRIED FOR A GENERATION THE FILE DID NOT NEED (IA-17b): its
@@ -980,7 +995,8 @@ type FiledJob = Result<(Box<Filed>, Option<lineage::DayContract>), Refused>;
 
 /// THE BACK-FILL PASS (D-3350 under WP-16): every file the append door refused
 /// outright, filed through the back-fill door ([`Door::BackFill`]), one after
-/// the other in listing order on the calling thread. Each had asked for the
+/// the other in listing order on the calling thread; one its month takes only
+/// as a new generation is gathered (IA-17b, D-4899). Each had asked for the
 /// day's `begin` line before it reached a door, so `begun` holds it.
 fn back_fill(filing: &Filing<'_>, begun: Option<u64>, done: Vec<JobDone>) -> Vec<FiledJob> {
     let begin_again = || {
