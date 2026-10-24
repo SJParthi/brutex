@@ -1025,10 +1025,13 @@ fn diagnose(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Diagnosi
         tried: Vec::new(),
         raw,
     };
-    month
-        .raw
-        .slots
-        .sort_by_key(|slot| std::cmp::Reverse(slot.header.generation));
+    // NEWEST FIRST, by one comparison: a region holds at most
+    // `format::MAX_SLOTS` (two) slots, so nothing is sorted.
+    if let [first, second] = month.raw.slots.as_mut_slice()
+        && first.header.generation < second.header.generation
+    {
+        std::mem::swap(first, second);
+    }
     if let Some((cut, rows)) = month.commit_cut() {
         return month
             .found(cut, rows)

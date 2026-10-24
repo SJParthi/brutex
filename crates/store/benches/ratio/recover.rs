@@ -22,7 +22,11 @@
 //! The measured target of the goal — a full one-second month on the
 //! operator's drive, n = 20 — is the Mac's (`NEEDS THE MAC` in
 //! `reports/cloud-db-R3-20.md`): these rows are invented fixtures on
-//! whatever disk the bench runs on.
+//! whatever disk the bench runs on. These rows run from
+//! `crates/store/benches/ratio.rs`; what each recovery keeps and drops is
+//! proved, not timed, by
+//! `store::recover::tests::a_month_cut_at_every_synced_write_recovers_to_its_last_good_commit`
+//! (invariant R320-01).
 
 use std::fs;
 use std::path::{Path, PathBuf};

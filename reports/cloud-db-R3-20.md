@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -109,3 +109,32 @@ IA-16, R3-16, R3-36, SC-4.
   D-6247 heading two entries, is the base's own, gate 27b, BASE-REDS-1023).
 - NEXT: full gates (fmt, clippy workspace, workspace tests, deny, CI shell gates), then coverage
   and mutants on the touched modules.
+
+### 2026-10-24 20:59 IST — gates run; HELD (every GO-<NAME> removed)
+
+- `cargo fmt --all --check`: clean. `cargo clippy --workspace --all-targets --locked -- -D warnings`:
+  clean (EXIT 0).
+- `cargo deny check`: `advisories FAILED, bans ok, licenses ok, sources ok`, on RUSTSEC-2026-0386
+  (tokio `AsyncFd::new` unsound). The unmodified base `7b397bbe` fails the same advisory, same id;
+  this branch does not touch `Cargo.toml` or `Cargo.lock`. NEEDS THE MAC (a lock bump is not
+  this part's).
+- CI shell gates, every `Gate N` run block of `.github/workflows/ci.yml` run on this branch and on
+  a worktree of the base `7b397bbe` (with `GITHUB_ENV` and `RUNNER_TEMP` emulated): the same gates
+  are red on both, 1c, 1d, 10, 11, 12, 19, 23, 27b, 30 (the CONTEXT 4.10 list, BASE-REDS-1023's),
+  13a and 13b (exit 127: `gates-jobs`, built by a non-gate step, not emulated); every other gate run
+  is green on both. Within each red gate the branch's refusals equal the base's after two fixes made
+  here: gate 11 refused one more `.contains` in `crates/cli/src/store_write.rs` (raised 7 -> 8 in
+  `ALLOW_MEMBER`, `.github/gates_ledger.rs`, reason in `docs/06-limits.md`) and the slot sort in
+  `recover.rs` (replaced by one comparison of the at most two slots); gate 12 refused the bench
+  module's cost claim naming no proof (it now names `crates/store/benches/ratio.rs` and the test).
+  Not run here: 1e, 6d, 20, 31 (a no-front-end build, the web tests, coverage, macOS), and 13c, 6c,
+  5, 3 on the base (stopped: the disk filled).
+- The disk allowance filled once (the base worktree's own `target/`, 12 GB, from gate 13c's build);
+  deleted (my scratch build output only), 12 GB free.
+- Workspace tests (`cargo test --workspace --locked --no-fail-fast`): still running at this save
+  point; the api lib suite had 9 failures (root-owned permission checks, slow-reader timing under
+  load, and `a_full_calendar_pool_refuses_the_census_and_the_audit`, whose child sat at 0% CPU for
+  25 min and was stopped by me). None touches this part's files; to be compared with the base.
+- NEXT: when HOLD is gone: read the finished workspace run, rerun every failure on this branch and on
+  the base worktree, then llvm-cov (lines and regions, stable; branch coverage needs a nightly this
+  container lacks) and cargo-mutants on recover.rs, file.rs's diff and month_recover_command.rs.

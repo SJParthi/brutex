@@ -21651,3 +21651,9 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-R320-03 | A whole-block cut is refused `not_the_tail` when the first block that fails lies below the tail block of the oldest surviving commit and a later whole block verifies, even when the month's two newest commits were both in the open batch and a power cut left exactly that pattern | below that tail block a durable commit's history and a batch's lost writes cannot be told apart from the month alone, and dropping verified history on a guess is refused | such a month stays refused, named, until it is restored (R4-09b) | R3-20 |
 | L-R320-04 | The read-again line is written for the whole tree's key (`<kind> <day> *`) only; a day closed done under a names filter alone keeps that key | the journal's keys per filter are read only through `JournalReader::is_done`, asked for `*` | a run with that filter skips the day; a whole-tree run reads it; the end record in `audit/<vendor>.recoveries` names every dropped day | R3-20 |
 | L-R320-05 | Between the recovery and the importer's re-read the census row of the month counts bars the recovery dropped (the census is written by a landing, never by this door) | the census row is the served month's header, written by the landing that changes it (`REPAIR.md`, D-3350) | until the Resume that re-reads the dropped days; the recovery record and the end record name the dropped count | R3-20 |
+
+- **Gate 11.** `crates/cli/src/store_write.rs` rose from 7 to 8 membership
+  probes (`ALLOW_MEMBER`, `.github/gates_ledger.rs`): `month-recover` writes
+  unless `--plan`, one probe of the verb's own five arguments, in the arm shape
+  gate 30's `form_of` reads (R3-20, D-7093). `crates/store/src/recover.rs`
+  sorts nothing: its at most two header slots are ordered by one comparison.
