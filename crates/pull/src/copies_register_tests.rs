@@ -1429,3 +1429,50 @@ fn config_of_sources(gdfl: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Conf
     })
     .unwrap()
 }
+
+/// The p50, p99 and max of `times`, ns.
+fn spread(times: &mut [u128]) -> (u128, u128, u128) {
+    times.sort_unstable();
+    let at = |q: usize| times[(times.len() * q).div_ceil(100).max(1) - 1];
+    (at(50), at(99), *times.last().unwrap())
+}
+
+/// TIMED: a held answer (n = 200 sequential calls) over copy roots of 100,
+/// 1,000 and 10,000 files, a hundred to a folder, each walked once first. The
+/// held answer touches no file of the tree (one `lstat` per root), so its
+/// p50 at 100x is bounded against 1x. The figures for `docs/06-limits.md`
+/// L-CC5-1 and L-CC5-2 are the gate-8 bench's (`crates/api/benches/ratio/
+/// copies.rs`); this test prints nothing (gate 23).
+#[test]
+fn a_held_answer_and_a_walk_are_timed_at_1x_10x_100x() {
+    let base = scratch("timed");
+    let mut held_p50 = Vec::with_capacity(3);
+    for files in [100_usize, 1_000, 10_000] {
+        let copy = base.join(format!("copy-{files}"));
+        for n in 0..files {
+            put(&copy.join(format!("f{:03}/{n}.bin", n / 100)), b"invented");
+        }
+        let config = config_of(&[&copy], Vec::new());
+        let cache = Cache::new();
+        let Served::Register { register, .. } = answer(&cache, &Host, &config, &|| 0) else {
+            panic!("a walk");
+        };
+        assert_eq!(register.roots[0].files, files as u64);
+        let mut held = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let began = std::time::Instant::now();
+            let served = answer(&cache, &Host, &config, &|| 0);
+            held.push(began.elapsed().as_nanos());
+            assert!(matches!(served, Served::Register { fresh: false, .. }));
+        }
+        let (h50, _, _) = spread(&mut held);
+        held_p50.push(h50);
+    }
+    // A HELD ANSWER DOES NOT FOLLOW THE TREE: a hundred times the files may
+    // not cost ten times the p50 (a walk per request would cost a hundred).
+    assert!(
+        held_p50[2] < held_p50[0].saturating_mul(10).max(200_000),
+        "{held_p50:?}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

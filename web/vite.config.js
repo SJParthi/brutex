@@ -30,6 +30,10 @@ const ROUTES = [
 	// FREE SPACE, STORE SIZE, CENSUS RETENTION AND THE BACKUP RECEIPT for the
 	// /ingest disk line (DB-B73, WP-81).
 	'/disk.json',
+	// THE EXTRA-COPIES REGISTER the /ingest copies panel reads (CC-5): each
+	// copy root's bytes, reader and proof, and every second name of a live
+	// vendor file. Not covered by `/disk.json`: a proxy key matches by prefix.
+	'/disk/copies.json',
 	// WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES /db SHOWS (DB-B74, WP-81).
 	'/scrub.json',
 	// THE READ POOLS' COUNTS the /ingest pools panel reads (R3-08): answered,

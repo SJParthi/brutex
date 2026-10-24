@@ -1100,7 +1100,8 @@ pub struct Hazard {
     /// The file's bytes, which are the live file's: removing this name
     /// frees none of them.
     pub bytes: u64,
-    /// Whether the name is a partial download's (`.part`, `.tmp`): the
+    /// Whether the name's extension is not the live file's own
+    /// ([`is_partial`]): a partial-download or temporary name, the
     /// resumed-write case.
     pub partial: bool,
 }
@@ -1551,7 +1552,7 @@ fn copy_root_of(
                 ino: id.1,
                 nlink: named.meta.nlink,
                 bytes: named.meta.size,
-                partial: is_partial(&named.path),
+                partial: is_partial(&named.path, live_path),
             });
         }
     }
@@ -1626,11 +1627,15 @@ fn refused_root(
     }
 }
 
-/// Whether a name is a partial download's: `.part` or `.tmp` at its end.
+/// Whether a second name `path` of the live file `live` is a partial or
+/// temporary name: its extension is not the live file's own, as a
+/// downloader's `<out>.part` or a writer's temporary is not (`2020.zip.part`
+/// beside `2020.zip`). Read from the two names, never from a typed list of
+/// extensions: a tool that resumes into a name of its own spelling is caught
+/// whatever it spells.
 #[must_use]
-pub fn is_partial(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext == OsStr::new("part") || ext == OsStr::new("tmp"))
+pub fn is_partial(path: &Path, live: &Path) -> bool {
+    path.extension() != live.extension()
 }
 
 /// A path quoted with every control character escaped, so a name holding a

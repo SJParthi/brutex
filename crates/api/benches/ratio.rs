@@ -71,6 +71,8 @@ mod calendar;
 mod census;
 #[path = "ratio/chain.rs"]
 mod chain;
+#[path = "ratio/copies.rs"]
+mod copies;
 #[path = "ratio/dayflags.rs"]
 mod dayflags;
 #[path = "ratio/db_page.rs"]
@@ -720,6 +722,7 @@ fn served_routes_are_flat() -> bool {
     ok &= reads::reads_are_flat(&mut stores);
     ok &= db_page::page_reads_are_flat(&mut stores);
     ok &= settings::settings_are_flat(&mut stores);
+    ok &= copies::copies_are_flat(&mut stores);
     ok &= rollup::rollups_are_flat(&mut stores);
     ok &= export::exports_are_flat(&mut stores);
     for store in &stores {
@@ -786,6 +789,7 @@ fn main() {
         reads::ROUTES,
         db_page::ROUTES,
         settings::ROUTES,
+        copies::ROUTES,
         rollup::ROUTES,
         export::ROUTES,
     ]

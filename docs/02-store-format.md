@@ -4815,9 +4815,12 @@ no other:
 | 7 … | `set <key> <value>` | one line for each key this generation sets, in key order; a key it does not set has no line; a key set twice is a fault |
 | last | `crc32c <8 hex digits>` (written lowercase) | CRC-32C (Castagnoli) of every byte before this line, from the first byte of line 1 to the LF that ends the line before it |
 
-The ten keys, and the check every value passes when it is saved AND when it
+The keys, and the check every value passes when it is saved AND when it
 is read back (a value that fails, or is not written exactly as a save writes
-it, makes the file a fault):
+it, makes the file a fault). This said "the ten keys"; `store::settings::KEYS`
+is 12 since CC-5 appended `disk.extra_copy_roots`. `disk.floor` (R4-07,
+D-4987) has no row here yet: CC-5 names that drift and leaves the row to its
+owner.
 
 | Key | Value |
 |---|---|
@@ -4829,10 +4832,14 @@ it, makes the file a fault):
 | `open.order` | `newest` or `oldest` |
 | `always.shown` | 1 to 64 store symbols, comma-separated, none twice |
 | `source.gdfl`, `source.masters` | an absolute path of at most 1,024 bytes with no `..`; a save requires it to be a directory that exists, a read checks its shape only (a folder that moved since is the route's to report, not a damaged file) |
+| `disk.extra_copy_roots` | the folders the copies register lists (CC-5, D-7040): absolute paths separated by `\|` (a folder name may hold a comma; a folder whose own path holds `\|` cannot be named), each of at most 1,024 bytes with no `..`, none empty, none named twice, none inside another, the whole value at most 4,096 bytes (the settings route's own ceiling, `brutex_core::secret_shape::MAX_VALUE_BYTES`); a save requires each to be a directory that exists, a read checks the shape only. Read through `store::settings::copy_roots`. **Unset: a named wait, no default** |
 
 A key no generation sets is answered by its named fallback: `source.masters`
 by the start script's `BRUTEX_MASTERS`, every other key by its caller's own
-default — and every answer says which.
+default — and every answer says which. `disk.extra_copy_roots` is the
+exception: it has no fallback and no default, and while it is unset
+`/disk/copies.json` and `cli disk-copies` answer a named wait and walk
+nothing (D-7040).
 
 **Size.** A file larger than 64 KiB (`MAX_FILE_BYTES`, 65,536 bytes) is a
 fault; a reader takes at most that many bytes plus one even from a file that

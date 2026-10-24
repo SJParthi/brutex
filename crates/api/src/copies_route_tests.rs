@@ -283,8 +283,24 @@ async fn the_handler_answers_through_the_ops_read_pool() {
     let site = Loaded::new(crate::server::Site::load(&store.join("masters"), &store));
     let (status, headers, body) = copies_json(axum::extract::State(site)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(headers[0].1, "application/json; charset=utf-8");
-    assert_eq!(headers[1].1, "no-store");
+    assert_eq!(
+        headers[axum::http::header::CONTENT_TYPE],
+        "application/json; charset=utf-8"
+    );
+    assert_eq!(headers[axum::http::header::CACHE_CONTROL], "no-store");
+    assert!(
+        headers.get(axum::http::header::RETRY_AFTER).is_none(),
+        "an answer in full never asks to be retried"
+    );
+    for asks_again in [
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::TOO_MANY_REQUESTS,
+    ] {
+        assert_eq!(
+            headers_for(asks_again)[axum::http::header::RETRY_AFTER],
+            "1"
+        );
+    }
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["state"], "walked");
     assert_eq!(body["roots"][0]["bytes"], 5);

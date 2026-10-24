@@ -36,7 +36,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use axum::http::{HeaderName, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use pull::copies_register::{
     self, Cache, Config, CopyRoot, Fs, Hazard, LiveReport, Receipt, Register, Served, Sources,
     State, Twin,
@@ -45,16 +45,6 @@ use serde_json::{Value, json};
 use store::settings::Key;
 
 use super::{Loaded, settings_route};
-
-/// The headers of every answer.
-type Headers = [(HeaderName, &'static str); 3];
-
-/// The JSON content type, no caching, and a retry hint for the `503`.
-const HEADERS: Headers = [
-    (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-    (header::CACHE_CONTROL, "no-store"),
-    (header::RETRY_AFTER, "1"),
-];
 
 /// A path as JSON: its text when it is UTF-8, else its escaped form, which
 /// opens with a quote, so it is never mistaken for a lossy guess.
@@ -332,7 +322,7 @@ pub(crate) fn answer(
 /// `GET /disk/copies.json`. See the module header.
 pub(super) async fn copies_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
-) -> (StatusCode, Headers, String) {
+) -> (StatusCode, HeaderMap, String) {
     let root = site.store_root.clone();
     let work = move || {
         answer(
@@ -343,17 +333,31 @@ pub(super) async fn copies_json(
             &copies_register::now_micros,
         )
     };
-    match crate::detail::run_ops_read(work).await {
-        Ok((status, body)) => (status, HEADERS, body),
-        Err(why) => {
-            let (status, body) = crate::detail::admission_refused(
-                "a copies register read",
-                crate::detail::MAX_OPS_READ_CONCURRENT,
-                &why,
-            );
-            (status, HEADERS, body)
-        }
+    let (status, body) = match crate::detail::run_ops_read(work).await {
+        Ok(answered) => answered,
+        Err(why) => crate::detail::admission_refused(
+            "a copies register read",
+            crate::detail::MAX_OPS_READ_CONCURRENT,
+            &why,
+        ),
+    };
+    (status, headers_for(status), body)
+}
+
+/// The JSON content type and no caching on every answer, and a retry hint
+/// only on one that asks to be retried (a walk running, a full pool): an
+/// answer in full never says "try again".
+fn headers_for(status: StatusCode) -> HeaderMap {
+    let mut headers = HeaderMap::with_capacity(3);
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::TOO_MANY_REQUESTS {
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
+    headers
 }
 
 #[cfg(test)]

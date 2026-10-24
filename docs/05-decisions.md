@@ -84081,3 +84081,194 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+
+### D-7040 — CC-5: the copy roots live in one setting, `disk.extra_copy_roots`; several folders split by `|`; no count typed; unset is a named wait, never a default — 2026-10-24
+
+**Implemented by** CC-5 (FM-607). The block D-7040..D-7049 is CC-5's in the
+registry of 18 Oct; D-7049 is not used.
+
+**The name.** The spec named the setting `extra_copy_roots`; every key at the
+head is dotted lower-case (`source.gdfl`, `disk.floor`), so it is spelled
+`disk.extra_copy_roots` (`store::settings::Key::ExtraCopyRoots`, slot 11,
+`KEYS` 11 -> 12), appended as R4-07 appended `disk.floor`, with no format
+version bump (`docs/02-store-format.md` §42).
+
+**The value.** Absolute folders separated by `|`: a folder name may hold a
+comma, and a settings value is one line, so neither a comma nor a line break
+can separate. A folder whose own path holds `|` cannot be named, and is
+refused by name rather than split silently. Each folder is at most 1,024
+bytes with no `..`; none is empty, none named twice, none inside another (a
+`Path` orders by component, so one neighbour on each side in an ordered set
+decides it: O(r log r)). A save requires each to exist; a read checks the
+shape only. The one reader is `store::settings::copy_roots`.
+
+**No count of its own.** The operator's rule of 24 Oct (README, "no typed
+number outside the Winner Gate") leaves the whole value's bytes as the only
+bound: 4,096, the settings route's existing ceiling on any value it looks at
+(`brutex_core::secret_shape::MAX_VALUE_BYTES`), so a value this check passes is
+never refused there as over that cap. The spec's "the most roots" is answered
+by that, not by a new number.
+
+**Unset.** No fallback, no environment value and no default folder:
+`/disk/copies.json` answers `200 {"state":"waiting"}` naming the key, and
+`cli disk-copies` prints `DISK COPIES WAITING` and exits 1; nothing is walked
+(amendment (c)). The settings route serves the key with no value and
+`pull::copies_register::UNSET_WAIT` as its source, and names its reader.
+
+### D-7041 — CC-5: the live roots are read where the rest of the build reads them, and an unset one is named, never guessed — 2026-10-24
+
+**Implemented by** CC-5. The register compares the copy roots with the LIVE
+roots (`pull::copies_register::LiveKind`): the CM archive
+(`BRUTEX_GDFL_CM_ARCHIVE`), the options archives (`BRUTEX_GDFL_NFO_ARCHIVES`)
+and the tick store (`BRUTEX_GDFL_TICKSTORE`) through the one rule every
+`BRUTEX_GDFL_*` root is read by, `pull::gdfl_run::source_root` (unset or
+empty is `SourceUnset`, never a default); the `_v3` ledger
+(`BRUTEX_GDFL_V3_LEDGER`, the same rule); the settings `source.gdfl` and
+`source.masters` (the latter's `BRUTEX_MASTERS` fallback, said as such); and
+the store root the caller serves. Each one not configured is listed in
+`unset_live` with why, so the answer says what it could not compare against.
+No path is typed in tracked code.
+
+### D-7042 — CC-5: a hazard is a copy-root name of a file that has a name under a walked live root, by `(st_dev, st_ino)` within one walk; it is a red row and a non-zero exit, never an alert kind — 2026-10-24
+
+**Implemented by** CC-5. FM-607's "one `live_archive_hard_linked` alert" is
+read through D-6900 (no alert kind whose producer is unattended; amendment
+(a)): a HAZARD is a red row on `/disk/copies.json` and on the /ingest panel,
+one `error` event (`pull.copies`, audited), and `cli disk-copies` exiting 1.
+
+**The comparison.** Two names are one file when their `(st_dev, st_ino)`
+are equal, compared only within one walk: an inode number is unique per
+volume, and a volume's `st_dev` changed across a remount on 13 Oct, so
+neither is ever compared across walks or alone (amendment (e)). A name under
+a copy root is red when its file also has a name under a WALKED live root
+and the name is not itself one of those live names. Every hazard is listed
+(path, the live name, kind, `st_dev`, `st_ino`, nlink, bytes), flagged
+`partial` for a `.part` or `.tmp` name: the resumed-write case.
+
+**Which live roots are walked.** The vendor archives (CM, options, the
+`source.gdfl` delivery folder) and the tick store: their files are the ones
+a resumed write would change in place, and a walk of them is affordable. The
+ledger, the masters and the store are not walked; a copy file with more
+names than the walk found is listed as linked ELSEWHERE, never as safe. The
+bytes of a file shared with a live root are the live file's: they are never
+counted as a copy root's own (`extra_bytes`).
+
+### D-7043 — CC-5: the walk enters every directory once by `(st_dev, st_ino)`, follows no link, and types no cap; a fault keeps a root off the retirement list — 2026-10-24
+
+**Implemented by** CC-5. The spec asked for "a cap (files and depth) and what
+an over-cap root answers". The operator's rule of 24 Oct ("no typed number
+outside the Winner Gate", README) contradicts a typed cap, and the README's
+operator section wins over the part's file (CONTEXT section 4): the walk is
+bounded by the tree itself instead. Every directory is entered at most once,
+by its `(st_dev, st_ino)`; a symbolic link is counted and never followed; so
+a loop through a second mount ends, named in `revisited`. Each root is walked
+as itself only: a directory that IS another configured root, by its
+identity, is skipped where it is met and named (`skipped_roots`), so no file
+is two roots'. The roots are walked on `available_parallelism` threads; the
+merge is in the setting's order, so the answer does not depend on which
+finished first (`CLAUDE.md` §3 rule 5).
+
+A root that is absent, not a directory, a link, or cannot be listed is
+REFUSED by name with no figure. A subfolder that cannot be listed, or a name
+that vanishes between its listing and its look, is a named fault: the root is
+answered `partial`, its counts are of what was read, and it is never offered
+for retirement. Every list (hazards, faults, receipts, links elsewhere) is
+whole, in path order. The walk is O(entries under the roots):
+`docs/06-limits.md` L-CC5-1.
+
+### D-7044 — CC-5: the reader rule — a copy root is read when it is, or holds, a live root, or lies in a part of one its reader reads — 2026-10-24
+
+**Implemented by** CC-5 (`pull::copies_register::reader_of`). A copy root has
+a reader when a configured live root (D-7041) (1) is the copy root or lies
+inside it: removing it would remove the live root; or (2) holds it, in a part
+that root's reader reads (`LiveKind::reads`). The archives, the delivery
+folder, the masters and the store are read as whole trees, so a folder inside
+one is never offered for retirement. The tick store's readers open only
+`cm/` and `options/` (`TICK_STORE_READ_TOPS`, bound to the readers' own
+`DayTable::walk` lines by `tick_store_tops_are_the_readers_own`). The ledger
+is read at `<yyyy>/_v3/` under its root, and a `<yyyy>` folder holds one.
+
+So "under a configured live root" does not by itself mean "has a reader"
+(spec section 3.5): `prove-20261004`, inside the tick store's folder and
+outside `cm/` and `options/`, has no reader, and its retirement line names
+the live root it lies in and says to retire only that folder. The `_v3`
+ledger has the ledger's reader whenever `BRUTEX_GDFL_V3_LEDGER` names it, so
+it is never offered as "no reader". Comparison is by path components, the
+names readers open.
+
+### D-7045 — CC-5: the proof rule — three receipt shapes, read line by line; a `VERIFIED.tsv` proves a twin when every `source_identity` matches a live archive file today by inode, size, mtime and ctime, never `st_dev` — 2026-10-24
+
+**Implemented by** CC-5 (`read_receipt`, `SourceIdentity::matches`). A
+receipt is a regular file named `ALL_VERIFIED.txt`, `VERIFIED.tsv` or
+`<stem>.prove.out` (the 13 Oct receipt shapes). It STATES its proof when it is
+UTF-8 text ending in a line break whose first non-empty line is the
+statement; a `.prove.out` must also hold the line `ALL-PROVED`. Empty, torn
+(no final line break), not UTF-8 and silent receipts are each named and prove
+nothing. A copy root's `proof` is its first stating receipt by path.
+
+A copy root has a PROVEN TWIN when every row of every stating `VERIFIED.tsv`
+in it carries a `source_identity`
+(`dev:inode:size:mtime_s:mtime_ns:ctime_s:ctime_ns`) that matches a walked
+live archive file today in inode, size and both times. `st_dev` is never
+compared: on 13 Oct the year zips matched their 27 Sep receipts in everything
+but `st_dev`, which a remount changed. Otherwise the retirement line says
+"no proven twin ... these bytes may be the ONLY copy" (FM-082's lesson: the
+operator's hand step must never remove a live source an import still needs).
+Receipts are streamed one line at a time; no receipt size is typed.
+
+### D-7046 — CC-5: the register is walked at three moments only and served from memory between them; every answer names its walk and its age; no request waits on another's walk — 2026-10-24
+
+**Implemented by** CC-5 (`pull::copies_register::answer`, `Cache`). Amendment
+(a): no background walk. The register walks (1) on the first request of
+`GET /disk/copies.json` after start, (2) on a request that finds the
+configured roots or a root's own stat (`st_dev`, `st_ino`, mtime and ctime
+with their nanoseconds) changed, and (3) on every `cli disk-copies`. Every
+other request is one settings `stat`, one `lstat` per configured root and
+the body rendered once per walk.
+
+A root's own stat changes only when its DIRECT entries change, so a link made
+deeper in a tree is not seen until the next walk (amendment (f)): every answer
+carries `walked_at`, `age_ms` (from a monotonic clock, so a wall-clock jump
+cannot make it negative), `walk_us`, `fresh`, `why` and `roots_walked`, and
+the verb always walks afresh. A request that meets another's walk is never
+made to wait: it is served the held register marked `rewalking`, or, before
+any walk has landed, a `503` naming the walk with `Retry-After: 1`.
+`pull::copies_register::total` reads the held register only, never walking,
+for R4-29's `extra_copies_bytes` (amendment (b)).
+
+### D-7047 — CC-5: the retirement list is text for the operator, with no command; the code never deletes, moves or renames; `cli disk-copies` exits 0 only with no hazard and every root walked whole — 2026-10-24
+
+**Implemented by** CC-5. The retirement list (`retirement`, `retirement_text`)
+holds every copy root walked whole that nothing reads, with the bytes its
+removal would free, its file count, why it has no reader, its twin in words
+and what to take care of (a live root it lies in; names in it that are a live
+file's; files with names elsewhere), then every hazard name, which frees no
+byte and removes the in-place-change hazard. Its first line carries the fixed
+sentence "the operator removes these by hand; the app never does". It holds
+no command: every path is written quoted, with control characters and bytes
+that are not UTF-8 escaped, so a name with a line break stays one line
+(`the_retirement_list_contains_no_delete_command`). The /ingest panel offers
+it for download as text.
+
+No code here deletes, moves, renames, truncates or creates a file: the `Fs`
+seam has three reading methods and no other, and
+`crates/pull/tests/no_scheduler_delete.rs` (R4-06) lists
+`copies_register.rs`, `copies_route.rs` and `disk_copies_command.rs`.
+
+`cli disk-copies` takes no argument (any is exit 2) and exits 0 only when no
+live file has a second name and every root was walked whole; exit 1 names a
+hazard, a root not walked whole, the key unset or a refused store root on its
+last line. It is a reader in `cli::store_write` and not a sweep.
+
+### D-7048 — CC-5: what the register puts on `/logs` — one audited `error` per hazard, one `warn` per root not walked whole, one `info` per walk — 2026-10-24
+
+**Implemented by** CC-5 (`notes`, `note_walked`, target `pull.copies`). Each
+hazard is an `error` ("live archive file hard-linked under another name",
+with path, live name, kind, `st_dev`, `st_ino`, nlink), so the audit stream
+keeps it (`telemetry::is_audited` takes every `error`). Each copy root or
+walked live root not walked whole is a `warn` naming it and why, so `/logs`
+shows every refusal by name. Each walk is one `info` with its roots, extra
+bytes, hazard count, walk time and whether it was whole. A walk is not a
+state change of the store (it writes nothing), so no `lifecycle` row is
+added to `telemetry::run_dirs::state_events::TABLE`; the settings generation
+that names the roots is the audited state change (`POST /settings`).
