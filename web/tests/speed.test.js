@@ -3766,6 +3766,26 @@ test('an answer is held to a bound in bytes as well as in time: a timed row keep
   } finally {
     site.close();
   }
+  // Who keeps what: every timed ask (a row's, each after a restart) keeps the head; discovery, the field check and the up checks keep the whole.
+  /** @type {string[]} */
+  const kept = [];
+  const strict = standIn({ ignore: new Set() });
+  /** @param {string} b @param {string} path @param {{method?: string, keep?: string}} [o] */
+  const spy = async (b, path, o = {}) => {
+    const u = new URL(path, 'http://x');
+    kept.push(`${o.keep ?? 'whole'} ${o.method ?? 'GET'} ${u.pathname}${[...u.searchParams.values()].includes(GARBLED) ? ' garbled' : ''}`);
+    return strict.send(b, path, o);
+  };
+  const spied = await sheet.runSheet({ ...argsFor(), n: 2, clients: [1], restart: 'x', restarts: 1 }, { send: spy, log: () => {}, restart: async () => 0 });
+  assert.equal(spied.ok, true, spied.failures.join('\n'));
+  const { requests } = sheet.requestsFor(spied.ctx ?? CTX);
+  const withQuery = requests.filter((r) => r.url.includes('?'));
+  const fields = withQuery.reduce((n, r) => n + new Set(new URL(r.url, 'http://x').searchParams.keys()).size, 0);
+  assert.equal(kept.filter((k) => k.startsWith('head ')).length, requests.length * 5, 'n = 2 cold, n = 2 warm and one after the restart, each keeping the head');
+  assert.equal(kept.filter((k) => k === `whole ${UP_METHOD} ${UP_ROUTE}`).length, 2, 'the up check at the start and after the restart');
+  assert.equal(kept.filter((k) => k.startsWith('whole GET ') && !k.endsWith(' garbled')).length, withQuery.length, 'the field check keeps the whole of each original');
+  assert.equal(kept.filter((k) => k.startsWith('whole ') && k.endsWith(' garbled')).length, fields, 'and of each garbled answer');
+  assert.equal(kept.length, requests.length * 5 + 2 + withQuery.length + fields, 'and nothing else is asked');
   // A discovery answer past the text bound, or not JSON, is refused by name.
   const args = sheet.parseArgs(['--base', 'http://h:1']);
   await assert.rejects(sheet.discover(async () => ({ ...answer(200, '(an answer of 9 bytes, sha256 x)'), bytes: 9, kept: 'digest' }), args), /^Error: discovering the selection: \/feeds\.json answered 9 bytes, past the 64000000 the sheet keeps as text$/);
