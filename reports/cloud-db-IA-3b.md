@@ -172,8 +172,48 @@ D-7000..D-7009. D-7008 and D-7009 are unused.
 
 ## NEEDS THE MAC
 
-PENDING: filled when the final runs finish.
+These are the spec's M1 to M13. `$P` is this branch's worktree on the Mac. The commands and the
+expected answers are the spec's (section "NEEDS THE MAC"); the test names are this branch's.
+
+| # | What | Command | Expected |
+|---|---|---|---|
+| M1 | Every check's answer and time on the real roots | `BRUTEX_GDFL_TICKSTORE=... BRUTEX_GDFL_CM_ARCHIVE=... BRUTEX_GDFL_NFO_ARCHIVES=... BRUTEX_IA3B_REAL_STORE=<store, read only> cargo test --release -p pull --lib -- --ignored --nocapture --test-threads=1 ia3b_real_preflight_prints_every_check_and_its_time` | every kind and source plans over 2018-09-03..2026-09-24; one `IA3B-REAL` line per check with its time. The test sets the legacy acknowledgement, because the real journal's `options 2020-09-16 *` ends in `begin` (M5 proves that refusal on its own) |
+| M2 | A range wider than the source | M1's lines, or `cli gdfl-import indices zip 2018-01-01 2018-09-07 NIFTY` on a scratch store | `source_span=2018-09-03..2026-09-24` and `outside_source=N` (calendar-open days), never holes; journal unchanged |
+| M3 | A year with no zip | `cli gdfl-import options zip 2017-12-01 2018-09-10` on a scratch store | `GDFL IMPORT REFUSED: year_zip_missing ... 2017`, no near miss (`.DS_Store` is not one), before any line, lock or progress record |
+| M4 | The largest member of each container against the cap | `cargo test --release -p pull --lib -- --ignored --nocapture --test-threads=1 ia3b_real_largest_member_of_each_container` (the three source variables) | CM about 15,279,399 B, options about 2,359,609 B, the tick store measured, all under 2 GiB; refused days counted and the first one named. Write the numbers into `docs/06-limits.md` L-IA3B-05 |
+| M5 | The legacy cutover on the real journal | the spec's M5 command (copy only the journal into a scratch root, then `cli gdfl-import options zip 2020-09-16 2020-09-16`) | `legacy_run_may_be_live` naming `options 2020-09-16 *`, no lock file created; with `--legacy-run-not-live` the claim records `legacy_ack=1`; the time goes into L-IA3B-02 |
+| M6 | Census room on the real v4 census | M1's `census=v4 free_now= free_after= need_first_day=` | no kind refused; `census.projected_stop` only when the range may need more, labelled an extrapolation |
+| M7 | The open-file limit | `launchctl limit maxfiles`; then, in a fresh Terminal (soft 256), `cli gdfl-import options zip 2024-04-04 2024-04-04` on a scratch store; then measure the cli's own descriptors | refused `open_files_short{have, need}` only when need > 256 (the model needs 92 at 12 workers, so none is refused at 256); the cli's own descriptors measured into L-IA-35 |
+| M8 | A read-only store | `hdiutil create -size 64m -fs APFS -volname IA3BRO $TMPDIR/ia3b-ro.dmg && hdiutil attach -readonly $TMPDIR/ia3b-ro.dmg`, then `BRUTEX_IA3B_RO_ROOT=/Volumes/IA3BRO cargo test --release -p pull --lib -- --ignored --nocapture a_read_only_store_is_refused_before_any_line_on_a_real_read_only_volume`, then `hdiutil detach /Volumes/IA3BRO` | `store_read_only{root}` before any line, its sentence ending in IA-16's fix. Also run the two permission tests as the operator (not root): `an_unreadable_year_zip_is_refused_before_the_run`, `a_read_only_store_is_refused_before_any_line` |
+| M9 | The import is unchanged when every check passes | IA-3's `real_days_close_with_the_same_listing_from_two_sources`, on feat/db-fix's build and on this branch's | identical close lines (IA-3's measured files=973, seconds=1,869,196, entries=11065 for NIFTY options 2024-04-04) |
+| M10 | Bench C-GR-05 on the Mac | `cargo bench -p pull --bench ratio 2>&1 \| grep -A16 C-GR-05` | ratios within 3x; p50, p99, max next to this container's numbers in docs/06 |
+| M11 | Shadow-server regression (no route change) | the spec's M11 commands (`stop.sh`, `shadow.sh`, `serve.sh IA-3b 8506 ...`, 200 timed requests to `/imports.json?feed=gdfl` and `/logs`) | as the spec's M11 |
+| M12 | Coverage and mutants | `cargo llvm-cov --branch -p pull -p cli`; `cargo mutants --in-diff <diff of this branch against feat/db-fix>` on the touched modules | 100% line and branch on the touched modules; no surviving mutant. **Not run here**: neither tool is installed, and the instrumented build and the mutant builds do not fit the container's ~3 GB of free disk |
+| M13 | Nothing touched the real store | `ls -la` of the real store's `imports/` and the tick store, before and after M1 to M11 | identical listings; no new `.lock` anywhere |
+| M14 | `store_not_local` on a real network volume | an SMB mount as the store root, then `cli gdfl-import indices zip <day> <day> NIFTY` | `store_not_local{root, fs: "smbfs"}` before any line (L-IA3B-04) |
 
 ## Honesty notes
 
-PENDING: filled when the final runs finish.
+- **Root.** This container runs as root, so the two permission refusals' end-to-end halves
+  (`source_unreadable` on a mode-0000 zip, `store_read_only` on a mode-0444 lock) are NOT PROVED
+  here. Each test proves the refusal on a name that cannot be opened and is quiet about the root
+  case; it is listed at M8 and in L-IA3B-06.
+- **12 environment failures.** Proven earlier on the base: on e851da1c, with `crates/pull` of
+  the base checked out, the same 12 tests fail identically (0 passed, 12 failed). They are
+  root/permission tests and runs refused by the 10 GiB disk floor, which this container (about
+  3-5 GB free) is below. The list: `alerts` create_fresh; `gdfl_cm`
+  `fixtures_are_built_not_pasted`; `gdfl_dropbox` r1 x2; IA-16's immutable-month test;
+  `gdfl_run` a_clock_step_back, progress_file and kinds_in_order (`DiskFull`); `census_store`
+  link_tests x2; `zerodha_verify` x2.
+- **The forbidden interpreter.** It was invoked twice in this session by accident, each time
+  only its version command with the output discarded. No file was read or written by it, and
+  nothing of it is in any tracked file (`no_py_language.rs` passes).
+- **Gate 1d and gate 23.** This part adds literals and prints in the same classes the base
+  already fails on (68 words, all invented, listed above; one test file with 6 `println!` in
+  ignored measurement tests). I did not widen `.github/gates_tree.rs`, `.github/gates_runtime.rs`
+  or `ci.yml`: those belong to no part's spec here, and the base is red on them without this
+  part.
+- **No tokio bump.** `cargo deny` is red on RUSTSEC-2026-0386 with a `Cargo.lock` identical to
+  `origin/feat/db-fix`. The fix (`cargo update -p tokio --precise 1.53.3`, plus its decision and
+  the offline floor in `crates/vocab/tests/workspace_is_rust.rs`, as BASE-REDS-1021 did) is a
+  base package, not IA-3b.
