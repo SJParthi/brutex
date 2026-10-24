@@ -744,7 +744,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * `--restart` command was waited on with no bound, and the `--writer` was
  * stopped by a SIGTERM to its shell alone). `wait` resolves with its exit
  * code, or with what ended it instead, said after "the command": `was ended
- * by SIGTERM`, `could not be started: ...`. `stop()` ends its group — SIGTERM,
+ * by SIGTERM`, `could not be started: ...`; what it prints goes to the
+ * sheet's stderr. `stop()` ends its group — SIGTERM,
  * then SIGKILL past {@link COMMAND_STOP_MS}, each wait bounded — and says how,
  * after "its process group".
  *
@@ -752,7 +753,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<string>}}
  */
 export function run(command) {
-  const child = spawn(command, { shell: true, stdio: ['ignore', 'inherit', 'inherit'], detached: true });
+  // Its output goes to the sheet's stderr, so the sheet's stdout is the sheet alone.
+  const child = spawn(command, { shell: true, stdio: ['ignore', 2, 2], detached: true });
   COMMANDS.add(child);
   guardCommands();
   let exited = false;

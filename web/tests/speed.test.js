@@ -3437,11 +3437,12 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   try {
     const ctx = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
     const pid = join(dir, 'restart.pid');
-    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '2000', '--up-wait-ms', '2000', '--restart', `echo $$ > '${pid}'; exec sleep 1000`, '--restarts', '1']);
+    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '2000', '--up-wait-ms', '2000', '--restart', `echo restart-said; echo $$ > '${pid}'; exec sleep 1000`, '--restarts', '1']);
     assert.equal(cmd.code, 1, cmd.stderr);
     assert.ok(cmd.ms < 30_000, `the command ended (took ${cmd.ms} ms)`);
     assert.match(cmd.stdout, /- FAILED: restart 1: the --restart command did not exit within 2000 ms \(--restart-wait-ms\), so its process group was sent SIGTERM and left/);
     assert.ok(await endsWithin(await pidIn(pid)), 'nothing of the restart command is left');
+    assert.ok(!cmd.stdout.includes('restart-said') && cmd.stderr.includes('restart-said'), 'what a command prints goes to stderr: the sheet on stdout is the sheet alone');
     // A sheet sent SIGTERM while its --restart command runs ends that command's group too.
     const pid2 = join(dir, 'restart-2.pid');
     const { spawn } = await import('node:child_process');
