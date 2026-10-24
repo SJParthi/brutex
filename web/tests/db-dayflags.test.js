@@ -424,6 +424,11 @@ test('DB-B20, DB-A15, goal 3: a frozen index, a value outside the day range, a c
   const minutes = { basis: 'minutes_scanned', flagged: null, runs: 0, unjudged_s: 600, auction_aside: false };
   assert.deepEqual(cellOf(rec({ index: { frozen: minutes, outside_day_range: null } })).kinds, ['frozen_unjudged']);
   assert.deepEqual(kindsOf(rec({ index: { frozen: { ...minutes, flagged: true, runs: 1 }, outside_day_range: null } })), ['frozen']);
+  // verify-R3-13-r2 E6: a ledger run the day's session cannot hold is refused
+  // by name, `flagged: null`: not judged, never "frozen" (the check's lines
+  // were served frozen in session) and never "not frozen".
+  const refused = { basis: 'day_ledger', flagged: null, longest_s: 999999, judged_s: null, refused: 'starts_outside_session' };
+  assert.deepEqual(cellOf(rec({ index: { frozen: refused, outside_day_range: null } })).kinds, ['frozen_unjudged']);
   assert.deepEqual(kindsOf(rec({ index: { frozen: null, outside_day_range: null } })), ['session']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 21594 } })), ['peer_on_closed', 'closed']);
   assert.deepEqual(kindsOf(rec({ calendar: { code: '.' }, held: { bars: 0 }, peer: { feed: 'gdfl', bars: 0 } })), ['closed']);
