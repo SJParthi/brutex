@@ -8,6 +8,7 @@ import { dayLabel, secondLabel } from './dates.js';
 import { group } from './money.js';
 import { selectionSegments } from './db/notes-labels.js';
 import { contractRungsOf, SEGMENT_KEYS } from './db/selection-model.js';
+import { parseKey } from './instrument.js';
 
 export const STORE_CENSUS_MS = 30_000;
 
@@ -1018,12 +1019,19 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
       why: typeof refusal?.why === 'string' && refusal.why !== '' ? refusal.why
         : typeof refusal?.error === 'string' ? refusal.error : `HTTP ${response.status} and no reason named` };
   };
+  /* A BODY THAT IS NOT JSON IS NAMED, NEVER THROWN (R3-12): a torn answer
+     reached the page as an unnamed SyntaxError. */
+  const TORN = Symbol('not JSON');
+  /** @param {Response} response */
+  const jsonOf = async (response) => {
+    try { return await response.json(); } catch { return TORN; }
+  };
   const rootResponse = await get(facetsUrl({ feed, segment: /** @type {any} */ (null) }));
   if (!rootResponse.ok) {
     return fail(`/census/facets.json?feed=${feed} answered HTTP ${rootResponse.status}: ${(await refusalOf(rootResponse)).why}`);
   }
-  const root = await rootResponse.json();
-  const rootWhy = rootFault(root, feed);
+  const root = await jsonOf(rootResponse);
+  const rootWhy = root === TORN ? 'its body is not JSON' : rootFault(root, feed);
   if (rootWhy) return fail(`/census/facets.json?feed=${feed}: ${rootWhy}`);
   const lag = censusLag(rootResponse.headers);
   // A DEGRADED CENSUS IS NOT DRAWN FROM (CE-77): the whole read refuses it
@@ -1038,8 +1046,8 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
     const query = { feed, segment, underlying, ...(at ? { expiry: at } : {}) };
     const response = await get(rowsUrl(query));
     if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
-    const body = await response.json();
-    const fault = rowsFault(body, query);
+    const body = await jsonOf(response);
+    const fault = body === TORN ? 'its body is not JSON' : rowsFault(body, query);
     return fault
       ? { ok: false, code: null, why: fault, query, body: null, headers: response.headers }
       : { ok: true, code: null, why: '', query, body, headers: response.headers };
@@ -1050,8 +1058,8 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
     const query = { feed, segment, underlying };
     const response = await get(facetsUrl(query));
     if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
-    const body = await response.json();
-    const fault = facetsFault(body, query);
+    const body = await jsonOf(response);
+    const fault = body === TORN ? 'its body is not JSON' : facetsFault(body, query);
     return fault
       ? { ok: false, code: null, why: fault, query, body: null, headers: response.headers }
       : { ok: true, code: null, why: '', query, body, headers: response.headers };
@@ -1067,10 +1075,15 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
   ]);
   const generationOf = new Map(root.segments.map((/** @type {any} */ row) => [row.segment, row.generation]));
   /** ONE CENSUS, OR NONE: every answer is of the generation the root was, vendor-wide and for its own part. */
-  const movedWhy = (/** @type {string} */ segment, /** @type {Headers} */ headers, /** @type {number} */ generation) =>
-    censusLag(headers).generation !== lag.generation || generation !== generationOf.get(segment)
-      ? `the census moved between the answers (${segment}: generation ${group(generationOf.get(segment))}, then ${group(generation)})`
+  const movedWhy = (/** @type {string} */ segment, /** @type {Headers} */ headers, /** @type {number} */ generation) => {
+    if (generation !== generationOf.get(segment)) {
+      return `the census moved between the answers (${segment}: generation ${group(generationOf.get(segment))}, then ${group(generation)})`;
+    }
+    const at = censusLag(headers).generation;
+    return at !== lag.generation
+      ? `the census moved between the answers (the feed's generation ${lag.generation === null ? 'unnamed' : group(lag.generation)}, then ${at === null ? 'unnamed' : group(at)}, while ${segment} was read)`
       : null;
+  };
 
   /** @type {ScopeRead[]} */
   const read = [];
@@ -1091,10 +1104,14 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
     if (moved) return moved;
     const decoded = await decodeCensus(body.census, feed, signal);
     let bars = 0;
-    const head = `${body.exchange}-${segment}-${underlying}`;
     for (const item of decoded) {
-      if (item.instrument !== head && !String(item.instrument).startsWith(`${head}-`)) {
-        return `${segment} answered a row of ${item.instrument}, which is not ${underlying}`;
+      // ITS OWN ROWS, BY THE KEY'S GRAMMAR (R3-12): a bare prefix took
+      // `NSE-CASH-BAJAJ-AUTO` for a row of BAJAJ. The exchange, segment and
+      // underlying are read off the key, and a chain's rows carry its expiry.
+      const key = parseKey(String(item.instrument));
+      if (key.exchange !== body.exchange || key.segment !== segment || key.underlying !== underlying ||
+          (body.expiry && key.expiry !== body.expiry)) {
+        return `${segment} answered a row of ${item.instrument}, which is not ${underlying}${body.expiry ? ` at ${body.expiry}` : ''}`;
       }
       bars += item.rows;
     }

@@ -586,3 +586,126 @@ test('the instrument list is the server\'s underlyings of the segments read, and
     'the census rows of ALPHA (options at 2019-03-28) could not be read from /census/facets.json: HTTP 503. This page never reads the whole census in their place; Refresh asks again');
   assert.match(scopeFailure({ underlying: 'ALPHA' }, 'x'), /^the census rows of ALPHA \(every segment\) could not/);
 });
+
+/* ----------------------------------------------------------------------
+   R3-12: EXTREME CASES (the operator's rule 4). One record, the most an
+   answer carries, boundaries of the day and the year, out-of-order and
+   torn answers, garbage views, a symbol no list names, and combinations.
+   ---------------------------------------------------------------------- */
+import { listedOf, segmentOf } from '../src/lib/db/selection-model.js';
+
+test('extreme: one record everywhere: one spot row, one listed expiry', async () => {
+  const one = /** @type {Array<[string, string, string, number]>} */ ([['NSE-INDEX-ALPHA', '2019-03', '1day', 1]]);
+  const { request } = server({ ...EVERY(), [Q('INDEX')]: [200, rowsBody('INDEX', 7, one)], [L('FNO')]: [200, listingBody('FNO', 9, ['2019-03-28'])] });
+  const answer = await readScope(request, 'example', { underlying: 'ALPHA' });
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  if (!answer.ok) return;
+  assert.deepEqual(answer.rows.map((row) => `${row.instrument}|${row.rows}`), ['NSE-INDEX-ALPHA|1']);
+  assert.deepEqual(answer.scope.expiries.map((row) => row.expiry), ['2019-03-28']);
+  assert.equal(scopeText(answer.scope), 'INDEX 1 row(s), FNO 1 expiry(ies) offered');
+});
+
+test('extreme: the most one rows answer carries (4,096) is read whole; one past it is named, never read short', async () => {
+  const full = /** @type {Array<[string, string, string, number]>} */ (Array.from({ length: 4096 }, (_, n) =>
+    [`NSE-FNO-ALPHA-2019-03-28-${1_000_000 + n * 100}-${n % 2 ? 'PE' : 'CE'}`, '2019-03', '1s', 1]));
+  const atCap = await readScope(server({ ...EVERY(), [Q('FNO', '2019-03-28')]: [200, rowsBody('FNO', 9, full, { expiry: '2019-03-28' })] }).request,
+    'example', { underlying: 'ALPHA', expiry: '2019-03-28', segments: ['options'] });
+  assert.equal(atCap.ok && atCap.rows.length, 4096);
+  const past = await readScope(server({ ...EVERY(), [Q('FNO', '2019-03-28')]: [400, { ...TOO_MANY, reached: 4097 }] }).request,
+    'example', { underlying: 'ALPHA', expiry: '2019-03-28', segments: ['options'] });
+  assert.equal(past.ok && past.rows.length, 0);
+  assert.equal(past.ok && past.scope.unread.length, 1);
+});
+
+test('extreme: the day and the year: an expiry today is live, at the archive end expired, one day past it cut, and a year turns in order', () => {
+  const today = '2026-10-24';
+  const archiveTo = '2026-09-24';
+  const listing = ['2026-10-24', '2026-09-24', '2026-09-25', '2019-12-26', '2020-01-02', '2026-10-29'].map((expiry) => ({ expiry, strikes: 10, future: true }));
+  const filed = (/** @type {any} */ e, /** @type {string} */ family) => segmentOf({ expiry: e.expiry, instrument: family === 'futures' ? 'x-FUT' : 'x-CE' }, today, archiveTo);
+  assert.deepEqual(listedOf(listing, 'options-live', filed).map((e) => e.expiry), ['2026-10-24', '2026-10-29'], 'today is not settled');
+  assert.deepEqual(listedOf(listing, 'options', filed).map((e) => e.expiry), ['2026-09-24', '2019-12-26', '2020-01-02'], 'the archive end is inside it');
+  assert.deepEqual(listedOf(listing, 'options-cut', filed).map((e) => e.expiry), ['2026-09-25'], 'one day past the archive end is cut');
+  assert.deepEqual(listedOf(listing, 'spot', filed), [], 'spot lists no expiry');
+  assert.equal(listedOf(listing, '', filed).length, 6, 'every segment lists every one');
+  // A futures key keeps only expiries with a future, an options key only those with strikes.
+  const mixed = [{ expiry: '2019-03-28', strikes: 0, future: true }, { expiry: '2019-04-25', strikes: 4, future: false }];
+  assert.deepEqual(listedOf(mixed, 'futures', filed).map((e) => e.expiry), ['2019-03-28']);
+  assert.deepEqual(listedOf(mixed, 'options', filed).map((e) => e.expiry), ['2019-04-25']);
+});
+
+test('extreme: a listing out of order comes back in order; a torn body and a torn root are named, never thrown', async () => {
+  const turned = ['2020-01-02', '2019-12-26', '2019-03-28'];
+  const sorted = await readScope(server({ ...EVERY(), [L('FNO')]: [200, listingBody('FNO', 9, turned)] }).request, 'example', { underlying: 'ALPHA', segments: ['options'] });
+  assert.deepEqual(sorted.ok && sorted.scope.expiries.map((row) => row.expiry), ['2019-03-28', '2019-12-26', '2020-01-02']);
+  /** @type {any} */
+  const tornAt = (/** @type {string} */ torn) => async (/** @type {string} */ url) => url === torn
+    ? new Response('{"schema":1,"feed":"exa', { status: 200, headers: HEADERS })
+    : server(EVERY()).request(url, { cache: 'no-store' });
+  for (const [torn, why] of /** @type {Array<[string, RegExp]>} */ ([[ROOT, /^\/census\/facets\.json\?feed=example: its body is not JSON$/],
+    [Q('INDEX'), /^ALPHA in INDEX: its body is not JSON$/], [L('FNO'), /^ALPHA in FNO: its body is not JSON$/]])) {
+    const answer = await readScope(tornAt(torn), 'example', { underlying: 'ALPHA' });
+    assert.equal(answer.ok, false, torn);
+    if (!answer.ok) assert.match(answer.reason, why);
+  }
+});
+
+test('extreme: garbage views are refused before any request, mixed with good ones or not', async () => {
+  for (const segments of [['options', 'index'], [''], ['SPOT'], ['spot-cut-live'], ['__proto__']]) {
+    const { request, asked } = server(EVERY());
+    const answer = await readScope(request, 'example', { underlying: 'ALPHA', segments });
+    assert.equal(answer.ok, false, JSON.stringify(segments));
+    if (!answer.ok) assert.match(answer.reason, /is not one this page knows \(it reads spot, futures, options\); nothing was read for it/);
+    assert.deepEqual(asked, [], JSON.stringify(segments));
+  }
+});
+
+test('extreme, out of the box: a symbol with a hyphen and an ampersand is asked encoded, and a longer name sharing its prefix is not its row', async () => {
+  // NSE lists BAJAJ-AUTO and M&M: a name no list in this repository spells.
+  const ask = (/** @type {string} */ underlying) => rowsUrl({ feed: 'example', segment: 'CASH', underlying });
+  assert.equal(ask('M&M'), '/census/facets.json?feed=example&segment=CASH&underlying=M%26M&rows=census-tuples-v1');
+  const rows = /** @type {Array<[string, string, string, number]>} */ ([['NSE-CASH-BAJAJ-AUTO', '2019-03', '1min', 7]]);
+  const body = { ...rowsBody('CASH', 5, rows), underlying: 'BAJAJ' };
+  const answers = { [ROOT]: /** @type {[number, any]} */ ([200, root()]), [rowsUrl({ feed: 'example', segment: 'INDEX', underlying: 'BAJAJ' })]: /** @type {[number, any]} */ ([200, { ...rowsBody('INDEX', 7, []), underlying: 'BAJAJ' }]),
+    [rowsUrl({ feed: 'example', segment: 'CASH', underlying: 'BAJAJ' })]: /** @type {[number, any]} */ ([200, body]) };
+  const answer = await readScope(server(answers).request, 'example', { underlying: 'BAJAJ', segments: ['spot'] });
+  assert.equal(answer.ok, false);
+  if (!answer.ok) assert.equal(answer.reason, 'CASH answered a row of NSE-CASH-BAJAJ-AUTO, which is not BAJAJ');
+  // A chain's rows carry the expiry asked, or they are refused.
+  const chain = await readScope(server({ ...EVERY(), [Q('FNO', '2019-03-28')]: [200, rowsBody('FNO', 9, [['NSE-FNO-ALPHA-2019-04-25-1150000-CE', '2019-04', '1s', 3]], { expiry: '2019-03-28' })] }).request,
+    'example', { underlying: 'ALPHA', expiry: '2019-03-28', segments: ['options'] });
+  assert.equal(!chain.ok && chain.reason, 'FNO answered a row of NSE-FNO-ALPHA-2019-04-25-1150000-CE, which is not ALPHA at 2019-03-28');
+});
+
+test('extreme, combined: a saturated server AND a census that moves between the answers: asked twice at most, then refused as moved', async () => {
+  /** @type {Map<string, number>} */
+  const asked = new Map();
+  const answers = EVERY();
+  /** @type {any} */
+  const request = async (/** @type {string} */ url) => {
+    const n = (asked.get(url) ?? 0) + 1;
+    asked.set(url, n);
+    if (n === 1) return new Response('{}', { status: 429, headers: { ...HEADERS, 'retry-after': '1' } });
+    // THE SECOND ANSWER OF THE LISTING IS A NEWER CENSUS.
+    if (url === L('FNO')) return new Response(JSON.stringify(listingBody('FNO', 9, EXPIRIES)), { status: 200, headers: { ...HEADERS, 'x-brutex-census-generation': '22' } });
+    return new Response(JSON.stringify(answers[url][1]), { status: answers[url][0], headers: HEADERS });
+  };
+  const answer = await readScope(request, 'example', { underlying: 'ALPHA' }, { pause: async () => {} });
+  assert.equal(answer.ok, false);
+  if (!answer.ok) assert.match(answer.reason, /census moved between the answers \(the feed's generation 21, then 22, while FNO was read\)/);
+  assert.equal([...asked.values()].every((n) => n <= 2), true, 'never a third request');
+});
+
+test('extreme, combined: ten times the expiries AND the chosen chain past the cap AND every segment: offered, named, nothing whole', async () => {
+  const many = Array.from({ length: 4040 }, (_, n) => new Date(Date.UTC(2018, 8, 6) + n * 7 * 86_400_000).toISOString().slice(0, 10));
+  const chosen = many[2020];
+  const { request, asked } = server({ ...EVERY(), [L('FNO')]: [200, listingBody('FNO', 9, many)], [Q('FNO', chosen)]: [400, { ...TOO_MANY, reached: 9000 }] });
+  const answer = await readScope(request, 'example', { underlying: 'ALPHA', expiry: chosen, segments: [] });
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  if (!answer.ok) return;
+  assert.equal(answer.scope.expiries.length, 4040);
+  assert.deepEqual(answer.scope.unread.map((part) => `${part.segment} ${part.expiry}`), [`FNO ${chosen}`]);
+  assert.equal(answer.rows.length, 3, 'the spot rows stay');
+  assert.equal(asked.some((url) => url.includes('/store.json')), false);
+  // The page then refuses that chain by name rather than drawing it empty.
+  assert.equal(scopeNeed({ scope: answer.scope, filter: 'ALPHA', kind: 'options', expiry: chosen }), null, 'not missing: read and refused');
+});

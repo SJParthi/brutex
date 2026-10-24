@@ -269,3 +269,61 @@ test('no_db_view_downloads_the_whole_census', async () => {
     globalThis.fetch = real;
   }
 });
+
+test('extreme, concurrent: a scope read a newer selection replaced is never published, even when it lands last', async () => {
+  const { store, syncStore } = await storeModule();
+  const server = fakeServer();
+  /** @type {Map<string, () => void>} */
+  const held = new Map();
+  const real = globalThis.fetch;
+  // ALPHA's INDEX rows are held back until the test lets them go.
+  const alphaIndex = '/census/facets.json?feed=example&segment=INDEX&underlying=ALPHA&rows=census-tuples-v1';
+  globalThis.fetch = /** @type {any} */ (async (/** @type {any} */ url) => {
+    if (String(url) === alphaIndex) await new Promise((done) => held.set(String(url), /** @type {() => void} */ (done)));
+    return server.fetch(url);
+  });
+  try {
+    syncStore('example', { underlying: 'ALPHA', expiry: null, segments: ['spot'] });
+    for (let i = 0; i < 50 && !held.has(alphaIndex); i++) await new Promise((done) => setTimeout(done, 1));
+    assert.equal(held.has(alphaIndex), true, 'ALPHA is in flight');
+    // A NEWER SELECTION: BETA, read while ALPHA waits.
+    syncStore('example', { underlying: 'BETA', expiry: null, segments: ['spot'] });
+    assert.equal(await settled(store), 'ready');
+    assert.equal(store.scope?.underlying, 'BETA');
+    // ALPHA LANDS LAST, and changes nothing.
+    held.get(alphaIndex)?.();
+    for (let i = 0; i < 50; i++) await new Promise((done) => setTimeout(done, 1));
+    assert.equal(store.scope?.underlying, 'BETA');
+    assert.equal(store.rows.every((/** @type {any} */ row) => row.instrument.includes('BETA')), true);
+    assert.equal(store.state, 'ready');
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test('extreme, concurrent and combined: a segment switch while a read is in flight, and the new read fails: the failure shown is the new one, the old rows never land', async () => {
+  const { store, syncStore } = await storeModule();
+  const server = fakeServer({ refuse: { '/census/facets.json?feed=example&segment=FNO&underlying=ALPHA': [503, { error: 'census_unreadable', why: 'the FNO part is torn' }] } });
+  /** @type {(() => void) | null} */
+  let release = null;
+  const real = globalThis.fetch;
+  globalThis.fetch = /** @type {any} */ (async (/** @type {any} */ url) => {
+    if (String(url).includes('segment=CASH') && release === null) await new Promise((done) => { release = /** @type {() => void} */ (done); });
+    return server.fetch(url);
+  });
+  try {
+    syncStore('example', { underlying: 'ALPHA', expiry: null, segments: ['spot'] });
+    for (let i = 0; i < 50 && release === null; i++) await new Promise((done) => setTimeout(done, 1));
+    // THE SWITCH TO OPTIONS, whose listing the server refuses.
+    syncStore('example', { underlying: 'ALPHA', expiry: null, segments: ['options'] });
+    assert.equal(await settled(store), 'error');
+    assert.match(String(store.error), /^the census rows of ALPHA \(options\) could not be read from \/census\/facets\.json: ALPHA in FNO: the FNO part is torn\./);
+    /** @type {any} */ (release)?.();
+    for (let i = 0; i < 50; i++) await new Promise((done) => setTimeout(done, 1));
+    assert.equal(store.state, 'error', 'the old spot read did not land over the failure');
+    assert.deepEqual(store.rows, []);
+    assert.equal(server.asked.some((url) => url.startsWith('/store.json')), false);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
