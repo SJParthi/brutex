@@ -1562,3 +1562,92 @@ fn a_dropped_line_synced_and_never_indexed_is_caught_up_by_the_next_writer() {
         .count();
     assert_eq!(dropped, 1, "indexed once, never a second line");
 }
+
+/// THE SELF-CHECK OF REPAIR 2: a reader answered from an image BEHIND its
+/// ledger whenever any writer held the lock, taking the lag for that writer's
+/// own act in flight. The lag may as well be an act a failed publish left
+/// unindexed that the next writer is still bringing into the index (lock
+/// taken, rebuild not yet renamed): then a month that act recorded whole read
+/// as clear and its bars were served. An image behind its ledger is never the
+/// answer now: a reader with no patience (the CLI's, the importer's) is
+/// refused by name at once, a patient one (a page's) waits within its
+/// patience and is refused by name when it runs out, and one whose writer's
+/// level image lands in time answers from that image.
+#[test]
+fn an_image_behind_its_ledger_is_never_the_answer_while_a_writer_holds_the_lock() {
+    let store = Store::new("lag-under-lock");
+    let rows: Vec<Bar> = (0..2).map(|i| bar(i, 6_037)).collect();
+    let first = minute("QFIXM1", march());
+    store.month(first, &rows);
+    apply_month(
+        &store.root,
+        first,
+        SYMBOL,
+        &[rows[0].ts_micros],
+        why(Cause::ZeroPrice),
+    )
+    .expect("an earlier act");
+    // AN ACT LEDGERED AND NEVER INDEXED: its publish was refused.
+    let path = minute("QFIXN1", march());
+    store.month(path, &rows);
+    let act = Record {
+        path,
+        scope: Scope::WholeMonth,
+        cause: Cause::BeforeListing,
+        stamps: &[],
+        bars: 2,
+        revision: 0,
+        source_digest: digest_of(&rows),
+        who: "refused publish",
+        reason: "invented: its index publish was refused",
+    };
+    let line = super::ledger_line(&series_key(path), &act, 1_792_000_000_000_000);
+    super::append_line(&ledger_path(&store.root, Vendor::Zerodha), &line).expect("never indexed");
+    // THE NEXT WRITER HOLDS THE LOCK, its catch-up not yet published.
+    let held = super::writer_lock(&store.root, Vendor::Zerodha, super::WRITER_PATIENCE)
+        .expect("the next writer's lock");
+    assert_eq!(
+        probe(&store.root, path).map_err(|why| why.code()),
+        Err("quarantine_being_written"),
+        "a reader with no patience is refused by name, never the stale image's clear"
+    );
+    assert_eq!(
+        Snapshot::load(&store.root, Vendor::Zerodha)
+            .map(|snapshot| snapshot.get(path))
+            .map_err(|why| why.code()),
+        Err("quarantine_being_written")
+    );
+    let started = std::time::Instant::now();
+    let patient = crate::flock::with_patience(std::time::Duration::from_millis(60), || {
+        probe(&store.root, path)
+    });
+    let waited = started.elapsed();
+    let words = patient
+        .as_ref()
+        .map_or_else(ToString::to_string, |found| format!("{found:?}"));
+    assert_eq!(
+        patient.map_err(|why| why.code()),
+        Err("quarantine_being_written")
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(60),
+        "a patient reader waits its patience first: {waited:?}"
+    );
+    assert!(
+        words.contains(crate::flock::BEING_WRITTEN),
+        "the sentence asks again: {words}"
+    );
+    // THE WRITER'S LEVEL IMAGE LANDS within a waiting reader's patience.
+    let root = store.root.clone();
+    let reader = std::thread::spawn(move || {
+        crate::flock::with_patience(crate::flock::MAX_PATIENCE, || probe(&root, path))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    super::catch_up_locked(&store.root, Vendor::Zerodha).expect("the writer catches up");
+    held.release().expect("the lock let go");
+    let after = reader.join().expect("the reader ends");
+    assert!(
+        matches!(after, Ok(Probe::Quarantined(entry)) if entry.scope == Scope::WholeMonth && entry.bars == 2),
+        "{after:?}"
+    );
+}

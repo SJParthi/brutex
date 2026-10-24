@@ -350,6 +350,24 @@ pub enum QuarantineError {
         /// The ledger's length now.
         ledger_len: u64,
     },
+    /// `quarantine_being_written`: the image describes `built_from` bytes of
+    /// the ledger, which holds `ledger_len`, and a writer held the feed's lock
+    /// for all `waited_ms` this reader could wait (its thread's patience,
+    /// [`crate::flock::patience`]: none for the CLI and the importer). The
+    /// writer may be writing its own act or bringing the index level with
+    /// one a failed publish left unindexed; a reader cannot tell which, so an
+    /// image behind its ledger is never the answer (R4-18 repair 2). Its
+    /// sentence carries [`crate::flock::BEING_WRITTEN`]: ask again.
+    BeingWritten {
+        /// The index.
+        path: PathBuf,
+        /// The ledger bytes the image describes.
+        built_from: u64,
+        /// The ledger's length at the last look.
+        ledger_len: u64,
+        /// How long this reader waited, ms.
+        waited_ms: u64,
+    },
     /// `quarantine_ledger_damaged`: complete ledger lines that fail their
     /// checksum or do not parse, by byte offset. The act each recorded is not
     /// known, so nothing is rebuilt from the ledger, counted from it or
@@ -398,6 +416,7 @@ impl QuarantineError {
             Self::Torn { .. } | Self::HeaderDamaged { .. } => "quarantine_index_torn",
             Self::Damaged { .. } => "quarantine_slot_damaged",
             Self::Stale { .. } => "quarantine_index_stale",
+            Self::BeingWritten { .. } => "quarantine_being_written",
             Self::LedgerDamaged { .. } => "quarantine_ledger_damaged",
             Self::Full { .. } => "quarantine_index_full",
             Self::Held { .. } => "quarantine_held",
@@ -434,6 +453,17 @@ impl fmt::Display for QuarantineError {
                 f,
                 "quarantine_index_stale: {} describes {built_from} bytes of its ledger, which holds {ledger_len}, and no writer is at work: an act is ledgered and not indexed (a publish refused or killed after its ledger line), or the ledger was restored or cut; the quarantine is not known until the next writer rebuilds the index from its ledger",
                 path.display()
+            ),
+            Self::BeingWritten {
+                path,
+                built_from,
+                ledger_len,
+                waited_ms,
+            } => write!(
+                f,
+                "quarantine_being_written: {} describes {built_from} bytes of its ledger, which holds {ledger_len}, and a writer held the quarantine lock for all {waited_ms} ms this reader could wait: an act is being written, or the index is being brought level with one a failed publish left unindexed, and an image behind its ledger is never the answer; {}",
+                path.display(),
+                crate::flock::BEING_WRITTEN
             ),
             Self::LedgerDamaged { path, offsets } => write!(
                 f,
