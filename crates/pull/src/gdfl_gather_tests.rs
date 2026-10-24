@@ -1272,3 +1272,378 @@ fn a_census_that_refuses_the_repaired_rows_ends_the_run_and_the_next_converges()
     assert!(begun_not_closed(&journal(&store)).is_empty());
     std::fs::remove_dir_all(&store).unwrap();
 }
+
+// ── The flush's other ends of a run (D-4899 (7)) ───────────────────────────
+
+/// **A STORE THAT TAKES NO WRITES AT THE GATHERED REPAIR ENDS THE RUN** by
+/// that name (D-4899 (7)): the host refuses NIFTY's repair with permission
+/// denied, the run ends `store_not_writable`, no gathered day is closed and
+/// nothing is published; with writes allowed again the next run converges.
+#[test]
+fn a_store_that_takes_no_writes_at_the_gathered_repair_ends_the_run_with_its_days_begun() {
+    let days = (day(2024, 4, 1), day(2024, 4, 3));
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-not-writable", &[later]);
+    let denied = FailKind::Io {
+        kind: std::io::ErrorKind::PermissionDenied,
+        publication_may_be_visible: false,
+    };
+    filing::inject::plant_gathered(&store, "NIFTY", denied);
+
+    let ended = drive_over(&store, days, asked(), &both).unwrap_err();
+
+    assert_eq!(ended.code(), "store_not_writable", "{ended}");
+    assert_eq!(begun_not_closed(&journal(&store)).len(), 3);
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 0);
+    let resumed = drive_over(&store, days, asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **A STORE LOST WHILE ITS MONTH IS REPAIRED ENDS THE RUN `store_lost`**
+/// (D-4899 (7), D-4852): the root is gone when NIFTY's repair answers, the
+/// run ends naming it, the gathered days are begun in the journal the root
+/// took with it, and once the volume is back the next run converges.
+#[test]
+fn a_store_lost_at_the_gathered_repair_ends_the_run_and_the_next_converges() {
+    let days = (day(2024, 4, 1), day(2024, 4, 3));
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-lost", &[later]);
+    let gone = PathBuf::from(format!("{}.gone", store.display()));
+    let missing = FailKind::Io {
+        kind: std::io::ErrorKind::NotFound,
+        publication_may_be_visible: false,
+    };
+    filing::inject::plant_gathered_lost(&store, "NIFTY", missing);
+
+    let ended = drive_over(&store, days, asked(), &both).unwrap_err();
+
+    assert_eq!(ended.code(), "store_lost", "{ended}");
+    assert!(!store.exists(), "the root went away");
+    assert_eq!(begun_not_closed(&journal(&gone)).len(), 3);
+    std::fs::rename(&gone, &store).unwrap();
+    let resumed = drive_over(&store, days, asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **COMBINATION: A DAY THAT GATHERED AND WHOSE OWN PASS ENDS THE RUN.**
+/// NIFTY's April holds only the 4th, so its 1 April file is gathered;
+/// BANKNIFTY holds nothing, so its file appends, and that append meets a
+/// full disk. The day's pass ends the run `disk_full`: the day stays begun
+/// (its close is never deferred over bars in no month), nothing is
+/// repaired, and the next run converges.
+#[test]
+fn a_day_that_gathered_and_whose_pass_ends_the_run_stays_begun() {
+    let on = day(2024, 4, 1);
+    let later = day(2024, 4, 4);
+    let store = scratch("ia17b-day-ends");
+    let nifty_only = |at: Day| vec![invented("NIFTY", at, 4)];
+    let held = drive_over(&store, (later, later), RunOptions::default(), &nifty_only).unwrap();
+    assert!(held.failures.is_empty(), "{:?}", held.failures);
+    filing::inject::plant(&store, "BANKNIFTY.invented", FailKind::DiskFull, false);
+
+    let ended = drive_over(&store, (on, on), asked(), &both).unwrap_err();
+
+    assert_eq!(ended.code(), "disk_full", "{ended}");
+    assert_eq!(
+        begun_not_closed(&journal(&store)),
+        vec!["indices 2024-04-01 *".to_owned()]
+    );
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 0);
+    let resumed = drive_over(&store, (on, on), asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **A REPAIR JOURNAL THAT WILL NOT TAKE THE `repairing` LINE** refuses the
+/// gathered repair before anything is published: each gathered file names
+/// it, each day closes `incomplete` (read again by the next run, never
+/// `done`), no generation is made; once the journal takes lines again the
+/// next run repairs the month once.
+#[test]
+fn a_repair_journal_that_takes_no_line_refuses_the_gathered_repair_by_name() {
+    let days = (day(2024, 4, 1), day(2024, 4, 3));
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-journal", &[later]);
+    let repairs = store.join("audit").join("gdfl.repairs");
+    std::fs::create_dir_all(&repairs).unwrap();
+
+    let refused = drive_over(&store, days, asked(), &both).unwrap();
+
+    assert!(
+        refused
+            .failures
+            .iter()
+            .any(|one| one.why.contains("would not take the `repairing` line")),
+        "{:?}",
+        refused.failures
+    );
+    let text = journal(&store);
+    assert!(begun_not_closed(&text).is_empty(), "{text}");
+    assert!(
+        text.contains("\nincomplete indices 2024-04-01 * "),
+        "{text}"
+    );
+    assert!(!text.contains("\ndone indices 2024-04-01 * "), "{text}");
+    for symbol in ["NIFTY", "BANKNIFTY"] {
+        assert_eq!(generation(&store, month_of("INDEX", symbol, later)), 0);
+    }
+    std::fs::remove_dir(&repairs).unwrap();
+    let resumed = drive_over(&store, days, asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(resumed.months_repaired, 2);
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **A PRINT CARRIED FOR A GENERATION ITS BARS NEVER NEEDED IS NAMED, NEVER
+/// DROPPED** (D-TBD-IA-17b-1 (3), out of the box): the month's sidecar
+/// holds the 25th while its bars hold nothing (the 25th's bars never
+/// landed). The 22nd's bars append to the month as served; its print, which
+/// the sidecar can take only with a new generation, cannot go with one, so
+/// the file names it as a failure; the sidecar is left as it was.
+#[test]
+fn a_print_carried_for_a_generation_its_bars_never_needed_is_named_never_dropped() {
+    let root = scratch("ia17b-orphan");
+    let [d22, _, _, d25] = cas_days();
+    let source = cas_world(&root, &cas_days());
+    let (later, orphan) = (root.join("later"), root.join("orphan"));
+    assert!(
+        stocks(&source, (d25, d25), &later, false)
+            .failures
+            .is_empty()
+    );
+    let month = month_of("CASH", SHARE, d22);
+    let sidecar = month.to_path_buf(&orphan).with_extension("auc");
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::copy(month.to_path_buf(&later).with_extension("auc"), &sidecar).unwrap();
+    let held = std::fs::read(&sidecar).unwrap();
+
+    let got = stocks(&source, (d22, d22), &orphan, false);
+
+    assert!(
+        got.failures
+            .iter()
+            .any(|one| one.why.contains("closing-auction print(s) of")
+                && one.why.contains("no new generation carries them")),
+        "{:?}",
+        got.failures
+    );
+    assert_eq!(
+        std::fs::read(&sidecar).unwrap(),
+        held,
+        "the sidecar as it was"
+    );
+    assert_eq!(generation(&orphan, month), 0, "the bars appended");
+    assert!(
+        !served(&orphan, month, SHARE).is_empty(),
+        "the 22nd's bars landed"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// **COMBINATION: TWO FILES OF ONE INSTRUMENT ON ONE DAY, READING ITS
+/// SECONDS DIFFERENTLY, BOTH GATHERED.** The first is gathered; the second
+/// would offer the same seconds at other prices, and is refused by name at
+/// the gather (one second is never offered twice), never merged and never
+/// a silent winner. The month is repaired once with the first file's bars.
+#[test]
+fn a_second_file_reading_a_gathered_second_differently_is_refused_and_the_first_kept() {
+    let on = day(2024, 4, 1);
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-twice", &[later]);
+    let first = invented("NIFTY", on, 4);
+    let files = |at: Day| {
+        let one = invented("NIFTY", at, 4);
+        let mut again = one.clone();
+        again.name = "NIFTY.again".to_owned();
+        for tick in &mut again.ticks {
+            tick.ltp += 3;
+        }
+        vec![one, again]
+    };
+
+    let got = drive_over(&store, (on, on), asked(), &files).unwrap();
+
+    assert!(
+        got.failures
+            .iter()
+            .any(|one| one.why.contains("one second is never offered twice")),
+        "{:?}",
+        got.failures
+    );
+    let nifty = month_of("INDEX", "NIFTY", later);
+    assert_eq!(
+        generation(&store, nifty),
+        1,
+        "one repair, of the first file"
+    );
+    let closes: Vec<i64> = served(&store, nifty, "NIFTY")
+        .iter()
+        .filter(|bar| bar.ts_micros < i64::from(later.days_from_epoch()) * 86_400 * 1_000_000)
+        .map(|bar| bar.close)
+        .collect();
+    let read: Vec<i64> = first.ticks.iter().map(|tick| tick.ltp).collect();
+    assert_eq!(closes, read, "the first file's prices, the second's never");
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **THE JUDGE DOOR, AND THE GATHERED REPAIR, AT THE DOOR ITSELF.** A batch
+/// its month can take is appended by the judging door as the append door
+/// would (`Filed::Appended`, nothing gathered); no bars are no write; and a
+/// gathered repair whose month's served generation cannot be told (a
+/// directory where its pointer belongs) is refused by name before anything
+/// is journaled or published.
+#[test]
+fn the_judge_door_appends_what_its_month_takes_and_a_repair_that_cannot_tell_its_generation_is_refused()
+ {
+    let store = scratch("ia17b-door");
+    let on = day(2024, 4, 1);
+    let request = april_request();
+    let start = 1_711_943_100;
+
+    let (done, filed) = crate::ingest::gather_rows(
+        &bars_from(start, 4),
+        "NIFTY",
+        "ia17b judge door",
+        &store,
+        plan(ImportKind::Indices, &request, None),
+    );
+    assert_eq!(filed, crate::ingest::Filed::Appended, "{:?}", done.failures);
+    assert_eq!(done.bars_committed, 4);
+    let (none, nothing) = crate::ingest::gather_rows(
+        &[],
+        "NIFTY",
+        "ia17b judge door",
+        &store,
+        plan(ImportKind::Indices, &request, None),
+    );
+    assert_eq!(nothing, crate::ingest::Filed::Appended);
+    assert_eq!(none.bars_committed, 0);
+
+    let nifty = month_of("INDEX", "NIFTY", on);
+    std::fs::create_dir_all(store::generation::pointer_path(&store, nifty)).unwrap();
+    let (refused, _, added) = crate::ingest::repair_gathered(
+        &bars_from(start + 86_400, 2),
+        ("NIFTY", "ia17b judge door"),
+        &store,
+        plan(ImportKind::Indices, &request, None),
+        (FailKind::NotHeld, REASON),
+        None,
+    );
+    assert!(
+        refused
+            .failures
+            .iter()
+            .any(|one| one.why.contains("the generation served could not be read")),
+        "{:?}",
+        refused.failures
+    );
+    assert!(added.is_empty());
+    assert!(
+        repair_lines(&store, "repairing").is_empty(),
+        "nothing journaled"
+    );
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **COMBINATION: A STOP MID-DAY, AFTER A FILE WAS GATHERED** (D-4899 (5),
+/// D-4853). The stop is asked at the day's second file: NIFTY's file was
+/// gathered, BANKNIFTY's is never taken. The stop offers what was gathered
+/// (NIFTY's month repaired) and the day closes `incomplete` by what was
+/// written, `reason=stopped`, never `done` and never left begun; the resume
+/// reads it again and repairs BANKNIFTY's month alone.
+#[test]
+fn a_stop_mid_day_after_a_gathered_file_closes_the_day_by_what_was_written() {
+    let on = day(2024, 4, 1);
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-stop-mid", &[later]);
+    // Checks: 1 the run's start, 2 the day's top, 3 its first file, 4 its
+    // second: the stop is asked there.
+    let stop = StopControl::tripping_at(store.join("imports/gdfl.stop"), 1_790_000_401, 4);
+    let options = RunOptions {
+        run: Some(1_790_000_401),
+        stop: Some(&stop),
+        ..asked()
+    };
+
+    let ended = drive_over(&store, (on, on), options, &both).unwrap_err();
+
+    assert_eq!(ended.code(), "stopped", "{ended}");
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    assert_eq!(generation(&store, month_of("INDEX", "BANKNIFTY", later)), 0);
+    let text = journal(&store);
+    assert!(begun_not_closed(&text).is_empty(), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("incomplete indices 2024-04-01 * ")
+                && line.contains("reason=stopped")),
+        "{text}"
+    );
+    let resumed = drive_over(&store, (on, on), asked(), &both).unwrap();
+    assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
+    assert_eq!(resumed.months_repaired, 1, "BANKNIFTY's month alone");
+    assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
+    assert_eq!(generation(&store, month_of("INDEX", "BANKNIFTY", later)), 1);
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// **COMBINATION: A LATER DAY CLOSED BEFORE THE EARLIER DAY WAITING FOR ITS
+/// MONTH, BOTH INCOMPLETE.** NIFTY holds the 4th. The 1st and the 3rd read
+/// NIFTY alone and are gathered; the 2nd reads BANKNIFTY alone, whose
+/// append is refused, so it closes at once. The gathered repair is refused
+/// at the run's end (the repair journal takes no line), so the 1st and the
+/// 3rd close after the 2nd. The report's lists of days stay in day order,
+/// each day named once.
+#[test]
+fn a_deferred_close_after_a_later_days_close_keeps_the_report_in_day_order() {
+    let (d1, d2, d3, d4) = (
+        day(2024, 4, 1),
+        day(2024, 4, 2),
+        day(2024, 4, 3),
+        day(2024, 4, 4),
+    );
+    let store = scratch("ia17b-order");
+    let nifty = |on: Day| vec![invented("NIFTY", on, 4)];
+    let held = drive_over(&store, (d4, d4), RunOptions::default(), &nifty).unwrap();
+    assert!(held.failures.is_empty(), "{:?}", held.failures);
+    std::fs::create_dir_all(store.join("audit").join("gdfl.repairs")).unwrap();
+    filing::inject::plant(&store, "BANKNIFTY.invented", FailKind::NotHeld, false);
+    let files = |on: Day| {
+        if on == d2 {
+            vec![invented("BANKNIFTY", on, 4)]
+        } else {
+            vec![invented("NIFTY", on, 4)]
+        }
+    };
+
+    let got = drive_over(&store, (d1, d3), asked(), &files).unwrap();
+
+    let mut named: Vec<Day> = got
+        .closed_incomplete
+        .iter()
+        .chain(&got.closed_with_refusals)
+        .chain(&got.closed_refused)
+        .copied()
+        .collect();
+    named.sort_unstable();
+    assert_eq!(named, vec![d1, d2, d3], "{got:?}");
+    for list in [
+        &got.closed_incomplete,
+        &got.closed_with_refusals,
+        &got.closed_refused,
+    ] {
+        assert!(list.windows(2).all(|pair| pair[0] < pair[1]), "{list:?}");
+    }
+    assert!(begun_not_closed(&journal(&store)).is_empty());
+    std::fs::remove_dir_all(&store).unwrap();
+}

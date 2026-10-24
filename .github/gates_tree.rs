@@ -2889,17 +2889,19 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 // `gather_unclosed`, `files_gathered`, `new_generation`, `prints_carried`,
 // `auction_revision_written`, `leftover_cleared_bytes`. (2) Test labels: the
 // scratch folders its tests make under the system temp directory
-// (`ia17b-...`), a store folder `upto`, the month `2024-05` a test names in a
-// journal line, and `different`, a word a test reads in a refusal. (3)
-// `clear_refs`, the Linux file `/proc/self/clear_refs` bench C-RP-02 writes
-// to restart its peak resident set. None names an account, an environment,
-// a vendor credential or a field of a parameter path.
+// (`ia17b-...`), the store folders `upto` and `orphan`, the month `2024-05` a
+// test names in a journal line, and `different`, a word a test reads in a
+// refusal. (3) `clear_refs`, the Linux file `/proc/self/clear_refs` bench
+// C-RP-02 writes to restart its peak resident set. None names an account, an
+// environment, a vendor credential or a field of a parameter path.
 const IA17B_LITERAL: &str = "gather_deferred gather_repaired gather_unclosed files_gathered \
      new_generation prints_carried auction_revision_written leftover_cleared_bytes \
-     ia17b-auc-differs ia17b-auc-in-order ia17b-auc-merge ia17b-auc-older ia17b-auc-repeat \
-     ia17b-auc-revision ia17b-cas ia17b-census ia17b-crash ia17b-fm092 ia17b-fm098 ia17b-full \
-     ia17b-full-boundary ia17b-middle ia17b-mixed ia17b-once ia17b-reused ia17b-sizes \
-     ia17b-stop ia17b-stop-boundary ia17b-year upto 2024-05 different clear_refs";
+     ia17b-auc-differs ia17b-auc-in-order ia17b-auc-merge ia17b-auc-older ia17b-auc-pointer \
+     ia17b-auc-repeat ia17b-auc-revision ia17b-cas ia17b-census ia17b-crash ia17b-day-ends \
+     ia17b-door ia17b-fm092 ia17b-fm098 ia17b-full ia17b-full-boundary ia17b-journal \
+     ia17b-lost ia17b-middle ia17b-mixed ia17b-not-writable ia17b-once ia17b-order \
+     ia17b-orphan ia17b-reused ia17b-sizes ia17b-stop ia17b-stop-boundary ia17b-stop-mid \
+     ia17b-twice ia17b-year upto orphan 2024-05 different clear_refs";
 
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each

@@ -84164,7 +84164,9 @@ BUILT: the CASH writer passed as `repair_month_with`'s step, and
    repair is served. Its signature is unchanged (`api` and `cli` call it).
 2. **An append never writes inside a served revision.** `auction::append`
    refuses a month served from a revision by name (CLAUDE.md §3 rule 8,
-   D-3350) and writes only the original's sidecar.
+   D-3350) and writes only the original's sidecar. A month whose served
+   generation cannot be told (its pointer not a regular file) is refused by
+   name too, never taken to be the original (CLAUDE.md §4).
 3. **Prints the month takes only with a new generation are carried.**
    `auction::file_or_carry`, the import's door: a day older than one the
    sidecar holds, or a day a revision-served month's sidecar lacks, is
@@ -84190,4 +84192,4 @@ all on 13 Oct 2026 (SC-CLOSE-4), so no served month loses a sidecar.
 
 **Proof.** `pull::gdfl_import::tests::gather::a_cash_months_gathered_repair_writes_its_auction_file_before_it_is_served`,
 `pull::gdfl_cm::auction::revision_tests` (`docs/04-invariants.md` IA-RP-02b,
-IA-AUC-02, IA-AUC-03).
+IA-AUC-02 to IA-AUC-05).

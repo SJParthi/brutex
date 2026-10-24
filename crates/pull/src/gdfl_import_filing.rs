@@ -1967,24 +1967,24 @@ fn repair_offer(
         .iter()
         .map(|one| (one.day, one.prints.as_slice()))
         .collect();
-    let mut write_auction = |revision_root: &Path| -> Result<(), String> {
-        match (share.as_ref(), month_of) {
-            (Some(share), Some(month_of)) => crate::gdfl_cm::auction::write_revision(
+    // THE STEP EXISTS ONLY FOR A SHARE WHOSE MONTH IS NAMED: there is no
+    // step that writes nothing.
+    let mut write_auction = share.as_ref().zip(month_of).map(|(share, month_of)| {
+        let carried = &carried;
+        move |revision_root: &Path| -> Result<(), String> {
+            crate::gdfl_cm::auction::write_revision(
                 run.store_root,
                 revision_root,
                 share,
                 month_of,
-                &carried,
+                carried,
             )
-            .map(|_| ()),
-            _ => Ok(()),
+            .map(|_| ())
         }
-    };
-    let step: Option<store::repair::BeforePromote<'_>> = if share.is_some() {
-        Some(&mut write_auction)
-    } else {
-        None
-    };
+    });
+    let step: Option<store::repair::BeforePromote<'_>> = write_auction
+        .as_mut()
+        .map(|write| write as store::repair::BeforePromote<'_>);
     #[cfg(test)]
     if let Some(done) = inject::gathered(run.store_root, &symbol) {
         return (done, Landed::Appended, Vec::new());
@@ -2239,8 +2239,9 @@ pub(super) mod inject {
     }
 
     /// The answers planted for a GATHERED REPAIR (IA-17b): the store root,
-    /// the instrument and the kind its repair answers with.
-    static GATHERED: Mutex<Vec<(PathBuf, String, FailKind)>> = Mutex::new(Vec::new());
+    /// the instrument, the kind its repair answers with, and whether the
+    /// root is renamed to `<root>.gone` before it answers.
+    static GATHERED: Mutex<Vec<(PathBuf, String, FailKind, bool)>> = Mutex::new(Vec::new());
 
     /// Plants `kind` as the answer of `symbol`'s next gathered repair under
     /// `root`: a full disk at publication, which a test cannot make on
@@ -2249,7 +2250,17 @@ pub(super) mod inject {
         GATHERED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((root.to_path_buf(), symbol.to_owned(), kind));
+            .push((root.to_path_buf(), symbol.to_owned(), kind, false));
+    }
+
+    /// Plants `kind` as the answer of `symbol`'s next gathered repair under
+    /// `root`, the root renamed to `<root>.gone` first: the store's volume
+    /// unplugged while the month was being repaired.
+    pub(in crate::gdfl_import) fn plant_gathered_lost(root: &Path, symbol: &str, kind: FailKind) {
+        GATHERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), symbol.to_owned(), kind, true));
     }
 
     /// The answer planted for `symbol`'s gathered repair under `root`,
@@ -2260,8 +2271,16 @@ pub(super) mod inject {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let at = planted
             .iter()
-            .position(|(r, name, _)| r == root && name == symbol)?;
-        let (_, _, kind) = planted.remove(at);
+            .position(|(r, name, _, _)| r == root && name == symbol)?;
+        let (_, _, kind, lose_root) = planted.remove(at);
+        drop(planted);
+        if lose_root {
+            let mut gone = root.as_os_str().to_owned();
+            gone.push(".gone");
+            // A rename that fails leaves the root in place: the test that
+            // planted the loss then reads no `store_lost` and fails.
+            let _moved = std::fs::rename(root, &gone);
+        }
         Some(Ingested {
             failures: vec![Failure::new(
                 symbol,
@@ -2300,3 +2319,9 @@ pub(super) mod inject {
         })
     }
 }
+
+/// The gather's own helpers at the unit: the arms a run in day order never
+/// reaches (IA-17b, D-4899).
+#[cfg(test)]
+#[path = "gdfl_gather_unit_tests.rs"]
+mod gather_unit_tests;

@@ -351,6 +351,13 @@ fn the_step_is_repeatable_and_writes_nothing_for_nothing() {
         None
     );
     assert!(!target.exists());
+    let no_prints: [(Day, &[Print]); 1] = [(day(23), &[])];
+    assert_eq!(
+        write_revision(&store, &revision, &key(), day(1), &no_prints).unwrap(),
+        None,
+        "a carried day with no print carries nothing"
+    );
+    assert!(!target.exists());
 
     let carried = [(day(22), &[print(711_965, 11)][..])];
     seam::FAIL_AFTER.with(|after| after.set(Some(20)));
@@ -379,5 +386,29 @@ fn the_step_is_repeatable_and_writes_nothing_for_nothing() {
         modified,
         "the same bytes are not written again"
     );
+    std::fs::remove_dir_all(store).unwrap();
+}
+
+/// **A MONTH WHOSE SERVED GENERATION CANNOT BE TOLD TAKES NO PRINT**
+/// (D-TBD-IA-17b-1 (2)): a generation pointer that is not a regular file
+/// (here a directory at its name) refuses the append by name, never
+/// guessing that the original is served. (A pointer shorter than one record
+/// is a torn tail the store reads past, `store::generation::served`.)
+#[test]
+fn a_month_whose_served_generation_cannot_be_told_takes_no_print() {
+    let store = original_holding("ia17b-auc-pointer", day(24));
+    let pointer = store::generation::pointer_path(&store, month());
+    std::fs::create_dir_all(&pointer).unwrap();
+    let before = tree(&store);
+
+    let refused = append(&store, &key(), day(22), &[print(711_965, 11)]).unwrap_err();
+
+    assert!(
+        refused
+            .to_string()
+            .contains("served generation cannot be told"),
+        "{refused}"
+    );
+    assert_eq!(tree(&store), before, "nothing written");
     std::fs::remove_dir_all(store).unwrap();
 }
