@@ -53,7 +53,6 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 
 ## Left
 
--
 - `docs/06-limits.md` L-CC5 rows with the measured figures; the final merge of `origin/feat/db-fix`;
   every gate (fmt, clippy, the workspace tests, deny, coverage, mutants, the CI shell gates).
 
@@ -153,7 +152,10 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - Bench `cargo bench -p api --bench ratio --locked --no-run -j 1`: `Finished bench profile ... in
   19m 58s` (with 4 jobs the release link of `cli` was killed for memory, SIGKILL).
 - Commit `da57ae23`, pushed.
-- NEXT: read the served bench's copies rows (`cargo bench -p api --bench ratio --locked --
+- The served bench run started before the hold (`cargo bench -p api --bench ratio --locked --
+  --served-only`) recompiled after the last edit and was killed (SIGKILL: two release links of
+  `cli` at once ran out of memory): exit 101, NO figure taken.
+- NEXT: build the bench with `-j 1`, then read the served bench's copies rows (`cargo bench -p api --bench ratio --locked -j 1 --
   --served-only`, started before the hold) and write `docs/06-limits.md` L-CC5 rows; re-run the
   shell gates; merge the newest `origin/feat/db-fix`; then fmt, clippy, the workspace tests, deny,
   coverage (nightly installed for `--branch`) and mutants on the touched modules.
