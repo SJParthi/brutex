@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: BLOCKED
 
 # CC-20 (cloud): benches for every check primitive, with limits rows
 
@@ -168,3 +168,93 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
 - `cargo deny check` (cargo-deny 0.19.0, CI's pin): `advisories ok, bans ok, licenses ok, sources
   ok`, exit 0 (two duplicate-crate warnings only).
 - NEXT: the workspace test run (in progress), then the base comparison of its failures.
+
+### 2026-10-25 14:35 IST: save point 11 (final merge, final gates; code complete)
+
+- GO without HOLD (`1dcc33e9`); resumed from save point 10's NEXT.
+- Merged `origin/feat/db-fix` at `bf9b1c8f` (R4-18 and the parts before it): commit 341af46b;
+  conflicts only in docs/04 and docs/06, resolved as both, base rows first. Diff against the base:
+  additions only (15 files).
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: `Finished`, exit 0.
+- `cargo deny check` (cargo-deny 0.19.0, installed here with `cargo install --locked`):
+  `advisories ok, bans ok, licenses ok, sources ok`, exit 0.
+- `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
+  (as root, the container's only login): 11,219 passed, 30 failed, all 30 in the `--lib` unit tests
+  of api (9), cli (3), pull (9), store (5) and telemetry (4). CC-20 changes no file under any
+  crate's `src/`, so those lib test targets are compiled from exactly the base's source: they are
+  base or environment reds, not CC-20's. `core`'s `bench_modules` (4 passed) and
+  `cost_invariants` passed. The 30 rerun by their built binaries as the unprivileged `ubuntu` user
+  (`runuser -u ubuntu -- <lib test binary> --exact <names>`): 23 pass (they need a non-root user:
+  mode-000 and read-only folders), 7 still fail:
+  `pull gdfl_cm::tests::fixtures_are_built_not_pasted` ("pasted GDFL CM rows in
+  crates/cli/src/tick_second_check_tests.rs", a base file from DATA-1w),
+  `api detail::tests::a_refused_admission_names_what_its_bound_and_why` (folder read Saturated,
+  timing) and five `api server::head_deadline_body_tests::*` (slow-reader socket timing in this
+  VM). The two skipped api tests hang in this container (save point 8).
+- `cargo bench -p pull --bench ratio --locked` after the merge, then its built binary twice
+  (`--bench`): **C-CHK-04 BREACHED in two runs of three** (single-file census cold load, per entry,
+  10x to 100x: 3.318x, 3.243x, 2.890x; ceiling 3x); every other C-CHK row passed in all three.
+  Two more runs under glibc's `MALLOC_MMAP_THRESHOLD_`/`MALLOC_TRIM_THRESHOLD_`/`MALLOC_TOP_PAD_`
+  (no large block handed back between loads): 2.017x and 1.946x. About 40% of the rise is fresh
+  page faults at 100,000 entries; the rest is not attributed. Recorded as a new paragraph at the end
+  of CC-20's docs/06 section. The ceiling (D-6800) and the census load (not CC-20's file) are
+  unchanged: this is an operator decision (below).
+- Not run here: `cargo llvm-cov` and `cargo mutants` (not installed in this container; the diff has
+  no library or binary source, so `cargo mutants --in-diff` lists none: save point 8).
+
+## Final summary (25 Oct)
+
+**Done:** the seven bench modules (C-CHK-01 to C-CHK-10), each registered in its crate's
+`benches/ratio.rs` and folded into the verdict; `crates/core/tests/bench_modules.rs` (failing
+first, then green); `crates/pull/tests/check_primitive_real.rs` (the Mac's real-size run,
+`#[ignore]`); docs/04 rows C-CHK-01..10, docs/05 D-6800..D-6804, docs/06 L-CHK-01..07 with three
+runs each and today's C-CHK-04 finding. Private `NfoZips::year` and `admit` are benched through
+their public callers on fixtures (no seam: PREC-6, R4-09 and R3-26 have not merged), per the spec.
+
+**Left (none of it CC-20 code):**
+1. OPERATOR DECISION: C-CHK-04 breaches its 3x per-tenfold-step ceiling in 2 of 3 runs on this
+   cloud host (3.318x / 3.243x / 2.890x; 24 Oct: 2.11x-2.25x). Choices: let IA-13's Mac runs
+   decide on the real host; or the census load's owner pre-sizes and reuses its memory (about 40% of
+   the rise measured as page faults). Widening the ceiling is not offered.
+2. Base reds in the workspace test run (7 failing as a non-root user, listed above; 2 hangs).
+3. Base reds in the api bench harness: `reads.rs` (102,400-bar month past the 60,000-row cap),
+   `C-LG-03`, a `C-15 ... marginal` row (save point 7).
+4. Coverage and mutants runs: the Mac (no tool here).
+
+**Measurements:** p50/p99/max with n for every row are in docs/06 L-CHK-01..07; today's post-merge
+pull run, n=200 per row: C-CHK-04 one load at 100,000 entries p50 85.2 ms, p99 117.2 ms, max
+117.9 ms; C-CHK-05 p50 90.6 ms, p99 118.9 ms, max 127.2 ms; C-CHK-06 (1,000 epochs) p50 89.2 ms,
+p99 136.7 ms, max 144.0 ms; C-CHK-08 a 22-session month p50 0.260 ms, p99 0.419 ms, max 1.95 ms;
+C-CHK-09 p50 32 ns, p99 34 ns, max 12.3 us (n=20,000); C-CHK-10 p50 401 ns, p99 1.73 us, max
+44.1 us (n=1,000). Method: the gate-8 harness, sequential single calls, release/LTO, cloud VM.
+
+**Extreme cases** (`bench_modules.rs`, each failing before the modules existed): a module
+unmounted; a dangling mount; mounted but never called; mounted twice; a longer module name whose
+tail matches; a doc comment between `#[path]` and `mod`; an empty `ratio/` folder; a note and a
+nested folder beside the modules. Combinations: three faults in one harness at once; a fault in one
+crate of two. Out of the box: a CRLF harness. In the benches: an absent census, an absent
+partition, one entry, a torn `.man.tmp` epoch, a symbolic link at an epoch's name, a 1e5x median
+strike, a reversed flagged month.
+
+**Files outside ownership:** `crates/core/tests/bench_modules.rs` (the spec's failing-first test,
+new), `crates/pull/tests/check_primitive_real.rs` (new, `#[ignore]`), and one mount line block in
+each of `crates/pull/benches/ratio.rs` and `crates/api/benches/ratio.rs`.
+
+**D-numbers used:** D-6800, D-6801, D-6802, D-6803, D-6804 (block D-6800..D-6819).
+
+## NEEDS THE MAC
+
+1. `cargo bench -p pull --bench ratio --locked`, three times: expected `all ratios within the
+   ceiling` with every C-CHK-01..06 and 08..10 row `ok`; C-CHK-04's 10x-to-100x step is the one to
+   watch (cloud: 2.89x-3.32x).
+2. `cargo bench -p api --bench ratio --locked`, three times: expected C-CHK-07's six rows `ok`
+   (cloud: 0.98x-1.01x); the harness then exits 1 in `reads.rs` (base red) until that is fixed.
+3. `BRUTEX_GDFL_NFO_ARCHIVES=<the options archive folder> BRUTEX_CC20_CENSUS_ROOT=<the store root>
+   cargo test -p pull --test check_primitive_real --locked -- --ignored --nocapture`: expected both
+   tests pass, printing the real year-index build time and the real census cold load time.
+4. `cargo test --workspace --locked` as the operator (not root): expected the same failure set as
+   unmodified `feat/db-fix` (CC-20 adds no lib source).
+5. `cargo llvm-cov --branch -p core --test bench_modules` and `cargo mutants --in-diff <CC-20's
+   diff>`: expected 100% on `bench_modules.rs` and `No mutants to filter`.
+6. No shadow server, `:8080` or store write applies: CC-20 serves and writes nothing.

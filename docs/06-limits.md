@@ -21830,3 +21830,26 @@ different row each run). That is why C-CHK-07 is called before the served
 routes: so it is measured and gated at all. Fixing `reads.rs` or the two rows is
 not CC-20's (its owned files exclude every existing bench module); it is named
 in CC-20's report for the Mac.
+
+**C-CHK-04 sits on its ceiling on this host, and part of why is measured** (25 Oct
+2026, same cloud host class, after merging `origin/feat/db-fix` at `bf9b1c8f`;
+the census load's code is unchanged since the 24 Oct runs). Three runs of the pull
+harness (one `cargo bench -p pull --bench ratio --locked`, two of its built binary
+with `--bench`): the single-file load's 10x-to-100x step per entry was 3.318x,
+3.243x and 2.890x, so gate 8 refused C-CHK-04 in two runs of three; the partition
+rows (C-CHK-05, C-CHK-06) passed at 2.62x to 2.76x. On 24 Oct the same step was
+2.11x to 2.25x. Two more runs of the same binary under glibc's own tunables
+`MALLOC_MMAP_THRESHOLD_=4294967296 MALLOC_TRIM_THRESHOLD_=4294967296
+MALLOC_TOP_PAD_=268435456` (no large block handed back to the kernel between loads)
+gave 2.017x and 1.946x (single file) and 1.766x and 1.824x (partition): **about 40%
+of the 100,000-entry load's cost per entry was the kernel faulting in fresh pages
+for blocks the previous load handed back**, a cost the 1,000-entry baseline, served
+from the reused heap, does not pay. The rest of the rise (about 2x per entry) is
+NOT attributed by measurement (cache residency of the larger index is the
+untested candidate). A real run loads once in a fresh process, so it pays those
+faults at every size; the bench's 1x baseline understates them. Neither the
+ceiling nor the census load is changed here: the ceiling is D-6800's and widening
+it to match a breach is the shape `CLAUDE.md` refuses, and the census load
+(`pull::ingest::census_store`, `pull::manifest`) is not CC-20's to edit. The
+operator's choice, named in CC-20's report: the Mac's runs (IA-13) decide on the
+real host, or the census load's owner pre-sizes and reuses its memory.
