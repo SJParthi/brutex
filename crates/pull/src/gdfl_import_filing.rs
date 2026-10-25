@@ -1804,16 +1804,21 @@ fn merge_into(bars: &mut Vec<Bar>, more: Vec<Bar>) -> Result<(), i64> {
     let mut merged = Vec::with_capacity(bars.len() + more.len());
     let (mut held, mut new) = (bars.iter().copied().peekable(), more.into_iter().peekable());
     loop {
+        // One three-way compare a step: two guards (`==`, then `<`) left a
+        // `<=` that could never differ from the `<` (D-0192).
         let next = match (held.peek(), new.peek()) {
-            (Some(a), Some(b)) if a.ts_micros == b.ts_micros => {
-                if a != b {
-                    return Err(a.ts_micros);
+            (Some(a), Some(b)) => match a.ts_micros.cmp(&b.ts_micros) {
+                std::cmp::Ordering::Less => held.next(),
+                std::cmp::Ordering::Greater => new.next(),
+                std::cmp::Ordering::Equal => {
+                    if a != b {
+                        return Err(a.ts_micros);
+                    }
+                    let _same = new.next();
+                    held.next()
                 }
-                let _same = new.next();
-                held.next()
-            }
-            (Some(a), Some(b)) if a.ts_micros < b.ts_micros => held.next(),
-            (Some(_) | None, Some(_)) => new.next(),
+            },
+            (None, Some(_)) => new.next(),
             (Some(_), None) => held.next(),
             (None, None) => break,
         };
