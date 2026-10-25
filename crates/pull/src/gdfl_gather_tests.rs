@@ -1647,3 +1647,31 @@ fn a_deferred_close_after_a_later_days_close_keeps_the_report_in_day_order() {
     assert!(begun_not_closed(&journal(&store)).is_empty());
     std::fs::remove_dir_all(&store).unwrap();
 }
+
+/// **A DAY IS NAMED ONCE, AT ITS PLACE** (IA-RP-28, D-4878, D-4899 (4)):
+/// a day closed again the same way, at the end or behind a later day's,
+/// is not named twice; a deferred close goes in before the later days, the
+/// first of a list included.
+#[test]
+fn a_day_closed_again_is_named_once_and_a_deferred_one_at_its_place() {
+    let (d1, d2, d3, d4) = (
+        day(2024, 4, 1),
+        day(2024, 4, 2),
+        day(2024, 4, 3),
+        day(2024, 4, 4),
+    );
+    let name = crate::gdfl_import::day::name_in_order;
+    let mut days = Vec::new();
+    name(&mut days, d2);
+    assert_eq!(days, [d2], "an empty list takes the day");
+    name(&mut days, d2);
+    assert_eq!(days, [d2], "a day closed again at the end is named once");
+    name(&mut days, d4);
+    name(&mut days, d3);
+    assert_eq!(days, [d2, d3, d4], "a deferred close behind a later day's");
+    name(&mut days, d3);
+    assert_eq!(days, [d2, d3, d4], "named once behind a later day too");
+    name(&mut days, d1);
+    name(&mut days, d1);
+    assert_eq!(days, [d1, d2, d3, d4], "before every day held, once");
+}

@@ -2757,6 +2757,23 @@ fn take_read(
     failures.extend(extras.failures);
 }
 
+/// `day` into one of the report's ascending lists of days, NAMED ONCE however
+/// many of its member keys closed that way (D-4878): the days of a run
+/// ascend, so the day is the list's last. A close a gathered repair deferred
+/// (IA-17b, D-4899) can follow a later day's: it goes in at its place, so
+/// every list stays in day order.
+pub(super) fn name_in_order(days: &mut Vec<Day>, day: Day) {
+    // Back from the end past the later days: at most the days of one month
+    // a deferred close waited behind, none on a close in order.
+    let mut at = days.len();
+    while at > 0 && days.get(at - 1).is_some_and(|later| *later > day) {
+        at -= 1;
+    }
+    if at == 0 || days.get(at - 1) != Some(&day) {
+        days.insert(at, day);
+    }
+}
+
 /// Files a closed day in the report, by how it closed, with its failures, and
 /// logs its one summary event ([`note_day`]).
 fn record_close(
@@ -2766,21 +2783,7 @@ fn record_close(
     failures: Vec<Staged>,
     census_ms: Option<u64>,
 ) {
-    // A DAY IS NAMED ONCE however many of its member keys closed that way
-    // (D-4878): the days of a run ascend, so the day is the list's last. A
-    // close a gathered repair deferred (IA-17b, D-4899) can follow a later
-    // day's: it goes in at its place, so every list stays in day order.
-    let named = |days: &mut Vec<Day>| {
-        // Back from the end past the later days: at most the days of one
-        // month a deferred close waited behind, none on a close in order.
-        let mut at = days.len();
-        while at > 0 && days.get(at - 1).is_some_and(|later| *later > day) {
-            at -= 1;
-        }
-        if at == 0 || days.get(at - 1) != Some(&day) {
-            days.insert(at, day);
-        }
-    };
+    let named = |days: &mut Vec<Day>| name_in_order(days, day);
     match outcome {
         Outcome::Done => {}
         Outcome::DoneWithRefusals => named(&mut report.closed_with_refusals),
