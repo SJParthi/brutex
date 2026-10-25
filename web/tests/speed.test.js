@@ -1014,6 +1014,45 @@ test('a page is judged against the four targets, each miss by name and figure', 
   assert.deepEqual(harness.judge('/x', 'cold', [load({ status: 299, longest: 50, fcp: 299.9 })]).failures, [], 'a pause of exactly 50 ms is no pause over 50 ms; 299 is 2xx');
 });
 
+test('a real browser\'s row is checked for what does not depend on the machine: measured, its verdict its failures\', and failed only on a timed judgement', () => {
+  // Repair 7 (verify r7, 25 Oct): the tests that run a real Chrome pinned a
+  // row to `| holds |`, so one slow paint failed a correct build. Their
+  // check, `measuredRow`, is held here to the harness's own rows (`judge`):
+  // it must let every timed judgement through and nothing else.
+  const load = (/** @type {object} */ o) => ({ fcp: 100, longest: 10, heap: 10e6, wire: 300e3, settled: true, status: 200, drew: true, ...o });
+  /** @param {string} page @param {object[]} loads @param {string[]} [more] */
+  const run = (page, loads, more = []) => {
+    const j = harness.judge(page, 'cold', /** @type {any} */ (loads));
+    return { lines: ['| page | ...', j.row], failures: [...j.failures, ...more] };
+  };
+  assert.deepEqual(measuredRow(run('/a', [load({})]), '/a', 'cold', 1), [], 'a row that holds');
+  // Every timed judgement, alone and together, the targets cell FAILS.
+  const slow = run('/a?x=1', [load({ fcp: 1628 }), load({ fcp: null, longest: 51 }), load({ drew: false })]);
+  assert.deepEqual(measuredRow(slow, '/a?x=1', 'cold', 3), [
+    '/a?x=1 cold: 1 of 3 loads painted no first content',
+    '/a?x=1 cold: first content p99 1628.0 ms, not under 300 ms',
+    '/a?x=1 cold: a pause of 51.0 ms, over 50 ms',
+    `/a?x=1 cold: 1 of 3 loads drew no frame within ${harness.FRAME_WAIT_MS} ms of settling (a hidden tab draws none), so they are not settled loads`
+  ]);
+  assert.deepEqual(measuredRow(run('/a', [load({ fcp: null })]), '/a', 'cold', 1), ['/a cold: 1 of 1 loads painted no first content'], 'a paint later than the wait is a timed judgement');
+  // Never a judgement the machine's speed cannot cause, never another page's, never a row that disagrees with its failures.
+  for (const [r, why] of /** @type {[any, RegExp][]} */ ([
+    [run('/a', [load({ status: 404 })]), /fails only on how fast the machine drew it, never on: \/a cold: 1 of 1 loads were not the page \(HTTP 404\)/],
+    [run('/a', [load({ wire: 400e3 })]), /never on: \/a cold: 400\.0 KB on the wire, not under 400 KB/],
+    [run('/a', [load({ heap: 100e6 })]), /never on: \/a cold: script heap 100\.0 MB, not under 100 MB/],
+    [run('/a', [load({ settled: false })]), /never on: \/a cold: 1 loads still had a request in flight after 30 s/],
+    [run('/a', [load({})], ['/a cold: an uncaught error: Error: boom']), /never on: \/a cold: an uncaught error: Error: boom/],
+    [run('/a', [load({})], ['/a cold: first content p99 400.0 ms, not under 300 ms']), /the targets cell agrees with the row's failures/],
+    [{ lines: ['| /a | cold | 0 | NOT MEASURED: the load did not end within 10 ms (no answer to its document) | — | — | — | FAILS |'], failures: [] }, /\/a cold is measured over 1 loads/],
+    [{ lines: [], failures: [] }, /one \/a cold row/],
+    [{ lines: [run('/a', [load({})]).lines[1], run('/a', [load({})]).lines[1]], failures: [] }, /one \/a cold row/]
+  ])) assert.throws(() => measuredRow(r, '/a', 'cold', 1), why);
+  assert.throws(() => measuredRow(run('/a', [load({}), load({})]), '/a', 'cold', 1), /\/a cold is measured over 1 loads/, 'n is the row\'s');
+  assert.equal(timedJudgement('/b cold: first content p99 400.0 ms, not under 300 ms', '/a'), false, 'another page\'s judgement is not this page\'s');
+  assert.equal(timedJudgement('/a idle: first content p99 400.0 ms, not under 300 ms', '/a'), false, 'cold or warm only');
+  assert.equal(timedJudgement('/a warm: a pause of 60.0 ms, over 50 ms', '/a'), true);
+});
+
 test('an idle tab may ask only for the header-only up check; anything else is listed', () => {
   const base = 'http://127.0.0.1:8080';
   const quiet = harness.idleVerdict([{ method: 'HEAD', url: `${base}/inspection.json` }, { method: 'HEAD', url: `${base}/inspection.json` }], base);
@@ -1134,8 +1173,9 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     const args = harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/db,/gaps,/blank,/missing', '--idle-tabs', '1,2', '--idle-ms', '1000', '--settle-ms', '100', '--hook', hook, '--hook', silent, '--capture', capture, ...root]);
     const r = await harness.runHarness(args);
     const text = r.lines.join('\n');
-    assert.match(text, /^\| \/db \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m);
-    assert.match(text, /^\| \/db \| warm \| 2 \|.*\| holds \|$/m);
+    // Measured, and judged by how fast this machine drew it, which is not what this test is about (repair 7; verify r7).
+    measuredRow(r, '/db', 'cold', 2);
+    measuredRow(r, '/db', 'warm', 2);
     for (const name of ['picker click', 'feed switch', 'page turn of option cells', 'sort at the 20,000-row browser sort edge']) {
       assert.match(text, new RegExp(`^\\| ${name} \\| 2 \\| [\\d.]+ / [\\d.]+ / [\\d.]+ \\| [\\d.]+ \\|$`, 'm'), `${name} is measured on a page that has its controls`);
     }
@@ -1401,11 +1441,22 @@ test('the harness as a command writes its sheet and exits by its verdict', { tim
     const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
     const { execFile } = await import('node:child_process');
     const script = new URL('ci/browser-harness.mjs', web).pathname;
-    for (const [pages, code] of /** @type {const} */ ([['/speed', 0], ['/blank', 1]])) {
-      const ran = await new Promise((resolve) => execFile(process.execPath, [script, '--base', site.base, '--n', '1', '--pages', pages, '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--out', out, ...root], (error, stdout) => resolve({ code: error ? error.code : 0, stdout })));
-      assert.equal(/** @type {any} */ (ran).code, code, String(/** @type {any} */ (ran).stdout));
-      assert.match(readFileSync(out, 'utf8'), code === 0 ? /^# Browser harness — PASS/ : /^# Browser harness — FAIL[\s\S]*- FAILED: \/blank cold: 1 of 1 loads painted no first content/);
-    }
+    /** @param {string} pages @returns {Promise<{code: number, stdout: string}>} */
+    const ran = (pages) => new Promise((resolve) => execFile(process.execPath, [script, '--base', site.base, '--n', '1', '--pages', pages, '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--out', out, ...root], (error, stdout) => resolve({ code: error ? Number(error.code) : 0, stdout })));
+    // `/speed`: the exit is the verdict its sheet states, whichever verdict this machine's figures give (repair 7;
+    // verify r7: it was pinned to PASS, which one slow paint of a busy machine turns into a FAIL of a correct build).
+    const speed = await ran('/speed');
+    const sheetText = readFileSync(out, 'utf8');
+    const verdict = /^# Browser harness — (PASS|FAIL)\n/.exec(sheetText);
+    assert.ok(verdict, sheetText);
+    assert.equal(speed.code, verdict[1] === 'PASS' ? 0 : 1, speed.stdout);
+    const failed = sheetText.split('\n').filter((l) => l.startsWith('- FAILED: ')).map((l) => l.slice('- FAILED: '.length));
+    assert.equal(failed.length === 0, verdict[1] === 'PASS', 'a sheet fails exactly when it names a failure');
+    for (const f of failed) assert.ok(timedJudgement(f, '/speed'), `a FAIL only on how fast this machine drew /speed: ${f}`);
+    // `/blank` paints nothing on any machine: FAIL, exit 1.
+    const blank = await ran('/blank');
+    assert.equal(blank.code, 1, blank.stdout);
+    assert.match(readFileSync(out, 'utf8'), /^# Browser harness — FAIL[\s\S]*- FAILED: \/blank cold: 1 of 1 loads painted no first content/);
   } finally {
     site.server.close();
   }
@@ -1917,6 +1968,13 @@ test('a stop signals a group only while it is the browser\'s: a group that has g
  * when the first page is asked for; `speedThrows` makes `/speed` throw an
  * uncaught error once a load (repair 6: the shared reporter check loads it).
  *
+ * `/later?paint=N` (repair 7) is `/later` whose head names a stylesheet the
+ * stand-in answers N ms after it is asked: a stylesheet in the head blocks
+ * the first paint and the load event alike, so the load ends and its first
+ * content is drawn no sooner than N ms after the document was asked for,
+ * whatever the machine. It makes a cold row fail its first-content target
+ * on purpose, so a test can show its own claim does not depend on that row.
+ *
  * @param {{noReporter?: boolean, reportStatus?: number, forget?: boolean, bareDb?: boolean, fallback?: boolean,
  *   noEntry?: boolean, build?: string | null | ((path: string) => string), hangSources?: boolean, onFirstPage?: () => void,
  *   speedThrows?: boolean}} o
@@ -1931,8 +1989,8 @@ async function browserStandIn(o) {
   const script = o.noReporter ? '' : `<script type="module">import '/lib/page-report.js';</script>`;
   const entry = '/_app/immutable/entry/app.T1.js';
   const preload = o.noEntry ? '' : `<link rel="modulepreload" href="${entry}">`;
-  /** @param {string} title @param {string} [extra] */
-  const page = (title, extra = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title>${preload}<body><h1>${title}</h1>${extra}${script}`;
+  /** @param {string} title @param {string} [extra] @param {string} [head] */
+  const page = (title, extra = '', head = '') => `<!doctype html><meta charset="utf-8"><title>${title}</title>${preload}${head}<body><h1>${title}</h1>${extra}${script}`;
   // A ROUND TRIP INSIDE ONE DOCUMENT, as the app's router makes one: a link
   // is taken in place (`history.pushState`, nothing loaded), the page in view
   // is unmounted and the next one mounted, and the browser's back button
@@ -2009,6 +2067,9 @@ async function browserStandIn(o) {
       res.write(`<!doctype html><title>later</title>${preload}<p>part of a page; the rest never comes`);
       return void held.push(res);
     }
+    // `/later?paint=N`: drawn no sooner than N ms after it is asked (a stylesheet in its head, answered N ms late).
+    if (u.pathname === '/later' && u.searchParams.has('paint')) return send(200, 'text/html; charset=utf-8', page('later', '', `<link rel="stylesheet" href="/slow.css?ms=${Number(u.searchParams.get('paint'))}">`));
+    if (u.pathname === '/slow.css') return void setTimeout(() => send(200, 'text/css', 'h1 { color: #123456; }'), Number(u.searchParams.get('ms')));
     // A page whose app entry, named in a script it does not run, is never answered.
     if (u.pathname === '/hang-entry') return send(200, 'text/html; charset=utf-8', '<!doctype html><title>hang-entry</title><body><h1>hang-entry</h1><script type="text/plain">import("/_app/immutable/entry/app.HANG.js")</script>');
     if (u.pathname === '/_app/immutable/entry/app.HANG.js') return void held.push(res);
@@ -2050,6 +2111,69 @@ async function browserStandIn(o) {
     server.close();
   };
   return { server, log, requests, stop, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
+}
+
+/**
+ * THE JUDGEMENTS OF A REAL BROWSER'S ROW THAT HOW BUSY THE MACHINE IS CAN
+ * CHANGE (repair 7; verify r7, 25 Oct). First content and the longest pause
+ * are wall-clock readings of a real Chrome: one cold first paint of a
+ * stand-in page took 1,628 ms in a full `npm test` on this Mac (load
+ * average 10 to 20), its row failed the 300 ms target, and a test about a
+ * load that does not end failed with it (one counted run of three). A paint
+ * later than the harness's paint wait is said as a load that painted
+ * nothing, and a frame not drawn within its wait as a load not settled:
+ * both are the same clock. The heap and the wire of a stand-in page are not
+ * on this list: they are its bytes, not its timing.
+ */
+const TIMED_JUDGEMENTS = [
+  new RegExp(`^first content p99 \\d+\\.\\d ms, not under ${PAGE_TARGETS.firstContentP99Ms} ms$`),
+  new RegExp(`^a pause of \\d+\\.\\d ms, over ${PAGE_TARGETS.longestPauseMs} ms$`),
+  /^\d+ of \d+ loads painted no first content$/,
+  new RegExp(`^\\d+ of \\d+ loads drew no frame within ${harness.FRAME_WAIT_MS} ms of settling \\(a hidden tab draws none\\), so they are not settled loads$`)
+];
+
+/**
+ * The load bound of a run that must tell a load that never ends from one
+ * that ends (repair 7). At 1,500 ms the stall test's cold loads, which must
+ * end, had too little room: a load that took longer under a busy machine
+ * was said not to end, the harness doing its job on the wrong page. Ten
+ * seconds is several times the slowest stand-in load this Mac has shown
+ * (L-R315-28); a load that never ends is said the same way at any bound,
+ * so the only cost is the wait for each one that never ends.
+ */
+const STALL_BOUND_MS = 10_000;
+
+/** Whether `failure` is one of `page`'s timed judgements, cold or warm. @param {string} failure @param {string} page */
+function timedJudgement(failure, page) {
+  return ['cold', 'warm'].some((phase) => failure.startsWith(`${page} ${phase}: `) && TIMED_JUDGEMENTS.some((re) => re.test(failure.slice(`${page} ${phase}: `.length))));
+}
+
+/**
+ * A real browser's row, checked for all that does not depend on how busy
+ * the machine is (repair 7): there is one such row, measured over `n`
+ * loads, each figure a reading (first content may be `not painted`); every
+ * failure the run gave that row is a timed judgement (TIMED_JUDGEMENTS),
+ * never a load that was not the page, did not end, did not settle, threw,
+ * or was too heavy; and its targets cell says `holds` exactly when it has
+ * none. The targets themselves are tested on fixed figures (`judge`), where
+ * the answer is the same on every machine. Answers the row's failures.
+ *
+ * @param {{lines: string[], failures: string[]}} r
+ * @param {string} page
+ * @param {'cold' | 'warm'} phase
+ * @param {number} n
+ * @returns {string[]}
+ */
+function measuredRow(r, page, phase, n) {
+  const rows = r.lines.filter((l) => l.startsWith(`| ${page} | ${phase} | `));
+  assert.equal(rows.length, 1, `one ${page} ${phase} row:\n${r.lines.join('\n')}`);
+  const figure = '\\d+\\.\\d / \\d+\\.\\d / \\d+\\.\\d';
+  const m = new RegExp(`^\\| [^|]+ \\| ${phase} \\| ${n} \\| (?:${figure}|not painted) \\| ${figure} \\| ${figure} \\| ${figure} \\| (holds|FAILS) \\|$`).exec(rows[0]);
+  assert.ok(m, `${page} ${phase} is measured over ${n} loads, each figure a reading: ${rows[0]}`);
+  const own = r.failures.filter((f) => f.startsWith(`${page} ${phase}: `));
+  for (const f of own) assert.ok(timedJudgement(f, page), `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}`);
+  assert.equal(m[1], own.length === 0 ? 'holds' : 'FAILS', `the targets cell agrees with the row's failures (${own.join('; ') || 'none'})`);
+  return own;
 }
 
 /** A `Response` as far as the code under test reads one.
@@ -2733,40 +2857,58 @@ test('every DevTools command is bounded: one the browser does not answer is refu
   assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--load-wait-ms', '2147483648']), /^Error: --load-wait-ms must be at most 2147483647$/);
 });
 
-test('a load that does not end within its bound fails its page by name, and the run goes on to its sheet and a non-zero exit', { timeout: 240_000 }, async () => {
+test('a load that does not end within its bound fails its page by name, and the run goes on to its sheet and a non-zero exit', { timeout: 300_000 }, async () => {
   // Before (verify r4, 23 Oct): loadOnce waited for Page.loadEventFired with
   // no bound, so /stall (its headers and part of its body, never the end)
   // printed nothing and wrote no sheet in 9 min 49 s, and a server paused
   // with SIGSTOP held a cold load for the whole pause.
+  //
+  // WHAT THIS TEST CLAIMS DOES NOT DEPEND ON HOW BUSY THE MACHINE IS (repair
+  // 7; verify r7, 25 Oct). It pinned each page that ends to its targets cell
+  // (`| holds |`) and to a list of failures with nothing else in it, so one
+  // cold first paint of 1,628 ms failed it in a full `npm test` (one counted
+  // run of three), and at a 1,500 ms bound a cold load that took longer to
+  // END was itself said not to end. Now a page that ends is checked for being
+  // measured (`measuredRow`), whatever its figures say; the loads that must
+  // end have a bound they end well inside; and `/later?paint=400` fails its
+  // first-content target on purpose, every run, beside its warm stall.
   const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
   assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
   const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
   const site = await browserStandIn({});
   const dir = mkdtempSync(join(tmpdir(), 'r315-stall-'));
+  // A bound a load that ends ends well inside: see L-R315-28 for the cold loads measured on this Mac. A load that never ends is said the same way at any bound; only the wait for it is longer.
+  const bound = STALL_BOUND_MS;
+  const stalled = `the load did not end within ${bound} ms (its document was answered HTTP 200 and did not finish)`;
+  const unanswered = `the load did not end within ${bound} ms (no answer to its document)`;
+  /** @param {string} pages @param {string} n */
+  const run = (pages, n) => harness.runHarness(harness.parseArgs(['--base', site.base, '--n', n, '--pages', pages, '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', String(bound), ...root]));
   try {
     const t0 = performance.now();
-    const r = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '2', '--pages', '/stall,/hang,/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
+    const r = await run('/stall,/hang,/speed', '2');
     const took = performance.now() - t0;
     const text = r.lines.join('\n');
-    const stalled = 'the load did not end within 1500 ms (its document was answered HTTP 200 and did not finish)';
-    const unanswered = 'the load did not end within 1500 ms (no answer to its document)';
     assert.match(text, new RegExp(`^\\| /stall \\| cold \\| 0 \\| NOT MEASURED: ${stalled.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
     assert.match(text, new RegExp(`^\\| /hang \\| cold \\| 0 \\| NOT MEASURED: ${unanswered.replace(/[()]/g, '\\$&')} \\| — \\| — \\| — \\| FAILS \\|$`, 'm'), text);
-    assert.match(text, /^\| \/speed \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m, 'the run goes on to the next page');
-    assert.match(text, /^\| \/speed \| warm \| 2 \|/m);
-    assert.deepEqual(r.failures.filter((f) => /^\/(stall|hang) /.test(f)), [`/stall cold: ${stalled}`, `/hang cold: ${unanswered}`]);
+    // The run goes on to the next page, and measures it: how its figures meet the targets is this machine's, not this test's.
+    measuredRow(r, '/speed', 'cold', 2);
+    measuredRow(r, '/speed', 'warm', 2);
+    assert.deepEqual(r.failures.filter((f) => !f.startsWith('/speed ')), [`/stall cold: ${stalled}`, `/hang cold: ${unanswered}`]);
     assert.equal(r.ok, false);
-    assert.ok(took < 60_000, `bounded: the run took ${took.toFixed(0)} ms`);
+    assert.ok(took < 2 * bound + 90_000, `bounded: two loads that never end, at ${bound} ms each, and five that end; the run took ${took.toFixed(0)} ms`);
     assert.equal(r.lines.filter((l) => l.startsWith('| /stall ')).length, 1, 'a page whose load did not end is not loaded again');
-    // A page whose cold loads end and whose warm load does not: the cold row stands, the warm row says why.
-    const later = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/later', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
+    // A page whose cold load ends and whose warm load does not: the cold row stands, measured and judged, and the warm
+    // row says why. Drawn no sooner than 400 ms (`paint`), its cold row FAILS its first-content target every run, so
+    // the stall is shown said beside a failing cold row, as verify r7's 1,628 ms paint made it in a full run.
+    const later = await run('/later?paint=400', '1');
     const laterText = later.lines.join('\n');
-    assert.match(laterText, /^\| \/later \| cold \| 1 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|.*\| holds \|$/m, laterText);
-    assert.ok(laterText.includes(`| /later | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), laterText);
-    assert.deepEqual(later.failures, [`/later warm: ${stalled}`]);
-    // A timed warm load that does not end, after the first warm load did: said the same way.
-    const second = await harness.runHarness(harness.parseArgs(['--base', site.base, '--n', '1', '--pages', '/later?after=2', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--load-wait-ms', '1500', ...root]));
-    assert.deepEqual(second.failures, [`/later?after=2 warm: ${stalled}`]);
+    assert.ok(measuredRow(later, '/later?paint=400', 'cold', 1).length > 0, 'a first content drawn no sooner than 400 ms fails its 300 ms target');
+    assert.ok(laterText.includes(`| /later?paint=400 | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), laterText);
+    assert.deepEqual(later.failures.filter((f) => !f.startsWith('/later?paint=400 cold: ')), [`/later?paint=400 warm: ${stalled}`]);
+    // A timed warm load that does not end, after the first warm load did: said the same way, whatever the cold row says.
+    const second = await run('/later?after=2', '1');
+    measuredRow(second, '/later?after=2', 'cold', 1);
+    assert.deepEqual(second.failures.filter((f) => !f.startsWith('/later?after=2 cold: ')), [`/later?after=2 warm: ${stalled}`]);
     assert.ok(second.lines.includes(`| /later?after=2 | warm | 0 | NOT MEASURED: ${stalled} | — | — | — | FAILS |`), second.lines.join('\n'));
     // As a command: the sheet is written and the exit is 1.
     const { execFile } = await import('node:child_process');
@@ -2875,8 +3017,9 @@ test('a page the app does not route fails by name and is never passed: the build
       assert.ok(text.includes(`| ${p} | cold | 1 | NOT MEASURED: ${no(p)} | — | — | — | FAILS |`), text);
       assert.ok(r.failures.includes(`${p} cold: ${no(p)}`), r.failures.join('\n'));
     }
-    assert.match(text, /^\| \/speed\/ \| cold \| 2 \| [\d.]+ \/ [\d.]+ \/ [\d.]+ \|/m, 'a page under a spelling the router takes is measured');
-    assert.match(text, /^\| \/speed\/ \| warm \| 2 \|.*\| holds \|$/m);
+    // A page under a spelling the router takes is measured, cold and warm; its figures against the targets are this machine's (repair 7).
+    measuredRow(r, '/speed/', 'cold', 2);
+    measuredRow(r, '/speed/', 'warm', 2);
     assert.equal(r.ok, false);
     assert.match(harness.renderHarness(r, { n: 2, base: site.base }), /^# Browser harness — FAIL/, 'never a PASS sheet for a page the app does not have');
     const saved = JSON.parse(readFileSync(capture, 'utf8'));
@@ -3163,7 +3306,9 @@ test('a sheet that cannot be written at the end of a run is named on stderr, aft
   try {
     const ran = await run('ci/browser-harness.mjs', ['--base', site.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--out', join(dir, 'sheet.md')]);
     assert.equal(ran.code, 2, ran.stderr);
-    assert.match(ran.stdout, /^# Browser harness — PASS/, 'the sheet is on stdout');
+    // The sheet is on stdout, whichever verdict this machine's figures give it (repair 7: it was pinned to PASS).
+    assert.match(ran.stdout, /^# Browser harness — (PASS|FAIL)\n/, 'the sheet is on stdout');
+    for (const f of ran.stdout.split('\n').filter((l) => l.startsWith('- FAILED: '))) assert.ok(timedJudgement(f.slice('- FAILED: '.length), '/speed'), `a FAIL only on how fast this machine drew /speed: ${f}`);
     assert.match(ran.stderr, /^browser-harness: could not write .*sheet\.md whole: EACCES/);
   } finally {
     chmodSync(dir, 0o700);
