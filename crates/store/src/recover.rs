@@ -1055,9 +1055,11 @@ fn diagnose(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Diagnosi
         raw,
     };
     // NEWEST FIRST, by one comparison: a region holds at most
-    // `format::MAX_SLOTS` (two) slots, so nothing is sorted.
+    // `format::MAX_SLOTS` (two) slots, so nothing is sorted. Two surviving
+    // slots never share a generation (each sits where its own puts it), so
+    // the second leads exactly when it holds the higher one.
     if let [first, second] = month.raw.slots.as_mut_slice()
-        && first.header.generation < second.header.generation
+        && second.header.generation == first.header.generation.max(second.header.generation)
     {
         std::mem::swap(first, second);
     }
@@ -1667,11 +1669,13 @@ fn refuse_links(root: &Path, leaf: &Path) -> Result<(), RecoverError> {
 }
 
 /// The directories between `root` and `dir` that do not exist yet,
-/// root-most first, so each new entry's parent can be synced.
+/// root-most first, so each new entry's parent can be synced. The walk ends
+/// at the first that exists: at the latest the root, which the month's own
+/// lock proved there before the door got this far.
 fn missing_dirs(root: &Path, dir: &Path) -> Vec<PathBuf> {
     let mut missing = Vec::new();
     let mut cursor = Some(dir);
-    while let Some(here) = cursor.filter(|&here| here != root && here.starts_with(root)) {
+    while let Some(here) = cursor.filter(|here| here.starts_with(root)) {
         if !matches!(here.try_exists(), Ok(false)) {
             break;
         }
