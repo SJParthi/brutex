@@ -748,6 +748,10 @@ export function garbledUrl(url, field) {
  *   merge, and R4-28's F&O modes (`$lib/fno-modes.js`, about 0.8 KB). No
  *   R3-15 file grew. So `/ingest` is now 550,000 B, 4,411 B of room; the
  *   other two are inside theirs (`/db` 8,639 B of room, `/backtest` 6,275).
+ *   Those bytes are ONE BUILD'S (verify r8 nit, 26 Oct): verify r8's build
+ *   of the same tree, and repair 8's of it merged with the next
+ *   `feat/db-fix`, each weighed 4 B more on all three pages (1,118,729 /
+ *   816,365 / 545,593 B), so `/ingest` has 4,407 B of room there.
  *
  * Each time that is the budget doing its job — a page grew and the build
  * said so; the figure it now holds is the merged tree's, by the same
