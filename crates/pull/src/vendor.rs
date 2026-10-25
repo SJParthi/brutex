@@ -6021,12 +6021,6 @@ const ZERODHA_FLOOR: GranularityFloor = GranularityFloor {
              kite.trade/docs/connect/v3/historical/ on 14 Aug 2026.",
 };
 
-/// Zerodha, and it is the vendor `docs/07-plan.md` §5 predicted.
-///
-/// Every one of the three fields §5 named as unable to express an arbitrary
-/// broker is exercised by this single row: the path carries the instrument AND
-/// the rung (D-0133), the scheme carries a prefix and a SECOND secret
-/// (D-0134), and the timestamp carries its own zone (D-0135).
 /// Kite's futures route: a future's own token, and the continuous flag for
 /// the near-month series (R4-28, CON-12; D-7186).
 pub const ZERODHA_CONTINUOUS: ContinuousSpec = ContinuousSpec {
@@ -6057,6 +6051,12 @@ pub const KITE_TOKENS_ARE_REUSED: &str = "docs/00-charter.md §4z, the Expired F
      by the exchange and not obtainable from the instrument master; CLAUDE.md section 1: NSE \
      reuses instrument tokens across an expiry boundary.";
 
+/// Zerodha, and it is the vendor `docs/07-plan.md` §5 predicted.
+///
+/// Every one of the three fields §5 named as unable to express an arbitrary
+/// broker is exercised by this single row: the path carries the instrument AND
+/// the rung (D-0133), the scheme carries a prefix and a SECOND secret
+/// (D-0134), and the timestamp carries its own zone (D-0135).
 const ZERODHA: Descriptor = Descriptor {
     // NOT MEASURED, AND THEREFORE NOT CLAIMED TO BE THE OTHER ONE.
     //
