@@ -275,3 +275,12 @@ The red runs were taken here (section "Tests failing before, passing after").
   base `bf9b1c8f` (by exact name; the hang alone under `timeout 300`). 20:40 IST HOLD (base
   `17d214c2`, the per-part GO withdrawn) arrived during that attribution run; the step was finished
   and the final report written. STATUS: BLOCKED on base items only; code complete.
+- 25 Oct, new cloud session (23:0x IST, `GO` present, no `HOLD`): checked out the branch at
+  `d749b4b0`. `origin/feat/db-fix` had moved to `cc0a3a0d` (Merge R4-28), so it was merged as
+  `b60b0f46` (the `docs/05-decisions.md` append conflict resolved with `feat/db-fix`'s file kept as
+  the exact prefix, D-7185..D-7194 first, then D-6740..D-6742). fmt exit 0; clippy exit 0; every
+  `costs` suite green (lib 300 passed 1 ignored, adversarial 4, dhan_calculator 12, fa73061 11
+  passed 1 ignored). Language-purity gates (all but 1e) on the branch and the base `cc0a3a0d`: 23
+  green and the same 10 red on each (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30), refusals identical
+  sorted except counts, timings and gate 10's line number (R427-11, 8793 vs 8777). Workspace test
+  run in progress.
