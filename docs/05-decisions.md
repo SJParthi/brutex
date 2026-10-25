@@ -79360,8 +79360,10 @@ Repair round 8 (26 Oct, after verify r8):
     renderer's memory. A polling stand-in's capped settle and an
     interaction's click that drew no frame or did not settle are the
     machine's clock in a test, named, never pinned (R315-38). The byte
-    figures of one build (item 36) are one build's: verify r8's build of the
-    same tree weighed 4 B more on every page.
+    figures of item 36 are one build's: SvelteKit names each build afresh
+    (its version string and its `__sveltekit_<id>` global), whose lengths
+    vary, so verify r8's build and this round's first weighed 4 B more on
+    every page, and this round's last the same as item 36's.
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-38);
 measurements in `docs/06-limits.md` L-R315-01 to L-R315-30.
