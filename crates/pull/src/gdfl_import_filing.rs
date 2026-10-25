@@ -1401,7 +1401,8 @@ impl DayFiler<'_> {
                 .borrow_mut()
                 .take(*gathered, (self.key, self.day));
             match taken {
-                Ok(()) => self.gathered += 1,
+                Ok(true) => self.gathered += 1,
+                Ok(false) => {}
                 Err(refusal) => {
                     self.failures
                         .push(note_staged(self.ctx.run, self.day, &name, &refusal));
@@ -1698,7 +1699,9 @@ impl Gather {
 
     /// Gathers `file` of `key`'s `day` into its month's offer: one probe,
     /// and an append of its bars after the offer's last (an ordered merge
-    /// only when a day is gathered out of order).
+    /// only when a day is gathered out of order). `Ok(true)` once gathered:
+    /// `key`'s `day` is then the close that waits last ([`Self::waits`]);
+    /// `Ok(false)` for a file with no bars, which gathers nothing.
     ///
     /// # Errors
     ///
@@ -1710,7 +1713,7 @@ impl Gather {
         &mut self,
         file: GatheredFile,
         (key, day): (&str, Day),
-    ) -> Result<(), ImportRefusal> {
+    ) -> Result<bool, ImportRefusal> {
         let GatheredFile {
             key: month_key,
             name,
@@ -1720,7 +1723,7 @@ impl Gather {
             request,
         } = file;
         let (Some(first), Some(last)) = (seconds.first(), seconds.last()) else {
-            return Ok(());
+            return Ok(false);
         };
         let span = (first.ts_micros, last.ts_micros);
         let known = self.index.get(&month_key).copied();
@@ -1757,7 +1760,7 @@ impl Gather {
             place
         };
         let Some(offer) = self.offers.get_mut(place) else {
-            return Ok(());
+            return Ok(false);
         };
         merge_into(&mut offer.bars, seconds).map_err(|at| ImportRefusal::Store {
             kind: FailKind::Differs,
@@ -1784,7 +1787,7 @@ impl Gather {
         };
         offer.files.push(OfferedFile { at, name, span });
         self.month = Some(month_key.2);
-        Ok(())
+        Ok(true)
     }
 }
 

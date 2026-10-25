@@ -171,7 +171,7 @@ fn an_offers_window_widens_to_a_day_outside_it_and_never_for_one_inside() {
 #[test]
 fn a_file_with_no_bars_gathers_nothing() {
     let mut gather = Gather::default();
-    gather
+    let took = gather
         .take(
             GatheredFile::for_test(
                 &april(),
@@ -181,6 +181,7 @@ fn a_file_with_no_bars_gathers_nothing() {
             ("indices 2024-04-01 *", day(2024, 4, 1)),
         )
         .unwrap();
+    assert!(!took, "a file with no bars is not counted as gathered");
     assert!(gather.is_empty());
     assert_eq!(gather.offered(&april()), None);
 }
@@ -260,9 +261,12 @@ fn each_key_of_a_day_waits_as_its_own() {
     let mut gather = Gather::default();
     assert!(!gather.waits(base, on), "nothing waits in an empty gather");
 
-    gather
-        .take(file(1_711_943_100..1_711_943_104), (base, on))
-        .unwrap();
+    assert!(
+        gather
+            .take(file(1_711_943_100..1_711_943_104), (base, on))
+            .unwrap(),
+        "a file with bars is gathered"
+    );
     assert!(gather.waits(base, on));
     assert!(!gather.waits(member, on), "another key of the day");
     assert!(!gather.waits(base, next), "the key on another day");

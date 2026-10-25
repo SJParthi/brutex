@@ -2316,8 +2316,10 @@ where
     // D-4899): some of its files' bars are in no month yet, so closing the
     // day now would let a crash before the repair lose them for good (a
     // `done` day is never read again). Its close is written once the repair
-    // is done ([`flush_gather`]).
-    if gathered > 0 && ctx.gather.borrow().waits(key, day) {
+    // is done ([`flush_gather`]). Every file `gathered` counts was taken
+    // into an offer under this key's day, which is then the close that waits
+    // last ([`super::filing::Gather::take`]), so the count is the one test.
+    if gathered > 0 {
         let close = super::filing::DeferredClose {
             member: pass.member.cloned(),
             stopped,
