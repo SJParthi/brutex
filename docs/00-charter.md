@@ -1830,3 +1830,18 @@ CSV, and reading it cold means expanding and parsing the whole file.
 record (37,237), not the EQ rows it keeps; that it is the cause of the 18-25
 MB per held master the check measured is an inference from the reservation,
 UNVERIFIED as a split of the resident memory.
+
+## The data checks on `/ingest` — no new external fact (DATA-1w, D-5190 to D-5195)
+
+`/feed-checks.json`, `/tick-checks.json` and `/calendar-days.json` serve what
+DATA-1 (`cli feed-reconcile`), DATA-2 (`cli tick-to-second-check`) and CAL-1
+(`pull::calendar`) already compute, and add no claim about a vendor, an
+exchange, an instrument or a cost. Each excluded day `/calendar-days.json`
+lists carries the notice, holiday circular, special-session evidence or halt
+record CAL-1's table names, exactly as `cli calendar-days` prints it; the
+sources behind those rows are the ones CAL-1 recorded in this charter, and no
+address or notice number is added here. The counts on the panel are the check
+files' own rows, read from folders the deploy names (D-5193); this package
+measured none of them on the real store beyond the read-only shadow check its
+report names, and the populated tables in its tests are invented (shares
+`ZZ*` and `Q&Q`, prices ending 7777).
