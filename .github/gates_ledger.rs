@@ -1703,6 +1703,12 @@ const ALLOW_SORT: Allow = &[
     // docs/06-limits.md, "Gate 11 — BASE-GATE11". The calendar's sort of
     // its unmeasured days was rewritten instead.
     ("crates/costs/src/lot.rs", 1),
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `CasFlags::refusals`
+    // puts ONE request's refused days in day order, at most one a day of a
+    // page of `PAGE_DAYS` = 92, once per request. Reason in
+    // docs/06-limits.md, "Gate 11 — R3-13". The sidecar month's sort and the
+    // frozen run's window sort were rewritten instead.
+    ("crates/api/src/dayflags_rules.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1889,6 +1895,11 @@ const ALLOW_SCAN: Allow = &[
     // a word's position in the runs ledger's compiled `MODES` (15) and
     // `KINDS` (6), once per run.
     ("crates/pull/src/zerodha_verify.rs", 2),
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `asked_rung` finds the
+    // `timeframe=` word in `store::path::Timeframe::KNOWN`, a compile-time
+    // table of ten rungs, once per request. Reason in docs/06-limits.md,
+    // "Gate 11 — R3-13".
+    ("crates/api/src/dayflags_rules.rs", 1),
 ];
 
 /// EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6 first
@@ -2036,7 +2047,12 @@ const ALLOW_MEMBER: Allow = &[
     // list of one day, a tree probe and the restart walk's closed list, a
     // verb's compile-time flag and environment tables, and R3-35's move of
     // three `gdfl_import.rs` sites into the journal file (4 -> 1 above).
-    ("crates/api/src/dayflags.rs", 1),
+    // 1 -> 4, R3-13 repair 1 (D-7300 item 24; docs/06-limits.md, "Gate 11 —
+    // R3-13"): `QualityLine::SERVED` (three names) and `FLAGS_VERSIONS` (two
+    // versions, IA-16's, merged undeclared) are compile-time tables asked
+    // once per ledger field or line; `peer.per_day` is one page's peer days,
+    // at most `PAGE_DAYS` = 92, asked once per page.
+    ("crates/api/src/dayflags.rs", 4),
     ("crates/cli/src/watchdog_command.rs", 3),
     ("crates/pull/src/gdfl_import_journal.rs", 3),
     // GF-1, 18 Oct 2026: R3-09 and R4-06, merged after GF-1's run of
@@ -2067,6 +2083,11 @@ const ALLOW_MEMBER: Allow = &[
     // two comparisons, the shape rule 7 permits. Reason in
     // docs/06-limits.md, "Gate 11 — BASE-GATE11".
     ("crates/pull/src/reference_data.rs", 1),
+    // R3-13 repair 1, 23 Oct 2026 (D-7300 item 24): `said_of` asks a
+    // `HashSet` sized once by the month's sidecar records whether a day is
+    // filed: one hash probe (it replaced a sort and a binary search). Reason
+    // in docs/06-limits.md, "Gate 11 — R3-13".
+    ("crates/api/src/dayflags_rules.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {
