@@ -337,3 +337,15 @@ Store writes needed: none.
   again: this save point is pushed and I wait; the run finishes on its own.
   NEXT (when released): read the pull mutants result, run the 3 `reasons_route.rs` mutants
   (`-p api -- --lib -- reasons_route`), then STATUS: DONE or BLOCKED-complete on base items only.
+- 2026-10-25, mutants (pull) finished: 34 mutants, 24 caught, 9 unviable, 0 timeout, 1 MISSED:
+  `crates/pull/src/reasons.rs: replace note_built with ()` (the `pull.reasons` / `reasons table built`
+  event had no test that read it back). Fixed: one `SITES` row in `crates/pull/src/emit_sites.rs` (the
+  crate's single read-back-from-disk test; a file outside ownership, one row) driving
+  `reasons::body("emit-sites-reasons")` and requiring the event with that build. Proved by hand: with
+  `note_built`'s call disabled, `emit_sites::every_emit_site_in_this_crate_reaches_a_file` FAILS; restored,
+  it passes. docs/04 R405-05 names the test. Gate 1d: `emit-sites-reasons` declared in `R4_05_LITERAL`
+  (the undeclared count is back to the base's own 465 reds). `cargo fmt --all --check` clean;
+  `cargo clippy -p pull --all-targets --locked -- -D warnings` clean; `.github/gates_tree.rs` rustfmt and
+  `rustc --test` 49/49. Files outside ownership gain `crates/pull/src/emit_sites.rs` (one row).
+  Still HOLD: pushed, waiting. NEXT: the 3 `reasons_route.rs` mutants, the workspace clippy once more,
+  then STATUS: DONE or BLOCKED-complete on base items only.

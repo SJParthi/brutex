@@ -1413,6 +1413,16 @@ static SITES: &[Site] = &[
         says: ("code", Says::Holds("alert_kind_unknown")),
         drive: drive_alert_not_saved,
     },
+    Site {
+        // R4-05: the one event a `/reasons.json` body build writes.
+        at: "crates/pull/src/reasons.rs — note_built",
+        target: "pull.reasons",
+        message: "reasons table built",
+        says: ("build", Says::Holds("emit-sites-reasons")),
+        drive: |_| {
+            let _ = crate::reasons::body("emit-sites-reasons");
+        },
+    },
 ];
 
 // ===========================================================================

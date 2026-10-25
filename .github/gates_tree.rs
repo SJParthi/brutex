@@ -2897,8 +2897,9 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 // `zzenv` and `zzvendor` of an invented parameter path the alert key check
 // must refuse, invented digests (`0a1b`, `0a1b2c3d4e5f6a7b`,
 // `0a1b2c3d4e5f6a7c`), an invented factor (`1-2`) and a kind no build names
-// (`kind_26`). None names an account, an environment, a vendor credential or a
-// field of a parameter path.
+// (`kind_26`), and the invented build id of its emit-sites row
+// (`emit-sites-reasons`). None names an account, an environment, a vendor
+// credential or a field of a parameter path.
 const R4_05_LITERAL: &str = "absent_from_store after_index_close archive_day_on_closed_day \
      built_under_earlier_rule count_mismatch day_partial daycheck_differs deferred_pending \
      details_capped expiry_after_close extra_in_store lineage_unchecked lineage_unrecorded match \
@@ -2911,7 +2912,7 @@ const R4_05_LITERAL: &str = "absent_from_store after_index_close archive_day_on_
      as_of last_pass zz_before_listing_renamed zz_hidden zz_invented_cause zz_invented_kind \
      zz_invented_refusal zz_invented_row_cause zz_orphan zz_retired zz_run_busy_renamed \
      zz_unknown zz_unknown_code zz_wild zzenv zzorg zzvendor 0a1b 0a1b2c3d4e5f6a7b \
-     0a1b2c3d4e5f6a7c 1-2 kind_26";
+     0a1b2c3d4e5f6a7c 1-2 kind_26 emit-sites-reasons";
 
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
