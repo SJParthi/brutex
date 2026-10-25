@@ -21397,6 +21397,79 @@ without R4-17 and not R4-17's files: rule 3 at
 pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ~~~~
 
+### Gate 11 — R4-28, declared at its merge (R4-28 repair 5, 24 October 2026)
+
+~~~~text
+Gate 11 run on R4-28's tip as the r5 check read it (feat/db-fix merged at
+its CLOUD-MUTCLI merge) refused seven entries, 22 occurrences, every one in
+R4-28's two new
+production files (the r5 check's blocking item). Each was read before it
+was counted or removed: 16 are removed, 6 are declared (D-7191).
+
+RULE 1 (`ALLOW_SEARCH`) -- 3 removed, none declared. `Catalog::of_day` and
+  `Catalog::before` searched the receipted stamps. They are now one probe
+  each of two indices `Catalog::read` builds from its one listing:
+  `newest_on`, each (kind, day)'s newest receipted ordinal, and `place`,
+  each receipted stamp's place in its kind's ascending list. `before` of a
+  stamp no receipt commits is `None` (it answered the stamp below it), and
+  `diff_for` refuses that stamp by name. `first_listed::list_in` searched
+  the book's stamps for those on or before the plan's last day; `listing`
+  now takes the book, and `Book::through` cuts them with one day-table
+  index.
+RULE 3 (`ALLOW_UNSIZED`) -- 9 removed, none declared. `Catalog::read`
+  lists the names first and sizes its map from them. `Snapshot::parse`
+  sizes its rows and its token index from the dump's line count and its
+  word map from a stated hint (64; a dump carries a few dozen exchange,
+  segment and type words), and its duplicated-token set is gone: the
+  token's index slot answers `Duplicated`. The diff sizes its token map
+  from the old rows and its gone-share map from the gone shares, found
+  first. The first-listed log sizes its committed map from its name=count
+  pairs, collected first; the take-in cache is sized to the names the log
+  already commits; a plan's why-not map is made only when the plan took
+  snapshots in.
+RULE 4 (`ALLOW_SORT`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `Catalog::read` orders the receipted stamps of each kind and the
+  entries named incomplete, once per listing. The listing is already linear
+  in the snapshots directory's entries, a body and a receipt per attended
+  refresh and whatever a kill left (L-R428-10), and nothing after it sorts
+  (L-R428-13). `diff` orders its records once per attended refresh, over
+  the changes only, inside a comparison of two whole dumps (L-R428-03), so
+  one pair of dumps writes one `.diff` byte for byte (CLAUDE.md section 3
+  rule 5). `Book::of` (the tests and the bench) sorted the snapshots it was
+  given; it now checks their order in one pass and refuses another.
+RULE 6 (`ALLOW_SCAN`) -- 2 removed, none declared. The dump's header is
+  indexed once into a map (of two columns with one name the first is read,
+  as before), and a change kind's count slot is `Change::index`, a match.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `diff` asks the new dump's key set, a `HashSet` built once per
+  diff, whether an old row's key is still listed, at its three places (the
+  gone shares, the same-token arm, the delistings): one hash probe each.
+  The duplicated-token set's probe went with the set.
+
+pull/src/master_snapshots_first_listed.rs needs no line. Every other
+refusal is feat/db-fix's own, present there without R4-28 and in other
+packages' files, and the REFUSED lines of each pair of runs (R4-28's
+tree and feat/db-fix's at the same merge) are the same lines: 16 on the
+tree that merged feat/db-fix at its CLOUD-MUTCLI merge
+(cli/src/tick_second_check.rs and tick_second_index.rs;
+pull/src/gdfl_import.rs, gdfl_import_causes.rs, gdfl_import_day.rs and
+gdfl_import_quality.rs; api/src/dayflags.rs), 15 on the tree that merged it
+at its R3-13 merge, where R3-13's merge took the api/src/dayflags.rs one
+away, 19 on the tree that merged it at its DATA-1w merge, whose four new
+ones are DATA-1w's own (api/src/feed_checks_files.rs under rules 3, 4 and 6,
+api/src/feed_checks.rs under rule 7), and 28 on the tree that merged it at
+its R4-18 merge, whose nine new ones are R4-18's own
+(api/src/quarantine_route.rs, cli/src/zerodha_quarantine.rs twice,
+store/src/quarantine.rs five times, store/src/repair.rs). At every one of
+those merges the six lines above are the whole difference: rule 4 counts
+three more than feat/db-fix's and rule 7 three more (171 against 168 and 239
+against 236 at the DATA-1w merge; 176 against 173 and 242 against 239 at the
+R4-18 merge).
+No sentence here names a commit by its hash: the store's citation check
+(crates/store/tests/cited_commits.rs) holds every hash in this file to
+`main`'s history, and none of these merges is on it.
+~~~~
+
 ## The upkeep runner (R3-17, D-6270)
 
 `pull::upkeep` and `cli upkeep`. None of it is on a request path: a page reads
@@ -21491,6 +21564,56 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
 | L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
 | L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |
+
+## Dated Kite masters and futures day candles (R4-28; D-7185, D-7186)
+
+Measured on 22 Oct 2026 on this machine (M4 Pro, dev profile, opt-level 3)
+over a COPY of the Kite dump the operator's app landed on 6 Oct 2026
+(108,915 rows, 8,854,256 bytes; nothing of it is in the repository), through
+the ignored test
+`pull::master_snapshots::tests::a_real_size_dump_is_measured`. A second agent
+repeats it with `BRUTEX_KITE_DUMP=<a copy of a landed dump>` and
+`cargo test -p pull --lib -- --ignored --exact --nocapture master_snapshots::tests::a_real_size_dump_is_measured`.
+
+- One snapshot write (gzip, listing, receipt, three syncs): 223 ms; the
+  snapshot is 1,446,540 bytes.
+- One parse and index of the dump: 115 ms.
+- One diff of two such snapshots (two reads, two parses, the comparison and
+  the `.diff` write): 419 ms.
+- `token_on` the first time a book needs two snapshots (both read, checked
+  and indexed): 331 ms. After that, n=200 tokens spread over the dump, one
+  call each, sequential: p50 1.25 µs, p99 5.3 µs, max 230 µs (one outlier).
+- C-MS-01 (`crates/pull/benches/ratio/master_snapshots.rs`, gate 8, run 22 Oct
+  2026 by `cargo bench -p pull --bench ratio`, snapshots of 2,000 invented
+  rows): on a snapshot day (one probe) p50 41 ns, p99 42 ns at 1, 10 and 100
+  snapshots (max 125 ns, 23.3 µs and 2.3 µs; n=20,000 each), ratios 1.020x
+  and 1.023x; between two snapshots (two probes) p50 42 ns, p99 84 ns at 10
+  and 100 (max 209 ns and 167 ns), ratio 0.989x. Ceiling 3.0x.
+
+**Disk, projected from the measured snapshot (an extrapolation):** one
+attended refresh writes the Kite snapshot (about 1.45 MB), the NSE Total
+Market snapshot (about 50 KB before compression) and one `.diff` of
+`(records + 1) x 192` bytes, five files with the receipts. At one refresh a
+trading day, about 250 refreshes a year: about 0.4 GB and 1,250 files a year,
+plus the diffs, whose daily size is not measured (each records one line per
+listing, delisting and change). A same-day refresh with the same bytes writes
+nothing.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R428-01 | The first `token_on` into a snapshot not yet loaded reads, checks and parses it | a snapshot is held only after its first use; the day table finds it in one index | O(rows of that snapshot) once per book (331 ms for two real-size snapshots); then one index and at most two probes (p99 5.3 µs) | R4-28 |
+| L-R428-02 | Memory of a book grows with the snapshots it has loaded | each loaded snapshot keeps its rows and index; a walk that must not keep them uses `Book::with_snapshot`, which reads one at a time | about one parsed dump per loaded snapshot; the day table is one `u32` per calendar day spanned, at most 40 years | R4-28 |
+| L-R428-03 | The diff is O(rows of both snapshots) | it compares two whole dumps, once per refresh that lands a new Kite snapshot, at operator time | 419 ms at 108,915 rows | R4-28 |
+| L-R428-04 | CLOSED by R4-28 repair 1 (D-7187). `fnowork::futures_plan` used to read every receipted snapshot on or before the window's end, one at a time, on every run and for every underlying | the first snapshot that lists each future is the start of the days its token is believed to name it; that day is now read from the first-listed index (L-R428-07) | was O(snapshots x rows) per underlying per run, measured linear by a second agent: 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at 40 (real 108,915-row dump, dev profile) | R4-28 |
+| L-R428-05 | Which contract a continuous candle came from is UNVERIFIED | the vendor states no roll day | the continuous series is filed as answered under `<UNDERLYING>-FUT-C1` and never split into contracts | R4-28 |
+| L-R428-06 | Contracts that expired before the first snapshot have no per-contract series | no token of theirs was ever cached; the vendor reaches them only through `continuous=1` | their days are in `<UNDERLYING>-FUT-C1` only, labelled | R4-28 |
+| L-R428-07 | A futures plan still parses the NEWEST snapshot once per request (D-7187) | `token_reused` and the continuous series are checked against the newest dump, which is opened per request; every older snapshot is read from the first-listed index instead, and the absorbed log and the directory listing are one short record per snapshot | O(rows of the newest dump) per underlying per run, plus a small term linear in the snapshots held, which is NOT flat: the directory listing, the absorbed log (one short line per snapshot, read and checked whole on every plan) and the stamp loops. A second agent measured it on synthetic 2,000-row snapshots: 1.74x at 1,000 snapshots against 1, about 1.5 us per snapshot (R4-28 r2 check); at real dump size the newest parse dominates. Unbounded in principle, bounded in practice by the attended refreshes: one snapshot a day refreshed, and a `_2` only when a same-day refresh differs. Measured on a copy of the real 108,915-row dump, dev profile, the book opened and NIFTY planned, n=50 single calls a size: 1 snapshot p50 119.1 ms, p99 122.6 ms, max 146.0 ms; 10 snapshots p50 119.4 ms, p99 125.2 ms, max 126.3 ms; 100 snapshots p50 116.8 ms, p99 120.1 ms, max 149.7 ms (`fnowork::futures_tests::a_real_size_plan_does_not_grow_with_the_snapshots_held`, opt-in). Before the index: 240 ms at 1, 1,331 ms at 10, 5,008 ms at 40. C-MS-02 holds it flat at 1, 10 and 100 synthetic snapshots | R4-28 |
+| L-R428-08 | Writing a Kite snapshot now also takes its futures into the first-listed index | one parse of the snapshot, and one append and sync per underlying with a contract no earlier snapshot listed (a new month lists one per underlying); the absorbed line is synced last | once per attended refresh. Measured on the same copy, 100 snapshots written: p50 337 ms, p99 851 ms, max 7,076 ms; the max is the first snapshot, which creates and syncs 219 index files (one per NFO future name). Disk: one 82-byte line per contract ever listed, one 60-byte absorbed line per snapshot; after those 100 snapshots, 219 files and 884 KB on disk (4 KB blocks) | R4-28 |
+| L-R428-09 | A first-listed index that does not match its commit log is rebuilt as a new generation (R4-28 repair 2; D-7188) | a file missing, cut or garbled, or a commit-log line that does not check, cannot say which contracts exist from which day, and nothing on disk can repair it but the receipted snapshots themselves; the damaged generation is left as found (append-only), so each damage found costs one new generation's disk too | linear in the snapshots held: every receipted snapshot is read and parsed once more, once per damage found. MEASURED as a whole rebuild by the R4-28 r3 check (`state/fix/round2/verify-R4-28-r3.progress.md`, probe `probe_v3_rs_rebuild_at_real_size`, a copy of the real 108,915-row dump, dev-test profile, load 54-121): 6,580 ms over 10 snapshots (658 ms a snapshot) and 12,993 ms over 30 (433 ms a snapshot), so 0.43 to 0.66 s a snapshot on that host; at 100 snapshots that is about 43 to 66 s (EXTRAPOLATED from the 10 and 30 measurements), under the writers' lock, so a refresh or plan that finds it waits that long. The repair-2 estimate it replaces (0.12 to 0.34 s a snapshot, extrapolated from L-R428-07 and L-R428-08) was below what was measured. A second damage in the same call is refused `futures_index_damaged`, never rebuilt in a loop | R4-28 |
+| L-R428-10 | Every refresh names every incomplete snapshot entry of its kind, and it costs one directory listing (R4-28 repair 3) | the code deletes nothing, so a write cut by a kill stays on disk until someone moves it aside by hand, and every later refresh names it again: in the `/masters/refresh` outcome (`snapshot.incomplete`), in one Warn `pull.masters.snapshot` event each, and in the facts of every futures pull over the book. A refresh that writes nothing (a refused landing, an empty body) lists the directory once to name them; a write already lists it under the writers' lock and names them from that listing | at most `master_snapshots::INCOMPLETE_NAMED` (64) entries are named per refresh outcome, per refresh's events and per plan, newest first; the rest are counted (`unnamed`, one more Warn event, one more plan line), never dropped unseen. The listing itself is O(entries in the snapshots directory), as every write already was (L-R428-08) | R4-28 |
+| L-R428-11 | A refresh names at most `DIFF_NAMED` (256) of the diff's symbol, ISIN, lot-size, expiry and token changes (R4-28 repair 4) | an exchange-wide revision (a lot-size change for every contract) changes one row per contract, tens of thousands in one dump, and one Warn event and one outcome object each would be that many | the first 256 in the diff's own order are named in the `/masters/refresh` outcome (`diff.named`) and in one Warn `pull.masters.snapshot` event each; the rest are counted (`diff.unnamed`, `diff.named_total`, one more Warn event naming the `.diff` file), and every change of every kind is in the fixed-record `.diff` file, never dropped | R4-28 |
+| L-R428-12 | `Book::open` waits for a master write in flight (R4-28 repair 4) | the listing takes the writers' lock shared, so a body whose receipt is still being written is never named cut; it waits for that writer and no other reader | the wait is the writer's own hold, which is measured: a snapshot write with its futures take-in p50 337 ms, p99 851 ms, max 7,076 ms (L-R428-08), and, only after damage is found, a first-listed rebuild at 0.43 to 0.66 s a snapshot held (6,580 ms over 10 and 12,993 ms over 30 measured; about 43 to 66 s at 100, EXTRAPOLATED: L-R428-09); a diff is computed outside the lock and holds it only for one write, sync and rename. The wait itself is NOT MEASURED apart from those holds | R4-28 |
+| L-R428-13 | `Catalog::read` orders what its one listing found, and the diff orders its own records (R4-28 repair 5; D-7191; gate 11 rule 4, declared) | a directory lists its names in no order, and the listing is the only place the receipted stamps of a kind and the entries named incomplete are put in order; the diff's records are put in one order so one pair of dumps writes one `.diff` byte for byte | the listing is O(entries in the snapshots directory) (L-R428-10) and its orderings O(n log n) in the receipted snapshots of a kind and in the incomplete entries, once per listing; every answer after it (`of_day`, `before`, `is_receipted`) is one hash probe, and nothing else in the module sorts or searches the stamps. The diff's ordering is O(c log c) in its c changes, once per attended refresh, inside its O(rows) comparison (L-R428-03). MEASURED 24 Oct 2026 on the Mac with the host at load average 70 to 167 on 14 cores (other agents' builds), dev-test profile, `master_snapshots::tests::measure_the_catalog_listing_and_its_probes` (opt-in), n=200 a size, one body name and one receipt name a snapshot: `Catalog::read` at 1 receipted snapshot p50 20 us, p99 114 us, max 1,165 us; at 100 p50 130 us, p99 701 us, max 1,924 us; at 1,000 p50 1,292 us, p99 2,461 us, max 2,629 us (linear in the names, about 1.3 us a snapshot at p50); the three probes after it together p50 84 to 209 ns, p99 333 to 1,375 ns, max 666 ns to 10.75 us, flat. The same run's real-size dump (`a_real_size_dump_is_measured`, the copy of the 108,915-row dump): the diff with its ordering 509 ms, one parse 109 ms (earlier rounds 83 to 115 ms; one sample each, so no faster or slower is claimed) | R4-28 |
 
 ## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
 
@@ -21665,6 +21788,22 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-T2S-11 | The `--out` containment check (D-5187, D-5189) asks the host where each component of `--out` and of each root is, and follows a root's links outward only at the root's top | a path is placed only by the host: each component that exists is resolved with `canonicalize`, which walks the path again from its root, so one check is O(c^2) host lookups for c components, bounded by the path's depth and paid once per run, never per row or per day; a link INSIDE the store is refused by the written form. An `--out` written as the physical target of a link at the TOP of the store or of the tick store (`/data/bars/r` where `<store>/bars -> /data/bars`) was not refused until D-5189 (amended 23 Oct 2026, verify-DATA-2-r3 ATK-16): `link_around` lists each root's top once and reads each link there once (a relative target taken against the root, a dangling one included), O(entries at the root's top) once per run. The target of a link DEEPER in a root is still not followed, and a link swapped in between the check and `create_dir_all` is not seen. Its lock name is opened once per run by `pull::gdfl_run::locks::open_lock_path` (D-5188, amended 23 Oct 2026: `O_NOFOLLOW \| O_NONBLOCK`, then a regular file with exactly one name); the name is not checked again after the lock is taken, so a lock file removed or replaced under a live run is not seen (no command of this repository deletes one) | `take_lock` (open and lock of a name a run left), n = 1,000 calls in the host's temp directory on the internal disk (dev profile at opt-level 3, `the_lock_name_is_timed_once_per_run`, 23 Oct 2026, machine loaded by other builds): p50 21,584 ns p99 33,333 ns max 517,208 ns, **measured**, once per run; on WD_BLACK not measured (UNVERIFIED). `inside`, n = 1,000 calls for each of four shapes on WD_BLACK under a loaded machine (dev profile at opt-level 3, `the_out_containment_check_is_timed_once_per_shape`, 21 Oct 2026): through `..` p50 130,291 ns p99 276,459 ns max 392,875 ns; a bare relative name p50 113,166 p99 152,375 max 537,041 ns; through a link p50 101,291 p99 159,542 max 320,125 ns; outside p50 73,792 p99 144,125 max 470,417 ns. **Measured**, once per run. Re-measured 23 Oct 2026 at 19:12 IST in the host's temp directory on the internal disk (dev profile at opt-level 3 with debuginfo, all six of the machine's cargo slots busy, n = 1,000 each): `take_lock` p50 14,042 ns p99 47,083 ns max 91,500 ns; `inside` through `..` p50 124,958 p99 505,791 max 19,915,000 ns, a bare relative name p50 105,042 p99 364,375 max 7,965,667 ns, through a link p50 97,625 p99 309,667 max 17,083,750 ns, outside p50 69,042 p99 203,334 max 12,909,166 ns; `link_around` (D-5189) on a root of eight entries, two of them links, `--out` outside both, p50 129,500 ns p99 450,292 ns max 16,975,292 ns (`the_d_5189_steps_are_timed`). **Measured**, once per run each; the maxima of several milliseconds are single calls on a machine that busy, and p99 stays under 0.51 ms. The real store and the tick store hold no link at their top (`ls -la` and `find -maxdepth 1 -type l`, read-only, 23 Oct 2026), so on them `link_around` refuses nothing; a shadow store holds its `bars` link there. Deeper levels were not walked (UNVERIFIED) | DATA-2 |
 | L-T2S-12 | Each file the check reads back, each archive it opens and each row's symbol cell costs one more bounded step (D-5189) | a version CSV, index or day segment is opened `O_NOFOLLOW \| O_NONBLOCK` and `fstat`ed before its one read (`index::read_regular`, once per file a run reads; the read itself is O(file bytes), as L-T2S-10 says); an archive is opened `O_NONBLOCK` and `fstat`ed before the importer's reader indexes it (`open_archive`, once per archive a run reads); a row's symbol cell is one pass over the share's name, at most the host's file-name length (255 bytes), so O(1) per row; a share whose months cannot be listed in a run with no YEAR is planned by every month of the years in play, 12 opens a year at most, as L-T2S-03 counts | n = 1,000 calls each, the host's temp directory on the internal disk, dev profile at opt-level 3 with debuginfo, all six cargo slots busy (`the_d_5189_steps_are_timed`, 23 Oct 2026 19:12 IST): `read_regular` of a 64 KiB file p50 11,958 ns p99 34,625 ns max 82,708 ns; `open_archive` of a small invented archive p50 12,958 ns p99 57,083 ns max 321,625 ns (the open, the `fstat` and the reader's central directory); `symbol_cell` of a name the store admits p50 0 ns (below the clock's step) p99 42 ns max 292 ns, of a name it escapes p50 42 ns p99 84 ns max 38,583 ns. **Measured**. On WD_BLACK and on the 128 GB vendor archive not measured by this test (UNVERIFIED); the real-data runs time whole share-days (L-T2S-04) | DATA-2 |
 
+## The data checks on `/ingest` (DATA-1w, D-5190 to D-5195)
+
+`GET /feed-checks.json`, `GET /tick-checks.json` and `GET /calendar-days.json`
+(`crates/api/src/feed_checks.rs`, `crates/api/src/feed_checks_files.rs`),
+read-only over the check folders D-5193 names.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-D1W-01 | A request is one `stat` of the folder, one map probe per month or year on the page and O(limit) rows; `limit` may be any value up to the list's length, so one answer may carry a whole month's shares or a share's days | nothing typed (operator 16 Oct 2026 17:15 IST): the page size is the asker's, and the panel asks a whole list in two asks (D-5192) | O(limit) per request, O(1) per row returned. MEASURED 24 Oct 2026 on this package's shadow (release `api`, 127.0.0.1:9105, n = 200 sequential GETs per URL, `curl` `time_total`, one connection each, versions already held): `/feed-checks.json` over a synthetic format-3 folder of three months x 213 shares x 20 days (4,260 rows a month) p50/p99/max 0.432/0.592/0.655 ms for the months; a month at limit=1 0.420/0.812/0.869 ms and at limit=213 (the whole month) 1.053/1.251/1.296 ms; one share's 20 days 0.455/0.757/1.033 ms; a source row 0.449/0.582/0.646 ms; a 404 month 0.398/0.527/0.607 ms; a 400 month 0.370/0.455/0.489 ms. `/tick-checks.json` over the REAL DATA-2 versions in `state/datacheck/rust-t2s-r6/out` (2019, 2025, 2026; 2019 is 71,202 rows): the years 0.446/0.621/0.865 ms; 2019's months 0.523/0.645/0.672 ms; 2019-03 at limit=1 0.435/0.720/2.711 ms and at limit=287 (every share) 2.479/2.844/3.255 ms; M&M's 19 days 0.474/0.680/0.776 ms; a source row 0.496/0.955/1.169 ms. `/calendar-days.json` the years 0.401/0.612/0.638 ms and 2024's 20 days 0.448/0.624/0.726 ms. The whole-list pages grow with limit, as this row says; every other figure stays flat | DATA-1w |
+| L-D1W-02 | The first ask of a version parses it whole, and a folder whose modification time moved is listed again | a version is a CSV whose rows are not fixed-width; the one pass interns every word into fixed-stride rows, after which a row is one index | O(the version's bytes) once per version per server process (the `cold` figure), and O(names in the folder) once per change of the folder's time, never per request otherwise. MEASURED 24 Oct 2026 (the `load_micros` each answer states, release build, the shadow above): the real tick-to-second versions 2019 (37,958,020 bytes, 71,202 rows) 200,584 us, 2025 216,985 us and 2026 166,353 us; a synthetic feed month (608,992 bytes, 4,260 rows) 6.7 ms | DATA-1w |
+| L-D1W-03 | The newest version of every month and year asked is held in memory for the server's life | a version is immutable once its name appears (append-only), so a parse need not be repeated; nothing evicts a month never asked again | bounded by the months and years the folders hold, one version each (a superseded version is replaced, never kept beside it): a feed-reconcile month of about 213 shares x 23 days is under 5,000 rows of a few dozen bytes each; a tick year of the size L-T2S-09 names (about 115,000 share-days) is a few MB. Not measured as resident memory (UNVERIFIED) | DATA-1w |
+| L-D1W-04 | The source row behind a number is re-read from the file and checked against the FNV-1a of the line as it was loaded, not against a cryptographic digest | the tick CSV's BLAKE3 is checked once against the index at load; a per-line BLAKE3 would cost the load a second hash per row for a file the law already forbids rewriting | one positional read of one line per ask; a rewrite that keeps a line's length and FNV-1a is not detected by that read (the load's own checks still run on the next version) | DATA-1w |
+| L-D1W-05 | Which folder holds the real checks on the operator's store is a deploy choice, not a measurement | DATA-1's full run and DATA-2's `--out` are main-session store steps (D-5193); until they land in `<store>/audit/` or the variables name them, every route answers 404 naming the folder | the shadow check of this package served that 404 against a shadow of the real store (MEASURED 24 Oct 2026 on the final build: with neither variable set, every route of both checks answers 404 "`<shadow>/audit/tick-to-second` does not exist: no tick-to-second check has been written there yet", D-5197; the real feed-reconcile versions under `state/datacheck/rust-feed-reconcile-20261016` are format 1 and each is refused by name, "is not `# brutex feed-reconcile 3`", one `/logs` warning a version for five asks); the populated tables were checked on synthetic check files only | DATA-1w |
+| L-D1W-06 | A refused version's answer is held until a newer version appears or the server restarts, a refusal from the host included (D-5196) | the writer's door returns words, not a kind, so a refusal of the bytes and one of the host cannot be told apart; re-reading a refused version on each ask is the O(bytes)-per-request cost D-5196 removed | one load per version per process; the answer names the restart that clears it. A host fault that heals is served as refused until then | DATA-1w |
+| L-D1W-07 | A tick-to-second load groups its rows by share once, after the last row (D-5197): one pass over the rows and one sort of each month's shares, and a `u32` per row more is held (`TickYear::by_share`) | the writer prints rows by (day, symbol, role), so a share-month is not one run of the file; grouping on each request would be O(rows) a request | inside the one load L-D1W-02 bounds and measured there (2019's 71,202 rows load in 200,584 us, grouping included); a share-month page is then one slice, O(limit). The sort is O(s log s) for s shares of a month, at most the shares the year holds (287 in 2019-03) | DATA-1w |
+
 ## Vendor-padded minutes, the summary's version 2, and the measured decisions (R4-27; D-7270 to D-7274)
 
 | ID | Limit | Why it is not closed | Bound | Package |
@@ -21686,3 +21825,126 @@ version files named are under the run folder `state/datacheck/rust-t2s-r6/out/` 
 | L-IA4-02 | An options file's refused rows are named in a `warn` log line (first 16) and counted on the day's D-3335 line, not yet in the durable audit stream with file and line | the durable naming is R4-22's (FM-077's audit half, IMPORT-BAD-ROW); IA-4 is the decode half | one log line per file, O(1) per row | R4-22 |
 | L-IA4-03 | NOT DONE: definition 5 has no sentence in R3-13's `definition_means` (`crates/api/src/dayflags_rules.rs`, the /db day band), which names 1 to 4 | R3-13 was not merged on feat/db-fix when IA-4 landed, so there was nothing to extend | the band shows no meaning for `definition=5` until it lands | R4-27-OPT |
 | L-IA4-04 | NOT DONE: a resume under another definition (RA-308, test IA-GR-06d) is read whole under the new one, but no journal line or page says "resumed under a new definition" | a day left open is read again file by file under the running definition, and the store answers `AlreadyPresent` or refuses by name, so no mix is filed silently; naming the previous definition needs a journal field and a page row the IA-4 change does not own | the warn line `importing again a day an earlier run did not finish under this bar definition` names the day and the running definition | IA-16, IA-12b |
+
+## The /db day band's read-time rules (R3-13, D-7300)
+
+Measured 20 October 2026 on two fresh shadows of the real store
+(`state/fix/shadow.sh`, bars linked read-only, `serve.sh` under the kernel
+write lock), GET requests only. Before: a release build of the head of `feat/db-fix` on 20 October
+2026 (its AH-05 merge), in a target directory of its own, on `127.0.0.1:9701`. After: this
+branch, release, on `127.0.0.1:9700`. Each query ran on both servers,
+interleaved: the first request after start (cold), then n = 200 sequential
+requests (warm, one `curl` each reading `%{time_total}`), then n = 1,200
+requests over 60 concurrent clients (`xargs -P 60`). The machine was shared
+with other builds (load average 10 to 15 on 14 cores). Cold starts were
+sampled again by restarting both servers ten times, alternately, and timing
+one request per query after each start (memos empty, page cache warm). An
+import writing at the same time was NOT MEASURED on the real store (no writer
+may run against a shadow whose bars are the real store's). On the synthetic
+store (`the_day_band_is_timed_cold_warm_concurrent_and_growing`, run on this
+Mac on the same day, release-like test profile): warm, one client, n = 1,000,
+p50 2.02 / p99 3.38 / max 3.87 ms; the same with an import appending to the
+journal 2.07 / 3.56 / 3.81; 60 clients with an import writing (973 lines
+appended), n = 1,200, 31.5 / 120.5 / 142.2; cold (a fresh copy of the store,
+memos empty), n = 20, p50 11.6 / max 13.0; and the warm p50 at 10x and 100x
+the history no page reads is 0.89 and 0.89 of 1x (the gate is 3).
+
+**Re-measured 20 October 2026, 12:04-12:08 IST**, after `feat/db-fix`'s IA-3
+merge and D-7300 item 17 (item 18 came after it and adds one field lookup on
+a share day that counts auction prints): a release build of this branch on
+`127.0.0.1:9700` and the base (the head of `feat/db-fix` at its R4-09a
+merge, before IA-3, which changes nothing in `crates/api`) on
+`127.0.0.1:9701`, two fresh shadows, run in the order branch, base, base,
+branch (the first pass of each was taken at load average 15 to 20 on 14
+cores and is in the R3-13 report, not here). The second pass, warm,
+n = 200, p50 / p99 / max ms, base → branch: GDFL NIFTY 2024-07..09 3.59 / 4.55
+/ 6.93 → 2.62 / 3.17 / 5.65; Zerodha NIFTY 2.55 / 3.10 / 3.90 → 2.12 / 2.80 /
+**4.19**; Zerodha BANKNIFTY 2.41 / 3.00 / 7.41 → 2.21 / 2.76 / 4.66; Zerodha
+RELIANCE 3.62 / 4.33 / 5.96 → 3.31 / 3.81 / **6.82**; GDFL RELIANCE 4.12 / 4.66
+/ 4.79 → 3.98 / 4.62 / **6.69**; GDFL NIFTY 2019-11-28 12000 CE, 2019-09..11,
+3.41 / 4.08 / 4.87 → 2.51 / 3.11 / **7.19**. 60 clients, n = 1,200: 6.22 /
+15.42 / 19.81 → 4.75 / 13.09 / 17.16; 4.23 / 27.49 / 34.66 → 4.04 / 10.94 /
+21.99; 4.02 / 13.14 / 21.77 → 3.79 / 8.05 / 18.53; 6.23 / 17.36 / 37.17 →
+5.18 / **20.86** / 25.11; 6.47 / 15.48 / 20.49 → 6.11 / **17.94** / **35.52**;
+5.57 / 18.92 / 34.01 → 4.66 / 17.43 / 29.05. Bold: the branch above the
+base. p50 is lower on the branch in every case; single
+maxima and two 60-client p99s are higher, on a machine shared with other
+builds, and are stated rather than dropped.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R3-13-1 | `/dayflags.json` with R3-13's rules, measured on the real store | a page is at most 92 days, and each day reads a bounded set (L-R3-13-2, L-R3-13-3); the figures are what that costs | **Warm, n = 200, p50 / p99 / max ms, before → after:** GDFL NIFTY 2024-07..09 3.48 / 4.18 / 4.76 → 2.55 / 3.13 / 3.37; Zerodha NIFTY 2.56 / 3.18 / 3.46 → 2.12 / 2.62 / 2.66; GDFL NIFTY 2019-11-28 12000 CE, 2019-09..11, 3.37 / 3.80 / 4.12 → 2.73 / 3.33 / 3.55; Zerodha BANKNIFTY 2.52 / 3.03 / 3.10 → 2.10 / 2.62 / 4.14; Zerodha RELIANCE 3.73 / 4.44 / 4.71 → 3.20 / 3.77 / 4.08; GDFL RELIANCE 4.10 / 5.71 / 12.10 → 4.01 / 4.85 / 10.81. **60 clients, n = 1,200:** 5.25 / 14.09 / 24.84 → 3.90 / 11.32 / 20.55; 3.94 / 7.45 / 15.69 → 3.19 / 7.47 / 11.72; 4.80 / 8.65 / 9.87 → 4.16 / 7.14 / **16.92**; 3.81 / 14.62 / 20.69 → 3.14 / 7.47 / 8.34; 5.64 / 10.36 / 13.48 → 4.94 / 9.47 / **13.85**; 6.08 / **11.29** / 28.84 → 6.01 / **13.30** / 20.78 (bold: after above before; a second full run on the build before the auction-window fix had other tails above, e.g. Zerodha NIFTY max 44.14 against 33.09, so at 60 clients on a shared machine the tails move run to run and p50 is lower in every case). **Cold, ten restarts each, median / max ms:** a process's first request (the Zerodha NIFTY page) 73.4 / 132.3 → 77.9 / 114.8; its first GDFL page 4.24 / 6.34 → **22.16 / 26.89**: the late-row ledger's first read of the 14.0 MB, 23,270-line import journal, once per process (L-R3-13-3 d), after which a GDFL page is 2.9 to 3.1 ms; its third, GDFL RELIANCE, 4.55 / 24.45 → 5.15 / 16.94. A page whose 63 index sessions are scanned cold costs 3.1 to 3.2 ms once the process's ledgers are read. Where "after" is above "before" it is said here, not hidden: the target "no slower than today" is met at p50 everywhere and in warm p99 and max, and not in every 60-client tail or in the first GDFL request of a process | R3-13 |
+| L-R3-13-2 | The frozen-index and day-range flags judge only what each feed's measure can see | Zerodha's flag is read from minutes and GDFL's from the import's day ledger; neither reads seconds at request time | **Zerodha:** each index day's one-minute bars once per process, at most 1,440 record reads a day (`MAX_SCAN_BARS`; a day holding more is not scanned and its `frozen` is `null`), a page's first scans on one scoped thread a month on the month's own handle. **GDFL:** `flat_max_s` and `flat_max_at` of the day ledger only, which keep the day's LONGEST unchanged run and nothing shorter: so `flagged` is `false` only where that run is under 180 s, and `null`, never "not frozen", where it lies in the recorded halt or the auction window (every auction-era day the ledger has measured, 2026-09-25..30, from 15:15:00) or has no stamp on such a day — a shorter frozen run elsewhere in that session is NOT MEASURED (D-7300 item 19); a day the ledger does not measure (every import before the field existed, e.g. 2020-03-13 and 2022-03-07) is `null` and says so; a value outside the day range is not judged on GDFL at read time (up to 22,500 seconds a day). **Set aside, never judged:** a recorded halt, and from 2026-08-03 the cash closing auction's window, `[15:15:00, 15:30:00)` from the session tables, on NIFTY and BANKNIFTY alone, the two indices whose stillness there is sourced (D-7300 items 15 and 25; the stillness is measured, `docs/00-charter.md`, its cause UNVERIFIED). **Not judged on any other index:** a run that reaches 180 s only inside that window is `null`, "index frozen not judged", never "not frozen" and never "frozen" — which of such an index's runs there are the auction's cannot be told from its minutes, and the store holds no constituent list that would tell it (of 135 Zerodha index series, 37 hold still through the window on all 42 auction-era sessions and 70 never hold one value there for 180 s); until repair 2 the window was set aside on every index, so a frozen feed there read "not frozen" (verify-R3-13-r2 X1). The 180 s threshold is chosen, not sourced. On the real store, 2018-2026, Zerodha flags exactly one frozen day for NIFTY and one for BANKNIFTY, 2022-03-07 (before the window was set aside it also flagged all 42 sessions of each from 2026-08-03), and a value outside the day bar's range on 9 NIFTY and 4 BANKNIFTY days | R3-13 |
+| L-R3-13-3 | What the band keeps for the process, and what it reads per page | each is read once and kept so a request does not repeat it; each is bounded by the store, not by the requests | (a) the scan memo holds one entry per (month file, index day) a page has shown, about 130 bytes each: at most the store's Zerodha index days (135 series here; an extrapolation, not a measurement, puts every day of every series at under 100 MB), keyed by the file's (device, inode) and the day's first row, so a new generation of a month is read afresh — on APFS, the store's file system, `store`'s inode-reuse test passes with its files on the store's volume; (b) the previous `1day` bar: 12 opens back, then at most 144 `stat`s and one open, once a page; (c) a share's dated closing-auction flag: that day's NSE master read once a day for every F&O underlying together (one read keeps the 213 flags) and once for each (share, day) outside that list, and the answers kept, never the master (D-7300 item 20; the cold read is L-R3-13-4; a refusal once per request); a GDFL share's `.auc` sidecar: one read of the small file a month a request, each day answered from it by one hash probe of a set sized once by its records (repair 1; closes L-AH03-2 for the band; `sources.rs` stays AG-04's); (d) the late-row ledger: the whole import journal once per process (14.0 MB, the cold cost in L-R3-13-1), then only the bytes appended; (e) a GDFL share page counts the market index (NIFTY) beside it, one open a month and two lookups a day, and reads one record a day for its first second; (f) a renamed share's peer is counted under each other name only where its own name holds no month | R3-13 |
+| L-R3-13-4 | A share's dated closing-auction flag read cold: the first auction-era share page of a process | each auction-era day's flag needs that day's NSE master expanded (11 MB, 37,237 records, `docs/00-charter.md`) and parsed by `pull` (`DailyEligibility::parse`, not R3-13's); nothing smaller on disk holds the flag, so a day's first read is a whole-file parse, bounded by `MAX_EXPANDED` and run at most `LOADS_AT_ONCE` = 4 at a time in the process (D-7300 item 20) | **In process, release, n = 200 each, p50 / p99 / max ms** (`the_cold_auction_era_share_page_is_timed` over a read-only shadow of the store, 23 Oct 2026; cold = every kept flag dropped before each ask, the route's other memos warm): Zerodha DALBHARAT 2026-08-10..09-30 (37 auction-era sessions) cold 817 / 963 / 986, its flags alone 752 / 927 / 1,051, ten concurrent cold asks 756 / 765 / 765, warm 1.28 / 1.57 / 1.60; Zerodha RELIANCE 2026-08-03..09-30 (42 sessions) cold 845 / 888 / 889, flags alone 882 / 1,466 / 1,963, ten concurrent 846 / 869 / 869, warm 1.52 / 2.11 / 2.42. **Through the server, ten restarts:** the first auction-era share page of a process (DALBHARAT 08-10..09-30, after 08-03..07 at 154-165 ms) 0.78-0.87 s, against 2.57-3.15 s before this repair and 0.005-0.011 s on the base, which read no master; a second F&O share right after (RELIANCE 08-03..09-30) 2.4-16 ms, every F&O underlying's flag being kept from the first page's reads; a share outside the F&O list (AAVAS) 0.87-0.97 s, its own reads. Ten concurrent cold asks of the DALBHARAT page: 8 answered in 0.76-0.88 s and 2 refused 429 by the server's admission limit, against 4.47-4.53 s before. **Memory:** no master is held — the malloc zone's live bytes stay 6.7 GB across the first auction-era pages (`vmmap -summary`), and the flags add about 17,500 live allocations for 47 days of 213 shares; the process's physical footprint rises 0.6-0.7 GB once (`footprint`), which is libmalloc's cache of the parses' freed large buffers ("Malloc Large (empty)" 386 MB → 1.1 GB), reused by later parses (two more shares over the same 42 days: −0.10 GB and +0.005 GB), against +744 MB for 42 days and +1.39 GB at ten concurrent asks before; that cache's own cap is the allocator's, UNVERIFIED here. Measured after the server's startup census warm settles (about 0.5 GB in its first 10 s, which confounds an earlier reading). **Not met:** the spec's cold target "no slower than today" for this page — about 0.8 s against 5-11 ms — until `pull`'s parse is cheaper (its map reserved for every record, not the 4,428 EQ rows it keeps) or one bounded master memo is shared with `bars_change` and `sources`; both are named for their owners | R3-13 |
+
+### Gate 11 — R3-13, the day band's constructs, read and declared (repair 1, 23 October 2026)
+
+`state/fix/ci-shell-gates.sh --jobs language-purity --fast` on this branch after
+the BASE-GATE11 merge, compared step by step with the same run on feat/db-fix's
+head at that merge: gate 11 refused R3-13's files and nothing else that
+feat/db-fix does not already refuse. Five constructs were rewritten (D-7300 item 24) and the
+rest are declared here, each read before it was counted:
+
+~~~~text
+REWRITTEN -- api/src/dayflags_rules.rs
+  rule 1 + rule 4: a month's auction sidecar was a sorted, deduplicated Vec
+    searched by `binary_search`; it is now a HashSet sized once by the
+    file's records, and a day is one probe (`said_of`).
+  rule 4: the frozen run's two set-aside windows (the recorded halt and the
+    cash closing auction) were sorted; two windows are put in order as
+    their min and max (`outside_of`), one comparison each.
+  rule 3: FLIGHTS (sized for LOADS_AT_ONCE = 4 parses), READS (test only),
+    CasFlags::refused and SCANS (one page, PAGE_DAYS = 92) and
+    AuctionSidecars::seen (PAGE_MONTHS = 5, the most months 92 days touch)
+    are sized once, before they are filled.
+RULE 4 (`ALLOW_SORT`) -- api/src/dayflags_rules.rs 0 -> 1: `CasFlags::refusals`
+  puts one request's refused days in day order: at most one a day of a page
+  of PAGE_DAYS = 92 days, once per request, so the band's refusals read in
+  day order whatever order the page's threads finished in.
+RULE 6 (`ALLOW_SCAN`) -- api/src/dayflags_rules.rs 0 -> 1: `asked_rung` finds
+  the `timeframe=` word in `store::path::Timeframe::KNOWN`, a compile-time
+  table of ten rungs, once per request (`Timeframe::from_secs` searches the
+  same table the same way).
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags_rules.rs 0 -> 1: `said_of`'s
+  `days.contains(..)` is a probe of that HashSet, a hash probe.
+RULE 7 (`ALLOW_MEMBER`) -- api/src/dayflags.rs 1 -> 4: beside AF-02's
+  closers list (the 1 declared on 17 October), `QualityLine::SERVED` (three
+  names) asked once per field of a day-ledger line; `FLAGS_VERSIONS` (two
+  versions) asked once per line, IA-16's, merged onto feat/db-fix
+  undeclared (feat/db-fix refuses it at its BASE-GATE11 merge); and
+  `peer.per_day`,
+  one page's peer days, at most PAGE_DAYS = 92, asked once per page whether
+  any holds no file (DB-031's renamed-share lookup).
+~~~~
+
+Gate 23 (`api/src/dayflags_rules_tests.rs`: `eprintln!` 6, `println!` 1, every
+one in an `#[ignore]` timing of a `#[cfg(test)]`-mounted file), gate 12 (two doc
+blocks that claimed a cost and named no test now name
+`the_day_band_is_timed_cold_warm_concurrent_and_growing` and
+`the_cold_auction_era_share_page_is_timed`) and gate 10 (five `✓` rows whose
+proof was a front-end test or a measurement now name the test file or the
+timing tests) were R3-13's on the same run and are fixed in the same change.
+
+## The quarantine (R4-18, D-7290)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R418-01 | `store::quarantine::probe` is O(1), measured | one `open` (ENOENT for a feed never quarantined), one `fstat`, one 64-byte positional read of the header, one `lstat` of the ledger and one 512-byte positional read of the key's bucket (R4-18 repair 2); an index behind its ledger costs a second look and one shared `flock` asked without waiting, and while a writer holds the lock the same after each pause within the thread's patience (L-R418-13) | C-QU-01, `crates/store/benches/ratio/quarantine.rs`, n=300 single calls, repair 2 (24 Oct 2026, macOS, load 45-60): at 12, 120 and 1,200 quarantined months a hit p50 14.8/15.4/12.5 us, p99 29.5/27.3/21.1 us, max 54/38/72 us; a miss p50 21.2/15.3/12.1 us, p99 46.1/27.5/16.7 us, max 187/63/49 us; ratios 0.871x..0.939x, within the gate 8 ceiling (3,000 per mille). Before repair 2 (22 Oct 2026, one read and no `lstat`): a hit p50 10.3/10.1/10.0 us, p99 16.0/11.3/17.0 us; ratios 0.989x..1.010x | R4-18 |
+| L-R418-02 | `Snapshot::load` and `Summary::load` are not O(1) | they read the whole index (524,800 bytes) or the whole ledger, ONCE per cached `/store.json` or `/instruments.json` body; each row after it is one hash probe | C-QU-02 `Snapshot::load` p50 80/87/140 us, p99 99/101/178 us at 12/120/1,200 months, n=50. The ledger grows with the stamps named: 532,956 bytes and 194 lines (33 dropping, 33 dropped, 128 whole_month) after the four-share rehearsal (IRFC, KFINTECH, MAZDOCK, PIIND, every derived rung) | R4-18 |
+| L-R418-03 | `record` rewrites the whole index | an index published by staging file and rename is never half-written; one rewrite per act, on the write path only | 524,800 bytes and two syncs a record. The four-share rehearsal (194 ledger lines, 161 index records, 33 new revisions holding 6.8 MB) took 2 s for IRFC and 2 s for PIIND end to end | R4-18 |
+| L-R418-04 | The index holds 8,192 home slots, 8 a bucket, and its EFFECTIVE capacity is far below 8,192: the first refusal comes when any one bucket's 8 slots are taken | a bucket whose 8 slots all hold other months refuses `quarantine_index_full` by name BEFORE the act's ledger line (R4-18 repair 2: nothing is written, and the verb exits 1). A WHOLE-MONTH record refused this way leaves that month's bars SERVED until a larger index exists, so the verb's exit 1 must be acted on; a larger index (a wider bucket) is a new version beside v2 | SIMULATED, not measured on a store: uniform homes, the exact placement rule (home = hash mod 8,192, first free of the 8 slots from it), 300 trials, awk, 23 Oct 2026: first refusal after min 1,060, p1 1,580, p5 1,840, median 2,554, p95 3,156, max 3,545 entries (the second agent's own 300 trials: min 1,393, median 2,613, max 3,445). The rehearsal's 160 months fill 160 / 8,192 = 19.5 per mille of the homes (the earlier "2 per mille" was wrong) | R4-18 |
+| L-R418-05 | `publish_without`, `drop_month`, `restate_month` and `apply_month` are O(month) | they read and write the whole month, as every repair does | C-QU-03 (`drop_month`, one bar named, n=5, 22 Oct 2026, macOS temp dir, machine loaded): 183 bars (60min) p50 384 ms max 393 ms; 7,875 bars (1min) p50 534 ms max 650 ms; 472,445 bars (1s) p50 4.42 s max 9.24 s. The constant is the reservation, receipt, pointer and directory syncs every revision pays | R4-18 |
+| L-R418-06 | A derived bucket mixing a named minute and a kept one is set aside whole, not folded again | the repair fold (`pull::ingest`'s derive path) refuses a changed held bar and is not reachable from `cli` | for `before_listing` and `zero_price` every such bucket is wholly named; for PIIND's `foreign_level` the kept minutes of a mixed bucket are not served at the derived rung until a refold door exists | R4-18 |
+| L-R418-07 | `/store.json` and `/instruments.json` carry the quarantine of the body they cache | a body is kept per census read, so a quarantine recorded after it shows once the census changes (a `cli census-recount` after an apply); `/store.json`'s compact wire does not carry the field yet (R4-03) | one census refresh | R4-18 |
+| L-R418-08 | The census rows of a dropped month still count the bars of the generation before it | the verb writes no census; the store step runs `cli census-recount` after an apply | until the recount | R4-18 |
+| L-R418-09 | `store::quarantine::apply_month` holds no lock on the MONTH across its read, its decision and its write (the package's spec item 4, NOT DONE); since R4-18 repair 2 it holds the FEED's quarantine writer lock for its whole sequence, so two applies never interleave | every quarantine write of the feed is serialised under `audit/<feed>.quarantine.lock`, a whole apply at a time, and a drop publishes through `store::repair`, which refuses a source whose header moved since it was read (`StaleSource`), so a drop never publishes over an append; a WHOLE-MONTH record publishes nothing, so nothing reads the month again between `split_named`'s count and the record, and no lock that every appender of a month also takes exists to share | one append landing inside one apply's read-to-record window: that bar is withheld with the month, under a ledger line whose `bars` is the count read before it (withheld, never a foreign bar served) | R4-18 |
+| L-R418-10 | A torn quarantine index (not 524,800 bytes) or one whose header does not check answers every `/bars.json` month of its feed with 500 `quarantine_index_torn`, a damaged slot every month whose bucket holds it with 500 `quarantine_slot_damaged`, and an index that does not describe the whole ledger while no writer is at work (a publish refused or killed after its ledger line, R4-18 repair 2) every month of the feed with 500 `quarantine_index_stale`, by name, until a writer rebuilds the index (and while a writer holds the lock past the read's patience, 503 `quarantine_being_written`, ask again: L-R418-13) | a reader that cannot trust the index cannot tell a quarantined month from a clear one, so it serves no bars past it; the rebuild runs only under the writer lock: every apply and the verb's `--apply` run it first (`store::quarantine::catch_up`, named in the verb's output), the api does not run it at start; `/bars/window.json` names the fault per month and serves none of those months | from the tear to the next quarantine write on that feed | R4-18 |
+| L-R418-11 | `/bars.json` serves a month with a dropped subset without naming the drop | its 200 answer is a bare JSON array, which no field can join without changing every reader of it; what it serves is the generation without the named bars, which is the instrument's own. The drop is named by `/instruments.json`'s quarantine counts and by its ledger line | every dropped month, until a header or an envelope carries it | R4-18 |
+| L-R418-12 | A damaged quarantine ledger line (a checksum that fails, a line that does not parse) holds every rebuild, catch-up, listing (`/store.json` 503 by name, `/instruments.json` rows `{"unknown":"quarantine_ledger_damaged"}`), door (`repair_month` and `restate_month` of a month a drop names) and apply of its feed refused by name until the ledger is restored from a copy (R4-18 repair 2, D-7291) | the act the line recorded is not known, so any index or count built without it could answer "clear" for a month it names; the ledger is append-only, so no verb rewrites or skips the line. While the published index still describes the whole ledger, `probe` (and so `/bars.json`, `/bars/window.json` and the stored sweep) keeps answering from it: it was built while the line was whole | from the damage to the restore; a restore is an operator step (`R4-09b`'s backup) | R4-18 |
+| L-R418-13 | A read of a quarantined feed waits, or is refused by name, while an act is being published | the ledger line is written and synced before the index is published, and a reader never answers from an image behind its ledger (R4-18 repair 2, D-7291): while a writer holds the feed's lock it cannot tell that writer's act in flight from an act a failed publish left unindexed that the writer is still bringing level, so it waits for the writer's image within its thread's patience (the server's page reads have `api::detail::READ_PATIENCE_MS`, 200 ms; the CLI, the importer and the stored sweep none) and is refused `quarantine_being_written` when it runs out: 503 "being written, ask again" with `Retry-After` on `/bars.json` and `/bars/window.json`, `month_busy` to the importer, a named refusal to the stored sweep. A read that meets no lag pays one `lstat`; one that meets a lag pays a second look and one shared `flock` asked without waiting, then the same after each pause of the store's one wait loop (1 ms doubling to 16 ms) | one ledger sync and one index publish (two syncs of 524,800 bytes) per act. MEASURED on a private copy of real IRFC (shadow :8460, 24 Oct 2026, load 30-70): the IRFC `before_listing` `--apply`, 112 acts in 0.83 s, while two readers asked `/bars.json` back to back: the named month (1min 2018-06) answered 200 x108 then 409 x131, one change and no 503, p50 0.65 p99 41.25 max 69.09 ms; a clear month (1min 2021-02) 200 x223, p50 1.83 p99 24.25 max 63.10 ms; the same reads with no writer p99 0.81 to 2.20 ms | R4-18 |
+| L-R418-14 | The doors that add or restate bars (`store::repair::repair_month`, the ingest's, and `restate_month`) read the whole quarantine ledger for a month a drop names | `store::quarantine::set_aside` holds back every stamp a `dropped` or `dropping` line of the month names, and the index holds counts, not stamps; it is judged once the served month is open (R4-18 repair 2), so a drop is met there or refuses the door's own promotion (`StaleSource`) | one probe for a month no quarantine names (every month of a feed never quarantined); O(ledger) for a month a drop names, on the write path only | R4-18 |
+| L-R418-15 | `GET /pull/quarantine.json` (the plan) is O(plan + months named), not O(1) | a `whole_month` row reads its whole served month and each derived month to name their stamps; it is the verb's own `--plan`, behind the bounded pool | measured by the second check: PIIND p99 29 ms | R4-18 |
+| L-R418-16 | `restate_month` writes no journal line of its own | the repair journal (`audit/<feed>.repairs`) is `pull`'s, and `store` does not depend on `pull`; the door emits one `store.restate` event with its reason and what changed, and returns every field a journal line needs | until its first caller (R4-23) journals it as `pull::ingest` journals `repair_month` | R4-18 |
+| L-R418-17 | A quarantine ledger cut below what its index describes (put back from an older copy, or truncated) holds every writer, catch-up and listing (`/store.json` 503 by name, `/instruments.json` rows `{"unknown":"quarantine_ledger_cut"}`) of its feed refused by name (`quarantine_ledger_cut`), and every reader of its index answers `quarantine_index_stale`, until the ledger is restored (R4-18 repair 2, D-7292) | the index records acts the cut ledger no longer holds, and a rebuild from what is left would forget them, serving again a month a lost line recorded whole; which copy is right is the operator's to say. To accept the ledger as it is, the operator sets the index aside (a rename, never a deletion) and the next writer rebuilds it from the ledger | from the cut to the restore; a restore is an operator step (`R4-09b`'s backup) | R4-18 |
+| L-R418-18 | The server-rendered `/bars` page does not probe the quarantine: it serves a month recorded whole, bars and all, without naming it (the second check of R4-18 repair 1, follow-up) | the page is `api::server::bars_html`, outside this package's files; the readers that do probe the index (`/bars.json` 409 by name, `/bars/window.json`, the stored sweep, `/store.json`, `/instruments.json`, and the doors that add or restate bars) are listed in `store::quarantine`'s module doc, which said "every reader" until R4-18 repair 2 | every month recorded whole, on that one page, until R4-03 or the `/bars` page's owner joins it (one `store::quarantine::probe` per page, O(1)) | R4-18 |

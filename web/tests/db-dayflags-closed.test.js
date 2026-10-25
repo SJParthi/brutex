@@ -35,8 +35,10 @@ function rec(/** @type {Record<string, any>} */ over = {}) {
 const label = (/** @type {string} */ iso) => `[${iso}]`;
 /** The archive span as `/feeds.json` serves it (R3-05). */
 const ARCHIVE = { from: '2018-09-03', to: '2026-09-24', from_binds: true, to_binds: false };
+// THE OTHER FEED HOLDS NOTHING ON A WEEKEND either: a closed day the other
+// feed traded is its own kind, `peer_on_closed` (R3-13, DB-A15).
 const weekend = (/** @type {string} */ day) =>
-  rec({ day, calendar: { code: '.', kind: 'closed' }, import: { outcome: 'none', reached: false }, held: { feed: 'gdfl', rung: '1s', bars: 0, why: null }, says: ['closed: a weekend'] });
+  rec({ day, calendar: { code: '.', kind: 'closed' }, import: { outcome: 'none', reached: false }, held: { feed: 'gdfl', rung: '1s', bars: 0, why: null }, peer: { feed: 'zerodha', rung: '1min', bars: 0, why: null }, says: ['closed: a weekend'] });
 const unimported = (/** @type {string} */ day) => rec({ day, import: { outcome: 'none', reached: false }, held: { feed: 'gdfl', rung: '1s', bars: 0, why: null } });
 
 test('a_closed_day_outside_the_archive_is_closed_not_a_session', () => {

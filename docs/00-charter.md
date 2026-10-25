@@ -404,6 +404,8 @@ lane above applies only to the history depth, which that page still does not sta
 | `day` close | **MEASURED: the official close, not the last print.** NIFTY `day` close differs from the last `minute` close of the same day on **2,081 of 2,126** common days of 2018-01..2026-09 (median 4.69 bps, p99 33.4, maximum 109.0 on 2021-02-24, the outage day of §3, whose minutes stop at 10:08); BANKNIFTY 2,083 of 2,126 (median 6.44 bps, p99 44.1, maximum 231.8 the same day). From 2026-08-03 the two are equal on all 42 common days for both. Read 7 Oct 2026 through the shadow store, the `1day` and `1min` files under `bars/zerodha/NSE/INDEX/NIFTY/` and `.../BANKNIFTY/`. How the exchange forms its official close is not sourced here. The `day` bar is not a fold of its minutes (D-3001, D-3347). D-3324. | measured 7 Oct 2026 |
 | `minute` candles of a CAS-eligible share from 2026-08-03 | **MEASURED: they end at 15:14.** RELIANCE holds 360 `minute` bars on 2026-09-24 (09:15–15:14) and 375 on 2026-07-31 (09:15–15:29), `bars/zerodha/NSE/CASH/RELIANCE/1min/`, read 7 Oct 2026. The landing drops bars from 15:15 for an eligible share (`fetch::cash_close_verdict`, §9), so this is the store's rule as much as the vendor's. The `day` close that day, ₹1,219.20, is the closing-auction price (§9 below). D-3320. | measured 7 Oct 2026 |
 | Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
+| Futures, the source and its lane (R4-28, CON-12, D-7186) | **Kite, `day` candles only, NFO futures only, stored and never swept.** Two series per underlying. (1) Each contract, keyed (underlying, expiry), asked through **its own token** over the days a dated master snapshot (DLY-09, D-7185) says that token named it: from the first snapshot listing it to its expiry. A token the newest snapshot maps to another contract is never asked for the older one's history. (2) The vendor's continuous series, asked with `continuous=1` through the newest snapshot's nearest live future, filed **as answered** under `<UNDERLYING>-FUT-C1`. `oi=1` on both, so open interest is kept. **Minute candles of an expired future: UNVERIFIED** (the page above documents `day` only) and never asked. **GDFL futures: none on disk** — the yearly NFO zips hold 0 futures entries in 1,997 days (ingest design E22); whether GDFL sells futures files is the operator's question. | documented (route) · the operator, 20 Oct 2026 (scope) |
+| Which contract a continuous candle came from | **UNVERIFIED.** The historical page (`https://kite.trade/docs/connect/v3/historical/`, "Continuous data", captured 19 Aug 2026, re-read 22 Oct 2026) gives one example, a live January future whose token returns the December and November contracts as the dates move back, and states no roll day: whether the series moves to the next contract on the expiry day or on the session after it is not said. So `<UNDERLYING>-FUT-C1` is never split into contracts and no contract is inferred from a date. The same page says intraday history of an expired contract is reachable only through that contract's own cached token, and that a daily snapshot of the instrument dump is the only token registry, which is what DLY-09 keeps. | unverified (roll) · documented (registry) |
 | Window cap | **NOW STATED, AND NOT BY THE PAGE.** The historical page still states no span limit at any interval — that half of the old row was and remains true. The figures come from Zerodha's own Kite Connect developer forum, thread `kite.trade/forum/discussion/7756`, posted by staff member `rakeshr` in May 2020, which other forum threads and Zerodha staff cite as the canonical reference. Max days per single request: `minute` **60** · `3minute` **100** · `5minute` **100** · `10minute` **100** · `15minute` **200** · `30minute` **200** · `60minute` **400** · `day` **2000**. A request spanning more than the permitted days for its interval FAILS, so a backfill must chunk to them. Captured 19 Aug 2026. | forum-sourced, authoritative-but-unversioned |
 | Rate limit | **3 requests/second** on the historical candle endpoint | documented |
 | Rate-limit refusal | HTTP **429** | documented |
@@ -1765,3 +1767,81 @@ row is reproduced.
 | Traded seconds stamped at or after the session's close | 688,669 | 980,389 | 705,880 | `pull::session::Window::verdict` on rule-T seconds | measured |
 | Trade-for-trade series files (`<SYM>.BE.NSE.csv`, `<SYM>.BZ.NSE.csv`) on a day the store holds nothing for that share | 212 (142 BE, 70 BZ) | 651 (BE) | 377 (BE) | the archive files the import's scope maps to a stored share | measured |
 | Closing-auction prints the decoder diverts | 0 | 0 | 8,868 (LTQ sum 2,324,708,814, every identical row counted) | `pull::gdfl_cm` diversion count | measured |
+
+## An NSE index through the cash closing auction — measured 2026-10-20 and 2026-10-23 (R3-13; D-7300)
+
+What the sources say, and no more. §9 records the cash market's dated
+closing-auction eligibility and leaves "whether an index level freezes during
+the auction" UNVERIFIED. The index session row in force from 2026-08-03
+(`pull::vendor`'s `NSE_INDEX_SESSIONS`) keeps the index's 15:30 close and
+cites `CAS_INDEX_CIRCULAR`, which reasons from NSE/CMTR/74466 §A (closing
+auction eligibility is "stocks on which derivative contracts are available")
+that "every NIFTY 50 and NIFTY BANK constituent qualifies", so that at 15:15
+every share those two indices are computed from leaves continuous trading,
+and cites NSE's FAQ v1.0 Q7 for the index then using the continuous session's
+last prices. D-0151 says it of "the swept index", the same two. None of them
+says it of any other index.
+
+**This section said** "§9 and D-0151 record that from 2026-08-03 every share
+an NSE index is computed from leaves continuous trading at 15:15". Neither
+says that, and the third table row below measures it false (verify-R3-13-r2
+X1, 2026-10-23). R3-13 had set the window aside on every index on its
+strength, so a frozen feed inside 15:15-15:30 on any index went unjudged and
+read "not frozen".
+
+| What | Measured | How |
+|---|---|---|
+| Zerodha NIFTY and BANKNIFTY `1min`, 15:15 onward | On **every** session 2026-08-03..2026-09-30 (42 each), exactly one run of minutes with `O = H = L = C`, each equal to the one before, starting **15:15** and lasting **780 or 840 s** (to 15:27 or 15:28); on **none** of the sessions 2026-07-20..2026-07-31 | `GET /dayflags.json?feed=zerodha&instrument=NSE-INDEX-{NIFTY,BANKNIFTY}&from=2026-07-20&to=2026-09-30` on a read-only shadow of the operator's store (bars linked, `state/fix/shadow.sh`), R3-13's build before the auction window was set aside: `index.frozen.longest_from` and `longest_s` per day |
+| GDFL NIFTY seconds, 15:15 onward | The import's day ledger measures the index unchanged from **15:15:00** for **838, 860, 864 and 799 s** on 2026-09-25, -28, -29 and -30 (`flat_max_s`, `flat_max_at`; BANKNIFTY 839 s from 15:14:59 on 2026-09-25) | `<store>/imports/gdfl.dayflags` lines 107-136, read 2026-10-20 through the same shadow |
+| Zerodha, every index series the store holds, `[15:15, 15:30)` (2026-10-23) | Of **135** series: **37** hold a run of 180 s or more (the rule above) inside the window on **all 42** sessions 2026-08-03..2026-09-30: NIFTY, BANKNIFTY, 34 more equity indices (NIFTYIT, NIFTYFINSERVICE, NIFTYMIDSELECT, NIFTYPVTBANK and NIFTYMIDCAP50 among them) and NIFTYGS48YR, a government-bond index. **70** hold all 42 sessions and **never** such a run: INDIAVIX (its longest run there 60 s), NIFTYSMLCAP250, NIFTYMICROCAP250, NIFTYMIDCAP150, NIFTYNEXT50, NIFTY100 and NIFTY500 among them (longest 0, 60 or 120 s). **13** hold one on some sessions: five more NIFTYGS* bond indices on 14 to 39, NIFTY100ESG on 40, NIFTYCOMMODITIES on 6, NIFTYMSFINSERV and NIFTYPSE on 2, NIFTYAUTO, NIFTYHOUSING, NIFTYLOWVOL50 and NIFTYNONCYCCONS on 1. **15** hold no minute there in those months. In 2026-07 (23 sessions, before the auction) only the six NIFTYGS* bond indices with bars (8 to 23 sessions) and NIFTY50TR1XINV (one session, 180 s) hold such a run | `GET /bars/window.json?feed=zerodha&key=NSE-INDEX-<k>&timeframe=1min&from=<m>&to=<m>&tod_from=15:15:00&tod_to=15:29:59&limit=1000&sort=ts&dir=asc` for every `<k>` under `<store>/bars/zerodha/NSE/INDEX` and `<m>` in 2026-07, 2026-08 and 2026-09, on a fresh read-only shadow, R3-13's repair-1 release build; each IST day's longest run taken by a `jq` fold of `fold_minutes`'s rule (`work-20260925/scratch/repair2-R3-13`, outside the repository) |
+| GDFL's day ledger, the nine indices it measures, 2026-09-25..30 | NIFTY, BANKNIFTY, NIFTYFINSERVICE, NIFTYFPI150, NIFTYIT and NIFTYMIDSELECT unchanged from 15:14:59-15:15:01 for 799 to 864 s (NIFTYFPI150 433 s on 2026-09-30); INDIAVIX, NIFTYCPSE and NIFTYNEXT50 under 180 s every day (their longest 138 s) | `<store>/imports/gdfl.dayflags` lines 107-142 (`flat_max_s`, `flat_max_at`), read 2026-10-23 through the same shadow |
+| The NIFTY 50's shares' dated flag | Every one of `brutex_core::universe::NIFTY_50`'s 50 shares (the snapshot fetched 2026-08-11) carries `ElgbltyClsgAuctnSsn` 1 on all 42 dated masters 2026-08-03..2026-09-30 | `GET /dayflags.json?feed=zerodha&instrument=NSE-CASH-<share>&from=2026-08-03&to=2026-09-30`, each day's `calendar.cas` (`basis: dated_master`), the same shadow |
+
+So NIFTY and BANKNIFTY **hold still from 15:15 until the auction's close is
+printed** on both feeds, every session of the auction era measured, as the
+circular's reasoning says, and the NIFTY 50's shares are all eligible on each
+of those sessions. Other indices differ: some hold still there every session,
+others never hold one value there for 180 s. Which kind an index is cannot be told
+from its own minutes on one day, and the store holds no constituent list that
+would tell it (`brutex_core::universe` holds undated snapshots of the NIFTY
+50, 100, 200, 500 and Total Market, none of NIFTY BANK). So R3-13 sets the
+window aside for NIFTY and BANKNIFTY alone, as it sets a recorded halt aside,
+and leaves a run inside it on any other index NOT JUDGED, never "not frozen"
+(D-7300 items 15 and 25). **UNVERIFIED:** why an index holds still there
+(whether NSE stops recomputing it, or computes it from constituents that no
+longer trade), why some indices hold still there and others do not, and
+whether a session outside the measured span differs; no NSE page read here
+says any of it.
+
+## The NSE CM security master as stored — measured 2026-10-21 (R3-13; D-7300 item 20)
+
+What one dated master the store holds is, measured, not what NSE publishes
+about it. It sizes the cost of reading a share's dated closing-auction flag
+(§9) that `docs/06-limits.md` L-R3-13-4 states.
+
+| What | Measured | How |
+|---|---|---|
+| Masters held | 42 dated files: every weekday 2026-08-03..2026-09-30 but 2026-09-14 | `ls <store>/session-masters`, read-only, 2026-10-21 |
+| `NSE_CM_security_01092026.csv.gz` | 1,236,938 bytes compressed, 11,176,003 bytes expanded; 37,238 lines (one header, 37,237 records), of which 4,428 have `SctySrs` `EQ` | `gzip -dc` piped to `wc -lc`, and the EQ records counted on the third comma field (the field before the first free-text column), read-only |
+
+So a share's flag on one day is one of about 4,400 EQ rows in about 11 MB of
+CSV, and reading it cold means expanding and parsing the whole file.
+`pull::cash_auction::DailyEligibility::parse` reserves its map for every
+record (37,237), not the EQ rows it keeps; that it is the cause of the 18-25
+MB per held master the check measured is an inference from the reservation,
+UNVERIFIED as a split of the resident memory.
+
+## The data checks on `/ingest` — no new external fact (DATA-1w, D-5190 to D-5195)
+
+`/feed-checks.json`, `/tick-checks.json` and `/calendar-days.json` serve what
+DATA-1 (`cli feed-reconcile`), DATA-2 (`cli tick-to-second-check`) and CAL-1
+(`pull::calendar`) already compute, and add no claim about a vendor, an
+exchange, an instrument or a cost. Each excluded day `/calendar-days.json`
+lists carries the notice, holiday circular, special-session evidence or halt
+record CAL-1's table names, exactly as `cli calendar-days` prints it; the
+sources behind those rows are the ones CAL-1 recorded in this charter, and no
+address or notice number is added here. The counts on the panel are the check
+files' own rows, read from folders the deploy names (D-5193); this package
+measured none of them on the real store beyond the read-only shadow check its
+report names, and the populated tables in its tests are invented (shares
+`ZZ*` and `Q&Q`, prices ending 7777).

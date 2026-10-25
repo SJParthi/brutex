@@ -83934,6 +83934,214 @@ or in the package report.
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
 
+### D-5190 — `/ingest` serves the three data checks through three read-only routes, `/feed-checks.json`, `/tick-checks.json` and `/calendar-days.json`, and one panel (DATA-1w) — 2026-10-23
+
+**What was missing.** DATA-1 (`cli feed-reconcile`, D-5170 to D-5179),
+DATA-2 (`cli tick-to-second-check`, D-5180 to D-5189) and CAL-1 (the
+tradable-day rule, D-5150 to D-5159) each write or hold an append-only answer,
+and none of them was visible where the operator looks: the feed reconcile's
+month files and the tick check's year versions sat in folders, and the
+excluded days were a `cli calendar-days YEAR` page.
+
+**The decision.**
+
+1. `GET /feed-checks.json` reads DATA-1's newest FULL version of a month
+   (`feed-reconcile-YYYY-MM.v<N>.csv`) through
+   `cli::feed_reconcile::file_digest`, the door DATA-1's own factor reader uses,
+   so a file of another format, cut or damaged is refused there in its words.
+   A `--symbols` file is never a month's authority (D-5178) and is never read.
+   With no `month` it pages the months held; with `month` it gives the month's
+   counts and pages its shares; with `month` and `symbol` it pages the share's
+   day rows; with `month`, `version` and `line` it gives the source row.
+2. `GET /tick-checks.json` reads DATA-2's newest version of a year that has
+   its index (the index is linked last, so a version without one is not
+   finished) through `cli::tick_second_check::index::newest`, and the CSV
+   beside it, which must hash to the BLAKE3 the index records. With no `year`
+   and no `month` it pages the years; with `year` the year's counts and its
+   months; with `month` (and `symbol`) the month's shares (a share's days); with
+   `year`, `version` and `line` the source row.
+3. `GET /calendar-days.json` reads CAL-1's compile-time tables: with no `year`
+   every year of the calendar of record with its counts by reason
+   (`pull::calendar::year_exclusions`); with `year` (and one `reason`) its
+   excluded days, each with the notice, holiday circular, special-session
+   evidence or halt record it rests on. Ordinary weekends are counted, never
+   listed, exactly as `cli calendar-days` prints them. A year the record does
+   not wholly hold is named with `YearRefusal`'s words, never counted.
+4. `web/src/routes/ingest/panels/FeedChecks.svelte` mounts through the panel
+   registry (R4-01), so `+page.svelte` is not edited. It shows plain
+   comparison tables: per month (stocks, stock-days by status, adjusted
+   stocks, ex-date days, Zerodha-minute-short days, rule-T exact share,
+   rule-A minute-high match share), per share of a clicked month, per day of a
+   clicked share, the source row behind a day, and the excluded days per year
+   by reason with each day's notice.
+5. The routes write nothing and start nothing; the panel reads once when it
+   opens and when Reload is pressed, and never polls, because a check changes
+   only when a check run writes a new version.
+
+### D-5191 — A check version is parsed once into fixed-stride rows; a request is one `stat`, one probe and O(limit) (DATA-1w) — 2026-10-23
+
+1. **A version is parsed once per server process**, in one pass over its
+   bytes, into a vector of fixed-size rows (`FeedRow`, `TickRow`) and the
+   tallies a page shows. Every word a row carries (status, day kind, role,
+   compare, flag names, ...) is interned to a small number, so a row's size
+   does not depend on its text.
+2. **The folder listing is re-read only when the folder's modification time
+   moved.** The `stat` comes before the listing, so a name linked after the
+   `stat` moves the time again and the next request lists again; a name linked
+   before it is in the listing. A folder that does not exist holds nothing and
+   is asked again each time.
+3. **Only the newest version of each month or year is held**, keyed by folder
+   and month (or year); a newer version replaces it. Memory is bounded by the
+   months and years the folder holds, never by the versions on disk.
+4. A request then costs one `stat` of the folder, one map probe per month or
+   year on the page, and O(limit) for the rows it returns. The one-pass load is
+   O(the version's bytes), once per version, and is the `cold` figure every
+   measurement names separately (`docs/06-limits.md` L-D1W-02).
+5. **A share's rows are one run.** The feed-reconcile writer prints a share's
+   rows together and the tick check's CSV is sorted by share and day; a share
+   (or a share's month) whose rows are in two places is a damaged file, refused
+   by name, never answered with a half.
+
+### D-5192 — Paging is nothing typed: `limit` and `offset` are required, and every page past a list's edges is refused by name (DATA-1w) — 2026-10-23
+
+Under the operator's rule of 16 Oct 2026 17:15 IST:
+
+1. `limit` and `offset` are required named fields with no default. A missing
+   one, one that is not a whole number written as one (`+1`, `01`, `1e3` are
+   refused), a `limit` of zero, a `limit` above the list's length, or an
+   `offset` at or past its end is refused (400) naming the list's total. A
+   list with no rows is a 404 naming where it looked, never an empty page.
+2. Every answer states `total`, `offset`, `limit` and `returned`.
+3. A field a route does not read is refused by name, never ignored.
+4. The panel reads a whole list in two asks: one row to learn the total, then
+   `limit=total`. It types no page size.
+
+### D-5193 — Where the check files are read from, named in every answer (DATA-1w) — 2026-10-23
+
+1. `BRUTEX_FEED_RECONCILE_DIR` and `BRUTEX_TICK_SECOND_DIR` name the folders
+   when set. Unset, they are the store's audit area:
+   `<store>/audit/feed-reconcile`, where DATA-1's full run writes (its
+   `store_writes_needed`), and `<store>/audit/tick-to-second`.
+2. DATA-2 refuses an `--out` inside the store (D-5187), so its versions reach
+   the store's audit area only as copies of finished versions (immutable, a
+   new name each), or the deploy names its folder with
+   `BRUTEX_TICK_SECOND_DIR`. Which one is the main session's choice at deploy.
+3. Every answer carries `dir` and `dir_from` (which of the two chose it), so a
+   404 for an unconfigured or empty folder is never mistaken for an empty
+   check.
+
+### D-5194 — What each number on the panel means, and how it leads to its source row (DATA-1w) — 2026-10-23
+
+1. **Stock-days** are feed-reconcile rows of one day; a share whose month
+   could not be read has one row, day `-`, counted as a row and not a
+   stock-day.
+2. **Adjusted** and **ex-date** days are the rows the writer flagged
+   `adjusted` and `ex_date`; every ex-date is unsourced (no corporate-action
+   source is merged, R4-26).
+3. **Zerodha-minute-short days** are rows whose `short_volume` is above zero:
+   MEASURED, NOT JUDGED. No ENV-1 envelope is merged, so every computed day's
+   `short_judgement` is `unjudged:no_env1_envelope`, and the panel says so.
+4. **The factor** is the exact paisa pair `(median_z, median_g)` the writer
+   printed; never a float.
+5. **A tick share-day** is the row the year's index names for it (its record
+   holds the row's line), so an `extra` row a `landing` row follows is listed
+   and not counted; a row whose share-day the index does not hold means the
+   two files disagree, and the version is refused.
+6. **Rule T exact** is share-days whose `compare` is `exact_T`, of every
+   share-day. **Rule A minute-high match** is Zerodha minutes whose high the
+   rule-A seconds match exactly, summed, of the minutes compared, on the RAW
+   basis (D-5188). Both are served as the two integers; only the browser
+   divides.
+7. **Every day row carries its line**, and `month|year`, `version` and `line`
+   return that row again by one positional read of the file, checked against
+   the FNV-1a of the line as it was loaded: a version rewritten under its name
+   (which the append-only law forbids) is refused, never served as the old
+   row. A line asked of a version that is no longer the newest is a 404.
+8. Each stock-day also carries `tradable`: `pull::calendar::tradable_day`'s
+   reason when the day takes no trade (CAL-1), `null` when it does.
+
+### D-5195 — The two writers' column lines are public, so the reader checks a version's columns against the writer's own (DATA-1w) — 2026-10-23
+
+`cli::feed_reconcile::COLUMNS` and `cli::tick_second_check::HEADER` were
+`pub(crate)`. They are `pub` now, and the reader refuses a version whose
+column line is not exactly the writer's: a column added, renamed or moved by a
+later format is refused by name rather than read by position into the wrong
+field. No byte either writer prints changes. These are the only two lines of
+DATA-1's and DATA-2's files this package touches.
+
+### D-5196 — A refused check version is held as refused, under the version the listing named, and read again only when a newer version appears (DATA-1w) — 2026-10-24
+
+**What was wrong.** D-5191 held a parsed version and nothing else: a version
+that was cut, damaged, of another format, or not its index's was read and
+parsed again on every ask. A page of months (or years) that named it cost
+O(that version's bytes) per request, not O(limit), and `note_refused` put one
+warning on `/logs` per request where its own comment promised one per version.
+The held entry was also keyed by the version the file named, so a version the
+listing and the writer's door named differently would reload on every ask.
+
+**The decision.**
+
+1. The answer a version gives, the parsed version OR its refusal, is held
+   under the version the folder's listing named when it was asked, keyed by
+   folder and month (or year). A version file is never rewritten, so its
+   refusal stands as long as its name is the newest; a newer version is a new
+   name, the listing moves, and it is read afresh.
+2. A held refusal says so in its own words (`held: this version is refused
+   until a newer version appears or the server restarts`), so a reader is
+   never told a stale answer is a fresh one.
+3. A refusal that came from the host (an `EIO`, too many open files) is held
+   the same way, because the two cannot be told apart through
+   `cli::feed_reconcile::file_digest`'s words; that is `docs/06-limits.md`
+   L-D1W-06, and its answer names the restart that clears it.
+4. Test support only: forgetting held answers is scoped to one test's own
+   folder, so tests running beside it keep theirs.
+
+D1W-19, D1W-20, D1W-21.
+
+### D-5197 — A tick-to-second version is read in the writer's own order, (day, symbol, role), and a missing check folder is named as missing (DATA-1w) — 2026-10-24
+
+**What was wrong, found on real check files.** The reader took a
+tick-to-second CSV to be sorted by share and day and filed each share-month as
+one run of consecutive rows. `cli::tick_second_check` prints a version from a
+`BTreeMap` keyed by `RowKey = (day, symbol, role)`, so a month's shares
+interleave day by day. On a read-only shadow of the real store, with
+`BRUTEX_TICK_SECOND_DIR` naming `state/datacheck/rust-t2s-r6/out`, all three
+real versions (2019, 2025 and 2026, `v001`) were refused with "a share's rows
+of month 1 are in two places". Every synthetic fixture had been written in
+share-first order, the same assumption the reader made, so no test caught it.
+On the same shadow, with neither check folder present under `<store>/audit/`,
+both routes said "there are no feed-reconcile months in ...". Those are the
+words of a check that ran and found nothing, not of a folder nobody wrote.
+
+**The decision.**
+
+1. Each row's key `(day, symbol, role)`, compared as the writer's `String`
+   tuple compares it, must be above the row before it. Share-first order, a
+   role out of order within a share-day, or one key twice is refused, naming
+   the line and both keys. A version in any other order was not printed by
+   this writer.
+2. A share's rows of a month are filed under its slot as they are read (one
+   probe each). After the last row, one pass groups them: each month's shares
+   in symbol byte order, and each share-month one run of
+   `TickYear::by_share`, a row-number array. A page of a share's days is one
+   slice of that run, and each row is one index into `TickYear::rows`. The
+   source row behind a number is still found by one subtraction, because
+   `rows` stays in file order. A share's `first_line` and `last_line` are its
+   first and last lines that month, not a span of consecutive lines.
+3. A check folder that does not exist is a 404 naming the folder, saying no
+   check has been written there and naming the verb that writes it. This
+   holds on every listing, month and year ask of both routes. A folder that
+   exists and is empty still says "there are no ...". A missing folder is
+   never held, so a check written later is served by the same process.
+4. A page of months or years is one slice of the listing in key order
+   (`Listing::page`), never a walk past `offset` keys.
+5. Every refused version, whatever refused it (the host, its bytes or its
+   parse), is one `api.feed_checks check file refused` warning on `/logs`.
+   It is raised where the refusal is held, once per version (D-5196). Until
+   now only parse refusals warned.
+
+D1W-22, D1W-23, D1W-24, D1W-25; `docs/06-limits.md` L-D1W-07.
+
 ### D-7270 — INT-15: a vendor-padded minute is defined, counted per day, and never read as a trade; a derived bucket of only padded minutes has no bar (measured both ways) — 2026-10-22
 
 The numbers D-7270 to D-7274 were taken from an unused block above the
@@ -84466,3 +84674,1130 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+### D-7290 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
+
+Findings ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6, DLY-08 (the policy;
+the classifier is R4-23's).
+
+**D-3350 restated.** The code cited D-3350 — "a repair adds bars and never
+drops one" — and its rule stands for every repair: `store::repair::repair_month`
+keeps every held bar and refuses a held bar that would change
+(`HeldBarDiffers`). It is AMENDED by one door and only one:
+
+1. **`store::repair::publish_without`** publishes a new revision of a month
+   WITHOUT exactly the bars at the named stamps, every other bar byte for
+   byte as held, through the same reservation, write, read-back, receipt and
+   syncs as `publish`. A drop list that is empty, unsorted or repeated is
+   `NothingNamed`; a stamp the month does not hold is `UnheldStamp` — both
+   before anything is reserved. A list naming every held bar is `WholeMonth`:
+   no empty generation is ever published. `drop_month` takes the next free
+   ordinal (stepped-over ordinals named, `RevisionLimit` at 1,024) and
+   promotes; the old generation stays byte-identical.
+2. **The quarantine (`store::quarantine`).** `<store>/audit/<feed>.quarantine.ledger`
+   is the truth: one text line per act (`dropping` before the door,
+   `dropped` after the promotion, `whole_month`), with the series key, month,
+   cause, bars, revision, the BLAKE3 of the named bars as held, who, the
+   reason (1 to 200 bytes, one line) and every stamp, each line CRC-32C'd. A
+   torn last line is never read as a line and the next append ends it with a
+   newline first: no byte of the ledger is changed. `<store>/audit/<feed>.quarantine`
+   is derived: a 64-byte header and 8,199 fixed 64-byte slots open-addressed
+   by the BLAKE3 of (series key, month), a bucket of 8 that never wraps, so a
+   probe is ONE 512-byte positional read; published whole by staging file,
+   sync and rename. An index of the wrong length or a slot that fails its CRC
+   answers `quarantine_index_torn` / `quarantine_slot_damaged`, never "clear",
+   and is rebuilt from the ledger by the next record or `rebuild`. One writer
+   at a time under `<feed>.quarantine.lock`; a second waits up to
+   `store::flock::MAX_PATIENCE` (1 s; written as 10 s until repair 1, a wait
+   the clamp never allowed), then is refused naming the holder.
+3. **`apply_month`** ledgers first, then publishes, then indexes; a second
+   apply writes nothing; a run killed between the promotion and its
+   `dropped` line is finished from its intent (`Resumed`).
+4. **The restate policy (DLY-08)**: `store::repair::restate_month` with
+   `Restate { open_interest_applies }` keeps every held stamp, takes an
+   offered bar's values at a held stamp (a correction, named), adds offered
+   bars at stamps the month lacks, reads the revision back whole and only
+   then promotes. `repair_month`'s rule is untouched; R4-23's classifier
+   decides which months are restated.
+5. **Readers by name.** `cli`'s stored sweep refuses a quarantined month
+   (either scope) naming scope, cause and ledger line; `/bars.json` answers a
+   month quarantined whole 409 `month_quarantined` with the quarantine and no
+   bars; `/bars/window.json` names it among its faults and serves its other
+   months; `/store.json` (expanded form) rows of a feed with any quarantine
+   carry `"quarantine"` (null or the month's), and `/instruments.json` rows
+   carry `"quarantine"` (null, `{months, whole_months, bars, causes}`, or
+   `{unknown: <code>}`), each read once per cached body.
+6. **`cli zerodha-quarantine SYMBOL|ALL FROM TO --cause C --reason R
+   [--plan|--apply]`** acts on R4-17's newest series-identity plan (or
+   `--plan-file`): its `quarantine` rows of the cause asked, in the window;
+   `before_listing` stamps are checked against the share's listing day once
+   more (a master is required). A minute month's derived rungs set aside
+   every bucket whose span holds a named minute, with the same cause.
+   `GET /pull/quarantine.json` and `POST /pull/quarantine` run this one verb
+   (plan on the store-read pool, the press on the operations pool, one press
+   at a time per server, 409 `quarantine_running`), and `/ingest`'s
+   Quarantine panel sends one request per press.
+
+**Not done, said here.** A derived bucket mixing a named minute and a kept
+one is set aside whole, not folded again from its kept minutes: the fold of
+a repair (`pull::ingest`'s derive path) refuses a changed held bar and is not
+reachable from `cli`. For `before_listing` and `zero_price` every such
+bucket is wholly named; for PIIND's `foreign_level` a mixed bucket loses its
+kept minutes' share until a refold door exists. The census is not rewritten
+by the verb: `cli census-recount` follows an apply. `/store.json`'s compact
+wire (`census-tuples-v1`) does not yet carry the field (R4-03 carries it
+over when it restructures the route).
+
+Proof: `store::quarantine::tests::*` (thirteen tests), `store::repair::tests::{a_drop_naming_an_unheld_stamp_is_refused,
+a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source,
+a_drop_past_the_last_ordinal_is_the_revision_limit,
+the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation}`,
+`cli::zerodha_quarantine::tests::*`, `cli::stored::tests::a_stored_sweep_refuses_a_quarantined_month`,
+`api::server::quarantine_route::tests::*`, and `web/tests/quarantine.test.js`.
+
+**Repair 1 (23 Oct 2026), found by the second agent's check.**
+
+1. **A month quarantined whole stays whole.** `apply_month` once treated a
+   whole-month record as done only when the new plan named every held bar;
+   a later plan naming a subset (a second cause in the month, or a derived
+   bucket covering one minute of one) published a generation without that
+   subset, and its `dropped` line replaced the `whole_month` slot, so
+   `/bars.json`, `/bars/window.json` and the stored sweep served the rest of
+   a month recorded foreign. Now the probe's `whole_month` answers
+   `already_whole` for any subset and writes nothing (a stamp neither held
+   nor ledgered is still refused; an intent a killed run owes is still
+   finished), and ONE merge rule (`quarantine::merged`) serves the index,
+   its rebuild from the ledger and `Summary::load`: a drop onto a drop adds
+   its bars, a drop onto a whole record keeps the whole record, anything
+   else is the newer line. A ledger that already holds a `dropped` line
+   after a `whole_month` line (an older build's) therefore reads whole.
+2. **A press is held by its work, not by its client.** The guard is moved
+   into the blocking closure, so a client that leaves no longer frees the
+   press while `spawn_blocking` keeps applying.
+3. **The verb's mode is the parsed one.** `command_at` takes the writer's
+   gate from the parsed `--apply`, not from a token search (a reason spelled
+   `--apply` is a reason); a plan row listing a stamp twice is refused by
+   name; a symbol is the core's canonical spelling (`brutex_core::symbol::
+   Symbol`, which upper-cases), so `irfc` is `IRFC`.
+4. **Renumbered.** This entry was written as D-7121, an id inside
+   BASE-REDS-1021's block (D-7120..D-7129); it is D-7290, from the block
+   registered for R4-18.
+5. **The writer's patience is the clamp's.** `WRITER_PATIENCE` read 10 s,
+   but `store::flock::Flock::try_lock_patiently` clamps every wait to
+   `MAX_PATIENCE` (1 s); the constant is now that bound, so neither the code
+   nor this entry claims a wait that never happens.
+
+Repair 1's proof: `store::quarantine::tests::{a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing,
+a_derived_month_recorded_whole_is_not_reopened_by_one_bucket,
+a_dropped_line_after_a_whole_line_never_downgrades_index_rebuild_or_summary,
+the_merge_rule_never_lets_a_drop_lift_a_whole_record,
+an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole}`,
+`api::server::quarantine_route::tests::a_press_whose_client_leaves_holds_the_press_until_its_work_ends`,
+`cli::zerodha_quarantine::tests::{a_plan_whose_reason_is_the_apply_flag_is_a_plan_not_a_writer,
+a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one}`
+(docs/04-invariants.md R418-16..R418-18). The index's effective capacity is
+restated in `docs/06-limits.md` L-R418-04 from a simulation, not the 8,192
+homes.
+
+### D-7291 — R4-18 repair 2: the quarantine index never lags its ledger unsaid; a damaged ledger line is named and never rebuilt away; no door re-serves a set-aside bar — 2026-10-23
+
+The second check of R4-18 (repair 1) found three blocking defects in the
+package's own code, each reproduced on a private store, and each now closed
+by a test that failed before the change (`docs/04-invariants.md`
+R418-19..R418-23):
+
+1. **A damaged ledger line was dropped without a word.** The index rebuild
+   and `Summary::load` read only the valid lines, so a month recorded whole
+   by a line whose checksum failed read as clear, the listings under-counted
+   and the apply that rebuilt the index answered success. NOW a complete line
+   that is not valid UTF-8, fails its checksum or does not parse is DAMAGE,
+   refused by name (`quarantine_ledger_damaged`, with every offset) by every
+   rebuild, catch-up, listing, door and apply, with nothing written, and one
+   `store.quarantine` error event; the verb prints it (a plan exits 1, an
+   apply refuses before its first write). A torn append is no longer ended by
+   a bare newline, which made it indistinguishable from damage: the next
+   writer ends it with `\ttorn` (in the same write as its own line), and such
+   a line is an ENDED torn append, never an act and never damage, because the
+   kill it records left none. No verb lifts damage: the ledger is
+   append-only, so it is restored from a copy (`docs/06-limits.md`
+   L-R418-12).
+2. **The index could lag its ledger with every reader trusting it.** A
+   publish refused (a full disk, a read-only directory) or killed after the
+   ledger line was synced left the line unindexed; a dropped month was then
+   never re-indexed (`already_dropped`), and a month recorded whole was
+   served while the listings called it quarantined. NOW the index header
+   (version 2) records the ledger bytes the image describes. A reader answers
+   ONLY from an image whose header checks and whose described length is the
+   ledger's; otherwise it answers `quarantine_index_stale` or
+   `quarantine_index_torn` by name, never "clear" (a zeroed image included).
+   An image behind its ledger is never the answer even while a writer holds
+   the feed's lock: the repair's own self-check before landing found that
+   taking such a lag for the writer's act in flight answered "clear", during
+   the next writer's catch-up, for a month an act a failed publish left
+   unindexed recorded whole. While a writer holds the lock the reader waits
+   for its image within its thread's patience (`store::flock::patience`: the
+   server's page reads have some, the CLI and the importer none) through the
+   store's one wait loop and is refused `quarantine_being_written` ("being
+   written, ask again": 503 with `Retry-After` on `/bars.json`, `month_busy`
+   to the importer) when it runs out. Every writer brings the image level
+   with the ledger (a rebuild) under the lock before its own act, and refuses
+   a damaged ledger and a full bucket BEFORE its ledger line, so a refusal
+   writes nothing and only a host refusal of the final publish can leave a
+   line unindexed — which the next writer of any month of the feed then
+   finishes. An intent (`dropping`) is indexed as a drop of no bars.
+   `apply_month` judges its plan read-only first (a refusal writes nothing,
+   not even the lock file), then holds the feed's writer lock for its whole
+   sequence, so two applies of one feed never interleave (the second check's
+   double count), and finishes every intent a killed run owes the month,
+   whatever subset it names, before its own act.
+3. **The restate door re-served quarantined bars, and so did the ingest's
+   repair door.** A vendor re-pull still holds the minutes a quarantine set
+   aside, and `restate_month` — and `repair_month`, which `pull::ingest`
+   calls on every month its append door refuses — added them as bars the
+   month lacked. NOW both take their offered bars through one rule,
+   `store::quarantine::set_aside`: one probe for a month no quarantine names;
+   for a month a drop names, every stamp a `dropped` or `dropping` line names
+   is held back (never served again, one `store.repair` event); a month
+   recorded whole is `RepairError::Quarantined` and a quarantine that cannot
+   be read `RepairError::QuarantineUnknown`, each with nothing written.
+   The rule is judged ONCE THE SERVED MONTH IS OPEN (the self-check before
+   landing: judged before the open, a drop intended and promoted between the
+   two read as nothing set aside): a drop ledgers its intent before its door
+   promotes, so a month opened after that promotion meets the intent, and one
+   opened before it refuses the door's own promotion (`StaleSource`).
+   `pull`'s failure table files them as `repair_impossible` and
+   `store_damaged` (a writer still bringing the index level, `month_busy`).
+   `restate_month` reports what it held back and emits one
+   `store.restate` event with its reason and what changed; the journal line
+   a run keeps is its caller's (R4-23), from those fields, as `pull::ingest`
+   keeps one for `repair_month`.
+
+**The formats change before their first landing.** Index version 1 and the
+ledger without the torn mark were never written to the real store (0
+quarantine files, measured) and never merged. An image of version 1 is not
+read as current (its version does not check) and is rebuilt from its
+ledger; index version 2 and the ledger as `docs/02-store-format.md` now
+states them are frozen from their first landing.
+
+### D-7292 — R4-18 repair 2, the resumed self-check: the ledger's head is found past torn heads; a ledger cut below its index is refused, never rebuilt away; a month's entry counts every bar it set aside and names every cause — 2026-10-24
+
+The repair's self-check before landing, resumed after the second check's
+three blocking issues were closed (D-7291), found two more defects in the
+package's own code and closed one follow-up the second check listed, each by
+a test that failed on the code it read (304c702f5) (`docs/04-invariants.md`
+R418-24..R418-26):
+
+1. **A head torn by a killed first write stopped every later writer.** A
+   feed's first act writes the ledger's head and its line in one write, so a
+   writer killed in it (or refused by a full disk) leaves a strict prefix of
+   the head. The next writer ended it and wrote the head again — and every
+   writer after it looked for the head only at byte 0 and refused the ledger
+   as `quarantine_ledger_damaged` at byte 0, for ever (the first apply's own
+   `dropped` line among them, after its door had promoted), while every
+   reader of the ledger read it whole and undamaged. NOW the writer finds the
+   head by the readers' own rule: the first complete line that is no ended
+   torn append (one positional read of at most 4,096 bytes).
+2. **A ledger cut below what its index describes was rebuilt away.** Put back
+   from an older copy, or truncated, the ledger no longer held acts the index
+   records, and the next writer of any month of the feed rebuilt the index
+   from what was left: a month a lost line had recorded whole read as clear
+   and was served again. NOW an image whose checked header describes MORE of
+   the ledger than it holds is refused by every writer, `quarantine_ledger_cut`
+   (both lengths named, one `store.quarantine` error event), with nothing
+   written; the listings (`Summary::load`, so `/store.json` and
+   `/instruments.json`) refuse it by name too, reading the index header
+   before the ledger so an append between the two reads never looks like a
+   cut; every reader of the index answers `quarantine_index_stale`
+   meanwhile, its sentence saying the ledger must be restored. An image that cannot be
+   trusted at all (a wrong length, a header that does not check) still says
+   nothing of the ledger and is rebuilt from it; `store::quarantine::rebuild`,
+   asked for by name, still rebuilds from the ledger as it is.
+3. **A month dropped for one cause and then recorded whole for another kept
+   only the whole record's bars and cause** (the second check's follow-up on
+   `merged`): its bars were the served generation's after the drops, so the
+   bars the drops set aside before it were left out of the index, its
+   rebuild, the snapshot and the summary, and `/bars.json` said "all 2 of its
+   bars are zero_price" of a month that set aside 6. NOW the one merge rule
+   adds them, and every entry carries every cause its month's acts named
+   (`store::quarantine::Causes`, slot byte 22 of index version 2, which has
+   not landed); `/bars.json`, `/bars/window.json`, `/store.json` (a new
+   `causes` array beside `cause`, the newest act's), the stored sweep, the
+   verb's plan and the doors' refusal name them all.
+
+### D-7300 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
+
+**Number** taken at landing from the ledger's head (amendment A6): first
+D-5903, then D-5904 when IA-3 landed D-5903 first, then D-7135 on 2026-10-23
+when SC-4 landed D-5904 first, and D-7300 the same day when LEDGER-1023
+landed D-7135 first (the no-fresh-root cut's block D-7135..D-7144, recorded
+after R3-13 had taken D-7135 without recording it). D-7300..D-7304 is R3-13's
+block in the decision-block registry, clear of every block recorded for
+another package (R4-18's D-7290..D-7294 the highest). Built in
+the cloud (branch `cloud/db-R3-13-20261017`, 17 Oct) and finished on the Mac
+(20 Oct; repair round 1, 21-23 Oct).
+**Findings:** DB-029, DB-031, DB-053, DB-A15, DB-B20, DB-G38, DB-G40,
+SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
+
+1. `/dayflags.json` takes `timeframe=` (a rung `store::path::Timeframe::KNOWN`
+   names) and counts `held` at it; the feed's finest rung is counted beside it
+   as `finest` where the two differ. Absent, the finest is counted, so every
+   existing caller is unchanged. `Asked` gains no field (`sources.rs` builds it
+   by name); the rung travels as `dayflags_rules::Band`. Every caller of the
+   band, the L-IA-39 bench's `imports::day_band_json` included, parses its
+   query with one function, `dayflags::query_of`.
+2. `expiry=` narrows an option family key (`NSE-FNO-NIFTY`) to one expiry; a
+   contract's own key names its expiry and a disagreeing `expiry=` is refused,
+   as is one on a spot key. A day after the expiry is `expired`:
+   `owed_minutes` and `unverified_minutes` 0, as `/gaps.json`.
+3. A share's phases are built with its dated master flag
+   (`pull::cash_session_cache`, read as `bars_change::Rules::eligibility` reads
+   it): flag 1 owes 360 continuous minutes, flag 0 375, no master 360 and 15
+   unverified, with the reader's reason in `calendar.cas.why` and the notes. A
+   failed load is kept by the request only (AF-03's rule). Nothing is read for
+   a closed day; a session after today (IST) is `basis: "not_yet"`, never a
+   refusal. A loaded master is kept for the process (one per session day read).
+4. **"Kept apart from trades" is decided PER DAY, never per month** (closes
+   `docs/06-limits.md` L-AH03-2 for the band; `sources.rs` stays AG-04's): a
+   GDFL share month's `.auc` sidecar is read once a request a month, and a day
+   is `auction_sidecar: true` only where a record is stamped on it. A month
+   whose sidecar files nothing that day says so; a sidecar that will not read
+   is named in the notes and never said absent. An index record says the
+   prints are "counted by the import". The page calls the session's last print
+   the auction's only where it equals the official day close (0 bps), and never
+   claims the print's book.
+5. FROZEN: an index value unchanged for **180 s or more** in session, outside
+   any recorded halt and, from 2026-08-03, outside the cash closing auction's
+   window (item 15), which is set aside on NIFTY and BANKNIFTY and not judged
+   on any other index (item 25). Chosen, not sourced
+   (DB-B20's detector); the cause of a frozen dissemination is UNVERIFIED. Zerodha: from the day's one-minute bars
+   (`O = H = L = C`, equal minute to minute, no minute missing), scanned once
+   per (month file's device and inode, day's first row) and kept with the end
+   row it was read to; a page's first scans run on one scoped thread a month,
+   each on the month's own handle. GDFL: from the day ledger's `flat_max_s`,
+   counting only the run's seconds outside the recorded halt and the auction's
+   window (`judged_s`; 2020-03-13's run from 09:21:09 is the halt's), and a
+   run with no stamp on a halt or auction day is not flagged. OUTSIDE THE DAY RANGE: a minute's high above the
+   Zerodha `1day` bar's high, or its low below its low; not judged on GDFL at
+   read time (its seconds are up to 22,500 reads a day). Flags only; the bars
+   are served unchanged.
+6. A `recounted` day keeps the `late=` and `max_back_s=` of the last `done`,
+   `incomplete` or `refused` close of its kind, day and filter, named by
+   `late_line`. The count is said over all of the kind-day's files for a `*`
+   run, and over the files its run read, named by its filter, otherwise.
+7. `bar_definition`: the import journal's deciding line, else the day ledger's
+   line; current by `pull::gdfl_import::definition_is_current`. Said on every
+   option day and on any day not current.
+8. A day-ledger field this reader has no name for is served under its own name
+   on the line's object and listed in `unknown`; the names `scope`, `line` and
+   `unknown` are the object's own and refuse the line, as does a field written
+   twice.
+9. A share's peer count is looked up under its other names from
+   `brutex_core::alias::LINEAGE` (D-3333) where its own name holds no month
+   (`peer.as`).
+10. A GDFL share's `sampled` names the market index `NIFTY` (`of: "market"`)
+    and the share's own first held second (CMP-06).
+11. The previous held `1day` bar is looked for up to 12 opens back and then up
+    to 144 more months by probe, one open (DB-031); a history found empty there
+    is not probed again by `series_start`. **A month is held in either form and
+    in the generation the read door serves** (`store::generation::served_bars_path`,
+    D-5899): a month held only as `.sbar`, or served from a repair generation,
+    is never looked past, and a name the door would refuse is held, so the open
+    that follows names the refusal instead of an older month standing in.
+12. The band's peer feed and each feed's finest rung come from one function,
+    `dayflags_rules::feed_rungs` (R3-34 points it at the feed table).
+13. **Every count the band adds is a month fault** (R3-08's `month_faults`):
+    the grid's rung, a renamed share's other name and every failed read in a
+    month that opened, so damage beside a writer-held month is answered as
+    damage, never as "being written, ask again".
+14. On the page, a share is trade-driven, and its zero-volume minutes are
+    counted, by the feed's finest rung, whatever rung the grid counts; the
+    closing-auction line counts "kept apart" only on days whose dated flag is 1
+    (`casCounts`). Goal 4 reads `/sources/day.json`'s `basis`; a day whose
+    `basis.factor` is not a number is unmeasured and neither joins nor breaks a
+    run. Whether a percentage statistic on an adjusted run is refused stays
+    D-3323's and is not built here.
+15. **THE CASH CLOSING AUCTION'S WINDOW IS SET ASIDE ON AN INDEX DAY, AS A
+    HALT IS** (the Mac finish, found on the real store on 2026-10-20): from
+    2026-08-03 every NIFTY and BANKNIFTY session read "index value frozen in
+    session" from 15:15 on both feeds, because the index holds still while
+    its constituents are in the cash closing auction. The window is
+    `[the CAS-eligible share close, the index's close)` from the session
+    tables (`Venue::share_hours_on`, `Venue::hours_on`; 15:15:00-15:30:00),
+    on the index venue only and only from 2026-08-03
+    (`dayflags_rules::auction_window`). A Zerodha minute inside it never
+    starts or extends a frozen run; a GDFL ledger run counts only its seconds
+    outside the halt and the window, the two counted once where they meet.
+    The window is served as `index.frozen.auction_window` and named in the
+    phrase. Where either session row carries no verified hours nothing is set
+    aside, so a run there is flagged, never hidden. The stillness itself is a
+    MEASURED fact (`docs/00-charter.md`, "An NSE index through the cash
+    closing auction"), not the cause: why the index holds still there is
+    UNVERIFIED. **Narrowed by item 25:** "on the index venue only" set the
+    window aside on every NSE index; it is set aside on NIFTY and BANKNIFTY
+    alone, and a run inside it on any other index is not judged.
+16. **A day after expiry names no bar definition** (the Mac finish of
+    SC-CLOSE-12 and goal 3, found on the real store: the family narrowed to
+    2019-03-28 read "bar definition 3 built this day" beside "expired" over
+    2024-10). The kind-day's import built nothing of an expired contract, so
+    `bar_definition` is `null` there and no phrase is said; the band never
+    marks a day that owes nothing as built under an older definition.
+
+17. **A value outside the day's range inside a recorded halt is still
+    flagged, and says where it is** (the Mac's second re-check on the real
+    store: Zerodha NIFTY 2020-03-13 read "intraday low 79.00 points below the
+    day bar's low, at 10:07" beside "halt (suspected) 09:22-10:20" with
+    nothing joining the two). `outside_day_range` gains `above_in_halt` and
+    `below_in_halt` (`null` where that side is not flagged), true where the
+    extreme's stamp lies inside the calendar's recorded halt `[from, resume)`,
+    and the phrase ends ", inside the recorded halt". No cause is claimed for
+    the value: why the index printed there is UNVERIFIED.
+
+18. **A share whose dated closing-auction flag is 0 is never said to have an
+    auction print** (the Mac's third re-check on the real store, 20 October:
+    GDFL DALBHARAT, flag 0 from 2026-08-27, read "192 closing-auction
+    print(s) in the day's share files; this share's month holds no auction
+    sidecar, so its print is not kept apart from trades" on 2026-09-25, naming
+    a print a share outside the auction has no part in). Where
+    `calendar.cas.eligible` is `false` and the month's `.auc` files no print
+    for the day, the phrase says the flag is 0, that the share takes no part
+    in the auction and has no print to keep apart, and what the month's
+    sidecar holds. A day whose sidecar files a print says the file whatever
+    the flag: the record is the evidence. A flag of 1, or one no master holds,
+    keeps the words of item 4.
+
+19. **A GDFL index day the day ledger cannot judge is `null`, never "not
+    frozen"** (the check of 20-21 October, verify-R3-13-r1 blocking 1; amends
+    item 15's GDFL clause). The ledger keeps only the day's LONGEST unchanged
+    run (`flat_max_s`, `flat_max_at`), so where that run lies in the recorded
+    halt or the cash closing auction's window, or carries no stamp on a day
+    that has either, a shorter run of 180 s or more elsewhere in the session
+    cannot be seen. On every auction-era day the ledger has measured
+    (2026-09-25..30) the run is the auction's, from 15:15:00, and the record
+    answered `flagged: false`: every later GDFL index day would have read
+    "not frozen" whatever happened before 15:15. Now `index.frozen.flagged`
+    is `false` only where the longest run is under 180 s; `true` where its
+    longest single stretch outside the two windows reaches 180 s; and `null`
+    otherwise, with the phrase "index frozen not judged: the day ledger
+    measures only the day's longest unchanged run, ..., a shorter run of 180
+    s or more elsewhere in the session is not measured (UNVERIFIED)".
+    `judged_s` is that longest stretch, no longer the run less its set-aside
+    seconds: a run on both sides of a halt is two runs, as a Zerodha minute
+    inside a window ends a run (`dayflags_rules::outside_of`). A GDFL index
+    day holding bars and no `flat_max_s` says it is not measured, and why
+    (no indices line, or a line written before the measure). The band draws
+    `flagged: null` as its own kind, `frozen_unjudged`, "frozen run not
+    judged" (info), never as "frozen" and never as an ordinary session.
+    Chosen, not sourced: the ledger's measure is the import's (D-7300
+    item 15); what it does not measure is said, not guessed.
+
+20. **A share's flag is kept for the process, never its master; a day asked
+    at once is read once; a page's cold days are read together, a few at a
+    time** (verify-R3-13-r1 blocking 2). The memo of whole parsed masters
+    this package added (`MASTERS`) had no bound and held each auction-era
+    day's master beside `bars_change`'s own copy: 18-25 MB of resident memory
+    a day, never freed (+744 MB for 42 days, measured by the check), and the
+    first auction-era share page of a process took 2.6-3.15 s (4.5 s at ten
+    concurrent cold asks, +1.39 GB). Now `dayflags_rules::FLAGS` keeps only
+    `(masters directory, day, symbol) -> the master's answer` (the flag, or
+    its refusal to name the share), in two generations of at most
+    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A master read keeps
+    the flag of every F&O underlying on its day
+    (`brutex_core::universe::FNO_UNDERLYINGS`, CLAUDE.md §1's 213 shares,
+    each under its universe ISIN, as `CasFlags::of` asks), not only the
+    asking share's: with only that one kept, each further share's first
+    auction-era page parsed the same masters again. That is 213 hash probes
+    against a parse already made, and 213 flags a day, at most 153
+    auction-era sessions in one generation; a share outside the list keeps
+    only its own flag, as it asks. A load in flight is
+    shared by every reader that asks while it runs (`FLIGHTS`) and ended when
+    its first reader is done, so a master lives only as long as the requests
+    reading it. At most `LOADS_AT_ONCE` = 4 masters are parsed at once in the
+    process, so concurrent cold pages cannot multiply the parse's memory; a
+    page's cold days are read on up to that many scoped threads
+    (`CasFlags::on_sessions`), each day once per request. A load's refusal
+    is still never kept beyond the readers that met it (AF-03). The parse
+    itself is `pull`'s and is unchanged: `DailyEligibility::parse` reserving
+    its map for every CSV line (37,237) rather than the EQ rows it keeps
+    (4,428) is named for `pull`'s owner, as is one bounded master memo shared
+    by `bars_change` and `sources` (L-R3-13-4). Measured cold and warm in
+    L-R3-13-4. Chosen, not tuned: 4 slots of the Mac's 14 cores, leaving the
+    rest to the route's other work and to imports; the bound is the choice,
+    its number is not sourced or measured to be best.
+
+21. **An unchanged index value that goes on past absent minutes is counted
+    and said** (the check's follow-up: Zerodha BANKNIFTY 2022-03-07 09:54-09:57
+    was reported as shorter runs, without saying why). A minute the file does
+    not hold still ends a run, so each part is measured alone, as before; the
+    times a flat minute after the gap prints the run's value are counted
+    (`DayScan::broken`, served as `index.frozen.broken_by_absent`) and the
+    phrase says "index value unchanged across absent minutes N time(s): a
+    minute the file does not hold ends a run, so each part is measured
+    alone". No value is assumed for the absent minutes.
+
+22. **A series with no file for the month names no bar definition** (the
+    check's follow-up: a contract the store holds no file of read "bar
+    definition 2 built this day" from the options kind-day). The kind-day's
+    import built nothing of it, so `bar_definition` is `null` and no phrase
+    is said, as after expiry (item 16). A file that holds no bar that day
+    keeps its definition: the import read the day.
+
+23. **Two words of the band say what they count** (the check's follow-ups).
+    On a coarser grid the zero-volume phrase names the finest rung it counts
+    ("300 of 375 Zerodha 1min bar(s) carry zero volume"); and a Zerodha
+    share's run label asks `/sources/day.json` for the route's whole 31-day
+    page laid around the rows' days (`basisWindowOf`; their newest 31 where
+    they span more), so a page showing one day names the run as far as that
+    page reaches rather than "2019-06-07 → 2019-06-07", and an open edge reads
+    "the run may go on both ways past the days read".
+
+24. **The CI shell gates are run on R3-13's files, and what they refuse is
+    rewritten or declared** (repair 1, after BASE-GATE11 put those gates in
+    the Mac run, D-6620). On this branch, compared step by step with
+    feat/db-fix's head, gates 10, 11, 12 and 23 refused R3-13's files and
+    nothing new besides. Rewritten: a month's auction sidecar is a set sized
+    once by its records, so a day is one hash probe, never a sort and a
+    binary search; the frozen run's two set-aside windows are ordered as
+    their min and max, never a sort (a `second < first` swap was tried first
+    and its `<=` mutant was equivalent, so it was restructured away, as
+    D-0192 directs); every map is sized once (`PAGE_DAYS`,
+    `PAGE_MONTHS` = 5, `LOADS_AT_ONCE`). Declared, each with its bound in
+    `docs/06-limits.md` ("Gate 11 — R3-13"): one request's refused days put
+    in day order (at most 92), the `timeframe=` word found in the ten-rung
+    `Timeframe::KNOWN`, the sidecar set's probe, and in `dayflags.rs` two
+    compile-time tables (IA-16's `FLAGS_VERSIONS` among them, merged
+    undeclared) and one page's peer days. The ignored timings' seven prints
+    are declared for gate 23; two cost claims name their timing tests (gate
+    12); five rows name their test file or timing tests (gate 10). The
+    bounds are unchanged: these are the same reads in O(1) shapes or with
+    their bound stated, and the band's answers are byte-identical before and
+    after on the shadow's 50 checks.
+
+25. **The cash closing auction's window is set aside on NIFTY and BANKNIFTY
+    alone; a run inside it on any other index is not judged, never "not
+    frozen"** (the check of 23 October, verify-R3-13-r2 X1; amends items 5,
+    15 and 19). Item 15 set the window aside on the index venue, so on every
+    NSE index, on the reason that every share an index is computed from
+    leaves continuous trading at 15:15. That is what `pull::vendor`'s
+    `CAS_INDEX_CIRCULAR`, the index session row's citation, argues for NIFTY
+    50 and NIFTY BANK and for no other index, and it is measured false for
+    others (`docs/00-charter.md`, "An NSE index through the cash closing
+    auction"): of the 135 Zerodha index series, 70 never hold one value for
+    180 s in 15:15-15:30 on any of the 42 auction-era sessions (INDIA VIX,
+    NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150, whose
+    longest unchanged run there is 60 s or none, among them), so a
+    frozen feed there went unjudged and the record read `flagged: false`
+    with no phrase, the hidden verdict item 19 refused for GDFL. Now
+    `dayflags_rules::auction_of` reads the window for each index. It is SET
+    ASIDE, as before, where `still_through_auction` holds: the exchange is
+    NSE and the sourced index table's row for the symbol
+    (`brutex_core::alias::INDICES`, D-3332) is named "NIFTY 50" or "NIFTY
+    BANK", the citation's own words, which a test pins to the session row's
+    citation. On every other index its minutes are `Minute::Unjudged`: they
+    end a judged run, and a run through them that reaches 180 s while no
+    judged run inside it does is the day's unjudged run (`DayScan::unjudged`,
+    folded beside the judged run in one pass): `index.frozen.flagged` is
+    `null`, `unjudged_s` and `unjudged_from` name it, and the phrase is
+    "index frozen not judged: unchanged for N minute(s) from HH:MM to HH:MM
+    (1min), all of it inside the cash closing auction's window, where an
+    index holding still is sourced for NIFTY 50 and NIFTY BANK alone;
+    whether this run is the auction's or a frozen feed's is not known
+    (UNVERIFIED)" (or "only N minute(s) of it in one stretch outside" the
+    window). A judged run anywhere else still flags the day `true`, the
+    window's run said beside it; a day with neither is `false`. GDFL's
+    ledger answers as item 19 had it (a run inside the window is `null`) and
+    its phrase now says that on such an index the run itself is not judged.
+    Both feeds serve `auction_aside`: `true`, `false`, or `null` on a day
+    with no window. Where no minute is not judged the fold is the one it
+    was, so a day before 2026-08-03 and a NIFTY or BANKNIFTY day keep every
+    verdict, run and phrase they had, the new fields beside them; so does
+    every other index's auction-era day that holds no run of 180 s in the
+    window (INDIA VIX's, measured). **Rejected:** judging
+    the window like any other minute on every other index, because 35 more
+    indices hold still there on every auction-era session (measured) and
+    would read "frozen in session" every day, a claim no source supports
+    either; and deciding per index and day from its constituents' dated
+    flags, because the store holds no constituent list (only undated
+    snapshots of five broad indices, none of NIFTY BANK) and it would add a
+    master read to every index day (L-R3-13-4). Chosen, not tuned: the two
+    indices are the source's, not a measurement's, and a third is added only
+    by a cited source and a new row here.
+26. **A GDFL ledger run the day's session cannot hold is refused by name,
+    never judged** (the check of 23 October, verify-R3-13-r2 attack E6, a
+    follow-up). Lines appended only to a shadow's clone of
+    `imports/gdfl.dayflags` (999999 s from 23:59:59, `u64::MAX` s from
+    09:15:00, 600 s from 15:29:59) were each served "index value frozen in
+    session", the second with `judged_s` 18446744073709495815. The import
+    measures `flat_max_s` over the session's own rows only
+    (`pull::gdfl_import_quality`, `FlatRun`: "the longest run of in-session
+    rows"), so its first and its last second each lie inside a window of the
+    day's session. `IndexDay` now carries that session, as the import reads
+    it (`pull::gdfl_cm::session_of`: the full session or a special one's
+    windows), and `IndexDay::outside_session` refuses a run that starts
+    outside every window, ends outside every window, has no stamp and is
+    longer than the session spans (first open to last close, gaps between
+    windows included), or falls on a day the calendar holds no session for:
+    `flagged` and `judged_s` are `null`, `frozen.refused` names why
+    (`starts_outside_session`, `ends_outside_session`,
+    `longer_than_session`, `no_session`), and the phrase is "index frozen
+    refused: the day ledger's longest unchanged run, N s from HH:MM:SS,
+    <why> (<the session's windows>); the import measures a run over the
+    session's own rows only, so the line is not that measure and the day's
+    frozen run is not judged (UNVERIFIED)". A short run is refused as a long
+    one is, since neither is the import's measure. A run across the gap of a
+    two-window day has both its ends in session and is judged. Every real
+    line holding `flat_max_s` (the 36 of 2026-09-25..30, read 2026-10-24)
+    lies inside 09:15:00-15:30:00, its latest end 15:29:24, so no served
+    answer changes. At most four window comparisons and one calendar lookup a
+    day; measured through a read-only shadow of the real store, warm, n = 200
+    each, three interleaved restarts of each build: GDFL NIFTY
+    2026-09-24..30 p50 1.32, 2.43 and 2.14 ms against 1.35, 2.36 and 2.23 ms
+    before (load 28 to 43, so the p99 and max of both move with the load:
+    4.98 to 20.62 and 6.94 to 51.99 ms here, 2.88 to 15.40 and 5.11 to 24.23
+    before). **Rejected:** refusing the whole record, because the day's other
+    flags do not depend on the run; and `session_s`, the line's own session
+    length, as the bound, because it places no stamp.
+27. **The band's legend names the flags behind each day's lead** (the check
+    of 23 October, verify-R3-13-r2, a follow-up). A cell is coloured by its
+    most severe kind and the legend counted that lead alone, so a flag that
+    is never a day's lead was in no legend: "frozen run not judged" on GDFL
+    NIFTY 2026-09-24..30 was said only in each day's line. `alsoTally`
+    (`web/src/lib/db/dayflags.js`) counts every kind a cell holds after its
+    lead, once per cell, in `DAY_KINDS`'s order, and the band draws it under
+    the legend as "also on these days, behind each day's lead". Never a fact
+    kind (a closed day, a day outside a span), which is no flag, and never
+    `cas`, which the band's closing-auction line already counts over every
+    cell that shows it. One pass over at most one page of cells, each cell's
+    kinds bounded by `DAY_KINDS`; no request. **Rejected:** colouring a cell
+    by more than one kind, which would change every day's colour for one
+    legend line.
+28. **The run through is decided by one comparison of its step with a
+    minute** (repair 2's mutation run on the lines it changed). The fold
+    counted a run broken by absent minutes with `step > MINUTE` in the match
+    arm whose guard had already found the same value's step not to be one
+    minute, so `>` and `>=` could not differ there: the `>=` mutant
+    (`dayflags_rules.rs:1254:51` at 312923190) survived as an equivalent,
+    and its `-` to `+` twin was equivalent on every stored, minute-aligned
+    input. As D-0192 directs it is restructured, never excluded: the same
+    unchanged value on a minute not set aside compares its step with a
+    minute once (`std::cmp::Ordering`): equal goes on, greater counts the run
+    broken and starts anew, less (no next minute of a one-minute rung) ends
+    the run unbroken. Read arm by arm against the old guard, no answer
+    changes for any input; a sub-minute step case is added to
+    `a_frozen_run_is_three_unchanged_minutes_in_a_row`.
+29. **Bar definition 5 is named** (IA-4, merged into feat/db-fix on 24
+    October; D-4877). The import's `BAR_DEFINITION` became 5 and an options
+    day is current under 5 alone, while `definition_means` had no sentence
+    for 5: merged as it was, the band would have called this build's own
+    definition "a definition this build does not name". It now says what 5
+    changed, in the import's own terms (D-4816, D-4829, D-4877), and
+    `a_spot_day_names_its_definition_only_when_it_is_not_current` walks every
+    definition from 1 to `pull::gdfl_import::BAR_DEFINITION`, so the next
+    number the import names fails the build until the band names it too.
+    `current` and the label still follow `definition_is_current` alone: an
+    options day under 2, 3 or 4 is labelled until it is restated.
+
+**Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
+L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
+10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
+
+### D-7185 — R4-28 (DLY-09): the Kite instrument dump is kept by date, one receipted snapshot per refresh, diffed against the one before, and a token is resolved by date — 2026-10-22
+
+The number is the first of R4-28's own block D-7185..D-7194
+(`state/decision-blocks.json`, OPS-08). This entry and the four after it
+were first written under numbers inside blocks other parts own, and were
+renumbered into this block, in order, before landing (R4-28 repair 4,
+the LEDGER-1023 follow-up). Nothing in them changed but the numbers.
+
+1. **Every landing of the Kite dump, and of NSE's NIFTY Total Market file,
+   is also written as a dated snapshot** under `<masters>/master-snapshots/`:
+   `instruments_<yyyymmdd>.csv.gz` and `nse_total_market_<yyyymmdd>.csv.gz`,
+   each with a `.receipt` binding the date, the URL, the compressed length
+   and SHA-256 and the body's length and SHA-256. The one call is made after
+   `masters::land` at its only call site (`api::mastersrun::obtain`); a
+   landing that refused writes no snapshot and the newest one stands.
+   `pull::master_snapshots`, on `cash_session_cache`'s pattern.
+2. **Nothing is rewritten.** Both files are created `O_EXCL`. The receipt is
+   the commit marker, written last: a body with no receipt (a kill between
+   the two) is named incomplete by `Catalog` and never read. A refresh whose
+   body equals the day's newest receipted snapshot is `already_held`; a
+   different body takes the next ordinal (`_2`, `_3`, ... up to 99, then a
+   refusal by name), past any incomplete entry, and the newest receipted
+   ordinal is the day's snapshot. Writers take one advisory lock beside the
+   snapshots; the refresh's own FIFO lock already serialises one process.
+3. **`token_on(day, exchange, token)`** (`Book::token_on`) answers from the
+   newest receipted snapshot on or before the day, through that snapshot's
+   own hash index, found by a day table (one index). On a snapshot day that
+   snapshot answers alone. Between two snapshots the older one is believed
+   only when the next later one maps the token to the same contract (the
+   diff's key); otherwise `token_ambiguous`, naming both. Before the first
+   snapshot: `before_first_snapshot`, never the earliest row and never
+   today's. A token two rows carry in one snapshot: `token_duplicated`. A
+   snapshot that does not check: `snapshot_unreadable`, named.
+4. **The diff** of each Kite snapshot against the receipted one before it is
+   written once, `O_EXCL`, as `<yyyymmdd>[_n].diff`: fixed 192-byte lines, a
+   header naming both snapshots and the count. Kinds: `listing`, `delisting`
+   (counted), `symbol` (the same token under a new symbol, or the same ISIN
+   under a new symbol), `isin`, `lot_size`, `expiry`, `token` (the same key
+   under a new token) (each named), and `isin_unknown`: a share is named
+   the day its ISIN becomes unknown (known on the old date) or the day it
+   appears without one, and the day's total is the header's
+   `isin_unknown_total` (the dump landed 6 Oct 2026 holds 10,182 NSE cash
+   rows against the Total Market file's 750, so naming every unknown share
+   every day would repeat some 9,400 names a day). The ISIN of
+   a share is read from the NSE Total Market snapshot **of the same date**
+   only: the Kite dump has no ISIN column (charter §4z), and a share neither
+   file lists that day is `isin_unknown`, never inferred. Whether every F&O
+   underlying is in the NIFTY Total Market file is UNVERIFIED. The
+   `/masters/refresh` outcome carries the snapshot and the diff's counts and
+   every named change; `pull.masters.snapshot` carries one event per refresh
+   source and one per named change. A refresh the same day reads the written
+   diff back rather than recomputing it.
+5. **`newest_snapshot_day`** reads the newest Kite snapshot's date from its
+   checked receipt, for R4-23's `master_stale` refusal (FM-267); a newest
+   snapshot that does not check is refused by name, never answered with an
+   older date.
+6. **Not built (the operator's one-command cut of 20 Oct 2026):** the scheduled morning
+   refresh and the MasterChanges panel. A refresh stays the attended
+   `POST /masters/refresh`; the diff's reader is its outcome and the events.
+
+Proof: `pull::master_snapshots::tests` (21 tests, among them
+`one_token_two_dates_resolves_to_two_contracts`,
+`the_diff_of_two_days_lists_exactly_the_injected_changes`,
+`a_snapshot_is_never_rewritten`,
+`a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contract`,
+`a_date_before_the_first_snapshot_resolves_nothing`,
+`a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used`,
+`an_isin_change_between_masters_is_named`); the bound is C-MS-01 in
+`crates/pull/benches/ratio/master_snapshots.rs` (docs/06-limits.md
+L-R428-01..04).
+
+### D-7186 — R4-28 (CON-12, FUT-C1): Zerodha futures day candles are stored and never swept; the token is an address, never an identity — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **Scope.** The operator put the futures legs back on 20 Oct 2026 (CON-12
+   and its continuous series FUT-C1, "stored and never swept"). This
+   supersedes, for FUTURES only, the 21 Aug 2026 instruction that Zerodha
+   carries no expired F&O; options stay refused on Zerodha. `CLAUDE.md` §1
+   already allows contracts to be stored and never swept, so the engine
+   surface does not change: `Instrument::is_sweepable` refuses every
+   contract and every FNO key
+   (`fnowork::futures_tests::a_future_is_never_sweepable`).
+2. **The source and its lane** are the charter's new rows beside "Expired
+   F&O" (§4z): Kite, `day` candles only, NFO futures only, `oi=1`. Minute
+   candles of an expired future stay UNVERIFIED and are never asked. GDFL
+   holds no futures (ingest design E22); whether it sells them is the
+   operator's question.
+3. **Identity.** A future is one contract keyed (underlying, expiry) through
+   `core::instrument::Contract::of(Kind::Future)`, filed at
+   `bars/zerodha/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/<yyyy-mm>.bin` with
+   its open interest. Its expiry is the one the dated snapshot states (the
+   settled date, so an expiry the exchange moved for a holiday is the moved
+   one). The vendor's token is only the ADDRESS: a contract is asked through
+   its own token from the first dated snapshot that lists it to its expiry,
+   and a token the newest snapshot maps to another contract is refused
+   `token_reused` and never asked for the older contract's history
+   (`two_contracts_reusing_a_token_on_different_dates_stay_separate`). A
+   token the newest snapshot no longer lists (flushed after expiry) is
+   asked: an answer of nothing ends that contract's history by name
+   (`history_ends`), and a refusal stops that series by name
+   (`vendor_refused`, with the vendor's own words) while the pull goes on.
+4. **The continuous series** is asked with `continuous=1` through the newest
+   snapshot's nearest future expiring on or after the day of the pull, and
+   filed **as answered** under its own symbol `<UNDERLYING>-FUT-C1` (segment
+   FNO, no contract). The vendor states no roll day, so the series is never
+   split into contracts and no contract is inferred from a date
+   (`a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_split`).
+5. **The route.** `pull::vendor::FnoAccess::ByToken(ZERODHA_CONTINUOUS)` on
+   the Zerodha descriptor, whose segments now include FNO with no basis row
+   (unmeasured, `Basis::segment` answers `None`). `POST /pull/fno` with
+   `vendor=zerodha&series=futures&granularity=1day` plans through the dated
+   snapshots (`fnowork::futures_plan`) and lands through
+   `fnowork::pull_futures_day`; options and minutes are refused by name; a
+   named expiry asks that contract alone. Every plan refusal and every series
+   is a `pull.futures` event.
+6. **The store write is the operator's**, inside 2018-01-01..2026-09-30 and
+   after a masters refresh has written a snapshot: one `/pull/fno
+   series=futures` per F&O underlying. Before the first snapshot nothing is
+   planned (`no_snapshot`). History before the first snapshot reaches the
+   store only as the continuous series.
+
+### D-7187 — R4-28 repair 1: a futures plan reads an append-only first-listed index, never every snapshot; its cost does not grow with the snapshots held — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** `fnowork::futures_plan` found the first snapshot that
+   lists each future by opening, unpacking and parsing every receipted
+   snapshot on or before the window's end, on every `POST /pull/fno
+   series=futures` run and for every underlying, keeping nothing between
+   runs. A second agent measured it on copies of the real 108,915-row dump
+   (dev profile, NIFTY): 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at
+   40 — linear, unbounded, and against the operator's rule that no work is
+   redone that an index can remember. `docs/06-limits.md` L-R428-04 named
+   the cost and bounded nothing.
+2. **The rule.** The day a receipted snapshot first listed a contract never
+   changes, so it is written down once. `master_snapshots::first_listed`
+   keeps, under the snapshots directory in `futures-first-listed/`, one
+   append-only file per (exchange, underlying name) — a line per (type,
+   expiry, token) the first time a snapshot lists it, and again only when an
+   older snapshot taken in later lists it earlier; the reader takes the
+   earliest day — and `absorbed.idx`, a line per snapshot taken in, written
+   after every line it added is synced. That line is the commit marker, as a
+   receipt is a snapshot's. Every Kite snapshot write takes its futures in
+   under the writers' lock it already holds; a plan reads the index and
+   parses the newest snapshot alone (for `token_reused` and the continuous
+   series). A snapshot on or before the window's end that the index does
+   not hold (one held before the index existed, or a kill before its commit
+   line) is taken in by the next plan, once, under the same lock.
+3. **Nothing is dropped silently.** Every line ends in a check over its own
+   bytes: a line cut by a kill is skipped and counted (`pull.futures` event),
+   and the next append starts a new line; no line is rewritten. A snapshot
+   whose checked body does not parse is recorded unparseable once and named
+   by every plan that needs it, exactly as before (`snapshot_unreadable`); a
+   snapshot whose receipt or body does not check is not recorded, is named,
+   and is retried. A future row with a field a line cannot carry is counted
+   on its commit line and in the `pull.masters.snapshot` event. A book built
+   in memory has no index and is refused `futures_index` by name.
+4. **Scope.** Only the route's own exchange and future type are taken in
+   (`ZERODHA_CONTINUOUS`: NFO, FUT), so a refresh touches only the files of
+   underlyings with a new contract — about one line per underlying when a
+   new month is listed, none on other days. Another route's (exchange,
+   type) is its own index, taken in on its first plan.
+5. **Proof.** C-MS-02 holds `futures_plan` flat at 1, 10 and 100 snapshots
+   on disk; `docs/04-invariants.md` R428-09..11 name the tests;
+   `docs/06-limits.md` L-R428-04 is closed and L-R428-07/08 state what
+   remains.
+
+### D-7188 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** D-7187 made the first-listed index the only place
+   `fnowork::futures_plan` learns which contracts exist and from which day,
+   and nothing checked an underlying's file against `absorbed.idx`. A second
+   agent showed it (`state/fix/round2/verify-R4-28-r2.json`): the file gone,
+   cut at a line boundary or one committed line garbled, and the plan
+   silently dropped contracts with nothing refused, so `POST /pull/fno`
+   would have answered 200 "every planned futures series was asked". The
+   only sign was a Warn event claiming the snapshots "were taken in again",
+   which was false. This repair found a fourth case the same gap allows: a
+   snapshot written over a cut file re-filed the lost contract under its own,
+   later day. All four failed first (R4-28 r2 `before.log`).
+2. **The rule.** Each commit line records, for every name whose file grew,
+   how many checked lines of that name the file then held (`name=count`,
+   names percent-encoded as their files are). Every read of an underlying's
+   file — by a plan, and by a snapshot write before it appends — is checked
+   against the most the log records and against every line checking; so is
+   every line of the commit log. A mismatch means the generation can no
+   longer say which contracts exist from which day.
+3. **Append-only repair, never a hidden fallback.** The index lives in
+   generation directories `futures-first-listed/g<N>`; the highest is the
+   index. A damaged generation is left exactly as found: `generations.idx`
+   records the next generation and why, then its directory is made, and the
+   receipted snapshots the call needs are taken into it again (the snapshot
+   bodies are the source of truth, fixed by their receipts). The plan says
+   so — `FuturesPlan::rebuilt`, an Error `pull.futures` event, the receipt's
+   "Futures index rebuilt" fact — in words that are true. If the new
+   generation does not match its own log either, the call refuses
+   `futures_index_damaged` by name (502) and never rebuilds in a loop; an
+   I/O failure is a named error, never taken for damage. Option 2 alone
+   (refuse every time) was not chosen: it would leave an underlying's
+   futures unplannable until someone moved files by hand, and the snapshots
+   that can rebuild the index are already on disk.
+4. **A kill mid-append.** A line a kill cut short no longer reads as
+   harmless: it does not check, so the generation is rebuilt once. Whole
+   lines that landed without their commit line are still taken in again and
+   committed by the next commit line, with no duplicate. The format tag moves
+   to `fl2`; the repair-1 layout (`absorbed.idx` directly in
+   `futures-first-listed/`) was never written outside test folders and is
+   not read.
+5. **Parse rules are recorded.** An unparseable record carries
+   `PARSE_RULES` (`unparseable@1`); one recorded under other rules is taken
+   in again, so a later, relaxed parser can take the day in (the r2 check's
+   follow-up).
+6. **Cost.** No change on the healthy path but one directory listing of
+   the index's top (one entry per generation) and the counts on commit
+   lines that grew. A rebuild is linear in the snapshots held, once per
+   damage found (`docs/06-limits.md` L-R428-09); L-R428-07 now states the
+   small linear term the r2 check measured instead of "flat".
+7. **Also.** `POST /pull/fno series=futures` opens the book and plans, and
+   `masters::land` with the snapshot write after it run off the async
+   workers (`off_the_workers`), since they take a blocking flock, fsync and
+   parse the dump.
+8. **Proof.** `docs/04-invariants.md` R428-12 and R428-13 name the tests.
+
+### D-7189 — R4-28 repair 3: every incomplete snapshot entry is named by every refresh that finds it; a token is never resolved past its own expiry; a future-dated newest snapshot is refused — 2026-10-23
+
+The number follows D-7188 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** A snapshot write cut by a kill leaves a body with no
+   receipt (or a receipt cut before its rename). `Catalog::read` listed it
+   as incomplete and nothing read it, which kept the data path safe, but
+   `Catalog::incomplete()` had no caller outside the tests: `snapshot()`
+   read the catalog under the writers' lock and dropped the list, and
+   neither `Snapshotted`, its `/masters/refresh` JSON nor the
+   `pull.masters.snapshot` event had a field for it. The next refresh
+   stepped past the cut ordinal to `_2` and named nothing, so no log, event,
+   outcome or page could show that a day's snapshot was cut, or why it was
+   `_2` (`state/fix/round2/verify-R4-28-r3.json`; the second agent's probe
+   also SIGKILLed a real-size writer 19 times and the next refresh named
+   none of the 12 entries left). That is `CLAUDE.md` §4's banned fallback
+   that hides a failure, and operator rule 3.
+2. **The rule.** The catalog lists each entry as kind, stamp, file and why.
+   `write_snapshot` returns the outcome with its kind's entries, from the
+   one listing it already reads under the lock, so the ordinal and the names
+   can never disagree. The landing hook carries them into `Snapshotted` and
+   the refresh outcome (`snapshot.incomplete`: `held`, `named` newest first,
+   `unnamed`, `refusal`), and emits one Warn `pull.masters.snapshot` event
+   per entry (`an incomplete master snapshot entry is held and never read`,
+   with `entry`, `stamp`, `day`, `why` and `held`). A refused landing, which
+   writes nothing, lists the directory once and names them all the same. The
+   event of a new snapshot says which of the day's earlier ordinals it
+   stepped past. `snapshot()`, the convenience the tests and the bench call,
+   names them in `/logs` itself, so no caller can drop the list unseen. A
+   refusal past `MAX_ORDINAL` counts receipted snapshots and incomplete
+   entries apart. Every futures pull names the book's incomplete Kite
+   entries (`FuturesPlan::incomplete`, the "Incomplete master snapshots"
+   fact).
+3. **Bounded, never silent.** The code deletes nothing, so the residue stays
+   until someone moves it aside, and every refresh names it again. At most
+   `INCOMPLETE_NAMED` (64) entries are named per outcome, per refresh's
+   events and per plan, newest first; the rest are counted (`unnamed`, one
+   more Warn event, one more plan line). The listing is the one every write
+   already read (`docs/06-limits.md` L-R428-10).
+4. **`token_expired` (PREC-10, the r3 check's follow-up, reproduced on the
+   real dump: an October index future resolved on 2026-11-02, after its
+   2026-10-27 expiry).** `Book::token_on` answers `TokenOn::Expired` for a
+   row whose contract expired before the day, on every path that used to
+   resolve it, because the exchange flushes a token at expiry and reuses it.
+   The expiry day itself still resolves. `fnowork::futures_plan` checks
+   identity, not trading, so a contract the newest snapshot still lists
+   past its expiry is still asked. One existing assertion changed its
+   expected answer and became stronger:
+   `the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day`
+   asserted that a day past a January future's expiry resolved it; it now
+   asserts `token_expired` from the same governing stamp, and that the
+   expiry day itself resolves.
+5. **A future-dated newest snapshot is refused (the r3 check's A13).**
+   `newest_snapshot_day` takes the caller's `today` and refuses, by name, a
+   newest Kite snapshot dated after it. A snapshot is dated by the clock that
+   writes it, so one from the future means that clock jumped. Believing it
+   would make R4-23's `master_stale` call the master fresh until the calendar
+   caught up. Refusing every out-of-order write was not chosen:
+   `first_listed` deliberately takes a snapshot written out of order (its
+   own test), and it would not catch a clock that ran ahead.
+6. **One contract, one token (the r3 check's follow-up).** A futures plan
+   that finds one (underlying, expiry) listed under more than one token asks
+   none of them and names each `contract_duplicated` with every token: asking
+   both would file two series as one contract's. The diff's half of the same
+   follow-up (a key listed twice in one dump reads as a token change) is NOT
+   DONE: it needs a new change kind in the fixed-record diff.
+7. **Proof.** `docs/04-invariants.md` R428-14..17 name the tests. Both
+   blocking-item tests failed first on the unfixed tree (5d009f454 with only
+   the new tests, `state/fix/round2/R4-28-r3-logs/before3.log` and
+   `before3-pull.log`): the outcome JSON named none of the cut entries.
+
+### D-7190 — R4-28 repair 4: a futures pull counts the bars it WROTE, beside the bars it offered, and accounts for every row it read; its journal outcome comes from the written count — 2026-10-24
+
+The number follows D-7189 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** `fnowork::FuturesLanded` carried `Ingested::bars_stored`,
+   the bars a landing OFFERED the store, under the words "Bars written to
+   the store", and the futures arm of `POST /pull/fno` printed it as "Bars
+   stored", put it in the journal record's count and chose `Stored` or
+   `Empty` from it. An identical re-pull, which writes nothing because the
+   store holds every bar byte for byte, answered "4 bars stored from 4 rows"
+   and was journalled `Stored`: the misreport `Ingested::bars_committed`
+   was added to end (`pull::ingest`, the field's own note). A row the
+   landing dropped (a day the calendar records closed, a day before the
+   window, a day past the window and the expiry) was counted nowhere on the
+   receipt, which had no written count, no drop census and no balance line,
+   while the options landings on the same route count `bars_committed` and
+   the spot receipt shows written, dropped and the balance. The pull
+   ladder's written-bars figure reads "Bars written to the file" first and
+   "Bars stored" after it, so a futures leg added bars that were never
+   written to the run's total.
+2. **The rule.** The futures pull sums each landing's own `Ingested`:
+   offered (`bars_stored`), written (`bars_committed`), folded
+   (`rows_folded`) and the drop census. The receipt shows them under the
+   spot receipt's words ("Bars offered to the store", "Bars written to the
+   file", "Rows folded into an open bar", "Rows dropped"), names the drops
+   by reason ("Dropped, by reason") and prints the balance line
+   (`read = offered + folded + dropped`, or `NO` naming the stopped series).
+   Each series line and each `pull.futures` series event say the written
+   count first and the offered count beside it (with "N already held" when
+   the store already held them), the folded count and the drops by reason;
+   the event carries the line itself, so `/logs` and the receipt cannot
+   disagree.
+3. **The journal.** The record's count is the WRITTEN count, as the options
+   landings' is (`FnoLanded::record_landing`), and it now carries the rows
+   folded and the drops by reason the futures arm measured; every other arm
+   keeps the zeroes `Record::refused` writes, byte for byte. The outcome
+   comes from the written count: `Stored` when a bar was written, `Empty`
+   when every bar offered was already held (or nothing was left to file),
+   with the reason inside the note's 60 kept bytes, and `Failed` when a
+   series stopped, a contract was not asked, or the rows do not balance.
+4. **Cost.** Four additions per landing and one line per series; nothing
+   new is read. The pull ladder treats `Empty` as clean, as it does for the
+   options walk, so a re-pull of a held window still completes its leg.
+5. **Proof.** `docs/04-invariants.md` R428-18 names the tests. The two
+   blocking-item tests failed on the unfixed tip (82d389b5b with only those
+   tests, written against the fields it had: `state/fix/round2/R4-28-r4-logs/`
+   `before.log`).
+6. **The r4 check's follow-ups taken in the same files.** (a) A receipt cut
+   before its rename holds its ordinal even with its body gone, so the next
+   write steps past it instead of being refused at that partial receipt's
+   name (R428-19). (b) A refresh names at most `DIFF_NAMED` (256) diff
+   changes in its outcome and its Warn events and counts the rest
+   (`named_total`, `unnamed`, one more event naming the `.diff` file, which
+   keeps every change): an exchange-wide lot-size revision is one change
+   per contract (R428-20, `docs/06-limits.md` L-R428-11). (c) A futures plan
+   refuses a newest snapshot dated after today by name,
+   `snapshot_from_the_future`, as `newest_snapshot_day` already did
+   (R428-21). (d) The `Snapshot::parse` note on a token listed twice now says
+   which row takes the slot (the later one; neither is answered).
+   (e) Each futures landing runs off the async workers (`block_in_place`
+   on a multi-thread runtime, inline on a current-thread one), as the
+   plan already did in the server (R428-22).
+7. **Three more of the r4 check's follow-ups, in the same file.** (f) The
+   `.diff` is written whole under an `O_EXCL` partial name
+   (`<diff>.partial`, then `_2`, `_3`, ... up to `MAX_ORDINAL`), synced and
+   renamed into place under the writers' lock (open since r1). A kill
+   mid-write leaves a partial that `Catalog` names (Kite, "a .diff cut
+   before its rename committed it") and no reader opens, never a torn diff
+   under the diff's own name. The next refresh makes the diff again, whole,
+   and steps past the partial, which is left exactly as found: the code
+   deletes and overwrites nothing. A torn file under the diff's own name
+   (damage from outside) is still refused by name and never written over
+   (R428-23). (g) `Book::open` lists under the writers' lock taken shared,
+   so a refresh that has written its body and not yet its receipt is waited
+   for and never named cut on the futures receipt. Readers list beside each
+   other, and a root that does not exist is still an empty book and is not
+   created (R428-24, `docs/06-limits.md` L-R428-12). (h) A name that is a
+   snapshot's, a receipt's or a partial receipt's in another case is named
+   incomplete and holds its ordinal. On a case-insensitive volume (macOS by
+   default) it is the very name `create_new` would make, so the next write
+   now steps past it instead of being refused on every refresh while the
+   listing, which compares bytes, saw nothing there (R428-25).
+8. **The event half, proved.** No test read a `pull.futures` series event
+   back: the receipt tests read `FuturesLanded`, and no futures site is in
+   `emit_sites`. `crates/pull/tests/futures_events.rs`, a binary of its own
+   because `telemetry::install` is a process singleton, drives the shipped
+   `pull_futures_day` three times and reads the lines off the sink's file:
+   the first pull of six candles says written 3, offered 3, dropped 3 with
+   each reason; the identical re-pull says written 0, offered 3 and "3
+   already held"; a contract answered no candle is an error line naming
+   `history_ends`. Every line is whole: nothing cut at its ceiling and no
+   field counted away past `telemetry::MAX_FIELDS` (the event carries 11 of
+   the 12).
+
+### D-7191 — R4-28 repair 5: the snapshot catalog, the book and the diff answer from indices built once; gate 11's six remaining lines are declared with their bounds; a Zerodha futures ask reaches its route — 2026-10-24
+
+The number follows D-7190 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** CI gate 11 (banned constructs on the O(1) paths) refused
+   seven entries, 22 occurrences, in R4-28's two new production files,
+   `crates/pull/src/master_snapshots.rs` and
+   `crates/pull/src/master_snapshots_first_listed.rs`: three searches
+   (`partition_point`) where the law is "never binary_search" (docs/07
+   layer 4), nine maps made unsized where it is "pre-size every map"
+   (docs/07 law 2), four sorts, two searches of a list the data sent and
+   four membership tests. None was in the gate's allowlists and none had a
+   gate-11 reason in `docs/06-limits.md`; the gate's other 16 refusals on
+   that run are feat/db-fix's own, in other packages' files.
+2. **What was removed (16).** `Catalog::read` lists the directory's names
+   first, sizes its maps from them, and builds two indices with its one
+   ordering: each (kind, day)'s newest receipted ordinal, and each receipted
+   stamp's place in its kind's list. `Catalog::of_day`, `Catalog::before`
+   and the new `Catalog::is_receipted` are one probe each. `before` of a
+   stamp no receipt commits is now `None` (the search answered the
+   receipted stamp below any stamp), and `diff_for` refuses such a stamp by
+   name, where it answered `Ok(None)`, "the first snapshot", whenever none
+   came before it. `first_listed::listing` takes the `Book` and reads the
+   stamps on or before the plan's last day from `Book::through`, one
+   day-table index. `Snapshot::parse` indexes the header once (the first of
+   two columns with one name is read, as before), sizes its rows and token
+   index from the dump's line count and its word map from `WORDS_HINT`
+   (64), and keeps a token's duplication in its one index slot (`Slot`), so
+   a lookup is one probe for the word and one for the token. The diff sizes
+   its token map from the old rows and its gone-share map from the gone
+   shares; the first-listed log sizes its committed map from its pairs and
+   the take-in cache from the names the log commits, and a plan makes its
+   why-not map only when it took snapshots in. A change kind's count slot is
+   `Change::index`, a match. `Book::of` (the tests and the bench) no longer
+   sorts what it is given: it checks the order in one pass and refuses
+   snapshots not given oldest first.
+3. **What is declared (6), each bounded.** In `.github/gates_ledger.rs`,
+   `crates/pull/src/master_snapshots.rs` takes rule 4 = 3 and rule 7 = 3.
+   Rule 4: `Catalog::read` orders the receipted stamps of each kind and the
+   entries named incomplete once per listing, which is already linear in
+   the directory's entries (L-R428-10), and nothing after it sorts; `diff`
+   orders its records once per attended refresh, over its changes only,
+   inside a comparison of two whole dumps (L-R428-03), so one pair of dumps
+   writes one `.diff` byte for byte (CLAUDE.md section 3 rule 5). Rule 7:
+   `diff`'s three probes of the new dump's key set, a `HashSet` built once
+   per diff: hash probes, the shape the rule permits. The reasons are in
+   `docs/06-limits.md`, "Gate 11 — R4-28, declared at its merge", and
+   L-R428-13 records the listing's cost.
+4. **Proof.** `docs/04-invariants.md` R428-26..R428-33. The gate run on the
+   edited tree refuses no R4-28 file, and its REFUSED lines equal those of
+   feat/db-fix's own run. The tests that change behaviour (a predecessor for
+   a stamp no file holds, `diff_for` of such a stamp, `Book::of` given its
+   snapshots newest first) fail on the unfixed code: each asserts the
+   refusal or the `None` that code did not give.
+5. **A defect found in the self-check: the futures route could not be
+   asked.** `ingest::parse_fno` refused every rung but `1min` for every
+   expired-series ask (the operator's rule of 2026-08-19), and the futures
+   route's own guard refuses every rung but its route's `1day`, so no body
+   reached `fnowork::futures_plan`: D-7186 point 5's own request was refused
+   at the parse, and its `series=futures` is not a word the parse knows (the
+   wire word is `fut`). The receipt tests built `FnoRequest` by hand, at
+   `1day`, so nothing exercised the parse. Now `ingest::expired_rung` parses
+   an expired FUTURE of a feed whose descriptor routes futures through a
+   token (`FnoAccess::ByToken`, Zerodha alone) at that route's rung: an
+   absent granularity is that rung, as an absent one is `1min` for every
+   other ask, and any other rung is refused at the parse by name
+   (`Refusal::ExpiredFutureAtItsRouteRungOnly`, field `granularity`).
+   Options, and every other feed's futures, keep the one-minute rule. The
+   store step is therefore `POST /pull/fno` with
+   `vendor=zerodha&series=fut&underlying=<UND>&from=..&to=..` and
+   `granularity=1day` or none. R4-06's
+   `crates/api/tests/store_step_forms.rs` pinned the old refusal of S-48's
+   planned body at `1day` and asked R4-28 to reconcile the two; it now pins
+   that the body parses at `1day` once an underlying is named and refuses
+   `1min` by name, and still refuses the body without an underlying, so
+   S-48 (`config/store-steps.toml`) stays planned, its text saying why: the
+   route takes one underlying a request, and no form names all the F&O
+   underlyings at once.
+6. **The r5 check's follow-ups taken.** (a) A whole-plan refusal of
+   `futures_plan` (`no_snapshot`, `snapshot_from_the_future`,
+   `futures_index`) is one Error `pull.futures` event naming the underlying
+   and the refusal; it reached the receipt and `/audit` only. (b) The
+   futures receipt's line of incomplete entries is "Incomplete
+   master-snapshot entries": a cut `.diff` and a name in another case are
+   listed there too, and each line says which it is. (c) The failure note no
+   longer says a pull's landed series "may not be read as held": what each
+   series line says it wrote is held. (d) The `fno` handler's note no longer
+   says Zerodha declares `FnoAccess::None`. (e) `/ingest` knew four `fno`
+   words and declined Zerodha's `by_token` as "states no expired-derivative
+   history"; the five words now live in one table (`web/src/lib/fno-modes.js`,
+   pinned to the server's match by its test), Zerodha is asked for futures
+   and named as served for futures only, and a word the table does not know
+   is declined as unknown, never read as `none`. (f) Gate 12's refusal of
+   the C-MS-01/02 bench note (no proof named) and gate 23's four undeclared
+   test prints in R4-28's files (now five, with the catalog measurement) are
+   answered: the note names its harness, `crates/pull/benches/ratio.rs`, and
+   `.github/workflows/ci.yml` declares the prints. (g) Gate 1d's 135 new
+   segment-shaped literals in R4-28's `crates/pull` files (column names of
+   Kite's public dump, the snapshot store's own names, refusal words, fields,
+   invented fixtures and scratch tags) are declared, each read, as one group
+   in `.github/gates_tree.rs` (`R4_28_LITERAL`), so the gate's undeclared
+   list on R4-28's tree is feat/db-fix's own 466.
+7. **Not taken, and why.** A pull whose plan refused a contract for a reason
+   the snapshots fix (`token_reused`, `contract_duplicated`) is still
+   journalled `Failed`, so such an underlying's futures leg stays failed
+   until the operator acts; making it complete needs an outcome the journal
+   does not have (it has no partial outcome) or a rule that lets a known gap
+   read as a complete leg, and D-7190 point 3 chose `Failed`.

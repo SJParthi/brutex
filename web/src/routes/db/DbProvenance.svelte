@@ -60,7 +60,7 @@
   import { untrack } from 'svelte';
   import { ask } from '$lib/ask.js';
   import { askAgainWhileWritten } from '$lib/being-written.js';
-  import { dayLabel, barTimeLabel, secondLabel } from '$lib/dates.js';
+  import { dayLabel, barTimeLabel, secondLabel, istDay } from '$lib/dates.js';
   import {
     TF_SECS,
     fmt,
@@ -80,6 +80,10 @@
     reachesAuction,
     sourceNotRead,
     drawerFacts,
+    shareBasisUrl,
+    basisWindowOf,
+    basisRunsOf,
+    basisRunLabel,
     segmentOfKey,
     remember,
     PROV_FILES_MAX,
@@ -178,11 +182,31 @@
     return a?.state === 'ok' ? a.body : null;
   };
 
+  /**
+   * A ZERODHA SHARE'S ADJUSTED OR QUANTISED RUNS (R3-13 goal 4; DB-G38,
+   * DB-G40): one `/sources/day.json` of the route's whole 31-day page laid
+   * around the page's days of one share (`basisWindowOf`; their newest 31 where
+   * they span more), so each row is labelled with the run its day belongs to,
+   * first and last day as far as the page reaches, from the served factor. `null`
+   * for another feed, a page of no share or of more than one.
+   */
+  const basisUrl = $derived.by(() => {
+    if (wire !== 'zerodha') return null;
+    const share = runs.filter((r) => segmentOfKey(r.instrument) === 'CASH');
+    const keys = new Set(share.map((r) => r.instrument));
+    if (keys.size !== 1) return null;
+    const asked = basisWindowOf(share.flatMap((r) => [istDay(r.first.ts), istDay(r.last.ts)]).filter(Boolean));
+    return asked ? shareBasisUrl([...keys][0], asked.from, asked.to) : null;
+  });
+  /** The runs `basisUrl` answered, oldest first; `[]` until it answers. */
+  const basisRuns = $derived(basisRunsOf(bodyOf(basisUrl)));
+
   /** Every URL the page's run lines need. */
   const pageUrls = $derived.by(() => {
     if (!wire) return [];
     /** @type {string[]} */
     const want = files.files.map(monthUrl);
+    if (basisUrl) want.push(basisUrl);
     for (const run of runs) {
       const c = casUrls(run);
       if (c) {
@@ -278,7 +302,11 @@
         answer: provAnswer?.state === 'ok' ? provAnswer.body : provAnswer?.state === 'error' ? { error: provAnswer.why } : null,
         bar,
         tail: bodyOf(u.cas?.tail),
-        dayFacts
+        dayFacts,
+        // THE DAY BAND'S RECORD OF THE ROW'S DAY, for its bar definition
+        // (R3-13 goal 3), and the share's adjusted runs (goal 4).
+        band: (db.dayBandCells ?? []).find((/** @type {any} */ c) => c.day === row.day) ?? null,
+        basis: basisRuns
       }),
       reading,
       failed,
@@ -317,6 +345,8 @@
     const segment = segmentOfKey(run.instrument);
     const price = priceBadge(feed, segment, run.tf, src?.pullDay ?? null);
     const close = closeBadge(feed, segment, run.tf);
+    // THE ADJUSTED OR QUANTISED RUN THE ROWS' DAY BELONGS TO (R3-13 goal 4).
+    const basis = segment === 'CASH' ? basisRunLabel(basisRuns, run.day || istDay(run.first.ts)) : null;
     // EVERY RUN THAT REACHES THE AUCTION IS MARKED from its rows' own phases;
     // the session's last print and the day's record sharpen a GDFL mark where
     // they were read, and a day past the cap says it was not.
@@ -349,6 +379,7 @@
       casCapped,
       price,
       close,
+      basis,
       marks,
       casReading,
       casFailed,
@@ -371,7 +402,7 @@
           ? `error|${l.answer.why}`
           : 'reading';
     const own = l.marks.length > 0 || l.casReading || l.casCapped || l.casFailed.length > 0 ? run.key : '';
-    return [run.tf, run.day, l.price.text, l.close?.short ?? '', l.window ?? '', said, own].join('§');
+    return [run.tf, run.day, l.price.text, l.close?.short ?? '', l.basis?.short ?? '', l.window ?? '', said, own].join('§');
   }
 
   /**
@@ -435,6 +466,7 @@
           {/if}
           <span class="bb {l.price.tone}" title={l.price.title}>{l.price.tone === 'adjusted' ? l.price.text : l.price.short}</span>
           {#if l.close}<span class="bb {l.close.tone}" title={l.close.title}>{l.close.short}</span>{/if}
+          {#if l.basis}<span class="bb {l.basis.tone}" title={l.basis.text}>{l.basis.short}</span>{/if}
           {#if l.window}<span class="bb warn" title="D-3338: the operator's window">{l.window}</span>{/if}
           <span class="psrc {l.src?.state ?? l.answer?.state ?? 'unread'}">
             {#if !l.read && l.src}
