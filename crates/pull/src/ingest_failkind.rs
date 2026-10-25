@@ -34,7 +34,9 @@ use store::repair::RepairError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FailKind {
     /// Another process holds the month (a writer, or a reader's shared lock),
-    /// or the repair found its source advanced under it. Retried for at most
+    /// or the repair found its source advanced under it, or the feed's
+    /// quarantine index was still being brought level by its writer (R4-18
+    /// repair 2). Retried for at most
     /// two seconds at the import's call site, then `month_busy`; held back.
     MonthBusy,
     /// The host said the disk is full: the run ends `disk_full`.
@@ -180,22 +182,51 @@ impl FailKind {
     pub const fn of_repair(why: &RepairError) -> Self {
         match why {
             RepairError::Store(inner) => Self::of_store(inner),
-            RepairError::StaleSource => Self::MonthBusy,
+            // A source that moved under the repair, or (R4-18 repair 2) a writer
+            // of the feed's quarantine still bringing its index level as the
+            // reader's patience ran out (the importer's is none): the month is
+            // busy, as a month a writer holds, retried at the import's call
+            // site; never store damage.
+            RepairError::StaleSource
+            | RepairError::QuarantineUnknown(
+                store::quarantine::QuarantineError::BeingWritten { .. },
+            ) => Self::MonthBusy,
             RepairError::RowLimit { .. }
             | RepairError::NoBasisWitness
             | RepairError::UnsealedSource
             | RepairError::Conflict
             | RepairError::Incomplete(_)
-            | RepairError::InvalidReceipt(_) => Self::RepairRefused,
+            | RepairError::InvalidReceipt(_)
+            // R4-18's drop and restate doors: a caller's malformed
+            // request, refused before anything is reserved or written.
+            | RepairError::UnheldStamp(_)
+            | RepairError::WholeMonth { .. }
+            | RepairError::NothingNamed
+            | RepairError::Reason(_) => Self::RepairRefused,
             RepairError::HeldBarDiffers { .. }
             | RepairError::IndexedSibling(_)
-            | RepairError::RevisionLimit => Self::RepairImpossible,
+            | RepairError::RevisionLimit
+            // R4-18 repair 2: a month quarantined whole takes no bar, for
+            // good; no later build or repair lifts a quarantine.
+            | RepairError::Quarantined(_) => Self::RepairImpossible,
+            // R4-18 repair 2: the feed's quarantine index or ledger cannot
+            // be trusted (torn, stale, damaged), so which offered bars it
+            // set aside is not known: a fault of the store, held back, read
+            // again once a writer has rebuilt the index.
+            RepairError::QuarantineUnknown(_) => Self::StoreDamaged,
             RepairError::MissingTimestamp(_) => Self::BatchRefused,
             // D-4898 (IA-17): the revision is published, complete and not
             // served; the same repair offered again finds it and promotes.
             // So it is the visible-publication row: never a hole.
             RepairError::BeforePromote { .. } => Self::Io {
                 kind: ErrorKind::Other,
+                publication_may_be_visible: true,
+            },
+            // R4-18 (the restate policy): the revision is published and its
+            // read-back differs, so it is NOT promoted; like BeforePromote it
+            // exists unserved, and the bytes the host returned are the fault.
+            RepairError::ReadBack { .. } => Self::Io {
+                kind: ErrorKind::InvalidData,
                 publication_may_be_visible: true,
             },
             RepairError::Io {

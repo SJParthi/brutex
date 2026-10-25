@@ -291,6 +291,10 @@ fn instruments_body(
     read: &super::Read,
 ) -> String {
     let held = held_by_listing(site, feed, slot);
+    // THE QUARANTINE READ ONCE PER KEPT BODY (R4-18; ING-01 e): each row
+    // is then one hash probe. A ledger that will not read is said on every
+    // row by its code, never read as "clear".
+    let quarantine = store::quarantine::Summary::load(&site.store_root, feed);
     let mut rows: Vec<Row> = if feed.publishes_master() {
         read.merged
             .by_key
@@ -308,6 +312,7 @@ fn instruments_body(
                     .unwrap_or_default(),
                 master: Some(feed),
                 spot: true,
+                quarantine: quarantine_of(&quarantine, key),
             })
             .collect()
     } else {
@@ -332,6 +337,7 @@ fn instruments_body(
                     held: held.clone(),
                     master: None,
                     spot: is_spot,
+                    quarantine: quarantine_of(&quarantine, &key),
                 }
             })
             .collect()
@@ -357,6 +363,39 @@ fn instruments_body(
     out
 }
 
+/// One instrument's `"quarantine"` (R4-18): `null`, its months and causes,
+/// or the code of a ledger that would not read.
+pub(super) fn quarantine_of(
+    summary: &Result<store::quarantine::Summary, store::quarantine::QuarantineError>,
+    key: &InstrumentKey,
+) -> String {
+    match summary {
+        Err(why) => format!(r#"{{"unknown":{}}}"#, render::json_string(why.code())),
+        Ok(summary) => summary
+            .instrument(
+                key.exchange.as_str(),
+                key.segment.as_str(),
+                key.underlying.as_str(),
+            )
+            .map_or_else(
+                || "null".to_owned(),
+                |held| {
+                    format!(
+                        r#"{{"months":{},"whole_months":{},"bars":{},"causes":[{}]}}"#,
+                        held.months,
+                        held.whole_months,
+                        held.bars,
+                        held.causes
+                            .iter()
+                            .map(|cause| render::json_string(cause.code()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                },
+            ),
+    }
+}
+
 /// One `/instruments.json` row.
 struct Row {
     key: InstrumentKey,
@@ -367,6 +406,9 @@ struct Row {
     /// Whether this is a spot listing; `false` for an option underlying the
     /// feed holds no spot series of.
     spot: bool,
+    /// The instrument's quarantine (R4-18): `"null"` when none, else its
+    /// months, bars and causes, rendered once.
+    quarantine: String,
 }
 
 impl Row {
@@ -403,13 +445,14 @@ impl Row {
         }
         let _ = write!(
             out,
-            r#"}},"spot":{},"options":{},"master":{},"href":{}}}"#,
+            r#"}},"spot":{},"options":{},"master":{},"quarantine":{},"href":{}}}"#,
             self.spot,
             self.held.options,
             self.master.map_or_else(
                 || "null".to_owned(),
                 |feed| render::json_string(feed.as_str())
             ),
+            self.quarantine,
             render::json_string(&format!(
                 "/instruments?q={}",
                 render::query_value(&canonical)
