@@ -170,7 +170,9 @@ pub const MAX_WINDOW_WALK: u32 = 14;
 /// ([`crate::calendar::kind_of`]) does not call closed, or more than
 /// [`MAX_WINDOW_WALK`] days between them. A measured row whose window holds
 /// one does not know its ex-date's day (`Action::day_known`). At most
-/// [`MAX_WINDOW_WALK`] calendar lookups: O(1).
+/// [`MAX_WINDOW_WALK`] calendar lookups: O(1), and a window longer than the
+/// walk answers with no day walked
+/// (`pull::corporate_actions::tests::a_session_between_two_days_is_found_within_a_bounded_walk`).
 #[must_use]
 pub fn session_between(after: Day, through: Day) -> bool {
     let (from, to) = (after.days_from_epoch(), through.days_from_epoch());
@@ -484,7 +486,11 @@ impl Action {
     /// ([`session_between`]). A row that does not is placed on the first day
     /// the new basis was seen and must say "between", never "at this
     /// session": a month missing from the input, or days with no basis,
-    /// leave a window the data never saw. O(1).
+    /// leave a window the data never saw. O(1): one [`session_between`],
+    /// whose walk is bounded by
+    /// `pull::corporate_actions::tests::a_session_between_two_days_is_found_within_a_bounded_walk`;
+    /// the answer is pinned by
+    /// `pull::corporate_actions::tests::a_two_for_one_step_across_a_missing_month_does_not_know_its_day`.
     #[must_use]
     pub fn day_known(&self) -> bool {
         self.after
@@ -1687,7 +1693,10 @@ fn back_across(up: bool, from: &Run, run: &Run) -> bool {
 /// The magnitude is the levels', never a step's alone: a 0.7% step beside a
 /// tenfold one is crossed back by it; the tenfold one is crossed by neither.
 /// Each side stops at the span's edge, so at most the runs starting within
-/// [`REVERSAL_DAYS`] either side are read: O(1) for one step.
+/// [`REVERSAL_DAYS`] either side are read: O(1) for one step by its shape.
+/// No test counts the runs it reads, so that bound is UNVERIFIED as a
+/// measurement (`docs/06-limits.md` L-R426-08); what it answers is pinned by
+/// `pull::corporate_actions::tests::a_large_step_walked_back_in_smaller_steps_within_90_days_is_reversed`.
 fn crossed_back(runs: &[Run], at: usize, step: &Step) -> Option<Day> {
     let up = step.up();
     let (old, new) = (runs.get(at)?, runs.get(at.checked_add(1)?)?);

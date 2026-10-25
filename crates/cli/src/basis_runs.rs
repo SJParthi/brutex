@@ -228,12 +228,18 @@ fn next_month(month: YearMonth) -> Option<YearMonth> {
 }
 
 /// `month` numbered from January of year 0, so that the distance between
-/// two months is one subtraction. At most 9999 x 12 + 11. O(1).
+/// two months is one subtraction. At most 9999 x 12 + 11. O(1): two
+/// multiplications and an addition, no loop; the distances it gives are
+/// pinned by
+/// `cli::basis_runs::tests::a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read`.
 fn ordinal(month: YearMonth) -> usize {
     usize::from(month.year()) * 12 + usize::from(month.month().saturating_sub(1))
 }
 
-/// How many months `first..=last` holds. O(1).
+/// How many months `first..=last` holds. O(1): one subtraction of two
+/// [`ordinal`]s, proved at the edges (1,200 months walk, 1,201 and 96,360
+/// are refused) by
+/// `cli::basis_runs::tests::a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read`.
 ///
 /// # Errors
 ///
@@ -299,7 +305,9 @@ impl Gaps {
 
     /// How many missing months come before the month numbered `at`. A month
     /// before the window counts none and one after it counts all, which is
-    /// exact: no month outside the window is missing. O(1).
+    /// exact: no month outside the window is missing. O(1): one clamp and
+    /// one read, against the list filtered directly in
+    /// `cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`.
     fn count_before(&self, at: usize) -> usize {
         let Some(first) = self.first else {
             return 0;
@@ -310,7 +318,10 @@ impl Gaps {
     }
 
     /// The missing months strictly after `from` and strictly before `to`.
-    /// Two reads of the counts, then the slice. O(1).
+    /// Two reads of the counts, then the slice. O(1), and equal to the
+    /// missing list filtered directly for every pair of months around
+    /// windows of 1 to 25 months and a 1,200-month one:
+    /// `cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`.
     pub(crate) fn between(&self, from: YearMonth, to: YearMonth) -> &[YearMonth] {
         let start = self.count_before(ordinal(from) + 1);
         let end = self.count_before(ordinal(to));
@@ -846,7 +857,10 @@ fn month_of(day: Day) -> Option<YearMonth> {
 /// For a step whose window `(after, ex_date]` holds a session with no
 /// basis: says the day is unknown, and names every month of the window
 /// missing from `DIR`. Empty for a step that knows its day. O(1) to find
-/// the months ([`Gaps::between`]), then one word per month named.
+/// the months ([`Gaps::between`], proved by
+/// `cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`),
+/// then one word per month named; the note itself is pinned by
+/// `cli::basis_runs::tests::a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothing`.
 fn window_note(folded: &Folded, step: &Step) -> String {
     if step.day_known() {
         return String::new();

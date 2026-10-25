@@ -85724,6 +85724,15 @@ made the walk 96,360 months, 96,358 of them missing, although `MAX_MONTHS`
    The walk already passes every month of the window once, so recording the
    counts as it goes costs nothing a search saves, and an allowlist would
    keep a search on a path the law names.
+4. **Gate 12 too.** Every cost claim in R4-26's doc blocks names its proof
+   inside the block: the five in `basis_runs.rs` (`ordinal`,
+   `window_months`, `Gaps::count_before`, `Gaps::between`, `window_note`)
+   name the tests below, `session_between` and `Action::day_known` name
+   `pull::corporate_actions::tests::a_session_between_two_days_is_found_within_a_bounded_walk`,
+   and `crossed_back`, whose per-step read count no test measures, says
+   UNVERIFIED and L-R426-08 says so too. At the merge of `feat/db-fix`
+   13dcf5e59 gate 12 refused those eight blocks and nothing else of
+   R4-26's.
 
 **Proof.** `cli::basis_runs::tests::a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read`,
 `cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`
