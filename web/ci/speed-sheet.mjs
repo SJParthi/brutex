@@ -1033,7 +1033,7 @@ export function readCapturedFile(path) {
  *   restart?: (command: string, waitMs: number) => Promise<number | string>}} [deps] `restart` runs one
  *   restart within `waitMs` and resolves with its exit code, or with what happened instead
  *   ({@link restartWithin}, the shell command, by default)
- * @returns {Promise<SheetResult>}
+ * @returns {Promise<SheetResult & {notes: string[]}>} every return carries its notes (the day taken, R315-38)
  */
 export async function runSheet(args, deps = {}) {
   const sendTo = deps.send ?? timed;
@@ -1055,13 +1055,13 @@ export async function runSheet(args, deps = {}) {
     try {
       captureText = readCapturedFile(args.fromPages);
     } catch (why) {
-      return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: --from-pages ${args.fromPages}: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx: null, commit: null };
+      return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: --from-pages ${args.fromPages}: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx: null, commit: null, notes: [] };
     }
   }
 
   const up = await send(UP_ROUTE, { method: UP_METHOD });
   if (up.status !== 200) {
-    return { ok: false, rows: [], ignored: [], failures: [`the server at ${args.base} is not up: ${UP_METHOD} ${UP_ROUTE} answered ${'error' in up ? up.error : `HTTP ${up.status}`}`], notMeasured, skipped: [], ctx: null, commit: null };
+    return { ok: false, rows: [], ignored: [], failures: [`the server at ${args.base} is not up: ${UP_METHOD} ${UP_ROUTE} answered ${'error' in up ? up.error : `HTTP ${up.status}`}`], notMeasured, skipped: [], ctx: null, commit: null, notes: [] };
   }
   const commit = up.build;
   if (commit === null || commit === 'unstamped') {
@@ -1074,7 +1074,7 @@ export async function runSheet(args, deps = {}) {
   try {
     ctx = await discover((p) => send(p), args);
   } catch (why) {
-    return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit };
+    return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit, notes: [] };
   }
   const taken = dayTakenNote(ctx);
   /** @type {string[]} */
@@ -1086,7 +1086,7 @@ export async function runSheet(args, deps = {}) {
   } catch (why) {
     // A CAPTURE THAT CANNOT BE READ IS A FAILED RUN, NAMED: replaying part
     // of it, or none of it in silence, would time fewer pages than asked.
-    return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx, commit };
+    return { ok: false, rows: [], ignored: [], failures: [`the capture of the pages' own requests could not be read: ${/** @type {Error} */ (why).message}`], notMeasured, skipped: [], ctx, commit, notes };
   }
   const { requests, skipped } = requestsFor(ctx, captured);
   if (captureText === null) notMeasured.push('the requests /gaps, /audit, /markets and the other pages build inline: no --from-pages capture was given');
@@ -1432,9 +1432,9 @@ export const STDERR_SETTLE_MS = 1_000;
  * A command's lines on `stream` (its stderr), one line a call, through ONE
  * persistent `error` listener a stream, so a reader that has gone is
  * COUNTED, never thrown (verify r8, 26 Oct: `process.stderr` had no `error`
- * listener in either command, and Node's console listens only for the
- * synchronous part of a write, so the EPIPE a closed pipe reports a tick
- * later was an uncaught exception: a sheet whose stderr reader had gone
+ * listener in either command, and Node's console keeps none there, so the
+ * EPIPE of a line written after the reader had gone was thrown as an
+ * uncaught exception, a tick after its write: a sheet whose stderr reader had gone
  * (`2>&1 | head -1`) died mid-run with its `--out` never written and
  * nothing said, and either command's end turned its exit into 1 whatever
  * its run's verdict). Once a write has failed, no later line is written:
@@ -1615,7 +1615,7 @@ async function main() {
   const result = await runSheet(args, { log: said.say });
   // The sheet says what its own stderr did not show, from which line (verify r8).
   const note = await stderrNote(said);
-  const text = renderSheet(note === null ? result : { ...result, notes: [...(result.notes ?? []), note] }, args);
+  const text = renderSheet(note === null ? result : { ...result, notes: [...result.notes, note] }, args);
   const flushed = written(process.stdout, text, 'speed-sheet');
   let code = result.ok ? 0 : 1;
   if (args.out) {

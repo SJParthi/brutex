@@ -79326,10 +79326,10 @@ Repair round 8 (26 Oct, after verify r8):
 
 39. **A closed stderr is counted, never thrown, and the sheet says it**
     (R315-36; verify r8, blocking 1). Neither command listened on
-    `process.stderr`, and Node's console listens only while it writes, so
-    the EPIPE a closed stderr reports a tick later killed a sheet mid-run
-    (exit 1, no `--out`, nothing said) and turned either command's end into
-    exit 1. Each `main` now takes `saidOn(process.stderr)` first: one
+    `process.stderr`, and Node's console keeps no listener there, so the
+    EPIPE of a line written after the reader had gone killed a sheet
+    mid-run (exit 1, no `--out`, nothing said) and turned either command's
+    end into exit 1. Each `main` now takes `saidOn(process.stderr)` first: one
     persistent listener and one count a stream, every line of the command's
     own said through it, a line stderr did not take counted and none
     written after a failure. The run goes on, `--out` is written whole, the

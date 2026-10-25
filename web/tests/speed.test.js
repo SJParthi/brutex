@@ -4340,8 +4340,8 @@ const closingReader = (argv, close, gone) => new Promise((resolve) => {
 
 test('a command\'s lines on stderr are said through one listener a stream: a reader that has gone is counted, never thrown, and the first line not shown is named', async () => {
   // Before (verify r8, 26 Oct): neither command listened on process.stderr,
-  // and console.error listens only during the synchronous part of a write,
-  // so the EPIPE a closed stderr reports a tick later was thrown.
+  // and Node's console keeps no listener there, so the EPIPE of a line
+  // written after the reader had gone was thrown, a tick after its write.
   const { Writable } = await import('node:stream');
   /** @type {string[]} */
   const took = [];
@@ -4454,6 +4454,13 @@ test('every sheet still waiting on a stream hears its failure, each said once by
     assert.deepEqual(lines, ['browser-harness: stdout was closed before it took the whole sheet (3 B): EPIPE; what it did not take is lost\n', 'browser-harness: stdout was closed before it took the whole sheet (4 B): EPIPE; what it did not take is lost\n']);
     assert.equal(sheet.sheetsWaitingOn(held), 0);
     assert.equal(held.listenerCount('error'), 1, 'still one listener');
+    // A stream that answers the sheet after its bound, and fails then: let go at the bound, said once; its late failure says nothing more.
+    lines.length = 0;
+    const slowly = new Writable({ write(_c, _e, done) { setTimeout(() => done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })), 150); } });
+    assert.equal(await sheet.written(slowly, 'late', 'speed-sheet', 30), false);
+    assert.equal(sheet.sheetsWaitingOn(slowly), 0);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(lines, ['speed-sheet: stdout did not take the whole sheet (4 B) within 30 ms; what it did not take is lost\n'], 'said once, at the bound');
     // A stream that takes each sheet: none waits behind its end; a stream never handed one has none.
     const sink = new Writable({ write(_c, _e, done) { done(); } });
     for (let i = 0; i < 12; i += 1) assert.equal(await sheet.written(sink, 'x', 'speed-sheet', 5_000), true);
@@ -4523,6 +4530,37 @@ test('a sheet whose stderr reader goes after its first line runs to its end: its
       assert.equal(ran.stdout, close === 'stderr' ? text : '', `${close}: stdout is the sheet, the same as --out, unless it was closed first`);
       assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'no file left half written');
     }
+  } finally {
+    server.close();
+  }
+});
+
+test('a sheet whose stderr is closed from its start and whose run ends before it times anything still writes its --out whole, naming the line stderr lost', { timeout: 60_000 }, async () => {
+  // Every return of the run carries its notes, so a run that ends early can still say what stderr lost (repair 8):
+  // its one line, the warning of an unstamped server, goes to a stderr already closed, and discovery then fails.
+  const server = http.createServer((req, res) => {
+    res.writeHead(req.method === 'HEAD' && req.url === UP_ROUTE ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(req.method === 'HEAD' ? undefined : '{"error":"not here"}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  const dir = mkdtempSync(join(tmpdir(), 'r315-stderr-early-'));
+  const out = join(dir, 'sheet.md');
+  try {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', base, '--allow-unstamped', '--out', out], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stderr.destroy();
+    let stdout = '';
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
+    const [code, signal] = await new Promise((resolve) => child.on('close', (c, s) => resolve([c, s])));
+    assert.deepEqual([code, signal], [1, null], 'the run failed by name: its exit is that verdict');
+    assert.ok(existsSync(out), '--out was written');
+    const text = readFileSync(out, 'utf8');
+    assert.equal(stdout, text);
+    assert.match(text, /^# Speed sheet — FAIL\n/);
+    assert.match(text, /\n- stderr was closed \(EPIPE\) from the line "WARNING: the server names no build \(x-brutex-build\); a sheet that cannot name its commit measures no build — allowed by --allow-unstamped": 1 of this run's own lines on it were not shown\n- FAILED: discovering the selection: \/feeds\.json answered HTTP 404\n$/);
   } finally {
     server.close();
   }
