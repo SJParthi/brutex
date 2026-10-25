@@ -197,6 +197,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "calendar-days"
                 // The upkeep runner (R3-17, D-6270): a store verb.
                 | "upkeep"
+                // The month recovery door (R3-20, D-7093): a store verb.
+                | "month-recover"
                 // The tick-to-second check (DATA-2, D-5181): a read-only
                 // store check, never a sweep.
                 | "tick-to-second-check"

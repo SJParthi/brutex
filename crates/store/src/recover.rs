@@ -1,7 +1,7 @@
 //! Month recovery after a power cut: the door that brings back a month left
 //! refused at its last commit whose records check out, writing the safe part
 //! as a new file and saying what it dropped. R3-20, D-7093; NEW-23, RA-276,
-//! RA-280, RA-330, FM-062; the store door critic D-4911 (c) proposed.
+//! RA-280, RA-330, FM-062; the store door the round-7 critic's resolution (c) proposed.
 //!
 //! # The state it recovers from (D-3353)
 //!

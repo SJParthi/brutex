@@ -1463,7 +1463,7 @@ dry_run = [
   "the --yes line with BRUTEX_STORE on a private copy holding the month",
 ]
 env = ["BRUTEX_STORE"]
-prerequisites = ["R3-20", "operator: the yes for each month the plan names (no month is recovered unasked, and nothing recovers at start: D-6900)", "operator: no GDFL import, census verb or upkeep run working on the store while it runs (R-01)"]
+prerequisites = ["R3-20", "operator: the yes for each month the plan names (no month is recovered unasked, and nothing recovers at start: D-6900)", "operator: every writer stopped (no GDFL import, census verb or upkeep run working on the store while it runs, R-01)"]
 check = [
   "cli month-recover VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG YYYY-MM --plan answers 'recovered revision N is served ... the re-read is named' for each month recovered, and a second --yes says 'Already recovered; nothing was written'",
   "shasum -a 256 of the original month's .bin and .crc equals the value taken before the run",
