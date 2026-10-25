@@ -3,6 +3,18 @@ STATUS: IN PROGRESS
 NEXT: continue the mutant sample shard by shard (`--shard k/20 --sharding round-robin`, k = 1..9,
 11..19; this session runs k = 1, 2, ...), then write the final status. The rest is NEEDS THE MAC.
 
+## Session of 25 Oct 2026, second leg (a new cloud session, continuing from `075dc877`)
+
+- **Fourth base merge.** `origin/feat/db-fix` moved to `bf9b1c8f` (Merge R4-18: quarantine);
+  merged as `cf6034d7`. `docs/04` and `docs/06` conflicted only where both sides appended at the
+  end: feat/db-fix's file is the exact byte prefix (checked with `cmp -n`), IA-17b's blocks after
+  it; `docs/05` merged cleanly. Under `crates/pull` R4-18 touched only `ingest_failkind.rs` and its
+  tests, neither of this part's; `Cargo.lock` unchanged. The mutant diff
+  (`git diff origin/feat/db-fix HEAD -- crates/pull/src`) still lists the same 264 mutants, and
+  shard 0/20 names the same first mutants as before.
+- **Gates after it:** `cargo fmt --all --check` green; `cargo clippy --workspace --all-targets
+  --locked -- -D warnings` green (exit 0). The mutant shards are running (below).
+
 ## Session of 25 Oct 2026 (a new cloud session, continuing from `381ea29c`)
 
 `GO-IA-17b` is back on `cloud/db-base-20261024`, so this part builds under its own GO.
