@@ -1,6 +1,30 @@
 STATUS: IN PROGRESS
 
-NEXT: shards 5..9, 11..19 of the 264 (running in /home/user/brutex-mwt, `/tmp/claude-0/scratchpad/shards.sh`), each MISSED fixed as found; then `cargo mutants --in-diff` of the fixes' own lines, gate 1e again with the CPU free, the final report.
+NEXT: the mutant shards 7, 8, 12..19 of the 264 and the 68 mutants of the fixes' lines (running in /home/user/brutex-mwt and /home/user/brutex-fwt), each MISSED fixed as found; then coverage again, gate 1e, the final report.
+
+## Session of 25-26 Oct 2026, third leg (a new cloud session, continuing from `7d401a3a`)
+
+The previous leg's mutant worktree did not survive the container; its fixes did. Its commit log
+names the shards it finished after the section below was written: 5 (`6336404d` IA-AUC-06,
+`9a09997d` IA-RP-31, `25437274` an equivalent mutant restructured away), 6 (`91f10357`), 9
+(`4ef253d5` IA-AUC-07) and 11 (`7d401a3a` IA-AUC-08). Shards 7 and 8 left no record, so they run
+again.
+
+- **Fifth base merge.** `origin/feat/db-fix` moved to `13dcf5e5` (Merge R4-28, Merge CLOUD-MUTAPIB);
+  merged as `33a5f5ba`. `.github/gates_tree.rs` conflicted on `DECLARED`: R4-28's group first,
+  IA-17b's after, the length 76 -> 77, and gate 0's tool tests pass on it (49 passed). `docs/05`
+  conflicted only at the end: feat/db-fix's file is the exact byte prefix (`cmp -n`), IA-17b's
+  blocks after it; `docs/04` and `docs/06` merged cleanly with the same prefix property. Nothing the
+  base moved under `crates/pull` (`fno*`, `master_snapshots*`, `masters.rs`, `vendor.rs`, `lib.rs`)
+  is this part's; `Cargo.lock` unchanged.
+- **Gates after it:** `cargo fmt --all --check` green; `cargo clippy --workspace --all-targets
+  --locked -- -D warnings` green; `cargo deny check` (0.19.0) `advisories ok, bans ok, licenses ok,
+  sources ok`.
+- **The mutant run resumed.** The same 264-mutant list (`cargo mutants --list --in-diff <git diff
+  bf9b1c8f cf6034d7 -- crates/pull/src>` prints 264 in a worktree of `8954122f`, whose code is
+  `cf6034d7`'s), shards 7, 8, 12..19 of 20, round-robin, the same skips, `TMPDIR` on a world-writable
+  tmpfs. Beside it, every mutant of the fixes' own lines (`git diff cf6034d7 7d401a3a --
+  crates/pull/src`: 68 mutants) in a worktree of `33a5f5ba`.
 
 ## Session of 25 Oct 2026, second leg (a new cloud session, continuing from `075dc877`)
 
