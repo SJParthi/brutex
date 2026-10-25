@@ -2896,7 +2896,8 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 // environment, a vendor credential or a field of a parameter path.
 const IA17B_LITERAL: &str = "gather_deferred gather_repaired gather_unclosed files_gathered \
      new_generation prints_carried auction_revision_written leftover_cleared_bytes \
-     ia17b-auc-differs ia17b-auc-in-order ia17b-auc-merge ia17b-auc-older ia17b-auc-pointer \
+     ia17b-auc-differs ia17b-auc-in-order ia17b-auc-merge ia17b-auc-midnight ia17b-auc-older \
+     ia17b-auc-pointer \
      ia17b-auc-repeat ia17b-auc-revision ia17b-busy ia17b-cas ia17b-census ia17b-crash \
      ia17b-day-ends ia17b-door ia17b-fm092 ia17b-fm098 ia17b-full ia17b-full-boundary \
      ia17b-journal ia17b-lost ia17b-middle ia17b-mixed ia17b-not-writable ia17b-once ia17b-order \

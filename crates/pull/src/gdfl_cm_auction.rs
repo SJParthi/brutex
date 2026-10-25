@@ -747,10 +747,16 @@ pub fn file_or_carry(
     }
 }
 
+/// `day`'s IST date as UTC microseconds, from its first (inclusive) to the
+/// next day's first (exclusive).
+fn span_of_day(day: Day) -> (i64, i64) {
+    let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
+    (start, start + 86_400 * 1_000_000)
+}
+
 /// The records of `records` stamped on `day`'s IST date, in file order.
 fn records_of_day(records: &[Record], day: Day) -> Vec<Record> {
-    let start = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
-    let end = start + 86_400 * 1_000_000;
+    let (start, end) = span_of_day(day);
     records
         .iter()
         .filter(|r| r.t_micros >= start && r.t_micros < end)
@@ -1028,12 +1034,14 @@ pub fn write_revision(
         // stated: the held records are in day order (`parse` refuses any
         // other), so the carried day goes in after the last record of an
         // earlier day, walking back from the end past the later days (at
-        // most a month of records).
+        // most a month of records). A later day's record is one at or after
+        // the next IST midnight: no record of `day` itself is left by here.
+        let (_, end) = span_of_day(day);
         let mut at = records.len();
         while at > 0
             && records
                 .get(at - 1)
-                .is_some_and(|record| ist_day(record.t_micros) > i64::from(day.days_from_epoch()))
+                .is_some_and(|record| record.t_micros >= end)
         {
             at -= 1;
         }

@@ -447,3 +447,34 @@ fn a_days_records_are_those_of_its_ist_date_midnight_to_midnight() {
         "the day's first and last IST microsecond, and nothing of its neighbours"
     );
 }
+
+/// **A CARRIED DAY GOES IN BEFORE A RECORD ON THE NEXT IST MIDNIGHT**
+/// (IA-AUC-07, D-TBD-IA-17b-1 (4); clock edges): the served sidecar holds
+/// the 24th's print stamped at 00:00:00 IST, the next day's first
+/// microsecond after the 23rd; the 23rd carried with the new generation
+/// goes in before it, so the revision's file stays in IST day order.
+#[test]
+fn a_carried_day_goes_in_before_a_record_on_the_next_ist_midnight() {
+    let store = original_holding("ia17b-auc-midnight", day(24));
+    let at_midnight = Print {
+        sod: 0,
+        ..print(712_365, 40)
+    };
+    append(&store, &key(), day(24), &[at_midnight]).unwrap();
+    let revision = published(&store, day(23));
+    let p23 = [print(712_165, 22)];
+
+    let written =
+        write_revision(&store, &revision, &key(), day(1), &[(day(23), &p23[..])]).unwrap();
+
+    assert_eq!(written, Some(2));
+    let target = month().to_path_buf(&revision).with_extension(EXTENSION);
+    let sidecar = read(&target).unwrap().unwrap();
+    let utc = |d: u8| i64::from(day(d).days_from_epoch());
+    assert_eq!(
+        days_of(&sidecar),
+        vec![utc(23), utc(24)],
+        "in IST day order"
+    );
+    std::fs::remove_dir_all(store).unwrap();
+}
