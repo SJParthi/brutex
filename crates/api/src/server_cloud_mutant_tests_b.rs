@@ -494,6 +494,7 @@ fn months_to_walk_stops_at_the_last_nameable_month() {
         expiry: None,
         window: pull::session::Window::new(day(9999, 12, 1), day(9999, 12, 2))
             .expect("a window at the end of the calendar"),
+        run: 0,
         rate: None,
         clamped_from: None,
         feed: pull::vendor::Feed::Groww,
@@ -1675,7 +1676,7 @@ async fn fno_pull_held_refuses_an_unknown_feed() {
     let root = Root::new("pull-held-unknown");
     let site = root.site();
     let (status, axum::response::Html(body)) =
-        fno_pull_held(&site, "underlying=NIFTY&series=opt&vendor=nonsense").await;
+        fno_pull_held(&site, "underlying=NIFTY&series=opt&vendor=nonsense", 0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
         body.contains(&render::escape(
@@ -1704,6 +1705,7 @@ async fn fno_pull_held_refuses_a_held_seat() {
     let (status, axum::response::Html(body)) = fno_pull_held(
         &site,
         "underlying=NIFTY&series=opt&vendor=groww&from=2025-07-01&to=2025-07-01",
+        0,
     )
     .await;
     drop(seat);

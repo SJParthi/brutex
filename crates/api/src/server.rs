@@ -31141,6 +31141,7 @@ mod tests {
                 .expect("a window"),
             feed: pull::vendor::Feed::Zerodha,
             granularity,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -31217,6 +31218,7 @@ mod tests {
             window,
             feed: pull::vendor::Feed::Zerodha,
             granularity: pull::vendor::Granularity::Day1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -31282,6 +31284,7 @@ mod tests {
             window,
             feed: pull::vendor::Feed::Zerodha,
             granularity: pull::vendor::Granularity::Day1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
