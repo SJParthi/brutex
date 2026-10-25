@@ -235,6 +235,13 @@ fn the_days_dropped_by_recovery_are_read_again() {
     let (code, out) = store.run("--plan");
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("plan: nothing is written"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "— gdfl NSE/INDEX/NIFTY 1min 2020-03 under {}",
+            store.root.display()
+        )),
+        "{out}"
+    );
     assert!(out.contains("the first 1 whole block(s)"), "{out}");
     assert!(
         out.contains(
