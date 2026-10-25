@@ -156,3 +156,15 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
 - NEXT (on GO): merge the newest `origin/feat/db-fix`, run `cargo test --workspace --locked
   --no-fail-fast` on this branch and on an unmodified base worktree, compare the failure sets, then
   the final report.
+
+### 2026-10-25 save point 10 (GO; merged the newest base; fmt, clippy, deny green)
+
+- GO without HOLD at `1dcc33e9` (25 Oct 13:12 IST); resumed.
+- Merged `origin/feat/db-fix` at `666ddf7f` (DATA-1w and the parts before it): commit 21522e31;
+  conflicts only in docs/04, docs/05 and docs/06, resolved as both, base rows first; the diff
+  against the base is still additions only (15 files, 2,460 lines added, none removed).
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: `Finished`, exit 0.
+- `cargo deny check` (cargo-deny 0.19.0, CI's pin): `advisories ok, bans ok, licenses ok, sources
+  ok`, exit 0 (two duplicate-crate warnings only).
+- NEXT: the workspace test run (in progress), then the base comparison of its failures.
