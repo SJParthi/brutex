@@ -1052,3 +1052,42 @@ fn a_share_members_hole_is_its_shares_and_an_options_member_key_is_shown_not_rea
     assert_eq!(got["holes_unrepairable"], 1);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// **A MEMBER-ONLY DAY OWNS ITS OWN MEMBER'S FILE AND NO OTHER'S** (a member
+/// key, a swept symbol and a log-only row at once): on a day whose only close
+/// is `*+NSE-INDEX-NIFTY`, a refusal of NIFTY's own file is that close's,
+/// while a refusal of BANKNIFTY's file is no close's and keeps the day's
+/// log-only `*` row, so a refusal another member's run never read is never
+/// hidden under the member close beside it.
+#[test]
+fn a_member_only_day_owns_its_own_members_file_and_no_other() {
+    let journal = key("done", "2019-03-04", "*+NSE-INDEX-NIFTY", "");
+    let refusals = |about: &str| refused(1, 1_000, None, "2019-03-04", about, "zz refused");
+    let shown = |name: &str, about: &str| {
+        let root = store(name, &journal, &refusals(about));
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&kind=indices&from=2019-03-04&to=2019-03-04&order=asc"),
+        )
+        .expect("reads");
+        let filters: Vec<(String, String)> = rows(&got)
+            .iter()
+            .map(|row| {
+                (
+                    row["filter"].as_str().unwrap().to_owned(),
+                    row["outcome"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        filters
+    };
+    let own = ("*+NSE-INDEX-NIFTY".to_owned(), "done".to_owned());
+    assert_eq!(shown("own-file", "NIFTY 50.NSE_IDX.csv"), [own.clone()]);
+    let other = shown("other-file", "NIFTY BANK.NSE_IDX.csv");
+    assert_eq!(
+        other,
+        [("*".to_owned(), "refused".to_owned()), own],
+        "another swept member's refusal is no member close's"
+    );
+}
