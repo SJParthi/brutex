@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -140,3 +140,16 @@ IA-16, R3-16, R3-36, SC-4.
 - NEXT: when HOLD is gone: the store suite, read the finished workspace run, rerun every failure on this branch and on
   the base worktree, then llvm-cov (lines and regions, stable; branch coverage needs a nightly this
   container lacks) and cargo-mutants on recover.rs, file.rs's diff and month_recover_command.rs.
+
+### 2026-10-25 13:12 IST — new session (25 Oct account); HOLD lifted; merge
+
+- Started from the branch tip `580ef522`. HOLD of 13:0x IST lifted at `1dcc33e9` ("Lift HOLD: all
+  nine cloud parts build"); GO present.
+- `cargo test -p store --locked` (lib): every `recover::tests` test passes (19) after the slot-order
+  edit, so that edit is now tested. The lib run's only failures are 3 `settings::tests` that need a
+  non-root user (`a_directory_that_stops_being_readable_...` says "this host reads a 000 directory
+  (root?)"); this container runs as uid 0. Not this part's files.
+- Merged the newest `origin/feat/db-fix` (`666ddf7f`, Merge DATA-1w; also R3-13): conflicts only in
+  `docs/04-invariants.md`, `docs/05-decisions.md`, `docs/06-limits.md` (both sides appended a
+  section), both kept. Merge commit `716cd5d1`.
+- NEXT: fmt, clippy, the workspace tests on the merged tree, deny, then llvm-cov and cargo-mutants.
