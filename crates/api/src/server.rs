@@ -5145,12 +5145,18 @@ fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequ
     if let Some(day) = about.day.as_deref() {
         event = event.with("day", telemetry::Value::Str(day));
     }
-    let noted = telemetry::emit(&event);
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
+    // A LINE THE SINK DROPS IS COUNTED THERE, AND IS NOT A PANIC HERE.
+    //
+    // This asserted `is_written()` unless no sink was installed, and an error
+    // line is above every floor, so the assertion could fail only when the
+    // sink DROPPED it: a full disk, or a sink already closed (R3-14). In a
+    // build with debug assertions, the dev profile the Run button builds, the
+    // panic came before the page heard of the member, so on a full disk,
+    // where a member dies at the store and its line cannot be written, the
+    // operator lost both. `telemetry::emit` never panics on a drop and counts
+    // it in `Sink::health`; this site now does as every other one in this
+    // file does.
+    let _noted = telemetry::emit(&event);
     site.autopilot
         .fail(&failure.instrument, &about, &failure.why);
 }
@@ -7467,6 +7473,13 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
+                //
+                // `VENDOR_DOWN` the same way, and put back only on a refusal
+                // with nothing before it: a written prefix makes the
+                // instrument a success, which clears the breaker, and nothing
+                // strips the marker from `Chunks::unfetched`.
+                let vendor_down = marked_why.starts_with(VENDOR_DOWN);
+                let marked_why = marked_why.trim_start_matches(VENDOR_DOWN);
                 let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
                 let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
                 let sentence = {
@@ -7481,7 +7494,10 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    // A dropped line is counted by the sink and never
+                    // stops the refusal, for the reason
+                    // `note_member_failure` gives.
+                    let _noted = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -7490,10 +7506,6 @@ async fn fetch_chunks(
                             .with("from", telemetry::Value::Str(&chunk.from().to_string()))
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
-                    );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
                     );
                     format!(
                         "the broker did not answer with a window. This was \
@@ -7511,6 +7523,8 @@ async fn fetch_chunks(
                 };
                 let sentence = if credential_dead {
                     format!("{CREDENTIAL_DEAD}{sentence}")
+                } else if vendor_down && bodies.is_empty() {
+                    format!("{VENDOR_DOWN}{sentence}")
                 } else {
                     sentence
                 };
@@ -8416,8 +8430,15 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, as `laddered` marks its own: `broker_run`'s
+                        // breaker counts consecutive instruments by this
+                        // marker and by nothing else. Without it the spot
+                        // path, which retries here and not in `laddered`,
+                        // could never trip that breaker, and an outage cost
+                        // this whole ladder for every instrument in the run.
+                        // `fetch_chunks` lifts it and puts it back in front.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -8776,11 +8797,9 @@ fn note_instrument_refusal(
     if let Some(month) = about.one_month() {
         event = event.with("month", telemetry::Value::Str(month));
     }
-    let emitted = telemetry::emit(&event);
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped line is counted by the sink and never stops the run that
+    // refused the instrument, for the reason `note_member_failure` gives.
+    let _emitted = telemetry::emit(&event);
 }
 
 /// What the page says when the breaker stops a run.
@@ -11041,6 +11060,10 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                // `VENDOR_DOWN` is stripped: no breaker reads it on this
+                // path, and left on it would reach the page as an invisible
+                // control character.
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
@@ -12634,7 +12657,8 @@ fn price_group(
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
                 &mut out,
-                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
+                "the vendor sent no underlying level beside this bar, so there \
+                 is nothing to price it against",
             );
             continue;
         };
@@ -19315,9 +19339,15 @@ impl Drop for ServeLock {
     /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
         drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
-        }
+        // THROUGH A POISONED SET, as `take_serve_lock` inserts through one.
+        // Skipping the removal on poison left the key in the set after the
+        // file lock was released, so the next serve of this root in this
+        // process was handed the in-process pass with NO file lock held, and
+        // a second process could take the store beside it.
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.root);
     }
 }
 
@@ -19606,9 +19636,11 @@ fn stamp_outcome(
 
 /// Drops a root out of the in-process set after a failed take.
 fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
-    }
+    // Through a poisoned set, for the reason `ServeLock::drop` gives.
+    serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key);
 }
 
 /// The exit code of a server that has stopped, and the reason if it fell over.
@@ -25734,6 +25766,54 @@ mod tests {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// A stop asked once a serve of `root` has finished its start-up load.
+    ///
+    /// R3-14 repair 5 races the load against the stop and polls the stop
+    /// first (`loaded_or_stopped`), so [`fired`] ends a serve BEFORE its load:
+    /// the universe's verdict, the banner after the load, the first event, the
+    /// recovery at start and the stop's exit code are never reached. The
+    /// `listening` event is written after the load and before `serve`, so this
+    /// stop waits for one naming `root` that was written after the stop was
+    /// made, on whichever sink the process has installed, and then answers
+    /// inside `serve`, as a pressed stop would.
+    ///
+    /// A root that does not resolve is named as given: such a serve is refused
+    /// before it listens, so the stop is never polled to its end.
+    pub(super) fn after_the_load(root: &Path) -> Shutdown {
+        let store = std::fs::canonicalize(root)
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        let from = telemetry::global().map_or(0, |sink| sink.health().next_seq);
+        Box::pin(async move {
+            while !listening_since(from, &store) {
+                tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether the installed sink holds a `listening` event at or after
+    /// `from` whose store is `store`.
+    fn listening_since(from: u64, store: &str) -> bool {
+        telemetry::global().is_some_and(|sink| {
+            let dir = sink
+                .path()
+                .parent()
+                .expect("the sink writes a file inside a directory")
+                .to_path_buf();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.serve");
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .iter()
+                .any(|record| {
+                    record.seq >= from
+                        && record.message == "listening"
+                        && crate::emitted::says(record, "store", store)
+                })
+        })
+    }
+
     /// One command line, owned.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
@@ -28714,8 +28794,13 @@ mod tests {
 
         let expected =
             masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+        // STOPPED AFTER THE LOAD, NOT BEFORE IT. Since R3-14 repair 5 a stop
+        // that has already fired wins the race with the start-up load and the
+        // serve exits OK before it reads the universe, so on a host whose
+        // store is on disk and free this read `left: 0, right: 3` and the
+        // `listening` event below was never written.
         assert_eq!(
-            run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+            run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
             expected,
             "a serve exits on the verdict of the universe it served"
         );
@@ -35084,9 +35169,10 @@ mod tests {
         );
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
-        // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // directly because the only other way in is through a live socket.
+        // This is the proof the line is written: the `debug_assert` that once
+        // demanded `is_written` at the site was vacuous with no sink installed
+        // and panicked on a dropped line, and is gone (see the site).
         let from = crate::emitted::mark();
         // FILED UNDER ITS OWN DAY AND MONTH (D-3341, DB-G45): the failure
         // names 2026-08-04, and the line says so rather than the window's
@@ -36896,3 +36982,28 @@ mod pool_table_tests;
 #[cfg(test)]
 #[path = "hand_stop_tests.rs"]
 mod hand_stop_tests;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_b.rs"]
+mod cloud_mutant_tests_b;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_c.rs"]
+mod cloud_mutant_tests_c;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_a.rs"]
+mod cloud_mutant_tests_a;
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_d.rs"]
+mod cloud_mutant_tests_d;
+
+// Tests added by the cloud mutation pass of 18 Oct (cloud/mut-api-b-20261018).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_e.rs"]
+mod cloud_mutant_tests_e;
