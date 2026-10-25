@@ -83549,6 +83549,214 @@ or in the package report.
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
 
+### D-5190 — `/ingest` serves the three data checks through three read-only routes, `/feed-checks.json`, `/tick-checks.json` and `/calendar-days.json`, and one panel (DATA-1w) — 2026-10-23
+
+**What was missing.** DATA-1 (`cli feed-reconcile`, D-5170 to D-5179),
+DATA-2 (`cli tick-to-second-check`, D-5180 to D-5189) and CAL-1 (the
+tradable-day rule, D-5150 to D-5159) each write or hold an append-only answer,
+and none of them was visible where the operator looks: the feed reconcile's
+month files and the tick check's year versions sat in folders, and the
+excluded days were a `cli calendar-days YEAR` page.
+
+**The decision.**
+
+1. `GET /feed-checks.json` reads DATA-1's newest FULL version of a month
+   (`feed-reconcile-YYYY-MM.v<N>.csv`) through
+   `cli::feed_reconcile::file_digest`, the door DATA-1's own factor reader uses,
+   so a file of another format, cut or damaged is refused there in its words.
+   A `--symbols` file is never a month's authority (D-5178) and is never read.
+   With no `month` it pages the months held; with `month` it gives the month's
+   counts and pages its shares; with `month` and `symbol` it pages the share's
+   day rows; with `month`, `version` and `line` it gives the source row.
+2. `GET /tick-checks.json` reads DATA-2's newest version of a year that has
+   its index (the index is linked last, so a version without one is not
+   finished) through `cli::tick_second_check::index::newest`, and the CSV
+   beside it, which must hash to the BLAKE3 the index records. With no `year`
+   and no `month` it pages the years; with `year` the year's counts and its
+   months; with `month` (and `symbol`) the month's shares (a share's days); with
+   `year`, `version` and `line` the source row.
+3. `GET /calendar-days.json` reads CAL-1's compile-time tables: with no `year`
+   every year of the calendar of record with its counts by reason
+   (`pull::calendar::year_exclusions`); with `year` (and one `reason`) its
+   excluded days, each with the notice, holiday circular, special-session
+   evidence or halt record it rests on. Ordinary weekends are counted, never
+   listed, exactly as `cli calendar-days` prints them. A year the record does
+   not wholly hold is named with `YearRefusal`'s words, never counted.
+4. `web/src/routes/ingest/panels/FeedChecks.svelte` mounts through the panel
+   registry (R4-01), so `+page.svelte` is not edited. It shows plain
+   comparison tables: per month (stocks, stock-days by status, adjusted
+   stocks, ex-date days, Zerodha-minute-short days, rule-T exact share,
+   rule-A minute-high match share), per share of a clicked month, per day of a
+   clicked share, the source row behind a day, and the excluded days per year
+   by reason with each day's notice.
+5. The routes write nothing and start nothing; the panel reads once when it
+   opens and when Reload is pressed, and never polls, because a check changes
+   only when a check run writes a new version.
+
+### D-5191 — A check version is parsed once into fixed-stride rows; a request is one `stat`, one probe and O(limit) (DATA-1w) — 2026-10-23
+
+1. **A version is parsed once per server process**, in one pass over its
+   bytes, into a vector of fixed-size rows (`FeedRow`, `TickRow`) and the
+   tallies a page shows. Every word a row carries (status, day kind, role,
+   compare, flag names, ...) is interned to a small number, so a row's size
+   does not depend on its text.
+2. **The folder listing is re-read only when the folder's modification time
+   moved.** The `stat` comes before the listing, so a name linked after the
+   `stat` moves the time again and the next request lists again; a name linked
+   before it is in the listing. A folder that does not exist holds nothing and
+   is asked again each time.
+3. **Only the newest version of each month or year is held**, keyed by folder
+   and month (or year); a newer version replaces it. Memory is bounded by the
+   months and years the folder holds, never by the versions on disk.
+4. A request then costs one `stat` of the folder, one map probe per month or
+   year on the page, and O(limit) for the rows it returns. The one-pass load is
+   O(the version's bytes), once per version, and is the `cold` figure every
+   measurement names separately (`docs/06-limits.md` L-D1W-02).
+5. **A share's rows are one run.** The feed-reconcile writer prints a share's
+   rows together and the tick check's CSV is sorted by share and day; a share
+   (or a share's month) whose rows are in two places is a damaged file, refused
+   by name, never answered with a half.
+
+### D-5192 — Paging is nothing typed: `limit` and `offset` are required, and every page past a list's edges is refused by name (DATA-1w) — 2026-10-23
+
+Under the operator's rule of 16 Oct 2026 17:15 IST:
+
+1. `limit` and `offset` are required named fields with no default. A missing
+   one, one that is not a whole number written as one (`+1`, `01`, `1e3` are
+   refused), a `limit` of zero, a `limit` above the list's length, or an
+   `offset` at or past its end is refused (400) naming the list's total. A
+   list with no rows is a 404 naming where it looked, never an empty page.
+2. Every answer states `total`, `offset`, `limit` and `returned`.
+3. A field a route does not read is refused by name, never ignored.
+4. The panel reads a whole list in two asks: one row to learn the total, then
+   `limit=total`. It types no page size.
+
+### D-5193 — Where the check files are read from, named in every answer (DATA-1w) — 2026-10-23
+
+1. `BRUTEX_FEED_RECONCILE_DIR` and `BRUTEX_TICK_SECOND_DIR` name the folders
+   when set. Unset, they are the store's audit area:
+   `<store>/audit/feed-reconcile`, where DATA-1's full run writes (its
+   `store_writes_needed`), and `<store>/audit/tick-to-second`.
+2. DATA-2 refuses an `--out` inside the store (D-5187), so its versions reach
+   the store's audit area only as copies of finished versions (immutable, a
+   new name each), or the deploy names its folder with
+   `BRUTEX_TICK_SECOND_DIR`. Which one is the main session's choice at deploy.
+3. Every answer carries `dir` and `dir_from` (which of the two chose it), so a
+   404 for an unconfigured or empty folder is never mistaken for an empty
+   check.
+
+### D-5194 — What each number on the panel means, and how it leads to its source row (DATA-1w) — 2026-10-23
+
+1. **Stock-days** are feed-reconcile rows of one day; a share whose month
+   could not be read has one row, day `-`, counted as a row and not a
+   stock-day.
+2. **Adjusted** and **ex-date** days are the rows the writer flagged
+   `adjusted` and `ex_date`; every ex-date is unsourced (no corporate-action
+   source is merged, R4-26).
+3. **Zerodha-minute-short days** are rows whose `short_volume` is above zero:
+   MEASURED, NOT JUDGED. No ENV-1 envelope is merged, so every computed day's
+   `short_judgement` is `unjudged:no_env1_envelope`, and the panel says so.
+4. **The factor** is the exact paisa pair `(median_z, median_g)` the writer
+   printed; never a float.
+5. **A tick share-day** is the row the year's index names for it (its record
+   holds the row's line), so an `extra` row a `landing` row follows is listed
+   and not counted; a row whose share-day the index does not hold means the
+   two files disagree, and the version is refused.
+6. **Rule T exact** is share-days whose `compare` is `exact_T`, of every
+   share-day. **Rule A minute-high match** is Zerodha minutes whose high the
+   rule-A seconds match exactly, summed, of the minutes compared, on the RAW
+   basis (D-5188). Both are served as the two integers; only the browser
+   divides.
+7. **Every day row carries its line**, and `month|year`, `version` and `line`
+   return that row again by one positional read of the file, checked against
+   the FNV-1a of the line as it was loaded: a version rewritten under its name
+   (which the append-only law forbids) is refused, never served as the old
+   row. A line asked of a version that is no longer the newest is a 404.
+8. Each stock-day also carries `tradable`: `pull::calendar::tradable_day`'s
+   reason when the day takes no trade (CAL-1), `null` when it does.
+
+### D-5195 — The two writers' column lines are public, so the reader checks a version's columns against the writer's own (DATA-1w) — 2026-10-23
+
+`cli::feed_reconcile::COLUMNS` and `cli::tick_second_check::HEADER` were
+`pub(crate)`. They are `pub` now, and the reader refuses a version whose
+column line is not exactly the writer's: a column added, renamed or moved by a
+later format is refused by name rather than read by position into the wrong
+field. No byte either writer prints changes. These are the only two lines of
+DATA-1's and DATA-2's files this package touches.
+
+### D-5196 — A refused check version is held as refused, under the version the listing named, and read again only when a newer version appears (DATA-1w) — 2026-10-24
+
+**What was wrong.** D-5191 held a parsed version and nothing else: a version
+that was cut, damaged, of another format, or not its index's was read and
+parsed again on every ask. A page of months (or years) that named it cost
+O(that version's bytes) per request, not O(limit), and `note_refused` put one
+warning on `/logs` per request where its own comment promised one per version.
+The held entry was also keyed by the version the file named, so a version the
+listing and the writer's door named differently would reload on every ask.
+
+**The decision.**
+
+1. The answer a version gives, the parsed version OR its refusal, is held
+   under the version the folder's listing named when it was asked, keyed by
+   folder and month (or year). A version file is never rewritten, so its
+   refusal stands as long as its name is the newest; a newer version is a new
+   name, the listing moves, and it is read afresh.
+2. A held refusal says so in its own words (`held: this version is refused
+   until a newer version appears or the server restarts`), so a reader is
+   never told a stale answer is a fresh one.
+3. A refusal that came from the host (an `EIO`, too many open files) is held
+   the same way, because the two cannot be told apart through
+   `cli::feed_reconcile::file_digest`'s words; that is `docs/06-limits.md`
+   L-D1W-06, and its answer names the restart that clears it.
+4. Test support only: forgetting held answers is scoped to one test's own
+   folder, so tests running beside it keep theirs.
+
+D1W-19, D1W-20, D1W-21.
+
+### D-5197 — A tick-to-second version is read in the writer's own order, (day, symbol, role), and a missing check folder is named as missing (DATA-1w) — 2026-10-24
+
+**What was wrong, found on real check files.** The reader took a
+tick-to-second CSV to be sorted by share and day and filed each share-month as
+one run of consecutive rows. `cli::tick_second_check` prints a version from a
+`BTreeMap` keyed by `RowKey = (day, symbol, role)`, so a month's shares
+interleave day by day. On a read-only shadow of the real store, with
+`BRUTEX_TICK_SECOND_DIR` naming `state/datacheck/rust-t2s-r6/out`, all three
+real versions (2019, 2025 and 2026, `v001`) were refused with "a share's rows
+of month 1 are in two places". Every synthetic fixture had been written in
+share-first order, the same assumption the reader made, so no test caught it.
+On the same shadow, with neither check folder present under `<store>/audit/`,
+both routes said "there are no feed-reconcile months in ...". Those are the
+words of a check that ran and found nothing, not of a folder nobody wrote.
+
+**The decision.**
+
+1. Each row's key `(day, symbol, role)`, compared as the writer's `String`
+   tuple compares it, must be above the row before it. Share-first order, a
+   role out of order within a share-day, or one key twice is refused, naming
+   the line and both keys. A version in any other order was not printed by
+   this writer.
+2. A share's rows of a month are filed under its slot as they are read (one
+   probe each). After the last row, one pass groups them: each month's shares
+   in symbol byte order, and each share-month one run of
+   `TickYear::by_share`, a row-number array. A page of a share's days is one
+   slice of that run, and each row is one index into `TickYear::rows`. The
+   source row behind a number is still found by one subtraction, because
+   `rows` stays in file order. A share's `first_line` and `last_line` are its
+   first and last lines that month, not a span of consecutive lines.
+3. A check folder that does not exist is a 404 naming the folder, saying no
+   check has been written there and naming the verb that writes it. This
+   holds on every listing, month and year ask of both routes. A folder that
+   exists and is empty still says "there are no ...". A missing folder is
+   never held, so a check written later is served by the same process.
+4. A page of months or years is one slice of the listing in key order
+   (`Listing::page`), never a walk past `offset` keys.
+5. Every refused version, whatever refused it (the host, its bytes or its
+   parse), is one `api.feed_checks check file refused` warning on `/logs`.
+   It is raised where the refusal is held, once per version (D-5196). Until
+   now only parse refusals warned.
+
+D1W-22, D1W-23, D1W-24, D1W-25; `docs/06-limits.md` L-D1W-07.
+
 ### D-7270 — INT-15: a vendor-padded minute is defined, counted per day, and never read as a trade; a derived bucket of only padded minutes has no bar (measured both ways) — 2026-10-22
 
 The numbers D-7270 to D-7274 were taken from an unused block above the
