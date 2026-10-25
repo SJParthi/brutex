@@ -1,7 +1,6 @@
 STATUS: IN PROGRESS
 
-NEXT: continue the mutant sample shard by shard (`--shard k/20 --sharding round-robin`, k = 1..9,
-11..19; this session runs k = 1, 2, ...), then write the final status. The rest is NEEDS THE MAC.
+NEXT: shards 5..9, 11..19 of the 264 (running in /home/user/brutex-mwt, `/tmp/claude-0/scratchpad/shards.sh`), each MISSED fixed as found; then `cargo mutants --in-diff` of the fixes' own lines, gate 1e again with the CPU free, the final report.
 
 ## Session of 25 Oct 2026, second leg (a new cloud session, continuing from `075dc877`)
 
@@ -13,7 +12,36 @@ NEXT: continue the mutant sample shard by shard (`--shard k/20 --sharding round-
   (`git diff origin/feat/db-fix HEAD -- crates/pull/src`) still lists the same 264 mutants, and
   shard 0/20 names the same first mutants as before.
 - **Gates after it:** `cargo fmt --all --check` green; `cargo clippy --workspace --all-targets
-  --locked -- -D warnings` green (exit 0). The mutant shards are running (below).
+  --locked -- -D warnings` green (exit 0); `cargo deny check` (0.19.0) `advisories ok, bans ok,
+  licenses ok, sources ok`.
+- **The mutant run, shard by shard** (`cargo mutants` 26.2.0 `--in-place --in-diff <git diff
+  origin/feat/db-fix -- crates/pull/src at cf6034d7> --shard k/20 --sharding round-robin -p pull
+  -- --lib -- gdfl_import:: gdfl_cm:: ingest::`, skipping by name the 4 tests root defeats or the
+  base owns: `gdfl_cm::tests::fixtures_are_built_not_pasted`,
+  `gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name`,
+  `ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words`,
+  `ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing`), in a
+  worktree of `8954122f` under `/home/user` (a worktree under the scratch `/tmp` folder failed 3
+  more tests: their uid-65534 child cannot reach the binary there). **Every MISSED mutant is a
+  missing test, and each was fixed on the branch the same hour** (each test shown failing on the
+  mutant by applying it by hand, and passing on the code):
+  - shard 1: `gdfl_import_filing.rs` `&&`→`||` in `Gather::is_empty`. A real defect behind it:
+    `Gather::take` made a new month's offer before judging `MAX_ROWS`, so a refused first file left
+    an empty offer the flush would repair. Fixed (the judgement first; `is_empty` the one test of
+    the waiting days), IA-RP-27, `b7f1e8b3`.
+  - shard 2: `gdfl_import_day.rs` `-`→`+` in `record_close` (a day closed twice the same way was
+    never tested): the insert is `name_in_order`, IA-RP-28, `fe52ea99`. `note_gathered_repair` →
+    `()` (the audited event was never read): a test capture and IA-RP-29, `623b06e5`.
+  - shard 3: `ingest.rs` the busy guard → `false` in `judge_back_fill` (base code moved, never run):
+    IA-RP-30, `875fd56f`. `give_added` `<`→`<=` (no stamp on a file's first second): a test of
+    both edges, IA-RP-26, `9b4eb459`. Two more MISSED there (`-`→`/` in `record_close`, `==`→`!=`
+    in `note_gathered_repair`) are the same lines, caught by IA-RP-28 and IA-RP-29.
+  - shard 4: `close_deferred`'s `stopped` guard → `false` (the stop test never read
+    `days_imported`): asserted, `9f35d7b9`.
+  - Gate 1d: the two new test folders declared (`ia17b-busy`, `ia17b-told`), `83a27e22`; its
+    undeclared set equals the base's again.
+  The worktree keeps the code the list was made from, so every shard stays a partition of the same
+  264; the new code's own mutants are run after (NEXT).
 
 ## Session of 25 Oct 2026 (a new cloud session, continuing from `381ea29c`)
 
