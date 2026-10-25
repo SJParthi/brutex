@@ -206,6 +206,11 @@ R3-01, R3-02, R3-03, R3-04, R3-05, R3-09 (one merge each). R3-12 itself: not mer
 - Every GO-<NAME> removed at 20:20 IST (`604b8f20`), HOLD present. Step finished, `01889efe`
   pushed, report HELD. The `--no-fail-fast` cargo run continues locally. Waiting for HOLD to go.
 
+### 2026-10-25 IST session resumed, still HELD
+
+- New cloud session on the existing branch at `cebde51d`. `origin/cloud/db-base-20261024` at `40f1cdb2`:
+  HOLD present, per-part GO only for R4-09b, IA-10a and IA-17b; no GO-R3-12. No step started; waiting.
+
 ## Decision numbers
 
 D-7111 (the block D-7110..D-7119's second id, R3-12's): /db reads only what its view shows. No
