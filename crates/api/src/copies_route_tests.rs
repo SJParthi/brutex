@@ -343,3 +343,162 @@ fn a_name_that_is_not_utf8_is_served_escaped_and_a_refused_root_has_no_figures()
     assert_eq!(body["retirement_list"].as_array().unwrap().len(), 0);
     let _ = std::fs::remove_dir_all(&store);
 }
+
+/// The host, except that one folder refuses its listing and another lists,
+/// beside its own names, the name `again`: a second way into itself, as a
+/// second mount of one folder is.
+struct Odd {
+    refuse: PathBuf,
+    again: PathBuf,
+}
+
+impl Fs for Odd {
+    fn lstat(&self, path: &Path) -> io::Result<Meta> {
+        if path == self.again.join("again") {
+            return Host.lstat(&self.again);
+        }
+        Host.lstat(path)
+    }
+
+    fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString)) -> io::Result<()> {
+        if dir == self.refuse {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        Host.list(dir, each)?;
+        if dir == self.again {
+            each(OsString::from("again"));
+        }
+        Ok(())
+    }
+
+    fn lines(&self, path: &Path, each: &mut dyn FnMut(&[u8])) -> Result<Ending, String> {
+        Host.lines(path, each)
+    }
+}
+
+/// EVERY SHAPE A ROOT TAKES ON THE WIRE: a root with a folder that will not
+/// list is `partial` with its fault, the folder it met twice named once in
+/// `revisited` and its file with a name outside every root in
+/// `linked_elsewhere`; a copy whose `VERIFIED.tsv` names the live archive
+/// file as it stands today is `proven` with its rows counted; a folder
+/// inside the tick store, outside the parts its readers read, has no reader
+/// and names the live root it lies `inside`; and a folder holding the
+/// options archives lists them in `skipped_roots` (D-7043..D-7045).
+#[test]
+fn a_partial_root_a_proven_twin_and_a_folder_inside_a_live_root_are_served() {
+    use std::os::unix::fs::MetadataExt as _;
+    let store = root("shapes");
+    let folders = root("shapes-folders");
+    let around = folders.join("invented-around");
+    let archive = around.join("Options");
+    let twin = folders.join("invented-twin");
+    let ticks = folders.join("invented-ticks");
+    let prove = ticks.join("prove");
+    let partial = folders.join("invented-partial");
+    for dir in [&archive, &twin, &prove, &partial.join("shut")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(archive.join("2020.zip"), b"invented year zip").unwrap();
+    std::fs::write(twin.join("2020.zip"), b"invented year zip").unwrap();
+    let m = std::fs::metadata(archive.join("2020.zip")).unwrap();
+    std::fs::write(
+        twin.join("VERIFIED.tsv"),
+        format!(
+            "name\tsource_identity\n2020.zip\t{}:{}:{}:{}:{}:{}:{}\n",
+            m.dev(),
+            m.ino(),
+            m.size(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec()
+        ),
+    )
+    .unwrap();
+    std::fs::write(prove.join("p.prove.out"), b"ALL-PROVED\n").unwrap();
+    std::fs::write(partial.join("kept.bin"), b"kept").unwrap();
+    std::fs::hard_link(partial.join("kept.bin"), folders.join("elsewhere.bin")).unwrap();
+    save_roots(
+        &store,
+        &format!(
+            "{}|{}|{}|{}",
+            twin.display(),
+            prove.display(),
+            partial.display(),
+            around.display()
+        ),
+    );
+    let (archive_text, ticks_text) = (archive.display().to_string(), ticks.display().to_string());
+    let env = move |name: &str| match name {
+        pull::gdfl_run::NFO_ARCHIVES_VAR => Some(OsString::from(&archive_text)),
+        pull::gdfl_run::TICKSTORE_VAR => Some(OsString::from(&ticks_text)),
+        _ => None,
+    };
+    let fs = Odd {
+        refuse: partial.join("shut"),
+        again: partial.clone(),
+    };
+    let (status, body) = json_of(answer(&store, &Cache::new(), &fs, &env, &|| 1));
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let roots = body["roots"].as_array().unwrap();
+    assert_eq!(roots[0]["twin"]["proven"], true, "{}", roots[0]);
+    assert_eq!(roots[0]["twin"]["sources"], 1);
+    assert_eq!(roots[0]["receipts"][0]["kind"], "verified_tsv");
+    assert_eq!(roots[1]["reader"], "none found");
+    assert_eq!(roots[1]["inside"]["kind"], "tick_store");
+    assert_eq!(roots[1]["inside"]["path"], ticks.display().to_string());
+    assert_eq!(roots[2]["state"], "partial", "{}", roots[2]);
+    assert_eq!(roots[2]["bytes"], 4, "what was read is counted");
+    assert_eq!(
+        roots[2]["faults"][0]["path"],
+        partial.join("shut").display().to_string()
+    );
+    assert_eq!(roots[2]["retirable"], false);
+    assert_eq!(
+        roots[2]["revisited"][0],
+        partial.join("again").display().to_string()
+    );
+    assert_eq!(
+        roots[2]["linked_elsewhere"][0],
+        partial.join("kept.bin").display().to_string()
+    );
+    assert_eq!(roots[3]["skipped_roots"][0], archive.display().to_string());
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_dir_all(&folders);
+}
+
+/// ONE RENDERING PER WALK: asked again for the same register, the body is
+/// the one already rendered, the same allocation, never rendered twice. The
+/// process holds one rendering, so another test's walk landing in between
+/// is told apart by asking until two renderings in a row are of this one.
+#[test]
+fn a_register_is_rendered_once_however_often_it_is_served() {
+    let store = root("rendered");
+    let copy = root("rendered-copy");
+    std::fs::write(copy.join("a.bin"), b"abc").unwrap();
+    save_roots(&store, &copy.display().to_string());
+    let config = configured(&store, &no_env).unwrap();
+    let register = std::sync::Arc::new(copies_register::walk(&Host, &config, 1));
+    let same = (0..1_000).any(|_| {
+        let first = rendered(&register);
+        std::sync::Arc::ptr_eq(&first, &rendered(&register))
+    });
+    assert!(same, "a second ask renders nothing");
+    assert!(rendered(&register).contains("\"files\":1,"));
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_dir_all(&copy);
+}
+
+/// A FULL OPS-READ POOL is refused by name, `429`, the register's read
+/// named; an admitted answer passes through untouched.
+#[test]
+fn a_full_pool_is_refused_by_name_and_an_admitted_answer_passes() {
+    let (status, body) = admitted(Err(crate::detail::RunError::Saturated));
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(body.contains("a copies register read"), "{body}");
+    assert_eq!(headers_for(status)[axum::http::header::RETRY_AFTER], "1");
+    assert_eq!(
+        admitted(Ok((StatusCode::OK, "{}".to_owned()))),
+        (StatusCode::OK, "{}".to_owned())
+    );
+}

@@ -209,6 +209,11 @@ fn configured(
     })
 }
 
+/// The process environment, read at the edge.
+fn process_env(var: &str) -> Option<OsString> {
+    std::env::var_os(var)
+}
+
 /// The verb as dispatched: the CLI's store root, the host's filesystem, the
 /// process environment and the wall clock.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
@@ -216,7 +221,7 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
         arguments,
         &crate::store_write::root_for("disk-copies", arguments),
         &copies_register::Host,
-        &|name| std::env::var_os(name),
+        &process_env,
         &copies_register::now_micros,
         out,
     )
@@ -360,15 +365,9 @@ mod tests {
         let mut out = String::new();
         let walked = AtomicI64::new(0);
         let now = || walked.fetch_add(1, Ordering::SeqCst);
+        let store = || -> Result<PathBuf, String> { Ok(base.clone()) };
         let env = |_: &str| None;
-        let code = command_with(
-            &[],
-            &|| Ok(base.clone()),
-            &copies_register::Host,
-            &env,
-            &now,
-            &mut out,
-        );
+        let code = command_with(&[], &store, &copies_register::Host, &env, &now, &mut out);
         assert_eq!(code, FAILED);
         assert!(
             out.starts_with("DISK COPIES WAITING: disk.extra_copy_roots is not set"),
@@ -379,21 +378,14 @@ mod tests {
         std::fs::create_dir_all(base.join("settings")).unwrap();
         std::fs::write(settings::dir(&base), b"a file where a folder belongs").unwrap();
         let mut out = String::new();
-        let code = command_with(
-            &[],
-            &|| Ok(base.clone()),
-            &copies_register::Host,
-            &env,
-            &now,
-            &mut out,
-        );
+        let code = command_with(&[], &store, &copies_register::Host, &env, &now, &mut out);
         assert_eq!(code, FAILED);
         assert!(out.contains("cannot be read"), "{out}");
         let mut out = String::new();
         assert_eq!(
             command_with(
                 &["--now"],
-                &|| Ok(base.clone()),
+                &store,
                 &copies_register::Host,
                 &env,
                 &now,
@@ -401,10 +393,8 @@ mod tests {
             ),
             MISUSED
         );
-        assert!(
-            out.contains("takes no argument") && out.contains(USAGE),
-            "{out}"
-        );
+        assert!(out.contains("takes no argument"), "{out}");
+        assert!(out.contains(USAGE), "{out}");
         let mut out = String::new();
         let code = command_with(
             &[],
@@ -416,6 +406,7 @@ mod tests {
         );
         assert_eq!(code, FAILED);
         assert_eq!(out, "DISK COPIES REFUSED: no store root (invented)\n");
+        assert_eq!(now(), 0, "no run of the four walked");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -476,6 +467,122 @@ mod tests {
             !text.contains("gone"),
             "a refused root is never offered: {text}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The host, except that one folder refuses its listing.
+    struct Refusing(PathBuf);
+
+    impl Fs for Refusing {
+        fn lstat(&self, path: &Path) -> std::io::Result<copies_register::Meta> {
+            copies_register::Host.lstat(path)
+        }
+
+        fn list(&self, dir: &Path, each: &mut dyn FnMut(OsString)) -> std::io::Result<()> {
+            if dir == self.0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            copies_register::Host.list(dir, each)
+        }
+
+        fn lines(
+            &self,
+            path: &Path,
+            each: &mut dyn FnMut(&[u8]),
+        ) -> Result<copies_register::Ending, String> {
+            copies_register::Host.lines(path, each)
+        }
+    }
+
+    /// EVERY LINE A ROOT CAN PRINT: a proven twin says `proven: `, a folder
+    /// inside the tick store names the live root it lies in, a folder that
+    /// will not list is `NOT WALKED WHOLE` with its `FAULT`, and a second
+    /// name of a live file that is not a partial name is a hazard without
+    /// the resumed-write words; and the verb as dispatched refuses an
+    /// argument before it reads anything.
+    #[test]
+    fn every_line_a_root_can_print() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (base, store, archive) = fixture("lines", false);
+        let twin = base.join("twin");
+        let ticks = base.join("ticks");
+        let prove = ticks.join("prove");
+        let partial = base.join("partial");
+        for dir in [&twin, &prove, &partial.join("shut")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(twin.join("2020.zip"), b"invented year zip").unwrap();
+        std::fs::hard_link(archive.join("2020.zip"), twin.join("2020.again.zip")).unwrap();
+        let m = std::fs::metadata(archive.join("2020.zip")).unwrap();
+        std::fs::write(
+            twin.join("VERIFIED.tsv"),
+            format!(
+                "name\tsource_identity\n2020.zip\t{}:{}:{}:{}:{}:{}:{}\n",
+                m.dev(),
+                m.ino(),
+                m.size(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec()
+            ),
+        )
+        .unwrap();
+        save_roots(
+            &store,
+            &format!(
+                "{}|{}|{}",
+                twin.display(),
+                prove.display(),
+                partial.display()
+            ),
+        );
+        let ticks_text = ticks.as_os_str().to_owned();
+        let env = |name: &str| match name {
+            pull::gdfl_run::NFO_ARCHIVES_VAR => Some(archive.as_os_str().to_owned()),
+            pull::gdfl_run::TICKSTORE_VAR => Some(ticks_text.clone()),
+            _ => None,
+        };
+        let mut out = String::new();
+        let code = command_with(
+            &[],
+            &|| Ok(store.clone()),
+            &Refusing(partial.join("shut")),
+            &env,
+            &|| 0,
+            &mut out,
+        );
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains("  twin: proven: a proven twin"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "  inside the live tick_store root {:?}",
+                ticks.as_os_str()
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("ROOT {:?} NOT WALKED WHOLE", partial.as_os_str())),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("  FAULT {:?}: ", partial.join("shut").as_os_str())),
+            "{out}"
+        );
+        let hazard = out
+            .lines()
+            .find(|line| line.starts_with("HAZARD "))
+            .unwrap();
+        assert!(hazard.contains("2020.again.zip"), "{out}");
+        assert!(hazard.ends_with(')'), "not a partial name: {hazard}");
+        assert_eq!(
+            process_env("PATH"),
+            std::env::var_os("PATH"),
+            "the process environment as it stands"
+        );
+        let mut out = String::new();
+        assert_eq!(command(&["--anything"], &mut out), MISUSED);
+        assert!(out.starts_with("DISK COPIES MISUSED"), "{out}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

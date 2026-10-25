@@ -333,15 +333,21 @@ pub(super) async fn copies_json(
             &copies_register::now_micros,
         )
     };
-    let (status, body) = match crate::detail::run_ops_read(work).await {
+    let (status, body) = admitted(crate::detail::run_ops_read(work).await);
+    (status, headers_for(status), body)
+}
+
+/// The answer, or the ops-read pool's refusal by name when no slot freed in
+/// time (`429`, retried).
+fn admitted(run: Result<(StatusCode, String), crate::detail::RunError>) -> (StatusCode, String) {
+    match run {
         Ok(answered) => answered,
         Err(why) => crate::detail::admission_refused(
             "a copies register read",
             crate::detail::MAX_OPS_READ_CONCURRENT,
             &why,
         ),
-    };
-    (status, headers_for(status), body)
+    }
 }
 
 /// The JSON content type and no caching on every answer, and a retry hint
