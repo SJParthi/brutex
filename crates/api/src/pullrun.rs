@@ -355,6 +355,15 @@ pub struct Progress {
     /// makes is now addressed to its own number and lands nowhere once the slot
     /// holds another. Not rendered: the page has no use for it. D-2760.
     pub generation: u64,
+    /// The run's durable id from the store-wide runs ledger (D-4880; IA-10c,
+    /// D-6260), taken at the claim, mode `pull`: every leg carries it into its
+    /// landings (their receipts, spools and ledger lines) and takes none of its
+    /// own, and it is the sink's run key `/logs?run=` groups the run's events by.
+    /// Beside [`Self::generation`], which keeps its in-process role and restarts
+    /// at 1 with the api (D-2760, F52); this one never repeats across a restart.
+    /// `0` for the never-ran document and for a claim not made by `/pull/run`
+    /// (recovery, whose spot runs each take their own).
+    pub run_id: u64,
     /// When the run was claimed, in Unix milliseconds by the server's clock,
     /// or `None` for the never-ran document.
     ///
@@ -552,6 +561,9 @@ impl Progress {
                 .started_at_ms
                 .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
         );
+        // THE RUN'S DURABLE ID (IA-10c, D-6260); `null` before one is taken.
+        out.push_str(",\"runId\":");
+        out.push_str(&run_id_json(self.run_id));
         out.push_str(",\"asked\":[");
         for (nth, leg) in self.asked.iter().enumerate() {
             if nth > 0 {
@@ -3481,19 +3493,197 @@ fn leg_outcome(status: axum::http::StatusCode, html: &str) -> LegOutcome {
 
 /// The production request boundary. Tests substitute receipts here while
 /// exercising the same pass loop and feed state transitions, without sockets.
+///
+/// EACH LEG CARRIES ITS RUN'S DURABLE ID (IA-10c, D-6260): the id the slot's
+/// run took at its claim, handed to the route's own door so the leg takes
+/// none of its own. It never travels in the leg's form, so no request can
+/// name another run's id.
 async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String) {
+    let run = slot_run_id(&site);
     match leg.route {
         Route::Spot => {
             let (status, _receipt, body) =
-                crate::server::pull_spot(axum::extract::State(site), leg.body).await;
+                crate::server::pull_spot_leg(axum::extract::State(site), leg.body, run).await;
             (status, body.0)
         }
         Route::Fno => {
             let (status, body) =
-                crate::server::pull_fno(axum::extract::State(site), leg.body).await;
+                crate::server::pull_fno_leg(axum::extract::State(site), leg.body, run).await;
             (status, body.0)
         }
     }
+}
+
+/// A run's durable id as `/pull/run.json` writes it: the number, or `null`
+/// for `0`, which no runs-ledger record holds (IA-10c).
+fn run_id_json(run: u64) -> String {
+    if run == 0 {
+        "null".to_owned()
+    } else {
+        run.to_string()
+    }
+}
+
+/// The durable runs-ledger id of the run that holds the slot, `0` when the
+/// slot holds none or a claim that took none (IA-10c).
+fn slot_run_id(site: &Site) -> u64 {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, |progress| progress.run_id)
+}
+
+/// The telemetry sink's run key, held by a `/pull/run` for its whole length
+/// under its durable id (`note_run_started` claims the same id for each leg
+/// where it claims one, D-6260), released when dropped, so a ledger line and
+/// the run's events name one run.
+struct SinkRun(Option<u64>);
+
+impl SinkRun {
+    fn claim(run: u64) -> Self {
+        Self(telemetry::global().and_then(|sink| sink.claim_run(run).then_some(run)))
+    }
+}
+
+impl Drop for SinkRun {
+    fn drop(&mut self) {
+        if let (Some(sink), Some(run)) = (telemetry::global(), self.0) {
+            sink.release_run(run);
+        }
+    }
+}
+
+// ------------------------------------------------- IA-10c: landing runs --
+
+/// The answers one instrument's windows were landed from, carried beside
+/// their bars to the hook after the landing door (IA-10c, D-6262).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Answers {
+    /// The instrument key the answers are kept under: the bar path's own.
+    pub key: Option<brutex_core::instrument::InstrumentKey>,
+    /// One per body, in the bodies' order: the vendor's text, digest and
+    /// status (its rows travel with the body).
+    pub bodies: Vec<pull::response_keep::Answered>,
+    /// The landing run's hook, set when the run hands the window to its door.
+    pub hook: Option<std::sync::Arc<pull::ingest::landing_run::RunHook>>,
+}
+
+impl Answers {
+    /// The answers of one instrument's bodies, kept under `key` by `hook`.
+    pub(crate) fn of(
+        key: Option<brutex_core::instrument::InstrumentKey>,
+        bodies: Vec<pull::response_keep::Answered>,
+        hook: Option<&std::sync::Arc<pull::ingest::landing_run::RunHook>>,
+    ) -> Self {
+        Self {
+            key,
+            bodies,
+            hook: hook.map(std::sync::Arc::clone),
+        }
+    }
+
+    /// The landing's runs-ledger id, `0` without a hook.
+    pub(crate) fn run(&self) -> u64 {
+        self.hook.as_ref().map_or(0, |hook| hook.run())
+    }
+}
+
+/// One landing request's run (IA-10c, D-6260, D-6263): its hook (its id,
+/// keeper and one spool writer) and its share of the vendor's landing claim,
+/// held until dropped at the request's end.
+#[derive(Debug)]
+pub(crate) struct LandingRun {
+    /// The hook every window of the request is handed to.
+    pub hook: std::sync::Arc<pull::ingest::landing_run::RunHook>,
+    _claim: pull::ingest::landing_run::VendorClaim,
+}
+
+/// Opens one landing request's run: the vendor's landing claim, SHARED (a
+/// `cli zerodha-repair --from-store` holding it refuses the request by name
+/// before an id is spent, FM-163), then the id: `given` when the request is a
+/// `/pull/run` leg, which takes none of its own, else one runs-ledger id of
+/// `mode`. Its hook is pre-sized to `series`, the series the request plans
+/// to land (its instruments, or a walk's wanted contract-months; D-6268).
+/// Blocks for two syncs (the id's record and its claims line, D-6269): called
+/// off the shared workers.
+///
+/// # Errors
+///
+/// The claim's refusal (`run_busy` naming the holder) or the runs ledger's
+/// (`runs_ledger_damaged`, `clock_implausible`, `lock_stalled`, ...), as a
+/// sentence: nothing is asked of the vendor and nothing lands without an id.
+pub(crate) fn open_landing(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    mode: pull::ingest::landing_run::Mode,
+    given: u64,
+    series: usize,
+) -> Result<LandingRun, String> {
+    use pull::ingest::landing_run as lr;
+    let pid = std::process::id();
+    let claim = lr::claim(
+        root,
+        vendor,
+        pull::gdfl_run::locks::Hold::Shared,
+        &format!("api pid {pid} {} (taking its run id)", mode.word()),
+    )
+    .map_err(|fault| {
+        format!(
+            "{fault}; another process is landing {}'s months, so nothing was asked of the vendor",
+            vendor.as_str()
+        )
+    })?;
+    let run = if given == 0 {
+        lr::allocate(root, mode, lr::By::Api, lr::kind_of(vendor)).map_err(|fault| {
+            format!("{fault}; no landing runs without a run id, so nothing was asked of the vendor")
+        })?
+    } else {
+        given
+    };
+    claim.note(&format!(
+        "api pid {pid} run {run} ({}) since {}",
+        mode.word(),
+        crate::ingest::epoch_secs(std::time::SystemTime::now())
+    ));
+    Ok(LandingRun {
+        hook: std::sync::Arc::new(lr::RunHook::new(root, run, vendor, series)),
+        _claim: claim,
+    })
+}
+
+/// The hook after a landing door returned (D-4859: land, keep, spool): body
+/// `nth` of `answers` kept with its receipt (`door`, and the landing's own
+/// named refusals), then its verdicts spooled. A window with no answer or no
+/// hook is said by name, an error event "response not kept", never skipped
+/// in silence: its minutes read `no_response_kept` at the next verification.
+pub(crate) fn keep_and_spool(
+    answers: &Answers,
+    nth: usize,
+    (granularity, encoding, asked): (
+        pull::vendor::Granularity,
+        pull::vendor::TimestampEncoding,
+        pull::session::Window,
+    ),
+    rows: &[pull::fetch::RawRow],
+    (landing, door): (&pull::ingest::DoorLanding, pull::response_keep::Door),
+) -> Option<pull::ingest::landing_run::Hooked> {
+    let (Some(hook), Some(key), Some(answered)) =
+        (&answers.hook, &answers.key, answers.bodies.get(nth))
+    else {
+        pull::ingest::landing_run::note_unhooked(asked);
+        return None;
+    };
+    Some(hook.after_landing(&pull::ingest::landing_run::Landed {
+        key,
+        granularity,
+        asked,
+        answered,
+        rows,
+        landing,
+        door,
+        encoding,
+    }))
 }
 
 /// Record a failure without copying an HTML document into the wire status.
@@ -3876,6 +4066,10 @@ async fn run_pass<F, Fut>(
 /// `run` is the [`Progress::generation`] the caller installed when it claimed
 /// the slot; every edit this run makes is addressed to it. D-2760.
 pub async fn conduct(site: Loaded, run: u64, legs: Vec<Leg>) {
+    // THE SINK'S RUN KEY IS THE RUN'S DURABLE ID FOR ITS WHOLE LENGTH
+    // (IA-10c, D-6260): each leg's `note_run_started` finds it held under the
+    // same id, so every leg's events and every ledger line name one run.
+    let _key = SinkRun::claim(slot_run_id(&site));
     conduct_with(site, run, legs, request_leg).await;
 }
 
@@ -4768,6 +4962,7 @@ mod tests {
             finished: None,
             started: true,
             generation: 0,
+            run_id: 0,
             started_at_ms: Some(1_791_000_000_000),
             asked: Vec::new(),
             feeds: vec![FeedReport {
@@ -8684,6 +8879,7 @@ mod tests {
             finished: None,
             started: true,
             generation: 0,
+            run_id: 0,
             started_at_ms: None,
             asked: Vec::new(),
             feeds: vec![

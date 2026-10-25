@@ -612,7 +612,7 @@ fn shape_alert(
 }
 
 /// UTC milliseconds of a vendor stamp in `encoding`.
-fn utc_millis(timestamp: i64, encoding: TimestampEncoding) -> i128 {
+pub(crate) fn utc_millis(timestamp: i64, encoding: TimestampEncoding) -> i128 {
     let offset = i128::from(IST_OFFSET_SECS) * 1_000;
     match encoding {
         TimestampEncoding::EpochMillisUtc => i128::from(timestamp),

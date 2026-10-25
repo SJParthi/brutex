@@ -1954,6 +1954,19 @@ jobs:
           #     parent gave it.
           declared="$declared api/src/bars_sort.rs:println!:1
           api/src/render.rs:println!:2"
+          # ONE MORE FILE, the same kind, from IA-10c (declared at its repair
+          # round 1, 23 Oct 2026, D-6268): `pull/src/landing_run_tests.rs`
+          # println! 8, all in the `#[ignore]`d `ia10c_timings`, inside the
+          # `#[cfg(test)]` `#[path]` test module of `pull::ingest::landing_run`,
+          # so no production path reaches any of them: the timing root, and the
+          # n, p50, p99 and max of a landing's runs-ledger id, the vendor's
+          # landing claim taken shared and noted, one gap-ledger append through
+          # the audit ledger lock and the hook after one landed day, for
+          # docs/06-limits.md's IA-10c table; repair round 3 (25 Oct 2026,
+          # D-6269) adds three beside 50 MB of claims: the seed's one whole
+          # pass, a run id (the tail read) and the whole pass a damage event
+          # takes.
+          declared="$declared pull/src/landing_run_tests.rs:println!:8"
           # ONE MORE FILE, from R3-13 (declared at its repair round 1, 23 Oct
           # 2026, D-7300 item 24). It is mounted only under `#[cfg(test)]`
           # (the `#[path]` test module of `api::server::dayflags::rules`), and

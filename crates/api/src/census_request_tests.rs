@@ -3313,6 +3313,7 @@ fn landed_nifty() -> BrokerWindow {
         exchange: "NSE",
         segment: "INDEX",
         store_vendor: Vendor::Dhan,
+        answers: crate::pullrun::Answers::default(),
         window,
         granularity: pull::vendor::Granularity::Minute1,
         bodies: Vec::new(),
