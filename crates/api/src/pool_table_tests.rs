@@ -348,6 +348,26 @@ const ROUTES: &[(&str, Runs)] = &[
             STORE_READ,
         ),
     ),
+    // THE QUARANTINE (R4-18): its plan on the store-read pool, its press on
+    // the operations pool, one press at a time per server.
+    (
+        "/pull/quarantine.json",
+        pool(
+            Named::StoreRead,
+            "quarantine_route.rs",
+            "quarantine_plan_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/pull/quarantine",
+        pool(
+            Named::OpsRead,
+            "quarantine_route.rs",
+            "quarantine_apply",
+            "crate::detail::run_ops_read(",
+        ),
+    ),
     (
         "/pull/fno",
         Runs::Write("starts a pull run on its own thread"),

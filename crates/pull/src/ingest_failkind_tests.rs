@@ -398,6 +398,21 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
         (RepairError::Conflict, FailKind::RepairRefused),
         (RepairError::Incomplete(p()), FailKind::RepairRefused),
         (RepairError::InvalidReceipt(p()), FailKind::RepairRefused),
+        // R4-18's drop and restate doors.
+        (RepairError::UnheldStamp(7), FailKind::RepairRefused),
+        (RepairError::WholeMonth { bars: 4 }, FailKind::RepairRefused),
+        (RepairError::NothingNamed, FailKind::RepairRefused),
+        (
+            RepairError::Reason("invented".to_owned()),
+            FailKind::RepairRefused,
+        ),
+        (
+            RepairError::ReadBack { index: 3 },
+            FailKind::Io {
+                kind: ErrorKind::InvalidData,
+                publication_may_be_visible: true,
+            },
+        ),
         (
             RepairError::HeldBarDiffers {
                 ts_micros: 1,
@@ -408,6 +423,36 @@ fn every_repair_refusal() -> Vec<(RepairError, FailKind)> {
         ),
         (RepairError::IndexedSibling(p()), FailKind::RepairImpossible),
         (RepairError::RevisionLimit, FailKind::RepairImpossible),
+        // R4-18 repair 2: the doors that add or restate bars.
+        (
+            RepairError::Quarantined(store::quarantine::Entry {
+                scope: store::quarantine::Scope::WholeMonth,
+                cause: store::quarantine::Cause::BeforeListing,
+                causes: store::quarantine::Causes::of(store::quarantine::Cause::BeforeListing),
+                bars: 4,
+                ledger_at: 28,
+                revision: 0,
+                written_at: 1,
+            }),
+            FailKind::RepairImpossible,
+        ),
+        (
+            RepairError::QuarantineUnknown(store::quarantine::QuarantineError::Stale {
+                path: p(),
+                built_from: 28,
+                ledger_len: 300,
+            }),
+            FailKind::StoreDamaged,
+        ),
+        (
+            RepairError::QuarantineUnknown(store::quarantine::QuarantineError::BeingWritten {
+                path: p(),
+                built_from: 28,
+                ledger_len: 300,
+                waited_ms: 0,
+            }),
+            FailKind::MonthBusy,
+        ),
         (RepairError::MissingTimestamp(7), FailKind::BatchRefused),
         (
             RepairError::BeforePromote {

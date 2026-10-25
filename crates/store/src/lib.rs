@@ -86,6 +86,7 @@ pub mod path;
 /// written after the bars it names are committed and never touching them
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
+pub mod quarantine;
 /// Month recovery after a power cut: a month left refused is brought back at
 /// its last commit whose records check out, the safe part written as a new
 /// revision and what it dropped recorded (R3-20, D-7093).

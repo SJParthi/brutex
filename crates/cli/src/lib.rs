@@ -136,10 +136,21 @@ pub mod verify_merge_command;
 /// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
 /// the store and the calendar with no vendor call (R3-18).
 mod zerodha_gaps_command;
+/// `cli zerodha-quarantine`: the bars R4-17's plan names set aside, a month
+/// recorded whole or served as a new generation without them (R4-18).
+mod zerodha_quarantine;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
 /// for every series, or repaired to a new generation from bars another store
 /// holds (D-3350, WP-13c).
 mod zerodha_repair;
+
+/// `cli zerodha-quarantine` over a store root the caller holds: the API's
+/// `GET /pull/quarantine.json` (with `--plan`) and `POST /pull/quarantine`
+/// (with `--apply`) run this one verb, never a second implementation
+/// (R4-18). Answers the exit code; the report is written to `out`.
+pub fn zerodha_quarantine_at(arguments: &[&str], root: &std::path::Path, out: &mut String) -> u8 {
+    zerodha_quarantine::command_at(arguments, root, out)
+}
 /// `cli zerodha-verify`: the cold Zerodha verification of a span, from the store
 /// alone, spooled and merged (IA-9, D-4811).
 mod zerodha_verify_command;
@@ -780,6 +791,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    bars: then each month is repaired to a new
                                    generation, held bars kept and never changed,
                                    journaled in audit/zerodha.repairs (D-3350).
+       cli zerodha-quarantine SYMBOL|ALL FROM TO --cause CAUSE --reason TEXT
+                          [--segment CASH|INDEX] [--plan-file PATH] [--plan|--apply]
+                                   the bars the series-identity plan names (CAUSE
+                                   before_listing, foreign_level or zero_price;
+                                   FROM, TO are YYYY-MM-DD): per month the stamps
+                                   and why; --apply records a month named whole
+                                   or serves a new generation without them, the
+                                   old one byte-identical, ledgered in
+                                   audit/zerodha.quarantine.ledger (R4-18).
        cli top          [VENDOR UNDERLYING]
                                    the ranked TOP COMBINATIONS of the best
                                    complete recorded run, read back from the
@@ -3058,6 +3078,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)
         }
+        ["zerodha-quarantine", arguments @ ..] if !arguments.is_empty() => {
+            zerodha_quarantine::command(arguments, out)
+        }
         ["series-identity", arguments @ ..] if !arguments.is_empty() => {
             series_identity::command(arguments, out)
         }
@@ -3144,7 +3167,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 63] = [
+const COMMANDS: [&str; 64] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3206,6 +3229,7 @@ const COMMANDS: [&str; 63] = [
     "verify-merge",
     "watchdog",
     "zerodha-gaps",
+    "zerodha-quarantine",
     "zerodha-repair",
     "zerodha-verify",
 ];
