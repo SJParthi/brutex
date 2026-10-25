@@ -21409,10 +21409,16 @@ tree that merged feat/db-fix at its CLOUD-MUTCLI merge
 pull/src/gdfl_import.rs, gdfl_import_causes.rs, gdfl_import_day.rs and
 gdfl_import_quality.rs; api/src/dayflags.rs), 15 on the tree that merged it
 at its R3-13 merge, where R3-13's merge took the api/src/dayflags.rs one
-away, and 19 on the tree that merged it at its DATA-1w merge, whose four new
+away, 19 on the tree that merged it at its DATA-1w merge, whose four new
 ones are DATA-1w's own (api/src/feed_checks_files.rs under rules 3, 4 and 6,
-api/src/feed_checks.rs under rule 7). On that last merge rule 4 counts 171
-against feat/db-fix's 168 and rule 7 239 against 236: the six lines above.
+api/src/feed_checks.rs under rule 7), and 28 on the tree that merged it at
+its R4-18 merge, whose nine new ones are R4-18's own
+(api/src/quarantine_route.rs, cli/src/zerodha_quarantine.rs twice,
+store/src/quarantine.rs five times, store/src/repair.rs). At every one of
+those merges the six lines above are the whole difference: rule 4 counts
+three more than feat/db-fix's and rule 7 three more (171 against 168 and 239
+against 236 at the DATA-1w merge; 176 against 173 and 242 against 239 at the
+R4-18 merge).
 No sentence here names a commit by its hash: the store's citation check
 (crates/store/tests/cited_commits.rs) holds every hash in this file to
 `main`'s history, and none of these merges is on it.
