@@ -273,10 +273,22 @@ fn a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_
     }
     let dir = dir_text(&out);
     for (arguments, window) in [
-        (vec!["--dir", dir.as_str(), "--apply"], "1970-01..9999-12 spans 96360"),
-        (vec!["--dir", dir.as_str(), "--to", "9999-12"], "1970-01..9999-12 spans 96360"),
-        (vec!["--dir", dir.as_str(), "--from", "1970-01"], "1970-01..9999-12 spans 96360"),
-        (vec!["--dir", dir.as_str(), "--from", "2000-01"], "2000-01..9999-12 spans 96000"),
+        (
+            vec!["--dir", dir.as_str(), "--apply"],
+            "1970-01..9999-12 spans 96360",
+        ),
+        (
+            vec!["--dir", dir.as_str(), "--to", "9999-12"],
+            "1970-01..9999-12 spans 96360",
+        ),
+        (
+            vec!["--dir", dir.as_str(), "--from", "1970-01"],
+            "1970-01..9999-12 spans 96360",
+        ),
+        (
+            vec!["--dir", dir.as_str(), "--from", "2000-01"],
+            "2000-01..9999-12 spans 96000",
+        ),
     ] {
         let (code, text) = basis_runs(&store.0, &arguments);
         assert_eq!(code, FAILED, "{arguments:?}: {text}");
