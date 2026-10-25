@@ -375,6 +375,59 @@ fn the_months_missing_inside_a_steps_window_are_two_reads_never_a_search() {
     assert!(none.months().is_empty() && none.between(nth(0), nth(40)).is_empty());
 }
 
+fn time(n: usize, mut call: impl FnMut()) -> (u128, u128, u128) {
+    let mut took: Vec<u128> = (0..n)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            call();
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    took.sort_unstable();
+    (took[n / 2], took[(n * 99) / 100], took[n - 1])
+}
+
+#[test]
+fn a_steps_missing_months_cost_the_same_at_12_120_and_1200_months_measured() {
+    // Windows of 12, 120 and 1,200 months (the widest a run walks), every
+    // other month missing. A step's lookup is two reads of the counts and a
+    // slice; the step's own window is three months at each size, so only
+    // the lookup grows with the window, and its median holds flat.
+    use super::Gaps;
+    let nth = |offset: usize| {
+        let ordinal = 2000 * 12 + offset;
+        YearMonth::new(
+            u16::try_from(ordinal / 12).unwrap(),
+            u8::try_from(ordinal % 12 + 1).unwrap(),
+        )
+        .unwrap()
+    };
+    let mut medians = Vec::new();
+    for len in [12_usize, 120, 1_200] {
+        let mut gaps = Gaps::new(nth(0), len);
+        for i in 0..len {
+            gaps.walk(nth(i), i % 2 == 0);
+        }
+        let (from, to) = (nth(len / 2), nth(len / 2 + 4));
+        assert!(!gaps.between(from, to).is_empty(), "len {len}");
+        let (p50, p99, max) = time(2_000, || {
+            std::hint::black_box(
+                gaps.between(std::hint::black_box(from), std::hint::black_box(to))
+                    .len(),
+            );
+        });
+        println!(
+            "missing months of one step in a {len}-month window: p50 {p50} ns, p99 {p99} ns, \
+             max {max} ns, n 2000"
+        );
+        medians.push(p50);
+    }
+    assert!(
+        medians[2] <= medians[0].max(200) * 4,
+        "the lookup's median at 12, 120 and 1,200 months: {medians:?} ns"
+    );
+}
+
 #[test]
 fn basis_runs_finds_its_missing_months_without_a_search_on_the_production_path() {
     // CI gate 11 rule 1 (docs/07 layer 4: never binary_search) refused the
