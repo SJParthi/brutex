@@ -238,6 +238,28 @@ const ROUTES: &[(&str, Runs)] = &[
         "/dayflags.json",
         pool(Named::StoreRead, "dayflags.rs", "dayflags_json", STORE_READ),
     ),
+    (
+        "/feed-checks.json",
+        pool(
+            Named::StoreRead,
+            "feed_checks.rs",
+            "feed_checks_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/tick-checks.json",
+        pool(
+            Named::StoreRead,
+            "feed_checks.rs",
+            "tick_checks_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/calendar-days.json",
+        Runs::Memory("the compiled session calendar tables, no store read"),
+    ),
     ("/aliases.json", Runs::Memory("the compiled alias table")),
     (
         "/sources.json",
