@@ -953,14 +953,13 @@ struct Slot {
     header: Header,
 }
 
-/// The original month's raw facts: its length, its region's checksum, its
-/// surviving slots and its sidecar's length.
+/// The original month's raw facts: its length, its region's checksum and its
+/// surviving slots.
 struct Raw {
     bars: PathBuf,
     len: u64,
     region_crc: u32,
     slots: Vec<Slot>,
-    sidecar_len: u64,
 }
 
 fn io_at(path: &Path, operation: &'static str) -> impl FnOnce(io::Error) -> RecoverError {
@@ -972,7 +971,7 @@ fn io_at(path: &Path, operation: &'static str) -> impl FnOnce(io::Error) -> Reco
     }
 }
 
-/// Reads the original month's length, header region and sidecar length, and
+/// Reads the original month's length and header region, and
 /// decodes each slot that sits where its own generation puts it.
 fn raw(root: &Path, path: StorePath<'_>) -> Result<Raw, RecoverError> {
     let bars = path.to_path_buf(root);
@@ -995,15 +994,11 @@ fn raw(root: &Path, path: StorePath<'_>) -> Result<Raw, RecoverError> {
             (header.generation % slot_count == index).then_some(Slot { header })
         })
         .collect();
-    let sidecar = path.with_file(FileKind::Checksums).to_path_buf(root);
-    let sidecar_len =
-        present(&sidecar, "measure the checksum sidecar")?.map_or(0, |meta| meta.len());
     Ok(Raw {
         bars,
         len,
         region_crc: crc32c(&region),
         slots,
-        sidecar_len,
     })
 }
 
@@ -1164,20 +1159,20 @@ impl Month<'_> {
             return Err(self.nothing());
         };
         let per_block = self.layout.records_per_block();
+        // The sidecar needs no bound of its own: a block whose checksum entry
+        // never reached it fails its read, so the prefix stops there.
         let whole = self
             .layout
             .capacity_for(self.raw.len)
-            .min(self.raw.sidecar_len / 4 * per_block)
             .min(claimed.header.n_valid)
             / per_block;
         if whole == 0 {
             return Err(self.nothing());
         }
+        // THE PROBE OPENS THE MONTH AT THE CLAIM; only the first `whole`
+        // blocks are read through it, whatever count the claim names.
         let probe = self.cut(
-            Header {
-                n_valid: whole * per_block,
-                ..claimed.header
-            },
+            claimed.header,
             Basis::Blocks {
                 blocks: whole,
                 generation: claimed.header.generation,
@@ -1213,13 +1208,12 @@ impl Month<'_> {
         }
         let blocks = failed.unwrap_or(whole);
         let kept = blocks * per_block;
-        let first = rows.first().map(|bar| bar.ts_micros);
         let last = usize::try_from(kept)
             .ok()
             .and_then(|kept| kept.checked_sub(1))
             .and_then(|at| rows.get(at))
             .map(|bar| bar.ts_micros);
-        let (Some(first), Some(last)) = (first, last) else {
+        let Some(last) = last else {
             return Err(self.nothing());
         };
         // THE OLDEST SURVIVING COMMIT THAT PUBLISHED EVERY KEPT RECORD.
@@ -1235,7 +1229,6 @@ impl Month<'_> {
             Header {
                 generation,
                 n_valid: kept,
-                first_ts_micros: first,
                 last_ts_micros: last,
                 ..claimed.header
             },
@@ -1351,7 +1344,7 @@ fn verified(
 }
 
 /// The records of the first `whole` blocks up to the first block that fails,
-/// and that block. Inside [`within`] a probe header naming `whole` blocks.
+/// and that block. Inside [`within`] a probe at the surviving claim.
 fn blocks_prefix(
     root: &Path,
     path: StorePath<'_>,
@@ -1381,7 +1374,8 @@ fn verified_blocks_after(
     per_block: u64,
 ) -> Result<u64, RecoverError> {
     let file = BarFile::open_existing_at(root, path, symbol_id)?;
-    Ok((failed + 1..whole)
+    Ok((failed..whole)
+        .skip(1)
         .filter(|block| file.read_record(block * per_block).is_ok())
         .count() as u64)
 }
@@ -1428,7 +1422,6 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
         && let Served::Revision(pointer) = generation::served(root, path)?
         && record.revision == pointer.revision
     {
-        records.release()?;
         return Ok(Outcome::Already(record));
     }
     // A PROMOTION ALREADY MADE BY THIS CUT is resumed: only its record is
@@ -1465,7 +1458,6 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
         reread_named: false,
         record: 0,
     })?;
-    records.release()?;
     Ok(Outcome::Recovered(Recovered {
         refused,
         tried,
@@ -1523,7 +1515,6 @@ pub fn note_reread(
             ));
         }
     };
-    records.release()?;
     Ok(noted)
 }
 
@@ -1570,7 +1561,9 @@ fn publish(
     Err(RepairError::RevisionLimit.into())
 }
 
-/// A month's record file, held exclusively for the life of the value.
+/// A month's record file, held exclusively for the life of the value: the
+/// lock goes when the value drops (`Flock`'s drop unlocks explicitly, never
+/// by close, and logs a refusal it cannot return, D-0693).
 struct RecordFile {
     path: PathBuf,
     lock: Flock<File>,
@@ -1635,13 +1628,6 @@ impl RecordFile {
         sync_dir(&self.directory)?;
         Ok(record)
     }
-
-    fn release(self) -> Result<(), RecoverError> {
-        let Self { path, lock, .. } = self;
-        lock.release()
-            .map_err(io::Error::from)
-            .map_err(io_at(&path, "release the record file's lock"))
-    }
 }
 
 /// `O_NOFOLLOW` on the hosts `crate::open_flags` has a verified value for.
@@ -1696,7 +1682,16 @@ fn missing_dirs(root: &Path, dir: &Path) -> Vec<PathBuf> {
     missing
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Every directory this thread's door synced, in order. The tests' seam
+    /// only: a sync leaves no trace a test can read otherwise.
+    static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+}
+
 fn sync_dir(dir: &Path) -> Result<(), RecoverError> {
+    #[cfg(test)]
+    SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
     let handle = File::open(dir).map_err(io_at(dir, "open a directory for sync"))?;
     handle.sync_all().map_err(io_at(dir, "sync a directory"))
 }

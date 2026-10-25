@@ -707,7 +707,7 @@ fn a_writer_holding_the_month_refuses_the_door_and_nothing_is_written() {
             matches!(busy, RecoverError::Store(StoreError::Locked { .. })),
             "{busy:?}"
         );
-        records.release().unwrap();
+        drop(records);
         assert_eq!(store.served(), 0, "nothing was published");
     }
     assert!(matches!(store.recover().unwrap(), Outcome::Recovered(_)));
@@ -827,6 +827,14 @@ fn a_torn_record_file_is_stepped_over_and_garbage_is_refused() {
     let crc = super::seal(&unknown_basis, 0);
     unknown_basis[252..].copy_from_slice(&crc.to_le_bytes());
     assert_eq!(super::Record::decode(&unknown_basis, 0), None, "basis 9");
+    // A WRONG MAGIC OR VERSION is refused on its own, its seal made good.
+    for (at, what) in [(0usize, "magic"), (8, "version")] {
+        let mut resealed = bytes;
+        resealed[at] ^= 0x01;
+        let crc = super::seal(&resealed, 0);
+        resealed[252..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(super::Record::decode(&resealed, 0), None, "{what}");
+    }
     let mut unknown_flag = bytes;
     unknown_flag[13] = 2;
     let crc = super::seal(&unknown_flag, 0);
@@ -965,6 +973,20 @@ fn damage_inside_the_months_history_is_not_a_torn_tail() {
     assert_eq!(verified_after, 3, "blocks 1, 2 and 3 of 300 bars verify");
     assert!(refused.to_string().contains("not the torn tail"));
     assert_eq!(store.tree(), tree);
+    // BLOCK 2 DAMAGED TOO: each block past the first failure is read on its
+    // own, so the count names blocks 1 and 3 and not block 2.
+    let mut image = store.image();
+    image.bin[32_768 + 2 * 4_088 + 9] ^= 0x01;
+    store.put(&image);
+    let RecoverError::NotTheTail {
+        block,
+        verified_after,
+        ..
+    } = store.plan().unwrap_err()
+    else {
+        panic!("not the tail");
+    };
+    assert_eq!((block, verified_after), (0, 2));
 }
 
 /// TWO COMMITS IN ONE BATCH AT THE YEAR END (a combination): the month's
@@ -1320,6 +1342,13 @@ fn the_re_read_is_noted_once_against_its_own_recovery() {
         noted
     );
     assert_eq!(store.tree(), tree, "a second note writes nothing");
+    // THE SAME RECOVERY whatever flag or position the caller's copy has.
+    let moved = Record { record: 7, ..noted };
+    assert_eq!(
+        super::note_reread(&store.root, store.path(), &moved).unwrap(),
+        noted
+    );
+    assert_eq!(store.tree(), tree);
     assert_eq!(store.recover().unwrap(), Outcome::Already(noted));
     assert_eq!(store.plan().unwrap(), Plan::Recovered(noted));
 }
@@ -1841,4 +1870,186 @@ fn a_revision_root_that_cannot_be_made_is_the_publications_refusal() {
     assert_eq!(refused.word(), "repair_refused", "{refused}");
     assert_eq!(store.served(), 0);
     assert_eq!(read_record(&store.root, store.path()), Ok(None));
+}
+
+/// THE NEWEST COMMIT IS TRIED FIRST wherever its slot lies: after three
+/// commits the newest sits in the second slot, and it is the one tried (and
+/// named) before the older one is kept.
+#[test]
+fn the_newest_commit_is_tried_first_from_either_slot() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 100));
+    store.commit(&store.day(3, 80));
+    let before = store.image();
+    store.commit(&store.day(4, 60));
+    let after = store.image();
+    let writes = writes(&before, &after);
+    let slot = writes
+        .iter()
+        .position(|write| matches!(write, Write::Slot(..)))
+        .unwrap();
+    assert!(
+        matches!(writes[slot], Write::Slot(16_384, _)),
+        "the third commit's slot is the second"
+    );
+    store.put(&torn(&before, &writes, 1 << slot));
+    let Plan::Cut { cut, tried, .. } = store.plan().unwrap() else {
+        panic!("cut");
+    };
+    assert_eq!(cut.basis(), Basis::Commit { generation: 2 });
+    assert_eq!(
+        tried.iter().map(|one| one.generation).collect::<Vec<_>>(),
+        vec![3],
+        "the newest was tried first: {tried:?}"
+    );
+}
+
+/// A CLAIM PAST THE FILE'S END WITH NO COMMIT THAT CHECKS OUT (a
+/// combination): the newest slot names records the file never grew to hold,
+/// and a block of the older commit's records is damaged. The whole blocks
+/// the file holds and that verify are the cut, probed at the file's own
+/// length, never at the claim.
+#[test]
+fn a_claim_past_the_files_end_with_no_good_commit_keeps_the_whole_blocks_it_holds() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 100));
+    let before = store.image();
+    store.commit(&store.day(3, 80));
+    let after = store.image();
+    let writes = writes(&before, &after);
+    let slot = writes
+        .iter()
+        .position(|write| matches!(write, Write::Slot(..)))
+        .unwrap();
+    let mut image = torn(&before, &writes, 1 << slot);
+    // Record 80, in block 1 of the durable commit.
+    image.bin[32_768 + 80 * 56 + 9] ^= 0x01;
+    store.put(&image);
+    let Plan::Cut {
+        cut,
+        dropped,
+        tried,
+        ..
+    } = store.plan().unwrap()
+    else {
+        panic!("cut");
+    };
+    assert_eq!(tried.len(), 2, "{tried:?}");
+    assert_eq!(
+        cut.basis(),
+        Basis::Blocks {
+            blocks: 1,
+            generation: 1
+        }
+    );
+    assert_eq!((dropped.kept, dropped.claimed), (73, 180));
+    let Outcome::Recovered(done) = store.recover().unwrap() else {
+        panic!("recovered");
+    };
+    assert_eq!(done.record.dropped.kept, 73);
+    assert_eq!(store.served_bars().unwrap(), store.day(2, 73));
+}
+
+/// THE PREFIX IS READ TO ITS LAST WHOLE BLOCK: a 150-bar month whose next
+/// 150-bar append lost only the records it wrote into the shared block 2
+/// (its checksum entry, re-sealed, did land). Neither commit checks out;
+/// blocks 0 and 1 do, and they are the cut.
+#[test]
+fn a_lost_write_into_the_shared_block_keeps_the_blocks_before_it() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 150));
+    let before = store.image();
+    store.commit(&store.day(3, 150));
+    let after = store.image();
+    let writes = writes(&before, &after);
+    let shared = 32_768 + 150 * 56;
+    let lost = writes
+        .iter()
+        .position(|write| matches!(write, Write::Records(at, _) if *at == shared))
+        .unwrap();
+    let every = (1u64 << writes.len()) - 1;
+    store.put(&torn(&before, &writes, every & !(1 << lost)));
+    let Plan::Cut {
+        cut,
+        dropped,
+        tried,
+        ..
+    } = store.plan().unwrap()
+    else {
+        panic!("cut");
+    };
+    assert_eq!(tried.len(), 2, "{tried:?}");
+    assert_eq!(
+        cut.basis(),
+        Basis::Blocks {
+            blocks: 2,
+            generation: 1
+        }
+    );
+    assert_eq!((dropped.kept, dropped.claimed), (146, 300));
+    assert_eq!((dropped.first_day, dropped.last_day), (2, 3));
+}
+
+/// DURABLE NAMES AND A TRUE CLOCK: the first recovery of a store makes the
+/// record's directories and syncs the parent of each one it made, root-most
+/// first, then the record's own directory; a second month beside it makes
+/// none and syncs only its directory. Each record carries the time it was
+/// written, between the two clock reads around the door.
+#[test]
+fn every_directory_made_is_synced_and_the_record_carries_its_time() {
+    let _sink = crate::emits::hold_the_sink();
+    let now = || {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros(),
+        )
+        .unwrap()
+    };
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    super::SYNCED.with(|synced| synced.borrow_mut().clear());
+    let before = now();
+    let record = read_record_or_recover(&store);
+    let after = now();
+    assert!(
+        (before..=after).contains(&record.recovered_at_micros),
+        "{before} <= {} <= {after}",
+        record.recovered_at_micros
+    );
+    let directory = record_path(&store.root, store.path())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut expected = vec![store.root.clone()];
+    let mut made = directory.clone();
+    let mut below = Vec::new();
+    while made != store.root {
+        below.push(made.clone());
+        made = made.parent().unwrap().to_path_buf();
+    }
+    below.reverse();
+    // The parent of each directory made, root-most first: the root, then
+    // every made directory but the last; then the record's directory.
+    expected.extend(below.iter().take(below.len() - 1).cloned());
+    expected.push(directory.clone());
+    let synced = super::SYNCED.with(|synced| synced.borrow_mut().split_off(0));
+    assert_eq!(synced, expected);
+
+    let april = Store {
+        root: store.root.clone(),
+        month: YearMonth::new(2020, 4).unwrap(),
+    };
+    torn_month(&april);
+    read_record_or_recover(&april);
+    let synced = super::SYNCED.with(|synced| synced.borrow_mut().split_off(0));
+    assert_eq!(
+        synced,
+        vec![directory],
+        "nothing made, its directory synced"
+    );
 }
