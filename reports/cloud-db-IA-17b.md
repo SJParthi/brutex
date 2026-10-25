@@ -1,13 +1,46 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
-NEXT: when `HOLD` is gone (or `GO-IA-17b` is back) on `cloud/db-base-20261024`: merge the newest
-`origin/feat/db-fix` if it moved, rerun fmt, clippy, deny, the CI shell gates and the pull and cli
-import tests; continue the mutant sample shard by shard (`--shard k/20 --sharding round-robin`,
-k = 1..9, 11..19). The rest is NEEDS THE MAC.
+NEXT: continue the mutant sample shard by shard (`--shard k/20 --sharding round-robin`, k = 1..9,
+11..19; this session runs k = 1, 2, ...), then write the final status. The rest is NEEDS THE MAC.
 
-Held at this save point by `HOLD` on `cloud/db-base-20261024` (`604b8f20`, "Remove every GO-<NAME>:
-all cloud parts hold at their next save point", 24 Oct 2026), after `GO-IA-17b` was removed. Until
-that commit this part ran under its own `GO-IA-17b`.
+## Session of 25 Oct 2026 (a new cloud session, continuing from `381ea29c`)
+
+`GO-IA-17b` is back on `cloud/db-base-20261024`, so this part builds under its own GO.
+
+- **Third base merge.** `origin/feat/db-fix` moved to `666ddf7f` (Merge DATA-1w, after Merge R3-13);
+  merged as `9947dc2e`. The three ledgers (`docs/04`, `05`, `06`) conflicted only where both sides
+  appended at the end; both kept whole, feat/db-fix's text the exact byte prefix (checked with
+  `cmp`), IA-17b's blocks after it. Nothing under `crates/pull` moved on the base
+  (`git diff d39e789e -- crates/pull/src` equals `git diff origin/feat/db-fix -- crates/pull/src`
+  byte for byte), so the coverage and mutant tables below still describe the diff. R3-13's new
+  `api::dayflags_rules` calls `gdfl_cm::auction::path` and `append`, whose signatures this part kept.
+- **The Mac's spec-check note, checked.** "auction::append writes through path(); it must resolve
+  the served generation without writing inside a served revision." `append` (`append_typed`,
+  `crates/pull/src/gdfl_cm_auction.rs`) does not write through `path()`: it asks
+  `store::generation::served` first, refuses by name (`NotFiled::Revision`) any month not served as
+  the original, refuses a pointer it cannot read (never guessing the original), and only then writes,
+  through `original_path`, which never names a revision root. `path()` (the reader's resolution) and
+  `write_revision` (which writes only under the NEW, not-yet-served revision root, before promotion)
+  are the only other places that name a generation. Proved by
+  `revision_tests::a_revision_served_month_is_never_appended_to_and_its_readers_read_the_served_sidecar`
+  and `revision_tests::a_month_whose_served_generation_cannot_be_told_takes_no_print`. No code change.
+- **Gates after the merge** (this host: root, 4 cores; `TMPDIR` on a tmpfs):
+  - `cargo fmt --all --check`: green.
+  - `cargo clippy --workspace --all-targets --locked -- -D warnings`: green (exit 0).
+  - `cargo deny check` (cargo-deny 0.19.0, CI's pin, installed fresh): `advisories ok, bans ok,
+    licenses ok, sources ok`. RUSTSEC-2026-0386 (tokio 1.53.1) is the base's item BASE-DENY-1024;
+    `Cargo.lock` untouched.
+  - `cargo test -p pull --locked --no-fail-fast`: **2,545 passed, 9 failed, 49 ignored**: the same
+    9 root/base failures as before (listed under Gates); all 35 of this part's tests
+    (`gather`, `revision_tests`, `gather_unit_tests`) pass.
+  - `cargo test -p api --lib --locked -- dayflags` (R3-13's tests that call `auction::append` and
+    `path`): 116 passed, 0 failed.
+  - `cargo test -p cli --locked --no-fail-fast -- gdfl_import tick_second scrub_blocks
+    watchdog_command gdfl_run`: 166 passed, 3 failed (the same three chmod tests root ignores).
+  - CI shell gates touching this part's files, each step's `run:` body run as written, against a
+    worktree of `666ddf7f` for comparison: gate 0 green; gate 14 green (pull pin 39 with `C-RP-02`);
+    gate 12 red on both, no new refused block (767 claim blocks, 165 name a test, 41 an invariant
+    row); gate 1d red on both, **the set of undeclared words identical** to the base's.
 
 # IA-17b: D-4875 remainder: the once-per-month gather and the CASH .auc writer
 
