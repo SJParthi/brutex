@@ -860,6 +860,19 @@ fn a_torn_record_file_is_stepped_over_and_garbage_is_refused() {
     let refused = read_record(&store.root, store.path()).unwrap_err();
     assert_eq!(refused.word(), "record_refused");
     assert!(refused.to_string().contains("none of its 1 whole record"));
+    // THE LONGEST FILE READ is MAX_RECORDS records and a torn one more; a
+    // byte past it is refused.
+    let mut longest = bytes.to_vec();
+    longest.resize(
+        usize::try_from((super::MAX_RECORDS + 1) * RECORD_LEN).unwrap(),
+        0,
+    );
+    fs::write(&at, &longest).unwrap();
+    assert_eq!(
+        read_record(&store.root, store.path()).unwrap(),
+        Some(record),
+        "a file of the longest length is read"
+    );
     fs::write(&at, vec![0u8; usize::try_from(super::MAX_LEN).unwrap() + 1]).unwrap();
     assert!(
         read_record(&store.root, store.path())
@@ -1080,7 +1093,11 @@ fn a_cut_never_applies_to_other_bytes_another_thread_or_another_file() {
         assert!(store.served_bars().is_err(), "moved length");
     });
     assert_eq!(cut.bin_len(), u64::try_from(longer.bin.len()).unwrap() - 1);
-    assert_ne!(cut.region_crc(), 0);
+    assert_eq!(
+        cut.region_crc(),
+        crate::crc::crc32c(&longer.bin[..32_768]),
+        "the CRC-32C of the header region it was planned against"
+    );
 }
 
 /// OUT OF THE BOX: A RECORD DIRECTORY LINKED ELSEWHERE is refused before
