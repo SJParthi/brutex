@@ -27,7 +27,9 @@
 //! band (its days' intervals, each widened by 0.2%, intersected) is not
 //! empty and ends `drift` where it empties; a month missing from `DIR` is named and
 //! leaves a gap, never a break nor a guess. A share with no basis day has no
-//! run and is named.
+//! run and is named. The window, first month to last (asked, or held when a
+//! flag is left out), is at most 1,200 months and a wider one is refused by
+//! name before any file is read (D-7197).
 //!
 //! # What it writes
 //!
@@ -96,7 +98,9 @@ pub(crate) const USAGE: &str =
 /// The first line of every report.
 pub const FORMAT: &str = "# brutex basis-runs 1";
 
-/// The most months one run reads: 2000-01 to 2099-12.
+/// The most months one run reads, and the widest window it walks: 2000-01
+/// to 2099-12 (D-7197). A wider `--from`/`--to`, or a directory whose
+/// first and last months lie further apart, is refused by name.
 const MAX_MONTHS: usize = 1_200;
 
 /// What the operator asked for.
@@ -123,8 +127,9 @@ fn month(text: &str) -> Result<YearMonth, String> {
 /// # Errors
 ///
 /// A missing `--dir`, an unknown or repeated flag, a flag without its value,
-/// a month that is not `YYYY-MM`, `--from` after `--to`, or `--ledger`
-/// without `--apply`; each by name.
+/// a month that is not `YYYY-MM`, `--from` after `--to`, a `--from`/`--to`
+/// window wider than [`MAX_MONTHS`], or `--ledger` without `--apply`; each
+/// by name.
 pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let mut dir = None;
     let (mut from, mut to) = (None, None);
@@ -153,6 +158,9 @@ pub(crate) fn ask(arguments: &[&str]) -> Result<Ask, String> {
         && from > to
     {
         return Err(format!("--from {from} is after --to {to}"));
+    }
+    if let (Some(from), Some(to)) = (from, to) {
+        window_months(from, to).map_err(|why| format!("--from {from} --to {to}: {why}"))?;
     }
     if ledger && !write {
         return Err("--ledger writes the measured ledger and needs --apply".to_owned());
@@ -219,6 +227,97 @@ fn next_month(month: YearMonth) -> Option<YearMonth> {
     YearMonth::new(year, number).ok()
 }
 
+/// `month` numbered from January of year 0, so that the distance between
+/// two months is one subtraction. At most 9999 x 12 + 11. O(1).
+fn ordinal(month: YearMonth) -> usize {
+    usize::from(month.year()) * 12 + usize::from(month.month().saturating_sub(1))
+}
+
+/// How many months `first..=last` holds. O(1).
+///
+/// # Errors
+///
+/// `first` after `last`, or a window of more than [`MAX_MONTHS`] months,
+/// which no run walks; each by name.
+fn window_months(first: YearMonth, last: YearMonth) -> Result<usize, String> {
+    let months = ordinal(last)
+        .checked_sub(ordinal(first))
+        .map(|apart| apart + 1)
+        .ok_or_else(|| format!("{first} is after {last}"))?;
+    if months > MAX_MONTHS {
+        return Err(format!(
+            "the window {first}..{last} spans {months} months, more than the {MAX_MONTHS} one \
+             run reads; name a narrower --from/--to"
+        ));
+    }
+    Ok(months)
+}
+
+/// The months of a run's window `DIR` holds no full file of, with one
+/// prefix count per month walked: `before[i]` is how many of them lie
+/// before the window's month `i`. A step finds the missing months inside
+/// its own window in two reads of `before`, never a search (CI gate 11
+/// rule 1, D-7197); the window is at most [`MAX_MONTHS`] months, so the
+/// counts are at most 1,201 words.
+#[derive(Debug, Default)]
+pub(crate) struct Gaps {
+    /// The window's first month, offset 0 of `before`; `None` before any
+    /// window is walked.
+    first: Option<YearMonth>,
+    /// The months missing, ascending.
+    months: Vec<YearMonth>,
+    /// `before[i]`: how many of `months` lie before the window's month `i`.
+    /// One entry a month walked, and one more.
+    before: Vec<usize>,
+}
+
+impl Gaps {
+    /// The record of a window starting at `first` and `months` months long,
+    /// before any month of it is walked.
+    fn new(first: YearMonth, months: usize) -> Self {
+        let mut before = Vec::with_capacity(months.saturating_add(1));
+        before.push(0);
+        Self {
+            first: Some(first),
+            months: Vec::new(),
+            before,
+        }
+    }
+
+    /// The window's next month, in order: held, or missing from `DIR`.
+    fn walk(&mut self, month: YearMonth, held: bool) {
+        if !held {
+            self.months.push(month);
+        }
+        self.before.push(self.months.len());
+    }
+
+    /// Every month missing, ascending.
+    pub(crate) fn months(&self) -> &[YearMonth] {
+        &self.months
+    }
+
+    /// How many missing months come before the month numbered `at`. A month
+    /// before the window counts none and one after it counts all, which is
+    /// exact: no month outside the window is missing. O(1).
+    fn count_before(&self, at: usize) -> usize {
+        let Some(first) = self.first else {
+            return 0;
+        };
+        let last = self.before.len().saturating_sub(1);
+        let offset = at.saturating_sub(ordinal(first)).min(last);
+        self.before.get(offset).copied().unwrap_or(0)
+    }
+
+    /// The missing months strictly after `from` and strictly before `to`.
+    /// Two reads of the counts, then the slice. O(1).
+    pub(crate) fn between(&self, from: YearMonth, to: YearMonth) -> &[YearMonth] {
+        let start = self.count_before(ordinal(from) + 1);
+        let end = self.count_before(ordinal(to));
+        self.months.get(start..end).unwrap_or(&[])
+    }
+}
+
 /// Why a stock-day was not folded, as the report counts it.
 fn refusal_word(why: &FactorRefusal) -> &'static str {
     match why {
@@ -237,7 +336,7 @@ pub(crate) struct Folded {
     /// The months read, each with its file and that file's BLAKE3.
     pub(crate) read: Vec<(YearMonth, PathBuf, [u8; 32])>,
     /// The months in range `DIR` holds no full file of.
-    pub(crate) missing: Vec<YearMonth>,
+    pub(crate) missing: Gaps,
     /// Every run, by share then first day.
     pub(crate) runs: Vec<Run>,
     /// Shares a file held with no basis day at all.
@@ -298,8 +397,10 @@ fn fold_month(
 ///
 /// # Errors
 ///
-/// A directory that cannot be listed, no month in range, or a version file
-/// DATA-1's reader refuses (cut, damaged, of another format); each by name.
+/// A directory that cannot be listed, no month in range, a window (the
+/// asked or held months, first to last) wider than [`MAX_MONTHS`], or a
+/// version file DATA-1's reader refuses (cut, damaged, of another format);
+/// each by name.
 pub(crate) fn fold(ask: &Ask) -> Result<Folded, String> {
     let held = months_in(&ask.dir)?;
     let in_range: Vec<YearMonth> = held
@@ -322,20 +423,24 @@ pub(crate) fn fold(ask: &Ask) -> Result<Folded, String> {
             ask.dir.display()
         ));
     }
+    // BOUNDED BEFORE ANYTHING IS READ: the walk below is one step a month
+    // of the window, and a window is at most MAX_MONTHS long (D-7197).
+    let span = window_months(first, last)?;
     let mut folders: BTreeMap<String, Folder> = BTreeMap::new();
     let mut seen_days: BTreeMap<String, u64> = BTreeMap::new();
     let mut refused: BTreeMap<String, String> = BTreeMap::new();
     let mut skipped: BTreeMap<&'static str, u64> = BTreeMap::new();
     let mut days_folded = 0_u64;
     let mut read = Vec::new();
-    let mut missing = Vec::new();
+    let mut missing = Gaps::new(first, span);
     // The months held, walked beside the calendar: one compare a month.
     let mut held_months = in_range.iter().copied().peekable();
     let mut at = Some(first);
     while let Some(month) = at.filter(|m| *m <= last) {
         at = next_month(month);
-        if held_months.next_if_eq(&month).is_none() {
-            missing.push(month);
+        let held = held_months.next_if_eq(&month).is_some();
+        missing.walk(month, held);
+        if !held {
             continue;
         }
         let index = FactorIndex::load(&ask.dir, month)?;
@@ -424,9 +529,9 @@ pub(crate) fn runs_draft(ask: &Ask, folded: &Folded, fetched: Day) -> Draft {
          {first}..{last}, {} missing",
         ask.dir.display(),
         folded.read.len(),
-        folded.missing.len(),
+        folded.missing.months().len(),
     );
-    if let Some(gap) = folded.missing.first() {
+    if let Some(gap) = folded.missing.months().first() {
         let _ = write!(source, ", the first {gap}");
     }
     source.push(')');
@@ -505,14 +610,15 @@ pub(crate) fn command_with(
             .last()
             .map(|(m, ..)| m.to_string())
             .unwrap_or_default(),
-        folded.missing.len(),
-        if folded.missing.is_empty() {
+        folded.missing.months().len(),
+        if folded.missing.months().is_empty() {
             String::new()
         } else {
             format!(
                 ": {}",
                 folded
                     .missing
+                    .months()
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -739,7 +845,8 @@ fn month_of(day: Day) -> Option<YearMonth> {
 
 /// For a step whose window `(after, ex_date]` holds a session with no
 /// basis: says the day is unknown, and names every month of the window
-/// missing from `DIR`. Empty for a step that knows its day. O(log missing).
+/// missing from `DIR`. Empty for a step that knows its day. O(1) to find
+/// the months ([`Gaps::between`]), then one word per month named.
 fn window_note(folded: &Folded, step: &Step) -> String {
     if step.day_known() {
         return String::new();
@@ -747,9 +854,7 @@ fn window_note(folded: &Folded, step: &Step) -> String {
     let mut note =
         String::from("; ex-date UNKNOWN inside the window: a session with no basis lies between");
     if let (Some(from), Some(to)) = (month_of(step.after), month_of(step.ex_date)) {
-        let start = folded.missing.partition_point(|m| *m <= from);
-        let end = folded.missing.partition_point(|m| *m < to);
-        let gaps = folded.missing.get(start..end).unwrap_or(&[]);
+        let gaps = folded.missing.between(from, to);
         if !gaps.is_empty() {
             let _ = write!(
                 note,

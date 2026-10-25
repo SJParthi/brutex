@@ -85690,3 +85690,50 @@ ms, p99 4.50 ms, max 4.81 ms. The routes read the tables; none runs `judge`.
 reads at most the runs starting within 90 days either side (fewer than 92 a
 side), rule 3 at most 5 runs a side, and the wobble is one monotone window
 maximum each way. L-R426-08.
+
+### D-7197 — R4-26 repair 3: a basis-runs window is at most 1,200 months and a wider one is refused by name; a step's missing months are two reads of a prefix count, never a search — 2026-10-26
+
+**Context.** The third check of R4-26 (`state/fix/round2/verify-R4-26-r3.json`)
+found CI gate 11 rule 1 (docs/07 layer 4: never `binary_search`) refusing
+`crates/cli/src/basis_runs.rs`: `window_note` found the months missing
+inside a step's window with two `partition_point` calls over the run's list
+of missing months, and no allowlist line in `.github/gates_ledger.rs` and no
+gate-11 reason in `docs/06-limits.md` covered them. Its attack A9 found that
+list bounded only by `YearMonth`'s 1970..9999: `--from 1970-01 --to 9999-12`
+made the walk 96,360 months, 96,358 of them missing, although `MAX_MONTHS`
+(1,200) already bounded the files a directory may hold.
+
+**Decision.**
+
+1. A run's window, first month to last (as asked, or as held when a flag is
+   left out), is at most `MAX_MONTHS` (1,200) months, 2000-01 to 2099-12
+   wide. A wider one is refused by name: by the argument parser when both
+   flags are given (`refused: --from A --to B: the window A..B spans N
+   months, more than the 1200 one run reads; name a narrower --from/--to`,
+   exit 2), and by the fold on the resolved window before any file is read
+   (`BASIS RUNS REFUSED: the window ...`, exit 1), so a directory holding a
+   1970-01 file and a 9999-12 file is refused with no flag at all.
+2. The months missing are held as `Gaps`: the ascending list, and one prefix
+   count per month of the window walked (`before[i]` is how many lie before
+   the window's month `i`). A step's missing months are the slice between
+   two reads of the counts: O(1) to find, no search, so gate 11 rule 1 holds
+   on the file with no allowlist line. A month outside the window is
+   clamped to its edge, which is exact: no month outside the window is
+   missing.
+3. **Not taken:** an allowlist line for the two calls with a docs/06 reason.
+   The walk already passes every month of the window once, so recording the
+   counts as it goes costs nothing a search saves, and an allowlist would
+   keep a search on a path the law names.
+
+**Proof.** `cli::basis_runs::tests::a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read`,
+`cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`
+(every pair of months around windows of 1, 2, 3, 12 and 25 months under six
+patterns, and a 1,200-month window at a stride and at its edges, against
+the list filtered directly) and
+`cli::basis_runs::tests::basis_runs_finds_its_missing_months_without_a_search_on_the_production_path`;
+CI gate 11 through `state/fix/ci-shell-gates.sh`. R426-25 and R426-26
+(`docs/04-invariants.md`); L-R426-11 (`docs/06-limits.md`).
+
+**Cost.** The walk is one step a month of the window, at most 1,200, and the
+counts one word a month, at most 1,201; each step's lookup is two reads and
+the slice of the months it names.

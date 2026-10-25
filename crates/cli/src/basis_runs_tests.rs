@@ -239,6 +239,148 @@ fn every_misuse_is_refused_by_name_with_the_usage() {
     );
 }
 
+#[test]
+fn a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read() {
+    // ATTACK A9 (verify-R4-26-r3): 1970-01..9999-12 is 96,360 months, and
+    // the walk over the window was bounded by nothing narrower (D-7197).
+    let (code, text) = basis_runs(
+        Path::new("/nonexistent"),
+        &["--dir", "a", "--from", "1970-01", "--to", "9999-12"],
+    );
+    assert_eq!(code, MISUSED, "{text}");
+    assert!(
+        text.contains(
+            "refused: --from 1970-01 --to 9999-12: the window 1970-01..9999-12 spans 96360 \
+             months, more than the 1200 one run reads; name a narrower --from/--to"
+        ) && text.contains(USAGE),
+        "{text}"
+    );
+    // The edge: 1,200 months are a window, 1,201 are refused; one is a window.
+    assert!(ask(&["--dir", "a", "--from", "2000-01", "--to", "2099-12"]).is_ok());
+    let wide = ask(&["--dir", "a", "--from", "2000-01", "--to", "2100-01"]).unwrap_err();
+    assert!(
+        wide.contains("the window 2000-01..2100-01 spans 1201 months"),
+        "{wide}"
+    );
+    assert!(ask(&["--dir", "a", "--from", "2025-03", "--to", "2025-03"]).is_ok());
+
+    // A DIRECTORY whose first and last months lie that far apart is refused
+    // the same way with no flag, or with one, before any file is read: both
+    // files are empty, and reading either refuses for another reason.
+    let (store, out) = (Dir::new("store"), Dir::new("out"));
+    for month in ["1970-01", "9999-12"] {
+        fs::write(out.0.join(format!("feed-reconcile-{month}.v1.csv")), b"").unwrap();
+    }
+    let dir = dir_text(&out);
+    for (arguments, window) in [
+        (vec!["--dir", dir.as_str(), "--apply"], "1970-01..9999-12 spans 96360"),
+        (vec!["--dir", dir.as_str(), "--to", "9999-12"], "1970-01..9999-12 spans 96360"),
+        (vec!["--dir", dir.as_str(), "--from", "1970-01"], "1970-01..9999-12 spans 96360"),
+        (vec!["--dir", dir.as_str(), "--from", "2000-01"], "2000-01..9999-12 spans 96000"),
+    ] {
+        let (code, text) = basis_runs(&store.0, &arguments);
+        assert_eq!(code, FAILED, "{arguments:?}: {text}");
+        assert!(
+            text.contains(&format!(
+                "BASIS RUNS REFUSED: the window {window} months, more than the 1200 one run \
+                 reads; name a narrower --from/--to. Nothing was written."
+            )),
+            "{arguments:?}: {text}"
+        );
+    }
+    assert!(!Table::BasisRuns.dir(&store.0).exists());
+    // A window inside the bound walks, and reaches the file it holds: 1970-01
+    // to 2000-01 is 361 months, and the empty 1970-01 file is what refuses.
+    let (code, text) = basis_runs(&store.0, &["--dir", dir.as_str(), "--to", "2000-01"]);
+    assert_eq!(code, FAILED, "{text}");
+    assert!(
+        text.contains("BASIS RUNS REFUSED") && !text.contains("the window"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_months_missing_inside_a_steps_window_are_two_reads_never_a_search() {
+    use super::Gaps;
+    // The month `offset` months after 2000-01.
+    let nth = |offset: usize| {
+        let ordinal = 2000 * 12 + offset;
+        YearMonth::new(
+            u16::try_from(ordinal / 12).unwrap(),
+            u8::try_from(ordinal % 12 + 1).unwrap(),
+        )
+        .unwrap()
+    };
+    // A window of `len` months from 2000-03 (two months before it and two
+    // after it are asked about too), each month held or missing by `held`.
+    let check = |len: usize, held: &dyn Fn(usize) -> bool, stride: usize| {
+        let mut gaps = Gaps::new(nth(2), len);
+        for i in 0..len {
+            gaps.walk(nth(2 + i), held(i));
+        }
+        let missing: Vec<YearMonth> = (0..len).filter(|i| !held(*i)).map(|i| nth(2 + i)).collect();
+        assert_eq!(gaps.months(), missing.as_slice(), "len {len}");
+        let asked: Vec<usize> = (0..len + 4)
+            .step_by(stride)
+            .chain([0, 1, 2, len, len + 1, len + 2, len + 3])
+            .collect();
+        for from in &asked {
+            for to in &asked {
+                let (from, to) = (nth(*from), nth(*to));
+                let want: Vec<YearMonth> = missing
+                    .iter()
+                    .copied()
+                    .filter(|m| from < *m && *m < to)
+                    .collect();
+                assert_eq!(
+                    gaps.between(from, to),
+                    want.as_slice(),
+                    "len {len}, {from}..{to}"
+                );
+            }
+        }
+    };
+    let mut bits = 0x9e37_79b9_u64;
+    let noise: Vec<bool> = (0..1_200)
+        .map(|_| {
+            bits = bits.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            bits >> 63 == 0
+        })
+        .collect();
+    for len in [1, 2, 3, 12, 25] {
+        check(len, &|_| true, 1);
+        check(len, &|_| false, 1);
+        check(len, &|i| i % 2 == 0, 1);
+        check(len, &|i| i % 3 != 1, 1);
+        check(len, &|i| i != 0 && i + 1 != len, 1);
+        check(len, &|i| noise[i], 1);
+    }
+    // THE MAXIMUM: a 1,200-month window, asked at a stride and at its edges.
+    check(1_200, &|i| i % 2 == 1, 41);
+    check(1_200, &|i| noise[i], 37);
+    // No window walked: nothing is missing anywhere.
+    let none = Gaps::default();
+    assert!(none.months().is_empty() && none.between(nth(0), nth(40)).is_empty());
+}
+
+#[test]
+fn basis_runs_finds_its_missing_months_without_a_search_on_the_production_path() {
+    // CI gate 11 rule 1 (docs/07 layer 4: never binary_search) refused the
+    // two `partition_point` calls `window_note` held (verify-R4-26-r3).
+    let source = include_str!("basis_runs.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+    for construct in [".binary_search", ".partition_point"] {
+        assert!(
+            !production.contains(construct),
+            "basis_runs.rs holds `{construct}` outside its tests"
+        );
+    }
+    assert!(
+        production.contains("folded.missing.between(from, to)"),
+        "window_note reads the prefix counts"
+    );
+}
+
 // ─────────────────────────────── end to end ───────────────────────────────
 
 #[test]
@@ -623,7 +765,7 @@ fn a_step_too_large_to_measure_is_counted_on_its_own_line() {
     };
     let folded = super::Folded {
         read: Vec::new(),
-        missing: Vec::new(),
+        missing: super::Gaps::default(),
         runs: vec![old, new],
         no_run: Vec::new(),
         refused: Vec::new(),
