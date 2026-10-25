@@ -4,10 +4,10 @@ STATUS: HELD
 
 Branch `cloud/db-R3-20-20261024`. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R3-20.md`.
 Prerequisites IA-16, R3-16, R3-36 (and SC-4) are merged on `feat/db-fix`. Newest `origin/feat/db-fix`
-merged: `bf9b1c8f` (Merge R4-18), merge commit `373fbe03` (25 Oct).
+merged: `cc0a3a0d` (Merge R4-28), merge commit `f922ccd3` (25 Oct, 23:0x IST).
 
-HELD at 21:05 IST, 25 Oct: `HOLD` on the base branch (`17d214c2`, "HOLD all cloud parts except IA-10a
-and IA-17b until the 23:00 reset"), no `GO-R3-20`. Code and tests are pushed at `faf0ed8c`.
+HELD at 02:09 IST, 26 Oct: `HOLD` on the base branch (`4dce2ee1`, "HOLD cloud parts without GO until the
+04:00 IST reset"), no `GO-R3-20`. Code and tests are pushed at `b3fc883c`.
 
 ## Done
 
@@ -28,13 +28,13 @@ and IA-17b until the 23:00 reset"), no `GO-R3-20`. Code and tests are pushed at 
 
 ## Left
 
-1. Re-measure coverage after the 25 Oct tests (last measured just before them: recover.rs lines
-   916/924, branches 102/104; month_recover_command.rs 356/392, 30/34 — the tests added after that
-   target every remaining line and branch named by the lcov run).
-2. `cargo mutants --in-diff` on recover.rs, file.rs's diff and month_recover_command.rs (installed
-   here: cargo-mutants 27.1.0; not run yet).
-3. Merge the newest `origin/feat/db-fix` again before the final gates; rerun fmt, clippy, the touched
-   suites.
+1. Store mutants, second run on `b3fc883c` (after the first run's 22 survivors were each killed by a
+   test or their code removed): shard 0/2 running at the HOLD (48 of 116 tested, 0 missed so far);
+   shard 1/2 next. Command:
+   `CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo mutants --in-diff <diff of recover.rs and file.rs vs feat/db-fix> -p store -j 4 -C --lib --shard K/2 -- -- recover`.
+2. cli mutants: `cargo mutants --in-diff <diff of month_recover_command.rs> -p cli -C --lib -- -- month_recover` (41 mutants; not run yet).
+3. Coverage once more after the mutant fixes (the 25 Oct 23:xx run is in the Gates table).
+4. Merge the newest `origin/feat/db-fix` again before the final gates; fmt, clippy, the touched suites.
 
 ## Gates (commands and results)
 
@@ -43,13 +43,13 @@ and IA-17b until the 23:00 reset"), no `GO-R3-20`. Code and tests are pushed at 
 | fmt | `cargo fmt --all --check` | clean (25 Oct, after the last commit) |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean, EXIT 0 (25 Oct, after the R4-18 merge); `-p store -p cli` clean after the last commit |
 | tests | `cargo test --workspace --locked --no-fail-fast` | 33 failures on the merged tree; 3 were this part's and are fixed (each rerun green: `sweep_wiring_tests` 22 pass, `decision_citations` 4 pass, `rehearsal` 16 pass). The other 30 are the container's: tests that `chmod` a file or directory and expect a refusal (this container runs as uid 0, which ignores modes: settings, sink, census link_tests, gdfl_dropbox, gdfl_import ia16, alerts, scrub_blocks, watchdog, zerodha_verify, quarantine index-publish, pullrun journal extremes), slow-reader timing tests (head_deadline_body_tests, feeds_route window, detail admission), `gdfl_cm::fixtures_are_built_not_pasted` (names DATA-1w's `tick_second_check_tests.rs`), and two tests that hang at 0% CPU (`gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`, `cloud_mutants_bars::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`; stopped by me). The hangs, the api timing failures and the pull permission failures were reproduced on a worktree of the unmodified base `bf9b1c8f` (same result); none touches this part's files (`crates/api` is not in the diff). |
-| store suite | `cargo test -p store --lib --locked recover` | `ok. 30 passed; 0 failed` |
+| store suite | `cargo test -p store --lib --locked recover` | `ok. 34 passed; 0 failed` (26 Oct, `b3fc883c`) |
 | cli suite | `cargo test -p cli --lib --locked month_recover` | `ok. 11 passed; 0 failed` |
 | deny | `cargo deny check` | `advisories FAILED, bans ok, licenses ok, sources ok`: RUSTSEC-2026-0386 (tokio 1.53.1), a BASE item (BASE-DENY-1024 bumps tokio; this branch never touches Cargo.lock) |
 | gate 30 | `rustc --edition=2024 -D warnings .github/gates_store_steps.rs` then `check config/store-steps.toml --merges … --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml` | no refusal names S-52 or R3-20; the 5 refusals left are the base's own `merged = false` flags (IA-1, IA-4, R4-18, R4-27, R3-17) |
 | CI shell gates | every `Gate N` block of ci.yml (24 Oct run) | red only where the base is red (1c, 1d, 10, 11, 12, 19, 23, 27b, 30; 13a/13b need a non-gate build step); within each the branch's refusals equal the base's (24 Oct log) |
-| coverage | `cargo +nightly llvm-cov --branch` over `-p store --lib -- recover` and `-p cli --lib -- month_recover store_write` | in progress (Left 1). store_write.rs: every line and branch of this branch's hunks is covered; its 6 unreached lines and 3 branches are base test code outside the diff |
-| mutants | `cargo mutants --in-diff` | not run yet (Left 2) |
+| coverage | `cargo +nightly llvm-cov --branch --no-report -p store --lib -- recover`, then `-p cli --lib -- month_recover store_write`, then `cargo +nightly llvm-cov report --branch` (25 Oct 23:xx, at `f922ccd3`) | recover.rs: branches 104/104 (100%), every line executed in the line view (`--text`); month_recover_command.rs: branches 30/30 (100%), every line executed; file.rs diff: every line and both arms of each new branch executed. The summary table counts 925/931 and 396/399 lines: zero-count copies of closures in the other test binary on lines the line view shows executed. store_write.rs: every line and branch of this branch's hunks covered; its 6 unreached lines and 3 branches are base test code outside the diff |
+| mutants | store: `cargo mutants --in-diff … -p store -j 4 -C --lib -- -- recover` | first run at `d6afa13e`: 243 mutants, 175 caught, 46 unviable, 22 missed; every one of the 22 is now caught by a named test or its code removed as changing nothing (commit `b3fc883c`); second run in progress (Left 1). cli: not run yet (Left 2) |
 
 ## Measurements (p50 / p99 / max, n, method)
 
@@ -88,6 +88,7 @@ and IA-17b until the 23:00 reset"), no `GO-R3-20`. Code and tests are pushed at 
 20. a later revision and a foreign cut's revision — `a_later_or_a_foreign_cut_revision_is_served_as_it_is`; a stranger's record — `a_record_of_another_recovery_is_not_this_ones_answer`
 21. * a power cut during a census compaction — `a_power_cut_during_a_compaction_plans_and_resumes`
 22. the importer's re-read of done days — `the_days_dropped_by_recovery_are_read_again`; a torn journal tail — `a_re_read_not_named_is_written_by_the_next_run_and_only_once`; a live GDFL run — `a_live_run_or_an_unreadable_journal_is_named`; a segment no import kind files — `a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand`; an end record that cannot be written — `an_end_record_that_cannot_be_written_fails_by_name_and_is_written_next_run`
+23. * a claim past the file's end with no commit that checks out — `a_claim_past_the_files_end_with_no_good_commit_keeps_the_whole_blocks_it_holds`; a lost write into the shared block 2 — `a_lost_write_into_the_shared_block_keeps_the_blocks_before_it`; the newest commit in the second slot — `the_newest_commit_is_tried_first_from_either_slot`; every directory made synced and the record's clock — `every_directory_made_is_synced_and_the_record_carries_its_time`
 
 ## Files outside ownership (kept minimal)
 
@@ -306,3 +307,15 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
 - HOLD at 20:40 IST (`17d214c2`), no GO-R3-20: pushed `faf0ed8c`, waiting.
 - NEXT: when HOLD is gone (or GO-R3-20 appears): re-measure coverage, run cargo-mutants on the diff,
   merge the newest feat/db-fix, final gates.
+
+### 2026-10-25 23:03 – 26 Oct 02:09 IST — merge, coverage, mutants; HELD
+
+- HOLD lifted at 23:03 (`7136d5d5`). Merged `origin/feat/db-fix` `cc0a3a0d` (Merge R4-28), clean.
+- Coverage (nightly `--branch`): recover.rs and month_recover_command.rs 100% of branches, every line
+  executed; file.rs's diff fully covered.
+- Store mutants, first run (`d6afa13e`): 243 tested, 175 caught, 46 unviable, 22 missed. Each of the
+  22 killed by a new test or its code removed (`b3fc883c`); store suite 34 tests.
+- HOLD at 02:07 (`4dce2ee1`, until the 04:00 reset), no GO-R3-20: pushed, waiting. The second store
+  mutants run (shard 0/2) keeps running in the background meanwhile.
+- NEXT: when GO: read shard 0's result, run shard 1/2, then the cli mutants, coverage again, merge
+  the newest feat/db-fix, final gates.
