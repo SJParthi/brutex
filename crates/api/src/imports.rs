@@ -1548,10 +1548,12 @@ struct Unlisted {
 /// and resolves each run it needs through the parse's indexes (D-4896). Here, and
 /// not in `dayflags`, only because this module is the one of the two that a
 /// caller outside `server` can reach; `logs::dayflags_json_over` is that
-/// caller, for the bench that measures `docs/06-limits.md` L-IA-39.
+/// caller, for the bench that measures `docs/06-limits.md` L-IA-39. The
+/// query is parsed by the band's one parse (`dayflags::query_of`, R3-13), so
+/// the bench can ask the grid's `timeframe=` and an `expiry=` as the route does.
 pub(crate) fn day_band_json(root: &std::path::Path, query: &str) -> Result<String, String> {
-    let asked = super::dayflags::asked(query)?;
-    Ok(super::dayflags::answer(root, &asked).to_string())
+    let (asked, band) = super::dayflags::query_of(query)?;
+    Ok(super::dayflags::answer_at(root, &asked, band).to_string())
 }
 
 /// How many of a run's lifecycle events `run=` shows: the newest.

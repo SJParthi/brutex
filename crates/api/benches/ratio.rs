@@ -77,6 +77,8 @@ mod dayflags;
 mod db_page;
 #[path = "ratio/export.rs"]
 mod export;
+#[path = "ratio/feed_checks.rs"]
+mod feed_checks;
 #[path = "ratio/gaps.rs"]
 mod gaps;
 #[path = "ratio/greeks.rs"]
@@ -722,6 +724,7 @@ fn served_routes_are_flat() -> bool {
     ok &= settings::settings_are_flat(&mut stores);
     ok &= rollup::rollups_are_flat(&mut stores);
     ok &= export::exports_are_flat(&mut stores);
+    ok &= feed_checks::checks_are_flat(&mut stores);
     for store in &stores {
         let _ignored = std::fs::remove_dir_all(&store.root);
     }
@@ -788,6 +791,7 @@ fn main() {
         settings::ROUTES,
         rollup::ROUTES,
         export::ROUTES,
+        feed_checks::ROUTES,
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));
