@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-5 — Copies register (cloud build report)
 
@@ -159,3 +159,11 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   --served-only`, started before the hold) and write `docs/06-limits.md` L-CC5 rows; re-run the
   shell gates; merge the newest `origin/feat/db-fix`; then fmt, clippy, the workspace tests, deny,
   coverage (nightly installed for `--branch`) and mutants on the touched modules.
+
+### 2026-10-25 — resumed (GO, HOLD lifted 13:1x IST)
+
+- New container; `HOLD` found at start, polled; `GO` with no `HOLD` (base `1dcc33e9`, "Lift HOLD: all
+  nine cloud parts build") at the first poll.
+- Merged the newest `origin/feat/db-fix` (`666ddf7f`, Merge DATA-1w): two both-sides-added conflicts
+  (`docs/04-invariants.md`: CC-5's section beside R3-13's; `docs/05-decisions.md`: D-7040..D-7048
+  beside D-7300), resolved by keeping both whole.
