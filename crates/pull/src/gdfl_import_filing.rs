@@ -1663,9 +1663,11 @@ impl Gather {
             .map(|offer| offer.bars.len())
     }
 
-    /// Whether nothing is gathered and no close waits.
+    /// Whether nothing is gathered and no close waits: one test, because an
+    /// offer is made only with a file whose day then waits ([`Self::take`]),
+    /// and a day waits only for a file an offer holds.
     pub(super) fn is_empty(&self) -> bool {
-        self.offers.is_empty() && self.deferred.is_empty()
+        self.deferred.is_empty()
     }
 
     /// Whether filing `day` leaves the month gathered: its offers are then
@@ -1721,7 +1723,25 @@ impl Gather {
             return Ok(());
         };
         let span = (first.ts_micros, last.ts_micros);
-        let place = if let Some(&place) = self.index.get(&month_key) {
+        let known = self.index.get(&month_key).copied();
+        // Judged before an offer is made, so a refused file leaves no empty
+        // offer behind: an offer exists only with a file a waiting day gathered.
+        let held = known
+            .and_then(|at| self.offers.get(at))
+            .map_or(0, |offer| offer.bars.len());
+        if held.saturating_add(seconds.len()) > store::repair::MAX_ROWS {
+            return Err(ImportRefusal::Store {
+                kind: FailKind::RepairRefused,
+                why: format!(
+                    "{name}: its {} bars would take the gathered repair of {} past the {} rows \
+                     a month holds at most; refused, never cut",
+                    seconds.len(),
+                    held_key_text(&month_key),
+                    store::repair::MAX_ROWS
+                ),
+            });
+        }
+        let place = if let Some(place) = known {
             place
         } else {
             self.offers.push(Offer {
@@ -1739,19 +1759,6 @@ impl Gather {
         let Some(offer) = self.offers.get_mut(place) else {
             return Ok(());
         };
-        let held = offer.bars.len();
-        if held.saturating_add(seconds.len()) > store::repair::MAX_ROWS {
-            return Err(ImportRefusal::Store {
-                kind: FailKind::RepairRefused,
-                why: format!(
-                    "{name}: its {} bars would take the gathered repair of {} past the {} rows \
-                     a month holds at most; refused, never cut",
-                    seconds.len(),
-                    held_key_text(&month_key),
-                    store::repair::MAX_ROWS
-                ),
-            });
-        }
         merge_into(&mut offer.bars, seconds).map_err(|at| ImportRefusal::Store {
             kind: FailKind::Differs,
             why: format!(

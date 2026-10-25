@@ -184,3 +184,25 @@ fn a_file_with_no_bars_gathers_nothing() {
     assert!(gather.is_empty());
     assert_eq!(gather.offered(&april()), None);
 }
+
+/// **A FILE REFUSED PAST THE MOST A MONTH HOLDS LEAVES NO OFFER BEHIND**
+/// (IA-RP-27): the first file of a month, refused by name, makes no empty
+/// offer for the run's flush to repair, and no close waits for it.
+#[test]
+fn a_first_file_refused_past_the_most_a_month_holds_leaves_no_offer() {
+    let mut gather = Gather::default();
+    let past = i64::try_from(store::repair::MAX_ROWS + 1).unwrap();
+    let refused = gather
+        .take(
+            GatheredFile::for_test(
+                &april(),
+                bars(1_711_943_100..1_711_943_100 + past),
+                request(day(2024, 4, 1), day(2024, 4, 30)),
+            ),
+            ("indices 2024-04-01 *", day(2024, 4, 1)),
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("never cut"), "{refused}");
+    assert_eq!(gather.offered(&april()), None, "no empty offer is left");
+    assert!(gather.is_empty(), "nothing gathered and no close waits");
+}
