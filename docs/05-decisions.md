@@ -86295,3 +86295,284 @@ D-7185).
    until the operator acts; making it complete needs an outcome the journal
    does not have (it has no partial outcome) or a rule that lets a known gap
    read as a complete leg, and D-7190 point 3 chose `Failed`.
+
+### D-7310 — G3: the written series rule — a share's EQ, BE and BZ day files are filed, every other series code is refused by name as `series_not_stored:<code>` — 2026-10-24
+
+**Implemented by** R4-22. **Findings** G3 (the GDFL capital-market reader's
+series files). D-7275 to D-7309 are left to the packages in flight that hold
+them (R4-18, R3-13); this package's entries start here, and the merge may
+renumber them at landing.
+
+**What was wrong.** WP-12f filed a share's `.BE` and `.BZ` day files under the
+share's key (D-4878 item 8) with the codes UNVERIFIED against an NSE source
+(L-WP12f-4), and every other series file of a share (`BL` block deals, `T0`,
+`N1` debt, `GS`, `TB`, `SM`, ...) was an unnamed skip, counted only in the
+census's unresolved total: a day whose share traded in another series said
+nothing of it.
+
+**What is decided.**
+
+1. The codes are sourced: NSE's "Legend of series" (read 24 Oct 2026,
+   `docs/00-charter.md`, "NSE equity series codes — read 24 Oct 2026") names
+   `EQ` the rolling series and `BE`/`BZ` the trade-for-trade series of fully
+   paid equity shares; the dated security masters on disk carry them in
+   `SctySrs`.
+2. THE WRITTEN RULE (`pull::gdfl_cm::CmScope::series_refusal`): under the
+   stored scope a share's own stem (`EQ`) and its `BE` and `BZ` files are
+   filed under the share's key, unchanged; a stem `<SHARE>.<CODE>.NSE` of a
+   share the scope files, whose code is anything else, seen before or not, is
+   refused BY NAME, `CmRefusal::SeriesNotStored`, its words
+   `series_not_stored:<code>: ...`, cause `series_not_stored` (a vendor rule:
+   it closes the day done with refusals, the same bytes refused the same way
+   every time), never filed. The refusal names the share's key that day, so a
+   filtered run refuses it only where it wants that share. A code is 1 to 8
+   ASCII letters or digits (`MAX_SERIES_CODE`); a longer or odd suffix is no
+   series name and stays a counted skip. The swept scope files no series and
+   refuses none (WP-12f's skip).
+3. A day holding a share's own file and its `BE` or `BZ` file stays refused
+   by name, both files (WP-12f's twins rule).
+
+**Proved by** `pull::gdfl_cm::series_code_tests::every_series_code_is_stored_or_refused_by_a_written_rule`,
+`a_bl_day_file_is_refused_series_not_stored`,
+`a_day_of_one_trade_for_trade_file_and_three_refused_series_files_the_be_alone`,
+`a_day_holding_a_plain_and_a_be_file_of_one_share_refuses_both`,
+`a_series_name_is_read_only_inside_its_bounds` and
+`an_old_symbols_series_file_names_the_newest_key`.
+
+**Store step.** G3's re-read is WP-12f's: `cli gdfl-import stocks zip
+2018-09-03 2026-07-31` unfiltered, stopping at 2026-07-31. A day closed `done`
+before this rule is not read again by it; its series files stay unnamed in
+that close until a re-read.
+
+### D-7311 — G2: nine dated symbol changes join `core::alias` from a new read of NSE's file and one circular; six rows of the same read are held back as re-key decisions — 2026-10-24
+
+**Implemented by** R4-22. **Findings** G2 (six stems in the archive stop the
+day before a new ticker starts), FM-288's join half.
+
+**What was wrong.** `core::alias::SYMBOL_CHANGES` held the 18 rows the 7 Oct
+read transcribed. `ANGELBRKG`, `RNAM`, `MINDAIND`, `GET&D` and `RUCHI` were
+each their own (unstored) key, so their days before each change never reached
+the series the store keys under the new symbol, and
+`LINEAGE.current("RUCHI")` was `RUCHI`.
+
+**What is decided.**
+
+1. NSE's `symbolchange.csv` is read again (24 Oct 2026, 69,403 bytes, sha256
+   `b080e538...`), recorded as a NEW dated citation
+   (`alias::SYMBOL_CHANGE_CSV_20261024`); the 7 Oct citation and every row
+   resting on it are unchanged.
+2. Applied, in date order: `BAJAJTEMPO -> FORCEMOT` 2019-08-19, `RNAM ->
+   NAM-INDIA` 2020-01-23, `ADANIGAS -> ATGL` 2021-01-13, `MAGMA -> POONAWALLA`
+   2021-08-05, `ANGELBRKG -> ANGELONE` 2021-11-11, `RUCHI -> PATANJALI`
+   2022-07-13 (NSE/CML/52890, the file has no row), `MINDAIND -> UNOMINDA`
+   2022-08-05, `TWL -> TITAGARH` 2023-06-19, `GET&D -> GVT&D` 2024-11-05: each
+   a row whose old symbol the store holds under no key of its own, so filing
+   it only adds days to a series already keyed under the new symbol, splits no
+   options contract (D-3354 item 4 finds no old directory) and changes no
+   PIT-1 membership (no option file carries an old symbol: the store's
+   `bars/gdfl/NSE/FNO/` holds none of the nine). 27 rows, `Lineage<27, 128>`,
+   worst probe 4 or fewer.
+3. Held back, read and not applied: `KPIT -> BSOFT`, `TATAGLOBAL ->
+   TATACONSUM`, `CENTURYTEX -> ABREL`, `INFIBEAM -> CCAVENUE`, `GUJGASLTD ->
+   GUJENERGY`, `ICICIPRULI -> ICICILIFE`. The store holds each old symbol under
+   its own key, so applying one re-keys stored months and refuses options runs
+   until the re-key records them (D-3354 item 4), and `ICICIPRULI` is an F&O
+   list share (`CLAUDE.md` §1). Each is a decision and a store step for the
+   operator; until then each keeps two keys, as D-3354 item 3 says of a rename
+   with no row. The 7 Oct statement that NSE's file has no row for `TATAGLOBAL`
+   or `KPIT` is contradicted by the 24 Oct bytes (charter); why is UNVERIFIED.
+
+**Proved by** `brutex_core::alias::tests::the_six_stem_handovers_are_sourced_rows`,
+`ruchi_is_filed_under_patanjali_only_on_the_days_each_stem_was_live`,
+`a_read_again_never_edits_the_first_read`,
+`the_held_back_rows_of_the_second_read_are_not_applied`,
+`every_index_option_underlying_joins_its_dated_spot_series`,
+`lineage_lookup_cost_is_flat_from_18_to_27_rows`,
+`pull::gdfl_cm::series_code_tests::an_old_stem_before_its_change_is_filed_under_the_newest_symbol_for_ruchi_patanjali`
+and `every_dated_handover_files_the_old_stem_under_the_new_symbol_the_day_before`.
+
+**Store step.** `cli gdfl-import stocks zip 2018-09-03 2026-07-31 ANGELONE
+NAM-INDIA UNOMINDA GVT&D PATANJALI FORCEMOT ATGL POONAWALLA TITAGARH
+--repair-reason "<reason>"`: the inside-month days go through the D-3350
+repair door, so the run carries a repair reason. Rehearsed on 25 Oct 2026
+with this build on a store root of this package's own holding APFS clones of
+the real store's months of the nine symbols (`shadow/R4-22-g2`; the real
+journal, dayflags, repairs ledger and ANGELONE's 2021-11 unchanged by mtime,
+size and sha256): a month the store holds from the change on (ANGELONE's
+2021-11 from 11-11; by the months the real store lists, NAM-INDIA's 2020-01,
+UNOMINDA's 2022-08, FORCEMOT's 2019-08, ATGL's 2021-01 and TITAGARH's 2023-06
+are the same case, not rehearsed one by one) takes its old stem's earlier
+days only as new generations. Without
+the reason the seven `ANGELBRKG` days of 2021-11 were each
+`needs_month_generation` (a hole a repair-reason run reads); with it they
+landed, one generation per day (2021-11 from 65,732 to 90,359 rows, 64.8 MB
+of revision files: L-R422-12). A month the store does not hold is created
+plainly: PATANJALI's 2022-07 from `RUCHI.BE` (07-01 to 07-12) and
+`PATANJALI.BE` (07-13), POONAWALLA's 2021-08 from MAGMA's days 08-02 to
+08-04 (MAGMA's and POONAWALLA's debt-series files refused
+`series_not_stored`, D-7310). The range stops at 2026-07-31: an auction-era
+day is refused `restated_auction_band` for the run's filter (D-4878 item 10;
+rehearsed on 2026-08-03 and 2026-08-04). The table is the compiled
+seed R3-30's loader serves while a store holds no `reference/v1/symbol_changes`
+generation (the real store holds none on 24 Oct 2026); a store that has
+seeded one takes these rows as its next generation, a store step of its own.
+
+### D-7312 — ERR-11, the GDFL half: an unknown header is named by the digest of its column names, refused under an OPEN cause, and said once per shape — 2026-10-24
+
+**Implemented by** R4-22. **Findings** ERR-11 (the GDFL half; the Kite half
+and the alert kind are R4-13's and R4-05's, cut from this package on 18 Oct
+2026). Changes D-3317's cause table for one code.
+
+**What was wrong.** A header neither GDFL reader knows was
+`CmRefusal::HeaderUnknown` / `NfoRefusal::HeaderUnknown`, a unit refusal whose
+cause CLOSED the day (`Cause::vendor`): one renamed column closed every day of
+the change `done with refusals`, so no later run read those days again, even
+after a build learned the header, and nothing named what the new header was.
+
+**What is decided.**
+
+1. Both refusals carry `pull::gdfl_cm::HeaderShape`: the BLAKE3 of the first
+   line's column names (each its `u32` length then its bytes; never a row,
+   never a value) and the column count. Their words name both, with the word
+   `vendor_format_changed`. A known header is never hashed.
+2. `header_unknown` is an OPEN cause (`Cause::open(Stage::Vendor, ..)`) in
+   `cm_cause` and `nfo_cause`: a day with a format-changed file is
+   `incomplete` (or `refused` when no file was read clean, D-3317 item 3),
+   never `done`, and the next run reads it again.
+3. `pull::gdfl_format::note_format_changed`: one `error` line at
+   `pull.gdfl.format`, "vendor format changed", per shape per process, naming
+   the tree, the day, the FIRST member that showed it, the column count and the
+   digest; audited, so `/logs` finds it by the digest. At most 1,024 shapes are
+   remembered; past that every new shape is said every time (bounded memory,
+   never a dropped line).
+4. NOT decided here: the durable alert keyed `vendor_format_changed:gdfl:<digest>`
+   (R4-05's kind, not in `pull::alerts::KINDS` at feat/db-fix 7b397bbe7) and
+   the GDFL run stopping at a format change. This build keeps reading the
+   other days, each format-changed file refused by name.
+5. THE COLUMN-COUNT HALF: the rows' column set changed under a KNOWN header.
+   A file past D-3318's bound (more than 64 refused rows and one in every
+   1,000) in which EVERY row read is of the file's own Ticker and Date and
+   has one same field count other than the header's (ten for the capital
+   market; ten plus D-4829's empty trailing fields for options) is
+   `CmRefusal::ColumnsChanged` / `NfoRefusal::ColumnsChanged` in place of
+   `too_many_bad_rows`, cause
+   `columns_changed`, OPEN like `header_unknown`, its shape
+   `HeaderShape::of_rows` (the BLAKE3 of `u32::MAX`, the rows' count and the
+   header's names, so never a header's own shape) said once per shape on the
+   same line with `code=columns_changed`. Until now every such row was a
+   malformed row and the file `too_many_bad_rows`, a cause that CLOSED the
+   day. Unchanged: one row of another count among the header's rows is a
+   refused row (D-3318); rows of two other counts, blank lines and lines of
+   another Ticker or Date are bad rows; a last line with no newline is a cut
+   file refused whole (CM-07) unless every row before it had its same count.
+   O(1) per row: one counter, one compare.
+
+**Proved by** `pull::gdfl_cm::format_change_tests::a_renamed_header_column_leaves_the_day_incomplete_and_alerts_once`,
+`every_row_of_one_other_field_count_is_a_column_set_change`,
+`a_few_bent_rows_or_two_counts_stay_bad_rows_never_a_format_change`,
+`the_options_reader_names_a_column_set_change_the_same_way`,
+`a_column_set_change_leaves_the_day_incomplete_and_is_said_once`,
+`the_same_header_digest_alerts_once`, `a_day_of_format_changed_files_is_never_closed_done`,
+`a_header_renamed_on_one_day_only_leaves_that_day_alone_incomplete`,
+`an_unknown_header_is_an_open_cause_in_both_readers`,
+`an_options_header_change_is_refused_by_its_shape_and_said_once` and
+`crates/pull/tests/gdfl_bad_row_audit.rs::a_renamed_header_is_named_once_by_its_shape_in_the_audit_stream`.
+
+### D-7313 — IMPORT-BAD-ROW: the refused rows' one line per file is an `error`, so every named row reaches the durable audit stream with its file and line — 2026-10-24
+
+**Implemented by** R4-22. **Findings** IMPORT-BAD-ROW (the residual after
+IA-4's per-row options decode, D-4816), FM-077's audit half,
+docs/06-limits.md L-IA4-02. Changes D-3318's and D-3341's level for one line.
+
+**What was wrong.** Both GDFL readers name a file's refused rows in one line,
+"rows refused, file read" (`pull::gdfl_cm::note_refused_rows`), with the file
+and the first 16 rows as `line:fault` words. At `warn` that line reached the
+rolling ring alone (`telemetry::is_audited` takes every `error` and, at `warn`,
+only lifecycle and state lines), which a pull's flood rolls in seconds, and it
+was rationed with every other `warn` of its pair: the file and line of
+2018-11-06's lettered LTP or 2018-11-09's bad time could be gone before anyone
+looked.
+
+**What is decided.** The line is emitted at `error`: still one line per file,
+never one per row, its first `NAMED_ROWS` named and every row counted; it is
+now in the durable audit stream and outside the `warn` ration. Nothing about
+which rows are refused, or the day's close, changes.
+
+**Proved by** `crates/pull/tests/gdfl_bad_row_audit.rs::a_bad_options_row_is_named_with_file_and_line_in_the_audit_stream`
+(the two measured options shapes, invented), `an_index_files_zero_ltp_rows_are_named_in_the_audit_stream`
+(NIFTY 50 2022-03-07's four zero-LTP rows, invented) and
+`pull::gdfl_cm::format_change_tests::the_refused_rows_line_and_the_format_line_are_audited`.
+
+**Store steps.** The days that lost a file to one bad row are re-read under
+definition 5 (IA-4), filtered (unfiltered options runs are refused
+`underlying_split` until R4-21 applies) and WITH a repair reason:
+`cli gdfl-import options zip 2018-11-06 2018-11-06 BANKNIFTY --repair-reason
+"<reason>"` and `cli gdfl-import options zip 2018-11-09 2018-11-09 AXISBANK
+--repair-reason "<reason>"`. Each refused file's contract-month is held from
+the contract's other days, so its day lands only as a new generation,
+through the repair door. NEVER `--retry-refused` or a plain run first:
+rehearsed on 25 Oct 2026 with this build on store roots of this package's
+own holding APFS clones of the 318 real contract directories the two days
+touch (`shadow/R4-22-retry`, `shadow/R4-22-retry2`; the real journal,
+dayflags, lots, repairs ledger and three of the months unchanged by mtime,
+size and sha256), a run without the reason records the refused contract
+`needs_month_generation` and every contract whose held definition-2 bars
+carry another open interest than definition 5 reads (123 of BANKNIFTY's 261
+files, 6 of AXISBANK's 57; OHLCV identical, the open interest of a few
+seconds differs: operator answer 10's bar-close open interest) as
+`bars_differ_held`, which closes the day for every later run: a repair-reason
+run after it read 0 files, so the refused files would never land. With the
+reason first, BANKNIFTY 2018-11-15 26700 CE's 2018-11 took the day's 2,871
+seconds as generation 1 (16,558 + 2,871 = 19,429 rows) and AXISBANK
+2018-11-29 580 PE's took 501 (6,118 + 501 = 6,619), and this build's
+`/bars.json` served them so; both days then close `incomplete` with the
+`bars_differ_held` contracts, which WP-80's re-import of the definition-2
+option months as new generations owns (L-R422-12). The second is AXISBANK, not
+BANKNIFTY: the store's own audit stream (`logs/cli/audit.ndjson`, seq 4072,
+2026-10-06) names 2018-11-09's one refusal as `AXISBANK18NOV580PE`, "line 451:
+not ten well-formed fields", a row of ten fields whose Time holds a letter
+(read 24 Oct 2026 from the vendor's `NOV_2018/GFDLNFO_TICK_09112018.zip`,
+field classes only, no value copied). The store's journal shows both days
+`incomplete` under definition 2, so the filtered run reads them again.
+Rehearsed on 24 Oct 2026 into an EMPTY scratch store over the real archives
+with this build (the naming, not the store step): 2018-11-06 BANKNIFTY `done`, 261 files,
+`BANKNIFTY15NOV1826700CE.NFO.csv` named `13668:malformed` in the audit stream;
+2018-11-09 AXISBANK `done`, 57 files, `AXISBANK18NOV580PE.NFO.csv` named
+`451:malformed`. `/imports.json?feed=gdfl&kind=indices&from=2022-03-07&to=2022-03-07`
+shows that day `done` under definition 3 with no failure (24 Oct 2026), so it
+needs no step; its four zero-LTP NIFTY 50 rows (lines 4820, 4821, 44168,
+44169) were refused rows already, and the rehearsal names them in the audit
+stream.
+
+### D-7314 — FM-101: a capital-market row dated another real day and stamped outside the session is refused by name as a row; inside the session it still refuses the file — 2026-10-24
+
+**Implemented by** R4-22. **Findings** FM-101 (IMPORT-BAD-ROW), the mirror of
+D-3318's zero-LTP case.
+
+**What was wrong.** `pull::gdfl_cm::parse_row` refused the WHOLE file at the
+first row whose Date was not the folder's (`CmRefusal::DateMismatch`), and the
+cause closes the day: one trailing housekeeping row dated the next day, or a
+first row carrying the day before's close, lost the day's NIFTY 50 file and
+every option bar's spot that day, for good.
+
+**What is decided.** A row whose Date is a REAL `DD/MM/YYYY` of another day
+and whose Time is a real time OUTSIDE the day's session (before the first
+window's first second, or at or after the last window's end; a special
+session's own windows, D-3319) is refused by name, `RowFault::WrongDate`
+(`wrong_date`), counted in `RowsRefused::wrong_date` and in D-3335's
+`rows_refused`, named with its line in the refused-rows line (D-7313); the
+file's other rows are read. A row of another date INSIDE the session, a Date
+that is not a real `DD/MM/YYYY`, or a Time that does not read still refuses the
+whole file, as does a file every row of which is refused (its first refusal)
+and one past D-3318's bound (`TooManyBadRows`). The options reader is
+unchanged (its Date check stays file-level). A dedicated dayflags field
+`rows_refused_wrong_date` is not added: the day ledger's line is R4-25's (v=3)
+to version (docs/06-limits.md L-R422-08).
+
+**Proved by** `pull::gdfl_cm::format_change_tests::a_trailing_row_with_the_next_days_date_is_refused_as_a_row`
+and `a_file_with_a_next_day_trailing_row_lands_its_day`; the in-session
+refusal still by `pull::gdfl_cm::tests::date_mismatch_refuses` and
+`admission_tests::a_row_of_another_file_still_refuses_the_whole_file`.
+
+**Store step.** None of its own: a day closed `done with refusals` for
+`date_mismatch` is read again only by `--retry-refused`, as any closed day.

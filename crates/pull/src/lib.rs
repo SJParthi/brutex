@@ -168,6 +168,9 @@ pub mod gdfl_dayzips;
 /// The GDFL Dropbox fetch inside the app: list, pick, download, verify and
 /// hand on, never overwriting, never deleting (E2E-01, R4-07).
 pub mod gdfl_dropbox;
+/// A vendor format change in either GDFL reader, said once per header shape
+/// with the first member that showed it (ERR-11, R4-22, D-7312).
+pub mod gdfl_format;
 /// The common GDFL import runtime: indices, stocks and option contracts
 /// folded to one-second and one-minute bars through the one ingest door,
 /// incremental by day. D-2802.
