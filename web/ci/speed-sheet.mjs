@@ -361,6 +361,10 @@ export function parseArgs(argv) {
   if (day !== null && !(/^\d{4}-\d{2}-\d{2}$/.test(day) && calendarHas(day))) throw new Error('--day is YYYY-MM-DD, a day the calendar has');
   const month = o.month === undefined ? null : String(o.month);
   if (month !== null && !(/^\d{4}-\d{2}$/.test(month) && calendarHas(`${month}-01`))) throw new Error('--month is YYYY-MM, a month the calendar has');
+  // A DAY OF ITS MONTH (verify r7 follow-up, 25 Oct: `--day 2024-02-29
+  // --month 2024-12` was taken, and the run asked the month's pages about a
+  // day the month does not hold).
+  if (day !== null && month !== null && day.slice(0, 7) !== month) throw new Error(`--day ${day} is not a day of --month ${month}`);
   // ONE FILE IS NOT BOTH (verify r5 follow-up, 23 Oct: the harness wrote its
   // sheet over its own capture and exited 0): the sheet read here would be
   // replaced by the one written at the end. By the file, not its spelling.
@@ -682,8 +686,13 @@ export async function discover(get, args) {
     const finest = held[0];
     if (!finest) throw new Error(`discovering the selection: ${url} holds no stored rung of ${feed} for ${args.instrument}; pass --timeframe, --month and --day`);
     timeframe = timeframe ?? String(finest.rung);
-    month = month ?? String(finest.last_month);
-    day = day ?? String(finest.last_day ?? `${month}-01`);
+    // THE DAY AND THE MONTH ARE ONE (verify r7 follow-up): a day given alone
+    // is read in its own month, never in the rung's newest; a month given
+    // alone takes the rung's newest day only when that day is in it, and
+    // otherwise starts at its first day, as a rung that names no day does.
+    month = month ?? (day !== null ? day.slice(0, 7) : String(finest.last_month));
+    const newest = finest.last_day ? String(finest.last_day) : null;
+    day = day ?? (newest !== null && newest.slice(0, 7) === month ? newest : `${month}-01`);
   }
   return { feed, instrument: args.instrument, timeframe, month, day, ...monthDays(month) };
 }
@@ -1381,6 +1390,13 @@ export const STDOUT_WAIT_MS = 60_000;
  * lost). Bounded: a reader that has not taken it within `ms` is said on
  * stderr, by name, and the promise resolves `false`.
  *
+ * A READER THAT CLOSED THE PIPE IS SAID, NOT THROWN (verify r7 follow-up,
+ * 25 Oct): the stream's `error` (EPIPE when the reader is gone, as
+ * `| head -1` leaves it) had no listener, so it was thrown as uncaught and
+ * a run that passed exited 1 with a stack. It is heard here, said on stderr
+ * by name, and the promise resolves `false`; the caller's exit code stays
+ * the run's own, and an `--out` file is still written whole.
+ *
  * @param {NodeJS.WritableStream} stream
  * @param {string} text
  * @param {string} name the command, for the line on stderr
@@ -1389,14 +1405,23 @@ export const STDOUT_WAIT_MS = 60_000;
  */
 export function written(stream, text, name, ms = STDOUT_WAIT_MS) {
   return new Promise((resolve) => {
-    const t = setTimeout(() => {
-      process.stderr.write(`${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost\n`);
-      resolve(false);
-    }, ms);
-    stream.write(text, () => {
+    let over = false;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let t;
+    /** @param {boolean} took @param {string} [said] */
+    const end = (took, said) => {
+      if (over) return;
+      over = true;
       clearTimeout(t);
-      resolve(true);
-    });
+      if (said !== undefined) process.stderr.write(said);
+      resolve(took);
+    };
+    /** @param {NodeJS.ErrnoException} why */
+    const lost = (why) => end(false, `${name}: stdout was closed before it took the whole sheet (${Buffer.byteLength(text)} B): ${why.code ?? why.message}; what it did not take is lost\n`);
+    // Kept for the rest of the process: a stream that failed once can fail again, and is heard each time.
+    stream.on?.('error', lost);
+    t = setTimeout(() => end(false, `${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost\n`), ms);
+    stream.write(text, (/** @type {NodeJS.ErrnoException | null | undefined} */ why) => (why ? lost(why) : end(true)));
   });
 }
 

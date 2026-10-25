@@ -3979,7 +3979,9 @@ test('the sheet\'s follow-ups: one file by its device and inode, a day and a mon
   assert.equal(sheet.sameFile(cap, join(dir, 'other.json')), false, 'a path that names nothing yet is not the file');
   assert.equal(sheet.parseArgs([...base, '--from-pages', cap, '--out', join(dir, 'sheet.md')]).out, join(dir, 'sheet.md'));
   // A day and a month the calendar has (verify r6 follow-up: 2024-13 and 2024-02-30 were taken).
-  assert.equal(sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-12']).day, '2024-02-29');
+  assert.equal(sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-02']).day, '2024-02-29');
+  // Repair 7 (verify r7 follow-up): this line took `--month 2024-12` with that day; a day must be one of its month's.
+  assert.throws(() => sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-12']), /^Error: --day 2024-02-29 is not a day of --month 2024-12$/);
   for (const [flag, v] of [['--day', '2024-02-30'], ['--day', '2023-02-29'], ['--day', '2024-13-01'], ['--day', '2024-00-10'], ['--day', '2024-04-31'], ['--month', '2024-13'], ['--month', '2024-00']]) {
     assert.throws(() => sheet.parseArgs([...base, flag, v]), flag === '--day' ? /^Error: --day is YYYY-MM-DD, a day the calendar has$/ : /^Error: --month is YYYY-MM, a month the calendar has$/, `${flag} ${v}`);
   }
@@ -4053,8 +4055,8 @@ test('a browser\'s stderr is kept as its last lines only and read no more once i
     for (const s of sockets) s.destroy();
     silent.close();
   }
-  // The source keeps a tail, never the whole.
-  assert.match(source('ci/browser-harness.mjs'), /text = \(text \+ c\)\.slice\(-STDERR_TAIL\);/);
+  // The source keeps a tail, never the whole, and searches each chunk before it cuts (repair 7).
+  assert.match(source('ci/browser-harness.mjs'), /const seen = text \+ c;\s*const m = \/DevTools listening on \(ws:\\\/\\\/\\S\+\)\\r\?\\n\/\.exec\(seen\);[\s\S]{0,400}?text = seen\.slice\(-STDERR_TAIL\);/);
 });
 
 test('the end of a command waits for stdout to take its whole sheet, bounded: a stream that takes nothing is said on stderr and let go', async () => {
@@ -4082,4 +4084,111 @@ test('the end of a command waits for stdout to take its whole sheet, bounded: a 
   assert.deepEqual(said, ['speed-sheet: stdout did not take the whole sheet (10 B) within 50 ms; what it did not take is lost\n']);
   // Both commands exit through it.
   for (const file of ['ci/speed-sheet.mjs', 'ci/browser-harness.mjs']) assert.match(source(file), /const flushed = written\(process\.stdout, text, '[a-z-]+'\);[\s\S]*await flushed;\s*process\.exit\(code\);/, file);
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 7 (25 Oct): verify r7's follow-ups in R3-15's own files (its
+// two blocking findings are the real-browser checks above, `measuredRow`,
+// and `/ingest`'s budget, D-5915 item 36).
+// ---------------------------------------------------------------------------
+
+test('a reader that closes the pipe early is said on stderr, and the command keeps its run\'s exit code', { timeout: 60_000 }, async () => {
+  // Before (verify r7 follow-up, 25 Oct): the stream's `error` had no
+  // listener, so EPIPE from a reader that had gone (`| head -1`) was thrown
+  // as uncaught, and a run that PASSED exited 1 with a stack. The child ends
+  // as both commands' `main` ends: `written`, then `process.exit(code)`.
+  const { spawn } = await import('node:child_process');
+  const module = new URL('ci/speed-sheet.mjs', web).href;
+  const ends = `import { written } from ${JSON.stringify(module)}; process.stderr.write('ready\\n'); process.stdin.resume();` +
+    " process.stdin.on('end', async () => { const flushed = written(process.stdout, 'x'.repeat(1_000_000), 'speed-sheet'); await flushed; process.exit(0); });";
+  const child = spawn(process.execPath, ['--input-type=module', '-e', ends], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let said = '';
+  const exited = /** @type {Promise<{code: number | null, signal: string | null}>} */ (new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal }))));
+  child.stderr.on('data', (c) => {
+    said += c;
+    // The reader goes away first, then the child is told to write.
+    if (said.includes('ready\n') && !child.stdout.destroyed) {
+      child.stdout.destroy();
+      child.stdin.end();
+    }
+  });
+  const { code, signal } = await exited;
+  assert.deepEqual([code, signal], [0, null], said);
+  assert.match(said, /^ready\nspeed-sheet: stdout was closed before it took the whole sheet \(1000000 B\): EPIPE; what it did not take is lost\n$/);
+  // A stream that fails as it is written to is said the same way, and its later failures are heard too.
+  const { Writable } = await import('node:stream');
+  const broken = new Writable({ write(_chunk, _encoding, done) { done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); } });
+  /** @type {string[]} */
+  const lines = [];
+  const write = process.stderr.write;
+  process.stderr.write = /** @type {any} */ ((/** @type {any} */ s) => (lines.push(String(s)), true));
+  let took;
+  try {
+    took = await sheet.written(broken, 'abc', 'browser-harness', 5_000);
+    assert.doesNotThrow(() => broken.emit('error', Object.assign(new Error('again'), { code: 'EPIPE' })), 'a later failure of the same stream is heard, never thrown');
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(took, false);
+  assert.deepEqual(lines, ['browser-harness: stdout was closed before it took the whole sheet (3 B): EPIPE; what it did not take is lost\n'], 'said once');
+  // One without a code is said by its message.
+  const plain = new Writable({ write(_chunk, _encoding, done) { done(new Error('the disk went away')); } });
+  /** @type {string[]} */
+  const plainLines = [];
+  process.stderr.write = /** @type {any} */ ((/** @type {any} */ s) => (plainLines.push(String(s)), true));
+  try {
+    assert.equal(await sheet.written(plain, 'abcd', 'speed-sheet', 5_000), false);
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.deepEqual(plainLines, ['speed-sheet: stdout was closed before it took the whole sheet (4 B): the disk went away; what it did not take is lost\n']);
+});
+
+test('a browser\'s DevTools address is searched for in its chunk before the tail is cut: an address followed in one write by more than STDERR_TAIL characters is taken', { timeout: 60_000 }, async () => {
+  // Before (verify r7 follow-up, 25 Oct): the tail was cut to its last
+  // STDERR_TAIL characters first and searched after, so an address followed
+  // in its own chunk by more was cut away unread, and the launch waited out
+  // its bound: "the browser printed no DevTools address".
+  const net = await import('node:net');
+  /** @type {import('node:net').Socket[]} */
+  const sockets = [];
+  const silent = net.createServer((s) => sockets.push(s));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const port = /** @type {import('node:net').AddressInfo} */ (silent.address()).port;
+  const fake = mkdtempSync(join(tmpdir(), 'r315-early-'));
+  const loud = join(fake, 'loud');
+  // One write: the address, then four tails' worth of one more line, then nothing.
+  writeFileSync(loud, `#!${process.execPath}\nprocess.stderr.write('DevTools listening on ws://127.0.0.1:${port}/devtools/browser/early\\n' + 'y'.repeat(${harness.STDERR_TAIL * 4}) + '\\n');\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+  const root = mkdtempSync(join(tmpdir(), 'r315-early-root-'));
+  try {
+    await assert.rejects(harness.launch(loud, false, 1_500, root), new RegExp(`^Error: could not connect to ws://127\\.0\\.0\\.1:${port}/devtools/browser/early: no handshake within 1500 ms$`), 'the address was found in its chunk');
+    assert.deepEqual(readdirSync(root), [], 'the browser was stopped and its profile removed');
+  } finally {
+    for (const s of sockets) s.destroy();
+    silent.close();
+  }
+});
+
+test('one idle-tab count is one idle row, and a day is one of its month\'s, given or found', async () => {
+  // Before (verify r7 follow-ups, 25 Oct): `--idle-tabs 1,1` was taken, and
+  // `--day` outside `--month` too; a day given alone was read in the rung's
+  // newest month, and a month given alone took the rung's newest day though
+  // that day was in another month.
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--idle-tabs', '1,1']), /^Error: --idle-tabs names 1 twice: each idle-tab count is measured once a run$/);
+  assert.throws(() => harness.parseArgs(['--base', 'http://h:1', '--idle-tabs', '1,10,20,10']), /^Error: --idle-tabs names 10 twice: /);
+  assert.deepEqual(harness.parseArgs(['--base', 'http://h:1', '--idle-tabs', '20,1,10']).idleTabs, [20, 1, 10], 'any order, each once');
+  const base = ['--base', 'http://h:1'];
+  assert.throws(() => sheet.parseArgs([...base, '--day', '2026-09-30', '--month', '2026-08']), /^Error: --day 2026-09-30 is not a day of --month 2026-08$/);
+  assert.throws(() => sheet.parseArgs([...base, '--day', '2025-08-01', '--month', '2026-08']), /^Error: --day 2025-08-01 is not a day of --month 2026-08$/, 'the year is part of the month');
+  assert.deepEqual([sheet.parseArgs([...base, '--day', '2026-08-31', '--month', '2026-08']).day, sheet.parseArgs([...base, '--day', '2026-08-31']).month], ['2026-08-31', null]);
+  const args = sheet.parseArgs(base);
+  const rungs = { rungs: [{ feed: 'zerodha', rung: '1min', stored: true, last_month: '2026-08', last_day: '2026-08-31' }] };
+  const url = String(rungsUrl('NSE-INDEX-NIFTY'));
+  const get = async (/** @type {string} */ p) => (p === url ? answer(200, JSON.stringify(rungs)) : answer(404));
+  const dayAlone = await sheet.discover(get, { ...args, feed: 'zerodha', day: '2025-03-05' });
+  assert.deepEqual([dayAlone.month, dayAlone.day, dayAlone.from, dayAlone.to], ['2025-03', '2025-03-05', '2025-03-01', '2025-03-31'], 'a day given alone is read in its own month');
+  const monthAlone = await sheet.discover(get, { ...args, feed: 'zerodha', month: '2025-03' });
+  assert.deepEqual([monthAlone.month, monthAlone.day], ['2025-03', '2025-03-01'], 'the rung\'s newest day is not in the month given: the month starts at its first day');
+  const newestIn = await sheet.discover(get, { ...args, feed: 'zerodha', month: '2026-08' });
+  assert.equal(newestIn.day, '2026-08-31', 'the rung\'s newest day, when it is in the month given');
 });

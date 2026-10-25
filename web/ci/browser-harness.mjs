@@ -502,6 +502,11 @@ export function parseArgs(argv) {
   }
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map((t) => (DECIMAL.test(t) ? Number(t) : Number.NaN));
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
+  // One count, one idle row (verify r7 follow-up, 25 Oct: `1,1` was taken, so
+  // one count was held idle twice, a second row and by default an hour more,
+  // as `--clients 10,10` once timed every request twice).
+  const twice = idleTabs.find((t, i) => idleTabs.indexOf(t) !== i);
+  if (twice !== undefined) throw new Error(`--idle-tabs names ${twice} twice: each idle-tab count is measured once a run`);
   const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
   const instrument = String(o.instrument ?? EDGE_INSTRUMENT);
   if (rungsUrl(instrument) === null || linkOfKey(instrument) === null) throw new Error(`--instrument ${JSON.stringify(instrument)} is not an instrument key (NSE-INDEX-NIFTY, NSE-EQ-RELIANCE, ...)`);
@@ -895,17 +900,20 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = 
   let ws;
   try {
     const url = await new Promise((resolve, reject) => {
-      // ONLY ITS LAST STDERR_TAIL CHARACTERS ARE KEPT AND SEARCHED, and none
-      // once the address is found (verify r6 follow-up, 24 Oct: the whole of
-      // the browser's stderr was kept for the run and searched again on every
-      // chunk). The line must be whole, so an address cut between two chunks
-      // is never taken.
+      // ONLY ITS LAST STDERR_TAIL CHARACTERS ARE KEPT FROM ONE CHUNK TO THE
+      // NEXT, and none once the address is found (verify r6 follow-up, 24 Oct:
+      // the whole of the browser's stderr was kept for the run and searched
+      // again on every chunk). The line must be whole, so an address cut
+      // between two chunks is never taken. EACH CHUNK IS SEARCHED BEFORE THE
+      // CUT (verify r7 follow-up, 25 Oct): the tail was cut first, so an
+      // address followed in its own chunk by more than STDERR_TAIL characters
+      // was cut away unread and the launch waited out its bound.
       let text = '';
       const timer = setTimeout(() => reject(new Error(`the browser printed no DevTools address in ${waitMs} ms: ${text.slice(-400)}`)), waitMs);
       /** @param {Buffer | string} c */
       const heard = (c) => {
-        text = (text + c).slice(-STDERR_TAIL);
-        const m = /DevTools listening on (ws:\/\/\S+)\r?\n/.exec(text);
+        const seen = text + c;
+        const m = /DevTools listening on (ws:\/\/\S+)\r?\n/.exec(seen);
         if (m) {
           clearTimeout(timer);
           // Read on and keep nothing: a browser that writes to a pipe nobody reads blocks once it is full.
@@ -913,7 +921,9 @@ export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = 
           child.stderr?.resume();
           text = '';
           resolve(m[1]);
+          return;
         }
+        text = seen.slice(-STDERR_TAIL);
       };
       child.stderr?.on('data', heard);
       child.on('error', (why) => {
