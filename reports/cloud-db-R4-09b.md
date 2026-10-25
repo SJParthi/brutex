@@ -1,7 +1,13 @@
-STATUS: HELD
+STATUS: BLOCKED (code complete; every remaining red is a base or environment item, each named below)
 
-NEXT (after the hold lifts): merge any newer `origin/feat/db-fix`, rerun the gates and push. Every part of the build is done; the gates that are not green (coverage under 100% with branch coverage unavailable here, mutants not run, and the base reds `cargo deny`, the 27 tests and the CI shell gates) are named below and in NEEDS THE MAC.
-HELD at 21:06 IST on 24 Oct, at this save point: commit `604b8f20` on the base branch removed `GO-R4-09b` while `HOLD` stands.
+NEXT: nothing for the cloud. The Mac merges `Merge R4-09b: ...` after the NEEDS THE MAC list. The items that keep this from DONE, none of them this part's code:
+- **base** `cargo deny` red on RUSTSEC-2026-0386 (tokio 1.53.1; BASE-DENY-1024 owns the lock bump);
+- **base** 30 workspace test failures, every one red on the unmodified base `bf9b1c8f` too (see "Final gates");
+- **base** CI shell gates 1c, 1d, 10, 11, 12, 19, 23, 27b, 29 and 30, the same set red on the base, none naming a file of this part;
+- **environment** branch coverage (`--branch` needs nightly, not installed) and line coverage of the host-refusal closures under 100%;
+- **environment** `cargo mutants --in-diff` (575 mutants, about two days on this 4-vCPU host): not run.
+
+Final merge and gates: 25 Oct, on head after merging `origin/feat/db-fix` `bf9b1c8f` (Merge R4-18).
 
 # R4-09b — the store's backup verb and its restore drill (AUT-06), cloud build
 
@@ -10,7 +16,12 @@ Branch `cloud/db-R4-09b-20261024`, cut from `origin/feat/db-fix` `e851da1c` (Mer
 the newest, `7b397bbe` (Merge CLOUD-MUTCLI, after Merge CLOUD-MUTSTORE), as `847cbd8e`. Before the first
 merge, both sides had `COMMANDS` at 62: this part's two verbs on one side, R4-27's two on the other.
 The merge sets it to 64. The second merge touched no file of
-this part and kept git's default subject.
+this part and kept git's default subject. A third, `666ddf7f` (Merge DATA-1w, after Merge R3-13), went in
+as `62ada6da` (three end-of-file doc appends kept both sides). A fourth and final one, `bf9b1c8f`
+(Merge R4-18), went in on 25 Oct: R4-18 added one verb and one writer, so `COMMANDS` is 63 + 2 = **65**
+and `store_write`'s `WRITERS` and its writing-verb test table 20 + 2 = **22**; `docs/04` and `docs/06`
+keep both appends, R4-18's first. No D-number, invariant id or limit id is duplicated (gates 27 and
+27b's id checks read 3,326 rows and 1,751 headings, 27b red only on the base's D-6247).
 Prerequisite `R4-09a`: merged (`Merge R4-09a:` is in `git log origin/feat/db-fix --first-parent --merges`).
 Decision block: D-7175..D-7184; this part uses **D-7175 to D-7181**. D-7137 is LEDGER-1023's; no second one was written.
 
@@ -60,7 +71,7 @@ Decision block: D-7175..D-7184; this part uses **D-7175 to D-7181**. D-7137 is L
     failed= busy= scratch= commit= month=...`, capped at 1,024 bytes with `more=`).
 - **Registration** (`crates/cli/src/lib.rs`): `mod backup;`, the re-exports (`BackupReceipt`,
   `BackupDrillLine`, `BACKUP_RECEIPTS`, `BACKUP_DRILLS`, `backup_decoded`), two dispatch arms, two
-  `USAGE` entries, and `COMMANDS` 64 (60 + R4-27's two + these two).
+  `USAGE` entries, and `COMMANDS` 65 (60 + R4-27's two + R4-18's one + these two).
 - **`/disk.json`** (`crates/api/src/disk_route.rs`, read side only): `backup` keeps `recorded`, `last`
   and `why`, and gains:
   - `receipt`: every word, `null` when a hand receipt lacks it;
@@ -105,7 +116,7 @@ D-7182 to D-7184 are unused.
 
 | File | Why |
 |---|---|
-| `crates/cli/src/store_write.rs` | `"backup"`, `"backup-drill"` in `WRITERS` (19 → 21); `"backup" => !arguments.contains(&"--plan"),` (the one arm shape gate 30 reads); rows in `a_plan_or_a_dry_run_is_not_a_write_and_its_applying_form_is` and `every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link` |
+| `crates/cli/src/store_write.rs` | `"backup"`, `"backup-drill"` in `WRITERS` (20 → 22 after R4-18's merge; 19 → 21 before it); `"backup" => !arguments.contains(&"--plan"),` (the one arm shape gate 30 reads); rows in `a_plan_or_a_dry_run_is_not_a_write_and_its_applying_form_is` and `every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link` |
 | `.github/gates_ledger.rs` | `ALLOW_MEMBER` for `crates/cli/src/store_write.rs` 7 → 8 with its reason (docs/06), as IA-9 raised it 6 → 7 for `verify-merge`: gate 30 requires `!arguments.contains(&"--plan")` and gate 11 rule 7 counts it. No gate logic changed. |
 | `crates/cli/src/sweep_wiring_tests.rs` | `\| "backup" \| "backup-drill"` added to its list of verbs that are not sweeps (`only_actual_computation_verbs_can_establish_sweep_status` failed on the full run without it) |
 | `web/src/lib/disk.js`, `web/src/lib/DiskTile.svelte`, `web/tests/disk.test.js` | spec item 3, "the /db band" (the spec's file 4.1 names them) |
@@ -114,7 +125,26 @@ D-7182 to D-7184 are unused.
 `config/store-steps.toml` is untouched (gate 30 refuses `merged = true` before the `Merge R4-09b:`
 subject exists); the flip and the S-17 rewording are for the Mac's merge commit (below).
 
-## Gates (this cloud host: 4 vCPU Intel Xeon 2.10 GHz, Rust 1.97.1, node 22)
+## Final gates (25 Oct, on the head after merging `bf9b1c8f`, Merge R4-18)
+
+Same host class (4 vCPU, Rust stable, node 22, run as root). "Base red" means the same result on the
+unmodified `origin/feat/db-fix` `bf9b1c8f`, checked out as a worktree and run by the same commands.
+
+| Gate | Command | Result |
+|---|---|---|
+| fmt | `cargo fmt --all --check` | **green** |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **green** (`Finished`, no warning) |
+| tests: this part | `cargo test -p cli --locked --lib -- backup:: store_write:: sweep_wiring_tests:: every_command_is_listed_in_both_places`; `cargo test -p api --locked --lib -- disk_route` | **green**: cli 75 passed, 2 ignored (the measurements); api 26 passed, 1 ignored |
+| tests: workspace | `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (the two that hang here on the base too) | **red, every failure base red**: 30 failed (api lib 8, cli lib 3, pull lib 9, store lib 5, store `sealed_door` 1, telemetry lib 4); every other target green. The 11 api and cli failures were rerun by name on the base worktree: **all 11 fail there too** (`head_deadline_body_tests` 5, `detail`, `pullrun::restart_tests`, `feeds_route`; cli `scrub_blocks` unwritable ledger, `watchdog_command` 2). `crates/pull`, `crates/store` and `crates/telemetry` are **byte-identical** to the base (`git diff origin/feat/db-fix -- crates/pull crates/store crates/telemetry` is empty), so their 19 are the base's; they are read-only-permission tests run as root (store's two new `quarantine::tests::an_index_publish_refused_after_*` are R4-18's) and one p99 timing test (`both_second_formats_answer_the_same_bars_at_p99`). None names a file of this part |
+| deny | `cargo deny check` (cargo-deny installed here with `cargo install cargo-deny --locked`) | **red, base red**: `advisories FAILED, bans ok, licenses ok, sources ok`, RUSTSEC-2026-0386 only (tokio 1.53.1). The lock is the Mac's (BASE-DENY-1024) |
+| CI shell gates | every step of the `language-purity` job, in order, `RUNNER_TEMP`/`GITHUB_ENV` carried between steps (Gate 1e, a full build, not run) | red: 1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30. **The same ten on the base**; the logs differ only in file and row counts. Gate 11 reads `crates/cli/src/store_write.rs — 8 of 8` (rule 7: 240 on the branch, 239 on the base: this part's one). Gate 28 green for `backup.rs`. Gate 29 (new red since 24 Oct) is R4-18's `/pull/quarantine.json` and `/pull/quarantine` with no growth bench, on the base too. Gate 29b green |
+| web W2 | `npm test` (after `npm ci` here) | 1,587 pass, 1 fail, 9 cancelled. The base: 1,586 pass, 0 fail, the same 9 cancelled (timers in this container). The one fail is `tests/db-search.test.js` "a keystroke ... p99 ... inside one frame (16 ms)", a timing test run while the workspace tests loaded all 4 vCPUs; the file is untouched by this part and passes 29 of 29, three runs of three, alone. `tests/disk.test.js` 9 of 9 |
+| web W3 | `npm run check` | 44 errors, **base red**: the same 44 on the base |
+| web W1 | `npm run build` | builds (exit 0); `web/build` reset afterwards |
+| coverage | as below | **not re-run**: `backup.rs`, `backup_tests.rs`, `disk_route.rs`, `disk_route_backup_tests.rs`, `disk.js` and `DiskTile.svelte` are unchanged since the measured head (`git diff 997d08a9 HEAD` on them is empty), so the figures below stand. Branch coverage: environment (nightly not installed) |
+| mutants | | **not run**: environment (575 mutants), NEEDS THE MAC item 7 |
+
+## Gates of 24 Oct (history; this cloud host: 4 vCPU Intel Xeon 2.10 GHz, Rust 1.97.1, node 22)
 
 Every command below was run on the branch head after the last merge of `origin/feat/db-fix`
 (`7b397bbe`, Merge CLOUD-MUTCLI) unless it says otherwise. "Base red" means the same result was produced
@@ -259,5 +289,6 @@ is S-17, the operator's).
 8. **Web:** W1 (`web/build` regenerated: this part reset it, the deploy's rebuild is the main session's); W2 here 1565 pass, 0 fail, 5 cancelled, the same 5 cancelled on the unmodified base (`ask.test.js` 3, `census-worker.test.js` 2: timers in this container); W3 32 svelte-check errors, the same 32 on the base, none in this part's files.
 9. **Deploy and look (main session):** open `/db` and `/ingest` on `:8080` and send the operator a screenshot of the band ("NO COPY of this store is recorded." until S-17 runs).
 10. **The store write itself is the operator's (S-17):** the operator names the second drive; `cli backup --to <SECOND_DRIVE> --plan`, a measured sample, the first full copy with every writer stopped, one `cli backup-drill --from <SECOND_DRIVE> --months 3`, then S-17's census-recount and scrub-blocks checks on the copy. Size about 1.6 TB or more (an extrapolation `--plan` measures first).
-11. **The base reds this host shows (not this part's):** the 27 test failures above (the cli, pull, store and telemetry ones are read-only-permission tests run as root; the api lib's 8 fail by the same names on the base, cause not investigated), the two api tests that hang here on the base too, `cargo deny`, the CI shell gates 1c, 1d, 10, 11, 12, 19, 23, 27b and 30, web W2's 5 cancelled and W3's 32 errors. Each is the same on the unmodified base. On the Mac, run as the operator's user rather than root, the permission tests are expected to pass, an expectation not checked here.
+11. **The base reds this host shows (not this part's):** the 30 test failures of the final gates (27 on 24 Oct) (the cli, pull, store and telemetry ones are read-only-permission tests run as root; the api lib's 8 fail by the same names on the base, cause not investigated), the two api tests that hang here on the base too, `cargo deny`, the CI shell gates 1c, 1d, 10, 11, 12, 19, 23, 27b, 29 and 30, web W2's 9 cancelled and W3's 44 errors (all on `bf9b1c8f` too). Each is the same on the unmodified base. On the Mac, run as the operator's user rather than root, the permission tests are expected to pass, an expectation not checked here.
 12. **The merge commit `847cbd8e`** carries git's default subject (`Merge remote-tracking branch 'origin/feat/db-fix' into ...`). It is the branch's own merge of the base, not the `Merge R4-09b:` commit the Mac writes into `feat/db-fix`.
+13. **The merges `62ada6da` and the 25 Oct merge of `bf9b1c8f`** are the branch's own merges of the base (subjects `Merge origin/feat/db-fix (...) into cloud/db-R4-09b-20261024`), not the `Merge R4-09b:` commit. At merge-back, check `COMMANDS` (65) and `WRITERS` (22) against whatever `feat/db-fix` holds then: each later verb or writer adds one.
