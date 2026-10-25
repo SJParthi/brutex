@@ -1185,7 +1185,9 @@ test('the sheet runs over the real network against a server, by default, and as 
   }
 });
 
-test('the harness in a real browser: the four figures, the interactions, idle tabs, the reporter end to end, hooks and the capture', { timeout: 300_000 }, async () => {
+// Its bound has room for a slow machine (repair 8): it ran 55 s at this Mac's load, and 92 s and 296 s with Chrome at
+// background QoS (taskpolicy -b, 26 Oct), the second 4 s inside the 300 s it had.
+test('the harness in a real browser: the four figures, the interactions, idle tabs, the reporter end to end, hooks and the capture', { timeout: 600_000 }, async () => {
   const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
   assert.ok(chrome, 'the browser harness test needs Chrome or Chromium: set BRUTEX_CHROME');
   const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
