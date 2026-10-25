@@ -317,3 +317,23 @@ Store writes needed: none.
   NEXT (when released): `cargo mutants` on the 37 (pull with `-j 1`, then api), re-run the 16 `cli`
   fails and the `api`/`pull` fails above by name on the unmodified base `bf9b1c8f` (non-root), then
   STATUS: DONE or BLOCKED-complete on base items only.
+- 2026-10-25, later (released, then HOLD again): every non-root failure above was re-run by name.
+  `cli` lib: the 15 `gdfl_import_command*` tests PASS on re-run (umask 0022; the first run overlapped
+  the disk-full moment); `boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`
+  fails only as the non-root user and PASSES as root (the root-run list above does not name it).
+  `pull` lib: `gdfl_dropbox::tests::a_missing_link_is_a_named_wait` PASSES under umask 0022.
+  On the UNMODIFIED base `bf9b1c8f` (checked out in place, built with `cargo test -p api --lib -p pull
+  --lib -p api --test cloud_mutants_bars --locked --no-run`, same container, same load), the rest is
+  red IDENTICALLY: `gdfl_cm::tests::fixtures_are_built_not_pasted` (same file named);
+  `detail::tests::a_refused_admission_names_what_its_bound_and_why` and the five
+  `server::head_deadline_body_tests` slow-reader tests (7 pass, 6 fail on both, `--test-threads=1`);
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` and
+  `cloud_mutants_bars` `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` hang
+  on both (killed at 300 s); the other 58 `cloud_mutants_bars` tests pass on both. So every red test in
+  the workspace is red the same way on the base, or is a uid/umask artefact of this container: none
+  is caused by R4-05. NEEDS THE MAC: the workspace test run on the Mac (non-root, Node 24).
+  Mutants (pull, `-j 1`, `-- --lib -- reasons:: alerts:: --skip <the root-only test>`): running in the
+  background; at this save point 15 of 34 done: 9 caught, 6 unviable, 0 missed, 0 timeout. HOLD is set
+  again: this save point is pushed and I wait; the run finishes on its own.
+  NEXT (when released): read the pull mutants result, run the 3 `reasons_route.rs` mutants
+  (`-p api -- --lib -- reasons_route`), then STATUS: DONE or BLOCKED-complete on base items only.
