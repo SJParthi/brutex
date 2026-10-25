@@ -1605,6 +1605,12 @@ pub(crate) mod import_journal;
 pub(crate) mod imports;
 #[path = "ingest_refusals.rs"]
 pub(crate) mod ingest_refusals;
+// THE DATA CHECKS ON /ingest (DATA-1w, D-5190): DATA-1's feed reconcile, DATA-2's
+// tick-to-second check and CAL-1's excluded days, read-only.
+#[path = "feed_checks.rs"]
+mod feed_checks;
+#[path = "feed_checks_files.rs"]
+mod feed_checks_files;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]
@@ -16140,6 +16146,19 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         .route(
             "/dayflags.json",
             axum::routing::get(dayflags::dayflags_json),
+        )
+        // THE DATA CHECKS (DATA-1w, D-5190): read-only, paged, nothing typed.
+        .route(
+            "/feed-checks.json",
+            axum::routing::get(feed_checks::feed_checks_json),
+        )
+        .route(
+            "/tick-checks.json",
+            axum::routing::get(feed_checks::tick_checks_json),
+        )
+        .route(
+            "/calendar-days.json",
+            axum::routing::get(feed_checks::calendar_days_json),
         )
         .route("/aliases.json", axum::routing::get(aliases::aliases_json))
         .route("/sources.json", axum::routing::get(sources::sources_json))
