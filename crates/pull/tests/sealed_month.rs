@@ -103,6 +103,7 @@ fn land(root: &Path, from: Day, to: Day, rows: Vec<RawRow>) -> pull::ingest::Ing
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     };
     pull::ingest::from_window(&RawWindow { rows }, SYMBOL, "SC4 TEST", root, plan)
 }

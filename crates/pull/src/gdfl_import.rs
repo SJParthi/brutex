@@ -1910,6 +1910,7 @@ fn plan(kind: ImportKind, request: &BarRequest, contract: Option<Contract>) -> P
         exchange: "NSE",
         segment: kind.segment(),
         contract,
+        run: 0,
     }
 }
 
