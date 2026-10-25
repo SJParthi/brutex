@@ -1391,3 +1391,80 @@ fn the_calendar_horizon_is_warned_on_the_receipt_before_it_passes() {
         "  calendar horizon    not checked: the host clock names no day (FM-080)\n"
     );
 }
+
+/// **A SOURCE GONE BETWEEN THE PLAN AND THE RUN IS SAID, NEVER COUNTED AS
+/// EMPTY** (D-4817, FM-080; crash-and-resume's cousin: the outer zip is
+/// planned, then removed before the run opens it): the census says the
+/// archive could not be opened and why, never `ignored 0, misfiled 0,
+/// invalid 0`; and the receipt of a run whose source did not open still
+/// carries the calendar's horizon, before its refusal line.
+#[test]
+fn a_source_gone_after_the_plan_is_said_on_the_receipt_with_the_horizon() {
+    let root = scratch("census-gone");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let cm = root.join("cm.zip");
+    std::fs::write(&cm, cm_archive(pull::gdfl_cm::CmKind::Stocks, &empty_zip())).unwrap();
+    let env = env_of(&[(CM_ARCHIVE_VAR, cm.clone())]);
+    let request = asked(("stocks", "zip", "2024-04-01", "2024-04-01", &[]), &env).unwrap();
+    let log = LogState::Installed(PathBuf::from("logs/test"));
+    let unstamped =
+        unstamped_write_refusal(crate::commit_stamp(), env(ALLOW_UNSTAMPED_VAR).as_deref());
+    let process = Process {
+        store_root: &store,
+        commit: crate::commit_stamp(),
+        log: &log,
+        unstamped: unstamped.as_deref(),
+    };
+    let plan = gdfl_run::plan(request, &process, &env, &mut SourceCache::default())
+        .map_err(|why| why.to_string())
+        .unwrap();
+    let kind = &plan.kinds[0];
+    assert_eq!(kind.source, gdfl_run::SourceId::CmZip);
+    let door = guard::Door::open(guard::Opening {
+        kind: kind.kind,
+        var: kind.source.var(),
+        store: &store,
+        origin: &kind.origin,
+        only: &kind.only,
+        args: &["stocks", "zip", "2024-04-01", "2024-04-01"],
+        claim: None,
+        sidecar: None,
+    })
+    .map_err(|why| why.to_string())
+    .unwrap();
+    // Gone after the plan and the door, before the run opens it.
+    std::fs::remove_file(&cm).unwrap();
+
+    let census = Census::of(kind);
+    assert!(
+        matches!(&census, Census::None(why)
+            if why.starts_with("the archive could not be opened to count it: ")),
+        "a census of a removed archive is not counted: {census:?}"
+    );
+
+    let end = KindEnd::Unopened(RunRefusal::SourceUnopened {
+        path: cm.clone(),
+        why: "zz removed after the plan".to_owned(),
+    });
+    let mut out = String::new();
+    let code = receipt((kind, "zip", &store, &plan.request), end, door, &mut out);
+    assert_eq!(code, FAILED, "{out}");
+    let mut horizon = String::new();
+    render_horizon(&mut horizon, today_ist());
+    assert!(
+        !horizon.is_empty(),
+        "every day of the last sourced year warns"
+    );
+    let refused = out.find("GDFL IMPORT REFUSED: ").expect("the refusal line");
+    assert!(
+        out.find(&horizon).is_some_and(|at| at < refused),
+        "the horizon before the refusal: {out}"
+    );
+    assert!(out.contains("zz removed after the plan"), "{out}");
+    assert!(
+        !out.contains("source census"),
+        "no census of a source that did not open: {out}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

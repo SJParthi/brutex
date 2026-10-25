@@ -949,3 +949,106 @@ fn the_day_band_decodes_no_run_line_whatever_the_journal_holds() {
     assert_eq!(old["run_from"], "event");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `key`, for any import kind.
+fn kind_key(kind: &str, close: &str, day: &str, filter: &str, tail: &str) -> String {
+    key(close, day, filter, tail).replace(" indices ", &format!(" {kind} "))
+}
+
+/// **A SHARE MEMBER'S HOLE IS ITS SHARE'S, A SERIES' TOO, AND AN OPTIONS
+/// CLOSE UNDER A MEMBER KEY IS SHOWN, NEVER READ AS A MEMBER TREE** (a share
+/// member, a `.BE` series and a hole at once; and the out-of-the-box case no
+/// writer makes: `pull` writes member keys for the capital-market kinds only,
+/// so an `options` close under one is a hand-edited or foreign line):
+///
+/// * the share's day band shows `*+NSE-CASH-ZZSHARE`'s hole on the day the
+///   `*` close is done, and the `.BE` series' hole on its own day;
+/// * the option's day band shows the options close under its own key with
+///   its member named and no hole, and reads no member tree for it (an option
+///   is never a member);
+/// * `/imports.json`: a refusal about a file that names no swept symbol, on a
+///   stocks day whose only close is a member key, is that close's (its base
+///   is `*`), so no log-only `*` row is made up for the day.
+#[test]
+fn a_share_members_hole_is_its_shares_and_an_options_member_key_is_shown_not_read() {
+    let hole = "stage=file reason=repair_impossible";
+    let journal = [
+        kind_key("stocks", "done", "2019-03-01", "*", ""),
+        kind_key(
+            "stocks",
+            "incomplete",
+            "2019-03-01",
+            "*+NSE-CASH-ZZSHARE",
+            hole,
+        ),
+        kind_key(
+            "stocks",
+            "incomplete",
+            "2019-03-05",
+            "*+NSE-CASH-ZZSHARE.BE",
+            hole,
+        ),
+        kind_key("options", "done", "2019-03-01", "*+NSE-INDEX-NIFTY", ""),
+    ]
+    .concat();
+    let ring = refused(
+        1,
+        1_000,
+        None,
+        "2019-03-05",
+        "ZZNOWHERE.NSE.csv",
+        "zz unknown",
+    )
+    .replace("\"kind\":\"indices\"", "\"kind\":\"stocks\"");
+    let root = store("share-option", &journal, &ring);
+    let unrepairable = json!({ "reason": "repair_impossible", "repairable": false });
+
+    let share = day_band(
+        &root,
+        "feed=gdfl&instrument=NSE-CASH-ZZSHARE&from=2019-03-01&to=2019-03-05",
+    );
+    for (on, member) in [
+        ("2019-03-01", "NSE-CASH-ZZSHARE"),
+        ("2019-03-05", "NSE-CASH-ZZSHARE.BE"),
+    ] {
+        let import = &band_day(&share, on)["import"];
+        assert_eq!(import["member"], member, "{on}: {import:#}");
+        assert_eq!(import["outcome"], "incomplete", "{on}");
+        assert_eq!(import["hole"], unrepairable, "{on}");
+    }
+    assert_eq!(band_day(&share, "2019-03-04")["import"]["outcome"], "none");
+
+    let option = day_band(
+        &root,
+        "feed=gdfl&instrument=NSE-FNO-NIFTY-2019-03-28-1150000-CE&from=2019-03-01&to=2019-03-01",
+    );
+    let import = &band_day(&option, "2019-03-01")["import"];
+    assert_eq!(import["kind"], "options", "{import:#}");
+    assert_eq!(import["filter"], "*+NSE-INDEX-NIFTY");
+    assert_eq!(import["member"], "NSE-INDEX-NIFTY");
+    assert_eq!(import["outcome"], "done");
+    assert_eq!(import.get("hole"), Some(&Value::Null));
+
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&kind=stocks&from=2019-03-05&to=2019-03-05"),
+    )
+    .expect("reads");
+    let shown: Vec<(&str, &str)> = rows(&got)
+        .iter()
+        .map(|row| {
+            (
+                row["filter"].as_str().unwrap(),
+                row["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [("*+NSE-CASH-ZZSHARE.BE", "incomplete")],
+        "no log-only `*` row is made up for a refusal the member key owns: {got:#}"
+    );
+    assert_eq!(got["holes"]["repair_impossible"], 1);
+    assert_eq!(got["holes_unrepairable"], 1);
+    let _ = std::fs::remove_dir_all(&root);
+}
