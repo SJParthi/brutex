@@ -167,3 +167,15 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - Merged the newest `origin/feat/db-fix` (`666ddf7f`, Merge DATA-1w): two both-sides-added conflicts
   (`docs/04-invariants.md`: CC-5's section beside R3-13's; `docs/05-decisions.md`: D-7040..D-7048
   beside D-7300), resolved by keeping both whole.
+- After the merge: `cargo build --workspace --locked --all-targets`: no warning, no error.
+  `cargo fmt --all --check`: exit 0. `cargo clippy --workspace --all-targets --locked -j 2 -- -D warnings`:
+  `Finished`, no warning.
+- Shell gates re-run (the `run:` blocks of ci.yml's `language-purity` job, `GITHUB_ENV` emulated so
+  gate 0's `SOURCE_SCAN` reaches the rest; gate 1e not run here, it builds a second worktree), on
+  this branch and on an unmodified worktree of `origin/feat/db-fix` `666ddf7f`: red on BOTH, the same
+  nine, base reds: 1c, 1d, 10, 11, 12, 19, 23, 27b, 30. Findings diffed line by line (paths and
+  counts normalised): 1c, 10, 30 identical; 11, 12, 19, 23, 27b differ only in their scanned-line and
+  file counts (12's REFUSED list identical modulo line numbers); 1d: 521 undeclared on this branch
+  against 466 on the base, the 55 literals of this part's files (left with the gate's owner, as
+  recorded at save point 6). Every other gate (0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21,
+  22, 24, 28, 25, 27, 26, 14, 29, 29b): exit 0 on this branch.
