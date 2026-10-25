@@ -337,6 +337,8 @@ test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(v[2].line, '/audit: 400.0 KB on first load (0.0 KB script, 0.0 KB style), budget 400.0 KB', 'equal figures are one figure');
   const nearTarget = budgetVerdict([{ route: '/db', node: 6, js: 400_040, css: 0, bytes: 400_040, files: [] }])[0].line;
   assert.equal(nearTarget, '/db: 400040 B on first load (400.0 KB script, 0.0 KB style), budget 825000 B — over the 400000 B wire target', 'near the wire target only');
+  const nearBudget = budgetVerdict([{ route: '/db', node: 6, js: 825_001, css: 0, bytes: 825_001, files: [] }])[0].line;
+  assert.equal(nearBudget, '/db: 825001 B on first load (825.0 KB script, 0.0 KB style), budget 825000 B — OVER ITS BUDGET — over the 400000 B wire target', 'near a budget that is not the target');
 });
 
 test('the budget refuses a build it cannot read, naming what was missing', () => {
