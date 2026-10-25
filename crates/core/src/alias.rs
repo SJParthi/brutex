@@ -310,6 +310,34 @@ pub const SYMBOL_CHANGE_CSV: Citation = Citation {
     says: "69,052 bytes, 1,065 lines: company, old symbol, new symbol, date",
 };
 
+/// NSE's file of symbol changes, READ AGAIN (R4-22, G2): a new dated read,
+/// never an edit of [`SYMBOL_CHANGE_CSV`]'s. The file had grown by 351 bytes
+/// and six lines since 7 Oct 2026, and every row this table took from the
+/// first read is still in it with the same date. The rows this read added to
+/// the table are the ones whose OLD symbol the store holds under no key of its
+/// own: filing them only adds the old stem's days to a series the store
+/// already keys under the new symbol (`docs/00-charter.md`, "Symbol changes
+/// read again — 24 Oct 2026").
+pub const SYMBOL_CHANGE_CSV_20261024: Citation = Citation {
+    url: "https://nsearchives.nseindia.com/content/equities/symbolchange.csv",
+    read: "2026-10-24",
+    sha256: Some("b080e538a5c3c8b5cc1fd048768b2b660c880cc38b3c2bafc7c0f1b2f983566e"),
+    says: "69,403 bytes, 1,071 lines: company, old symbol, new symbol, date (read 18:07 IST and \
+           again 18:09 IST, the same bytes)",
+};
+
+/// NSE's circular for RUCHI to PATANJALI, the one hand-over of R4-22's six
+/// that NSE's file does not list (read 24 Oct 2026: no row names either
+/// symbol).
+pub const CML52890: Citation = Citation {
+    url: "https://nsearchives.nseindia.com/content/circulars/CML52890.pdf",
+    read: "2026-10-24",
+    sha256: Some("fb719fd261a2e29eab4d3daa99982a85156b1fcebbe6992643af5bdb7fb47794"),
+    says: "NSE/CML/52890, Circular Ref. No. 0786/2022, 7 July 2022, \"Change in name and symbol \
+           of Ruchi Soya Industries Limited\": RUCHI to PATANJALI, Ruchi Soya Industries Limited \
+           to Patanjali Foods Limited, w.e.f. July 13, 2022 (428,781 bytes)",
+};
+
 /// NSE's circular for ZOMATO to ETERNAL.
 pub const CML67420: Citation = Citation {
     url: "https://nsearchives.nseindia.com/content/circulars/CML67420.pdf",
@@ -394,6 +422,10 @@ const VIX_SOURCES: &[Citation] = &[ALL_INDICES, GDFL_STEM, KITE_DUMP, STORE_KEY]
 const IN_THE_FILE: &[Citation] = &[SYMBOL_CHANGE_CSV];
 /// ZOMATO to ETERNAL, read in NSE's file and in its own circular.
 const IN_THE_FILE_AND_CIRCULAR: &[Citation] = &[SYMBOL_CHANGE_CSV, CML67420];
+/// A symbol change first transcribed from the 24 Oct 2026 read of NSE's file.
+const IN_THE_FILE_READ_AGAIN: &[Citation] = &[SYMBOL_CHANGE_CSV_20261024];
+/// RUCHI to PATANJALI, read in its own circular: NSE's file has no row.
+const IN_CIRCULAR_CML52890: &[Citation] = &[CML52890];
 
 /// Every index this table names. Order is the charter's.
 pub const INDEX_ROWS: [IndexRow; 9] = [
@@ -490,24 +522,65 @@ const fn change(old: &'static str, new: &'static str, effective: Ymd) -> SymbolC
     }
 }
 
+/// One row of NSE's file as read again on 24 Oct 2026 (R4-22, G2).
+const fn read_again(old: &'static str, new: &'static str, effective: Ymd) -> SymbolChange {
+    SymbolChange {
+        old,
+        new,
+        effective,
+        status: Status::Sourced(IN_THE_FILE_READ_AGAIN),
+    }
+}
+
 /// The rows of NSE's `symbolchange.csv` whose old or new symbol the store
-/// holds as a GDFL share or option series (charter, checked 7 Oct 2026).
-/// Order is the file's date order, as the charter lists them.
-pub const SYMBOL_CHANGES: [SymbolChange; 18] = [
+/// holds as a GDFL share or option series (charter, checked 7 Oct 2026, and
+/// again on 24 Oct 2026 over the 358 symbols the store then held), and the
+/// one hand-over NSE published only in a circular (`RUCHI -> PATANJALI`,
+/// NSE/CML/52890). Order is the date order, as the charter lists them.
+///
+/// **What the 24 Oct read added, and what it did not (R4-22, G2).** Nine
+/// rows whose old symbol the store holds under no key of its own, so filing
+/// them only adds the old stem's days to the series the store already keys
+/// under the new symbol: the five hand-overs the archive was measured to
+/// hold (`ANGELBRKG`, `RNAM`, `MINDAIND`, `GET&D`, `RUCHI`) and four the
+/// re-run check found (`BAJAJTEMPO`, `ADANIGAS`, `MAGMA`, `TWL`). Six rows
+/// of the same read whose OLD symbol the store holds under its own key are
+/// NOT here (`KPIT -> BSOFT`, `TATAGLOBAL -> TATACONSUM`, `CENTURYTEX ->
+/// ABREL`, `INFIBEAM -> CCAVENUE`, `GUJGASLTD -> GUJENERGY`, `ICICIPRULI ->
+/// ICICILIFE`): applying one re-keys stored months and refuses every options
+/// run that wants the new symbol until the re-key records them (D-3354 item
+/// 4), and `ICICIPRULI -> ICICILIFE` would move an F&O list symbol off its
+/// own key (`crate::universe::FNO_UNDERLYINGS` names `ICICIPRULI`). Each is a
+/// store step and a decision, listed in the charter, never applied here.
+pub const SYMBOL_CHANGES: [SymbolChange; 27] = [
     change("IDFCBANK", "IDFCFIRSTB", Ymd::new(2019, 1, 16)),
+    read_again("BAJAJTEMPO", "FORCEMOT", Ymd::new(2019, 8, 19)),
+    read_again("RNAM", "NAM-INDIA", Ymd::new(2020, 1, 23)),
     change("NIITTECH", "COFORGE", Ymd::new(2020, 8, 20)),
     change("INFRATEL", "INDUSTOWER", Ymd::new(2020, 12, 18)),
+    read_again("ADANIGAS", "ATGL", Ymd::new(2021, 1, 13)),
+    read_again("MAGMA", "POONAWALLA", Ymd::new(2021, 8, 5)),
+    read_again("ANGELBRKG", "ANGELONE", Ymd::new(2021, 11, 11)),
     change("CADILAHC", "ZYDUSLIFE", Ymd::new(2022, 3, 7)),
     change("MOTHERSUMI", "MOTHERSON", Ymd::new(2022, 6, 9)),
+    SymbolChange {
+        old: "RUCHI",
+        new: "PATANJALI",
+        effective: Ymd::new(2022, 7, 13),
+        status: Status::Sourced(IN_CIRCULAR_CML52890),
+    },
+    read_again("MINDAIND", "UNOMINDA", Ymd::new(2022, 8, 5)),
     change("LTI", "LTIM", Ymd::new(2022, 12, 5)),
     change("SRTRANSFIN", "SHRIRAMFIN", Ymd::new(2022, 12, 20)),
     change("IIFLWAM", "360ONE", Ymd::new(2023, 1, 23)),
     change("PVR", "PVRINOX", Ymd::new(2023, 5, 12)),
+    read_again("TWL", "TITAGARH", Ymd::new(2023, 6, 19)),
     change("ADANITRANS", "ADANIENSOL", Ymd::new(2023, 8, 24)),
     change("AMARAJABAT", "ARE&M", Ymd::new(2023, 10, 27)),
     change("L&TFH", "LTF", Ymd::new(2024, 4, 23)),
     change("MCDOWELL-N", "UNITDSPR", Ymd::new(2024, 6, 7)),
     change("IBULHSGFIN", "SAMMAANCAP", Ymd::new(2024, 7, 26)),
+    read_again("GET&D", "GVT&D", Ymd::new(2024, 11, 5)),
     change("GMRINFRA", "GMRAIRPORT", Ymd::new(2024, 12, 11)),
     SymbolChange {
         old: "ZOMATO",
@@ -860,9 +933,9 @@ const fn not_aliased_symbols<const N: usize>(rows: &[NotAliased; N]) -> [&'stati
 /// [`NOT_ALIASED`], probed by symbol.
 static NOT_ALIASED_INDEX: MemberIndex<8> = MemberIndex::build(&not_aliased_symbols(&NOT_ALIASED));
 
-/// The shipped symbol changes. Eighteen rows in 128 slots, under a quarter
+/// The shipped symbol changes. Twenty-seven rows in 128 slots, under a quarter
 /// full.
-pub static LINEAGE: Lineage<18, 128> = Lineage::build(SYMBOL_CHANGES);
+pub static LINEAGE: Lineage<27, 128> = Lineage::build(SYMBOL_CHANGES);
 
 /// The applied index row whose F&O symbol is `fno`. One probe.
 #[must_use]
@@ -1275,21 +1348,21 @@ mod tests {
         assert_eq!(LINEAGE.filed_under("LTI", day(2022, 12, 2)), Ok("LTM"));
         assert_eq!(
             LINEAGE.filed_under("LTI", day(2022, 12, 5)),
-            Err(Stale::AfterChange(SYMBOL_CHANGES[5]))
+            Err(Stale::AfterChange(change_from("LTI")))
         );
         assert_eq!(LINEAGE.filed_under("LTIM", day(2024, 1, 1)), Ok("LTM"));
         assert_eq!(
             LINEAGE.filed_under("LTIM", day(2021, 1, 1)),
-            Err(Stale::BeforeChange(SYMBOL_CHANGES[5]))
+            Err(Stale::BeforeChange(change_from("LTI")))
         );
         assert_eq!(
             LINEAGE.filed_under("LTIM", day(2026, 2, 27)),
-            Err(Stale::AfterChange(SYMBOL_CHANGES[17]))
+            Err(Stale::AfterChange(change_from("LTIM")))
         );
         assert_eq!(LINEAGE.filed_under("LTM", day(2026, 2, 27)), Ok("LTM"));
         assert_eq!(
             LINEAGE.filed_under("LTM", day(2026, 2, 26)),
-            Err(Stale::BeforeChange(SYMBOL_CHANGES[17]))
+            Err(Stale::BeforeChange(change_from("LTIM")))
         );
         assert_eq!(
             LINEAGE.filed_under("ZOMATO", day(2025, 4, 8)),
@@ -1511,7 +1584,7 @@ mod tests {
     #[test]
     fn the_tables_build_at_run_time_and_probe_within_a_bound() {
         let indices: Indices<9, 18, 128> = Indices::build(INDEX_ROWS, INDEX_NAMES);
-        let lineage: Lineage<18, 128> = Lineage::build(SYMBOL_CHANGES);
+        let lineage: Lineage<27, 128> = Lineage::build(SYMBOL_CHANGES);
         assert_eq!(indices.by_fno("FINNIFTY"), INDICES.by_fno("FINNIFTY"));
         assert_eq!(indices.by_name("finnifty"), INDICES.by_name("FINNIFTY"));
         let refused = not_aliased_symbols(&NOT_ALIASED);
@@ -1536,5 +1609,258 @@ mod tests {
         let news: Vec<&str> = SYMBOL_CHANGES.iter().map(|c| c.new).collect();
         assert!(worst(&LINEAGE.by_old, &olds) <= 4);
         assert!(worst(&LINEAGE.by_new, &news) <= 4);
+    }
+
+    /// The shipped row whose old symbol is `old`, looked up by symbol so a
+    /// row appended in date order never moves what a test means.
+    fn change_from(old: &str) -> SymbolChange {
+        *SYMBOL_CHANGES
+            .iter()
+            .find(|row| row.old == old)
+            .unwrap_or_else(|| panic!("no shipped change from {old}"))
+    }
+
+    /// **G2 (R4-22, D-7311): THE SIX STEM HAND-OVERS.** The archive holds a
+    /// stem that stops the day before the new ticker starts for six shares.
+    /// Five are sourced rows now, each with the date its source states, so
+    /// the old stem's days are filed under the newest symbol; the sixth,
+    /// `TATAGLOBAL -> TATACONSUM`, keeps two keys (D-3354 item 3), because
+    /// applying it re-keys months the store holds under `TATAGLOBAL` (the
+    /// charter lists it as read and held back). Before R4-22,
+    /// `LINEAGE.current("RUCHI")` was `RUCHI`.
+    #[test]
+    fn the_six_stem_handovers_are_sourced_rows() {
+        let day = Ymd::new;
+        for (old, new, effective, source) in [
+            (
+                "ANGELBRKG",
+                "ANGELONE",
+                day(2021, 11, 11),
+                SYMBOL_CHANGE_CSV_20261024,
+            ),
+            (
+                "RNAM",
+                "NAM-INDIA",
+                day(2020, 1, 23),
+                SYMBOL_CHANGE_CSV_20261024,
+            ),
+            (
+                "MINDAIND",
+                "UNOMINDA",
+                day(2022, 8, 5),
+                SYMBOL_CHANGE_CSV_20261024,
+            ),
+            (
+                "GET&D",
+                "GVT&D",
+                day(2024, 11, 5),
+                SYMBOL_CHANGE_CSV_20261024,
+            ),
+            ("RUCHI", "PATANJALI", day(2022, 7, 13), CML52890),
+        ] {
+            let row = LINEAGE.from_old(old).expect(old);
+            assert_eq!((row.new, row.effective), (new, effective), "{old}");
+            assert_eq!(row.status.citations(), &[source], "{old}");
+            assert_eq!(LINEAGE.to_new(new), Some(row), "{new}");
+            assert_eq!(LINEAGE.current(old), new, "{old}");
+            assert!(source.sha256.is_some_and(|sha| sha.len() == 64));
+            assert_eq!(source.read, "2026-10-24");
+        }
+        assert_eq!(LINEAGE.from_old("TATAGLOBAL"), None, "two keys, D-3354");
+        assert_eq!(LINEAGE.current("TATAGLOBAL"), "TATAGLOBAL");
+        assert_eq!(LINEAGE.current("TATACONSUM"), "TATACONSUM");
+        // The four rows the re-run check found, of the same class: the old
+        // symbol is held under no key of its own.
+        for (old, new) in [
+            ("BAJAJTEMPO", "FORCEMOT"),
+            ("ADANIGAS", "ATGL"),
+            ("MAGMA", "POONAWALLA"),
+            ("TWL", "TITAGARH"),
+        ] {
+            assert_eq!(LINEAGE.current(old), new, "{old}");
+            assert_eq!(
+                change_from(old).status.citations(),
+                &[SYMBOL_CHANGE_CSV_20261024]
+            );
+        }
+    }
+
+    /// RUCHI's own day: the old stem is filed under PATANJALI up to the day
+    /// before the change, refused from the change on; the new stem is refused
+    /// before it and filed from it. The day boundary is exact.
+    #[test]
+    fn ruchi_is_filed_under_patanjali_only_on_the_days_each_stem_was_live() {
+        let day = Ymd::new;
+        let change = change_from("RUCHI");
+        assert_eq!(
+            LINEAGE.filed_under("RUCHI", day(2018, 9, 3)),
+            Ok("PATANJALI")
+        );
+        assert_eq!(
+            LINEAGE.filed_under("RUCHI", day(2022, 7, 12)),
+            Ok("PATANJALI")
+        );
+        assert_eq!(
+            LINEAGE.filed_under("RUCHI", day(2022, 7, 13)),
+            Err(Stale::AfterChange(change))
+        );
+        assert_eq!(
+            LINEAGE.filed_under("PATANJALI", day(2022, 7, 12)),
+            Err(Stale::BeforeChange(change))
+        );
+        assert_eq!(
+            LINEAGE.filed_under("PATANJALI", day(2022, 7, 13)),
+            Ok("PATANJALI")
+        );
+        let back: Vec<_> = LINEAGE.backward("PATANJALI").map(|c| c.old).collect();
+        assert_eq!(back, ["RUCHI"]);
+    }
+
+    /// A NEW DATED READ NEVER EDITS THE OLD ONE (G2): the 7 Oct read keeps
+    /// its digest, every row transcribed from it still cites it alone, and
+    /// only the rows the 24 Oct read added cite the new read.
+    #[test]
+    fn a_read_again_never_edits_the_first_read() {
+        assert_eq!(
+            SYMBOL_CHANGE_CSV.sha256,
+            Some("948ccc56f46555bc6553538047d7b967e99a9250c58b7bf0a1d66a7e1f033e10")
+        );
+        assert_eq!(SYMBOL_CHANGE_CSV.read, "2026-10-07");
+        let first_read = SYMBOL_CHANGES
+            .iter()
+            .filter(|row| row.status.citations().first() == Some(&SYMBOL_CHANGE_CSV))
+            .count();
+        let read_again = SYMBOL_CHANGES
+            .iter()
+            .filter(|row| row.status.citations() == [SYMBOL_CHANGE_CSV_20261024])
+            .count();
+        let circular = SYMBOL_CHANGES
+            .iter()
+            .filter(|row| row.status.citations() == [CML52890])
+            .count();
+        assert_eq!((first_read, read_again, circular), (18, 8, 1));
+        assert_eq!(first_read + read_again + circular, SYMBOL_CHANGES.len());
+    }
+
+    /// The six rows of the 24 Oct read whose OLD symbol the store holds
+    /// under its own key are read and NOT applied: each would re-key stored
+    /// months and refuse options runs until re-keyed (D-3354 item 4), and
+    /// `ICICIPRULI` is an F&O list symbol. A lookup sees none.
+    #[test]
+    fn the_held_back_rows_of_the_second_read_are_not_applied() {
+        for old in [
+            "KPIT",
+            "TATAGLOBAL",
+            "CENTURYTEX",
+            "INFIBEAM",
+            "GUJGASLTD",
+            "ICICIPRULI",
+        ] {
+            assert_eq!(LINEAGE.from_old(old), None, "{old}");
+            assert_eq!(LINEAGE.current(old), old, "{old}");
+        }
+        assert!(FNO_UNDERLYINGS.contains(&"ICICIPRULI"));
+    }
+
+    /// **FM-288: every index option underlying joins its own spot series**,
+    /// by the one alias table, and a renamed share's options join the newest
+    /// symbol's spot. A name with no row is never guessed into an index: it
+    /// is a share under its own key (D-3332 item 3), whose spot the join
+    /// refuses by name where the store holds none.
+    #[test]
+    fn every_index_option_underlying_joins_its_dated_spot_series() {
+        for (fno, key) in [
+            ("NIFTY", "NIFTY"),
+            ("BANKNIFTY", "BANKNIFTY"),
+            ("FINNIFTY", "NIFTYFINSERVICE"),
+            ("MIDCPNIFTY", "NIFTYMIDSELECT"),
+            ("NIFTYNXT50", "NIFTYNEXT50"),
+            ("NIFTYIT", "NIFTYIT"),
+            ("NIFTYFPI", "NIFTYFPI150"),
+            ("NIFTYCPSE", "NIFTYCPSE"),
+        ] {
+            let got = option_underlying(fno);
+            assert_eq!((got.segment, got.key), (Segment::Index, key), "{fno}");
+            assert!(matches!(got.via, Via::Index(row) if row.store_key == key));
+        }
+        for row in INDEX_ROWS.iter().filter(|row| row.fno.is_some()) {
+            let fno = row.fno.unwrap();
+            assert_eq!(option_underlying(fno).key, row.store_key, "{fno}");
+            assert_eq!(option_underlying(row.store_key).key, row.store_key);
+        }
+        let ruchi = option_underlying("RUCHI");
+        assert_eq!((ruchi.segment, ruchi.key), (Segment::Cash, "PATANJALI"));
+        assert!(matches!(ruchi.via, Via::Renamed(change) if change.old == "RUCHI"));
+        for unknown in ["NIFTYXYZ", "ZZINDEX", "NIFTY 50X"] {
+            let got = option_underlying(unknown);
+            assert_eq!(
+                (got.segment, got.key, got.via),
+                (Segment::Cash, unknown, Via::Own)
+            );
+        }
+    }
+
+    /// The bench of G2 (R4-22): `from_old` and `to_new` stay one probe of a
+    /// compile-time table whether it holds the 18 rows of the first read or
+    /// the 27 of today, measured (p50, p99, max over n = 200 lookups each,
+    /// hits and misses alternating) and bounded by the worst probe, which is
+    /// what the assertion pins: a wall-clock bound on a shared machine would
+    /// assert the machine, not the table.
+    #[test]
+    fn lineage_lookup_cost_is_flat_from_18_to_27_rows() {
+        let first: [SymbolChange; 18] = core::array::from_fn(|at| {
+            SYMBOL_CHANGES
+                .iter()
+                .filter(|row| row.status.citations().first() == Some(&SYMBOL_CHANGE_CSV))
+                .nth(at)
+                .copied()
+                .unwrap()
+        });
+        let small: Lineage<18, 128> = Lineage::build(first);
+        let large: Lineage<27, 128> = Lineage::build(SYMBOL_CHANGES);
+        let asked: Vec<&str> = SYMBOL_CHANGES
+            .iter()
+            .flat_map(|row| [row.old, "ZZNOTASYMBOL", row.new])
+            .collect();
+        let time = |look: &dyn Fn(&str) -> bool| {
+            let mut took: Vec<u128> = (0..200)
+                .map(|n| {
+                    let name = asked[n % asked.len()];
+                    let started = std::time::Instant::now();
+                    let hit = look(name);
+                    let ns = started.elapsed().as_nanos();
+                    assert!(hit || !name.is_empty());
+                    ns
+                })
+                .collect();
+            took.sort_unstable();
+            (took[100], took[197], took[199])
+        };
+        let small_cost =
+            time(&|name| small.from_old(name).is_some() || small.to_new(name).is_some());
+        let large_cost =
+            time(&|name| large.from_old(name).is_some() || large.to_new(name).is_some());
+        eprintln!(
+            "lineage lookup ns (p50, p99, max), n=200: 18 rows {small_cost:?}, 27 rows {large_cost:?}"
+        );
+        let worst = |table: &MemberIndex<128>, members: &[&str]| {
+            members
+                .iter()
+                .map(|m| {
+                    let mut at = mask(fnv1a(m), 128);
+                    let mut steps = 1;
+                    while table.slots[at] != Some(*m) {
+                        at = (at + 1) & 127;
+                        steps += 1;
+                    }
+                    steps
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let olds: Vec<&str> = first.iter().map(|c| c.old).collect();
+        let all_olds: Vec<&str> = SYMBOL_CHANGES.iter().map(|c| c.old).collect();
+        assert!(worst(&small.by_old, &olds) <= 4);
+        assert!(worst(&large.by_old, &all_olds) <= 4);
     }
 }
