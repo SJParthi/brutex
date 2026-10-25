@@ -179,3 +179,56 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   against 466 on the base, the 55 literals of this part's files (left with the gate's owner, as
   recorded at save point 6). Every other gate (0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21,
   22, 24, 28, 25, 27, 26, 14, 29, 29b): exit 0 on this branch.
+
+### 2026-10-25 — new container, save point 7 (GO, no HOLD)
+
+- New container (no target, no gate tools): reinstalled `cargo-deny` 0.20.2, `cargo-llvm-cov` 0.9.1,
+  `cargo-mutants` 27.1.0 from crates.io; nightly with `llvm-tools-preview` for `--branch`.
+- Merged the newest `origin/feat/db-fix` (`bf9b1c8f`, Merge R4-18): textually clean, merge commit
+  `b8f3b34f`. R4-18 added its own verb (`zerodha-quarantine`), so `COMMANDS` is now `[&str; 64]`
+  (62 base + R4-18 + CC-5); commit `52718be3`, pushed.
+- `cargo build --workspace --locked --all-targets -j 4`: `Finished`, exit 0, no warning.
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings`: `Finished`, exit 0.
+- `cargo deny check`: `advisories FAILED, bans ok, licenses ok, sources ok`; the one error is
+  RUSTSEC-2026-0386 (tokio 1.53.1), the BASE item BASE-DENY-1024 owns (Cargo.lock is the Mac's).
+- `cargo test --workspace --locked -j 4 --no-fail-fast`: exit 101, 6 targets red, 31 tests:
+  29 failed and 2 hung (killed after 15 min each). EVERY ONE is red on an unmodified worktree of
+  `origin/feat/db-fix` `bf9b1c8f` too (its test binaries built and run with the same `--exact`
+  names, `--test-threads=1`): the same 29 FAILED, and the 2 hung (`timeout 240`, exit 124). None
+  is in a file of this part. They are permission-bit tests (this container runs as root), the
+  slow-reader socket tests and two full-pool child tests:
+  - api lib (8 + 1 hung): `detail::tests::a_refused_admission_names_what_its_bound_and_why`,
+    `pullrun::restart_tests::the_journals_own_extremes`,
+    `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`, the five
+    `server::head_deadline_body_tests::*`; HUNG
+    `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+    (its child waits on a barrier; gdb: the body's `Release` guard waiting in `drop`).
+    (`logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code` failed under
+    the full parallel run only, and passes alone on both.)
+  - api `--test cloud_mutants_bars` (1 hung):
+    `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`.
+  - cli lib (3): `scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger`,
+    `watchdog_command::tests::a_read_only_state_directory_sends_no_notice_at_all_rather_than_many`,
+    `watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`.
+  - pull lib (9): `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`,
+    `gdfl_cm::tests::fixtures_are_built_not_pasted`, `gdfl_dropbox::tests::repair_r1::a_journal_that_cannot_be_written_stops_the_press_before_any_byte`,
+    `gdfl_dropbox::tests::repair_r1::a_read_only_store_root_is_not_writable_not_lost`,
+    `gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name`,
+    `ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words`,
+    `ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing`,
+    `zerodha_verify::tests::a_refused_open_keeps_the_hosts_words`,
+    `zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named`.
+  - store lib (5): `quarantine::tests::an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply`,
+    `quarantine::tests::an_index_publish_refused_after_a_whole_line_is_finished_by_the_next_apply`,
+    and the three `settings::tests::*` permission tests named at save point 3 (now SHOWN red on the base).
+  - telemetry lib (4): `sink::tests::a_coverage_file_is_read_line_by_line_and_extended_where_it_stands`,
+    `sink::tests::a_failed_delete_is_counted_named_and_left_for_the_next_start`,
+    `sink::tests::a_rename_aside_that_cannot_happen_fails_the_roll_by_name`,
+    `sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`.
+  Every test of this part's files passes in that run (`copies_register::` 25 tests ok, `copies_route` 5,
+  `disk_copies_command` 3, `settings::tests::the_extra_copy_roots_key_is_checked_and_stored_canonically`,
+  `no_scheduler_delete` 5).
+- NEXT: the served bench (`cargo bench -p api --bench ratio --locked -j 2 -- --served-only`, running),
+  its copies rows into `docs/06-limits.md` L-CC5; then coverage and mutants on the touched modules
+  (disk is 11 GB free: target/ is cleared between them).
