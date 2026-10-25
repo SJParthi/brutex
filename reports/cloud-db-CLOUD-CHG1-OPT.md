@@ -217,3 +217,7 @@ Final list after the remaining gates; the spec's section 7 sequence applies.
   - test-only coverage fixes, mutants `2 caught, 1 unviable`;
   - pushed `f854fd09`.
 - 18:55 IST: HOLD (set 18:16) seen at this save point. NEXT: as in "Held" above.
+- 25 Oct, new cloud session: checked out the branch at `12d4faab`. `HOLD` (set 25 Oct 13:0x IST,
+  base `40f1cdb2`) is present and there is no `GO-CLOUD-CHG1-OPT`, so no step was started. The two
+  runs the previous session left going were lost with its container; NEXT item 1 now means a fresh
+  workspace test run. Waiting as the README says. NEXT: unchanged.
