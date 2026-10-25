@@ -240,3 +240,37 @@ fn a_stamp_on_a_files_first_or_last_second_is_its_own() {
     let counts: Vec<usize> = deferred.iter().map(|one| one.committed).collect();
     assert_eq!(counts, vec![2, 2, 1], "10 and 20; 30 and 40; 40 again");
 }
+
+/// **EACH KEY OF A DAY WAITS AS ITS OWN** (IA-RP-31, D-4899 (4), WP-12f): a
+/// day's base key and a member key of the same day, each gathering a file,
+/// are two waiting closes, and only the last taken is the one that waits
+/// last; another key of the day, or the key on another day, does not wait;
+/// nothing waits in an empty gather.
+#[test]
+fn each_key_of_a_day_waits_as_its_own() {
+    let (on, next) = (day(2024, 4, 1), day(2024, 4, 2));
+    let (base, member) = ("indices 2024-04-01 *", "indices 2024-04-01 *+NIFTY");
+    let file = |seconds| {
+        GatheredFile::for_test(
+            &april(),
+            bars(seconds),
+            request(day(2024, 4, 1), day(2024, 4, 30)),
+        )
+    };
+    let mut gather = Gather::default();
+    assert!(!gather.waits(base, on), "nothing waits in an empty gather");
+
+    gather
+        .take(file(1_711_943_100..1_711_943_104), (base, on))
+        .unwrap();
+    assert!(gather.waits(base, on));
+    assert!(!gather.waits(member, on), "another key of the day");
+    assert!(!gather.waits(base, next), "the key on another day");
+
+    gather
+        .take(file(1_711_943_104..1_711_943_108), (member, on))
+        .unwrap();
+    assert!(gather.waits(member, on), "the member key waits as its own");
+    assert!(!gather.waits(base, on), "the base key no longer waits last");
+    assert_eq!(gather.offered(&april()), Some(8));
+}
