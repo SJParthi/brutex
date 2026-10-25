@@ -4142,6 +4142,26 @@ test('a reader that closes the pipe early is said on stderr, and the command kee
     process.stderr.write = write;
   }
   assert.deepEqual(plainLines, ['speed-sheet: stdout was closed before it took the whole sheet (4 B): the disk went away; what it did not take is lost\n']);
+  // One listener a stream, however many sheets it is handed: none is left behind a call (a first cut added one a
+  // call, and the twelfth drew Node's MaxListenersExceededWarning).
+  const sink = new Writable({ write(_chunk, _encoding, done) { done(); } });
+  const listening = sink.listenerCount('error');
+  for (let i = 0; i < 12; i += 1) assert.equal(await sheet.written(sink, 'x', 'speed-sheet', 5_000), true);
+  assert.equal(sink.listenerCount('error'), listening + 1);
+  // The newest sheet hears the stream's failure, said once.
+  const later = new Writable({ write(_chunk, _encoding, done) { done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); } });
+  /** @type {string[]} */
+  const twice = [];
+  process.stderr.write = /** @type {any} */ ((/** @type {any} */ s) => (twice.push(String(s)), true));
+  try {
+    assert.equal(await sheet.written(later, 'one', 'speed-sheet', 5_000), false);
+    assert.equal(await sheet.written(later, 'two!', 'speed-sheet', 5_000), false);
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(later.listenerCount('error'), 1);
+  assert.deepEqual(twice, ['speed-sheet: stdout was closed before it took the whole sheet (3 B): EPIPE; what it did not take is lost\n', 'speed-sheet: stdout was closed before it took the whole sheet (4 B): ERR_STREAM_DESTROYED; what it did not take is lost\n']);
 });
 
 test('a browser\'s DevTools address is searched for in its chunk before the tail is cut: an address followed in one write by more than STDERR_TAIL characters is taken', { timeout: 60_000 }, async () => {

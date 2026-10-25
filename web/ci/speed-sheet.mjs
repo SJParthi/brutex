@@ -1379,6 +1379,9 @@ export function unwritable(option, path) {
   return '';
 }
 
+/** Each stream `written` listens to, and the sheet that hears its failure. @type {WeakMap<object, {lost: (why: NodeJS.ErrnoException) => void}>} */
+const HEARD = new WeakMap();
+
 /** How long a command's end waits for stdout to take its whole sheet, ms. */
 export const STDOUT_WAIT_MS = 60_000;
 
@@ -1395,7 +1398,10 @@ export const STDOUT_WAIT_MS = 60_000;
  * `| head -1` leaves it) had no listener, so it was thrown as uncaught and
  * a run that passed exited 1 with a stack. It is heard here, said on stderr
  * by name, and the promise resolves `false`; the caller's exit code stays
- * the run's own, and an `--out` file is still written whole.
+ * the run's own, and an `--out` file is still written whole. A stream's
+ * failure reaches its write's callback first and its `error` event after,
+ * so the listener stays for the rest of the process: ONE listener a stream
+ * (`HEARD`), however many sheets it is handed, each failure said once.
  *
  * @param {NodeJS.WritableStream} stream
  * @param {string} text
@@ -1418,8 +1424,15 @@ export function written(stream, text, name, ms = STDOUT_WAIT_MS) {
     };
     /** @param {NodeJS.ErrnoException} why */
     const lost = (why) => end(false, `${name}: stdout was closed before it took the whole sheet (${Buffer.byteLength(text)} B): ${why.code ?? why.message}; what it did not take is lost\n`);
-    // Kept for the rest of the process: a stream that failed once can fail again, and is heard each time.
-    stream.on?.('error', lost);
+    let heard = HEARD.get(stream);
+    if (heard === undefined) {
+      const at = { lost: lost };
+      heard = at;
+      HEARD.set(stream, at);
+      stream.on?.('error', (/** @type {NodeJS.ErrnoException} */ why) => at.lost(why));
+    }
+    // The newest sheet handed to the stream hears its failure; one already ended says nothing twice.
+    heard.lost = lost;
     t = setTimeout(() => end(false, `${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost\n`), ms);
     stream.write(text, (/** @type {NodeJS.ErrnoException | null | undefined} */ why) => (why ? lost(why) : end(true)));
   });

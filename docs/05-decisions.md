@@ -79277,8 +79277,53 @@ Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
     taken only from a whole line; the shared reporter check's tab and a
     hook's tabs are heard for uncaught errors, as R315-30 said of every tab.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-33);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-27.
+Repair round 7 (25 Oct, after verify r7):
+
+36. **`/ingest`'s budget is 550,000 B** (verify r7, blocking 2). On the tree
+    merged with `feat/db-fix` at `cc0a3a0d`, `/ingest` weighed 545,589 B on
+    its first load, past 525,000: its page loads every panel on the first
+    load (`import.meta.glob('./panels/*.svelte', { eager: true })`), and
+    DATA-1w's feed checks added about 22.6 KB and R4-18's quarantine about
+    9.0 KB (verify r7 weighed them merge by merge), R4-28's F&O modes about
+    0.8 KB. No R3-15 file grew. Held just above its size, rounded up to
+    25 KB, by item 2's rule (items 2 and 10 hold the earlier figures);
+    `/db` (816,361 B) and `/backtest` (1,118,725 B) are inside theirs. Not
+    taken: shrinking the page, whose panels are other parts' files; and a
+    budget with more room, which would let a page grow unseen. 4,411 B of
+    room is left, so the next panel on `/ingest`'s first load may fail the
+    build again: the budget doing its job, and the merge that lands must
+    weigh it again.
+37. **A test that drives a real browser asserts only what does not depend
+    on how busy the machine is** (R315-34; verify r7, blocking 1). A real
+    Chrome's first content and longest pause are this machine's clock, so
+    a row it measured is checked for being measured — over its loads, each
+    figure a reading, its targets cell agreeing with its failures — and for
+    failing, if at all, only on those timed judgements; the targets are
+    proved on fixed figures (`judge`), the same on every machine. A
+    command's exit is the verdict its own sheet states, whichever that is.
+    The stall test's loads that must end get a 10,000 ms bound, about 69
+    times the slowest stand-in load end measured on this Mac (L-R315-28),
+    and `/later?paint=400` fails its first-content target on purpose every
+    run, so the warm stall is shown said beside a failing cold row. Not
+    taken: looser targets for tests, which would put a second set of
+    targets in the harness; retrying a test, which hides the slow run it
+    retries; and a fake browser with a fixed clock, which would not be the
+    browser the harness drives.
+38. **Verify r7's follow-ups** (R315-35). A reader that closed the pipe is
+    said on stderr and the command keeps its run's exit code, since the
+    sheet and an `--out` file were never the reader's to fail; `written`
+    hears the stream's failure with one listener a stream. The browser's
+    stderr is searched a chunk at a time before the tail is cut. Each
+    `--idle-tabs` count is one row. A day is one of its month's: given
+    together they must agree; a day given alone is read in its own month;
+    a month given alone takes the rung's newest day only when it is in that
+    month, else starts at its first day, as a rung that names no day does.
+    `L-R315-26` now says the peak at many clients (verify r7's 60- and
+    512-client figures), which is above the one-client bound the test
+    holds.
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-35);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-28.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
