@@ -1,9 +1,48 @@
-STATUS: HELD
+STATUS: BLOCKED
 
 # R4-05 (cloud): one reasons dictionary with its gate and route, and the kept alert kinds
 
-Branch `cloud/db-R4-05-20261024`, cut from `origin/feat/db-fix` at `e851da1c` (Merge DATA-2).
-Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R4-05.md`.
+**Code complete** at the head of `cloud/db-R4-05-20261024`, merged with `origin/feat/db-fix` `cc0a3a0d`
+(R4-28). Every gate this part can turn green is green; what stays red is a base item (shown red the same
+way on the unmodified base) or an environment item of this container, each named below. Merge-back also waits on the
+FILES_ONLY link to R3-21 (not merged) and on settling KINDS with R4-09 (see "Alert kinds" below).
+
+## Final gate results (merged tree `cc0a3a0d` + R4-05)
+
+| Gate | Command | Result |
+|---|---|---|
+| fmt | `cargo fmt --all --check` | clean |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | EXIT 0 |
+| test | 175 test binaries of `cargo test --workspace --locked --no-run`, each run as a non-root user, umask 0022 | all pass except the base and environment items below |
+| deny | `cargo deny check` | BLOCKED (base): advisories FAILED on RUSTSEC-2026-0386 (tokio 1.53.1) only; bans, licenses, sources ok. BASE-DENY-1024 owns Cargo.lock; not bumped here |
+| coverage | `cargo llvm-cov` (stable) | `pull/src/reasons.rs` 100%, `api/src/reasons_route.rs` 100% (regions, functions, lines); `pull/src/alerts.rs`: every line and region this part added is covered |
+| branch coverage | `cargo llvm-cov --branch` | BLOCKED (environment): needs a nightly compiler; this container has only the pinned 1.97.1 |
+| mutants | `cargo mutants --in-diff` on reasons.rs, alerts.rs, reasons_route.rs | 37 mutants: 26 caught, 10 unviable, 1 missed then fixed (`516ab325`): 0 surviving |
+| web | W1, W3, W4, W5, W6 | pass |
+| web | W2 `node --test web/tests/*.test.js` | 1,602 pass, 0 fail, 9 cancelled; the base `cc0a3a0d`: 1,592 / 0 / 9, the SAME nine timer and census-worker tests (Node 22 here, CI runs Node 24). R4-05's own: 21 pass |
+| shell | 1d, 10, 10b (re-run after the last edit) | 1d: 465 undeclared against the base's 466, none of R4-05's; 10: the base's 2 missing on both; 10b pass |
+
+### Blocking items, each named (base or environment; none caused by R4-05)
+
+1. RUSTSEC-2026-0386 (`cargo deny`): base item, BASE-DENY-1024.
+2. Branch coverage: nightly compiler absent here (NEEDS THE MAC item 8).
+3. Workspace test reds, each red the same way on the unmodified base or an artefact of this container:
+   - `pull` lib `gdfl_cm::tests::fixtures_are_built_not_pasted`: red on the base (it names pasted GDFL CM
+     rows in `crates/cli/src/tick_second_check_tests.rs`, a DATA-1w file).
+   - `api` lib `detail::tests::a_refused_admission_names_what_its_bound_and_why` and five
+     `server::head_deadline_body_tests` slow-reader tests: red on the base (7 pass / 6 fail on both).
+   - `api` lib `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+     and `api --test cloud_mutants_bars` `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`:
+     hang on the base too (the other 58 `cloud_mutants_bars` tests pass on both).
+   - `cli` lib `boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`:
+     fails only as the non-root user; passes as root.
+   - Root-only (pass as non-root): `alerts::tests::create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`
+     and the rest of the 60 the root run listed below.
+   - Free-space floor: `cli --test gdfl_run_logs` (2 tests) and the `gdfl_import_command` tests refuse
+     `disk_full` when the container has under 10 GiB free (the store's floor, CONC-031); with space freed
+     they pass.
+4. CI shell gates red on the base (CONTEXT §4.10, BASE-REDS-1023): 1c, 1d, 10, 11, 12, 19, 23, 27b, 30;
+   R4-05 adds nothing inside them (see "Gates so far").
 
 ## Prerequisites
 
@@ -368,3 +407,10 @@ Store writes needed: none.
   differ); 10b pass on both.
   NEXT: the workspace's 175 test binaries, non-root with umask 0022, on this merged tree (running);
   then STATUS.
+- 2026-10-25, final: the 175 test binaries of the merged tree run as the non-root user (umask 0022):
+  every binary passes except `pull` lib (1: the base's `fixtures_are_built_not_pasted`), `cli` lib (1:
+  the boolean-search test that passes as root), `api` lib (2,594 tests: 2,571 pass, 16 ignored, the 6
+  base reds, the base's hanging `gaps_route` test), `cloud_mutants_bars` (the base's hang) and
+  `cli --test gdfl_run_logs` (2, `disk_full` below the 10 GiB floor at that moment; 4/4 pass once 21
+  stale test binaries of earlier builds were deleted). `origin/feat/db-fix` is still `cc0a3a0d`.
+  STATUS: BLOCKED on base and environment items only, each named at the top; code complete.
