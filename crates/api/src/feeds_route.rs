@@ -1023,6 +1023,10 @@ impl ImportReach {
 /// open days — a month's rows, at most 31 days of three kinds.
 /// UNVERIFIED: no test times the reach at two journal sizes (GF-1, gate 12;
 /// `docs/06-limits.md` L-GF1-33); the bound is L-R305-3's.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one reach from one journal snapshot: the open days, the open member keys and the window, read once"
+)]
 pub(crate) fn imported_to(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,

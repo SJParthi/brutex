@@ -237,8 +237,7 @@ impl DayRow {
         }
         let reason = self.reason.as_deref()?;
         pull::gdfl_import::hole_reasons()
-            .iter()
-            .any(|known| *known == reason)
+            .contains(&reason)
             .then(|| Hole {
                 reason,
                 repairable: pull::gdfl_import::hole_is_repairable(reason),
@@ -489,8 +488,11 @@ impl Parsed {
     /// the larger id, `None` before every run. O(log runs): one range probe
     /// of the start index (D-4896), for a refusal that carries no run.
     pub(crate) fn run_running_at(&self, at_ms: u64) -> Option<&RunLine> {
-        let at_s = at_ms / 1_000;
-        let (_, at) = self.runs_by_start.range(..=(at_s, u64::MAX)).next_back()?;
+        let seconds = at_ms / 1_000;
+        let (_, at) = self
+            .runs_by_start
+            .range(..=(seconds, u64::MAX))
+            .next_back()?;
         self.runs.get(usize::try_from(*at).ok()?)
     }
 

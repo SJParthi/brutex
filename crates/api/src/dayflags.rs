@@ -1415,6 +1415,10 @@ struct Superseded {
 /// very member: one name split and one resolve. One run that reopened two
 /// members of a day logs both members' refusals in one window, so the window
 /// alone never says which member a refusal is about.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one walk of a close's logged refusals: placed by run or by time, this member's or another's, superseded or later, in the order the doc states them"
+)]
 fn refusals_of(
     row: &Value,
     inst: &Instrument,
@@ -1468,7 +1472,7 @@ fn refusals_of(
         let (placed, by) = super::imports::placed_of(parsed, event_run, at_ms, close_run, next_s);
         match by {
             super::imports::PlacedBy::Run => {
-                out.placed_by_run = out.placed_by_run.saturating_add(1)
+                out.placed_by_run = out.placed_by_run.saturating_add(1);
             }
             super::imports::PlacedBy::Time => {
                 out.placed_by_time = out.placed_by_time.saturating_add(1);
@@ -1539,6 +1543,10 @@ fn refusals_of(
 
 /// The record's `import`: the journal row's standing, or `none` with whether
 /// the import has reached the day.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one record of a journal row: its standing, its late rows, its member and hole, and its refusals by run, each a field of the one answer"
+)]
 fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
     let Some(row) = rows.by_day.get(&day.to_string()) else {
         let reached = rows.last_day.is_some_and(|last| day <= last);

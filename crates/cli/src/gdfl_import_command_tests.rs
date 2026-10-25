@@ -1230,6 +1230,10 @@ fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
 /// End to end, a tick store holding a stray file names it on the receipt
 /// of a run that read nothing. Every name is invented.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every census reason of every source, then the end-to-end receipt, in the order the doc states them"
+)]
 fn a_source_census_is_named_on_the_receipt() {
     let archive = pull::gdfl_archive::ArchiveCensus {
         ignored: 2,
