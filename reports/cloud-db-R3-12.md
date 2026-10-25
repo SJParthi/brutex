@@ -236,9 +236,44 @@ content, memory, wire, picker click) are M16 and M17 below, unmeasured here.
 - Named, NOT edited (typed lists outside R3-12's files, L-R312-06): `DbCalendar.svelte`'s feed list (WP-54, R3-02), `notes-coverage.js`'s dates (R3-04), the store segment words in `notes-labels.js` and `dayflags.js` (R3-13), `completeness.js` (R3-04).
 
 
+## Re-run after merging R4-18, 25 Oct (commit 7dd90988)
+
+A new cloud session on the branch at `d2d26724`. `origin/cloud/db-base-20261024` at `1dcc33e9`: GO
+present, HOLD absent. `origin/feat/db-fix` had moved to `bf9b1c8f` (Merge R4-18), so it was merged
+again before the final gates, as `7dd90988`. Conflicts only in the two append-only ledgers
+(`docs/04-invariants.md`, `06-limits.md`): both sides kept whole, the base's entries first; no line
+of the base's is removed (`git diff origin/feat/db-fix HEAD -- docs/04-invariants.md docs/06-limits.md`
+shows additions only). R4-18 touches three files under `web/` (`lib/quarantine.js`,
+`routes/ingest/panels/Quarantine.svelte`, `tests/quarantine.test.js`), none of them R3-12's.
+`git diff origin/feat/db-fix HEAD -- crates Cargo.toml Cargo.lock deny.toml` is empty. No code
+changed in this pass; every gate was run again on the merged tree:
+
+| gate | command | result | red at base? |
+|---|---|---|---|
+| fmt | `cargo fmt --all --check` | exit 0 | - |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | exit 0 | - |
+| deny | `cargo deny check` (cargo-deny 0.20.2, installed again here) | RED: advisories FAILED on RUSTSEC-2026-0386 (tokio 1.53.1) only; bans, licenses, sources ok | BASE ITEM: `Cargo.lock` and `deny.toml` equal the base's; BASE-DENY-1024 bumps tokio on the Mac. Not bumped here. |
+| test | `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` | RED, environment: 252 targets, 11,216 pass, 29 fail, 94 ignored; 5 targets red (`api`, `cli`, `pull`, `store`, `telemetry` lib) | every red is the container's (below) |
+| front-end tests | `npm ci && npm test` in `web/` (Node 22.22.0) | 1,620 tests, 1,617 pass, 0 fail, 3 cancelled: `tests/ask.test.js` 2-4 ("Promise resolution is still pending but the event loop has already resolved") | not R3-12's file; the same three as every earlier run under Node 22 |
+| W3 svelte-check | `npm run check` | 44 errors, 2 warnings, 11 files: the same files and per-file counts as the base listed in the final round | yes; none in a file R3-12 touched |
+| W4 unused CSS | `npm run build`, count of "unused css selector" | 0 | - |
+| build | `npm run build` | exit 0; `web/build` restored, never committed | W1 is the Mac's (R5) |
+| gate 27 | `./gl invariant-ids` | OK, 3,302 rows unique | - |
+| gate 27b | `./gl decision-numbers` | RED AT BASE: D-6247 heads two entries; a worktree of `origin/feat/db-fix` gives the same | yes |
+| gate 10 | ci.yml's gate 10 steps by hand (`source_scan`, `invariant_paths`, `gl invariant-tests`) | RED AT BASE: R427-11, HA-02, AG05-13 only; a worktree of `origin/feat/db-fix` names the same three; no R312 row named | yes |
+
+The 29 cargo reds: the 28 of the final round less `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`
+(it passed in this run: api lib has 8), plus two new R4-18 tests in `store` lib,
+`quarantine::tests::an_index_publish_refused_after_a_dropped_line_is_finished_by_the_next_apply` and
+`..._after_a_whole_line_is_finished_by_the_next_apply`: each sets the audit directory to mode `0o555`
+(`crates/store/src/quarantine_tests.rs:1242`) and expects the publish refused; the container runs as
+root, root writes anyway, and the apply returns `Ok(Dropped ..)` (line 1245). Same cause as the three
+`settings` tests beside them; not a file R3-12 changed or reads. The two `Barrier` hangs stay skipped
+(4 cores, 8 holders).
+
 ## Left (NEXT)
 
-- Nothing left for the cloud. At merge-back: the NEEDS THE MAC list below, a fresh `web/build`, and
+- Nothing left for the cloud (merged up to `origin/feat/db-fix` `bf9b1c8f`, R4-18, and every gate run again). At merge-back: the NEEDS THE MAC list below, a fresh `web/build`, and
   the base items (BASE-DENY-1024's tokio bump; gates 10, 27b and svelte-check red at base).
 
 ## Log
@@ -303,6 +338,11 @@ content, memory, wire, picker click) are M16 and M17 below, unmeasured here.
 - Merged `origin/feat/db-fix` `666ddf7f` (`5ce8d562`); the ten-times timer fix (`76f1c6d3`); every
   gate run (Final round above). STATUS BLOCKED on base and environment items only.
 
+### 2026-10-25 IST new session (GO present, HOLD absent at `1dcc33e9`)
+
+- Merged `origin/feat/db-fix` `bf9b1c8f` (R4-18) as `7dd90988`; every gate run again on the merged
+  tree ("Re-run after merging R4-18" above). STATUS stays BLOCKED on base and environment items only.
+
 ## Decision numbers
 
 D-7111 (the block D-7110..D-7119's second id, R3-12's): /db reads only what its view shows. No
@@ -357,7 +397,7 @@ Gates the container could not make green (run on the Mac after the merge):
 
 | # | command | expected answer |
 |---|---|---|
-| R1 | `cargo test --workspace --locked` (8+ cores, not root) | green, including the two `Barrier` tests skipped here and the 28 root, timing and fixture reds listed above; any red also red on `feat/db-fix` is a base item |
+| R1 | `cargo test --workspace --locked` (8+ cores, not root) | green, including the two `Barrier` tests skipped here and the 29 root, timing and fixture reds listed above (the R4-18 re-run); any red also red on `feat/db-fix` is a base item |
 | R2 | `cargo deny check` after BASE-DENY-1024 (tokio 1.53.3) | advisories ok; R3-12 does not touch the lock |
 | R3 | `cd web && npm run check` | the base's count (44 errors in 11 files on 25 Oct); none in an R3-12 file |
 | R4 | `cd web && npm test` under Node 24 | 0 fail, 0 cancelled (`ask.test.js` 2-4 are cancelled under Node 22 here) |
