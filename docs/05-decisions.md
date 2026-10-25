@@ -79322,8 +79322,49 @@ Repair round 7 (25 Oct, after verify r7):
     512-client figures), which is above the one-client bound the test
     holds. Each new step is bounded and measured (L-R315-29).
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-35);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-29.
+Repair round 8 (26 Oct, after verify r8):
+
+39. **A closed stderr is counted, never thrown, and the sheet says it**
+    (R315-36; verify r8, blocking 1). Neither command listened on
+    `process.stderr`, and Node's console listens only while it writes, so
+    the EPIPE a closed stderr reports a tick later killed a sheet mid-run
+    (exit 1, no `--out`, nothing said) and turned either command's end into
+    exit 1. Each `main` now takes `saidOn(process.stderr)` first: one
+    persistent listener and one count a stream, every line of the command's
+    own said through it, a line stderr did not take counted and none
+    written after a failure. The run goes on, `--out` is written whole, the
+    exit stays the run's verdict, and the sheet names the first line stderr
+    did not show and how many after it, as a note. Not taken: dropping the
+    run's progress lines when stderr is not a terminal, which would hide
+    what a run is doing from every reader; ignoring EPIPE with a bare
+    listener, which keeps the process alive and says nothing; and writing
+    the note to stderr, the one place a reader cannot see.
+40. **Every sheet still waiting on a stream hears its failure** (R315-37;
+    verify r8, blocking 2, mutant R8-M12). The one listener told only the
+    newest sheet, and no test could tell: deleting the line that handed it
+    over left every test green. Each stream now keeps the set of the sheets
+    whose writes have not ended; a failure ends every one of them, each
+    said once by its own size, and each leaves the set as it ends. Verify
+    r8's case (a sheet's write in flight behind another when the stream
+    fails) is a test that kills that mutant on the old code, and the
+    mutants of this round's code are each killed (L-R315-30). Not taken:
+    removing the line and its claim, since a sheet whose write was in
+    flight would then wait out its whole bound and say the wrong reason.
+41. **Verify r8's follow-ups.** A day the sheet took rather than found (a
+    month's first day) is said as not known to be a session, since nothing
+    the sheet asks during discovery says which days hold one; asking the
+    calendar for a held session was not taken here, as it adds a request
+    with its own build-in-progress protocol to every run that names a
+    month alone. Figures that round to one are said to the byte. The heap
+    target is the page's script heap, said so beside L-R315-01, not the
+    renderer's memory. A polling stand-in's capped settle and an
+    interaction's click that drew no frame or did not settle are the
+    machine's clock in a test, named, never pinned (R315-38). The byte
+    figures of one build (item 36) are one build's: verify r8's build of the
+    same tree weighed 4 B more on every page.
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-38);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-30.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
