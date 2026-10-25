@@ -193,7 +193,59 @@ close's refusals, the receipt's census read), for the Mac to number.
 
 ## NEEDS THE MAC
 
-To be written at the end (spec section 13).
+Every command below is the spec's section 13, run as written there; this list adds only what
+this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925`, worktree
+`$W/wt/P-IA-10a` on `fix/db-IA-10a` holding this branch. Never `:8080`, never the real store.
+
+1. **Gates on the Mac (13.1).** `cargo fmt --all --check`;
+   `cargo clippy -p pull -p api -p cli --all-targets -- -D warnings`;
+   `cargo test -p pull -p api -p cli --locked`; `cargo build --release -p api -p cli`; then
+   `stop.sh`/`shadow.sh`/`serve.sh IA-10a 8405`. Expected: every gate green (the 30 failures and
+   two hangs listed under Gates are this container's root user and 4 cores; on the Mac, as a
+   normal user, they pass as they do on `feat/db-fix`); `OURS`.
+2. **Branch coverage.** `cargo +nightly llvm-cov --branch --no-fail-fast --locked -p api -p cli -p pull --lib`
+   over the eight touched source files. Expected: every line and branch this diff adds covered,
+   except `import_journal.rs`'s `u32::try_from(self.runs.len())` `Err` arm (IA-11r's line, a
+   journal of more than `u32::MAX` `run` lines), named here rather than excused.
+3. **Mutants not finished here** (see Gates for what was run and its result): the remainder by
+   `cargo mutants --in-diff <(git diff origin/feat/db-fix -- crates/api/src crates/pull/src crates/cli/src/gdfl_import_command.rs ':!*_tests.rs') -p api -p pull -p cli`.
+   Expected: 0 missed.
+4. **Real journal, unchanged answers (13.2).** Re-count the real journal first
+   (`awk '$1!="run" && $4 ~ /\+/' <journal> | wc -l` expected 0;
+   `grep '^incomplete' <journal> | grep -o 'reason=[a-z_]*' | sort | uniq -c` expected only
+   `14 reason=filing` among hole-or-filing reasons, none of the five hole reasons). Then the eight
+   `curl | jq -S` answers of 13.2 from the baseline build and from this build on 8405, `diff`ed
+   after deleting only `base_filter`, `member`, `member_symbol`, `hole`, `holes`,
+   `holes_unrepairable`, `journal_days_holes`, the day band record's `placed`, `run_from`. Expected:
+   identical; `holes` empty or all 0, `holes_unrepairable` 0, no `hole` object on any row;
+   `/feeds.json`'s open days unchanged; one F&O stock month and one illiquid strike's
+   provenance month the same.
+5. **Member keys and holes on the shadow's cloned journal (13.3).** Append the four synthetic
+   lines of 13.3 (and the share-member pair on `*+NSE-CASH-<sym>` and `*+NSE-CASH-<sym>.BE`) to
+   `$W/shadow/IA-10a/imports/gdfl.journal`, restart. Expected exactly as 13.3 lists: the two
+   member rows with `base_filter` `*` and their members; `hole` `{needs_month_generation, true}`
+   and `{bars_differ_held, false}`; holes by reason 1 + 1, `holes_unrepairable` 1; the `*` row
+   `done`; no invented `logged_only` row; NIFTYIT's day band and provenance month show `D` as a
+   hole, NIFTY's unchanged; `/audit.json` agrees with `/imports.json`. Then a lone
+   `begin indices D2 *+NSE-INDEX-NIFTYIT`: expected `/feeds.json` does NOT list `D2` as an open
+   segment day; the reach's `from` counts 1 open member key and names it (D-TBD-IA-10a-1 item 1).
+   `/db` in the browser pane only if no other agent uses it: NIFTYIT's band shows `D`'s hole.
+6. **Timings (13.4).** n = 200 sequential GETs each (`curl -s -o /dev/null -w '%{time_total}'`)
+   of `/imports.json?feed=gdfl`, `/dayflags.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2019-10&to=2019-10`
+   and `/provenance.json?feed=gdfl&instrument=NSE-INDEX-NIFTY&timeframe=1s&month=2019-10`, on the
+   real journal and after appending 100,000 synthetic `run` lines to the shadow's journal; p50,
+   p99, max. Expected: `/dayflags.json` of the same order at both sizes (11 Oct before D-4896:
+   p50 1.74 ms against 103.85 ms). Write the numbers into L-IA-39's after-row in
+   `docs/06-limits.md` beside this container's bench figures.
+7. **The receipt (13.5)** on the private root `$W/shadow/IA-10a-rx` exactly as 13.5 (the `bars`
+   link moved aside, never deleted; the CM archive path from the local configuration, never
+   written down). Expected: the census lines (ignored, misfiled, invalid, each at most 16 names
+   and "and N more"); on any day of 2026 the horizon line (`last_day` 2026-12-31, `ends_soon`
+   true, `owed_year` 2027; `days_left` is 68 on 24 Oct, so 31 Dec minus the run's day); the real
+   store's journal size and mtime unchanged. And `indices tickstore` if configured.
+8. **Gate 11's three loose allowlist entries** (dayflags rule 4 and rule 6, imports rule 6):
+   warnings, not failures; for the allowlist's owner to drop at merge-back if wanted.
+9. **Store writes:** none (13.6).
 
 ## Log
 
