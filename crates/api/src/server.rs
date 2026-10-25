@@ -1643,6 +1643,9 @@ mod gaps_route;
 mod instruments_route;
 #[path = "month_change.rs"]
 mod month_change;
+/// `GET /pull/quarantine.json` and `POST /pull/quarantine` (R4-18).
+#[path = "quarantine_route.rs"]
+mod quarantine_route;
 /// `/reasons.json`: the reasons dictionary, served once per build (READ-02, R4-05).
 #[path = "reasons_route.rs"]
 mod reasons_route;
@@ -1684,6 +1687,7 @@ pub use instruments_route::{MASTER_NOTE_HEADER, MASTER_STATE_HEADER, UNIVERSE_ST
 use instruments_route::{instruments_json, universe_reach_json};
 pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
+use quarantine_route::{quarantine_apply, quarantine_plan_json};
 use repair_route::repair_plan_json;
 use settings_route::{settings_json, settings_post};
 pub(crate) use store_route::behind as census_behind;
@@ -16215,6 +16219,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             )),
         )
         .route("/pull/repair.json", axum::routing::get(repair_plan_json))
+        // THE QUARANTINE (R4-18): its plan, and the press that applies it.
+        .route(
+            "/pull/quarantine.json",
+            axum::routing::get(quarantine_plan_json),
+        )
+        .route("/pull/quarantine", axum::routing::post(quarantine_apply))
         .route("/pull/fno", axum::routing::post(pull_fno))
         // THE ONE PRESS. `/pull/spot` and `/pull/fno` above are unchanged and
         // still serve one leg each; this starts a run that drives them itself,
