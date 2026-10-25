@@ -1845,3 +1845,129 @@ files' own rows, read from folders the deploy names (D-5193); this package
 measured none of them on the real store beyond the read-only shadow check its
 report names, and the populated tables in its tests are invented (shares
 `ZZ*` and `Q&Q`, prices ending 7777).
+
+## Symbol changes read again — 24 Oct 2026 (R4-22, G2, D-7311)
+
+`CLAUDE.md` §3 rule 1. The 7 Oct read above is kept as it was; this is a NEW
+dated read of the same file, made because six share stems in the GDFL archive
+stop the day before a new ticker starts and the 7 Oct transcription named none
+of them, and because the 14 Oct options import added about 277 underlyings to
+the store.
+
+**The file.** NSE's `symbolchange.csv`,
+`https://nsearchives.nseindia.com/content/equities/symbolchange.csv`, fetched
+over HTTPS on 24 Oct 2026 at 18:07:31 IST and again at 18:09:24 IST: both
+times 69,403 bytes, 1,071 lines (LF count), sha256
+`b080e538a5c3c8b5cc1fd048768b2b660c880cc38b3c2bafc7c0f1b2f983566e`. Header
+`NAME OF THE COMPANY,OLD SYMBOL,NEW SYMBOL,EFFECTIVE DATE`; no row holds a
+quoted comma (every row is four fields). The bytes are not kept in the
+repository; the digest is of the bytes read, and the exchange may serve other
+bytes later. Every one of the 18 rows transcribed from the 7 Oct read is still
+in this read with the same date.
+
+**The check, re-run.** The rows whose old or new symbol the store held on 24
+Oct 2026 (358 symbols: every `bars/gdfl/NSE/CASH/`, `bars/gdfl/NSE/FNO/` and
+`bars/zerodha/NSE/CASH/` key, listed read-only): 88 rows. Those dated before
+2018 change no file of the GDFL archive (2018-09-03 on) or of the Zerodha
+window (2018-01-01 on) and are not transcribed. Of the rest, the 18 already in
+`core::alias::SYMBOL_CHANGES` and these:
+
+| Old symbol | New symbol | Date in the file | Old symbol held by the store | Applied |
+|---|---|---|---|---|
+| `BAJAJTEMPO` | `FORCEMOT` | 19-AUG-2019 | no | yes |
+| `RNAM` | `NAM-INDIA` | 23-JAN-2020 | no | yes |
+| `ADANIGAS` | `ATGL` | 13-JAN-2021 | no | yes |
+| `MAGMA` | `POONAWALLA` | 05-AUG-2021 | no | yes |
+| `ANGELBRKG` | `ANGELONE` | 11-NOV-2021 | no | yes |
+| `MINDAIND` | `UNOMINDA` | 05-AUG-2022 | no | yes |
+| `TWL` | `TITAGARH` | 19-JUN-2023 | no | yes |
+| `GET&D` | `GVT&D` | 05-NOV-2024 | no | yes |
+| `KPIT` | `BSOFT` | 26-FEB-2019 | yes (CASH, FNO) | **no** |
+| `TATAGLOBAL` | `TATACONSUM` | 27-FEB-2020 | yes (CASH, FNO) | **no** |
+| `CENTURYTEX` | `ABREL` | 10-OCT-2024 | yes (CASH, FNO) | **no** |
+| `INFIBEAM` | `CCAVENUE` | 03-FEB-2026 | yes (CASH, FNO) | **no** |
+| `GUJGASLTD` | `GUJENERGY` | 01-JUL-2026 | yes (CASH, FNO) | **no** |
+| `ICICIPRULI` | `ICICILIFE` | 23-OCT-2026 | yes (CASH, FNO, Zerodha CASH) | **no** |
+
+A row whose old symbol the store holds under no key of its own is applied:
+filing it only adds the old stem's days to the series the store already keys
+under the new symbol. A row whose OLD symbol the store holds under its own key
+is read and NOT applied: applying it re-keys stored months and refuses every
+options run that wants the new symbol until the re-key records the old
+contracts superseded (D-3354 item 4), and `ICICIPRULI` is a symbol of
+`core::universe::FNO_UNDERLYINGS`, so applying its row would move an F&O list
+share off its own key (`CLAUDE.md` §1). Each held-back row is a store step and
+a decision, never a code change made here.
+
+**The 7 Oct statement about `TATAGLOBAL` and `KPIT`.** The section above says
+`TATAGLOBAL -> TATACONSUM` and `KPIT -> BSOFT` have no row in the file as read
+on 7 Oct 2026. Today's bytes hold both rows. The 7 Oct bytes are not on this
+disk, so whether NSE added the rows since or the 7 Oct check missed them is
+UNVERIFIED. Nothing applied changes either way: both stay two keys (D-3354
+item 3) until the re-key decision above is made.
+
+**RUCHI -> PATANJALI.** NSE's file holds no row naming `RUCHI` or `PATANJALI`
+(read 24 Oct 2026). The hand-over is sourced from its own circular instead:
+[NSE/CML/52890](https://nsearchives.nseindia.com/content/circulars/CML52890.pdf),
+Circular Ref. No. 0786/2022, 7 July 2022, "Change in name and symbol of Ruchi
+Soya Industries Limited": existing symbol `RUCHI`, new symbol `PATANJALI`,
+Ruchi Soya Industries Limited to Patanjali Foods Limited, "shall be changed
+w.e.f. July 13, 2022". Fetched over HTTPS on 24 Oct 2026: 428,781 bytes,
+sha256 `fb719fd261a2e29eab4d3daa99982a85156b1fcebbe6992643af5bdb7fb47794`.
+Applied as `RUCHI -> PATANJALI`, effective 2022-07-13.
+
+## NSE equity series codes — read 24 Oct 2026 (R4-22, G3, D-7310)
+
+`CLAUDE.md` §3 rule 1. The capital-market archive names a share's day file
+`<SYM>.NSE` for its own series and `<SYM>.<CODE>.NSE` for another; until R4-22
+the codes the reader filed (`BE`, `BZ`, WP-12f) were UNVERIFIED and every other
+code was a silent skip.
+
+**NSE's definitions.** "Legend of series",
+`https://www.nseindia.com/static/market-data/legend-of-series`, fetched over
+HTTPS on 24 Oct 2026 at 18:12:34 IST: 322,319 bytes as decoded, sha256
+`a33d1ef92e79ea6b303dd173b3706013f80402bf7f52d07bf8ff5403486a30d2`. The page
+carries per-request tokens, so another read's digest differs; its table says
+"Updated on: 19/09/2024". What the rule relies on, as the table states it
+(security; rolling settlement; trade for trade):
+
+| Security | Rolling settlement | Trade for trade |
+|---|---|---|
+| Fully paid equity shares/ETF's | `EQ` | `BE`/`BZ` |
+| Fully paid equity shares SME | `SM` | `ST`/`SZ` |
+| Partly paid equity shares | `E@` | `X@` |
+| Units of mutual funds (close ended) | `MF` | `ME` |
+| Non convertible preference shares | `P@` | `O@` |
+| Fully convertible preference shares | `Q@` | `F@` |
+| Non convertible debt instruments | `N@`, `Y@`, `Z@`, `A@`, `B@` | `@@`, `U@`, `M@` |
+| Fully convertible debt instruments | `D@` | `S@` |
+| Convertible warrants | `W@` | `K@` |
+| Units of InvITs | `IV` | `ID` |
+| Gold bond; government securities; state development loans; treasury bills | `GB`; `GS`; `SG`; `TB` | — |
+| Units of REITs | `RR` | `RT` |
+| Rights entitlement | — | `BE` |
+| Buyback through the exchange route; block deals | `BO`; `BL` | — |
+
+(`@` is a digit or a letter, with the exceptions the page lists.) The page
+also says "BE/ST = ... presently being used for the securities moved to Trade
+for Trade (Surveillance)" and "BZ /SZ= The securities moved to Trade for Trade
+(Z category) for non-compliance of certain listing conditions as per SEBI
+circular no. CIR/MRD/DSA/31/2013 dated September 30, 2013". `T0` (seen in the
+archive and in the masters below) is not on the page: what it means is
+UNVERIFIED, and the rule does not need it.
+
+**The codes measured on disk.** The dated NSE security master
+`<store>/session-masters/NSE_CM_security_29092026.csv.gz` (its receipt: source
+`https://nsearchives.nseindia.com//content/cm/NSE_CM_security_29092026.csv.gz`,
+1,263,465 bytes, sha256
+`b8baf047456927440c3a5b61cd3d67fbf0f1903685afd9b3642e976688649467`), column
+`SctySrs`, counted read-only on 24 Oct 2026: `EQ` 4,464 rows, `BE` 3,358, `BZ`
+231, `BL` 3,591, `T0` 525, `SM` 797, `ST` 797, `GS` 293, `TB` 1,035; 453
+distinct codes across the 42 masters on disk (2026-08-03 to 2026-09-30).
+
+**The written rule** (`pull::gdfl_cm::CmScope::series_refusal`): a share's own
+stem is `EQ` and is filed under the share's key; `BE` and `BZ` are filed under
+the share's key too (WP-12f, D-4878 item 8); every other code, seen before or
+not, is refused by name as `series_not_stored:<code>` and never filed. A day
+holding both a share's own file and its `BE` or `BZ` file refuses both by name
+(WP-12f's rule).

@@ -1559,7 +1559,12 @@ mod cm_extremes {
             )
         );
         for (bytes, want) in [
-            (Vec::new(), CmRefusal::HeaderUnknown),
+            (
+                Vec::new(),
+                CmRefusal::HeaderUnknown {
+                    shape: pull::gdfl_cm::HeaderShape::of(b""),
+                },
+            ),
             (header.clone().into_bytes(), CmRefusal::NoSessionRows),
             (cut.into_bytes(), CmRefusal::MalformedRow { line: 2 }),
             (quote_only.into_bytes(), CmRefusal::NoSessionRows),

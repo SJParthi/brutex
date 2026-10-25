@@ -2471,6 +2471,15 @@ fn cm_jobs<'a, L>(
                 continue;
             }
             Some(Ok(None)) => {
+                // THE WRITTEN SERIES RULE (G3, R4-22, D-7310): a share's day
+                // file of a series the store does not file is refused by
+                // name where the run wants the share, never skipped unnamed.
+                if let Some(why) = stem.and_then(|stem| listing.series_refusal(stem))
+                    && why.filed_as().is_none_or(|symbol| run.wants(symbol))
+                {
+                    listed.refused.push((index, Refused::cm(file.name(), &why)));
+                    continue;
+                }
                 // A stem of the day's own folder no scope files: kept, the
                 // few closest to each swept symbol by name, for
                 // `absent_from_listing` (D21; IA-16 repair 2).
