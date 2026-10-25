@@ -68,6 +68,99 @@ Not measured here (NEEDS THE MAC item 7): the socket's share, the shadow server,
   (in `ci.yml`) and measured; 10, 11, 19 differ only in counts. Not run here: 1e (a whole-workspace
   build and test with `web/` moved aside: the workspace test gate covers its test half).
 
+## Alert kinds this part appends (for the Mac to settle with R4-09 and R3-21 at merge-back)
+
+KINDS at `origin/feat/db-fix` `bf9b1c8f` ends at 21; R3-21 is not merged. R4-05 appends exactly four
+kinds, in this order, after the last merged kind:
+
+| Kind | Word | Key builder |
+|---|---|---|
+| 22 | `vendor_format_changed` | `alerts::vendor_format_changed` -> `Keyed` |
+| 23 | `vendor_restated` | `alerts::vendor_restated` -> `Keyed` |
+| 24 | `scrub_stale` | `alerts::scrub_stale` -> `Keyed` |
+| 25 | `credential_dead` | `alerts::credential_dead` -> `Keyed` |
+
+R4-09 also names `scrub_stale` and `credential_dead`. KINDS is append-only: whichever of R3-21, R4-05
+and R4-09 merges later renumbers its own rows to follow the last merged kind, keeps the words, and
+never takes a second number for a word already merged (if R4-09 lands `scrub_stale` and
+`credential_dead` first, R4-05 drops its two rows and keeps its key builders on R4-09's numbers). The
+KINDS pin (in `alerts::tests::an_older_unacknowledged_alert_never_leaves_view`), the `appended()` helper and the unknown-kind probes (`kind_word(26)`) move with the count.
+
+## Extreme cases (tests; each fails before the change and passes after)
+
+1. Empty input: `an_empty_table_names_every_code_and_no_row` (reasons gate).
+2. One-record input: `a_one_row_table_names_every_other_code`.
+3. Duplicate rows: `a_duplicate_row_is_named_once`.
+4. Maximum input: `titleFor is one Map lookup at any table size` (100,000-row table, web) and
+   `a_long_sentence_is_served_whole`.
+5. Garbage parameters: `a_tag_that_is_not_a_header_value_is_not_sent_and_never_answered_304`;
+   `garbage_alert_parameters_are_refused_by_name` (kind 26).
+6. Concurrent requests: `reasons_json_p99_is_under_five_ms_cold_warm_and_with_sixty_clients`
+   (60 clients, half revalidating).
+7. A reader from a newer build (out-of-order versions): `a_queue_holding_a_kind_past_this_build_reads_every_record_by_name`.
+8. Torn or refused answers: `a refused, thrown or foreign answer is a table with its reason, never a
+   throw or a second request` and `a body that holds fewer usable rows than it counts says so and keeps
+   the good ones` (web).
+9. COMBINATION: `a_missing_row_an_orphan_and_a_duplicate_at_once_are_each_named`.
+10. COMBINATION: `an_acknowledged_dead_credential_is_put_again_and_another_day_beside_an_open_one`;
+    `a_refused_part_writes_nothing_beside_an_open_alert_of_its_kind`.
+11. OUT OF THE BOX: `a_key_part_cannot_forge_another_key` (a symbol holding the key separator) and
+    `no_alert_text_carries_a_secret_shape` / `a_secret_shaped_text_is_refused_with_its_row` (a reason
+    sentence or alert part shaped like a token).
+12. Renamed or long symbols: `a_long_restated_symbol_cuts_the_text_never_the_key`.
+13. Unknown state: `an_unknown_stage_state_is_shown_as_unknown_never_as_ok` (web, FM-280).
+
+## Files outside ownership (each minimal)
+
+- `crates/pull/src/lib.rs` (`pub mod reasons;`), `crates/api/src/server.rs` (mod and route lines),
+  `crates/api/src/pool_table_tests.rs` and `crates/api/src/operation_audit_tests.rs` (one row each):
+  the shared lines the spec lists.
+- `web/src/lib/ImportPanel.svelte` (titles, control chip, unknown-state tag; spec 4.3).
+- `web/vite.config.js`: the dev proxy names `/reasons.json` (W2's `proxy.test.js` fails without it).
+- `.github/gates_routes.rs` (`/reasons.json` in the compiled-table owed list), `.github/gates_tree.rs`
+  (`R4_05_LITERAL`, gate 1d), `.github/workflows/ci.yml` (gate 23 declares two measurement prints).
+- `docs/02` §38, `docs/04`, `docs/05`, `docs/06` rows; `web/build/**` rebuilt.
+
+## D-numbers used
+
+`D-TBD-R4-05-1` (row shape and controls), `-2` (the gate's sources and method), `-3` (`/reasons.json`
+once per build, ETag, 304), `-4` (kinds 22 to 25 and their key rules), `-5` (unknown state never OK;
+the title cut). The cut itself is cited as D-6900.
+
+## NEEDS THE MAC
+
+Spec section 6 in full, steps 1 to 10, unchanged (a shadow on `:8452`, GET only):
+
+1. `curl -s -D /tmp/r405.h http://127.0.0.1:8452/reasons.json -o /tmp/r405.json` -> 200, JSON, an
+   `ETag` of the form `"<build>.<16 hex>"`; again with `If-None-Match: <that etag>` -> 304 (implemented).
+   `jq '.rows | length' /tmp/r405.json` -> 184, the count `cargo test -p pull reasons` checks.
+2. `jq '.rows[] | select(.code=="needs_month_generation")' /tmp/r405.json` -> a sentence and the
+   control `press Repair`; the same for `repair_in_open_month`, `month_superseded`, `bars_differ_held`,
+   `repair_refused`, `repair_impossible`.
+3. For `o` in incomplete, refused, open:
+   `curl -s 'http://127.0.0.1:8452/imports.json?feed=gdfl&outcome=<o>' | jq -r '.rows[].reason // empty' | sort | uniq -c`
+   -> every word is a `code` in `/tmp/r405.json`; expected zero misses (record the words and counts).
+4. NIFTY first: one NIFTY spot day and one NIFTY options day from step 3, then BANKNIFTY, one F&O stock,
+   one illiquid strike: each reason has a sentence and an action (a count of 0 is evidence).
+5. `/ingest` and `/audit` in the browser: hover shows the sentence, the action is the control label, no
+   new paragraph, an unknown state reads `unknown state <word>`. Screenshot.
+6. `BRUTEX_STORE=$W/shadow/R4-05 $W/tgt/bin-R4-05/release/cli alerts` and `... alerts --older` -> exit 0,
+   kinds 1..21 named as before, no `UNKNOWN` for an old record. Never `--ack` or `--replace-damaged`.
+7. Bench on the shadow: `/reasons.json` n=200 sequential GETs cold and warm, and 60 concurrent clients,
+   with no import running and once with an import writing to a private fixture store: p99 under 5 ms.
+8. Gates after the final `git merge feat/db-fix`: fmt; `cargo clippy -p pull -p api --all-targets -- -D warnings`;
+   `cargo test -p pull -p api --locked` as a NON-ROOT user; `(cd web && npm run build && npm test)` and
+   svelte-check under Node 24; `cargo deny check` (expected green once BASE-DENY-1024 bumps tokio to
+   1.53.3; red here only on RUSTSEC-2026-0386); `cargo llvm-cov --branch` (nightly; this container has
+   only the pinned stable 1.97.1, so branch coverage was not measured here) and
+   `cargo mutants --in-diff <diff of reasons.rs, alerts.rs, reasons_route.rs vs feat/db-fix> -p pull -p api`
+   (expected: 37 mutants, 0 missed) if this report does not show them run.
+9. Merge only after `Merge R3-21:` is on feat/db-fix (or the link is cut); renumber the appended kinds
+   to follow the last merged kind (see the kinds table above, and R4-09) and re-run the KINDS pin test.
+10. `$W/state/fix/stop.sh R4-05`.
+
+Store writes needed: none.
+
 ## Process slips, said plainly
 
 - Three shell commands in this session named or ran the Py-language interpreter by mistake: a version
@@ -192,3 +285,35 @@ Not measured here (NEEDS THE MAC item 7): the socket's share, the shadow server,
   `watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`
   `zerodha_verify::tests::a_refused_open_keeps_the_hosts_words`
   `zerodha_verify::tests::a_write_beside_a_merge_that_fails_is_named`
+- 2026-10-25 (new cloud session, GO without HOLD at start): the branch tip was `707d1476` (the last
+  session had merged `666ddf7f`: R3-13, DATA-1w). Merged `origin/feat/db-fix` `bf9b1c8f` (R4-18):
+  conflicts textual only (server.rs mod lines, docs/04 and docs/06 sections), resolved both in merge
+  order (`e0dfd034`); `web/build` rebuilt and reproduced by a second build (`9d84b605`).
+  On the merged tree: `cargo fmt --all --check` clean; `cargo build --workspace --all-targets --locked`
+  clean; `cargo clippy --workspace --all-targets --locked -- -D warnings` EXIT 0;
+  `cargo test -p pull --lib --locked -- reasons:: alerts::` 69 pass, 1 ignored, 1 fail (the root-only
+  `create_fresh_returns_a_refusal_that_is_not_already_exists_as_the_host_gave_it`, which PASSES run as a
+  non-root user); `cargo test -p api --lib --locked -- reasons_route pool_table operation_audit` 39 pass;
+  `cargo deny check`: advisories FAILED on RUSTSEC-2026-0386 only (the base item; bans, licenses,
+  sources ok).
+  Coverage (`cargo llvm-cov`, stable 1.97.1; `--branch` needs nightly, refused here: NEEDS THE MAC):
+  `pull/src/reasons.rs` 100% regions, functions and lines; `api/src/reasons_route.rs` 100%;
+  `pull/src/alerts.rs` 93% of the whole file from the reasons/alerts filter, and NONE of the 177 lines
+  this part added to it is missed (no zero-count line, no zero-count region on any added line).
+  The workspace's 173 test binaries run one by one as a NON-ROOT user (`useradd tester`, binaries built
+  by `cargo test --workspace --locked --no-run`): every binary passes except `pull` lib (2 fails:
+  `gdfl_cm::tests::fixtures_are_built_not_pasted`, which names pasted GDFL CM rows in
+  `crates/cli/src/tick_second_check_tests.rs`, a DATA-1w file of the base this part does not touch; and
+  `gdfl_dropbox::tests::a_missing_link_is_a_named_wait`, which passes under umask 0022: the test user's
+  umask 0002 made the config directory too open), `cli` lib (16 fails, all in
+  `gdfl_import_command*` and one boolean-search integration test, files this part does not touch; the
+  run overlapped a disk-full moment, to be re-run), `api` lib (the slow-reader deadline tests and the
+  hanging `gaps_route` test, as before; files this part does not touch) and `cloud_mutants_bars`
+  (timed out on the hanging `spot_json_is_refused_by_name_when_every_store_read_slot_is_held`).
+  Mutants: `cargo mutants --in-diff` found 37 mutants (22 reasons.rs, 12 alerts.rs, 3 reasons_route.rs);
+  the first run's baseline passed, then the container's disk allowance ran out (cargo-mutants' copy);
+  freed (the coverage target), not yet re-run. HOLD was set on the base during this step: this save
+  point is pushed and I wait.
+  NEXT (when released): `cargo mutants` on the 37 (pull with `-j 1`, then api), re-run the 16 `cli`
+  fails and the `api`/`pull` fails above by name on the unmodified base `bf9b1c8f` (non-root), then
+  STATUS: DONE or BLOCKED-complete on base items only.
