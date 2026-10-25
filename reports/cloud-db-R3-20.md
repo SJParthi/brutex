@@ -1,12 +1,153 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
-Branch `cloud/db-R3-20-20261024`, cut from `origin/feat/db-fix` at `e851da1ca` (Merge DATA-2).
-Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R3-20.md`.
+Branch `cloud/db-R3-20-20261024`. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R3-20.md`.
+Prerequisites IA-16, R3-16, R3-36 (and SC-4) are merged on `feat/db-fix`. Newest `origin/feat/db-fix`
+merged: `bf9b1c8f` (Merge R4-18), merge commit `373fbe03` (25 Oct).
 
-Prerequisites, all merged at `e851da1ca` (`git log origin/feat/db-fix --first-parent --merges`):
-IA-16, R3-16, R3-36, SC-4.
+HELD at 21:05 IST, 25 Oct: `HOLD` on the base branch (`17d214c2`, "HOLD all cloud parts except IA-10a
+and IA-17b until the 23:00 reset"), no `GO-R3-20`. Code and tests are pushed at `faf0ed8c`.
+
+## Done
+
+- `crates/store/src/recover.rs` — the door: `plan` (read-only), `recover` (writes a NEW revision of the
+  kept bars, promotes it, appends a 256-byte record), `note_reread`, `read_record`, `record_path`,
+  `RecoverError` (every refusal by word), `Recovered::how`; the per-thread cut scope (`within`/`scoped`).
+- `crates/store/src/file.rs` — `read_header` applies the door's cut on the door's own thread only, for
+  the exact bytes it was planned against; `open_existing_at` is `pub(crate)`.
+- `crates/store/src/recover_tests.rs` — 30 tests (list below).
+- `crates/cli/src/month_recover_command.rs` — `cli month-recover VENDOR EX/SEG/SYM[/CONTRACT] RUNG
+  YYYY-MM --plan|--yes`: plan, recovery, read-again lines in the GDFL import journal (reason
+  `store_damaged`), end record in `audit/<vendor>.recoveries`, the note; 11 tests in
+  `month_recover_command_tests.rs`.
+- Bench rows C-RC-01 / C-RC-02 (`crates/store/benches/ratio/recover.rs`), store step S-52, the D-7093
+  entry, L-IA-40 and L-R320-01..05, store format §44, invariants R320-01..10 (texts for the Mac to land).
+- 25 Oct: three workspace-test refusals of this part fixed (sweep-wiring list, S-52's writers-stopped
+  prerequisite wording, a D-4911 citation in a crate with no docs/05 heading); coverage work (below).
+
+## Left
+
+1. Re-measure coverage after the 25 Oct tests (last measured just before them: recover.rs lines
+   916/924, branches 102/104; month_recover_command.rs 356/392, 30/34 — the tests added after that
+   target every remaining line and branch named by the lcov run).
+2. `cargo mutants --in-diff` on recover.rs, file.rs's diff and month_recover_command.rs (installed
+   here: cargo-mutants 27.1.0; not run yet).
+3. Merge the newest `origin/feat/db-fix` again before the final gates; rerun fmt, clippy, the touched
+   suites.
+
+## Gates (commands and results)
+
+| gate | command | result |
+|---|---|---|
+| fmt | `cargo fmt --all --check` | clean (25 Oct, after the last commit) |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean, EXIT 0 (25 Oct, after the R4-18 merge); `-p store -p cli` clean after the last commit |
+| tests | `cargo test --workspace --locked --no-fail-fast` | 33 failures on the merged tree; 3 were this part's and are fixed (each rerun green: `sweep_wiring_tests` 22 pass, `decision_citations` 4 pass, `rehearsal` 16 pass). The other 30 are the container's: tests that `chmod` a file or directory and expect a refusal (this container runs as uid 0, which ignores modes: settings, sink, census link_tests, gdfl_dropbox, gdfl_import ia16, alerts, scrub_blocks, watchdog, zerodha_verify, quarantine index-publish, pullrun journal extremes), slow-reader timing tests (head_deadline_body_tests, feeds_route window, detail admission), `gdfl_cm::fixtures_are_built_not_pasted` (names DATA-1w's `tick_second_check_tests.rs`), and two tests that hang at 0% CPU (`gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`, `cloud_mutants_bars::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`; stopped by me). The hangs, the api timing failures and the pull permission failures were reproduced on a worktree of the unmodified base `bf9b1c8f` (same result); none touches this part's files (`crates/api` is not in the diff). |
+| store suite | `cargo test -p store --lib --locked recover` | `ok. 30 passed; 0 failed` |
+| cli suite | `cargo test -p cli --lib --locked month_recover` | `ok. 11 passed; 0 failed` |
+| deny | `cargo deny check` | `advisories FAILED, bans ok, licenses ok, sources ok`: RUSTSEC-2026-0386 (tokio 1.53.1), a BASE item (BASE-DENY-1024 bumps tokio; this branch never touches Cargo.lock) |
+| gate 30 | `rustc --edition=2024 -D warnings .github/gates_store_steps.rs` then `check config/store-steps.toml --merges … --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml` | no refusal names S-52 or R3-20; the 5 refusals left are the base's own `merged = false` flags (IA-1, IA-4, R4-18, R4-27, R3-17) |
+| CI shell gates | every `Gate N` block of ci.yml (24 Oct run) | red only where the base is red (1c, 1d, 10, 11, 12, 19, 23, 27b, 30; 13a/13b need a non-gate build step); within each the branch's refusals equal the base's (24 Oct log) |
+| coverage | `cargo +nightly llvm-cov --branch` over `-p store --lib -- recover` and `-p cli --lib -- month_recover store_write` | in progress (Left 1). store_write.rs: every line and branch of this branch's hunks is covered; its 6 unreached lines and 3 branches are base test code outside the diff |
+| mutants | `cargo mutants --in-diff` | not run yet (Left 2) |
+
+## Measurements (p50 / p99 / max, n, method)
+
+- C-RC-01, recover a torn month (22,500 kept bars, 100 torn) with 1x / 10x / 100x months stored:
+  p50 49.2 / 46.2 / 48.2 ms, p99 64.5 / 55.7 / 60.6 ms, max 73.5 / 57.8 / 71.4 ms, n = 20 each;
+  min-of-5 ratio 0.991x (10x) and 1.039x (100x) against the 3.0x ceiling. Method: `Instant` around one
+  `recover` call, a fresh copy of the torn month put back outside the timer; invented fixtures on the
+  cloud runner's disk (24 Oct, `cargo bench -p store --bench ratio --locked`, EXIT 0).
+- C-RC-02, one kept bar: 1,894,661 ps at 22,500 bars, 1,503,131 ps at 90,000 bars, ratio 0.793x.
+- The door is NOT O(1) and says so (L-IA-40): O(the month's bytes) per run, one attended run per month,
+  never a read path. The months stored beside it do not enter it (C-RC-01 flat). The full one-second
+  NIFTY month on the operator's drive is NOT MEASURED (NEEDS THE MAC 7).
+
+## Extreme cases (each a test; * = a combination; † = out of the box)
+
+1. every subset of a day's writes torn (records per block, length, each checksum entry, the slot) —
+   `a_month_cut_at_every_synced_write_recovers_to_its_last_good_commit`
+2. FM-062: a power cut inside a batch — `a_power_cut_inside_a_batch_is_named_and_repaired`
+3. empty: a month born in the open batch — `a_month_that_held_nothing_proven_is_refused_by_name_and_left_as_it_was`
+4. one record — `a_one_bar_month_recovers_its_one_bar`
+5. * maximum (44,640 bars, the row ceiling) and a door cut off mid-way — `a_full_month_cut_while_its_door_was_cut_off_resumes_at_the_row_ceiling`
+6. month and year edges (00:00 on the 1st, 23:59 on the 31st, December) — `the_month_and_year_edges_name_the_first_and_last_days`
+7. * two commits torn in one batch at a year end — `two_commits_torn_in_one_batch_at_a_year_end_keep_the_whole_blocks`
+8. crash after the promotion, before the record — `a_door_cut_off_after_its_promotion_writes_the_record_it_owes`, and at the verb `a_door_cut_off_before_its_record_is_planned_and_resumed_by_name`
+9. a writer holding the month — `a_writer_holding_the_month_refuses_the_door_and_nothing_is_written`
+10. torn and garbage record files — `a_torn_record_file_is_stepped_over_and_garbage_is_refused`
+11. damage inside the history (not a tail) — `damage_inside_the_months_history_is_not_a_torn_tail`
+12. † a cut never applies to other bytes, another thread or another file — `a_cut_never_applies_to_other_bytes_another_thread_or_another_file`
+13. † a misdirected write: one header slot written into the other's place — `a_slot_written_into_the_others_place_is_not_a_torn_tail`
+14. * all-zero header region; an unproven first block — `a_month_with_no_header_left_or_no_proven_block_is_refused_by_name`
+15. links (record file, month lock, bar file) and a missing bar file beside its lock — `links_and_a_missing_bar_file_are_refused_by_name`, `a_linked_record_directory_is_refused_before_anything_is_published`
+16. full disk's cousin: record directory / revision root cannot be made — `a_record_directory_that_cannot_be_made_stops_the_door_before_it_publishes`, `a_revision_root_that_cannot_be_made_is_the_publications_refusal`
+17. * two doors at once (the other finishes between plan and record) — `a_door_that_finished_first_is_the_answer_and_nothing_is_written_twice`
+18. maximum ordinals: one held, and all 1,024 held — `held_ordinals_are_stepped_over_and_the_last_refuses_at_the_limit`
+19. a full record file (64 records) — `a_full_record_file_refuses_one_more_record`
+20. a later revision and a foreign cut's revision — `a_later_or_a_foreign_cut_revision_is_served_as_it_is`; a stranger's record — `a_record_of_another_recovery_is_not_this_ones_answer`
+21. * a power cut during a census compaction — `a_power_cut_during_a_compaction_plans_and_resumes`
+22. the importer's re-read of done days — `the_days_dropped_by_recovery_are_read_again`; a torn journal tail — `a_re_read_not_named_is_written_by_the_next_run_and_only_once`; a live GDFL run — `a_live_run_or_an_unreadable_journal_is_named`; a segment no import kind files — `a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand`; an end record that cannot be written — `an_end_record_that_cannot_be_written_fails_by_name_and_is_written_next_run`
+
+## Files outside ownership (kept minimal)
+
+`crates/cli/src/lib.rs` (module, usage, dispatch, `COMMANDS` 64), `crates/cli/src/store_write.rs`
+(`WRITERS` 21, `--plan` read-only, test rows), `crates/cli/src/sweep_wiring_tests.rs` (month-recover is a
+store verb), `crates/store/src/lib.rs` (`pub mod recover`), `crates/store/benches/ratio.rs` and
+`crates/store/benches/ratio/recover.rs`, `config/store-steps.toml` (package R3-20, step S-52),
+`.github/gates_ledger.rs` (gate 11 `ALLOW_MEMBER` store_write.rs 7 -> 8), `docs/02-store-format.md` §44,
+`docs/04-invariants.md` R320-01..10, `docs/05-decisions.md` D-7093, `docs/06-limits.md` L-IA-40 and
+L-R320-01..05.
+
+## D-numbers
+
+D-7093 (assigned). No `D-TBD-R3-20-n` was needed.
+
+## NEEDS THE MAC
+
+Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925`.
+
+1. Build: `export CARGO_TARGET_DIR=$W/tgt/pool-2; mkdir $W/tgt/pool-2.lock; (cd $W/wt/P-R3-20 && git ls-files -z | xargs -0 touch && cargo build --release -p api -p cli); mkdir -p $W/tgt/bin-R3-20/release && cp $W/tgt/pool-2/release/{api,cli} $W/tgt/bin-R3-20/release/; rmdir $W/tgt/pool-2.lock`.
+2. A private APFS-clone copy (`cp -c`) with a real `bars/` directory: a GDFL one-second NIFTY spot month
+   (first), a NIFTY option month, a BANKNIFTY month, an F&O stock month, an illiquid strike month, plus
+   `imports/`, `manifest/`, `bar-generations-v1/`, `bar-revisions-v1/`. Expected: `find <copy> -type l`
+   prints nothing; `stat -f %i` of each month differs from the real store's.
+3. Tear each copied month as a power cut does (the shape of the cli tests' `Store::tear(false)`). No
+   cli seam ships; the cloud tests tear in-memory images (`recover_tests.rs` `torn`). On the copy: keep
+   `B=<month>.bin` and `C=<month>.crc` aside as `B0`, `C0`; append one more day to the month (the
+   release cli's import, on the copy only); then put back the old records with the NEW header region:
+   `cp B0 T && dd if=<month>.bin of=T bs=32768 count=1 conv=notrunc && cp T <month>.bin && cp C0 <month>.crc`
+   (old length and records, the newest slot claiming the appended day). Expected:
+   `BRUTEX_STORE=<copy> cli month-recover gdfl NSE/INDEX/NIFTY 1s <yyyy-mm> --plan` prints
+   `refused   … n_valid claims more records than the file holds` and `cut       the commit of
+   generation N: keeps K bars` (K = the bars before the append), and the shadow GET of that month
+   answers `month_damaged` 500 naming the file.
+4. `BRUTEX_STORE=<copy> $W/tgt/bin-R3-20/release/cli month-recover gdfl NSE/INDEX/NIFTY 1s <yyyy-mm> --plan`
+   then `--yes`. Expected: exit 0; `shasum -a 256` of the original `.bin` and `.crc` unchanged; the
+   receipt names the cut (generation, kept bars, last stamp), the dropped bars and IST days;
+   `audit/gdfl.recoveries` gains one `recovered month=…` line; `logs/cli/audit.ndjson` gains the
+   `cli.month_recover.lifecycle` `month recovered` event; a second `--yes` prints `Already recovered;
+   nothing was written.`
+5. Resume the importer on the copy over the dropped days. Expected: each day the journal showed done
+   gets one `incomplete … reason=store_damaged` line from step 4 and is read again; the month then equals
+   a clean import of the same days bar for bar; no day loops `incomplete reason=store_damaged`.
+6. Serve the copy on 8426 (`stop.sh R3-20; serve.sh R3-20 8426 $W/tgt/bin-R3-20 $W/wt/P-R3-20`, store
+   root the copy); `lsof -nP -iTCP:8426 -sTCP:LISTEN -t` equals the pid file. Expected:
+   `curl -s 'http://127.0.0.1:8426/audit.json?feed=gdfl'` lists the recovery; the month's bars route
+   answers 200 with every bar up to the cut; the store-step list shows S-52. GETs only.
+7. Time `cli month-recover … --yes` on the full one-second NIFTY month, n = 20, a fresh clone each,
+   `/usr/bin/time -l` (wall, peak RSS): p50/p99/max; again with 10x and 100x months stored beside it
+   (ratio <= 3.0x). Write the figures into L-IA-40. Also `cargo bench -p store --bench ratio` (C-RC-01,
+   C-RC-02: `all ratios within the ceiling`).
+8. Gate 30 on the merged tree: no refusal names S-52 (set `merged = true` for R3-20 at the merge).
+9. The real store untouched: `imports/gdfl.journal`, `audit/` and the five months keep length and mtime.
+10. No write on the real store: a refused real month is recovered only as step S-52, on the operator's
+    yes, after a rehearsal on a copy.
+11. Coverage and mutants on the Mac's toolchain if the cloud's runs are incomplete at merge-back:
+    `cargo llvm-cov --branch -p store --lib -- recover` and `-p cli --lib -- month_recover` (expected 100%
+    lines and branches of recover.rs, month_recover_command.rs and file.rs's diff);
+    `cargo mutants --in-diff <diff of this branch> -p store -p cli` (expected: no surviving mutant).
+12. `cargo deny check` after BASE-DENY-1024 lands (expected green; this branch does not touch Cargo.lock).
 
 ## Progress log
 
@@ -153,3 +294,15 @@ IA-16, R3-16, R3-36, SC-4.
   `docs/04-invariants.md`, `docs/05-decisions.md`, `docs/06-limits.md` (both sides appended a
   section), both kept. Merge commit `716cd5d1`.
 - NEXT: fmt, clippy, the workspace tests on the merged tree, deny, then llvm-cov and cargo-mutants.
+
+### 2026-10-25 13:30–21:05 IST — merge, gates, coverage; HELD
+
+- Merged `origin/feat/db-fix` `bf9b1c8f` (Merge R4-18): conflicts in store `lib.rs`, the ratio bench,
+  `store_write.rs` and `docs/02-store-format.md`, both sides kept (feat/db-fix first); `WRITERS` 21,
+  `COMMANDS` 64.
+- Installed cargo-deny, cargo-llvm-cov, cargo-mutants and a nightly toolchain (branch coverage).
+- Workspace tests, deny, gate 30: results in the Gates table. Three refusals of this part fixed.
+- Coverage: refactors and 16 new tests (store 19 -> 30, cli 7 -> 11); see Done and Left.
+- HOLD at 20:40 IST (`17d214c2`), no GO-R3-20: pushed `faf0ed8c`, waiting.
+- NEXT: when HOLD is gone (or GO-R3-20 appears): re-measure coverage, run cargo-mutants on the diff,
+  merge the newest feat/db-fix, final gates.
