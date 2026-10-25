@@ -1551,6 +1551,7 @@ fn fno_complete_chooses_its_outcome_by_bars_rows_and_held_months() {
         rows_read,
         bars_stored,
         failures: 0,
+        ..FnoCounts::default()
     };
 
     let (status, body) = fno_complete(&page, Vec::new(), counts(5, 1), 0);
@@ -2340,14 +2341,15 @@ async fn a_feed_that_serves_expired_derivatives_goes_on_to_discovery() {
 
 // Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
 
-/// **A feed that declares no expired-derivative history is not walked, even
-/// with a credential in hand.** Zerodha's descriptor says `FnoAccess::None`
-/// (the operator's rule of 19 Aug 2026: spot only), so the walk refuses
-/// before any vendor request is built and the outcome is NOT STARTED.
-/// Covers `fno_walk`'s `!spec.fno.serves()` arm (server.rs:11515), which the
-/// form never reaches because the parse names a feed that serves.
+/// **A Zerodha OPTIONS walk is not walked, even with a credential in hand.**
+/// Written when Zerodha's descriptor said `FnoAccess::None`; since D-7186 it
+/// declares `FnoAccess::ByToken` (futures day candles only), so the walk goes to
+/// `fno_futures`, whose `futures_refusal` refuses an options request by name
+/// before any vendor request is built, and the outcome is NOT STARTED. Retargeted
+/// at the CLOUD-MUTAPIB merge: the `!spec.fno.serves()` arm it once covered is
+/// reached by no HTTP feed today.
 #[tokio::test]
-async fn a_feed_that_serves_no_expired_derivatives_is_not_walked() {
+async fn a_zerodha_options_walk_is_refused_before_any_request() {
     let root = Root::new("walk-zerodha");
     // TWO SECRETS: Zerodha's auth names a key and a token, scripted as one
     // `key:token` answer (`credential_law::Script`).
@@ -2362,15 +2364,18 @@ async fn a_feed_that_serves_no_expired_derivatives_is_not_walked() {
     let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
         panic!("the premise: Zerodha is an HTTP feed");
     };
-    assert!(!spec.fno.serves(), "the premise: no expired derivatives");
+    assert!(
+        spec.fno.by_token().is_some(),
+        "the premise: futures through a token only"
+    );
 
     let (status, body) = walk(&asked, today, &site).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(
         body.contains(&render::escape(
-            "this feed declares no expired-derivative history at all, so there is \
-             nothing to ask it for"
+            "this feed serves expired FUTURES day candles only, through a token; nothing \
+             was sent rather than futures being filed under an options request"
         )),
         "{}",
         visible(&body)
