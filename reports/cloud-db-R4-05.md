@@ -349,3 +349,22 @@ Store writes needed: none.
   `rustc --test` 49/49. Files outside ownership gain `crates/pull/src/emit_sites.rs` (one row).
   Still HOLD: pushed, waiting. NEXT: the 3 `reasons_route.rs` mutants, the workspace clippy once more,
   then STATUS: DONE or BLOCKED-complete on base items only.
+- 2026-10-25, released again: merged `origin/feat/db-fix` `cc0a3a0d` (R4-28): conflicts textual only,
+  resolved both in merge order (R4-28, then R4-05): gate 1d's `DECLARED` holds both groups (76 -> 77),
+  gate 23's declared prints list both, docs/05 keeps R4-28's entries then D-TBD-R4-05-1..5. KINDS at the
+  head still ends at 21 (R3-21 and R4-09 not merged). `web/build` rebuilt, reproduced by a second build.
+  On the merged tree: `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets --locked
+  -- -D warnings` EXIT 0; `cargo deny check`: advisories FAILED on RUSTSEC-2026-0386 only (base item;
+  bans, licenses, sources ok); `cargo test -p pull --lib -- reasons:: alerts:: emit_sites` 70 pass, 1
+  ignored, 1 root-only fail (passes non-root).
+  Mutants (api, `-p api -- --lib -- reasons_route`): 3 mutants, 2 caught, 1 unviable, 0 missed. With
+  the pull run (34: 24 caught, 9 unviable, 1 missed, then fixed by `516ab325`): 37 mutants, 0 surviving.
+  Web, branch against a clean worktree of the base `cc0a3a0d` under the same Node 22: W1 pass; W2
+  1,602 pass / 0 fail / 9 cancelled on the branch, 1,592 / 0 / 9 on the base, the SAME nine timer and
+  census-worker tests cancelled on both (R4-05's own files: 21 pass); W3 the same 44 svelte-check errors
+  on both (`diff` of the sorted lists is empty), `gates-jobs w3` exit 0; W4 0 unused selectors; W5
+  clean; W6 clean. Shell gates re-run on branch and base: 1d 465 undeclared on the branch against 466
+  on the base (R4-05 declares `match`), none of R4-05's; 10 the same 2 missing on both (counts only
+  differ); 10b pass on both.
+  NEXT: the workspace's 175 test binaries, non-root with umask 0022, on this merged tree (running);
+  then STATUS.
