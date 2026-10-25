@@ -1686,6 +1686,10 @@ pub struct Fetched {
     pub body: Option<String>,
     /// Every step, in order.
     pub attempts: Vec<Attempt>,
+    /// What the landing hook did with the body after it landed: the dated
+    /// snapshot and, for the Kite dump, its diff (R4-28, DLY-09). `None`
+    /// until the hook runs, and for a source that is not snapshotted.
+    pub snapshot: Option<crate::master_snapshots::Snapshotted>,
 }
 
 impl Fetched {
@@ -1753,6 +1757,7 @@ pub async fn fetch<D: crate::chain::Discovery, P: Pause>(
                     return Fetched {
                         body: Some(body),
                         attempts,
+                        snapshot: None,
                     };
                 }
                 Err(refusal) => refusal,
@@ -1791,6 +1796,7 @@ pub async fn fetch<D: crate::chain::Discovery, P: Pause>(
     Fetched {
         body: None,
         attempts,
+        snapshot: None,
     }
 }
 
@@ -3194,6 +3200,7 @@ mod tests {
         let empty = Fetched {
             body: None,
             attempts: Vec::new(),
+            snapshot: None,
         };
         assert_eq!(empty.last_refusal(), None);
         assert_eq!(empty.waited_ms(), 0);
@@ -3206,6 +3213,7 @@ mod tests {
                 waited_ms: 3,
                 got: Got::Body { bytes: 1 },
             }],
+            snapshot: None,
         };
         assert_eq!(only_ok.last_refusal(), None, "a body is not a refusal");
         assert_eq!(only_ok.waited_ms(), 3);
