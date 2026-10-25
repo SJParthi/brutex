@@ -83549,6 +83549,214 @@ or in the package report.
 
 T2S-16 (amended), T2S-23, T2S-24, T2S-25.
 
+### D-5190 — `/ingest` serves the three data checks through three read-only routes, `/feed-checks.json`, `/tick-checks.json` and `/calendar-days.json`, and one panel (DATA-1w) — 2026-10-23
+
+**What was missing.** DATA-1 (`cli feed-reconcile`, D-5170 to D-5179),
+DATA-2 (`cli tick-to-second-check`, D-5180 to D-5189) and CAL-1 (the
+tradable-day rule, D-5150 to D-5159) each write or hold an append-only answer,
+and none of them was visible where the operator looks: the feed reconcile's
+month files and the tick check's year versions sat in folders, and the
+excluded days were a `cli calendar-days YEAR` page.
+
+**The decision.**
+
+1. `GET /feed-checks.json` reads DATA-1's newest FULL version of a month
+   (`feed-reconcile-YYYY-MM.v<N>.csv`) through
+   `cli::feed_reconcile::file_digest`, the door DATA-1's own factor reader uses,
+   so a file of another format, cut or damaged is refused there in its words.
+   A `--symbols` file is never a month's authority (D-5178) and is never read.
+   With no `month` it pages the months held; with `month` it gives the month's
+   counts and pages its shares; with `month` and `symbol` it pages the share's
+   day rows; with `month`, `version` and `line` it gives the source row.
+2. `GET /tick-checks.json` reads DATA-2's newest version of a year that has
+   its index (the index is linked last, so a version without one is not
+   finished) through `cli::tick_second_check::index::newest`, and the CSV
+   beside it, which must hash to the BLAKE3 the index records. With no `year`
+   and no `month` it pages the years; with `year` the year's counts and its
+   months; with `month` (and `symbol`) the month's shares (a share's days); with
+   `year`, `version` and `line` the source row.
+3. `GET /calendar-days.json` reads CAL-1's compile-time tables: with no `year`
+   every year of the calendar of record with its counts by reason
+   (`pull::calendar::year_exclusions`); with `year` (and one `reason`) its
+   excluded days, each with the notice, holiday circular, special-session
+   evidence or halt record it rests on. Ordinary weekends are counted, never
+   listed, exactly as `cli calendar-days` prints them. A year the record does
+   not wholly hold is named with `YearRefusal`'s words, never counted.
+4. `web/src/routes/ingest/panels/FeedChecks.svelte` mounts through the panel
+   registry (R4-01), so `+page.svelte` is not edited. It shows plain
+   comparison tables: per month (stocks, stock-days by status, adjusted
+   stocks, ex-date days, Zerodha-minute-short days, rule-T exact share,
+   rule-A minute-high match share), per share of a clicked month, per day of a
+   clicked share, the source row behind a day, and the excluded days per year
+   by reason with each day's notice.
+5. The routes write nothing and start nothing; the panel reads once when it
+   opens and when Reload is pressed, and never polls, because a check changes
+   only when a check run writes a new version.
+
+### D-5191 — A check version is parsed once into fixed-stride rows; a request is one `stat`, one probe and O(limit) (DATA-1w) — 2026-10-23
+
+1. **A version is parsed once per server process**, in one pass over its
+   bytes, into a vector of fixed-size rows (`FeedRow`, `TickRow`) and the
+   tallies a page shows. Every word a row carries (status, day kind, role,
+   compare, flag names, ...) is interned to a small number, so a row's size
+   does not depend on its text.
+2. **The folder listing is re-read only when the folder's modification time
+   moved.** The `stat` comes before the listing, so a name linked after the
+   `stat` moves the time again and the next request lists again; a name linked
+   before it is in the listing. A folder that does not exist holds nothing and
+   is asked again each time.
+3. **Only the newest version of each month or year is held**, keyed by folder
+   and month (or year); a newer version replaces it. Memory is bounded by the
+   months and years the folder holds, never by the versions on disk.
+4. A request then costs one `stat` of the folder, one map probe per month or
+   year on the page, and O(limit) for the rows it returns. The one-pass load is
+   O(the version's bytes), once per version, and is the `cold` figure every
+   measurement names separately (`docs/06-limits.md` L-D1W-02).
+5. **A share's rows are one run.** The feed-reconcile writer prints a share's
+   rows together and the tick check's CSV is sorted by share and day; a share
+   (or a share's month) whose rows are in two places is a damaged file, refused
+   by name, never answered with a half.
+
+### D-5192 — Paging is nothing typed: `limit` and `offset` are required, and every page past a list's edges is refused by name (DATA-1w) — 2026-10-23
+
+Under the operator's rule of 16 Oct 2026 17:15 IST:
+
+1. `limit` and `offset` are required named fields with no default. A missing
+   one, one that is not a whole number written as one (`+1`, `01`, `1e3` are
+   refused), a `limit` of zero, a `limit` above the list's length, or an
+   `offset` at or past its end is refused (400) naming the list's total. A
+   list with no rows is a 404 naming where it looked, never an empty page.
+2. Every answer states `total`, `offset`, `limit` and `returned`.
+3. A field a route does not read is refused by name, never ignored.
+4. The panel reads a whole list in two asks: one row to learn the total, then
+   `limit=total`. It types no page size.
+
+### D-5193 — Where the check files are read from, named in every answer (DATA-1w) — 2026-10-23
+
+1. `BRUTEX_FEED_RECONCILE_DIR` and `BRUTEX_TICK_SECOND_DIR` name the folders
+   when set. Unset, they are the store's audit area:
+   `<store>/audit/feed-reconcile`, where DATA-1's full run writes (its
+   `store_writes_needed`), and `<store>/audit/tick-to-second`.
+2. DATA-2 refuses an `--out` inside the store (D-5187), so its versions reach
+   the store's audit area only as copies of finished versions (immutable, a
+   new name each), or the deploy names its folder with
+   `BRUTEX_TICK_SECOND_DIR`. Which one is the main session's choice at deploy.
+3. Every answer carries `dir` and `dir_from` (which of the two chose it), so a
+   404 for an unconfigured or empty folder is never mistaken for an empty
+   check.
+
+### D-5194 — What each number on the panel means, and how it leads to its source row (DATA-1w) — 2026-10-23
+
+1. **Stock-days** are feed-reconcile rows of one day; a share whose month
+   could not be read has one row, day `-`, counted as a row and not a
+   stock-day.
+2. **Adjusted** and **ex-date** days are the rows the writer flagged
+   `adjusted` and `ex_date`; every ex-date is unsourced (no corporate-action
+   source is merged, R4-26).
+3. **Zerodha-minute-short days** are rows whose `short_volume` is above zero:
+   MEASURED, NOT JUDGED. No ENV-1 envelope is merged, so every computed day's
+   `short_judgement` is `unjudged:no_env1_envelope`, and the panel says so.
+4. **The factor** is the exact paisa pair `(median_z, median_g)` the writer
+   printed; never a float.
+5. **A tick share-day** is the row the year's index names for it (its record
+   holds the row's line), so an `extra` row a `landing` row follows is listed
+   and not counted; a row whose share-day the index does not hold means the
+   two files disagree, and the version is refused.
+6. **Rule T exact** is share-days whose `compare` is `exact_T`, of every
+   share-day. **Rule A minute-high match** is Zerodha minutes whose high the
+   rule-A seconds match exactly, summed, of the minutes compared, on the RAW
+   basis (D-5188). Both are served as the two integers; only the browser
+   divides.
+7. **Every day row carries its line**, and `month|year`, `version` and `line`
+   return that row again by one positional read of the file, checked against
+   the FNV-1a of the line as it was loaded: a version rewritten under its name
+   (which the append-only law forbids) is refused, never served as the old
+   row. A line asked of a version that is no longer the newest is a 404.
+8. Each stock-day also carries `tradable`: `pull::calendar::tradable_day`'s
+   reason when the day takes no trade (CAL-1), `null` when it does.
+
+### D-5195 — The two writers' column lines are public, so the reader checks a version's columns against the writer's own (DATA-1w) — 2026-10-23
+
+`cli::feed_reconcile::COLUMNS` and `cli::tick_second_check::HEADER` were
+`pub(crate)`. They are `pub` now, and the reader refuses a version whose
+column line is not exactly the writer's: a column added, renamed or moved by a
+later format is refused by name rather than read by position into the wrong
+field. No byte either writer prints changes. These are the only two lines of
+DATA-1's and DATA-2's files this package touches.
+
+### D-5196 — A refused check version is held as refused, under the version the listing named, and read again only when a newer version appears (DATA-1w) — 2026-10-24
+
+**What was wrong.** D-5191 held a parsed version and nothing else: a version
+that was cut, damaged, of another format, or not its index's was read and
+parsed again on every ask. A page of months (or years) that named it cost
+O(that version's bytes) per request, not O(limit), and `note_refused` put one
+warning on `/logs` per request where its own comment promised one per version.
+The held entry was also keyed by the version the file named, so a version the
+listing and the writer's door named differently would reload on every ask.
+
+**The decision.**
+
+1. The answer a version gives, the parsed version OR its refusal, is held
+   under the version the folder's listing named when it was asked, keyed by
+   folder and month (or year). A version file is never rewritten, so its
+   refusal stands as long as its name is the newest; a newer version is a new
+   name, the listing moves, and it is read afresh.
+2. A held refusal says so in its own words (`held: this version is refused
+   until a newer version appears or the server restarts`), so a reader is
+   never told a stale answer is a fresh one.
+3. A refusal that came from the host (an `EIO`, too many open files) is held
+   the same way, because the two cannot be told apart through
+   `cli::feed_reconcile::file_digest`'s words; that is `docs/06-limits.md`
+   L-D1W-06, and its answer names the restart that clears it.
+4. Test support only: forgetting held answers is scoped to one test's own
+   folder, so tests running beside it keep theirs.
+
+D1W-19, D1W-20, D1W-21.
+
+### D-5197 — A tick-to-second version is read in the writer's own order, (day, symbol, role), and a missing check folder is named as missing (DATA-1w) — 2026-10-24
+
+**What was wrong, found on real check files.** The reader took a
+tick-to-second CSV to be sorted by share and day and filed each share-month as
+one run of consecutive rows. `cli::tick_second_check` prints a version from a
+`BTreeMap` keyed by `RowKey = (day, symbol, role)`, so a month's shares
+interleave day by day. On a read-only shadow of the real store, with
+`BRUTEX_TICK_SECOND_DIR` naming `state/datacheck/rust-t2s-r6/out`, all three
+real versions (2019, 2025 and 2026, `v001`) were refused with "a share's rows
+of month 1 are in two places". Every synthetic fixture had been written in
+share-first order, the same assumption the reader made, so no test caught it.
+On the same shadow, with neither check folder present under `<store>/audit/`,
+both routes said "there are no feed-reconcile months in ...". Those are the
+words of a check that ran and found nothing, not of a folder nobody wrote.
+
+**The decision.**
+
+1. Each row's key `(day, symbol, role)`, compared as the writer's `String`
+   tuple compares it, must be above the row before it. Share-first order, a
+   role out of order within a share-day, or one key twice is refused, naming
+   the line and both keys. A version in any other order was not printed by
+   this writer.
+2. A share's rows of a month are filed under its slot as they are read (one
+   probe each). After the last row, one pass groups them: each month's shares
+   in symbol byte order, and each share-month one run of
+   `TickYear::by_share`, a row-number array. A page of a share's days is one
+   slice of that run, and each row is one index into `TickYear::rows`. The
+   source row behind a number is still found by one subtraction, because
+   `rows` stays in file order. A share's `first_line` and `last_line` are its
+   first and last lines that month, not a span of consecutive lines.
+3. A check folder that does not exist is a 404 naming the folder, saying no
+   check has been written there and naming the verb that writes it. This
+   holds on every listing, month and year ask of both routes. A folder that
+   exists and is empty still says "there are no ...". A missing folder is
+   never held, so a check written later is served by the same process.
+4. A page of months or years is one slice of the listing in key order
+   (`Listing::page`), never a walk past `offset` keys.
+5. Every refused version, whatever refused it (the host, its bytes or its
+   parse), is one `api.feed_checks check file refused` warning on `/logs`.
+   It is raised where the refusal is held, once per version (D-5196). Until
+   now only parse refusals warned.
+
+D1W-22, D1W-23, D1W-24, D1W-25; `docs/06-limits.md` L-D1W-07.
+
 ### D-7270 — INT-15: a vendor-padded minute is defined, counted per day, and never read as a trade; a derived bucket of only padded minutes has no bar (measured both ways) — 2026-10-22
 
 The numbers D-7270 to D-7274 were taken from an unused block above the
@@ -84081,6 +84289,382 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+
+### D-7300 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
+
+**Number** taken at landing from the ledger's head (amendment A6): first
+D-5903, then D-5904 when IA-3 landed D-5903 first, then D-7135 on 2026-10-23
+when SC-4 landed D-5904 first, and D-7300 the same day when LEDGER-1023
+landed D-7135 first (the no-fresh-root cut's block D-7135..D-7144, recorded
+after R3-13 had taken D-7135 without recording it). D-7300..D-7304 is R3-13's
+block in the decision-block registry, clear of every block recorded for
+another package (R4-18's D-7290..D-7294 the highest). Built in
+the cloud (branch `cloud/db-R3-13-20261017`, 17 Oct) and finished on the Mac
+(20 Oct; repair round 1, 21-23 Oct).
+**Findings:** DB-029, DB-031, DB-053, DB-A15, DB-B20, DB-G38, DB-G40,
+SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
+
+1. `/dayflags.json` takes `timeframe=` (a rung `store::path::Timeframe::KNOWN`
+   names) and counts `held` at it; the feed's finest rung is counted beside it
+   as `finest` where the two differ. Absent, the finest is counted, so every
+   existing caller is unchanged. `Asked` gains no field (`sources.rs` builds it
+   by name); the rung travels as `dayflags_rules::Band`. Every caller of the
+   band, the L-IA-39 bench's `imports::day_band_json` included, parses its
+   query with one function, `dayflags::query_of`.
+2. `expiry=` narrows an option family key (`NSE-FNO-NIFTY`) to one expiry; a
+   contract's own key names its expiry and a disagreeing `expiry=` is refused,
+   as is one on a spot key. A day after the expiry is `expired`:
+   `owed_minutes` and `unverified_minutes` 0, as `/gaps.json`.
+3. A share's phases are built with its dated master flag
+   (`pull::cash_session_cache`, read as `bars_change::Rules::eligibility` reads
+   it): flag 1 owes 360 continuous minutes, flag 0 375, no master 360 and 15
+   unverified, with the reader's reason in `calendar.cas.why` and the notes. A
+   failed load is kept by the request only (AF-03's rule). Nothing is read for
+   a closed day; a session after today (IST) is `basis: "not_yet"`, never a
+   refusal. A loaded master is kept for the process (one per session day read).
+4. **"Kept apart from trades" is decided PER DAY, never per month** (closes
+   `docs/06-limits.md` L-AH03-2 for the band; `sources.rs` stays AG-04's): a
+   GDFL share month's `.auc` sidecar is read once a request a month, and a day
+   is `auction_sidecar: true` only where a record is stamped on it. A month
+   whose sidecar files nothing that day says so; a sidecar that will not read
+   is named in the notes and never said absent. An index record says the
+   prints are "counted by the import". The page calls the session's last print
+   the auction's only where it equals the official day close (0 bps), and never
+   claims the print's book.
+5. FROZEN: an index value unchanged for **180 s or more** in session, outside
+   any recorded halt and, from 2026-08-03, outside the cash closing auction's
+   window (item 15), which is set aside on NIFTY and BANKNIFTY and not judged
+   on any other index (item 25). Chosen, not sourced
+   (DB-B20's detector); the cause of a frozen dissemination is UNVERIFIED. Zerodha: from the day's one-minute bars
+   (`O = H = L = C`, equal minute to minute, no minute missing), scanned once
+   per (month file's device and inode, day's first row) and kept with the end
+   row it was read to; a page's first scans run on one scoped thread a month,
+   each on the month's own handle. GDFL: from the day ledger's `flat_max_s`,
+   counting only the run's seconds outside the recorded halt and the auction's
+   window (`judged_s`; 2020-03-13's run from 09:21:09 is the halt's), and a
+   run with no stamp on a halt or auction day is not flagged. OUTSIDE THE DAY RANGE: a minute's high above the
+   Zerodha `1day` bar's high, or its low below its low; not judged on GDFL at
+   read time (its seconds are up to 22,500 reads a day). Flags only; the bars
+   are served unchanged.
+6. A `recounted` day keeps the `late=` and `max_back_s=` of the last `done`,
+   `incomplete` or `refused` close of its kind, day and filter, named by
+   `late_line`. The count is said over all of the kind-day's files for a `*`
+   run, and over the files its run read, named by its filter, otherwise.
+7. `bar_definition`: the import journal's deciding line, else the day ledger's
+   line; current by `pull::gdfl_import::definition_is_current`. Said on every
+   option day and on any day not current.
+8. A day-ledger field this reader has no name for is served under its own name
+   on the line's object and listed in `unknown`; the names `scope`, `line` and
+   `unknown` are the object's own and refuse the line, as does a field written
+   twice.
+9. A share's peer count is looked up under its other names from
+   `brutex_core::alias::LINEAGE` (D-3333) where its own name holds no month
+   (`peer.as`).
+10. A GDFL share's `sampled` names the market index `NIFTY` (`of: "market"`)
+    and the share's own first held second (CMP-06).
+11. The previous held `1day` bar is looked for up to 12 opens back and then up
+    to 144 more months by probe, one open (DB-031); a history found empty there
+    is not probed again by `series_start`. **A month is held in either form and
+    in the generation the read door serves** (`store::generation::served_bars_path`,
+    D-5899): a month held only as `.sbar`, or served from a repair generation,
+    is never looked past, and a name the door would refuse is held, so the open
+    that follows names the refusal instead of an older month standing in.
+12. The band's peer feed and each feed's finest rung come from one function,
+    `dayflags_rules::feed_rungs` (R3-34 points it at the feed table).
+13. **Every count the band adds is a month fault** (R3-08's `month_faults`):
+    the grid's rung, a renamed share's other name and every failed read in a
+    month that opened, so damage beside a writer-held month is answered as
+    damage, never as "being written, ask again".
+14. On the page, a share is trade-driven, and its zero-volume minutes are
+    counted, by the feed's finest rung, whatever rung the grid counts; the
+    closing-auction line counts "kept apart" only on days whose dated flag is 1
+    (`casCounts`). Goal 4 reads `/sources/day.json`'s `basis`; a day whose
+    `basis.factor` is not a number is unmeasured and neither joins nor breaks a
+    run. Whether a percentage statistic on an adjusted run is refused stays
+    D-3323's and is not built here.
+15. **THE CASH CLOSING AUCTION'S WINDOW IS SET ASIDE ON AN INDEX DAY, AS A
+    HALT IS** (the Mac finish, found on the real store on 2026-10-20): from
+    2026-08-03 every NIFTY and BANKNIFTY session read "index value frozen in
+    session" from 15:15 on both feeds, because the index holds still while
+    its constituents are in the cash closing auction. The window is
+    `[the CAS-eligible share close, the index's close)` from the session
+    tables (`Venue::share_hours_on`, `Venue::hours_on`; 15:15:00-15:30:00),
+    on the index venue only and only from 2026-08-03
+    (`dayflags_rules::auction_window`). A Zerodha minute inside it never
+    starts or extends a frozen run; a GDFL ledger run counts only its seconds
+    outside the halt and the window, the two counted once where they meet.
+    The window is served as `index.frozen.auction_window` and named in the
+    phrase. Where either session row carries no verified hours nothing is set
+    aside, so a run there is flagged, never hidden. The stillness itself is a
+    MEASURED fact (`docs/00-charter.md`, "An NSE index through the cash
+    closing auction"), not the cause: why the index holds still there is
+    UNVERIFIED. **Narrowed by item 25:** "on the index venue only" set the
+    window aside on every NSE index; it is set aside on NIFTY and BANKNIFTY
+    alone, and a run inside it on any other index is not judged.
+16. **A day after expiry names no bar definition** (the Mac finish of
+    SC-CLOSE-12 and goal 3, found on the real store: the family narrowed to
+    2019-03-28 read "bar definition 3 built this day" beside "expired" over
+    2024-10). The kind-day's import built nothing of an expired contract, so
+    `bar_definition` is `null` there and no phrase is said; the band never
+    marks a day that owes nothing as built under an older definition.
+
+17. **A value outside the day's range inside a recorded halt is still
+    flagged, and says where it is** (the Mac's second re-check on the real
+    store: Zerodha NIFTY 2020-03-13 read "intraday low 79.00 points below the
+    day bar's low, at 10:07" beside "halt (suspected) 09:22-10:20" with
+    nothing joining the two). `outside_day_range` gains `above_in_halt` and
+    `below_in_halt` (`null` where that side is not flagged), true where the
+    extreme's stamp lies inside the calendar's recorded halt `[from, resume)`,
+    and the phrase ends ", inside the recorded halt". No cause is claimed for
+    the value: why the index printed there is UNVERIFIED.
+
+18. **A share whose dated closing-auction flag is 0 is never said to have an
+    auction print** (the Mac's third re-check on the real store, 20 October:
+    GDFL DALBHARAT, flag 0 from 2026-08-27, read "192 closing-auction
+    print(s) in the day's share files; this share's month holds no auction
+    sidecar, so its print is not kept apart from trades" on 2026-09-25, naming
+    a print a share outside the auction has no part in). Where
+    `calendar.cas.eligible` is `false` and the month's `.auc` files no print
+    for the day, the phrase says the flag is 0, that the share takes no part
+    in the auction and has no print to keep apart, and what the month's
+    sidecar holds. A day whose sidecar files a print says the file whatever
+    the flag: the record is the evidence. A flag of 1, or one no master holds,
+    keeps the words of item 4.
+
+19. **A GDFL index day the day ledger cannot judge is `null`, never "not
+    frozen"** (the check of 20-21 October, verify-R3-13-r1 blocking 1; amends
+    item 15's GDFL clause). The ledger keeps only the day's LONGEST unchanged
+    run (`flat_max_s`, `flat_max_at`), so where that run lies in the recorded
+    halt or the cash closing auction's window, or carries no stamp on a day
+    that has either, a shorter run of 180 s or more elsewhere in the session
+    cannot be seen. On every auction-era day the ledger has measured
+    (2026-09-25..30) the run is the auction's, from 15:15:00, and the record
+    answered `flagged: false`: every later GDFL index day would have read
+    "not frozen" whatever happened before 15:15. Now `index.frozen.flagged`
+    is `false` only where the longest run is under 180 s; `true` where its
+    longest single stretch outside the two windows reaches 180 s; and `null`
+    otherwise, with the phrase "index frozen not judged: the day ledger
+    measures only the day's longest unchanged run, ..., a shorter run of 180
+    s or more elsewhere in the session is not measured (UNVERIFIED)".
+    `judged_s` is that longest stretch, no longer the run less its set-aside
+    seconds: a run on both sides of a halt is two runs, as a Zerodha minute
+    inside a window ends a run (`dayflags_rules::outside_of`). A GDFL index
+    day holding bars and no `flat_max_s` says it is not measured, and why
+    (no indices line, or a line written before the measure). The band draws
+    `flagged: null` as its own kind, `frozen_unjudged`, "frozen run not
+    judged" (info), never as "frozen" and never as an ordinary session.
+    Chosen, not sourced: the ledger's measure is the import's (D-7300
+    item 15); what it does not measure is said, not guessed.
+
+20. **A share's flag is kept for the process, never its master; a day asked
+    at once is read once; a page's cold days are read together, a few at a
+    time** (verify-R3-13-r1 blocking 2). The memo of whole parsed masters
+    this package added (`MASTERS`) had no bound and held each auction-era
+    day's master beside `bars_change`'s own copy: 18-25 MB of resident memory
+    a day, never freed (+744 MB for 42 days, measured by the check), and the
+    first auction-era share page of a process took 2.6-3.15 s (4.5 s at ten
+    concurrent cold asks, +1.39 GB). Now `dayflags_rules::FLAGS` keeps only
+    `(masters directory, day, symbol) -> the master's answer` (the flag, or
+    its refusal to name the share), in two generations of at most
+    `FLAG_CAP` / 2 = 32,768 each, the bars-memo rule. A master read keeps
+    the flag of every F&O underlying on its day
+    (`brutex_core::universe::FNO_UNDERLYINGS`, CLAUDE.md §1's 213 shares,
+    each under its universe ISIN, as `CasFlags::of` asks), not only the
+    asking share's: with only that one kept, each further share's first
+    auction-era page parsed the same masters again. That is 213 hash probes
+    against a parse already made, and 213 flags a day, at most 153
+    auction-era sessions in one generation; a share outside the list keeps
+    only its own flag, as it asks. A load in flight is
+    shared by every reader that asks while it runs (`FLIGHTS`) and ended when
+    its first reader is done, so a master lives only as long as the requests
+    reading it. At most `LOADS_AT_ONCE` = 4 masters are parsed at once in the
+    process, so concurrent cold pages cannot multiply the parse's memory; a
+    page's cold days are read on up to that many scoped threads
+    (`CasFlags::on_sessions`), each day once per request. A load's refusal
+    is still never kept beyond the readers that met it (AF-03). The parse
+    itself is `pull`'s and is unchanged: `DailyEligibility::parse` reserving
+    its map for every CSV line (37,237) rather than the EQ rows it keeps
+    (4,428) is named for `pull`'s owner, as is one bounded master memo shared
+    by `bars_change` and `sources` (L-R3-13-4). Measured cold and warm in
+    L-R3-13-4. Chosen, not tuned: 4 slots of the Mac's 14 cores, leaving the
+    rest to the route's other work and to imports; the bound is the choice,
+    its number is not sourced or measured to be best.
+
+21. **An unchanged index value that goes on past absent minutes is counted
+    and said** (the check's follow-up: Zerodha BANKNIFTY 2022-03-07 09:54-09:57
+    was reported as shorter runs, without saying why). A minute the file does
+    not hold still ends a run, so each part is measured alone, as before; the
+    times a flat minute after the gap prints the run's value are counted
+    (`DayScan::broken`, served as `index.frozen.broken_by_absent`) and the
+    phrase says "index value unchanged across absent minutes N time(s): a
+    minute the file does not hold ends a run, so each part is measured
+    alone". No value is assumed for the absent minutes.
+
+22. **A series with no file for the month names no bar definition** (the
+    check's follow-up: a contract the store holds no file of read "bar
+    definition 2 built this day" from the options kind-day). The kind-day's
+    import built nothing of it, so `bar_definition` is `null` and no phrase
+    is said, as after expiry (item 16). A file that holds no bar that day
+    keeps its definition: the import read the day.
+
+23. **Two words of the band say what they count** (the check's follow-ups).
+    On a coarser grid the zero-volume phrase names the finest rung it counts
+    ("300 of 375 Zerodha 1min bar(s) carry zero volume"); and a Zerodha
+    share's run label asks `/sources/day.json` for the route's whole 31-day
+    page laid around the rows' days (`basisWindowOf`; their newest 31 where
+    they span more), so a page showing one day names the run as far as that
+    page reaches rather than "2019-06-07 → 2019-06-07", and an open edge reads
+    "the run may go on both ways past the days read".
+
+24. **The CI shell gates are run on R3-13's files, and what they refuse is
+    rewritten or declared** (repair 1, after BASE-GATE11 put those gates in
+    the Mac run, D-6620). On this branch, compared step by step with
+    feat/db-fix's head, gates 10, 11, 12 and 23 refused R3-13's files and
+    nothing new besides. Rewritten: a month's auction sidecar is a set sized
+    once by its records, so a day is one hash probe, never a sort and a
+    binary search; the frozen run's two set-aside windows are ordered as
+    their min and max, never a sort (a `second < first` swap was tried first
+    and its `<=` mutant was equivalent, so it was restructured away, as
+    D-0192 directs); every map is sized once (`PAGE_DAYS`,
+    `PAGE_MONTHS` = 5, `LOADS_AT_ONCE`). Declared, each with its bound in
+    `docs/06-limits.md` ("Gate 11 — R3-13"): one request's refused days put
+    in day order (at most 92), the `timeframe=` word found in the ten-rung
+    `Timeframe::KNOWN`, the sidecar set's probe, and in `dayflags.rs` two
+    compile-time tables (IA-16's `FLAGS_VERSIONS` among them, merged
+    undeclared) and one page's peer days. The ignored timings' seven prints
+    are declared for gate 23; two cost claims name their timing tests (gate
+    12); five rows name their test file or timing tests (gate 10). The
+    bounds are unchanged: these are the same reads in O(1) shapes or with
+    their bound stated, and the band's answers are byte-identical before and
+    after on the shadow's 50 checks.
+
+25. **The cash closing auction's window is set aside on NIFTY and BANKNIFTY
+    alone; a run inside it on any other index is not judged, never "not
+    frozen"** (the check of 23 October, verify-R3-13-r2 X1; amends items 5,
+    15 and 19). Item 15 set the window aside on the index venue, so on every
+    NSE index, on the reason that every share an index is computed from
+    leaves continuous trading at 15:15. That is what `pull::vendor`'s
+    `CAS_INDEX_CIRCULAR`, the index session row's citation, argues for NIFTY
+    50 and NIFTY BANK and for no other index, and it is measured false for
+    others (`docs/00-charter.md`, "An NSE index through the cash closing
+    auction"): of the 135 Zerodha index series, 70 never hold one value for
+    180 s in 15:15-15:30 on any of the 42 auction-era sessions (INDIA VIX,
+    NIFTY SMALLCAP 250, NIFTY MICROCAP 250 and NIFTY MIDCAP 150, whose
+    longest unchanged run there is 60 s or none, among them), so a
+    frozen feed there went unjudged and the record read `flagged: false`
+    with no phrase, the hidden verdict item 19 refused for GDFL. Now
+    `dayflags_rules::auction_of` reads the window for each index. It is SET
+    ASIDE, as before, where `still_through_auction` holds: the exchange is
+    NSE and the sourced index table's row for the symbol
+    (`brutex_core::alias::INDICES`, D-3332) is named "NIFTY 50" or "NIFTY
+    BANK", the citation's own words, which a test pins to the session row's
+    citation. On every other index its minutes are `Minute::Unjudged`: they
+    end a judged run, and a run through them that reaches 180 s while no
+    judged run inside it does is the day's unjudged run (`DayScan::unjudged`,
+    folded beside the judged run in one pass): `index.frozen.flagged` is
+    `null`, `unjudged_s` and `unjudged_from` name it, and the phrase is
+    "index frozen not judged: unchanged for N minute(s) from HH:MM to HH:MM
+    (1min), all of it inside the cash closing auction's window, where an
+    index holding still is sourced for NIFTY 50 and NIFTY BANK alone;
+    whether this run is the auction's or a frozen feed's is not known
+    (UNVERIFIED)" (or "only N minute(s) of it in one stretch outside" the
+    window). A judged run anywhere else still flags the day `true`, the
+    window's run said beside it; a day with neither is `false`. GDFL's
+    ledger answers as item 19 had it (a run inside the window is `null`) and
+    its phrase now says that on such an index the run itself is not judged.
+    Both feeds serve `auction_aside`: `true`, `false`, or `null` on a day
+    with no window. Where no minute is not judged the fold is the one it
+    was, so a day before 2026-08-03 and a NIFTY or BANKNIFTY day keep every
+    verdict, run and phrase they had, the new fields beside them; so does
+    every other index's auction-era day that holds no run of 180 s in the
+    window (INDIA VIX's, measured). **Rejected:** judging
+    the window like any other minute on every other index, because 35 more
+    indices hold still there on every auction-era session (measured) and
+    would read "frozen in session" every day, a claim no source supports
+    either; and deciding per index and day from its constituents' dated
+    flags, because the store holds no constituent list (only undated
+    snapshots of five broad indices, none of NIFTY BANK) and it would add a
+    master read to every index day (L-R3-13-4). Chosen, not tuned: the two
+    indices are the source's, not a measurement's, and a third is added only
+    by a cited source and a new row here.
+26. **A GDFL ledger run the day's session cannot hold is refused by name,
+    never judged** (the check of 23 October, verify-R3-13-r2 attack E6, a
+    follow-up). Lines appended only to a shadow's clone of
+    `imports/gdfl.dayflags` (999999 s from 23:59:59, `u64::MAX` s from
+    09:15:00, 600 s from 15:29:59) were each served "index value frozen in
+    session", the second with `judged_s` 18446744073709495815. The import
+    measures `flat_max_s` over the session's own rows only
+    (`pull::gdfl_import_quality`, `FlatRun`: "the longest run of in-session
+    rows"), so its first and its last second each lie inside a window of the
+    day's session. `IndexDay` now carries that session, as the import reads
+    it (`pull::gdfl_cm::session_of`: the full session or a special one's
+    windows), and `IndexDay::outside_session` refuses a run that starts
+    outside every window, ends outside every window, has no stamp and is
+    longer than the session spans (first open to last close, gaps between
+    windows included), or falls on a day the calendar holds no session for:
+    `flagged` and `judged_s` are `null`, `frozen.refused` names why
+    (`starts_outside_session`, `ends_outside_session`,
+    `longer_than_session`, `no_session`), and the phrase is "index frozen
+    refused: the day ledger's longest unchanged run, N s from HH:MM:SS,
+    <why> (<the session's windows>); the import measures a run over the
+    session's own rows only, so the line is not that measure and the day's
+    frozen run is not judged (UNVERIFIED)". A short run is refused as a long
+    one is, since neither is the import's measure. A run across the gap of a
+    two-window day has both its ends in session and is judged. Every real
+    line holding `flat_max_s` (the 36 of 2026-09-25..30, read 2026-10-24)
+    lies inside 09:15:00-15:30:00, its latest end 15:29:24, so no served
+    answer changes. At most four window comparisons and one calendar lookup a
+    day; measured through a read-only shadow of the real store, warm, n = 200
+    each, three interleaved restarts of each build: GDFL NIFTY
+    2026-09-24..30 p50 1.32, 2.43 and 2.14 ms against 1.35, 2.36 and 2.23 ms
+    before (load 28 to 43, so the p99 and max of both move with the load:
+    4.98 to 20.62 and 6.94 to 51.99 ms here, 2.88 to 15.40 and 5.11 to 24.23
+    before). **Rejected:** refusing the whole record, because the day's other
+    flags do not depend on the run; and `session_s`, the line's own session
+    length, as the bound, because it places no stamp.
+27. **The band's legend names the flags behind each day's lead** (the check
+    of 23 October, verify-R3-13-r2, a follow-up). A cell is coloured by its
+    most severe kind and the legend counted that lead alone, so a flag that
+    is never a day's lead was in no legend: "frozen run not judged" on GDFL
+    NIFTY 2026-09-24..30 was said only in each day's line. `alsoTally`
+    (`web/src/lib/db/dayflags.js`) counts every kind a cell holds after its
+    lead, once per cell, in `DAY_KINDS`'s order, and the band draws it under
+    the legend as "also on these days, behind each day's lead". Never a fact
+    kind (a closed day, a day outside a span), which is no flag, and never
+    `cas`, which the band's closing-auction line already counts over every
+    cell that shows it. One pass over at most one page of cells, each cell's
+    kinds bounded by `DAY_KINDS`; no request. **Rejected:** colouring a cell
+    by more than one kind, which would change every day's colour for one
+    legend line.
+28. **The run through is decided by one comparison of its step with a
+    minute** (repair 2's mutation run on the lines it changed). The fold
+    counted a run broken by absent minutes with `step > MINUTE` in the match
+    arm whose guard had already found the same value's step not to be one
+    minute, so `>` and `>=` could not differ there: the `>=` mutant
+    (`dayflags_rules.rs:1254:51` at 312923190) survived as an equivalent,
+    and its `-` to `+` twin was equivalent on every stored, minute-aligned
+    input. As D-0192 directs it is restructured, never excluded: the same
+    unchanged value on a minute not set aside compares its step with a
+    minute once (`std::cmp::Ordering`): equal goes on, greater counts the run
+    broken and starts anew, less (no next minute of a one-minute rung) ends
+    the run unbroken. Read arm by arm against the old guard, no answer
+    changes for any input; a sub-minute step case is added to
+    `a_frozen_run_is_three_unchanged_minutes_in_a_row`.
+29. **Bar definition 5 is named** (IA-4, merged into feat/db-fix on 24
+    October; D-4877). The import's `BAR_DEFINITION` became 5 and an options
+    day is current under 5 alone, while `definition_means` had no sentence
+    for 5: merged as it was, the band would have called this build's own
+    definition "a definition this build does not name". It now says what 5
+    changed, in the import's own terms (D-4816, D-4829, D-4877), and
+    `a_spot_day_names_its_definition_only_when_it_is_not_current` walks every
+    definition from 1 to `pull::gdfl_import::BAR_DEFINITION`, so the next
+    number the import names fails the build until the band names it too.
+    `current` and the label still follow `definition_is_current` alone: an
+    options day under 2, 3 or 4 is labelled until it is restated.
+
+**Proof:** R313-01 to R313-41 (`docs/04-invariants.md`); the limits are
+L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
+10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
 
 ### D-6740 — The dated options card has one IPFT authority and one boundary: `FA73061_EFFECTIVE` is the regime's own `MAR_2026`, kept by name, and the card's IPFT is `regime::ipft_rate` and nothing else, held by its text (CLOUD-CHG1-OPT) — 2026-10-24
 
