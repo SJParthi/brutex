@@ -33,9 +33,10 @@
 //! calls, and the first read of each store (the ring read once, the journal
 //! parsed once), which is bounded by the files and paid once per process.
 //! And, beside C-LG-02, `/dayflags.json`'s day band over the same three
-//! journals: its read of the journal keeps every `run` line, so it tracks
-//! the journal and is `docs/06-limits.md` L-IA-39, measured here at 1,000,
-//! 10,000 and 100,000 `run` lines and gated by nothing.
+//! journals: since D-4896 (IA-10a) it decodes no `run` line, so it should not
+//! track the journal; `docs/06-limits.md` L-IA-39 records it before and
+//! after, measured here at 1,000, 10,000 and 100,000 `run` lines and gated by
+//! nothing.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
