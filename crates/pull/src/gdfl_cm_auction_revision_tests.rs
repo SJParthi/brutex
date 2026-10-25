@@ -412,3 +412,38 @@ fn a_month_whose_served_generation_cannot_be_told_takes_no_print() {
     assert_eq!(tree(&store), before, "nothing written");
     std::fs::remove_dir_all(store).unwrap();
 }
+
+/// **A DAY'S RECORDS ARE THOSE OF ITS IST DATE, MIDNIGHT TO MIDNIGHT**
+/// (IA-AUC-06, D-TBD-IA-17b-1 (3); clock edges): a record on the day's
+/// first IST microsecond is the day's, one a microsecond before it is the
+/// day before's, and one on the next IST midnight is the next day's, so a
+/// generation's carried prints are matched to the day they were filed for
+/// and to no other, whatever the hour of the print.
+#[test]
+fn a_days_records_are_those_of_its_ist_date_midnight_to_midnight() {
+    let on = day(23);
+    let midnight = (i64::from(on.days_from_epoch()) * 86_400 - IST_OFFSET_SECS) * 1_000_000;
+    let at = |t_micros: i64| Record {
+        t_micros,
+        price_paisa: 123_457,
+        quantity: 7,
+        rows: 1,
+    };
+    let records = [
+        at(midnight - 1),
+        at(midnight),
+        at(midnight + 86_400 * 1_000_000 - 1),
+        at(midnight + 86_400 * 1_000_000),
+    ];
+
+    let got: Vec<i64> = records_of_day(&records, on)
+        .iter()
+        .map(|record| record.t_micros)
+        .collect();
+
+    assert_eq!(
+        got,
+        [midnight, midnight + 86_400 * 1_000_000 - 1],
+        "the day's first and last IST microsecond, and nothing of its neighbours"
+    );
+}
