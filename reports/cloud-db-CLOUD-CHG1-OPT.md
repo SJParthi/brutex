@@ -284,3 +284,7 @@ The red runs were taken here (section "Tests failing before, passing after").
   green and the same 10 red on each (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30), refusals identical
   sorted except counts, timings and gate 10's line number (R427-11, 8793 vs 8777). Workspace test
   run in progress.
+  Workspace test (`-j 2`, the two known hangs skipped by name): 254 suites, 5 targets red, `api` lib
+  8, `cli` lib 3, `pull` lib 9, `store` lib 5, `telemetry` lib 4 (29); the same 29 names run by
+  exact name on the unmodified base `cc0a3a0d` all `FAILED` there too (`0 passed; 8/3/9/5/4
+  failed`). Every `costs` suite ok. The two hangs are being re-run alone on the base.
