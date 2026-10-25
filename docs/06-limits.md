@@ -21799,7 +21799,7 @@ O(1) row is held from its 1x baseline.
 **The api harness itself exits 1 on this tree, after C-CHK-07, in all three runs,
 on rows CC-20 does not touch.** `crates/api/benches/ratio/reads.rs` asks
 `/bars.json` for a whole 102,400-bar month, past `MAX_MONTH_ANSWER_ROWS`
-(60,000, R3-08, commit bb1df4b7 of 17 Oct; `reads.rs` last changed 15 Oct), is
+(60,000, set by R3-08 on 17 Oct; `reads.rs` last changed 15 Oct), is
 answered `400 too_many_rows`, and refuses ("the bench measured nothing"), which
 ends the harness. `C-LG-03 span alone 200->2000` breached in every run (3.502x /
 3.423x / 3.636x), and one `C-15 ... marginal` row breached in runs B and C (a
