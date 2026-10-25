@@ -478,3 +478,30 @@ fn a_carried_day_goes_in_before_a_record_on_the_next_ist_midnight() {
     );
     std::fs::remove_dir_all(store).unwrap();
 }
+
+/// **A DAY BEFORE A RECORD ON ITS NEXT IST MIDNIGHT IS NEVER INSERTED**
+/// (IA-AUC-08, D-TBD-IA-17b-1 (1); clock edges): the sidecar holds the
+/// 24th's print stamped at 00:00:00 IST, the 23rd's next microsecond; an
+/// append of the 23rd is refused as a new generation, never an insertion,
+/// and the file keeps the one record it held.
+#[test]
+fn a_day_before_a_record_on_its_next_ist_midnight_is_never_inserted() {
+    let store = scratch("ia17b-auc-before-midnight");
+    let at_midnight = Print {
+        sod: 0,
+        ..print(712_365, 40)
+    };
+    append(&store, &key(), day(24), &[at_midnight]).unwrap();
+
+    let refused = append(&store, &key(), day(23), &[print(712_165, 22)]).unwrap_err();
+
+    assert!(
+        refused.to_string().contains("never an insertion"),
+        "{refused}"
+    );
+    let held = read(&path(&store, &key(), day(1)).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.records.len(), 1, "nothing inserted");
+    std::fs::remove_dir_all(store).unwrap();
+}

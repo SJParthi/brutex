@@ -898,7 +898,7 @@ fn write_day_held(
     } else {
         parse(&bytes).map_err(|why| other(format!("{}: {why}", path.display())))?
     };
-    let end = (i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 86_400) * 1_000_000;
+    let (_, end) = span_of_day(day);
     let held_day = records_of_day(&held.records, day);
     if !held_day.is_empty() {
         if held_day == offered {
