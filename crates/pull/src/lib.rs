@@ -210,6 +210,7 @@ pub mod kite;
 /// security master (R4-17).
 pub mod listing;
 pub mod manifest;
+pub mod master_snapshots;
 /// Where an instrument master comes from, and what it takes to replace one.
 ///
 /// `core::vendor::master_file` has always named where each feed's master is
