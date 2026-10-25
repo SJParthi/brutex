@@ -1968,6 +1968,20 @@ jobs:
           #     `the_cold_auction_era_share_page_is_timed` (L-R3-13-4).
           declared="$declared api/src/dayflags_rules_tests.rs:eprintln!:6
           api/src/dayflags_rules_tests.rs:println!:1"
+          # TWO MORE FILES, one kind, declared by R4-28 (repair 5, 24 Oct 2026,
+          # D-7191): the printed lines of on-demand `#[ignore]` measurements in
+          # `#[cfg(test)]`-mounted modules; no production path reaches them.
+          #   pull/src/fnowork_futures_tests.rs println! 2: each snapshot
+          #     written with its futures taken in, and the n=50 p50, p99 and
+          #     max of `futures_plan` at 1, 10 and 100 snapshots of a copy of
+          #     a real dump (L-R428-07, L-R428-08).
+          #   pull/src/master_snapshots_tests.rs println! 3: the n=200 p50,
+          #     p99 and max of the landing hook with incomplete entries held
+          #     (L-R428-10), the real-size dump's write, parse, diff and
+          #     `token_on` (L-R428-01, L-R428-03), and of `Catalog::read` and
+          #     its probes at 1, 100 and 1,000 snapshots (L-R428-13).
+          declared="$declared pull/src/fnowork_futures_tests.rs:println!:2
+          pull/src/master_snapshots_tests.rs:println!:3"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

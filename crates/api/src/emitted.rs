@@ -1243,6 +1243,7 @@ fn cases() -> Vec<Case> {
                             verdict: pull::masters::Verdict::Never,
                         },
                     }],
+                    snapshot: None,
                 };
                 crate::mastersrun::record(
                     source,
