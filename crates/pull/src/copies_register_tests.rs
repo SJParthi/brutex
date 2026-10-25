@@ -120,6 +120,9 @@ struct Fake {
     hold: Mutex<Option<PathBuf>>,
     holding: AtomicBool,
     held: AtomicBool,
+    /// Paths whose `lstat` the host refuses with something other than "not
+    /// found".
+    broken: Mutex<Vec<PathBuf>>,
 }
 
 /// A `Meta` of `kind`.
@@ -211,6 +214,15 @@ impl Fake {
 impl Fs for Fake {
     fn lstat(&self, path: &Path) -> io::Result<Meta> {
         self.lstats.fetch_add(1, Ordering::SeqCst);
+        if self
+            .broken
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|broken| broken == path)
+        {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
         if self.hold.lock().unwrap().as_deref() == Some(path) {
             self.held.store(true, Ordering::SeqCst);
             while self.holding.load(Ordering::SeqCst) {
@@ -1475,4 +1487,432 @@ fn a_held_answer_and_a_walk_are_timed_at_1x_10x_100x() {
         "{held_p50:?}"
     );
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ═══ Every line and branch reached (the coverage pass of 25 Oct) ═══════════
+
+/// A reader whose every read is refused, as a disk that fails mid-file.
+struct Failing;
+
+impl io::Read for Failing {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::other("an invented read error"))
+    }
+}
+
+/// THE HOST'S READING, APART FROM ITS OPEN: lines are handed one at a time
+/// with their break removed, a last line with no break is TORN, and a read
+/// the disk refuses mid-file is that refusal in its words, never "empty".
+#[test]
+fn a_receipt_read_that_fails_mid_file_is_the_hosts_refusal() {
+    let mut seen = Vec::new();
+    let ending = lines_of(&mut &b"first\nsecond"[..], &mut |line| {
+        seen.push(line.to_vec());
+    });
+    assert_eq!(ending, Ok(Ending::Torn));
+    assert_eq!(seen, vec![b"first".to_vec(), b"second".to_vec()]);
+    let ending = lines_of(&mut io::BufReader::new(Failing), &mut |_| panic!("no line"));
+    assert_eq!(ending, Err("an invented read error".to_owned()));
+    let base = scratch("torn-host");
+    put(&base.join("ALL_VERIFIED.txt"), b"all verified, cut sh");
+    let mut lines = 0;
+    let ending = Host.lines(&base.join("ALL_VERIFIED.txt"), &mut |_| lines += 1);
+    assert_eq!((ending, lines), (Ok(Ending::Torn), 1));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A SOCKET IS NEITHER A FILE, A FOLDER NOR A LINK: the host names it
+/// `Other`, the walk counts it and never opens it; and a path written with a
+/// `.` part still reaches the tick store's read tops by its names alone.
+#[test]
+fn a_socket_in_a_copy_root_is_counted_never_opened() {
+    let base = scratch("socket");
+    let copy = base.join("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    let socket = copy.join("ALL_VERIFIED.txt.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    assert_eq!(Host.lstat(&socket).unwrap().kind, Kind::Other);
+    let register = host_walk(&config_of(&[&copy], Vec::new()));
+    assert_eq!((register.roots[0].others, register.roots[0].files), (1, 0));
+    assert!(LiveKind::TickStore.reads(Path::new("./cm/2024")));
+    assert!(!LiveKind::TickStore.reads(Path::new("./prove")));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// EVERY WAY A ROOT CAN FAIL ITS OWN LOOK is named in its stamp, and a name
+/// inside a walk whose look the host refuses (not "not found") is a fault
+/// of the root in the host's words.
+#[test]
+fn a_root_that_is_a_file_a_link_or_unreadable_is_named_in_its_stamp() {
+    let fs = Fake::default();
+    fs.file("/f", 1, 1, 1, b"x");
+    fs.add(
+        "/l",
+        Node {
+            meta: meta(Kind::Link, 1, 2, 1, 0),
+            children: None,
+            bytes: Vec::new(),
+        },
+    );
+    fs.broken.lock().unwrap().push(PathBuf::from("/b"));
+    let named = |path: &str| match root_stat(&fs, Path::new(path)) {
+        RootStat::Not(why) => why,
+        RootStat::Dir(stamp) => panic!("{stamp:?}"),
+    };
+    assert_eq!(named("/f"), "not a directory");
+    assert!(named("/l").contains("symbolic link"));
+    assert!(
+        named("/b").starts_with("cannot be read: "),
+        "{}",
+        named("/b")
+    );
+    assert_eq!(named("/absent"), "absent: no such folder");
+    fs.dir("/copy", 1, 3);
+    fs.file("/copy/ok", 1, 4, 1, b"ab");
+    fs.file("/copy/bad", 1, 5, 1, b"cd");
+    fs.broken.lock().unwrap().push(PathBuf::from("/copy/bad"));
+    let register = walk(&fs, &config_of(&[Path::new("/copy")], Vec::new()), 0);
+    let root = &register.roots[0];
+    assert_eq!(root.state, State::Walked { whole: false });
+    let (path, why) = root.faults.iter().next().unwrap();
+    assert_eq!(path, Path::new("/copy/bad"));
+    assert!(why.starts_with("cannot be read: "), "{why}");
+    assert_eq!(root.bytes, 2);
+}
+
+/// A LIVE ROOT NOT WALKED WHOLE is named twice over: absent, it is refused
+/// with no file counted; with a folder that will not list, it names the
+/// fault; each puts one `warn`, and the register is not whole, so "no
+/// hazard" is never claimed over it.
+#[test]
+fn a_live_root_absent_or_with_a_fault_is_a_warning_and_not_whole() {
+    let fs = Fake::default();
+    fs.dir("/copy", 1, 1);
+    fs.file("/copy/k", 1, 2, 1, b"k");
+    fs.dir("/arch", 1, 3);
+    fs.dir("/arch/2020", 1, 4);
+    fs.file("/arch/2020/a.zip", 1, 5, 1, b"zip");
+    fs.refuse_listing("/arch/2020");
+    let config = config_of(
+        &[Path::new("/copy")],
+        vec![
+            live(LiveKind::CmArchive, Path::new("/arch")),
+            live(LiveKind::NfoArchives, Path::new("/missing")),
+        ],
+    );
+    let register = walk(&fs, &config, 0);
+    let faulted = register.live[0].why.as_deref().unwrap();
+    assert!(faulted.starts_with("1 fault(s) while walked"), "{faulted}");
+    assert!(faulted.contains("\"/arch/2020\""), "{faulted}");
+    assert!(register.live[1].walked);
+    assert_eq!(register.live[1].files, 0);
+    assert!(
+        register.live[1]
+            .why
+            .as_deref()
+            .unwrap()
+            .contains("cannot be read")
+    );
+    assert!(!register.whole());
+    let warned: Vec<String> = notes(&register)
+        .into_iter()
+        .filter(|note| note.message == "live root not walked whole")
+        .map(|note| note.fields[1].1.clone())
+        .collect();
+    assert_eq!(warned, vec!["cm_archive", "nfo_archives"]);
+}
+
+/// A `VERIFIED.tsv` that is torn, or whose `source_identity` is not an
+/// identity, proves no twin and says which and why; an unreadable receipt
+/// is the host's words; and an archive file with the same inode and size
+/// but other times is not the source a receipt named.
+#[test]
+fn a_torn_or_misspelled_verified_tsv_proves_no_twin() {
+    assert_eq!(ReceiptKind::AllVerified.word(), "all_verified");
+    assert_eq!(ReceiptKind::VerifiedTsv.word(), "verified_tsv");
+    assert_eq!(ReceiptKind::ProveOut.word(), "prove_out");
+    let fs = Fake::default();
+    fs.dir("/torn", 1, 1);
+    fs.file(
+        "/torn/VERIFIED.tsv",
+        1,
+        2,
+        1,
+        b"name\tsource_identity\na\t1:2:3:4:5:6:7",
+    );
+    fs.dir("/spelt", 1, 3);
+    fs.file(
+        "/spelt/VERIFIED.tsv",
+        1,
+        4,
+        1,
+        b"name\tsource_identity\na\tnot an identity\n",
+    );
+    let register = walk(
+        &fs,
+        &config_of(&[Path::new("/torn"), Path::new("/spelt")], Vec::new()),
+        0,
+    );
+    let Twin::NotProven(torn) = &register.roots[0].twin else {
+        panic!("{:?}", register.roots[0].twin);
+    };
+    assert_eq!(torn, "\"/torn/VERIFIED.tsv\" is torn");
+    let receipt = &register.roots[1].receipts[0];
+    assert_eq!(receipt.verdict, "states");
+    assert!(
+        receipt
+            .first_unmatched
+            .as_deref()
+            .unwrap()
+            .contains("\"not an identity\" is not dev:inode:size"),
+        "{receipt:?}"
+    );
+    assert!(matches!(register.roots[1].twin, Twin::NotProven(_)));
+    let unread = read_receipt(
+        &fs,
+        Path::new("/nowhere/ALL_VERIFIED.txt"),
+        ReceiptKind::AllVerified,
+        &Archives::default(),
+    );
+    assert_eq!(
+        (unread.verdict, unread.why.as_deref()),
+        ("unreadable", Some("absent"))
+    );
+    let mut archives = Archives::with_capacity(1);
+    archives.add(
+        PathBuf::from("/arch/2020.zip"),
+        meta(Kind::File, 1, 9, 1, 4),
+    );
+    let mut identity = SourceIdentity {
+        dev: 77,
+        ino: 9,
+        size: 4,
+        mtime_s: 1_700_000_000,
+        mtime_ns: 7,
+        ctime_s: 1_700_000_001,
+        ctime_ns: 9,
+    };
+    assert_eq!(archives.find(&identity), Some(Path::new("/arch/2020.zip")));
+    identity.mtime_ns = 8;
+    assert_eq!(
+        archives.find(&identity),
+        None,
+        "same inode and size, other times"
+    );
+}
+
+/// WHAT TO TAKE CARE OF is said on the retirement list: a folder inside a
+/// live root its reader does not read names that root and says to retire
+/// only the folder; a folder holding a second name of a live file says its
+/// bytes are not counted; and a register with nothing to retire says so in
+/// words, never as a blank list.
+#[test]
+fn the_retirement_list_says_what_to_take_care_of_and_when_nothing_is_left() {
+    let fs = Fake::default();
+    fs.dir("/ticks", 1, 1);
+    fs.dir("/ticks/prove", 1, 2);
+    fs.file("/ticks/prove/p.out", 1, 3, 1, b"proof");
+    fs.dir("/arch", 1, 4);
+    fs.file("/arch/2020.zip", 1, 5, 2, b"zipzip");
+    fs.dir("/queue", 1, 6);
+    fs.file("/queue/2020.preserved.1.zip.part", 1, 5, 2, b"zipzip");
+    let register = walk(
+        &fs,
+        &config_of(
+            &[Path::new("/ticks/prove"), Path::new("/queue")],
+            vec![
+                live(LiveKind::TickStore, Path::new("/ticks")),
+                live(LiveKind::NfoArchives, Path::new("/arch")),
+            ],
+        ),
+        0,
+    );
+    let list = retirement(&register);
+    let caution = |path: &str| {
+        list.iter()
+            .find(|retire| retire.path == Path::new(path) && !retire.hazard)
+            .and_then(|retire| retire.caution.clone())
+            .unwrap()
+    };
+    assert!(
+        caution("/ticks/prove").contains("lies inside the live tick_store root \"/ticks\""),
+        "{list:?}"
+    );
+    assert!(
+        caution("/queue").starts_with("1 name(s) in it are second names of live files"),
+        "{list:?}"
+    );
+    let empty = walk(&fs, &config_of(&[], Vec::new()), 0);
+    assert!(
+        retirement_text(&empty).contains("Nothing to retire: every copy root walked has a reader")
+    );
+}
+
+/// A CLOCK BEFORE 1970 is a negative count of microseconds, never a
+/// refusal or a zero; one after it is positive.
+#[test]
+fn a_wall_clock_before_1970_is_negative_micros() {
+    let epoch = std::time::UNIX_EPOCH;
+    assert_eq!(
+        micros_of(epoch - std::time::Duration::from_secs(1)),
+        -1_000_000
+    );
+    assert_eq!(
+        micros_of(epoch + std::time::Duration::from_millis(1_500)),
+        1_500_000
+    );
+    assert!(now_micros() > 0);
+}
+
+/// THE ANSWER SAYS WHY IT WALKED OR DID NOT: other configured roots walk
+/// again and say so; a request that meets another holding the walk's lock
+/// is never made to wait, and is served the last walk marked `rewalking`.
+#[test]
+fn a_changed_configuration_walks_and_a_held_lock_serves_the_last_walk() {
+    let fs = Fake::default();
+    fs.dir("/one", 1, 1);
+    fs.dir("/two", 1, 2);
+    let cache = Cache::new();
+    let first = config_of(&[Path::new("/one")], Vec::new());
+    let second = config_of(&[Path::new("/one"), Path::new("/two")], Vec::new());
+    assert!(matches!(
+        answer(&cache, &fs, &first, &|| 1),
+        Served::Register { fresh: true, .. }
+    ));
+    let Served::Register { why, fresh, .. } = answer(&cache, &fs, &second, &|| 2) else {
+        panic!("a walk");
+    };
+    assert!(fresh);
+    assert_eq!(why, "the configured roots changed since the last walk");
+    let walking = cache.walking.lock().unwrap();
+    let Served::Register {
+        register,
+        why,
+        fresh,
+        rewalking,
+        ..
+    } = answer(&cache, &fs, &first, &|| 3)
+    else {
+        panic!("the held walk");
+    };
+    assert!(rewalking && !fresh, "{why}");
+    assert!(
+        why.starts_with("being re-walked by another request (the configured roots changed"),
+        "{why}"
+    );
+    assert_eq!(
+        register.roots.len(),
+        2,
+        "the last walk, of the second roots"
+    );
+    assert!(
+        matches!(
+            answer(&cache, &fs, &second, &|| 4),
+            Served::Register {
+                fresh: false,
+                rewalking: false,
+                ..
+            }
+        ),
+        "an unchanged answer is served whoever holds the lock"
+    );
+    drop(walking);
+}
+
+/// THE LAST EDGES: an identity differing in any one compared field is not a
+/// match (`st_dev` never compared); an empty environment fallback is unset,
+/// never a folder; a live root that is not walked does not make the
+/// register partial; a retirement line with nothing to take care of says
+/// nothing more; and the process has exactly one cache.
+#[test]
+fn every_compared_field_unset_fallback_and_plain_line_is_exact() {
+    let file = meta(Kind::File, 1, 9, 1, 4);
+    let same = SourceIdentity {
+        dev: 2,
+        ino: 9,
+        size: 4,
+        mtime_s: 1_700_000_000,
+        mtime_ns: 7,
+        ctime_s: 1_700_000_001,
+        ctime_ns: 9,
+    };
+    assert!(same.matches(&file), "st_dev is never compared");
+    for other in [
+        SourceIdentity { ino: 8, ..same },
+        SourceIdentity { size: 5, ..same },
+        SourceIdentity { mtime_s: 1, ..same },
+        SourceIdentity {
+            mtime_ns: 1,
+            ..same
+        },
+        SourceIdentity { ctime_s: 1, ..same },
+        SourceIdentity {
+            ctime_ns: 1,
+            ..same
+        },
+    ] {
+        assert!(!other.matches(&file), "{other:?}");
+    }
+    let env = |name: &str| (name == "BRUTEX_MASTERS").then(OsString::new);
+    let config = config(&Sources {
+        copy_roots: Some("/i/a"),
+        source_gdfl: None,
+        source_masters: None,
+        store_root: Path::new("/i/store"),
+        env: &env,
+    })
+    .unwrap();
+    assert!(
+        config.unset_live.iter().any(|why| why
+            == "source_masters: source.masters is not set, so nothing is compared with it"),
+        "{:?}",
+        config.unset_live
+    );
+    let fs = Fake::default();
+    fs.dir("/plain", 1, 1);
+    fs.file("/plain/a.csv", 1, 2, 1, b"abc");
+    fs.dir("/store", 1, 3);
+    let register = walk(
+        &fs,
+        &config_of(
+            &[Path::new("/plain")],
+            vec![live(LiveKind::Store, Path::new("/store"))],
+        ),
+        0,
+    );
+    assert!(!register.live[0].walked);
+    assert!(register.whole(), "a store not walked is not a partial walk");
+    let text = retirement_text(&register);
+    assert!(
+        text.contains("1. \"/plain\"\n   bytes freed: 3 in 1 file(s)"),
+        "{text}"
+    );
+    assert!(!text.contains("take care"), "{text}");
+    assert!(std::ptr::eq(process_cache(), process_cache()));
+}
+
+/// A ROOT WHOSE OWN STAT CHANGED is named in the answer's `why`.
+#[test]
+fn a_changed_root_is_named_in_the_answer() {
+    let fs = Fake::default();
+    fs.dir("/one", 1, 1);
+    fs.dir("/store", 1, 2);
+    let cache = Cache::new();
+    let config = config_of(
+        &[Path::new("/one")],
+        vec![live(LiveKind::Store, Path::new("/store"))],
+    );
+    let _ = answer(&cache, &fs, &config, &|| 1);
+    fs.nodes
+        .lock()
+        .unwrap()
+        .get_mut(Path::new("/one"))
+        .unwrap()
+        .meta
+        .mtime_ns = 8;
+    let Served::Register { why, fresh, .. } = answer(&cache, &fs, &config, &|| 2) else {
+        panic!("a walk");
+    };
+    assert!(fresh);
+    assert_eq!(why, "the own stat of \"/one\" changed");
 }

@@ -85,7 +85,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
-use std::io::{self, BufRead as _};
+use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
@@ -255,24 +255,33 @@ impl Fs for Host {
 
     fn lines(&self, path: &Path, each: &mut dyn FnMut(&[u8])) -> Result<Ending, String> {
         let file = store::safe_open::open_read(path).map_err(|refusal| refusal.to_string())?;
-        let mut reader = io::BufReader::new(file);
-        let mut line = Vec::new();
-        let mut ending = Ending::Empty;
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) => return Ok(ending),
-                Ok(_) => {
-                    ending = if line.last() == Some(&b'\n') {
-                        line.pop();
-                        Ending::LineBreak
-                    } else {
-                        Ending::Torn
-                    };
-                    each(&line);
-                }
-                Err(why) => return Err(why.to_string()),
+        lines_of(&mut io::BufReader::new(file), each)
+    }
+}
+
+/// Calls `each` with every line `reader` holds, its line break removed, one
+/// line held at a time: [`Host`]'s reading of a receipt, apart from its open.
+///
+/// # Errors
+///
+/// The reader's refusal, in its words.
+pub fn lines_of(reader: &mut dyn BufRead, each: &mut dyn FnMut(&[u8])) -> Result<Ending, String> {
+    let mut line = Vec::new();
+    let mut ending = Ending::Empty;
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return Ok(ending),
+            Ok(_) => {
+                ending = if line.last() == Some(&b'\n') {
+                    line.pop();
+                    Ending::LineBreak
+                } else {
+                    Ending::Torn
+                };
+                each(&line);
             }
+            Err(why) => return Err(why.to_string()),
         }
     }
 }
@@ -1225,7 +1234,13 @@ impl Register {
 /// The current wall clock, UNIX microseconds (negative before 1970).
 #[must_use]
 pub fn now_micros() -> i64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    micros_of(std::time::SystemTime::now())
+}
+
+/// `at` as UNIX microseconds (negative before 1970), saturating.
+#[must_use]
+pub fn micros_of(at: std::time::SystemTime) -> i64 {
+    match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_micros()).unwrap_or(i64::MAX),
         Err(before) => {
             i64::try_from(before.duration().as_micros()).map_or(i64::MIN, i64::saturating_neg)
@@ -1360,8 +1375,11 @@ fn walk_all(
                 }),
         )
         .collect();
-    let slots: Vec<Mutex<Option<Result<Walked, String>>>> =
-        (0..ids.len()).map(|_| Mutex::new(None)).collect();
+    // EVERY SLOT STARTS AS THE REFUSAL IT KEEPS if no thread fills it, so no
+    // root is ever answered as walked without its walk.
+    let slots: Vec<Mutex<Result<Walked, String>>> = (0..ids.len())
+        .map(|_| Mutex::new(Err("the walk's thread ended before this root".to_owned())))
+        .collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
@@ -1373,27 +1391,22 @@ fn walk_all(
                     jobs.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
                 {
                     let walked = walk_root(fs, path, &skip_for(ids, at), keep);
-                    if let Some(slot) = slots.get(at) {
-                        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(walked);
-                    }
+                    let _filled: Option<()> = slots.get(at).map(|slot| {
+                        *slot.lock().unwrap_or_else(PoisonError::into_inner) = walked;
+                    });
                 }
             });
         }
     });
-    let ended = || Err("the walk's thread ended before this root".to_owned());
     let mut slots = slots
         .into_iter()
         .map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner));
-    let copy_walks: Vec<Result<Walked, String>> = slots
-        .by_ref()
-        .take(copies)
-        .map(|walked| walked.unwrap_or_else(ended))
-        .collect();
+    let copy_walks: Vec<Result<Walked, String>> = slots.by_ref().take(copies).collect();
     let live_walks: Vec<Option<LiveWalk>> = config
         .live
         .iter()
         .zip(slots)
-        .map(|(root, walked)| root.kind.walked().then(|| walked.unwrap_or_else(ended)))
+        .map(|(root, walked)| root.kind.walked().then_some(walked))
         .collect();
     (copy_walks, live_walks)
 }
@@ -1519,42 +1532,47 @@ fn copy_root_of(
     let mut linked_live = 0_u64;
     let mut linked_elsewhere: BTreeSet<PathBuf> = BTreeSet::new();
     for (id, names) in &walked.shared {
-        let Some(first) = names.first() else {
-            continue;
-        };
-        bytes = bytes.saturating_add(first.meta.size);
+        // EVERY NAME OF ONE FILE carries its one size and link count: the
+        // largest of an empty list is never asked, as `file_met` files a
+        // shared file with its first name.
+        let size = names.iter().map(|n| n.meta.size).max().unwrap_or_default();
+        let nlink = names.iter().map(|n| n.meta.nlink).max().unwrap_or_default();
+        bytes = bytes.saturating_add(size);
         let seen = links.all_names.get(id).map_or(0, HashSet::len);
-        if u64::try_from(seen).unwrap_or(u64::MAX) < first.meta.nlink {
-            let smallest = names.iter().map(|n| &n.path).min().unwrap_or(&first.path);
-            linked_elsewhere.insert(smallest.clone());
+        if u64::try_from(seen).unwrap_or(u64::MAX) < nlink {
+            linked_elsewhere.extend(names.iter().map(|n| &n.path).min().cloned());
         }
         let Some(lives) = links.live_names.get(id) else {
             if links.counted_in.get(id) == Some(&at) {
-                extra = extra.saturating_add(first.meta.size);
+                extra = extra.saturating_add(size);
             }
             continue;
         };
         // THE BYTES ARE THE LIVE FILE'S, so none is this root's own; and each
-        // name here that is not itself a live name is red.
-        let Some((live_path, kind)) = lives.iter().min_by(|a, b| a.0.cmp(&b.0)) else {
-            continue;
-        };
-        for named in names {
-            if lives.iter().any(|(live, _)| *live == named.path) {
-                continue;
-            }
-            linked_live = linked_live.saturating_add(1);
-            hazards.insert(Hazard {
-                path: named.path.clone(),
-                live: live_path.clone(),
-                kind: *kind,
-                dev: id.0,
-                ino: id.1,
-                nlink: named.meta.nlink,
-                bytes: named.meta.size,
-                partial: is_partial(&named.path, live_path),
+        // name here that is not itself a live name is red, against the live
+        // name first by path.
+        lives
+            .iter()
+            .min_by(|a, b| a.0.cmp(&b.0))
+            .into_iter()
+            .for_each(|(live_path, kind)| {
+                for named in names {
+                    if lives.iter().any(|(live, _)| *live == named.path) {
+                        continue;
+                    }
+                    linked_live = linked_live.saturating_add(1);
+                    hazards.insert(Hazard {
+                        path: named.path.clone(),
+                        live: live_path.clone(),
+                        kind: *kind,
+                        dev: id.0,
+                        ino: id.1,
+                        nlink: named.meta.nlink,
+                        bytes: named.meta.size,
+                        partial: is_partial(&named.path, live_path),
+                    });
+                }
             });
-        }
     }
     let receipts: Vec<Receipt> = walked
         .receipts
@@ -1958,6 +1976,14 @@ pub fn process_cache() -> &'static Cache {
 /// it.
 pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64) -> Served {
     let stamps = stamps(fs, config);
+    // THE WALK'S LOCK IS ASKED FOR BEFORE THE HELD ANSWER IS COMPARED, never
+    // waited on: a request that holds it compares and walks with no other
+    // walk able to land in between, so the same roots are never walked twice
+    // over; one that does not is answered from what is held (marked
+    // `rewalking` when its roots changed: the request holding the lock may be
+    // only comparing, and then the next request walks). The order is always
+    // `walking`, then `held`.
+    let walking = cache.walking.try_lock();
     let why = {
         let held = cache.held.lock().unwrap_or_else(PoisonError::into_inner);
         match held.as_ref() {
@@ -1978,7 +2004,7 @@ pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64
             None => "the first request since start".to_owned(),
         }
     };
-    let Ok(_walking) = cache.walking.try_lock() else {
+    let Ok(_walking) = walking else {
         let held = cache.held.lock().unwrap_or_else(PoisonError::into_inner);
         return held
             .as_ref()
@@ -1990,24 +2016,6 @@ pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64
                 rewalking: true,
             });
     };
-    // LOOK AGAIN UNDER THE WALK'S LOCK: a request that walked while this one
-    // compared may have held exactly this answer already, and a second walk
-    // of the same roots would be work done twice.
-    if let Some(held) = cache
-        .held
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .filter(|held| held.config == *config && held.stamps == stamps)
-    {
-        return Served::Register {
-            register: Arc::clone(&held.register),
-            age_ms: u64::try_from(held.at.elapsed().as_millis()).unwrap_or(u64::MAX),
-            fresh: false,
-            why: "served from memory: another request walked these roots a moment ago".to_owned(),
-            rewalking: false,
-        };
-    }
     let register = Arc::new(walk(fs, config, now()));
     note_walked(&register);
     *cache.held.lock().unwrap_or_else(PoisonError::into_inner) = Some(Held {
@@ -2025,18 +2033,17 @@ pub fn answer(cache: &Cache, fs: &dyn Fs, config: &Config, now: &dyn Fn() -> i64
     }
 }
 
-/// The first root whose own stat differs, in words.
+/// Every root whose own stat differs, in words, in the setting's order.
 fn changed_root(config: &Config, before: &[RootStat], now: &[RootStat]) -> String {
-    config
+    let changed: Vec<String> = config
         .copy_roots
         .iter()
         .chain(config.live.iter().map(|root| &root.path))
         .zip(before.iter().zip(now))
-        .find(|(_, (was, is))| was != is)
-        .map_or_else(
-            || "a root's own stat changed".to_owned(),
-            |(path, _)| format!("the own stat of {} changed", quoted(path)),
-        )
+        .filter(|(_, (was, is))| was != is)
+        .map(|(path, _)| quoted(path))
+        .collect();
+    format!("the own stat of {} changed", changed.join(", "))
 }
 
 /// What [`total`] answers for `/disk.json` (R4-29's one field).
