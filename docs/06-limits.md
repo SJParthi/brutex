@@ -21358,6 +21358,79 @@ without R4-17 and not R4-17's files: rule 3 at
 pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ~~~~
 
+### Gate 11 — R4-28, declared at its merge (R4-28 repair 5, 24 October 2026)
+
+~~~~text
+Gate 11 run on R4-28's tip as the r5 check read it (feat/db-fix merged at
+its CLOUD-MUTCLI merge) refused seven entries, 22 occurrences, every one in
+R4-28's two new
+production files (the r5 check's blocking item). Each was read before it
+was counted or removed: 16 are removed, 6 are declared (D-7191).
+
+RULE 1 (`ALLOW_SEARCH`) -- 3 removed, none declared. `Catalog::of_day` and
+  `Catalog::before` searched the receipted stamps. They are now one probe
+  each of two indices `Catalog::read` builds from its one listing:
+  `newest_on`, each (kind, day)'s newest receipted ordinal, and `place`,
+  each receipted stamp's place in its kind's ascending list. `before` of a
+  stamp no receipt commits is `None` (it answered the stamp below it), and
+  `diff_for` refuses that stamp by name. `first_listed::list_in` searched
+  the book's stamps for those on or before the plan's last day; `listing`
+  now takes the book, and `Book::through` cuts them with one day-table
+  index.
+RULE 3 (`ALLOW_UNSIZED`) -- 9 removed, none declared. `Catalog::read`
+  lists the names first and sizes its map from them. `Snapshot::parse`
+  sizes its rows and its token index from the dump's line count and its
+  word map from a stated hint (64; a dump carries a few dozen exchange,
+  segment and type words), and its duplicated-token set is gone: the
+  token's index slot answers `Duplicated`. The diff sizes its token map
+  from the old rows and its gone-share map from the gone shares, found
+  first. The first-listed log sizes its committed map from its name=count
+  pairs, collected first; the take-in cache is sized to the names the log
+  already commits; a plan's why-not map is made only when the plan took
+  snapshots in.
+RULE 4 (`ALLOW_SORT`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `Catalog::read` orders the receipted stamps of each kind and the
+  entries named incomplete, once per listing. The listing is already linear
+  in the snapshots directory's entries, a body and a receipt per attended
+  refresh and whatever a kill left (L-R428-10), and nothing after it sorts
+  (L-R428-13). `diff` orders its records once per attended refresh, over
+  the changes only, inside a comparison of two whole dumps (L-R428-03), so
+  one pair of dumps writes one `.diff` byte for byte (CLAUDE.md section 3
+  rule 5). `Book::of` (the tests and the bench) sorted the snapshots it was
+  given; it now checks their order in one pass and refuses another.
+RULE 6 (`ALLOW_SCAN`) -- 2 removed, none declared. The dump's header is
+  indexed once into a map (of two columns with one name the first is read,
+  as before), and a change kind's count slot is `Change::index`, a match.
+RULE 7 (`ALLOW_MEMBER`) -- pull/src/master_snapshots.rs 0 -> 3; one
+  removed. `diff` asks the new dump's key set, a `HashSet` built once per
+  diff, whether an old row's key is still listed, at its three places (the
+  gone shares, the same-token arm, the delistings): one hash probe each.
+  The duplicated-token set's probe went with the set.
+
+pull/src/master_snapshots_first_listed.rs needs no line. Every other
+refusal is feat/db-fix's own, present there without R4-28 and in other
+packages' files, and the REFUSED lines of each pair of runs (R4-28's
+tree and feat/db-fix's at the same merge) are the same lines: 16 on the
+tree that merged feat/db-fix at its CLOUD-MUTCLI merge
+(cli/src/tick_second_check.rs and tick_second_index.rs;
+pull/src/gdfl_import.rs, gdfl_import_causes.rs, gdfl_import_day.rs and
+gdfl_import_quality.rs; api/src/dayflags.rs), 15 on the tree that merged it
+at its R3-13 merge, where R3-13's merge took the api/src/dayflags.rs one
+away, 19 on the tree that merged it at its DATA-1w merge, whose four new
+ones are DATA-1w's own (api/src/feed_checks_files.rs under rules 3, 4 and 6,
+api/src/feed_checks.rs under rule 7), and 28 on the tree that merged it at
+its R4-18 merge, whose nine new ones are R4-18's own
+(api/src/quarantine_route.rs, cli/src/zerodha_quarantine.rs twice,
+store/src/quarantine.rs five times, store/src/repair.rs). At every one of
+those merges the six lines above are the whole difference: rule 4 counts
+three more than feat/db-fix's and rule 7 three more (171 against 168 and 239
+against 236 at the DATA-1w merge; 176 against 173 and 242 against 239 at the
+R4-18 merge).
+No sentence here names a commit by its hash: the store's citation check
+(crates/store/tests/cited_commits.rs) holds every hash in this file to
+`main`'s history, and none of these merges is on it.
+~~~~
+
 ## The upkeep runner (R3-17, D-6270)
 
 `pull::upkeep` and `cli upkeep`. None of it is on a request path: a page reads
@@ -21452,6 +21525,56 @@ zips in `/Volumes/WD_BLACK/Options`. A second agent repeats it with
 | L-R330-03 | `CalendarTable::retractions` and `expiry_alias::rekey_plan` are linear | operator-time plans before a new generation is applied | O(span days) and O(contracts), each settle walking at most `CLOSED_WALK_DAYS` | R3-30 |
 | L-R330-04 | `/greeks.json` still reads the T-bill table from `BRUTEX_TBILL91_SERIES`, not from `reference/v1/risk_free_rate` | `api` is outside R3-30's files; the gap labels reach the wire through the same `Series` | per request one `stat`, as before | R3-30 |
 | L-R330-05 | The compiled `costs::lot::lot_size` and the loaded lot table answer differently on spans whose revisions are unsourced | readers move to the table in R3-10-OPT | none; named in D-6246 item 4 | R3-30 |
+
+## Dated Kite masters and futures day candles (R4-28; D-7185, D-7186)
+
+Measured on 22 Oct 2026 on this machine (M4 Pro, dev profile, opt-level 3)
+over a COPY of the Kite dump the operator's app landed on 6 Oct 2026
+(108,915 rows, 8,854,256 bytes; nothing of it is in the repository), through
+the ignored test
+`pull::master_snapshots::tests::a_real_size_dump_is_measured`. A second agent
+repeats it with `BRUTEX_KITE_DUMP=<a copy of a landed dump>` and
+`cargo test -p pull --lib -- --ignored --exact --nocapture master_snapshots::tests::a_real_size_dump_is_measured`.
+
+- One snapshot write (gzip, listing, receipt, three syncs): 223 ms; the
+  snapshot is 1,446,540 bytes.
+- One parse and index of the dump: 115 ms.
+- One diff of two such snapshots (two reads, two parses, the comparison and
+  the `.diff` write): 419 ms.
+- `token_on` the first time a book needs two snapshots (both read, checked
+  and indexed): 331 ms. After that, n=200 tokens spread over the dump, one
+  call each, sequential: p50 1.25 µs, p99 5.3 µs, max 230 µs (one outlier).
+- C-MS-01 (`crates/pull/benches/ratio/master_snapshots.rs`, gate 8, run 22 Oct
+  2026 by `cargo bench -p pull --bench ratio`, snapshots of 2,000 invented
+  rows): on a snapshot day (one probe) p50 41 ns, p99 42 ns at 1, 10 and 100
+  snapshots (max 125 ns, 23.3 µs and 2.3 µs; n=20,000 each), ratios 1.020x
+  and 1.023x; between two snapshots (two probes) p50 42 ns, p99 84 ns at 10
+  and 100 (max 209 ns and 167 ns), ratio 0.989x. Ceiling 3.0x.
+
+**Disk, projected from the measured snapshot (an extrapolation):** one
+attended refresh writes the Kite snapshot (about 1.45 MB), the NSE Total
+Market snapshot (about 50 KB before compression) and one `.diff` of
+`(records + 1) x 192` bytes, five files with the receipts. At one refresh a
+trading day, about 250 refreshes a year: about 0.4 GB and 1,250 files a year,
+plus the diffs, whose daily size is not measured (each records one line per
+listing, delisting and change). A same-day refresh with the same bytes writes
+nothing.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R428-01 | The first `token_on` into a snapshot not yet loaded reads, checks and parses it | a snapshot is held only after its first use; the day table finds it in one index | O(rows of that snapshot) once per book (331 ms for two real-size snapshots); then one index and at most two probes (p99 5.3 µs) | R4-28 |
+| L-R428-02 | Memory of a book grows with the snapshots it has loaded | each loaded snapshot keeps its rows and index; a walk that must not keep them uses `Book::with_snapshot`, which reads one at a time | about one parsed dump per loaded snapshot; the day table is one `u32` per calendar day spanned, at most 40 years | R4-28 |
+| L-R428-03 | The diff is O(rows of both snapshots) | it compares two whole dumps, once per refresh that lands a new Kite snapshot, at operator time | 419 ms at 108,915 rows | R4-28 |
+| L-R428-04 | CLOSED by R4-28 repair 1 (D-7187). `fnowork::futures_plan` used to read every receipted snapshot on or before the window's end, one at a time, on every run and for every underlying | the first snapshot that lists each future is the start of the days its token is believed to name it; that day is now read from the first-listed index (L-R428-07) | was O(snapshots x rows) per underlying per run, measured linear by a second agent: 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at 40 (real 108,915-row dump, dev profile) | R4-28 |
+| L-R428-05 | Which contract a continuous candle came from is UNVERIFIED | the vendor states no roll day | the continuous series is filed as answered under `<UNDERLYING>-FUT-C1` and never split into contracts | R4-28 |
+| L-R428-06 | Contracts that expired before the first snapshot have no per-contract series | no token of theirs was ever cached; the vendor reaches them only through `continuous=1` | their days are in `<UNDERLYING>-FUT-C1` only, labelled | R4-28 |
+| L-R428-07 | A futures plan still parses the NEWEST snapshot once per request (D-7187) | `token_reused` and the continuous series are checked against the newest dump, which is opened per request; every older snapshot is read from the first-listed index instead, and the absorbed log and the directory listing are one short record per snapshot | O(rows of the newest dump) per underlying per run, plus a small term linear in the snapshots held, which is NOT flat: the directory listing, the absorbed log (one short line per snapshot, read and checked whole on every plan) and the stamp loops. A second agent measured it on synthetic 2,000-row snapshots: 1.74x at 1,000 snapshots against 1, about 1.5 us per snapshot (R4-28 r2 check); at real dump size the newest parse dominates. Unbounded in principle, bounded in practice by the attended refreshes: one snapshot a day refreshed, and a `_2` only when a same-day refresh differs. Measured on a copy of the real 108,915-row dump, dev profile, the book opened and NIFTY planned, n=50 single calls a size: 1 snapshot p50 119.1 ms, p99 122.6 ms, max 146.0 ms; 10 snapshots p50 119.4 ms, p99 125.2 ms, max 126.3 ms; 100 snapshots p50 116.8 ms, p99 120.1 ms, max 149.7 ms (`fnowork::futures_tests::a_real_size_plan_does_not_grow_with_the_snapshots_held`, opt-in). Before the index: 240 ms at 1, 1,331 ms at 10, 5,008 ms at 40. C-MS-02 holds it flat at 1, 10 and 100 synthetic snapshots | R4-28 |
+| L-R428-08 | Writing a Kite snapshot now also takes its futures into the first-listed index | one parse of the snapshot, and one append and sync per underlying with a contract no earlier snapshot listed (a new month lists one per underlying); the absorbed line is synced last | once per attended refresh. Measured on the same copy, 100 snapshots written: p50 337 ms, p99 851 ms, max 7,076 ms; the max is the first snapshot, which creates and syncs 219 index files (one per NFO future name). Disk: one 82-byte line per contract ever listed, one 60-byte absorbed line per snapshot; after those 100 snapshots, 219 files and 884 KB on disk (4 KB blocks) | R4-28 |
+| L-R428-09 | A first-listed index that does not match its commit log is rebuilt as a new generation (R4-28 repair 2; D-7188) | a file missing, cut or garbled, or a commit-log line that does not check, cannot say which contracts exist from which day, and nothing on disk can repair it but the receipted snapshots themselves; the damaged generation is left as found (append-only), so each damage found costs one new generation's disk too | linear in the snapshots held: every receipted snapshot is read and parsed once more, once per damage found. MEASURED as a whole rebuild by the R4-28 r3 check (`state/fix/round2/verify-R4-28-r3.progress.md`, probe `probe_v3_rs_rebuild_at_real_size`, a copy of the real 108,915-row dump, dev-test profile, load 54-121): 6,580 ms over 10 snapshots (658 ms a snapshot) and 12,993 ms over 30 (433 ms a snapshot), so 0.43 to 0.66 s a snapshot on that host; at 100 snapshots that is about 43 to 66 s (EXTRAPOLATED from the 10 and 30 measurements), under the writers' lock, so a refresh or plan that finds it waits that long. The repair-2 estimate it replaces (0.12 to 0.34 s a snapshot, extrapolated from L-R428-07 and L-R428-08) was below what was measured. A second damage in the same call is refused `futures_index_damaged`, never rebuilt in a loop | R4-28 |
+| L-R428-10 | Every refresh names every incomplete snapshot entry of its kind, and it costs one directory listing (R4-28 repair 3) | the code deletes nothing, so a write cut by a kill stays on disk until someone moves it aside by hand, and every later refresh names it again: in the `/masters/refresh` outcome (`snapshot.incomplete`), in one Warn `pull.masters.snapshot` event each, and in the facts of every futures pull over the book. A refresh that writes nothing (a refused landing, an empty body) lists the directory once to name them; a write already lists it under the writers' lock and names them from that listing | at most `master_snapshots::INCOMPLETE_NAMED` (64) entries are named per refresh outcome, per refresh's events and per plan, newest first; the rest are counted (`unnamed`, one more Warn event, one more plan line), never dropped unseen. The listing itself is O(entries in the snapshots directory), as every write already was (L-R428-08) | R4-28 |
+| L-R428-11 | A refresh names at most `DIFF_NAMED` (256) of the diff's symbol, ISIN, lot-size, expiry and token changes (R4-28 repair 4) | an exchange-wide revision (a lot-size change for every contract) changes one row per contract, tens of thousands in one dump, and one Warn event and one outcome object each would be that many | the first 256 in the diff's own order are named in the `/masters/refresh` outcome (`diff.named`) and in one Warn `pull.masters.snapshot` event each; the rest are counted (`diff.unnamed`, `diff.named_total`, one more Warn event naming the `.diff` file), and every change of every kind is in the fixed-record `.diff` file, never dropped | R4-28 |
+| L-R428-12 | `Book::open` waits for a master write in flight (R4-28 repair 4) | the listing takes the writers' lock shared, so a body whose receipt is still being written is never named cut; it waits for that writer and no other reader | the wait is the writer's own hold, which is measured: a snapshot write with its futures take-in p50 337 ms, p99 851 ms, max 7,076 ms (L-R428-08), and, only after damage is found, a first-listed rebuild at 0.43 to 0.66 s a snapshot held (6,580 ms over 10 and 12,993 ms over 30 measured; about 43 to 66 s at 100, EXTRAPOLATED: L-R428-09); a diff is computed outside the lock and holds it only for one write, sync and rename. The wait itself is NOT MEASURED apart from those holds | R4-28 |
+| L-R428-13 | `Catalog::read` orders what its one listing found, and the diff orders its own records (R4-28 repair 5; D-7191; gate 11 rule 4, declared) | a directory lists its names in no order, and the listing is the only place the receipted stamps of a kind and the entries named incomplete are put in order; the diff's records are put in one order so one pair of dumps writes one `.diff` byte for byte | the listing is O(entries in the snapshots directory) (L-R428-10) and its orderings O(n log n) in the receipted snapshots of a kind and in the incomplete entries, once per listing; every answer after it (`of_day`, `before`, `is_receipted`) is one hash probe, and nothing else in the module sorts or searches the stamps. The diff's ordering is O(c log c) in its c changes, once per attended refresh, inside its O(rows) comparison (L-R428-03). MEASURED 24 Oct 2026 on the Mac with the host at load average 70 to 167 on 14 cores (other agents' builds), dev-test profile, `master_snapshots::tests::measure_the_catalog_listing_and_its_probes` (opt-in), n=200 a size, one body name and one receipt name a snapshot: `Catalog::read` at 1 receipted snapshot p50 20 us, p99 114 us, max 1,165 us; at 100 p50 130 us, p99 701 us, max 1,924 us; at 1,000 p50 1,292 us, p99 2,461 us, max 2,629 us (linear in the names, about 1.3 us a snapshot at p50); the three probes after it together p50 84 to 209 ns, p99 333 to 1,375 ns, max 666 ns to 10.75 us, flat. The same run's real-size dump (`a_real_size_dump_is_measured`, the copy of the 108,915-row dump): the diff with its ordering 509 ms, one parse 109 ms (earlier rounds 83 to 115 ms; one sample each, so no faster or slower is claimed) | R4-28 |
 
 ## The emSign distrust bump: `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10 (BASE-REDS-1021, D-7120)
 
