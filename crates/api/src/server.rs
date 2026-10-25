@@ -5150,12 +5150,18 @@ fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequ
     if let Some(day) = about.day.as_deref() {
         event = event.with("day", telemetry::Value::Str(day));
     }
-    let noted = telemetry::emit(&event);
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
+    // A LINE THE SINK DROPS IS COUNTED THERE, AND IS NOT A PANIC HERE.
+    //
+    // This asserted `is_written()` unless no sink was installed, and an error
+    // line is above every floor, so the assertion could fail only when the
+    // sink DROPPED it: a full disk, or a sink already closed (R3-14). In a
+    // build with debug assertions, the dev profile the Run button builds, the
+    // panic came before the page heard of the member, so on a full disk,
+    // where a member dies at the store and its line cannot be written, the
+    // operator lost both. `telemetry::emit` never panics on a drop and counts
+    // it in `Sink::health`; this site now does as every other one in this
+    // file does.
+    let _noted = telemetry::emit(&event);
     site.autopilot
         .fail(&failure.instrument, &about, &failure.why);
 }
@@ -5827,7 +5833,7 @@ async fn land_broker_member(
 /// `'static` copies of a whole fetched window; this borrows it. On a
 /// current-thread runtime (a test's) there is no other worker to starve and
 /// `block_in_place` is not allowed, so the work runs where it is.
-fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
+pub(crate) fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
         _ => work(),
@@ -7472,6 +7478,13 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
+                //
+                // `VENDOR_DOWN` the same way, and put back only on a refusal
+                // with nothing before it: a written prefix makes the
+                // instrument a success, which clears the breaker, and nothing
+                // strips the marker from `Chunks::unfetched`.
+                let vendor_down = marked_why.starts_with(VENDOR_DOWN);
+                let marked_why = marked_why.trim_start_matches(VENDOR_DOWN);
                 let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
                 let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
                 let sentence = {
@@ -7486,7 +7499,10 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    // A dropped line is counted by the sink and never
+                    // stops the refusal, for the reason
+                    // `note_member_failure` gives.
+                    let _noted = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -7495,10 +7511,6 @@ async fn fetch_chunks(
                             .with("from", telemetry::Value::Str(&chunk.from().to_string()))
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
-                    );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
                     );
                     format!(
                         "the broker did not answer with a window. This was \
@@ -7516,6 +7528,8 @@ async fn fetch_chunks(
                 };
                 let sentence = if credential_dead {
                     format!("{CREDENTIAL_DEAD}{sentence}")
+                } else if vendor_down && bodies.is_empty() {
+                    format!("{VENDOR_DOWN}{sentence}")
                 } else {
                     sentence
                 };
@@ -8421,8 +8435,15 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, as `laddered` marks its own: `broker_run`'s
+                        // breaker counts consecutive instruments by this
+                        // marker and by nothing else. Without it the spot
+                        // path, which retries here and not in `laddered`,
+                        // could never trip that breaker, and an outage cost
+                        // this whole ladder for every instrument in the run.
+                        // `fetch_chunks` lifts it and puts it back in front.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -8781,11 +8802,9 @@ fn note_instrument_refusal(
     if let Some(month) = about.one_month() {
         event = event.with("month", telemetry::Value::Str(month));
     }
-    let emitted = telemetry::emit(&event);
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped line is counted by the sink and never stops the run that
+    // refused the instrument, for the reason `note_member_failure` gives.
+    let _emitted = telemetry::emit(&event);
 }
 
 /// What the page says when the breaker stops a run.
@@ -10425,6 +10444,12 @@ struct FnoPage<'a> {
 /// this route actually measures: it lands contract by contract and keeps its own
 /// tallies. Inventing the two it does not measure — `rows_folded` and `counted`
 /// — would be the §3 rule 6 failure of claiming a measurement never taken.
+///
+/// The futures arm is the exception that proves it: it lands through
+/// `ingest::from_window` and sums each landing's `Ingested`, so it HAS measured
+/// the rows folded and the drops by reason, and fills `rows_folded` and
+/// `drops` (R4-28 repair 4; D-7190). Every other arm leaves both at the zeroes
+/// [`audit::Record::refused`] has always written, and still never `counted`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct FnoCounts {
     /// Contracts this run asked the vendor about.
@@ -10435,6 +10460,13 @@ struct FnoCounts {
     bars_stored: u64,
     /// Contracts that were asked for and did not land.
     failures: u64,
+    /// Rows folded into a bar already open. Measured by the futures arm only,
+    /// which lands through `ingest::from_window` and sums its count (R4-28
+    /// repair 4; D-7190); zero on every other arm, as before.
+    rows_folded: u64,
+    /// Rows dropped, by reason. Measured by the futures arm only, from each
+    /// landing's own census; every other arm keeps the zeroes it always wrote.
+    drops: audit::Drops,
 }
 
 impl FnoPage<'_> {
@@ -10466,7 +10498,7 @@ impl FnoPage<'_> {
         why: &str,
         counts: FnoCounts,
     ) -> (axum::http::StatusCode, String) {
-        let record = audit::Record::refused(
+        let mut record = audit::Record::refused(
             audit::Scope::Fno,
             outcome,
             self.now,
@@ -10480,6 +10512,11 @@ impl FnoPage<'_> {
             counts.bars_stored,
             counts.failures,
         );
+        // WHAT THE FUTURES ARM MEASURED BESIDE THE FOUR (R4-28 repair 4): the
+        // defaults are the zeroes `Record::refused` writes, so no other arm's
+        // record changes by a byte.
+        record.rows_folded = counts.rows_folded;
+        record.drops = counts.drops;
         facts.push(recorded_fact(self.journal, &record));
         let body = if outcome == audit::Outcome::NotStarted {
             facts.push(("Reason", why.to_owned()));
@@ -11028,6 +11065,10 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                // `VENDOR_DOWN` is stripped: no breaker reads it on this
+                // path, and left on it would reach the page as an invisible
+                // control character.
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
@@ -11519,20 +11560,30 @@ async fn fno_walk(
     if let Some(rolling) = spec.fno.by_offset() {
         return fno_roll(&page, facts, asked, site, &wire, rolling).await;
     }
+    // THE THIRD SHAPE: FUTURES DAY CANDLES THROUGH A TOKEN (R4-28, CON-12;
+    // D-7186). Each token is resolved by date through the dated master
+    // snapshots and never decides identity; options are refused here.
+    if let Some(route) = spec.fno.by_token() {
+        return fno_futures(&page, facts, asked, site, &wire, route).await;
+    }
     // ASKED AS THE QUESTION IT IS. This read `by_name().is_none()`, which is
     // the same verdict reached by a different question -- "has it a NAME walk"
     // rather than "does it serve expired contracts at all" -- and left
     // `FnoAccess::serves` with no caller anywhere in shipped code. A predicate
     // nothing asks is a rule nothing enforces.
     //
-    // THE OPERATOR'S RULE OF 19 AUG 2026 RESTS ON THIS ARM: Zerodha is spot
-    // only, and an expired future or option must never be attempted for it
-    // even if it is ticked by mistake. Its descriptor declares
-    // `FnoAccess::None`, so this refuses BEFORE any vendor request is built --
-    // and `Vendor::segment_of` declines `NFO-FUT`, `NFO-OPT`, `MCX` and `BSE`
-    // for it besides, so no derivative row of its master exists to be asked
-    // about in the first place. Two independent refusals, neither relying on
-    // the other.
+    // A FEED THAT DECLARES NO EXPIRED-DERIVATIVE HISTORY AT ALL stops here,
+    // BEFORE any vendor request is built. Zerodha no longer reaches this arm
+    // (R4-28 repair 5, the r5 check's follow-up: this note still said it
+    // declared `FnoAccess::None`): since D-7186 its descriptor declares
+    // `FnoAccess::ByToken`, futures day candles through a token resolved by
+    // date, answered by `fno_futures` above, which refuses options by name.
+    // The operator's rule of 19 Aug 2026 (Zerodha spot only) stands for
+    // options and for the sweep: a future is stored and never swept.
+    // `Vendor::segment_of` still declines `NFO-FUT`, `NFO-OPT`, `MCX` and
+    // `BSE` for it, so the universe's master decode holds no derivative row;
+    // the futures leg reads its tokens from the dated master snapshots
+    // (`pull::master_snapshots`) instead.
     if !spec.fno.serves() {
         return page.say(
             facts,
@@ -12611,7 +12662,8 @@ fn price_group(
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
                 &mut out,
-                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
+                "the vendor sent no underlying level beside this bar, so there \
+                 is nothing to price it against",
             );
             continue;
         };
@@ -13867,6 +13919,7 @@ fn rolling_receipt(
         rows_read: rows_read as u64,
         bars_stored: stored as u64,
         failures: failed as u64,
+        ..FnoCounts::default()
     };
 
     if failed == 0 {
@@ -13899,6 +13952,225 @@ fn rolling_receipt(
         audit::Outcome::Failed,
         "some contracts did not land; the month is incomplete and must not be \
          read as held",
+        counted,
+    )
+}
+
+/// Why a futures-through-a-token feed sends nothing for `asked`: options, or
+/// a rung the route does not serve (R4-28, CON-12; D-7186).
+fn futures_refusal(
+    asked: &ingest::FnoRequest,
+    route: pull::vendor::ContinuousSpec,
+) -> Option<&'static str> {
+    if matches!(asked.series, ingest::Series::Options) {
+        return Some(
+            "this feed serves expired FUTURES day candles only, through a token; nothing \
+             was sent rather than futures being filed under an options request",
+        );
+    }
+    (asked.granularity != route.granularity).then_some(
+        "this feed serves expired futures as day candles only; minute candles of an \
+         expired future are UNVERIFIED (charter §4z), so nothing was sent",
+    )
+}
+
+/// ONE NAMED EXPIRY ASKS FOR THAT CONTRACT ALONE: not the continuous series,
+/// which is no one contract. A named expiry no dated snapshot lists inside
+/// the window is refused by name rather than answered as an empty run.
+fn narrowed_to_expiry(
+    mut plan: pull::fnowork::FuturesPlan,
+    asked: &ingest::FnoRequest,
+) -> Result<pull::fnowork::FuturesPlan, String> {
+    let Some(expiry) = asked.expiry else {
+        return Ok(plan);
+    };
+    plan.asks.retain(|ask| {
+        matches!(ask.series, pull::fnowork::FuturesSeries::Contract { expiry: held, .. } if held == expiry)
+    });
+    if plan.asks.is_empty() && plan.refused.is_empty() {
+        return Err(format!(
+            "no dated master snapshot lists a future of {} expiring on {expiry} inside the \
+             window, so nothing was sent",
+            asked.underlying.as_str()
+        ));
+    }
+    Ok(plan)
+}
+
+/// `POST /pull/fno` on a feed that serves futures day candles through a token
+/// (R4-28, CON-12; D-7186): stored, never swept.
+///
+/// Each future is filed under its own contract keyed (underlying, expiry), the
+/// vendor's continuous series under `<UNDERLYING>-FUT-C1`, open interest kept.
+/// The plan, the requests and every refusal are `pull.futures` events; the
+/// receipt names every series and every contract not asked for.
+async fn fno_futures(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    route: pull::vendor::ContinuousSpec,
+) -> (axum::http::StatusCode, String) {
+    let unavailable = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+    if let Some(why) = futures_refusal(asked, route) {
+        return page.say(facts, unavailable, audit::Outcome::NotStarted, why);
+    }
+    let last_settled = match ingest::last_settled_day(page.today) {
+        Ok(day) => day,
+        Err(why) => {
+            return page.say(
+                facts,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                audit::Outcome::NotStarted,
+                &why.to_string(),
+            );
+        }
+    };
+    // OFF THE ASYNC WORKERS (R4-28 repair 2): opening the book parses the
+    // newest snapshot, and the plan takes the writers' lock (a blocking flock)
+    // and may take snapshots into the futures index.
+    let planned = off_the_workers(|| {
+        let book = masters_dir().and_then(|dir| {
+            pull::master_snapshots::Book::open(&dir.join(pull::master_snapshots::SNAPSHOT_DIR))
+        })?;
+        pull::fnowork::futures_plan(
+            &book,
+            route,
+            asked.underlying.as_str(),
+            asked.window,
+            page.today,
+            last_settled,
+        )
+    });
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
+    };
+    let plan = match narrowed_to_expiry(plan, asked) {
+        Ok(plan) => plan,
+        Err(why) => return page.say(facts, unavailable, audit::Outcome::NotStarted, &why),
+    };
+    facts.push(("Dated master snapshot", plan.newest.to_string()));
+    facts.push(("Series asked", plan.asks.len().to_string()));
+    if let Some(ref why) = plan.rebuilt {
+        facts.push(("Futures index rebuilt", why.clone()));
+    }
+    // NAMED WHERE THE PULL IS READ (R4-28 repair 3): a Kite snapshot cut
+    // before its receipt is never read, so a day it would have dated resolves
+    // from its neighbours. ENTRIES, not snapshots (R4-28 repair 5, the r5
+    // check's follow-up): a cut `.diff` and a name in another case are listed
+    // here too, and each line says which it is.
+    if !plan.incomplete.is_empty() {
+        facts.push((
+            "Incomplete master-snapshot entries",
+            plan.incomplete.join(" · "),
+        ));
+    }
+    if !plan.refused.is_empty() {
+        facts.push(("Not asked", plan.refused.join(" · ")));
+    }
+    let governed = Governed {
+        inner: &wire.source,
+        feed: asked.feed,
+        site,
+    };
+    let origin = wire.source.endpoint(route.granularity);
+    let landed = pull::fnowork::pull_futures_day(
+        &governed,
+        &wire.spec,
+        &plan,
+        &site.store_root,
+        wire.store_vendor,
+        &origin,
+    )
+    .await;
+    futures_answer(page, facts, &plan, &landed)
+}
+
+/// The futures pull's receipt and journal record, from what its landings
+/// measured (R4-28 repair 4; D-7190).
+///
+/// # Written, beside offered, and every row accounted for
+///
+/// The receipt states the bars WRITTEN (`Ingested::bars_committed`) under the
+/// spot receipt's own words, with the bars offered beside them, the rows
+/// folded, the rows dropped by reason and the balance line, and the journal's
+/// count and outcome come from the written figure, as the options landings'
+/// do (`FnoLanded::record_landing`). It used to put the OFFERED count under
+/// "Bars stored" and journal it `Stored`, so an identical re-pull that wrote
+/// nothing read as a pull that stored every bar, and the pull ladder's
+/// written-bars figure, which reads "Bars written to the file" first and
+/// "Bars stored" after it, summed bars that were never written.
+fn futures_answer(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    plan: &pull::fnowork::FuturesPlan,
+    landed: &pull::fnowork::FuturesLanded,
+) -> (axum::http::StatusCode, String) {
+    facts.push(("Rows read", landed.rows_read.to_string()));
+    facts.push(("Bars offered to the store", landed.bars_offered.to_string()));
+    facts.push((
+        "Bars written to the file",
+        landed.bars_committed.to_string(),
+    ));
+    facts.push((
+        "Rows folded into an open bar",
+        landed.rows_folded.to_string(),
+    ));
+    facts.push(("Rows dropped", landed.census.total().to_string()));
+    if !landed.census.is_empty() {
+        facts.push(("Dropped, by reason", landed.dropped_by_reason()));
+    }
+    facts.push(("Balances", landed.balance_line()));
+    for line in &landed.series {
+        facts.push(("Series", line.clone()));
+    }
+    let counted = FnoCounts {
+        contracts: plan.asks.len() as u64,
+        rows_read: landed.rows_read as u64,
+        bars_stored: landed.bars_committed as u64,
+        failures: landed.failed.len() as u64,
+        rows_folded: landed.rows_folded as u64,
+        drops: audit::Drops::of_census(landed.census),
+    };
+    // Each reason says what it is inside the journal note's first
+    // `audit::NOTE_CAPACITY` bytes, which is all a run record keeps.
+    let asked_whole = landed.failed.is_empty() && plan.refused.is_empty();
+    if asked_whole && landed.balances() {
+        let (outcome, why) = if landed.bars_committed > 0 {
+            (
+                audit::Outcome::Stored,
+                "every planned futures series was asked and filed under its own contract \
+                 or its continuous series",
+            )
+        } else if landed.bars_offered > 0 {
+            (
+                audit::Outcome::Empty,
+                "the store already held every futures bar offered; nothing new was \
+                 written, and every planned series was asked",
+            )
+        } else {
+            (
+                audit::Outcome::Empty,
+                "no futures bar was left to file: the vendor answered none inside the \
+                 window on a trading day; every planned series was asked",
+            )
+        };
+        return page.say_counted(facts, axum::http::StatusCode::OK, outcome, why, counted);
+    }
+    page.say_counted(
+        facts,
+        axum::http::StatusCode::BAD_GATEWAY,
+        audit::Outcome::Failed,
+        if asked_whole {
+            "the futures rows read do not balance against the bars offered, folded and \
+             dropped; see the Balances line, and read nothing of this pull as held"
+        } else {
+            "some futures series were not asked or did not land whole; each is named above. \
+             What each series line says it wrote is held, a stopped series' too; a contract \
+             not asked holds nothing from this pull"
+        },
         counted,
     )
 }
@@ -14081,6 +14353,7 @@ async fn fno_report(
         rows_read: rows_read as u64,
         bars_stored: stored as u64,
         failures: failures as u64,
+        ..FnoCounts::default()
     };
 
     if failures == 0 {
@@ -19073,9 +19346,15 @@ impl Drop for ServeLock {
     /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
         drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
-        }
+        // THROUGH A POISONED SET, as `take_serve_lock` inserts through one.
+        // Skipping the removal on poison left the key in the set after the
+        // file lock was released, so the next serve of this root in this
+        // process was handed the in-process pass with NO file lock held, and
+        // a second process could take the store beside it.
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.root);
     }
 }
 
@@ -19364,9 +19643,11 @@ fn stamp_outcome(
 
 /// Drops a root out of the in-process set after a failed take.
 fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
-    }
+    // Through a poisoned set, for the reason `ServeLock::drop` gives.
+    serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key);
 }
 
 /// The exit code of a server that has stopped, and the reason if it fell over.
@@ -25492,6 +25773,54 @@ mod tests {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// A stop asked once a serve of `root` has finished its start-up load.
+    ///
+    /// R3-14 repair 5 races the load against the stop and polls the stop
+    /// first (`loaded_or_stopped`), so [`fired`] ends a serve BEFORE its load:
+    /// the universe's verdict, the banner after the load, the first event, the
+    /// recovery at start and the stop's exit code are never reached. The
+    /// `listening` event is written after the load and before `serve`, so this
+    /// stop waits for one naming `root` that was written after the stop was
+    /// made, on whichever sink the process has installed, and then answers
+    /// inside `serve`, as a pressed stop would.
+    ///
+    /// A root that does not resolve is named as given: such a serve is refused
+    /// before it listens, so the stop is never polled to its end.
+    pub(super) fn after_the_load(root: &Path) -> Shutdown {
+        let store = std::fs::canonicalize(root)
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        let from = telemetry::global().map_or(0, |sink| sink.health().next_seq);
+        Box::pin(async move {
+            while !listening_since(from, &store) {
+                tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether the installed sink holds a `listening` event at or after
+    /// `from` whose store is `store`.
+    fn listening_since(from: u64, store: &str) -> bool {
+        telemetry::global().is_some_and(|sink| {
+            let dir = sink
+                .path()
+                .parent()
+                .expect("the sink writes a file inside a directory")
+                .to_path_buf();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.serve");
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .iter()
+                .any(|record| {
+                    record.seq >= from
+                        && record.message == "listening"
+                        && crate::emitted::says(record, "store", store)
+                })
+        })
+    }
+
     /// One command line, owned.
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
@@ -28472,8 +28801,13 @@ mod tests {
 
         let expected =
             masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+        // STOPPED AFTER THE LOAD, NOT BEFORE IT. Since R3-14 repair 5 a stop
+        // that has already fired wins the race with the start-up load and the
+        // serve exits OK before it reads the universe, so on a host whose
+        // store is on disk and free this read `left: 0, right: 3` and the
+        // `listening` event below was never written.
         assert_eq!(
-            run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+            run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
             expected,
             "a serve exits on the verdict of the universe it served"
         );
@@ -30094,6 +30428,348 @@ mod tests {
     /// contract fetched and filed"*, because every contract that WAS discovered
     /// was.
     ///
+    /// R4-28 (CON-12; D-7186): the futures route asks for FUTURES at the DAY
+    /// rung and nothing else. Zerodha's descriptor carries the token route, an
+    /// options request and a minute request are refused before any credential
+    /// or snapshot is read, and a futures day request is not refused here.
+    #[test]
+    fn the_futures_route_refuses_options_and_minutes_by_name() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let pull::vendor::Transport::Http(spec) =
+            pull::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        let route = spec
+            .fno
+            .by_token()
+            .expect("Zerodha serves futures through a token");
+        assert!(spec.fno.by_name().is_none() && spec.fno.by_offset().is_none());
+        let asked = |series, granularity| ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series,
+            expiry: None,
+            window: pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31))
+                .expect("a window"),
+            feed: pull::vendor::Feed::Zerodha,
+            granularity,
+            rate: None,
+            clamped_from: None,
+        };
+        let options = futures_refusal(
+            &asked(ingest::Series::Options, pull::vendor::Granularity::Day1),
+            route,
+        )
+        .expect("options are refused");
+        assert!(options.contains("FUTURES day candles only"), "{options}");
+        let minutes = futures_refusal(
+            &asked(ingest::Series::Futures, pull::vendor::Granularity::Minute1),
+            route,
+        )
+        .expect("minutes are refused");
+        assert!(minutes.contains("UNVERIFIED"), "{minutes}");
+        assert_eq!(
+            futures_refusal(
+                &asked(ingest::Series::Futures, pull::vendor::Granularity::Day1),
+                route
+            ),
+            None
+        );
+    }
+
+    /// R4-28 (CON-12): a named expiry asks that one contract and not the
+    /// continuous series; an expiry no snapshot lists is refused by name.
+    #[test]
+    fn a_named_futures_expiry_asks_that_contract_alone_or_is_refused_by_name() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let window =
+            pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31)).expect("a window");
+        let contract = |y, m, d| {
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future {
+                expiry: brutex_core::instrument::Expiry::new(y, m, d).expect("an expiry"),
+            })
+            .expect("a future renders")
+        };
+        let ask = |token, series| pull::fnowork::FuturesAsk {
+            token,
+            series,
+            window,
+        };
+        let plan = pull::fnowork::FuturesPlan {
+            underlying: "NIFTY".to_owned(),
+            newest: pull::master_snapshots::Stamp {
+                day: day(2026, 1, 2),
+                ordinal: 1,
+            },
+            asks: vec![
+                ask(
+                    1,
+                    pull::fnowork::FuturesSeries::Contract {
+                        contract: contract(2026, 1, 27),
+                        expiry: day(2026, 1, 27),
+                    },
+                ),
+                ask(
+                    2,
+                    pull::fnowork::FuturesSeries::Contract {
+                        contract: contract(2026, 2, 24),
+                        expiry: day(2026, 2, 24),
+                    },
+                ),
+                ask(1, pull::fnowork::FuturesSeries::Continuous),
+            ],
+            refused: Vec::new(),
+            rebuilt: None,
+            incomplete: Vec::new(),
+        };
+        let asked = |expiry| ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Futures,
+            expiry,
+            window,
+            feed: pull::vendor::Feed::Zerodha,
+            granularity: pull::vendor::Granularity::Day1,
+            rate: None,
+            clamped_from: None,
+        };
+        let all = narrowed_to_expiry(plan.clone(), &asked(None)).expect("no expiry named");
+        assert_eq!(all.asks.len(), 3);
+        let one = narrowed_to_expiry(plan.clone(), &asked(Some(day(2026, 1, 27))))
+            .expect("a listed expiry");
+        assert_eq!(one.asks.len(), 1);
+        assert_eq!(one.asks[0].token, 1);
+        let why = narrowed_to_expiry(plan, &asked(Some(day(2026, 3, 31))))
+            .expect_err("an expiry no snapshot lists");
+        assert!(why.contains("expiring on 2026-03-31"), "{why}");
+    }
+
+    /// One receipt fact by its label, as the pull ladder's `receipt_fact`
+    /// reads it.
+    fn futures_fact(body: &str, label: &str) -> Option<String> {
+        let (_, rest) = body.split_once(&format!("<th>{label}</th><td>"))?;
+        rest.split_once("</td>").map(|(cell, _)| cell.to_owned())
+    }
+
+    /// What the futures route answered for one landing: the status, the
+    /// receipt and the record it journalled.
+    struct FuturesAnswered {
+        code: axum::http::StatusCode,
+        body: String,
+        record: audit::Record,
+    }
+
+    /// A futures pull of the continuous series over 2026-01-01..09 that read
+    /// five rows, offered `offered` and wrote `committed`.
+    fn futures_landed(offered: usize, committed: usize) -> pull::fnowork::FuturesLanded {
+        pull::fnowork::FuturesLanded {
+            requests: 1,
+            rows_read: 5,
+            bars_offered: offered,
+            bars_committed: committed,
+            series: vec!["NIFTY-FUT-C1: one line".to_owned()],
+            ..pull::fnowork::FuturesLanded::default()
+        }
+    }
+
+    /// `landed`, answered by the futures route into a fresh journal.
+    fn futures_answered(landed: &pull::fnowork::FuturesLanded) -> FuturesAnswered {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let window =
+            pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 9)).expect("a window");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "brutex-r428-futures-receipt-{}-{nanos}",
+            std::process::id()
+        ));
+        // The journal never recreates a missing store root, so the scratch
+        // root is made here and the journal makes only its `audit/`.
+        std::fs::create_dir_all(&root).expect("a scratch store root");
+        let journal = audit::Journal::at(&root);
+        let asked = ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Futures,
+            expiry: None,
+            window,
+            feed: pull::vendor::Feed::Zerodha,
+            granularity: pull::vendor::Granularity::Day1,
+            rate: None,
+            clamped_from: None,
+        };
+        let page = FnoPage {
+            asked: &asked,
+            now: std::time::UNIX_EPOCH + std::time::Duration::from_mins(29_470_000),
+            today: day(2026, 1, 12),
+            journal: &journal,
+            broker: Broker::Live,
+        };
+        let plan = pull::fnowork::FuturesPlan {
+            underlying: "NIFTY".to_owned(),
+            newest: pull::master_snapshots::Stamp {
+                day: day(2026, 1, 2),
+                ordinal: 1,
+            },
+            asks: vec![pull::fnowork::FuturesAsk {
+                token: 1,
+                series: pull::fnowork::FuturesSeries::Continuous,
+                window,
+            }],
+            refused: Vec::new(),
+            rebuilt: None,
+            incomplete: Vec::new(),
+        };
+        let (code, body) = futures_answer(&page, Vec::new(), &plan, landed);
+        let record = newest_record(&journal, &journal.look()).expect("journalled");
+        FuturesAnswered { code, body, record }
+    }
+
+    /// R4-28 repair 4 (D-7190): THE FUTURES RECEIPT AND ITS JOURNAL RECORD
+    /// COUNT BARS WRITTEN, BESIDE BARS OFFERED. A re-pull that wrote nothing
+    /// is `Empty` with nothing written, never `Stored` with the offered count
+    /// under "Bars stored" (the pull ladder would have summed it as written).
+    #[test]
+    fn the_futures_receipt_and_record_count_bars_written_beside_offered() {
+        let repull = futures_answered(&futures_landed(5, 0));
+        assert_eq!(repull.code, axum::http::StatusCode::OK);
+        assert_eq!(repull.record.outcome, audit::Outcome::Empty);
+        assert_eq!((repull.record.rows_read, repull.record.bars_stored), (5, 0));
+        assert!(
+            repull.record.note.contains("already held"),
+            "{}",
+            repull.record.note
+        );
+        let fact = |label| futures_fact(&repull.body, label);
+        assert_eq!(fact("Bars written to the file").as_deref(), Some("0"));
+        assert_eq!(fact("Bars offered to the store").as_deref(), Some("5"));
+        assert_eq!(fact("Bars stored"), None, "no offered count under it");
+        assert_eq!(
+            fact("Balances").as_deref(),
+            Some("yes — 5 read = 5 offered + 0 folded + 0 dropped")
+        );
+        assert_eq!(fact("Dropped, by reason"), None);
+
+        let first = futures_answered(&futures_landed(5, 5));
+        assert_eq!(first.code, axum::http::StatusCode::OK);
+        assert_eq!(first.record.outcome, audit::Outcome::Stored);
+        assert_eq!(first.record.bars_stored, 5);
+        assert_eq!(
+            futures_fact(&first.body, "Bars written to the file").as_deref(),
+            Some("5")
+        );
+    }
+
+    /// R4-28 repair 5 (D-7191): A ZERODHA FUTURES BODY GETS PAST BOTH GUARDS.
+    /// `ingest::parse_fno` refused every rung but `1min` and this route's
+    /// guard refuses every rung but its own `1day`, so no body could be
+    /// asked: the receipt tests above build the request by hand. The body
+    /// D-7186 names (series `fut`, the wire word) now parses to what the guard
+    /// admits, with the rung named or left out; options are still refused by
+    /// the route, by name.
+    #[test]
+    fn a_zerodha_futures_body_is_admitted_by_the_parse_and_the_route_alike() {
+        let today = Day::new(2026, 8, 7).expect("a real day");
+        let route = pull::vendor::ZERODHA_CONTINUOUS;
+        for body in [
+            "underlying=NIFTY&series=fut&vendor=zerodha&granularity=1day&from=2026-07-01\
+             &to=2026-07-30",
+            "underlying=NIFTY&series=fut&vendor=zerodha&from=2026-07-01&to=2026-07-30",
+        ] {
+            let asked = ingest::parse_fno(body, today).expect("a Zerodha futures ask parses");
+            assert_eq!(futures_refusal(&asked, route), None, "{body}");
+        }
+        let options = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=zerodha&from=2026-07-01&to=2026-07-30",
+            today,
+        )
+        .expect("an options ask parses");
+        assert!(
+            futures_refusal(&options, route).is_some_and(|why| why.contains("FUTURES day candles")),
+            "options are refused by the route"
+        );
+    }
+
+    /// R4-28 repair 4 (D-7190): drops are named by reason on the receipt and
+    /// kept by reason in the record, beside the rows folded.
+    #[test]
+    fn a_futures_receipt_names_its_drops_and_the_record_keeps_them() {
+        let mut census = pull::session::DropCensus::new();
+        census.count(pull::session::DropReason::OnClosedDay);
+        census.count(pull::session::DropReason::AfterWindow);
+        let answered = futures_answered(&pull::fnowork::FuturesLanded {
+            rows_read: 6,
+            rows_folded: 1,
+            census,
+            ..futures_landed(3, 3)
+        });
+        assert_eq!(answered.code, axum::http::StatusCode::OK);
+        assert_eq!(answered.record.outcome, audit::Outcome::Stored);
+        assert_eq!(answered.record.rows_folded, 1);
+        assert_eq!(answered.record.drops, audit::Drops::of_census(census));
+        assert_eq!(answered.record.drops.total(), 2);
+        let fact = |label| futures_fact(&answered.body, label);
+        assert_eq!(fact("Rows dropped").as_deref(), Some("2"));
+        assert_eq!(
+            fact("Dropped, by reason").as_deref(),
+            Some(
+                "after the requested window 1 · on a day the exchange calendar records \
+                 closed 1"
+            )
+        );
+        assert_eq!(
+            fact("Balances").as_deref(),
+            Some("yes — 6 read = 3 offered + 1 folded + 2 dropped")
+        );
+    }
+
+    /// R4-28 repair 4 (D-7190): nothing to file is `Empty` and says so; a
+    /// series that stopped, or rows that do not balance, are `Failed`.
+    #[test]
+    fn a_futures_pull_with_nothing_to_file_or_that_does_not_balance_says_which() {
+        let nothing = futures_answered(&pull::fnowork::FuturesLanded {
+            rows_read: 0,
+            ..futures_landed(0, 0)
+        });
+        assert_eq!(nothing.code, axum::http::StatusCode::OK);
+        assert_eq!(nothing.record.outcome, audit::Outcome::Empty);
+        assert!(
+            nothing.record.note.contains("no futures bar was left"),
+            "{}",
+            nothing.record.note
+        );
+
+        let stopped = futures_answered(&pull::fnowork::FuturesLanded {
+            failed: vec!["NIFTY-FUT-C1: vendor_refused".to_owned()],
+            ..futures_landed(5, 5)
+        });
+        assert_eq!(stopped.code, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            (
+                stopped.record.outcome,
+                stopped.record.failures,
+                stopped.record.bars_stored
+            ),
+            (audit::Outcome::Failed, 1, 5)
+        );
+        assert!(
+            futures_fact(&stopped.body, "Balances").is_some_and(|line| line.starts_with("NO — ")),
+            "{}",
+            stopped.body
+        );
+
+        let unbalanced = futures_answered(&pull::fnowork::FuturesLanded {
+            rows_read: 7,
+            ..futures_landed(5, 5)
+        });
+        assert_eq!(unbalanced.code, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(unbalanced.record.outcome, audit::Outcome::Failed);
+        assert!(
+            unbalanced.record.note.contains("do not balance"),
+            "{}",
+            unbalanced.record.note
+        );
+    }
+
     /// This is the operator's requirement stated plainly — *press Pull and the
     /// entire window is pulled* — and the shape that broke it is the hardest
     /// kind to see: not an error, a smaller question answered perfectly.
@@ -34500,9 +35176,10 @@ mod tests {
         );
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
-        // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // directly because the only other way in is through a live socket.
+        // This is the proof the line is written: the `debug_assert` that once
+        // demanded `is_written` at the site was vacuous with no sink installed
+        // and panicked on a dropped line, and is gone (see the site).
         let from = crate::emitted::mark();
         // FILED UNDER ITS OWN DAY AND MONTH (D-3341, DB-G45): the failure
         // names 2026-08-04, and the line says so rather than the window's
@@ -36312,3 +36989,28 @@ mod pool_table_tests;
 #[cfg(test)]
 #[path = "hand_stop_tests.rs"]
 mod hand_stop_tests;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_b.rs"]
+mod cloud_mutant_tests_b;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_c.rs"]
+mod cloud_mutant_tests_c;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_a.rs"]
+mod cloud_mutant_tests_a;
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_d.rs"]
+mod cloud_mutant_tests_d;
+
+// Tests added by the cloud mutation pass of 18 Oct (cloud/mut-api-b-20261018).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_e.rs"]
+mod cloud_mutant_tests_e;

@@ -84992,6 +84992,509 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
 10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
 
+### D-7185 — R4-28 (DLY-09): the Kite instrument dump is kept by date, one receipted snapshot per refresh, diffed against the one before, and a token is resolved by date — 2026-10-22
+
+The number is the first of R4-28's own block D-7185..D-7194
+(`state/decision-blocks.json`, OPS-08). This entry and the four after it
+were first written under numbers inside blocks other parts own, and were
+renumbered into this block, in order, before landing (R4-28 repair 4,
+the LEDGER-1023 follow-up). Nothing in them changed but the numbers.
+
+1. **Every landing of the Kite dump, and of NSE's NIFTY Total Market file,
+   is also written as a dated snapshot** under `<masters>/master-snapshots/`:
+   `instruments_<yyyymmdd>.csv.gz` and `nse_total_market_<yyyymmdd>.csv.gz`,
+   each with a `.receipt` binding the date, the URL, the compressed length
+   and SHA-256 and the body's length and SHA-256. The one call is made after
+   `masters::land` at its only call site (`api::mastersrun::obtain`); a
+   landing that refused writes no snapshot and the newest one stands.
+   `pull::master_snapshots`, on `cash_session_cache`'s pattern.
+2. **Nothing is rewritten.** Both files are created `O_EXCL`. The receipt is
+   the commit marker, written last: a body with no receipt (a kill between
+   the two) is named incomplete by `Catalog` and never read. A refresh whose
+   body equals the day's newest receipted snapshot is `already_held`; a
+   different body takes the next ordinal (`_2`, `_3`, ... up to 99, then a
+   refusal by name), past any incomplete entry, and the newest receipted
+   ordinal is the day's snapshot. Writers take one advisory lock beside the
+   snapshots; the refresh's own FIFO lock already serialises one process.
+3. **`token_on(day, exchange, token)`** (`Book::token_on`) answers from the
+   newest receipted snapshot on or before the day, through that snapshot's
+   own hash index, found by a day table (one index). On a snapshot day that
+   snapshot answers alone. Between two snapshots the older one is believed
+   only when the next later one maps the token to the same contract (the
+   diff's key); otherwise `token_ambiguous`, naming both. Before the first
+   snapshot: `before_first_snapshot`, never the earliest row and never
+   today's. A token two rows carry in one snapshot: `token_duplicated`. A
+   snapshot that does not check: `snapshot_unreadable`, named.
+4. **The diff** of each Kite snapshot against the receipted one before it is
+   written once, `O_EXCL`, as `<yyyymmdd>[_n].diff`: fixed 192-byte lines, a
+   header naming both snapshots and the count. Kinds: `listing`, `delisting`
+   (counted), `symbol` (the same token under a new symbol, or the same ISIN
+   under a new symbol), `isin`, `lot_size`, `expiry`, `token` (the same key
+   under a new token) (each named), and `isin_unknown`: a share is named
+   the day its ISIN becomes unknown (known on the old date) or the day it
+   appears without one, and the day's total is the header's
+   `isin_unknown_total` (the dump landed 6 Oct 2026 holds 10,182 NSE cash
+   rows against the Total Market file's 750, so naming every unknown share
+   every day would repeat some 9,400 names a day). The ISIN of
+   a share is read from the NSE Total Market snapshot **of the same date**
+   only: the Kite dump has no ISIN column (charter §4z), and a share neither
+   file lists that day is `isin_unknown`, never inferred. Whether every F&O
+   underlying is in the NIFTY Total Market file is UNVERIFIED. The
+   `/masters/refresh` outcome carries the snapshot and the diff's counts and
+   every named change; `pull.masters.snapshot` carries one event per refresh
+   source and one per named change. A refresh the same day reads the written
+   diff back rather than recomputing it.
+5. **`newest_snapshot_day`** reads the newest Kite snapshot's date from its
+   checked receipt, for R4-23's `master_stale` refusal (FM-267); a newest
+   snapshot that does not check is refused by name, never answered with an
+   older date.
+6. **Not built (the operator's one-command cut of 20 Oct 2026):** the scheduled morning
+   refresh and the MasterChanges panel. A refresh stays the attended
+   `POST /masters/refresh`; the diff's reader is its outcome and the events.
+
+Proof: `pull::master_snapshots::tests` (21 tests, among them
+`one_token_two_dates_resolves_to_two_contracts`,
+`the_diff_of_two_days_lists_exactly_the_injected_changes`,
+`a_snapshot_is_never_rewritten`,
+`a_token_reused_between_two_sparse_snapshots_is_ambiguous_not_the_older_contract`,
+`a_date_before_the_first_snapshot_resolves_nothing`,
+`a_snapshot_cut_before_its_receipt_is_never_read_and_the_next_refresh_is_used`,
+`an_isin_change_between_masters_is_named`); the bound is C-MS-01 in
+`crates/pull/benches/ratio/master_snapshots.rs` (docs/06-limits.md
+L-R428-01..04).
+
+### D-7186 — R4-28 (CON-12, FUT-C1): Zerodha futures day candles are stored and never swept; the token is an address, never an identity — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **Scope.** The operator put the futures legs back on 20 Oct 2026 (CON-12
+   and its continuous series FUT-C1, "stored and never swept"). This
+   supersedes, for FUTURES only, the 21 Aug 2026 instruction that Zerodha
+   carries no expired F&O; options stay refused on Zerodha. `CLAUDE.md` §1
+   already allows contracts to be stored and never swept, so the engine
+   surface does not change: `Instrument::is_sweepable` refuses every
+   contract and every FNO key
+   (`fnowork::futures_tests::a_future_is_never_sweepable`).
+2. **The source and its lane** are the charter's new rows beside "Expired
+   F&O" (§4z): Kite, `day` candles only, NFO futures only, `oi=1`. Minute
+   candles of an expired future stay UNVERIFIED and are never asked. GDFL
+   holds no futures (ingest design E22); whether it sells them is the
+   operator's question.
+3. **Identity.** A future is one contract keyed (underlying, expiry) through
+   `core::instrument::Contract::of(Kind::Future)`, filed at
+   `bars/zerodha/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/<yyyy-mm>.bin` with
+   its open interest. Its expiry is the one the dated snapshot states (the
+   settled date, so an expiry the exchange moved for a holiday is the moved
+   one). The vendor's token is only the ADDRESS: a contract is asked through
+   its own token from the first dated snapshot that lists it to its expiry,
+   and a token the newest snapshot maps to another contract is refused
+   `token_reused` and never asked for the older contract's history
+   (`two_contracts_reusing_a_token_on_different_dates_stay_separate`). A
+   token the newest snapshot no longer lists (flushed after expiry) is
+   asked: an answer of nothing ends that contract's history by name
+   (`history_ends`), and a refusal stops that series by name
+   (`vendor_refused`, with the vendor's own words) while the pull goes on.
+4. **The continuous series** is asked with `continuous=1` through the newest
+   snapshot's nearest future expiring on or after the day of the pull, and
+   filed **as answered** under its own symbol `<UNDERLYING>-FUT-C1` (segment
+   FNO, no contract). The vendor states no roll day, so the series is never
+   split into contracts and no contract is inferred from a date
+   (`a_continuous_series_across_a_holiday_roll_is_filed_as_answered_and_never_split`).
+5. **The route.** `pull::vendor::FnoAccess::ByToken(ZERODHA_CONTINUOUS)` on
+   the Zerodha descriptor, whose segments now include FNO with no basis row
+   (unmeasured, `Basis::segment` answers `None`). `POST /pull/fno` with
+   `vendor=zerodha&series=futures&granularity=1day` plans through the dated
+   snapshots (`fnowork::futures_plan`) and lands through
+   `fnowork::pull_futures_day`; options and minutes are refused by name; a
+   named expiry asks that contract alone. Every plan refusal and every series
+   is a `pull.futures` event.
+6. **The store write is the operator's**, inside 2018-01-01..2026-09-30 and
+   after a masters refresh has written a snapshot: one `/pull/fno
+   series=futures` per F&O underlying. Before the first snapshot nothing is
+   planned (`no_snapshot`). History before the first snapshot reaches the
+   store only as the continuous series.
+
+### D-7187 — R4-28 repair 1: a futures plan reads an append-only first-listed index, never every snapshot; its cost does not grow with the snapshots held — 2026-10-22
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** `fnowork::futures_plan` found the first snapshot that
+   lists each future by opening, unpacking and parsing every receipted
+   snapshot on or before the window's end, on every `POST /pull/fno
+   series=futures` run and for every underlying, keeping nothing between
+   runs. A second agent measured it on copies of the real 108,915-row dump
+   (dev profile, NIFTY): 240 ms at 1 snapshot, 1,331 ms at 10, 5,008 ms at
+   40 — linear, unbounded, and against the operator's rule that no work is
+   redone that an index can remember. `docs/06-limits.md` L-R428-04 named
+   the cost and bounded nothing.
+2. **The rule.** The day a receipted snapshot first listed a contract never
+   changes, so it is written down once. `master_snapshots::first_listed`
+   keeps, under the snapshots directory in `futures-first-listed/`, one
+   append-only file per (exchange, underlying name) — a line per (type,
+   expiry, token) the first time a snapshot lists it, and again only when an
+   older snapshot taken in later lists it earlier; the reader takes the
+   earliest day — and `absorbed.idx`, a line per snapshot taken in, written
+   after every line it added is synced. That line is the commit marker, as a
+   receipt is a snapshot's. Every Kite snapshot write takes its futures in
+   under the writers' lock it already holds; a plan reads the index and
+   parses the newest snapshot alone (for `token_reused` and the continuous
+   series). A snapshot on or before the window's end that the index does
+   not hold (one held before the index existed, or a kill before its commit
+   line) is taken in by the next plan, once, under the same lock.
+3. **Nothing is dropped silently.** Every line ends in a check over its own
+   bytes: a line cut by a kill is skipped and counted (`pull.futures` event),
+   and the next append starts a new line; no line is rewritten. A snapshot
+   whose checked body does not parse is recorded unparseable once and named
+   by every plan that needs it, exactly as before (`snapshot_unreadable`); a
+   snapshot whose receipt or body does not check is not recorded, is named,
+   and is retried. A future row with a field a line cannot carry is counted
+   on its commit line and in the `pull.masters.snapshot` event. A book built
+   in memory has no index and is refused `futures_index` by name.
+4. **Scope.** Only the route's own exchange and future type are taken in
+   (`ZERODHA_CONTINUOUS`: NFO, FUT), so a refresh touches only the files of
+   underlyings with a new contract — about one line per underlying when a
+   new month is listed, none on other days. Another route's (exchange,
+   type) is its own index, taken in on its first plan.
+5. **Proof.** C-MS-02 holds `futures_plan` flat at 1, 10 and 100 snapshots
+   on disk; `docs/04-invariants.md` R428-09..11 name the tests;
+   `docs/06-limits.md` L-R428-04 is closed and L-R428-07/08 state what
+   remains.
+
+### D-7188 — R4-28 repair 2: the futures first-listed index is trusted only while it matches its own commit log; one that does not is rebuilt as a new generation, never planned from — 2026-10-23
+
+The number is from R4-28's own block D-7185..D-7194 (see D-7185).
+
+1. **The defect.** D-7187 made the first-listed index the only place
+   `fnowork::futures_plan` learns which contracts exist and from which day,
+   and nothing checked an underlying's file against `absorbed.idx`. A second
+   agent showed it (`state/fix/round2/verify-R4-28-r2.json`): the file gone,
+   cut at a line boundary or one committed line garbled, and the plan
+   silently dropped contracts with nothing refused, so `POST /pull/fno`
+   would have answered 200 "every planned futures series was asked". The
+   only sign was a Warn event claiming the snapshots "were taken in again",
+   which was false. This repair found a fourth case the same gap allows: a
+   snapshot written over a cut file re-filed the lost contract under its own,
+   later day. All four failed first (R4-28 r2 `before.log`).
+2. **The rule.** Each commit line records, for every name whose file grew,
+   how many checked lines of that name the file then held (`name=count`,
+   names percent-encoded as their files are). Every read of an underlying's
+   file — by a plan, and by a snapshot write before it appends — is checked
+   against the most the log records and against every line checking; so is
+   every line of the commit log. A mismatch means the generation can no
+   longer say which contracts exist from which day.
+3. **Append-only repair, never a hidden fallback.** The index lives in
+   generation directories `futures-first-listed/g<N>`; the highest is the
+   index. A damaged generation is left exactly as found: `generations.idx`
+   records the next generation and why, then its directory is made, and the
+   receipted snapshots the call needs are taken into it again (the snapshot
+   bodies are the source of truth, fixed by their receipts). The plan says
+   so — `FuturesPlan::rebuilt`, an Error `pull.futures` event, the receipt's
+   "Futures index rebuilt" fact — in words that are true. If the new
+   generation does not match its own log either, the call refuses
+   `futures_index_damaged` by name (502) and never rebuilds in a loop; an
+   I/O failure is a named error, never taken for damage. Option 2 alone
+   (refuse every time) was not chosen: it would leave an underlying's
+   futures unplannable until someone moved files by hand, and the snapshots
+   that can rebuild the index are already on disk.
+4. **A kill mid-append.** A line a kill cut short no longer reads as
+   harmless: it does not check, so the generation is rebuilt once. Whole
+   lines that landed without their commit line are still taken in again and
+   committed by the next commit line, with no duplicate. The format tag moves
+   to `fl2`; the repair-1 layout (`absorbed.idx` directly in
+   `futures-first-listed/`) was never written outside test folders and is
+   not read.
+5. **Parse rules are recorded.** An unparseable record carries
+   `PARSE_RULES` (`unparseable@1`); one recorded under other rules is taken
+   in again, so a later, relaxed parser can take the day in (the r2 check's
+   follow-up).
+6. **Cost.** No change on the healthy path but one directory listing of
+   the index's top (one entry per generation) and the counts on commit
+   lines that grew. A rebuild is linear in the snapshots held, once per
+   damage found (`docs/06-limits.md` L-R428-09); L-R428-07 now states the
+   small linear term the r2 check measured instead of "flat".
+7. **Also.** `POST /pull/fno series=futures` opens the book and plans, and
+   `masters::land` with the snapshot write after it run off the async
+   workers (`off_the_workers`), since they take a blocking flock, fsync and
+   parse the dump.
+8. **Proof.** `docs/04-invariants.md` R428-12 and R428-13 name the tests.
+
+### D-7189 — R4-28 repair 3: every incomplete snapshot entry is named by every refresh that finds it; a token is never resolved past its own expiry; a future-dated newest snapshot is refused — 2026-10-23
+
+The number follows D-7188 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** A snapshot write cut by a kill leaves a body with no
+   receipt (or a receipt cut before its rename). `Catalog::read` listed it
+   as incomplete and nothing read it, which kept the data path safe, but
+   `Catalog::incomplete()` had no caller outside the tests: `snapshot()`
+   read the catalog under the writers' lock and dropped the list, and
+   neither `Snapshotted`, its `/masters/refresh` JSON nor the
+   `pull.masters.snapshot` event had a field for it. The next refresh
+   stepped past the cut ordinal to `_2` and named nothing, so no log, event,
+   outcome or page could show that a day's snapshot was cut, or why it was
+   `_2` (`state/fix/round2/verify-R4-28-r3.json`; the second agent's probe
+   also SIGKILLed a real-size writer 19 times and the next refresh named
+   none of the 12 entries left). That is `CLAUDE.md` §4's banned fallback
+   that hides a failure, and operator rule 3.
+2. **The rule.** The catalog lists each entry as kind, stamp, file and why.
+   `write_snapshot` returns the outcome with its kind's entries, from the
+   one listing it already reads under the lock, so the ordinal and the names
+   can never disagree. The landing hook carries them into `Snapshotted` and
+   the refresh outcome (`snapshot.incomplete`: `held`, `named` newest first,
+   `unnamed`, `refusal`), and emits one Warn `pull.masters.snapshot` event
+   per entry (`an incomplete master snapshot entry is held and never read`,
+   with `entry`, `stamp`, `day`, `why` and `held`). A refused landing, which
+   writes nothing, lists the directory once and names them all the same. The
+   event of a new snapshot says which of the day's earlier ordinals it
+   stepped past. `snapshot()`, the convenience the tests and the bench call,
+   names them in `/logs` itself, so no caller can drop the list unseen. A
+   refusal past `MAX_ORDINAL` counts receipted snapshots and incomplete
+   entries apart. Every futures pull names the book's incomplete Kite
+   entries (`FuturesPlan::incomplete`, the "Incomplete master snapshots"
+   fact).
+3. **Bounded, never silent.** The code deletes nothing, so the residue stays
+   until someone moves it aside, and every refresh names it again. At most
+   `INCOMPLETE_NAMED` (64) entries are named per outcome, per refresh's
+   events and per plan, newest first; the rest are counted (`unnamed`, one
+   more Warn event, one more plan line). The listing is the one every write
+   already read (`docs/06-limits.md` L-R428-10).
+4. **`token_expired` (PREC-10, the r3 check's follow-up, reproduced on the
+   real dump: an October index future resolved on 2026-11-02, after its
+   2026-10-27 expiry).** `Book::token_on` answers `TokenOn::Expired` for a
+   row whose contract expired before the day, on every path that used to
+   resolve it, because the exchange flushes a token at expiry and reuses it.
+   The expiry day itself still resolves. `fnowork::futures_plan` checks
+   identity, not trading, so a contract the newest snapshot still lists
+   past its expiry is still asked. One existing assertion changed its
+   expected answer and became stronger:
+   `the_day_table_crosses_a_year_boundary_and_two_snapshots_of_one_day`
+   asserted that a day past a January future's expiry resolved it; it now
+   asserts `token_expired` from the same governing stamp, and that the
+   expiry day itself resolves.
+5. **A future-dated newest snapshot is refused (the r3 check's A13).**
+   `newest_snapshot_day` takes the caller's `today` and refuses, by name, a
+   newest Kite snapshot dated after it. A snapshot is dated by the clock that
+   writes it, so one from the future means that clock jumped. Believing it
+   would make R4-23's `master_stale` call the master fresh until the calendar
+   caught up. Refusing every out-of-order write was not chosen:
+   `first_listed` deliberately takes a snapshot written out of order (its
+   own test), and it would not catch a clock that ran ahead.
+6. **One contract, one token (the r3 check's follow-up).** A futures plan
+   that finds one (underlying, expiry) listed under more than one token asks
+   none of them and names each `contract_duplicated` with every token: asking
+   both would file two series as one contract's. The diff's half of the same
+   follow-up (a key listed twice in one dump reads as a token change) is NOT
+   DONE: it needs a new change kind in the fixed-record diff.
+7. **Proof.** `docs/04-invariants.md` R428-14..17 name the tests. Both
+   blocking-item tests failed first on the unfixed tree (5d009f454 with only
+   the new tests, `state/fix/round2/R4-28-r3-logs/before3.log` and
+   `before3-pull.log`): the outcome JSON named none of the cut entries.
+
+### D-7190 — R4-28 repair 4: a futures pull counts the bars it WROTE, beside the bars it offered, and accounts for every row it read; its journal outcome comes from the written count — 2026-10-24
+
+The number follows D-7189 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** `fnowork::FuturesLanded` carried `Ingested::bars_stored`,
+   the bars a landing OFFERED the store, under the words "Bars written to
+   the store", and the futures arm of `POST /pull/fno` printed it as "Bars
+   stored", put it in the journal record's count and chose `Stored` or
+   `Empty` from it. An identical re-pull, which writes nothing because the
+   store holds every bar byte for byte, answered "4 bars stored from 4 rows"
+   and was journalled `Stored`: the misreport `Ingested::bars_committed`
+   was added to end (`pull::ingest`, the field's own note). A row the
+   landing dropped (a day the calendar records closed, a day before the
+   window, a day past the window and the expiry) was counted nowhere on the
+   receipt, which had no written count, no drop census and no balance line,
+   while the options landings on the same route count `bars_committed` and
+   the spot receipt shows written, dropped and the balance. The pull
+   ladder's written-bars figure reads "Bars written to the file" first and
+   "Bars stored" after it, so a futures leg added bars that were never
+   written to the run's total.
+2. **The rule.** The futures pull sums each landing's own `Ingested`:
+   offered (`bars_stored`), written (`bars_committed`), folded
+   (`rows_folded`) and the drop census. The receipt shows them under the
+   spot receipt's words ("Bars offered to the store", "Bars written to the
+   file", "Rows folded into an open bar", "Rows dropped"), names the drops
+   by reason ("Dropped, by reason") and prints the balance line
+   (`read = offered + folded + dropped`, or `NO` naming the stopped series).
+   Each series line and each `pull.futures` series event say the written
+   count first and the offered count beside it (with "N already held" when
+   the store already held them), the folded count and the drops by reason;
+   the event carries the line itself, so `/logs` and the receipt cannot
+   disagree.
+3. **The journal.** The record's count is the WRITTEN count, as the options
+   landings' is (`FnoLanded::record_landing`), and it now carries the rows
+   folded and the drops by reason the futures arm measured; every other arm
+   keeps the zeroes `Record::refused` writes, byte for byte. The outcome
+   comes from the written count: `Stored` when a bar was written, `Empty`
+   when every bar offered was already held (or nothing was left to file),
+   with the reason inside the note's 60 kept bytes, and `Failed` when a
+   series stopped, a contract was not asked, or the rows do not balance.
+4. **Cost.** Four additions per landing and one line per series; nothing
+   new is read. The pull ladder treats `Empty` as clean, as it does for the
+   options walk, so a re-pull of a held window still completes its leg.
+5. **Proof.** `docs/04-invariants.md` R428-18 names the tests. The two
+   blocking-item tests failed on the unfixed tip (82d389b5b with only those
+   tests, written against the fields it had: `state/fix/round2/R4-28-r4-logs/`
+   `before.log`).
+6. **The r4 check's follow-ups taken in the same files.** (a) A receipt cut
+   before its rename holds its ordinal even with its body gone, so the next
+   write steps past it instead of being refused at that partial receipt's
+   name (R428-19). (b) A refresh names at most `DIFF_NAMED` (256) diff
+   changes in its outcome and its Warn events and counts the rest
+   (`named_total`, `unnamed`, one more event naming the `.diff` file, which
+   keeps every change): an exchange-wide lot-size revision is one change
+   per contract (R428-20, `docs/06-limits.md` L-R428-11). (c) A futures plan
+   refuses a newest snapshot dated after today by name,
+   `snapshot_from_the_future`, as `newest_snapshot_day` already did
+   (R428-21). (d) The `Snapshot::parse` note on a token listed twice now says
+   which row takes the slot (the later one; neither is answered).
+   (e) Each futures landing runs off the async workers (`block_in_place`
+   on a multi-thread runtime, inline on a current-thread one), as the
+   plan already did in the server (R428-22).
+7. **Three more of the r4 check's follow-ups, in the same file.** (f) The
+   `.diff` is written whole under an `O_EXCL` partial name
+   (`<diff>.partial`, then `_2`, `_3`, ... up to `MAX_ORDINAL`), synced and
+   renamed into place under the writers' lock (open since r1). A kill
+   mid-write leaves a partial that `Catalog` names (Kite, "a .diff cut
+   before its rename committed it") and no reader opens, never a torn diff
+   under the diff's own name. The next refresh makes the diff again, whole,
+   and steps past the partial, which is left exactly as found: the code
+   deletes and overwrites nothing. A torn file under the diff's own name
+   (damage from outside) is still refused by name and never written over
+   (R428-23). (g) `Book::open` lists under the writers' lock taken shared,
+   so a refresh that has written its body and not yet its receipt is waited
+   for and never named cut on the futures receipt. Readers list beside each
+   other, and a root that does not exist is still an empty book and is not
+   created (R428-24, `docs/06-limits.md` L-R428-12). (h) A name that is a
+   snapshot's, a receipt's or a partial receipt's in another case is named
+   incomplete and holds its ordinal. On a case-insensitive volume (macOS by
+   default) it is the very name `create_new` would make, so the next write
+   now steps past it instead of being refused on every refresh while the
+   listing, which compares bytes, saw nothing there (R428-25).
+8. **The event half, proved.** No test read a `pull.futures` series event
+   back: the receipt tests read `FuturesLanded`, and no futures site is in
+   `emit_sites`. `crates/pull/tests/futures_events.rs`, a binary of its own
+   because `telemetry::install` is a process singleton, drives the shipped
+   `pull_futures_day` three times and reads the lines off the sink's file:
+   the first pull of six candles says written 3, offered 3, dropped 3 with
+   each reason; the identical re-pull says written 0, offered 3 and "3
+   already held"; a contract answered no candle is an error line naming
+   `history_ends`. Every line is whole: nothing cut at its ceiling and no
+   field counted away past `telemetry::MAX_FIELDS` (the event carries 11 of
+   the 12).
+
+### D-7191 — R4-28 repair 5: the snapshot catalog, the book and the diff answer from indices built once; gate 11's six remaining lines are declared with their bounds; a Zerodha futures ask reaches its route — 2026-10-24
+
+The number follows D-7190 in R4-28's own block D-7185..D-7194 (see
+D-7185).
+
+1. **The defect.** CI gate 11 (banned constructs on the O(1) paths) refused
+   seven entries, 22 occurrences, in R4-28's two new production files,
+   `crates/pull/src/master_snapshots.rs` and
+   `crates/pull/src/master_snapshots_first_listed.rs`: three searches
+   (`partition_point`) where the law is "never binary_search" (docs/07
+   layer 4), nine maps made unsized where it is "pre-size every map"
+   (docs/07 law 2), four sorts, two searches of a list the data sent and
+   four membership tests. None was in the gate's allowlists and none had a
+   gate-11 reason in `docs/06-limits.md`; the gate's other 16 refusals on
+   that run are feat/db-fix's own, in other packages' files.
+2. **What was removed (16).** `Catalog::read` lists the directory's names
+   first, sizes its maps from them, and builds two indices with its one
+   ordering: each (kind, day)'s newest receipted ordinal, and each receipted
+   stamp's place in its kind's list. `Catalog::of_day`, `Catalog::before`
+   and the new `Catalog::is_receipted` are one probe each. `before` of a
+   stamp no receipt commits is now `None` (the search answered the
+   receipted stamp below any stamp), and `diff_for` refuses such a stamp by
+   name, where it answered `Ok(None)`, "the first snapshot", whenever none
+   came before it. `first_listed::listing` takes the `Book` and reads the
+   stamps on or before the plan's last day from `Book::through`, one
+   day-table index. `Snapshot::parse` indexes the header once (the first of
+   two columns with one name is read, as before), sizes its rows and token
+   index from the dump's line count and its word map from `WORDS_HINT`
+   (64), and keeps a token's duplication in its one index slot (`Slot`), so
+   a lookup is one probe for the word and one for the token. The diff sizes
+   its token map from the old rows and its gone-share map from the gone
+   shares; the first-listed log sizes its committed map from its pairs and
+   the take-in cache from the names the log commits, and a plan makes its
+   why-not map only when it took snapshots in. A change kind's count slot is
+   `Change::index`, a match. `Book::of` (the tests and the bench) no longer
+   sorts what it is given: it checks the order in one pass and refuses
+   snapshots not given oldest first.
+3. **What is declared (6), each bounded.** In `.github/gates_ledger.rs`,
+   `crates/pull/src/master_snapshots.rs` takes rule 4 = 3 and rule 7 = 3.
+   Rule 4: `Catalog::read` orders the receipted stamps of each kind and the
+   entries named incomplete once per listing, which is already linear in
+   the directory's entries (L-R428-10), and nothing after it sorts; `diff`
+   orders its records once per attended refresh, over its changes only,
+   inside a comparison of two whole dumps (L-R428-03), so one pair of dumps
+   writes one `.diff` byte for byte (CLAUDE.md section 3 rule 5). Rule 7:
+   `diff`'s three probes of the new dump's key set, a `HashSet` built once
+   per diff: hash probes, the shape the rule permits. The reasons are in
+   `docs/06-limits.md`, "Gate 11 — R4-28, declared at its merge", and
+   L-R428-13 records the listing's cost.
+4. **Proof.** `docs/04-invariants.md` R428-26..R428-33. The gate run on the
+   edited tree refuses no R4-28 file, and its REFUSED lines equal those of
+   feat/db-fix's own run. The tests that change behaviour (a predecessor for
+   a stamp no file holds, `diff_for` of such a stamp, `Book::of` given its
+   snapshots newest first) fail on the unfixed code: each asserts the
+   refusal or the `None` that code did not give.
+5. **A defect found in the self-check: the futures route could not be
+   asked.** `ingest::parse_fno` refused every rung but `1min` for every
+   expired-series ask (the operator's rule of 2026-08-19), and the futures
+   route's own guard refuses every rung but its route's `1day`, so no body
+   reached `fnowork::futures_plan`: D-7186 point 5's own request was refused
+   at the parse, and its `series=futures` is not a word the parse knows (the
+   wire word is `fut`). The receipt tests built `FnoRequest` by hand, at
+   `1day`, so nothing exercised the parse. Now `ingest::expired_rung` parses
+   an expired FUTURE of a feed whose descriptor routes futures through a
+   token (`FnoAccess::ByToken`, Zerodha alone) at that route's rung: an
+   absent granularity is that rung, as an absent one is `1min` for every
+   other ask, and any other rung is refused at the parse by name
+   (`Refusal::ExpiredFutureAtItsRouteRungOnly`, field `granularity`).
+   Options, and every other feed's futures, keep the one-minute rule. The
+   store step is therefore `POST /pull/fno` with
+   `vendor=zerodha&series=fut&underlying=<UND>&from=..&to=..` and
+   `granularity=1day` or none. R4-06's
+   `crates/api/tests/store_step_forms.rs` pinned the old refusal of S-48's
+   planned body at `1day` and asked R4-28 to reconcile the two; it now pins
+   that the body parses at `1day` once an underlying is named and refuses
+   `1min` by name, and still refuses the body without an underlying, so
+   S-48 (`config/store-steps.toml`) stays planned, its text saying why: the
+   route takes one underlying a request, and no form names all the F&O
+   underlyings at once.
+6. **The r5 check's follow-ups taken.** (a) A whole-plan refusal of
+   `futures_plan` (`no_snapshot`, `snapshot_from_the_future`,
+   `futures_index`) is one Error `pull.futures` event naming the underlying
+   and the refusal; it reached the receipt and `/audit` only. (b) The
+   futures receipt's line of incomplete entries is "Incomplete
+   master-snapshot entries": a cut `.diff` and a name in another case are
+   listed there too, and each line says which it is. (c) The failure note no
+   longer says a pull's landed series "may not be read as held": what each
+   series line says it wrote is held. (d) The `fno` handler's note no longer
+   says Zerodha declares `FnoAccess::None`. (e) `/ingest` knew four `fno`
+   words and declined Zerodha's `by_token` as "states no expired-derivative
+   history"; the five words now live in one table (`web/src/lib/fno-modes.js`,
+   pinned to the server's match by its test), Zerodha is asked for futures
+   and named as served for futures only, and a word the table does not know
+   is declined as unknown, never read as `none`. (f) Gate 12's refusal of
+   the C-MS-01/02 bench note (no proof named) and gate 23's four undeclared
+   test prints in R4-28's files (now five, with the catalog measurement) are
+   answered: the note names its harness, `crates/pull/benches/ratio.rs`, and
+   `.github/workflows/ci.yml` declares the prints. (g) Gate 1d's 135 new
+   segment-shaped literals in R4-28's `crates/pull` files (column names of
+   Kite's public dump, the snapshot store's own names, refusal words, fields,
+   invented fixtures and scratch tags) are declared, each read, as one group
+   in `.github/gates_tree.rs` (`R4_28_LITERAL`), so the gate's undeclared
+   list on R4-28's tree is feat/db-fix's own 466.
+7. **Not taken, and why.** A pull whose plan refused a contract for a reason
+   the snapshots fix (`token_reused`, `contract_duplicated`) is still
+   journalled `Failed`, so such an underlying's futures leg stays failed
+   until the operator acts; making it complete needs an outcome the journal
+   does not have (it has no partial outcome) or a rule that lets a known gap
+   read as a complete leg, and D-7190 point 3 chose `Failed`.
+
 ### D-7195 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
 
 **Context.** D-6892 drew one measured `corporate_actions` row from every
