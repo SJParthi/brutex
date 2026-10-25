@@ -791,6 +791,21 @@ pub enum Refusal {
         /// The rung that was asked for.
         got: String,
     },
+    /// An expired FUTURE was asked of a feed that routes futures through a
+    /// token, at a rung other than that route's own (R4-28 repair 5; D-7186,
+    /// D-7191).
+    ///
+    /// The one exception to the rule above: Zerodha serves an expired future
+    /// as DAY candles through `continuous=1` (`docs/00-charter.md` §4z, the
+    /// Expired F&O row), and a minute candle of an expired future is
+    /// UNVERIFIED there, so its futures are pulled at the route's rung and at
+    /// no other. Refused at the parse for the reason the rule above is.
+    ExpiredFutureAtItsRouteRungOnly {
+        /// The rung that was asked for.
+        got: String,
+        /// The one rung the feed's futures route serves.
+        rung: &'static str,
+    },
     /// The underlying is not a symbol this engine can even name.
     BadUnderlying {
         /// What arrived.
@@ -852,6 +867,35 @@ impl Refusal {
             // the one caller matches the two arms above before delegating, so a
             // third arriving here is a caller that forgot to.
             _ => write!(f, "REFUSED · a member field this build cannot describe"),
+        }
+    }
+
+    /// The two refusals of an expired series' rung (split out of the
+    /// formatter for its line ceiling when the second arrived, R4-28 repair 5).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the formatter refuses.
+    fn write_rung_refusal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
+                f,
+                "REFUSED · an expired series is pulled at ONE MINUTE only, and \
+                 {got:?} was asked for. Nothing was sent: no discovery walk, no \
+                 credential read and no vendor contacted. Ask again with \
+                 granularity={}.",
+                pull::vendor::Granularity::Minute1.dir()
+            ),
+            Self::ExpiredFutureAtItsRouteRungOnly { ref got, rung } => write!(
+                f,
+                "REFUSED · this feed serves an expired future at {rung} only, through \
+                 its token (minute candles of an expired future are UNVERIFIED, \
+                 docs/00-charter.md §4z), and {got:?} was asked for. Nothing was \
+                 sent: no plan, no credential read and no vendor contacted. Ask \
+                 again with granularity={rung}, or leave it empty."
+            ),
+            // UNREACHABLE BY CONSTRUCTION, as in `write_member_refusal`.
+            _ => write!(f, "REFUSED · a rung this build cannot describe"),
         }
     }
 }
@@ -953,14 +997,8 @@ impl fmt::Display for Refusal {
             ),
             Self::UnknownVendor { ref got } => f.write_str(&unknown_vendor_refusal(got)),
             Self::InvalidCashIdentity { ref got } => f.write_str(&cash_identity_refusal(got)),
-            Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
-                f,
-                "REFUSED · an expired series is pulled at ONE MINUTE only, and \
-                 {got:?} was asked for. Nothing was sent: no discovery walk, no \
-                 credential read and no vendor contacted. Ask again with \
-                 granularity={}.",
-                pull::vendor::Granularity::Minute1.dir()
-            ),
+            Self::ExpiredSeriesIsOneMinuteOnly { .. }
+            | Self::ExpiredFutureAtItsRouteRungOnly { .. } => self.write_rung_refusal(f),
             Self::UnknownGranularity { ref got } => write!(
                 f,
                 "REFUSED · {got:?} is not a bar length on this ladder. Nothing \
@@ -1238,7 +1276,9 @@ pub struct FnoRequest {
     /// Which bar size the contracts will be fetched at once discovery names
     /// them. Carried here rather than assumed at the fetch, because
     /// `CLAUDE.md` §6's argument against a defaulted parameter applies to a
-    /// defaulted rung just as squarely.
+    /// defaulted rung just as squarely. Always `1min`, except an expired
+    /// future of a feed that routes futures through a token, which is its
+    /// route's own rung (`1day` for Zerodha; R4-28 repair 5, D-7191).
     pub granularity: pull::vendor::Granularity,
 }
 
@@ -1436,9 +1476,9 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
         Refusal::UnknownSeries { .. } => Some("series"),
         Refusal::UnknownVendor { .. } => Some("vendor"),
         Refusal::InvalidCashIdentity { .. } => Some("cash_identity"),
-        Refusal::UnknownGranularity { .. } | Refusal::ExpiredSeriesIsOneMinuteOnly { .. } => {
-            Some("granularity")
-        }
+        Refusal::UnknownGranularity { .. }
+        | Refusal::ExpiredSeriesIsOneMinuteOnly { .. }
+        | Refusal::ExpiredFutureAtItsRouteRungOnly { .. } => Some("granularity"),
         Refusal::BadUnderlying { .. } | Refusal::NotAnFnoUnderlying { .. } => Some("underlying"),
         Refusal::LiveContract { .. } => Some("expiry"),
         Refusal::ClockUnusable { .. } => None,
@@ -1810,28 +1850,74 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         },
         granularity: {
             let raw = param(body, "granularity");
+            let absent = raw.is_empty();
             let rung = parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?;
-            // ONE MINUTE, AND ONLY ONE MINUTE, FOR AN EXPIRED SERIES.
-            //
-            // The operator's rule of 2026-08-19. Spot keeps both rungs -- its
-            // day-level pass is the cheap first sweep D-0055 added -- but an
-            // expired contract is stored at minute resolution or not at all: a
-            // daily bar on a contract that traded for three months is sixty
-            // rows that cannot be re-derived into the minute series later, and
-            // the append-only store makes that irreversible.
-            //
-            // Compared by discriminant, like every other rung comparison in
-            // this workspace, rather than by the rendered word -- two spellings
-            // of one rung is what `vendor::granularity_tokens` exists to keep
-            // apart.
-            if rung as u8 != pull::vendor::Granularity::Minute1 as u8 {
-                return Err(Refusal::ExpiredSeriesIsOneMinuteOnly {
-                    got: rung.dir().to_owned(),
-                });
-            }
-            rung
+            // The vendor field was read and refused above when it names no
+            // feed, so this second read of it only finds the feed again.
+            expired_rung(rung, absent, series, parse_feed(&param(body, "vendor")))?
         },
     })
+}
+
+/// The one rung an expired series is pulled at.
+///
+/// # ONE MINUTE, AND ONLY ONE MINUTE, FOR AN EXPIRED SERIES
+///
+/// The operator's rule of 2026-08-19. Spot keeps both rungs -- its day-level
+/// pass is the cheap first sweep D-0055 added -- but an expired contract is
+/// stored at minute resolution or not at all: a daily bar on a contract that
+/// traded for three months is sixty rows that cannot be re-derived into the
+/// minute series later, and the append-only store makes that irreversible.
+///
+/// # The one exception: an expired future through a token (D-7186)
+///
+/// A feed whose descriptor routes expired FUTURES through a token
+/// (`pull::vendor::FnoAccess::ByToken`, Zerodha) serves them as that route's
+/// own rung, the day candles `docs/00-charter.md` §4z records, and a minute
+/// candle of an expired future is UNVERIFIED there. Its futures are pulled at
+/// that rung and at no other: an absent granularity is that rung, as an absent
+/// one is `1min` for every other ask, and any other rung is refused by name
+/// ([`Refusal::ExpiredFutureAtItsRouteRungOnly`]). R4-28 repair 5: this parse
+/// refused every rung but `1min` for every feed, and the futures route refused
+/// every rung but its own, so no Zerodha futures pull could be asked at all.
+/// Its options keep the one-minute rule here and are refused by the route.
+///
+/// Compared by discriminant, like every other rung comparison in this
+/// workspace, rather than by the rendered word -- two spellings of one rung is
+/// what `vendor::granularity_tokens` exists to keep apart.
+fn expired_rung(
+    rung: pull::vendor::Granularity,
+    absent: bool,
+    series: Series,
+    feed: Option<pull::vendor::Feed>,
+) -> Result<pull::vendor::Granularity, Refusal> {
+    let by_token = feed
+        .and_then(futures_route)
+        .filter(|_| matches!(series, Series::Futures));
+    if let Some(route) = by_token {
+        if absent || rung as u8 == route.granularity as u8 {
+            return Ok(route.granularity);
+        }
+        return Err(Refusal::ExpiredFutureAtItsRouteRungOnly {
+            got: rung.dir().to_owned(),
+            rung: route.granularity.dir(),
+        });
+    }
+    if rung as u8 != pull::vendor::Granularity::Minute1 as u8 {
+        return Err(Refusal::ExpiredSeriesIsOneMinuteOnly {
+            got: rung.dir().to_owned(),
+        });
+    }
+    Ok(rung)
+}
+
+/// The futures route of a feed that routes expired futures through a token,
+/// read off its own descriptor: `None` for every other feed.
+fn futures_route(feed: pull::vendor::Feed) -> Option<pull::vendor::ContinuousSpec> {
+    match feed.descriptor().transport {
+        pull::vendor::Transport::Http(spec) => spec.fno.by_token(),
+        pull::vendor::Transport::LocalArchive(_) => None,
+    }
 }
 
 /// Epoch seconds of a moment, in either direction.
@@ -3578,6 +3664,85 @@ mod tests {
                 rung.dir()
             );
         }
+    }
+
+    /// R4-28 repair 5 (D-7191): AN EXPIRED FUTURE OF A FEED THAT ROUTES
+    /// FUTURES THROUGH A TOKEN is parsed at that route's one rung, `1day` for
+    /// Zerodha, whether the body names it or not, and every other rung is
+    /// refused by name at the parse. Its options, and every other feed's
+    /// futures, keep the one-minute rule. Before the repair this parse refused
+    /// `1day` for every feed and the futures route refused `1min`, so no
+    /// Zerodha futures pull could be asked at all.
+    #[test]
+    fn a_token_routed_future_is_parsed_at_its_routes_rung_and_no_other() {
+        let base = "underlying=NIFTY&series=fut&vendor=zerodha&from=2026-07-01&to=2026-07-30";
+        let absent = parse_fno(base, today()).expect("an absent rung is the route's");
+        assert_eq!(
+            absent.granularity as u8,
+            pull::vendor::Granularity::Day1 as u8
+        );
+        assert_eq!(absent.feed, pull::vendor::Feed::Zerodha);
+        for rung in pull::vendor::Granularity::ALL {
+            let out = parse_fno(&format!("{base}&granularity={}", rung.dir()), today());
+            if rung as u8 == pull::vendor::Granularity::Day1 as u8 {
+                assert_eq!(out.expect("its one rung").granularity as u8, rung as u8);
+                continue;
+            }
+            let refused = out.expect_err("every other rung is refused");
+            assert_eq!(
+                refused,
+                Refusal::ExpiredFutureAtItsRouteRungOnly {
+                    got: rung.dir().to_owned(),
+                    rung: "1day",
+                },
+                "{}",
+                rung.dir()
+            );
+            assert_eq!(refused_field(&refused), Some("granularity"));
+            let said = refused.to_string();
+            assert!(said.contains("at 1day only"), "{said}");
+            assert!(said.contains("granularity=1day"), "{said}");
+            assert!(said.contains("no vendor contacted"), "{said}");
+        }
+        // ITS OPTIONS keep the one-minute rule here; the route refuses them.
+        let options = "underlying=NIFTY&series=opt&vendor=zerodha&from=2026-07-01&to=2026-07-30";
+        assert_eq!(
+            parse_fno(options, today()).expect("one minute").granularity as u8,
+            pull::vendor::Granularity::Minute1 as u8
+        );
+        assert_eq!(
+            parse_fno(&format!("{options}&granularity=1day"), today()).expect_err("a daily option"),
+            Refusal::ExpiredSeriesIsOneMinuteOnly {
+                got: "1day".to_owned()
+            }
+        );
+        // EVERY OTHER FEED'S FUTURES keep it too.
+        for feed in pull::vendor::Feed::ALL {
+            if futures_route(feed).is_some() {
+                continue;
+            }
+            let body = format!(
+                "underlying=NIFTY&series=fut&vendor={}&from=2026-07-01&to=2026-07-30\
+                 &granularity=1day",
+                feed.wire()
+            );
+            assert_eq!(
+                parse_fno(&body, today()).expect_err("a daily future"),
+                Refusal::ExpiredSeriesIsOneMinuteOnly {
+                    got: "1day".to_owned()
+                },
+                "{}",
+                feed.wire()
+            );
+        }
+        assert_eq!(
+            pull::vendor::Feed::ALL
+                .into_iter()
+                .filter(|&feed| futures_route(feed).is_some())
+                .count(),
+            1,
+            "Zerodha alone routes futures through a token"
+        );
     }
 
     /// The refusal names the field to fix and says nothing was sent.

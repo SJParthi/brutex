@@ -77,6 +77,13 @@ mod fno_membership;
 #[path = "ratio/day_table.rs"]
 mod day_table;
 
+/// C-MS-01: `master_snapshots::Book::token_on` flat at 1, 10 and 100 dated
+/// snapshots (R4-28, DLY-09). C-MS-02: `fnowork::futures_plan` flat at 1, 10
+/// and 100 snapshots on disk (R4-28 repair 1). Both held to the ceiling by
+/// this harness, `crates/pull/benches/ratio.rs`.
+#[path = "ratio/master_snapshots.rs"]
+mod master_snapshots;
+
 /// C-PD-01 and C-PD-02: the cash derive fold, which judges every minute for
 /// vendor padding, and the padded count per day, flat per minute (R4-27).
 #[path = "ratio/padded.rs"]
@@ -2027,6 +2034,8 @@ fn main() {
     ok &= tickstore_write::tickstore_write_is_flat_per_member();
     ok &= identity::identity_is_flat();
     ok &= disk_projection::disk_projection_is_flat();
+    ok &= master_snapshots::token_on_is_flat();
+    ok &= master_snapshots::futures_plan_is_flat();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
     let (keep_root, keep_stores) = keep_stores();
     ok &= keep_lookup_is_flat(&keep_stores);
