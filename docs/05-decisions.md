@@ -79320,10 +79320,10 @@ Repair round 7 (25 Oct, after verify r7):
     month, else starts at its first day, as a rung that names no day does.
     `L-R315-26` now says the peak at many clients (verify r7's 60- and
     512-client figures), which is above the one-client bound the test
-    holds.
+    holds. Each new step is bounded and measured (L-R315-29).
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-35);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-28.
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-29.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 

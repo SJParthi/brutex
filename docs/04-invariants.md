@@ -8356,7 +8356,7 @@ AG06-09, AG06-11). Every fixture is invented.
 proof is in `web/tests/speed.test.js` unless another file is named; the two
 browser-driving tests find Chrome at `CHROME_PATHS` or `BRUTEX_CHROME` and fail
 by name when there is none. Every fixture is invented. The measured page
-targets and the sheet are rows L-R315-01 to L-R315-28 of `docs/06-limits.md`.
+targets and the sheet are rows L-R315-01 to L-R315-29 of `docs/06-limits.md`.
 
 | Id | Invariant | Proof | |
 |---|---|---|---|
