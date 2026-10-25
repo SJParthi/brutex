@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: BLOCKED
 
 # CLOUD-CHG1-OPT: cloud build report
 
@@ -7,37 +7,32 @@ stack, the golden option test's record). Spec: `reports/db-specs-20261024/CLOUD-
 `origin/cloud/db-base-20261024`. Branch `cloud/db-CLOUD-CHG1-OPT-20261024`, cut from
 `origin/feat/db-fix` at `e851da1ca`. The newest `origin/feat/db-fix` was merged in four times before
 the final gates: `1f84b447` (Merge R4-27), `7b397bbe` (Merge CLOUD-MUTCLI), `666ddf7f` (Merge
-DATA-1w), then `bf9b1c8f` (Merge R4-18, no conflict, as `a3e04fc2`). Prerequisites CHG-0
-(`baa74072d`) and CLOUD-CHG1 (`7fe3b6cc8`) are merged.
+DATA-1w), then `bf9b1c8f` (Merge R4-18, no conflict, as `a3e04fc2`), still its tip at the end.
+Prerequisites CHG-0 (`baa74072d`) and CLOUD-CHG1 (`7fe3b6cc8`) are merged.
 
-## Held (fourth time)
+## Status: code complete; every remaining red is the base's or this container's
 
-`HOLD` was set again at 18:52 IST on 25 Oct (base `62267ba5`; only R4-09b, IA-10a and IA-17b keep
-building) and seen at the save point after the shell-gate comparison. Code complete; every step is
-committed and pushed at `28fe5ecc`. One run is left to finish (no usage budget): gate 1e on the
-unmodified base `bf9b1c8f`, for the comparison below.
+BLOCKED only on items that are not this part's, each measured on the unmodified base `bf9b1c8f`:
 
-Done this session (25 Oct, after 13:12 IST), on the merged tree `a3e04fc2` / `28fe5ecc`:
-- fmt exit 0; workspace clippy exit 0 (`Finished` in 2m21s);
-- language-purity shell gates on the branch and on the base `bf9b1c8f`, all 34 each (results in the
-  Gates table): the same 11 gates red on both, with the same refusals, except gate 10, where the
-  branch stopped on MY row CHG1OPT-01 (`crate::rate::ipft` named as text that must not remain
-  resolves to no crate). Fixed in `28fe5ecc` (written module-first, `rate::ipft`); gate 10 then
-  stops on the base's own row R427-11, as the base does;
-- deny not re-run: this fresh container has no `cargo-deny`, and `Cargo.lock`, `Cargo.toml`,
-  `deny.toml` and every crate manifest are identical between `666ddf7f` (last measured: the base's
-  RUSTSEC-2026-0386 only) and `bf9b1c8f`, and between `bf9b1c8f` and this branch.
+1. **`cargo deny check`: RUSTSEC-2026-0386** (tokio 1.53.1). Base item; BASE-DENY-1024 bumps tokio to
+   1.53.3 on the Mac. `Cargo.lock` and every manifest are untouched here.
+2. **`cargo test --workspace`: 29 tests red, the same 29 on the base** (run by exact name on
+   `bf9b1c8f`: `api` 8, `cli` 3, `pull` 9, `store` 5, `telemetry` 4, all `FAILED` there too). They
+   are read-only-directory and refused-write tests (this container runs as root, which ignores the
+   modes they set) and five slow-reader socket tests in `api`. None is in `costs`; `costs` is all
+   green.
+3. **Two `api` tests hang, on the base too:**
+   `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+   (lib) and `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
+   (`tests/cloud_mutants_bars.rs`). Each was run ALONE on this branch and on the base and killed by
+   `timeout 300` (exit 124) on both, all threads parked on futexes.
+4. **CI shell gates (language-purity): the same 11 red on the base**, with the same refusals; see
+   the Gates table. The one red that was mine (gate 10 on my row CHG1OPT-01) is fixed in `28fe5ecc`.
 
-NEXT, when `HOLD` is gone or `GO-CLOUD-CHG1-OPT` exists:
-1. Read the base gate-1e log (scratch, lost if the container is reclaimed; then re-run it, killing
-   the hanging test as below) and compare its failed-test list with the branch's 29.
-2. Run `cargo test --workspace --locked --no-fail-fast -j 2 -- --skip
-   a_full_calendar_pool_refuses_the_census_and_the_audit` ALONE (the first run this session was
-   OOM-killed in `rustc` while gate 1e built a second workspace at the same time). Attribute every
-   red to the base by re-running it on `bf9b1c8f`.
-3. Re-run `cargo test -p costs` on `28fe5ecc`.
-4. Write the final report and push `STATUS: DONE` (or `BLOCKED` naming the base items) if every red
-   is shown to be the base's.
+The 25 Oct 20:40 IST `HOLD` (base `17d214c2`, `GO-CLOUD-CHG1-OPT` withdrawn) arrived during the last
+attribution run; that step was finished and this report written, and no new step was started.
+Nothing is left to build. `crates/costs` is byte-identical from `f854fd09` (where coverage, mutants and
+the bench were taken) to the final head, so those results stand for it.
 
 ## What was built (code at `f854fd09`)
 
@@ -122,10 +117,10 @@ item 1 was settled at the head and item 2 mostly done; both are recorded, not re
 |---|---|---|
 | fmt | `cargo fmt --all --check` | exit 0 on the merged tree `a3e04fc2` (25 Oct); `28fe5ecc` changes one doc line only |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | exit 0 (`Finished`, 2m21s) on the merged tree `a3e04fc2` (25 Oct). Earlier: the first run was red on my own test (`type_complexity`, then `items_after_statements`), fixed in `f1e2d15c` |
-| test | `cargo test --workspace --locked --no-fail-fast` | NOT DONE on `a3e04fc2`: the run was OOM-killed (`rustc` for `cli`, SIGKILL) while gate 1e built a second workspace; see NEXT. The one test that hangs, `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`, hangs the same way ALONE on the unmodified base `666ddf7f` (no output for 8 min at 0% CPU) and in gate 1e on both trees (killed after 180 s by my own watcher). Gate 1e's own `cargo test --workspace` on the branch: `FAILED. 2537 passed; 29 failed; 16 ignored` in one binary; base list to compare (NEXT 1). Earlier `api` reds seen: `detail::tests::a_refused_admission_names_what_its_bound_and_why`, `pullrun::restart_tests::the_journals_own_extremes`, `server::feeds_route::tests::the_window_is_refused_loudly_when_degraded_or_inverted`, five `server::head_deadline_body_tests`; `api` is not touched by this part |
+| test | `cargo test --workspace --locked --no-fail-fast -j 2 -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit` | on `28fe5ecc`: 251 suites; 6 targets red (`api` lib 8, `api` `cloud_mutants_bars` (one test hung, killed), `cli` lib 3, `pull` lib 9, `store` lib 5, `telemetry` lib 4), all 29 failing tests `FAILED` on the base `bf9b1c8f` too, run there by exact name; both hangs reproduce ALONE on the base (`timeout 300`, exit 124). Every `costs` suite ok (lib 300 passed 1 ignored; adversarial 4; dhan_calculator 12; fa73061 file 11 passed 1 ignored). BASE / ENVIRONMENT (root) |
 | costs | `cargo test -p costs` (under both llvm-cov runs, on `f854fd09`'s code) | lib `ok. 300 passed; 1 ignored`, adversarial `ok. 4 passed`, dhan_calculator `ok. 12 passed`, the CHG-0 file `ok. 11 passed; 1 ignored` |
-| deny | `cargo deny check` | **red, and red on the unmodified base too**: `advisories FAILED, bans ok, licenses ok, sources ok`, the same single advisory RUSTSEC-2026-0386 (tokio 1.53.1, `AsyncFd` I/O safety; fix: tokio >=1.53.3) on this branch and on `origin/feat/db-fix` `7b397bbe`. `Cargo.toml` and `Cargo.lock` are untouched here (CONTEXT 4.10): NEEDS THE MAC |
-| CI shell gates (language-purity job, `checks_all`'s own commands, all 34) | 25 Oct, branch `a3e04fc2` and base `bf9b1c8f`: 23 green and 11 red on each, the same 11 (1c, 1d, 1e, 10, 11, 12, 19, 23, 27b, 29, 30). Each red's refusals compared sorted: identical except counts (lines in scope, decision headings 1747 vs 1744, the three D-674x) and gate 10, which on the branch stopped at MY row CHG1OPT-01; fixed in `28fe5ecc`, after which gate 10 stops on the base's own R427-11 as the base does. No red names a file this part touches. Gate 29 is new since `1f84b447` and red on the base too. Gate 1e on the base: running at the hold (its first run hit the container's disk limit and is discarded) |
+| deny | `cargo deny check` | **red, and red on the unmodified base too**: `advisories FAILED, bans ok, licenses ok, sources ok`, the single advisory RUSTSEC-2026-0386 (tokio 1.53.1; fix tokio >=1.53.3), measured on `7b397bbe` and `666ddf7f` and this branch. Not re-run on 25 Oct after `bf9b1c8f`: no `cargo-deny` in this fresh container, and `Cargo.lock`, `Cargo.toml`, `deny.toml` and every crate manifest are identical from `666ddf7f` to `bf9b1c8f` to this branch. BASE item (BASE-DENY-1024): NEEDS THE MAC |
+| CI shell gates (language-purity job, `checks_all`'s own commands, all 34) | 25 Oct, branch `a3e04fc2` and base `bf9b1c8f`: 23 green and 11 red on each, the same 11 (1c, 1d, 1e, 10, 11, 12, 19, 23, 27b, 29, 30). Each red's refusals compared sorted: identical except counts (lines in scope; 1747 vs 1744 decision headings, the three D-674x) and gate 10, which on the branch stopped at MY row CHG1OPT-01; fixed in `28fe5ecc`, after which gate 10 stops on the base's own R427-11 as the base does. Gate 1e (workspace test with `web/` deleted): `FAILED. 2537 passed; 29 failed; 16 ignored` in `api` on both, the same 29 names and an identical tail. No red names a file this part touches. BASE |
 | coverage, lines | `cargo llvm-cov -p costs --locked` (stable, fresh dir) | `regime.rs` 100%; `schedule.rs` 99.49% (5 missed: 1244, 1311, 1319, 1665, 1674); `stack.rs` 99.83% (3 missed: 589, 720, 907). Every missed line predates this part and lies outside its hunks; **every added line is covered** |
 | coverage, branches | `cargo +nightly llvm-cov -p costs --branch --locked` (fresh dir; `--branch` needs nightly, installed here as a tool) | `regime.rs` 25/26, `schedule.rs` 32/34, `stack.rs` 86/88. Every untaken branch (regime 274; schedule 1275, 1664; stack 2878) predates this part; **every added branch is taken**. Nightly also put five untaken short-circuit branches and one unreachable `panic!` line in my new tests; they were fixed in `f854fd09` without weakening an assertion |
 | mutants | `cargo mutants --in-diff <costs diff> -p costs` | `3 mutants tested in 50s: 2 caught, 1 unviable`, none survived. Caught: the boundary guard forced `true`, and forced `false`. Unviable: the card replaced by `Ok(Default::default())`; `RateCard` has no `Default` |
@@ -200,7 +195,39 @@ D-6740, D-6741, D-6742, from the assigned block D-6740..D-6759. They were checke
 
 ## NEEDS THE MAC
 
-Final list after the remaining gates; the spec's section 7 sequence applies.
+This part changes no route, page, cli verb, import or store file, so there is **no real-data,
+shadow-server, store-write or `:8080` check** (spec section 7). At merge-back, in a worktree of this
+branch merged onto the newest `feat/db-fix`, with the shared-pool lock and the `PATH` /
+`CARGO_TARGET_DIR` of spec section 7, as the operator (not root):
+
+```text
+cargo fmt --all --check                                   # expect exit 0
+cargo clippy --workspace --all-targets -- -D warnings     # expect exit 0
+cargo test -p costs --locked                              # expect lib ok. 300 passed; 1 ignored, adversarial 4, dhan_calculator 12, fa73061 11 passed 1 ignored
+cargo test -p costs --locked --test dhan_calculator -- the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases --exact
+                                                          # expect 1 passed
+cargo test -p costs --locked --lib -- schedule::tests::the_dated_option_card stack::tests::a_dated_option
+                                                          # expect all pass
+cargo test -p costs --locked --lib -- fa73061 stack::tests::a_position_carried_across_fa73061 stack::tests::the_smallest_premium stack::tests::fourteen_threads
+                                                          # expect all pass (the other new tests, by name)
+cargo test -p costs --locked --test fa73061               # expect 11 passed, 1 ignored, unchanged
+cargo test --workspace --locked -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store
+                                                          # expect green as on feat/db-fix. Here, as root, the same 29 tests failed on the base and the
+                                                          # branch, and the two api tests above hung on both: if either hangs on the Mac, it is feat/db-fix's
+cargo deny check                                          # expect green after BASE-DENY-1024 (tokio 1.53.3); red only on RUSTSEC-2026-0386 before it
+cargo bench -p costs --locked --bench stack               # expect C-CHG-01..10 within the 3.0x ceiling (here 0.851x-1.659x); record date, host, load
+cargo llvm-cov -p costs --branch --locked                 # expect every added line and branch covered (here: lines regime 100%, schedule 99.49%, stack 99.83%,
+                                                          # the misses all pre-existing: schedule 1244 1311 1319 1665 1674, stack 589 720 907)
+cargo mutants -p costs --file crates/costs/src/schedule.rs --file crates/costs/src/stack.rs --file crates/costs/src/regime.rs --file crates/costs/tests/dhan_calculator.rs
+                                                          # expect no surviving mutant on the touched code (here --in-diff: 2 caught, 1 unviable)
+checks_all script | bash -s -- <out dir>                  # expect the language-purity gates no redder than feat/db-fix's own (here: the same 11 as bf9b1c8f)
+```
+
+Expected answers (spec section 7): NSE dated card 3553 on 2026-02-27 (3503 + 50) and on 2026-03-02
+(3553 + 0); options NSE Dated, buy 65 at Rs 100 and sell 65 at Rs 120: exchange line Rs 5.08 on both
+days, STT Rs 8 (0.10%) on both days, 0.15% only from 2026-04-01;
+`RateCard::resolve(Options, Nse, 2023-04-01, Dated)` refuses while `ipft_rate(Nse, 2023-04-01)` is 50.
+The red runs were taken here (section "Tests failing before, passing after").
 
 ## Log
 
@@ -243,3 +270,8 @@ Final list after the remaining gates; the spec's section 7 sequence applies.
   Shell gates on both trees; gate 10's red on my own row fixed in `28fe5ecc`. Workspace test run
   OOM-killed (two workspaces building at once); deny not re-run (no `cargo-deny` here; no manifest
   or lock change since its last run). 18:52 IST HOLD (base `62267ba5`) seen; report written HELD.
+- 25 Oct, 19:23 IST: `GO-CLOUD-CHG1-OPT` released. Base gate 1e: the same 29 `api` reds as the
+  branch. Workspace test run alone (`-j 2`): 29 reds and one more hang, every one reproduced on the
+  base `bf9b1c8f` (by exact name; the hang alone under `timeout 300`). 20:40 IST HOLD (base
+  `17d214c2`, the per-part GO withdrawn) arrived during that attribution run; the step was finished
+  and the final report written. STATUS: BLOCKED on base items only; code complete.
