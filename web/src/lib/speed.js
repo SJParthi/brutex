@@ -712,7 +712,8 @@ export function garbledUrl(url, field) {
  * Raising one is a decision with its reason, never an edit to make a build
  * pass (D-5915).
  *
- * Measured three times, and the last is the one the budgets hold:
+ * Measured on each merged tree below, and the last is the one the budgets
+ * hold (this said "three times" from the fourth on):
  *
  * * the build of `f9cdb584` (16 Oct 2026, the cloud cut) — `/backtest`
  *   1,091,954 B, `/db` 726,909 B, `/ingest` 482,536 B;
@@ -735,7 +736,18 @@ export function garbledUrl(url, field) {
  *   1,118,393 B, `/db` 804,033 B, `/ingest` 512,891 B. `/db` was past
  *   800,000 B by R3-04's Coverage tab and the counts that agree (D-5870,
  *   13,702 B more on its first load than the 20 Oct figure above), so `/db`
- *   is now 825,000 B; the other two are inside theirs.
+ *   is now 825,000 B; the other two are inside theirs;
+ * * the build of `feat/db-fix` at `cc0a3a0d` with R3-15 merged in (25 Oct
+ *   2026, the Mac, `npm run build`, weighed to the byte as the plugin weighs
+ *   it) — `/backtest` 1,118,725 B, `/db` 816,361 B, `/ingest` 545,589 B.
+ *   `/ingest` was past 525,000 B by the panels its page loads on its first
+ *   load (`import.meta.glob('./panels/*.svelte', { eager: true })`):
+ *   DATA-1w's feed checks (`FeedChecks.svelte`, `$lib/feed-checks.js`,
+ *   about 22.6 KB) and R4-18's quarantine (`Quarantine.svelte`,
+ *   `$lib/quarantine.js`, about 9.0 KB), as verify r7 weighed them merge by
+ *   merge, and R4-28's F&O modes (`$lib/fno-modes.js`, about 0.8 KB). No
+ *   R3-15 file grew. So `/ingest` is now 550,000 B, 4,411 B of room; the
+ *   other two are inside theirs (`/db` 8,639 B of room, `/backtest` 6,275).
  *
  * Each time that is the budget doing its job — a page grew and the build
  * said so; the figure it now holds is the merged tree's, by the same
@@ -747,7 +759,7 @@ export const BUNDLE_BUDGETS = Object.freeze({
   default: PAGE_TARGETS.wireBytes,
   '/backtest': 1_125_000,
   '/db': 825_000,
-  '/ingest': 525_000
+  '/ingest': 550_000
 });
 
 /** @param {string} route */

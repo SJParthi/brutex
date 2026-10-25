@@ -326,6 +326,8 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
 test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(budgetOf('/gaps'), 400_000);
   assert.equal(budgetOf('/db'), 825_000, 'raised for R3-04 on the 20 Oct merged tree (D-5915 item 10)');
+  assert.equal(budgetOf('/ingest'), 550_000, 'raised for DATA-1w\'s and R4-18\'s panels and R4-28\'s F&O modes on the 25 Oct merged tree (D-5915 item 36)');
+  assert.equal(budgetOf('/backtest'), 1_125_000);
   const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }, { route: '/audit', node: 3, js: 1, css: 1, bytes: 400_000, files: [] }]);
   assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true], [false, false]], 'exactly the budget, and exactly the target, are inside');
   assert.match(v[1].line, /— OVER ITS BUDGET — over the 400\.0 KB wire target/);
