@@ -1133,14 +1133,18 @@ test('the sheet runs over the real network against a server, by default, and as 
   const dir = mkdtempSync(join(tmpdir(), 'r315-cli-'));
   try {
     const args = { ...sheet.parseArgs(['--base', base, '--n', '2', '--clients', '1,3']), feed: CTX.feed, timeframe: CTX.timeframe, month: CTX.month, day: CTX.day };
-    const quiet = console.error;
-    console.error = () => {};
+    // By default the run's lines go to stderr through `saidOn` (repair 8): each is taken here, and its write called back.
+    const write = process.stderr.write;
+    /** @type {string[]} */
+    const progress = [];
+    process.stderr.write = /** @type {any} */ ((/** @type {any} */ s, /** @type {any} */ cb) => (progress.push(String(s)), typeof cb === 'function' && cb(), true));
     let real;
     try {
       real = await sheet.runSheet(args);
     } finally {
-      console.error = quiet;
+      process.stderr.write = write;
     }
+    assert.ok(progress.length >= 4 && progress.every((l) => /^speed sheet: .*\n$/.test(l)), progress.join(''));
     assert.deepEqual(real.failures, []);
     assert.ok(real.rows.every((r) => r.classes.answered === r.n), 'every timed request was answered over the network');
     const { spawnSync } = await import('node:child_process');
@@ -4211,4 +4215,292 @@ test('one idle-tab count is one idle row, and a day is one of its month\'s, give
   assert.deepEqual([monthAlone.month, monthAlone.day], ['2025-03', '2025-03-01'], 'the rung\'s newest day is not in the month given: the month starts at its first day');
   const newestIn = await sheet.discover(get, { ...args, feed: 'zerodha', month: '2026-08' });
   assert.equal(newestIn.day, '2026-08-31', 'the rung\'s newest day, when it is in the month given');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 8 (26 Oct): verify r8's two blocking findings, a closed
+// stderr (it ended a run, or a command's exit) and the newest-sheet-only
+// listener (a surviving mutant), each failing on ade26e944.
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a command with stdout and stderr piped here and, unless `close` is
+ * `keep`, closes the reader of stderr (and of stdout too, for `both`) once
+ * stderr has given its first whole line, as `2>&1 | head -1` does; `gone`
+ * (a file) is made right after, for a child that waits on it.
+ *
+ * @param {string[]} argv
+ * @param {'keep' | 'stderr' | 'both'} close
+ * @param {string} [gone]
+ * @returns {Promise<{code: number | null, signal: string | null, stdout: string, stderr: string, ms: number}>}
+ */
+const closingReader = (argv, close, gone) => new Promise((resolve) => {
+  const t0 = Date.now();
+  void import('node:child_process').then(({ spawn }) => {
+    const child = spawn(process.execPath, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => {
+      stdout += c;
+    });
+    child.stderr.on('data', (c) => {
+      stderr += c;
+      if (close === 'keep' || !stderr.includes('\n') || child.stderr.destroyed) return;
+      child.stderr.destroy();
+      if (close === 'both') child.stdout.destroy();
+      if (gone !== undefined) writeFileSync(gone, '');
+    });
+    child.on('close', (code, signal) => resolve({ code, signal, stdout, stderr, ms: Date.now() - t0 }));
+  });
+});
+
+test('a command\'s lines on stderr are said through one listener a stream: a reader that has gone is counted, never thrown, and the first line not shown is named', async () => {
+  // Before (verify r8, 26 Oct): neither command listened on process.stderr,
+  // and console.error listens only during the synchronous part of a write,
+  // so the EPIPE a closed stderr reports a tick later was thrown.
+  const { Writable } = await import('node:stream');
+  /** @type {string[]} */
+  const took = [];
+  const fine = new Writable({ write(chunk, _e, done) { took.push(String(chunk)); done(); } });
+  const a = sheet.saidOn(fine);
+  assert.equal(sheet.saidOn(fine), a, 'one object a stream');
+  assert.equal(fine.listenerCount('error'), 1, 'one listener a stream, however often it is asked for');
+  a.say('one');
+  a.say('two');
+  assert.equal(a.pending(), 2, 'two lines in flight');
+  assert.equal(await a.settled(5_000), true);
+  assert.equal(a.pending(), 0);
+  assert.deepEqual(took, ['one\n', 'two\n']);
+  assert.equal(a.closed(), null);
+  assert.equal(await sheet.stderrNote(a, 5_000), null, 'a stderr that took every line: no note');
+  // The reader goes after the first line: the second line's write fails (its callback, then the stream's error, heard).
+  /** @type {string[]} */
+  const got = [];
+  const closing = new Writable({ write(chunk, _e, done) { if (got.length === 0) { got.push(String(chunk)); done(); } else done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); } });
+  const b = sheet.saidOn(closing);
+  b.say('speed sheet: first');
+  b.say('speed sheet: second');
+  b.say('speed sheet: third');
+  assert.equal(await b.settled(5_000), true, 'every line called back, the lost ones too');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(b.closed(), { why: 'EPIPE', step: 'speed sheet: second', lost: 2 });
+  b.say('speed sheet: fourth');
+  assert.deepEqual(b.closed(), { why: 'EPIPE', step: 'speed sheet: second', lost: 3 }, 'a line after the failure is counted at once, never written');
+  assert.equal(b.pending(), 0);
+  assert.deepEqual(got, ['speed sheet: first\n']);
+  assert.equal(await sheet.stderrNote(b, 5_000), 'stderr was closed (EPIPE) from the line "speed sheet: second": 3 of this run\'s own lines on it were not shown');
+  // A stream that failed under another writer (a hook's line): closed, none of its own lost until the next; the first failure is the one said.
+  const other = new Writable({ write(_c, _e, done) { done(); } });
+  const c = sheet.saidOn(other);
+  other.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+  other.emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+  assert.deepEqual(c.closed(), { why: 'EPIPE', step: null, lost: 0 });
+  assert.equal(await sheet.stderrNote(c, 5_000), 'stderr was closed (EPIPE) during the run; none of this run\'s own lines on it was lost');
+  c.say('after');
+  assert.deepEqual(c.closed(), { why: 'EPIPE', step: 'after', lost: 1 });
+  // A failure its write's callback reports and no error event follows (not a Node stream) is heard the same; one with no code by its message.
+  const quiet = { on() {}, write(/** @type {string} */ _s, /** @type {(e: Error) => void} */ cb) { cb(new Error('the disk went away')); return false; } };
+  const d = sheet.saidOn(/** @type {any} */ (quiet));
+  d.say('x');
+  d.say('y');
+  assert.deepEqual(d.closed(), { why: 'the disk went away', step: 'x', lost: 2 });
+  // A stderr that has not taken a line: the wait ends at its bound, and is said; each wait after one that settled is its own.
+  let firstOf = true;
+  const half = new Writable({ write(_c, _e, done) { if (firstOf) { firstOf = false; setTimeout(done, 5); } } });
+  const e = sheet.saidOn(half);
+  e.say('taken');
+  assert.equal(await e.settled(5_000), true);
+  e.say('held');
+  const t0 = Date.now();
+  assert.equal(await e.settled(50), false, 'a line still in flight at the bound');
+  assert.ok(Date.now() - t0 >= 45, 'at the bound, not before');
+  assert.equal(e.pending(), 1);
+  assert.equal(await sheet.stderrNote(e, 50), 'stderr had not taken 1 of this run\'s own lines 50 ms after the run');
+  assert.equal(e.closed(), null);
+  // Two in flight, the first taken and the second not: not settled.
+  let firstOf2 = true;
+  const half2 = new Writable({ write(_c, _e, done) { if (firstOf2) { firstOf2 = false; setTimeout(done, 5); } } });
+  const f = sheet.saidOn(half2);
+  f.say('taken');
+  f.say('held');
+  assert.equal(await f.settled(100), false, 'one line taken of two is not every line');
+  assert.equal(f.pending(), 1);
+});
+
+test('every sheet still waiting on a stream hears its failure, each said once by its own size, and none stays behind its end', async () => {
+  // Before (verify r8, 26 Oct; mutant R8-M12): only the newest sheet heard
+  // the stream's failure, and the line that handed it over could be deleted
+  // with every test green; a sheet whose write was in flight behind another
+  // waited out its whole bound, then said the wrong reason.
+  const { Writable } = await import('node:stream');
+  /** @type {string[]} */
+  const lines = [];
+  /** @type {(() => void)[]} */
+  const later = [];
+  const write = process.stderr.write;
+  // Each line is taken, and its write called back a moment later: the count of the command's own stderr is kept.
+  process.stderr.write = /** @type {any} */ ((/** @type {any} */ s, /** @type {any} */ cb) => (lines.push(String(s)), typeof cb === 'function' && later.push(cb), true));
+  const err = sheet.saidOn(process.stderr);
+  try {
+    // Verify r8's case exactly: the first sheet ends at its bound, the second's write is still in flight when the stream fails.
+    const stuck = new Writable({ write() {} });
+    assert.equal(await sheet.written(stuck, 'one', 'speed-sheet', 200), false);
+    assert.equal(sheet.sheetsWaitingOn(stuck), 0, 'a sheet that ended at its bound waits no more');
+    const before = err.pending();
+    const second = sheet.written(stuck, 'two', 'speed-sheet', 5_000);
+    assert.equal(sheet.sheetsWaitingOn(stuck), 1);
+    const t1 = Date.now();
+    setTimeout(() => stuck.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })), 50);
+    assert.equal(await second, false);
+    const took = Date.now() - t1;
+    assert.ok(took < 2_500, `the second sheet ended at the failure, not at its 5,000 ms bound (took ${took} ms)`);
+    assert.deepEqual(lines, ['speed-sheet: stdout did not take the whole sheet (3 B) within 200 ms; what it did not take is lost\n', 'speed-sheet: stdout was closed before it took the whole sheet (3 B): EPIPE; what it did not take is lost\n']);
+    assert.equal(err.pending(), before + 1, 'the line went out through the command\'s counted stderr (saidOn)');
+    assert.equal(sheet.sheetsWaitingOn(stuck), 0);
+    // Two sheets waiting at once: both hear the failure, in the order they were handed, each by its own size.
+    lines.length = 0;
+    const held = new Writable({ write() {} });
+    const t2 = Date.now();
+    const first = sheet.written(held, 'one', 'browser-harness', 5_000);
+    const next = sheet.written(held, 'four', 'browser-harness', 5_000);
+    assert.equal(sheet.sheetsWaitingOn(held), 2);
+    held.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+    assert.deepEqual(await Promise.all([first, next]), [false, false]);
+    assert.ok(Date.now() - t2 < 2_500, 'both at the failure');
+    assert.deepEqual(lines, ['browser-harness: stdout was closed before it took the whole sheet (3 B): EPIPE; what it did not take is lost\n', 'browser-harness: stdout was closed before it took the whole sheet (4 B): EPIPE; what it did not take is lost\n']);
+    assert.equal(sheet.sheetsWaitingOn(held), 0);
+    assert.equal(held.listenerCount('error'), 1, 'still one listener');
+    // A stream that takes each sheet: none waits behind its end; a stream never handed one has none.
+    const sink = new Writable({ write(_c, _e, done) { done(); } });
+    for (let i = 0; i < 12; i += 1) assert.equal(await sheet.written(sink, 'x', 'speed-sheet', 5_000), true);
+    assert.equal(sheet.sheetsWaitingOn(sink), 0);
+    assert.equal(sheet.sheetsWaitingOn({}), 0);
+  } finally {
+    process.stderr.write = write;
+    for (const cb of later) cb();
+  }
+  assert.equal(err.closed(), null, 'this process\'s stderr was never failed by the test');
+});
+
+test('the waits at a command\'s end leave no timer behind: a process whose streams take their lines ends when its work does', { timeout: 60_000 }, async () => {
+  // A wait that clears no timer holds the process for its whole bound after its stream has answered.
+  const { execFile } = await import('node:child_process');
+  const module = new URL('ci/speed-sheet.mjs', web).href;
+  const code = `import { Writable } from 'node:stream'; import { saidOn, written } from ${JSON.stringify(module)};` +
+    ' const slow = () => new Writable({ write(_c, _e, done) { setTimeout(done, 20); } });' +
+    " const s = saidOn(slow()); s.say('one'); const settled = await s.settled(30_000);" +
+    " const took = await written(slow(), 'the sheet', 'speed-sheet', 30_000);" +
+    ' process.stdout.write(JSON.stringify({ settled, took }));';
+  const t0 = Date.now();
+  const ran = /** @type {{error: Error | null, stdout: string}} */ (await new Promise((resolve) => execFile(process.execPath, ['--input-type=module', '-e', code], { timeout: 25_000 }, (error, stdout) => resolve({ error, stdout }))));
+  const ms = Date.now() - t0;
+  assert.equal(ran.error, null, String(ran.error));
+  assert.deepEqual(JSON.parse(ran.stdout), { settled: true, took: true });
+  assert.ok(ms < 10_000, `the process ended with its work, not at a 30,000 ms bound (took ${ms} ms)`);
+});
+
+test('a sheet whose stderr reader goes after its first line runs to its end: its exit is its verdict, --out is whole, and the sheet names the first line stderr did not show', { timeout: 120_000 }, async () => {
+  // Before (verify r8, 26 Oct): the next line's EPIPE was thrown a tick
+  // later, so the sheet exited 1 within milliseconds, its --out never
+  // written and nothing said; with stdout closed too (2>&1 | head -1), the same.
+  const strict = standIn({ ignore: new Set() });
+  const server = http.createServer(async (req, res) => {
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  const dir = mkdtempSync(join(tmpdir(), 'r315-stderr-'));
+  try {
+    const argv = [new URL('ci/speed-sheet.mjs', web).pathname, '--base', base, '--n', '1', '--clients', '1', '--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
+    // The same run with its readers kept: its lines, PASS, exit 0, and a sheet that says nothing of stderr.
+    const kept = await closingReader([...argv, '--out', join(dir, 'kept.md')], 'keep');
+    assert.deepEqual([kept.code, kept.signal], [0, null], kept.stderr);
+    const lines = kept.stderr.split('\n').filter((l) => l !== '');
+    assert.ok(lines.length >= 4 && lines.every((l) => l.startsWith('speed sheet: ')), kept.stderr);
+    assert.match(kept.stdout, /^# Speed sheet — PASS\n/);
+    assert.equal(readFileSync(join(dir, 'kept.md'), 'utf8'), kept.stdout);
+    assert.doesNotMatch(kept.stdout, /stderr/);
+    for (const close of /** @type {const} */ (['stderr', 'both'])) {
+      const out = join(dir, `${close}.md`);
+      const ran = await closingReader([...argv, '--out', out], close);
+      assert.deepEqual([ran.code, ran.signal], [0, null], `${close}: the exit is the run's verdict, PASS (${ran.ms} ms): ${ran.stderr}`);
+      assert.ok(existsSync(out), `${close}: --out was written`);
+      const text = readFileSync(out, 'utf8');
+      assert.match(text, /^# Speed sheet — PASS\n/, close);
+      const m = /^- stderr was closed \(EPIPE\) from the line "(.+)": (\d+) of this run's own lines on it were not shown$/m.exec(text);
+      assert.ok(m, `${close}: the sheet names the first line stderr did not show:\n${text}`);
+      const at = lines.indexOf(m[1]);
+      assert.ok(at >= 1, `${close}: a line of the run, after the one that was read: ${m[1]}`);
+      assert.equal(Number(m[2]), lines.length - at, `${close}: that line and every one after it`);
+      assert.ok(ran.stderr.startsWith(`${lines[0]}\n`), `${close}: the reader had the first line: ${ran.stderr}`);
+      assert.equal(ran.stdout, close === 'stderr' ? text : '', `${close}: stdout is the sheet, the same as --out, unless it was closed first`);
+      assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'no file left half written');
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('a harness whose stderr reader goes mid-run runs to its end: its exit is its verdict, --out is whole, and the sheet says stderr was closed', { timeout: 240_000 }, async () => {
+  // Before (verify r8, 26 Oct): a line written to the closed stderr — a
+  // hook's here, the harness's own at a stop it could not finish, or
+  // `written`'s at the end with stdout gone too — was thrown a tick later:
+  // exit 1 and no --out.
+  const site = await browserStandIn({});
+  const dir = mkdtempSync(join(tmpdir(), 'r315-harness-stderr-'));
+  try {
+    const root = process.getuid?.() === 0 ? ['--no-sandbox'] : [];
+    const script = new URL('ci/browser-harness.mjs', web).pathname;
+    for (const close of /** @type {const} */ (['stderr', 'both'])) {
+      const gone = join(dir, `${close}.gone`);
+      const hook = join(dir, `${close}-hook.mjs`);
+      // The hook says a line, waits (bounded) until the reader has gone, says another into the closed pipe, and goes on.
+      writeFileSync(hook, [
+        "import { existsSync } from 'node:fs';",
+        'export default async () => {',
+        "  process.stderr.write('hook: first\\n');",
+        `  for (let i = 0; i < 800 && !existsSync(${JSON.stringify(gone)}); i += 1) await new Promise((r) => setTimeout(r, 25));`,
+        "  process.stderr.write('hook: second\\n');",
+        '  await new Promise((r) => setTimeout(r, 200));',
+        "  return { rows: ['the hook said two lines'] };",
+        '};',
+        ''
+      ].join('\n'));
+      const out = join(dir, `${close}.md`);
+      const ran = await closingReader([script, '--base', site.base, '--n', '1', '--pages', '/speed', '--no-interactions', '--no-idle', '--no-report-check', '--settle-ms', '100', '--hook', hook, '--out', out, ...root], close, gone);
+      assert.ok(existsSync(gone), `${close}: the reader went after the hook's first line`);
+      assert.ok(existsSync(out), `${close}: --out was written (exit ${ran.code}, signal ${ran.signal}): ${ran.stderr}`);
+      const text = readFileSync(out, 'utf8');
+      const verdict = /^# Browser harness — (PASS|FAIL)\n/.exec(text);
+      assert.ok(verdict, text);
+      assert.deepEqual([ran.code, ran.signal], [verdict[1] === 'PASS' ? 0 : 1, null], `${close}: the exit is the verdict its sheet states:\n${text}`);
+      for (const f of text.split('\n').filter((l) => l.startsWith('- FAILED: ')).map((l) => l.slice('- FAILED: '.length))) assert.ok(timedJudgement(f, '/speed'), `${close}: a FAIL only on how fast this machine drew /speed: ${f}`);
+      assert.match(text, /\nHook [^\n]*:\nthe hook said two lines\n/, `${close}: the run went on past the line stderr lost`);
+      assert.match(text, /^- stderr was closed \(EPIPE\) during the run; none of this run's own lines on it was lost$/m, `${close}:\n${text}`);
+      assert.ok(ran.stderr.startsWith('hook: first\n'), ran.stderr);
+      assert.equal(ran.stdout, close === 'stderr' ? text : '', `${close}: stdout is the sheet, the same as --out, unless it was closed first`);
+    }
+  } finally {
+    site.server.close();
+  }
+});
+
+test('both commands say their lines through the counted stderr from their first line, and a sheet\'s note comes before what it did not measure', () => {
+  for (const [file, name] of /** @type {const} */ ([['ci/speed-sheet.mjs', 'speed-sheet'], ['ci/browser-harness.mjs', 'browser-harness']])) {
+    const src = source(file);
+    const main = src.slice(src.indexOf('async function main() {'));
+    assert.match(main, /^async function main\(\) \{\n(?:\s*\/\/[^\n]*\n)*\s*const said = saidOn\(process\.stderr\);\n/, `${file}: the listener is the first thing main does`);
+    assert.doesNotMatch(main, /console\.|process\.stderr\.write/, `${file}: every line of main through said.say`);
+    assert.match(main, /const note = await stderrNote\(said\);/, file);
+    assert.equal((main.match(new RegExp(`said\\.say\\(\`${name}: `, 'g')) ?? []).length, name === 'speed-sheet' ? 2 : 3, file);
+  }
+  assert.doesNotMatch(source('ci/speed-sheet.mjs') + source('ci/browser-harness.mjs'), /console\.error|process\.stderr\.write\(/, 'no line reaches stderr around the count');
+  assert.match(source('ci/speed-sheet.mjs'), /const log = deps\.log \?\? saidOn\(process\.stderr\)\.say;/);
+  const text = sheet.renderSheet({ ok: true, rows: [], ignored: [], failures: [], notMeasured: ['nm'], skipped: ['sk'], ctx: null, commit: null, notes: ['stderr was closed (EPIPE) from the line "x": 1 of this run\'s own lines on it were not shown'] }, { n: 1, clients: [1] });
+  assert.match(text, /^# Speed sheet — PASS\n/, 'a note never changes the verdict');
+  assert.match(text, /\n\n- stderr was closed \(EPIPE\) from the line "x": 1 of this run's own lines on it were not shown\n- SKIPPED: sk\n- NOT MEASURED: nm\n$/);
+  assert.doesNotMatch(sheet.renderSheet({ ok: true, rows: [], ignored: [], failures: [], notMeasured: [], skipped: [], ctx: null, commit: null }, { n: 1, clients: [1] }), /\n- /, 'no notes, no line');
 });

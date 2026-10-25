@@ -100,6 +100,10 @@
  *
  * Exit 0 when every row was answered, stamped by one build and no field was
  * ignored; 1 with every reason printed otherwise; 2 for a misused command.
+ * A closed stdout or stderr changes none of these and ends no run (verify r7
+ * and r8): what a reader that has gone did not take is counted, the sheet
+ * names the first of the run's lines stderr did not show, and `--out` is
+ * still written whole.
  * It only reads: GET and HEAD, never a write, whatever a capture holds.
  */
 import http from 'node:http';
@@ -1000,7 +1004,7 @@ export function readCapturedFile(path) {
  *
  * @typedef {{ok: boolean, rows: SheetRow[], ignored: {request: SheetRequest, field: string, how: string, said: string}[],
  *   failures: string[], notMeasured: string[], skipped: string[], ctx: SheetContext | null,
- *   commit: string | null}} SheetResult
+ *   commit: string | null, notes?: string[]}} SheetResult
  *
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
@@ -1012,7 +1016,8 @@ export function readCapturedFile(path) {
 export async function runSheet(args, deps = {}) {
   const sendTo = deps.send ?? timed;
   const restartOnce = deps.restart ?? restartWithin;
-  const log = deps.log ?? ((line) => console.error(line));
+  // A closed stderr is counted, never thrown (verify r8: the console's line threw it a tick later, mid-run).
+  const log = deps.log ?? saidOn(process.stderr).say;
   /** @param {string} path @param {object} [o] */
   const send = (path, o = {}) => sendTo(args.base, path, { timeoutMs: args.timeoutMs, ...o });
   /** @type {string[]} */
@@ -1275,7 +1280,8 @@ const msText = (ms) => (ms < 10 ? ms.toFixed(2) : ms.toFixed(1));
 
 /**
  * The sheet as Markdown: every row stamped with its commit, then every
- * section not measured and every failure.
+ * section not measured and every failure. A note (what the run's own stderr
+ * did not show) comes first, and never changes the verdict.
  *
  * @param {SheetResult} result
  * @param {{n: number, clients: number[]}} args
@@ -1297,6 +1303,7 @@ export function renderSheet(result, args) {
     lines.push(`| ${commit} | ${r.page} | \`${r.route}\` | ${r.label || r.builder} | ${r.phase} | ${r.clients} | ${r.n} | ${msText(r.p50)} | ${msText(r.p99)} | ${msText(r.max)} | ${c('answered')} | ${c('refused')} | ${c('busy')} | ${c('failed')} | ${c('no answer')} | ${r.bytes} |`);
   }
   lines.push('');
+  for (const n of result.notes ?? []) lines.push(`- ${n}`);
   for (const s of result.skipped) lines.push(`- SKIPPED: ${s}`);
   for (const s of result.notMeasured) lines.push(`- NOT MEASURED: ${s}`);
   for (const f of result.failures) lines.push(`- FAILED: ${f}`);
@@ -1379,8 +1386,123 @@ export function unwritable(option, path) {
   return '';
 }
 
-/** Each stream `written` listens to, and the sheet that hears its failure. @type {WeakMap<object, {lost: (why: NodeJS.ErrnoException) => void}>} */
+/**
+ * A command's own lines on a stream (stderr), and what became of them.
+ *
+ * @typedef {{say: (line: string) => void, closed: () => ({why: string, step: string | null, lost: number} | null),
+ *   pending: () => number, settled: (ms: number) => Promise<boolean>}} Said
+ */
+
+/** Each stream {@link saidOn} says lines on, once a stream. @type {WeakMap<object, Said>} */
+const SAYS = new WeakMap();
+
+/**
+ * How long the end of a run waits for stderr to take the run's own lines
+ * before its sheet is written, ms: a line a closed stderr did not take is
+ * known only once its write has called back, and the sheet says it.
+ */
+export const STDERR_SETTLE_MS = 1_000;
+
+/**
+ * A command's lines on `stream` (its stderr), one line a call, through ONE
+ * persistent `error` listener a stream, so a reader that has gone is
+ * COUNTED, never thrown (verify r8, 26 Oct: `process.stderr` had no `error`
+ * listener in either command, and Node's console listens only for the
+ * synchronous part of a write, so the EPIPE a closed pipe reports a tick
+ * later was an uncaught exception: a sheet whose stderr reader had gone
+ * (`2>&1 | head -1`) died mid-run with its `--out` never written and
+ * nothing said, and either command's end turned its exit into 1 whatever
+ * its run's verdict). Once a write has failed, no later line is written:
+ * each is counted. `closed()` names the failure, the first line not shown
+ * (`step`, null while none was lost) and how many were not; `settled(ms)`
+ * resolves once every line handed has called back, or `false` at the bound.
+ * The same object for the same stream, however often it is asked, so every
+ * line of the process is counted in one place.
+ *
+ * @param {NodeJS.WritableStream} stream
+ * @returns {Said}
+ */
+export function saidOn(stream) {
+  const known = SAYS.get(stream);
+  if (known !== undefined) return known;
+  /** @type {string | null} */
+  let why = null;
+  /** @type {string | null} */
+  let step = null;
+  let lost = 0;
+  let pending = 0;
+  /** @type {Promise<void> | null} resolved once no line is in flight; a new one for each wait after that */
+  let drained = null;
+  /** @type {() => void} */
+  let release = () => {};
+  /** @param {NodeJS.ErrnoException} e */
+  const failed = (e) => {
+    why ??= String(e.code ?? e.message);
+  };
+  /** @param {string} line */
+  const lose = (line) => {
+    lost += 1;
+    step ??= line;
+  };
+  stream.on?.('error', failed);
+  /** @type {Said} */
+  const said = {
+    say(line) {
+      if (why !== null) return void lose(line);
+      pending += 1;
+      stream.write(`${line}\n`, (/** @type {NodeJS.ErrnoException | null | undefined} */ e) => {
+        pending -= 1;
+        if (e) {
+          failed(e);
+          lose(line);
+        }
+        if (pending > 0) return;
+        drained = null;
+        release();
+      });
+    },
+    closed: () => (why === null ? null : { why, step, lost }),
+    pending: () => pending,
+    settled(ms) {
+      if (pending === 0) return Promise.resolve(true);
+      drained ??= new Promise((resolve) => {
+        release = resolve;
+      });
+      const now = drained;
+      return new Promise((resolve) => {
+        const t = setTimeout(() => resolve(false), ms);
+        void now.then(() => {
+          clearTimeout(t);
+          resolve(true);
+        });
+      });
+    }
+  };
+  SAYS.set(stream, said);
+  return said;
+}
+
+/**
+ * What a run's own stderr did not show, for its sheet, once the run's lines
+ * have settled (at most `ms`): `null` when stderr took every one.
+ *
+ * @param {Said} said
+ * @param {number} [ms]
+ * @returns {Promise<string | null>}
+ */
+export async function stderrNote(said, ms = STDERR_SETTLE_MS) {
+  const took = await said.settled(ms);
+  const gone = said.closed();
+  if (gone !== null && gone.step === null) return `stderr was closed (${gone.why}) during the run; none of this run's own lines on it was lost`;
+  if (gone !== null) return `stderr was closed (${gone.why}) from the line "${gone.step}": ${gone.lost} of this run's own lines on it were not shown`;
+  return took ? null : `stderr had not taken ${said.pending()} of this run's own lines ${ms} ms after the run`;
+}
+
+/** Each stream `written` listens to, and the sheets still waiting on it. @type {WeakMap<object, Set<(why: NodeJS.ErrnoException) => void>>} */
 const HEARD = new WeakMap();
+
+/** How many sheets handed to `stream` are still waiting on it (none once each has ended). @param {object} stream */
+export const sheetsWaitingOn = (stream) => HEARD.get(stream)?.size ?? 0;
 
 /** How long a command's end waits for stdout to take its whole sheet, ms. */
 export const STDOUT_WAIT_MS = 60_000;
@@ -1403,6 +1525,15 @@ export const STDOUT_WAIT_MS = 60_000;
  * so the listener stays for the rest of the process: ONE listener a stream
  * (`HEARD`), however many sheets it is handed, each failure said once.
  *
+ * EVERY SHEET STILL WAITING HEARS ITS STREAM'S FAILURE (verify r8, 26 Oct:
+ * the listener told only the newest sheet, and no test could tell, so a
+ * sheet whose write was still in flight when its stream failed, behind an
+ * earlier one, waited out its whole bound and then said the wrong reason,
+ * "did not take ... within N ms"). Each sheet waits in its stream's set
+ * from its write until it ends, each is said once, by its own size, and
+ * none stays behind its end ({@link sheetsWaitingOn}). Its line goes out
+ * through {@link saidOn}, so a closed stderr is counted, never thrown.
+ *
  * @param {NodeJS.WritableStream} stream
  * @param {string} text
  * @param {string} name the command, for the line on stderr
@@ -1411,6 +1542,18 @@ export const STDOUT_WAIT_MS = 60_000;
  */
 export function written(stream, text, name, ms = STDOUT_WAIT_MS) {
   return new Promise((resolve) => {
+    let sheets = HEARD.get(stream);
+    if (sheets === undefined) {
+      /** @type {Set<(why: NodeJS.ErrnoException) => void>} */
+      const all = new Set();
+      sheets = all;
+      HEARD.set(stream, all);
+      // Each sheet leaves the set as it ends, and a Set's walk takes the deletion of the one it is on.
+      stream.on?.('error', (/** @type {NodeJS.ErrnoException} */ why) => {
+        for (const lost of all) lost(why);
+      });
+    }
+    const waiting = sheets;
     let over = false;
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let t;
@@ -1419,26 +1562,21 @@ export function written(stream, text, name, ms = STDOUT_WAIT_MS) {
       if (over) return;
       over = true;
       clearTimeout(t);
-      if (said !== undefined) process.stderr.write(said);
+      waiting.delete(lost);
+      if (said !== undefined) saidOn(process.stderr).say(said);
       resolve(took);
     };
     /** @param {NodeJS.ErrnoException} why */
-    const lost = (why) => end(false, `${name}: stdout was closed before it took the whole sheet (${Buffer.byteLength(text)} B): ${why.code ?? why.message}; what it did not take is lost\n`);
-    let heard = HEARD.get(stream);
-    if (heard === undefined) {
-      const at = { lost: lost };
-      heard = at;
-      HEARD.set(stream, at);
-      stream.on?.('error', (/** @type {NodeJS.ErrnoException} */ why) => at.lost(why));
-    }
-    // The newest sheet handed to the stream hears its failure; one already ended says nothing twice.
-    heard.lost = lost;
-    t = setTimeout(() => end(false, `${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost\n`), ms);
+    const lost = (why) => end(false, `${name}: stdout was closed before it took the whole sheet (${Buffer.byteLength(text)} B): ${why.code ?? why.message}; what it did not take is lost`);
+    waiting.add(lost);
+    t = setTimeout(() => end(false, `${name}: stdout did not take the whole sheet (${Buffer.byteLength(text)} B) within ${ms} ms; what it did not take is lost`), ms);
     stream.write(text, (/** @type {NodeJS.ErrnoException | null | undefined} */ why) => (why ? lost(why) : end(true)));
   });
 }
 
 async function main() {
+  // FIRST: every line of the run goes to stderr through one listener, so a reader that has gone is counted, never thrown.
+  const said = saidOn(process.stderr);
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
@@ -1446,11 +1584,13 @@ async function main() {
     const why = args.out === null ? '' : unwritable('--out', args.out);
     if (why !== '') throw new Error(why);
   } catch (why) {
-    console.error(`speed-sheet: ${/** @type {Error} */ (why).message}`);
+    said.say(`speed-sheet: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
-  const result = await runSheet(args);
-  const text = renderSheet(result, args);
+  const result = await runSheet(args, { log: said.say });
+  // The sheet says what its own stderr did not show, from which line (verify r8).
+  const note = await stderrNote(said);
+  const text = renderSheet(note === null ? result : { ...result, notes: [...(result.notes ?? []), note] }, args);
   const flushed = written(process.stdout, text, 'speed-sheet');
   let code = result.ok ? 0 : 1;
   if (args.out) {
@@ -1458,7 +1598,7 @@ async function main() {
       writeWhole(args.out, text);
     } catch (why) {
       // The sheet is on stdout already; the file that could not be written is named, never a stack.
-      console.error(`speed-sheet: ${/** @type {Error} */ (why).message}`);
+      said.say(`speed-sheet: ${/** @type {Error} */ (why).message}`);
       code = 2;
     }
   }

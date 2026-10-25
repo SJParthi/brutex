@@ -90,7 +90,10 @@
  * Node's own WebSocket. Exit 0 when every target holds; 1 with every reason
  * otherwise (the sheet is written, and names the build that answered); 2
  * for a misused command, an `--out` or `--capture` that cannot be written,
- * or no browser.
+ * or no browser. A closed stdout or stderr changes none of these and ends
+ * no run (verify r7 and r8): what a reader that has gone did not take is
+ * counted, the sheet says that stderr was closed, and `--out` is still
+ * written whole.
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -105,7 +108,7 @@ import { BUILD_HEADER } from '../src/lib/runtime-inspection.js';
 import { LOCAL_SORT_BUDGET, windowQuery } from '../src/lib/db/bars-plan.js';
 import { rungsUrl, rungSeconds, SOURCES_DEFAULTS } from '../src/lib/sources.js';
 import { linkOfKey } from '../src/lib/db/selection-model.js';
-import { writeWhole, MAX_WAIT_MS, DECIMAL, GROUP_POLL_MS, groupRunning, signalGroup, sameFile, unwritable, written } from './speed-sheet.mjs';
+import { writeWhole, MAX_WAIT_MS, DECIMAL, GROUP_POLL_MS, groupRunning, signalGroup, sameFile, unwritable, written, saidOn, stderrNote } from './speed-sheet.mjs';
 
 // The longest wait a Node timer holds, and the sheet's own reading of a whole
 // number: one rule for both commands (`speed-sheet.mjs` says why). The
@@ -832,7 +835,7 @@ function tracked(child, profile) {
         if (alive() || groupRunning(child.pid)) signalGroup(child, 'SIGKILL');
         remove();
       } catch (why) {
-        process.stderr.write(`browser-harness: could not stop the browser ${child.pid} or remove ${profile}: ${/** @type {Error} */ (why).message}\n`);
+        saidOn(process.stderr).say(`browser-harness: could not stop the browser ${child.pid} or remove ${profile}: ${/** @type {Error} */ (why).message}`);
       }
     }
   };
@@ -1833,6 +1836,9 @@ export function renderHarness(result, args) {
 }
 
 async function main() {
+  // FIRST: stderr has one listener for the run (verify r8), so a reader that has gone is counted, never thrown,
+  // whoever writes to it: the harness's own lines, a hook's, or `written`'s at the end.
+  const said = saidOn(process.stderr);
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
@@ -1841,16 +1847,19 @@ async function main() {
       if (why !== '') throw new Error(why);
     }
   } catch (why) {
-    console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
+    said.say(`browser-harness: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
   let result;
   try {
     result = await runHarness(args);
   } catch (why) {
-    console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
+    said.say(`browser-harness: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
+  // The sheet says that stderr was closed during the run, and what of the run's own it did not show.
+  const note = await stderrNote(said);
+  if (note !== null) result.notes.push(note);
   const text = renderHarness(result, args);
   // EXIT ONLY ONCE STDOUT HAS THE WHOLE SHEET (verify r6 follow-up): a piped sheet past 64 KB was cut at the exit.
   const flushed = written(process.stdout, text, 'browser-harness');
@@ -1860,7 +1869,7 @@ async function main() {
       writeWhole(args.out, text);
     } catch (why) {
       // The sheet is on stdout already; the file that could not be written is named.
-      console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
+      said.say(`browser-harness: ${/** @type {Error} */ (why).message}`);
       code = 2;
     }
   }
