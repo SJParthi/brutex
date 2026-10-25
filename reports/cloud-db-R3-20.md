@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -332,3 +332,16 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   clean on the merged tree.
 - cli mutants (41) running.
 - NEXT: the cli mutants' result, store mutants on `812136f5`'s edit, coverage again, workspace tests, deny.
+
+### 26 Oct 05:05 IST — cli mutants partial; HELD (HOLD of 04:55 IST)
+
+- cli mutants (`cargo mutants --in-diff <diff of month_recover_command.rs vs feat/db-fix> -p cli -j 2
+  -C --lib -- -- month_recover`, 41 mutants, at `00aea160`): 11 tested so far, 6 caught, 3 unviable,
+  2 missed (`Ask::named` -> `String::new()` / `"xyzzy"`: no test read the month's name). Now caught:
+  `the_days_dropped_by_recovery_are_read_again` asserts the header line
+  `— gdfl NSE/INDEX/NIFTY 1min 2020-03 under <root>`; with the mutant applied by hand that test fails
+  at line 238, without it `ok. 11 passed; 0 failed`.
+- HOLD at 04:55 IST (`a884e5ff`, until the 09:00 IST reset), no GO-R3-20: pushed, waiting. The cli
+  mutants run continues in the background.
+- NEXT: when GO: read the cli mutants' result and fix any survivor, store mutants on `812136f5`'s edit,
+  coverage again, workspace tests, deny, report.
