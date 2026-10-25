@@ -1,1 +1,0 @@
-HOLD 25 Oct 18:5x IST (Mac pace rule: 5-hour 23% at ~0.57%/min). Parts with a GO-<NAME> file keep building (R4-09b, IA-10a, IA-17b); every other part finishes its step, commits, pushes, writes STATUS: HELD and waits.
