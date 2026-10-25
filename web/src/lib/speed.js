@@ -751,9 +751,9 @@ export function garbledUrl(url, field) {
  *   Those bytes are ONE BUILD'S (verify r8 nit, 26 Oct): SvelteKit names
  *   each build afresh (its version string and its `__sveltekit_<id>`
  *   global, both in the shared start chunk), and the names' lengths vary,
- *   so verify r8's build and repair 8's first one weighed 4 B more on all
- *   three pages (1,118,729 / 816,365 / 545,593 B; `/ingest` 4,407 B of
- *   room) and repair 8's last one the same as repair 7's.
+ *   so builds differ by a few bytes on every page with nothing else changed: `/ingest`
+ *   weighed 545,585, 545,589 and 545,593 B in the builds of 25 and 26 Oct
+ *   (at least 4,407 B of room).
  *
  * Each time that is the budget doing its job — a page grew and the build
  * said so; the figure it now holds is the merged tree's, by the same

@@ -79362,8 +79362,9 @@ Repair round 8 (26 Oct, after verify r8):
     machine's clock in a test, named, never pinned (R315-38). The byte
     figures of item 36 are one build's: SvelteKit names each build afresh
     (its version string and its `__sveltekit_<id>` global), whose lengths
-    vary, so verify r8's build and this round's first weighed 4 B more on
-    every page, and this round's last the same as item 36's.
+    vary, so builds differ by a few bytes on every page, nothing else changed:
+    `/ingest` weighed 545,585, 545,589 and 545,593 B in the builds of 25
+    and 26 Oct (L-R315-10).
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-38);
 measurements in `docs/06-limits.md` L-R315-01 to L-R315-30.
