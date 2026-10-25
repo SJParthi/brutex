@@ -58,10 +58,21 @@
     typeof db.toDay === 'string' && db.toDay !== '' ? db.toDay : typeof db.toMonth === 'string' ? db.toMonth : ''
   );
 
+  /* A BACK-ADJUSTED SHARE'S RUNS ARE NAMED ROW BY ROW (R3-13 goal 4): the
+     badge says where, since a selection of many days spans runs with
+     different factors and only the rows' own days can name theirs. */
+  const RUNS_WHERE =
+    ' Each row\'s adjusted or quantised run is named, with its first and last day and the factor /sources/day.json serves, on its Source line below the grid and in its Details.';
+  /** @param {string} seg */
+  const priceOf = (seg) => {
+    const p = priceBadge(feed, seg, rung);
+    return p.tone === 'adjusted' ? { ...p, title: `${p.title}${RUNS_WHERE}` } : p;
+  };
+
   const groups = $derived(
     segments.map((seg) => ({
       seg,
-      price: priceBadge(feed, seg, rung),
+      price: priceOf(seg),
       volume: volumeBadge(feed, seg, rung),
       close: closeBadge(feed, seg, rung),
       auction: auctionNote(feed, seg, through),

@@ -295,6 +295,11 @@ const ROUTES = [
 	// `crates/api/src/imports.rs`). Without them `npm run dev` answers the
 	// HTML fallback and the band reports a JSON error for a routing gap.
 	'/dayflags.json',
+	// THE DATA CHECKS the /ingest panel FeedChecks reads (DATA-1w, D-5190;
+	// `crates/api/src/feed_checks.rs`).
+	'/feed-checks.json',
+	'/tick-checks.json',
+	'/calendar-days.json',
 	'/imports.json',
 	'/vocab.json',
 	'/universes.json',
