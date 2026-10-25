@@ -865,10 +865,14 @@ export function budgetVerdict(pages) {
     const over = p.bytes > budget;
     const overTarget = p.bytes > PAGE_TARGETS.wireBytes;
     const kb = (/** @type {number} */ b) => `${(b / 1_000).toFixed(1)} KB`;
+    // TWO FIGURES THAT ROUND TO ONE ARE SAID TO THE BYTE (verify r8 nit, 26 Oct: a page 1 B over its budget read
+    // "545.6 KB on first load ..., budget 545.6 KB — OVER ITS BUDGET"): the page, its budget and the wire target.
+    const near = (/** @type {number} */ limit) => p.bytes !== limit && kb(p.bytes) === kb(limit);
+    const size = near(budget) || near(PAGE_TARGETS.wireBytes) ? (/** @type {number} */ b) => `${b} B` : kb;
     const line =
-      `${p.route}: ${kb(p.bytes)} on first load (${kb(p.js)} script, ${kb(p.css)} style), budget ${kb(budget)}` +
+      `${p.route}: ${size(p.bytes)} on first load (${kb(p.js)} script, ${kb(p.css)} style), budget ${size(budget)}` +
       (over ? ' — OVER ITS BUDGET' : '') +
-      (overTarget ? ` — over the ${kb(PAGE_TARGETS.wireBytes)} wire target` : '');
+      (overTarget ? ` — over the ${size(PAGE_TARGETS.wireBytes)} wire target` : '');
     return { route: p.route, bytes: p.bytes, budget, over, overTarget, line };
   });
 }

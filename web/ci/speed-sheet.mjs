@@ -140,8 +140,9 @@ export function pagePathOf(page) {
 
 /**
  * @typedef {{feed: string, instrument: string, timeframe: string, month: string, day: string,
- *   from: string, to: string}} SheetContext the selection every request is built for: the
- *   one /db opens on (NIFTY · Spot · the feed's finest timeframe · newest first)
+ *   from: string, to: string, dayFrom?: 'given' | 'newest' | 'first'}} SheetContext the selection every request is built for: the
+ *   one /db opens on (NIFTY · Spot · the feed's finest timeframe · newest first); `dayFrom`
+ *   says how the day was chosen (given, the rung's newest, or the month's first, taken)
  * @typedef {{page: string, route: string, label?: string, method?: string, builder: Function | null,
  *   from: string | null, usedBy: string, make: (c: SheetContext) => string | null}} CatalogueEntry
  */
@@ -680,6 +681,8 @@ export async function discover(get, args) {
     feed = String(row.wire);
   }
   let { timeframe, month, day } = args;
+  /** @type {SheetContext['dayFrom']} */
+  let dayFrom = 'given';
   if (timeframe === null || month === null || day === null) {
     const url = rungsUrl(args.instrument);
     if (url === null) throw new Error(`discovering the selection: ${args.instrument} is not an instrument key rungsUrl can ask about`);
@@ -696,9 +699,28 @@ export async function discover(get, args) {
     // otherwise starts at its first day, as a rung that names no day does.
     month = month ?? (day !== null ? day.slice(0, 7) : String(finest.last_month));
     const newest = finest.last_day ? String(finest.last_day) : null;
-    day = day ?? (newest !== null && newest.slice(0, 7) === month ? newest : `${month}-01`);
+    if (day === null) {
+      // A DAY TAKEN, NOT FOUND, IS SAID (verify r8 follow-up, 26 Oct: --month
+      // 2025-03 alone took 2025-03-01, a Saturday, and timed its empty answer
+      // as the day's, saying nothing): `dayFrom` says how the day was chosen.
+      dayFrom = newest !== null && newest.slice(0, 7) === month ? 'newest' : 'first';
+      day = dayFrom === 'newest' ? String(newest) : `${month}-01`;
+    }
   }
-  return { feed, instrument: args.instrument, timeframe, month, day, ...monthDays(month) };
+  return { feed, instrument: args.instrument, timeframe, month, day, dayFrom, ...monthDays(month) };
+}
+
+/**
+ * What the sheet says of a day it took rather than found: `null` for a day
+ * given or the rung's newest, a line for a month's first day, which nothing
+ * here knows to be a session.
+ *
+ * @param {SheetContext} ctx
+ * @returns {string | null}
+ */
+export function dayTakenNote(ctx) {
+  if (ctx.dayFrom !== 'first') return null;
+  return `the day ${ctx.day} was taken, not found: it is the first of ${ctx.month}, and the rung's newest day is not in that month, so whether it holds a session is not known here and the day's rows may time a day with no bars; pass --day to name a session day`;
 }
 
 /**
@@ -1054,6 +1076,9 @@ export async function runSheet(args, deps = {}) {
   } catch (why) {
     return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit };
   }
+  const taken = dayTakenNote(ctx);
+  /** @type {string[]} */
+  const notes = taken === null ? [] : [taken];
   /** @type {{page: string, method: string, url: string}[]} */
   let captured = [];
   try {
@@ -1272,7 +1297,7 @@ export async function runSheet(args, deps = {}) {
       if ((row.classes[k] ?? 0) > 0) failures.push(`${row.page} ${row.url} (${row.phase}, ${row.clients} clients): ${row.classes[k]} ${k} — ${row.said}`);
     }
   }
-  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit };
+  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes };
 }
 
 /** @param {number} ms */

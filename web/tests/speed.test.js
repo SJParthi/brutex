@@ -188,7 +188,8 @@ test('the_bundle_is_inside_its_budget', async () => {
   const quiet = console.log;
   console.log = () => {};
   try {
-    assert.throws(() => plugin.writeBundle.call(ctx, { dir: big }), /1 page\(s\) past their budget.*\/gaps: 400\.0 KB on first load.*budget 400\.0 KB — OVER ITS BUDGET/);
+    // One byte over: said to the byte, since both figures round to 400.0 KB (repair 8; verify r8 nit).
+    assert.throws(() => plugin.writeBundle.call(ctx, { dir: big }), /1 page\(s\) past their budget.*\/gaps: 400001 B on first load.*budget 400000 B — OVER ITS BUDGET/);
     assert.doesNotThrow(() => plugin.writeBundle.call(ctx, { dir: synthBuild({ pageBytes: 1_000 }) }));
     // A client output without its entry, or with no directory, is REFUSED by
     // name (repair round 1: it passed unweighed). The server build, which
@@ -330,7 +331,12 @@ test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(budgetOf('/backtest'), 1_125_000);
   const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }, { route: '/audit', node: 3, js: 1, css: 1, bytes: 400_000, files: [] }]);
   assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true], [false, false]], 'exactly the budget, and exactly the target, are inside');
-  assert.match(v[1].line, /— OVER ITS BUDGET — over the 400\.0 KB wire target/);
+  // Figures that round to one are said to the byte (repair 8; verify r8 nit: "545.6 KB ..., budget 545.6 KB — OVER").
+  assert.equal(v[1].line, '/gaps: 400001 B on first load (0.0 KB script, 0.0 KB style), budget 400000 B — OVER ITS BUDGET — over the 400000 B wire target');
+  assert.equal(v[0].line, '/db: 700.0 KB on first load (600.0 KB script, 100.0 KB style), budget 825.0 KB — over the 400.0 KB wire target');
+  assert.equal(v[2].line, '/audit: 400.0 KB on first load (0.0 KB script, 0.0 KB style), budget 400.0 KB', 'equal figures are one figure');
+  const nearTarget = budgetVerdict([{ route: '/db', node: 6, js: 400_040, css: 0, bytes: 400_040, files: [] }])[0].line;
+  assert.equal(nearTarget, '/db: 400040 B on first load (400.0 KB script, 0.0 KB style), budget 825000 B — over the 400000 B wire target', 'near the wire target only');
 });
 
 test('the budget refuses a build it cannot read, naming what was missing', () => {
@@ -837,9 +843,9 @@ test('the sheet discovers the selection /db opens on, from the server, or refuse
   const feeds = [{ wire: 'dhan', ready: false }, { wire: 'zerodha', ready: true }];
   const url = String(rungsUrl('NSE-INDEX-NIFTY'));
   const ctx = await sheet.discover(get({ '/feeds.json': feeds, [url]: rungs }), args);
-  assert.deepEqual(ctx, { feed: 'zerodha', instrument: 'NSE-INDEX-NIFTY', timeframe: '1min', month: '2026-08', day: '2026-08-31', from: '2026-08-01', to: '2026-08-31' });
+  assert.deepEqual(ctx, { feed: 'zerodha', instrument: 'NSE-INDEX-NIFTY', timeframe: '1min', month: '2026-08', day: '2026-08-31', dayFrom: 'newest', from: '2026-08-01', to: '2026-08-31' });
   const gdfl = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'gdfl' });
-  assert.deepEqual([gdfl.timeframe, gdfl.day], ['1s', '2026-07-01'], 'a rung with no last day starts at its month');
+  assert.deepEqual([gdfl.timeframe, gdfl.day, gdfl.dayFrom], ['1s', '2026-07-01', 'first'], 'a rung with no last day starts at its month, a day taken (repair 8)');
   const noMonth = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'zerodha', timeframe: '1min', day: '2026-08-03' });
   assert.deepEqual([noMonth.month, noMonth.day], ['2026-08', '2026-08-03'], 'a month not given is discovered though the rung and the day are');
   const noDay = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'zerodha', timeframe: '1min', month: '2026-08' });
@@ -1053,6 +1059,23 @@ test('a real browser\'s row is checked for what does not depend on the machine: 
   assert.equal(timedJudgement('/b cold: first content p99 400.0 ms, not under 300 ms', '/a'), false, 'another page\'s judgement is not this page\'s');
   assert.equal(timedJudgement('/a idle: first content p99 400.0 ms, not under 300 ms', '/a'), false, 'cold or warm only');
   assert.equal(timedJudgement('/a warm: a pause of 60.0 ms, over 50 ms', '/a'), true);
+  // Repair 8 (verify r8 follow-up): on a page that polls, a capped settle is the clock's too; on another page, refused (above).
+  assert.deepEqual(measuredRow(run('/a', [load({ settled: false })]), '/a', 'cold', 1, { polls: true }), ['/a cold: 1 loads still had a request in flight after 30 s']);
+  assert.throws(() => measuredRow(run('/a', [load({ status: 404 })]), '/a', 'cold', 1, { polls: true }), /never on: \/a cold: 1 of 1 loads were not the page/, 'polling excuses the settle cap only');
+  // An interaction: each click timed or named by the clock's two outcomes, a pause only as its judgement, never NOT MEASURED.
+  const rowOf = (/** @type {string} */ line, /** @type {string[]} */ failures = []) => ({ lines: ['| interaction | n | ...', line], failures });
+  const frames = `picker click: 1 click(s) drew no frame within ${harness.FRAME_WAIT_MS} ms, not timed`;
+  assert.equal(measuredInteraction(rowOf('| picker click | 2 | 10.0 / 12.0 / 12.0 | 3.0 |'), 'picker click', 2), 2);
+  assert.equal(measuredInteraction(rowOf('| picker click | 1 | 10.0 / 10.0 / 10.0 | 3.0 |', [frames, 'picker click: a pause of 60.0 ms, over 50 ms']), 'picker click', 2), 1);
+  assert.equal(measuredInteraction(rowOf('| picker click | 0 | NOT TIMED: no click settled within 30 s | 3.0 |', ['picker click: 2 click(s) still had a request in flight 30 s later, not timed']), 'picker click', 2), 0);
+  for (const [r, why] of /** @type {[any, RegExp][]} */ ([
+    [rowOf('| picker click | 0 | NOT MEASURED: #db-search is not on /db | — |'), /picker click is measured on a page that has its controls/],
+    [rowOf('| picker click | 1 | 10.0 / 10.0 / 10.0 | 3.0 |'), /each of its 2 clicks timed or named \(1 timed, 0 named\)/],
+    [rowOf('| picker click | 2 | 10.0 / 12.0 / 12.0 | 3.0 |', [frames]), /each of its 2 clicks timed or named \(2 timed, 1 named\)/],
+    [rowOf('| picker click | 2 | 10.0 / 12.0 / 12.0 | 3.0 |', ['picker click: NOT MEASURED — /db: the page stopped answering']), /never on: picker click: NOT MEASURED/],
+    [rowOf('| picker click | 0 | 10.0 / 12.0 / 12.0 | 3.0 |', ['picker click: 2 click(s) still had a request in flight 30 s later, not timed']), /figures exactly when a click was timed/],
+    [{ lines: [], failures: [] }, /one picker click row/]
+  ])) assert.throws(() => measuredInteraction(r, 'picker click', 2), why);
 });
 
 test('an idle tab may ask only for the header-only up check; anything else is listed', () => {
@@ -1180,11 +1203,11 @@ test('the harness in a real browser: the four figures, the interactions, idle ta
     const r = await harness.runHarness(args);
     const text = r.lines.join('\n');
     // Measured, and judged by how fast this machine drew it, which is not what this test is about (repair 7; verify r7).
-    measuredRow(r, '/db', 'cold', 2);
-    measuredRow(r, '/db', 'warm', 2);
-    for (const name of ['picker click', 'feed switch', 'page turn of option cells', 'sort at the 20,000-row browser sort edge']) {
-      assert.match(text, new RegExp(`^\\| ${name} \\| 2 \\| [\\d.]+ / [\\d.]+ / [\\d.]+ \\| [\\d.]+ \\|$`, 'm'), `${name} is measured on a page that has its controls`);
-    }
+    // The /db stand-in polls its up check every 300 ms, and each click is timed only as fast as the machine draws and
+    // settles it, so a capped settle and a click not timed are named outcomes of its clock too (repair 8; verify r8).
+    measuredRow(r, '/db', 'cold', 2, { polls: true });
+    measuredRow(r, '/db', 'warm', 2, { polls: true });
+    for (const name of ['picker click', 'feed switch', 'page turn of option cells', 'sort at the 20,000-row browser sort edge']) measuredInteraction(r, name, 2);
     assert.match(text, /^\| 1 \| 1 \| 1 s \| \d+ \| none \|$/m);
     assert.match(text, /^\| 2 \| 2 \| 1 s \| \d+ \| GET \/feeds\.json \|$/m, 'two idle tabs, each in its own window, both visible');
     assert.match(text, /Shared reporter: a failed \/feeds\.json\?harness=\d+ was reported \(202\) and found in \/logs\.json\./);
@@ -2164,22 +2187,61 @@ function timedJudgement(failure, page) {
  * none. The targets themselves are tested on fixed figures (`judge`), where
  * the answer is the same on every machine. Answers the row's failures.
  *
+ * A PAGE THAT POLLS (`polls`, repair 8; verify r8 follow-up, 26 Oct): a
+ * stand-in that asks every 300 ms settles in the gaps between its asks, so a
+ * load that ran out the 30 s settle cap there is the machine's clock too (a
+ * throttled Chrome bunched its timers: 2 of 5 runs); on any other page it
+ * is the page's own fault, and refused.
+ *
  * @param {{lines: string[], failures: string[]}} r
  * @param {string} page
  * @param {'cold' | 'warm'} phase
  * @param {number} n
+ * @param {{polls?: boolean}} [o]
  * @returns {string[]}
  */
-function measuredRow(r, page, phase, n) {
+function measuredRow(r, page, phase, n, o = {}) {
   const rows = r.lines.filter((l) => l.startsWith(`| ${page} | ${phase} | `));
   assert.equal(rows.length, 1, `one ${page} ${phase} row:\n${r.lines.join('\n')}`);
   const figure = '\\d+\\.\\d / \\d+\\.\\d / \\d+\\.\\d';
   const m = new RegExp(`^\\| [^|]+ \\| ${phase} \\| ${n} \\| (?:${figure}|not painted) \\| ${figure} \\| ${figure} \\| ${figure} \\| (holds|FAILS) \\|$`).exec(rows[0]);
   assert.ok(m, `${page} ${phase} is measured over ${n} loads, each figure a reading: ${rows[0]}`);
   const own = r.failures.filter((f) => f.startsWith(`${page} ${phase}: `));
-  for (const f of own) assert.ok(timedJudgement(f, page), `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}`);
+  const capped = (/** @type {string} */ f) => o.polls === true && /^\d+ loads still had a request in flight after 30 s$/.test(f.slice(`${page} ${phase}: `.length));
+  for (const f of own) assert.ok(timedJudgement(f, page) || capped(f), `${page} ${phase} fails only on how fast the machine drew it, never on: ${f}`);
   assert.equal(m[1], own.length === 0 ? 'holds' : 'FAILS', `the targets cell agrees with the row's failures (${own.join('; ') || 'none'})`);
   return own;
+}
+
+/**
+ * An interaction's row, checked as {@link measuredRow} checks a page's
+ * (repair 8; verify r8 follow-up, 26 Oct: the row was pinned to n = 2, and a
+ * click is timed only if its tab draws two frames within `FRAME_WAIT_MS`
+ * and settles within 30 s, both the machine's clock): measured on a page
+ * that has its controls, never NOT MEASURED; each of its `n` clicks timed or
+ * named as one of those two outcomes; and a pause past its target only as
+ * the timed judgement it is. Answers how many clicks were timed.
+ *
+ * @param {{lines: string[], failures: string[]}} r
+ * @param {string} name
+ * @param {number} n
+ * @returns {number}
+ */
+function measuredInteraction(r, name, n) {
+  const rows = r.lines.filter((l) => l.startsWith(`| ${name} | `));
+  assert.equal(rows.length, 1, `one ${name} row:\n${r.lines.join('\n')}`);
+  const m = new RegExp(`^\\| ${name} \\| (\\d+) \\| (?:([\\d.]+ / [\\d.]+ / [\\d.]+)|NOT TIMED: no click settled within 30 s) \\| [\\d.]+ \\|$`).exec(rows[0]);
+  assert.ok(m, `${name} is measured on a page that has its controls: ${rows[0]}`);
+  const timed = Number(m[1]);
+  assert.equal(m[2] === undefined, timed === 0, `${name}: figures exactly when a click was timed: ${rows[0]}`);
+  let named = 0;
+  for (const f of r.failures.filter((x) => x.startsWith(`${name}: `))) {
+    const k = new RegExp(`^${name}: (\\d+) click\\(s\\) (?:drew no frame within ${harness.FRAME_WAIT_MS} ms|still had a request in flight 30 s later), not timed$`).exec(f);
+    if (k) named += Number(k[1]);
+    else assert.match(f, new RegExp(`^${name}: a pause of \\d+\\.\\d ms, over ${PAGE_TARGETS.longestPauseMs} ms$`), `${name} fails only on how fast the machine drew it, never on: ${f}`);
+  }
+  assert.equal(timed + named, n, `${name}: each of its ${n} clicks timed or named (${timed} timed, ${named} named)`);
+  return timed;
 }
 
 /** A `Response` as far as the code under test reads one.
@@ -4210,11 +4272,29 @@ test('one idle-tab count is one idle row, and a day is one of its month\'s, give
   const url = String(rungsUrl('NSE-INDEX-NIFTY'));
   const get = async (/** @type {string} */ p) => (p === url ? answer(200, JSON.stringify(rungs)) : answer(404));
   const dayAlone = await sheet.discover(get, { ...args, feed: 'zerodha', day: '2025-03-05' });
-  assert.deepEqual([dayAlone.month, dayAlone.day, dayAlone.from, dayAlone.to], ['2025-03', '2025-03-05', '2025-03-01', '2025-03-31'], 'a day given alone is read in its own month');
+  assert.deepEqual([dayAlone.month, dayAlone.day, dayAlone.from, dayAlone.to, dayAlone.dayFrom], ['2025-03', '2025-03-05', '2025-03-01', '2025-03-31', 'given'], 'a day given alone is read in its own month');
   const monthAlone = await sheet.discover(get, { ...args, feed: 'zerodha', month: '2025-03' });
-  assert.deepEqual([monthAlone.month, monthAlone.day], ['2025-03', '2025-03-01'], 'the rung\'s newest day is not in the month given: the month starts at its first day');
+  assert.deepEqual([monthAlone.month, monthAlone.day, monthAlone.dayFrom], ['2025-03', '2025-03-01', 'first'], 'the rung\'s newest day is not in the month given: the month starts at its first day, taken');
   const newestIn = await sheet.discover(get, { ...args, feed: 'zerodha', month: '2026-08' });
-  assert.equal(newestIn.day, '2026-08-31', 'the rung\'s newest day, when it is in the month given');
+  assert.deepEqual([newestIn.day, newestIn.dayFrom], ['2026-08-31', 'newest'], 'the rung\'s newest day, when it is in the month given');
+  const all = await sheet.discover(async () => answer(404), { ...args, feed: 'zerodha', timeframe: '1min', month: '2025-03', day: '2025-03-03' });
+  assert.equal(all.dayFrom, 'given', 'all three given: nothing asked');
+});
+
+test('a day the sheet took rather than found is said in the sheet: the first of a month given alone is not known to be a session', async () => {
+  // Before (verify r8 follow-up, 26 Oct): `--month 2025-03` alone timed
+  // 2025-03-01, a Saturday, and its empty answer as the day's, saying nothing.
+  assert.equal(sheet.dayTakenNote({ ...CTX, dayFrom: 'given' }), null);
+  assert.equal(sheet.dayTakenNote({ ...CTX, dayFrom: 'newest' }), null);
+  assert.equal(sheet.dayTakenNote(CTX), null, 'a context that does not say how its day was chosen was handed in whole');
+  assert.equal(sheet.dayTakenNote({ ...CTX, month: '2025-03', day: '2025-03-01', dayFrom: 'first' }), 'the day 2025-03-01 was taken, not found: it is the first of 2025-03, and the rung\'s newest day is not in that month, so whether it holds a session is not known here and the day\'s rows may time a day with no bars; pass --day to name a session day');
+  const args = sheet.parseArgs(['--base', 'http://stand.in', '--n', '1', '--clients', '1', '--month', '2026-08']);
+  const taken = await sheet.runSheet({ ...args, feed: 'zerodha' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.deepEqual([taken.ctx?.month, taken.ctx?.day, taken.ok], ['2026-08', '2026-08-01', true], taken.failures.join('\n'));
+  assert.deepEqual(taken.notes, [sheet.dayTakenNote(/** @type {any} */ (taken.ctx))]);
+  assert.match(sheet.renderSheet(taken, args), /^# Speed sheet — PASS\n[\s\S]*\n- the day 2026-08-01 was taken, not found: /, 'said in the sheet, its verdict its own');
+  const found = await sheet.runSheet({ ...args, month: '2026-09', feed: 'zerodha' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.deepEqual([found.ctx?.day, found.notes], ['2026-09-30', []], 'the rung\'s newest day: nothing to say');
 });
 
 // ---------------------------------------------------------------------------
