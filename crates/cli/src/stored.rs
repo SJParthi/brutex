@@ -2506,6 +2506,18 @@ fn prior_session_bar(
         .map_err(|why| format!("{year}-{month:02} is not a month: {why}"))?;
     let path = StorePath::for_key(vendor, key, timeframe, ym, FileKind::Bars)
         .map_err(|why| format!("no store path for {year}-{month:02}: {why}"))?;
+    // A QUARANTINED MONTH NEVER ANCHORS "YESTERDAY" (R4-18): its last bar
+    // may be another security's, so the anchor is refused by name, one probe.
+    refuse_quarantined(
+        root,
+        path,
+        (key.underlying.as_str(), rung_name, year, month),
+    )
+    .map_err(|why| match why {
+        LoadFailure::Missing(why) | LoadFailure::Refused(why) => {
+            format!("the {rung_name} month {year}-{month:02} before it: {why}")
+        }
+    })?;
     let hash = brutex_core::universe::fnv1a(key.underlying.as_str()).to_le_bytes();
     let symbol_id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| match why {
@@ -2618,6 +2630,43 @@ impl StoredSpanLoadBoundV1 {
     }
 }
 
+/// [`load_classified_with_ceiling`]'s quarantine refusal (R4-18), by name:
+/// the scope, the cause, the bars and where the ledger line is. O(1): one
+/// probe.
+fn refuse_quarantined(
+    root: &Path,
+    path: StorePath<'_>,
+    (underlying, rung_name, year, month): (&str, &str, u16, u8),
+) -> Result<(), LoadFailure> {
+    match store::quarantine::probe(root, path) {
+        Ok(store::quarantine::Probe::Clear) => Ok(()),
+        Ok(store::quarantine::Probe::Quarantined(entry)) => Err(LoadFailure::Refused(format!(
+            "{underlying} {rung_name} {year}-{month:02} is QUARANTINED ({} {}, {} bar(s) \
+             named{}; ledger audit/{}.quarantine.ledger at byte {}): its named bars are not \
+             this instrument's own, so a sweep refuses the month rather than read around \
+             them. Nothing was read.",
+            entry.scope.code(),
+            // EVERY CAUSE THE MONTH'S ACTS NAMED, over every bar they set
+            // aside (R4-18 repair 2).
+            entry.causes.said(),
+            entry.bars,
+            // AN INTENT ONLY (R4-18 repair 2): a drop ledgered and not yet
+            // finished is indexed as a drop of no bars.
+            if entry.bars == 0 {
+                ", a drop ledgered and not yet finished"
+            } else {
+                ""
+            },
+            path.vendor().as_str(),
+            entry.ledger_at
+        ))),
+        Err(why) => Err(LoadFailure::Refused(format!(
+            "{underlying} {rung_name} {year}-{month:02}: whether it is quarantined is not \
+             known ({why}). Nothing was read."
+        ))),
+    }
+}
+
 /// [`load`] with genuine absence kept distinct from every unsafe refusal.
 fn load_classified(
     root: &Path,
@@ -2652,6 +2701,16 @@ fn load_classified_with_ceiling(
         .map_err(|why| format!("{year}-{month:02} is not a month: {why}"))?;
     let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
         .map_err(|why| format!("no store path for that selection: {why}"))?;
+
+    // A QUARANTINED MONTH IS REFUSED BY NAME (R4-18; ING-01 b, Z5, Z6): a
+    // month the quarantine names — recorded whole (every bar another
+    // security's, or zero), or served as a generation without its named bars
+    // — is not a clean instrument-month to sweep. ONE PROBE, two positional
+    // reads of the feed's index (`store::quarantine::probe`: its header and
+    // the key's bucket), before anything
+    // of the month is opened; an index that cannot be trusted refuses too,
+    // never reads as "clear".
+    refuse_quarantined(root, path, (underlying, rung_name, year, month))?;
 
     // THE SYMBOL ID IS THE STORE'S OWN, NOT A NEW ONE. `pull::ingest` writes
     // `fnv1a(symbol) as u32` into the header, and `open_existing` compares what
@@ -3901,6 +3960,79 @@ mod tests {
     /// Writes `n` bars for NIFTY 1min 2026-08 under `vendor`, and returns the root.
     fn seeded(tag: &str, vendor: Vendor, n: i64) -> std::path::PathBuf {
         seeded_symbol(tag, vendor, "NIFTY", n)
+    }
+
+    /// **A STORED SWEEP REFUSES A QUARANTINED MONTH BY NAME** (R4-18): the
+    /// month loads before, and after the quarantine records it the load is
+    /// refused naming the scope, the cause and the ledger, with nothing read.
+    #[test]
+    fn a_stored_sweep_refuses_a_quarantined_month() {
+        let r = seeded("quarantined", Vendor::Zerodha, 4);
+        assert!(
+            load(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8).is_ok(),
+            "clear before"
+        );
+        let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("an index");
+        let ym = YearMonth::new(2026, 8).expect("a month");
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::MINUTE_1,
+            ym,
+            FileKind::Bars,
+        )
+        .expect("a path");
+        store::quarantine::record(
+            &r,
+            &store::quarantine::Record {
+                path,
+                scope: store::quarantine::Scope::WholeMonth,
+                cause: store::quarantine::Cause::ForeignLevel,
+                stamps: &[],
+                bars: 4,
+                revision: 0,
+                source_digest: store::quarantine::digest_of(&bars(4)),
+                who: "test",
+                reason: "invented: another security's level",
+            },
+        )
+        .expect("recorded");
+        let why = match load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8) {
+            Err(LoadFailure::Refused(why)) => why,
+            Err(LoadFailure::Missing(why)) => panic!("refused as missing: {why}"),
+            Ok(loaded) => panic!("a quarantined month loaded {} bars", loaded.bars.len()),
+        };
+        assert!(
+            why.contains("QUARANTINED (whole_month foreign_level, 4 bar(s)"),
+            "{why}"
+        );
+        assert!(why.contains("zerodha.quarantine.ledger"), "{why}");
+        // NOR DOES IT ANCHOR "YESTERDAY": the month before September is read
+        // for its last regular bar, and a quarantined one is refused by name.
+        let september = 1_785_727_500_000_000_i64 + 29 * 86_400_000_000;
+        let anchor = prior_session_bar(&r, Vendor::Zerodha, &key, "1min", september);
+        assert!(
+            anchor
+                .as_ref()
+                .is_err_and(|why| why.contains("before it") && why.contains("QUARANTINED")),
+            "{:?}",
+            anchor.map(|candle| candle.ts_micros)
+        );
+        // A torn index is not "clear": the month is refused, naming it.
+        let index = store::quarantine::index_path(&r, Vendor::Zerodha);
+        let bytes = std::fs::read(&index).expect("the index");
+        std::fs::write(&index, &bytes[..100]).expect("torn");
+        let Err(LoadFailure::Refused(torn)) =
+            load_classified(&r, Vendor::Zerodha, "NIFTY", "1min", 2026, 8)
+        else {
+            panic!("a torn index must refuse");
+        };
+        assert!(torn.contains("quarantine_index_torn"), "{torn}");
+        // Another feed's month is untouched by this feed's quarantine.
+        let other = seeded("quarantined-other", Vendor::Dhan, 4);
+        assert!(load(&other, Vendor::Dhan, "NIFTY", "1min", 2026, 8).is_ok());
+        let _cleanup = std::fs::remove_dir_all(&r);
+        let _cleanup = std::fs::remove_dir_all(&other);
     }
 
     #[test]
