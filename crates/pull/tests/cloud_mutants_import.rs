@@ -950,6 +950,7 @@ fn request_minutes_a_gap_line_names_the_sinks_run() {
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     };
     let store = scratch("GapRun");
     let done = pull::ingest::from_window(

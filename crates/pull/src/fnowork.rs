@@ -1321,6 +1321,11 @@ async fn pull_one<D: crate::chain::Discovery>(
                     exchange: VENUE.as_str(),
                     segment: Segment::Fno.as_str(),
                     contract,
+                    // No runs-ledger id reaches a futures day pull yet (R4-28
+                    // and IA-10c landed apart): `0` is `Plan.run`'s documented
+                    // "no ledger id", so its lines name the sink's claimed run
+                    // as before. Carrying the request's id here is a follow-up.
+                    run: 0,
                 },
             )
         });

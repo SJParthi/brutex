@@ -1345,6 +1345,7 @@ fn plan_over<'a>(request: &'a BarRequest, exchange: &'a str, scale: PriceScale) 
         exchange,
         segment: "INDEX",
         contract: None,
+        run: 0,
     }
 }
 

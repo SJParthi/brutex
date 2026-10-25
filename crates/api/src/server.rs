@@ -3126,14 +3126,28 @@ fn spot_reach_text(asked: &ingest::SpotRequest, site: &Site) -> String {
 /// attribute is a courtesy, a parser is a rule"* — and spot had only the
 /// courtesy. An attribute is absent from a `curl`, from a replayed POST, and
 /// from any client that is not the browser the form was rendered for.
+#[cfg(test)]
 async fn spot_answer(
     body: &str,
     today: Day,
     now: std::time::SystemTime,
     site: &Site,
 ) -> (axum::http::StatusCode, String) {
+    spot_answer_in(body, today, now, site, 0).await
+}
+
+/// [`spot_answer`] under a `/pull/run` leg's durable id `run` (`0`: the
+/// broker run takes its own after the seat; IA-10c, D-6260). The id is never
+/// read from the form.
+async fn spot_answer_in(
+    body: &str,
+    today: Day,
+    now: std::time::SystemTime,
+    site: &Site,
+    run: u64,
+) -> (axum::http::StatusCode, String) {
     let journal = site.journal();
-    match ingest::parse_spot(body, today) {
+    match ingest::parse_spot(body, today).map(|asked| ingest::SpotRequest { run, ..asked }) {
         Err(why) => {
             let record = audit::Record::refused(
                 audit::Scope::Spot,
@@ -3387,7 +3401,7 @@ fn land_bodies_scheduled(
         site,
         cash_schedule,
         bodies,
-        (observed_calendar.as_deref(), None),
+        (observed_calendar.as_deref(), None, 0),
     )
 }
 
@@ -3410,12 +3424,16 @@ fn land_bodies_scheduled(
 /// window never needs an earlier body's bars: bodies are disjoint windows, and
 /// the observation is diagnostic, never schedule authority. The cost that
 /// remains per instrument is written in `docs/06-limits.md`'s D-1446 section.
+///
+/// `first` is the index of `bodies[0]` in `landed.bodies`, so each body is
+/// handed to the hook with ITS answer (`landed.answers.bodies[first + n]`):
+/// `land_spot` passes one body at a time (IA-10c).
 fn land_bodies_observed(
     landed: &BrokerWindow,
     site: &Site,
     cash_schedule: Option<&pull::cash_auction::Schedule>,
     bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
-    (observed_calendar, repair): (Option<&pull::calendar::Calendar>, Option<&str>),
+    (observed_calendar, repair, first): (Option<&pull::calendar::Calendar>, Option<&str>, usize),
 ) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
@@ -3472,9 +3490,12 @@ fn land_bodies_observed(
         exchange: landed.exchange,
         segment: landed.segment,
         contract: landed.contract,
+        // THE LANDING'S RUNS-LEDGER ID (IA-10c, D-6260): every gap, derive and
+        // repair-journal line it writes says `run=` this, and its receipts carry it.
+        run: landed.answers.run(),
     };
     let mut done = pull::ingest::Ingested::default();
-    for (chunk, body) in bodies {
+    for (nth, (chunk, body)) in bodies.iter().enumerate() {
         // EACH BODY IS FILTERED AGAINST THE WINDOW IT WAS FETCHED FOR.
         //
         // One `BarRequest` was built above and reused for every body, carrying
@@ -3499,23 +3520,42 @@ fn land_bodies_observed(
         // THE REPAIR DOOR, only for `POST /pull/repair` (D-3350): a month the
         // append-only store refuses becomes a new generation. Every other
         // pull lands through the append door alone.
-        done.absorb(match repair {
-            None => pull::ingest::from_window(
-                body,
-                &landed.instrument,
-                &landed.origin,
-                &site.store_root,
-                plan,
+        let (door, landing) = match repair {
+            None => (
+                pull::response_keep::Door::FromWindow,
+                pull::ingest::from_window_with_refusals(
+                    body,
+                    &landed.instrument,
+                    &landed.origin,
+                    &site.store_root,
+                    plan,
+                ),
             ),
-            Some(reason) => pull::ingest::repair_window(
-                body,
-                &landed.instrument,
-                &landed.origin,
-                &site.store_root,
-                plan,
-                reason,
+            Some(reason) => (
+                pull::response_keep::Door::RepairWindow,
+                pull::ingest::repair_window_with_refusals(
+                    body,
+                    &landed.instrument,
+                    &landed.origin,
+                    &site.store_root,
+                    plan,
+                    reason,
+                ),
             ),
-        });
+        };
+        // LAND, KEEP, SPOOL, AFTER EITHER DOOR (D-4859; IA-10c, D-6262): the
+        // vendor's answer is kept with a receipt whose rows-refused field is
+        // this landing's own named refusals and whose door byte says which
+        // door, then its days are verified into the run's spool. On the
+        // landing's own thread: this function runs off the shared workers.
+        let _hooked = crate::pullrun::keep_and_spool(
+            &landed.answers,
+            first.saturating_add(nth),
+            (landed.granularity, landed.spec.timestamps, *chunk),
+            &body.rows,
+            (&landing, door),
+        );
+        done.absorb(landing.ingested);
     }
     done
 }
@@ -4937,7 +4977,7 @@ pub(crate) struct Blocked {
 ///
 /// The result is discarded for the reason `pull::ingest`'s `note_*` helpers
 /// give — a level-filtered event legitimately reaches no file.
-fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u64> {
+fn note_run_started(asked: &ingest::SpotRequest, instruments: usize, run: u64) -> Option<u64> {
     // STAMP EVERY LATER EVENT WITH THIS RUN, before the first of them.
     //
     // A log file spanning three backfills is three interleaved stories, and an
@@ -4964,8 +5004,18 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
     // A claim gives the key to the FIRST leg of a press and lets every
     // concurrent sibling inherit it, which is correct: they are one press. The
     // losers do not take it and, in `note_run_finished`, do not release it.
+    //
+    // THE KEY IS THE LANDING'S DURABLE RUNS-LEDGER ID (IA-10c, D-6260), so the
+    // run's events and its ledger lines, receipts and spools name one run, and
+    // a `/pull/run` (which holds the key under the same id for its whole
+    // length) and its legs agree. The start instant only for a run that took
+    // no id: a feed with no store prefix, which lands nothing.
     let claimed = telemetry::global().and_then(|sink| {
-        let id = telemetry::now_millis().unsigned_abs();
+        let id = if run == 0 {
+            telemetry::now_millis().unsigned_abs()
+        } else {
+            run
+        };
         sink.claim_run(id).then_some(id)
     });
     let _dropped_when_filtered = telemetry::emit(
@@ -5145,12 +5195,18 @@ fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequ
     if let Some(day) = about.day.as_deref() {
         event = event.with("day", telemetry::Value::Str(day));
     }
-    let noted = telemetry::emit(&event);
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
+    // A LINE THE SINK DROPS IS COUNTED THERE, AND IS NOT A PANIC HERE.
+    //
+    // This asserted `is_written()` unless no sink was installed, and an error
+    // line is above every floor, so the assertion could fail only when the
+    // sink DROPPED it: a full disk, or a sink already closed (R3-14). In a
+    // build with debug assertions, the dev profile the Run button builds, the
+    // panic came before the page heard of the member, so on a full disk,
+    // where a member dies at the store and its line cannot be written, the
+    // operator lost both. `telemetry::emit` never panics on a drop and counts
+    // it in `Sink::health`; this site now does as every other one in this
+    // file does.
+    let _noted = telemetry::emit(&event);
     site.autopilot
         .fail(&failure.instrument, &about, &failure.why);
 }
@@ -5848,7 +5904,12 @@ async fn land_spot(
     // synchronous store I/O that used to hold a Tokio worker the HTTP surface
     // shares for the length of a landing. See [`off_the_workers`].
     let observed_calendar = off_the_workers(|| ingestion_observations(landed, site));
+    // WHICH BODY OF `landed.bodies` THIS IS, so the hook keeps ITS answer
+    // (IA-10c): one body at a time, in order.
+    let mut first = 0_usize;
     for bodies in landed.bodies.chunks(1) {
+        let at = first;
+        first = first.saturating_add(bodies.len());
         match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
             Ok(schedule) => done.absorb(off_the_workers(|| {
                 land_bodies_observed(
@@ -5856,7 +5917,7 @@ async fn land_spot(
                     site,
                     schedule.as_ref(),
                     bodies,
-                    (observed_calendar.as_deref(), repair),
+                    (observed_calendar.as_deref(), repair, at),
                 )
             })),
             Err(why) => {
@@ -6081,6 +6142,67 @@ fn zerodha_isin_cross_check(
     Ok(())
 }
 
+/// The broker run's landing run (IA-10c, D-6260, D-6263): a `/pull/run` leg
+/// carries its run's id and takes none; a `/pull/spot` or `/pull/repair`
+/// request, the autopilot and a recovery each take a `pull-spot` or
+/// `pull-repair` id of their own, after their seat; with it the vendor's
+/// landing claim, shared (FM-163). Off the shared workers (two syncs,
+/// D-6269). Then the run is started on the log under that id
+/// (`note_run_started` claims the sink's run key with it) for `instruments`
+/// instruments, and the claimed key is answered beside the landing run.
+///
+/// `None` for a feed with no store prefix, which lands nothing: each
+/// instrument refuses by name at its window (`broker_window`), so no id is
+/// taken for it.
+///
+/// # Errors
+///
+/// The run, refused before any vendor is asked: `409` when another process
+/// holds the vendor's landing claim (`run_busy`, naming it), `503` when the
+/// runs ledger gives no id.
+fn open_spot_landing(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    instruments: usize,
+) -> Result<(Option<crate::pullrun::LandingRun>, Option<u64>), (String, axum::http::StatusCode)> {
+    let landing = match asked.feed.store_vendor() {
+        None => None,
+        Some(vendor) => {
+            let mode = if asked.repair.is_some() {
+                pull::ingest::landing_run::Mode::Repair
+            } else {
+                pull::ingest::landing_run::Mode::Spot
+            };
+            let opened = off_the_workers(|| {
+                crate::pullrun::open_landing(&site.store_root, vendor, mode, asked.run, instruments)
+            })
+            .map_err(|why| {
+                let code = landing_refusal_status(&why);
+                (why, code)
+            })?;
+            Some(opened)
+        }
+    };
+    let run = landing.as_ref().map_or(0, |landing| landing.hook.run());
+    let claimed = note_run_started(asked, instruments, run);
+    Ok((landing, claimed))
+}
+
+/// The status a landing refused before any vendor is asked answers with, on
+/// every door (IA-10c; D-6263): `409` when another process holds the
+/// vendor's landing claim (`run_busy`, naming the holder), `503` for every
+/// other refusal (the runs ledger's, the lock file's). One refusal, one
+/// status: a `/pull/fno` walk answered `503` for the `run_busy` a
+/// `/pull/spot` request answered `409` for (the second agent's repair-round-2
+/// follow-up).
+fn landing_refusal_status(why: &str) -> axum::http::StatusCode {
+    if why.starts_with("run_busy") {
+        axum::http::StatusCode::CONFLICT
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
 pub(crate) async fn broker_run_by(
     asked: &ingest::SpotRequest,
     site: &Site,
@@ -6160,8 +6282,10 @@ pub(crate) async fn broker_run_by(
         Ok(withheld) => withheld,
         Err(why) => return BrokerRun::out_of_order(why),
     };
-
-    let claimed_run = note_run_started(asked, targets.len());
+    let (landing, claimed_run) = match open_spot_landing(asked, site, targets.len()) {
+        Ok(opened) => opened,
+        Err((why, code)) => return BrokerRun::blocked(why, code),
+    };
     // THE RUN IS ON THE JOURNAL BEFORE ITS FIRST INSTRUMENT, and each failure
     // follows as its member lands (`RunLedger`, D-3341, DB-055, DB-G46).
     let journal = site.journal();
@@ -6191,7 +6315,7 @@ pub(crate) async fn broker_run_by(
     //
     // Shared by up to `BROKER_LANES` instruments on the wire at once, which is
     // why it lives in `Lanes` (D-3002).
-    let mut lanes = Lanes::default();
+    let mut lanes = Lanes::hooked(landing.as_ref());
     for (index, instrument) in targets.iter().enumerate() {
         // (instruments begun, instruments in the run), for every line below
         // that says how far the run got.
@@ -6629,6 +6753,11 @@ struct BrokerWindow {
     /// The store prefix these bars belong under, resolved through
     /// [`pull::vendor::Feed::store_vendor`] and never assumed.
     store_vendor: brutex_core::vendor::Vendor,
+    /// What each body was landed from, the key its answers are kept under and
+    /// the landing run's hook (IA-10c, D-6262): after either door returns,
+    /// [`land_bodies_observed`] hands each body's window to the hook, which
+    /// keeps the answer and spools its verdicts; its run is `Plan::run`.
+    answers: crate::pullrun::Answers,
 }
 
 /// A broker is never asked for a day that has not finished.
@@ -7420,6 +7549,9 @@ async fn fetch_chunks(
         .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?;
 
     let mut bodies = Vec::with_capacity(chunks.len());
+    // ONE ANSWER PER BODY, IN THE SAME ORDER (IA-10c): the vendor's body text
+    // beside its decoded rows, for the landing's keep.
+    let mut answers = Vec::with_capacity(chunks.len());
     for (nth, chunk) in chunks.iter().enumerate() {
         // THE BUDGET IS CHARGED PER REQUEST, NOT PER FORM SUBMISSION. One
         // submission is up to 81 requests; charging once would spend one permit
@@ -7435,7 +7567,7 @@ async fn fetch_chunks(
             // at. A budget that will not admit is as fatal to this loop as a
             // vendor that will not answer, and it dropped the prefix exactly
             // the same way.
-            return prefix_or_refusal(bodies, why);
+            return prefix_or_refusal((bodies, answers), why);
         }
 
         let request = pull::fetch::BarRequest {
@@ -7467,6 +7599,13 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
+                //
+                // `VENDOR_DOWN` the same way, and put back only on a refusal
+                // with nothing before it: a written prefix makes the
+                // instrument a success, which clears the breaker, and nothing
+                // strips the marker from `Chunks::unfetched`.
+                let vendor_down = marked_why.starts_with(VENDOR_DOWN);
+                let marked_why = marked_why.trim_start_matches(VENDOR_DOWN);
                 let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
                 let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
                 let sentence = {
@@ -7481,7 +7620,10 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    // A dropped line is counted by the sink and never
+                    // stops the refusal, for the reason
+                    // `note_member_failure` gives.
+                    let _noted = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -7490,10 +7632,6 @@ async fn fetch_chunks(
                             .with("from", telemetry::Value::Str(&chunk.from().to_string()))
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
-                    );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
                     );
                     format!(
                         "the broker did not answer with a window. This was \
@@ -7511,16 +7649,23 @@ async fn fetch_chunks(
                 };
                 let sentence = if credential_dead {
                     format!("{CREDENTIAL_DEAD}{sentence}")
+                } else if vendor_down && bodies.is_empty() {
+                    format!("{VENDOR_DOWN}{sentence}")
                 } else {
                     sentence
                 };
-                return prefix_or_refusal(bodies, sentence);
+                return prefix_or_refusal((bodies, answers), sentence);
             }
         };
+        // THE ROWS GO WITH THE BODIES, THE TEXT WITH THE ANSWERS: one copy of
+        // each, never the rows twice (IA-10c).
+        let mut answered = answered;
+        let rows = std::mem::take(&mut answered.window);
+        answers.push(answered);
         bodies.push((
             // THE CHUNK'S OWN WINDOW, travelling with the answer it belongs to
             // rather than being recomputed — or, as it was, discarded.
-            *chunk, answered,
+            *chunk, rows,
         ));
         // ONE LINE PER REQUEST THAT ACTUALLY WENT OUT, at `Trace`.
         //
@@ -7584,6 +7729,7 @@ async fn fetch_chunks(
     let leading = leading_hollow(&bodies);
     Ok(Chunks {
         bodies,
+        answers,
         unfetched,
         hollow,
         leading,
@@ -7883,6 +8029,9 @@ struct Chunks {
     leading: usize,
     /// How many chunks the window was split into.
     total: usize,
+    /// The vendor's answer to each body, in the same order: its text, digest
+    /// and status, its rows moved into [`Self::bodies`] (IA-10c, D-6262).
+    answers: Vec<pull::response_keep::Answered>,
 }
 
 /// The prefix if there is one, or the refusal if there is not.
@@ -7893,7 +8042,10 @@ struct Chunks {
 /// reached the wire and stored nothing, which is exactly what the `Err` arm has
 /// always meant — so that path is unchanged and every test of it still holds.
 fn prefix_or_refusal(
-    bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+    (bodies, answers): (
+        Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+        Vec<pull::response_keep::Answered>,
+    ),
     why: String,
 ) -> Result<Chunks, String> {
     if bodies.is_empty() {
@@ -7901,6 +8053,7 @@ fn prefix_or_refusal(
     } else {
         Ok(Chunks {
             bodies,
+            answers,
             unfetched: Some(why),
             hollow: Vec::new(),
             leading: 0,
@@ -8264,6 +8417,13 @@ const fn step(
 ///
 /// The governor already handles *sustained* throttling; this handles the blip.
 ///
+/// # The answer, kept (IA-10c, D-6262)
+///
+/// It answers the vendor's body beside the decoded rows
+/// (`HttpSource::window_answered_async`, D-4920), so the landing's hook can
+/// keep what the vendor actually sent; the request on the wire, its retries
+/// and its governor feedback are `window_async`'s, unchanged.
+///
 /// # Errors
 ///
 /// The last refusal, either returned early by the table above or after
@@ -8273,7 +8433,7 @@ async fn with_retry(
     request: &pull::fetch::BarRequest,
     feed: pull::vendor::Feed,
     site: &Site,
-) -> Result<pull::fetch::RawWindow, String> {
+) -> Result<pull::response_keep::Answered, String> {
     let mut last = String::new();
     // Counted apart from `attempt`, so a 5xx budget is spent by 5xx answers.
     let mut server_errors = 0u32;
@@ -8293,7 +8453,11 @@ async fn with_retry(
         if attempt > 1 {
             await_budget(feed, site).await?;
         }
-        match source.window_async(request).await {
+        match source
+            .window_answered_async(request)
+            .await
+            .map_err(pull::fetch::FetchError::from)
+        {
             // THE ADDITIVE INCREASE IS TAKEN BY THE TRANSPORT, NOT HERE, AND
             // IT USED TO BE TAKEN TWICE.
             //
@@ -8416,8 +8580,15 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, as `laddered` marks its own: `broker_run`'s
+                        // breaker counts consecutive instruments by this
+                        // marker and by nothing else. Without it the spot
+                        // path, which retries here and not in `laddered`,
+                        // could never trip that breaker, and an outage cost
+                        // this whole ladder for every instrument in the run.
+                        // `fetch_chunks` lifts it and puts it back in front.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -8776,11 +8947,9 @@ fn note_instrument_refusal(
     if let Some(month) = about.one_month() {
         event = event.with("month", telemetry::Value::Str(month));
     }
-    let emitted = telemetry::emit(&event);
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped line is counted by the sink and never stops the run that
+    // refused the instrument, for the reason `note_member_failure` gives.
+    let _emitted = telemetry::emit(&event);
 }
 
 /// What the page says when the breaker stops a run.
@@ -9025,9 +9194,20 @@ struct Lanes {
     /// Whether the last instrument acted on proved the credential live. A run
     /// starts narrow, so one request learns that before three are sent.
     wide: bool,
+    /// The run's landing hook, handed to every window a lane answers so it
+    /// reaches its door with the run's keep and spool (IA-10c, D-6262).
+    hook: Option<std::sync::Arc<pull::ingest::landing_run::RunHook>>,
 }
 
 impl Lanes {
+    /// The lanes of a run whose windows land under `landing`'s hook.
+    fn hooked(landing: Option<&crate::pullrun::LandingRun>) -> Self {
+        Self {
+            hook: landing.map(|landing| std::sync::Arc::clone(&landing.hook)),
+            ..Self::default()
+        }
+    }
+
     /// The answer for `targets[index]`: the next lane already fetched, or, when
     /// none is waiting, the next `BROKER_LANES` instruments fetched together
     /// (one while the credential is unproven). Landing stays one instrument at
@@ -9053,13 +9233,17 @@ impl Lanes {
             self.ahead
                 .extend([first, second, third].into_iter().flatten());
         }
-        let answer = self.ahead.pop_front().unwrap_or_else(|| {
+        let mut answer = self.ahead.pop_front().unwrap_or_else(|| {
             Err(format!(
                 "instrument {} of {}: no lane answered for it",
                 index.saturating_add(1),
                 targets.len()
             ))
         });
+        // THE RUN'S HOOK GOES WITH THE WINDOW TO ITS DOOR (IA-10c).
+        if let Ok(window) = &mut answer {
+            window.answers.hook.clone_from(&self.hook);
+        }
         // WIDE ONLY AFTER THE VENDOR ANSWERED: a refusal before the wire
         // proved nothing about the token. A rejection narrows it again in
         // `credential_halts`.
@@ -9318,6 +9502,13 @@ async fn broker_window(
         origin,
         spec,
         store_vendor,
+        // THE VENDOR'S ANSWERS, KEPT UNDER THE BAR PATH'S OWN KEY (IA-10c);
+        // the broker run hands the window its run's hook before it lands.
+        answers: crate::pullrun::Answers {
+            key: Some(*instrument),
+            bodies: bodies.answers,
+            hook: None,
+        },
     })
 }
 
@@ -9781,6 +9972,7 @@ fn run_local(
         exchange: Exchange::Nse.as_str(),
         segment: Segment::Fno.as_str(),
         contract: None,
+        run: 0,
     };
     pull::ingest::from_dir(std::path::Path::new(folder), store_root, plan)
         .map_err(|why| why.to_string())
@@ -9886,6 +10078,54 @@ pub(crate) async fn pull_run(
         *held = Some(claimed);
         run
     };
+
+    // THE RUN'S DURABLE ID, AT ITS CLAIM (D-4880; IA-10c, D-6260): one
+    // runs-ledger record, mode `pull`, which every leg carries into its
+    // landings and the sink's run key holds for the run's length. Off the
+    // shared workers (two syncs, critic IA-10b-3, D-6269), after the slot is held, so
+    // two presses never both take one. Refused, the slot is closed with the
+    // reason and nothing is asked of any vendor.
+    let kind = if legs
+        .iter()
+        .any(|leg| leg.vendor == pull::vendor::Feed::Zerodha.wire())
+    {
+        pull::ingest::landing_run::kind_of(brutex_core::vendor::Vendor::Zerodha)
+    } else {
+        "-"
+    };
+    let taken = off_the_workers(|| {
+        pull::ingest::landing_run::allocate(
+            &site.store_root,
+            pull::ingest::landing_run::Mode::Run,
+            pull::ingest::landing_run::By::Api,
+            kind,
+        )
+    });
+    let mut held = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(progress) = held.as_mut().filter(|progress| progress.generation == run) else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            json_headers(),
+            run_refusal_json(&crate::pullrun::Refusal::AlreadyRunning.why()),
+        );
+    };
+    match taken {
+        Ok(id) => progress.run_id = id,
+        Err(fault) => {
+            let why =
+                format!("{fault}; the run took no id, so it did not start and no vendor was asked");
+            progress.finished = Some(why.clone());
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                json_headers(),
+                run_refusal_json(&why),
+            );
+        }
+    }
+    drop(held);
 
     let legs_asked = legs.len();
     let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
@@ -10079,6 +10319,17 @@ pub(crate) async fn pull_spot(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> SpotAnswer {
+    pull_spot_leg(axum::extract::State(site), body, 0).await
+}
+
+/// [`pull_spot`] for a `/pull/run` leg, which carries its run's durable id
+/// `run` and takes none of its own (IA-10c, D-6260); `0` is the route's own
+/// request, which takes a `pull-spot` id after its seat.
+pub(crate) async fn pull_spot_leg(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+    run: u64,
+) -> SpotAnswer {
     // AN ORDINARY PULL NEVER REPAIRS (D-3350): `repair_reason` is
     // `/pull/repair`'s field, and a body carrying it here is refused rather
     // than read as an append that the store would then refuse month by month.
@@ -10089,7 +10340,7 @@ pub(crate) async fn pull_spot(
         );
     }
     let (code, page) = detached_pull("Spot pull", async move {
-        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body).await;
+        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body, run).await;
         (code, page)
     })
     .await;
@@ -10110,23 +10361,28 @@ pub(crate) async fn pull_spot(
 /// pull — [`spot_pull_held`] runs it — with one difference at the write: a
 /// month the append-only store refuses is published as a new generation of
 /// held and offered bars, and every reader opens it. The reason is required,
-/// one line of at most [`MAX_REPAIR_REASON`] bytes, and is journaled with
-/// every repair in `audit/<feed>.repairs`.
+/// and is journaled with every repair in `audit/<feed>.repairs`.
+///
+/// # One repair-reason rule for both feeds (D-4874, IA-GR-42; IA-10c, D-6264)
+///
+/// The reason as the form sent it is judged by
+/// [`pull::ingest::repair_reason_ok`], the rule `POST /gdfl/import` and `cli
+/// gdfl-import --repair-reason` apply: something a reader can see, at most
+/// [`pull::ingest::MAX_REPAIR_REASON`] (200) bytes, one line with no control
+/// character. This route had its own copy, which trimmed first, so a reason
+/// led by a tab was taken here and refused by the GDFL door.
 pub(crate) async fn pull_repair(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> SpotAnswer {
-    let reason = param(&body, "repair_reason");
-    let reason = reason.trim();
-    if reason.is_empty() || reason.len() > MAX_REPAIR_REASON || reason.chars().any(char::is_control)
-    {
+    if !pull::ingest::repair_reason_ok(&param(&body, "repair_reason")) {
         return repair_refusal(
             "Repair pull",
-            "a repair names why it is run: repair_reason, one line of at most 200 bytes; nothing was requested",
+            "a repair names why it is run: repair_reason, one line of at most 200 bytes with no control character (D-4874, the one rule both feeds apply); nothing was requested",
         );
     }
     let (code, page) = detached_pull("Repair pull", async move {
-        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body).await;
+        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body, 0).await;
         (code, page)
     })
     .await;
@@ -10139,9 +10395,6 @@ pub(crate) async fn pull_repair(
         axum::response::Html(page),
     )
 }
-
-/// The longest `repair_reason` a repair takes, in bytes.
-const MAX_REPAIR_REASON: usize = 200;
 
 /// A repair-field refusal: nothing requested, nothing written.
 fn repair_refusal(scope: &'static str, why: &str) -> SpotAnswer {
@@ -10235,8 +10488,10 @@ fn seat_holder(site: &Site, feed: pull::vendor::Feed) -> String {
     }
 }
 
-/// The body of `POST /pull/spot`, run detached by [`pull_spot`].
-async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
+/// The body of `POST /pull/spot`, run detached by [`pull_spot`]. `run` is a
+/// `/pull/run` leg's durable id, or `0` for a request that takes its own after
+/// its seat (IA-10c, D-6260).
+async fn spot_pull_held(site: &Site, body: &str, run: u64) -> SpotAnswer {
     // ONE STAMP, EVERY ARM. Built once here rather than at each `return`, so a
     // later arm cannot be the one that forgets it — the receipt marker is only
     // worth requiring if it is unconditional.
@@ -10330,7 +10585,7 @@ async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
     // refusal arm is spelled out here. `dated`'s job was always to turn a bad
     // clock into a page, and that is what these three lines do.
     let (code, page) = match ingest::ist_day(now) {
-        Ok(today) => spot_answer(body, today, now, site).await,
+        Ok(today) => spot_answer_in(body, today, now, site, run).await,
         Err(why) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             refusal_html("Spot pull", &why),
@@ -10344,6 +10599,7 @@ async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
 ///
 /// Split from the handler so the expiry gate is driven by a value rather than
 /// by the machine's clock — `CLAUDE.md` §3 rule 5.
+#[cfg(test)]
 async fn fno_answer(
     body: &str,
     today: Day,
@@ -10358,7 +10614,21 @@ async fn fno_answer(
     // into a walk.
     site: &Site,
 ) -> (axum::http::StatusCode, String) {
-    match ingest::parse_fno(body, today) {
+    fno_answer_in(body, today, now, journal, broker, site, 0).await
+}
+
+/// [`fno_answer`] under a `/pull/run` leg's durable id `run` (`0`: the walk
+/// takes its own after its seat; IA-10c, D-6260). Never read from the form.
+async fn fno_answer_in(
+    body: &str,
+    today: Day,
+    now: std::time::SystemTime,
+    journal: &audit::Journal,
+    broker: Broker,
+    site: &Site,
+    run: u64,
+) -> (axum::http::StatusCode, String) {
+    match ingest::parse_fno(body, today).map(|asked| ingest::FnoRequest { run, ..asked }) {
         Err(why) => {
             let record = audit::Record::refused(
                 audit::Scope::Fno,
@@ -10674,11 +10944,52 @@ where
 /// shape of the code and no bench in this workspace times it.
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
+/// [`fno_land_in`] with no landing run: the walk's own tests, which drive the
+/// fetch and the landing against a loopback and keep nothing (each window is
+/// then said "response not kept" by name, never silently).
+#[cfg(test)]
 async fn fno_land(
     wanted: &[pull::fno::Found],
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
+) -> FnoLanded {
+    fno_land_in(wanted, asked, site, (wire, None)).await
+}
+
+/// The instrument key a contract's answers are kept under: the bar path's own,
+/// checked against the contract the walk files its bars under, so a pack can
+/// never sit beside another contract's bars (IA-10c). `None` for an
+/// underlying the store cannot name or a contract that does not render back;
+/// the hook then says "response not kept" by name.
+fn contract_key(found: &pull::fno::Found) -> Option<brutex_core::instrument::InstrumentKey> {
+    let kind = match found.option {
+        Some((strike, side)) => brutex_core::instrument::Kind::Option {
+            expiry: found.expiry,
+            strike,
+            side,
+        },
+        None => brutex_core::instrument::Kind::Future {
+            expiry: found.expiry,
+        },
+    };
+    let key = brutex_core::instrument::InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Fno,
+        underlying: brutex_core::symbol::Symbol::new(&found.underlying).ok()?,
+        kind,
+    };
+    (brutex_core::instrument::Contract::of(kind) == Some(found.contract)).then_some(key)
+}
+
+async fn fno_land_in(
+    wanted: &[pull::fno::Found],
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    (wire, hook): (
+        &Wire,
+        Option<&std::sync::Arc<pull::ingest::landing_run::RunHook>>,
+    ),
 ) -> FnoLanded {
     let mut out = FnoLanded::default();
     // CONTRACTS ATTEMPTED, NOT BARS STORED. See the budget halt below.
@@ -10784,8 +11095,8 @@ async fn fno_land(
 
         let fetched = fetch_chain_chunks(found, &chunks, asked, site, wire).await;
         out.rows_read = out.rows_read.saturating_add(fetched.rows_read);
-        let bodies = match fetched.result {
-            Fetched::Bodies(bodies) => bodies,
+        let (bodies, answers) = match fetched.result {
+            Fetched::Bodies(bodies, answers) => (bodies, answers),
             Fetched::ContractRefused(refusal) => {
                 if out.record_refusal(&refusal)
                     && let Err((stop, why)) =
@@ -10852,6 +11163,7 @@ async fn fno_land(
             granularity: asked.granularity,
             store_vendor: wire.store_vendor,
             contract: Some(found.contract),
+            answers: crate::pullrun::Answers::of(contract_key(found), answers, hook),
         };
         let done = land_one(&landed, site);
         if !out.record_landing(&found.vendor_symbol, &done) {
@@ -10956,7 +11268,10 @@ fn price_chain_contract(
 /// message.
 enum Fetched {
     /// Every chunk answered. The chunk's own window travels with its body.
-    Bodies(Vec<(pull::session::Window, pull::fetch::RawWindow)>),
+    Bodies(
+        Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+        Vec<pull::response_keep::Answered>,
+    ),
     /// This contract is abandoned; the run continues.
     ContractRefused(String),
     /// The rate budget is exhausted; no further contract is asked for.
@@ -11019,6 +11334,7 @@ async fn fetch_chain_chunks(
     wire: &Wire,
 ) -> FetchedBatch {
     let mut bodies = Vec::with_capacity(chunks.len());
+    let mut answers = Vec::with_capacity(chunks.len());
     let mut rows_read = 0usize;
     for chunk in chunks {
         if let Err(halt) = await_budget(asked.feed, site).await {
@@ -11032,7 +11348,9 @@ async fn fetch_chain_chunks(
             // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as the
             // spot path carries it — a body filed under the whole range would
             // claim months it does not hold.
-            Ok(body) => {
+            Ok(mut answered) => {
+                let body = std::mem::take(&mut answered.window);
+                answers.push(answered);
                 rows_read = rows_read.saturating_add(body.rows.len());
                 bodies.push((*chunk, body));
             }
@@ -11041,6 +11359,10 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                // `VENDOR_DOWN` is stripped: no breaker reads it on this
+                // path, and left on it would reach the page as an invisible
+                // control character.
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
@@ -11056,7 +11378,7 @@ async fn fetch_chain_chunks(
     }
     FetchedBatch {
         rows_read,
-        result: Fetched::Bodies(bodies),
+        result: Fetched::Bodies(bodies, answers),
     }
 }
 
@@ -11431,6 +11753,48 @@ fn fno_opened(
             "Opened in the journal",
             format!("NO — a restart during this walk would not be seen at the next start. {why}"),
         ),
+    }
+}
+
+/// The facts an expired-F&O page states, in order.
+type FnoFacts = Vec<(&'static str, String)>;
+
+/// The walk's landing run (IA-10c, D-6260, D-6263): after its seat and before
+/// its first window lands, a `/pull/run` leg's own run's id or a `pull-fno`
+/// id of its own, and the vendor's landing claim, shared (FM-163); the run is
+/// one more fact on the page. Off the shared workers (two syncs, D-6269).
+///
+/// # Errors
+///
+/// The page that says the walk did not start, in the claim's or the runs
+/// ledger's words: `409` when another process holds the vendor's landing
+/// claim, `503` for every other refusal ([`landing_refusal_status`], as a
+/// `/pull/spot` request answers). Nothing is asked of the vendor.
+fn fno_landing(
+    page: &FnoPage<'_>,
+    mut facts: FnoFacts,
+    (site, wire, asked): (&Site, &Wire, &ingest::FnoRequest),
+    contracts: usize,
+) -> Result<(crate::pullrun::LandingRun, FnoFacts), (axum::http::StatusCode, String)> {
+    match off_the_workers(|| {
+        crate::pullrun::open_landing(
+            &site.store_root,
+            wire.store_vendor,
+            pull::ingest::landing_run::Mode::Fno,
+            asked.run,
+            contracts,
+        )
+    }) {
+        Ok(landing) => {
+            facts.push(("Run", landing.hook.run().to_string()));
+            Ok((landing, facts))
+        }
+        Err(why) => Err(page.say(
+            facts,
+            landing_refusal_status(&why),
+            audit::Outcome::NotStarted,
+            &why,
+        )),
     }
 }
 
@@ -12634,7 +12998,8 @@ fn price_group(
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
                 &mut out,
-                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
+                "the vendor sent no underlying level beside this bar, so there \
+                 is nothing to price it against",
             );
             continue;
         };
@@ -13227,6 +13592,7 @@ fn land_rolling_group(
         exchange: brutex_core::instrument::Exchange::Nse.as_str(),
         segment: brutex_core::instrument::Segment::Fno.as_str(),
         contract: Some(contract),
+        run: 0,
     };
     let done = pull::ingest::from_rows(
         &bars,
@@ -14284,6 +14650,11 @@ async fn fno_report(
         );
     }
 
+    // ONE RUNS-LEDGER ID FOR THE WALK (IA-10c, D-6260): see `fno_landing`.
+    let (landing, mut facts) = match fno_landing(page, facts, (site, wire, asked), wanted.len()) {
+        Ok(opened) => opened,
+        Err(refused) => return refused,
+    };
     // AND NOW THE BARS. Discovery said which contracts existed; this
     // fetches what they did and files it.
     let FnoLanded {
@@ -14294,7 +14665,7 @@ async fn fno_report(
         why,
         priced,
         credential_stop,
-    } = fno_land(&wanted, asked, site, wire).await;
+    } = fno_land_in(&wanted, asked, site, (wire, Some(&landing.hook))).await;
     facts.push(("Bars stored", stored.to_string()));
     credential_stop_facts(&mut facts, credential_stop);
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
@@ -14401,8 +14772,19 @@ pub(crate) async fn pull_fno(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
+    pull_fno_leg(axum::extract::State(site), body, 0).await
+}
+
+/// [`pull_fno`] for a `/pull/run` leg, which carries its run's durable id
+/// `run` and takes none of its own (IA-10c, D-6260); `0` is the route's own
+/// request, which takes a `pull-fno` id after its seat.
+pub(crate) async fn pull_fno_leg(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+    run: u64,
+) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let (code, page) = detached_pull("Expired F&O pull", async move {
-        let (code, axum::response::Html(page)) = fno_pull_held(&site, &body).await;
+        let (code, axum::response::Html(page)) = fno_pull_held(&site, &body, run).await;
         (code, page)
     })
     .await;
@@ -14413,6 +14795,7 @@ pub(crate) async fn pull_fno(
 async fn fno_pull_held(
     site: &Site,
     body: &str,
+    run: u64,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let now = std::time::SystemTime::now();
     let journal = site.journal();
@@ -14507,7 +14890,7 @@ async fn fno_pull_held(
     // futures would touch every page that uses it for one caller's benefit, so
     // the day is resolved first and the refusal arm is spelled out here.
     let (code, page) = match ingest::ist_day(now) {
-        Ok(today) => fno_answer(body, today, now, &journal, site.broker, site).await,
+        Ok(today) => fno_answer_in(body, today, now, &journal, site.broker, site, run).await,
         Err(why) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             refusal_html("Expired F&O pull", &why),
@@ -19315,9 +19698,15 @@ impl Drop for ServeLock {
     /// finds the file still locked, and refuses itself.
     fn drop(&mut self) {
         drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
-        }
+        // THROUGH A POISONED SET, as `take_serve_lock` inserts through one.
+        // Skipping the removal on poison left the key in the set after the
+        // file lock was released, so the next serve of this root in this
+        // process was handed the in-process pass with NO file lock held, and
+        // a second process could take the store beside it.
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.root);
     }
 }
 
@@ -19606,9 +19995,11 @@ fn stamp_outcome(
 
 /// Drops a root out of the in-process set after a failed take.
 fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
-    }
+    // Through a poisoned set, for the reason `ServeLock::drop` gives.
+    serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key);
 }
 
 /// The exit code of a server that has stopped, and the reason if it fell over.
@@ -22303,6 +22694,7 @@ mod tests {
             exchange: "NSE",
             segment: "CASH",
             store_vendor: Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window: pull::session::Window::new(on, on).expect("a window"),
             granularity: pull::vendor::Granularity::Minute1,
             bodies: Vec::new(),
@@ -23622,6 +24014,7 @@ mod tests {
             exchange: "NSE",
             segment: "CASH",
             store_vendor: Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window: Window::new(before, after).unwrap(),
             granularity: Granularity::Minute1,
             bodies: vec![
@@ -23660,6 +24053,336 @@ mod tests {
         assert_eq!(again.rows_read, 2);
         assert_eq!(again.bars_committed, 0);
         assert!(!again.failures.is_empty());
+    }
+
+    /// IA-10c (options combined, 20 Oct 2026): a `/pull/fno` window lands
+    /// through the same door a spot window takes (`fno_land` builds a
+    /// `BrokerWindow` and calls `land_one`), so its answer is kept under its
+    /// own contract's pack, its receipt carries the walk's runs-ledger id
+    /// (offset 60, mode `pull-fno`) and its verdicts are spooled under it.
+    /// The contract and its prices are invented (ZZIDX near 11,111.00).
+    /// An invented option contract of an invented underlying (ZZIDX), as the
+    /// expired-F&O walk's discovery names one.
+    fn invented_option() -> pull::fno::Found {
+        use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
+        let expiry = Expiry::new(2024, 4, 25).unwrap();
+        let strike = brutex_core::price::Paisa::from_raw(1_111_100);
+        let kind = Kind::Option {
+            expiry,
+            strike,
+            side: OptionSide::Call,
+        };
+        pull::fno::Found {
+            vendor_symbol: "ZZIDX-INVENTED-CE".to_owned(),
+            underlying: "ZZIDX".to_owned(),
+            contract: Contract::of(kind).unwrap(),
+            expiry,
+            option: Some((strike, OptionSide::Call)),
+        }
+    }
+
+    /// A Kite-shaped body of ten invented option minutes on 23 Apr 2024.
+    fn invented_option_body() -> String {
+        let candles: Vec<String> = (555..565)
+            .map(|m: u32| {
+                format!(
+                    "[\"2024-04-23T{:02}:{:02}:00+0530\",11.11,11.61,10.61,11.21,{},{}]",
+                    m / 60,
+                    m % 60,
+                    100 + m,
+                    5_000 + m
+                )
+            })
+            .collect();
+        format!(
+            "{{\"status\":\"success\",\"data\":{{\"candles\":[{}]}}}}",
+            candles.join(",")
+        )
+    }
+
+    /// A contract that does not render back to the walk's own is never kept
+    /// beside another contract's bars (`contract_key`, IA-10c).
+    #[test]
+    fn a_contract_that_does_not_render_back_is_never_kept() {
+        let found = invented_option();
+        assert!(super::contract_key(&found).is_some());
+        let mut other = found;
+        other.option = Some((
+            brutex_core::price::Paisa::from_raw(1_111_200),
+            brutex_core::instrument::OptionSide::Put,
+        ));
+        assert_eq!(super::contract_key(&other), None);
+        let mut future = invented_option();
+        future.option = None;
+        assert_eq!(
+            super::contract_key(&future),
+            None,
+            "a future's key is not the option's"
+        );
+    }
+
+    #[test]
+    fn a_pull_fno_window_is_kept_and_carries_its_run_id() {
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("ia10c-fno", "INE002A01018");
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let on = day(2024, 4, 23);
+        let found = invented_option();
+        let body = invented_option_body();
+        let decoded = pull::http::decode_body(&body, &spec, Listing::Derivative).unwrap();
+        let mut answered = pull::response_keep::Answered::of(decoded, body, 200);
+        let rows = std::mem::take(&mut answered.window);
+        let landing = crate::pullrun::open_landing(
+            &site.store_root,
+            Vendor::Zerodha,
+            pull::ingest::landing_run::Mode::Fno,
+            0,
+            1,
+        )
+        .unwrap();
+        let run = landing.hook.run();
+        let window = pull::session::Window::new(on, on).unwrap();
+        let landed = BrokerWindow {
+            listing: Listing::Derivative,
+            bodies: vec![(window, rows)],
+            unfetched: None,
+            before_first_bar: None,
+            instrument: "ZZIDX".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "FNO",
+            window,
+            granularity: Granularity::Minute1,
+            store_vendor: Vendor::Zerodha,
+            contract: Some(found.contract),
+            answers: crate::pullrun::Answers {
+                key: super::contract_key(&found),
+                bodies: vec![answered],
+                hook: Some(std::sync::Arc::clone(&landing.hook)),
+            },
+        };
+        let done = super::land_one(&landed, &site);
+        assert_eq!(done.bars_committed, 10, "{done:?}");
+        let key = super::contract_key(&found).unwrap();
+        let pack = pull::response_keep::Pack {
+            vendor: Vendor::Zerodha,
+            key: &key,
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let dir = pull::response_keep::pack_dir(&site.store_root, pack).unwrap();
+        assert!(
+            dir.ends_with(format!("ZZIDX/{}/1min", found.contract.as_str())),
+            "the contract's own pack: {}",
+            dir.display()
+        );
+        let receipts =
+            pull::response_keep::receipts(&site.store_root, pack, on.year_month().unwrap())
+                .unwrap();
+        let [(0, segment)] = receipts.as_slice() else {
+            panic!("{receipts:?}");
+        };
+        let [receipt] = segment.receipts.as_slice() else {
+            panic!("{segment:?}");
+        };
+        assert_eq!(u64::from(receipt.run), run, "offset 60 is the walk's id");
+        assert_eq!(receipt.door, pull::response_keep::Door::FromWindow);
+        assert_eq!(receipt.rows_landed, 10);
+        assert!(
+            site.store_root
+                .join("verify/spool")
+                .join(run.to_string())
+                .is_dir(),
+            "its verdicts are spooled under the walk's id"
+        );
+        let modes: Vec<String> = pull::gdfl_run::ledger::read_all(&site.store_root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.unwrap().mode)
+            .filter(|mode| mode != "seed")
+            .collect();
+        assert_eq!(modes, ["pull-fno"]);
+    }
+
+    /// IA-GR-43, the api's half: a landing request's run is opened from its
+    /// route after its seat: a route's own request takes one id of its mode, a
+    /// `/pull/run` leg carries its run's and takes none, and a cli repair
+    /// holding the vendor's landing claim refuses the request by name before
+    /// an id is spent (FM-163).
+    #[test]
+    fn every_zerodha_landing_takes_one_runs_ledger_id() {
+        use pull::ingest::landing_run::{Mode, claim};
+        let (site, _) = readiness_fixture("ia10c-ids", "INE002A01018");
+        let records = |site: &Site| -> Vec<(u64, String)> {
+            pull::gdfl_run::ledger::read_all(&site.store_root)
+                .unwrap()
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.mode != "seed")
+                .map(|entry| (entry.id, entry.mode))
+                .collect()
+        };
+        let spot =
+            crate::pullrun::open_landing(&site.store_root, Vendor::Zerodha, Mode::Spot, 0, 1)
+                .unwrap();
+        let repair =
+            crate::pullrun::open_landing(&site.store_root, Vendor::Zerodha, Mode::Repair, 0, 1)
+                .unwrap();
+        let fno = crate::pullrun::open_landing(&site.store_root, Vendor::Zerodha, Mode::Fno, 0, 1)
+            .unwrap();
+        assert_eq!(
+            records(&site),
+            [
+                (spot.hook.run(), "pull-spot".to_owned()),
+                (repair.hook.run(), "pull-repair".to_owned()),
+                (fno.hook.run(), "pull-fno".to_owned()),
+            ]
+        );
+        // A LEG CARRIES ITS RUN'S ID AND TAKES NONE.
+        let leg = crate::pullrun::open_landing(
+            &site.store_root,
+            Vendor::Zerodha,
+            Mode::Spot,
+            spot.hook.run(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(leg.hook.run(), spot.hook.run());
+        assert_eq!(records(&site).len(), 3, "no record for a leg");
+        drop((spot, repair, fno, leg));
+        // A CLI REPAIR HOLDING THE VENDOR REFUSES THE REQUEST, NAMED.
+        let cli = claim(
+            &site.store_root,
+            Vendor::Zerodha,
+            pull::gdfl_run::locks::Hold::Exclusive,
+            "cli pid 9 run 9 (zerodha-repair ZZIDX)",
+        )
+        .unwrap();
+        let refused =
+            crate::pullrun::open_landing(&site.store_root, Vendor::Zerodha, Mode::Spot, 0, 1)
+                .unwrap_err();
+        assert!(refused.starts_with("run_busy"), "{refused}");
+        assert!(
+            refused.contains("cli pid 9 run 9 (zerodha-repair ZZIDX)"),
+            "{refused}"
+        );
+        assert_eq!(records(&site).len(), 3, "no id was spent");
+        drop(cli);
+        // A WINDOW THAT REACHES ITS DOOR WITH NO RUN is said, never kept in
+        // silence.
+        let none = crate::pullrun::keep_and_spool(
+            &crate::pullrun::Answers::default(),
+            0,
+            (
+                pull::vendor::Granularity::Minute1,
+                pull::vendor::TimestampEncoding::EpochSecondsUtc,
+                pull::session::Window::new(day(2024, 4, 23), day(2024, 4, 23)).unwrap(),
+            ),
+            &[],
+            (
+                &pull::ingest::DoorLanding::default(),
+                pull::response_keep::Door::FromWindow,
+            ),
+        );
+        assert!(none.is_none());
+    }
+
+    /// IA-10c repair 2 (the second agent's follow-up; D-6263): ONE REFUSAL,
+    /// ONE STATUS, ON EVERY LANDING DOOR. While a `cli zerodha-repair
+    /// --from-store` holds the vendor's landing claim, a `/pull/fno` walk is
+    /// refused `409` naming the holder, as a `/pull/spot` request is, where
+    /// it answered `503`; a runs ledger that gives no id (two bad records at
+    /// its tail) answers `503` on both doors. Nothing is asked of a vendor.
+    #[test]
+    fn a_landing_refused_by_another_holder_answers_409_on_every_door() {
+        use pull::gdfl_run::locks::Hold;
+        let (site, spot) = readiness_fixture("ia10c-409", "INE002A01018");
+        let today = day(2025, 8, 2);
+        let asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=groww&from=2025-07-01&to=2025-07-01",
+            today,
+        )
+        .unwrap();
+        let pull::vendor::Transport::Http(shipped) = asked.feed.descriptor().transport else {
+            panic!("the walk's feed is an HTTP feed");
+        };
+        let spec = pull::vendor::HttpSpec {
+            // No real credential or vendor connection can enter this test.
+            base_url: "http://127.0.0.1:0",
+            ..shipped
+        };
+        let source = pull::http::HttpSource::new(
+            spec,
+            pull::http::Credential::token("generated-offline-fixture".to_owned()),
+        )
+        .unwrap();
+        let wire = Wire {
+            source,
+            spec,
+            store_vendor: Vendor::Groww,
+        };
+        let journal = site.journal();
+        let page = FnoPage {
+            asked: &asked,
+            now: std::time::UNIX_EPOCH,
+            today,
+            journal: &journal,
+            broker: Broker::Refused,
+        };
+        let holder = "cli pid 9 run 9 (zerodha-repair ZZIDX)";
+        let cli = pull::ingest::landing_run::claim(
+            &site.store_root,
+            Vendor::Groww,
+            Hold::Exclusive,
+            holder,
+        )
+        .unwrap();
+        let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
+            panic!("a walk opened while another process held the vendor");
+        };
+        assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("run_busy") && body.contains(holder), "{body}");
+        let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
+            panic!("a spot request opened while another process held the vendor");
+        };
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{why}");
+        assert!(why.starts_with("run_busy") && why.contains(holder), "{why}");
+        drop(cli);
+        // A LEDGER THAT GIVES NO ID: two bad records at its tail.
+        for _ in 0..2 {
+            drop(
+                crate::pullrun::open_landing(
+                    &site.store_root,
+                    Vendor::Groww,
+                    pull::ingest::landing_run::Mode::Spot,
+                    0,
+                    1,
+                )
+                .unwrap(),
+            );
+        }
+        let path = site.store_root.join(pull::gdfl_run::ledger::LEDGER);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let len = bytes.len();
+        bytes[len - 10] ^= 1;
+        bytes[len - 138] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        let Err((status, body)) = fno_landing(&page, Vec::new(), (&site, &wire, &asked), 1) else {
+            panic!("a walk took an id from a damaged ledger");
+        };
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body.contains("runs_ledger_damaged"), "{body}");
+        let Err((why, code)) = open_spot_landing(&spot, &site, 1) else {
+            panic!("a spot request took an id from a damaged ledger");
+        };
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{why}");
+        assert!(why.starts_with("runs_ledger_damaged"), "{why}");
     }
 
     #[test]
@@ -23705,6 +24428,7 @@ mod tests {
                 exchange: "NSE",
                 segment: "INDEX",
                 store_vendor: Vendor::Zerodha,
+                answers: crate::pullrun::Answers::default(),
                 window,
                 granularity: Granularity::Day1,
                 bodies: vec![(
@@ -23799,6 +24523,7 @@ mod tests {
             exchange: "NSE",
             segment: "INDEX",
             store_vendor: Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window,
             granularity: Granularity::Day1,
             bodies: vec![(
@@ -23888,6 +24613,7 @@ mod tests {
             exchange: "NSE",
             segment: "INDEX",
             store_vendor: Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window: first,
             granularity: Granularity::Day1,
             bodies: vec![(
@@ -24004,6 +24730,7 @@ mod tests {
             exchange: "NSE",
             segment: "CASH",
             store_vendor: Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window,
             granularity: Granularity::Minute1,
             bodies: vec![(window, RawWindow { rows })],
@@ -25732,6 +26459,54 @@ mod tests {
     /// A signal that has already fired.
     fn fired() -> Shutdown {
         Box::pin(std::future::ready(Ok(())))
+    }
+
+    /// A stop asked once a serve of `root` has finished its start-up load.
+    ///
+    /// R3-14 repair 5 races the load against the stop and polls the stop
+    /// first (`loaded_or_stopped`), so [`fired`] ends a serve BEFORE its load:
+    /// the universe's verdict, the banner after the load, the first event, the
+    /// recovery at start and the stop's exit code are never reached. The
+    /// `listening` event is written after the load and before `serve`, so this
+    /// stop waits for one naming `root` that was written after the stop was
+    /// made, on whichever sink the process has installed, and then answers
+    /// inside `serve`, as a pressed stop would.
+    ///
+    /// A root that does not resolve is named as given: such a serve is refused
+    /// before it listens, so the stop is never polled to its end.
+    pub(super) fn after_the_load(root: &Path) -> Shutdown {
+        let store = std::fs::canonicalize(root)
+            .unwrap_or_else(|_| root.to_path_buf())
+            .display()
+            .to_string();
+        let from = telemetry::global().map_or(0, |sink| sink.health().next_seq);
+        Box::pin(async move {
+            while !listening_since(from, &store) {
+                tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+            }
+            Ok(())
+        })
+    }
+
+    /// Whether the installed sink holds a `listening` event at or after
+    /// `from` whose store is `store`.
+    fn listening_since(from: u64, store: &str) -> bool {
+        telemetry::global().is_some_and(|sink| {
+            let dir = sink
+                .path()
+                .parent()
+                .expect("the sink writes a file inside a directory")
+                .to_path_buf();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target("api.serve");
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .iter()
+                .any(|record| {
+                    record.seq >= from
+                        && record.message == "listening"
+                        && crate::emitted::says(record, "store", store)
+                })
+        })
     }
 
     /// One command line, owned.
@@ -28714,8 +29489,13 @@ mod tests {
 
         let expected =
             masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+        // STOPPED AFTER THE LOAD, NOT BEFORE IT. Since R3-14 repair 5 a stop
+        // that has already fired wins the race with the start-up load and the
+        // serve exits OK before it reads the universe, so on a host whose
+        // store is on disk and free this read `left: 0, right: 3` and the
+        // `listening` event below was never written.
         assert_eq!(
-            run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+            run(&argv(&["serve", "127.0.0.1:0"]), after_the_load(&root)).await,
             expected,
             "a serve exits on the verdict of the universe it served"
         );
@@ -30361,6 +31141,7 @@ mod tests {
                 .expect("a window"),
             feed: pull::vendor::Feed::Zerodha,
             granularity,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30437,6 +31218,7 @@ mod tests {
             window,
             feed: pull::vendor::Feed::Zerodha,
             granularity: pull::vendor::Granularity::Day1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30502,6 +31284,7 @@ mod tests {
             window,
             feed: pull::vendor::Feed::Zerodha,
             granularity: pull::vendor::Granularity::Day1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30696,6 +31479,7 @@ mod tests {
                 .expect("a window"),
             feed: pull::vendor::Feed::Groww,
             granularity: pull::vendor::Granularity::Minute1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30744,6 +31528,7 @@ mod tests {
                 .expect("a window"),
             feed: pull::vendor::Feed::Groww,
             granularity: pull::vendor::Granularity::Minute1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30786,6 +31571,7 @@ mod tests {
                 .expect("a window"),
             feed: pull::vendor::Feed::Groww,
             granularity: pull::vendor::Granularity::Minute1,
+            run: 0,
             rate: None,
             clamped_from: None,
         };
@@ -30913,14 +31699,31 @@ mod tests {
     #[test]
     fn both_pull_routes_run_detached_from_the_connection() {
         let source = include_str!("server.rs");
-        for (route, held) in [
+        // THE ROUTES ARE THEIR LEGS' DOORS WITH NO RUN (IA-10c): each route
+        // hands its body to its `_leg` twin with `0`, and the twin is what
+        // runs detached, for a route's request and a `/pull/run` leg alike.
+        for (route, leg) in [
             (
                 "pub(crate) async fn pull_spot(",
-                "spot_pull_held(&site, &body)",
+                "pull_spot_leg(axum::extract::State(site), body, 0)",
             ),
             (
                 "pub(crate) async fn pull_fno(",
-                "fno_pull_held(&site, &body)",
+                "pull_fno_leg(axum::extract::State(site), body, 0)",
+            ),
+        ] {
+            let tail = source.split_once(route).expect("route exists").1;
+            let body = &tail[..tail.find("\n}\n").expect("body ends")];
+            assert!(body.contains(leg), "{route} must hand its body to {leg}");
+        }
+        for (route, held) in [
+            (
+                "pub(crate) async fn pull_spot_leg(",
+                "spot_pull_held(&site, &body, run)",
+            ),
+            (
+                "pub(crate) async fn pull_fno_leg(",
+                "fno_pull_held(&site, &body, run)",
             ),
         ] {
             let tail = source.split_once(route).expect("route exists").1;
@@ -33801,6 +34604,7 @@ mod tests {
             hollow,
             total,
             bodies,
+            answers: Vec::new(),
         }
     }
 
@@ -34021,7 +34825,7 @@ mod tests {
     /// an HTTP status, not just a shape.
     #[tokio::test]
     async fn an_empty_prefix_is_still_a_refusal_and_not_an_empty_success() {
-        let bodies = Vec::new();
+        let bodies = (Vec::new(), Vec::new());
         let refused = prefix_or_refusal(bodies, "the vendor refused chunk one".to_owned());
         assert!(
             refused.is_err(),
@@ -35084,9 +35888,10 @@ mod tests {
         );
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
-        // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // directly because the only other way in is through a live socket.
+        // This is the proof the line is written: the `debug_assert` that once
+        // demanded `is_written` at the site was vacuous with no sink installed
+        // and panicked on a dropped line, and is gone (see the site).
         let from = crate::emitted::mark();
         // FILED UNDER ITS OWN DAY AND MONTH (D-3341, DB-G45): the failure
         // names 2026-08-04, and the line says so rather than the window's
@@ -36896,3 +37701,28 @@ mod pool_table_tests;
 #[cfg(test)]
 #[path = "hand_stop_tests.rs"]
 mod hand_stop_tests;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_b.rs"]
+mod cloud_mutant_tests_b;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_c.rs"]
+mod cloud_mutant_tests_c;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_a.rs"]
+mod cloud_mutant_tests_a;
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_d.rs"]
+mod cloud_mutant_tests_d;
+
+// Tests added by the cloud mutation pass of 18 Oct (cloud/mut-api-b-20261018).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_e.rs"]
+mod cloud_mutant_tests_e;
