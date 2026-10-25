@@ -1319,6 +1319,27 @@ fn the_extra_copy_roots_key_is_checked_and_stored_canonically() {
     assert!(check(Key::ExtraCopyRoots, &joined).is_ok());
     let long = format!("/{}", "a".repeat(super::MAX_COPY_ROOTS_BYTES));
     assert!(refused(&long).contains("bytes, past the"));
+    // AT THE CEILING EXACTLY a value is read, one byte past it is refused:
+    // folders of at most MAX_PATH_BYTES each, one letter apart, filling the
+    // value to MAX_COPY_ROOTS_BYTES.
+    let mut full = String::with_capacity(super::MAX_COPY_ROOTS_BYTES + 1);
+    for letter in 'a'..='z' {
+        let room =
+            super::MAX_COPY_ROOTS_BYTES.saturating_sub(full.len() + usize::from(!full.is_empty()));
+        if room < 2 {
+            break;
+        }
+        if !full.is_empty() {
+            full.push(COPY_ROOT_SEPARATOR);
+        }
+        let piece = room.min(super::MAX_PATH_BYTES);
+        full.push('/');
+        full.extend(std::iter::repeat_n(letter, piece - 1));
+    }
+    assert_eq!(full.len(), super::MAX_COPY_ROOTS_BYTES);
+    assert!(copy_roots(&full).is_ok(), "the ceiling itself is a value");
+    let past = format!("{full}x");
+    assert!(copy_roots(&past).unwrap_err().contains("bytes, past the"));
     assert!(check_stored(Key::ExtraCopyRoots, "relative").is_err());
     assert!(check_stored(Key::ExtraCopyRoots, &format!("{value}|{value}")).is_err());
     let _ = std::fs::remove_dir_all(&base);
