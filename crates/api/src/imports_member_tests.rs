@@ -1083,7 +1083,10 @@ fn a_member_only_day_owns_its_own_members_file_and_no_other() {
         filters
     };
     let own = ("*+NSE-INDEX-NIFTY".to_owned(), "done".to_owned());
-    assert_eq!(shown("own-file", "NIFTY 50.NSE_IDX.csv"), [own.clone()]);
+    assert_eq!(
+        shown("own-file", "NIFTY 50.NSE_IDX.csv"),
+        std::slice::from_ref(&own)
+    );
     let other = shown("other-file", "NIFTY BANK.NSE_IDX.csv");
     assert_eq!(
         other,
