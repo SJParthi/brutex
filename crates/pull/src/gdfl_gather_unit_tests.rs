@@ -206,3 +206,37 @@ fn a_first_file_refused_past_the_most_a_month_holds_leaves_no_offer() {
     assert_eq!(gather.offered(&april()), None, "no empty offer is left");
     assert!(gather.is_empty(), "nothing gathered and no close waits");
 }
+
+/// **A STAMP AT A FILE'S FIRST OR LAST SECOND IS ITS OWN** (IA-RP-26, the
+/// edges): a file's span is closed at both ends, and a file that begins on
+/// the second the last one ended walks again and is given it too.
+#[test]
+fn a_stamp_on_a_files_first_or_last_second_is_its_own() {
+    let offered = |at: usize, span: (i64, i64)| OfferedFile {
+        at,
+        name: format!("file-{at}"),
+        span,
+    };
+    let offer = Offer {
+        key: april(),
+        bars: Vec::new(),
+        appended: FailKind::NotHeld,
+        files: vec![
+            offered(0, (10, 20)),
+            offered(1, (30, 40)),
+            offered(2, (40, 45)),
+        ],
+        auction: Vec::new(),
+        request: request(day(2024, 4, 1), day(2024, 4, 30)),
+    };
+    let mut deferred = vec![
+        waiting(day(2024, 4, 1)),
+        waiting(day(2024, 4, 2)),
+        waiting(day(2024, 4, 3)),
+    ];
+
+    give_added(&offer, &[10, 20, 30, 40], &mut deferred);
+
+    let counts: Vec<usize> = deferred.iter().map(|one| one.committed).collect();
+    assert_eq!(counts, vec![2, 2, 1], "10 and 20; 30 and 40; 40 again");
+}
