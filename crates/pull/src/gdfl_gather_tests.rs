@@ -1578,6 +1578,11 @@ fn a_stop_mid_day_after_a_gathered_file_closes_the_day_by_what_was_written() {
     let ended = drive_over(&store, (on, on), options, &both).unwrap_err();
 
     assert_eq!(ended.code(), "stopped", "{ended}");
+    assert_eq!(
+        ended.report().unwrap().days_imported,
+        0,
+        "a day the stop cut short is not imported"
+    );
     assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
     assert_eq!(generation(&store, month_of("INDEX", "BANKNIFTY", later)), 0);
     let text = journal(&store);
@@ -1591,6 +1596,7 @@ fn a_stop_mid_day_after_a_gathered_file_closes_the_day_by_what_was_written() {
     let resumed = drive_over(&store, (on, on), asked(), &both).unwrap();
     assert!(resumed.failures.is_empty(), "{:?}", resumed.failures);
     assert_eq!(resumed.months_repaired, 1, "BANKNIFTY's month alone");
+    assert_eq!(resumed.days_imported, 1, "the resume imports it");
     assert_eq!(generation(&store, month_of("INDEX", "NIFTY", later)), 1);
     assert_eq!(generation(&store, month_of("INDEX", "BANKNIFTY", later)), 1);
     assert!(begun_not_closed(&journal(&store)).is_empty());
