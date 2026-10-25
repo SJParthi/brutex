@@ -21354,8 +21354,9 @@ pull/src/gdfl_import_journal.rs and rule 6 at pull/src/gdfl_run.rs.
 ### Gate 11 — R4-28, declared at its merge (R4-28 repair 5, 24 October 2026)
 
 ~~~~text
-Gate 11 run on R4-28's tip (c01ee84aa, feat/db-fix 7b397bbe7 merged)
-refused seven entries, 22 occurrences, every one in R4-28's two new
+Gate 11 run on R4-28's tip as the r5 check read it (feat/db-fix merged at
+its CLOUD-MUTCLI merge) refused seven entries, 22 occurrences, every one in
+R4-28's two new
 production files (the r5 check's blocking item). Each was read before it
 was counted or removed: 16 are removed, 6 are declared (D-7191).
 
@@ -21401,13 +21402,20 @@ RULE 7 (`ALLOW_MEMBER`) -- pull/src/master_snapshots.rs 0 -> 3; one
 
 pull/src/master_snapshots_first_listed.rs needs no line. Every other
 refusal is feat/db-fix's own, present there without R4-28 and in other
-packages' files, and the REFUSED lines of the two runs are the same lines:
-16 on the tree that merged feat/db-fix 7b397bbe7 (cli/src/tick_second_check.rs
-and tick_second_index.rs; pull/src/gdfl_import.rs, gdfl_import_causes.rs,
-gdfl_import_day.rs and gdfl_import_quality.rs; api/src/dayflags.rs), and 15
-on the tree that merged 4cd50042d, where R3-13's merge took the
-api/src/dayflags.rs one away. On that merge rule 4 counts 170 against
-feat/db-fix's 167 and rule 7 238 against 235: the six lines above.
+packages' files, and the REFUSED lines of each pair of runs (R4-28's
+tree and feat/db-fix's at the same merge) are the same lines: 16 on the
+tree that merged feat/db-fix at its CLOUD-MUTCLI merge
+(cli/src/tick_second_check.rs and tick_second_index.rs;
+pull/src/gdfl_import.rs, gdfl_import_causes.rs, gdfl_import_day.rs and
+gdfl_import_quality.rs; api/src/dayflags.rs), 15 on the tree that merged it
+at its R3-13 merge, where R3-13's merge took the api/src/dayflags.rs one
+away, and 19 on the tree that merged it at its DATA-1w merge, whose four new
+ones are DATA-1w's own (api/src/feed_checks_files.rs under rules 3, 4 and 6,
+api/src/feed_checks.rs under rule 7). On that last merge rule 4 counts 171
+against feat/db-fix's 168 and rule 7 239 against 236: the six lines above.
+No sentence here names a commit by its hash: the store's citation check
+(crates/store/tests/cited_commits.rs) holds every hash in this file to
+`main`'s history, and none of these merges is on it.
 ~~~~
 
 ## The upkeep runner (R3-17, D-6270)
