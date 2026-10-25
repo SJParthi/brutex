@@ -99,7 +99,7 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `corporate_actions` one) under `reference/`, which `/basis.json`,
 /// `/dayflags.json` and `/sources/day.json` serve, so each must name the
 /// commit that folded it. Without `--apply` it prints and writes nothing.
-pub(crate) const WRITERS: [&str; 20] = [
+pub(crate) const WRITERS: [&str; 21] = [
     "alerts",
     "basis-runs",
     "census-migrate",
@@ -118,6 +118,7 @@ pub(crate) const WRITERS: [&str; 20] = [
     "upkeep",
     "verify-merge",
     "zerodha-gaps",
+    "zerodha-quarantine",
     "zerodha-repair",
     "zerodha-verify",
 ];
@@ -126,8 +127,10 @@ pub(crate) const WRITERS: [&str; 20] = [
 ///
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
 /// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
-/// `msum-build ... --dry-run`, `gdfl-rekey`, `zerodha-gaps` and `basis-runs`
-/// each without `--apply`, `zerodha-repair` without `--from-store`, and
+/// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, `zerodha-gaps`
+/// without `--apply`, `zerodha-quarantine` without `--apply` (R4-18),
+/// `basis-runs` without `--apply` (R4-26), `zerodha-repair` without
+/// `--from-store`, and
 /// `feed-reconcile` without `--out` (its `factor` and `months` forms, which
 /// take no `--out`: one reads a version file, the other the census) each
 /// state in their own module that they write nothing; `alerts` writes only as
@@ -148,7 +151,9 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
             !arguments.contains(&"--dry-run")
         }
         "upkeep" => matches!(arguments.first(), Some(&("run" | "resume"))),
-        "basis-runs" | "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
+        "basis-runs" | "gdfl-rekey" | "zerodha-gaps" | "zerodha-quarantine" => {
+            arguments.contains(&"--apply")
+        }
         "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         "verify-merge" => !arguments.contains(&"--list"),
@@ -483,7 +488,7 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 20] = [
+        let writing: [(&str, &[&str]); 21] = [
             ("alerts", &["--ack", "1"]),
             ("basis-runs", &["--dir", "DIR", "--apply"]),
             ("census-migrate", &["gdfl"]),
@@ -502,6 +507,7 @@ mod tests {
             ("upkeep", &["run"]),
             ("verify-merge", &[]),
             ("zerodha-gaps", &["--apply"]),
+            ("zerodha-quarantine", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),
             ("zerodha-verify", &["2024-01-01", "2024-01-31"]),
         ];
@@ -532,6 +538,7 @@ mod tests {
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-gaps", &[][..]),
+            ("zerodha-quarantine", &["--plan"][..]),
             ("zerodha-repair", &[][..]),
             ("verify-merge", &["--list"][..]),
             ("top", &[][..]),
