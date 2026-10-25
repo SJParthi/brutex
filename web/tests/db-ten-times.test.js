@@ -91,11 +91,15 @@ async function longestTask(work) {
   };
   setImmediate(beat);
   await work();
+  // The beat queued before this turn runs first, so the stretch that ends the
+  // work is timed too: a work with no await of its own (the list rules) was
+  // otherwise never timed at all and read 0 ms.
+  await new Promise((done) => setImmediate(done));
   running = false;
   return longest;
 }
 
-test('db_loads_at_ten_times_the_list_without_a_long_task', async () => {
+test('db_loads_at_ten_times_the_list_without_a_long_task', async (t) => {
   const server = tenTimes();
   const real = globalThis.fetch;
   globalThis.fetch = /** @type {any} */ (server.fetch);
@@ -143,9 +147,22 @@ test('db_loads_at_ten_times_the_list_without_a_long_task', async () => {
       viewSegments(scope.listed, []);
     });
     assert.ok(lists < LONG_TASK_MS, `the page's list rules held the loop ${lists.toFixed(1)} ms`);
+    // The run's numbers, for the report's n = 20 table (a TAP diagnostic line).
+    t.diagnostic(`ten-times spot_ms=${spot.toFixed(2)} options_ms=${options.toFixed(2)} chain_ms=${chain.toFixed(2)} lists_ms=${lists.toFixed(2)} spot_bytes=${spotBytes}`);
     // THE WHOLE CENSUS WAS NEVER ASKED, at any size.
     assert.deepEqual(server.asked.filter((url) => url.startsWith('/store.json')), []);
   } finally {
     globalThis.fetch = real;
   }
+});
+
+// The gate's own timer: a stretch with no await of its own is a long task too.
+// Before the last beat was awaited, this read 0 ms, and the list-rules phase
+// above asserted nothing.
+test('the_timer_times_a_stretch_with_no_await', async () => {
+  const held = await longestTask(async () => {
+    const until = performance.now() + 2 * LONG_TASK_MS;
+    while (performance.now() < until);
+  });
+  assert.ok(held >= 2 * LONG_TASK_MS, `a ${2 * LONG_TASK_MS} ms stretch read ${held.toFixed(1)} ms`);
 });
