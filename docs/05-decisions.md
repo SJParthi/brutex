@@ -84290,6 +84290,254 @@ so no membership file version or run-identity term moves.
 (`/imports.json` reads a `recounted` close by the definition it carries, as
 the importer's journal does; until IA-4 the page called every recounted
 row current, among them the 210 options keys recounted under 2) (IA4-07).
+### D-7290 — R4-18: a bar is dropped only by its named stamp with a recorded cause; a month named whole is recorded, never published empty; the quarantine is a ledger and a one-read index; the restate policy flips only after read-back — 2026-10-22
+
+Findings ING-01 (a, b, e), RT-DATA-02 (c, d), Z5, Z6, DLY-08 (the policy;
+the classifier is R4-23's).
+
+**D-3350 restated.** The code cited D-3350 — "a repair adds bars and never
+drops one" — and its rule stands for every repair: `store::repair::repair_month`
+keeps every held bar and refuses a held bar that would change
+(`HeldBarDiffers`). It is AMENDED by one door and only one:
+
+1. **`store::repair::publish_without`** publishes a new revision of a month
+   WITHOUT exactly the bars at the named stamps, every other bar byte for
+   byte as held, through the same reservation, write, read-back, receipt and
+   syncs as `publish`. A drop list that is empty, unsorted or repeated is
+   `NothingNamed`; a stamp the month does not hold is `UnheldStamp` — both
+   before anything is reserved. A list naming every held bar is `WholeMonth`:
+   no empty generation is ever published. `drop_month` takes the next free
+   ordinal (stepped-over ordinals named, `RevisionLimit` at 1,024) and
+   promotes; the old generation stays byte-identical.
+2. **The quarantine (`store::quarantine`).** `<store>/audit/<feed>.quarantine.ledger`
+   is the truth: one text line per act (`dropping` before the door,
+   `dropped` after the promotion, `whole_month`), with the series key, month,
+   cause, bars, revision, the BLAKE3 of the named bars as held, who, the
+   reason (1 to 200 bytes, one line) and every stamp, each line CRC-32C'd. A
+   torn last line is never read as a line and the next append ends it with a
+   newline first: no byte of the ledger is changed. `<store>/audit/<feed>.quarantine`
+   is derived: a 64-byte header and 8,199 fixed 64-byte slots open-addressed
+   by the BLAKE3 of (series key, month), a bucket of 8 that never wraps, so a
+   probe is ONE 512-byte positional read; published whole by staging file,
+   sync and rename. An index of the wrong length or a slot that fails its CRC
+   answers `quarantine_index_torn` / `quarantine_slot_damaged`, never "clear",
+   and is rebuilt from the ledger by the next record or `rebuild`. One writer
+   at a time under `<feed>.quarantine.lock`; a second waits up to
+   `store::flock::MAX_PATIENCE` (1 s; written as 10 s until repair 1, a wait
+   the clamp never allowed), then is refused naming the holder.
+3. **`apply_month`** ledgers first, then publishes, then indexes; a second
+   apply writes nothing; a run killed between the promotion and its
+   `dropped` line is finished from its intent (`Resumed`).
+4. **The restate policy (DLY-08)**: `store::repair::restate_month` with
+   `Restate { open_interest_applies }` keeps every held stamp, takes an
+   offered bar's values at a held stamp (a correction, named), adds offered
+   bars at stamps the month lacks, reads the revision back whole and only
+   then promotes. `repair_month`'s rule is untouched; R4-23's classifier
+   decides which months are restated.
+5. **Readers by name.** `cli`'s stored sweep refuses a quarantined month
+   (either scope) naming scope, cause and ledger line; `/bars.json` answers a
+   month quarantined whole 409 `month_quarantined` with the quarantine and no
+   bars; `/bars/window.json` names it among its faults and serves its other
+   months; `/store.json` (expanded form) rows of a feed with any quarantine
+   carry `"quarantine"` (null or the month's), and `/instruments.json` rows
+   carry `"quarantine"` (null, `{months, whole_months, bars, causes}`, or
+   `{unknown: <code>}`), each read once per cached body.
+6. **`cli zerodha-quarantine SYMBOL|ALL FROM TO --cause C --reason R
+   [--plan|--apply]`** acts on R4-17's newest series-identity plan (or
+   `--plan-file`): its `quarantine` rows of the cause asked, in the window;
+   `before_listing` stamps are checked against the share's listing day once
+   more (a master is required). A minute month's derived rungs set aside
+   every bucket whose span holds a named minute, with the same cause.
+   `GET /pull/quarantine.json` and `POST /pull/quarantine` run this one verb
+   (plan on the store-read pool, the press on the operations pool, one press
+   at a time per server, 409 `quarantine_running`), and `/ingest`'s
+   Quarantine panel sends one request per press.
+
+**Not done, said here.** A derived bucket mixing a named minute and a kept
+one is set aside whole, not folded again from its kept minutes: the fold of
+a repair (`pull::ingest`'s derive path) refuses a changed held bar and is not
+reachable from `cli`. For `before_listing` and `zero_price` every such
+bucket is wholly named; for PIIND's `foreign_level` a mixed bucket loses its
+kept minutes' share until a refold door exists. The census is not rewritten
+by the verb: `cli census-recount` follows an apply. `/store.json`'s compact
+wire (`census-tuples-v1`) does not yet carry the field (R4-03 carries it
+over when it restructures the route).
+
+Proof: `store::quarantine::tests::*` (thirteen tests), `store::repair::tests::{a_drop_naming_an_unheld_stamp_is_refused,
+a_drop_publishes_the_kept_bars_and_refuses_a_stale_or_held_source,
+a_drop_past_the_last_ordinal_is_the_revision_limit,
+the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation}`,
+`cli::zerodha_quarantine::tests::*`, `cli::stored::tests::a_stored_sweep_refuses_a_quarantined_month`,
+`api::server::quarantine_route::tests::*`, and `web/tests/quarantine.test.js`.
+
+**Repair 1 (23 Oct 2026), found by the second agent's check.**
+
+1. **A month quarantined whole stays whole.** `apply_month` once treated a
+   whole-month record as done only when the new plan named every held bar;
+   a later plan naming a subset (a second cause in the month, or a derived
+   bucket covering one minute of one) published a generation without that
+   subset, and its `dropped` line replaced the `whole_month` slot, so
+   `/bars.json`, `/bars/window.json` and the stored sweep served the rest of
+   a month recorded foreign. Now the probe's `whole_month` answers
+   `already_whole` for any subset and writes nothing (a stamp neither held
+   nor ledgered is still refused; an intent a killed run owes is still
+   finished), and ONE merge rule (`quarantine::merged`) serves the index,
+   its rebuild from the ledger and `Summary::load`: a drop onto a drop adds
+   its bars, a drop onto a whole record keeps the whole record, anything
+   else is the newer line. A ledger that already holds a `dropped` line
+   after a `whole_month` line (an older build's) therefore reads whole.
+2. **A press is held by its work, not by its client.** The guard is moved
+   into the blocking closure, so a client that leaves no longer frees the
+   press while `spawn_blocking` keeps applying.
+3. **The verb's mode is the parsed one.** `command_at` takes the writer's
+   gate from the parsed `--apply`, not from a token search (a reason spelled
+   `--apply` is a reason); a plan row listing a stamp twice is refused by
+   name; a symbol is the core's canonical spelling (`brutex_core::symbol::
+   Symbol`, which upper-cases), so `irfc` is `IRFC`.
+4. **Renumbered.** This entry was written as D-7121, an id inside
+   BASE-REDS-1021's block (D-7120..D-7129); it is D-7290, from the block
+   registered for R4-18.
+5. **The writer's patience is the clamp's.** `WRITER_PATIENCE` read 10 s,
+   but `store::flock::Flock::try_lock_patiently` clamps every wait to
+   `MAX_PATIENCE` (1 s); the constant is now that bound, so neither the code
+   nor this entry claims a wait that never happens.
+
+Repair 1's proof: `store::quarantine::tests::{a_partial_plan_on_a_month_quarantined_whole_keeps_it_whole_and_writes_nothing,
+a_derived_month_recorded_whole_is_not_reopened_by_one_bucket,
+a_dropped_line_after_a_whole_line_never_downgrades_index_rebuild_or_summary,
+the_merge_rule_never_lets_a_drop_lift_a_whole_record,
+an_intent_owed_on_a_month_since_recorded_whole_is_finished_and_it_stays_whole}`,
+`api::server::quarantine_route::tests::a_press_whose_client_leaves_holds_the_press_until_its_work_ends`,
+`cli::zerodha_quarantine::tests::{a_plan_whose_reason_is_the_apply_flag_is_a_plan_not_a_writer,
+a_stamp_listed_twice_is_refused_and_a_lower_case_symbol_is_the_canonical_one}`
+(docs/04-invariants.md R418-16..R418-18). The index's effective capacity is
+restated in `docs/06-limits.md` L-R418-04 from a simulation, not the 8,192
+homes.
+
+### D-7291 — R4-18 repair 2: the quarantine index never lags its ledger unsaid; a damaged ledger line is named and never rebuilt away; no door re-serves a set-aside bar — 2026-10-23
+
+The second check of R4-18 (repair 1) found three blocking defects in the
+package's own code, each reproduced on a private store, and each now closed
+by a test that failed before the change (`docs/04-invariants.md`
+R418-19..R418-23):
+
+1. **A damaged ledger line was dropped without a word.** The index rebuild
+   and `Summary::load` read only the valid lines, so a month recorded whole
+   by a line whose checksum failed read as clear, the listings under-counted
+   and the apply that rebuilt the index answered success. NOW a complete line
+   that is not valid UTF-8, fails its checksum or does not parse is DAMAGE,
+   refused by name (`quarantine_ledger_damaged`, with every offset) by every
+   rebuild, catch-up, listing, door and apply, with nothing written, and one
+   `store.quarantine` error event; the verb prints it (a plan exits 1, an
+   apply refuses before its first write). A torn append is no longer ended by
+   a bare newline, which made it indistinguishable from damage: the next
+   writer ends it with `\ttorn` (in the same write as its own line), and such
+   a line is an ENDED torn append, never an act and never damage, because the
+   kill it records left none. No verb lifts damage: the ledger is
+   append-only, so it is restored from a copy (`docs/06-limits.md`
+   L-R418-12).
+2. **The index could lag its ledger with every reader trusting it.** A
+   publish refused (a full disk, a read-only directory) or killed after the
+   ledger line was synced left the line unindexed; a dropped month was then
+   never re-indexed (`already_dropped`), and a month recorded whole was
+   served while the listings called it quarantined. NOW the index header
+   (version 2) records the ledger bytes the image describes. A reader answers
+   ONLY from an image whose header checks and whose described length is the
+   ledger's; otherwise it answers `quarantine_index_stale` or
+   `quarantine_index_torn` by name, never "clear" (a zeroed image included).
+   An image behind its ledger is never the answer even while a writer holds
+   the feed's lock: the repair's own self-check before landing found that
+   taking such a lag for the writer's act in flight answered "clear", during
+   the next writer's catch-up, for a month an act a failed publish left
+   unindexed recorded whole. While a writer holds the lock the reader waits
+   for its image within its thread's patience (`store::flock::patience`: the
+   server's page reads have some, the CLI and the importer none) through the
+   store's one wait loop and is refused `quarantine_being_written` ("being
+   written, ask again": 503 with `Retry-After` on `/bars.json`, `month_busy`
+   to the importer) when it runs out. Every writer brings the image level
+   with the ledger (a rebuild) under the lock before its own act, and refuses
+   a damaged ledger and a full bucket BEFORE its ledger line, so a refusal
+   writes nothing and only a host refusal of the final publish can leave a
+   line unindexed — which the next writer of any month of the feed then
+   finishes. An intent (`dropping`) is indexed as a drop of no bars.
+   `apply_month` judges its plan read-only first (a refusal writes nothing,
+   not even the lock file), then holds the feed's writer lock for its whole
+   sequence, so two applies of one feed never interleave (the second check's
+   double count), and finishes every intent a killed run owes the month,
+   whatever subset it names, before its own act.
+3. **The restate door re-served quarantined bars, and so did the ingest's
+   repair door.** A vendor re-pull still holds the minutes a quarantine set
+   aside, and `restate_month` — and `repair_month`, which `pull::ingest`
+   calls on every month its append door refuses — added them as bars the
+   month lacked. NOW both take their offered bars through one rule,
+   `store::quarantine::set_aside`: one probe for a month no quarantine names;
+   for a month a drop names, every stamp a `dropped` or `dropping` line names
+   is held back (never served again, one `store.repair` event); a month
+   recorded whole is `RepairError::Quarantined` and a quarantine that cannot
+   be read `RepairError::QuarantineUnknown`, each with nothing written.
+   The rule is judged ONCE THE SERVED MONTH IS OPEN (the self-check before
+   landing: judged before the open, a drop intended and promoted between the
+   two read as nothing set aside): a drop ledgers its intent before its door
+   promotes, so a month opened after that promotion meets the intent, and one
+   opened before it refuses the door's own promotion (`StaleSource`).
+   `pull`'s failure table files them as `repair_impossible` and
+   `store_damaged` (a writer still bringing the index level, `month_busy`).
+   `restate_month` reports what it held back and emits one
+   `store.restate` event with its reason and what changed; the journal line
+   a run keeps is its caller's (R4-23), from those fields, as `pull::ingest`
+   keeps one for `repair_month`.
+
+**The formats change before their first landing.** Index version 1 and the
+ledger without the torn mark were never written to the real store (0
+quarantine files, measured) and never merged. An image of version 1 is not
+read as current (its version does not check) and is rebuilt from its
+ledger; index version 2 and the ledger as `docs/02-store-format.md` now
+states them are frozen from their first landing.
+
+### D-7292 — R4-18 repair 2, the resumed self-check: the ledger's head is found past torn heads; a ledger cut below its index is refused, never rebuilt away; a month's entry counts every bar it set aside and names every cause — 2026-10-24
+
+The repair's self-check before landing, resumed after the second check's
+three blocking issues were closed (D-7291), found two more defects in the
+package's own code and closed one follow-up the second check listed, each by
+a test that failed on the code it read (304c702f5) (`docs/04-invariants.md`
+R418-24..R418-26):
+
+1. **A head torn by a killed first write stopped every later writer.** A
+   feed's first act writes the ledger's head and its line in one write, so a
+   writer killed in it (or refused by a full disk) leaves a strict prefix of
+   the head. The next writer ended it and wrote the head again — and every
+   writer after it looked for the head only at byte 0 and refused the ledger
+   as `quarantine_ledger_damaged` at byte 0, for ever (the first apply's own
+   `dropped` line among them, after its door had promoted), while every
+   reader of the ledger read it whole and undamaged. NOW the writer finds the
+   head by the readers' own rule: the first complete line that is no ended
+   torn append (one positional read of at most 4,096 bytes).
+2. **A ledger cut below what its index describes was rebuilt away.** Put back
+   from an older copy, or truncated, the ledger no longer held acts the index
+   records, and the next writer of any month of the feed rebuilt the index
+   from what was left: a month a lost line had recorded whole read as clear
+   and was served again. NOW an image whose checked header describes MORE of
+   the ledger than it holds is refused by every writer, `quarantine_ledger_cut`
+   (both lengths named, one `store.quarantine` error event), with nothing
+   written; the listings (`Summary::load`, so `/store.json` and
+   `/instruments.json`) refuse it by name too, reading the index header
+   before the ledger so an append between the two reads never looks like a
+   cut; every reader of the index answers `quarantine_index_stale`
+   meanwhile, its sentence saying the ledger must be restored. An image that cannot be
+   trusted at all (a wrong length, a header that does not check) still says
+   nothing of the ledger and is rebuilt from it; `store::quarantine::rebuild`,
+   asked for by name, still rebuilds from the ledger as it is.
+3. **A month dropped for one cause and then recorded whole for another kept
+   only the whole record's bars and cause** (the second check's follow-up on
+   `merged`): its bars were the served generation's after the drops, so the
+   bars the drops set aside before it were left out of the index, its
+   rebuild, the snapshot and the summary, and `/bars.json` said "all 2 of its
+   bars are zero_price" of a month that set aside 6. NOW the one merge rule
+   adds them, and every entry carries every cause its month's acts named
+   (`store::quarantine::Causes`, slot byte 22 of index version 2, which has
+   not landed); `/bars.json`, `/bars/window.json`, `/store.json` (a new
+   `causes` array beside `cause`, the newest act's), the stored sweep, the
+   verb's plan and the doors' refusal name them all.
 
 ### D-4896 — The day band places a refusal by its own run, through the run-id index, and by the clock only when the journal names no run of it; no request decodes every `run` line (IA-10a; L-IA-39 rewritten) — 2026-10-24
 
