@@ -1675,3 +1675,78 @@ fn a_day_closed_again_is_named_once_and_a_deferred_one_at_its_place() {
     name(&mut days, d1);
     assert_eq!(days, [d1, d2, d3, d4], "before every day held, once");
 }
+
+thread_local! {
+    /// Every "gathered month repair finished" event the runs of THIS thread
+    /// told, in order, each field as its text: a run repairs its gathered
+    /// months on the thread that called it, so a test reads only its own.
+    static GATHERED: std::cell::RefCell<Vec<std::collections::BTreeMap<String, String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps `event` for the test on this thread ([`gathered_taken`]).
+pub(in crate::gdfl_import) fn gathered_emitted(event: &telemetry::Event<'_>) {
+    let fields = event
+        .fields()
+        .iter()
+        .map(|(name, value)| {
+            let text = match *value {
+                telemetry::Value::Str(text) => text.to_owned(),
+                telemetry::Value::Uint(count) => count.to_string(),
+                telemetry::Value::Bool(flag) => flag.to_string(),
+                other => format!("{other:?}"),
+            };
+            ((*name).to_owned(), text)
+        })
+        .collect();
+    GATHERED.with_borrow_mut(|kept| kept.push(fields));
+}
+
+/// The gathered-repair events told on this thread since the last call.
+fn gathered_taken() -> Vec<std::collections::BTreeMap<String, String>> {
+    GATHERED.with_borrow_mut(std::mem::take)
+}
+
+/// **THE GATHERED REPAIR TELLS WHAT IT DID** (IA-RP-29, D-4899 (2), D-4893): one
+/// audited event per (instrument, month) repaired once, naming the month,
+/// its days and files, the bars offered and added, whether a generation
+/// was made, the prints carried and the run; a run that repairs nothing
+/// tells none.
+#[test]
+fn the_gathered_repair_tells_each_month_it_repaired_once() {
+    let (apr_2, apr_3) = (day(2024, 4, 2), day(2024, 4, 3));
+    let store = holding("ia17b-told", &[day(2024, 4, 4)]);
+    let _earlier = gathered_taken();
+
+    let got = drive_over(&store, (apr_2, apr_3), asked(), &both).unwrap();
+
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert_eq!(got.months_repaired, 2, "{got:?}");
+    let told = gathered_taken();
+    let months: Vec<&str> = told.iter().map(|one| one["month"].as_str()).collect();
+    assert_eq!(months, ["NIFTY 2024-04", "BANKNIFTY 2024-04"], "{told:?}");
+    for one in &told {
+        let field = |name: &str| one.get(name).map(String::as_str);
+        assert_eq!(field("kind"), Some("indices"), "{one:?}");
+        assert_eq!(field("days"), Some("2"), "{one:?}");
+        assert_eq!(field("files"), Some("2"), "{one:?}");
+        assert_eq!(
+            field("offered"),
+            field("added"),
+            "every bar offered added: {one:?}"
+        );
+        assert_ne!(field("offered"), Some("0"), "{one:?}");
+        assert_eq!(field("new_generation"), Some("true"), "{one:?}");
+        assert_eq!(field("prints_carried"), Some("0"), "{one:?}");
+        assert_eq!(field("code"), Some("gather_repaired"), "{one:?}");
+        assert!(field("run").is_some(), "{one:?}");
+    }
+
+    let again = drive_over(&store, (apr_2, apr_3), asked(), &both).unwrap();
+    assert_eq!(again.months_repaired, 0, "{again:?}");
+    assert!(
+        gathered_taken().is_empty(),
+        "nothing repaired, nothing told"
+    );
+    std::fs::remove_dir_all(&store).unwrap();
+}

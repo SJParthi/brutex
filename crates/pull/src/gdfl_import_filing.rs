@@ -2125,19 +2125,20 @@ fn note_gathered_repair(
         seen.len()
     };
     let month = held_key_text(&offer.key);
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::info(TARGET, GATHERED_REPAIR_FINISHED)
-            .with("kind", ctx.run.kind.as_str())
-            .with("month", month.as_str())
-            .with("days", days)
-            .with("files", offer.files.len())
-            .with("offered", offer.bars.len())
-            .with("added", added)
-            .with("new_generation", landed == Landed::NewGeneration)
-            .with("prints_carried", offer.auction.len())
-            .with("run", ctx.id)
-            .with("code", "gather_repaired"),
-    );
+    let event = telemetry::Event::info(TARGET, GATHERED_REPAIR_FINISHED)
+        .with("kind", ctx.run.kind.as_str())
+        .with("month", month.as_str())
+        .with("days", days)
+        .with("files", offer.files.len())
+        .with("offered", offer.bars.len())
+        .with("added", added)
+        .with("new_generation", landed == Landed::NewGeneration)
+        .with("prints_carried", offer.auction.len())
+        .with("run", ctx.id)
+        .with("code", "gather_repaired");
+    #[cfg(test)]
+    super::tests::gather::gathered_emitted(&event);
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// The message of [`note_gathered_repair`]'s event: a lifecycle word
