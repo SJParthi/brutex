@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -319,3 +319,16 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   mutants run (shard 0/2) keeps running in the background meanwhile.
 - NEXT: when GO: read shard 0's result, run shard 1/2, then the cli mutants, coverage again, merge
   the newest feat/db-fix, final gates.
+
+### 26 Oct 04:08 IST — new session; HOLD lifted; second store run read, merge, cli mutants
+
+- HOLD lifted at 04:06 (`fe6d379e`); GO present. Started from the branch tip `812136f5`.
+- Store mutants, second run (at `b3fc883c`, finished by the last session): 232 mutants, 184 caught,
+  46 unviable, 2 missed, both equivalent and their code removed in `812136f5` (the slot order's `<`,
+  `missing_dirs`' root test). `cargo test -p store --lib --locked recover` at `812136f5`:
+  `ok. 34 passed; 0 failed`.
+- Merged `origin/feat/db-fix` `13dcf5e5` (CLOUD-MUTAPIB and its merge fix), clean: merge `00aea160`.
+  `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets --locked -- -D warnings`
+  clean on the merged tree.
+- cli mutants (41) running.
+- NEXT: the cli mutants' result, store mutants on `812136f5`'s edit, coverage again, workspace tests, deny.
