@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CLOUD-CHG1-OPT: cloud build report
 
@@ -221,3 +221,10 @@ Final list after the remaining gates; the spec's section 7 sequence applies.
   base `40f1cdb2`) is present and there is no `GO-CLOUD-CHG1-OPT`, so no step was started. The two
   runs the previous session left going were lost with its container; NEXT item 1 now means a fresh
   workspace test run. Waiting as the README says. NEXT: unchanged.
+- 25 Oct, 13:12 IST: HOLD lifted (base `1dcc33e9`). Merged `origin/feat/db-fix` at `666ddf7f` into
+  `bbdd1738` (the `docs/05-decisions.md` append conflict resolved as both, in merge order: D-7300
+  first, then D-6740..D-6742). fmt exit 0, clippy exit 0, deny red on the base's RUSTSEC-2026-0386
+  only. The workspace test run hung again on
+  `a_full_calendar_pool_refuses_the_census_and_the_audit`; the same test run ALONE on the
+  unmodified base `666ddf7f` hung the same way (no output for 8 min at 0% CPU, killed). Final gates
+  in progress.
