@@ -232,3 +232,28 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
 - NEXT: the served bench (`cargo bench -p api --bench ratio --locked -j 2 -- --served-only`, running),
   its copies rows into `docs/06-limits.md` L-CC5; then coverage and mutants on the touched modules
   (disk is 11 GB free: target/ is cleared between them).
+
+### 2026-10-25 — after save point 7 (commits the earlier session pushed without a log entry)
+
+- `9b03bdd3`: `docs/06-limits.md` L-CC5-1..4 with the gate-8 bench's measured figures (the served
+  bench, `cargo bench -p api --bench ratio --locked -j 2 -- --served-only`; figures in the rows).
+- `7fdc5408`: a coverage run found reachable lines of `copies_register.rs` with no test; 11 tests
+  added; `answer()` asks the walk lock (never waiting) before it compares the held answer.
+- `532b9fe0`: tests for the unreached lines of `copies_route.rs` and `disk_copies_command.rs`.
+- `5233e81b`: `cargo mutants` found `replace > with >= in copy_roots` surviving; a test holds the
+  byte ceiling exactly (shown red with the mutant applied by hand, green without).
+
+### 2026-10-25/26 — new container, save point 8 (GO, no HOLD; base `fe6d379e`)
+
+- New container again: reinstalled `cargo-deny` 0.20.2, `cargo-llvm-cov` 0.9.1, `cargo-mutants`
+  27.1.0 from crates.io, nightly with `llvm-tools-preview`.
+- Merged the newest `origin/feat/db-fix` (`13dcf5e5`, CLOUD-MUTAPIB merge fix): textually clean,
+  merge commit `9e6f55fc`, pushed.
+- `cargo build --workspace --locked --all-targets -j 3`: `Finished`, no warning.
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings`: `Finished`, no warning.
+- This part's tests after the merge: `copies_register` 35 passed; `copies_route` 8 passed;
+  `cli -- disk_copies every_command a_known_command store_write sweep` 87 passed;
+  `store settings::tests` 22 passed, 3 FAILED (the three root-permission tests shown red on the
+  base at save point 7; `the_extra_copy_roots_key_is_checked_and_stored_canonically` ok);
+  `no_scheduler_delete` 5 passed; `api -- pool_table operation_audit settings_route` 55 passed.
