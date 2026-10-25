@@ -263,8 +263,8 @@ fn journal_view(root: &Path, ask: &Ask, dropped: &Dropped) -> Result<Reread, Str
     let mut view = Reread::default();
     for day in dropped.days() {
         let date = ask.date(day);
-        let on = pull::session::Day::new(ask.month.year(), ask.month.month(), day)
-            .map_err(|why| format!("{date}: {why}"))?;
+        let on = pull::session::Day::new(ask.month.year(), ask.month.month(), day);
+        let on = on.map_err(|why| format!("{date}: {why}"))?;
         if journal.is_done(kind, on, "*") {
             view.lines.push(date);
         } else {
@@ -286,8 +286,14 @@ fn reread_line(kind: ImportKind, date: &str) -> String {
 }
 
 /// Writes the read-again lines for the dropped days the journal shows done,
-/// under the journal's own lock, never beside a live GDFL run.
-fn write_reread(root: &Path, ask: &Ask, dropped: &Dropped) -> Result<Reread, String> {
+/// under the journal's own lock (waited for at most `wait`), never beside a
+/// live GDFL run.
+fn write_reread(
+    root: &Path,
+    ask: &Ask,
+    dropped: &Dropped,
+    wait: std::time::Duration,
+) -> Result<Reread, String> {
     let view = journal_view(root, ask, dropped)?;
     if view.lines.is_empty() {
         return Ok(view);
@@ -301,8 +307,8 @@ fn write_reread(root: &Path, ask: &Ask, dropped: &Dropped) -> Result<Reread, Str
     let kind = kind_of(ask)?;
     let journal = pull::gdfl_import::journal_path(root);
     let lock = pull::gdfl_import::journal_lock_path(&journal);
-    let _held = pull::gdfl_run::locks::take_path_within(&lock, pull::gdfl_run::locks::LOCK_WAIT)
-        .map_err(|fault| format!("{}: {fault}", lock.display()))?;
+    let held = pull::gdfl_run::locks::take_path_within(&lock, wait);
+    let _held = held.map_err(|fault| format!("{}: {fault}", lock.display()))?;
     append_lines(
         &journal,
         &view
@@ -318,24 +324,25 @@ fn write_reread(root: &Path, ask: &Ask, dropped: &Dropped) -> Result<Reread, Str
 /// line is torn is refused, never joined: the importer closes its own torn
 /// line on its next run.
 fn append_lines(journal: &Path, lines: &[String]) -> Result<(), String> {
-    use std::io::{Read as _, Seek as _, Write as _};
+    use std::io::Write as _;
+    use std::os::unix::fs::FileExt as _;
     let named = |why: std::io::Error| format!("{}: {why}", journal.display());
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .append(true)
         .open(journal)
         .map_err(named)?;
-    if file.metadata().map_err(named)?.len() > 0 {
-        let mut last = [0u8; 1];
-        file.seek(std::io::SeekFrom::End(-1)).map_err(named)?;
-        file.read_exact(&mut last).map_err(named)?;
-        if last != *b"\n" {
-            return Err(format!(
-                "{} ends in a torn line; the importer closes it on its next run, and the \
-                 read-again lines are not joined to it",
-                journal.display()
-            ));
-        }
+    // ITS LAST BYTE, or none: an empty journal reads nothing and ends whole.
+    let len = file.metadata().map_err(named)?.len();
+    let mut last = *b"\n";
+    file.read_at(&mut last, len.saturating_sub(1))
+        .map_err(named)?;
+    if last != *b"\n" {
+        return Err(format!(
+            "{} ends in a torn line; the importer closes it on its next run, and the \
+             read-again lines are not joined to it",
+            journal.display()
+        ));
     }
     let mut text = String::new();
     for line in lines {
@@ -518,14 +525,7 @@ fn run_yes(out: &mut String, root: &Path, ask: &Ask, path: StorePath<'_>) -> u8 
                 "  wrote     revision {} ({}; {} ordinal(s) stepped over), promoted; record {} at \
                  {}",
                 done.record.revision.ordinal(),
-                if done.resumed {
-                    "found served: a run cut off before its record"
-                } else {
-                    match done.published {
-                        store::repair::Published::Created => "created",
-                        store::repair::Published::Reused => "found complete and reused",
-                    }
-                },
+                done.how(),
                 done.skipped.len(),
                 done.record.record,
                 store::recover::record_path(root, path).display()
@@ -535,7 +535,7 @@ fn run_yes(out: &mut String, root: &Path, ask: &Ask, path: StorePath<'_>) -> u8 
         Err(why) => return refused(out, ask, &why),
     };
     render_record(out, ask, &record);
-    let reread = match write_reread(root, ask, &record.dropped) {
+    let reread = match write_reread(root, ask, &record.dropped, pull::gdfl_run::locks::LOCK_WAIT) {
         Ok(reread) => reread,
         Err(why) => {
             let _ = writeln!(out, "MONTH RECOVER: the re-read was not named: {why}");
@@ -549,12 +549,7 @@ fn run_yes(out: &mut String, root: &Path, ask: &Ask, path: StorePath<'_>) -> u8 
     };
     render_view(out, &reread);
     let line = ledger_line(path, ask, &record, &reread);
-    let ended = pull::audit_ledger::append(root, ask.vendor, LEDGER, std::slice::from_ref(&line))
-        .map_err(|why| format!("the end record was not written: {why}"))
-        .and_then(|()| {
-            store::recover::note_reread(root, path, &record)
-                .map_err(|why| format!("the re-read was not noted: {why}"))
-        });
+    let ended = end_record(root, ask.vendor, &line).and_then(|()| noted(root, path, &record));
     match ended {
         Ok(noted) => {
             crate::note(
@@ -587,6 +582,19 @@ fn run_yes(out: &mut String, root: &Path, ask: &Ask, path: StorePath<'_>) -> u8 
             FAILED
         }
     }
+}
+
+/// The run's end record, one line of `audit/<vendor>.recoveries`.
+fn end_record(root: &Path, vendor: Vendor, line: &str) -> Result<(), String> {
+    let lines = [line.to_owned()];
+    let appended = pull::audit_ledger::append(root, vendor, LEDGER, &lines);
+    appended.map_err(|why| format!("the end record was not written: {why}"))
+}
+
+/// The recovery's record, marked: its re-read is named.
+fn noted(root: &Path, path: StorePath<'_>, record: &Record) -> Result<Record, String> {
+    let noted = store::recover::note_reread(root, path, record);
+    noted.map_err(|why| format!("the re-read was not noted: {why}"))
 }
 
 /// Runs the verb against the store root `store` names, so every arm is driven

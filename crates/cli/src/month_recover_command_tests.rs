@@ -45,6 +45,7 @@ const INDEX: Policy = Policy {
 struct Store {
     root: PathBuf,
     vendor: Vendor,
+    segment: &'static str,
     month: YearMonth,
 }
 
@@ -59,6 +60,7 @@ impl Store {
         Self {
             root,
             vendor,
+            segment: "INDEX",
             month: YearMonth::new(2020, 3).unwrap(),
         }
     }
@@ -71,7 +73,7 @@ impl Store {
         StorePath::new(PathParts {
             vendor: self.vendor,
             exchange: "NSE",
-            segment: "INDEX",
+            segment: self.segment,
             symbol: "NIFTY",
             contract: None,
             timeframe: Timeframe::MINUTE_1,
@@ -147,7 +149,7 @@ impl Store {
         let code = command_with(
             &[
                 self.vendor.as_str(),
-                "NSE/INDEX/NIFTY",
+                &format!("NSE/{}/NIFTY", self.segment),
                 "1min",
                 "2020-03",
                 form,
@@ -630,4 +632,148 @@ fn the_ledger_is_the_vendors_recoveries_file() {
             .extension()
             .is_some()
     );
+}
+
+/// A SEGMENT NO IMPORT KIND FILES: a GDFL month outside every import kind's
+/// segment has no journal to name its days in. The plan and the recovery
+/// say so by name and name the days for a re-read by hand; no journal is
+/// written, and the end record lists no read-again line.
+#[test]
+fn a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand() {
+    let mut store = Store::new(Vendor::Gdfl);
+    store.segment = "BOGUS";
+    store.tear(false);
+    let (code, out) = store.run("--plan");
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("no GDFL import kind files the segment BOGUS"),
+        "{out}"
+    );
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, OK, "{out}");
+    assert!(!store.root.join("imports").exists(), "no journal written");
+    assert!(
+        store.ledger().contains(" reread=none "),
+        "{}",
+        store.ledger()
+    );
+}
+
+/// CRASH BETWEEN THE PROMOTION AND THE RECORD, at the verb: the record file
+/// lost (a door cut off before it). The plan says the revision is served
+/// and only the record is owed; the yes writes the record, says it found
+/// the revision served, and writes the end record again.
+#[test]
+fn a_door_cut_off_before_its_record_is_planned_and_resumed_by_name() {
+    let store = Store::new(Vendor::Gdfl);
+    store.tear(true);
+    store.journal(JOURNAL);
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, OK, "{out}");
+    fs::remove_file(store::recover::record_path(&store.root, store.path())).unwrap();
+    let (code, out) = store.run("--plan");
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("promoted  revision 1 is served already"),
+        "{out}"
+    );
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("found served: a run cut off before its record"),
+        "{out}"
+    );
+    assert_eq!(store.ledger().lines().count(), 2, "{}", store.ledger());
+}
+
+/// THE END RECORD CANNOT BE WRITTEN (a file holds the audit directory's
+/// name): the recovery stands, the verb fails by name, and the same command
+/// once the directory is back writes the end record and the note.
+#[test]
+fn an_end_record_that_cannot_be_written_fails_by_name_and_is_written_next_run() {
+    let store = Store::new(Vendor::Gdfl);
+    store.tear(true);
+    store.journal(JOURNAL);
+    fs::write(store.root.join("audit"), b"not a directory").unwrap();
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("the end record was not written"), "{out}");
+    assert!(out.contains("the same command writes it"), "{out}");
+    fs::remove_file(store.root.join("audit")).unwrap();
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(store.ledger().lines().count(), 1);
+}
+
+/// THE STEPS' OWN REFUSALS, each by name: the journal's lock held past the
+/// wait, a journal that cannot be opened, a note against a recovery that is
+/// not the month's, a contract segment the store does not render, the
+/// receipt of a view with no day on either side, and the env door's misuse.
+#[test]
+fn every_step_refusal_is_said_by_name() {
+    let store = Store::new(Vendor::Gdfl);
+    store.tear(true);
+    store.journal(JOURNAL);
+    let arguments = ["gdfl", "NSE/INDEX/NIFTY", "1min", "2020-03", "--yes"];
+    let ask = super::ask(&arguments).unwrap();
+    let store::recover::Plan::Cut { dropped, .. } =
+        store::recover::plan(&store.root, store.path(), Store::symbol_id()).unwrap()
+    else {
+        panic!("cut");
+    };
+    let journal = pull::gdfl_import::journal_path(&store.root);
+    let lock = pull::gdfl_import::journal_lock_path(&journal);
+    let held =
+        pull::gdfl_run::locks::take_path_within(&lock, std::time::Duration::from_secs(1)).unwrap();
+    let waited =
+        super::write_reread(&store.root, &ask, &dropped, std::time::Duration::ZERO).unwrap_err();
+    assert!(waited.contains(&lock.display().to_string()), "{waited}");
+    drop(held);
+
+    let gone = store.root.join("no-such-directory").join("journal");
+    let refused = super::append_lines(&gone, &["x".to_owned()]).unwrap_err();
+    assert!(refused.contains("no-such-directory"), "{refused}");
+    let empty = store.root.join("empty.journal");
+    fs::write(&empty, b"").unwrap();
+    super::append_lines(&empty, &["a whole line".to_owned()]).unwrap();
+    assert_eq!(fs::read_to_string(&empty).unwrap(), "a whole line\n");
+
+    let (code, out) = store.run("--yes");
+    assert_eq!(code, OK, "{out}");
+    let record = store::recover::read_record(&store.root, store.path())
+        .unwrap()
+        .unwrap();
+    let foreign = store::recover::Record {
+        revision: store::repair::Revision::new(7).unwrap(),
+        ..record
+    };
+    let refused = super::noted(&store.root, store.path(), &foreign).unwrap_err();
+    assert!(refused.contains("the re-read was not noted"), "{refused}");
+
+    let mut out = String::new();
+    assert_eq!(
+        command_with(
+            &[
+                "gdfl",
+                "NSE/FNO/NIFTY/not-a-contract",
+                "1min",
+                "2020-03",
+                "--plan"
+            ],
+            &|| Ok(PathBuf::from("/nowhere")),
+            &mut out
+        ),
+        MISUSED
+    );
+    assert!(out.contains("is not a contract segment"), "{out}");
+
+    let mut out = String::new();
+    super::render_view(&mut out, &super::Reread::default());
+    assert!(
+        out.contains("given a read-again line: none; not done, read by any Resume: none"),
+        "{out}"
+    );
+
+    let mut out = String::new();
+    assert_eq!(super::command(&["gdfl"], &mut out), MISUSED, "{out}");
 }

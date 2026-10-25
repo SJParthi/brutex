@@ -626,6 +626,7 @@ fn a_full_month_cut_while_its_door_was_cut_off_resumes_at_the_row_ceiling() {
         panic!("recovered");
     };
     assert_eq!(done.published, Published::Reused, "the complete revision");
+    assert_eq!(done.how(), "found complete and reused");
     assert_eq!(done.record.revision, Revision::new(1).unwrap());
     assert_eq!(store.served_bars().unwrap(), kept.to_vec());
     store.reread(&every[43_200..]);
@@ -812,7 +813,7 @@ fn a_torn_record_file_is_stepped_over_and_garbage_is_refused() {
         reread_named: true,
         record: 0,
     };
-    let bytes = record.encode().unwrap();
+    let bytes = record.encode(Path::new("/r")).unwrap();
     assert_eq!(bytes.len() as u64, RECORD_LEN);
     assert_eq!(super::Record::decode(&bytes, 0), Some(record));
     assert_eq!(super::Record::decode(&bytes, 1), None, "moved");
@@ -1312,4 +1313,515 @@ fn read_record_or_recover(store: &Store) -> Record {
         Outcome::Recovered(done) => done.record,
         other => panic!("{other:?}"),
     }
+}
+
+/// A month torn the commonest way: 100 bars of day 2 durable, then a day-3
+/// append of 80 whose header slot reached the drive and nothing else did.
+fn torn_month(store: &Store) {
+    store.commit(&store.day(2, 100));
+    let before = store.image();
+    store.commit(&store.day(3, 80));
+    let after = store.image();
+    let writes = writes(&before, &after);
+    let slot = writes
+        .iter()
+        .position(|write| matches!(write, Write::Slot(..)))
+        .unwrap();
+    store.put(&torn(&before, &writes, 1 << slot));
+}
+
+/// OUT OF THE BOX: A MISDIRECTED WRITE. One header slot's bytes landed in
+/// the other's place, so the month is refused (a slot holds a commit that
+/// belongs in the other) while every record its newest commit names checks
+/// out. Nothing is torn, so nothing is cut: the door refuses by name, says
+/// why, and writes nothing, in either direction of the copy.
+#[test]
+fn a_slot_written_into_the_others_place_is_not_a_torn_tail() {
+    let _sink = crate::emits::hold_the_sink();
+    for (from, to) in [(0usize, 16_384usize), (16_384, 0)] {
+        let store = Store::new(2020, 3);
+        store.commit(&store.day(2, 100));
+        store.commit(&store.day(3, 80));
+        let mut image = store.image();
+        let slot = image.bin[from..from + 64].to_vec();
+        image.bin[to..to + 64].copy_from_slice(&slot);
+        store.put(&image);
+        let tree = store.tree();
+        let refused = store.recover().unwrap_err();
+        assert_eq!(refused.word(), "nothing_verifies", "{refused}");
+        assert!(refused.to_string().contains("not a torn tail"), "{refused}");
+        assert_eq!(store.tree(), tree, "nothing was written");
+    }
+}
+
+/// EMPTY HEADER AND AN UNPROVEN FIRST BLOCK (two extremes): a month whose
+/// whole header region is zeros has no commit to name and no claim to cut
+/// against; a one-block month whose first record's bytes flipped has no
+/// whole block that verifies. Each is refused by name, nothing written.
+#[test]
+fn a_month_with_no_header_left_or_no_proven_block_is_refused_by_name() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 80));
+    let mut image = store.image();
+    image.bin[..32_768].fill(0);
+    store.put(&image);
+    let tree = store.tree();
+    let refused = store.plan().unwrap_err();
+    let RecoverError::NoCommit { tried, .. } = &refused else {
+        panic!("{refused:?}");
+    };
+    assert!(tried.is_empty(), "no slot to try: {tried:?}");
+    assert_eq!(store.recover().unwrap_err(), refused);
+    assert_eq!(store.tree(), tree);
+
+    let store = Store::new(2020, 3);
+    store.commit(&store.day(2, 80));
+    let mut image = store.image();
+    image.bin[32_768 + 9] ^= 0x01;
+    store.put(&image);
+    let tree = store.tree();
+    let refused = store.plan().unwrap_err();
+    assert_eq!(refused.word(), "nothing_verifies", "{refused}");
+    assert_eq!(store.recover().unwrap_err(), refused);
+    assert_eq!(store.tree(), tree);
+}
+
+/// LINKS AND HOLES WHERE THE DOOR LOOKS: a record file that is a link, a
+/// month lock that is a link, a lock whose bar file is gone and a bar file
+/// that is a link are each refused by name before anything is written.
+#[test]
+fn links_and_a_missing_bar_file_are_refused_by_name() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    let at = record_path(&store.root, store.path());
+    fs::create_dir_all(at.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(store.root.join("nowhere"), &at).unwrap();
+    // The plan of a month served from its original reads no record, so it
+    // still names the cut; the recovery meets the link before any write.
+    assert!(matches!(store.plan(), Ok(Plan::Cut { .. })));
+    let refused = store.recover().unwrap_err();
+    assert!(
+        matches!(refused, RecoverError::Store(StoreError::Symlinked { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(store.served(), 0);
+    assert!(
+        !store.root.join("bar-revisions-v1").exists(),
+        "nothing published"
+    );
+    let read = read_record(&store.root, store.path()).unwrap_err();
+    assert_eq!(read.word(), "record_refused");
+    assert!(read.to_string().contains("cannot open it"), "{read}");
+    fs::remove_file(&at).unwrap();
+
+    let lock = store.file(FileKind::Lock);
+    fs::rename(&lock, store.root.join("lock-aside")).unwrap();
+    std::os::unix::fs::symlink(store.root.join("lock-aside"), &lock).unwrap();
+    let refused = store.plan().unwrap_err();
+    assert_eq!(refused.word(), "io", "{refused}");
+    assert!(refused.to_string().contains("open the month's lock"));
+    fs::remove_file(&lock).unwrap();
+    fs::rename(store.root.join("lock-aside"), &lock).unwrap();
+
+    let bars = store.file(FileKind::Bars);
+    fs::rename(&bars, store.root.join("bars-aside")).unwrap();
+    let missing = store.recover().unwrap_err();
+    assert_eq!(missing.word(), "month_missing", "{missing}");
+    std::os::unix::fs::symlink(store.root.join("bars-aside"), &bars).unwrap();
+    let linked = store.recover().unwrap_err();
+    assert_eq!(linked.word(), "io", "{linked}");
+    assert!(linked.to_string().contains("open the bar file"), "{linked}");
+    assert_eq!(
+        read_record(&store.root, store.path()),
+        Ok(None),
+        "no record"
+    );
+}
+
+/// FULL DISK'S COUSIN: the record's directory cannot be made (a file holds
+/// its name). The door is refused by name before it publishes, and the
+/// month stays served from its original.
+#[test]
+fn a_record_directory_that_cannot_be_made_stops_the_door_before_it_publishes() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    fs::write(store.root.join(super::ROOT), b"not a directory").unwrap();
+    let refused = store.recover().unwrap_err();
+    assert_eq!(refused.word(), "io", "{refused}");
+    assert!(
+        refused.to_string().contains("create record directories"),
+        "{refused}"
+    );
+    assert_eq!(store.served(), 0);
+    assert!(!store.root.join("bar-revisions-v1").exists());
+}
+
+/// TWO DOORS AT ONCE: a second door finishes the recovery between this
+/// door's plan and its record lock. This door answers with what the other
+/// recorded and writes nothing more: one revision, one record.
+#[test]
+fn a_door_that_finished_first_is_the_answer_and_nothing_is_written_twice() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    let (root, path) = (store.root.clone(), store.path());
+    super::BETWEEN.with(|between| {
+        *between.borrow_mut() = Some(Box::new(move || {
+            assert!(matches!(
+                recover(&root, path, SYMBOL),
+                Ok(Outcome::Recovered(_))
+            ));
+        }));
+    });
+    let Outcome::Already(record) = store.recover().unwrap() else {
+        panic!("the other door's record is the answer");
+    };
+    assert_eq!(record.record, 0, "one record");
+    assert_eq!(record.revision, Revision::new(1).unwrap());
+    assert_eq!(
+        fs::metadata(record_path(&store.root, store.path()))
+            .unwrap()
+            .len(),
+        RECORD_LEN
+    );
+    assert_eq!(store.served_bars().unwrap(), store.day(2, 100));
+}
+
+/// MAXIMUM ORDINALS: an ordinal another request left unfinished is stepped
+/// over and named, and the recovery lands at the next; when every ordinal
+/// is held the door is refused at the revision limit and nothing is served.
+#[test]
+fn held_ordinals_are_stepped_over_and_the_last_refuses_at_the_limit() {
+    let _sink = crate::emits::hold_the_sink();
+    let block = |store: &Store, ordinal: u32| {
+        let at = store.path().to_path_buf(&repair::revision_root(
+            &store.root,
+            Revision::new(ordinal).unwrap(),
+        ));
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(&at, b"").unwrap();
+    };
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    block(&store, 1);
+    let Outcome::Recovered(done) = store.recover().unwrap() else {
+        panic!("recovered");
+    };
+    assert_eq!(done.record.revision, Revision::new(2).unwrap());
+    assert_eq!(done.skipped.len(), 1);
+    assert_eq!(done.skipped[0].0, 1);
+
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    for ordinal in 1..=repair::MAX_REVISIONS {
+        block(&store, ordinal);
+    }
+    let refused = store.recover().unwrap_err();
+    assert_eq!(
+        refused,
+        RecoverError::Repair(repair::RepairError::RevisionLimit)
+    );
+    assert_eq!(store.served(), 0);
+    assert_eq!(
+        read_record(&store.root, store.path()),
+        Ok(None),
+        "the record file holds no record"
+    );
+}
+
+/// A FULL RECORD FILE: a month whose record file already holds the most
+/// records a month's file holds refuses one more, by name, and the file
+/// keeps its bytes.
+#[test]
+fn a_full_record_file_refuses_one_more_record() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    let recorded = read_record_or_recover(&store);
+    let at = record_path(&store.root, store.path());
+    let last = super::MAX_RECORDS - 1;
+    let moved = Record {
+        record: last,
+        ..recorded
+    };
+    let mut bytes = fs::read(&at).unwrap();
+    bytes.resize(usize::try_from(last * RECORD_LEN).unwrap(), 0);
+    bytes.extend_from_slice(&moved.encode(&at).unwrap());
+    fs::write(&at, &bytes).unwrap();
+    let refused = super::note_reread(&store.root, store.path(), &recorded).unwrap_err();
+    assert_eq!(refused.word(), "record_refused", "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("the most a month's file holds")
+    );
+    assert_eq!(fs::read(&at).unwrap(), bytes);
+}
+
+/// AFTER THE RECOVERY, A LATER GENERATION: the re-read promotes a newer
+/// revision over the recovered one, and a revision another door promoted
+/// from a different cut of the same torn bytes is not this door's. Both
+/// are answered as served (clean at their ordinal), and nothing is written.
+#[test]
+fn a_later_or_a_foreign_cut_revision_is_served_as_it_is() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    read_record_or_recover(&store);
+    store.reread(&store.day(3, 80));
+    assert_eq!(store.served(), 2);
+    let tree = store.tree();
+    assert_eq!(
+        store.plan().unwrap(),
+        Plan::Clean {
+            ordinal: 2,
+            n_valid: 180
+        }
+    );
+    assert_eq!(store.tree(), tree);
+
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    let Plan::Cut { cut, .. } = store.plan().unwrap() else {
+        panic!("cut");
+    };
+    let kept = store.day(2, 73);
+    let other = Cut {
+        header: Header {
+            n_valid: 73,
+            last_ts_micros: kept[72].ts_micros,
+            ..cut.header()
+        },
+        ..cut.clone()
+    };
+    let revision = Revision::new(1).unwrap();
+    within(&other, || {
+        repair::publish(
+            &store.root,
+            store.path(),
+            SYMBOL,
+            revision,
+            other.header(),
+            &kept,
+        )
+    })
+    .unwrap();
+    within(&other, || {
+        generation::promote(&store.root, store.path(), SYMBOL, revision)
+    })
+    .unwrap();
+    assert_eq!(
+        store.plan().unwrap(),
+        Plan::Clean {
+            ordinal: 1,
+            n_valid: 73
+        }
+    );
+}
+
+/// THE HELPERS' OWN REFUSALS, each said by name: a lock held or refused by
+/// the host, a name the host cannot look at, a read refusal of either kind,
+/// a record read by number, a leaf outside the root, a header that does not
+/// encode, kept rows that are empty, out of the month, out of order or not
+/// the header's, a cut planned against other bytes, and a repair refusal.
+#[test]
+fn every_helper_refusal_is_said_by_name() {
+    let _sink = crate::emits::hold_the_sink();
+    let path = PathBuf::from("/store/x.lock");
+    assert_eq!(
+        super::lock_refused(path.clone(), "lock", std::fs::TryLockError::WouldBlock),
+        RecoverError::Store(StoreError::Locked { path: path.clone() })
+    );
+    let host = super::lock_refused(
+        path.clone(),
+        "lock",
+        std::fs::TryLockError::Error(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+    );
+    assert_eq!(host.to_string(), "io: lock /store/x.lock: Unsupported");
+
+    let store = Store::new(2020, 3);
+    let file = store.root.join("plain");
+    fs::write(&file, b"x").unwrap();
+    let under_a_file = super::present(&file.join("below"), "inspect").unwrap_err();
+    assert_eq!(under_a_file.word(), "io");
+    assert!(super::present(&file, "inspect").unwrap().is_some());
+    assert!(
+        super::present(&store.root.join("absent"), "inspect")
+            .unwrap()
+            .is_none()
+    );
+
+    assert_eq!(
+        super::why_kind(&crate::safe_open::ReadRefusal::NotRegular {
+            path: path.clone(),
+            found: crate::safe_open::Found::Directory,
+        }),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        super::why_kind(&crate::safe_open::ReadRefusal::Io {
+            path: path.clone(),
+            action: "open",
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }),
+        std::io::ErrorKind::PermissionDenied
+    );
+    let numbered = super::record_io(&path, "read record", Some(7))(std::io::Error::from(
+        std::io::ErrorKind::UnexpectedEof,
+    ));
+    assert!(
+        numbered.to_string().contains("cannot read record 7:"),
+        "{numbered}"
+    );
+    assert_eq!(
+        super::refuse_links(Path::new("/store"), Path::new("/elsewhere/x")),
+        Ok(())
+    );
+
+    store.commit(&store.day(2, 10));
+    let header = BarFile::open_existing(&store.root, store.path(), SYMBOL)
+        .unwrap()
+        .header();
+    let unencodable = Record {
+        source: Header {
+            record_stride: 7,
+            ..header
+        },
+        ..read_record_template(&store, header)
+    };
+    let refused = unencodable.encode(&path).unwrap_err();
+    assert_eq!(refused.word(), "record_refused");
+    assert!(refused.to_string().contains("does not encode"), "{refused}");
+
+    let rows = store.day(2, 10);
+    let check = |header: Header, rows: &[Bar]| super::check_rows(store.path(), header, rows);
+    assert_eq!(check(header, &rows), Ok(()));
+    assert!(check(header, &[]).unwrap_err().contains("names no record"));
+    let mut reversed = rows.clone();
+    reversed.reverse();
+    assert!(check(header, &reversed).is_err(), "out of order");
+    let next_month = [bar(store.month.ist_bounds_micros().1 + MINUTE, 0)];
+    assert!(check(header, &next_month).is_err(), "outside the month");
+    let late_first = Header {
+        first_ts_micros: header.first_ts_micros + MINUTE,
+        ..header
+    };
+    assert!(
+        check(late_first, &rows)
+            .unwrap_err()
+            .contains("its header says")
+    );
+    let early_last = Header {
+        last_ts_micros: header.last_ts_micros - MINUTE,
+        ..header
+    };
+    assert!(
+        check(early_last, &rows)
+            .unwrap_err()
+            .contains("its header says")
+    );
+
+    let elsewhere = Cut {
+        bars: store.file(FileKind::Bars),
+        len: 0,
+        region_crc: 0,
+        header: Header {
+            n_valid: 9,
+            ..header
+        },
+        basis: Basis::Commit { generation: 1 },
+    };
+    let moved = super::verified(&store.root, store.path(), SYMBOL, &elsewhere).unwrap_err();
+    assert!(moved.contains("moved since"), "{moved}");
+
+    assert_eq!(
+        RecoverError::from(repair::RepairError::RevisionLimit).word(),
+        "repair_refused"
+    );
+}
+
+/// A record of `header`'s month, its fields invented.
+fn read_record_template(store: &Store, header: Header) -> Record {
+    Record {
+        revision: Revision::new(1).unwrap(),
+        basis: Basis::Commit {
+            generation: header.generation,
+        },
+        source: header,
+        dropped: Dropped {
+            kept: header.n_valid,
+            last_kept_ts: header.last_ts_micros,
+            claimed: header.n_valid + 1,
+            claimed_generation: header.generation + 1,
+            claimed_last_ts: store.at(3, 0),
+            bars: 1,
+            first_day: 2,
+            last_day: 3,
+        },
+        bin_len: 0,
+        region_crc: 0,
+        recovered_at_micros: 0,
+        reread_named: false,
+        record: 0,
+    }
+}
+
+/// A RECORD OF ANOTHER RECOVERY in the month's file is never this one's
+/// answer: with the month served from its original, and with it served from
+/// this cut's own revision (a door cut off before its record), the door
+/// recovers or resumes and appends its own record after the stranger's.
+#[test]
+fn a_record_of_another_recovery_is_not_this_ones_answer() {
+    let _sink = crate::emits::hold_the_sink();
+    let stranger = |store: &Store| {
+        let at = record_path(&store.root, store.path());
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        let header = Header {
+            n_valid: 1,
+            ..Header::genesis(SYMBOL, 60, crate::format::FLAG_CHECKSUMS)
+        };
+        let other = Record {
+            revision: Revision::new(9).unwrap(),
+            ..read_record_template(store, header)
+        };
+        fs::write(&at, other.encode(&at).unwrap()).unwrap();
+    };
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    stranger(&store);
+    let Outcome::Recovered(done) = store.recover().unwrap() else {
+        panic!("recovered");
+    };
+    assert_eq!(done.record.record, 1, "after the stranger's");
+    assert_eq!(done.how(), "created");
+
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    read_record_or_recover(&store);
+    stranger(&store);
+    let Outcome::Recovered(done) = store.recover().unwrap() else {
+        panic!("resumed");
+    };
+    assert!(done.resumed);
+    assert_eq!(done.how(), "found served: a run cut off before its record");
+    assert_eq!(done.record.revision, Revision::new(1).unwrap());
+    assert_eq!(done.record.record, 1);
+}
+
+/// A REVISION ROOT THAT CANNOT BE MADE (a file holds its name) is the
+/// publication's refusal, said as the repair door says it; nothing is
+/// promoted and no record is written.
+#[test]
+fn a_revision_root_that_cannot_be_made_is_the_publications_refusal() {
+    let _sink = crate::emits::hold_the_sink();
+    let store = Store::new(2020, 3);
+    torn_month(&store);
+    fs::write(store.root.join("bar-revisions-v1"), b"not a directory").unwrap();
+    let refused = store.recover().unwrap_err();
+    assert_eq!(refused.word(), "repair_refused", "{refused}");
+    assert_eq!(store.served(), 0);
+    assert_eq!(read_record(&store.root, store.path()), Ok(None));
 }

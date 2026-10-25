@@ -373,14 +373,11 @@ pub struct Record {
 }
 
 impl Record {
-    fn encode(&self) -> Result<[u8; RECORD], RecoverError> {
+    fn encode(&self, at: &Path) -> Result<[u8; RECORD], RecoverError> {
         let source = self
             .source
             .commit()
-            .map_err(|why| RecoverError::Record {
-                path: PathBuf::new(),
-                reason: format!("the cut header does not encode: {why}"),
-            })?
+            .map_err(|why| record_refused(at, format!("the cut header does not encode: {why}")))?
             .bytes;
         let mut bytes = [0u8; RECORD];
         let fields: [(usize, &[u8]); 17] = [
@@ -402,15 +399,13 @@ impl Record {
             (136, &self.dropped.bars.to_le_bytes()),
             (144, &self.recovered_at_micros.to_le_bytes()),
         ];
+        // Each field lands at its fixed offset; the table above fits the
+        // record by construction, so a copy never runs past it.
         for (at, field) in fields {
-            if let Some(slot) = bytes.get_mut(at..at + field.len()) {
-                slot.copy_from_slice(field);
-            }
+            put(&mut bytes, at, field);
         }
         let crc = seal(&bytes, self.record);
-        if let Some(slot) = bytes.get_mut(RECORD - 4..) {
-            slot.copy_from_slice(&crc.to_le_bytes());
-        }
+        put(&mut bytes, RECORD - 4, &crc.to_le_bytes());
         Ok(bytes)
     }
 
@@ -476,6 +471,13 @@ impl Record {
     }
 }
 
+/// Copies `field` into `bytes` from `at` on.
+fn put(bytes: &mut [u8; RECORD], at: usize, field: &[u8]) {
+    for (to, from) in bytes.iter_mut().skip(at).zip(field) {
+        *to = *from;
+    }
+}
+
 /// CRC-32C of a record's first 252 bytes followed by its index, so a record
 /// copied to another position does not verify there.
 fn seal(bytes: &[u8; RECORD], record: u64) -> u32 {
@@ -521,6 +523,18 @@ pub struct Recovered {
     /// `true` when this call found its own promotion already made (a run cut
     /// off before its record) and wrote only the record.
     pub resumed: bool,
+}
+
+impl Recovered {
+    /// How the served revision came to be, in words for a receipt.
+    #[must_use]
+    pub const fn how(&self) -> &'static str {
+        match (self.resumed, self.published) {
+            (true, _) => "found served: a run cut off before its record",
+            (false, Published::Created) => "created",
+            (false, Published::Reused) => "found complete and reused",
+        }
+    }
 }
 
 /// Named refusals of the recovery door.
@@ -618,19 +632,19 @@ impl fmt::Display for RecoverError {
                 path.display()
             ),
             Self::NoCommit { refused, tried } => {
+                let tried = tried
+                    .iter()
+                    .map(|one| {
+                        format!(
+                            "; generation {} ({} bars): {}",
+                            one.generation, one.n_valid, one.refused
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .concat();
                 write!(
                     f,
-                    "{word}: the month is refused ({refused}) and no commit of it checks out"
-                )?;
-                for one in tried {
-                    write!(
-                        f,
-                        "; generation {} ({} bars): {}",
-                        one.generation, one.n_valid, one.refused
-                    )?;
-                }
-                f.write_str(
-                    "; no whole block verifies either, so there is nothing safe to keep: restore the month from the backup or re-import it, and nothing was written",
+                    "{word}: the month is refused ({refused}) and no commit of it checks out{tried}; no whole block verifies either, so there is nothing safe to keep: restore the month from the backup or re-import it, and nothing was written"
                 )
             }
             Self::NotTheTail {
@@ -688,7 +702,7 @@ pub fn read_record(root: &Path, path: StorePath<'_>) -> Result<Option<Record>, R
     let file = match crate::open_flags::open_read_no_follow(&at) {
         Ok(file) => file,
         Err(why) if why.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(why) => return Err(record_refused(&at, format!("cannot open it: {why}"))),
+        Err(why) => return Err(record_io(&at, "open it", None)(why)),
     };
     last_record(&file, &at)
 }
@@ -700,11 +714,23 @@ fn record_refused(path: &Path, reason: String) -> RecoverError {
     }
 }
 
+/// The host's refusal of `what` on the record file, as the file's refusal;
+/// `record` names the record it was reading.
+fn record_io(
+    path: &Path,
+    what: &'static str,
+    record: Option<u64>,
+) -> impl FnOnce(io::Error) -> RecoverError {
+    let path = path.to_path_buf();
+    move |why| {
+        let record = record.map_or_else(String::new, |at| format!(" {at}"));
+        record_refused(&path, format!("cannot {what}{record}: {why}"))
+    }
+}
+
 /// The last record of an open record file that verifies.
 fn last_record(file: &File, at: &Path) -> Result<Option<Record>, RecoverError> {
-    let meta = file
-        .metadata()
-        .map_err(|why| record_refused(at, format!("cannot measure it: {why}")))?;
+    let meta = file.metadata().map_err(record_io(at, "measure it", None))?;
     if !meta.is_file() {
         return Err(record_refused(at, "it is not a regular file".to_owned()));
     }
@@ -721,7 +747,7 @@ fn last_record(file: &File, at: &Path) -> Result<Option<Record>, RecoverError> {
         index -= 1;
         let mut bytes = [0u8; RECORD];
         file.read_exact_at(&mut bytes, index * RECORD_LEN)
-            .map_err(|why| record_refused(at, format!("cannot read record {index}: {why}")))?;
+            .map_err(record_io(at, "read record", Some(index)))?;
         if let Some(found) = Record::decode(&bytes, index) {
             return Ok(Some(found));
         }
@@ -784,14 +810,16 @@ fn month_lock(root: &Path, path: StorePath<'_>) -> Result<Flock<File>, RecoverEr
             });
         }
     };
-    match Flock::try_lock_shared(handle, lock_path.clone()) {
-        Ok(held) => Ok(held),
-        Err(TryLockError::WouldBlock) => Err(StoreError::Locked { path: lock_path }.into()),
-        Err(TryLockError::Error(why)) => Err(RecoverError::Io {
-            path: lock_path,
-            operation: "lock the month shared",
-            kind: why.kind(),
-        }),
+    Flock::try_lock_shared(handle, lock_path.clone())
+        .map_err(|why| lock_refused(lock_path, "lock the month shared", why))
+}
+
+/// A lock not taken: [`StoreError::Locked`] when another holds it, the
+/// host's refusal otherwise.
+fn lock_refused(path: PathBuf, operation: &'static str, why: TryLockError) -> RecoverError {
+    match why {
+        TryLockError::WouldBlock => StoreError::Locked { path }.into(),
+        TryLockError::Error(why) => io_at(&path, operation)(why),
     }
 }
 
@@ -815,18 +843,12 @@ fn planned(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Planned, 
         // not this door's promotion: the served revision is judged below as
         // any other.
         if pointer.previous == 0
-            && let Ok(Diagnosis::Cut(mut found)) = diagnose(original, path, symbol_id)
+            && let Ok(Diagnosis::Cut(found)) = diagnose(original, path, symbol_id)
         {
             let source =
                 RevisionReader::open(root, path, symbol_id, pointer.revision)?.source_header();
             if source == found.cut.header {
-                if let Plan::Cut { promoted, .. } = &mut found.plan {
-                    *promoted = Some(pointer);
-                }
-                return Ok(Planned {
-                    plan: found.plan,
-                    rows: found.rows,
-                });
+                return Ok(found.planned(Some(pointer)));
             }
         }
         // ANY OTHER REVISION: the month as served is what a reader opens.
@@ -855,10 +877,7 @@ fn planned(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Planned, 
             },
             rows: Vec::new(),
         }),
-        Diagnosis::Cut(found) => Ok(Planned {
-            plan: found.plan,
-            rows: found.rows,
-        }),
+        Diagnosis::Cut(found) => Ok(found.planned(None)),
     }
 }
 
@@ -868,11 +887,29 @@ enum Diagnosis {
     Cut(Box<Found>),
 }
 
-/// A cut, with its plan and its records.
+/// A cut, with what it drops, the commits tried and its records.
 struct Found {
+    refused: String,
     cut: Cut,
-    plan: Plan,
+    dropped: Dropped,
+    tried: Vec<Tried>,
     rows: Vec<Bar>,
+}
+
+impl Found {
+    /// The plan of this cut; `promoted` when its revision is already served.
+    fn planned(self, promoted: Option<generation::Pointer>) -> Planned {
+        Planned {
+            plan: Plan::Cut {
+                refused: self.refused,
+                cut: self.cut,
+                dropped: self.dropped,
+                tried: self.tried,
+                promoted,
+            },
+            rows: self.rows,
+        }
+    }
 }
 
 /// Every committed record of `file`, through the verified read path, checked
@@ -959,11 +996,8 @@ fn raw(root: &Path, path: StorePath<'_>) -> Result<Raw, RecoverError> {
         })
         .collect();
     let sidecar = path.with_file(FileKind::Checksums).to_path_buf(root);
-    let sidecar_len = match fs::symlink_metadata(&sidecar) {
-        Ok(meta) => meta.len(),
-        Err(why) if why.kind() == ErrorKind::NotFound => 0,
-        Err(why) => return Err(io_at(&sidecar, "measure the checksum sidecar")(why)),
-    };
+    let sidecar_len =
+        present(&sidecar, "measure the checksum sidecar")?.map_or(0, |meta| meta.len());
     Ok(Raw {
         bars,
         len,
@@ -1091,10 +1125,11 @@ impl Month<'_> {
                         generation: header.generation,
                     },
                 );
-                match verified(self.root, self.path, self.symbol_id, &cut) {
-                    Ok(rows) => return Some((cut, rows)),
-                    Err(why) => why,
+                let found = self.try_cut(cut);
+                if found.is_some() {
+                    return found;
                 }
+                continue;
             };
             self.tried.push(Tried {
                 generation: header.generation,
@@ -1103,6 +1138,22 @@ impl Month<'_> {
             });
         }
         None
+    }
+
+    /// `cut` with its records when the month opens at it and every kept
+    /// record checks out; otherwise `None`, the cut kept in `tried` with why.
+    fn try_cut(&mut self, cut: Cut) -> Option<(Cut, Vec<Bar>)> {
+        match verified(self.root, self.path, self.symbol_id, &cut) {
+            Ok(rows) => Some((cut, rows)),
+            Err(refused) => {
+                self.tried.push(Tried {
+                    generation: cut.header.generation,
+                    n_valid: cut.header.n_valid,
+                    refused,
+                });
+                None
+            }
+        }
     }
 
     /// NO COMMIT CHECKS OUT: the longest prefix of whole blocks that does,
@@ -1192,17 +1243,8 @@ impl Month<'_> {
         );
         // THE CUT IS OPENED ONCE MORE AS THE DOORS WILL OPEN IT, so what is
         // kept is what the publication's own source check reads.
-        match verified(root, path, symbol_id, &cut) {
-            Ok(rows) => Ok((cut, rows)),
-            Err(why) => {
-                self.tried.push(Tried {
-                    generation,
-                    n_valid: kept,
-                    refused: why,
-                });
-                Err(self.nothing())
-            }
-        }
+        let found = self.try_cut(cut);
+        found.ok_or_else(|| self.nothing())
     }
 
     /// Nothing safe to keep.
@@ -1242,14 +1284,10 @@ impl Month<'_> {
             last_day: day_of(month, claimed.last_ts_micros),
         };
         Ok(Found {
-            plan: Plan::Cut {
-                refused: self.refused,
-                cut: cut.clone(),
-                dropped,
-                tried: self.tried,
-                promoted: None,
-            },
+            refused: self.refused,
             cut,
+            dropped,
+            tried: self.tried,
             rows,
         })
     }
@@ -1272,18 +1310,24 @@ fn refuse_not_raw(root: &Path, path: StorePath<'_>) -> Result<(), RecoverError> 
         ),
     ] {
         let sibling = path.with_file(kind).to_path_buf(root);
-        match fs::symlink_metadata(&sibling) {
-            Ok(_) => {
-                return Err(RecoverError::NotRaw {
-                    path: sibling,
-                    why: why.to_owned(),
-                });
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(io_at(&sibling, "inspect a sibling")(error)),
+        if present(&sibling, "inspect a sibling")?.is_some() {
+            return Err(RecoverError::NotRaw {
+                path: sibling,
+                why: why.to_owned(),
+            });
         }
     }
     Ok(())
+}
+
+/// What is at `path`, never following a link: `None` when nothing is, the
+/// host's refusal of `operation` for anything else it says.
+fn present(path: &Path, operation: &'static str) -> Result<Option<fs::Metadata>, RecoverError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(why) if why.kind() == ErrorKind::NotFound => Ok(None),
+        Err(why) => Err(io_at(path, operation)(why)),
+    }
 }
 
 /// The month opened at `cut` on this thread, every kept record read through
@@ -1374,6 +1418,8 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
             promoted,
         } => (refused, cut, dropped, tried, promoted),
     };
+    #[cfg(test)]
+    between_plan_and_record();
     let records = RecordFile::open(root, path)?;
     // ONE DOOR AT A TIME per month: the record file's own lock is taken
     // before anything is written, and what another door recorded meanwhile
@@ -1429,6 +1475,22 @@ pub fn recover(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Result<Outco
         skipped,
         resumed,
     }))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A step run between a door's plan and its record file's lock, where a
+    /// second door can finish first. The tests' seam only.
+    static BETWEEN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Runs the step the tests left between a plan and its record, once.
+#[cfg(test)]
+fn between_plan_and_record() {
+    let step = BETWEEN.with(|between| between.borrow_mut().take());
+    if let Some(step) = step {
+        step();
+    }
 }
 
 /// Says the caller has named `record`'s dropped days for the importer's
@@ -1520,10 +1582,8 @@ impl RecordFile {
     /// record file, refusing a link below the root and another holder.
     fn open(root: &Path, month: StorePath<'_>) -> Result<Self, RecoverError> {
         let path = record_path(root, month);
-        let directory = path
-            .parent()
-            .ok_or_else(|| record_refused(&path, "it has no directory".to_owned()))?
-            .to_path_buf();
+        // A record path is a file under the root, so it has a directory.
+        let directory = path.parent().unwrap_or(root).to_path_buf();
         refuse_links(root, &path)?;
         let missing = missing_dirs(root, &directory);
         fs::create_dir_all(&directory).map_err(io_at(&directory, "create record directories"))?;
@@ -1536,15 +1596,8 @@ impl RecordFile {
         let handle = options
             .open(&path)
             .map_err(io_at(&path, "open the record file"))?;
-        let lock = match Flock::try_lock(handle, path.clone()) {
-            Ok(lock) => lock,
-            Err(TryLockError::WouldBlock) => {
-                return Err(StoreError::Locked { path }.into());
-            }
-            Err(TryLockError::Error(why)) => {
-                return Err(io_at(&path, "lock the record file")(why));
-            }
-        };
+        let lock = Flock::try_lock(handle, path.clone())
+            .map_err(|why| lock_refused(path.clone(), "lock the record file", why))?;
         Ok(Self {
             path,
             lock,
@@ -1572,10 +1625,7 @@ impl RecordFile {
             ));
         }
         record.record = index;
-        let bytes = record.encode().map_err(|why| match why {
-            RecoverError::Record { reason, .. } => record_refused(&self.path, reason),
-            other => other,
-        })?;
+        let bytes = record.encode(&self.path)?;
         self.lock
             .write_all_at(&bytes, index * RECORD_LEN)
             .map_err(io_at(&self.path, "write the record"))?;
@@ -1588,11 +1638,9 @@ impl RecordFile {
 
     fn release(self) -> Result<(), RecoverError> {
         let Self { path, lock, .. } = self;
-        lock.release().map_err(|why| RecoverError::Io {
-            path,
-            operation: "release the record file's lock",
-            kind: io::Error::from(why).kind(),
-        })
+        lock.release()
+            .map_err(io::Error::from)
+            .map_err(io_at(&path, "release the record file's lock"))
     }
 }
 
