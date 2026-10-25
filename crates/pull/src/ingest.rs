@@ -6357,6 +6357,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A BUSY MONTH IS JUDGED BY ITS SHAPE, AND A HELD BAR INSIDE THE SPAN
+    /// LEAVES IT BUSY** (IA-RP-30, D-4890, D-4899 (1)). While a reader holds
+    /// the month, a batch it lacks whole is judged lacked (the busy append's
+    /// refusal kept), and a batch whose span holds a bar of the month stays
+    /// `month_busy`: the busy append never compared them, so it is never
+    /// judged to differ. Once the reader is gone the same batch is
+    /// `bars_differ_held`.
+    #[test]
+    fn a_busy_month_is_judged_by_its_shape_and_an_overlap_stays_busy() {
+        let root = scratch("busyjudge");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let parts = || store::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        };
+        let entry = EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+        };
+        // Invented minutes from midday IST on 2026-01-01.
+        let bar = |n: i64| Bar {
+            ts_micros: (20_454_i64 * 86_400 - 19_800 + 6 * 3_600 + n * 60) * 1_000_000,
+            open: 100 + n,
+            high: 110 + n,
+            low: 90 + n,
+            close: 105 + n,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let held = [bar(10), bar(20)];
+        let _ = write_and_count(&held, &root, symbol_id, parts(), entry).expect("a first write");
+        let path = store::path::StorePath::new(parts()).expect("a path");
+        let judge = |bars: &[Bar]| super::judge_back_fill(bars, &root, symbol_id, (parts(), entry));
+
+        let reader = store::file::BarFile::open_existing(&root, path, symbol_id).expect("a reader");
+        let lacked = judge(&[bar(1), bar(3)]);
+        assert!(
+            matches!(
+                &lacked,
+                Ok(super::BackFill::Lacked(why, 0)) if why.kind == super::FailKind::MonthBusy
+            ),
+            "{lacked:?}"
+        );
+        let busy = judge(&[bar(5), bar(15)]).expect_err("a held bar inside the span");
+        assert_eq!(busy.kind, super::FailKind::MonthBusy, "{busy}");
+        drop(reader);
+
+        let differs = judge(&[bar(5), bar(15)]).expect_err("a held bar inside the span");
+        assert_eq!(differs.kind, super::FailKind::Differs, "{differs}");
+        assert!(differs.why.contains("not back-filled"), "{differs}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **ZERODHA'S PULLED DAY IS CHECKED AGAINST ITS OWN MINUTES, AND NO OTHER
     /// VENDOR'S IS.** No day file is a reason, not a silence; a day file that
     /// matches the fold agrees; a minute that moved the high is named; Dhan is
