@@ -585,6 +585,758 @@ pub fn gaps<S: core::hash::BuildHasher>(
     work
 }
 
+// ─────── futures day candles through a token: stored, never swept ───────
+//
+// R4-28, CON-12 and FUT-C1; D-7186. A future is filed as one contract keyed
+// (underlying, expiry) through `Contract::of(Kind::Future)`, under
+// `bars/<vendor>/NSE/FNO/<UNDERLYING>/<expiry>-FUT/1day/`, with its open
+// interest. The vendor's token is only the ADDRESS: which contract it names is
+// read from the dated master snapshots, and a token the newest snapshot maps
+// to another contract is never asked for an older one's history. The
+// vendor's continuous near-month series is filed as its own series,
+// `<UNDERLYING>-FUT-C1`, exactly as answered: the vendor states no roll day,
+// so it is never split into contracts. Nothing here is swept:
+// `Instrument::is_sweepable` refuses every contract and every FNO key.
+
+use crate::master_snapshots::{Book, Listed, Stamp, TokenOn, first_listed};
+use crate::session::{DropCensus, DropReason, Window};
+use crate::vendor::{ContinuousSpec, HttpSpec};
+
+/// The continuous series' symbol suffix: `<UNDERLYING>-FUT-C1`.
+pub const CONTINUOUS_SUFFIX: &str = "-FUT-C1";
+
+/// The `/logs` target of every futures plan refusal, request and landing.
+pub const FUTURES_EVENT: &str = "pull.futures";
+
+/// The symbol the continuous series is filed under.
+///
+/// # Errors
+///
+/// A name the store cannot file under (too long, or a byte a symbol may not
+/// carry).
+pub fn continuous_symbol(underlying: &str) -> Result<Symbol, InstrumentError> {
+    Symbol::new(&format!("{underlying}{CONTINUOUS_SUFFIX}"))
+}
+
+/// What one futures request is filed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuturesSeries {
+    /// One contract, keyed (underlying, expiry).
+    Contract {
+        /// The contract segment, `<expiry>-FUT`.
+        contract: brutex_core::instrument::Contract,
+        /// The expiry the dated snapshot states.
+        expiry: Day,
+    },
+    /// The vendor's continuous near-month series, as answered.
+    Continuous,
+}
+
+impl FuturesSeries {
+    /// How a receipt and `/logs` name it.
+    #[must_use]
+    pub fn label(&self, underlying: &str) -> String {
+        match *self {
+            Self::Contract { contract, .. } => format!("{underlying} {contract}"),
+            Self::Continuous => format!("{underlying}{CONTINUOUS_SUFFIX}"),
+        }
+    }
+}
+
+/// One futures request: the address, and what the answer is filed under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuturesAsk {
+    /// The vendor's token, resolved through a dated snapshot.
+    pub token: u64,
+    /// What the answer is filed under.
+    pub series: FuturesSeries,
+    /// The days asked for, inclusive.
+    pub window: Window,
+}
+
+/// What a futures pull will ask, and what it would not ask, by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuturesPlan {
+    /// The underlying.
+    pub underlying: String,
+    /// The newest snapshot every token was checked against.
+    pub newest: Stamp,
+    /// The requests, contracts by expiry first, the continuous series last.
+    pub asks: Vec<FuturesAsk>,
+    /// Every contract or series not asked for, and why.
+    pub refused: Vec<String>,
+    /// Why the futures first-listed index was rebuilt as a new generation
+    /// before this plan was read from it, when it did not match its commit log
+    /// (R4-28 repair 2).
+    pub rebuilt: Option<String>,
+    /// Every Kite snapshot entry the book's listing named incomplete (a write
+    /// cut before its receipt), newest first: never read by this plan, so a
+    /// day it would have dated resolves from its neighbours (R4-28 repair 3).
+    /// At most [`INCOMPLETE_NAMED`](crate::master_snapshots::INCOMPLETE_NAMED)
+    /// are named, and one line more counts the rest.
+    pub incomplete: Vec<String>,
+}
+
+/// The book's incomplete Kite entries as a plan names them: newest first, at
+/// most [`INCOMPLETE_NAMED`](crate::master_snapshots::INCOMPLETE_NAMED), and
+/// one line counting the rest.
+fn incomplete_lines(book: &Book) -> Vec<String> {
+    let held = book.incomplete();
+    let bound = crate::master_snapshots::INCOMPLETE_NAMED;
+    let mut lines: Vec<String> = held
+        .iter()
+        .rev()
+        .take(bound)
+        .map(ToString::to_string)
+        .collect();
+    if held.len() > bound {
+        lines.push(format!(
+            "{} older incomplete entries are held and not named here",
+            held.len().saturating_sub(bound)
+        ));
+    }
+    lines
+}
+
+/// Whether `listed` is a future of `underlying` on the route's exchange.
+fn is_future_of(listed: &Listed<'_>, route: ContinuousSpec, underlying: &str) -> bool {
+    listed.exchange() == route.exchange
+        && listed.instrument_type() == route.future_type
+        && listed.name() == underlying
+        && listed.expiry().is_some()
+}
+
+/// The contract segment of a future expiring on `expiry`.
+fn future_contract(expiry: Day) -> Option<brutex_core::instrument::Contract> {
+    let expiry =
+        brutex_core::instrument::Expiry::new(expiry.year(), expiry.month(), expiry.day()).ok()?;
+    brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future { expiry })
+}
+
+/// Plans one underlying's futures pull over `window`.
+///
+/// Each contract is asked from the first snapshot that lists it (a token is
+/// believed to name a contract only from a snapshot that says so) to its
+/// expiry, inside the window. That first day is read from the
+/// [`first_listed`](crate::master_snapshots::first_listed) index, which every
+/// snapshot write fills, so no older snapshot is opened here: the cost does not
+/// grow with the snapshots held (R4-28 repair 1; D-7187). A snapshot on or
+/// before the window's end that the index does not hold yet is taken in first,
+/// once; one that cannot be is refused by name. An index that does not match
+/// its commit log (a file missing, cut or garbled) is never planned from: a
+/// new generation is built from the receipted snapshots first and named in
+/// [`FuturesPlan::rebuilt`], and one that still does not match is refused
+/// `futures_index_damaged` (R4-28 repair 2). Each token is then checked
+/// against the NEWEST snapshot, the one snapshot a plan parses: one that
+/// now names another contract is refused `token_reused` and never asked for
+/// the older contract's history; one the newest snapshot no longer lists
+/// (flushed after expiry) is asked, and an answer of nothing ends that
+/// contract's history by name. The continuous series is asked through the
+/// newest snapshot's nearest future expiring on or after `today`.
+///
+/// # Errors
+///
+/// No receipted snapshot at all (`no_snapshot`): nothing is planned from an
+/// undated master. A newest snapshot dated after `today`
+/// (`snapshot_from_the_future`). A book built in memory, or an index that
+/// cannot be locked, read or appended to (`futures_index`): nothing is
+/// planned from a partial answer. Each is one Error [`FUTURES_EVENT`] event
+/// too, naming the underlying and the refusal (R4-28 repair 5, the r5
+/// check's follow-up: they reached the receipt and `/audit` only).
+pub fn futures_plan(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    window: Window,
+    today: Day,
+    last_settled: Day,
+) -> Result<FuturesPlan, String> {
+    plan_whole(book, route, underlying, window, today, last_settled).inspect_err(|why| {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Error,
+            FUTURES_EVENT,
+            "no future of the underlying was planned",
+            "underlying" => telemetry::Value::Str(underlying),
+            "why" => telemetry::Value::Str(why),
+        );
+    })
+}
+
+/// [`futures_plan`], before its refusal is emitted.
+fn plan_whole(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    window: Window,
+    today: Day,
+    last_settled: Day,
+) -> Result<FuturesPlan, String> {
+    let Some(newest) = book.newest() else {
+        return Err(format!(
+            "no_snapshot: no dated Kite master snapshot is held, so no futures token of \
+             {underlying} can be resolved by date; refresh the masters (POST /masters/refresh) \
+             first"
+        ));
+    };
+    // A NEWEST SNAPSHOT FROM THE FUTURE IS NEVER PLANNED FROM (R4-28 repair
+    // 4, the r4 check's follow-up), for the reason `newest_snapshot_day`
+    // refuses it: the clock that dated it ran ahead, and every token here is
+    // checked against the newest dump and the near month chosen from it.
+    if newest.day > today {
+        return Err(format!(
+            "snapshot_from_the_future: the newest dated Kite master snapshot {newest} is dated \
+             after today {today}: the clock that wrote it ran ahead or this one runs behind, so \
+             no future of {underlying} was planned from it. Move the future-dated snapshot and \
+             its receipt aside by hand to resume"
+        ));
+    }
+    let through = window.to().min(last_settled);
+    let listing = book
+        .root()
+        .ok_or_else(|| "a book built in memory has no snapshots directory".to_owned())
+        .and_then(|root| first_listed::listing(root, book, route, underlying, through))
+        .map_err(|why| format!("futures_index: {why}; no future of {underlying} was planned"))?;
+    if let Some(ref why) = listing.rebuilt {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Error,
+            FUTURES_EVENT,
+            "the futures first-listed index did not match its commit log, so this plan was read \
+             from a new generation built again from the receipted snapshots; the old one is left \
+             as it was",
+            "underlying" => telemetry::Value::Str(underlying),
+            "why" => telemetry::Value::Str(why),
+        );
+    }
+    let mut refused = listing.refused;
+    let first_seen = listing.first;
+    // ONE CONTRACT, ONE TOKEN (R4-28 repair 3, the r3 check's follow-up): a
+    // dump that lists one (underlying, expiry) under two tokens would file two
+    // series as one contract's, so neither is asked and both are named.
+    let mut tokens_of: std::collections::BTreeMap<Day, Vec<u64>> =
+        std::collections::BTreeMap::new();
+    for &(expiry, token) in first_seen.keys() {
+        tokens_of.entry(expiry).or_default().push(token);
+    }
+    let mut asks = Vec::with_capacity(first_seen.len().saturating_add(1));
+    for (&(expiry, token), &seen) in &first_seen {
+        let (from, to) = (seen.max(window.from()), expiry.min(through));
+        let Ok(span) = Window::new(from, to) else {
+            continue;
+        };
+        let tokens = tokens_of.get(&expiry).map_or(&[][..], Vec::as_slice);
+        match contract_ask(
+            book,
+            route,
+            underlying,
+            newest,
+            tokens,
+            (expiry, token, seen),
+            span,
+        ) {
+            Ok(ask) => asks.push(ask),
+            Err(why) => refused.push(why),
+        }
+    }
+    match continuous_ask(book, route, underlying, today, window.from(), through) {
+        Ok(Some(ask)) => asks.push(ask),
+        Ok(None) => {}
+        Err(why) => refused.push(why),
+    }
+    for why in &refused {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            FUTURES_EVENT,
+            "a futures contract or series was not asked for",
+            "underlying" => telemetry::Value::Str(underlying),
+            "why" => telemetry::Value::Str(why),
+        );
+    }
+    Ok(FuturesPlan {
+        underlying: underlying.to_owned(),
+        newest,
+        asks,
+        refused,
+        rebuilt: listing.rebuilt,
+        incomplete: incomplete_lines(book),
+    })
+}
+
+/// One contract's request over `span`, or why it is not asked, by name.
+///
+/// `tokens` is every token the index lists for this contract's expiry: more
+/// than one is `contract_duplicated` (R4-28 repair 3, the r3 check's
+/// follow-up), since a dump that lists one (underlying, expiry) under two
+/// tokens would file two series as one contract's, so neither is asked and
+/// both are named. The token is then checked against the newest snapshot.
+fn contract_ask(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    newest: Stamp,
+    tokens: &[u64],
+    (expiry, token, seen): (Day, u64, Day),
+    span: Window,
+) -> Result<FuturesAsk, String> {
+    let label = format!("{underlying} {expiry} future (token {token}, first listed {seen})");
+    if tokens.len() > 1 {
+        let tokens: Vec<String> = tokens.iter().map(u64::to_string).collect();
+        return Err(format!(
+            "contract_duplicated: {label}: the index lists this one contract under {} tokens \
+             ({}), so none is asked and no two series are filed as one",
+            tokens.len(),
+            tokens.join(", ")
+        ));
+    }
+    // IDENTITY, NOT TRADING: the newest snapshot may still list a contract
+    // past its expiry (`token_expired` on that day, R4-28 repair 3), and the
+    // same contract is still what the token names in its history.
+    match book.token_on(newest.day, route.exchange, token) {
+        TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. }
+            if is_future_of(&listed, route, underlying) && listed.expiry() == Some(expiry) => {}
+        TokenOn::NotListed { .. } => {}
+        TokenOn::Resolved { listed, .. } | TokenOn::Expired { listed, .. } => {
+            return Err(format!(
+                "token_reused: {label}: the newest snapshot {newest} maps the token to {}, so its \
+                 history is not asked through it",
+                listed.tradingsymbol()
+            ));
+        }
+        other => {
+            return Err(format!(
+                "{}: {label}, checked against the newest snapshot {newest}",
+                other.word()
+            ));
+        }
+    }
+    let contract = future_contract(expiry)
+        .ok_or_else(|| format!("contract_unnamed: {label}: no contract segment renders"))?;
+    Ok(FuturesAsk {
+        token,
+        series: FuturesSeries::Contract { contract, expiry },
+        window: span,
+    })
+}
+
+/// The continuous series' request: through the newest snapshot's nearest
+/// future of `underlying` expiring on or after `today`, over `from..=through`.
+/// `Ok(None)` when that span is empty; a refusal, by name, when no live
+/// future is listed or the newest snapshot does not read.
+fn continuous_ask(
+    book: &Book,
+    route: ContinuousSpec,
+    underlying: &str,
+    today: Day,
+    from: Day,
+    through: Day,
+) -> Result<Option<FuturesAsk>, String> {
+    let Some(newest) = book.newest() else {
+        return Err("no_snapshot: no dated Kite master snapshot is held".to_owned());
+    };
+    let last = book.stamps().len().saturating_sub(1);
+    let near = book
+        .with_snapshot(last, |snapshot| {
+            snapshot
+                .rows()
+                .filter(|listed| is_future_of(listed, route, underlying))
+                .filter(|listed| listed.expiry().is_some_and(|expiry| expiry >= today))
+                .min_by_key(|listed| (listed.expiry(), listed.token()))
+                .map(|listed| listed.token())
+        })
+        .map_err(|why| format!("snapshot_unreadable: {newest}: {why}"))?;
+    let Some(token) = near else {
+        return Err(format!(
+            "no_live_future: the newest snapshot {newest} lists no {} future of {underlying} \
+             expiring on or after {today}, so the continuous series has no token to ask through",
+            route.exchange
+        ));
+    };
+    Ok(Window::new(from, through).ok().map(|span| FuturesAsk {
+        token,
+        series: FuturesSeries::Continuous,
+        window: span,
+    }))
+}
+
+/// What one futures pull did: what it read, what it offered the store, what
+/// the store WROTE, and where every other row went.
+///
+/// # Offered is not written (R4-28 repair 4; D-7190)
+///
+/// [`crate::ingest::Ingested`] keeps two counts because they part on every
+/// re-pull: `bars_stored` is what a landing OFFERED the store and
+/// `bars_committed` what `Appended::Committed` wrote. This type used to carry
+/// the first under the words "bars written", so an identical re-pull that
+/// wrote nothing answered "4 bars stored" and was journalled `Stored`, the
+/// misreport `bars_committed` exists to end, and a row the landing dropped (a
+/// day the calendar records closed, a day before or after the window asked)
+/// was counted nowhere on the receipt. Both counts are carried under their
+/// own names now, with the fold count and the drop census beside them, so
+/// [`Self::balances`] can account for every row read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FuturesLanded {
+    /// Requests sent.
+    pub requests: usize,
+    /// Rows the vendor answered with, decoded.
+    pub rows_read: usize,
+    /// Bars OFFERED to the store (`Ingested::bars_stored`), not necessarily
+    /// written: a re-pull offers every bar again.
+    pub bars_offered: usize,
+    /// Bars this pull WROTE (`Ingested::bars_committed`): zero on a re-pull
+    /// of days the store already holds byte for byte.
+    pub bars_committed: usize,
+    /// Rows folded into a day bar already open: one day answered twice.
+    pub rows_folded: usize,
+    /// Every row that did not become a bar, by reason.
+    pub census: DropCensus,
+    /// One line per series asked: what it is and what came of it.
+    pub series: Vec<String>,
+    /// Every series that did not land whole, and why.
+    pub failed: Vec<String>,
+}
+
+impl FuturesLanded {
+    /// Whether every row read is accounted for (offered to the store, folded
+    /// into an open bar, or dropped by reason) and no series stopped.
+    ///
+    /// The same check as `Ingested::balances`, over the whole pull. A row
+    /// that is in none of the three is indistinguishable from one the vendor
+    /// never sent.
+    #[must_use]
+    pub fn balances(&self) -> bool {
+        self.failed.is_empty()
+            && self.rows_read
+                == self
+                    .bars_offered
+                    .saturating_add(self.rows_folded)
+                    .saturating_add(self.census.total() as usize)
+    }
+
+    /// The receipt's balance line, in the spot receipt's words.
+    #[must_use]
+    pub fn balance_line(&self) -> String {
+        if self.balances() {
+            format!(
+                "yes — {} read = {} offered + {} folded + {} dropped",
+                self.rows_read,
+                self.bars_offered,
+                self.rows_folded,
+                self.census.total()
+            )
+        } else {
+            format!(
+                "NO — {} rows read, {} offered, {} folded, {} dropped, {} series stopped",
+                self.rows_read,
+                self.bars_offered,
+                self.rows_folded,
+                self.census.total(),
+                self.failed.len()
+            )
+        }
+    }
+
+    /// Every reason that dropped a row, with its count; `none` when nothing
+    /// was dropped.
+    #[must_use]
+    pub fn dropped_by_reason(&self) -> String {
+        dropped_by_reason(&self.census)
+    }
+
+    /// Adds one series' outcome to the pull's totals.
+    fn absorb(&mut self, one: &SeriesOutcome) {
+        self.requests = self.requests.saturating_add(one.requests);
+        self.rows_read = self.rows_read.saturating_add(one.read);
+        self.bars_offered = self.bars_offered.saturating_add(one.offered);
+        self.bars_committed = self.bars_committed.saturating_add(one.committed);
+        self.rows_folded = self.rows_folded.saturating_add(one.folded);
+        self.census.absorb(one.census);
+    }
+}
+
+/// The reasons a futures receipt names, in the order `/audit` shows them.
+const DROP_REASONS: [DropReason; 5] = [
+    DropReason::BeforeWindow,
+    DropReason::AfterWindow,
+    DropReason::BeforeSessionOpen,
+    DropReason::AtOrAfterSessionClose,
+    DropReason::OnClosedDay,
+];
+
+/// Each reason in `census` that dropped a row, with its count, joined by
+/// ` · `; `none` when nothing was dropped.
+///
+/// The names explain the total and never replace it: every surface prints
+/// `census.total()` beside this line, so a drop under a reason this list did
+/// not yet name would still be counted there.
+fn dropped_by_reason(census: &DropCensus) -> String {
+    let named: Vec<String> = DROP_REASONS
+        .iter()
+        .filter_map(|reason| {
+            let n = census.of(*reason);
+            (n > 0).then(|| format!("{} {n}", reason.label()))
+        })
+        .collect();
+    if named.is_empty() {
+        "none".to_owned()
+    } else {
+        named.join(" · ")
+    }
+}
+
+/// Asks the vendor for every request of `plan` and lands each answer under
+/// its own series, open interest kept.
+///
+/// Each request is cut to the route's window cap. A refusal, an answer that
+/// will not decode, or an answer of nothing for a contract ends that series by
+/// name (an expired token the vendor no longer serves is exactly this), and the
+/// pull goes on to the next series. One [`FUTURES_EVENT`] event per series.
+///
+/// # Cost
+///
+/// One request per window chunk; one landing per answer, through the same
+/// `ingest::from_window` every pull uses.
+pub async fn pull_futures_day<D: crate::chain::Discovery>(
+    from: &D,
+    spec: &HttpSpec,
+    plan: &FuturesPlan,
+    store_root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    origin: &str,
+) -> FuturesLanded {
+    let mut out = FuturesLanded::default();
+    let Some(route) = spec.fno.by_token() else {
+        out.failed
+            .push("this feed has no futures token route; nothing was asked".to_owned());
+        return out;
+    };
+    let landing = Landing {
+        store_root,
+        vendor,
+        origin,
+    };
+    for ask in &plan.asks {
+        let label = ask.series.label(&plan.underlying);
+        let window = ask.window_text();
+        let one = pull_one(from, spec, route, &plan.underlying, ask, landing).await;
+        out.absorb(&one);
+        let line = one.line(&label, &window);
+        let (level, message) = if one.stopped.is_some() {
+            (telemetry::Level::Error, "a futures series stopped by name")
+        } else {
+            (telemetry::Level::Info, "a futures series landed")
+        };
+        let token = ask.token.to_string();
+        let dropped_by = dropped_by_reason(&one.census);
+        // THE EVENT COUNTS WHAT WAS WRITTEN, BESIDE WHAT WAS OFFERED, and
+        // carries the receipt's own line, so `/logs` and the receipt cannot
+        // disagree about one series (R4-28 repair 4; D-7190).
+        let _ = telemetry::emit_if!(
+            level,
+            FUTURES_EVENT,
+            message,
+            "series" => telemetry::Value::Str(&label),
+            "token" => telemetry::Value::Str(&token),
+            "window" => telemetry::Value::Str(&window),
+            "rows" => telemetry::Value::Uint(one.read as u64),
+            "offered" => telemetry::Value::Uint(one.offered as u64),
+            "written" => telemetry::Value::Uint(one.committed as u64),
+            "folded" => telemetry::Value::Uint(one.folded as u64),
+            "dropped" => telemetry::Value::Uint(u64::from(one.census.total())),
+            "dropped_by" => telemetry::Value::Str(&dropped_by),
+            "line" => telemetry::Value::Str(&line),
+            "detail" => telemetry::Value::Str(one.stopped.as_deref().unwrap_or("")),
+        );
+        if let Some(why) = one.stopped {
+            out.failed.push(format!("{label}: {why}"));
+        }
+        out.series.push(line);
+    }
+    out
+}
+
+impl FuturesAsk {
+    /// `from..to`, as a receipt prints it.
+    #[must_use]
+    pub fn window_text(&self) -> String {
+        format!("{}..{}", self.window.from(), self.window.to())
+    }
+}
+
+/// Where answers land.
+#[derive(Clone, Copy)]
+struct Landing<'a> {
+    store_root: &'a std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    origin: &'a str,
+}
+
+/// What one series came to, summed over its chunks from each landing's own
+/// `Ingested`.
+#[derive(Default)]
+struct SeriesOutcome {
+    /// Bars offered to the store (`Ingested::bars_stored`).
+    offered: usize,
+    /// Bars the store wrote (`Ingested::bars_committed`).
+    committed: usize,
+    /// Rows folded into a bar already open (`Ingested::rows_folded`).
+    folded: usize,
+    /// Rows dropped, by reason (`Ingested::census`).
+    census: DropCensus,
+    read: usize,
+    requests: usize,
+    stopped: Option<String>,
+}
+
+impl SeriesOutcome {
+    fn stop(mut self, why: String) -> Self {
+        self.stopped = Some(why);
+        self
+    }
+
+    /// Adds one chunk's landing.
+    fn absorb(&mut self, landed: &crate::ingest::Ingested) {
+        self.offered = self.offered.saturating_add(landed.bars_stored);
+        self.committed = self.committed.saturating_add(landed.bars_committed);
+        self.folded = self.folded.saturating_add(landed.rows_folded);
+        self.census.absorb(landed.census);
+    }
+
+    /// The receipt's line for this series: what was WRITTEN first, what was
+    /// offered beside it, and where every other row went.
+    ///
+    /// "already held" is the offered bars the store did not write: on a
+    /// landing that did not fail, `BarFile::append` wrote only what it did not
+    /// already hold byte for byte, so that is exactly what the difference is.
+    /// On a series that stopped it is not claimed.
+    fn line(&self, label: &str, window: &str) -> String {
+        let held = self.offered.saturating_sub(self.committed);
+        let held = if held > 0 && self.stopped.is_none() {
+            format!(" ({held} already held)")
+        } else {
+            String::new()
+        };
+        let dropped = self.census.total();
+        let dropped = if dropped == 0 {
+            "0 dropped".to_owned()
+        } else {
+            format!("{dropped} dropped ({})", dropped_by_reason(&self.census))
+        };
+        let stopped = self
+            .stopped
+            .as_ref()
+            .map_or_else(String::new, |why| format!("; then stopped: {why}"));
+        format!(
+            "{label}: {} bars written, {} offered{held} from {} rows over {window}; \
+             {} folded into an open bar; {dropped}{stopped}",
+            self.committed, self.offered, self.read, self.folded
+        )
+    }
+}
+
+/// Runs blocking store work off the async workers when there are workers to
+/// keep free: `block_in_place` on a multi-thread runtime, which hands this
+/// worker's other tasks to another while `work` runs; inline on a
+/// current-thread runtime (`block_in_place` panics there, and there is no
+/// other worker to starve) and outside any runtime.
+fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
+/// Asks and lands one series, chunk by chunk.
+async fn pull_one<D: crate::chain::Discovery>(
+    from: &D,
+    spec: &HttpSpec,
+    route: ContinuousSpec,
+    underlying: &str,
+    ask: &FuturesAsk,
+    landing: Landing<'_>,
+) -> SeriesOutcome {
+    let mut out = SeriesOutcome::default();
+    let (instrument, contract) = match ask.series {
+        FuturesSeries::Contract { contract, .. } => (underlying.to_owned(), Some(contract)),
+        FuturesSeries::Continuous => match continuous_symbol(underlying) {
+            Ok(symbol) => (symbol.as_str().to_owned(), None),
+            Err(why) => return out.stop(format!("the continuous symbol does not file: {why}")),
+        },
+    };
+    let chunks =
+        match crate::session::split_window(ask.window, spec.window_cap_days(route.granularity)) {
+            Ok(chunks) => chunks,
+            Err(why) => return out.stop(format!("the window does not split to the cap: {why}")),
+        };
+    let continuous = matches!(ask.series, FuturesSeries::Continuous);
+    for chunk in chunks {
+        let span = format!("{}..{}", chunk.from(), chunk.to());
+        let url = match crate::fno::day_candles_url(spec, ask.token, chunk, continuous) {
+            Ok(url) => url,
+            Err(why) => return out.stop(why),
+        };
+        out.requests = out.requests.saturating_add(1);
+        let body = match from.get(&url).await {
+            Ok(body) => body,
+            Err(refusal) => {
+                return out.stop(format!(
+                    "vendor_refused: the vendor refused {span}: {refusal}; nothing after it was asked for this series"
+                ));
+            }
+        };
+        let raw = match crate::http::decode_body(&body, spec, crate::vendor::Listing::Derivative) {
+            Ok(raw) => raw,
+            Err(why) => return out.stop(format!("the answer for {span} does not decode: {why}")),
+        };
+        out.read = out.read.saturating_add(raw.rows.len());
+        if raw.rows.is_empty() {
+            if contract.is_some() {
+                return out.stop(format!(
+                    "history_ends: the vendor answered no candle for {span}"
+                ));
+            }
+            continue;
+        }
+        let request = crate::fetch::BarRequest {
+            instrument_id: ask.token.to_string(),
+            listing: crate::vendor::Listing::Derivative,
+            window: chunk,
+            granularity: route.granularity,
+        };
+        // THE LANDING IS BLOCKING FILE WORK (bar files, the census, fsync),
+        // so it runs off the async workers when there are workers to keep
+        // free (R4-28 repair 4, the r4 check's follow-up).
+        let landed = off_the_workers(|| {
+            crate::ingest::from_window(
+                &raw,
+                &instrument,
+                landing.origin,
+                landing.store_root,
+                crate::ingest::Plan {
+                    calendar: crate::calendar::Runtime::default(),
+                    cash_schedule: None,
+                    columns: crate::csv::Columns::Gdfl,
+                    request: &request,
+                    encoding: spec.timestamps,
+                    scale: crate::http::DECODED_PRICE_SCALE,
+                    vendor: landing.vendor,
+                    exchange: VENUE.as_str(),
+                    segment: Segment::Fno.as_str(),
+                    contract,
+                },
+            )
+        });
+        out.absorb(&landed);
+        if let Some(failure) = landed.failures.first() {
+            let why = failure.why.clone();
+            return out.stop(format!("{span} did not land whole: {why}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "fnowork_futures_tests.rs"]
+mod futures_tests;
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

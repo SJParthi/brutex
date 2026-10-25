@@ -1377,13 +1377,13 @@ id = "S-48"
 title = "Zerodha futures 1day for the F&O underlyings inside the window"
 state = "pending"
 writes = "New Zerodha futures 1day series for the F&O underlyings, census, journal; stored, never swept (CLAUDE.md section 1)."
-command = ["planned: POST /pull/fno series=fut&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30 (R4-28 builds the form for all F&O underlyings at once: the route refuses this body today, as it takes one underlying= a request, and it stores an expired contract at 1min only, by the operator rule of 2026-08-19 that R4-28 must reconcile with this 1day step; the slug is fut, not futures; crates/api/tests/store_step_forms.rs pins the refusals)"]
+command = ["planned: POST /pull/fno series=fut&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30 (the route takes one underlying= a request and refuses this body without one; with one named it parses at the futures route's 1day rung since R4-28 repair 5, D-7191, which reconciled the operator rule of 2026-08-19 for a token-routed future; the form that names all F&O underlyings at once is not built; the slug is fut, not futures; crates/api/tests/store_step_forms.rs pins both)"]
 dry_run = ["planned: the same request for one underlying with BRUTEX_STORE on a private copy (R4-28's rehearsal)"]
 env = ["BRUTEX_STORE"]
 prerequisites = ["R4-28", "operator: approval of the futures pull", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
 check = ["census: a Zerodha futures 1day series for each F&O underlying, 2018-01 to 2026-09"]
 closes = ["OWED-28"]
-not_rehearsed = "waits for R4-28: the futures pull is not built; then for operator: the approval"
+not_rehearsed = "waits for R4-28: its merge (the route is built on fix/db-R4-28, one underlying a request) and a form naming all the F&O underlyings at once; then for operator: the approval"
 disk = "a few KB a contract-month at 1day (to be measured on the rehearsal)"
 
 [[step]]
