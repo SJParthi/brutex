@@ -6366,7 +6366,7 @@ mod tests {
     /// `bars_differ_held`.
     #[test]
     fn a_busy_month_is_judged_by_its_shape_and_an_overlap_stays_busy() {
-        let root = scratch("busyjudge");
+        let root = scratch("ia17b-busy");
         let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
         let parts = || store::path::PathParts {
             vendor: brutex_core::vendor::Vendor::Gdfl,
