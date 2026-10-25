@@ -146,3 +146,13 @@ Prerequisites: none (spec section 1). Decision block D-6800..D-6819. Failure-mat
   restarted).
 - HOLD found at 14:46 IST: held. The base comparison keeps running in the background.
 - NEXT: compare the base's failure set with this branch's; then the final report.
+
+### 2026-10-25 save point 9 (new cloud session; HELD on arrival)
+
+- Checked out the existing branch at `ee10bec6`; nothing redone.
+- `origin/cloud/db-base-20261024` at `40f1cdb2` carries `HOLD` (25 Oct 13:0x IST) and no
+  `GO-CC-20`: held before starting a step. The base failure-set comparison from save point 8 did
+  not survive the old container and has to be rerun.
+- NEXT (on GO): merge the newest `origin/feat/db-fix`, run `cargo test --workspace --locked
+  --no-fail-fast` on this branch and on an unmodified base worktree, compare the failure sets, then
+  the final report.
