@@ -2585,8 +2585,9 @@ test('a sheet and a capture are written whole: a new file renamed over the old, 
   assert.equal(readFileSync(join(dir, 'taken', 'inside'), 'utf8'), 'kept');
   // A directory that does not exist: refused before anything is made.
   assert.throws(() => sheet.writeWhole(join(dir, 'missing', 'sheet.md'), 'x'), /ENOENT/);
-  // Both commands write through it, and a write that fails is named, never a stack (repair 4).
-  assert.match(source('ci/speed-sheet.mjs'), /if \(args\.out\) \{\s*try \{\s*writeWhole\(args\.out, text\);\s*\} catch \(why\) \{/);
+  // Both commands write through it, and a write that fails is named, never a stack (repair 4); the sheet's is
+  // refused first when --out is the commands' log (repair 10), inside the same try.
+  assert.match(source('ci/speed-sheet.mjs'), /if \(args\.out\) \{\s*try \{\s*(?:\/\/[^\n]*\n\s*)*if \(result\.commandLog !== undefined && sameFile\(args\.out, result\.commandLog\)\) throw new Error\([^\n]*\);\s*writeWhole\(args\.out, text\);\s*\} catch \(why\) \{/);
   assert.match(source('ci/browser-harness.mjs'), /if \(args\.capture\) \{\s*try \{\s*writeWhole\(args\.capture, /);
   assert.match(source('ci/browser-harness.mjs'), /if \(args\.out\) \{\s*try \{\s*writeWhole\(args\.out, text\);\s*\} catch \(why\) \{/);
   assert.doesNotMatch(source('ci/browser-harness.mjs') + source('ci/speed-sheet.mjs'), /writeFileSync\((args|path)/);
