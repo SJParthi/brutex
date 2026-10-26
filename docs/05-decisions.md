@@ -86161,3 +86161,145 @@ refusal still by `pull::gdfl_cm::tests::date_mismatch_refuses` and
 
 **Store step.** None of its own: a day closed `done with refusals` for
 `date_mismatch` is read again only by `--retry-refused`, as any closed day.
+
+### D-7205 — `tokio` 1.53.1 → 1.53.3 in `Cargo.lock` only, clearing RUSTSEC-2026-0386 under every cargo-deny, and its offline advisory floor (BASE-DENY-1024) — 2026-10-25
+
+**Context** (BASE-DENY-1024). Cloud part IA-3b (`origin/cloud/db-IA-3b-20261024`,
+`reports/cloud-db-IA-3b.md`, first line `STATUS: BLOCKED`) ran `cargo deny
+check` with cargo-deny 0.20.2 on 24 Oct 2026 and found `advisories` red on
+**RUSTSEC-2026-0386** against `tokio` 1.53.1; bans, licenses and sources ok.
+That branch's `Cargo.lock` is byte-identical to `feat/db-fix`'s, so the base
+is red the same way. No commit turned it red. The advisory is dated
+2026-10-13, after BASE-REDS-1021's green (D-7120, 21 Oct), and is
+`informational = "unsound"`: `AsyncFd::new`, `with_interest`, `try_new` and
+`try_with_interest` are safe constructors that accept any `T: AsRawFd`, so
+safe code can register a descriptor it does not own, and a duplicated and
+closed descriptor whose number the OS reuses can leave a registration that
+fires after its allocation is freed. cargo-deny 0.19.0, the version on the
+Mac and the one CI gate 3 pins (`.github/workflows/ci.yml`: `cargo install
+cargo-deny --version 0.19.0 --locked`), reads the same database and reports
+`advisories ok`, because it does not refuse an informational `unsound`
+advisory; 0.20.2 does. So GitHub CI stayed green while a newer tool was red,
+and green depended on which tool version read the database. Re-read here on
+25 Oct 2026 at the database commit `cargo deny` fetched at 12:42 IST,
+`21d909e4c8bd4e14c7aea58bf980c881a0053ab1` (2026-10-24 10:30:13 +0200), the
+same commit and the same file digest the main session read on 24 Oct
+(`docs/00-charter.md`, "RustSec advisory RUSTSEC-2026-0386"). On the base
+(`feat/db-fix` at 4cd50042d, its tracked sources exported to a scratch
+directory): cargo-deny 0.19.0 `advisories ok, bans ok, licenses ok, sources
+ok`; cargo-deny 0.20.2 `error[unsound]: ... RUSTSEC-2026-0386` and
+`advisories FAILED, bans ok, licenses ok, sources ok`, exit 1
+(`state/fix/round2/logs-BASE-DENY-1024/deny-*-base-4cd50042d.log`).
+
+**Decision.**
+
+1. **A lock-only bump, and nothing else moved.** `tokio` 1.53.1 → 1.53.3,
+   the newest 1.53 release in the local crates.io index cache (1.54.0 and
+   1.54.1 are a minor line above it, not taken) and the first the advisory
+   patches on that line.
+   `git diff Cargo.lock` is tokio's `version` and `checksum` lines, two out
+   and two in (checksum `ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e`,
+   which `cargo fetch --locked` verified on download); no other package and
+   no `dependencies` list moved, and no `Cargo.toml` changes. `cargo update
+   -p tokio --precise 1.53.3` did more than that: it also re-chose
+   `windows-sys` 0.52.0 for `errno` 0.3.14 and `rustix` 1.1.4 in place of
+   0.61.2. Both declare `windows-sys = ">=0.52, <0.62"` for `cfg(windows)`
+   only, both versions were already in the lock, and neither is compiled on
+   macOS or the Linux CI runner; it is a resolver choice, not a requirement
+   of the bump. That choice was not taken: the two lines keep 0.61.2, and
+   `cargo metadata --locked` and `cargo fetch --locked` accept the lock as it
+   stands, so `--locked` gates see no change to make
+   (`logs-BASE-DENY-1024/cargo-update-precise-diff.txt` keeps what the
+   resolver proposed). The workspace declares `tokio = { version = "1",
+   features = ["rt-multi-thread", "macros", "fs", "signal", "time", "net",
+   "sync"] }` in the root manifest, named by `api` and `pull`. `cargo tree
+   --locked -i tokio -e normal`: `api` and `pull` directly; through
+   `async-compression` 0.4.42 ← `tower-http` 0.6.11 ← `reqwest` 0.12.28 ←
+   `pull` ← `api`, `cli`; and through `axum` 0.8.9, `hyper` 1.11.0,
+   `hyper-rustls` 0.27.9, `hyper-util` 0.1.20, `reqwest` 0.12.28,
+   `tokio-rustls` 0.26.4, `tokio-util` 0.7.19 and `tower` 0.5.3.
+2. **Why a lock bump is enough, and the scan the fingerprint demands.** Read
+   from the two registry sources (`~/.cargo/registry/src/*/tokio-1.53.1` and
+   `tokio-1.53.3`): neither ships a `build.rs` or any `.c`, `.cc`, `.cpp`,
+   `.h`, `.S`, `.s`, `.asm` or `.js` file; the file set moves from 564 to 565
+   files, all of them `.rs` tests (adds `src/runtime/io/driver/uring/tests.rs`
+   and `tests/task_trace_wake.rs`, drops `tests/io_async_fd_memory_leak.rs`);
+   the manifest moves only `version` and those `[[test]]` targets, with the
+   same features and the same 16 non-dev dependency entries. 1.53.3 is a
+   patch release inside the `"1"` the workspace declares; it exists on
+   crates.io unyanked with `rust-version` 1.71, as 1.53.1 has, under the
+   pinned 1.97 toolchain. `crates/vocab/tests/workspace_is_rust.rs` hashes
+   every package's version (D-1611), so the bump moved its pin,
+   0xADFB_F4EE_30AF_1851 → 0xB0FF_8621_DDCD_6A2F, recorded there in the form
+   of D-7120's paragraph: "IS ONE VERSION BUMP, NOT A NEW PACKAGE (D-7205)".
+   The package count stays 194 and `DECLARED` is unchanged.
+3. **What changes at run time, stated rather than hidden.** From 1.53.3's
+   `src/io/async_fd.rs`: the four constructors are `#[deprecated]` and now
+   call `AsyncFd::register` or `register_with_interest` inside an `unsafe`
+   block, so their behaviour is unchanged and only a caller sees a warning;
+   the alias `AsyncFdTryNewError` is deprecated too. `git grep AsyncFd`
+   finds no use in `crates/`, and none in the registry sources of the ten
+   crates above that depend on tokio, so no deprecation warning reaches
+   workspace code (`cargo clippy --workspace --all-targets -- -D warnings`
+   is the proof, recorded below). The remaining changes are the bug fixes of
+   tokio's own CHANGELOG for 1.53.2 and 1.53.3, digested in the charter.
+   This workspace reaches `tokio::time` (`sleep`, `timeout`, `Instant`),
+   `tokio::task::spawn_blocking`, `tokio::sync` (`oneshot`, `Notify`, a
+   `Mutex`), `tokio::fs` and one `tokio::join!` in `api`'s tests; of the
+   listed fixes those touch the timer-lock and shutdown fixes in `time` and
+   the blocking pool's rejected-task fix, each a fix to a lock order or a
+   shutdown path. It names no `Semaphore`, `mpsc`, `broadcast`, `JoinSet`,
+   `DuplexStream`, paused time or `tokio::process`. What `hyper`,
+   `reqwest`, `axum` and `tower` reach inside tokio was not read and is
+   **UNVERIFIED** (`docs/06-limits.md` L-BDENY-1). The `io_uring` fixes are
+   behind tokio's unstable cfg, which nothing here turns on.
+4. **The offline floor is raised.** `FLOORS` gains one row, `tokio`,
+   RUSTSEC-2026-0386, copied from the advisory file's own `[versions]`
+   lines: patched `[">= 1.51.6", "< 1.52.0"]` and `[">= 1.53.3"]`,
+   unaffected `["< 0.3.2"]`. Every existing row and test is kept.
+   `the_lock_is_above_every_advisory_floor` fails on the base's lock
+   (`tokio 1.53.1 is inside RUSTSEC-2026-0386`, run with the base's
+   `Cargo.lock` put back in this worktree:
+   `logs-BASE-DENY-1024/floor-old-lock.log`, 17 passed, 1 failed) and passes
+   on this one. `the_floors_refuse_the_versions_d7120_bumped_from` keeps its
+   meaning by judging against D-7120's two rows only, found by their
+   advisories (`rows_for`), never by position, and also asserts that the
+   whole table refuses exactly the same two lines; without that, its
+   `floors_not_held` assertion would have named `tokio`, a package its
+   synthetic lock never held. New: `the_floor_refuses_the_version_d7205_bumped_from`,
+   `every_bumped_from_version_at_once_is_one_refusal_each` and
+   `the_tokio_floor_judges_tokio_alone_and_every_copy_of_it` (the real
+   lock's `tokio-macros` 2.7.2, `tokio-rustls` 0.26.4 and `tokio-util`
+   0.7.19 are not `tokio`); `each_range_is_cut_at_its_published_bounds`
+   gains tokio's cut points. Invariant BREDS-05.
+5. **Green is a property of the tool version too, not only of the tree and
+   the database.** D-7120 point 5 found that the database decides; this
+   finding is that, at one database commit, cargo-deny 0.19.0 is green and
+   0.20.2 is red. The floor in `cargo test` does not depend on either.
+6. **Follow-up, not done here: CI gate 3's pin.** CI installs cargo-deny
+   0.19.0, which does not refuse an informational `unsound` advisory, so
+   the next such advisory against a locked package would again leave CI
+   green while a newer tool is red. Raising the pin (or setting
+   `deny.toml`'s `[advisories]` to refuse `unsound`) is a separate locked
+   choice: it changes what every later check refuses. This decision changes
+   neither the pin nor `deny.toml`. Owner: the main session
+   (`docs/06-limits.md` L-BDENY-2).
+
+**Proof.** `cargo deny check` on this tree at database commit
+`21d909e4c8bd4e14c7aea58bf980c881a0053ab1`: cargo-deny 0.19.0 and cargo-deny
+0.20.2 (installed into a private root, `cargo deny --version` printing
+`cargo-deny 0.20.2`) each `advisories ok, bans ok, licenses ok, sources ok`
+(`logs-BASE-DENY-1024/deny-*-branch.log`). Re-run on 26 Oct 2026 after
+`feat/db-fix` gained BASE-FIXTURE-1025, at the same database commit and the
+same file digest: the base, exported, again green under 0.19.0 and
+`advisories FAILED` (RUSTSEC-2026-0386, exit 1) under 0.20.2; this branch
+green under both (`logs-BASE-DENY-1024/r2-deny-*.log`). `cargo fmt --all
+--check` and `cargo clippy --workspace --all-targets --locked -- -D
+warnings` clean, no deprecation warning (`r2-clippy.log`). Invariant BREDS-05;
+`docs/06-limits.md` L-BREDS-3 (now three advisories), L-BDENY-1 and
+L-BDENY-2;
+`docs/11-findings.md` "BASE-DENY-1024". D-7206 to D-7214 are unused.
+
+**Cost.** No repository operation changes: one lock version, one table row,
+three new tests. The floor is test-time only, one parse of the lock and one pass
+over its 194 stanzas per row.

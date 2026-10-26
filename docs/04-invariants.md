@@ -8619,8 +8619,9 @@ advisory database at run time. These rows are the offline half of D-7120's two
 bumps: `FLOORS` in `crates/vocab/tests/workspace_is_rust.rs` holds each
 advisory's own `patched` and `unaffected` lines (`docs/00-charter.md` records
 the files and their digests), and `cargo test` fails on a lock below them. The
-table is hand-kept and covers these two advisories only (`docs/06-limits.md`
-L-BREDS-3).
+table is hand-kept and covers these two advisories and, since D-7205
+(BASE-DENY-1024), RUSTSEC-2026-0386 against `tokio`: three in all
+(`docs/06-limits.md` L-BREDS-3).
 
 | Id | Invariant | Proof | |
 |---|---|---|---|
@@ -8628,6 +8629,7 @@ L-BREDS-3).
 | BREDS-02 | **Each range is cut exactly at its published bounds.** `rustls-webpki` 0.103.15 and every older line (0.102.8, 0.0.0) are refused, 0.103.16 to 0.103.999 and 0.104.0 onwards cleared; `webpki-roots` 1.0.9, 1.0.0, 0.26.10 and 0.26.12 are refused, 1.0.10 onwards cleared, and 0.26.11 (with or without build metadata) cleared as the advisory's one `unaffected` version | `workspace_is_rust::each_range_is_cut_at_its_published_bounds` | ✓ |
 | BREDS-03 | **A version or comparator the check cannot read is refused by name, never cleared.** An empty, short, long, non-numeric, leading-zero or overflowing version, an empty pre-release or build tag, a stray dot, a stanza with no version line, a pre-release (cargo's pre-release matching is not modelled), and any operator other than `>= `, `< ` and `= ` | `workspace_is_rust::a_version_it_cannot_read_is_refused_by_name_never_cleared`, `workspace_is_rust::every_comparator_in_the_table_is_read_and_others_are_refused` | ✓ |
 | BREDS-04 | **Precedence is semver 2.0.0 §11's.** Its own example chain sorts in order, the table's bounds 0.103.16 < 0.104.0-alpha.1 < 0.104.0-alpha.8 < 0.104.0, and build metadata has no precedence | `workspace_is_rust::semver_precedence_is_the_specs` | ✓ |
+| BREDS-05 | **`Cargo.lock` holds no copy of `tokio` that RUSTSEC-2026-0386 does not clear, and holds `tokio` (D-7205).** Patched `>= 1.51.6, < 1.52.0` or `>= 1.53.3`, unaffected `< 0.3.2`, as the advisory file writes them: 0.3.1 and 0.0.0 cleared; 0.3.2, 1.0.0, 1.37.0, 1.51.5, 1.52.0, 1.52.9 and 1.53.0 to 1.53.2 refused; 1.51.6 to 1.51.999 and 1.53.3 onwards cleared. The three bumped-from versions at once are three refusals, one per advisory; a lock that bumped two is refused for the third alone; `tokio-macros`, `tokio-rustls` and `tokio-util` are not judged as `tokio`; every copy of `tokio` is judged; a `tokio` pre-release or unreadable version is refused by name; D-7120's own test still judges D-7120's two rows alone. Fails on the lock `feat/db-fix` held on 24 October 2026, before D-7205 (`tokio` 1.53.1) and passes on 1.53.3 | `workspace_is_rust::the_lock_is_above_every_advisory_floor`, `workspace_is_rust::the_floor_refuses_the_version_d7205_bumped_from`, `workspace_is_rust::every_bumped_from_version_at_once_is_one_refusal_each`, `workspace_is_rust::the_tokio_floor_judges_tokio_alone_and_every_copy_of_it`, `workspace_is_rust::each_range_is_cut_at_its_published_bounds`, `workspace_is_rust::the_floors_refuse_the_versions_d7120_bumped_from` | ✓ |
 
 ## The cli import verbs, pinned by the cloud mutation pass (CLOUD-MUTCLI, 16 October 2026)
 
