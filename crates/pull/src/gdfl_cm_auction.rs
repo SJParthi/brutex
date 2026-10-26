@@ -1117,20 +1117,21 @@ fn note_revision_written(
 ) {
     let month = format!("{:04}-{:02}", month_of.year(), month_of.month());
     let path_text = path.display().to_string();
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::info(
-            crate::gdfl_import::TARGET,
-            "auction file written for a new generation",
-        )
-        .with("symbol", key.underlying.as_str())
-        .with("month", month.as_str())
-        .with("records", records)
-        .with("from_version", usize::from(from_version))
-        .with("version", usize::from(VERSION))
-        .with("sidecar", path_text.as_str())
-        .with("leftover_cleared_bytes", cleared.unwrap_or(0))
-        .with("code", "auction_revision_written"),
-    );
+    let event = telemetry::Event::info(
+        crate::gdfl_import::TARGET,
+        "auction file written for a new generation",
+    )
+    .with("symbol", key.underlying.as_str())
+    .with("month", month.as_str())
+    .with("records", records)
+    .with("from_version", usize::from(from_version))
+    .with("version", usize::from(VERSION))
+    .with("sidecar", path_text.as_str())
+    .with("leftover_cleared_bytes", cleared.unwrap_or(0))
+    .with("code", "auction_revision_written");
+    #[cfg(test)]
+    revision_tests::written_emitted(&event);
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// Writes `bytes` at the file's end in one call.

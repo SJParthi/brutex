@@ -279,6 +279,23 @@ fn the_step_merges_the_served_sidecar_and_the_carried_days_in_day_order() {
     assert_eq!(sidecar.version, VERSION);
     let utc = |d: u8| i64::from(day(d).days_from_epoch());
     assert_eq!(days_of(&sidecar), vec![utc(22), utc(23), utc(24)]);
+    // TOLD, FIELD BY FIELD (IA-AUC-09, D-4893): one audited event names the
+    // share, the month, the records, the version the served one was in and
+    // the file written; nothing was left to clear.
+    let told = written_taken();
+    assert_eq!(told.len(), 1, "{told:?}");
+    let field = |name: &str| told[0].get(name).map(String::as_str);
+    assert_eq!(field("code"), Some("auction_revision_written"));
+    assert_eq!(field("symbol"), Some(key().underlying.as_str()));
+    assert_eq!(field("month"), Some("2026-09"));
+    assert_eq!(field("records"), Some("3"));
+    assert_eq!(field("from_version"), Some("1"));
+    assert_eq!(field("version"), Some(VERSION.to_string().as_str()));
+    assert_eq!(
+        field("sidecar"),
+        Some(target.display().to_string().as_str())
+    );
+    assert_eq!(field("leftover_cleared_bytes"), Some("0"));
     let in_order = scratch("ia17b-auc-in-order");
     for (d, prints) in [
         (22, &p22[..]),
@@ -356,6 +373,10 @@ fn the_step_is_repeatable_and_writes_nothing_for_nothing() {
         write_revision(&store, &revision, &key(), day(1), &no_prints).unwrap(),
         None,
         "a carried day with no print carries nothing"
+    );
+    assert!(
+        written_taken().is_empty(),
+        "a step that writes nothing tells nothing"
     );
     assert!(!target.exists());
 
@@ -504,4 +525,34 @@ fn a_day_before_a_record_on_its_next_ist_midnight_is_never_inserted() {
         .unwrap();
     assert_eq!(held.records.len(), 1, "nothing inserted");
     std::fs::remove_dir_all(store).unwrap();
+}
+
+thread_local! {
+    /// Every "auction file written for a new generation" event the steps of
+    /// THIS thread told, in order, each field as its text: the step runs on
+    /// the thread that called it, so a test reads only its own.
+    static WRITTEN: std::cell::RefCell<Vec<BTreeMap<String, String>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps `event` for the test on this thread ([`written_taken`]).
+pub(super) fn written_emitted(event: &telemetry::Event<'_>) {
+    let fields = event
+        .fields()
+        .iter()
+        .map(|(name, value)| {
+            let text = match *value {
+                telemetry::Value::Str(text) => text.to_owned(),
+                telemetry::Value::Uint(count) => count.to_string(),
+                other => format!("{other:?}"),
+            };
+            ((*name).to_owned(), text)
+        })
+        .collect();
+    WRITTEN.with_borrow_mut(|kept| kept.push(fields));
+}
+
+/// The revision-sidecar events told on this thread since the last call.
+fn written_taken() -> Vec<BTreeMap<String, String>> {
+    WRITTEN.with_borrow_mut(std::mem::take)
 }
