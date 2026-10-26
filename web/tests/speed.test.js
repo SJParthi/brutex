@@ -5652,7 +5652,7 @@ test('a restart\'s pass asks a route\'s requests in turn, each in a place one of
   assert.equal(sheet.NOT_FIRST.earlier({ r: s, seen: [0], at: [5], by: [s2] }), `its route /speed.json was asked first in that pass by this sheet's HEAD /speed.json?window=1h, ${WARMED}`, 'only the GET of /speed.json itself is the proof read');
 });
 
-test('a captured request names itself in the sheet\'s table, so two of one route are told apart, and a "|" a capture holds stays inside its cell', () => {
+test('a captured request names itself in the sheet\'s table, so two of one route are told apart, and a pipe character a capture holds stays inside its cell', () => {
   // Before (repair 11's self-check, 27 Oct): every captured request read 'captured from the page', so two of
   // one route, each now with its own firsts after a restart, were two rows alike; and a '|' in a captured
   // page, path or query, which a URL keeps as written, ended its cell there and shifted the row.

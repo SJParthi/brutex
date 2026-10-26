@@ -79450,8 +79450,10 @@ Repair round 10 (26 Oct, after verify r10):
     start by how long it took (a threshold is a guess); a check after the
     pass alone (the command's asks come before the pass); and a FAIL for an
     ask not proved a first. A route asked by two URLs in one pass (the
-    `/bars/window.json` grid and its extremes) gives each URL's first ask
-    since the start, the later one after the route's first (L-R315-32).
+    `/bars/window.json` grid and its extremes) gave each URL's first ask
+    since the start, the later one after the route's first (L-R315-32);
+    item 48 withdraws that (verify r11): the count proof held this sheet's
+    own earlier asks, so the later one was published as a first.
 46. **Verify r10's follow-ups.** `--month` and `--day` before 1970 are
     refused by name, sharing the server's bound (`store::path::YearMonth`,
     1970 to 9999), so R315-41's "as the server refuses it" holds; an empty
@@ -79483,8 +79485,43 @@ Repair round 10 (26 Oct, after verify r10):
     399,780 B hold 918 and 220 B of room, so the next shared byte fails the
     build at them, as the budget is meant to.
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-43);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-32.
+Repair round 11 (27 Oct, after verify r11):
+
+48. **Only a route's first ask in a restart's pass is timed as its first,
+    and a route's requests take turns going first** (R315-44; verify r11,
+    blocking X1). Item 45's count proof took an ask as its route's first
+    when the server had counted the route exactly as often as this sheet's
+    answered asks of it in the pass, and those asks included this sheet's
+    own earlier ones, so every later ask of a route in one pass passed it:
+    on the api the `/bars/window.json` extremes request, asked right after
+    the grid, read 4.06 / 8.34 ms as a first against its own first's 100 to
+    212 ms, and with the deploy step's `/db` capture 13 of the 30 requests
+    were published so. Now an ask is timed as a first only when it was this
+    sheet's first ask of its route in the pass (`/speed.json`'s is the read
+    that proved the restart), checked before the count; every later one is
+    a NOT MEASURED line naming the ask that went first ("its route
+    /bars/window.json was asked first in that pass by this sheet's GET
+    ..."), with each such ask and its restarts when they differ. And
+    `passOrder` turns a route's requests from one restart to the next, each
+    in a place one of them holds, so over g restarts each of a route's g
+    requests goes first once and every request still gets its own firsts;
+    `/speed.json` is never turned. The verifier's way (a) with its optional
+    turns. Not taken: its way (b), a later ask published under a phase or
+    mark of its own (a time of a warmed route beside first-after-restart
+    rows, which is what the warm rows already time); asking a shared
+    route's requests after restarts of their own (more restarts for the
+    same rows); and a fixed order (a later request would never be timed).
+    Taken with it: the old-server line now says the server's clock may be
+    ahead of this machine's, since the two cannot be told apart (verify
+    r11's follow-up), and a captured request names its method and URL in
+    the sheet's table ("captured from the page: GET ..."), with a `|` it
+    holds written escaped, so two of one route, each with its own firsts,
+    are told apart (found in this repair's self-check). Not done here: what
+    another route's earlier ask warmed for a route's first (a shared file
+    or cache) is not told by a route's count (L-R315-33).
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-44);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-33.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
