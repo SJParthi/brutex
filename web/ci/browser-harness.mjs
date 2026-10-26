@@ -1857,7 +1857,7 @@ async function main() {
     said.say(`browser-harness: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
-  // The sheet says that stderr was closed during the run, and what of the run's own it did not show.
+  // The sheet says that stderr was closed during the run, and what of the run's own it did not take.
   const note = await stderrNote(said);
   if (note !== null) result.notes.push(note);
   const text = renderHarness(result, args);

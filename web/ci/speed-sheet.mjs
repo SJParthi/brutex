@@ -38,6 +38,20 @@
  * (answered, refused, busy, failed, no answer). A section whose command was
  * not given is printed NOT MEASURED, never left out.
  *
+ * # A restart is proved before anything is timed (verify r9, 26 Oct)
+ *
+ * The pass checked only the command's exit code, that the up check answered
+ * and the build it named, so a `--restart` command that exited 0 and
+ * restarted nothing ('true', or a stop that failed before a start that found
+ * the old server still listening) published warm answers as `first after
+ * restart` rows under a PASS. Now the server's own start (`started_ms` of its
+ * `/speed.json`) is read before each run of the command and again once the
+ * server is up after it; a start that did not change fails that restart by
+ * name and ends the pass, as another build does, and a start that cannot be
+ * read is said and ends it too. The two asks a restart needs anyway are
+ * their routes' first after it: the up check that found the server up is the
+ * up route's, and the read that proved the restart is `/speed.json`'s.
+ *
  * # Usage (the deploy step runs this after every deploy)
  *
  *   node web/ci/speed-sheet.mjs --base http://127.0.0.1:8080 \
@@ -46,7 +60,21 @@
  *     [--feed <wire>] [--instrument NSE-INDEX-NIFTY] [--timeframe <rung>] \
  *     [--month YYYY-MM] [--day YYYY-MM-DD] [--out <sheet.md>] [--allow-unstamped] \
  *     [--timeout-ms 60000] [--up-wait-ms 120000] [--restart-wait-ms <the up wait>] \
- *     [--max-answer-bytes 16000000]
+ *     [--max-answer-bytes 16000000] [--command-log <file>]
+ *
+ * # What a command prints goes to a file of its own (verify r9, 26 Oct)
+ *
+ * The `--writer` and `--restart` commands were given the sheet's own stderr.
+ * A reader of it that had gone killed them with SIGPIPE (a writer that
+ * printed failed its pass, a restart that printed failed by name), and the
+ * child's start cleared O_NONBLOCK on the stream they shared, so a reader
+ * alive and not reading froze the whole sheet inside a write, past every
+ * timer. Now what they print is appended to `--command-log` (by default
+ * `<--out>.commands.log`, or a file in the system's temporary directory
+ * when there is no `--out`), each run of a command under a line that names
+ * it, and the sheet names the file. A file never blocks and never breaks: a
+ * server a `--restart` command starts in the background keeps printing into
+ * it after the sheet has ended, where a pipe would end it at its next line.
  *
  * # Every wait is bounded, and each bound is said (verify r5, 23 Oct)
  *
@@ -100,10 +128,12 @@
  *
  * Exit 0 when every row was answered, stamped by one build and no field was
  * ignored; 1 with every reason printed otherwise; 2 for a misused command.
- * A closed stdout or stderr changes none of these and ends no run (verify r7
- * and r8): what a reader that has gone did not take is counted, the sheet
- * names the first of the run's lines stderr did not show, and `--out` is
- * still written whole.
+ * A closed or stalled stdout or stderr changes none of these and ends no run
+ * (verify r7, r8 and r9): what a reader that has gone did not take is
+ * counted, the sheet names the first of the run's lines stderr did not take,
+ * a reader that does not read costs the run at most {@link STDERR_SETTLE_MS}
+ * at its end, the commands never share the stream, and `--out` is still
+ * written whole.
  * It only reads: GET and HEAD, never a write, whatever a capture holds.
  */
 import http from 'node:http';
@@ -111,6 +141,7 @@ import https from 'node:https';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -290,10 +321,12 @@ export const MAX_N = 10_000;
 export const DECIMAL = /^[0-9]+(?:[eE][0-9]+)?$/;
 
 /**
- * Whether `YYYY-MM-DD` is a day the calendar has: its month 01 to 12 and its
- * day in that month (2024-02-29 is, 2024-02-30 and 2024-13-01 are not).
- * `setUTCFullYear` takes the year as written, where `Date.UTC` would read 20
- * as 1920.
+ * Whether `YYYY-MM-DD` is a day the calendar has: its year 0001 or later
+ * (the common era has no year 0; verify r9 follow-up, 26 Oct: `--month
+ * 0000-01` was taken, and the server then refused every request by name),
+ * its month 01 to 12 and its day in that month (2024-02-29 is, 2024-02-30
+ * and 2024-13-01 are not). `setUTCFullYear` takes the year as written, where
+ * `Date.UTC` would read 20 as 1920.
  *
  * @param {string} day digits in the YYYY-MM-DD shape
  */
@@ -301,7 +334,7 @@ export function calendarHas(day) {
   const [y, m, d] = day.split('-').map(Number);
   const t = new Date(0);
   t.setUTCFullYear(y, m - 1, d);
-  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+  return y >= 1 && t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
 }
 
 /**
@@ -334,7 +367,7 @@ export function parseArgs(argv) {
   /** @type {Record<string, string | boolean>} */
   const o = {};
   const flags = new Set(['allow-unstamped', 'help']);
-  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms', 'up-wait-ms', 'restart-wait-ms', 'max-answer-bytes']);
+  const valued = new Set(['base', 'n', 'clients', 'writer', 'restart', 'restarts', 'from-pages', 'feed', 'instrument', 'timeframe', 'month', 'day', 'out', 'timeout-ms', 'up-wait-ms', 'restart-wait-ms', 'max-answer-bytes', 'command-log']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${JSON.stringify(a)}`);
@@ -376,6 +409,14 @@ export function parseArgs(argv) {
   if (o.out !== undefined && o['from-pages'] !== undefined && sameFile(String(o.out), String(o['from-pages']))) {
     throw new Error(`--out and --from-pages name one file (${String(o.out)}): the sheet would be written over the capture it reads`);
   }
+  // WHERE THE COMMANDS PRINT (verify r9, 26 Oct): a file of their own, never
+  // the sheet's stderr ({@link openCommandLog}); beside the sheet unless named.
+  const commandLog = o['command-log'] !== undefined ? String(o['command-log']) : o.out !== undefined ? `${String(o.out)}.commands.log` : null;
+  for (const other of /** @type {const} */ (['out', 'from-pages'])) {
+    if (commandLog !== null && o[other] !== undefined && sameFile(commandLog, String(o[other]))) {
+      throw new Error(`--command-log and --${other} name one file (${commandLog}): what the commands print would be written into the ${other === 'out' ? 'sheet' : 'capture'}`);
+    }
+  }
   return {
     base,
     n: whole('n', 200, 1, MAX_N),
@@ -400,7 +441,9 @@ export function parseArgs(argv) {
     // At most the largest answer kept as text: past it an answer is a digest,
     // and no answer that large is timed by many clients at once (verify r4
     // follow-up: 9,007,199,254,740,991 was taken).
-    maxAnswerBytes: whole('max-answer-bytes', MAX_ANSWER_BYTES, 1, MAX_TEXT_BYTES)
+    maxAnswerBytes: whole('max-answer-bytes', MAX_ANSWER_BYTES, 1, MAX_TEXT_BYTES),
+    // `null`: a file in the system's temporary directory, made at the first command.
+    commandLog
   };
 }
 
@@ -912,22 +955,67 @@ function guardCommands() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * The file the commands the sheet runs print to, opened to append, by its
+ * descriptor (verify r9, 26 Oct). Opened without blocking and checked
+ * through the open file: only a regular file is taken, because a named pipe
+ * or a terminal here would be the shared stream this file replaces — a
+ * reader that goes kills the command, one that does not read stalls it — and
+ * a named pipe nobody reads would block the open itself. Throws by name.
+ *
+ * @param {string} path
+ * @returns {number}
+ */
+export function openCommandLog(path) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NONBLOCK, 0o644);
+  if (fstatSync(fd).isFile()) return fd;
+  closeSync(fd);
+  throw new Error('not a regular file, and what the commands print is kept only in one');
+}
+
+/**
+ * Appends one line to the commands' log: the line that names a command
+ * before it runs. Never throws: the reason a line could not be written is
+ * returned, for the caller to say (`null` once it is written).
+ *
+ * @param {number} fd {@link openCommandLog}'s
+ * @param {string} line
+ * @returns {string | null}
+ */
+export function heading(fd, line) {
+  try {
+    writeFileSync(fd, `${line}\n`);
+    return null;
+  } catch (why) {
+    return /** @type {Error} */ (why).message;
+  }
+}
+
+/**
  * Runs `command` through the shell, DETACHED, so it leads a process group of
  * its own and a stop reaches every process it starts (verify r5, 23 Oct: a
  * `--restart` command was waited on with no bound, and the `--writer` was
  * stopped by a SIGTERM to its shell alone). `wait` resolves with its exit
  * code, or with what ended it instead, said after "the command": `was ended
- * by SIGTERM`, `could not be started: ...`; what it prints goes to the
- * sheet's stderr. `stop()` ends its group — SIGTERM,
+ * by SIGTERM`, `could not be started: ...`. What it prints goes to `log`
+ * ({@link openCommandLog}), never to the sheet's own stdout or stderr.
+ * `stop()` ends its group — SIGTERM,
  * then SIGKILL past {@link COMMAND_STOP_MS}, each wait bounded — and says how,
  * after "its process group".
  *
+ * NEVER THE SHEET'S OWN STDERR (verify r9, 26 Oct): it was given the sheet's
+ * fd 2. With the reader of that stream gone, the command died of SIGPIPE at
+ * its first line; and a child's start clears O_NONBLOCK on its stdio, which
+ * an inherited stream shares with the sheet, so from then on a reader alive
+ * and not reading froze the sheet inside a write that no timer could end
+ * (probed 26 Oct: a 300 KB write after such a spawn returned at 5,976 ms,
+ * when the reader left; after a spawn given a file, 12 ms).
+ *
  * @param {string} command
+ * @param {number} log the commands' log, for its stdout and its stderr
  * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<string>}}
  */
-export function run(command) {
-  // Its output goes to the sheet's stderr, so the sheet's stdout is the sheet alone.
-  const child = spawn(command, { shell: true, stdio: ['ignore', 2, 2], detached: true });
+export function run(command, log) {
+  const child = spawn(command, { shell: true, stdio: ['ignore', log, log], detached: true });
   COMMANDS.add(child);
   guardCommands();
   let exited = false;
@@ -984,10 +1072,11 @@ export function run(command) {
  *
  * @param {string} command
  * @param {number} ms `--restart-wait-ms`
+ * @param {number} log the commands' log ({@link run})
  * @returns {Promise<number | string>}
  */
-export async function restartWithin(command, ms) {
-  const cmd = run(command);
+export async function restartWithin(command, ms, log) {
+  const cmd = run(command, log);
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let t;
   const late = Symbol('late');
@@ -995,6 +1084,33 @@ export async function restartWithin(command, ms) {
   clearTimeout(t);
   if (got !== late) return /** @type {number | string} */ (got);
   return `did not exit within ${ms} ms (--restart-wait-ms), so its process group ${await cmd.stop()}`;
+}
+
+/**
+ * The server's own start, from an answer of `GET /speed.json`: its
+ * `started_ms`, the time the server's process began counting, which a new
+ * process gives anew and the same process never changes (`api::speed`). Or
+ * why it cannot be read, said after "could not be read: ". A restart is
+ * proved by this stamp changing across the `--restart` command (verify r9,
+ * 26 Oct: nothing proved one, so a command that restarted nothing published
+ * warm answers as `first after restart` rows under a PASS).
+ *
+ * @param {Answer | NoAnswer} a
+ * @returns {{started: number} | {why: string}}
+ */
+export function startedOf(a) {
+  if (a.status !== 200) return { why: `GET ${SPEED_ROUTE} answered ${'error' in a ? a.error : `HTTP ${a.status}`}` };
+  if ('kept' in a && a.kept !== undefined && a.kept !== 'text') return { why: `GET ${SPEED_ROUTE} answered ${a.bytes} bytes, past the ${MAX_TEXT_BYTES} the sheet keeps as text` };
+  /** @type {unknown} */
+  let body;
+  try {
+    body = JSON.parse(a.body);
+  } catch (why) {
+    return { why: `GET ${SPEED_ROUTE} answered HTTP 200 with a body that is not JSON (${/** @type {Error} */ (why).message})` };
+  }
+  const started = /** @type {{started_ms?: unknown} | null} */ (body)?.started_ms;
+  if (typeof started !== 'number' || !Number.isSafeInteger(started) || started < 0) return { why: `GET ${SPEED_ROUTE} answered without a whole started_ms` };
+  return { started };
 }
 
 /**
@@ -1030,18 +1146,55 @@ export function readCapturedFile(path) {
  *
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
- *   restart?: (command: string, waitMs: number) => Promise<number | string>}} [deps] `restart` runs one
- *   restart within `waitMs` and resolves with its exit code, or with what happened instead
- *   ({@link restartWithin}, the shell command, by default)
+ *   restart?: (command: string, waitMs: number, i: number) => Promise<number | string>,
+ *   openLog?: (path: string) => number}} [deps] `restart` runs restart `i` (from 1) within `waitMs` and
+ *   resolves with its exit code, or with what happened instead ({@link restartWithin}, the shell command
+ *   printing to the commands' log, by default); `openLog` opens that log ({@link openCommandLog} by default)
  * @returns {Promise<SheetResult & {notes: string[]}>} every return carries its notes (the day taken, R315-38)
  */
 export async function runSheet(args, deps = {}) {
   const sendTo = deps.send ?? timed;
-  const restartOnce = deps.restart ?? restartWithin;
+  const openLog = deps.openLog ?? openCommandLog;
   // A closed stderr is counted, never thrown (verify r8: the console's line threw it a tick later, mid-run).
   const log = deps.log ?? saidOn(process.stderr).say;
   /** @param {string} path @param {object} [o] */
   const send = (path, o = {}) => sendTo(args.base, path, { timeoutMs: args.timeoutMs, ...o });
+  /**
+   * WHERE THE COMMANDS PRINT (verify r9, 26 Oct): one file, opened at the
+   * first command the run starts and appended to, never the sheet's stderr
+   * ({@link run}). Each run of a command is headed there by a line naming it.
+   *
+   * @type {{fd: number, path: string, names: Set<string>} | {why: string} | null}
+   */
+  let kept = null;
+  /**
+   * The log's descriptor, headed for one run of a command, or why that
+   * command is not run: one whose output could not be kept is refused, never
+   * run with its output lost.
+   *
+   * @param {'--writer' | '--restart'} name @param {string} title what the heading line says of this run
+   * @returns {{fd: number} | {why: string}}
+   */
+  const loggedFor = (name, title) => {
+    if (kept === null) {
+      const path = args.commandLog ?? join(tmpdir(), `speed-sheet-${process.pid}-${Date.now()}.commands.log`);
+      try {
+        kept = { fd: openLog(path), path, names: new Set() };
+        log(`speed sheet: what the commands print goes to ${path}`);
+      } catch (why) {
+        kept = { why: `what it prints could not be kept in ${path}: ${/** @type {Error} */ (why).message}` };
+      }
+    }
+    if ('why' in kept) return kept;
+    const failed = heading(kept.fd, `=== ${new Date().toISOString()} ${title}`);
+    if (failed !== null) return { why: `what it prints could not be kept in ${kept.path}: ${failed}` };
+    kept.names.add(name);
+    return kept;
+  };
+  const restartOnce = deps.restart ?? (async (/** @type {string} */ command, /** @type {number} */ waitMs, /** @type {number} */ i) => {
+    const into = loggedFor('--restart', `restart ${i} of ${args.restarts}, the --restart command: ${command}`);
+    return 'why' in into ? `was not run: ${into.why}` : restartWithin(command, waitMs, into.fd);
+  });
   /** @type {string[]} */
   const failures = [];
   /** @type {string[]} */
@@ -1169,23 +1322,30 @@ export async function runSheet(args, deps = {}) {
     log(`speed sheet: warm at ${clients} clients`);
     for (const r of asked(clients, 'warm')) await timedRow(r, { n: args.n, clients, phase: 'warm', agentOf: warmAgent, timeoutMs: args.timeoutMs });
   }
-  if (args.writer === null) notMeasured.push('warm+writer: no --writer command was given (an import or a pull writing)');
-  else {
-    const writer = run(args.writer);
-    let exited = false;
-    void writer.wait.then(() => (exited = true));
+  const into = args.writer === null ? null : loggedFor('--writer', `the --writer command: ${args.writer}`);
+  if (into === null) notMeasured.push('warm+writer: no --writer command was given (an import or a pull writing)');
+  else if ('why' in into) {
+    failures.push(`the --writer command was not run: ${into.why}`);
+    notMeasured.push('warm+writer: the --writer command was not run (its FAILED line says why)');
+  } else {
+    const writer = run(/** @type {string} */ (args.writer), into.fd);
+    /** @type {number | string | null} how it ended, once it has */
+    let gone = null;
+    void writer.wait.then((how) => (gone = how));
     // One pass a client count: a single --clients count is not timed twice.
     for (const clients of new Set([Math.min(...args.clients), Math.max(...args.clients)])) {
       log(`speed sheet: warm+writer at ${clients} clients`);
       for (const r of asked(clients, 'warm+writer')) await timedRow(r, { n: args.n, clients, phase: 'warm+writer', agentOf: warmAgent, timeoutMs: args.timeoutMs });
     }
-    if (exited) failures.push('the --writer command ended before the warm+writer pass did: part of that pass ran with nothing writing');
+    // HOW IT ENDED IS NAMED (verify r9, 26 Oct: a writer killed by SIGPIPE read as any early end).
+    if (gone !== null) failures.push(`the --writer command ended before the warm+writer pass did: it ${typeof gone === 'number' ? `exited ${gone}` : gone}, so part of that pass ran with nothing writing`);
     // ITS WHOLE GROUP, BOUNDED: a SIGTERM to its shell alone left what the
     // shell started still writing after the sheet ended (verify r5 follow-up).
     const how = await writer.stop();
     log(`speed sheet: the --writer command's process group ${how}`);
     // A WRITER KILLED IS SAID IN THE SHEET (verify r6 follow-up, 24 Oct): it was said on stderr only.
     if (how === KILLED) failures.push(`the --writer command's process group ${how}: what it was writing was ended by force, not asked to stop`);
+    else notes.push(`the --writer command's process group ${how} at the end of the warm+writer pass`);
   }
   if (args.restart === null) notMeasured.push(`first after restart: no --restart command was given (${args.restarts} restarts asked)`);
   else {
@@ -1199,9 +1359,33 @@ export async function runSheet(args, deps = {}) {
     let ran = 0;
     /** @type {string | null} why the pass ended before its last restart */
     let ended = null;
+    const upKey = `${UP_METHOD} ${UP_ROUTE}`;
+    const speedKey = `GET ${SPEED_ROUTE}`;
+    /** @type {string[]} each restart timed, as the server's start before and after its command */
+    const proved = [];
+    /**
+     * The server's start now, with the answer that said it, or why it cannot
+     * be read; a `/speed.json` asked no more this run is not asked again.
+     *
+     * @returns {Promise<{started: number, answer: Answer | NoAnswer} | {why: string}>}
+     */
+    const startNow = async () => {
+      if (stalled.has(speedKey)) return { why: `GET ${SPEED_ROUTE} is asked no more this run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(speedKey)}` };
+      const answer = await send(SPEED_ROUTE);
+      const read = startedOf(answer);
+      return 'why' in read ? read : { started: read.started, answer };
+    };
     for (let i = 0; i < args.restarts; i += 1) {
       log(`speed sheet: restart ${i + 1} of ${args.restarts}`);
-      const code = await restartOnce(args.restart, args.restartWaitMs);
+      // THE SERVER'S OWN START, READ BEFORE THE COMMAND (verify r9, 26 Oct):
+      // the restart it runs is proved below by this stamp changing.
+      const was = await startNow();
+      if ('why' in was) {
+        failures.push(`restart ${i + 1}: the server's start could not be read before the --restart command, so a restart could not be told from none: ${was.why}`);
+        ended = `the server's start could not be read at restart ${i + 1}`;
+        break;
+      }
+      const code = await restartOnce(args.restart, args.restartWaitMs, i + 1);
       if (code !== 0) {
         failures.push(`restart ${i + 1}: the --restart command ${typeof code === 'number' ? `exited ${code}` : code}`);
         ended = `the --restart command failed at restart ${i + 1}`;
@@ -1234,11 +1418,35 @@ export async function runSheet(args, deps = {}) {
         ended = `the server came back as another build than the run's at restart ${i + 1}`;
         break;
       }
+      // THE RESTART IS PROVED BEFORE ANYTHING IS TIMED (verify r9, 26 Oct):
+      // the command's exit code and an up check prove nothing, since a
+      // command that restarted nothing ('true', or a stop refused before a
+      // start that found the old server listening) exits 0 and the old
+      // server answers. Its start that did not change ends the pass, as
+      // another build does: what it would time is a warm server.
+      const is = await startNow();
+      if ('why' in is) {
+        failures.push(`restart ${i + 1}: the server's start could not be read after the --restart command, so a restart could not be told from none: ${is.why}`);
+        ended = `the server's start could not be read at restart ${i + 1}`;
+        break;
+      }
+      if (is.started === was.started) {
+        failures.push(`restart ${i + 1}: the server at ${args.base} did not restart: its ${SPEED_ROUTE} said started_ms ${was.started} before the --restart command and after it`);
+        ended = `the server did not restart at restart ${i + 1}`;
+        break;
+      }
+      log(`speed sheet: restart ${i + 1}: the server restarted: started_ms ${was.started} before the command, ${is.started} after it`);
+      proved.push(`${was.started} to ${is.started}`);
       ran += 1;
+      // THE TWO ASKS THE RESTART NEEDED ARE THEIR ROUTES' FIRST AFTER IT: the
+      // up check that found the server up, and the read that proved the
+      // restart. Asked again, either row would time a second ask as a first.
+      /** @type {Map<string, Answer | NoAnswer>} */
+      const already = new Map([[upKey, up], [speedKey, is.answer]]);
       let switched = false;
       for (const r of requests) {
         if (stalled.has(keyOf(r))) continue;
-        const a = await send(r.url, { method: r.method, keep: 'head' });
+        const a = already.get(keyOf(r)) ?? (await send(r.url, { method: r.method, keep: 'head' }));
         const key = keyOf(r);
         const f = firsts.get(key) ?? { times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
         firsts.set(key, f);
@@ -1267,6 +1475,8 @@ export async function runSheet(args, deps = {}) {
       }
     }
     if (ended !== null) notMeasured.push(`first after restart: timed after ${ran} of the ${args.restarts} restarts asked: ${ended}`);
+    // EACH RESTART TIMED IS SAID WITH ITS PROOF, in the sheet (verify r9: only stderr said anything of it).
+    if (proved.length > 0) notes.push(`first after restart: ${proved.length} restart${proved.length === 1 ? '' : 's'} timed, each proved by the server's own start (${SPEED_ROUTE} started_ms) changing across the --restart command: ${proved.join(', ')}`);
     for (const r of requests) {
       const key = keyOf(r);
       const f = firsts.get(key);
@@ -1297,6 +1507,12 @@ export async function runSheet(args, deps = {}) {
       if ((row.classes[k] ?? 0) > 0) failures.push(`${row.page} ${row.url} (${row.phase}, ${row.clients} clients): ${row.classes[k]} ${k} — ${row.said}`);
     }
   }
+  // THE COMMANDS' LOG IS NAMED IN THE SHEET, and this run's hold on it let go:
+  // a process a command left running keeps its own.
+  if (kept !== null && 'fd' in kept) {
+    closeSync(kept.fd);
+    if (kept.names.size > 0) notes.push(`what the ${[...kept.names].join(' and ')} command${kept.names.size > 1 ? 's' : ''} printed is kept in ${kept.path}, each run under a line that names it`);
+  }
   return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes };
 }
 
@@ -1306,7 +1522,8 @@ const msText = (ms) => (ms < 10 ? ms.toFixed(2) : ms.toFixed(1));
 /**
  * The sheet as Markdown: every row stamped with its commit, then every
  * section not measured and every failure. A note (what the run's own stderr
- * did not show) comes first, and never changes the verdict.
+ * did not take, the proof of each restart, where the commands printed) comes
+ * first, and never changes the verdict.
  *
  * @param {SheetResult} result
  * @param {{n: number, clients: number[]}} args
@@ -1424,7 +1641,10 @@ const SAYS = new WeakMap();
 /**
  * How long the end of a run waits for stderr to take the run's own lines
  * before its sheet is written, ms: a line a closed stderr did not take is
- * known only once its write has called back, and the sheet says it.
+ * known only once its write has called back, and the sheet says it. A
+ * reader alive and not reading costs the run this wait and no more, because
+ * the stream stays non-blocking: no command the sheet starts is given it
+ * ({@link run}; verify r9, 26 Oct: one that was froze the sheet in a write).
  */
 export const STDERR_SETTLE_MS = 1_000;
 
@@ -1438,7 +1658,7 @@ export const STDERR_SETTLE_MS = 1_000;
  * (`2>&1 | head -1`) died mid-run with its `--out` never written and
  * nothing said, and either command's end turned its exit into 1 whatever
  * its run's verdict). Once a write has failed, no later line is written:
- * each is counted. `closed()` names the failure, the first line not shown
+ * each is counted. `closed()` names the failure, the first line not taken
  * (`step`, null while none was lost) and how many were not; `settled(ms)`
  * resolves once every line handed has called back, or `false` at the bound.
  * The same object for the same stream, however often it is asked, so every
@@ -1508,7 +1728,7 @@ export function saidOn(stream) {
 }
 
 /**
- * What a run's own stderr did not show, for its sheet, once the run's lines
+ * What a run's own stderr did not take, for its sheet, once the run's lines
  * have settled (at most `ms`): `null` when stderr took every one.
  *
  * @param {Said} said
@@ -1519,7 +1739,7 @@ export async function stderrNote(said, ms = STDERR_SETTLE_MS) {
   const took = await said.settled(ms);
   const gone = said.closed();
   if (gone !== null && gone.step === null) return `stderr was closed (${gone.why}) during the run; none of this run's own lines on it was lost`;
-  if (gone !== null) return `stderr was closed (${gone.why}) from the line "${gone.step}": ${gone.lost} of this run's own lines on it were not shown`;
+  if (gone !== null) return `stderr was closed (${gone.why}) from the line "${gone.step}": ${gone.lost} of this run's own lines on it were not taken`;
   return took ? null : `stderr had not taken ${said.pending()} of this run's own lines ${ms} ms after the run`;
 }
 
@@ -1608,12 +1828,15 @@ async function main() {
     // CHECKED BEFORE THE RUN, as the harness checks its outputs (verify r6 follow-up).
     const why = args.out === null ? '' : unwritable('--out', args.out);
     if (why !== '') throw new Error(why);
+    // And the file the commands print to, when a command is given (verify r9).
+    const logWhy = args.commandLog === null || (args.writer === null && args.restart === null) ? '' : unwritable('--command-log', args.commandLog);
+    if (logWhy !== '') throw new Error(logWhy);
   } catch (why) {
     said.say(`speed-sheet: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
   const result = await runSheet(args, { log: said.say });
-  // The sheet says what its own stderr did not show, from which line (verify r8).
+  // The sheet says what its own stderr did not take, from which line (verify r8).
   const note = await stderrNote(said);
   const text = renderSheet(note === null ? result : { ...result, notes: [...result.notes, note] }, args);
   const flushed = written(process.stdout, text, 'speed-sheet');

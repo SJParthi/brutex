@@ -762,6 +762,13 @@ test('the sheet\'s command line is read and every misuse is named', () => {
   assert.deepEqual([a.n, a.clients, a.restarts, a.instrument, a.allowUnstamped, a.writer], [200, [1, 10, 60], 20, 'NSE-INDEX-NIFTY', false, null]);
   const b = sheet.parseArgs(['--base', 'http://h:1', '--n', '5', '--clients', '2,3', '--writer', 'w', '--restart', 'r', '--restarts', '2', '--from-pages', 'c', '--feed', 'gdfl', '--instrument', 'NSE-INDEX-BANKNIFTY', '--timeframe', '1s', '--month', '2026-09', '--day', '2026-09-30', '--out', 'o.md', '--allow-unstamped', '--timeout-ms', '9']);
   assert.deepEqual([b.n, b.clients, b.writer, b.restart, b.restarts, b.fromPages, b.feed, b.timeframe, b.month, b.day, b.out, b.allowUnstamped, b.timeoutMs], [5, [2, 3], 'w', 'r', 2, 'c', 'gdfl', '1s', '2026-09', '2026-09-30', 'o.md', true, 9]);
+  // Repair 9: where the commands print, beside --out unless --command-log names it; one file is never two of them.
+  assert.equal(a.commandLog, null, 'no --out and no --command-log: a file in the system\'s temporary directory, made at the first command');
+  assert.equal(b.commandLog, 'o.md.commands.log');
+  assert.equal(sheet.parseArgs(['--base', 'http://h:1', '--out', 'o.md', '--command-log', 'c.log']).commandLog, 'c.log');
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--out', 'o.md', '--command-log', 'o.md']), /^Error: --command-log and --out name one file \(o\.md\): what the commands print would be written into the sheet$/);
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--from-pages', 'c.json', '--command-log', 'c.json']), /^Error: --command-log and --from-pages name one file \(c\.json\): what the commands print would be written into the capture$/);
+  assert.throws(() => sheet.parseArgs(['--base', 'http://h:1', '--command-log']), /^Error: --command-log needs a value$/);
   /** @type {[string[], RegExp][]} */
   const bad = [
     [['x'], /unexpected argument/],
@@ -903,10 +910,15 @@ test('a large answer is timed by one client at a time and kept as its digest, ea
 
 test('every phase of the sheet is run or said NOT MEASURED, and every row is stamped with one build', async () => {
   const server = standIn({ ignore: new Set() });
-  // A writer that exits at once, against a server slow enough for the exit to land mid-pass.
-  const slow = standIn({ ignore: new Set(), delayMs: 3 });
-  const done = await sheet.runSheet({ ...argsFor(), writer: 'true', restart: 'true', restarts: 2 }, { send: slow.send, log: () => {} });
-  assert.ok(done.failures.some((f) => f.includes('the --writer command ended before the warm+writer pass did')), done.failures.join('\n'));
+  // A writer that exits at once, against a server slow enough for the exit to land mid-pass; a restart
+  // command that restarts the stand-in (repair 9: one that restarts nothing times nothing), each printing
+  // into the commands' log.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-phases-'));
+  const start = join(dir, 'start');
+  writeFileSync(start, '1');
+  const slow = standIn({ ignore: new Set(), delayMs: 3, started: () => Number(readFileSync(start, 'utf8')) });
+  const done = await sheet.runSheet({ ...argsFor(), writer: 'true', restart: `echo $$ > '${start}'`, restarts: 2, commandLog: join(dir, 'commands.log') }, { send: slow.send, log: () => {} });
+  assert.ok(done.failures.some((f) => f.includes('the --writer command ended before the warm+writer pass did: it exited 0, so part of that pass ran with nothing writing')), done.failures.join('\n'));
   assert.ok(done.rows.some((r) => r.phase === 'warm+writer'));
   assert.equal(done.rows.filter((r) => r.phase === 'first after restart')[0].n, 2);
   assert.deepEqual(done.rows.filter((r) => r.phase === 'first after restart')[0].classes, { answered: 2 }, 'a restart row counts its answers like every other row');
@@ -920,11 +932,11 @@ test('every phase of the sheet is run or said NOT MEASURED, and every row is sta
   assert.match(said, /NOT MEASURED: first after restart: no --restart command was given \(20 restarts asked\)/);
   assert.doesNotMatch(said, /NOT MEASURED: the requests \/gaps/);
   // A restart command that fails, and a server that does not come back, are failures.
-  const bad = await sheet.runSheet({ ...argsFor(), restart: 'false', restarts: 2 }, { send: server.send, log: () => {} });
+  const bad = await sheet.runSheet({ ...argsFor(), restart: 'false', restarts: 2, commandLog: join(dir, 'commands.log') }, { send: server.send, log: () => {} });
   assert.ok(bad.failures.includes('restart 1: the --restart command exited 1'));
   // After the restart: down for two checks, then up, and the first /aliases.json fails.
   const state = { restarted: false, down: 0 };
-  const flaky = standIn({ ignore: new Set(), up: () => !(state.down > 0 && state.down-- > 0), failFirstOf: '/aliases.json', failWhen: () => state.restarted });
+  const flaky = standIn({ ignore: new Set(), up: () => !(state.down > 0 && state.down-- > 0), failFirstOf: '/aliases.json', failWhen: () => state.restarted, started: () => (state.restarted ? 2 : 1) });
   const restart = async () => {
     state.restarted = true;
     state.down = 2;
@@ -1133,15 +1145,17 @@ test('the sheet\'s own edges: a capture file, a request with no first answer, a 
   const never = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1, upWaitMs: 1 }, { send: standIn({ ignore: new Set(), up: (() => { let first = true; return () => (first ? ((first = false), true) : false); })() }).send, log: () => {}, restart: async () => 0 });
   assert.ok(never.failures.includes('restart 1: the server was not up 1 ms after the restart'), never.failures.join('\n'));
   const gone = standIn({ ignore: new Set(), drop: '/aliases.json' });
-  const blank = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1, allowUnstamped: true }, { send: standIn({ ignore: new Set(), build: null, drop: '/aliases.json' }).send, log: () => {}, restart: async () => 0 });
+  let starts = 0;
+  const blank = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1, allowUnstamped: true }, { send: standIn({ ignore: new Set(), build: null, drop: '/aliases.json', started: () => starts }).send, log: () => {}, restart: async () => ((starts += 1), 0) });
   assert.ok(blank.failures.includes('restart 1: the first /aliases.json answered dropped'), blank.failures.join('\n'));
   assert.deepEqual(blank.rows.filter((r) => r.phase === 'first after restart')[0].builds, [], 'an unstamped server stamps no build on a restart row');
   void gone;
   const slow = sheet.renderSheet({ ...blank, rows: [{ ...blank.rows[0], p50: 12.345, p99: 9.5, max: 10 }] }, argsFor());
   assert.match(slow, /\| 12\.3 \| 9\.50 \| 10\.0 \|/, 'from ten ms, one decimal');
-  assert.match(slow, /\|\n\n- (SKIPPED|NOT MEASURED|FAILED): /, 'a blank line between the table and the list');
+  // Repair 9: the list now opens with the note of the restart that was proved.
+  assert.match(slow, /\|\n\n- (?:first after restart: |SKIPPED: |NOT MEASURED: |FAILED: )/, 'a blank line between the table and the list');
   // A writer killed at the end of its pass, by a signal, is said as ended by its signal.
-  const killed = await sheet.runSheet({ ...argsFor(), writer: 'sleep 5' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  const killed = await sheet.runSheet({ ...argsFor(), writer: 'sleep 5', commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(!killed.failures.some((f) => f.includes('--writer')), killed.failures.join('\n'));
 });
 
@@ -2296,9 +2310,13 @@ function argsFor() {
  * A stand-in for the server: every route answers by its query; a field in
  * `ignore` is not read (its garbled value is answered like the real one), and
  * every other garbled value is refused, as a strict reader would.
+ * `/speed.json` answers a report whose `started_ms` is `started()`, the
+ * server's own start: a stand-in "restarts" when it changes (repair 9; the
+ * sheet proves each restart by it), and one never given `started` never does.
  *
  * @param {{ignore: Set<string>, build?: string | null | (() => string), status?: Record<string, number>,
- *   drop?: string, up?: () => boolean, failFirstOf?: string, failWhen?: () => boolean, delayMs?: number}} o
+ *   drop?: string, up?: () => boolean, failFirstOf?: string, failWhen?: () => boolean, delayMs?: number,
+ *   started?: () => unknown}} o
  */
 function standIn(o) {
   let served = 0;
@@ -2323,7 +2341,9 @@ function standIn(o) {
       if (read.some(([, v]) => v === GARBLED)) return { status: 400, headers: {}, body: '{"error":"a value this route cannot read"}', ms: 1, bytes: 40, build };
       const body = u.pathname === '/sources.json'
         ? JSON.stringify({ rungs: [{ feed: 'zerodha', rung: '1min', stored: true, last_month: '2026-09', last_day: '2026-09-30', read }] })
-        : JSON.stringify({ route: u.pathname, read });
+        : u.pathname === SPEED_ROUTE
+          ? JSON.stringify({ ...report([]), started_ms: o.started ? o.started() : report([]).started_ms, read })
+          : JSON.stringify({ route: u.pathname, read });
       return { status, headers: {}, body, ms: 1 + (served % 7), bytes: body.length, build };
     }
   };
@@ -3614,20 +3634,22 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   // exit with no bound (--restart 'sleep 1000' printed nothing in 60 s), and
   // the writer was ended by a SIGTERM to its shell alone.
   const dir = mkdtempSync(join(tmpdir(), 'r315-commands-'));
+  // What every command prints goes to the commands' log (repair 9).
+  const logFd = sheet.openCommandLog(join(dir, 'commands.log'));
   // One run, bounded: a command that never exits, with a child of its own in the background.
   const bg = join(dir, 'bg.pid');
   const t0 = Date.now();
-  const said = await sheet.restartWithin(`sleep 1000 & echo $! > '${bg}'; sleep 1000`, 300);
+  const said = await sheet.restartWithin(`sleep 1000 & echo $! > '${bg}'; sleep 1000`, 300, logFd);
   const took = Date.now() - t0;
   assert.equal(said, 'did not exit within 300 ms (--restart-wait-ms), so its process group was sent SIGTERM and left');
   assert.ok(took >= 290 && took < 300 + sheet.COMMAND_STOP_MS, `ended at its bound (took ${took} ms)`);
   assert.ok(await endsWithin(await pidIn(bg)), 'its background child was ended with it: the whole group');
   // In time, a command is its exit code, or what ended it.
-  assert.equal(await sheet.restartWithin('exit 3', 30_000), 3);
-  assert.equal(await sheet.restartWithin('kill -TERM $$', 30_000), 'was ended by SIGTERM');
+  assert.equal(await sheet.restartWithin('exit 3', 30_000, logFd), 3);
+  assert.equal(await sheet.restartWithin('kill -TERM $$', 30_000, logFd), 'was ended by SIGTERM');
   // What a restart that exited in time started in the background (a server) is left running.
   const served = join(dir, 'served.pid');
-  assert.equal(await sheet.restartWithin(`sleep 1000 & echo $! > '${served}'`, 30_000), 0);
+  assert.equal(await sheet.restartWithin(`sleep 1000 & echo $! > '${served}'`, 30_000, logFd), 0);
   const server = await pidIn(served);
   try {
     assert.ok(running(server), 'a command that exited in time is not followed into its group');
@@ -3636,7 +3658,7 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   }
   // A command that ignores SIGTERM is killed past COMMAND_STOP_MS, with its group.
   assert.equal(sheet.COMMAND_STOP_MS, 5_000);
-  const stubborn = sheet.run("trap '' TERM; sleep 1000");
+  const stubborn = sheet.run("trap '' TERM; sleep 1000", logFd);
   await nap(300);
   const t1 = Date.now();
   assert.equal(await stubborn.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
@@ -3645,7 +3667,7 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   assert.equal(await stubborn.stop(), 'had already left', 'a second stop signals nothing');
   // A process of the group that outlives the command and ignores SIGTERM is waited for, bounded, then killed with the group.
   const orphan = join(dir, 'orphan.pid');
-  const outlived = sheet.run(`(trap '' TERM; exec sleep 1000) & echo $! > '${orphan}'; sleep 1000`);
+  const outlived = sheet.run(`(trap '' TERM; exec sleep 1000) & echo $! > '${orphan}'; sleep 1000`, logFd);
   const left = await pidIn(orphan);
   const t2 = Date.now();
   assert.equal(await outlived.stop(), `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
@@ -3653,14 +3675,14 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   assert.ok(await endsWithin(left), 'and the process that outlived it was killed with the group');
   // A command that exited with a process of its group still running: the stop ends that process too.
   const behind = join(dir, 'behind.pid');
-  const quick = sheet.run(`sleep 1000 & echo $! > '${behind}'`);
+  const quick = sheet.run(`sleep 1000 & echo $! > '${behind}'`, logFd);
   assert.equal(await quick.wait, 0);
   const straggler = await pidIn(behind);
   assert.ok(running(straggler));
   assert.equal(await quick.stop(), 'was sent SIGTERM and left');
   assert.ok(await endsWithin(straggler), 'what the command left behind ended with its group');
   // In a run: the restart pass ends by name, and the sheet is still made.
-  const r = await sheet.runSheet({ ...argsFor(), restart: 'sleep 1000', restarts: 2, restartWaitMs: 300 }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'sleep 1000', restarts: 2, restartWaitMs: 300, commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(r.failures.includes('restart 1: the --restart command did not exit within 300 ms (--restart-wait-ms), so its process group was sent SIGTERM and left'), r.failures.join('\n'));
   assert.ok(r.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the --restart command failed at restart 1'), r.notMeasured.join('\n'));
   assert.ok(!r.rows.some((x) => x.phase === 'first after restart'), 'no restart row for a pass that timed nothing');
@@ -3669,7 +3691,7 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   /** @type {string[]} */
   const logged = [];
   // Its pass is slowed (25 ms an answer) so the writer's shell has started its child before the pass ends.
-  const w = await sheet.runSheet({ ...argsFor(), clients: [1], writer: `sleep 1000 & echo $! > '${wbg}'; sleep 1000` }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: (l) => logged.push(l) });
+  const w = await sheet.runSheet({ ...argsFor(), clients: [1], writer: `sleep 1000 & echo $! > '${wbg}'; sleep 1000`, commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: (l) => logged.push(l) });
   assert.equal(w.rows.filter((x) => x.phase === 'warm+writer').length, w.rows.filter((x) => x.phase === 'cold').length, 'one --clients count, one warm+writer pass');
   assert.ok(await endsWithin(await pidIn(wbg)), 'the writer\'s background child ended with its group');
   assert.ok(logged.includes('speed sheet: the --writer command\'s process group was sent SIGTERM and left'), logged.join('\n'));
@@ -3678,16 +3700,22 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   try {
     const ctx = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
     const pid = join(dir, 'restart.pid');
-    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '2000', '--up-wait-ms', '2000', '--restart', `echo restart-said; echo $$ > '${pid}'; exec sleep 1000`, '--restarts', '1']);
+    const cliLog = join(dir, 'cli-commands.log');
+    const cmd = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '2000', '--up-wait-ms', '2000', '--restart', `echo restart-said; echo $$ > '${pid}'; exec sleep 1000`, '--restarts', '1', '--command-log', cliLog]);
     assert.equal(cmd.code, 1, cmd.stderr);
     assert.ok(cmd.ms < 30_000, `the command ended (took ${cmd.ms} ms)`);
     assert.match(cmd.stdout, /- FAILED: restart 1: the --restart command did not exit within 2000 ms \(--restart-wait-ms\), so its process group was sent SIGTERM and left/);
     assert.ok(await endsWithin(await pidIn(pid)), 'nothing of the restart command is left');
-    assert.ok(!cmd.stdout.includes('restart-said') && cmd.stderr.includes('restart-said'), 'what a command prints goes to stderr: the sheet on stdout is the sheet alone');
+    // Repair 9: what a command prints goes to the commands' log, which the sheet names; never to the sheet's
+    // stdout, which is the sheet alone, nor to its stderr, which a command must not share.
+    assert.ok(!cmd.stdout.includes('restart-said') && !cmd.stderr.includes('restart-said'), `${cmd.stdout}\n${cmd.stderr}`);
+    assert.match(readFileSync(cliLog, 'utf8'), /^=== \d{4}-\d{2}-\d{2}T[^ ]+Z restart 1 of 1, the --restart command: echo restart-said; [^\n]*\nrestart-said\n$/);
+    assert.ok(cmd.stdout.includes(`- what the --restart command printed is kept in ${cliLog}, each run under a line that names it`), cmd.stdout);
+    assert.ok(cmd.stderr.includes(`speed sheet: what the commands print goes to ${cliLog}`), cmd.stderr);
     // A sheet sent SIGTERM while its --restart command runs ends that command's group too.
     const pid2 = join(dir, 'restart-2.pid');
     const { spawn } = await import('node:child_process');
-    const child = spawn(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--restart', `echo $$ > '${pid2}'; exec sleep 1000`, '--restarts', '1', '--restart-wait-ms', '600000'], { stdio: 'ignore' });
+    const child = spawn(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', site.base, '--n', '1', '--clients', '1', ...ctx, '--restart', `echo $$ > '${pid2}'; exec sleep 1000`, '--restarts', '1', '--restart-wait-ms', '600000', '--command-log', cliLog], { stdio: 'ignore' });
     const sleeper = await pidIn(pid2);
     const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
     child.kill('SIGTERM');
@@ -3702,7 +3730,9 @@ test('the up wait after a restart is --up-wait-ms in all: each check within it w
   // Before: each up check was bounded by --timeout-ms (60 s by default), so
   // an up check that was never answered held the wait 60 s past its 400 ms,
   // and a server not up was asked every request all the same.
-  const strict = standIn({ ignore: new Set() });
+  // Each restart the stand-in's own start changes (repair 9: the sheet proves each restart by it).
+  let starts = 0;
+  const strict = standIn({ ignore: new Set(), started: () => starts });
   let restarted = false;
   /** @type {number[]} */
   const limits = [];
@@ -3735,7 +3765,7 @@ test('the up wait after a restart is --up-wait-ms in all: each check within it w
     }
     return strict.send(b, path, o);
   };
-  const r2 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: send2, log: () => {}, restart: async () => ((after = true), 0) });
+  const r2 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: send2, log: () => {}, restart: async () => ((after = true), (starts += 1), 0) });
   assert.equal(aliases, 1, 'asked after the first restart, and no more');
   assert.ok(r2.failures.includes('restart 1: the first /aliases.json answered no whole answer within 60000 ms (its headers came, then 0 bytes of its body)'), r2.failures.join('\n'));
   assert.ok(r2.notMeasured.includes('first after restart: GET /aliases.json was asked after 1 of the 3 restarts run: it had no whole answer within --timeout-ms 60000 in the first ask after restart 1, and is asked no more'), r2.notMeasured.join('\n'));
@@ -3821,13 +3851,14 @@ test('a capture is read only as a regular file a capture could be: a named pipe 
 
 /**
  * The strict stand-in with each answer's build chosen by its route and by
- * how many restarts have run; its `restart` counts one and exits 0.
+ * how many restarts have run; its `restart` counts one and exits 0, and its
+ * own start (`started_ms`) is that count, so each restart is one.
  *
  * @param {(path: string, restarts: number) => string | null} buildOf
  */
 function switching(buildOf) {
-  const strict = standIn({ ignore: new Set() });
   const state = { restarts: 0 };
+  const strict = standIn({ ignore: new Set(), started: () => state.restarts });
   return {
     state,
     /** @param {string} b @param {string} path @param {{method?: string}} [o] */
@@ -3917,7 +3948,7 @@ test('as a command over the network: a --restart that brings the server back as 
   const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
   try {
     const ctx = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
-    const cmd = await sheetCommand(['--base', base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '5000', '--up-wait-ms', '5000', '--restart', `printf %s ${'d'.repeat(40)} > '${buildFile}'`, '--restarts', '2']);
+    const cmd = await sheetCommand(['--base', base, '--n', '1', '--clients', '1', ...ctx, '--timeout-ms', '5000', '--up-wait-ms', '5000', '--restart', `printf %s ${'d'.repeat(40)} > '${buildFile}'`, '--restarts', '2', '--command-log', join(dir, 'commands.log')]);
     assert.equal(cmd.code, 1, cmd.stderr);
     assert.match(cmd.stdout, /^# Speed sheet — FAIL/);
     assert.ok(cmd.stdout.includes(`- FAILED: restart 1: the server came back as ${'d'.repeat(40)}, not ${'c'.repeat(40)} (its HEAD /inspection.json said so)`), cmd.stdout);
@@ -3986,21 +4017,24 @@ test('an answer is held to a bound in bytes as well as in time: a timed row keep
   // Who keeps what: every timed ask (a row's, each after a restart) keeps the head; discovery, the field check and the up checks keep the whole.
   /** @type {string[]} */
   const kept = [];
-  const strict = standIn({ ignore: new Set() });
+  let starts = 0;
+  const strict = standIn({ ignore: new Set(), started: () => starts });
   /** @param {string} b @param {string} path @param {{method?: string, keep?: string}} [o] */
   const spy = async (b, path, o = {}) => {
     const u = new URL(path, 'http://x');
     kept.push(`${o.keep ?? 'whole'} ${o.method ?? 'GET'} ${u.pathname}${[...u.searchParams.values()].includes(GARBLED) ? ' garbled' : ''}`);
     return strict.send(b, path, o);
   };
-  const spied = await sheet.runSheet({ ...argsFor(), n: 2, clients: [1], restart: 'x', restarts: 1 }, { send: spy, log: () => {}, restart: async () => 0 });
+  const spied = await sheet.runSheet({ ...argsFor(), n: 2, clients: [1], restart: 'x', restarts: 1 }, { send: spy, log: () => {}, restart: async () => ((starts += 1), 0) });
   assert.equal(spied.ok, true, spied.failures.join('\n'));
   const { requests } = sheet.requestsFor(spied.ctx ?? CTX);
   const withQuery = requests.filter((r) => r.url.includes('?'));
   const fields = withQuery.reduce((n, r) => n + new Set(new URL(r.url, 'http://x').searchParams.keys()).size, 0);
-  assert.equal(kept.filter((k) => k.startsWith('head ')).length, requests.length * 5, 'n = 2 cold, n = 2 warm and one after the restart, each keeping the head');
+  // Repair 9: after the restart the up check's answer and the read that proved the restart are their routes' first asks.
+  assert.equal(kept.filter((k) => k.startsWith('head ')).length, requests.length * 5 - 2, 'n = 2 cold, n = 2 warm and one after the restart, each keeping the head, but for the two asks the restart needed');
   assert.equal(kept.filter((k) => k === `whole ${UP_METHOD} ${UP_ROUTE}`).length, 2, 'the up check at the start and after the restart');
-  assert.equal(kept.filter((k) => k.startsWith('whole GET ') && !k.endsWith(' garbled')).length, withQuery.length, 'the field check keeps the whole of each original');
+  assert.equal(kept.filter((k) => k === `whole GET ${SPEED_ROUTE}`).length, 2, 'the server\'s start, read before the restart and after it, whole');
+  assert.equal(kept.filter((k) => k.startsWith('whole GET ') && !k.endsWith(' garbled') && k !== `whole GET ${SPEED_ROUTE}`).length, withQuery.length, 'the field check keeps the whole of each original');
   assert.equal(kept.filter((k) => k.startsWith('whole ') && k.endsWith(' garbled')).length, fields, 'and of each garbled answer');
   assert.equal(kept.length, requests.length * 5 + 2 + withQuery.length + fields, 'and nothing else is asked');
   // A discovery answer past the text bound, or not JSON, is refused by name.
@@ -4052,10 +4086,13 @@ test('the sheet\'s follow-ups: one file by its device and inode, a day and a mon
   assert.equal(sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-02']).day, '2024-02-29');
   // Repair 7 (verify r7 follow-up): this line took `--month 2024-12` with that day; a day must be one of its month's.
   assert.throws(() => sheet.parseArgs([...base, '--day', '2024-02-29', '--month', '2024-12']), /^Error: --day 2024-02-29 is not a day of --month 2024-12$/);
-  for (const [flag, v] of [['--day', '2024-02-30'], ['--day', '2023-02-29'], ['--day', '2024-13-01'], ['--day', '2024-00-10'], ['--day', '2024-04-31'], ['--month', '2024-13'], ['--month', '2024-00']]) {
+  // Repair 9 (verify r9 follow-up): year 0000 is refused here, as the server refuses it, never asked.
+  for (const [flag, v] of [['--day', '2024-02-30'], ['--day', '2023-02-29'], ['--day', '2024-13-01'], ['--day', '2024-00-10'], ['--day', '2024-04-31'], ['--month', '2024-13'], ['--month', '2024-00'], ['--month', '0000-01'], ['--day', '0000-12-31']]) {
     assert.throws(() => sheet.parseArgs([...base, flag, v]), flag === '--day' ? /^Error: --day is YYYY-MM-DD, a day the calendar has$/ : /^Error: --month is YYYY-MM, a month the calendar has$/, `${flag} ${v}`);
   }
   assert.equal(sheet.calendarHas('0020-01-31'), true, 'a year is read as written, never as 1920');
+  assert.equal(sheet.calendarHas('0001-01-01'), true, 'the first day of the common era');
+  assert.equal(sheet.parseArgs([...base, '--month', '0001-01']).month, '0001-01');
   // --out is checked before the server is asked anything (verify r6 follow-up: only at the end).
   let asked = 0;
   const quiet = http.createServer((_req, res) => {
@@ -4100,7 +4137,7 @@ test('the sheet\'s follow-ups: one file by its device and inode, a day and a mon
   assert.equal(sheet.STDOUT_WAIT_MS, 60_000);
   // A writer the sheet had to kill is a failure in the sheet (verify r6 follow-up: said on stderr only).
   assert.equal(sheet.KILLED, `was sent SIGTERM and, still running ${sheet.COMMAND_STOP_MS} ms later, SIGKILL`);
-  const killed = await sheet.runSheet({ ...argsFor(), clients: [1], writer: "trap '' TERM; while :; do sleep 1; done" }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {} });
+  const killed = await sheet.runSheet({ ...argsFor(), clients: [1], writer: "trap '' TERM; while :; do sleep 1; done", commandLog: join(dir, 'commands.log') }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {} });
   assert.ok(killed.failures.includes(`the --writer command's process group ${sheet.KILLED}: what it was writing was ended by force, not asked to stop`), killed.failures.join('\n'));
 });
 
@@ -4338,7 +4375,7 @@ const closingReader = (argv, close, gone) => new Promise((resolve) => {
   });
 });
 
-test('a command\'s lines on stderr are said through one listener a stream: a reader that has gone is counted, never thrown, and the first line not shown is named', async () => {
+test('a command\'s lines on stderr are said through one listener a stream: a reader that has gone is counted, never thrown, and the first line not taken is named', async () => {
   // Before (verify r8, 26 Oct): neither command listened on process.stderr,
   // and Node's console keeps no listener there, so the EPIPE of a line
   // written after the reader had gone was thrown, a tick after its write.
@@ -4372,7 +4409,7 @@ test('a command\'s lines on stderr are said through one listener a stream: a rea
   assert.deepEqual(b.closed(), { why: 'EPIPE', step: 'speed sheet: second', lost: 3 }, 'a line after the failure is counted at once, never written');
   assert.equal(b.pending(), 0);
   assert.deepEqual(got, ['speed sheet: first\n']);
-  assert.equal(await sheet.stderrNote(b, 5_000), 'stderr was closed (EPIPE) from the line "speed sheet: second": 3 of this run\'s own lines on it were not shown');
+  assert.equal(await sheet.stderrNote(b, 5_000), 'stderr was closed (EPIPE) from the line "speed sheet: second": 3 of this run\'s own lines on it were not taken');
   // A stream that failed under another writer (a hook's line): closed, none of its own lost until the next; the first failure is the one said.
   const other = new Writable({ write(_c, _e, done) { done(); } });
   const c = sheet.saidOn(other);
@@ -4490,7 +4527,7 @@ test('the waits at a command\'s end leave no timer behind: a process whose strea
   assert.ok(ms < 10_000, `the process ended with its work, not at a 30,000 ms bound (took ${ms} ms)`);
 });
 
-test('a sheet whose stderr reader goes after its first line runs to its end: its exit is its verdict, --out is whole, and the sheet names the first line stderr did not show', { timeout: 120_000 }, async () => {
+test('a sheet whose stderr reader goes after its first line runs to its end: its exit is its verdict, --out is whole, and the sheet names the first line stderr did not take', { timeout: 120_000 }, async () => {
   // Before (verify r8, 26 Oct): the next line's EPIPE was thrown a tick
   // later, so the sheet exited 1 within milliseconds, its --out never
   // written and nothing said; with stdout closed too (2>&1 | head -1), the same.
@@ -4521,8 +4558,8 @@ test('a sheet whose stderr reader goes after its first line runs to its end: its
       assert.ok(existsSync(out), `${close}: --out was written`);
       const text = readFileSync(out, 'utf8');
       assert.match(text, /^# Speed sheet — PASS\n/, close);
-      const m = /^- stderr was closed \(EPIPE\) from the line "(.+)": (\d+) of this run's own lines on it were not shown$/m.exec(text);
-      assert.ok(m, `${close}: the sheet names the first line stderr did not show:\n${text}`);
+      const m = /^- stderr was closed \(EPIPE\) from the line "(.+)": (\d+) of this run's own lines on it were not taken$/m.exec(text);
+      assert.ok(m, `${close}: the sheet names the first line stderr did not take:\n${text}`);
       const at = lines.indexOf(m[1]);
       assert.ok(at >= 1, `${close}: a line of the run, after the one that was read: ${m[1]}`);
       assert.equal(Number(m[2]), lines.length - at, `${close}: that line and every one after it`);
@@ -4560,7 +4597,7 @@ test('a sheet whose stderr is closed from its start and whose run ends before it
     const text = readFileSync(out, 'utf8');
     assert.equal(stdout, text);
     assert.match(text, /^# Speed sheet — FAIL\n/);
-    assert.match(text, /\n- stderr was closed \(EPIPE\) from the line "WARNING: the server names no build \(x-brutex-build\); a sheet that cannot name its commit measures no build — allowed by --allow-unstamped": 1 of this run's own lines on it were not shown\n- FAILED: discovering the selection: \/feeds\.json answered HTTP 404\n$/);
+    assert.match(text, /\n- stderr was closed \(EPIPE\) from the line "WARNING: the server names no build \(x-brutex-build\); a sheet that cannot name its commit measures no build — allowed by --allow-unstamped": 1 of this run's own lines on it were not taken\n- FAILED: discovering the selection: \/feeds\.json answered HTTP 404\n$/);
   } finally {
     server.close();
   }
@@ -4621,8 +4658,387 @@ test('both commands say their lines through the counted stderr from their first 
   }
   assert.doesNotMatch(source('ci/speed-sheet.mjs') + source('ci/browser-harness.mjs'), /console\.error|process\.stderr\.write\(/, 'no line reaches stderr around the count');
   assert.match(source('ci/speed-sheet.mjs'), /const log = deps\.log \?\? saidOn\(process\.stderr\)\.say;/);
-  const text = sheet.renderSheet({ ok: true, rows: [], ignored: [], failures: [], notMeasured: ['nm'], skipped: ['sk'], ctx: null, commit: null, notes: ['stderr was closed (EPIPE) from the line "x": 1 of this run\'s own lines on it were not shown'] }, { n: 1, clients: [1] });
+  const text = sheet.renderSheet({ ok: true, rows: [], ignored: [], failures: [], notMeasured: ['nm'], skipped: ['sk'], ctx: null, commit: null, notes: ['stderr was closed (EPIPE) from the line "x": 1 of this run\'s own lines on it were not taken'] }, { n: 1, clients: [1] });
   assert.match(text, /^# Speed sheet — PASS\n/, 'a note never changes the verdict');
-  assert.match(text, /\n\n- stderr was closed \(EPIPE\) from the line "x": 1 of this run's own lines on it were not shown\n- SKIPPED: sk\n- NOT MEASURED: nm\n$/);
+  assert.match(text, /\n\n- stderr was closed \(EPIPE\) from the line "x": 1 of this run's own lines on it were not taken\n- SKIPPED: sk\n- NOT MEASURED: nm\n$/);
   assert.doesNotMatch(sheet.renderSheet({ ok: true, rows: [], ignored: [], failures: [], notMeasured: [], skipped: [], ctx: null, commit: null }, { n: 1, clients: [1] }), /\n- /, 'no notes, no line');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 9 (26 Oct): verify r9's two blocking findings, a restart never
+// proved and a command given the sheet's own stderr, and its cheap
+// follow-ups, each failing on 45e58698d.
+// ---------------------------------------------------------------------------
+
+/** The selection, as the command line names it. */
+const CTX_ARGS = ['--feed', CTX.feed, '--timeframe', CTX.timeframe, '--month', CTX.month, '--day', CTX.day];
+
+/** The speed sheet's own file, to run as a command. */
+const SHEET = new URL('ci/speed-sheet.mjs', web).pathname;
+
+/**
+ * A real server for the sheet over the strict stand-in, whose own start
+ * (`started_ms`) is the number in `startFile`: a `--restart` command that
+ * writes a new one there is a restart, one that does not is none. Each
+ * answer comes `delayMs` late, so a pass takes time.
+ *
+ * @param {string} startFile
+ * @param {number} delayMs
+ */
+async function startedServer(startFile, delayMs) {
+  const strict = standIn({ ignore: new Set(), delayMs, started: () => Number(readFileSync(startFile, 'utf8')) });
+  const server = http.createServer(async (req, res) => {
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(req.method === 'HEAD' ? undefined : a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  return { base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`, close: () => server.close() };
+}
+
+test('a restart is proved by the server\'s own start before anything is timed: a --restart that restarted nothing fails by name and times nothing, and the two asks a restart needs are their routes\' first after it', async () => {
+  // Before (verify r9, 26 Oct): the pass read only the command's exit code,
+  // the up check and the build it named, so a command that exited 0 and
+  // restarted nothing published warm answers as 'first after restart' rows
+  // under a PASS.
+  // (1) The verifier's case: the command exits 0 and the server's start never changes.
+  let ran = 0;
+  /** @type {string[]} */
+  const logged = [];
+  const none = await sheet.runSheet({ ...argsFor(), restart: 'true', restarts: 3 }, { send: standIn({ ignore: new Set() }).send, log: (l) => logged.push(l), restart: async () => ((ran += 1), 0) });
+  assert.equal(none.ok, false);
+  assert.deepEqual(none.failures, ['restart 1: the server at http://stand.in did not restart: its /speed.json said started_ms 1791600000000 before the --restart command and after it']);
+  assert.ok(none.notMeasured.includes('first after restart: timed after 0 of the 3 restarts asked: the server did not restart at restart 1'), none.notMeasured.join('\n'));
+  assert.ok(!none.rows.some((x) => x.phase === 'first after restart'), 'no warm answer is published as a first');
+  assert.equal(ran, 1, 'the pass ended at the restart that restarted nothing');
+  assert.ok(!logged.some((l) => l.includes('the server restarted')), logged.join('\n'));
+  assert.ok(!none.notes.some((n) => n.startsWith('first after restart')), 'no restart is said proved');
+  assert.match(sheet.renderSheet(none, argsFor()), /^# Speed sheet — FAIL\n/);
+  // A later restart that restarts nothing ends the pass there; what the earlier one timed stands, with its proof.
+  let n2 = 0;
+  const later = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: standIn({ ignore: new Set(), started: () => Math.min(n2, 1) }).send, log: () => {}, restart: async () => ((n2 += 1), 0) });
+  assert.ok(later.failures.includes('restart 2: the server at http://stand.in did not restart: its /speed.json said started_ms 1 before the --restart command and after it'), later.failures.join('\n'));
+  assert.ok(later.notMeasured.includes('first after restart: timed after 1 of the 3 restarts asked: the server did not restart at restart 2'), later.notMeasured.join('\n'));
+  assert.ok(later.rows.filter((x) => x.phase === 'first after restart').every((x) => x.n === 1));
+  assert.ok(later.notes.includes('first after restart: 1 restart timed, each proved by the server\'s own start (/speed.json started_ms) changing across the --restart command: 0 to 1'), later.notes.join('\n'));
+  // (2) A server that restarts each time: each restart proved and said, and after each the up check and the
+  // read that proved it are their routes' samples, never asked twice.
+  let starts = 100;
+  let restarted = 0;
+  /** @type {string[]} */
+  const asks = [];
+  const strict = standIn({ ignore: new Set(), started: () => starts });
+  /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+  const spy = async (b, path, o = {}) => {
+    if (restarted > 0) asks.push(`${o.method ?? 'GET'} ${path}`);
+    return strict.send(b, path, o);
+  };
+  /** @type {string[]} */
+  const lines = [];
+  const proved = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: spy, log: (l) => lines.push(l), restart: async () => ((restarted += 1), (starts += 5), 0) });
+  assert.equal(proved.ok, true, proved.failures.join('\n'));
+  const { requests } = sheet.requestsFor(proved.ctx ?? CTX);
+  const firsts = proved.rows.filter((x) => x.phase === 'first after restart');
+  assert.equal(firsts.length, requests.length);
+  assert.ok(firsts.every((x) => x.n === 3 && x.classes.answered === 3), JSON.stringify(firsts.map((x) => [x.url, x.n, x.classes])));
+  assert.ok(proved.notes.includes('first after restart: 3 restarts timed, each proved by the server\'s own start (/speed.json started_ms) changing across the --restart command: 100 to 105, 105 to 110, 110 to 115'), proved.notes.join('\n'));
+  assert.ok(lines.includes('speed sheet: restart 2: the server restarted: started_ms 105 before the command, 110 after it'), lines.join('\n'));
+  const count = (/** @type {string} */ k) => asks.filter((a) => a === k).length;
+  assert.equal(count(`${UP_METHOD} ${UP_ROUTE}`), 3, 'the up route is asked once a restart: its up check, which is its sample');
+  assert.equal(count(`GET ${SPEED_ROUTE}`), 5, '/speed.json: the proof after each of the 3 restarts, and the start before restarts 2 and 3; never a third time');
+  for (const r of requests.filter((x) => x.url !== UP_ROUTE && x.url !== SPEED_ROUTE)) assert.equal(count(`${r.method} ${r.url}`), 3, `${r.url} is asked once a restart`);
+  assert.equal(asks.length, 3 + 5 + 3 * (requests.length - 2), 'and nothing else is asked after a restart');
+  // (3) A start that cannot be read is said by name, and ends the pass before anything is timed.
+  /** @param {(path: string, restarts: number) => object | null} answerOf what /speed.json answers instead, by the restarts run @param {object} [o] */
+  const unreadable = async (answerOf, o = {}) => {
+    const state = { restarts: 0 };
+    const base = standIn({ ignore: new Set(), started: () => state.restarts, ...o });
+    /** @param {string} b @param {string} path @param {{method?: string}} [so] */
+    const send = async (b, path, so = {}) => {
+      const a = await base.send(b, path, so);
+      const other = new URL(path, 'http://x').pathname === SPEED_ROUTE ? answerOf(path, state.restarts) : null;
+      return other === null ? a : { ...a, ...other };
+    };
+    const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, restart: async () => ((state.restarts += 1), 0) });
+    assert.ok(!r.rows.some((x) => x.phase === 'first after restart'), 'nothing is timed after a restart not proved');
+    return { r, restarts: state.restarts };
+  };
+  const before404 = await unreadable(() => ({ status: 404 }));
+  assert.ok(before404.r.failures.includes('restart 1: the server\'s start could not be read before the --restart command, so a restart could not be told from none: GET /speed.json answered HTTP 404'), before404.r.failures.join('\n'));
+  assert.ok(before404.r.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the server\'s start could not be read at restart 1'), before404.r.notMeasured.join('\n'));
+  assert.equal(before404.restarts, 0, 'the command is not run when the start before it cannot be read');
+  const after503 = await unreadable((_p, n) => (n > 0 ? { status: 503, headers: {} } : null));
+  assert.ok(after503.r.failures.includes('restart 1: the server\'s start could not be read after the --restart command, so a restart could not be told from none: GET /speed.json answered HTTP 503'), after503.r.failures.join('\n'));
+  assert.equal(after503.restarts, 1);
+  const noStamp = await unreadable(() => null, { started: () => 'soon' });
+  assert.ok(noStamp.r.failures.includes('restart 1: the server\'s start could not be read before the --restart command, so a restart could not be told from none: GET /speed.json answered without a whole started_ms'), noStamp.r.failures.join('\n'));
+  // A /speed.json asked no more this run (it ran out its bound in the cold pass) is not asked for the start either.
+  let speedAsks = 0;
+  const stalledSpeed = standIn({ ignore: new Set() });
+  const r4 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, {
+    send: async (b, path, o = {}) => {
+      if (new URL(path, 'http://x').pathname !== SPEED_ROUTE) return stalledSpeed.send(b, path, o);
+      speedAsks += 1;
+      return { status: 0, error: 'no whole answer within 60000 ms (not even its headers came)', ms: 60_000, build: null, body: '', bytes: 0, headers: {}, timedOut: true };
+    },
+    log: () => {},
+    restart: async () => 0
+  });
+  assert.ok(r4.failures.includes('restart 1: the server\'s start could not be read before the --restart command, so a restart could not be told from none: GET /speed.json is asked no more this run: it had no whole answer within --timeout-ms 60000 in the cold pass at 1 clients'), r4.failures.join('\n'));
+  assert.equal(speedAsks, 1, 'asked once, in the cold pass, and never again');
+});
+
+test('the server\'s start is read from its /speed.json answer, or why not is said: a refusal, no answer, an answer kept as its digest, a body that is not JSON, and a started_ms that is not a whole number', () => {
+  const ok = { status: 200, headers: {}, body: JSON.stringify(report([])), ms: 1, bytes: 10, build: null, kept: /** @type {const} */ ('text') };
+  assert.deepEqual(sheet.startedOf(ok), { started: 1_791_600_000_000 });
+  assert.deepEqual(sheet.startedOf({ ...ok, body: '{"started_ms":0}' }), { started: 0 }, 'a start at 0 is a start');
+  assert.deepEqual(sheet.startedOf({ ...ok, status: 404 }), { why: 'GET /speed.json answered HTTP 404' });
+  assert.deepEqual(sheet.startedOf({ status: 0, error: 'ECONNREFUSED', ms: 1, build: null, body: '', bytes: 0, headers: {} }), { why: 'GET /speed.json answered ECONNREFUSED' });
+  assert.deepEqual(sheet.startedOf({ ...ok, kept: 'digest', bytes: 70_000_000 }), { why: 'GET /speed.json answered 70000000 bytes, past the 64000000 the sheet keeps as text' });
+  assert.match(sheet.startedOf({ ...ok, body: 'not json' }).why ?? '', /^GET \/speed\.json answered HTTP 200 with a body that is not JSON \(/);
+  for (const body of ['null', '[]', '{}', '{"started_ms":"1"}', '{"started_ms":-1}', '{"started_ms":1.5}', '{"started_ms":9007199254740993}']) {
+    assert.deepEqual(sheet.startedOf({ ...ok, body }), { why: 'GET /speed.json answered without a whole started_ms' }, body);
+  }
+  // An answer from a stand-in that does not say what it kept is read as text.
+  const { kept: _k, ...bare } = ok;
+  assert.deepEqual(sheet.startedOf(bare), { started: 1_791_600_000_000 });
+});
+
+test('as a command over the network: a --restart that restarts nothing exits 1 by name with no first-after-restart row, and one that restarts the server passes with each restart\'s proof in the sheet', { timeout: 60_000 }, async () => {
+  // The verifier's run in one process: --restart 'true' printed '# Speed sheet — PASS', exit 0, with 14 rows.
+  const dir = mkdtempSync(join(tmpdir(), 'r315-proof-'));
+  const start = join(dir, 'start');
+  writeFileSync(start, '1791600000000');
+  const site = await startedServer(start, 0);
+  try {
+    const argv = ['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--timeout-ms', '5000', '--up-wait-ms', '5000'];
+    const none = await sheetCommand([...argv, '--restart', 'true', '--restarts', '3', '--out', join(dir, 'none.md')]);
+    assert.equal(none.code, 1, none.stdout);
+    assert.match(none.stdout, /^# Speed sheet — FAIL\n/);
+    assert.ok(none.stdout.includes(`\n- FAILED: restart 1: the server at ${site.base} did not restart: its /speed.json said started_ms 1791600000000 before the --restart command and after it\n`), none.stdout);
+    assert.doesNotMatch(none.stdout, /\| first after restart \|/, 'no warm answer is printed as a first');
+    const real = await sheetCommand([...argv, '--restart', `echo $$ > '${start}'`, '--restarts', '2', '--out', join(dir, 'real.md')]);
+    assert.equal(real.code, 0, real.stdout);
+    assert.match(real.stdout, /^# Speed sheet — PASS\n/);
+    assert.equal((real.stdout.match(/\| first after restart \|/g) ?? []).length, sheet.requestsFor(CTX).requests.length);
+    assert.match(real.stdout, /\n- first after restart: 2 restarts timed, each proved by the server's own start \(\/speed\.json started_ms\) changing across the --restart command: 1791600000000 to (\d+), \1 to \d+\n/);
+    assert.match(readFileSync(join(dir, 'real.md.commands.log'), 'utf8'), /^=== \S+ restart 1 of 2, the --restart command: echo \$\$ > [^\n]+\n=== \S+ restart 2 of 2, the --restart command: echo \$\$ > [^\n]+\n$/);
+  } finally {
+    site.close();
+  }
+});
+
+test('a sheet whose stderr reader has gone keeps its --writer and --restart commands running: what they print goes to the commands\' log the sheet names, the writer lasts its whole pass, and the exit is the verdict', { timeout: 120_000 }, async () => {
+  // Before (verify r9, 26 Oct): both commands were given the sheet's own
+  // stderr, so with its reader gone (2>&1 | head -1) a writer that printed
+  // died of SIGPIPE ("ended before the warm+writer pass did", a FAIL) and a
+  // restart that printed failed "was ended by SIGPIPE".
+  const dir = mkdtempSync(join(tmpdir(), 'r315-gone-'));
+  const start = join(dir, 'start');
+  writeFileSync(start, '1');
+  const site = await startedServer(start, 5);
+  try {
+    const out = join(dir, 'sheet.md');
+    const argv = [SHEET, '--base', site.base, '--n', '3', '--clients', '1', ...CTX_ARGS, '--writer', 'while :; do echo writer-tick; sleep 0.05; done', '--restart', `echo restarting; echo $$ > '${start}'`, '--restarts', '2', '--out', out];
+    const ran = await closingReader(argv, 'both');
+    assert.ok(existsSync(out), `--out was written (exit ${ran.code}): ${ran.stderr}`);
+    const text = readFileSync(out, 'utf8');
+    assert.deepEqual([ran.code, ran.signal], [0, null], text);
+    assert.match(text, /^# Speed sheet — PASS\n/);
+    assert.doesNotMatch(text, /--writer command ended before/);
+    assert.match(text, /\n- the --writer command's process group was sent SIGTERM and left at the end of the warm\+writer pass\n/);
+    assert.ok(text.includes(`\n- what the --writer and --restart commands printed is kept in ${out}.commands.log, each run under a line that names it\n`), text);
+    assert.match(text, /\n- stderr was closed \(EPIPE\) from the line "[^"\n]+": \d+ of this run's own lines on it were not taken\n/);
+    assert.match(readFileSync(`${out}.commands.log`, 'utf8'), /^=== \S+ the --writer command: while :; do echo writer-tick; sleep 0\.05; done\n(?:writer-tick\n)+=== \S+ restart 1 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n=== \S+ restart 2 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n$/);
+    assert.equal(ran.stdout, '', 'stdout was closed too, so the sheet is the file\'s');
+  } finally {
+    site.close();
+  }
+});
+
+test('a stderr reader that is alive and not reading neither stalls a --writer nor freezes the sheet: the run ends in its own time plus at most STDERR_SETTLE_MS, --out is whole, and the sheet notes the lines stderr had not taken', { timeout: 180_000 }, async () => {
+  // Before (verify r9, 26 Oct): a child's start cleared O_NONBLOCK on the
+  // stderr it shared with the sheet, so once the writer had filled the pipe
+  // the sheet's next line blocked the whole process until the reader left
+  // (11.8 s traced, 30 s on the real command), past every timer, and the
+  // writer itself waited on the full pipe.
+  const { constants: c, openSync, closeSync, writeSync } = await import('node:fs');
+  const { spawn, spawnSync } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'r315-stalled-'));
+  const start = join(dir, 'start');
+  writeFileSync(start, '1');
+  // Each answer 50 ms late: the writer's pass lasts long enough for it to print past what a pipe holds.
+  const site = await startedServer(start, 50);
+  /**
+   * One run of the sheet whose stderr is a named pipe held open here and never read; `full` fills the pipe
+   * before the sheet starts, so none of its lines can be taken. The reader leaves at 40 s whatever happens.
+   *
+   * @param {string} name @param {boolean} full
+   */
+  const stalledRun = async (name, full) => {
+    const fifo = join(dir, `${name}.fifo`);
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+    const reader = openSync(fifo, c.O_RDONLY | c.O_NONBLOCK);
+    const end = openSync(fifo, c.O_WRONLY | c.O_NONBLOCK);
+    let filled = 0;
+    if (full) {
+      const chunk = Buffer.alloc(1_024, 0x2e);
+      try {
+        for (;;) filled += writeSync(end, chunk);
+      } catch (why) {
+        if (/** @type {NodeJS.ErrnoException} */ (why).code !== 'EAGAIN') throw why;
+      }
+    }
+    const out = join(dir, `${name}.md`);
+    const t0 = Date.now();
+    const child = spawn(process.execPath, [SHEET, '--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--writer', "head -c 400000 /dev/zero | tr '\\0' w; sleep 100", '--out', out], { stdio: ['ignore', 'pipe', end] });
+    closeSync(end);
+    let stdout = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    let open = true;
+    const leave = setTimeout(() => {
+      open = false;
+      closeSync(reader);
+    }, 40_000);
+    const code = await new Promise((resolve) => child.on('close', (cc) => resolve(cc)));
+    const ms = Date.now() - t0;
+    clearTimeout(leave);
+    if (open) closeSync(reader);
+    return { code, ms, stdout, out, filled };
+  };
+  try {
+    // (1) The verifier's case: the pipe empty at the start, the writer printing 400 KB.
+    const first = await stalledRun('empty', false);
+    assert.ok(first.ms < 20_000, `the sheet was not frozen until the reader left at 40 s (took ${first.ms} ms)`);
+    assert.equal(first.code, 0, first.stdout);
+    const text1 = readFileSync(first.out, 'utf8');
+    assert.equal(first.stdout, text1, 'stdout is the sheet, the same as --out');
+    assert.match(text1, /^# Speed sheet — PASS\n/);
+    // The writer was never stalled: it printed into its log past the 64 KB a pipe holds, where on the stalled
+    // pipe it would have stopped at the first full buffer.
+    const log1 = readFileSync(`${first.out}.commands.log`, 'utf8');
+    assert.match(log1.slice(0, log1.indexOf('\n') + 1), /^=== \S+ the --writer command: head -c 400000 [^\n]+\n$/);
+    const printed1 = log1.slice(log1.indexOf('\n') + 1);
+    assert.ok(printed1.length >= 65_536 && /^w+$/.test(printed1), `the writer printed ${printed1.length} B into its log`);
+    // (2) The pipe full from the start: none of the sheet's lines is taken, and the run waits STDERR_SETTLE_MS for them, no more.
+    const second = await stalledRun('full', true);
+    assert.ok(second.filled > 0, 'the pipe was filled');
+    assert.equal(second.code, 0, second.stdout);
+    const text2 = readFileSync(second.out, 'utf8');
+    assert.match(text2, /^# Speed sheet — PASS\n/);
+    assert.match(text2, /\n- stderr had not taken \d+ of this run's own lines 1000 ms after the run\n/);
+    assert.ok(second.ms >= sheet.STDERR_SETTLE_MS, `the settle wait was spent (took ${second.ms} ms)`);
+    assert.ok(second.ms - first.ms < sheet.STDERR_SETTLE_MS + 5_000, `and no more than it, give or take this machine (${second.ms} ms against ${first.ms} ms)`);
+    const log2 = readFileSync(`${second.out}.commands.log`, 'utf8');
+    const printed2 = log2.slice(log2.indexOf('\n') + 1);
+    assert.ok(printed2.length >= 65_536 && /^w+$/.test(printed2), `the writer was never stalled: it printed ${printed2.length} B into its log`);
+  } finally {
+    site.close();
+  }
+});
+
+test('the end of a run waits STDERR_SETTLE_MS for stderr to take the run\'s own lines: a line taken 200 ms late is waited for, and a stderr that takes none is let go at the bound', async () => {
+  // Verify r9 follow-up (mutant R9-M09, 1 for 1_000): no test pinned the default bound at a command's end.
+  const { Writable } = await import('node:stream');
+  assert.equal(sheet.STDERR_SETTLE_MS, 1_000);
+  const late = sheet.saidOn(new Writable({ write(_c, _e, done) { setTimeout(done, 200); } }));
+  late.say('speed sheet: the last line');
+  const t0 = Date.now();
+  assert.equal(await sheet.stderrNote(late), null, 'a stderr that took the last line 200 ms late took every line');
+  assert.ok(Date.now() - t0 >= 150, 'and it was waited for');
+  const never = sheet.saidOn(new Writable({ write() {} }));
+  never.say('speed sheet: a line never taken');
+  const t1 = Date.now();
+  assert.equal(await sheet.stderrNote(never), 'stderr had not taken 1 of this run\'s own lines 1000 ms after the run');
+  const waited = Date.now() - t1;
+  assert.ok(waited >= 950 && waited < 5_000, `let go at the bound (waited ${waited} ms)`);
+});
+
+test('the commands\' log: a regular file only, appended to, each run of a command under a line that names it; a log that cannot be kept refuses its command by name, never runs it with its output lost; and how a writer ended is named', { timeout: 120_000 }, async () => {
+  const { constants: c, openSync, closeSync } = await import('node:fs');
+  const { spawnSync, execFile } = await import('node:child_process');
+  const dir = mkdtempSync(join(tmpdir(), 'r315-cmdlog-'));
+  // A regular file, appended to: what was there stays, and a command's stdout and stderr both land in it.
+  const path = join(dir, 'commands.log');
+  writeFileSync(path, 'kept\n');
+  const fd = sheet.openCommandLog(path);
+  assert.equal(sheet.heading(fd, '=== a heading'), null);
+  const echoed = sheet.run('echo out; echo err >&2', fd);
+  assert.equal(await echoed.wait, 0);
+  closeSync(fd);
+  assert.equal(readFileSync(path, 'utf8'), 'kept\n=== a heading\nout\nerr\n');
+  // A heading that cannot be written is its reason, never a throw.
+  assert.match(String(sheet.heading(2 ** 30, 'x')), /^EBADF/, 'a descriptor no file has');
+  // Refused: a directory, a named pipe nobody reads (at the open, never waited on) and one somebody does.
+  assert.throws(() => sheet.openCommandLog(dir), /EISDIR/);
+  const fifo = join(dir, 'log.fifo');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  assert.throws(() => sheet.openCommandLog(fifo), /ENXIO/);
+  const reader = openSync(fifo, c.O_RDONLY | c.O_NONBLOCK);
+  try {
+    assert.throws(() => sheet.openCommandLog(fifo), /^Error: not a regular file, and what the commands print is kept only in one$/);
+  } finally {
+    closeSync(reader);
+  }
+  // In a run: a log that cannot be opened refuses the writer and the restart by name.
+  const noWriter = await sheet.runSheet({ ...argsFor(), writer: 'echo never', commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.ok(noWriter.failures.some((f) => f.startsWith(`the --writer command was not run: what it prints could not be kept in ${dir}: EISDIR`)), noWriter.failures.join('\n'));
+  assert.ok(noWriter.notMeasured.includes('warm+writer: the --writer command was not run (its FAILED line says why)'), noWriter.notMeasured.join('\n'));
+  assert.ok(!noWriter.rows.some((x) => x.phase === 'warm+writer'));
+  assert.ok(!noWriter.notes.some((n) => n.includes('printed is kept')), noWriter.notes.join('\n'));
+  const noRestart = await sheet.runSheet({ ...argsFor(), restart: 'echo never', restarts: 2, commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.ok(noRestart.failures.some((f) => f.startsWith(`restart 1: the --restart command was not run: what it prints could not be kept in ${dir}: EISDIR`)), noRestart.failures.join('\n'));
+  assert.ok(noRestart.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the --restart command failed at restart 1'), noRestart.notMeasured.join('\n'));
+  // How a writer that ended early ended is named: its exit code, or the signal that ended it.
+  const exits = await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'exit 3', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: () => {} });
+  assert.ok(exits.failures.includes('the --writer command ended before the warm+writer pass did: it exited 3, so part of that pass ran with nothing writing'), exits.failures.join('\n'));
+  assert.ok(exits.notes.includes('the --writer command\'s process group had already left at the end of the warm+writer pass'), exits.notes.join('\n'));
+  const piped = await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'kill -PIPE $$', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: () => {} });
+  assert.ok(piped.failures.includes('the --writer command ended before the warm+writer pass did: it was ended by SIGPIPE, so part of that pass ran with nothing writing'), piped.failures.join('\n'));
+  assert.match(readFileSync(path, 'utf8'), /\n=== \S+ the --writer command: exit 3\n=== \S+ the --writer command: kill -PIPE \$\$\n$/);
+  // A heading that cannot be written (a log opened read-only here, as a failing disk would leave the writes)
+  // refuses each command by name, adds nothing, and the file is not named as their log.
+  const ro = join(dir, 'read-only.log');
+  writeFileSync(ro, 'before\n');
+  const roRun = await sheet.runSheet({ ...argsFor(), writer: 'echo never', restart: 'echo never', restarts: 1, commandLog: ro }, { send: standIn({ ignore: new Set() }).send, log: () => {}, openLog: (p) => openSync(p, 'r') });
+  assert.ok(roRun.failures.some((f) => f.startsWith(`the --writer command was not run: what it prints could not be kept in ${ro}: EBADF`)), roRun.failures.join('\n'));
+  assert.ok(roRun.failures.some((f) => f.startsWith(`restart 1: the --restart command was not run: what it prints could not be kept in ${ro}: EBADF`)), roRun.failures.join('\n'));
+  assert.ok(!roRun.notes.some((n) => n.includes('printed is kept')), roRun.notes.join('\n'));
+  assert.equal(readFileSync(ro, 'utf8'), 'before\n');
+  // As a command: an unwritable --command-log is refused before the run, and only when a command is given;
+  // with no --out and no --command-log, the log is made in the temporary directory.
+  const start = join(dir, 'start');
+  writeFileSync(start, '1');
+  const site = await startedServer(start, 0);
+  try {
+    const argv = [SHEET, '--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS];
+    /** @param {string} file @param {string[]} args @param {NodeJS.ProcessEnv} [env] @returns {Promise<{code: number, stdout: string, stderr: string}>} */
+    const exec = (file, args, env) => new Promise((resolve) => execFile(file, args, { env: env ?? process.env, timeout: 60_000 }, (error, stdout, stderr) => resolve({ code: error ? Number(error.code) : 0, stdout, stderr })));
+    const missing = join(dir, 'missing', 'c.log');
+    const refused = await exec(process.execPath, [...argv, '--writer', 'true', '--command-log', missing]);
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /^speed-sheet: --command-log .*\/missing\/c\.log: .*\/missing cannot take a new file: ENOENT/);
+    assert.equal(refused.stdout, '');
+    const unused = await exec(process.execPath, [...argv, '--command-log', missing]);
+    assert.equal(unused.code, 0, `${unused.stdout}${unused.stderr}`);
+    const temp = await exec(process.execPath, [...argv, '--writer', 'echo in-the-temporary-directory; sleep 100'], { ...process.env, TMPDIR: dir });
+    assert.equal(temp.code, 0, temp.stdout);
+    const m = /\n- what the --writer command printed is kept in (\S+), each run under a line that names it\n/.exec(temp.stdout);
+    assert.ok(m && m[1].startsWith(join(dir, 'speed-sheet-')) && m[1].endsWith('.commands.log'), temp.stdout);
+    assert.match(readFileSync(m[1], 'utf8'), /^=== \S+ the --writer command: echo in-the-temporary-directory; sleep 100\nin-the-temporary-directory\n$/);
+  } finally {
+    site.close();
+  }
+});
+
+test('no command the sheet or the harness starts is given either one\'s own stdout or stderr', () => {
+  // Verify r9 (26 Oct): run() spawned with stdio ['ignore', 2, 2].
+  for (const file of ['ci/speed-sheet.mjs', 'ci/browser-harness.mjs']) {
+    const src = source(file);
+    const spawns = src.match(/spawn\([^;]*\);/g) ?? [];
+    assert.ok(spawns.length >= 1, file);
+    for (const s of spawns) assert.doesNotMatch(s, /stdio:\s*(?:'inherit'|\[[^\]]*(?:\b[12]\b|'inherit')[^\]]*\])/, `${file}: ${s}`);
+  }
+  assert.match(source('ci/speed-sheet.mjs'), /spawn\(command, \{ shell: true, stdio: \['ignore', log, log\], detached: true \}\)/);
 });
