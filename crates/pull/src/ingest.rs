@@ -1884,9 +1884,6 @@ fn rows_mode(
     let (bars, overlays, census) = keep_in_session(bars, overlays, &plan);
     done.census = census;
     let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
-    if bars.is_empty() {
-        return (done, Filed::Appended, Vec::new());
-    }
     let Some((first, last)) = bars.first().zip(bars.last()) else {
         return (done, Filed::Appended, Vec::new());
     };
@@ -6422,6 +6419,112 @@ mod tests {
         let differs = judge(&[bar(5), bar(15)]).expect_err("a held bar inside the span");
         assert_eq!(differs.kind, super::FailKind::Differs, "{differs}");
         assert!(differs.why.contains("not back-filled"), "{differs}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A BACK-FILL WHOSE JOURNAL REFUSES ITS LINE PUBLISHES NOTHING, AND A
+    /// BUSY MONTH WHOSE SERVED GENERATION CANNOT BE TOLD IS NEVER JUDGED**
+    /// (IA-RP-32, D-3350, D-4899 (1)). The lone back-fill door journals its
+    /// `repairing` line before anything is published: a ledger that will not
+    /// take it (a directory where the file goes, which no privilege writes
+    /// through) leaves the month as it was, the append's kind and the words
+    /// saying why. And while a reader holds the month, a pointer that cannot
+    /// be read is the store's refusal by name, never a guess that the month
+    /// lacks or holds the batch.
+    #[test]
+    fn a_refused_journal_publishes_nothing_and_an_untold_busy_month_is_not_judged() {
+        let root = scratch("ia17b-journal");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let parts = || store::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        };
+        let entry = EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+        };
+        // Invented minutes from midday IST on 2026-01-01.
+        let bar = |n: i64| Bar {
+            ts_micros: (20_454_i64 * 86_400 - 19_800 + 6 * 3_600 + n * 60) * 1_000_000,
+            open: 100 + n,
+            high: 110 + n,
+            low: 90 + n,
+            close: 105 + n,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let policy = store::repair::Policy {
+            open_interest_applies: false,
+            basis_witness: false,
+        };
+        let held = [bar(10), bar(20)];
+        let _ = write_and_count(&held, &root, symbol_id, parts(), entry).expect("a first write");
+        let path = store::path::StorePath::new(parts()).expect("a path");
+        let ledger = root.join("audit").join(format!(
+            "{}.repairs",
+            brutex_core::vendor::Vendor::Gdfl.as_str()
+        ));
+        std::fs::create_dir_all(&ledger).expect("a directory where the ledger goes");
+
+        let refused = super::back_fill_or_append(
+            &[bar(1), bar(3)],
+            &root,
+            symbol_id,
+            (parts(), entry),
+            (policy, "a test's hole"),
+        )
+        .expect_err("the journal took no line");
+        assert!(
+            refused.kind.repairable(),
+            "the append's own kind: {refused}"
+        );
+        assert!(
+            refused
+                .why
+                .contains("the repair journal would not take the `repairing` line"),
+            "{refused}"
+        );
+        assert!(refused.why.contains("nothing was published"), "{refused}");
+        assert_eq!(
+            store::generation::served(&root, path).expect("a served month"),
+            store::generation::Served::Original,
+            "no generation was published"
+        );
+        let file = store::file::BarFile::open_existing(&root, path, symbol_id).expect("a reader");
+        assert_eq!(file.header().n_valid, 2, "the month holds what it held");
+
+        // The month busy (the reader above), its file moved aside after the
+        // reader opened it and a directory in its place: the judgement cannot
+        // read the month as served, and says so.
+        let bin = store::generation::served_bars_path(&root, path).expect("the served file");
+        std::fs::rename(&bin, root.join("aside")).expect("the month moved aside");
+        std::fs::create_dir(&bin).expect("a directory where the month was");
+        let unread = super::judge_back_fill(&[bar(1), bar(3)], &root, symbol_id, (parts(), entry))
+            .expect_err("the month as served cannot be read");
+        assert_ne!(unread.kind, super::FailKind::MonthBusy, "{unread}");
+        assert!(
+            unread
+                .why
+                .contains("the month as served could not be read to judge it"),
+            "{unread}"
+        );
+        assert!(unread.why.contains("nothing was written"), "{unread}");
+        drop(file);
         let _ = std::fs::remove_dir_all(&root);
     }
 
