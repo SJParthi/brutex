@@ -392,8 +392,10 @@ fn a_steps_missing_months_cost_the_same_at_12_120_and_1200_months_measured() {
     // Windows of 12, 120 and 1,200 months (the widest a run walks), every
     // other month missing. A step's lookup is two reads of the counts and a
     // slice; the step's own window is three months at each size, so only
-    // the lookup grows with the window, and its median holds flat.
+    // the lookup grows with the window, and its median holds flat. One
+    // lookup is below the clock's tick, so a sample times BATCH of them.
     use super::Gaps;
+    const BATCH: u128 = 64;
     let nth = |offset: usize| {
         let ordinal = 2000 * 12 + offset;
         YearMonth::new(
@@ -411,20 +413,25 @@ fn a_steps_missing_months_cost_the_same_at_12_120_and_1200_months_measured() {
         let (from, to) = (nth(len / 2), nth(len / 2 + 4));
         assert!(!gaps.between(from, to).is_empty(), "len {len}");
         let (p50, p99, max) = time(2_000, || {
-            std::hint::black_box(
-                gaps.between(std::hint::black_box(from), std::hint::black_box(to))
-                    .len(),
-            );
+            for _ in 0..BATCH {
+                std::hint::black_box(
+                    gaps.between(std::hint::black_box(from), std::hint::black_box(to))
+                        .len(),
+                );
+            }
         });
         println!(
-            "missing months of one step in a {len}-month window: p50 {p50} ns, p99 {p99} ns, \
-             max {max} ns, n 2000"
+            "missing months of one step in a {len}-month window, per lookup ({BATCH} a sample): \
+             p50 {} ns, p99 {} ns, max {} ns, n 2000 samples",
+            p50 / BATCH,
+            p99 / BATCH,
+            max / BATCH
         );
         medians.push(p50);
     }
     assert!(
         medians[2] <= medians[0].max(200) * 4,
-        "the lookup's median at 12, 120 and 1,200 months: {medians:?} ns"
+        "the median of {BATCH} lookups at 12, 120 and 1,200 months: {medians:?} ns"
     );
 }
 
