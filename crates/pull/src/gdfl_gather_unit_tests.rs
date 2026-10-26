@@ -278,3 +278,70 @@ fn each_key_of_a_day_waits_as_its_own() {
     assert!(!gather.waits(base, on), "the base key no longer waits last");
     assert_eq!(gather.offered(&april()), Some(8));
 }
+
+/// **A CLOSE IS LEFT ONLY WITH THE DAY THAT WAITS** (IA-RP-34, D-4899 (4),
+/// found by the mutant run on `Gather::defer_close`): a close handed for a
+/// key or a day that is not the one waiting last is refused (`false`) and
+/// left with no day, so a day never closes by another's counts; the day
+/// that waits takes its own.
+#[test]
+fn a_close_is_left_only_with_the_day_that_waits() {
+    let (on, next) = (day(2024, 4, 1), day(2024, 4, 2));
+    let (base, member) = ("indices 2024-04-01 *", "indices 2024-04-01 *+NIFTY");
+    let zero = Mark {
+        files: 0,
+        files_skipped: 0,
+        rows: 0,
+        seconds: 0,
+        seconds_committed: 0,
+        late_rows: 0,
+        late_unresolved: 0,
+        failures: 0,
+    };
+    let close = |max_back_s| DeferredClose {
+        member: None,
+        stopped: false,
+        before: zero,
+        after: zero,
+        max_back_s,
+        listing: None,
+        failures: Vec::new(),
+        census_ms: 0,
+    };
+    let mut gather = Gather::default();
+    assert!(
+        !gather.defer_close((base, on), close(1)),
+        "no day waits in an empty gather"
+    );
+    gather
+        .take(
+            GatheredFile::for_test(
+                &april(),
+                bars(1_711_943_100..1_711_943_104),
+                request(day(2024, 4, 1), day(2024, 4, 30)),
+            ),
+            (base, on),
+        )
+        .unwrap();
+
+    assert!(
+        !gather.defer_close((member, on), close(2)),
+        "another key of the day"
+    );
+    assert!(
+        !gather.defer_close((base, next), close(3)),
+        "the key on another day"
+    );
+    assert!(
+        gather.deferred[0].close.is_none(),
+        "no close was left with the waiting day by another"
+    );
+    assert!(
+        gather.defer_close((base, on), close(4)),
+        "the day that waits"
+    );
+    assert_eq!(
+        gather.deferred[0].close.as_ref().map(|one| one.max_back_s),
+        Some(4)
+    );
+}
