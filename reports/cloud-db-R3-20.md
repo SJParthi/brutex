@@ -345,3 +345,7 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   mutants run continues in the background.
 - NEXT: when GO: read the cli mutants' result and fix any survivor, store mutants on `812136f5`'s edit,
   coverage again, workspace tests, deny, report.
+- 26 Oct ~06:40 IST, still HELD: the cli mutants run finished: `41 mutants tested in 2h: 3 missed, 33
+  caught, 5 unviable`. Missed: the two `Ask::named` ones (now caught, above) and
+  `month_recover_command.rs:254:17: delete field open from struct Reread expression in journal_view`
+  (to fix when GO: a test that reads the not-done days list of a journal holding an open day).
