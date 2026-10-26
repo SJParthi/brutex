@@ -2730,6 +2730,37 @@ const R4_28_LITERAL: &str = "1000 2026010 20260102 20260102_ 20260102_02 2026010
 // vendor credential or a field of a parameter path.
 const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-blocked claims_run gr41 held-differs held-month held-same ledger_run lifted lines-repair lost-whole lowered no_verifier_for_vendor nonsense not_kept noverifier run_too_wide rung_unstored unborn wide z16";
 
+// CC-5 (the copies register, `pull::copies_register`; D-7040 to D-7048),
+// declared at its final gate run (26 Oct 2026): the 61 literals gate 1d named
+// on its tree and not on feat/db-fix's, each read before it was listed. The
+// event target `pull.copies` and the settings key `disk.extra_copy_roots`
+// (`copies`, `roots`); the live-root labels (`cm_archive`, `nfo_archives`,
+// `tick_store`, `v3_ledger`, `source_gdfl`, `source_masters`); the receipt
+// kinds (`all_verified`, `verified_tsv`, `prove_out`), their verdicts
+// (`states`, `no_claim`) and the receipt column `source_identity` the
+// operator's own nested-proof receipts carry (spec section 3.5); the walk
+// event's and a hazard row's fields (`extra_bytes`, `hazards`, `walk_us`,
+// `ino`, `nlink`) and the fault word `vanish`; the shell words a retirement
+// list may never hold, which a test looks for and must not find (`shred`,
+// `trash`, `sudo`, `xargs`); the invented bytes `abcd`; and the tests'
+// invented folder names and scratch tags (`20x6`, `a-link`, `arch`,
+// `around`, `back`, `break`, `cm-archive`, `combo`, `deep`, `empty-one`,
+// `extracted`, `hazard`, `is-holds`, `loop`, `loose`, `mount-again`,
+// `never-removes`, `no-command`, `no-reader`, `not-configured`,
+// `options-nested-proof`, `options-queue`, `proof`, `proof2`, `prove`,
+// `prove-20261004`, `queue`, `run-1`, `scans`, `socket`, `spelt`,
+// `torn-host`, `up`, `went-away`, `work`, `zipzip`). The folder names copy
+// the shapes of the operator's work folders (spec section 3.5) and name no
+// real path. None names an account, an environment, a vendor credential or
+// a field of a parameter path.
+const CC5_LITERAL: &str = "20x6 a-link abcd all_verified arch around back break cm-archive \
+    cm_archive combo copies deep empty-one extra_bytes extracted hazard hazards ino is-holds \
+    loop loose mount-again never-removes nfo_archives nlink no-command no-reader no_claim \
+    not-configured options-nested-proof options-queue proof proof2 prove prove-20261004 \
+    prove_out queue roots run-1 scans shred socket source_gdfl source_identity source_masters \
+    spelt states sudo tick_store torn-host trash up v3_ledger vanish verified_tsv walk_us \
+    went-away work xargs zipzip";
+
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
 // refusal codes `before_listing`, `in_session_jump`, `non_positive_price`
@@ -2956,7 +2987,8 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with R4-28's group (repair 5, 24 Oct 2026).
 /// 76 -> 77 with IA-10c's group (merged into feat/db-fix 26 Oct 2026).
-const DECLARED: [&str; 77] = [
+/// 77 -> 78 with CC-5's group (26 Oct 2026).
+const DECLARED: [&str; 78] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3034,6 +3066,7 @@ const DECLARED: [&str; 77] = [
     IA9_LITERAL,
     R4_28_LITERAL,
     IA10C_LITERAL,
+    CC5_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
