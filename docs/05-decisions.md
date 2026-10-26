@@ -79464,6 +79464,24 @@ Repair round 10 (26 Oct, after verify r10):
     which machine load can break, as verify r10 saw once under coverage at
     a load near 170; and the real-browser tests' temporary directories (the
     main session's cleanup).
+47. **`/backtest`, `/db` and `/ingest` are budgeted 1,175,000 / 850,000 /
+    600,000 B** (repair 10, on the tree merged with `feat/db-fix` after
+    R3-12). The merged build weighed 1,164,100 / 831,220 / 590,976 B, all
+    three past items 10 and 36's budgets, and every other page grew too:
+    R3-12 made `$lib/store-census.js`, which every page loads first through
+    `$lib/store.svelte.js`, import `./db/notes-labels.js`,
+    `./db/selection-model.js` and `./instrument.js`, which bring
+    `./db/notes-controls.js` and `./db/input-check.js`, so a page that
+    loaded none of them gained 65,144 B (`/`, `/speed`, `/selection`,
+    `/autopilot`, `/mapping`, `/audit`, `/markets`, within 4 B) and the
+    three gained 45,375 / 14,859 / 45,387 B (they loaded some already). No
+    R3-15 file grew. Held just above their size, rounded up to 25 KB, by
+    item 2's rule (10,900 / 18,780 / 9,024 B of room). Not taken: moving
+    those imports off the shared path, which is R3-12's file (said to its
+    owner and the main session); and a budget for the pages under the
+    target, which keep the 400,000 B one: `/audit` 399,082 B and `/markets`
+    399,780 B hold 918 and 220 B of room, so the next shared byte fails the
+    build at them, as the budget is meant to.
 
 **Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-43);
 measurements in `docs/06-limits.md` L-R315-01 to L-R315-32.

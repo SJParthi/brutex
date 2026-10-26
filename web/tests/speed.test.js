@@ -326,19 +326,21 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
 
 test('each page has a budget, and the over-target pages are named', () => {
   assert.equal(budgetOf('/gaps'), 400_000);
-  assert.equal(budgetOf('/db'), 825_000, 'raised for R3-04 on the 20 Oct merged tree (D-5915 item 10)');
-  assert.equal(budgetOf('/ingest'), 550_000, 'raised for DATA-1w\'s and R4-18\'s panels and R4-28\'s F&O modes on the 25 Oct merged tree (D-5915 item 36)');
-  assert.equal(budgetOf('/backtest'), 1_125_000);
+  // Raised for R3-04 on the 20 Oct merged tree (D-5915 item 10), for DATA-1w's and R4-18's panels and R4-28's F&O
+  // modes on the 25 Oct one (item 36), and for R3-12's shared imports on the 27 Oct one (item 47).
+  assert.equal(budgetOf('/db'), 850_000, 'D-5915 item 47');
+  assert.equal(budgetOf('/ingest'), 600_000, 'D-5915 item 47');
+  assert.equal(budgetOf('/backtest'), 1_175_000, 'D-5915 item 47');
   const v = budgetVerdict([{ route: '/db', node: 6, js: 600_000, css: 100_000, bytes: 700_000, files: [] }, { route: '/gaps', node: 7, js: 1, css: 1, bytes: 400_001, files: [] }, { route: '/audit', node: 3, js: 1, css: 1, bytes: 400_000, files: [] }]);
   assert.deepEqual(v.map((x) => [x.over, x.overTarget]), [[false, true], [true, true], [false, false]], 'exactly the budget, and exactly the target, are inside');
   // Figures that round to one are said to the byte (repair 8; verify r8 nit: "545.6 KB ..., budget 545.6 KB — OVER").
   assert.equal(v[1].line, '/gaps: 400001 B on first load (0.0 KB script, 0.0 KB style), budget 400000 B — OVER ITS BUDGET — over the 400000 B wire target');
-  assert.equal(v[0].line, '/db: 700.0 KB on first load (600.0 KB script, 100.0 KB style), budget 825.0 KB — over the 400.0 KB wire target');
+  assert.equal(v[0].line, '/db: 700.0 KB on first load (600.0 KB script, 100.0 KB style), budget 850.0 KB — over the 400.0 KB wire target');
   assert.equal(v[2].line, '/audit: 400.0 KB on first load (0.0 KB script, 0.0 KB style), budget 400.0 KB', 'equal figures are one figure');
   const nearTarget = budgetVerdict([{ route: '/db', node: 6, js: 400_040, css: 0, bytes: 400_040, files: [] }])[0].line;
-  assert.equal(nearTarget, '/db: 400040 B on first load (400.0 KB script, 0.0 KB style), budget 825000 B — over the 400000 B wire target', 'near the wire target only');
-  const nearBudget = budgetVerdict([{ route: '/db', node: 6, js: 825_001, css: 0, bytes: 825_001, files: [] }])[0].line;
-  assert.equal(nearBudget, '/db: 825001 B on first load (825.0 KB script, 0.0 KB style), budget 825000 B — OVER ITS BUDGET — over the 400000 B wire target', 'near a budget that is not the target');
+  assert.equal(nearTarget, '/db: 400040 B on first load (400.0 KB script, 0.0 KB style), budget 850000 B — over the 400000 B wire target', 'near the wire target only');
+  const nearBudget = budgetVerdict([{ route: '/db', node: 6, js: 850_001, css: 0, bytes: 850_001, files: [] }])[0].line;
+  assert.equal(nearBudget, '/db: 850001 B on first load (850.0 KB script, 0.0 KB style), budget 850000 B — OVER ITS BUDGET — over the 400000 B wire target', 'near a budget that is not the target');
 });
 
 test('the budget refuses a build it cannot read, naming what was missing', () => {

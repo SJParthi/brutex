@@ -753,7 +753,20 @@ export function garbledUrl(url, field) {
  *   global, both in the shared start chunk), and the names' lengths vary,
  *   so builds differ by a few bytes on every page with nothing else changed: `/ingest`
  *   weighed 545,585, 545,589 and 545,593 B in the builds of 25 and 26 Oct
- *   (at least 4,407 B of room).
+ *   (at least 4,407 B of room);
+ * * the build of the tree merged with `feat/db-fix` after R3-12 (27 Oct
+ *   2026, the Mac, `npm run build`, weighed to the byte) — `/backtest`
+ *   1,164,100 B, `/db` 831,220 B, `/ingest` 590,976 B, all three past
+ *   their budgets. R3-12 made `$lib/store-census.js`, which every page
+ *   loads first through `$lib/store.svelte.js`, import `./db/notes-labels.js`,
+ *   `./db/selection-model.js` and `./instrument.js`, which bring
+ *   `./db/notes-controls.js` and `./db/input-check.js`: 65,144 B more on the
+ *   first load of a page that loaded none of them (`/`, `/speed`), fewer on
+ *   a page that loaded some (`/db` 14,859, `/backtest` 45,375, `/ingest`
+ *   45,387). No R3-15 file grew. So the three are now 1,175,000 / 850,000 /
+ *   600,000 B (10,900 / 18,780 / 9,024 B of room); every other page keeps
+ *   the 400,000 B target, `/audit` at 399,082 B and `/markets` at 399,780 B
+ *   (918 and 220 B of room) the nearest.
  *
  * Each time that is the budget doing its job — a page grew and the build
  * said so; the figure it now holds is the merged tree's, by the same
@@ -763,9 +776,9 @@ export function garbledUrl(url, field) {
  */
 export const BUNDLE_BUDGETS = Object.freeze({
   default: PAGE_TARGETS.wireBytes,
-  '/backtest': 1_125_000,
-  '/db': 825_000,
-  '/ingest': 550_000
+  '/backtest': 1_175_000,
+  '/db': 850_000,
+  '/ingest': 600_000
 });
 
 /** @param {string} route */
