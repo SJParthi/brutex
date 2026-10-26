@@ -1,13 +1,11 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # R3-20 (cloud): month recovery after a power cut
 
 Branch `cloud/db-R3-20-20261024`. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R3-20.md`.
 Prerequisites IA-16, R3-16, R3-36 (and SC-4) are merged on `feat/db-fix`. Newest `origin/feat/db-fix`
-merged: `cc0a3a0d` (Merge R4-28), merge commit `f922ccd3` (25 Oct, 23:0x IST).
-
-HELD at 02:09 IST, 26 Oct: `HOLD` on the base branch (`4dce2ee1`, "HOLD cloud parts without GO until the
-04:00 IST reset"), no `GO-R3-20`. Code and tests are pushed at `b3fc883c`.
+merged: `5901ec77` (Merge BASE-FIXTURE-1025; also R4-22, IA-10c), merge commit `20cb5151` (26 Oct,
+19:3x IST), clean.
 
 ## Done
 
@@ -28,13 +26,13 @@ HELD at 02:09 IST, 26 Oct: `HOLD` on the base branch (`4dce2ee1`, "HOLD cloud pa
 
 ## Left
 
-1. Store mutants, second run on `b3fc883c` (after the first run's 22 survivors were each killed by a
-   test or their code removed): shard 0/2 running at the HOLD (48 of 116 tested, 0 missed so far);
-   shard 1/2 next. Command:
-   `CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo mutants --in-diff <diff of recover.rs and file.rs vs feat/db-fix> -p store -j 4 -C --lib --shard K/2 -- -- recover`.
-2. cli mutants: `cargo mutants --in-diff <diff of month_recover_command.rs> -p cli -C --lib -- -- month_recover` (41 mutants; not run yet).
-3. Coverage once more after the mutant fixes (the 25 Oct 23:xx run is in the Gates table).
-4. Merge the newest `origin/feat/db-fix` again before the final gates; fmt, clippy, the touched suites.
+1. Coverage once more after the mutant fixes (nightly `--branch`; running, 26 Oct 19:5x IST).
+2. The final gates on the merged tree (`20cb5151` + this part's commits): clippy (running), workspace
+   tests, compared with a worktree of the unmodified base `5901ec77` for every failure.
+
+Done since the last session (26 Oct): the cli mutants' last survivor killed; store mutants on
+`812136f5`'s edit (0 missed); merge of `5901ec77`; fmt; deny; every CI shell gate of the
+language-purity job plus 6c and 5, branch against base (Gates table).
 
 ## Gates (commands and results)
 
@@ -45,11 +43,12 @@ HELD at 02:09 IST, 26 Oct: `HOLD` on the base branch (`4dce2ee1`, "HOLD cloud pa
 | tests | `cargo test --workspace --locked --no-fail-fast` | 33 failures on the merged tree; 3 were this part's and are fixed (each rerun green: `sweep_wiring_tests` 22 pass, `decision_citations` 4 pass, `rehearsal` 16 pass). The other 30 are the container's: tests that `chmod` a file or directory and expect a refusal (this container runs as uid 0, which ignores modes: settings, sink, census link_tests, gdfl_dropbox, gdfl_import ia16, alerts, scrub_blocks, watchdog, zerodha_verify, quarantine index-publish, pullrun journal extremes), slow-reader timing tests (head_deadline_body_tests, feeds_route window, detail admission), `gdfl_cm::fixtures_are_built_not_pasted` (names DATA-1w's `tick_second_check_tests.rs`), and two tests that hang at 0% CPU (`gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`, `cloud_mutants_bars::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`; stopped by me). The hangs, the api timing failures and the pull permission failures were reproduced on a worktree of the unmodified base `bf9b1c8f` (same result); none touches this part's files (`crates/api` is not in the diff). |
 | store suite | `cargo test -p store --lib --locked recover` | `ok. 34 passed; 0 failed` (26 Oct, `b3fc883c`) |
 | cli suite | `cargo test -p cli --lib --locked month_recover` | `ok. 11 passed; 0 failed` |
-| deny | `cargo deny check` | `advisories FAILED, bans ok, licenses ok, sources ok`: RUSTSEC-2026-0386 (tokio 1.53.1), a BASE item (BASE-DENY-1024 bumps tokio; this branch never touches Cargo.lock) |
+| deny | `cargo deny check` (cargo-deny 0.20.2) | 26 Oct, on the merged tree: `advisories FAILED, bans ok, licenses ok, sources ok`, the one error RUSTSEC-2026-0386 (tokio 1.53.1, `AsyncFd::new` unsound). The unmodified base `5901ec77` (a worktree) fails the same way with the same id. A BASE item: BASE-DENY-1024 bumps tokio; `git diff origin/feat/db-fix HEAD -- Cargo.lock` is empty and no `Cargo.toml` differs |
 | gate 30 | `rustc --edition=2024 -D warnings .github/gates_store_steps.rs` then `check config/store-steps.toml --merges … --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml` | no refusal names S-52 or R3-20; the 5 refusals left are the base's own `merged = false` flags (IA-1, IA-4, R4-18, R4-27, R3-17) |
-| CI shell gates | every `Gate N` block of ci.yml (24 Oct run) | red only where the base is red (1c, 1d, 10, 11, 12, 19, 23, 27b, 30; 13a/13b need a non-gate build step); within each the branch's refusals equal the base's (24 Oct log) |
+| CI shell gates | every run step of ci.yml's `language-purity` job (read with `yq`, run with `bash --noprofile --norc -eo pipefail`, `RUNNER_TEMP` and `GITHUB_ENV` emulated), on this branch and on a worktree of the unmodified base `5901ec77`; plus build-job gates 6c and 5 (26 Oct) | the same gates red on both: 1c, 1d, 10, 11, 12, 19, 23, 27b, 30, and 29 (exit 101, the same `every_route_has_a_limits_row_and_a_growth_bench` panic on both); green on both: 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b, 6c, 5. Within every red gate the output, sorted, equals the base's but for file and line counts and this part's two declared lines: gate 11 `allowed crates/cli/src/store_write.rs — 8 of 8` (base 7 of 7, raised in `.github/gates_ledger.rs`) and gate 30's `S-52 pending, waits for R3-20` row (no refusal names S-52 or R3-20; its 8 refusals are the base's `merged = false` flags: IA-1, IA-4, IA-10c, R4-18, R4-22, R4-27, R4-28, R3-17). Not run here: 1e (a no-front-end build), 13a/13b/13c/4/4a, 6d, 20, 18, 8, 31, W* |
 | coverage | `cargo +nightly llvm-cov --branch --no-report -p store --lib -- recover`, then `-p cli --lib -- month_recover store_write`, then `cargo +nightly llvm-cov report --branch` (25 Oct 23:xx, at `f922ccd3`) | recover.rs: branches 104/104 (100%), every line executed in the line view (`--text`); month_recover_command.rs: branches 30/30 (100%), every line executed; file.rs diff: every line and both arms of each new branch executed. The summary table counts 925/931 and 396/399 lines: zero-count copies of closures in the other test binary on lines the line view shows executed. store_write.rs: every line and branch of this branch's hunks covered; its 6 unreached lines and 3 branches are base test code outside the diff |
-| mutants | store: `cargo mutants --in-diff … -p store -j 4 -C --lib -- -- recover` | first run at `d6afa13e`: 243 mutants, 175 caught, 46 unviable, 22 missed; every one of the 22 is now caught by a named test or its code removed as changing nothing (commit `b3fc883c`); second run in progress (Left 1). cli: not run yet (Left 2) |
+| mutants | store: `CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo mutants --in-diff <diff> -p store -j 4 -C --lib -- -- recover` | first run at `d6afa13e` (diff of recover.rs and file.rs vs feat/db-fix): 243 mutants, 175 caught, 46 unviable, 22 missed; each of the 22 caught by a named test or its code removed (`b3fc883c`). Second run at `b3fc883c`: 232 mutants, 184 caught, 46 unviable, 2 missed, both equivalent and their code removed (`812136f5`). Third run on `812136f5`'s own diff (`git diff b3fc883c 812136f5 -- crates/store/src/recover.rs`), 26 Oct, cargo-mutants 27.1.0: `5 mutants tested in 5m: 3 caught, 2 unviable` (0 missed) |
+| mutants | cli: `cargo mutants --in-diff <diff of month_recover_command.rs vs feat/db-fix> -p cli -j 2 -C --lib -- -- month_recover` | at `00aea160`: `41 mutants tested in 2h: 3 missed, 33 caught, 5 unviable`. The 3 are killed: the two `Ask::named` ones by the header assertion in `the_days_dropped_by_recovery_are_read_again` (`897e6d4c`); `month_recover_command.rs:254:17: delete field open from struct Reread expression in journal_view` by the whole re-read line now asserted in `a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand` and `refusals_clean_months_and_another_feed_are_each_said_by_name` (`32fd8584`): with that mutant applied by hand both fail (`FAILED. 9 passed; 2 failed`), restored `ok. 11 passed; 0 failed`. The later commits change tests only, so no new mutant |
 
 ## Measurements (p50 / p99 / max, n, method)
 
@@ -349,3 +348,21 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   caught, 5 unviable`. Missed: the two `Ask::named` ones (now caught, above) and
   `month_recover_command.rs:254:17: delete field open from struct Reread expression in journal_view`
   (to fix when GO: a test that reads the not-done days list of a journal holding an open day).
+
+### 26 Oct 19:2x–19:55 IST — new session (26 Oct account); survivor killed, merge, deny, shell gates
+
+- GO present, HOLD lifted (`06af67c3`). Started from the branch tip `cf0746a3`. A fresh container:
+  cargo-deny 0.20.2 and cargo-mutants 27.1.0 built from crates.io, cargo-llvm-cov 0.9.1 from its
+  release download, nightly installed for `--branch`.
+- Merged `origin/feat/db-fix` `5901ec77` (Merge BASE-FIXTURE-1025; also R4-22, IA-10c), clean: merge
+  `20cb5151`. It touches no store file and none of this part's files.
+- The cli mutants' last survivor (`journal_view`'s `open` field) killed: the two no-journal tests now
+  assert the whole re-read line with its days (`11d07c4f`, corrected to name both dropped days in
+  `32fd8584`). `cargo test -p cli --lib --locked month_recover`: `ok. 11 passed; 0 failed`; with the
+  mutant applied by hand: `FAILED. 9 passed; 2 failed`.
+- Store mutants on `812136f5`'s edit: `5 mutants tested in 5m: 3 caught, 2 unviable`.
+- `cargo fmt --all --check`: clean. `cargo deny check`: the base's RUSTSEC-2026-0386 only, the same on
+  the base worktree. CI shell gates: branch equals base (Gates table).
+- NEXT: read the coverage run (nightly `--branch`, store `recover` then cli `month_recover store_write`)
+  and the workspace clippy; then the workspace tests, each failure rerun here and on the base worktree;
+  then the final report (STATUS: DONE only if every gate is green but the named base items).
