@@ -7073,6 +7073,61 @@ mod tests {
         assert_eq!(kept.superseded_count, 0);
     }
 
+    /// **PAST THE NAMED BOUND, AN EARLIER RUN'S REFUSALS ARE COUNTED, NEVER
+    /// NAMED** (DB-B45, D-4896; IA-10a: a maximum input and a combination).
+    /// One more distinct earlier-run refusal than [`MAX_REFUSALS_NAMED`],
+    /// alternately placed by the event's own run and by its time (no run of
+    /// its own): the answer names exactly the bound's first ones, in log
+    /// order, each saying how its run was found, and counts every one.
+    #[test]
+    fn superseded_refusals_past_the_named_bound_are_counted_not_named() {
+        let root = crate::server::import_journal::tests::journal(
+            "dayflags-superseded-bound",
+            "run 10 source=zip commit=aaa started=10\nrun 20 source=zip started=20\n",
+        );
+        let parsed = crate::server::import_journal::snapshot(&root)
+            .expect("reads")
+            .parsed;
+        let over = MAX_REFUSALS_NAMED + 1;
+        let logged: Vec<Value> = (0..over)
+            .map(|i| {
+                // All logged before run 20 started (second 20): the even
+                // ones carry run 10, which the journal names; the odd ones
+                // carry none and are placed by their time.
+                let at_ms = 15_000 + u64::try_from(i).expect("a small index");
+                let why = format!("old {i}");
+                if i % 2 == 0 {
+                    json!({ "about": "calendar", "why": why, "at_ms": at_ms, "run": 10 })
+                } else {
+                    json!({ "about": "calendar", "why": why, "at_ms": at_ms })
+                }
+            })
+            .collect();
+        let row = json!({ "run": 20, "logged": logged });
+        let inst = instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
+        let split = refusals_of(&row, &inst, day("2024-03-02"), (&parsed, None), None);
+        assert_eq!(split.superseded_count, over, "every one is counted");
+        assert_eq!(
+            split.superseded.len(),
+            MAX_REFUSALS_NAMED,
+            "only the bound's first are named"
+        );
+        for (i, named) in split.superseded.iter().enumerate() {
+            assert_eq!(named.why, format!("old {i}"), "in log order");
+            assert_eq!(named.run, Some(10), "its own run, or the one running then");
+            assert_eq!(named.commit.as_deref(), Some("aaa"));
+            let by = if i % 2 == 0 {
+                super::super::imports::PlacedBy::Run
+            } else {
+                super::super::imports::PlacedBy::Time
+            };
+            assert_eq!(named.run_from, by, "refusal {i}");
+        }
+        assert_eq!(split.placed_by_run, over.div_ceil(2));
+        assert_eq!(split.placed_by_time, over / 2);
+        assert_eq!(split.this_count, 0, "none is the close's own");
+    }
+
     /// **A CONTRACT RENAMED AT AN EX-DATE NAMES WHERE IT CONTINUES** (DB-G72,
     /// D-3331 item 4). The import's lineage ledger links the pre-ex key to the
     /// adjusted one; the answer names the link on both keys, a `stitched`
