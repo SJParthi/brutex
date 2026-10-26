@@ -77,6 +77,12 @@ const ROUTES = [
 	// instrument on screen; and one underlying's months and rungs for
 	// /backtest's rung switcher, in place of the whole census (DB-B58, WP-81).
 	'/census/facets.json',
+	// THE COVERAGE ROLL-UP (R3-09) /db's Coverage tab reads in place of the
+	// whole census (R3-12, NEW-07).
+	'/census/rollup.json',
+	// THE OPERATOR'S SETTINGS AND THE REQUEST CEILINGS (R3-05), whose ceilings
+	// /db plans its window requests against (R3-12, RA-259).
+	'/settings.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when

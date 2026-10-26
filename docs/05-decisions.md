@@ -86281,3 +86281,55 @@ concurrent first requests over a master no request has loaded), and
 `docs/04-invariants.md`, "One not-owed authority (R4-19; D-7315)".
 
 **Store step.** None: nothing is written, and every answer is read-time.
+
+### D-7111 — /db reads only what its view shows: the scope names its view's segments, a contract view offers its expiries from the facets answer, and no /db view reads the whole census (R3-12; FM-621, DB-G59, DB-G70, RA-005, RA-027, RA-258, RA-259) — 2026-10-24
+
+**Findings.** On :8080, 18 Oct 2026, `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s`
+asked `/census/facets.json?feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1`
+and drew `400 rows_too_many` (147,331 > 4,096) on screen: `readScope` asked
+the rows of every segment the root lists, whatever the view (FM-621,
+provisional id). On 12 Oct the options view with no expiry downloaded the
+whole census (53,131,576 B, 602,732 rows, 8 to 18 s, 465 MB of heap) to offer
+404 expiries the facets answer carries in 77,947 B. Any selection a scope did
+not hold, the Coverage grid and any control outside the bar rows read the
+whole census too.
+
+**Decision.**
+
+1. **The scope a view asks for names the segments it shows**
+   (`ScopeWanted.segments`, the page's own segment keys), resolved against the
+   root answer's own list by `viewSegments`, which reads the page-key to
+   store-segment rule from its one place (`selectionSegments`). A spot view
+   reads the spot segments' rows and never asks a contract segment anything; a
+   segment the view does not read is never fetched and never reported unread;
+   a segment the root lists that no view places is named, not read; a view key
+   the page does not know (`seg=index`) is refused before any request.
+2. **A contract view reads its segment's facets answer for the underlying and
+   offers its expiries from it**; a contract's rows are read only at a chosen
+   expiry. The server's refusal of a chain at the expiry on screen is named on
+   the page with its sentence, never read short and never replaced.
+3. **No /db view reads the whole census.** Every selection the held scope does
+   not cover (another instrument, segment or expiry) is read as its own scope;
+   the Coverage grid draws the selection's own rows and the server's roll-up
+   (`/census/rollup.json`); the instrument picker lists the server's
+   underlyings of the segments read (facets answers moved forward by deltas).
+   A scope that fails is the page's error with its reason; no whole census is
+   read in its place. Other pages still read the whole census and are never
+   handed one instrument's rows (`planRead`).
+4. **The request ceilings in force are the server's** (`/settings.json`,
+   R3-05): plans are refused by them and the page says "x of 1,024 series · y
+   of 240 months" before a request leaves; until the answer lands, or where it
+   lacks one, the build's copies (pinned by `web/tests/settings-ceilings.test.js`)
+   are in force and named.
+5. **The page logic R3-12 owns types no feed, no store segment and no date**:
+   `web/tests/no-typed-lists.test.js` reads the feed names from the
+   descriptor table and the segment words from `Segment::as_str`; its one
+   named exception is `CLOSE_CHANGE_DAY` (charter §7, D-2831, D-3320), which
+   no route serves yet.
+
+**Not decided here.** The opening instrument as a read setting (RA-270): the
+server's `/settings.json` names R3-33 as the reader of `open.instrument`, so
+`DEFAULT_INSTRUMENT` stays until that package lands. Proofs: docs/04-invariants.md
+R312-01 to R312-20 (R312-12 to R312-19 from the merge-back on the Mac, 26 Oct
+2026, and R312-20 from its repair 1); bounds: docs/06-limits.md L-R312-01 to
+L-R312-20 (L-R312-17 to L-R312-20 from repair 1).
