@@ -336,6 +336,15 @@ export const MAX_N = 10_000;
 export const DECIMAL = /^[0-9]+(?:[eE][0-9]+)?$/;
 
 /**
+ * The first year the store holds: `store::path::YearMonth::new` refuses a
+ * year outside 1970 to 9999 (a bar's time is microseconds since the Unix
+ * epoch, so none is before 1970, and a four-digit year ends at 9999), so the
+ * server refuses every request for an earlier month by name. `--month` and
+ * `--day` are held to it (verify r10 follow-up, 26 Oct).
+ */
+export const FIRST_STORE_YEAR = 1970;
+
+/**
  * Whether `YYYY-MM-DD` is a day the calendar has: its year 0001 or later
  * (the common era has no year 0; verify r9 follow-up, 26 Oct: `--month
  * 0000-01` was taken, and the server then refused every request by name),
@@ -395,6 +404,12 @@ export function parseArgs(argv) {
       i += 1;
     } else throw new Error(`unknown option --${name}`);
   }
+  // A FILE IS NAMED, NEVER EMPTY (verify r10 follow-up, 26 Oct: `--out ''`
+  // wrote no file and said nothing, and `--command-log ''` was refused only
+  // at the first command, after the cold and warm passes, as ENOENT for '').
+  for (const name of ['out', 'command-log', 'from-pages']) {
+    if (o[name] === '') throw new Error(`--${name} names no file: an empty name is refused`);
+  }
   const base = String(o.base ?? '');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('--base must be an origin such as http://127.0.0.1:8080 (no path)');
   const whole = (/** @type {string} */ name, /** @type {number} */ dflt, /** @type {number} */ min, max = Number.MAX_SAFE_INTEGER) => {
@@ -414,6 +429,12 @@ export function parseArgs(argv) {
   if (day !== null && !(/^\d{4}-\d{2}-\d{2}$/.test(day) && calendarHas(day))) throw new Error('--day is YYYY-MM-DD, a day the calendar has');
   const month = o.month === undefined ? null : String(o.month);
   if (month !== null && !(/^\d{4}-\d{2}$/.test(month) && calendarHas(`${month}-01`))) throw new Error('--month is YYYY-MM, a month the calendar has');
+  // A YEAR THE STORE HOLDS, as the server refuses any other (verify r10
+  // follow-up, 26 Oct: 0001-01 to 1969-12 were taken, and the server then
+  // refused every request by name). Four digits already bound the top.
+  for (const [flag, v] of /** @type {const} */ ([['--day', day], ['--month', month]])) {
+    if (v !== null && Number(v.slice(0, 4)) < FIRST_STORE_YEAR) throw new Error(`${flag} ${v} is before ${FIRST_STORE_YEAR}: the store holds no month before it (store::path::YearMonth holds ${FIRST_STORE_YEAR} to 9999), so the server would refuse every request`);
+  }
   // A DAY OF ITS MONTH (verify r7 follow-up, 25 Oct: `--day 2024-02-29
   // --month 2024-12` was taken, and the run asked the month's pages about a
   // day the month does not hold).
@@ -1302,7 +1323,8 @@ export function readCapturedFile(path) {
  *
  * @typedef {{ok: boolean, rows: SheetRow[], ignored: {request: SheetRequest, field: string, how: string, said: string}[],
  *   failures: string[], notMeasured: string[], skipped: string[], ctx: SheetContext | null,
- *   commit: string | null, notes?: string[]}} SheetResult
+ *   commit: string | null, notes?: string[], commandLog?: string}} SheetResult `commandLog` the file the run's
+ *   commands printed to, when it kept one
  *
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
@@ -1346,7 +1368,9 @@ export async function runSheet(args, deps = {}) {
       }
     }
     if ('why' in kept) return kept;
-    const failed = heading(kept.fd, `=== ${new Date().toISOString()} ${title}`);
+    // THE HEADING NAMES THIS SHEET (verify r10 follow-up, 26 Oct): sheets
+    // sharing one --command-log interleaved with no way to tell their runs apart.
+    const failed = heading(kept.fd, `=== ${new Date().toISOString()} speed sheet ${process.pid}: ${title}`);
     if (failed !== null) return { why: `what it prints could not be kept in ${kept.path}: ${failed}` };
     kept.names.add(name);
     return kept;
@@ -1752,7 +1776,7 @@ export async function runSheet(args, deps = {}) {
     closeSync(kept.fd);
     if (kept.names.size > 0) notes.push(`what the ${[...kept.names].join(' and ')} command${kept.names.size > 1 ? 's' : ''} printed is kept in ${kept.path}, each run under a line that names it`);
   }
-  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes };
+  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes, ...(kept !== null && 'fd' in kept ? { commandLog: kept.path } : {}) };
 }
 
 /** @param {number} ms */
@@ -2082,6 +2106,12 @@ async function main() {
   let code = result.ok ? 0 : 1;
   if (args.out) {
     try {
+      // NEVER OVER THE COMMANDS' LOG (verify r10 follow-up, 26 Oct): --out and
+      // --command-log naming one file that did not exist yet, by two spellings
+      // (a case on a volume that folds it, /tmp and /private/tmp), passed the
+      // check before the run, and the sheet's rename then replaced the log
+      // the sheet names. Now that the log exists, the files are compared.
+      if (result.commandLog !== undefined && sameFile(args.out, result.commandLog)) throw new Error(`--out ${args.out} is the commands' log ${result.commandLog}: the sheet is not written over what the commands printed`);
       writeWhole(args.out, text);
     } catch (why) {
       // The sheet is on stdout already; the file that could not be written is named, never a stack.

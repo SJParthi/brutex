@@ -3733,7 +3733,7 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
     // Repair 9: what a command prints goes to the commands' log, which the sheet names; never to the sheet's
     // stdout, which is the sheet alone, nor to its stderr, which a command must not share.
     assert.ok(!cmd.stdout.includes('restart-said') && !cmd.stderr.includes('restart-said'), `${cmd.stdout}\n${cmd.stderr}`);
-    assert.match(readFileSync(cliLog, 'utf8'), /^=== \d{4}-\d{2}-\d{2}T[^ ]+Z restart 1 of 1, the --restart command: echo restart-said; [^\n]*\nrestart-said\n$/);
+    assert.match(readFileSync(cliLog, 'utf8'), /^=== \d{4}-\d{2}-\d{2}T[^ ]+Z speed sheet \d+: restart 1 of 1, the --restart command: echo restart-said; [^\n]*\nrestart-said\n$/);
     assert.ok(cmd.stdout.includes(`- what the --restart command printed is kept in ${cliLog}, each run under a line that names it`), cmd.stdout);
     assert.ok(cmd.stderr.includes(`speed sheet: what the commands print goes to ${cliLog}`), cmd.stderr);
     // A sheet sent SIGTERM while its --restart command runs ends that command's group too.
@@ -4122,7 +4122,13 @@ test('the sheet\'s follow-ups: one file by its device and inode, a day and a mon
   }
   assert.equal(sheet.calendarHas('0020-01-31'), true, 'a year is read as written, never as 1920');
   assert.equal(sheet.calendarHas('0001-01-01'), true, 'the first day of the common era');
-  assert.equal(sheet.parseArgs([...base, '--month', '0001-01']).month, '0001-01');
+  // Repair 10 (verify r10 follow-up): a year the calendar has but the store cannot hold (before 1970, as
+  // store::path::YearMonth refuses it) is refused here too; this line took --month 0001-01.
+  assert.throws(() => sheet.parseArgs([...base, '--month', '0001-01']), /^Error: --month 0001-01 is before 1970: the store holds no month before it \(store::path::YearMonth holds 1970 to 9999\), so the server would refuse every request$/);
+  assert.throws(() => sheet.parseArgs([...base, '--day', '1969-12-31']), /^Error: --day 1969-12-31 is before 1970: /);
+  assert.equal(sheet.FIRST_STORE_YEAR, 1970);
+  assert.equal(sheet.parseArgs([...base, '--month', '1970-01', '--day', '1970-01-01']).month, '1970-01');
+  assert.equal(sheet.parseArgs([...base, '--month', '9999-12']).month, '9999-12');
   // --out is checked before the server is asked anything (verify r6 follow-up: only at the end).
   let asked = 0;
   const quiet = http.createServer((_req, res) => {
@@ -4866,7 +4872,7 @@ test('as a command over the network: a --restart that restarts nothing exits 1 b
     assert.match(real.stdout, /^# Speed sheet — PASS\n/);
     assert.equal((real.stdout.match(/\| first after restart \|/g) ?? []).length, sheet.requestsFor(CTX).requests.length);
     assert.match(real.stdout, /\n- first after restart: 2 restarts timed, each proved by the server's own start \(\/speed\.json started_ms\) changing across the --restart command: 1791600000000 to (\d+), \1 to \d+\n/);
-    assert.match(readFileSync(join(dir, 'real.md.commands.log'), 'utf8'), /^=== \S+ restart 1 of 2, the --restart command: echo \$\$ > [^\n]+\n=== \S+ restart 2 of 2, the --restart command: echo \$\$ > [^\n]+\n$/);
+    assert.match(readFileSync(join(dir, 'real.md.commands.log'), 'utf8'), /^=== \S+ speed sheet \d+: restart 1 of 2, the --restart command: echo \$\$ > [^\n]+\n=== \S+ speed sheet \d+: restart 2 of 2, the --restart command: echo \$\$ > [^\n]+\n$/);
   } finally {
     site.close();
   }
@@ -4893,7 +4899,7 @@ test('a sheet whose stderr reader has gone keeps its --writer and --restart comm
     assert.match(text, /\n- the --writer command's process group was sent SIGTERM and left at the end of the warm\+writer pass\n/);
     assert.ok(text.includes(`\n- what the --writer and --restart commands printed is kept in ${out}.commands.log, each run under a line that names it\n`), text);
     assert.match(text, /\n- stderr was closed \(EPIPE\) from the line "[^"\n]+": \d+ of this run's own lines on it were not taken\n/);
-    assert.match(readFileSync(`${out}.commands.log`, 'utf8'), /^=== \S+ the --writer command: while :; do echo writer-tick; sleep 0\.05; done\n(?:writer-tick\n)+=== \S+ restart 1 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n=== \S+ restart 2 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n$/);
+    assert.match(readFileSync(`${out}.commands.log`, 'utf8'), /^=== \S+ speed sheet \d+: the --writer command: while :; do echo writer-tick; sleep 0\.05; done\n(?:writer-tick\n)+=== \S+ speed sheet \d+: restart 1 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n=== \S+ speed sheet \d+: restart 2 of 2, the --restart command: echo restarting; [^\n]+\nrestarting\n$/);
     assert.equal(ran.stdout, '', 'stdout was closed too, so the sheet is the file\'s');
   } finally {
     site.close();
@@ -4961,7 +4967,7 @@ test('a stderr reader that is alive and not reading neither stalls a --writer no
     // The writer was never stalled: it printed into its log past the 64 KB a pipe holds, where on the stalled
     // pipe it would have stopped at the first full buffer.
     const log1 = readFileSync(`${first.out}.commands.log`, 'utf8');
-    assert.match(log1.slice(0, log1.indexOf('\n') + 1), /^=== \S+ the --writer command: head -c 400000 [^\n]+\n$/);
+    assert.match(log1.slice(0, log1.indexOf('\n') + 1), /^=== \S+ speed sheet \d+: the --writer command: head -c 400000 [^\n]+\n$/);
     const printed1 = log1.slice(log1.indexOf('\n') + 1);
     assert.ok(printed1.length >= 65_536 && /^w+$/.test(printed1), `the writer printed ${printed1.length} B into its log`);
     // (2) The pipe full from the start: none of the sheet's lines is taken, and the run waits STDERR_SETTLE_MS for them, no more.
@@ -5042,7 +5048,7 @@ test('the commands\' log: a regular file only, appended to, each run of a comman
   assert.ok(exits.notes.includes('the --writer command\'s process group had already left at the end of the warm+writer pass'), exits.notes.join('\n'));
   const piped = await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'kill -PIPE $$', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: () => {} });
   assert.ok(piped.failures.includes('the --writer command ended before the warm+writer pass did: it was ended by SIGPIPE, so part of that pass ran with nothing writing'), piped.failures.join('\n'));
-  assert.match(readFileSync(path, 'utf8'), /\n=== \S+ the --writer command: exit 3\n=== \S+ the --writer command: kill -PIPE \$\$\n$/);
+  assert.match(readFileSync(path, 'utf8'), /\n=== \S+ speed sheet \d+: the --writer command: exit 3\n=== \S+ speed sheet \d+: the --writer command: kill -PIPE \$\$\n$/);
   // A run lets go of the log at its end: no descriptor of this process is left open by a run that ran a command.
   const fds = () => readdirSync('/dev/fd').length;
   const held = fds();
@@ -5078,7 +5084,7 @@ test('the commands\' log: a regular file only, appended to, each run of a comman
     assert.equal(temp.code, 0, temp.stdout);
     const m = /\n- what the --writer command printed is kept in (\S+), each run under a line that names it\n/.exec(temp.stdout);
     assert.ok(m && m[1].startsWith(join(dir, 'speed-sheet-')) && m[1].endsWith('.commands.log'), temp.stdout);
-    assert.match(readFileSync(m[1], 'utf8'), /^=== \S+ the --writer command: echo in-the-temporary-directory; sleep 100\nin-the-temporary-directory\n$/);
+    assert.match(readFileSync(m[1], 'utf8'), /^=== \S+ speed sheet \d+: the --writer command: echo in-the-temporary-directory; sleep 100\nin-the-temporary-directory\n$/);
   } finally {
     site.close();
   }
@@ -5340,4 +5346,38 @@ test('what the server answered since its start is read from its /speed.json answ
   // A count of many restarts is its least and most.
   assert.match(sheet.NOT_FIRST.before({ r: req, seen: [1, 4, 2] }), /\(1 to 4 times: /);
   assert.match(sheet.NOT_FIRST.before({ r: req, seen: [2] }), /\(2 times: /);
+});
+
+test('verify r10\'s follow-ups: a file is named, never empty; --out and the commands\' log one file by two spellings is refused at the end, the log kept whole; and each heading in the log names the sheet that wrote it', { timeout: 60_000 }, async () => {
+  // Before (verify r10, 26 Oct): --out '' wrote no file and said nothing; --command-log '' failed only at
+  // the first command, after the cold and warm passes; and --out and --command-log naming one file that
+  // did not exist yet, by two spellings, wrote the sheet over the log the sheet named.
+  const base = ['--base', 'http://h:1'];
+  for (const name of ['--out', '--command-log', '--from-pages']) {
+    assert.throws(() => sheet.parseArgs([...base, name, '']), new RegExp(`^Error: ${name} names no file: an empty name is refused$`), name);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'r315-r10-'));
+  const other = mkdtempSync(join(tmpdir(), 'r315-r10-link-'));
+  const { symlinkSync, realpathSync } = await import('node:fs');
+  // The same directory by two spellings: its own path and a link to it.
+  symlinkSync(dir, join(other, 'same'));
+  const start = join(dir, 'start');
+  writeFileSync(start, '1');
+  const site = await startedServer(start, 0);
+  try {
+    const out = join(other, 'same', 'one.md');
+    const log = join(realpathSync(dir), 'one.md');
+    assert.equal(sheet.parseArgs([...base, '--out', out, '--command-log', log]).commandLog, log, 'neither exists before the run, so the run starts');
+    const ran = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--writer', 'echo the-writer-printed; sleep 30', '--out', out, '--command-log', log]);
+    assert.equal(ran.code, 2, ran.stderr);
+    assert.ok(ran.stderr.includes(`speed-sheet: --out ${out} is the commands' log ${log}: the sheet is not written over what the commands printed\n`), ran.stderr);
+    assert.match(ran.stdout, /^# Speed sheet — PASS\n/, 'the sheet is still on stdout');
+    assert.match(readFileSync(log, 'utf8'), /^=== \S+ speed sheet \d+: the --writer command: echo the-writer-printed; sleep 30\nthe-writer-printed\n$/, 'the log is kept whole, its heading naming the sheet');
+    // Two spellings of two files: the sheet is written.
+    const fine = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--writer', 'sleep 30', '--out', join(other, 'same', 'two.md'), '--command-log', join(realpathSync(dir), 'two.log')]);
+    assert.equal(fine.code, 0, fine.stderr);
+    assert.equal(readFileSync(join(dir, 'two.md'), 'utf8'), fine.stdout);
+  } finally {
+    site.close();
+  }
 });
