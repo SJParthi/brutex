@@ -117,16 +117,32 @@ fn at(h: u32, m: u32, s: u32) -> u32 {
     h * 3_600 + m * 60 + s
 }
 
-/// One invented row: `stem`, the day, the time, LTP, bid, ask and LTQ
-/// text; the quantities and open interest zero.
-fn row(stem: &str, d: Day, sod: u32, ltp: &str, (bid, ask): (&str, &str), ltq: &str) -> String {
+/// One invented row from its seven value fields in file order: LTP, bid,
+/// bid quantity, ask, ask quantity, LTQ and open interest. Every
+/// capital-market row these tests need is joined here at run time and
+/// never typed whole, so `pull`'s `fixtures_are_built_not_pasted` walk
+/// finds no literal row in this file (D-7215).
+fn cm_row(stem: &str, d: Day, sod: u32, fields: [&str; 7]) -> String {
     format!(
-        "{stem}.NSE,{:02}/{:02}/{:04},{},{ltp},{bid},0,{ask},0,{ltq},0",
+        "{stem}.NSE,{:02}/{:02}/{:04},{},{}",
         d.day(),
         d.month(),
         d.year(),
-        hms(sod)
+        hms(sod),
+        fields.join(",")
     )
+}
+
+/// The first `n` comma fields of a built row: a short line, cut from a
+/// whole built one rather than typed.
+fn first_fields(row: &str, n: usize) -> String {
+    row.split(',').take(n).collect::<Vec<_>>().join(",")
+}
+
+/// One invented row: `stem`, the day, the time, LTP, bid, ask and LTQ
+/// text; the quantities and open interest zero.
+fn row(stem: &str, d: Day, sod: u32, ltp: &str, (bid, ask): (&str, &str), ltq: &str) -> String {
+    cm_row(stem, d, sod, [ltp, bid, "0", ask, "0", ltq, "0"])
 }
 
 /// A trade row with no quote.
@@ -191,7 +207,7 @@ fn alpha_d1() -> Vec<String> {
         trade(s, d1, at(9, 15, 2), "7790.00", 0),
         trade(s, d1, at(9, 15, 3), "0.00", 1),
         trade(s, d1, at(9, 15, 4), "7777.005", 1),
-        format!("{s}.NSE,07/03/2025,{},7777.00,0,0,0,0,1", hms(at(9, 15, 5))),
+        first_fields(&trade(s, d1, at(9, 15, 5), "7777.00", 1), 9),
         row(s, d1, at(9, 15, 6), "7777.00", ("0", "0"), "-5"),
         row(s, d1, at(9, 15, 7), "-7777.00", ("0", "0"), "1"),
         row(s, d1, at(9, 15, 8), "7777.25", ("7778.00", "7777.50"), "2"),
@@ -2005,9 +2021,83 @@ fn every_misuse_is_refused_before_anything_is_read() {
     assert_eq!(every.archive, Some(PathBuf::from("z.zip")));
 }
 
+/// D-7215: the builders that replaced the pasted rows join the ten fields
+/// the decoder and the census read, in file order, at every boundary.
+#[test]
+fn the_row_builders_join_ten_fields_at_every_boundary() {
+    let fields = |r: &str| r.split(',').map(str::to_owned).collect::<Vec<_>>();
+    let whole = trade("ZZ", d(D1), at(10, 0, 0), "5.00", 1);
+    let f = fields(&whole);
+    assert_eq!(f.len(), 10, "{whole}");
+    assert_eq!(
+        (f[0].as_str(), f[1].as_str(), f[2].as_str()),
+        ("ZZ.NSE", "07/03/2025", "10:00:00")
+    );
+    assert_eq!(&f[3..], ["5.00", "0", "0", "0", "0", "1", "0"]);
+    // Every value field lands in its own place: no two share a value.
+    let placed = cm_row("ZZ", d(D1), 1, ["1.01", "2", "3", "4", "5", "6", "7"]);
+    assert_eq!(
+        &fields(&placed)[3..],
+        ["1.01", "2", "3", "4", "5", "6", "7"]
+    );
+    // Year boundary, first and last second of the clock, special session.
+    let first = fields(&trade("ZZ", day(2025, 1, 1), 0, "5.00", 1));
+    assert_eq!(
+        (first[1].as_str(), first[2].as_str()),
+        ("01/01/2025", "00:00:00")
+    );
+    let last = fields(&trade("ZZ", day(2024, 12, 31), at(23, 59, 59), "5.00", 1));
+    assert_eq!(
+        (last[1].as_str(), last[2].as_str()),
+        ("31/12/2024", "23:59:59")
+    );
+    assert_eq!(
+        fields(&trade("ZZ", d(MUHURAT), 0, "5.00", 1))[1],
+        "21/10/2025"
+    );
+    // Cutting: nothing, one field, a short line, exactly whole, past whole.
+    assert_eq!(first_fields(&whole, 0), "");
+    assert_eq!(first_fields(&whole, 1), "ZZ.NSE");
+    let short = first_fields(&whole, 9);
+    assert_eq!(fields(&short).len(), 9);
+    assert!(whole.starts_with(&short) && whole.len() > short.len());
+    assert_eq!(first_fields(&whole, 10), whole);
+    assert_eq!(first_fields(&whole, usize::MAX), whole);
+    // An empty field stays a field, so the count the census keys on holds.
+    assert_eq!(fields(&row("ZZ", d(D1), 0, "", ("", ""), "")).len(), 10);
+    // Combination: a negative LTP on a crossed quote at the year's last
+    // second, then the same row cut short — the census counts the whole
+    // one and skips the short one, exactly as for a pasted line.
+    let extreme = cm_row(
+        "ZZ",
+        day(2024, 12, 31),
+        at(23, 59, 59),
+        ["-5.00", "6.00", "1", "5.00", "1", "-1", "0"],
+    );
+    let c = census(&csv(&[extreme.clone(), first_fields(&extreme, 7)]));
+    assert_eq!(
+        (
+            c.lines,
+            c.negative_ltp,
+            c.negative_qty,
+            c.crossed,
+            c.one_sided
+        ),
+        (2, 1, 1, 1, 0)
+    );
+    // Out of the box: a maximum-width LTP of 4,096 digits is still one
+    // field of one ten-field line.
+    let wide = "9".repeat(4_096);
+    let huge = trade("ZZ", d(D1), 0, &wide, 1);
+    assert_eq!(fields(&huge).len(), 10);
+    assert_eq!(fields(&huge)[3].len(), 4_096);
+    assert_eq!(census(&csv(&[huge])).lines, 1);
+}
+
 #[test]
 fn the_census_is_one_pass_and_its_work_grows_with_the_rows_alone() {
-    let line = |i: usize| format!("ZZ.NSE,07/03/2025,10:00:00,{}.00,0,0,0,0,1,0", 1000 + i % 7);
+    let d1 = d(D1);
+    let line = |i: usize| trade("ZZ", d1, at(10, 0, 0), &format!("{}.00", 1000 + i % 7), 1);
     for n in [1_usize, 10, 10_000] {
         let rows: Vec<String> = (0..n).map(line).collect();
         let c = census(&csv(&rows));
@@ -2021,13 +2111,22 @@ fn the_census_is_one_pass_and_its_work_grows_with_the_rows_alone() {
     }
     // Built, not pasted (`pull::gdfl_cm::tests::fixtures_are_built_not_pasted`
     // walks every crate for a whole CM row written out; R4-22).
-    let zz = "ZZ.NSE";
     let rows = vec![
-        format!("{zz},07/03/2025,10:00:00,5.00,0,0,0,0,1,0"),
-        format!("{zz},07/03/2025,10:00:00,5.00,0,0,0,0,1,0"),
-        format!("{zz},07/03/2025,10:00:01,-5.00,6.00,1,5.00,1,1,0"),
-        format!("{zz},07/03/2025,10:00:01,5.00,0,-1,4.00,0,1,0"),
-        format!("{zz},07/03/2025,10:00:02,5.00,0,0,0"),
+        trade("ZZ", d1, at(10, 0, 0), "5.00", 1),
+        trade("ZZ", d1, at(10, 0, 0), "5.00", 1),
+        cm_row(
+            "ZZ",
+            d1,
+            at(10, 0, 1),
+            ["-5.00", "6.00", "1", "5.00", "1", "1", "0"],
+        ),
+        cm_row(
+            "ZZ",
+            d1,
+            at(10, 0, 1),
+            ["5.00", "0", "-1", "4.00", "0", "1", "0"],
+        ),
+        first_fields(&trade("ZZ", d1, at(10, 0, 2), "5.00", 1), 7),
     ];
     let c = census(&csv(&rows));
     assert_eq!(
