@@ -1092,6 +1092,12 @@ confirmed by two skeptics; their corrections are applied.
   FIXED in code: one hash probe a run, rows unchanged, 580x before and within
   16x after in the same run (D-7150 addendum, BRED-22). Same cause as F12,
   for the seventh time: the merge did not run the shell gates.
+- **BRED23-F23: a fourth timing test failed under load.** R3-19's
+  `a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check` asserted a
+  fixed 100 ms and timed out with the gate suite running beside it, with
+  nothing waiting. FIXED in the test, not by a looser bound: 100 ms or 20
+  times a same-run baseline (a regular file swapped in the same way); a
+  blocking check substituted still fails (D-7152 addendum, BRED-23).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

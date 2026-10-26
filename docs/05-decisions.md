@@ -83646,6 +83646,23 @@ the same `403`. Proved both ways: with the drain taken out,
 read 0 bytes of a 1-byte body (round2/logs-BASE-REDS-1023-t11.log); with it
 both pass (t9) (BRED-19). No bound was loosened and the refusal is unchanged.
 
+**Addendum, 27 Oct 2026 (a fourth timing test).** `cargo test -p pull`
+on this branch with the gate suite running beside it failed
+`pull::ingest::census_store::kept_tests::a_fifo_swapped_in_after_the_look_never_blocks_the_stub_check`
+(R3-19): "answered within 100 ms, never waiting on the FIFO: Timeout"
+(round2/logs-BASE-REDS-1023-g9-pull.log). The check does not wait (it opens
+`O_NOFOLLOW | O_NONBLOCK`); the rename of the FIFO over the stub and the
+open on the store's disk took longer than the fixed 100 ms with nothing
+waiting. Made load-robust as item 1 was: the same check, with a regular
+file swapped in the same way, is timed first in the same run, and the FIFO
+case must answer `false` within 100 ms or 20 times that baseline, whichever
+is the longer. 100 ms stays the floor, so nothing is looser on an idle
+machine, and a check that waits for a writer never answers, so no bound
+lets it pass. Proved both ways: with a check that opens without
+`O_NONBLOCK` substituted, the test failed, "no answer within 538.95 ms (the
+regular file's swap took 26.95 ms)" (round2/logs-BASE-REDS-1023-t17.log);
+with the real check it passes (t18) (BRED-23).
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed
