@@ -1359,9 +1359,10 @@ export function firstAfterRestart(r, a, o) {
  * its g requests is asked first and the others after it in turn, each
  * request of the route in a place one of them holds in `requests`: the routes
  * asked before a route's first ask are the same at every restart, and over g
- * restarts each request goes first once. `/speed.json` is not turned: its
- * first after a restart is the read that proved it, before the pass. Linear
- * in the requests, once a restart.
+ * restarts each request goes first once. `/speed.json` turns as any route
+ * does, though its first after a restart is always the read that proved
+ * it, made before the pass, which the pass takes as that route's first ask.
+ * Linear in the requests, once a restart.
  *
  * @param {SheetRequest[]} requests
  * @param {number} at the restart, from 1
@@ -1375,9 +1376,9 @@ export function passOrder(requests, at) {
     if (p === undefined) places.set(r.route, [i]);
     else p.push(i);
   }
-  const order = [...requests];
-  for (const [route, p] of places) {
-    if (route === SPEED_ROUTE || p.length < 2) continue;
+  /** @type {SheetRequest[]} every place is written once */
+  const order = new Array(requests.length);
+  for (const p of places.values()) {
     const turn = (at - 1) % p.length;
     for (const [j, place] of p.entries()) order[place] = requests[p[(j + turn) % p.length]];
   }

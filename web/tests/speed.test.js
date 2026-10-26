@@ -5606,7 +5606,7 @@ test('a route\'s later asks in a pass are never firsts, by request: with a first
   assert.ok(r3.notMeasured.includes(`first after restart: GET ${facets.url} is not timed as a first after restarts 2-3 (2 of the 3 timed): its route /census/facets.json was asked first in each of those passes by this sheet's GET ${SHARED.facets2} (restart 2) and GET ${SHARED.facets3} (restart 3), ${WARMED}`), r3.notMeasured.join('\n'));
 });
 
-test('a restart\'s pass asks a route\'s requests in turn, each in a place one of them holds, /speed.json never turned; and an ask after its route\'s first in the pass is never a first, whatever the count says, said with every ask that went first', () => {
+test('a restart\'s pass asks a route\'s requests in turn, each in a place one of them holds, /speed.json\'s too; and an ask after its route\'s first in the pass is never a first, whatever the count says, said with every ask that went first', () => {
   const R = (/** @type {string} */ route, /** @type {string} */ url, method = 'GET') => /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ ({ page: '/p', route, label: '', method, url, builder: '' });
   const a1 = R('/a', '/a?1');
   const a2 = R('/a', '/a?2');
@@ -5619,11 +5619,11 @@ test('a restart\'s pass asks a route\'s requests in turn, each in a place one of
   const requests = [a1, b, a2, s, c1, a3, s2, c2];
   const order = (/** @type {number} */ at) => sheet.passOrder(requests, at);
   assert.deepEqual(order(1), requests, 'the first restart asks them as given');
-  assert.deepEqual(order(2), [a2, b, a3, s, c2, a1, s2, c1]);
+  assert.deepEqual(order(2), [a2, b, a3, s2, c2, a1, s, c1]);
   assert.deepEqual(order(3), [a3, b, a1, s, c1, a2, s2, c2]);
   assert.deepEqual(order(7), order(1), 'and round again once every route has come round (3 and 2: at 7)');
   assert.deepEqual([1, 2, 3, 4].map((at) => order(at).find((r) => r.route === '/a')), [a1, a2, a3, a1], 'each of a route\'s requests goes first in turn');
-  for (const at of [1, 2, 3, 10_000]) assert.deepEqual([order(at)[1], order(at)[3], order(at)[6]], [b, s, s2], 'a route of one, and /speed.json, keep their places');
+  for (const at of [1, 2, 3, 10_000]) assert.deepEqual([order(at)[1], order(at)[3], order(at)[6]], at % 2 === 1 ? [b, s, s2] : [b, s2, s], 'a route of one keeps its place, and /speed.json\'s two take turns as any route\'s do');
   assert.deepEqual(requests, [a1, b, a2, s, c1, a3, s2, c2], 'the requests given are left as they were');
   assert.deepEqual(sheet.passOrder([], 5), []);
   // An ask after its route's first in the pass, by kind and its place among the others.

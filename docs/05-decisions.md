@@ -79505,7 +79505,8 @@ Repair round 11 (27 Oct, after verify r11):
     `passOrder` turns a route's requests from one restart to the next, each
     in a place one of them holds, so over g restarts each of a route's g
     requests goes first once and every request still gets its own firsts;
-    `/speed.json` is never turned. The verifier's way (a) with its optional
+    `/speed.json`'s first stays the read that proved the restart, made
+    before the pass. The verifier's way (a) with its optional
     turns. Not taken: its way (b), a later ask published under a phase or
     mark of its own (a time of a warmed route beside first-after-restart
     rows, which is what the warm rows already time); asking a shared
