@@ -85825,6 +85825,62 @@ D-7185).
    does not have (it has no partial outcome) or a rule that lets a known gap
    read as a complete leg, and D-7190 point 3 chose `Failed`.
 
+### D-7215 — BASE-FIXTURE-1025: the GDFL capital-market rows in `cli`'s tick-to-second-check tests are built, never pasted; the guard stays as it is — 2026-10-25
+
+**Number** the first of BASE-FIXTURE-1025's block D-7215..D-7224 in the
+decision-block registry; unused on `feat/db-fix` at `bf9b1c8ff` when taken.
+
+**Context.** Design §12 (revision 5) and D-0808 item 9 (the GDFL capital-market
+reader) say no GDFL row is committed: this repository is public
+(`CLAUDE.md` §8), a fixture in it is redistribution, and every test row is
+joined at run time from invented values. `pull`'s
+`gdfl_cm::tests::fixtures_are_built_not_pasted` enforces that: it walks every
+`.rs` file under `crates/` and fails on any text that holds a whole
+capital-market row after a `.NSE` or `.NSE_IDX` ticker (`holds_cm_row`: the
+comma, a `DD/MM/YYYY` date, an `HH:MM:SS` time and seven comma-led numeric
+fields).
+
+**The finding.** `crates/cli/src/tick_second_check_tests.rs`, which came in
+with DATA-2 (merged as `e851da1ca`; the newest commit touching it before this
+change is `4219faa2d`, DATA-2 repair 3), typed two such rows whole in
+`the_census_is_one_pass_and_its_work_grows_with_the_rows_alone` (an identical
+pair of `ZZ.NSE` trade rows the census counts as one identical line). So every
+head of `feat/db-fix` from `e851da1ca` on was red on the guard; the full gate
+on `666ddf7f7` (25 Oct 2026) was the first Mac gate to run to its end on such
+a head, and it blocked the app28 deploy. Re-checked on `bf9b1c8ff`: the guard
+fails naming that one file and no other. The rows were invented (ticker `ZZ`,
+price 5.00), so no vendor row was redistributed; the defect is that the guard
+cannot tell an invented literal from a quoted one, which is why the rule is
+"built", not "invented". Three more lines of the same test, one row of
+`alpha_d1` and the census's 10,000-line row maker were typed whole too; they
+escaped the detector only because a field held a minus sign, was missing, or
+was a `{}` placeholder.
+
+**The fix.** In that file alone, every capital-market row is joined by one
+builder, `cm_row(stem, day, second_of_day, [ltp, bid, bid_qty, ask, ask_qty,
+ltq, oi])`, from which the file's existing `row` and `trade` builders are now
+made; a short (torn) line is `first_fields` of a whole built row. Each test
+keeps its meaning and every assertion: the rows are the same values as
+before, field for field (the census still counts 5 lines, 1 identical,
+1 negative LTP, 1 negative quantity, 1 crossed and 1 one-sided quote; the
+nine-field line of `alpha_d1` is still the same nine fields). A new test,
+`the_row_builders_join_ten_fields_at_every_boundary`, pins the builder: ten
+fields in file order, year and clock boundaries, the Muhurat date, every cut
+length from none to past whole, empty fields, a negative LTP on a crossed
+quote cut short (a combination the census must count once and skip once),
+and a 4,096-digit LTP that is still one field of one line.
+
+**Why the guard stays as it is.** It was right: the file held whole rows.
+Narrowing it, an allowlist entry, a skip or a rename that hides the file from
+the walk would each let the next pasted row in unseen, which is the shape
+`CLAUDE.md` §4 bans ("a fallback that hides a failure"). No line of
+`crates/pull/src/gdfl_cm.rs` changes.
+
+**Proof:** `gdfl_cm::tests::fixtures_are_built_not_pasted` fails on
+`bf9b1c8ff` (pasted GDFL CM rows in `crates/cli/src/tick_second_check_tests.rs`)
+and passes on this change; every `tick_second_check` test in `cli` passes.
+No new invariant (the guard is the invariant); no limit changes.
+
 ### D-7310 — G3: the written series rule — a share's EQ, BE and BZ day files are filed, every other series code is refused by name as `series_not_stored:<code>` — 2026-10-24
 
 **Implemented by** R4-22. **Findings** G3 (the GDFL capital-market reader's
