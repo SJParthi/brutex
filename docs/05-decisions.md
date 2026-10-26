@@ -83567,6 +83567,27 @@ No bound was loosened: `APPEND_LOCK_WAIT` is unchanged, and the test now
 also requires that each refusal waited the whole of it, which the old one
 never checked.
 
+**Addendum, 26 Oct 2026 (a refused write's answer lost to a reset, gate
+31).** The macOS gate of the final run on 6b7059b86
+(state/fix/ci-gates-logs/bred1023-full12b, load average about 45) failed
+`api::speed::tests::a_served_request_is_counted_under_its_matched_path` on
+`ConnectionReset`: its cross-site `POST /page-report` is written by `write!`,
+which sends each formatted piece separately, and the cross-origin refusal
+answered `403` from the head and closed. The body that arrived after the
+close met a closed socket, the server's kernel answered it with a reset, and
+the reset discarded the `403` the client had not read yet. Not load alone and
+not the test: any client whose body trails its head can lose a right
+refusal. FIXED at the cause, in the one shared path: `same_origin_writes_only`,
+`refuse_writes` and `refuse_unstamped_writes` answer through
+`refused_after_draining`, which reads the body to its end (at most
+`MAX_FORM_BYTES` and the frame that crosses it, L-BRED23-08) and then sends
+the same `403`. Proved both ways: with the drain taken out,
+`a_write_refused_before_its_body_is_read_still_reaches_its_client` (the body
+300 ms after the head) failed on `ConnectionReset` and
+`a_refusal_reads_its_body_to_the_end_within_the_bound_and_answers_the_same`
+read 0 bytes of a 1-byte body (round2/logs-BASE-REDS-1023-t11.log); with it
+both pass (t9) (BRED-19). No bound was loosened and the refusal is unchanged.
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed

@@ -2633,7 +2633,8 @@ impl StoredSpanLoadBoundV1 {
 
 /// [`load_classified_with_ceiling`]'s quarantine refusal (R4-18), by name:
 /// the scope, the cause, the bars and where the ledger line is. O(1): one
-/// probe.
+/// probe, two positional reads
+/// (`quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`).
 fn refuse_quarantined(
     root: &Path,
     path: StorePath<'_>,

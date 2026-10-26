@@ -205,7 +205,8 @@ fn every_series_code_is_stored_or_refused_by_a_written_rule() {
 /// holds, a code past [`MAX_SERIES_CODE`], a share no scope files, a share
 /// one byte past a symbol, and a share at exactly a symbol's width. Only the
 /// last is a refused series; every other is no series name at all and stays
-/// a counted skip. O(1): the name's length is refused before it is read.
+/// a counted skip. O(1): the name's length is refused before it is read
+/// (timed in `gdfl_series_code_tests::the_series_rule_costs_one_split_and_one_probe_measured`).
 #[test]
 fn a_series_name_is_read_only_inside_its_bounds() {
     let d = day(2024, 4, 2);

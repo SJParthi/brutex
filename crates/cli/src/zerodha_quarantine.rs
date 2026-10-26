@@ -20,7 +20,8 @@
 //! are what is set aside: a `whole_month` row names every bar the month
 //! holds, a `timestamps` row its listed stamps. For `before_listing` each
 //! stamp is checked against the share's listing day once more
-//! (`pull::listing`, O(1) per symbol): a stamp on or after the listing day is
+//! (`pull::listing`, O(1) per symbol, UNVERIFIED: no test times the listing
+//! lookup, L-BRED23-09): a stamp on or after the listing day is
 //! refused by name and nothing of that month is written.
 //!
 //! # What `--apply` does
@@ -251,12 +252,11 @@ pub(crate) fn rows_of(text: &str, ask: &Ask) -> Result<Vec<Row>, String> {
                 }
                 // A STAMP LISTED TWICE is a malformed row, named; it is never
                 // silently folded into one.
-                let mut sorted = listed.clone();
-                sorted.sort_unstable();
-                let twice = sorted.windows(2).find_map(|pair| match pair {
-                    [one, two] if one == two => Some(*one),
-                    _ => None,
-                });
+                // One hash insert a stamp, the set sized by the row's own
+                // count (gate 11 rule 4, BASE-REDS-1023); the first stamp met
+                // twice, in the row's order, is the one named.
+                let mut seen = std::collections::HashSet::with_capacity(listed.len());
+                let twice = listed.iter().copied().find(|at| !seen.insert(*at));
                 if let Some(twice) = twice {
                     return Err(format!(
                         "a plan row lists stamp {twice} twice: `{key} {month}`"

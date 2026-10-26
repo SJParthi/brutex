@@ -3071,6 +3071,18 @@ const R4_27_LITERAL: &str = "as_trade keep_flat match rate_before_series rate_ca
 // an account, an environment, a vendor credential or a parameter-path field.
 const IA_4_LITERAL: &str = "300 ia4-currency ia4-f44 ia4-resume";
 
+// R4-22's merge (26 Oct 2026; declared by BASE-REDS-1023 at its merge of that
+// day, D-7147 addendum, each read first): the eleven `r422-*` words are
+// scratch-root names of `pull::gdfl_format_change_tests` and
+// `pull::gdfl_series_code_tests`; `columns_changed`, `series_not_stored` and
+// `wrong_date` are refusal causes of `pull::gdfl_cm` and
+// `pull::gdfl_import_causes` that a refused day prints by name; `bl` is a
+// lower-case series code a series-code test feeds the reader to see it
+// refused; `tree` is the `{tree}` placeholder of `pull::gdfl_archive`'s
+// member-name format and a word of two comments. None names an account, an
+// environment, a vendor credential or a parameter-path field.
+const R4_22_LITERAL: &str = "bl columns_changed r422-all-renamed r422-bl r422-columns r422-fm101 r422-mixed r422-nfo-header r422-one-day r422-one-day-inside r422-renamed r422-ruchi r422-twins series_not_stored tree wrong_date";
+
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
 /// raised 72 -> 73 for its own group, and both groups landed, so the joined
@@ -3083,7 +3095,8 @@ const IA_4_LITERAL: &str = "300 ia4-currency ia4-f44 ia4-resume";
 /// 78 -> 79 with R4-28's group (repair 5, 24 Oct 2026).
 /// 79 -> 80 with IA-10c's group (merged into feat/db-fix 26 Oct 2026); both
 /// sides of the BASE-REDS-1023 merge of 26 Oct kept, none counted twice.
-const DECLARED: [&str; 80] = [
+/// 80 -> 81 with R4-22's group, declared at the same merge (D-7147 addendum).
+const DECLARED: [&str; 81] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3164,6 +3177,7 @@ const DECLARED: [&str; 80] = [
     IA_4_LITERAL,
     R4_28_LITERAL,
     IA10C_LITERAL,
+    R4_22_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

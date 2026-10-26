@@ -1065,6 +1065,18 @@ confirmed by two skeptics; their corrections are applied.
   (`causal_tests::...`, `measure_tests::...`), BRED-17 names its run folder
   instead of the hash (bred1023-full10). Gate 1e stopped at its first failing
   test binary (api) and never reached either.
+- **BRED23-F19: gate 31, a right `403` lost to a reset.** The cross-origin
+  refusal answered from the head and closed while the client's body was
+  still on its way; the reset that body met discarded the answer, and
+  `api::speed::tests::a_served_request_is_counted_under_its_matched_path`
+  failed on `ConnectionReset` (bred1023-full12b). FIXED: the three early
+  refusals read the body, bounded by `MAX_FORM_BYTES`, before answering
+  (BRED-19, L-BRED23-08, D-7152 addendum). A production defect any client
+  could meet, which load only made visible.
+- **BRED23-F20: BRED23-F14's runtime join was superseded.** BASE-FIXTURE-1025
+  landed the same fix for `tick_second_check_tests.rs` on feat/db-fix (every
+  row built by `cm_row`, D-7215); the merge of 26 Oct takes its version, so
+  the file carries one way of building rows, not two.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

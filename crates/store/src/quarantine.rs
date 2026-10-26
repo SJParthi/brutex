@@ -142,7 +142,9 @@
 //!
 //! [`probe`]: one `open` (ENOENT for a feed never quarantined), one `fstat`,
 //! one `lstat` of the ledger and two positional reads (the 64-byte header and
-//! the 512-byte bucket) — O(1); when the image and the ledger disagree, a
+//! the 512-byte bucket) — O(1)
+//! (`quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`);
+//! when the image and the ledger disagree, a
 //! second look at once and one non-blocking `flock`, and while a writer holds
 //! the lock the same again after each pause, for at most the thread's
 //! patience (never past [`crate::flock::MAX_PATIENCE`]). [`Snapshot::load`]:
@@ -782,7 +784,8 @@ fn encode_slot(hash: &[u8; 16], month: u32, entry: &Entry, slot: u64) -> [u8; SL
 }
 
 /// Answers whether `path`'s month is quarantined. O(1): the header and the
-/// key's bucket, two positional reads, and the ledger's length.
+/// key's bucket, two positional reads, and the ledger's length
+/// (`quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`).
 ///
 /// # Errors
 ///
@@ -1097,7 +1100,9 @@ impl Snapshot {
         let Some(image) = image else {
             return Ok(Self::default());
         };
-        let mut months = HashMap::new();
+        // Pre-sized to the index's slots, the most months it can hold
+        // (gate 11 rule 3, BASE-REDS-1023).
+        let mut months = HashMap::with_capacity((INDEX_BYTES - HEADER) / SLOT);
         for (slot, bytes) in image
             .get(HEADER..)
             .unwrap_or(&[])
@@ -1930,7 +1935,9 @@ pub enum SetAside {
 }
 
 /// The month's [`SetAside`]. O(1) for a month no quarantine names (one
-/// [`probe`]); O(ledger) for one a drop names.
+/// [`probe`],
+/// `quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`);
+/// O(ledger) for one a drop names.
 ///
 /// # Errors
 ///
@@ -2373,8 +2380,11 @@ impl Summary {
             note_cut(feed, &refused);
             return Err(refused);
         }
-        let mut months: HashMap<(String, String), Entry> = HashMap::new();
-        let mut causes: HashMap<String, Vec<Cause>> = HashMap::new();
+        // Pre-sized by the ledger's lines, the most months and instruments
+        // they can name (gate 11 rule 3, BASE-REDS-1023).
+        let mut months: HashMap<(String, String), Entry> =
+            HashMap::with_capacity(ledger.lines.len());
+        let mut causes: HashMap<String, Vec<Cause>> = HashMap::with_capacity(ledger.lines.len());
         for line in &ledger.lines {
             let entry = entry_of(line);
             months
@@ -2387,7 +2397,7 @@ impl Summary {
                 named.sort_unstable();
             }
         }
-        let mut instruments: HashMap<String, Instrument> = HashMap::new();
+        let mut instruments: HashMap<String, Instrument> = HashMap::with_capacity(months.len());
         for ((key, _), entry) in &months {
             let instrument = instrument_of(key);
             let row = instruments.entry(instrument.clone()).or_default();
@@ -2551,9 +2561,20 @@ fn judge(
         .iter()
         .filter(|line| line.key == key && line.month == month)
         .collect();
-    let named_by = |at: i64, scope: Scope| {
+    // ONE HASH PROBE A STAMP (BASE-REDS-1023, gate 11 rule 1): the stamps a
+    // `dropped` and a `dropping` line of this month name, each set built once
+    // in one pass over the month's lines, sized by what they name.
+    let stamps_named = |scope: Scope| -> std::collections::HashSet<i64> {
         mine.iter()
-            .any(|line| line.scope == scope && line.stamps.binary_search(&at).is_ok())
+            .filter(|line| line.scope == scope)
+            .flat_map(|line| line.stamps.iter().copied())
+            .collect()
+    };
+    let (dropped, dropping) = (stamps_named(Scope::Dropped), stamps_named(Scope::Dropping));
+    let named_by = |at: i64, scope: Scope| match scope {
+        Scope::Dropped => dropped.contains(&at),
+        Scope::Dropping => dropping.contains(&at),
+        Scope::WholeMonth => false,
     };
     let unfinished: Vec<&Line> = mine
         .iter()
@@ -2572,7 +2593,10 @@ fn judge(
     wanted.sort_unstable();
     wanted.dedup();
     let (held, n_valid) = held_at(root, path, symbol_id, &wanted)?;
-    let holds = |at: i64| held.binary_search_by_key(&at, |bar| bar.ts_micros).is_ok();
+    let held_stamps: std::collections::HashSet<i64> =
+        held.iter().map(|bar| bar.ts_micros).collect();
+    let holds = |at: i64| held_stamps.contains(&at);
+    let named_set: std::collections::HashSet<i64> = named.iter().copied().collect();
     if let Some(at) = named.iter().find(|at| {
         !holds(**at) && !named_by(**at, Scope::Dropped) && !named_by(**at, Scope::Dropping)
     }) {
@@ -2580,7 +2604,7 @@ fn judge(
     }
     let held_named = held
         .iter()
-        .filter(|bar| named.binary_search(&bar.ts_micros).is_ok())
+        .filter(|bar| named_set.contains(&bar.ts_micros))
         .copied()
         .collect();
     let owed = unfinished

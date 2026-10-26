@@ -265,7 +265,7 @@ title = "the store compare root to root (cli store-compare --month) for proof 3'
 
 [[package]]
 name = "IA-10c"
-merged = false
+merged = true
 title = "Zerodha half of IA-10b (D-4919): the keep-and-spool hook on both landing doors and a runs-ledger id on every Zerodha landing, into the existing store"
 
 [[package]]
@@ -275,7 +275,7 @@ title = "survivorship guard: the CASH (stocks) import scope comes from PIT-1 dat
 
 [[package]]
 name = "R4-18"
-merged = false
+merged = true
 title = "Zerodha quarantine of pre-listing, zero-price and foreign-level months"
 
 [[package]]
@@ -290,7 +290,7 @@ title = "re-key across renames and into held months, and the restate of 2020-09-
 
 [[package]]
 name = "R4-22"
-merged = false
+merged = true
 title = "old-name sources, retry of refused rows"
 
 [[package]]
@@ -315,7 +315,7 @@ title = "padded-minute decision and AUT-10's decisions"
 
 [[package]]
 name = "R4-28"
-merged = false
+merged = true
 title = "Zerodha futures 1day"
 
 [[package]]
@@ -691,7 +691,7 @@ check = [
 ]
 closes = ["DB-012", "DB-G33", "OWED-03", "OWED-30"]
 helps = ["CMP-19"]
-not_rehearsed = "waits for IA-10c: the keep-and-spool hook that keeps every window's answer for IA-9 is not merged, so a month repaired before it lands keeps no answer IA-9 can prove (PROVEN-GATE (b)); then for operator: a Kite access token valid on the day"
+not_rehearsed = "waits for operator: a Kite access token valid on the day. IA-10c (the keep-and-spool hook PROVEN-GATE (b) needs) merged into feat/db-fix on 26 Oct 2026 (BASE-REDS-1023 set it merged), so the token is what is left; the rehearsal on a role=scratch copy needs it too"
 note = "Re-planned on 23 Oct 2026 (D-6900 item 6, recorded with that entry; IA-10c's text under D-7135). R4-14's gap queue, which this step waited for, is dropped by D-6900, so each month is one attended repair into the existing store, in S-13's and S-15's shape: the two command lines are written once a month the dry run names, <INDEX> or <SYMBOL> the series, <FIRST_DAY> and <LAST_DAY> that month's first and last day, each pressed from the /pull repair form after the operator's yes, and each rehearsed first on a role=scratch copy of the affected months. A hole that cannot be filled stays owed and named, and PROVEN-GATE refuses its day. IA-10c's text: minutes landed through cli zerodha-repair --from-store read no_response_kept, which PROVEN-GATE (b) refuses, so a hole that must be admitted is filled through POST /pull/repair with the keep hook. Whether the shares batch Z4 landed that way on 13 Oct (last_run) need the same is not decided here."
 last_run = "13 Oct 2026, by the main session on build app18 (batch Z4, about 18:01 to 18:13 UTC): the shares' 42 hole sessions in 10 months, 1,933 symbol-months, each copied by cli zerodha-repair <SYMBOL> <FROM> <TO> --segment CASH --from-store <a scratch store of a fresh pull> --reason <batch Z4>: 15,302 repair lines in audit/zerodha.repairs (a new generation per month and rung, every held bar kept). No index series was in it, so DB-012 and the NIFTY and BANKNIFTY half of DB-G33 stay open."
 disk = "measured on the dry run"
@@ -1296,7 +1296,7 @@ env = ["BRUTEX_STORE"]
 prerequisites = ["R4-18", "operator: a Kite access token valid on the day, for PIIND's scratch re-pull compare (read from Parameter Store; this repository never mints one)"]
 check = ["cli fold-audit zerodha IRFC 2018 1 2026 9 exits 0, and the same for KFINTECH, MAZDOCK and PIIND"]
 closes = ["OWED-23"]
-not_rehearsed = "waits for R4-18: the quarantine verb is not built"
+not_rehearsed = "waits for operator: a Kite access token valid on the day, for PIIND's scratch re-pull compare. R4-18 (the quarantine verb) merged into feat/db-fix on 25 Oct 2026 (BASE-REDS-1023 set it merged); the four lines that need no re-pull can be rehearsed with --plan on a private copy, and are not yet"
 disk = "one quarantine record a month (a few hundred bytes); no bar copied"
 
 [[step]]
@@ -1376,7 +1376,7 @@ env = ["BRUTEX_STORE"]
 prerequisites = ["R4-28", "operator: approval of the futures pull", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]
 check = ["census: a Zerodha futures 1day series for each F&O underlying, 2018-01 to 2026-09"]
 closes = ["OWED-28"]
-not_rehearsed = "waits for R4-28: its merge (the route is built on fix/db-R4-28, one underlying a request) and a form naming all the F&O underlyings at once; then for operator: the approval"
+not_rehearsed = "waits for operator: the approval of the futures pull and a Kite access token valid on the day. R4-28 merged into feat/db-fix on 25 Oct 2026 (BASE-REDS-1023 set it merged); the route takes one underlying a request, so a form naming all the F&O underlyings at once is still not built"
 disk = "a few KB a contract-month at 1day (to be measured on the rehearsal)"
 
 [[step]]

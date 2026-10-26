@@ -1525,6 +1525,16 @@ const ALLOW_UNSIZED: Allow = &[
     // sets were pre-sized instead. Reason in docs/06-limits.md, "Gate 11 —
     // BASE-REDS-1023: DATA-2".
     ("crates/cli/src/tick_second_check.rs", 1),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): DATA-1w, merged after
+    // the 24 Oct run. `feed_checks_files.rs`: the four process caches
+    // (`FEED_LISTINGS`, `TICK_LISTINGS` keyed by folder, `FEED_MONTHS`,
+    // `TICK_YEARS` keyed by folder and month or year) start empty inside a
+    // `LazyLock` and gain one entry the first time a folder or a month is
+    // asked, at most the archive's months (about 100); a FeedMonth's `slots`
+    // starts empty before its rows are counted and gains one entry a share
+    // (at most the F&O pool). Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks_files.rs", 5),
 ];
 
 /// Rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -1741,6 +1751,20 @@ const ALLOW_SORT: Allow = &[
     // "Gate 11 — R4-28, declared at its merge", and L-R428-13. `Book::of`'s
     // sort was removed instead: it checks the order it is given.
     ("crates/pull/src/master_snapshots.rs", 3),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): DATA-1w and R4-18,
+    // merged after the 24 Oct run; no request reaches any of them.
+    // `feed_checks_files.rs`: `group_by_share` puts one month's shares in
+    // symbol order once per load of a year (at most the F&O pool).
+    // `store/src/quarantine.rs`: `stamps_of` orders one month's set-aside
+    // stamps once per door that offers it bars (at most the month's minutes,
+    // inside a pass already O(ledger)); `Summary::load` keeps an instrument's
+    // causes ordered (at most `Cause::ALL`, a compile-time table); `judge`
+    // and `apply_month` order the operator's named stamps and the owed ones
+    // once per month applied (at most the month's minutes), which `held_at`
+    // reads in one merge pass. Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks_files.rs", 1),
+    ("crates/store/src/quarantine.rs", 4),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.
@@ -1856,7 +1880,12 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/calendar_record.rs", 2),
     ("crates/api/src/census.rs", 1),
     ("crates/api/src/chain.rs", 2),
-    ("crates/api/src/dayflags.rs", 2),
+    // 2 -> 5, BASE-REDS-1023 (26 Oct, D-7150 addendum): R3-13 added four
+    // searches of one day's `(ImportKind, line)` pairs, at most one per
+    // `ImportKind` (a compile-time enum of four), once per record, and
+    // removed one; docs/06-limits.md, "Gate 11 — BASE-REDS-1023: the 24..26
+    // Oct merges".
+    ("crates/api/src/dayflags.rs", 5),
     // api/src/disk_route.rs 1 -> 0, tightened by BASE-GATE11 (D-6628): RUST-1
     // measures the disk in-process, so `parse_df`'s scan of one df line is gone.
     ("crates/api/src/gaps_route.rs", 1),
@@ -1936,6 +1965,24 @@ const ALLOW_SCAN: Allow = &[
     // table of ten rungs, once per request. Reason in docs/06-limits.md,
     // "Gate 11 — R3-13".
     ("crates/api/src/dayflags_rules.rs", 1),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): the 24..26 Oct merges.
+    // `feed_checks.rs`: `NotTradable::ALL`, a compile-time table, once per
+    // request. `feed_checks_files.rs`: each of `FEED_KEPT`'s compile-time
+    // column names found once per load among a header this build checked
+    // equal to its own `COLUMNS`. `zerodha_quarantine.rs`: one validation
+    // pass over the plan's own stamps once per month applied, refusing the
+    // first before the listing day. `master_snapshots.rs`: `Change::ALL`, a
+    // compile-time table, once per diff line read. `store/src/quarantine.rs`:
+    // `Cause::ALL` and the three scopes, compile-time tables, once per
+    // ledger field; the ledger's line split (one pass over the bytes read,
+    // each byte once); and one validation pass over the named stamps in
+    // `judge`, once per month applied. Reason in docs/06-limits.md, "Gate 11
+    // — BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks.rs", 1),
+    ("crates/api/src/feed_checks_files.rs", 2),
+    ("crates/cli/src/zerodha_quarantine.rs", 1),
+    ("crates/pull/src/master_snapshots.rs", 1),
+    ("crates/store/src/quarantine.rs", 5),
 ];
 
 /// EMPTY SINCE D-1121 UNTIL D-7151. D-1115 pinned the 41 chained searches
@@ -2218,6 +2265,18 @@ const ALLOW_MEMBER: Allow = &[
     // removed instead: the token index's own slot answers it. Reason in
     // docs/06-limits.md, "Gate 11 — R4-28, declared at its merge".
     ("crates/pull/src/master_snapshots.rs", 3),
+    // BASE-REDS-1023, 26 Oct 2026 (D-7150 addendum): the 24..26 Oct merges.
+    // `feed_checks.rs` and `quarantine_route.rs`: a query field against the
+    // route's compile-time list of fields (at most six), once per field.
+    // `gdfl_format.rs`: `first_sight` asks a `HashSet` (one probe).
+    // `store/src/quarantine.rs`: a line's scope against the one to three
+    // scopes a caller names, and a cause against an instrument's causes (at
+    // most `Cause::ALL`). Reason in docs/06-limits.md, "Gate 11 —
+    // BASE-REDS-1023: the 24..26 Oct merges".
+    ("crates/api/src/feed_checks.rs", 1),
+    ("crates/api/src/quarantine_route.rs", 1),
+    ("crates/pull/src/gdfl_format.rs", 1),
+    ("crates/store/src/quarantine.rs", 2),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

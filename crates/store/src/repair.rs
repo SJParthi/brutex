@@ -539,7 +539,7 @@ pub fn publish(
 /// # Cost
 ///
 /// O(held) to read and compare, bounded by [`row_ceiling`], plus
-/// [`publish`]'s write. Not O(1), and not on a read path.
+/// [`publish`]'s write. Linear in the month, and not on a read path.
 ///
 /// # Errors
 ///
@@ -625,10 +625,13 @@ fn outside_quarantine<'a>(
         SetAside::Nothing => Ok((std::borrow::Cow::Borrowed(offered), Vec::new())),
         SetAside::Whole(entry) => Err(RepairError::Quarantined(entry)),
         SetAside::Stamps(stamps) => {
+            // One hash probe an offered bar (BASE-REDS-1023, gate 11 rule 1):
+            // the set is built once, sized by the stamps set aside.
+            let aside: std::collections::HashSet<i64> = stamps.iter().copied().collect();
             let (kept, back): (Vec<Bar>, Vec<Bar>) = offered
                 .iter()
                 .copied()
-                .partition(|bar| stamps.binary_search(&bar.ts_micros).is_err());
+                .partition(|bar| !aside.contains(&bar.ts_micros));
             let held_back: Vec<i64> = back.iter().map(|bar| bar.ts_micros).collect();
             note_held_back(path, &held_back);
             Ok((std::borrow::Cow::Owned(kept), held_back))

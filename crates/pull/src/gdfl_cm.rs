@@ -370,7 +370,8 @@ fn hash_names(hasher: &mut brutex_core::blake3::Hasher, line: &[u8]) -> u32 {
 /// D-7312 item 5), for both GDFL readers: how many, the first such count and
 /// whether a second count was seen. Only a row of the file's own Ticker and
 /// Date is counted, so a blank or foreign line is a bad row, never a sign of
-/// a column-set change. O(1) per row.
+/// a column-set change. O(1) per row (UNVERIFIED: no test times it,
+/// L-BRED23-09).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RowWidths {
     /// Rows of another field count.
@@ -3348,7 +3349,7 @@ fn parse_row(
 
 /// Whether `text` is a real day written `DD/MM/YYYY` (FM-101): ten bytes,
 /// slashes at their places, digits elsewhere and a date the calendar has.
-/// O(1): ten bytes.
+/// O(1): ten bytes (UNVERIFIED: no test times it, L-BRED23-09).
 fn is_real_date(text: &str) -> bool {
     let &[d1, d2, b'/', m1, m2, b'/', y1, y2, y3, y4] = text.as_bytes() else {
         return false;
