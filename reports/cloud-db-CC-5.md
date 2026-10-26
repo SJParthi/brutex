@@ -2,59 +2,204 @@ STATUS: IN PROGRESS
 
 # CC-5 — Copies register (cloud build report)
 
-Branch `cloud/db-CC-5-20261024`, cut from `origin/feat/db-fix` at `e851da1ca` (Merge DATA-2).
-Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md`. Decision block D-7040..D-7049.
-Prerequisites: none (spec section 1). FILES_ONLY links: none.
+Branch `cloud/db-CC-5-20261024`, cut from `origin/feat/db-fix` at `e851da1ca` (Merge DATA-2); the
+newest `origin/feat/db-fix`, `5901ec77` (Merge BASE-FIXTURE-1025), merged in at `e7f5311c` before the
+final gates. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md` (FM-607).
+Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY links: none.
 
-## Done so far
+## Done
 
 - `crates/store/src/settings.rs`: key 12 `disk.extra_copy_roots` (`Key::ExtraCopyRoots`, slot 11,
-  `KEYS` 11 -> 12), `COPY_ROOT_SEPARATOR` `|`, `MAX_COPY_ROOTS_BYTES` (= the settings route's own
-  4,096-byte `secret_shape` ceiling, an existing project number; no count of roots is typed).
-  `copy_roots()` is the one reader: absolute, no `..`, no empty piece, none twice, none nested,
-  checked with an ordered set (O(r log r)). `check` adds that each folder exists; `check_stored`
-  holds a stored value to its shape only. Test
-  `the_extra_copy_roots_key_is_checked_and_stored_canonically`: passes.
-- `crates/api/src/settings_route.rs`: the two required arms (`default_of`: `(None, UNSET_WAIT)`;
-  `reader_of`: `Ok(...)` naming `pull::copies_register`, `GET /disk/copies.json`, `cli disk-copies`).
-- `crates/pull/src/copies_register.rs` (new) and `copies_register_tests.rs` (new, 24 tests, all
-  pass): the read-only `Fs` seam (`lstat`, `list`, `lines` through `store::safe_open`; no writing
-  method exists), `config()`, `reader_of()` (D-7044), a walk that enters every directory once by
-  `(st_dev, st_ino)` on `available_parallelism` workers (no typed entry, depth, list or thread
-  count: the operator's 24 Oct rule), `(st_dev, st_ino)` hazards within one walk, streamed receipts
-  (`ALL_VERIFIED.txt`, `VERIFIED.tsv` matched by inode, size, mtime and ctime, never `st_dev`;
-  `*.prove.out` with `ALL-PROVED`), twins, the retirement list and its text, the events, the cache
-  (`answer`: re-walk only when the roots or a root's own stat change; no request waits on
-  another's walk), `total()` for R4-29.
-
-- `crates/api/src/copies_route.rs` (new) and `copies_route_tests.rs` (new, 5 tests, all pass):
-  `GET /disk/copies.json` in the ops-read pool; unset key = `200 waiting` naming the key; the first
-  walk since start = `503 walking` to any other request, never a wait; the register body rendered
-  once per walk and joined to each request's own head (`age_ms`, `fresh`, `why`, `rewalking`).
-  Wired in `server.rs` (one `mod` line, one `.route`), `operation_audit_tests.rs` (EXEMPT, DATA)
-  and `pool_table_tests.rs` (OpsRead row).
-
-- `crates/cli/src/disk_copies_command.rs` (new, 3 tests, all pass): `cli disk-copies`, no arguments,
-  always a fresh walk; exit 1 on a hazard, a root not walked whole, the key unset or a refused
-  store root; exit 2 on any argument. Wired in `crates/cli/src/lib.rs` (`mod`, one dispatch arm,
-  `COMMANDS` 62 -> 63, one usage entry, the zero-argument exemption), `store_write.rs` (reader
-  list) and `sweep_wiring_tests.rs` (non-sweep list).
-- `crates/pull/tests/no_scheduler_delete.rs` (R4-06): `DECLARED` 12 -> 15 and `LISTED` 4 -> 7 with
-  `copies_register.rs`, `copies_route.rs` and `disk_copies_command.rs`; its 5 tests pass.
-
-- The /ingest panel (written by a parallel subagent, reviewed): `web/src/routes/ingest/panels/Copies.svelte`
-  (order 95, through R4-01's registry; hazards red; the retirement list downloadable as text),
-  `web/src/lib/copies.js`, `web/tests/copies.test.js` (10 tests), and one dev-proxy line in
-  `web/vite.config.js` (`web/tests/proxy.test.js` requires every fetched route to have one).
-- The bench `crates/api/benches/ratio/copies.rs` (`/disk/copies.json` at 1x/10x/100x files, n = 200,
-  after the settings rows) and its three lines in `crates/api/benches/ratio.rs`.
-- `docs/02-store-format.md` §42 row, `docs/04-invariants.md` CC5-01..CC5-16,
-  `docs/05-decisions.md` D-7040..D-7048.
+  `KEYS` 11 -> 12), folders split by `|`, the whole value bounded by the settings route's existing
+  4,096-byte ceiling (no count of roots typed). `copy_roots()` is the one reader: absolute, no `..`,
+  none empty, twice or nested (an ordered set, O(r log r)); `check` adds that each folder exists,
+  `check_stored` holds a stored value to its shape only (D-7040).
+- `crates/api/src/settings_route.rs`: the two arms a new `Key` needs to compile (`default_of`:
+  `(None, UNSET_WAIT)`, a named wait; `reader_of`: names `pull::copies_register`,
+  `GET /disk/copies.json` and `cli disk-copies`).
+- `crates/pull/src/copies_register.rs` + `copies_register_tests.rs` (35 tests): a read-only `Fs` seam
+  (no writing method exists); the live roots read through `gdfl_run::source_root` and the settings
+  (D-7041); one walk that enters every directory once by `(st_dev, st_ino)`, follows no link, types no
+  cap and runs on `available_parallelism` workers (D-7043); hazards by `(st_dev, st_ino)` within one
+  walk, never across devices (D-7042, amendment (e)); the reader rule (D-7044); receipts
+  (`ALL_VERIFIED.txt`, `VERIFIED.tsv` matched by inode, size, mtime and ctime and never `st_dev`,
+  `*.prove.out` with `ALL-PROVED`) and twins (D-7045); the cache, re-walked only when the roots or a
+  root's own stat change, no request waiting on another's walk (D-7046); the retirement list as text
+  with no command (D-7047); the audited events (D-7048); `total()` for R4-29.
+- `crates/api/src/copies_route.rs` + `copies_route_tests.rs` (8 tests): `GET /disk/copies.json` in the
+  ops-read pool; unset = `200 waiting` naming the key; the first walk since start = `503 walking` with
+  `Retry-After` to any other request; the register rendered once per walk, joined to each request's
+  own head (`age_ms`, `fresh`, `why`, `rewalking`).
+- `crates/cli/src/disk_copies_command.rs` (4 tests): `cli disk-copies`, always a fresh walk; exit 0
+  only with no hazard and every root walked whole, 1 on a hazard, a partial root, the key unset or a
+  refused store root, 2 on any argument.
+- The /ingest panel `web/src/routes/ingest/panels/Copies.svelte` (order 95, R4-01's registry; hazards
+  red; the retirement list downloadable as text) with `web/src/lib/copies.js` and
+  `web/tests/copies.test.js` (10 tests).
+- The gate-8 bench `crates/api/benches/ratio/copies.rs` (`/disk/copies.json`, n = 200, 1x/10x/100x).
+- `docs/02-store-format.md` §42 row; `docs/04-invariants.md` CC5-01..CC5-16; `docs/05-decisions.md`
+  D-7040..D-7048; `docs/06-limits.md` L-CC5-1..4.
+- Final merge of `origin/feat/db-fix` `5901ec77`; every gate run on the merged tree (below).
 
 ## Left
 
-- `docs/06-limits.md` L-CC5 rows with the measured figures; the final merge of `origin/feat/db-fix`;
-  every gate (fmt, clippy, the workspace tests, deny, coverage, mutants, the CI shell gates).
+- PENDING
+
+## Gates (final run, 26 Oct 2026, on the merge with `origin/feat/db-fix` `5901ec77`)
+
+The base comparison is an unmodified worktree of `origin/feat/db-fix` `5901ec77`, built in its own
+target and run with the same commands.
+
+| Gate | Command | This branch | Unmodified base `5901ec77` |
+|---|---|---|---|
+| build | `cargo build --workspace --locked --all-targets -j 4` | `Finished`, 0 warnings (20 m 28 s) | — |
+| fmt | `cargo fmt --all --check` | exit 0 | — |
+| clippy | `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings` | `Finished`, no warning | — |
+| tests | `cargo test --workspace --locked -j 4 --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` | exit 101: 33 failed in five lib targets (api 12 of 2,950, cli 3 of 2,411, pull 9 of 2,158, store 5 of 431, telemetry 4 of 225), every other target ok; the two skipped hang (below) | — |
+| the 35, alone | each test binary `--exact <name> --test-threads=1`, `timeout 300`, from its crate's root | 33 FAILED, 2 TIMEOUT | the SAME 33 FAILED and the same 2 TIMEOUT |
+| deny | `cargo deny check` | `advisories FAILED, bans ok, licenses ok, sources ok`: RUSTSEC-2026-0386 (tokio 1.53.1) only | identical (`Cargo.lock` byte-identical): BASE-DENY-1024 |
+| CI shell gates | the `run:` blocks of ci.yml's `language-purity` job, `GITHUB_ENV`/`RUNNER_TEMP` emulated | red: 1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30; all others exit 0 | red: the same ten, with the same findings (counts aside); gate 1d's undeclared list equal after `CC5_LITERAL` |
+| gate 1e | (builds and tests the whole workspace a second time with the front end moved aside) | not run here; the build and test rows above cover the engine, and no crate reads `web/` | — |
+| web W1 | `npm --prefix web run build` + `gates_jobs w1` (Node 24.22.1) | red: the committed `web/build` is stale | red, the same: the base's own source does not build its committed bundle |
+| web W2 | `node --test web/tests/*.test.js` (Node 24.22.1) | `tests 1611, pass 1611, fail 0` | `tests 1601, pass 1601` (this part adds 10) |
+| web W3 | `npm --prefix web run check` + `gates_jobs w3 ... 0` | `svelte-check errors: 44 (ceiling 0)`, none in this part's files | the same 44 errors, line for line |
+| web W4, W5, W6 | as ci.yml | exit 0 (`distinct unused CSS selectors: 0`, `no comment swallows a rule`) | exit 0 |
+| coverage | PENDING | PENDING | — |
+| mutants | PENDING | PENDING | — |
+
+**Why the 35 are not this part's.** None is in a file of this part, and each fails or hangs alone on
+the unmodified base with the same command. They are tests of a refused permission or a read-only
+folder, which this container cannot refuse because it runs as root (store `settings::tests` x3,
+`quarantine::tests` x2, telemetry `sink::tests` x4, pull `alerts`, `gdfl_dropbox` x2, `gdfl_import`,
+`gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice` (a read-only claims
+file), `census_store::link_tests` x2, `zerodha_verify` x2, cli `scrub_blocks`, `watchdog_command`
+x2, api `audit::cloud_mutant_tests`, `pullrun::cloud_mutant_tests`, `pullrun::restart_tests`,
+`server::cloud_mutant_tests_c` x2, `feeds_route`, `detail`), the five slow-reader socket tests of
+`server::head_deadline_body_tests`, and the two full-pool children that hang
+(`server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`,
+`cloud_mutants_bars` `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`).
+Every test of this part's files passes in the workspace run.
+
+## Measurements (p50 / p99 / max)
+
+- `/disk/copies.json` served from memory (the gate-8 bench, `crates/api/benches/ratio/copies.rs`,
+  `cargo bench -p api --bench ratio --locked -j 2 -- --served-only`, release, this cloud container,
+  4 cores, 25 Oct 2026; n = 200 sequential requests per size, one copy root, a hundred invented files
+  to a folder): 125,975 / 386,666 / 1,457,036 ns at 100 files; 131,601 / 257,489 / 679,429 ns at
+  1,000; 140,852 / 419,218 / 1,139,531 ns at 10,000. p50 ratio 1x -> 100x 1.118x (ceiling 3,000 per
+  mille: ok). `docs/06-limits.md` L-CC5-2.
+- The walk (not O(1), O(entries), L-CC5-1), the first request, n = 1 each: 1.495 ms at 100 files,
+  3.920 ms at 1,000, 20.511 ms at 10,000. The real `tools-work/` tree is UNMEASURED here
+  (NEEDS THE MAC 8).
+- PENDING (re-measure on the final tree)
+
+## Extreme cases (each a test that fails before this part: the module did not exist)
+
+46 tests across the four Rust files; the 8 the spec names first, then:
+
+1. Empty root and one-file root, counted exactly (`an_empty_root_and_a_one_file_root_are_counted_exactly`).
+2. A root that vanishes mid-walk, or is a file, a link or unreadable (`a_root_that_vanishes_or_is_not_a_folder_is_refused_by_name`, `a_root_that_is_a_file_a_link_or_unreadable_is_named_in_its_stamp`).
+3. The same inode number on two devices is not a link (`the_same_inode_on_another_device_is_not_a_link`, amendment (e)).
+4. A link made deep in the tree after a cached walk is not seen until the root's own stat changes, and every answer says its age (`a_cached_answer_names_its_walk_time`, amendment (f)).
+5. A symlink loop and a folder met twice through a bind-style second name are walked once (`a_link_loop_and_a_folder_met_twice_are_walked_once`).
+6. Names with a comma, a line break or bytes that are not UTF-8 stay one line, quoted (`names_with_a_comma_a_line_break_or_no_utf8_stay_one_line`, `a_name_that_is_not_utf8_is_served_escaped_and_a_refused_root_has_no_figures`).
+7. An unreadable subfolder is a named fault that keeps the root off the retirement list (`an_unreadable_subfolder_is_a_named_fault`).
+8. Twenty requests during a cold walk take one walk; the others are answered `Walking` at once (`twenty_requests_during_a_cold_walk_take_one_walk`, `a_request_during_the_first_walk_is_a_503_naming_it`).
+9. A torn, empty, silent or misspelled receipt proves nothing (`a_torn_empty_or_silent_receipt_is_no_proof`, `a_torn_or_misspelled_verified_tsv_proves_no_twin`, `a_receipt_read_that_fails_mid_file_is_the_hosts_refusal`).
+10. A receipt written before a remount (another `st_dev`, the same inode, size and times) still matches (`a_receipt_from_before_a_remount_still_matches_by_inode_size_and_times`).
+11. A copy root inside a live root (as `prove-20261004` sits in the tick store) is read only where that root's reader reads; one that is or holds a live root is never offered (`a_copy_root_inside_a_live_root_is_read_only_where_that_root_reads`, `a_copy_root_that_is_or_holds_a_live_root_is_never_offered`).
+12. Clock edges: walk times at, just before and a day before the 1970 epoch are written exactly (`walk_times_at_the_clock_edges_are_written_exactly`, `a_wall_clock_before_1970_is_negative_micros`).
+13. A full ops-read pool is refused by name (`a_full_pool_is_refused_by_name_and_an_admitted_answer_passes`).
+14. The setting at its byte ceiling exactly is read, one byte past it refused (`the_extra_copy_roots_key_is_checked_and_stored_canonically`).
+
+Combinations: `hazards_of_two_kinds_a_shared_file_and_an_outside_link_in_one_walk` (a `.tmp` second
+name of a CM archive file (partial), a second name of a tick-store file, a file shared by two copy
+roots and a link to a file outside every root, in one walk); `a_partial_root_a_proven_twin_and_a_folder_inside_a_live_root_are_served` (a
+partial root, a proven twin and a folder inside a live root in one answer);
+`a_changed_configuration_walks_and_a_held_lock_serves_the_last_walk` (a changed configuration while
+another walk holds the lock).
+
+Out of the box: `a_pipe_named_like_a_receipt_is_never_opened` (a FIFO named `VERIFIED.tsv` would block
+a reader for ever; it is never opened); `a_socket_in_a_copy_root_is_counted_never_opened`;
+`the_retirement_list_contains_no_delete_command` over a folder whose own name holds `rm -rf` (the
+words are quoted as a path, never read as a command).
+
+## Files outside ownership (each minimal)
+
+The spec's section 4.2 list: `crates/pull/src/lib.rs` (one `pub mod` and its test module),
+`crates/api/src/server.rs` (one `mod` line, one `.route`), `crates/api/src/operation_audit_tests.rs`
+(EXEMPT row, DATA), `crates/api/src/pool_table_tests.rs` (OpsRead row), `crates/cli/src/lib.rs`
+(`mod`, one dispatch arm, `COMMANDS` 63 -> 64, one usage entry, the zero-argument exemption),
+`crates/cli/src/store_write.rs` (reader list), `crates/cli/src/sweep_wiring_tests.rs` (non-sweep
+list), `crates/pull/tests/no_scheduler_delete.rs` (`DECLARED` 12 -> 15, `LISTED` 4 -> 7: the register,
+the route and the verb), `crates/store/src/settings.rs` + `settings_tests.rs` (the appended key),
+`crates/api/src/settings_route.rs` (the two required arms, nothing else), `docs/02-store-format.md`
+§42 (the key's row), `crates/api/benches/ratio.rs` (`#[path]` mount and the call), and this part's own
+rows in `docs/04`, `05`, `06`. Beyond that list: `web/vite.config.js` (one dev-proxy line for the new
+route: `web/tests/proxy.test.js` requires one for every route a page fetches) and
+`.github/gates_tree.rs` (`CC5_LITERAL`, gate 1d's declaration of this part's 61 literals,
+`DECLARED` 77 -> 78, as R4-28 and IA-10c declared theirs).
+
+## D-numbers used
+
+D-7040, D-7041, D-7042, D-7043, D-7044, D-7045, D-7046, D-7047, D-7048 (CC-5's block). D-7049 unused.
+
+## NEEDS THE MAC
+
+All read-only on real data; none run in the cloud (`NOT RUN (cloud)`). Port 8510 is the part's
+shadow port (the second agent's 8610). `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925`.
+
+1. Baseline: `ls -li $W/tools-work/options-queue/*.zip.part /Volumes/WD_BLACK/Options/20*.zip`.
+   Expected: seven `<year>.preserved.<ts>.zip.part` names (2020-2026), nlink 2, each the inode of
+   `/Volumes/WD_BLACK/Options/<year>.zip`; six other `.zip.part` names, nlink 1, 81,481,744,630 B in
+   all. A difference means the operator acted: record the new baseline, never "fix" the tree.
+2. Unset is a named wait (a private empty store root served by the CC-5 release `api` on 8510):
+   `curl -s http://127.0.0.1:8510/disk/copies.json`. Expected `200`
+   `{"state":"waiting","key":"disk.extra_copy_roots","why":"not set: ...","walked":false,...}`;
+   `cli disk-copies` prints `DISK COPIES WAITING: disk.extra_copy_roots is not set...`, exit 1.
+3. Save the roots on that private root:
+   `curl -s -X POST http://127.0.0.1:8510/settings -H 'content-type: application/json' -d '{"expected":0,"changed_by":"cc5-check","reason":"copies register check","set":{"disk.extra_copy_roots":"<root>|<root>|..."}}'`
+   with the roots `$W/tools-work/options-nested-proof`, `$W/tools-work/options-queue`,
+   `$W/tools-work/update-20260925-30/extracted`, `/Volumes/WD_BLACK/brutex/tickstore-data/prove-20261004`,
+   `$W/tools-work/fullscan-20260930`, `$W/tools-work/optrescan-20261001` and the `_v3` ledger folder
+   under `/Volumes/WD_BLACK/NSE_Options_Tick`, with `BRUTEX_GDFL_NFO_ARCHIVES=/Volumes/WD_BLACK/Options`,
+   `BRUTEX_GDFL_CM_ARCHIVE`, `BRUTEX_GDFL_TICKSTORE` and `BRUTEX_GDFL_V3_LEDGER` set as the operator
+   runs. Expected: `200`, a new generation; a folder that does not exist is refused naming the key;
+   the value is NOT refused `secret_shaped`.
+4. The register over the real tree:
+   `curl -s http://127.0.0.1:8510/disk/copies.json | jq '{walked_at, age_ms, roots: [.roots[] | {path, state, bytes, files, reader, proof, duplicates_live}], hazards: .hazard_count, extra: .extra_copies_bytes}'`.
+   Expected within the 13 Oct measurement: options-nested-proof about 426.8 GiB, proof its
+   `ALL_VERIFIED.txt` / `VERIFIED.tsv` receipts, reader `none found`; options-queue's six partials
+   81,481,744,630 B, no reader; extracted about 12.68 GiB, 82,073 files, no reader; prove-20261004
+   about 5.30 GiB, fullscan about 18.94 GiB, optrescan about 17.66 GiB, no reader; the `_v3` ledger
+   about 2.38 GiB WITH reader `v3_ledger` and absent from `retirement_list`; `hazard_count` 7, one
+   `hazards[]` row per hard-linked `.zip.part` name naming its archive, `dev`, `ino`, `nlink` 2,
+   `partial` true. (Count with `.hazard_count` or `.hazards | length`: a retirement entry also
+   carries a `hazard` field.)
+5. The verb: `BRUTEX_STORE=<the private root> $W/tgt/bin-CC-5/release/cli disk-copies; echo "exit=$?"`.
+   Expected: the same seven `HAZARD` lines, the roots of step 4, a fresh `walked_at`, the last line
+   `DISK COPIES: 7 name(s) of live files are hard-linked under another name (exit 1)`, `exit=1`.
+6. Nothing changed: repeat step 1 (identical names, inodes, nlink, sizes), and
+   `find $W/tools-work -newer <a stamp made before step 4> -print | head` prints nothing.
+7. The cache on the real tree: two GETs in a row, the second with the same `walked_at` and a larger
+   `age_ms`, `fresh` false; `touch` a NEW file in a private copy root the check owns (never in
+   `tools-work/`), GET again: a new `walked_at`, `why` naming the changed root.
+8. The bench: `cargo bench -p api --bench ratio --locked -j 2 -- --served-only` (the `copies` rows),
+   and n >= 200 sequential `curl` GETs of `/disk/copies.json` on 8510 after step 4: p50, p99, max;
+   the cold walk's time over the real roots written into `docs/06-limits.md` L-CC5-1.
+9. The /ingest panel on `http://127.0.0.1:8510/ingest`: the Copies panel mounts through the
+   registry, shows the groups and seven red rows, the retirement list downloads as text with no
+   command and says "the operator removes these by hand; the app never does"; it fits 375 px.
+10. After merge, on :8080 (the main session's redeploy): steps 2, 4 and 9 again; a screenshot to the
+    operator.
+11. Rebuild `web/build` at merge-back (`npm --prefix web run build`, commit): W1 is red on the base
+    itself (its committed bundle is stale); this part does not commit `web/build`.
+12. The permission-bit tests (store `settings::tests` x3 among the 35 above) as a non-root user:
+    expected green on both the base and this branch.
+13. `cargo deny check` after BASE-DENY-1024 bumps tokio: expected green.
+
+Store writes needed: none by code. The settings generation of step 3 on the REAL store is the
+operator's own `POST /settings` (or the operator's yes) at merge-back.
 
 ## Log
 
@@ -337,3 +482,27 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   11, settings_route.rs 8, server.rs 4, cli lib.rs 2).
 - NEXT: the workspace test run (running); clippy; the new reds on an unmodified worktree of
   `5901ec77` by `--exact` name with `--test-threads=1`; web W1-W5; coverage; mutants; the report.
+
+### 2026-10-26 — save point 10: the workspace run, the base comparison, the web gates
+
+- `cargo test --workspace --locked -j 4 --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`:
+  `EXIT=101` in 31 m 52 s; red targets api lib (12 failed of 2,950), cli lib (3 of 2,411), pull lib
+  (9 of 2,158), store lib (5 of 431), telemetry lib (4 of 225); every other target ok. The save-point-8
+  reds of `gdfl_import_command`, `gdfl_run`, `tick_second_check`, `gdfl_run_logs` and `sealed_door`
+  do not recur after the merge of `5901ec77`.
+- `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings`: `Finished`, no warning.
+- The 33 and the 2 hangers, each alone (`--exact`, `--test-threads=1`, `timeout 300`, from the crate
+  root), on this branch: 33 FAILED, 2 TIMEOUT. On an unmodified worktree of `5901ec77` (its own
+  target: `cargo test --no-run --locked -p api -p cli -p pull -p store -p telemetry --lib` and
+  `-p api --test cloud_mutants_bars`): the same 33 FAILED and the same 2 TIMEOUT, outcome for
+  outcome. None is this part's. The new one since save point 8,
+  `gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice` (IA-10c), sets a
+  claims file read-only and expects the write refused: root writes it.
+- Web on Node 24.22.1 (`nvm install 24`; ci.yml's version), this branch / the base: W1 red / red
+  (the committed bundle is stale on the base itself); W2 `pass 1611, fail 0` / `pass 1601, fail 0`;
+  W3 `svelte-check errors: 44` / the same 44, line for line, none in this part's files; W4, W5, W6
+  exit 0 / exit 0. `web/build` restored after each build (`git checkout -- web/build`).
+- The report's top rewritten for the final run (gates table, measurements, extreme cases, files
+  outside ownership, D-numbers, NEEDS THE MAC).
+- NEXT: coverage (`cargo +nightly llvm-cov --branch`, running), then the served bench on the final
+  tree, then `cargo mutants --in-diff` over the 270 mutants, then STATUS.
