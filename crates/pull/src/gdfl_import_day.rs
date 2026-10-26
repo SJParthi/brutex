@@ -2832,3 +2832,7 @@ pub(super) enum Mode {
     /// auction sidecar.
     Rescan,
 }
+
+#[cfg(test)]
+#[path = "gdfl_import_day_tests.rs"]
+mod unit_tests;

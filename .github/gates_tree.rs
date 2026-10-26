@@ -2948,7 +2948,7 @@ const IA17B_LITERAL: &str = "gather_deferred gather_repaired gather_unclosed fil
      ia17b-day-ends ia17b-door ia17b-fm092 ia17b-fm098 ia17b-full ia17b-full-boundary \
      ia17b-journal ia17b-lost ia17b-middle ia17b-mixed ia17b-not-writable ia17b-once ia17b-order \
      ia17b-orphan ia17b-reused ia17b-sizes ia17b-stop ia17b-stop-boundary ia17b-stop-mid \
-     ia17b-told ia17b-twice ia17b-year upto orphan 2024-05 different clear_refs";
+     ia17b-told ia17b-twice ia17b-unclosed ia17b-year upto orphan 2024-05 different clear_refs";
 
 /// Every declared group, in the order the step joined them. 73 -> 74 at
 /// BASE-GATE11's merge of the CAL-1 merge (22 Oct 2026): PIT-1 and CAL-1 each
