@@ -5674,3 +5674,26 @@ test('a captured request names itself in the sheet\'s table, so two of one route
   assert.ok(table[0].includes(`| /db | \`/census/facets.json\` | captured from the page: GET ${SHARED.facets2} | cold |`), table[0]);
   assert.ok(table[1].includes('| /x\\|y | `/odd\\|path.json` | captured from the page: HEAD /odd\\|path.json?k=a\\|b | cold |'), table[1]);
 });
+
+test('a request asked no more this run is not its route\'s first after a restart: the next of its route goes first, and is timed at every restart', async () => {
+  // Repair 11's self-check: the ask that went first on a route is the first one ASKED, so a request skipped
+  // after a restart (it ran out its bound earlier in the run) never stands in front of its route's next.
+  const { requests } = sheet.requestsFor(CTX);
+  const grid = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'the grid, newest first'));
+  const extremes = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'extremes'));
+  let starts = 0;
+  let gridAfter = 0;
+  const strict = standIn({ ignore: new Set(), started: () => starts });
+  /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+  const send = async (b, path, o = {}) => {
+    if (path !== grid.url) return strict.send(b, path, o);
+    if (starts > 0) gridAfter += 1;
+    return { status: 0, error: 'no whole answer within 60000 ms (not even its headers came)', ms: 60_000, build: null, body: '', bytes: 0, headers: {}, timedOut: true };
+  };
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, restart: async () => ((starts += 1), 0) });
+  const row = r.rows.find((x) => x.phase === 'first after restart' && x.url === extremes.url);
+  assert.deepEqual([row?.n, row?.classes], [2, { answered: 2 }], 'the extremes is its route\'s first after both restarts');
+  assert.ok(!r.notMeasured.some((l) => l.includes(' is not timed as a first after ')), r.notMeasured.join('\n'));
+  assert.ok(r.notMeasured.some((l) => l.startsWith(`first after restart: GET ${grid.url} was not asked: it had no whole answer within --timeout-ms 60000 in `)), r.notMeasured.join('\n'));
+  assert.equal(gridAfter, 0, 'the grid is asked no more after a restart');
+});
