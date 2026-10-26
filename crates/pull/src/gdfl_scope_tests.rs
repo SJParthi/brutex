@@ -1440,7 +1440,9 @@ fn spell_day(d: Day) -> DayPlan {
 /// surface keeps skipping it; a day closed done under the swept surface is
 /// read again for the spell alone; a share with both its own file and a
 /// series file that day has both refused by name and nothing filed; and any
-/// other series (`.SM`) stays a skip.
+/// other series (`.SM`) is refused by name under the stored scope,
+/// `series_not_stored:SM`, never filed (R4-22, G3, D-7310; until then a
+/// silent skip), and stays a skip under the swept surface.
 #[test]
 fn a_trade_for_trade_spell_is_filed_under_its_shares_key() {
     let root = scratch("wp12f-series");
@@ -1493,15 +1495,34 @@ fn a_trade_for_trade_spell_is_filed_under_its_shares_key() {
         .filter(|failure| failure.instrument.contains("SUZLON"))
         .collect();
     assert_eq!(twins.len(), 1, "{:?}", wide.failures);
+    // G3 (D-7310): the SME series file of a filed share is refused by name
+    // where a run reads the day's base key under the stored scope (the
+    // in-order run below). A widening reads only the members the earlier
+    // close never covered, and a series of another code is no member, so the
+    // reopen names nothing of it.
+    let series = |failures: &[Failure]| {
+        failures
+            .iter()
+            .filter(|failure| {
+                failure.instrument.contains("RELIANCE.SM.NSE")
+                    && failure.why.starts_with("series_not_stored:SM: ")
+            })
+            .count()
+    };
+    assert_eq!(series(&wide.failures), 0, "{:?}", wide.failures);
     assert_eq!(wide.failures.len(), 1, "{:?}", wide.failures);
     assert_eq!(month(&store, "CASH", "SUZLON"), suzlon);
 
     // In order under the stored scope: the same bars for the spells, and the
     // twins refused, never one of them picked.
     let in_order = run_on(&root, ImportKind::Stocks, (on, on), &whole, Some(stored())).unwrap();
-    assert_eq!(in_order.failures.len(), 1, "{:?}", in_order.failures);
+    assert_eq!(in_order.failures.len(), 2, "{:?}", in_order.failures);
+    assert_eq!(series(&in_order.failures), 1, "{:?}", in_order.failures);
     assert!(
-        in_order.failures[0].instrument.contains("SUZLON"),
+        in_order
+            .failures
+            .iter()
+            .any(|failure| failure.instrument.contains("SUZLON")),
         "{:?}",
         in_order.failures
     );

@@ -207,6 +207,7 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
             exchange: "NSE",
             segment: "INDEX",
             contract: None,
+            run: 0,
         },
     )
     .expect("the folder is readable and the column shape is right")

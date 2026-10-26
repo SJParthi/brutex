@@ -164,6 +164,7 @@ fn landed_cash(instrument: &str) -> BrokerWindow {
     BrokerWindow {
         listing: pull::vendor::Listing::Equity,
         contract: None,
+        answers: crate::pullrun::Answers::default(),
         unfetched: None,
         before_first_bar: None,
         instrument: instrument.to_owned(),
@@ -681,6 +682,7 @@ async fn a_day_past_the_record_is_never_filed_as_a_member_failure() {
     let mut landed = BrokerWindow {
         listing: Listing::Index,
         contract: None,
+        answers: crate::pullrun::Answers::default(),
         unfetched: None,
         before_first_bar: None,
         instrument: "NIFTY".to_owned(),

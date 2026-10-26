@@ -5015,7 +5015,8 @@ release, and by the next run that takes the lock when it names no live claim.
 
 ### §37.5 — The runs ledger (IA-2; D-4847, D-4880)
 
-**Path.** `<store>/audit/runs.ledger`, its lock `<store>/audit/runs.ledger.lock`.
+**Path.** `<store>/audit/runs.ledger`, its lock `<store>/audit/runs.ledger.lock`,
+its claims `<store>/audit/runs.claims` (IA-10c repair 2, D-6269).
 Append-only, fixed 128-byte ASCII records, one per run of either feed and any
 mode; no header.
 
@@ -5027,24 +5028,91 @@ mode; no header.
 | 127 | 1 | a newline |
 
 **Allocation.** Under the lock (taken within 30 s, else `lock_stalled`): the
-last whole record is read at ⌊len ÷ 128⌋ × 128 − 128; `id = max(now,
-last + 1)`; the new record is written at ⌊len ÷ 128⌋ × 128, over any torn
-tail, and synced. A last whole record whose CRC fails is written over (its id
-was never used: a claim is written only after the sync), its predecessor read
-for `last`; a file shorter than one record, or whose only record fails, is
-seeded again at 0 with `<n> seed - - 0 <now>`, `n` the largest `run` id of the
-GDFL journal; two bad records at the tail refuse `runs_ledger_damaged` with an
-error event and an alert keyed `runs_ledger_damaged:<offset>`, and nothing is
-written. A clock before the calendar's first day, more than 366 days past the
-last day its sources cover, or more than a day behind the newest record's
-start is refused `clock_implausible`.
+last whole record is read at ⌊len ÷ 128⌋ × 128 − 128, and the claims' tail
+(their last 512 bytes, one read); `id = max(now, last + 1)`, `last` the
+newer of the ledger's last record and the claims' last line whose CRC
+verifies (IA-10c repair 3, D-6269: a later id in the claims means the ledger
+lost records whole, said at `warn` with an alert keyed
+`runs_ledger_behind_claims:<id>`); the new record is written at
+⌊len ÷ 128⌋ × 128, over any torn tail, and synced; then the id's claims line
+(below) is appended and synced, and only then is the id handed out. A last
+whole record whose CRC fails is
+written over, its predecessor read for `last`, and the new id is raised past
+the largest id the claims and the GDFL journal hold (IA-2 repair 2, D-5901,
+D-6269: the bad record may be one a run was given and then lost to bit rot,
+never parsed from its bytes); a file shorter than one record, or whose only
+record fails, is seeded again at 0 with `<n> seed - - 0 <now>`, `n` the
+largest `run` id of the GDFL journal and the claims; two bad records at the
+tail refuse `runs_ledger_damaged` with an error event and an alert keyed
+`runs_ledger_damaged:<offset>`, and nothing is written. A clock before the
+calendar's first day, more than 366 days past the last day its sources
+cover, or more than a day behind the newest record's start is refused
+`clock_implausible`.
+
+**The claims (D-6269).** `<store>/audit/runs.claims`: append-only text, one
+line per id the ledger has given, in the order given, written under the
+ledger's lock after the id's record is synced:
+
+```text
+run <id> <mode> <kind> <by> <pid> <started>[ resumes=<id>] crc=<8 hex>
+```
+
+the record's own body (bytes 0..114, its padding dropped), `run ` first, so
+the line reads as the GDFL journal's `run` lines do, then a space and the
+record's own CRC field (bytes 114..126; since IA-10c repair 3). A line is
+verified as its record is: the record is rebuilt from it (the body padded
+with spaces to 114 bytes, the CRC field, a space, a newline) and read by the
+ledger's own decoder, so a line names an id only when its CRC holds; a torn,
+rotted or foreign line names none. The longest line is 131 bytes and its line
+break. Appended through the text ledgers' one append
+(`pull::audit_ledger::append_path`): a regular file only, never through a
+link; a last line a crash left with no line break is closed first and stays a
+line of its own; synced. A claims line that cannot be written refuses the
+allocation `runs_ledger_io` naming the file: the id's record stays in the
+ledger and the id was never handed out, so later ids go past it.
+
+Read on EVERY allocation, by its tail (IA-10c repair 3): one open
+(non-blocking, never through a link, refused unless a regular file) and one
+positional read of the last 512 bytes, four records' worth, so a torn last
+fragment (the bytes after the last line break, never read for an id: its
+allocation never returned) and a first line the read cut into (passed over)
+still leave one whole line. The last whole line whose CRC verifies is the
+claims' `last`; whole lines after it that fail their CRC are said at `warn`
+(`runs claims tail damaged`) and never read for an id. Since a claims line
+is synced after its record, the claims' last id is never past the ledger's
+last unless the ledger lost records whole (a drive that dropped a flushed
+append, a ledger put back from an older copy, which its own bytes cannot
+show): then the new id is raised past the claims' last, said at `warn`
+(`runs ledger behind its claims`, with the ledger's and the claims' last ids)
+and by an alert of kind `runs_ledger_damaged` keyed
+`runs_ledger_behind_claims:<claimed id>`, its run that id; the allocation
+after it finds the ledger caught up and puts nothing more. Read WHOLE when the
+ledger cannot say its last id (a damaged last record, an unborn ledger): one
+pass, the largest id of its lines whose CRC verifies. Claims that exist and
+are not a regular file (a link, a pipe, a directory) or cannot be read refuse
+the allocation `runs_ledger_io` before anything is written (no seed and no id
+is guessed past ids it cannot see), and a pipe is refused at once, never
+waited on under the ledger's lock. It exists because a run that writes no
+journal line (a Zerodha landing, a cold verification, a merge) otherwise left
+nothing a lost last record could be raised past, and the next id under a
+clock at or behind the lost one was that run's id again (verify-IA-10c-r2,
+blocking 2; for a record lost whole, verify-IA-10c-r3). A ledger and claims
+that lost the same tail together are named in `docs/06-limits.md`
+L-IA10C-10.
 
 **Proof.** `pull::gdfl_run::ia2_tests::run_ids_never_repeat_whatever_the_clock_does`,
 `one_runs_ledger_serves_both_feeds_and_skips_a_torn_tail`,
 `a_garbage_runs_ledger_tail_is_named_never_read_as_an_id`,
 `an_implausible_clock_is_refused_and_lifts_no_id`,
 `a_claim_is_bounded_whatever_the_filter`,
-`a_stale_or_garbage_claim_or_sidecar_is_named_and_never_resumed`.
+`a_stale_or_garbage_claim_or_sidecar_is_named_and_never_resumed`,
+`a_damaged_last_record_that_a_run_used_is_never_handed_out_again`,
+`every_id_the_runs_ledger_gives_is_written_down_twice`;
+`pull::ingest::landing_run::tests::a_damaged_last_record_that_a_zerodha_landing_used_is_never_handed_out_again`,
+`an_unborn_ledger_is_seeded_past_every_id_a_zerodha_landing_used`,
+`a_ledger_that_lost_its_last_records_whole_never_hands_their_ids_out_again`,
+`a_rotted_claims_line_neither_lifts_nor_hides_an_id`,
+`claims_that_are_not_a_regular_file_are_refused_at_once`.
 
 **§41's holder record is retired for new runs.** Since IA-2 a cli run's run
 lock holds the claim above, not §41's `gdfl-lock v1` record; a lock file

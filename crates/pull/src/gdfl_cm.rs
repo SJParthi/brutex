@@ -98,7 +98,9 @@
 //! with their line, never kept and never repaired; the file's other rows are
 //! read. What a zero LTP means is UNVERIFIED and is not guessed. Three things
 //! still refuse the whole file: a Ticker or Date that is not the file's (a
-//! row of another file is not a bad row of this one), a malformed LAST line
+//! row of another file is not a bad row of this one; since FM-101, D-7314,
+//! a row of another REAL day stamped outside the session is a refused row,
+//! `wrong_date`, and only one inside it refuses the file), a malformed LAST line
 //! with no newline after it (that is where a cut file shows, CM-07), and
 //! more refused rows than [`MAX_BAD_ROWS`] AND one in every [`BAD_ROWS_PER`]
 //! of the file's rows ([`CmRefusal::TooManyBadRows`]: a file that is mostly
@@ -229,6 +231,15 @@ impl CmKind {
             Self::Stocks => STOCKS,
         }
     }
+
+    /// The tree's word, the import kind's own (`indices`, `stocks`).
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Indices => "indices",
+            Self::Stocks => "stocks",
+        }
+    }
 }
 
 /// The file extension's spelling, recorded per day.
@@ -251,6 +262,17 @@ pub enum HeaderVariant {
     OpenInterestSpaced,
 }
 
+impl HeaderVariant {
+    /// The header line, character for character.
+    #[must_use]
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::OpenInterest => HEADER_OPEN_INTEREST,
+            Self::OpenInterestSpaced => HEADER_OPEN_INTEREST_SPACED,
+        }
+    }
+}
+
 /// The modern header, character for character. The same literal the F&O
 /// archive descriptor declares, taken from there rather than typed twice.
 pub const HEADER_OPEN_INTEREST: &str = crate::vendor::GDFL_HEADER;
@@ -258,6 +280,146 @@ pub const HEADER_OPEN_INTEREST: &str = crate::vendor::GDFL_HEADER;
 /// The September 2018 header: `NIFTY 50.NSE_IDX.CSV` of 2018-09-03, line 1.
 pub const HEADER_OPEN_INTEREST_SPACED: &str =
     "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,Open Interest";
+
+/// The shape of a first line neither GDFL reader knows (ERR-11, R4-22,
+/// D-7312): the BLAKE3 of its column NAMES alone and how many there are.
+///
+/// The names are the line's comma-separated fields, its CR already stripped,
+/// each hashed as its byte length (`u32`, little-endian) and then its bytes,
+/// so `A,BC` and `AB,C` differ and nothing but the names enters: never a row,
+/// never a value. Two files whose headers spell the same names in the same
+/// order have the same shape, whatever their rows hold; a renamed, added,
+/// dropped or reordered column, a byte-order mark or a changed separator is
+/// another shape. An empty first line is the shape of no column at all.
+///
+/// The vendor's own shape is what the operator sees: one `pull.gdfl.format`
+/// event per shape per process names it with the first file that showed it
+/// ([`crate::gdfl_format::note_format_changed`]), and the import refuses
+/// every such file by name (`header_unknown`, an OPEN cause: a build that
+/// reads the new header fills the day). O(header bytes), once per refused
+/// file; a known header is never hashed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeaderShape {
+    /// The BLAKE3 of the length-prefixed names.
+    pub digest: [u8; 32],
+    /// How many names the line holds; 0 for an empty line.
+    pub columns: u32,
+}
+
+impl HeaderShape {
+    /// The shape of `line`, a first line with its CR stripped.
+    #[must_use]
+    pub fn of(line: &[u8]) -> Self {
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        let columns = hash_names(&mut hasher, line);
+        Self {
+            digest: hasher.finalize(),
+            columns,
+        }
+    }
+
+    /// The shape of ROWS of `columns` fields under the known header `line`
+    /// (ERR-11, D-7312 item 5, [`CmRefusal::ColumnsChanged`]): the vendor
+    /// changed the rows' column set and kept the header. The digest is of
+    /// `u32::MAX` (a length no name's prefix can be, so it is never a
+    /// header's own shape), the rows' count, then the header's names as
+    /// [`HeaderShape::of`] hashes them; `columns` is the rows' count, so two
+    /// counts under one header are two shapes. Never a row's value.
+    #[must_use]
+    pub fn of_rows(line: &[u8], columns: u32) -> Self {
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        hasher.update(&u32::MAX.to_le_bytes());
+        hasher.update(&columns.to_le_bytes());
+        let _names = hash_names(&mut hasher, line);
+        Self {
+            digest: hasher.finalize(),
+            columns,
+        }
+    }
+
+    /// The digest as 64 lower-case hex digits: the key the operator and an
+    /// alert name the shape by.
+    #[must_use]
+    pub fn hex(&self) -> String {
+        self.digest
+            .iter()
+            .fold(String::with_capacity(64), |mut hex, byte| {
+                let _infallible = core::fmt::Write::write_fmt(&mut hex, format_args!("{byte:02x}"));
+                hex
+            })
+    }
+}
+
+/// Hashes `line`'s comma-separated names into `hasher`, each as its byte
+/// length (`u32`, little-endian) and then its bytes, and returns how many
+/// there are; an empty line is no name at all. O(line bytes).
+fn hash_names(hasher: &mut brutex_core::blake3::Hasher, line: &[u8]) -> u32 {
+    let mut columns = 0_u32;
+    if !line.is_empty() {
+        for name in line.split(|&byte| byte == b',') {
+            let len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+            hasher.update(&len.to_le_bytes());
+            hasher.update(name);
+            columns = columns.saturating_add(1);
+        }
+    }
+    columns
+}
+
+/// The rows of one file whose field count is not its header's (ERR-11,
+/// D-7312 item 5), for both GDFL readers: how many, the first such count and
+/// whether a second count was seen. Only a row of the file's own Ticker and
+/// Date is counted, so a blank or foreign line is a bad row, never a sign of
+/// a column-set change. O(1) per row.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowWidths {
+    /// Rows of another field count.
+    rows: u32,
+    /// The first such row's count.
+    first: Option<u32>,
+    /// Whether two such rows had two counts.
+    mixed: bool,
+}
+
+impl RowWidths {
+    /// Counts one row of `count` fields, not the header's.
+    pub(crate) fn note(&mut self, count: u32) {
+        self.rows = self.rows.saturating_add(1);
+        match self.first {
+            None => self.first = Some(count),
+            Some(seen) if seen != count => self.mixed = true,
+            Some(_) => {}
+        }
+    }
+
+    /// The rows' one count when EVERY one of the `read` rows (at least one)
+    /// had it: the vendor's rows changed their column set. `None` when any
+    /// row had the header's count, two counts were seen, or no row was read.
+    /// Both readers ask only past D-3318's bound ([`MAX_BAD_ROWS`] refused
+    /// rows and one in [`BAD_ROWS_PER`]), so a file of a few bent rows (an
+    /// illiquid contract's one row with a stray comma) is a bad file named by
+    /// its first row, as before, never a format change.
+    #[must_use]
+    pub(crate) const fn changed(&self, read: u32) -> Option<u32> {
+        if read == 0 || self.rows != read || self.mixed {
+            return None;
+        }
+        self.first
+    }
+
+    /// Whether a LAST line with no newline after it, of `count` fields, is
+    /// the file's changed shape rather than a cut row (CM-07): every one of
+    /// the `before` rows read before it, at least [`MAX_BAD_ROWS`] of them,
+    /// had that same count. Any other such line is a cut file, refused whole
+    /// as before.
+    #[must_use]
+    pub(crate) fn continues(&self, count: u32, before: u32) -> bool {
+        before >= MAX_BAD_ROWS && self.rows == before && !self.mixed && self.first == Some(count)
+    }
+}
+
+/// The field count of a capital-market row: the header's ten columns.
+pub(crate) const CM_FIELDS: u32 = 10;
 
 /// Why a folder, a file or a row was refused. Every refusal names itself; none
 /// is skipped.
@@ -276,8 +438,34 @@ pub enum CmRefusal {
     /// for a case-sensitive one and for a day zip. A second name with any
     /// other extension is [`CmRefusal::ExtensionUnknown`] instead.
     AmbiguousCaseTwins,
-    /// The first line is neither observed header.
-    HeaderUnknown,
+    /// The first line is neither observed header (ERR-11, D-7312: an open
+    /// cause, never closing the day): `shape` names the line's columns by
+    /// digest, never its bytes.
+    HeaderUnknown {
+        /// The first line's column names, digested.
+        shape: HeaderShape,
+    },
+    /// Every row of a file under a known header has one same OTHER field
+    /// count, and there are more of them than D-3318's bound lets a file
+    /// refuse and still be read (ERR-11, D-7312 item 5): the vendor changed
+    /// the rows' column set and kept the header. An OPEN cause like
+    /// [`CmRefusal::HeaderUnknown`]: a build that reads the new rows fills
+    /// the day. One row of another count among the header's is a refused row
+    /// ([`RowFault::Malformed`]), never this; rows of two other counts are
+    /// bad rows ([`CmRefusal::TooManyBadRows`]), and a file of a few such
+    /// rows names its first, as before.
+    ColumnsChanged(ColumnSet),
+    /// A share's day file of an equity series the store does not file
+    /// (G3, D-7310): the written series rule files `EQ` (the share's own
+    /// stem, no suffix) and the trade-for-trade `BE` and `BZ` under the
+    /// share's key, and refuses every other code by name, seen before or
+    /// not (`BL`, `T0`, `N1`, `GS`, ...), never filed.
+    SeriesNotStored {
+        /// The series code the file is named for, as the vendor spelled it.
+        code: Box<str>,
+        /// The store symbol the share's own day is filed under that day.
+        share: Box<str>,
+    },
     /// The Ticker field is not the file's own stem.
     TickerMismatch {
         /// One-based line number.
@@ -482,7 +670,9 @@ impl core::fmt::Display for CmRefusal {
                 "two names for one ticker, each spelled .csv or .CSV \
                      (a case twin in a folder, or one name twice in a day zip); neither is read",
             ),
-            Self::HeaderUnknown => f.write_str("first line is neither observed GDFL CM header"),
+            Self::HeaderUnknown { shape } => header_unknown_text(f, CM_HEADER_NOT, shape),
+            Self::ColumnsChanged(set) => write!(f, "{set}"),
+            Self::SeriesNotStored { code, share } => series_not_stored(f, code, share),
             Self::TickerMismatch { line } => {
                 write!(f, "line {line}: Ticker is not the file's own stem")
             }
@@ -583,6 +773,73 @@ const BTS_WORD: &str = "tick-store day file";
 // core::fmt::Display>::fmt` past `clippy::too_many_lines` (as `fetch.rs`
 // says of its own).
 
+/// What an unknown first line is not, in the capital-market reader's words.
+const CM_HEADER_NOT: &str = "neither observed GDFL CM header";
+
+/// The words of an unknown header, for either GDFL reader (ERR-11, D-7312):
+/// what it is not, its column count and its shape digest, so a search for
+/// the digest finds every file of one vendor format change.
+pub(crate) fn header_unknown_text(
+    f: &mut core::fmt::Formatter<'_>,
+    not: &str,
+    shape: &HeaderShape,
+) -> core::fmt::Result {
+    write!(
+        f,
+        "first line is {not}: {} column(s), header shape {} (vendor_format_changed: a build that \
+         reads this header fills the day)",
+        shape.columns,
+        shape.hex()
+    )
+}
+
+/// A column-set change under a known header, for either GDFL reader's
+/// refusal (ERR-11, D-7312 item 5; [`CmRefusal::ColumnsChanged`],
+/// `NfoRefusal::ColumnsChanged`): what the rows were, against what the
+/// header names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnSet {
+    /// The header's names and the rows' count, digested
+    /// ([`HeaderShape::of_rows`]); `shape.columns` is the rows' count.
+    pub shape: HeaderShape,
+    /// The header's own count (an options header's empty trailing fields,
+    /// D-4829, included).
+    pub header: u32,
+    /// Every row read, each of `shape.columns` fields.
+    pub rows: u32,
+}
+
+/// The words of a column-set change: the code word, the rows' count against
+/// the header's, and the rows' shape digest, so a search for the digest
+/// finds every file of one vendor format change.
+impl core::fmt::Display for ColumnSet {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "columns_changed: every one of {} row(s) has {} field(s) where the header names {}, \
+             row shape {} (vendor_format_changed: a build that reads these rows fills the day)",
+            self.rows,
+            self.shape.columns,
+            self.header,
+            self.shape.hex()
+        )
+    }
+}
+
+/// [`CmRefusal::SeriesNotStored`]'s words (G3, D-7310). The code is named as
+/// `series_not_stored:<code>`, one word a search finds.
+fn series_not_stored(
+    f: &mut core::fmt::Formatter<'_>,
+    code: &str,
+    share: &str,
+) -> core::fmt::Result {
+    write!(
+        f,
+        "series_not_stored:{code}: {share}'s day file of series {code}; the store files a share's \
+         EQ (its own stem), BE and BZ only, and refuses every other series by name, never filed"
+    )
+}
+
 /// [`CmRefusal::ExtensionMissing`]'s words.
 fn extension_missing(f: &mut core::fmt::Formatter<'_>, stem: &str) -> core::fmt::Result {
     write!(
@@ -616,15 +873,17 @@ impl core::error::Error for CmRefusal {}
 impl CmRefusal {
     /// The store symbol a refused stem would have been filed under, where the
     /// refusal is about one series' name: for [`CmRefusal::SymbolNotInUse`]
-    /// the newest symbol its chain of changes reaches. `None` for every other
-    /// refusal. A filtered import refuses the stem only when it wants that
-    /// series.
+    /// the newest symbol its chain of changes reaches, for
+    /// [`CmRefusal::SeriesNotStored`] the share's own key that day. `None`
+    /// for every other refusal. A filtered import refuses the stem only when
+    /// it wants that series.
     #[must_use]
-    pub fn filed_as(&self) -> Option<&'static str> {
+    pub fn filed_as(&self) -> Option<&str> {
         match self {
             Self::SymbolNotInUse {
                 stale: Stale::AfterChange(change) | Stale::BeforeChange(change),
             } => Some(alias::LINEAGE.current(change.new)),
+            Self::SeriesNotStored { share, .. } => Some(&**share),
             _ => None,
         }
     }
@@ -652,13 +911,7 @@ pub(crate) fn ddmmyyyy(text: &str) -> Option<Day> {
     let &[d1, d2, m1, m2, y1, y2, y3, y4] = text.as_bytes() else {
         return None;
     };
-    let dd = digit(d1)? * 10 + digit(d2)?;
-    let mm = digit(m1)? * 10 + digit(m2)?;
-    let yyyy = u16::from(digit(y1)?) * 1_000
-        + u16::from(digit(y2)?) * 100
-        + u16::from(digit(y3)?) * 10
-        + u16::from(digit(y4)?);
-    Day::new(yyyy, mm, dd).ok()
+    ddmmyyyy_bytes([d1, d2, m1, m2, y1, y2, y3, y4])
 }
 
 /// One ASCII digit's value, or `None`.
@@ -1200,6 +1453,59 @@ impl CmScope {
         Some(format!("{share}{suffix}"))
     }
 
+    /// THE WRITTEN SERIES RULE's refusal (G3, D-7310): a stock stem
+    /// `<SHARE>.<CODE>.NSE` of a share this scope files, whose `CODE` is not
+    /// one the store files under the share's key, is refused by name
+    /// ([`CmRefusal::SeriesNotStored`]), never filed and never skipped
+    /// unnamed. `None` for every other stem: a share's own stem (`EQ`), its
+    /// `BE` or `BZ` file ([`SHARE_SERIES`], WP-12f), an index, a name whose
+    /// share no scope files, and every stem under the swept scope, which files
+    /// no series at all.
+    ///
+    /// The codes are NSE's own (`docs/00-charter.md`, "NSE equity series
+    /// codes — read 24 Oct 2026"): `BE`/`BZ` are the trade-for-trade series of
+    /// fully paid equity shares; `BL` is block deals, `SM`/`ST`/`SZ` SME
+    /// shares, `GS`/`TB`/`SG` government paper and `N@`, `Y@`, `Z@` and the
+    /// rest debt and other instruments. A code no source names (`T0`) and a
+    /// code never seen before are refused the same way: the rule names what is
+    /// filed, and everything else is refused.
+    ///
+    /// O(1): the name's length is refused past a symbol and a code before it
+    /// is read, then one split, two compares and one probe of the stored
+    /// shares (CM-13's stated exception).
+    #[must_use]
+    pub fn series_refusal(&self, kind: CmKind, stem: &str, day: Day) -> Option<CmRefusal> {
+        if kind != CmKind::Stocks || !self.series {
+            return None;
+        }
+        let name = stem.strip_suffix(STOCKS.stem_suffix)?;
+        if name.len() > SYMBOL_CAPACITY + 1 + MAX_SERIES_CODE {
+            return None;
+        }
+        let (share, code) = name.rsplit_once('.')?;
+        let named = !code.is_empty()
+            && code.len() <= MAX_SERIES_CODE
+            && code.bytes().all(|byte| byte.is_ascii_alphanumeric());
+        // `BE` and `BZ` are the share's own series ([`series_of`], WP-12f).
+        if !named || series_of(name).is_some() || share.len() > SYMBOL_CAPACITY {
+            return None;
+        }
+        if !self.files_share(share) {
+            return None;
+        }
+        // The share's key that day, as its own stem would be filed: the
+        // newest symbol of a live stem, or the stem's newest symbol when the
+        // stem was not live that day (the file is refused either way; the
+        // filter asks the key a reader asks for).
+        let filed = alias::LINEAGE
+            .filed_under(share, ymd(day))
+            .unwrap_or_else(|_| alias::LINEAGE.current(share));
+        Some(CmRefusal::SeriesNotStored {
+            code: code.into(),
+            share: filed.into(),
+        })
+    }
+
     /// THE MEMBER a stem of tree `kind` is to this scope (WP-12f, D-4878),
     /// `None` for a stem the scope files nothing of: `NSE-INDEX-<store key>`
     /// for an index, `NSE-CASH-<the stem's own symbol>` for a share, its
@@ -1293,15 +1599,27 @@ impl CmScope {
 
 /// The equity series, beside a share's own, whose day file is the share's
 /// own trading day (WP-12f, DB-B06): `BE` and `BZ`, the exchange's
-/// trade-for-trade series. UNVERIFIED against an NSE circular: no charter row
-/// names the series codes. What is measured (the audit of DB-B06, over the
-/// vendor's 2,001 stock days): no day holds both a share's own file and its
-/// `.BE` or `.BZ` file, and the price across each switch stays inside the
-/// day's band. Should a day ever hold both, both are refused by name
-/// ([`CmRefusal::AmbiguousCaseTwins`]) and neither is filed. A compiled list
-/// of two, because the dated security masters that name a symbol's series
-/// start in 2026 and the spells start in 2018 (`docs/06-limits.md`).
+/// trade-for-trade series. SOURCED since R4-22 (G3, D-7310): NSE's "Legend of
+/// series" (read 24 Oct 2026, `docs/00-charter.md`, "NSE equity series codes
+/// — read 24 Oct 2026") names, for fully paid equity shares, `EQ` the rolling
+/// settlement series and `BE`/`BZ` the trade-for-trade ones; the dated
+/// security masters on disk carry the same codes in `SctySrs`. What is
+/// measured (the audit of DB-B06, over the vendor's 2,001 stock days): no
+/// day holds both a share's own file and its `.BE` or `.BZ` file, and the
+/// price across each switch stays inside the day's band. Should a day ever
+/// hold both, both are refused by name ([`CmRefusal::AmbiguousCaseTwins`])
+/// and neither is filed. Every other code is refused by name
+/// ([`CmScope::series_refusal`]). A compiled list of two, because the dated
+/// security masters that name a symbol's series start in 2026 and the spells
+/// start in 2018 (`docs/06-limits.md`).
 pub const SHARE_SERIES: [&str; 2] = ["BE", "BZ"];
+
+/// The longest series code [`CmScope::series_refusal`] reads as one (G3):
+/// NSE's codes are two characters (`EQ`, `BE`, `N1`, `T0`); eight bounds the
+/// read and admits a longer code the exchange might add, refused by name
+/// like any other. A longer suffix is no series name and is counted with the
+/// day's unknown stems.
+pub const MAX_SERIES_CODE: usize = 8;
 
 /// A share name split into the share and its trade-for-trade series
 /// (`ADANIPOWER.BE` is `ADANIPOWER`, `BE`); `None` for a name with no such
@@ -1879,6 +2197,15 @@ impl<L> DayListing<L> {
         self.scope.filing(self.kind(), stem, self.day)
     }
 
+    /// The written series rule's refusal of the file named `stem` this day
+    /// ([`CmScope::series_refusal`], G3, D-7310): `Some` only for a stem
+    /// [`DayListing::filing`] files nothing of, so a reader that asks both
+    /// sees every entry once, a file, a refusal or a skip.
+    #[must_use]
+    pub fn series_refusal(&self, stem: &str) -> Option<CmRefusal> {
+        self.scope.series_refusal(self.kind(), stem, self.day)
+    }
+
     /// The member `stem` is to this listing's scope ([`CmScope::member_of`]).
     #[must_use]
     pub fn member(&self, stem: &str) -> Option<String> {
@@ -2057,16 +2384,26 @@ pub enum RowFault {
     /// is not a plain decimal, or a quote, quantity or open-interest field
     /// that is not a plain number.
     Malformed,
+    /// A capital-market row dated another real day and stamped OUTSIDE the
+    /// day's session (FM-101, IMPORT-BAD-ROW, R4-22, D-7314): a housekeeping
+    /// row of the next day at the file's end, or a first row carrying the day
+    /// before's close. Refused by name and the file read; a row of another
+    /// date INSIDE the session, or one whose Date is not a real
+    /// `DD/MM/YYYY`, still refuses the whole file
+    /// ([`CmRefusal::DateMismatch`]).
+    WrongDate,
 }
 
 impl RowFault {
-    /// The fault's word in a log line: `zero_ltp`, `off_grid` or `malformed`.
+    /// The fault's word in a log line: `zero_ltp`, `off_grid`, `malformed` or
+    /// `wrong_date`.
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
             Self::ZeroLtp => "zero_ltp",
             Self::OffGrid => "off_grid",
             Self::Malformed => "malformed",
+            Self::WrongDate => "wrong_date",
         }
     }
 }
@@ -2092,6 +2429,9 @@ pub struct RowsRefused {
     pub off_grid: u32,
     /// `rows_refused_malformed`.
     pub malformed: u32,
+    /// Rows of another date outside the session (FM-101, D-7314), counted
+    /// in [`RowsRefused::total`] and named `wrong_date`.
+    pub wrong_date: u32,
     /// The first [`NAMED_ROWS`] refused rows, in file order.
     pub named: Vec<RefusedRow>,
 }
@@ -2103,6 +2443,7 @@ impl RowsRefused {
         self.zero_ltp
             .saturating_add(self.off_grid)
             .saturating_add(self.malformed)
+            .saturating_add(self.wrong_date)
     }
 
     /// Counts one refused row, and names it while there is room. The one
@@ -2112,6 +2453,7 @@ impl RowsRefused {
             RowFault::ZeroLtp => &mut self.zero_ltp,
             RowFault::OffGrid => &mut self.off_grid,
             RowFault::Malformed => &mut self.malformed,
+            RowFault::WrongDate => &mut self.wrong_date,
         };
         *counter = counter.saturating_add(1);
         if self.named.len() < NAMED_ROWS {
@@ -2438,6 +2780,9 @@ struct Reading<'r> {
     /// How many traded rows in the match band carry a book and are kept in
     /// `rows` so far, for a watched share (SC-CLOSE-6).
     booked: u32,
+    /// The file's rows of another field count than the header's (ERR-11,
+    /// D-7312 item 5).
+    widths: RowWidths,
 }
 
 impl Reading<'_> {
@@ -2602,6 +2947,17 @@ impl Reading<'_> {
         if refused > MAX_BAD_ROWS
             && u64::from(refused) * u64::from(BAD_ROWS_PER) > u64::from(self.read)
         {
+            // ERR-11 (D-7312 item 5): past the bound, a file whose EVERY row
+            // is of one same other field count is the vendor's column set
+            // changed under a known header, an open cause, never the closing
+            // bad-row refusal.
+            if let Some(columns) = self.widths.changed(self.read) {
+                return Err(CmRefusal::ColumnsChanged(ColumnSet {
+                    shape: HeaderShape::of_rows(file.header.text().as_bytes(), columns),
+                    header: CM_FIELDS,
+                    rows: self.read,
+                }));
+            }
             return Err(CmRefusal::TooManyBadRows {
                 refused,
                 rows: self.read,
@@ -2668,7 +3024,13 @@ fn decode_ruled(
     let header = match lines.next().map(strip_cr) {
         Some(h) if h == HEADER_OPEN_INTEREST.as_bytes() => HeaderVariant::OpenInterest,
         Some(h) if h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => HeaderVariant::OpenInterestSpaced,
-        _ => return Err(CmRefusal::HeaderUnknown),
+        // ERR-11 (D-7312): the line's shape, digested once, names the
+        // format change; a known header above is never hashed.
+        other => {
+            return Err(CmRefusal::HeaderUnknown {
+                shape: HeaderShape::of(other.unwrap_or_default()),
+            });
+        }
     };
     let date = format!(
         "{:02}/{:02}/{:04}",
@@ -2689,6 +3051,7 @@ fn decode_ruled(
         prints: Vec::new(),
         band: MatchBand::Empty,
         booked: 0,
+        widths: RowWidths::default(),
     };
     let mut index = 0_usize;
     while let Some(raw) = lines.next() {
@@ -2716,7 +3079,13 @@ fn decode_ruled(
             return Err(CmRefusal::RowsOverCap { cap });
         }
         reading.read = reading.read.saturating_add(1);
-        match parse_row(strip_cr(raw), line, expect, &date, rules.price) {
+        match parse_row(
+            strip_cr(raw),
+            line,
+            (expect, &date),
+            rules.price,
+            (open_sod, end_sod),
+        ) {
             Ok(parsed) => reading.keep(parsed)?,
             Err(RowError::File(why)) => return Err(why),
             // A malformed last line with no newline after it is where a cut
@@ -2731,6 +3100,27 @@ fn decode_ruled(
                 sod,
                 refusal,
             }) => reading.refuse(RefusedRow { line, sod, fault }, refusal),
+            // A row of this file and day with another field count (ERR-11):
+            // a malformed row, counted toward a column-set change. A last
+            // line with no newline is a cut file (CM-07) unless every row
+            // before it had its same count: that is the file's changed
+            // shape, not a cut.
+            Err(RowError::Width { count, refusal }) => {
+                let before = reading.read.saturating_sub(1);
+                if last_without_newline && !reading.widths.continues(count, before) {
+                    return Err(refusal);
+                }
+                reading.widths.note(count);
+                let fault = RowFault::Malformed;
+                reading.refuse(
+                    RefusedRow {
+                        line,
+                        sod: None,
+                        fault,
+                    },
+                    refusal,
+                );
+            }
         }
     }
     reading.finish(end_sod)
@@ -2852,15 +3242,21 @@ enum RowError {
         sod: Option<u32>,
         refusal: CmRefusal,
     },
+    /// A row of this file's Ticker and Date with `count` fields, not the
+    /// header's (ERR-11, D-7312 item 5): refused by name as a malformed row,
+    /// and counted toward a column-set change ([`RowWidths`]).
+    Width { count: u32, refusal: CmRefusal },
 }
 
-/// One row's ten fields, checked in column order.
+/// One row's ten fields, checked in column order. `session` is the day's
+/// first second and its end (exclusive), which decide whether a row of
+/// another date is a refused row or a file of another day (FM-101).
 fn parse_row(
     bytes: &[u8],
     line: u32,
-    expect: &Expect<'_>,
-    date: &str,
+    (expect, date): (&Expect<'_>, &str),
     price: PriceRule,
+    session: (u32, u32),
 ) -> Result<Parsed, RowError> {
     let malformed = |sod: Option<u32>| RowError::Row {
         fault: RowFault::Malformed,
@@ -2877,6 +3273,16 @@ fn parse_row(
         count = count.saturating_add(1);
     }
     if count != fields.len() {
+        // ERR-11 (D-7312 item 5): a row of this file and day with another
+        // field count is counted toward a column-set change; any other line
+        // (blank, foreign, cut short of its Date) is a plain malformed row.
+        let [ticker, row_date, ..] = fields;
+        if ticker == expect.stem && row_date == date {
+            return Err(RowError::Width {
+                count: u32::try_from(count).unwrap_or(u32::MAX),
+                refusal: CmRefusal::MalformedRow { line },
+            });
+        }
         return Err(malformed(None));
     }
     let [
@@ -2895,7 +3301,18 @@ fn parse_row(
         return Err(RowError::File(CmRefusal::TickerMismatch { line }));
     }
     if row_date != date {
-        return Err(RowError::File(CmRefusal::DateMismatch { line }));
+        // FM-101 (IMPORT-BAD-ROW, R4-22, D-7314): a row of another REAL day
+        // stamped outside the session is a housekeeping row at the file's
+        // edge, refused by name; inside the session, or with a Date that is
+        // no `DD/MM/YYYY`, it is another day's file and refuses it whole.
+        return Err(match (is_real_date(row_date), second_of_day(time)) {
+            (true, Some(sod)) if sod < session.0 || sod >= session.1 => RowError::Row {
+                fault: RowFault::WrongDate,
+                sod: Some(sod),
+                refusal: CmRefusal::DateMismatch { line },
+            },
+            _ => RowError::File(CmRefusal::DateMismatch { line }),
+        });
     }
     let sod = second_of_day(time).ok_or_else(|| malformed(None))?;
     let (paisa, snapped) = ltp_of(last_price, price).map_err(|fault| RowError::Row {
@@ -2926,6 +3343,29 @@ fn parse_row(
         quotes_zero: is_zero(bid) && is_zero(ask),
         snapped,
     })
+}
+
+/// Whether `text` is a real day written `DD/MM/YYYY` (FM-101): ten bytes,
+/// slashes at their places, digits elsewhere and a date the calendar has.
+/// O(1): ten bytes.
+fn is_real_date(text: &str) -> bool {
+    let &[d1, d2, b'/', m1, m2, b'/', y1, y2, y3, y4] = text.as_bytes() else {
+        return false;
+    };
+    ddmmyyyy_bytes([d1, d2, m1, m2, y1, y2, y3, y4]).is_some()
+}
+
+/// `ddmmyyyy` as eight bytes, a real date or `None`: [`ddmmyyyy`]'s rule
+/// without a string to build.
+fn ddmmyyyy_bytes(bytes: [u8; 8]) -> Option<Day> {
+    let [d1, d2, m1, m2, y1, y2, y3, y4] = bytes;
+    let dd = digit(d1)? * 10 + digit(d2)?;
+    let mm = digit(m1)? * 10 + digit(m2)?;
+    let yyyy = u16::from(digit(y1)?) * 1_000
+        + u16::from(digit(y2)?) * 100
+        + u16::from(digit(y3)?) * 10
+        + u16::from(digit(y4)?);
+    Day::new(yyyy, mm, dd).ok()
 }
 
 /// Whether a plain decimal's every digit is zero.
@@ -3191,7 +3631,22 @@ pub fn read_listed<S: CmSource>(
             day: listing.day(),
         },
         &rules,
-    )?;
+    )
+    // ERR-11 (D-7312): a header this reader does not know, and rows whose
+    // column set changed under a known one (item 5), are said once per
+    // shape, naming this file as the first that showed it.
+    .inspect_err(|why| {
+        let (tree, day, member) = (kind.word(), listing.day(), file.name());
+        let _said = match why {
+            CmRefusal::HeaderUnknown { shape } => {
+                crate::gdfl_format::note_format_changed(tree, day, member, shape)
+            }
+            CmRefusal::ColumnsChanged(set) => {
+                crate::gdfl_format::note_columns_changed(tree, day, member, &set.shape)
+            }
+            _ => false,
+        };
+    })?;
     note_refused_rows(listing.day(), file.name(), &decoded.refused);
     Ok(Some(DayFile {
         name: file.name().to_owned(),
@@ -3201,10 +3656,20 @@ pub fn read_listed<S: CmSource>(
     }))
 }
 
-/// One `warn` line for a file whose rows were refused (D-3318; D-3341: one
-/// line per file, never one per row): the day, the file, every count, and
-/// the named rows as `line:fault` words. The options import says the same
-/// line for an options file (D-4816).
+/// One line for a file whose rows were refused (D-3318; D-3341: one line per
+/// file, never one per row): the day, the file, every count, and the named
+/// rows as `line:fault` words. The options import says the same line for an
+/// options file (D-4816).
+///
+/// **At `error`, so it reaches the durable audit stream (IMPORT-BAD-ROW,
+/// R4-22, D-7313).** A refused row is a refusal of the vendor's bytes, and
+/// the audit stream keeps refusals (`telemetry::is_audited`: every `error`).
+/// At `warn` the line reached the rolling ring alone, which a pull's flood
+/// rolls in seconds, and was rationed with every other `warn` of its pair
+/// (`telemetry::DEFAULT_FLOOD_LINES`): a full options import, one line per
+/// file with a bad row, could lose the very file and line a reader came for.
+/// Still one line per file, its first [`NAMED_ROWS`] rows named, so the
+/// stream grows by the files, never by the rows.
 pub(crate) fn note_refused_rows(day: Day, name: &str, refused: &RowsRefused) {
     if refused.total() == 0 {
         return;
@@ -3212,13 +3677,14 @@ pub(crate) fn note_refused_rows(day: Day, name: &str, refused: &RowsRefused) {
     let day_text = day.to_string();
     let named = refused.named_text();
     let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn(crate::gdfl_import::TARGET, "rows refused, file read")
+        &telemetry::Event::error(crate::gdfl_import::TARGET, "rows refused, file read")
             .with("day", day_text.as_str())
             .with("file", name)
             .with("rows_refused", refused.total())
             .with("zero_ltp", refused.zero_ltp)
             .with("off_grid", refused.off_grid)
             .with("malformed", refused.malformed)
+            .with("wrong_date", refused.wrong_date)
             .with("named", named.as_str()),
     );
 }
@@ -4717,9 +5183,12 @@ mod tests {
             padded.as_bytes(),
             row_first.as_bytes(),
         ] {
+            let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
             assert_eq!(
                 decode(bytes, &nifty(day(2024, 4, 1))),
-                Err(CmRefusal::HeaderUnknown),
+                Err(CmRefusal::HeaderUnknown {
+                    shape: HeaderShape::of(first)
+                }),
                 "{bytes:?}"
             );
         }
@@ -4962,7 +5431,9 @@ mod tests {
         let header = format!("{HEADER_OPEN_INTEREST}\r\r\n{}\r\n", n50("16:00:00", "100"));
         assert_eq!(
             decode(header.as_bytes(), &expect),
-            Err(CmRefusal::HeaderUnknown)
+            Err(CmRefusal::HeaderUnknown {
+                shape: HeaderShape::of(format!("{HEADER_OPEN_INTEREST}\r").as_bytes())
+            })
         );
     }
 
@@ -5600,7 +6071,19 @@ mod tests {
                 CmRefusal::AmbiguousCaseTwins,
                 "two names for one ticker, each spelled .csv or .CSV",
             ),
-            (CmRefusal::HeaderUnknown, "header"),
+            (
+                CmRefusal::HeaderUnknown {
+                    shape: HeaderShape::of(b"Ticker,When"),
+                },
+                "2 column(s), header shape ",
+            ),
+            (
+                CmRefusal::SeriesNotStored {
+                    code: "BL".into(),
+                    share: "ZZSHARE".into(),
+                },
+                "series_not_stored:BL: ZZSHARE's day file of series BL",
+            ),
             (CmRefusal::TickerMismatch { line: 7 }, "line 7: Ticker"),
             (CmRefusal::DateMismatch { line: 8 }, "line 8: Date"),
             (
@@ -5662,6 +6145,18 @@ mod tests {
 #[cfg(test)]
 #[path = "gdfl_cm_admission_tests.rs"]
 mod admission_tests;
+
+/// R4-22 (G3, G2): the written series rule and the six stem hand-overs,
+/// through the scope, the listing and the import.
+#[cfg(test)]
+#[path = "gdfl_series_code_tests.rs"]
+mod series_code_tests;
+
+/// R4-22 (ERR-11, IMPORT-BAD-ROW): a vendor format change in either GDFL
+/// reader, and the refused rows' one line.
+#[cfg(test)]
+#[path = "gdfl_format_change_tests.rs"]
+mod format_change_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
