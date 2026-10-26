@@ -103,6 +103,13 @@ pub const FORMAT: &str = "# brutex basis-runs 1";
 /// first and last months lie further apart, is refused by name.
 const MAX_MONTHS: usize = 1_200;
 
+/// How many refused shares the fold's warn event names; it counts them all.
+const REFUSED_NAMED: usize = 32;
+
+/// The commit a build with no stamp names (`store_write` refuses its writes
+/// unless the operator allows them).
+const UNSTAMPED: &str = "unstamped";
+
 /// What the operator asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Ask {
@@ -521,8 +528,11 @@ fn manifest(folded: &Folded) -> String {
     text
 }
 
-/// The basis-run table `folded` makes, as a draft.
-pub(crate) fn runs_draft(ask: &Ask, folded: &Folded, fetched: Day) -> Draft {
+/// The basis-run table `folded` makes, as a draft. Its receipt's `source`
+/// names the commit of the build that folded it, ahead of the directory a
+/// long name may be cut from (`store_write::WRITERS`: a generation names the
+/// commit that folded it; check 4 found it named nowhere).
+pub(crate) fn runs_draft(ask: &Ask, folded: &Folded, fetched: Day, commit: Option<&str>) -> Draft {
     let (first, last) = (
         folded
             .read
@@ -536,8 +546,9 @@ pub(crate) fn runs_draft(ask: &Ask, folded: &Folded, fetched: Day) -> Draft {
             .unwrap_or_default(),
     );
     let mut source = format!(
-        "measured, not sourced: cli basis-runs over DATA-1's feed-reconcile files in {} ({} months \
-         {first}..{last}, {} missing",
+        "measured, not sourced: cli basis-runs at commit {} over DATA-1's feed-reconcile files \
+         in {} ({} months {first}..{last}, {} missing",
+        commit.unwrap_or(UNSTAMPED),
         ask.dir.display(),
         folded.read.len(),
         folded.missing.months().len(),
@@ -577,11 +588,27 @@ fn today() -> Option<Day> {
 /// `cli basis-runs`: see the module header.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     let store = crate::store_write::root_for("basis-runs", arguments);
-    command_with(arguments, &store, today(), out)
+    command_with(arguments, &store, today(), crate::commit_stamp(), out)
 }
 
-/// The verb against the store root `store` names and the day `today`, so
-/// every arm is driven by a test without the process environment.
+/// A run that stops says why on stdout AND as one `cli.basis_runs` event
+/// on `/logs` carrying the same line, and returns `code` (check 4 of
+/// R4-26: a refusal or a failure lived on stdout alone, and the logs held
+/// only the lifecycle's `command finished` with its exit code).
+fn stopped(out: &mut String, code: u8, message: &'static str, line: &str) -> u8 {
+    let _ = writeln!(out, "{line}");
+    let level = if code == MISUSED {
+        telemetry::Level::Warn
+    } else {
+        telemetry::Level::Error
+    };
+    crate::note(&telemetry::Event::new(level, "cli.basis_runs", message).with("why", line));
+    code
+}
+
+/// The verb against the store root `store` names, the day `today` and the
+/// build's `commit`, so every arm is driven by a test without the process
+/// environment.
 #[expect(
     clippy::too_many_lines,
     reason = "one report printed top to bottom in the order the operator reads it"
@@ -590,20 +617,34 @@ pub(crate) fn command_with(
     arguments: &[&str],
     store: &dyn Fn() -> Result<PathBuf, String>,
     today: Option<Day>,
+    commit: Option<&str>,
     out: &mut String,
 ) -> u8 {
-    let ask = match ask(arguments) {
+    let mut ask = match ask(arguments) {
         Ok(ask) => ask,
         Err(why) => {
-            let _ = writeln!(out, "refused: {why}\nusage: {USAGE}");
-            return MISUSED;
+            let code = stopped(out, MISUSED, "basis runs misused", &format!("refused: {why}"));
+            let _ = writeln!(out, "usage: {USAGE}");
+            return code;
         }
     };
+    // ONE SPELLING OF ONE DIRECTORY: the receipt's source names it, so a
+    // trailing slash, a relative path or a link to the same directory is
+    // the same input and lands no new generation (check 4, attack E1). A
+    // directory that does not resolve stays as given, and the fold refuses
+    // it by that name.
+    if let Ok(canonical) = std::fs::canonicalize(&ask.dir) {
+        ask.dir = canonical;
+    }
     let folded = match fold(&ask) {
         Ok(folded) => folded,
         Err(why) => {
-            let _ = writeln!(out, "BASIS RUNS REFUSED: {why}. Nothing was written.");
-            return FAILED;
+            return stopped(
+                out,
+                FAILED,
+                "basis runs refused",
+                &format!("BASIS RUNS REFUSED: {why}. Nothing was written."),
+            );
         }
     };
     let _ = writeln!(out, "{FORMAT}");
@@ -666,13 +707,36 @@ pub(crate) fn command_with(
     for (symbol, why) in &folded.refused {
         let _ = writeln!(out, "refused {symbol}: {why}");
     }
+    if !folded.refused.is_empty() {
+        // A SHARE THE FOLD REFUSED IS NAMED ON /logs TOO, never dropped
+        // with a stdout line alone (check 4): it has no run in the table
+        // this run writes, so `/basis.json` answers `no_basis_run` for it.
+        let named: Vec<&str> = folded
+            .refused
+            .iter()
+            .take(REFUSED_NAMED)
+            .map(|(symbol, _)| symbol.as_str())
+            .collect();
+        crate::note(
+            &telemetry::Event::warn(
+                "cli.basis_runs",
+                "shares refused by the fold: no run of theirs is in the table",
+            )
+            .with(
+                "refused",
+                u64::try_from(folded.refused.len()).unwrap_or(u64::MAX),
+            )
+            .with("first", named.join(" ").as_str()),
+        );
+    }
     let tally = report_steps(out, &folded);
     let Some(today) = today else {
-        let _ = writeln!(
+        return stopped(
             out,
-            "BASIS RUNS FAILED: the clock gives no IST day. Nothing was written."
+            FAILED,
+            "basis runs failed",
+            "BASIS RUNS FAILED: the clock gives no IST day. Nothing was written.",
         );
-        return FAILED;
     };
     if tally.anomalies() > 0 || tally.steps_skipped > 0 {
         // NAMED, COUNTED AND ON /logs: proven steps the data does not show
@@ -697,14 +761,17 @@ pub(crate) fn command_with(
     let root = match store() {
         Ok(root) => root,
         Err(why) => {
-            let _ = writeln!(
-                out,
+            let line = format!(
                 "store: {why}; the runs were not written and nothing was checked against a table"
             );
-            return if ask.write { FAILED } else { OK };
+            if ask.write {
+                return stopped(out, FAILED, "basis runs failed", &line);
+            }
+            let _ = writeln!(out, "{line}");
+            return OK;
         }
     };
-    let mut draft = runs_draft(&ask, &folded, today);
+    let mut draft = runs_draft(&ask, &folded, today, commit);
     // IDEMPOTENT ACROSS DAYS: the same source bytes (the same manifest of
     // the same files) keep the day they were first read, so a rerun on
     // another day renders the same bytes and lands nothing.
@@ -724,8 +791,12 @@ pub(crate) fn command_with(
     let written = match reference_data::write(&root, &draft) {
         Ok(written) => written,
         Err(why) => {
-            let _ = writeln!(out, "BASIS RUNS FAILED: {why}. Nothing was written.");
-            return FAILED;
+            return stopped(
+                out,
+                FAILED,
+                "basis runs failed",
+                &format!("BASIS RUNS FAILED: {why}. Nothing was written."),
+            );
         }
     };
     let _ = writeln!(
@@ -745,7 +816,8 @@ pub(crate) fn command_with(
             .with("generation", written.generation)
             .with("landed", written.landed)
             .with("runs", u64::try_from(folded.runs.len()).unwrap_or(u64::MAX))
-            .with("sha256", written.sha256.as_str()),
+            .with("sha256", written.sha256.as_str())
+            .with("commit", commit.unwrap_or(UNSTAMPED)),
     );
     if !ask.ledger {
         report_check(out, &draft, &actions);
@@ -755,18 +827,27 @@ pub(crate) fn command_with(
     // a table that is refused: that table is looked at first.
     match &actions {
         Slot::Store { receipt, .. } if receipt.standing == Standing::Sourced => {
-            let _ = writeln!(
+            let code = stopped(
                 out,
-                "LEDGER REFUSED: the store's corporate_actions generation {} is sourced ({}); the \
-                 measured ledger never replaces it. The checker below names every step it lacks.",
-                receipt.generation, receipt.source
+                FAILED,
+                "measured ledger refused",
+                &format!(
+                    "LEDGER REFUSED: the store's corporate_actions generation {} is sourced \
+                     ({}); the measured ledger never replaces it. The checker below names every \
+                     step it lacks.",
+                    receipt.generation, receipt.source
+                ),
             );
             report_check(out, &draft, &actions);
-            return FAILED;
+            return code;
         }
         Slot::Refused(why) if why.kind != reference_data::RefusalKind::Absent => {
-            let _ = writeln!(out, "LEDGER REFUSED: {why}");
-            return FAILED;
+            return stopped(
+                out,
+                FAILED,
+                "measured ledger refused",
+                &format!("LEDGER REFUSED: {why}"),
+            );
         }
         _ => {}
     }
@@ -776,13 +857,16 @@ pub(crate) fn command_with(
     let runs = match reference_data::load_written(&written, BasisRuns::build) {
         Ok((_, table)) => table,
         Err(why) => {
-            let _ = writeln!(
+            return stopped(
                 out,
-                "LEDGER REFUSED: the basis runs generation {} just written does not load back: \
-                 {why}",
-                written.generation
+                FAILED,
+                "measured ledger refused",
+                &format!(
+                    "LEDGER REFUSED: the basis runs generation {} just written does not load \
+                     back: {why}",
+                    written.generation
+                ),
             );
-            return FAILED;
         }
     };
     let ledger =
@@ -805,12 +889,18 @@ pub(crate) fn command_with(
                 &telemetry::Event::info("cli.basis_runs", "measured ledger written")
                     .with("generation", landed.generation)
                     .with("landed", landed.landed)
-                    .with("rows", u64::try_from(ledger.rows.len()).unwrap_or(u64::MAX)),
+                    .with("rows", u64::try_from(ledger.rows.len()).unwrap_or(u64::MAX))
+                    .with("runs_generation", written.generation)
+                    .with("commit", commit.unwrap_or(UNSTAMPED)),
             );
         }
         Err(why) => {
-            let _ = writeln!(out, "LEDGER FAILED: {why}");
-            return FAILED;
+            return stopped(
+                out,
+                FAILED,
+                "measured ledger failed",
+                &format!("LEDGER FAILED: {why}"),
+            );
         }
     }
     let reloaded =

@@ -173,6 +173,7 @@ fn basis_runs(store: &Path, arguments: &[&str]) -> (u8, String) {
         arguments,
         &move || Ok(root.clone()),
         Some(day(2026, 10, 22)),
+        Some(COMMIT),
         &mut text,
     );
     (code, text)
@@ -536,8 +537,13 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
     ) else {
         panic!("stored");
     };
+    // ... and names the commit of the build that folded it, ahead of the
+    // directory (check 4: no receipt, event or audit row named it).
     assert!(
-        receipt.source.starts_with("measured, not sourced"),
+        receipt.source.starts_with(&format!(
+            "measured, not sourced: cli basis-runs at commit {COMMIT} over DATA-1's \
+             feed-reconcile files in "
+        )),
         "{}",
         receipt.source
     );
@@ -547,12 +553,55 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
         text.contains("not served") || text.contains("no_row SPLITCO"),
         "{text}"
     );
-    // A second run over the same files lands nothing new (append-only, idempotent).
-    let (code, again) = basis_runs(&store.0, &["--dir", &dir_text(&out), "--apply"]);
-    assert_eq!(code, OK, "{again}");
+    // A second run over the same files lands nothing new (append-only,
+    // idempotent), however the directory is spelled: with a trailing slash,
+    // through a symbolic link, or with a `.` in it (check 4, attack E1:
+    // each landed a generation of its own).
+    let link = Dir::new("link");
+    let linked = link.0.join("to-out");
+    std::os::unix::fs::symlink(&out.0, &linked).unwrap();
+    for spelling in [
+        dir_text(&out),
+        format!("{}/", dir_text(&out)),
+        linked.display().to_string(),
+        format!("{}/.", dir_text(&out)),
+    ] {
+        let (code, again) = basis_runs(&store.0, &["--dir", &spelling, "--apply"]);
+        assert_eq!(code, OK, "{spelling}: {again}");
+        assert!(
+            again.contains("basis_runs generation 1 already held these bytes"),
+            "{spelling}: {again}"
+        );
+    }
+    // A build of another commit lands a generation of its own that names
+    // it: the same rows, folded by other code.
+    let root = store.0.clone();
+    let mut other = String::new();
+    let code = command_with(
+        &["--dir", &dir_text(&out), "--apply"],
+        &move || Ok(root.clone()),
+        Some(day(2026, 10, 22)),
+        None,
+        &mut other,
+    );
+    assert_eq!(code, OK, "{other}");
     assert!(
-        again.contains("generation 1 already held these bytes"),
-        "{again}"
+        other.contains("basis_runs generation 2 landed"),
+        "{other}"
+    );
+    let Slot::Store { receipt, .. } = load_one(
+        &store.0,
+        Table::BasisRuns,
+        pull::corporate_actions::BasisRuns::build,
+    ) else {
+        panic!("stored");
+    };
+    assert!(
+        receipt
+            .source
+            .starts_with("measured, not sourced: cli basis-runs at commit unstamped over"),
+        "{}",
+        receipt.source
     );
 }
 
@@ -745,6 +794,7 @@ fn a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothi
         &["--dir", &dir_text(&out), "--apply", "--ledger"],
         &move || Ok(root.clone()),
         Some(day(2026, 11, 5)),
+        Some(COMMIT),
         &mut again,
     );
     assert_eq!(code, OK, "{again}");

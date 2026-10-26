@@ -304,15 +304,22 @@ fn basis_json_answers_the_run_holding_a_day_and_names_every_outside() {
     install(&store, &[measured_split()]);
     let kept = tables(&store);
     let inside = answer(&kept, &asked("symbol=SPLITCO&day=2025-03-04").unwrap());
-    assert_eq!(inside["day"]["factor"], "1/2");
+    // D-3339's direction, GDFL ÷ Zerodha, as `/sources/day.json` says it:
+    // before the 2:1 split the factor is the action's own 2/1, and the
+    // run's Zerodha/GDFL ratio rides beside it by name (check 4: this said
+    // 1/2 under the same word `/sources/day.json` used for 2/1).
+    assert_eq!(inside["day"]["factor"], "2/1");
+    assert_eq!(inside["day"]["zerodha_over_gdfl"], "1/2");
     assert_eq!(inside["day"]["run"]["end"], "step");
     assert!(inside["day"]["outside"].is_null());
     let on = answer(&kept, &asked("symbol=SPLITCO&day=2025-03-06").unwrap());
     assert_eq!(on["day"]["factor"], "1/1");
+    assert_eq!(on["day"]["zerodha_over_gdfl"], "1/1");
     assert_eq!(on["day"]["actions"][0]["ratio"], "2/1");
     assert_eq!(on["day"]["actions"][0]["excuses"], false);
     let after = answer(&kept, &asked("symbol=SPLITCO&day=2025-03-11").unwrap());
     assert!(after["day"]["factor"].is_null());
+    assert!(after["day"]["zerodha_over_gdfl"].is_null());
     assert!(
         after["day"]["outside"]
             .as_str()
@@ -398,6 +405,100 @@ fn the_tables_are_read_again_only_when_a_generation_lands() {
     assert_eq!(after.actions.receipt().unwrap().generation, 2);
 }
 
+/// The second generation of `measured_split`'s ledger, written to `store`.
+fn second_generation(store: &Path) {
+    let mut second = measured_split();
+    second.evidence = "basis_runs generation 2".to_owned();
+    write(
+        store,
+        &Draft {
+            table: Table::CorporateActions,
+            source: "invented ledger, generation 2".to_owned(),
+            source_sha256: None,
+            fetched: day(2026, 10, 22),
+            standing: Standing::Measured,
+            decision: "D-6892".to_owned(),
+            rows: vec![second.fields()],
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_generation_landing_inside_a_linked_table_directory_is_read() {
+    // ATTACK E7 (check 4): each table directory is a symbolic link to a
+    // directory elsewhere. A generation lands in the directory the link
+    // names and never changes the link, so a stamp of the link alone kept
+    // the first generation for ever.
+    let store = root("basis-link");
+    let elsewhere = root("basis-link-target");
+    install(&elsewhere, &[measured_split()]);
+    for table in [Table::CorporateActions, Table::BasisRuns] {
+        let named = table.dir(&store);
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(table.dir(&elsewhere), &named).unwrap();
+    }
+    let first = tables(&store);
+    assert_eq!(first.actions.receipt().unwrap().generation, 1);
+    assert!(Arc::ptr_eq(&first.actions, &tables(&store).actions), "kept");
+    second_generation(&elsewhere);
+    let after = tables(&store);
+    assert_eq!(
+        after.actions.receipt().map(|held| held.generation),
+        Some(2),
+        "the generation that landed behind the link is served"
+    );
+}
+
+#[test]
+fn a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired() {
+    // ATTACK E16 (check 4): a `chmod` changes a file's ctime and nothing
+    // else the stamp read, so a table refused while unreadable stayed
+    // refused after the mode was repaired.
+    use std::os::unix::fs::PermissionsExt as _;
+    let store = root("basis-mode");
+    install(&store, &[measured_split()]);
+    let served = Table::CorporateActions.path(&store, 1);
+    let mode = |bits: u32| {
+        std::fs::set_permissions(&served, std::fs::Permissions::from_mode(bits)).unwrap();
+    };
+    mode(0o000);
+    assert!(
+        std::fs::read(&served).is_err(),
+        "the test needs a reader the mode refuses (not root)"
+    );
+    let refused = tables(&store);
+    assert!(refused.actions.table().is_err(), "unreadable: refused");
+    mode(0o644);
+    let repaired = tables(&store);
+    assert_eq!(
+        repaired.actions.receipt().map(|held| held.generation),
+        Some(1),
+        "the repaired table is served: {:?}",
+        repaired.actions.table().err()
+    );
+}
+
+#[test]
+fn a_well_formed_day_the_calendar_does_not_hold_is_named_as_such() {
+    // Check 4's follow-up: `day=1969-12-31` was answered "is not
+    // YYYY-MM-DD", which it is.
+    for text in ["1969-12-31", "0000-01-01", "2025-02-30", "2025-13-01"] {
+        let why = asked(&format!("symbol=SPLITCO&day={text}")).unwrap_err();
+        assert_eq!(
+            why,
+            format!(
+                "day {text:?} is no calendar day: the calendar holds 1970-01-01 to 9999-12-31"
+            )
+        );
+    }
+    for text in ["2025-3-04", "2025/03/04", "20250304xx", "abcd-ef-gh", "2025-03-0a"] {
+        let why = asked(&format!("symbol=SPLITCO&day={text}")).unwrap_err();
+        assert_eq!(why, format!("day {text:?} is not YYYY-MM-DD"));
+    }
+    assert!(asked("symbol=SPLITCO&day=1970-01-01").is_ok());
+}
+
 #[test]
 fn a_lookup_costs_the_same_at_1x_10x_and_100x_runs_measured() {
     // The kept answer for one (share, day): four stats, one hash, one
@@ -480,6 +581,17 @@ fn a_compare_inside_a_run_applies_its_factor() {
         let run = &body["days"][0]["basis"]["measured_run"];
         // GDFL ÷ Zerodha, D-3339's direction: 2/1 inside the 1/2 run.
         assert_eq!(run["factor"].as_str(), factor, "{on}: {run:#}");
+        // ONE WORD, ONE DIRECTION: `/basis.json` says the same factor and
+        // the same named ratio for the day (check 4 of R4-26).
+        let basis = answer(
+            &tables(&store),
+            &super::asked(&format!("symbol=SPLITCO&day={on}")).unwrap(),
+        );
+        assert_eq!(basis["day"]["factor"], run["factor"], "{on}");
+        assert_eq!(
+            basis["day"]["zerodha_over_gdfl"], run["zerodha_over_gdfl"],
+            "{on}"
+        );
         assert_eq!(
             run["corporate_actions"].as_array().unwrap().len(),
             actions,
