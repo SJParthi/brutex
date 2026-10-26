@@ -1746,6 +1746,27 @@ above are unchanged. `RUSTSEC-2026-0382.md` is byte-identical at both.
 contacts present was not read: no connection was made. It is UNVERIFIED
 (`docs/06-limits.md` L-BREDS-1).
 
+## RustSec advisory RUSTSEC-2026-0386 — read 25 Oct 2026 (D-7205)
+
+One advisory turned `cargo deny check` red under cargo-deny 0.20.2 on an
+unchanged tree, while cargo-deny 0.19.0 (CI gate 3's pin) reads the same
+database and passes. What it says, and what the patched release does, rests
+on the files below: the advisory database `cargo deny` fetched (its own git
+checkout under `~/.cargo/advisory-dbs/`, at commit
+`21d909e4c8bd4e14c7aea58bf980c881a0053ab1`, 2026-10-24 10:30:13 +0200, the
+newest on 25 Oct 2026 at 12:42 IST) and the crates.io sources the build
+compiles. The digest is of the bytes read.
+
+| Source | sha256 of the bytes read | What it says, as far as the decision relies on it | Where it is applied |
+|---|---|---|---|
+| `crates/tokio/RUSTSEC-2026-0386.md` (RustSec advisory database) | `f92ab63fc1641af590f81babf9f211d77bdd7db14b82cb53a3a756a16864b520` | dated 2026-10-13, `informational = "unsound"`, categories `memory-corruption`, keywords `io-safety` and `use-after-free`, url `https://github.com/tokio-rs/tokio/pull/8587`; title "`AsyncFd::new` and related constructors violate I/O safety"; patched `>= 1.51.6, < 1.52.0` and `>= 1.53.3`, unaffected `< 0.3.2`; affected functions `tokio::io::unix::AsyncFd::new` and `with_interest` (`>= 0.3.2`), `try_new` and `try_with_interest` (`>= 1.37.0`); "Starting in Tokio 1.51.6, 1.53.3, and 1.54.0" the four are deprecated for the `unsafe` `AsyncFd::register` and `register_with_interest` | `tokio` 1.53.3 in `Cargo.lock` (D-7205 point 1); the `FLOORS` row in `crates/vocab/tests/workspace_is_rust.rs` (D-7205 point 4) |
+| `tokio-1.53.3/CHANGELOG.md` (crates.io) | `c7b607c14636d6e93020ece27de8ee7e2dc51b1a9b5f8c1135780a0dcee134b0` | the 1.53.2 (October 3rd, 2026) and 1.53.3 (October 13th, 2026) entries: 1.53.3 adds `AsyncFd::register` and `register_with_interest` and deprecates the four constructors (#8587), and fixes `DuplexStream` wakers, `join!`/`try_join!` on `Infallible`, paused time on `current_thread`, and semaphore close wakes; 1.53.2's fixes are in `fs`, `io`, `process` (Windows), the blocking pool, `sync` (mpsc, `Semaphore`, broadcast), `JoinSet` and `time` | what changes at run time (D-7205 point 3) |
+| `tokio-1.53.3/src/io/async_fd.rs` (crates.io) | `0d9365deaa40f8d069770308a105aad31fe527ea593acf95c40265407d9f143d` | `#[deprecated]` on `new`, `with_interest`, `try_new`, `try_with_interest` (each now calls `register` or `register_with_interest` in an `unsafe` block) and on the type alias `AsyncFdTryNewError`; tokio 1.53.1's copy has no `deprecated` attribute | D-7205 point 3 |
+
+**What is NOT sourced here.** Whether a crate this workspace compiles reaches
+a changed tokio path other than the deprecation was read only as far as
+D-7205 point 3 states; beyond that it is UNVERIFIED.
+
 ## GDFL share rows, measured by the tick-to-second check (DATA-2, D-5181)
 
 Measured 19 and 20 October 2026 by `cli tick-to-second-check` (build of
