@@ -86638,10 +86638,13 @@ own (attack E1); and every refusal or failure of a run said on stdout alone.
 **Decision.**
 
 1. The 121 literals are `R4_26_LITERAL` in `.github/gates_tree.rs`, each read
-   at its site, with the reason for each kind; `DECLARED` is 78 groups. The
-   four prints are declared in ci.yml gate 23 with what each prints. Gate
-   1d's undeclared list and gate 23's refusals on R4-26's tree are
-   `feat/db-fix`'s own. **Not taken:** writing the tests' ratios through
+   at its site, with the reason for each kind, and so is `no_row`, the
+   checker's finding word, which R4-26 writes too and which gate 1d already
+   named on `feat/db-fix` for `pull::reference_data`'s tests: 122 words.
+   `DECLARED` is 79 groups once R4-19's has landed beside it. The four
+   prints are declared in ci.yml gate 23 with what each prints. Gate 1d's
+   undeclared list on R4-26's tree is `feat/db-fix`'s own less `no_row`, and
+   gate 23's refusals are `feat/db-fix`'s own. **Not taken:** writing the tests' ratios through
    `Ratio::new` and their scratch tags through `format!` to keep them out of
    the gate's sight: that hides the literals rather than declaring them, the
    act the gate exists to make deliberate.

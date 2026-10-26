@@ -2750,9 +2750,12 @@ const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-bloc
 // `4765/10000`, `999999999999999877/3`, the overflowing
 // `10000000000000000000/1` and the negative `1/-2` the parse refuses) or
 // the level `100000` a test converts, none a date, a token or a price; and
-// the tests' scratch tags (`cor-absent` to `cor-wrong-factor`). None names
-// an account, an environment, a vendor credential or a field of a
-// parameter path.
+// the tests' scratch tags (`cor-absent` to `cor-wrong-factor`). And
+// `no_row`, the checker's finding for a ratio step no row explains, which
+// R4-26 writes too and which gate 1d already named on feat/db-fix, where
+// `pull::reference_data`'s tests write it: 122 words. None names an
+// account, an environment, a vendor credential or a field of a parameter
+// path.
 const R4_26_LITERAL: &str = "-2 100000 10000000000000000000 10005 10007 1001 1002 1003 1004 \
     1005 1006 1007 1012 102 104 10481 106 118 125 16 1993 1999 2000 2001 2007 253 280 32 33 \
     34 40 4000 47 472 4765 4767 49 4995 500 5005 503 560 63 81 998 9993 9995 \
@@ -2766,7 +2769,8 @@ const R4_26_LITERAL: &str = "-2 100000 10000000000000000000 10005 10007 1001 100
     cor-swapped cor-tenfold cor-tenfold-ca cor-torn cor-walk-back cor-weekend-split \
     cor-wide-wobble cor-wobble cor-wobble-ca cor-wrong-factor corporate-action \
     corporate_actions demerger den dividend drift ex_date factor_differs merger no_basis_run \
-    nse num product_too_large rights row_without_step share-days spinoff split tag unclassed";
+    no_row nse num product_too_large rights row_without_step share-days spinoff split tag \
+    unclassed";
 
 // R4-19 (one not-owed authority; D-7315). The codes of `pull::gaps::NotOwed`
 // a month or a day carries, the four `web/src/lib/ingest-months.js`
@@ -4798,8 +4802,8 @@ mod tests {
     #[test]
     fn gate_1d_declares_the_r4_26_reference_words() {
         // R4-26 repair 4: the 121 words its second agent named as
-        // undeclared, one of each kind read at its site; the group holds
-        // exactly those 121, each once.
+        // undeclared, one of each kind read at its site, and the checker's
+        // `no_row`; the group holds exactly those 122, each once.
         let d = declared();
         for w in [
             "ex_date",
@@ -4813,6 +4817,7 @@ mod tests {
             "row_without_step",
             "basis_within_wobble",
             "no_basis_run",
+            "no_row",
             "share-days",
             "10481",
             "999999999999999877",
@@ -4823,8 +4828,8 @@ mod tests {
             assert!(d.contains(w), "{w}");
         }
         let group: BTreeSet<&str> = R4_26_LITERAL.split_whitespace().collect();
-        assert_eq!(group.len(), 121);
-        assert_eq!(R4_26_LITERAL.split_whitespace().count(), 121);
+        assert_eq!(group.len(), 122);
+        assert_eq!(R4_26_LITERAL.split_whitespace().count(), 122);
         assert!(!d.contains("acmeorg"));
     }
 
