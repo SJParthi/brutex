@@ -1,6 +1,50 @@
 STATUS: IN PROGRESS
 
-NEXT: the mutant shards 7, 8, 12..19 of the 264 and the 68 mutants of the fixes' lines (running in /home/user/brutex-mwt and /home/user/brutex-fwt), each MISSED fixed as found; then coverage again, gate 1e, the final report.
+NEXT: the 149 mutants left (below), running at the head `0c18505b` in two in-place worktrees, each MISSED fixed as found; then coverage again, gate 1e, the final report.
+
+## Session of 26 Oct 2026, fourth leg (a new cloud session, continuing from `b847a810`)
+
+The third leg's worktrees did not survive the container; its fixes did. Its log after `e66351a3`
+names MISSED mutants of shards 12, 14 and 15, each fixed (`78630e22` IA-RP-34, `2317072e`
+IA-AUC-09, `307aad47` IA-RP-35, `b847a810` IA-RP-36), and two coverage tests (`4097b033` IA-RP-32,
+`fca1d9f1` IA-RP-33). No shard left a record of finishing, so every shard of 7, 8, 12..19 is
+counted as not done.
+
+- **Sixth base merge.** `origin/feat/db-fix` moved to `5901ec77` (Merge IA-10c, Merge R4-22, Merge
+  BASE-FIXTURE-1025); merged as `0c18505b`. `.github/gates_tree.rs` conflicted on `DECLARED`:
+  IA-10c's group first, IA-17b's after, the length 77 -> 78. `docs/04`, `05` and `06` conflicted
+  only where both sides appended at the end: feat/db-fix's file is the exact byte prefix
+  (`cmp -n`), IA-17b's blocks after it (each side's block checked byte for byte against its own
+  tail). `ingest.rs`, `gdfl_import.rs`, `gdfl_import_tests.rs` and `gdfl_scope_tests.rs` merged
+  cleanly. `cargo test -p pull --lib --locked -- gdfl_import:: gdfl_cm:: ingest::`: 601 passed, 3
+  failed (the three root-permission tests named below). BASE-FIXTURE-1025 made
+  `gdfl_cm::tests::fixtures_are_built_not_pasted` green (1 passed), so it is no longer skipped.
+  `Cargo.lock` is the base's byte for byte.
+- **The mutant list, rebuilt and matched, never restarted.** The 264 were listed again in a
+  worktree of `8954122f` (`cargo mutants --list --json --in-diff <git diff bf9b1c8f cf6034d7 --
+  crates/pull/src> -p pull`: 264), and each round-robin shard listed with `--shard k/20 --sharding
+  round-robin`; shard 0 names exactly the 14 mutants the first session's shard 0 reported. The
+  head's list (`git diff origin/feat/db-fix HEAD -- crates/pull/src` at `0c18505b`) is **255**. Each
+  head mutant was matched to the old list by file and description with its line and column
+  dropped, the k-th of a description to the k-th: **106** match a mutant of a finished shard (0..6,
+  9, 10, 11) and are not run again; **107** match a mutant of shards 7, 8, 12..19; **39** are new
+  (the fixes' own lines: `span_of_day`, `name_in_order`, `Gather::take`'s new return, and others);
+  **3** are rerun because their description's count changed (`>` in `write_revision`, 2 -> 1). So
+  **149** run, the 106 do not.
+- **How they run.** `cargo mutants` 26.2.0 `--in-place --in-diff <the head diff> -p pull
+  --cargo-arg=--lib --config <an examine_re list naming the 149 exactly, anchored>` `-- --
+  gdfl_import:: gdfl_cm:: ingest::`, skipping by name the three tests root defeats
+  (`gdfl_import::tests::ia16::an_immutable_month_stops_the_run_by_name`,
+  `ingest::census_store::link_tests::a_read_only_partition_directory_is_refused_with_the_host_s_words`,
+  `ingest::census_store::link_tests::an_idempotent_requirement_opens_nothing_for_writing`), split
+  alternately across two worktrees of `0c18505b` under `/home/user` (75 and 74; each list checked
+  with `--list` against the intended names, exact). `--cargo-arg=--lib` puts `--lib` on the build
+  as well as the test: without it the build step was `cargo test --no-run --package=pull` and
+  linked every pull integration-test binary on every mutant, which is why earlier legs measured
+  3.3 min a mutant. Built with `CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_INCREMENTAL=true`
+  in the environment for these runs only (nothing committed; `Cargo.toml` untouched): the same
+  code and the same tests, compiled faster. Each baseline: 601 passed, 0 failed, 19.6 s; test
+  timeout auto-set to 100 s.
 
 ## Session of 25-26 Oct 2026, third leg (a new cloud session, continuing from `7d401a3a`)
 
