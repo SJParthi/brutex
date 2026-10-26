@@ -86683,3 +86683,123 @@ refusal still by `pull::gdfl_cm::tests::date_mismatch_refuses` and
 
 **Store step.** None of its own: a day closed `done with refusals` for
 `date_mismatch` is read again only by `--retry-refused`, as any closed day.
+
+### D-7315 — R4-19: one not-owed authority — `pull::gaps::not_owed` names the session a series did not owe (NSE's withdrawal, before its listing, after its delisting, unread), the classifier's fifth reason; every classifier door and the repair plan ask it — 2026-10-26
+
+**Number** taken at landing from the ledger's head (amendment A6): D-7314
+(R4-22's D-7310..D-7314) was the head on feat/db-fix 5901ec778, R3-13's
+D-7301..D-7304 are reserved for its repairs, and no branch held D-7315.
+R4-19 has no block of its own in the registry; the merge renumbers this
+entry if another landing took D-7315 first. **Findings:** G4 and Z3 (the gap
+reason and the repair plan; the ladder gate is R4-23's), TC-04 (the reason
+and its evidence; the `/gaps.json` unread class is R4-19d's), COR-07 (the
+before-listing and after-delisting classes, on R4-17's listing span). Cut by
+D-6900 (the one-command cut) to the data core. **Decision.**
+
+1. **`pull::gaps::Reason` has five variants and no sixth.** The fifth,
+   `NotOwed(NotOwed)`, is a minute inside a session of record that this
+   series did not owe; until now it was answered `VendorHole`. `NotOwed` has
+   four answers: `InstrumentInactive(InactiveInterval)` — the interval and
+   both sources `cash_auction::independently_inactive` states for the exact
+   symbol and ISIN (FORCEMOT, INE451A01017, 2023-10-26..=2024-02-13:
+   CML58560, and the company filing carrying CML60618; `docs/00-charter.md`,
+   "FORCEMOT NSE interruption"); `BeforeListing { listed_on }` and
+   `AfterDelisting { delisted_on }` — R4-17's `listing::Span::before_listing`
+   and `history_ended`, on a receipted master's word only; `Unread` — no
+   stored reading covers the day. None is a loss and none adds to `expected`.
+   Their codes are the four `web/` already spells (`ingest-months.js`,
+   `REASON_CODES`, R4-01): `instrument_inactive`, `before_listing`,
+   `after_delisting`, `unread`; a run reads `instrument-inactive`,
+   `before-listing`, `after-delisting` or `unread`. `NotOwed::evidence` is the
+   one wording every consumer prints.
+2. **`pull::gaps::not_owed(key, day) -> Option<NotOwed>` is the one door**,
+   in this order: NSE's documented interruption, before the listing, after
+   the delisting, unread. The instrument facts are the NSE cash market's:
+   exchange `NSE`, segment `CASH`, the exact symbol and the universe's exact
+   ISIN, or nothing; a listing day the master does not state (`0`, blank,
+   conflicting), a span inferred from the vendor's own bars, no checked
+   master, and a day that is no calendar day excuse nothing. `Unread` reads
+   `Coverage::Stated { held_through, requested }`: a day after the series'
+   last held day (or every day of an absent month) that the feed's gap
+   ledger does not record as requested; `Coverage::Unstated`, every
+   caller's in this change, calls no day unread. O(1): a handful of constant
+   compares, at most two compares against the span the key holds, one bit
+   probe. `Key::series(exchange, segment, symbol, listing)` builds the key
+   once a series (the ISIN from `core::universe::nse_isin`, one
+   `Listing::span` probe).
+3. **The calendar says whether a session happened; `not_owed` says only
+   whether this series owed it.** It is asked for a session of record (open,
+   sized or not) before a venue's hours refine the day, so a withdrawn
+   share owes none of a session whose closing-auction eligibility nobody
+   recorded either. A closed day stays `closed`. A day the calendar cannot
+   attest stays `unmeasured` unless the instrument's own fact — withdrawn,
+   not yet listed, delisted — excuses it whatever the exchange did: one run
+   of that reason (measured on the operator's store: IRFC's 2018 months,
+   before its 2021-01-29 listing, on a cash door whose table starts
+   2019-12-02, read `before-listing`, not `unmeasured`); `unread` needs a
+   session to be read and is not taken there. The repair plan, whose
+   calendar of record attests from 2018-01-01, asks only of sessions and
+   names a day it cannot attest `unattested` as before. On an excused sized
+   session each minute that would
+   have been owed and held no bar reads the reason; a minute outside its
+   windows is still `outside-window`, a halt still the halt, a stored bar
+   still held. An excused session whose length no record states is one run
+   of the reason.
+4. **Every door is one walk, `classify_owed(stored, first, last, against,
+   door, key)`.** `classify_cash` takes the key, and its three call sites
+   change with it: `/gaps.json`'s NSE CASH door, which builds the key once a
+   request (`owed_listing`: `listing::for_store`, for an NSE cash share's own
+   series only) and also passes it to the one-second trade-driven CASH door,
+   so one day reads one class on both rungs; and `recovery.rs`'s two, with no
+   listing, so the recovery audit answers exactly as before (its own
+   `inactive()` filter is R4-19d's to replace by this door). `classify`,
+   `classify_against`, `classify_spot_index_against` and
+   `classify_derivative_against` pass `Key::NONE` and answer as before. Each
+   `/gaps.json` month row gains `not_owed_minutes` and `not_owed` (each
+   answer once: code, reason, days, minutes, first and last day, evidence;
+   for an interruption the symbol, interval, both sources and both circulars
+   by number, `circulars: ["CML58560", "CML60618"]` (two fields
+   `InactiveInterval` gains beside its sources, as the charter names them;
+   the evidence text names both too); for a listing
+   or a delisting its day and the master's file and SHA-256), and the
+   roll-up `not_owed_minutes`.
+5. **The repair plan asks it of every session.** `repair_plan::plan` builds
+   the key once a plan; `plan_month`, the stored-month gap ledger's door,
+   once a month, so the ledger never owes a session the plan does not. A
+   session not owed is `Month::not_owed` (`NotOwedSession { day, why, bars }`,
+   the bars held on it anyway named, never dropped) and never counted in
+   `sessions`, never missing or short, never a repair's. The plan states
+   nothing about reading: its own `tail` and `absent` remain its words for a
+   session not yet read. `/pull/repair.json` gives each month's `not_owed`
+   runs and `totals.not_owed_sessions`; `cli zerodha-repair` prints one line
+   a run with its evidence.
+6. **Not taken.** (a) A keyed sibling of `classify_cash`: two cash doors, one
+   unkeyed, would leave an owed path outside the authority. (b) One whole-day
+   run on an excused sized session: it would hide the session's windows and
+   change what `recovery.rs`'s `outside_session_count` calls a conflict.
+   (c) `Unread` in the repair plan: its tail and absent classes are already
+   that, with the fill each needs. (d) The display wiring — the
+   `/gaps.json` unread class, `calendar_record`'s owed counts, the day band's
+   notes, `calendar-owed.js` and `recovery.rs`'s `inactive()` — is R4-19d's;
+   the `/store` rows' `not_owed` R4-03's; the FINNIFTY alias on `/gaps.json`
+   R4-02's; the gap-queue and coverage-board seams were struck with R4-14 and
+   R4-15 (D-6900). Each calls this door when it lands.
+
+**Measured.** See `docs/06-limits.md`, "One not-owed authority (R4-19;
+D-7315)".
+
+**Proved by** `pull::gaps::not_owed_tests` (`forcemot_daily_gap_reason_is_inactive`
+and eleven more), `pull::ingest::repair_plan::not_owed_tests`
+(`an_inactive_session_is_not_a_repair_month` and three more),
+`pull::cash_auction`'s
+`independent_forcemot_inactivity_has_exact_identity_and_inclusive_boundaries`
+(the two circulars by number),
+`api::server::gaps_route::owed_tests`
+(`forcemot_withdrawal_days_are_not_owed_on_every_route`, its `/gaps.json`
+and `/pull/repair.json` halves, and three more, one of them eight
+concurrent first requests over a master no request has loaded), and
+`cli::zerodha_repair::owed_tests`
+(`the_forcemot_plan_names_no_repair_month_and_says_what_was_not_owed`);
+`docs/04-invariants.md`, "One not-owed authority (R4-19; D-7315)".
+
+**Store step.** None: nothing is written, and every answer is read-time.
