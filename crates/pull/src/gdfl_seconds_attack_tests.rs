@@ -881,8 +881,13 @@ fn hostile_rows_refuse_by_name_and_edge_prices_decode_exactly() {
     // A BOM, an empty file, a header in the middle, a column short or extra.
     let mut bom = vec![0xEF, 0xBB, 0xBF];
     bom.extend_from_slice(&session_file(std::slice::from_ref(&good)));
-    assert_eq!(decode(&bom, &expect(stem)), Err(CmRefusal::HeaderUnknown));
-    assert_eq!(decode(b"", &expect(stem)), Err(CmRefusal::HeaderUnknown));
+    let mut bom_header = vec![0xEF, 0xBB, 0xBF];
+    bom_header.extend_from_slice(crate::gdfl_cm::HEADER_OPEN_INTEREST.as_bytes());
+    let unknown = |first: &[u8]| CmRefusal::HeaderUnknown {
+        shape: crate::gdfl_cm::HeaderShape::of(first),
+    };
+    assert_eq!(decode(&bom, &expect(stem)), Err(unknown(&bom_header)));
+    assert_eq!(decode(b"", &expect(stem)), Err(unknown(b"")));
     let header = crate::gdfl_cm::HEADER_OPEN_INTEREST.to_owned();
     assert_eq!(
         decode(&session_file(&[good.clone(), header]), &expect(stem)),

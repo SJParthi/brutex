@@ -594,6 +594,7 @@ mod tests {
             exchange: "NSE",
             segment: "INDEX",
             store_vendor: brutex_core::vendor::Vendor::Zerodha,
+            answers: crate::pullrun::Answers::default(),
             window: Window::new(from, to).unwrap(),
             granularity: Granularity::Minute1,
             bodies: vec![(
@@ -720,6 +721,42 @@ mod tests {
             .await;
             assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{reason}");
             assert!(page.contains("a repair names why it is run"), "{page}");
+        }
+    }
+
+    /// **IA-GR-42, `POST /pull/repair`'s half (D-4874; IA-10c, D-6264): ONE
+    /// REPAIR-REASON RULE FOR BOTH FEEDS.** A 200-byte reason is taken; a
+    /// 201-byte one, an empty one, one of blanks alone and one holding a tab
+    /// (leading or inside: the route no longer trims before it judges) are
+    /// refused before a seat is taken, exactly as `pull::ingest::repair_reason_ok`
+    /// refuses them for `POST /gdfl/import` and `cli gdfl-import --repair-reason`.
+    #[tokio::test]
+    async fn one_repair_reason_rule_for_both_feeds() {
+        let (site, _) = super::super::tests::readiness_fixture("ia10c-reason", "INE002A01018");
+        let site = std::sync::Arc::new(site);
+        let body = "target=indices&vendor=zerodha&granularity=1min&member=NIFTY&from=2020-12-01&to=2020-12-31";
+        let taken = "r".repeat(pull::ingest::MAX_REPAIR_REASON);
+        let over = "r".repeat(pull::ingest::MAX_REPAIR_REASON + 1);
+        for (reason, ok) in [
+            (taken.as_str(), true),
+            (over.as_str(), false),
+            ("", false),
+            ("%20%20%20", false),
+            ("fill%09line", false),
+            ("%09fill", false),
+        ] {
+            let decoded = super::super::percent_decode(reason);
+            assert_eq!(pull::ingest::repair_reason_ok(&decoded), ok, "{reason}");
+            let (status, _, axum::response::Html(page)) = super::super::pull_repair(
+                axum::extract::State(std::sync::Arc::clone(&site)),
+                format!("{body}&repair_reason={reason}"),
+            )
+            .await;
+            let refused = page.contains("a repair names why it is run");
+            assert_eq!(!refused, ok, "{reason}: {status} {page}");
+            if !ok {
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{reason}");
+            }
         }
     }
 }

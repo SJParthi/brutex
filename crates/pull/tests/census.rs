@@ -229,6 +229,7 @@ fn plan_over<'a>(request: &'a BarRequest, segment: &'a str) -> Plan<'a> {
         exchange: "NSE",
         segment,
         contract: None,
+        run: 0,
     }
 }
 
