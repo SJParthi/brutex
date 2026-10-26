@@ -85738,9 +85738,12 @@ made the walk 96,360 months, 96,358 of them missing, although `MAX_MONTHS`
 `cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`
 (every pair of months around windows of 1, 2, 3, 12 and 25 months under six
 patterns, and a 1,200-month window at a stride and at its edges, against
-the list filtered directly) and
-`cli::basis_runs::tests::basis_runs_finds_its_missing_months_without_a_search_on_the_production_path`;
-CI gate 11 through `state/fix/ci-shell-gates.sh`. R426-25 and R426-26
+the list filtered directly),
+`cli::basis_runs::tests::basis_runs_finds_its_missing_months_without_a_search_on_the_production_path`
+and `cli::basis_runs::tests::a_steps_missing_months_cost_the_same_at_12_120_and_1200_months_measured`
+(per lookup p50 1 ns and p99 3 ns at 1,200 months, as at 12 and 120); CI
+gates 11 and 12 through `state/fix/ci-shell-gates.sh`, whose refusals on the
+merged tree are `feat/db-fix`'s own. R426-25 to R426-27
 (`docs/04-invariants.md`); L-R426-11 (`docs/06-limits.md`).
 
 **Cost.** The walk is one step a month of the window, at most 1,200, and the
