@@ -21974,7 +21974,8 @@ length; the rows now cycle whole measured months.
 **Routes on the operator's store** (a shadow server on `:8451`, bars read
 through the link, n=200 sequential warm GETs after one cold one, curl's
 `time_total`; the machine loaded by other agents' builds throughout; base =
-feat/db-fix 5901ec778 built from a `git archive` of it, final = this change):
+feat/db-fix 5901ec778, a commit of the integration branch that `main`'s squash
+merge does not keep, built from a `git archive` of it, final = this change):
 
 | Route and selection | base p50 / p99 / max | final p50 / p99 / max |
 |---|---|---|
