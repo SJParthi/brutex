@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-5 — Copies register (cloud build report)
 
@@ -257,3 +257,52 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   `store settings::tests` 22 passed, 3 FAILED (the three root-permission tests shown red on the
   base at save point 7; `the_extra_copy_roots_key_is_checked_and_stored_canonically` ok);
   `no_scheduler_delete` 5 passed; `api -- pool_table operation_audit settings_route` 55 passed.
+- `cargo test --workspace --locked -j 4 --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`
+  (the two skipped hang on the base, save point 7): `EXIT=101`; red targets: api lib (12 failed of 2,945),
+  cli lib (29 of 2,406), cli `--test gdfl_run_logs` (2 of 4), pull lib (12 of 2,108), store lib (5 of 431),
+  store `--test sealed_door` (1 of 1), telemetry lib (4 of 225). None is in a file of this part.
+  The 24 named at save point 7 recur (shown red on the base there). NEW since the merges of
+  `13dcf5e5` (CLOUD-MUTAPIB and the parts before it), NOT YET shown red on an unmodified base:
+  - `a_run_whose_sink_is_held_refuses_before_any_lock`
+  - `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`
+  - `both_second_formats_answer_the_same_bars_at_p99`
+  - `gdfl_import_command::cloud_mutant_tests::the_receipt_names_the_workers_and_durability_it_filed_with`
+  - `gdfl_import_command::guard::tests::a_change_is_never_accepted_by_a_run_that_skipped_no_day`
+  - `gdfl_import_command::guard::tests::a_changed_archive_with_every_day_done_is_named_not_ok`
+  - `gdfl_import_command::guard::tests::a_run_that_read_no_file_is_not_accepted_by_running_it_again`
+  - `gdfl_import_command::guard::tests::a_source_root_that_vanishes_after_files_were_read_is_named_source_lost`
+  - `gdfl_import_command::guard::tests::an_empty_range_owes_nothing_and_exits_ok`
+  - `gdfl_import_command::guard::tests::every_day_already_refused_identically_still_fails_when_the_root_is_gone`
+  - `gdfl_import_command::guard::tests::one_archive_reached_by_another_spelling_is_the_same_key`
+  - `gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`
+  - `gdfl_import_command::tests::a_named_failure_or_a_refused_run_exits_failed`
+  - `gdfl_import_command::tests::a_run_says_a_line_a_day_and_leaves_its_progress_record`
+  - `gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`
+  - `gdfl_import_command::tests::an_unstamped_build_is_refused_a_store_write_unless_allowed`
+  - `gdfl_import_command::tests::the_retry_flag_is_never_a_symbol_and_the_run_line_names_the_source`
+  - `gdfl_import_command::tests::the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds`
+  - `gdfl_run::tests::a_clock_step_back_never_aborts_a_run`
+  - `gdfl_run::tests::a_progress_file_that_cannot_be_written_is_named_and_the_run_goes_on`
+  - `gdfl_run::tests::the_kinds_run_in_order_on_the_calling_thread`
+  - `pullrun::cloud_mutant_tests::newest_records_that_cannot_be_read_leave_the_answer_not_known`
+  - `server::cloud_mutant_tests_c::a_store_that_takes_no_write_trips_the_store_breaker`
+  - `server::cloud_mutant_tests_c::a_store_whose_audit_dir_cannot_be_made_is_at_fault`
+  - `tick_second_check::tests::a_lock_name_that_is_a_link_a_directory_or_a_second_name_is_refused_and_nothing_goes_through_it`
+  - `tick_second_check::tests::a_month_held_only_sealed_is_checked_row_for_row_as_its_raw_form_was`
+  - `tick_second_check::tests::a_new_landing_of_a_checked_day_is_checked_again`
+  - `tick_second_check::tests::a_pipe_or_a_link_at_one_of_the_checks_own_names_and_a_pipe_archive_are_refused_at_once`
+  - `tick_second_check::tests::a_share_directory_the_store_refuses_is_one_cell_and_files_nothing_twice`
+  - `tick_second_check::tests::a_share_whose_months_cannot_be_listed_is_filed_month_by_month_with_or_without_a_year`
+  - `tick_second_check::tests::a_tick_store_landing_is_checked_against_that_tick_store_day_and_a_changed_day_is_refused`
+  - `tick_second_check::tests::a_version_whose_rows_are_not_the_ones_its_index_names_is_refused`
+  - `tick_second_check::tests::an_extra_archive_is_compared_beside_the_landing_and_labelled_not_the_landing_source`
+  - `tick_second_check::tests::every_status_and_source_is_named_against_the_landing_the_store_recorded`
+  - `tick_second_check::tests::no_worker_count_and_no_resumption_changes_a_byte_of_the_version`
+  - `two_cli_kinds_at_once_both_log`
+  Several are permission or read-only tests (this container runs as root); `cli` lib took 724 s
+  under the parallel run. To be shown red on an unmodified worktree of `origin/feat/db-fix`.
+- `HOLD` on the base with no `GO-CC-5` (fetched at the end of this run): stopped here.
+- NEXT: build an unmodified worktree of `origin/feat/db-fix` and run the NEW reds above by
+  `--exact` name with `--test-threads=1` (each one red there too, or a fix here); then
+  `cargo deny check`; coverage (`cargo +nightly llvm-cov --branch`) and `cargo mutants --in-diff`
+  on the touched modules (clear `target/` between, 11 GB free); the CI shell gates; the final report.
