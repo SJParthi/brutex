@@ -5651,3 +5651,26 @@ test('a restart\'s pass asks a route\'s requests in turn, each in a place one of
   assert.equal(sheet.NOT_FIRST.earlier({ r: s2, seen: [0], at: [5], by: [s] }), `its route /speed.json was asked first in that pass by this sheet's GET /speed.json (the read that proved the restart), ${WARMED}`);
   assert.equal(sheet.NOT_FIRST.earlier({ r: s, seen: [0], at: [5], by: [s2] }), `its route /speed.json was asked first in that pass by this sheet's HEAD /speed.json?window=1h, ${WARMED}`, 'only the GET of /speed.json itself is the proof read');
 });
+
+test('a captured request names itself in the sheet\'s table, so two of one route are told apart, and a "|" a capture holds stays inside its cell', () => {
+  // Before (repair 11's self-check, 27 Oct): every captured request read 'captured from the page', so two of
+  // one route, each now with its own firsts after a restart, were two rows alike; and a '|' in a captured
+  // page, path or query, which a URL keeps as written, ended its cell there and shifted the row.
+  const captured = sheet.readCapture(JSON.stringify({ requests: [
+    { page: '/db', method: 'GET', url: SHARED.facets2 },
+    { page: '/x|y', method: 'HEAD', url: '/odd|path.json?k=a|b' }
+  ] }));
+  const { requests } = sheet.requestsFor(CTX, captured);
+  const [one, two] = requests.slice(-2);
+  assert.equal(one.label, `captured from the page: GET ${SHARED.facets2}`);
+  assert.equal(two.label, 'captured from the page: HEAD /odd|path.json?k=a|b');
+  assert.equal(two.route, '/odd|path.json');
+  const row = (/** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ r) => ({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'cold', clients: 1, n: 1, p50: 1, p99: 1, max: 1, classes: { answered: 1 }, builds: ['c'.repeat(40)], unnamed: 0, bytes: 2, said: null, cut: null, notAsked: 0 });
+  const text = sheet.renderSheet({ ok: true, rows: [row(one), row(two)], ignored: [], failures: [], notMeasured: [], skipped: [], ctx: CTX, commit: 'c'.repeat(40) }, argsFor());
+  const table = text.split('\n').filter((l) => l.startsWith('| cccccccccccc |'));
+  assert.equal(table.length, 2, text);
+  const header = text.split('\n').find((l) => l.startsWith('| commit |')) ?? '';
+  for (const l of table) assert.equal(l.split(/(?<!\\)\|/).length, header.split('|').length, `one cell a column: ${l}`);
+  assert.ok(table[0].includes(`| /db | \`/census/facets.json\` | captured from the page: GET ${SHARED.facets2} | cold |`), table[0]);
+  assert.ok(table[1].includes('| /x\\|y | `/odd\\|path.json` | captured from the page: HEAD /odd\\|path.json?k=a\\|b | cold |'), table[1]);
+});

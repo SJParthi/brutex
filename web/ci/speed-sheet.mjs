@@ -278,7 +278,10 @@ export function requestsFor(ctx, captured = []) {
     const key = `${c.method} ${c.url}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    requests.push({ page: c.page, route: new URL(c.url, 'http://speed.sheet').pathname, label: 'captured from the page', method: c.method, url: c.url, builder: '(the page, captured)' });
+    // A CAPTURED REQUEST NAMES ITSELF (repair 11, 27 Oct): two of one route
+    // read the same in the sheet's table, and each now has its own firsts
+    // after a restart ({@link passOrder}).
+    requests.push({ page: c.page, route: new URL(c.url, 'http://speed.sheet').pathname, label: `captured from the page: ${key}`, method: c.method, url: c.url, builder: '(the page, captured)' });
   }
   return { requests, skipped };
 }
@@ -1896,12 +1899,15 @@ export function renderSheet(result, args) {
     '| commit | page | route | request | phase | clients | n | p50 ms | p99 ms | max ms | answered | refused | busy | failed | no answer | bytes |',
     '|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|'
   ];
+  // A cell from a capture may hold a '|' (a path or a query keeps it as
+  // written), which would end the cell there: it is written escaped.
+  const cell = (/** @type {string} */ s) => s.replaceAll('|', '\\|');
   for (const r of result.rows) {
     const c = (/** @type {string} */ k) => String(r.classes[k] ?? 0);
     // Answers that named no build beside some that named one are a second build (verify r6).
     const named = r.builds.length + (r.unnamed > 0 && r.builds.length > 0 ? 1 : 0);
     const commit = named === 1 ? r.builds[0].slice(0, 12) : named === 0 ? 'not named' : 'MIXED';
-    lines.push(`| ${commit} | ${r.page} | \`${r.route}\` | ${r.label || r.builder} | ${r.phase} | ${r.clients} | ${r.n} | ${msText(r.p50)} | ${msText(r.p99)} | ${msText(r.max)} | ${c('answered')} | ${c('refused')} | ${c('busy')} | ${c('failed')} | ${c('no answer')} | ${r.bytes} |`);
+    lines.push(`| ${commit} | ${cell(r.page)} | \`${cell(r.route)}\` | ${cell(r.label || r.builder)} | ${r.phase} | ${r.clients} | ${r.n} | ${msText(r.p50)} | ${msText(r.p99)} | ${msText(r.max)} | ${c('answered')} | ${c('refused')} | ${c('busy')} | ${c('failed')} | ${c('no answer')} | ${r.bytes} |`);
   }
   lines.push('');
   for (const n of result.notes ?? []) lines.push(`- ${n}`);
