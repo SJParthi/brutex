@@ -274,3 +274,17 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
   run; four tests added for the unreached lines (`283810c0`, `885a00d9`, `191ce354`).
 - NEXT: mutants on the diff (api and pull files against `api`'s tests, then the cli file),
   bench C-LG-02 in release, NEEDS THE MAC, STATUS.
+
+### 2026-10-26 19:32 IST (a new account's session; the 25 Oct session is unreachable)
+
+- GO-IA-10a present. Found the branch at `5ca8a885` (the 25 Oct report plus a merge of
+  `feat/db-fix` `4acb43f7`, CLOUD-MUTAPIB, `72330455`, and its NEEDS THE MAC commit).
+- Merged the newest `origin/feat/db-fix` `5901ec77` (IA-10c, R4-22, BASE-FIXTURE-1025):
+  `386d3e52`, no conflict; of the owned and outside-ownership files only `gdfl_cm.rs` and
+  `gdfl_import.rs` changed underneath (R4-22), and `member_share` stays `pub`,
+  `hole_reasons()` stays beside `hole_is_repairable`.
+- Tools reinstalled in this container (cargo-mutants 27.1.0, cargo-llvm-cov 0.9.1,
+  cargo-deny 0.19.0). `cargo mutants --list --in-diff` gives 124 mutants on the api and pull
+  files and 17 on the cli file (141, the 25 Oct count).
+- NEXT: the api/pull mutants (running), then the cli file's, then bench C-LG-02 in release,
+  then the final gates, NEEDS THE MAC, STATUS.
