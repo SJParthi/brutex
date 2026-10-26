@@ -1125,8 +1125,9 @@ impl PlacedBy {
 /// the day or left no line. Else by time ([`placed`]), against the close's
 /// run's start and `next_s`. The two routes that place a refusal
 /// (`/imports.json`'s log-only rows and `/dayflags.json`'s day band) call
-/// this one function, so they cannot disagree. O(1): at most two probes of
-/// the journal's id index (IA-RS-02, IA-RS-03).
+/// this one function, so they cannot disagree. O(1): at most three probes
+/// of the journal's id index, one that the run is named and one for each
+/// start (IA-RS-02, IA-RS-03).
 pub(crate) fn placed_of(
     parsed: &Parsed,
     event_run: Option<u64>,
@@ -1138,14 +1139,16 @@ pub(crate) fn placed_of(
         event_run.filter(|run| *run != 0 && parsed.holds_run(*run)),
         close_run,
     ) {
-        if event == close {
-            return (Placed::Within, PlacedBy::Run);
-        }
-        let earlier = (parsed.started_of(event), event) < (parsed.started_of(close), close);
-        let placed = if earlier {
-            Placed::Before
-        } else {
-            Placed::After
+        // ONE THREE-WAY COMPARE BY `(start, id)`: equal only for the close's
+        // own run (an id has one start), so `Within` needs no test of its
+        // own, and no spelling of the compare means the same as another (a
+        // `<` beside an `==` that came first had one, `<=`, that no test
+        // could tell apart).
+        let placed = match (parsed.started_of(event), event).cmp(&(parsed.started_of(close), close))
+        {
+            std::cmp::Ordering::Less => Placed::Before,
+            std::cmp::Ordering::Equal => Placed::Within,
+            std::cmp::Ordering::Greater => Placed::After,
         };
         return (placed, PlacedBy::Run);
     }

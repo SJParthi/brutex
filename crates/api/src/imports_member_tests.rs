@@ -866,7 +866,17 @@ fn an_empty_or_absent_journal_says_zero_holes_by_name() {
     let absent = crate::scratch::path("ia10a-absent");
     let _ = std::fs::remove_dir_all(&absent);
     std::fs::create_dir_all(&absent).expect("a scratch root");
-    for root in [&empty, &absent] {
+    // A plain `incomplete` beside a done day: an incomplete that is no hole.
+    let plain = store(
+        "plain-incomplete",
+        &[
+            key("done", "2019-03-01", "*", ""),
+            key("incomplete", "2019-03-04", "*", "stage=file reason=filing"),
+        ]
+        .concat(),
+        "",
+    );
+    for root in [&empty, &absent, &plain] {
         for got in [
             answer(root, &ask("feed=gdfl")).expect("reads"),
             summary(root),
@@ -874,10 +884,28 @@ fn an_empty_or_absent_journal_says_zero_holes_by_name() {
             assert_eq!(holes(&got).len(), 5, "{got:#}");
             assert!(holes(&got).iter().all(|(_, n)| *n == 0));
             assert_eq!(got["holes_unrepairable"], 0);
+            // NO HOLE, NO SENTENCE ABOUT HOLES: the note is owed only when
+            // a row is one.
+            assert!(
+                !got["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|note| note.as_str().is_some_and(|n| n.contains("are store holes"))),
+                "{:#}",
+                got["notes"]
+            );
         }
     }
+    let plain_got = answer(&plain, &ask("feed=gdfl")).expect("reads");
+    assert_eq!(
+        plain_got["counts"]["incomplete"], 1,
+        "{}",
+        plain_got["counts"]
+    );
     let _ = std::fs::remove_dir_all(&empty);
     let _ = std::fs::remove_dir_all(&absent);
+    let _ = std::fs::remove_dir_all(&plain);
 }
 
 /// **AN OPEN MEMBER KEY IS ONE MEMBER'S DAY, NOT THE SEGMENT'S** (item 4,
