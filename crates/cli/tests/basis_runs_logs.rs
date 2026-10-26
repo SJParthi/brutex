@@ -95,7 +95,12 @@ fn a_refused_run_says_why_on_its_log_as_well_as_on_stdout() {
                 the 1200 one run reads; name a narrower --from/--to. Nothing was written.";
     assert!(text.contains(line), "{text}");
     let refused = said(&store, "basis runs refused");
-    assert_eq!(refused.len(), 1, "{:?}", records(&store.join("logs").join("cli")));
+    assert_eq!(
+        refused.len(),
+        1,
+        "{:?}",
+        records(&store.join("logs").join("cli"))
+    );
     assert_eq!(refused[0].level, telemetry::Level::Error);
     assert_eq!(
         refused[0]
@@ -125,14 +130,20 @@ fn a_misused_run_says_why_on_its_log_as_a_warning() {
     assert_eq!(code, Some(2), "{text}");
     assert!(text.contains("usage: "), "{text}");
     let misused = said(&store, "basis runs misused");
-    assert_eq!(misused.len(), 1, "{:?}", records(&store.join("logs").join("cli")));
+    assert_eq!(
+        misused.len(),
+        1,
+        "{:?}",
+        records(&store.join("logs").join("cli"))
+    );
     assert_eq!(misused[0].level, telemetry::Level::Warn);
     let why = misused[0]
         .field("why")
         .and_then(telemetry::OwnedValue::as_str)
         .unwrap();
     assert!(
-        why.starts_with("refused: --from 1970-01 --to 9999-12: the window") && !why.contains("usage"),
+        why.starts_with("refused: --from 1970-01 --to 9999-12: the window")
+            && !why.contains("usage"),
         "the reason, not the usage text: {why}"
     );
 }

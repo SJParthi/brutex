@@ -623,7 +623,12 @@ pub(crate) fn command_with(
     let mut ask = match ask(arguments) {
         Ok(ask) => ask,
         Err(why) => {
-            let code = stopped(out, MISUSED, "basis runs misused", &format!("refused: {why}"));
+            let code = stopped(
+                out,
+                MISUSED,
+                "basis runs misused",
+                &format!("refused: {why}"),
+            );
             let _ = writeln!(out, "usage: {USAGE}");
             return code;
         }

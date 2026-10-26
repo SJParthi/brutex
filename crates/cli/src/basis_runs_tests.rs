@@ -585,10 +585,7 @@ fn a_measured_basis_run_ends_on_the_day_the_ratio_steps() {
         &mut other,
     );
     assert_eq!(code, OK, "{other}");
-    assert!(
-        other.contains("basis_runs generation 2 landed"),
-        "{other}"
-    );
+    assert!(other.contains("basis_runs generation 2 landed"), "{other}");
     let Slot::Store { receipt, .. } = load_one(
         &store.0,
         Table::BasisRuns,

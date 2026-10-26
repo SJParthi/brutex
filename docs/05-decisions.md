@@ -86494,3 +86494,73 @@ merged tree are `feat/db-fix`'s own. R426-25 to R426-27
 **Cost.** The walk is one step a month of the window, at most 1,200, and the
 counts one word a month, at most 1,201; each step's lookup is two reads and
 the slice of the months it names.
+
+### D-7198 — R4-26 repair 4: R4-26's gate-1d literals and measured-test prints are declared; `/basis.json`'s `factor` is D-3339's direction; a basis-runs generation names its commit and its directory canonically; a run that stops says why on `/logs` — 2026-10-26
+
+**Context.** The fourth check of R4-26 (`state/fix/round2/verify-R4-26-r4.json`)
+ran CI gates the repair-3 comparison had not looked at. Gate 1d ("every
+segment-shaped literal in crates/pull is declared") named 121 literals on
+R4-26's tree and not on `feat/db-fix`'s (603 against 482): the corporate-action
+table's columns, kinds and source tag, the checker's finding words, the
+anomaly classes, the halves of the tests' invented ratios split on their
+slash, and 52 scratch tags. Gate 23 ("stderr is not a log") refused the four
+`println!` of R4-26's measured tests, which ci.yml's gate 23 says a test's
+print needs declared too. Its follow-ups found `/basis.json`'s day `factor`
+in the opposite direction to `/sources/day.json`'s `measured_run.factor` for
+the same run (67/71 against 71/67 for TATASTEEL 2022-07-29); a kept table
+not read again when it lived behind a symbolic link (attack E7) or when its
+mode was repaired (attack E16); `day=1969-12-31` answered "is not
+YYYY-MM-DD"; no receipt, event or audit row naming the commit that folded a
+generation although `cli::store_write::WRITERS` says each must; a trailing
+slash, a link or a relative spelling of `--dir` landing a generation of its
+own (attack E1); and every refusal or failure of a run said on stdout alone.
+
+**Decision.**
+
+1. The 121 literals are `R4_26_LITERAL` in `.github/gates_tree.rs`, each read
+   at its site, with the reason for each kind; `DECLARED` is 78 groups. The
+   four prints are declared in ci.yml gate 23 with what each prints. Gate
+   1d's undeclared list and gate 23's refusals on R4-26's tree are
+   `feat/db-fix`'s own. **Not taken:** writing the tests' ratios through
+   `Ratio::new` and their scratch tags through `format!` to keep them out of
+   the gate's sight: that hides the literals rather than declaring them, the
+   act the gate exists to make deliberate.
+2. `/basis.json`'s day `factor` is GDFL ÷ Zerodha, D-3339's direction and the
+   word `/sources/day.json` uses, and the run's own Zerodha/GDFL ratio rides
+   beside it as `zerodha_over_gdfl` on both routes. A run's `ratio` stays the
+   stored column, Zerodha/GDFL, as `docs/02-store-format.md` names it.
+3. The kept tables' stamp holds the ctime as well as identity, mtime and
+   size, and follows a name that is a symbolic link with one more `stat`.
+4. A well-formed `YYYY-MM-DD` the calendar does not hold is answered as
+   that, with the calendar's range; only a malformed text is "not
+   YYYY-MM-DD".
+5. A `basis_runs` receipt's `source` begins `cli basis-runs at commit <sha>`
+   (`unstamped` for a build with no stamp), ahead of the directory a long
+   name may be cut from; the `basis runs written` and `measured ledger
+   written` events carry the commit too. `--dir` is made canonical before it
+   is read or named, so the same files spelled another way land nothing. A
+   build of another commit lands a generation of its own over the same
+   files: the receipt is where a reader of the table finds which code folded
+   it (L-R426-13).
+6. Every refusal and failure of `cli basis-runs` is one `cli.basis_runs`
+   event carrying the line stdout prints: an error for exit 1, a warning
+   for a misuse (exit 2), whose line holds the reason and not the usage
+   text. A share the fold refuses is counted on a warning naming the first
+   32 (L-R426-12).
+
+**Proof.** `gate_1d_declares_the_r4_26_reference_words` (run by gate 0) and
+CI gates 1d and 23 through `state/fix/ci-shell-gates.sh` on R4-26's tree and
+on `feat/db-fix`'s;
+`api::server::basis_route::tests::basis_json_answers_the_run_holding_a_day_and_names_every_outside`,
+`api::server::basis_route::tests::a_compare_inside_a_run_applies_its_factor`,
+`api::server::basis_route::tests::a_generation_landing_inside_a_linked_table_directory_is_read`,
+`api::server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`,
+`api::server::basis_route::tests::a_well_formed_day_the_calendar_does_not_hold_is_named_as_such`,
+`cli::basis_runs::tests::a_measured_basis_run_ends_on_the_day_the_ratio_steps`
+and the binary's `a_refused_run_says_why_on_its_log_as_well_as_on_stdout` and
+`a_misused_run_says_why_on_its_log_as_a_warning`. R426-28 to R426-33
+(`docs/04-invariants.md`); L-R426-03, L-R426-12 and L-R426-13
+(`docs/06-limits.md`).
+
+**Cost.** A kept answer is four `stat`s, eight at most when every name is a
+link; canonicalising `--dir` is one call a run.

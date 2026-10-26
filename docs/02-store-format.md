@@ -5171,7 +5171,9 @@ last day's: D-3339's `basis_step`), `drift` (the ratio walked out of the band) o
 is refused by name (the loader sorts nothing). At most 4,096 runs a share,
 and the per-share day tables a load builds (one `u16` per day of a share's
 span) at most 2^22 share-days in all. The receipt's `source` names the
-feed-reconcile directory and months read (and how many were missing), and
+commit of the `cli` build that folded the runs (`unstamped` for a build with
+no stamp; D-7198), then the feed-reconcile directory, canonical, and the
+months read (and how many were missing), and
 `source_sha256` is the SHA-256 of the list `<month> <file> <blake3>\n` of
 every file read.
 

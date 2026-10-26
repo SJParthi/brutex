@@ -487,12 +487,16 @@ fn a_well_formed_day_the_calendar_does_not_hold_is_named_as_such() {
         let why = asked(&format!("symbol=SPLITCO&day={text}")).unwrap_err();
         assert_eq!(
             why,
-            format!(
-                "day {text:?} is no calendar day: the calendar holds 1970-01-01 to 9999-12-31"
-            )
+            format!("day {text:?} is no calendar day: the calendar holds 1970-01-01 to 9999-12-31")
         );
     }
-    for text in ["2025-3-04", "2025/03/04", "20250304xx", "abcd-ef-gh", "2025-03-0a"] {
+    for text in [
+        "2025-3-04",
+        "2025/03/04",
+        "20250304xx",
+        "abcd-ef-gh",
+        "2025-03-0a",
+    ] {
         let why = asked(&format!("symbol=SPLITCO&day={text}")).unwrap_err();
         assert_eq!(why, format!("day {text:?} is not YYYY-MM-DD"));
     }
