@@ -558,7 +558,8 @@ impl Ledger {
     /// seen so far would cost each run the number of distinct answers, which
     /// the data sets (one per listing day, removal day or interval) and not a
     /// table, so a ledger of [`MAX_GAPS`] runs with as many answers was
-    /// quadratic.
+    /// quadratic. Proved by
+    /// `pull::gaps::not_owed_tests::not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers`.
     #[must_use]
     pub fn not_owed(&self) -> Vec<Excused> {
         let mut out: Vec<Excused> = Vec::with_capacity(NOT_OWED_KINDS);

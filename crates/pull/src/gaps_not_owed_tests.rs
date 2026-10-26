@@ -806,7 +806,10 @@ fn not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers() {
     };
     let (one_took, many_took) = (best(&one), best(&many));
     assert!(
-        many_took <= one_took.saturating_mul(16).max(std::time::Duration::from_micros(200)),
+        many_took
+            <= one_took
+                .saturating_mul(16)
+                .max(std::time::Duration::from_micros(200)),
         "{MAX_GAPS} distinct answers took {many_took:?} against {one_took:?} for one: \
          the cost grew with the answers"
     );

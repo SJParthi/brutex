@@ -1086,6 +1086,12 @@ confirmed by two skeptics; their corrections are applied.
   test prints, two owed benches and four merged flags (D-7147 addendum).
   Same cause as F12, now for the sixth time: no merge of the 24..26 Oct
   window ran the shell gates.
+- **BRED23-F22: R4-19's merge turned gate 11 red** (`RED 11` on the merge
+  of feat/db-fix 70eb5c5dd into this branch, bred1023-lp28): rule 6 refused
+  `pull::gaps::Ledger::not_owed`'s search through the answers seen so far.
+  FIXED in code: one hash probe a run, rows unchanged, 580x before and within
+  16x after in the same run (D-7150 addendum, BRED-22). Same cause as F12,
+  for the seventh time: the merge did not run the shell gates.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

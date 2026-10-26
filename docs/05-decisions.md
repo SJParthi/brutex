@@ -83531,6 +83531,21 @@ the five hash probes the fixes add, are declared in `.github/gates_ledger.rs`
 with their bound, none per row of a read; docs/06-limits.md "Gate 11 —
 BASE-REDS-1023: the 24..26 Oct merges" lists each. lp24 after the fix: gate
 11 green but for the five probes, then declared (lp25).
+
+**Addendum, 27 Oct 2026 (R4-19).** R4-19 merged without running gate 11,
+whose rule 6 refused one new site on this package's merge of feat/db-fix
+70eb5c5dd (state/fix/ci-gates-logs/bred1023-lp28): `pull::gaps::Ledger::not_owed`
+found each run's row by `out.iter_mut().find(..)`, a search through the
+distinct answers seen so far, which the data sets (one per listing day,
+removal day or interval) and not a table. Fixed in code, not declared: a
+map from the answer to its row, pre-sized to the four kinds, one probe a
+run; `NotOwed` and `cash_auction::InactiveInterval` derive `Hash`. The rows
+and their order are unchanged. Measured in the same run, best of 31, at
+`MAX_GAPS` runs: before, 6.39 ms with every run a distinct answer against
+11 us with one (580x, the test failed); after, within 16x and passing
+(`pull::gaps::not_owed_tests::not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers`).
+lp30 after the fix: language-purity --fast RED none (BRED-22).
+
 ### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
 
 Two gaps verify-BASE-GATE11-r1 named in `.github/gates_ledger.rs`:
