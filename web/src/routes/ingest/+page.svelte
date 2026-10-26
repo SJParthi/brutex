@@ -38,6 +38,7 @@
    * extrapolations as extrapolations.
    */
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
+  import { fnoDeclinedWhy, fnoPartialWhy, fnoSegmentsOf } from '$lib/fno-modes.js';
   import { cashIdentityFor, DEFAULT_ZERODHA_CASH_IDENTITY } from '$lib/cash-identity.js';
   import { singleMemberBody } from '$lib/row-pull.js';
   import Picker from '$lib/Picker.svelte';
@@ -3012,13 +3013,15 @@
   /**
    * WHICH FEEDS CAN ANSWER AN EXPIRED-F&O REQUEST AT ALL.
    *
-   * `/feeds.json` states it as `fno`, one of four words, because there are
-   * four cases and they are not a yes/no:
+   * `/feeds.json` states it as `fno`, one of five words, because there are
+   * five cases and they are not a yes/no (`$lib/fno-modes.js` holds the
+   * table this page answers from):
    *
-   *   by_name           — a discovery walk over contract names. This is the
-   *                       only shape `POST /pull/fno` builds today.
+   *   by_name           — a discovery walk over contract names.
    *   by_strike_offset  — no names to discover: the request names ATM±n and an
-   *                       expiry CODE. A different builder, not yet written.
+   *                       expiry CODE; options only.
+   *   by_token          — futures day candles per contract through a token
+   *                       resolved by date (D-7186); futures only.
    *   none              — the vendor serves no derivative history.
    *   local_folder      — an archive. Its expired contracts are files on disk,
    *                       not an answer to a GET, and never will be.
@@ -3050,13 +3053,14 @@
    * `v2/charts/rollingoption`, and `fno_roll` refuses `Series::Futures` by
    * name. Sending it a futures request would earn a refusal this page can
    * predict, so it does not send one.
+   *
+   * FUTURES ONLY FOR A TOKEN FEED (R4-28 repair 5): Zerodha states `by_token`
+   * since D-7186, a word this page did not know, so it was declined as
+   * "states no expired-derivative history", which is false for it. The five
+   * words and what each is asked for live in `$lib/fno-modes.js`.
    */
-  const fnoSegmentsFor = (/** @type {string} */ wire) => {
-    const how = feeds.all.find((f) => f.wire === wire)?.fno;
-    if (how === 'by_name') return ['futures', 'options'];
-    if (how === 'by_strike_offset') return ['options'];
-    return [];
-  };
+  const fnoSegmentsFor = (/** @type {string} */ wire) =>
+    fnoSegmentsOf(feeds.all.find((f) => f.wire === wire)?.fno);
 
   const fnoCapable = $derived(
     feedsChosen.filter((v) => fnoSegmentsFor(v).length > 0)
@@ -3074,15 +3078,11 @@
       .map((v) => ({ wire: v, how: feeds.all.find((f) => f.wire === v)?.fno }))
       /* NOW ONLY THE FEEDS THAT GENUINELY CANNOT BE ASKED. `by_strike_offset`
          used to land here with a reason that was not true — see `fnoCapable`.
-         It is served now, so it is no longer declined. */
-      .filter((x) => x.how !== 'by_name' && x.how !== 'by_strike_offset')
-      .map((x) => ({
-        feed: feedName(x.wire),
-        why:
-          x.how === 'local_folder'
-            ? 'is a folder of files, not an endpoint — there is no expiry list to ask it for.'
-            : 'states no expired-derivative history.'
-      }))
+         It is served now, so it is no longer declined; so is `by_token`
+         (R4-28 repair 5). A word the table does not know is declined and
+         named as unknown, never read as "no history". */
+      .filter((x) => fnoSegmentsOf(x.how).length === 0)
+      .map((x) => ({ feed: feedName(x.wire), why: fnoDeclinedWhy(x.how) }))
   );
 
   /**
@@ -3092,15 +3092,14 @@
    * silent drop lives. Dhan answers expired OPTIONS by strike offset and has no
    * expired-futures endpoint at all — so a run that ticks both segments sends it
    * one and not the other, and this line is what stops that being invisible.
+   * Zerodha is the mirror case: expired FUTURES through a token, no options
+   * (R4-28 repair 5). Each line's reason is its own feed's, from the table.
    */
   const fnoPartial = $derived(
     fnoCapable
-      .map((v) => ({ wire: v, segs: fnoSegmentsFor(v) }))
-      .filter((x) => x.segs.length > 0 && x.segs.length < 2)
-      .map((x) => ({
-        feed: feedName(x.wire),
-        why: `serves expired ${x.segs.join(' and ')} only — its endpoint is v2/charts/rollingoption, which addresses options by ATM±n and publishes no expired-futures series.`
-      }))
+      .map((v) => ({ wire: v, how: feeds.all.find((f) => f.wire === v)?.fno }))
+      .filter((x) => fnoPartialWhy(x.how) !== '')
+      .map((x) => ({ feed: feedName(x.wire), why: fnoPartialWhy(x.how) }))
   );
 
   const fnoBodies = $derived(

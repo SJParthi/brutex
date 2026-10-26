@@ -394,6 +394,11 @@ fn feeds_body(site: &Loaded, settings: &crate::server::settings_route::Snapshot)
                     "by_name"
                 } else if spec.fno.by_offset().is_some() {
                     "by_strike_offset"
+                } else if spec.fno.by_token().is_some() {
+                    // FUTURES DAY CANDLES THROUGH A TOKEN (R4-28, CON-12;
+                    // D-7186): a fourth word, because the request builder is
+                    // a fourth one and options are refused on it.
+                    "by_token"
                 } else {
                     "none"
                 }

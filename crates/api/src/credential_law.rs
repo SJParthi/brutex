@@ -238,7 +238,18 @@ impl Script {
         let vendor = feed
             .store_vendor()
             .ok_or_else(|| Unreadable::configuration("no store prefix".to_owned()))?;
-        let source = HttpSource::new(spec, pull::http::Credential::token(token))
+        // A TWO-SECRET FEED TAKES ITS KEY AND TOKEN FROM ONE ANSWER,
+        // `key:token`, so a script can stand in for a feed whose auth names a
+        // key field (Zerodha) as `server::read_credential` does with two
+        // parameters. A one-secret answer for such a feed is still refused by
+        // `HttpSource::new`, by name.
+        let credential = match (spec.auth.key_field, token.split_once(':')) {
+            (Some(_), Some((key, token))) => {
+                pull::http::Credential::pair(key.to_owned(), token.to_owned())
+            }
+            _ => pull::http::Credential::token(token),
+        };
+        let source = HttpSource::new(spec, credential)
             .map_err(|why| Unreadable::configuration(why.to_string()))?;
         Ok((source, vendor))
     }

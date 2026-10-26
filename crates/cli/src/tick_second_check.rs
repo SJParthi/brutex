@@ -2659,7 +2659,7 @@ fn elapsed(started: Instant) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// The CSV header.
-pub(crate) const HEADER: &str = "symbol,day,role,source,status,compare,session,file,source_name,\
+pub const HEADER: &str = "symbol,day,role,source,status,compare,session,file,source_name,\
 landing,checked_by,raw_rows,kept_rows,zero_ltp,off_grid,malformed,refused_whole,negative_ltp,\
 negative_qty,crossed_quote,one_sided_quote,identical_consecutive,out_of_order,late_traded,\
 ltq0_rows,ltq0_new_price,auction_prints,auction_volume,auction_in_sidecar,trades_in_session,\

@@ -958,7 +958,10 @@ fn dpn_08_every_underlying_with_decimal_and_extreme_strikes() {
         );
     }
     assert_eq!(tried, (FNO_UNDERLYINGS.len() - not_in_use) * 20);
-    assert_eq!(not_in_use, 6, "the symbols adopted after 2024-04-01");
+    // R4-22 (D-7311): `GVT&D`, adopted 2024-11-05 (`GET&D` before it), is
+    // the seventh; the other eight rows R4-22 added name symbols adopted
+    // before 2024-04-01 or outside the F&O list.
+    assert_eq!(not_in_use, 7, "the symbols adopted after 2024-04-01");
     // A zero strike is no strike.
     assert!(decode_ticker("X25APR240CE", on).is_err());
     assert!(decode_ticker("X25APR240.0CE", on).is_err());
@@ -1378,7 +1381,7 @@ fn dpn_13_a_hundred_thousand_bent_files_never_panic_and_refuse_at_a_line() {
                 refused += 1;
                 match why {
                     NfoRefusal::RowsOverCap { cap } => assert_eq!((cap, n), (4, n.max(5))),
-                    NfoRefusal::HeaderUnknown => panic!("the header was intact"),
+                    NfoRefusal::HeaderUnknown { .. } => panic!("the header was intact"),
                     NfoRefusal::TickerMismatch { line }
                     | NfoRefusal::DateMismatch { line }
                     | NfoRefusal::MalformedRow { line }
@@ -1564,7 +1567,9 @@ fn dpn_17_exactly_the_two_measured_headers_read() {
         let text = format!("{bad}\r\n{row}\r\n");
         assert_eq!(
             decode(text.as_bytes(), STEM, on),
-            Err(NfoRefusal::HeaderUnknown),
+            Err(NfoRefusal::HeaderUnknown {
+                shape: crate::gdfl_cm::HeaderShape::of(bad.as_bytes())
+            }),
             "{bad:?}"
         );
     }

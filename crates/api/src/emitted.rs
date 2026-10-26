@@ -1243,6 +1243,7 @@ fn cases() -> Vec<Case> {
                             verdict: pull::masters::Verdict::Never,
                         },
                     }],
+                    snapshot: None,
                 };
                 crate::mastersrun::record(
                     source,
@@ -1545,16 +1546,17 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
         let found = landed(from, case.target, case.message);
         let mine: Vec<&telemetry::Record> =
             found.iter().filter(|record| (case.mine)(record)).collect();
+        // Bound before the assertion so the message's values are computed on
+        // every run, not only on the failing one a passing suite never takes.
+        let (file, on_target) = (sink.path().display().to_string(), found.len());
         assert!(
             !mine.is_empty(),
-            "{}: the production call wrote no {:?} record with message {:?} to {}. \
-             {} record(s) on that target did land in the window; either the emit \
+            "{}: the production call wrote no {:?} record with message {:?} to {file}. \
+             {on_target} record(s) on that target did land in the window; either the emit \
              is gone or its fields changed.",
             case.site,
             case.target,
             case.message,
-            sink.path().display(),
-            found.len(),
         );
         for record in mine {
             assert_eq!(
@@ -1567,10 +1569,10 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
         }
     }
 
+    let health = sink.health();
     assert!(
-        !sink.health().is_loud(),
-        "nothing was dropped while proving the sites: {:?}",
-        sink.health(),
+        !health.is_loud(),
+        "nothing was dropped while proving the sites: {health:?}",
     );
 }
 
@@ -1801,10 +1803,10 @@ fn lib_emit_sites() -> usize {
         .filter(|path| path.file_name().is_some_and(|name| name != "main.rs"))
         .collect();
     paths.sort();
+    let read = paths.len();
     assert!(
-        paths.len() > 8,
-        "read only {} source file(s) — the layout changed and this stopped counting",
-        paths.len()
+        read > 8,
+        "read only {read} source file(s) — the layout changed and this stopped counting",
     );
     paths
         .iter()
@@ -1955,7 +1957,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // bars_export::tests::a_streamed_export_stops_when_cancelled`,
     // `the_export_is_every_page_of_the_window_in_its_order` and
     // `rows_that_change_mid_export_cut_the_stream_with_a_warning`.
-    const REACHED_IN_SERVER_TESTS: usize = 32;
+    // 32 -> 33 at DATA-1w (D-5196): `api.feed_checks check file refused`, the
+    // one site `feed_checks_files::note_refused`, reached from `hold` once per
+    // refused version and read back by `server::feed_checks::tests::
+    // a_refused_version_is_read_once_and_a_newer_version_is_read_afresh`.
+    const REACHED_IN_SERVER_TESTS: usize = 33;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2180,9 +2186,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 95 -> 96 at R3-10: the streamed export's one line
     // (`server::bars_export::ExportBody::end`), named above
     // `REACHED_IN_SERVER_TESTS`.
+    //
+    // 96 -> 97 at DATA-1w (D-5196): `api.feed_checks check file refused`
+    // (`server::feed_checks_files::note_refused`), named above
+    // `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 96,
+        lib_sites, 97,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

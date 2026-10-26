@@ -1065,3 +1065,12 @@ confirmed by two skeptics; their corrections are applied.
   (`causal_tests::...`, `measure_tests::...`), BRED-17 names its run folder
   instead of the hash (bred1023-full10). Gate 1e stopped at its first failing
   test binary (api) and never reached either.
+
+### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
+
+One row, for the guard that went red, because it breaks a written rule (design
+§12 revision 5, no GDFL row committed in a public repository).
+
+| ID | Sev | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `base-fixture-1025` | `law` | `pull`'s `fixtures_are_built_not_pasted` failed on every head of `feat/db-fix` from `e851da1ca` (DATA-2) on: `the_census_is_one_pass_and_its_work_grows_with_the_rows_alone` typed two whole capital-market rows (invented `ZZ.NSE` values, so nothing real was redistributed, but the guard cannot tell invented from quoted); four more lines of the same file typed rows that escaped the detector only by a minus sign, a missing field or a placeholder. First seen by the full gate on `666ddf7f7`, re-seen on `bf9b1c8ff`. | `crates/cli/src/tick_second_check_tests.rs` | `IN PROGRESS` — fixed on `fix/db-BASE-FIXTURE-1025` (every row joined by `cm_row`, short lines cut by `first_fields`, the guard unchanged); becomes `FIXED <sha>` when it lands on `feat/db-fix`. D-7215 |

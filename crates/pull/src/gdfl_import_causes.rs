@@ -889,7 +889,18 @@ pub const fn cm_cause(why: &CmRefusal) -> Cause {
         CmRefusal::FolderUnknown => Cause::vendor("folder_unknown"),
         CmRefusal::ExtensionUnknown => Cause::vendor("extension_unknown"),
         CmRefusal::AmbiguousCaseTwins => Cause::vendor("ambiguous_case_twins"),
-        CmRefusal::HeaderUnknown => Cause::vendor("header_unknown"),
+        // ERR-11 (R4-22, D-7312): a header this reader does not know is a
+        // vendor FORMAT change, not a fault of these bytes the same reader
+        // refuses the same way for ever: a build that reads the new header
+        // fills the day, so it never closes one (until D-7312 it closed every
+        // day "done with refusals", and the day was never read again).
+        CmRefusal::HeaderUnknown { .. } => Cause::open(Stage::Vendor, "header_unknown"),
+        // ERR-11 (D-7312 item 5): every row of one other field count under a
+        // known header is the same format change, its rows' column set.
+        CmRefusal::ColumnsChanged(_) => Cause::open(Stage::Vendor, "columns_changed"),
+        // G3 (D-7310): the written series rule refuses a share's day file of
+        // a series the store does not file, the same way every time.
+        CmRefusal::SeriesNotStored { .. } => Cause::vendor("series_not_stored"),
         CmRefusal::TickerMismatch { .. } => Cause::vendor("ticker_mismatch"),
         CmRefusal::DateMismatch { .. } => Cause::vendor("date_mismatch"),
         CmRefusal::MalformedRow { .. } => Cause::vendor("malformed_row"),
@@ -964,7 +975,9 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         NfoRefusal::TickerAmbiguous { .. } => Cause::vendor("ticker_ambiguous"),
         NfoRefusal::ContractNamedTwice { .. } => Cause::vendor("contract_named_twice"),
         NfoRefusal::DuplicateTicker { .. } => Cause::vendor("duplicate_ticker"),
-        NfoRefusal::HeaderUnknown => Cause::vendor("header_unknown"),
+        // ERR-11 (R4-22, D-7312): as the capital market's, an open cause.
+        NfoRefusal::HeaderUnknown { .. } => Cause::open(Stage::Vendor, "header_unknown"),
+        NfoRefusal::ColumnsChanged(_) => Cause::open(Stage::Vendor, "columns_changed"),
         NfoRefusal::TickerMismatch { .. } => Cause::vendor("ticker_mismatch"),
         NfoRefusal::DateMismatch { .. } => Cause::vendor("date_mismatch"),
         NfoRefusal::MalformedRow { .. } => Cause::vendor("malformed_row"),

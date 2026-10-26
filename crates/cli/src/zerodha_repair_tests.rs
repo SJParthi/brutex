@@ -100,6 +100,7 @@ fn land(root: &Path, symbol: &str, from: Day, to: Day) {
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     };
     let done = pull::ingest::from_window(
         &RawWindow {
@@ -224,6 +225,7 @@ fn a_short_session_is_listed_and_counted() {
             exchange: "NSE",
             segment: "INDEX",
             contract: None,
+            run: 0,
         },
     );
     assert!(done.bars_committed > 0, "{:#?}", done.failures);
@@ -352,5 +354,193 @@ fn misuse_is_refused_by_name() {
         assert_eq!(code, MISUSED, "{arguments:?}: {out}");
         assert!(out.contains(why), "{arguments:?}: {out}");
         assert!(out.contains(USAGE), "{out}");
+    }
+}
+
+// ------------------------------------------------------------------ IA-10c --
+
+/// The non-seed records of `root`'s runs ledger, as `(id, mode, by)`.
+fn ledger_records(root: &Path) -> Vec<(u64, String, String)> {
+    pull::gdfl_run::ledger::read_all(root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.mode != "seed")
+        .map(|entry| (entry.id, entry.mode, entry.by))
+        .collect()
+}
+
+/// IA-GR-43, the cli's half (D-4880, D-6260): `cli zerodha-repair
+/// --from-store` takes one `zerodha-repair` id before it opens the store,
+/// and every repair-journal and gap line it writes says `run=` that id (never
+/// run 0); its `repaired` gap lines say `origin=store` (D-6261), so its
+/// minutes are verified cold only.
+#[test]
+fn every_zerodha_landing_takes_one_runs_ledger_id() {
+    let store = Root::new();
+    let source = Root::new();
+    land(&store.0, "FIXIDX", day(2020, 12, 16), day(2020, 12, 31));
+    land(&source.0, "FIXIDX", day(2020, 12, 1), day(2020, 12, 31));
+    let source_root = source.0.display().to_string();
+    let (code, out) = store.run(&[
+        "FIXIDX",
+        "2020-12-01",
+        "2020-12-31",
+        "--from-store",
+        source_root.as_str(),
+        "--reason",
+        "fixture repair",
+    ]);
+    assert_eq!(code, OK, "{out}");
+    let records = ledger_records(&store.0);
+    let [(run, mode, by)] = records.as_slice() else {
+        panic!("{records:?}");
+    };
+    assert_eq!((mode.as_str(), by.as_str()), ("zerodha-repair", "cli"));
+    assert!(
+        out.contains(&format!("run {run} (zerodha-repair, runs ledger)")),
+        "{out}"
+    );
+    let journal = fs::read_to_string(store.0.join("audit").join("zerodha.repairs")).unwrap();
+    for line in journal.lines().filter(|l| l.contains("FIXIDX")) {
+        assert!(line.ends_with(&format!(" run={run}")), "{line}");
+    }
+    let gaps = fs::read_to_string(store.0.join("audit").join("zerodha.gaps")).unwrap();
+    let repaired: Vec<&str> = gaps
+        .lines()
+        .filter(|l| l.starts_with("gap NSE-INDEX-FIXIDX ") && l.contains(" why=repaired "))
+        .collect();
+    assert!(!repaired.is_empty(), "{gaps}");
+    for line in &repaired {
+        assert!(
+            line.ends_with(&format!(" run={run} origin=store")),
+            "{line}"
+        );
+    }
+    // NO RECEIPT AND NO SPOOL: no Kite request was made.
+    assert!(!store.0.join("responses").exists());
+    assert!(!store.0.join("verify").join("spool").exists());
+    // The vendor's claim names this run while it lands, and is free after.
+    let note = fs::read_to_string(store.0.join("imports").join("zerodha.landing.lock")).unwrap();
+    assert!(
+        note.contains(&format!("run {run} (zerodha-repair FIXIDX)")),
+        "{note}"
+    );
+}
+
+/// FM-163: a `cli zerodha-repair --from-store` while an api pull holds
+/// Zerodha's landing claim is refused, naming the holder, before anything is
+/// read or written: no id, no journal line, no bar.
+#[test]
+fn zerodha_repair_refuses_while_a_pull_run_holds_the_vendor() {
+    let store = Root::new();
+    let source = Root::new();
+    land(&store.0, "FIXIDX", day(2020, 12, 16), day(2020, 12, 31));
+    land(&source.0, "FIXIDX", day(2020, 12, 1), day(2020, 12, 31));
+    let api = pull::ingest::landing_run::claim(
+        &store.0,
+        brutex_core::vendor::Vendor::Zerodha,
+        pull::gdfl_run::locks::Hold::Shared,
+        "api pid 4242 run 1761190000 (pull-spot)",
+    )
+    .unwrap();
+    let source_root = source.0.display().to_string();
+    let arguments = [
+        "FIXIDX",
+        "2020-12-01",
+        "2020-12-31",
+        "--from-store",
+        source_root.as_str(),
+        "--reason",
+        "fixture repair",
+    ];
+    let (code, out) = store.run(&arguments);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED: run_busy"), "{out}");
+    assert!(
+        out.contains("api pid 4242 run 1761190000 (pull-spot)"),
+        "{out}"
+    );
+    assert!(ledger_records(&store.0).is_empty(), "no id was spent");
+    assert!(!store.0.join("audit").join("zerodha.repairs").exists());
+    drop(api);
+    let (code, out) = store.run(&arguments);
+    assert_eq!(code, OK, "once the pull let go: {out}");
+}
+
+/// D-4903 for a Zerodha repair (D-6265): a `--from-store` run whose event
+/// sink was refused is refused `log_unavailable` before the store is opened;
+/// a read-only plan is not (it writes nothing).
+#[test]
+fn a_repair_with_its_sink_refused_is_refused_before_the_store_opens() {
+    let store = Root::new();
+    let source = Root::new();
+    land(&source.0, "FIXIDX", day(2020, 12, 1), day(2020, 12, 31));
+    let source_root = source.0.display().to_string();
+    let refused = pull::gdfl_run::LogState::Refused("another cli holds logs/cli".to_owned());
+    let root = store.0.clone();
+    let mut out = String::new();
+    let code = super::command_in(
+        &[
+            "FIXIDX",
+            "2020-12-01",
+            "2020-12-31",
+            "--from-store",
+            source_root.as_str(),
+            "--reason",
+            "fixture repair",
+        ],
+        (&move || Ok(root.clone()), &refused),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("log_unavailable"), "{out}");
+    assert!(out.contains("another cli holds logs/cli"), "{out}");
+    assert_eq!(
+        fs::read_dir(&store.0).unwrap().count(),
+        0,
+        "nothing was created in the store: {out}"
+    );
+    let root = store.0.clone();
+    let mut out = String::new();
+    let code = super::command_in(
+        &["FIXIDX", "2020-12-01", "2020-12-31"],
+        (&move || Ok(root.clone()), &refused),
+        &mut out,
+    );
+    assert_ne!(code, MISUSED, "a plan is not refused for its sink: {out}");
+    assert!(!out.contains("log_unavailable"), "{out}");
+}
+
+/// IA-GR-42 for `cli zerodha-repair --reason` (D-6264): the one rule both
+/// feeds apply, judged as given: 200 bytes taken, 201 refused, a tab refused
+/// (leading too), blanks alone refused.
+#[test]
+fn one_repair_reason_rule_for_both_feeds() {
+    let store = Root::new();
+    let taken = "r".repeat(200);
+    let over = "r".repeat(201);
+    for (reason, ok) in [
+        (taken.as_str(), true),
+        (over.as_str(), false),
+        ("a\ttab", false),
+        ("\tleading", false),
+        ("   ", false),
+    ] {
+        let (code, out) = store.run(&[
+            "FIXIDX",
+            "2020-12-01",
+            "2020-12-31",
+            "--from-store",
+            "/nowhere",
+            "--reason",
+            reason,
+        ]);
+        assert_eq!(code == MISUSED, !ok, "{reason:?}: {out}");
+        assert_eq!(
+            out.contains("--reason is one line of at most 200 bytes"),
+            !ok,
+            "{reason:?}: {out}"
+        );
     }
 }

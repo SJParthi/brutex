@@ -129,6 +129,7 @@ fn plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
         exchange: "NSE",
         segment: "CASH",
         contract: None,
+        run: 0,
     }
 }
 

@@ -174,7 +174,7 @@ const PRICE_CEILING: i128 = 1 << 60;
 const BOUND_CEILING: i128 = 1 << 62;
 
 /// The column header, in output order.
-pub(crate) const COLUMNS: &str = "symbol,day,day_kind,status,applied_lag,lag_source,\
+pub const COLUMNS: &str = "symbol,day,day_kind,status,applied_lag,lag_source,\
 gdfl_day_volume,zerodha_day_volume,zerodha_minute_volume,gdfl_vs_day_pct,zmin_vs_day_pct,\
 zmin_vs_gdfl_pct,gdfl_seconds,gdfl_minutes,zerodha_minutes,matched_minutes,median_z,median_g,\
 min_z,min_g,max_z,max_g,interval_lo,interval_hi,emptied_at,emptied_pair,opposing_pair,range_lo,\

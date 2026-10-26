@@ -126,6 +126,7 @@ fn land(root: &Path, symbol: &str, granularity: pull::vendor::Granularity, rows:
             exchange: "NSE",
             segment: "INDEX",
             contract: None,
+            run: 0,
         },
     );
     assert!(done.failures.is_empty(), "{:?}", done.failures);

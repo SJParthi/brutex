@@ -1214,6 +1214,28 @@ impl SeriesPlan {
         let Ok(address) = StorePath::new(parts) else {
             return;
         };
+        // A MONTH QUARANTINED WHOLE IS NAMED, AND THE REST OF THE WINDOW IS
+        // SERVED (R4-18): one probe per month opened, two positional reads
+        // (the index header and the key's bucket), O(1) whatever the store holds.
+        match store::quarantine::probe(root, address) {
+            Ok(store::quarantine::Probe::Quarantined(entry))
+                if entry.scope == store::quarantine::Scope::WholeMonth =>
+            {
+                self.faults.push(format!(
+                    "{month}: quarantined, not served: all {} bars are {} (audit/{}.quarantine.ledger at byte {})",
+                    entry.bars,
+                    entry.causes.said(),
+                    self.vendor.as_str(),
+                    entry.ledger_at
+                ));
+                return;
+            }
+            Ok(_) => {}
+            Err(why) => {
+                self.faults.push(format!("{month}: {why}"));
+                return;
+            }
+        }
         // THE FILE EVERY READER OPENS, which a repair makes a revision's
         // (D-3350): the header and runs memos are keyed by it, so a promotion
         // is a new key and never a stale hit on the original's stamp.

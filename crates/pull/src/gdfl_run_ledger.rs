@@ -22,25 +22,60 @@
 //!
 //! Under `audit/runs.ledger.lock` (taken within [`super::locks::LOCK_WAIT`],
 //! D-4906): it reads the last whole record at L = ⌊len ÷ 128⌋ × 128 − 128
-//! (one positional read of 128 bytes), takes `id = max(now, last + 1)`,
-//! writes its record at ⌊len ÷ 128⌋ × 128, over any torn tail, and syncs.
+//! (one positional read of 128 bytes) and the claims' tail (one positional
+//! read of at most [`CLAIMS_TAIL`] bytes), takes `id = max(now, last + 1)`
+//! where `last` is the newer of the ledger's last record and the claims' last
+//! line whose CRC verifies, writes its record at ⌊len ÷ 128⌋ × 128, over any
+//! torn tail, and syncs; then appends the id's claims line (one 1-byte read
+//! of the claims' tail, one write) and syncs again (D-6269).
 //!
 //! A crash's leftovers (round 4, SF-12): bytes past the last whole record are
 //! a torn append and are written over; a last whole record whose CRC fails is
-//! an append that never finished its sync, so its id was never used: the
-//! record before it is read (a second 128-byte read), `last` is taken from
-//! it, and the new record is written at L over the bad one. A ledger shorter
-//! than one record, or whose only record fails its CRC, is unborn and is
-//! seeded again. TWO bad records at the tail cannot come from one interrupted
-//! append: [`RunsLedgerFault::Damaged`] names the offset, an error event and
-//! an alert (kind `runs_ledger_damaged`, keyed per offset) are put, and no
-//! run of either feed starts until the operator has looked: never skipped,
-//! never repaired silently.
+//! most likely an append that never finished its sync, whose id was never
+//! used, but may be a record a run was given and then lost to bit rot (IA-2
+//! repair 2, D-5901): the record before it is read (a second 128-byte read),
+//! `last` is taken from it, the new id is raised past the largest id the
+//! claims and the GDFL journal hold (below), and the new record is written
+//! at L over the bad one. A ledger shorter than one record, or whose only
+//! record fails its CRC, is unborn and is seeded again. TWO bad records at
+//! the tail cannot come from one interrupted append:
+//! [`RunsLedgerFault::Damaged`] names the offset, an error event and an
+//! alert (kind `runs_ledger_damaged`, keyed per offset) are put, and no run
+//! of either feed starts until the operator has looked: never skipped, never
+//! repaired silently.
+//!
+//! **Every id is written down twice** (IA-10c repair 2, D-6269): after its
+//! record is synced and before the id is handed out, still under the lock,
+//! one line `run <id> <mode> <kind> <by> <pid> <started>` (then
+//! ` resumes=<id>`, then the record's own ` crc=<8 hex>`) is appended to
+//! [`CLAIMS`] and synced. A run of any feed and mode is in it whether or not
+//! it ever writes a journal line, so a lost last record is raised past from
+//! it: before, only the GDFL journal was read, and a Zerodha landing's lost
+//! id, which no journal line holds, was given again to the next landing under
+//! a clock at or behind it. A claims line that cannot be written refuses the
+//! allocation (`runs_ledger_io`); the id's record stays in the ledger,
+//! unused, and later ids go past it.
+//!
+//! **A ledger behind its claims is raised past them** (IA-10c repair 3,
+//! D-6269): the claims line is synced after its record, so the claims' last
+//! line never names a later id than the ledger's last record unless the
+//! ledger lost records WHOLE (a drive that dropped a flushed append, a
+//! ledger put back from an older copy), which its own bytes cannot show.
+//! Every allocation therefore reads the claims' tail, and a later id there
+//! is the `last` the new id goes past, said at `warn` with an alert (kind
+//! `runs_ledger_damaged`, keyed per claimed id). A claims line is trusted
+//! only when its CRC verifies (the record is rebuilt from it and read as a
+//! record is), so a rotted line can neither lift every later id past what a
+//! receipt holds nor hide one; whole lines at the tail that fail it are said
+//! at `warn`. Claims that are not a regular file (a link, a pipe, a
+//! directory) refuse the allocation `runs_ledger_io` before anything is
+//! written, and are never waited on.
 //!
 //! **Seeding** (L-IA-23): the first record of an unborn ledger is
 //! `<n> seed - - 0 <now>`, where `n` is the largest `run` id the GDFL journal
-//! holds (one pass over the journal, once per store), so no id a journal line
-//! already carries is given again.
+//! and the claims (their lines whose CRC verifies) hold, one pass over each,
+//! once per store, so no id a journal line or a claims line already carries
+//! is given again.
 //!
 //! **A clock that cannot be right is refused** (RA-292, RA-326):
 //! `clock_implausible` when today is before the calendar's first day, more
@@ -62,8 +97,17 @@ use super::locks::{self, LockFault, TARGET};
 pub const LEDGER: &str = "audit/runs.ledger";
 /// Its lock.
 pub const LEDGER_LOCK: &str = "audit/runs.ledger.lock";
+/// Its claims: one `run <id> ...` line per id given, appended under
+/// [`LEDGER_LOCK`] after the id's record is synced (D-6269).
+pub const CLAIMS: &str = "audit/runs.claims";
 /// One record's bytes.
 pub const RECORD: u64 = 128;
+/// The claims' tail every allocation reads (IA-10c repair 3, D-6269): four
+/// records' worth. A claims line is at most 131 bytes and its line break
+/// (`run `, a body of at most 114 bytes, ` crc=` and 8 hex digits), so a
+/// torn last fragment and a first line the read cuts into still leave one
+/// whole line inside it.
+pub const CLAIMS_TAIL: u64 = 4 * RECORD;
 /// The bytes the CRC covers.
 pub const BODY: usize = 114;
 /// One day, in seconds: how far behind the newest record a clock may be.
@@ -284,10 +328,14 @@ impl LedgerHold {
     }
 
     /// Allocates the next id for `entry` (its `id` ignored, its `started`
-    /// the clock), writes its record and syncs it. O(1): one or two 128-byte
-    /// reads and one write (seeding once per store, and one pass over the
-    /// journal when a damaged last record is written over, which is rare and
-    /// said at `warn`: O(journal) then, bounded by L-IA-23's seed); measured by
+    /// the clock), writes its record and syncs it, then appends its claims
+    /// line and syncs that (D-6269). O(1): one or two 128-byte reads of the
+    /// ledger and one read of at most [`CLAIMS_TAIL`] bytes of the claims'
+    /// tail, one write and one sync of the record, one 1-byte read, one write
+    /// and one sync of the claims line (seeding once per store, and one pass
+    /// over the journal and the claims when a damaged last record is written
+    /// over, which is rare and said at `warn`: O(journal + claims) then,
+    /// bounded by L-IA-23's seed); measured by
     /// `pull::gdfl_run::ia2_tests::ia2_timings` (C-GR-08).
     ///
     /// # Errors
@@ -310,15 +358,27 @@ impl LedgerHold {
                 Err(why) => Err(io(why)),
             }
         };
-        // (offset to write at, the last record's id and start; `None` when
-        // the ledger is unborn and is seeded at 0; and, when a damaged last
-        // record is written over, the largest run id the journal holds).
+        // (offset to write at, the last record's id and start, or the claims'
+        // last line's when that is later; `None` when the ledger is unborn and
+        // is seeded at 0; and, when a damaged last record is written over, the
+        // largest run id the journal and the claims hold).
         let (mut at, last, used) = if whole == 0 {
             (0, None, None)
         } else {
             let tail = (whole - 1) * RECORD;
             match read(tail)? {
-                Some(last) => (whole * RECORD, Some(last), None),
+                // A HEALTHY LAST RECORD IS NOT ASSUMED THE LAST ID GIVEN (IA-10c
+                // repair 3, D-6269): a ledger that lost records whole (a drive
+                // that dropped a flushed append, a ledger put back from an
+                // older copy) ends at a record that verifies, and only its
+                // claims, synced after each record, still name the ids after
+                // it. Their tail is read every time (one bounded read), and
+                // the newer of the two is the last id the new one goes past.
+                Some(last) => (
+                    whole * RECORD,
+                    Some(newest(&self.store, &path, last)?),
+                    None,
+                ),
                 None if whole == 1 => (0, None, None),
                 None => {
                     let Some(before) = read(tail - RECORD)? else {
@@ -330,14 +390,16 @@ impl LedgerHold {
                     // repair 2; D-4880, D-5901): an append whose sync never
                     // finished is the likely cause, but a record a run was
                     // given and then lost to bit rot reads the same. Its id
-                    // is never parsed from the bad bytes; the journal, which
-                    // holds every id a run wrote a line under, is read once
-                    // and the new id is raised past it, so a clock behind
-                    // the lost record cannot hand that id out again.
-                    let used = largest_journal_run(&self.store)
-                        .map_err(|why| RunsLedgerFault::Io { why })?;
-                    note_written_over(&path, tail, used);
-                    (tail, Some(before), Some(used))
+                    // is never parsed from the bad bytes; the claims, which
+                    // hold every id the ledger has given (D-6269), and the
+                    // journal, which holds every id a GDFL run wrote a line
+                    // under before the claims existed, are read once and the
+                    // new id is raised past both, so a clock at or behind
+                    // the lost record cannot hand that id out again, whichever
+                    // feed's run it was.
+                    let floor = Floor::read(&self.store)?;
+                    note_written_over(&path, tail, floor);
+                    (tail, Some(before), Some(floor.largest()))
                 }
             }
         };
@@ -347,8 +409,11 @@ impl LedgerHold {
         let last_id = if let Some(last) = last {
             last.id
         } else {
+            // AN UNBORN LEDGER IS SEEDED PAST EVERY ID GIVEN BEFORE IT
+            // (L-IA-23; D-6269): one its only record held and lost, one of a
+            // ledger the store was put back without, are in the claims.
             let seed = Entry {
-                id: largest_journal_run(&self.store).map_err(|why| RunsLedgerFault::Io { why })?,
+                id: Floor::read(&self.store)?.largest(),
                 mode: "seed".to_owned(),
                 kind: "-".to_owned(),
                 by: "-".to_owned(),
@@ -389,15 +454,177 @@ impl LedgerHold {
             id,
             ..entry.clone()
         };
-        bytes.extend_from_slice(
-            &mine
-                .record()
-                .map_err(|why| RunsLedgerFault::Entry { why })?,
-        );
+        let record = mine
+            .record()
+            .map_err(|why| RunsLedgerFault::Entry { why })?;
+        bytes.extend_from_slice(&record);
         file.write_all_at(&bytes, at).map_err(io)?;
         file.sync_all().map_err(io)?;
+        // EVERY ID IS WRITTEN DOWN TWICE BEFORE IT IS GIVEN (IA-10c repair 2,
+        // D-6269): its record, synced, and then its claims line, synced, both
+        // under this lock. A run that writes no journal line of its own (a
+        // Zerodha landing, a cold verification, a merge) left nothing a lost
+        // last record could be raised past, and the next id under a clock at
+        // or behind it was that run's id again.
+        append_claim(&self.store, &record, id)?;
         Ok(id)
     }
+}
+
+/// What an id is raised past when the ledger cannot say its last id (an
+/// unborn ledger's seed, a damaged last record written over): the largest
+/// `run` id of the GDFL journal (L-IA-23) and of the claims (D-6269), each
+/// read once.
+#[derive(Debug, Clone, Copy)]
+struct Floor {
+    /// The GDFL journal's largest `run` id, or 0.
+    journal: u64,
+    /// The claims' largest id, or 0.
+    claims: u64,
+}
+
+impl Floor {
+    /// Reads both, one pass each.
+    fn read(store: &Path) -> Result<Self, RunsLedgerFault> {
+        let io = |why: String| RunsLedgerFault::Io { why };
+        Ok(Self {
+            journal: largest_journal_run(store).map_err(io)?,
+            claims: largest_claimed_run(store).map_err(io)?,
+        })
+    }
+
+    /// The larger of the two.
+    fn largest(self) -> u64 {
+        self.journal.max(self.claims)
+    }
+}
+
+/// The claims line of `record`: its body, `run ` first, its padding
+/// dropped, then its own CRC field (`run <id> <mode> <kind> <by> <pid>
+/// <started>`, then ` resumes=<id>`, then ` crc=<8 hex>`; the CRC since
+/// IA-10c repair 3), so a line is verified as its record is ([`claimed`]).
+fn claim_line(record: &[u8; 128]) -> String {
+    let body = String::from_utf8_lossy(record.get(..BODY).unwrap_or_default());
+    let crc = String::from_utf8_lossy(record.get(BODY..126).unwrap_or_default());
+    format!("run {} {crc}", body.trim_end_matches(' '))
+}
+
+/// The bytes a claims line ends with past its body: ` crc=` and 8 hex digits.
+const CLAIM_CRC: usize = 13;
+
+/// The record the claims line `line` (no line break) was written from, when
+/// its CRC verifies: the record is rebuilt (the body padded again, then its
+/// CRC field, a space and a line break) and read by [`Entry::of`], so a line
+/// is trusted exactly when a record would be. `None` for a torn, rotted or
+/// foreign line: its id is never read, so a rotted digit can neither lift
+/// every later id nor hide one (IA-10c repair 3, D-6269).
+fn claimed(line: &[u8]) -> Option<Entry> {
+    let rest = line.strip_prefix(b"run ")?;
+    let (body, crc) = rest.split_at_checked(rest.len().checked_sub(CLAIM_CRC)?)?;
+    let crc = crc.strip_prefix(b" ")?;
+    if body.len() > BODY {
+        return None;
+    }
+    let mut record = [b' '; 128];
+    for (slot, byte) in record.iter_mut().zip(body) {
+        *slot = *byte;
+    }
+    for (slot, byte) in record.iter_mut().skip(BODY).zip(crc) {
+        *slot = *byte;
+    }
+    if let Some(last) = record.last_mut() {
+        *last = b'\n';
+    }
+    Entry::of(&record)
+}
+
+/// What the claims' tail says (IA-10c repair 3, D-6269).
+#[derive(Debug, Default)]
+struct ClaimsTail {
+    /// The record of its last whole line whose CRC verifies.
+    last: Option<Entry>,
+    /// The whole lines after that one, or in the whole tail when none
+    /// verifies, whose CRC fails.
+    unverified: usize,
+}
+
+/// Reads the last [`CLAIMS_TAIL`] bytes of the claims of `store`: one open
+/// (non-blocking, never through a link, a regular file only) and one
+/// positional read, whatever the claims' length. The bytes after the last
+/// line break are a fragment a crash tore, whose id was never handed out
+/// (the next append closes it, and says so); the first line is passed over
+/// when the read began inside it.
+///
+/// # Errors
+///
+/// Claims that exist and are not a regular file, or cannot be read.
+fn claims_tail(store: &Path) -> Result<ClaimsTail, String> {
+    let path = store.join(CLAIMS);
+    let Some(file) = open_regular(&path, true)? else {
+        return Ok(ClaimsTail::default());
+    };
+    let named = |why: std::io::Error| format!("{}: {why}", path.display());
+    let len = file.metadata().map_err(named)?.len();
+    let from = len.saturating_sub(CLAIMS_TAIL);
+    let mut bytes = vec![0_u8; usize::try_from(len.saturating_sub(from)).unwrap_or(0)];
+    file.read_exact_at(&mut bytes, from).map_err(named)?;
+    let mut lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+    let _torn_or_empty = lines.pop();
+    let whole = lines.iter().skip(usize::from(from > 0));
+    let mut tail = ClaimsTail::default();
+    for line in whole.rev() {
+        if let Some(entry) = claimed(line) {
+            tail.last = Some(entry);
+            break;
+        }
+        tail.unverified = tail.unverified.saturating_add(1);
+    }
+    Ok(tail)
+}
+
+/// The newer of the ledger's healthy last record `last` and the claims'
+/// last line whose CRC verifies (IA-10c repair 3, D-6269): the claims line
+/// is synced after its record, so a later id in the claims means the ledger
+/// at `path` lost records whole, said at `warn` with an alert; whole lines at
+/// the claims' tail that fail their CRC are said at `warn` and never read.
+///
+/// # Errors
+///
+/// [`RunsLedgerFault::Io`]: claims that are not a regular file or cannot be
+/// read refuse the allocation before anything is written.
+fn newest(store: &Path, path: &Path, last: Entry) -> Result<Entry, RunsLedgerFault> {
+    let tail = claims_tail(store).map_err(|why| RunsLedgerFault::Io { why })?;
+    if tail.unverified > 0 {
+        note_claims_damaged(store, tail.unverified);
+    }
+    Ok(match tail.last {
+        Some(claimed) if claimed.id > last.id => {
+            note_behind_claims(store, path, &last, &claimed);
+            claimed
+        }
+        _ => last,
+    })
+}
+
+/// Appends run `id`'s claims line to [`CLAIMS`] and syncs it, under the
+/// ledger's lock, which every caller holds (D-6269), through the text
+/// ledgers' one append (`audit_ledger::append_path`): a regular file only,
+/// a torn last line closed first.
+///
+/// # Errors
+///
+/// [`RunsLedgerFault::Io`] naming the claims file: the id's record is
+/// written and synced, and the id is never handed out; the next allocation
+/// goes past it as past any record.
+fn append_claim(store: &Path, record: &[u8; 128], id: u64) -> Result<(), RunsLedgerFault> {
+    crate::audit_ledger::append_path(&store.join(CLAIMS), &[claim_line(record)]).map_err(|why| {
+        RunsLedgerFault::Io {
+            why: format!(
+                "its claims line was not written ({why}); run {id}'s record is in the ledger \
+                 and the id was not handed out"
+            ),
+        }
+    })
 }
 
 /// Takes the ledger's lock, allocates one id for `entry` and releases: for a
@@ -453,16 +680,66 @@ pub fn clock_check(now: u64, last: Option<&Entry>) -> Result<(), RunsLedgerFault
 }
 
 /// Says, at `warn`, that the ledger at `path` had one damaged last record at
-/// byte `offset`, which this allocation writes over, and the journal's
-/// largest run id the new id is raised past (IA-2 repair 2; D-5901): one bad
-/// record is a torn or rotted append, named rather than silently replaced.
-fn note_written_over(path: &Path, offset: u64, journal_run: u64) {
+/// byte `offset`, which this allocation writes over, and the journal's and
+/// the claims' largest run ids the new id is raised past (IA-2 repair 2;
+/// D-5901, D-6269): one bad record is a torn or rotted append, named rather
+/// than silently replaced.
+fn note_written_over(path: &Path, offset: u64, floor: Floor) {
     let shown = path.display().to_string();
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn(TARGET, "runs ledger last record written over")
             .with("ledger", shown.as_str())
             .with("offset", offset)
-            .with("journal_run", journal_run),
+            .with("journal_run", floor.journal)
+            .with("claims_run", floor.claims),
+    );
+}
+
+/// Says, at `warn` and with an alert (kind `runs_ledger_damaged`, keyed per
+/// claimed id, so the event puts one), that the ledger at `path` ends at run
+/// `last` while its claims name the later run `claimed` (IA-10c repair 3,
+/// D-6269): records the ledger had synced were lost whole, and the new id is
+/// raised past `claimed`, never repaired silently and never refused, since
+/// the claims still hold every id given.
+fn note_behind_claims(store: &Path, path: &Path, last: &Entry, claimed: &Entry) {
+    let shown = path.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(TARGET, "runs ledger behind its claims")
+            .with("ledger", shown.as_str())
+            .with("ledger_run", last.id)
+            .with("claims_run", claimed.id),
+    );
+    let key = format!("runs_ledger_behind_claims:{}", claimed.id);
+    let text = format!(
+        "ledger ends at run {}; its claims name run {}",
+        last.id, claimed.id
+    );
+    let alert = crate::alerts::NewAlert {
+        kind: 8,
+        key: &key,
+        day: 0,
+        run: claimed.id,
+        text: &text,
+    };
+    if let Err(why) = crate::alerts::put(store, &alert) {
+        let why = why.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error(TARGET, "runs ledger alert not put")
+                .with("key", key.as_str())
+                .with("why", why.as_str()),
+        );
+    }
+}
+
+/// Says, at `warn`, that `lines` whole lines at the tail of the claims of
+/// `store` fail their CRC (IA-10c repair 3, D-6269): a rotted or foreign
+/// line, whose id is never read; the ledger's own last record stands.
+fn note_claims_damaged(store: &Path, lines: usize) {
+    let shown = store.join(CLAIMS).display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(TARGET, "runs claims tail damaged")
+            .with("claims", shown.as_str())
+            .with("lines", u64::try_from(lines).unwrap_or(u64::MAX)),
     );
 }
 
@@ -495,27 +772,107 @@ fn note_damaged(store: &Path, path: &Path, offset: u64) {
 }
 
 /// The largest `run` id the GDFL journal of `store` holds, or 0: one pass
-/// over the journal, once per store (L-IA-23).
+/// over the journal, once per store (L-IA-23). A line that does not parse (a
+/// torn fragment, a rotted digit run past `u64`) names no id.
 ///
 /// # Errors
 ///
-/// A journal that exists and cannot be read.
+/// A journal that exists and is not a regular file (a pipe is refused at
+/// once, never waited on), or cannot be read.
 pub fn largest_journal_run(store: &Path) -> Result<u64, String> {
-    let path = crate::gdfl_import::journal_path(store);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(0),
-        Err(why) => return Err(format!("{}: {why}", path.display())),
+    // The journal's own writer follows a link at its name, so this reader
+    // does too; a pipe or a directory there is refused.
+    largest_line(&crate::gdfl_import::journal_path(store), false, |line| {
+        let id = line.strip_prefix(b"run ")?.split(|&b| b == b' ').next()?;
+        std::str::from_utf8(id).ok()?.parse::<u64>().ok()
+    })
+}
+
+/// The largest id the claims of `store` hold ([`CLAIMS`], D-6269), or 0:
+/// one pass, taken only when the ledger cannot say its last id. Only a line
+/// whose CRC verifies names an id ([`claimed`], repair round 3).
+///
+/// # Errors
+///
+/// Claims that exist and are not a regular file (a link, a pipe, a
+/// directory), or cannot be read.
+pub fn largest_claimed_run(store: &Path) -> Result<u64, String> {
+    largest_line(&store.join(CLAIMS), true, |line| {
+        claimed(line).map(|entry| entry.id)
+    })
+}
+
+/// The largest id `id_of` reads off the lines of the text file at `path`, or
+/// 0 when it names none or the file is not there; read through
+/// [`open_regular`], so a pipe planted at the name never holds the ledger's
+/// lock waiting for a writer (the second agent's repair-round-3 probe P4c).
+fn largest_line(
+    path: &Path,
+    no_link: bool,
+    id_of: impl Fn(&[u8]) -> Option<u64>,
+) -> Result<u64, String> {
+    use std::io::Read as _;
+    let Some(mut file) = open_regular(path, no_link)? else {
+        return Ok(0);
     };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|why| format!("{}: {why}", path.display()))?;
     Ok(bytes
         .split(|&b| b == b'\n')
-        .filter_map(|line| line.strip_prefix(b"run "))
-        .filter_map(|rest| {
-            let id = rest.split(|&b| b == b' ').next()?;
-            std::str::from_utf8(id).ok()?.parse::<u64>().ok()
-        })
+        .filter_map(id_of)
         .max()
         .unwrap_or(0))
+}
+
+/// Opens the text file at `path` to read the ids it holds, `None` when it is
+/// not there (IA-10c repair 3): non-blocking, so a pipe at the name opens at
+/// once and is refused by the handle's own `fstat` rather than waited on
+/// under the ledger's lock; never through a link when `no_link` (the claims,
+/// whose one writer refuses a link too).
+///
+/// # Errors
+///
+/// A link (when `no_link`), something other than a regular file, or an open
+/// that fails for any other reason, each naming the path.
+fn open_regular(path: &Path, no_link: bool) -> Result<Option<File>, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let flags = if no_link {
+        store::open_flags::O_NOFOLLOW_NONBLOCK
+    } else {
+        store::open_flags::O_NONBLOCK
+    };
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(why) => {
+            return Err(format!(
+                "{}: {why}; its ids are read only from a regular file{}",
+                path.display(),
+                if no_link {
+                    ", never through a link"
+                } else {
+                    ""
+                }
+            ));
+        }
+    };
+    let regular = file
+        .metadata()
+        .map_err(|why| format!("{}: {why}", path.display()))?
+        .is_file();
+    if regular {
+        Ok(Some(file))
+    } else {
+        Err(format!(
+            "{}: not a regular file, so no id is read from it and nothing is written",
+            path.display()
+        ))
+    }
 }
 
 /// Every whole record of the ledger of `store`, for a reader (the runs page,

@@ -554,11 +554,28 @@ fn write_change(out: &mut String, key: &str, change: Result<i64, Unknown>) {
 /// What is **not** constant is the caller: `census_now` re-reads and re-walks
 /// every manifest per request, which is O(entries) and was before this existed.
 /// `docs/06-limits.md` §41 records it rather than this comment hiding it.
+#[cfg(test)]
 pub(super) fn store_body(
     censuses: &[census::VendorCensus],
     entries: &[(census::Series, store::path::YearMonth)],
     feed: Vendor,
 ) -> String {
+    store_body_with(censuses, entries, feed, None)
+}
+
+/// [`store_body`], each row carrying `"quarantine"` (R4-18; ING-01 e) when
+/// `quarantine` is a feed's non-empty summary: `null` for a month the
+/// quarantine does not name, else its scope, cause, bars and ledger line. The
+/// summary is read once per cached body (`store::quarantine::Summary`), and
+/// each row costs one hash probe; a feed with no quarantine writes no key,
+/// so its wire is byte-identical to before.
+pub(super) fn store_body_with(
+    censuses: &[census::VendorCensus],
+    entries: &[(census::Series, store::path::YearMonth)],
+    feed: Vendor,
+    quarantine: Option<&store::quarantine::Summary>,
+) -> String {
+    let quarantine = quarantine.filter(|summary| !summary.is_empty());
     // ONE LOOKUP FOR THE WHOLE RESPONSE, not one per row. `Vendor::ALL` is four
     // long so the old per-row `find` was cheap, but it was O(vendors) inside an
     // O(entries) loop for a value that cannot change between iterations — and
@@ -645,10 +662,43 @@ pub(super) fn store_body(
                 before.map(|held| held.closes),
             ),
         );
+        if let Some(summary) = quarantine {
+            write_quarantine(&mut out, summary, series, *month, feed);
+        }
         out.push('}');
     }
     out.push(']');
     out
+}
+
+/// One row's `"quarantine"` (R4-18): one probe of the summary.
+fn write_quarantine(
+    out: &mut String,
+    summary: &store::quarantine::Summary,
+    series: &census::Series,
+    month: store::path::YearMonth,
+    feed: Vendor,
+) {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: feed,
+        exchange: series.exchange.as_str(),
+        segment: series.segment.as_str(),
+        symbol: series.symbol.as_str(),
+        contract: series.contract,
+        timeframe: series.timeframe,
+        month,
+        file: store::path::FileKind::Bars,
+    });
+    match path.ok().and_then(|path| summary.month(path)) {
+        Some(entry) => {
+            let _ = write!(
+                out,
+                r#","quarantine":{}"#,
+                super::bars_route::quarantine_json(&entry, feed)
+            );
+        }
+        None => out.push_str(r#","quarantine":null"#),
+    }
 }
 
 /// One census body's validator, for conditional requests.
@@ -850,7 +900,13 @@ pub(super) fn store_response(
     let encoded = match site.census_wire.get(slot, feed, format, || {
         let entries = slot.entries();
         match format {
-            store_wire::Format::Expanded => Ok(store_body(row, &entries, feed)),
+            // THE QUARANTINE READ ONCE PER CACHED BODY (R4-18): a ledger that
+            // will not read refuses the body by name, never drops the field.
+            store_wire::Format::Expanded => {
+                store::quarantine::Summary::load(&site.store_root, feed)
+                    .map(|summary| store_body_with(row, &entries, feed, Some(&summary)))
+                    .map_err(|why| why.to_string())
+            }
             store_wire::Format::Compact => store_wire::compact(row, &entries, feed),
         }
     }) {

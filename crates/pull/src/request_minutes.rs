@@ -112,6 +112,11 @@ pub(super) struct Refusals {
     pub(super) fronts: Vec<u32>,
     /// IST day numbers a repair added bars on, in order (D-3350).
     pub(super) repaired: Vec<u32>,
+    /// Each row `fetch::land_rows` refused by name, with its cause, for the
+    /// keeper's receipt (IA-10c, IA-RK-07). The gap ledger reads `seconds`.
+    pub(super) rows: Vec<crate::response_keep::RefusedRow>,
+    /// Rows refused by name whose causes did not pair with their stamps.
+    pub(super) unpaired: u32,
 }
 
 /// One pointer per time-ordered list of refused seconds, each advanced only
@@ -241,13 +246,20 @@ fn note_gap_group(instrument: &str, plan: Plan<'_>, group: &Group) {
 /// `done` is the member's receipt from `from_members`; the aggregated
 /// failures are appended to it. A ledger that cannot be written is a named
 /// failure and a `pull.file` "not filed" line, never silence.
+///
+/// `from_store` says the rows came from another store's bars (`cli
+/// zerodha-repair --from-store`, [`super::STORE_ORIGIN`]): a day the repair
+/// filled then gains `origin=store` on its `repaired` line (IA-10c, D-6261),
+/// a `name=value` field the ledger's readers pass over, so the verifier reads
+/// its minutes `no_response_kept (landed_from_store)`, never `match` against
+/// an answer nobody kept (IA-ZV-11).
 pub(super) fn report(
     rows: &[RawRow],
     instrument: &str,
     store_root: &Path,
     plan: Plan<'_>,
     done: &mut Ingested,
-    refusals: &Refusals,
+    (refusals, from_store): (&Refusals, bool),
 ) {
     let Some(venue) = audited_venue(plan) else {
         return;
@@ -261,11 +273,23 @@ pub(super) fn report(
         return;
     }
     let key = instrument_key(plan, instrument);
-    let run = run_ordinal();
+    // THE LANDING'S OWN RUN (D-6260): `Plan::run` when the caller holds a
+    // runs-ledger id, else the sink's claimed run, as before.
+    let run = match plan.run {
+        0 => run_ordinal(),
+        landing => landing,
+    };
     let lines: Vec<String> = audit
         .days
         .iter()
-        .map(|day| gap_line(&key, day, run))
+        .map(|day| {
+            let line = gap_line(&key, day, run);
+            if from_store && day.why == Why::Repaired {
+                format!("{line} origin=store")
+            } else {
+                line
+            }
+        })
         .collect();
     if let Err(why) = append_ledger(store_root, plan.vendor, &lines) {
         super::note_not_filed(instrument, "gap ledger", &why);
@@ -853,12 +877,54 @@ pub(super) fn ledger_key(exchange: &str, segment: &str, instrument: &str) -> Str
     format!("{exchange}-{segment}-{instrument}")
 }
 
-/// The run every ledger line written now belongs to: the telemetry sink's
-/// claimed run, the key `/logs?run=` groups a pull's events by, so a ledger
-/// line and the run's events name one run. Zero where no run is claimed or
-/// no sink is installed, which is the sink's own word for "no run".
-fn run_ordinal() -> u64 {
-    telemetry::global().map_or(0, telemetry::Sink::run)
+/// The run every ledger line written now belongs to (D-4880, IA-10c,
+/// D-6260): the landing's runs-ledger id ([`Plan::run`], put in force by
+/// [`run_scope`] for the length of one landing on its own thread), else the
+/// telemetry sink's claimed run, the key `/logs?run=` groups a pull's events
+/// by, so a ledger line and the run's events name one run. Zero where neither
+/// is held, which is the sink's own word for "no run".
+///
+/// The sink's run alone was wrong whenever two landings overlapped in one
+/// process (a `/pull/spot` beside a `/pull/fno`): the sink holds ONE claim,
+/// so the second request's lines named the first request's run.
+pub(super) fn run_ordinal() -> u64 {
+    match LANDING_RUN.with(std::cell::Cell::get) {
+        0 => telemetry::global().map_or(0, telemetry::Sink::run),
+        landing => landing,
+    }
+}
+
+std::thread_local! {
+    /// The landing's runs-ledger id while a landing runs on this thread.
+    static LANDING_RUN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The landing run in force on this thread until it is dropped, when the one
+/// before it is put back (a landing inside a landing keeps the outer one's
+/// once it returns).
+#[derive(Debug)]
+#[must_use = "the run is in force only while the scope lives"]
+pub(super) struct RunScope {
+    before: u64,
+}
+
+impl Drop for RunScope {
+    fn drop(&mut self) {
+        LANDING_RUN.with(|run| run.set(self.before));
+    }
+}
+
+/// Puts `run` in force for every ledger line this thread writes until the
+/// scope drops (D-6260). A landing takes it at its door from [`Plan::run`]:
+/// its lines are written many calls below the door (the repair journal, the
+/// derive ledger), and a parameter on every function between is the one
+/// somebody forgets. A landing runs on one thread from door to return
+/// (nothing in it spawns), so the scope covers every line it writes. `0`
+/// keeps the sink's run in force, as before.
+pub(super) fn run_scope(run: u64) -> RunScope {
+    RunScope {
+        before: LANDING_RUN.with(|cell| cell.replace(run)),
+    }
 }
 
 /// The ledger's and the group's mark for "none": one hyphen (D-3335's
@@ -964,12 +1030,22 @@ pub(super) fn record_derived(
 ///
 /// The host's words for a directory, open, write or sync that failed, or the
 /// refusal of a line that would break the line rules.
+///
+/// # Under the audit ledger lock (D-4888, IA-10c, closes L-IA-38)
+///
+/// Through [`super::audit_ledger::append`], the one function every writer of
+/// an `audit/<vendor>.<name>` ledger calls: `audit/<vendor>.gaps.lock` taken
+/// within its bounded wait (D-4906), the torn-tail newline, the line rules,
+/// `sync_data`. The api's pull path and `cli zerodha-repair --from-store`
+/// both write this ledger, from two processes at once; the ledger file's own
+/// `flock` already kept their batches apart, and the audit lock adds the
+/// bound a stalled holder could otherwise hold every landing for ever with.
 pub(super) fn append_ledger(
     store_root: &Path,
     vendor: brutex_core::vendor::Vendor,
     lines: &[String],
 ) -> Result<(), String> {
-    append_named(store_root, vendor, "gaps", lines)
+    super::audit_ledger::append(store_root, vendor, "gaps", lines)
 }
 
 /// [`append_ledger`] for `<store>/audit/<vendor>.<name>`, under the same line
@@ -1038,10 +1114,25 @@ pub(crate) fn append_named_picking<'l>(
     name: &str,
     pick: impl FnOnce(&mut std::fs::File) -> Result<std::borrow::Cow<'l, [String]>, String>,
 ) -> Result<(u64, bool), String> {
-    use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
     let dir = store_root.join("audit");
     std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-    let path = dir.join(format!("{}.{name}", vendor.as_str()));
+    append_path_picking(&dir.join(format!("{}.{name}", vendor.as_str())), pick)
+}
+
+/// [`append_named_picking`] for the text ledger at `path`, whose directory
+/// the caller has made: the same regular-file rule, exclusive `flock`, torn
+/// last line closed first, line rules and sync, for a ledger that is not an
+/// `audit/<vendor>.<name>` (the runs ledger's claims, `audit/runs.claims`,
+/// D-6269).
+///
+/// # Errors
+///
+/// What [`append_named_picking`] refuses, but for the directory it makes.
+pub(crate) fn append_path_picking<'l>(
+    path: &Path,
+    pick: impl FnOnce(&mut std::fs::File) -> Result<std::borrow::Cow<'l, [String]>, String>,
+) -> Result<(u64, bool), String> {
+    use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
     let named = |why: std::io::Error| format!("{}: {why}", path.display());
     // NEVER THROUGH A LINK, NEVER WAITING ON A PIPE: a link at the name is
     // refused by the open (`O_NOFOLLOW`), a pipe opens at once (`O_NONBLOCK`)
@@ -1051,7 +1142,7 @@ pub(crate) fn append_named_picking<'l>(
         .append(true)
         .create(true)
         .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
-        .open(&path)
+        .open(path)
         .map_err(|why| {
             format!(
                 "{}: {why}; a ledger is appended only as a regular file, never through a link",
@@ -1064,7 +1155,7 @@ pub(crate) fn append_named_picking<'l>(
             path.display()
         ));
     }
-    let mut ledger = store::flock::Flock::lock(file, path.as_path()).map_err(named)?;
+    let mut ledger = store::flock::Flock::lock(file, path).map_err(named)?;
     let lines = pick(&mut ledger)?;
     if lines.is_empty() {
         let end = ledger.metadata().map_err(named)?.len();
@@ -1159,6 +1250,7 @@ mod tests {
             exchange: "NSE",
             segment: "INDEX",
             contract: None,
+            run: 0,
         }
     }
 
@@ -1418,6 +1510,9 @@ mod tests {
     fn the_ledger_appends_lines_and_refuses_a_line_break() {
         let root = std::env::temp_dir().join(format!("brutex-LEDGER-UNIT-{}", std::process::id()));
         let _fresh = std::fs::remove_dir_all(&root);
+        // THE ROOT EXISTS: the gap ledger is written through the audit ledger
+        // lock, which never recreates a store root that went away (FM-125).
+        std::fs::create_dir_all(&root).unwrap();
         let vendor = brutex_core::vendor::Vendor::Zerodha;
         append_ledger(&root, vendor, &[]).unwrap();
         assert!(
@@ -1545,6 +1640,9 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("brutex-LEDGER-CONCURRENT-{}", std::process::id()));
         let _fresh = std::fs::remove_dir_all(&root);
+        // THE ROOT EXISTS: the gap ledger is written through the audit ledger
+        // lock, which never recreates a store root that went away (FM-125).
+        std::fs::create_dir_all(&root).unwrap();
         let vendor = brutex_core::vendor::Vendor::Zerodha;
         std::thread::scope(|scope| {
             for writer in 0..WRITERS {
@@ -1678,6 +1776,7 @@ mod cloud_mutant_tests {
             exchange,
             segment,
             contract: None,
+            run: 0,
         }
     }
 
@@ -1986,6 +2085,7 @@ mod cloud_mutant_tests {
             seconds: Vec::new(),
             fronts: vec![d1.days_from_epoch() - 9, d1.days_from_epoch()],
             repaired: vec![d1.days_from_epoch() - 2, d3.days_from_epoch()],
+            ..Refusals::default()
         };
         let audit = within(move || {
             let request = request_on(d1, d3);
@@ -2072,7 +2172,7 @@ mod cloud_mutant_tests {
             &root,
             plan_at(&request, "NSE", "INDEX"),
             &mut done,
-            &Refusals::default(),
+            (&Refusals::default(), false),
         );
         let [failure] = done.failures.as_slice() else {
             panic!("{:?}", done.failures);
@@ -2107,7 +2207,7 @@ mod cloud_mutant_tests {
             &root,
             plan_at(&request, "BSE", "INDEX"),
             &mut untouched,
-            &Refusals::default(),
+            (&Refusals::default(), false),
         );
         assert!(untouched.failures.is_empty());
         assert_eq!(
@@ -2125,7 +2225,7 @@ mod cloud_mutant_tests {
             &blocked,
             plan_at(&request, "NSE", "INDEX"),
             &mut named,
-            &Refusals::default(),
+            (&Refusals::default(), false),
         );
         assert_eq!(named.failures.len(), 2, "{:?}", named.failures);
         assert!(

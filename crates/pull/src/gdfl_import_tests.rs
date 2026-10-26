@@ -1298,10 +1298,14 @@ fn every_reader_refusal_has_its_cause() {
             false,
         ),
         (
-            nfo_cause(&NfoRefusal::Source(CmRefusal::HeaderUnknown)),
+            // ERR-11 (R4-22, D-7312): a vendor format change is an OPEN
+            // cause; it closed the day "done with refusals" until then.
+            nfo_cause(&NfoRefusal::Source(CmRefusal::HeaderUnknown {
+                shape: crate::gdfl_cm::HeaderShape::of(b""),
+            })),
             Stage::Vendor,
             "header_unknown",
-            true,
+            false,
         ),
     ] {
         assert_eq!((got.stage, got.code, got.closes), (stage, code, closes));

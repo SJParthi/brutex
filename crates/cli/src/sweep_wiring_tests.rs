@@ -175,6 +175,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "zerodha-repair"
                 // The stored-month gap ledger (R3-18): a store verb.
                 | "zerodha-gaps"
+                // The quarantine of named bars (R4-18): a store verb.
+                | "zerodha-quarantine"
                 // The Zerodha verifier and its spool merge (IA-9): store verbs.
                 | "verify-merge"
                 | "zerodha-verify"

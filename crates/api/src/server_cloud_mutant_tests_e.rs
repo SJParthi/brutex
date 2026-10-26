@@ -1,0 +1,838 @@
+//! Cloud mutation pass of 18 Oct (`cloud/mut-api-b-20261018`) over
+//! `server.rs`: the arms of AH-02's [`HeadDeadline`] and [`exchange_watch`]
+//! (D-4975) that a coverage run of the whole `api` lib suite on the merged
+//! tree (`feat/db-fix` `67c4e58d`, merged at `19e2c2f9`) left unexecuted,
+//! each driven where a test can reach it.
+//!
+//! The `HeadDeadline` here is built by hand around one end of a loopback
+//! pair, so a test can put it in the state it needs (a request in flight, or
+//! the head clock running) and read the one `api.serve` line it writes
+//! through [`crate::emitted`], by a tag in the request it is said to be
+//! answering.
+//!
+//! No test here opens a socket to anything but `127.0.0.1`, reads a
+//! credential, or contacts a vendor.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a failed fixture must fail the test by name"
+)]
+
+use super::*;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+/// How long any one read or write below may take before the test fails.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A connected pair: the accepted server side, and the client.
+async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let (server, _) = listener.accept().await.expect("accept");
+    (server, client)
+}
+
+/// A `HeadDeadline` over `server` whose connection is answering
+/// `GET /cloude/<tag>` with a `200` of 1,000 declared bytes, in the state
+/// `state`. Its one slot is the pool's only one, handed back with it.
+fn answering(
+    server: tokio::net::TcpStream,
+    tag: &str,
+    state: HeadState,
+) -> (std::sync::Arc<Slots>, HeadDeadline) {
+    let slots = std::sync::Arc::new(Slots {
+        live: std::sync::atomic::AtomicUsize::new(1),
+        cap: 1,
+        freed: tokio::sync::Notify::new(),
+    });
+    let slot = Slot(std::sync::Arc::clone(&slots));
+    let mut wrapped = HeadDeadline::new(server, slot, std::time::Duration::from_secs(30));
+    *wrapped
+        .exchange
+        .newest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ExchangeNote {
+        method: axum::http::Method::GET,
+        uri: format!("/cloude/{tag}").parse().expect("a path"),
+        status: Some(200),
+        length: Some(1_000),
+        counted: None,
+    });
+    wrapped.state = state;
+    (slots, wrapped)
+}
+
+/// The `api.serve` lines carrying `message` since `from` whose path names `tag`.
+fn lines(from: u64, message: &str, tag: &str) -> Vec<telemetry::Record> {
+    crate::emitted::landed(from, "api.serve", message)
+        .into_iter()
+        .filter(|record| crate::emitted::says(record, "path", tag))
+        .collect()
+}
+
+/// **A client that ends its stream while a response is in flight is reported
+/// once, as its close.** The end of the stream with a request in flight is
+/// the client leaving before its answer was whole, and the line says which
+/// request, its status, its declared length and that nothing of it went. A
+/// read into a buffer with no room is not an end of stream and says nothing,
+/// and a second end on the same connection writes no second line.
+///
+/// Covers `poll_read`'s end-of-stream arm (server.rs:17746-17753), which no
+/// served test reaches (a client that leaves mid-body is met by a failed
+/// write first), and the `reported` guard of `HeadDeadline::report`
+/// (17682-17683).
+#[tokio::test]
+async fn a_client_that_ends_its_stream_mid_response_is_reported_once_as_its_close() {
+    let _sink = crate::emitted::sink();
+    let from = crate::emitted::mark();
+    let (server, mut client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudeends", HeadState::Delivered);
+    client.shutdown().await.expect("the client ends its side");
+
+    // NO ROOM, NO END: a zero-length read reads nothing and reports nothing.
+    let mut no_room: [u8; 0] = [];
+    let none = tokio::time::timeout(PATIENCE, wrapped.read(&mut no_room))
+        .await
+        .expect("a zero-length read answers at once")
+        .expect("a zero-length read");
+    assert_eq!(none, 0);
+    assert!(!wrapped.reported);
+    assert!(lines(from, "response closed by the client", "cloudeends").is_empty());
+
+    // THE END OF THE STREAM, with room: reported, once.
+    let mut buf = [0_u8; 16];
+    let ended = tokio::time::timeout(PATIENCE, wrapped.read(&mut buf))
+        .await
+        .expect("the end answers at once")
+        .expect("an end of stream is no error");
+    assert_eq!(ended, 0);
+    assert!(wrapped.reported);
+    let said = lines(from, "response closed by the client", "cloudeends");
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(crate::emitted::says(
+        &said[0],
+        "why",
+        "the client closed its side before the response was whole"
+    ));
+    assert!(crate::emitted::says(&said[0], "method", "GET"));
+    assert!(crate::emitted::counts(&said[0], "status", 200));
+    assert!(crate::emitted::counts(&said[0], "declared_length", 1_000));
+    assert!(crate::emitted::counts(&said[0], "bytes_written", 0));
+    assert_eq!(
+        said[0]
+            .field("delivered")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        said[0]
+            .field("access_counted")
+            .and_then(telemetry::OwnedValue::as_bool),
+        Some(false)
+    );
+
+    // A SECOND END writes no second line: one per connection.
+    let again = tokio::time::timeout(PATIENCE, wrapped.read(&mut buf))
+        .await
+        .expect("the end answers again")
+        .expect("an end of stream is no error");
+    assert_eq!(again, 0);
+    assert_eq!(
+        lines(from, "response closed by the client", "cloudeends").len(),
+        1
+    );
+    assert!(
+        wrapped
+            .report(telemetry::Level::Warn, "response cut", "a second word")
+            .is_none(),
+        "a connection already reported says nothing more"
+    );
+    assert!(lines(from, "response cut", "cloudeends").is_empty());
+}
+
+/// **A read that fails while a response is in flight is reported as the
+/// client's close, naming the failure.** A reset peer is a client that left;
+/// the line carries the read's own error kind. Covers `poll_read`'s
+/// `Poll::Ready(Err(why))` report under `HeadState::Delivered`
+/// (server.rs:17758-17763).
+#[tokio::test]
+async fn a_read_that_fails_mid_response_is_reported_as_the_clients_close() {
+    let _sink = crate::emitted::sink();
+    let from = crate::emitted::mark();
+    let (server, client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudereset", HeadState::Delivered);
+    // SO_LINGER of zero turns the close into a reset.
+    #[allow(deprecated, reason = "the one portable way tokio offers to send RST")]
+    client
+        .set_linger(Some(std::time::Duration::ZERO))
+        .expect("linger");
+    drop(client);
+    let mut buf = [0_u8; 16];
+    let why = tokio::time::timeout(PATIENCE, wrapped.read(&mut buf))
+        .await
+        .expect("the reset arrives at once")
+        .expect_err("a reset is an error");
+    assert_eq!(why.kind(), std::io::ErrorKind::ConnectionReset, "{why}");
+    assert!(wrapped.reported);
+    let said = lines(from, "response closed by the client", "cloudereset");
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(crate::emitted::says(
+        &said[0],
+        "why",
+        "a read failed: connection reset"
+    ));
+    assert!(crate::emitted::counts(&said[0], "status", 200));
+}
+
+/// **A read that fails with no request in flight reports nothing.** The
+/// connection was waiting for a head; nobody was being answered, so there is
+/// no response to call closed. The error still reaches the reader as itself.
+/// The `HeadState::Delivered` test of the same arm is what this one stands
+/// beside.
+#[tokio::test]
+async fn a_read_that_fails_with_nothing_in_flight_reports_nothing() {
+    let _sink = crate::emitted::sink();
+    let from = crate::emitted::mark();
+    let (server, client) = socket_pair().await;
+    let waiting = HeadState::Awaiting {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        progress: 0,
+        partial: false,
+    };
+    let (_slots, mut wrapped) = answering(server, "cloudeidle", waiting);
+    #[allow(deprecated, reason = "the one portable way tokio offers to send RST")]
+    client
+        .set_linger(Some(std::time::Duration::ZERO))
+        .expect("linger");
+    drop(client);
+    let mut buf = [0_u8; 16];
+    let why = tokio::time::timeout(PATIENCE, wrapped.read(&mut buf))
+        .await
+        .expect("the reset arrives at once")
+        .expect_err("a reset is an error");
+    assert_eq!(why.kind(), std::io::ErrorKind::ConnectionReset, "{why}");
+    assert!(!wrapped.reported);
+    assert!(lines(from, "response closed by the client", "cloudeidle").is_empty());
+}
+
+/// **A direct write while the head clock runs starts a response.** hyper
+/// writes a response for a head it parsed from its own buffer, which this
+/// wrapper never saw; the write stops the head clock, counts its bytes from
+/// zero, and the flush after it, with every request finished, starts a fresh
+/// head's clock with nothing of the old partial head kept. Covers
+/// `poll_write`'s `HeadState::Awaiting` arm (server.rs:17790-17791); hyper's
+/// vectored writes reach only its twin.
+#[tokio::test]
+async fn a_direct_write_while_the_head_clock_runs_starts_a_response() {
+    let (server, mut client) = socket_pair().await;
+    let partway = HeadState::Awaiting {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        progress: 1,
+        partial: true,
+    };
+    let (slots, mut wrapped) = answering(server, "cloudewrite", partway);
+    wrapped.written = 99;
+    let wrote = tokio::time::timeout(PATIENCE, wrapped.write(b"HTTP/1.1 200 OK\r\n"))
+        .await
+        .expect("a write answers at once")
+        .expect("a write");
+    assert_eq!(wrote, 17);
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+    assert_eq!(
+        wrapped.written, 17,
+        "counted from zero at the response's start"
+    );
+
+    tokio::time::timeout(PATIENCE, wrapped.flush())
+        .await
+        .expect("a flush answers at once")
+        .expect("a flush");
+    let HeadState::Awaiting {
+        deadline,
+        progress,
+        partial,
+    } = wrapped.state
+    else {
+        panic!("the flush re-arms the head clock");
+    };
+    assert_eq!((progress, partial), (0, false));
+    assert!(deadline > tokio::time::Instant::now() + std::time::Duration::from_secs(25));
+
+    let mut got = [0_u8; 17];
+    tokio::time::timeout(PATIENCE, client.read_exact(&mut got))
+        .await
+        .expect("the peer reads it at once")
+        .expect("the peer reads it");
+    assert_eq!(&got, b"HTTP/1.1 200 OK\r\n");
+    drop(wrapped);
+    assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+/// **A router served without the limited listener passes through the watch
+/// untouched.** `exchange_watch` reads its connection's `Exchange` from the
+/// connect-info extension, which only `serve_limited` provides; anywhere else
+/// a request is answered as the router answers it. Covers the `else` arm of
+/// `exchange_watch`'s extension read (server.rs:17387-17392).
+#[tokio::test]
+async fn a_router_served_without_the_limited_listener_passes_through_the_watch() {
+    let app = axum::Router::new()
+        .route("/", axum::routing::get(|| async { "plain answer" }))
+        .layer(axum::middleware::from_fn(exchange_watch));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let served = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("a request");
+    let mut said = String::new();
+    tokio::time::timeout(PATIENCE, client.read_to_string(&mut said))
+        .await
+        .expect("an answer")
+        .expect("a readable answer");
+    served.abort();
+    assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+    assert!(said.ends_with("plain answer"), "{said:?}");
+}
+
+/// What `finished_day_only` must answer, at this instant, for a window that
+/// ends on `to`: refused while `to` is today and today's session has not
+/// settled, with the reason today is held back, and accepted otherwise.
+/// Built from the same parts the guard reads (the calendar of record, the
+/// venue's dated close, the minute of the day), but asked of them here.
+fn ending_on(to: Day) -> Result<(), String> {
+    let now = ingest::ist_moment(std::time::SystemTime::now()).expect("a usable clock");
+    let today = now.day();
+    if to != today {
+        // The day turned between building the window and asking: it ended
+        // yesterday, which is askable.
+        return Ok(());
+    }
+    let close = pull::vendor::Venue::NseCash
+        .hours_on(today)
+        .ok()
+        .map(pull::vendor::Session::close_minute);
+    match settled_today(
+        pull::calendar::exchange_kind_of(i64::from(today.days_from_epoch())),
+        close,
+        now.minute_of_day(),
+    ) {
+        Ok(()) => Ok(()),
+        Err(why) => Err(format!(
+            "{} Today: {why}.",
+            ingest::Refusal::WindowReachesToday { to, today }
+        )),
+    }
+}
+
+/// **A window that ends today is refused, with the reason today is held
+/// back, exactly while today's session has not settled.** The guard reads
+/// the wall clock, and this build has no clock seam, so the test asks the
+/// same question of the same parts at the moment of the call. Before and
+/// after it, so a minute (or a day) that turns in between is tolerated, and
+/// holds the answer to one of the two. On a day already settled (any closed
+/// day, and every open day from five minutes past its close) the answer is
+/// `Ok`. In the hours before that, it is the refusal ending in " Today: …",
+/// which kills the match guard at `finished_day_only`'s refusal
+/// (server.rs:6723) turned to `false`. Those hours are the only ones in
+/// which any test can tell that mutant apart.
+#[test]
+fn a_window_ending_today_is_held_back_exactly_while_today_is_unsettled() {
+    let today = ingest::ist_day(std::time::SystemTime::now()).expect("a usable clock");
+    let tomorrow = today.succ().expect("a day after today");
+    let asked = ingest::parse_spot(
+        &format!("target=swept&vendor=dhan&granularity=1day&from={today}&to={today}"),
+        tomorrow,
+    )
+    .expect("a one-day window ending today, parsed as of tomorrow");
+    assert_eq!(asked.window.to(), today);
+    let before = ending_on(today);
+    let got = finished_day_only(&asked);
+    let after = ending_on(today);
+    assert!(
+        got == before || got == after,
+        "got {got:?}; the guard's parts said {before:?} then {after:?}"
+    );
+}
+
+/// **A month's bars page names the records it could not read, and a clean
+/// month's page names none.** 200 invented one-minute bars of one month,
+/// read twice through `held_bars_page`: whole, then with one byte of its
+/// first record flipped, so the block checksum refuses that block's records
+/// and the rest still read. The clean page is "held" with no trouble block.
+/// The damaged one is not "held", and its "this month" block carries the
+/// read's own fault sentence. Kills deleting the `!` of
+/// `(!faults.is_empty()).then(..)` in `held_bars_page` (server.rs:15421),
+/// which hid a damaged month's faults and gave a clean month an empty one.
+#[test]
+fn a_damaged_month_names_its_unreadable_records_and_a_clean_one_names_none() {
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    let root = crate::scratch::path("cloude-held-bars");
+    let _ = std::fs::remove_dir_all(&root);
+    let masters = root.join("masters");
+    std::fs::create_dir_all(&masters).expect("empty offline masters");
+    let site = Site::load(&masters, &root);
+    let month = YearMonth::new(2024, 3).expect("a month");
+    let parts = PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month,
+        file: FileKind::Bars,
+    };
+    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    let id = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+    let day = Day::new(2024, 3, 1).expect("a session day");
+    let open_micros = i64::from(day.days_from_epoch()) * 86_400_000_000 + 13_500_000_000;
+    let rows: Vec<store::format::Bar> = (0..200_i64)
+        .map(|n| store::format::Bar {
+            ts_micros: open_micros + n * 60_000_000,
+            open: 2_200_000 + n * 100,
+            high: 2_200_000 + n * 100 + 500,
+            low: 2_200_000 + n * 100 - 500,
+            close: 2_200_000 + n * 100,
+            volume: n + 1,
+            open_interest: store::format::OI_NULL,
+        })
+        .collect();
+    let mut written = store::file::BarFile::open_or_create(
+        &root,
+        StorePath::new(parts).expect("a store path"),
+        id,
+    )
+    .expect("a bar file");
+    written.append(&rows).expect("invented bars");
+    drop(written);
+    let address = BarsAddress {
+        symbol: "NIFTY",
+        contract: None,
+        segment: "INDEX",
+        vendor: "dhan",
+        month: "2024-03",
+        timeframe: "1min",
+    };
+
+    let clean = crate::bars::open_classified(&root, parts)
+        .map_err(|why| why.message)
+        .expect("the month opens");
+    let (status, page) = held_bars_page(&site, &address, &clean, 0);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(!page.contains("<b>this month</b>"), "{page}");
+    assert!(page.contains("held"), "{page}");
+    let at = usize::try_from(clean.layout().offset_of(0).expect("a committed record"))
+        .expect("a test offset fits usize");
+    let path = clean.path().to_path_buf();
+    drop(clean);
+
+    let mut bytes = std::fs::read(&path).expect("the bar file reads");
+    bytes[at + 8] ^= 0xff;
+    std::fs::write(&path, &bytes).expect("the damaged bar file writes");
+    let damaged = crate::bars::open_classified(&root, parts)
+        .map_err(|why| why.message)
+        .expect("a damaged record still opens its month");
+    let (_rows, faults) = crate::bars::page(&damaged, 0, crate::bars::PAGE_BARS);
+    let said = faults.sentences();
+    assert!(!said.is_empty(), "the premise: the flipped byte is refused");
+    let (status, page) = held_bars_page(&site, &address, &damaged, 0);
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (_, trouble) = page
+        .split_once("<b>this month</b>")
+        .unwrap_or_else(|| panic!("a trouble block: {page}"));
+    assert!(
+        trouble.starts_with(&crate::render::escape(&said.join(" · "))),
+        "{trouble}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A head ends at its blank line, in either spelling, at the byte that
+/// ends it.** `\r\n\r\n` and the bare-LF `\n\n` that httparse also accepts
+/// both deliver the head on their last byte, from the head scan alone,
+/// without waiting for the service to count the request in. A `\r` that does
+/// not follow a line end, or a line end followed by anything but `\r` or
+/// `\n`, ends nothing. Kills deleting the `(1, b'\r') => 2` arm of
+/// `HeadDeadline::observe` (server.rs:17533), which a head ending in
+/// `\r\n\r\n` survived only because the service's own count delivered it a
+/// poll later.
+#[tokio::test]
+async fn a_head_ends_at_its_blank_line_in_either_spelling() {
+    let waiting = || HeadState::Awaiting {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        progress: 0,
+        partial: false,
+    };
+    let (server, _client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudehead", waiting());
+
+    // CRLF CRLF: one byte short of the end, the scan holds a line end and a
+    // `\r` after it.
+    wrapped.observe(b"GET / HTTP/1.1\r\nHost: x\r\n\r");
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 2,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+    wrapped.observe(b"\n");
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+
+    // BARE LF LF, fed one byte at a time.
+    wrapped.state = waiting();
+    for &byte in b"GET / HTTP/1.1\nHost: x\n" {
+        wrapped.observe(&[byte]);
+    }
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 1,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+    wrapped.observe(b"\n");
+    assert!(matches!(wrapped.state, HeadState::Delivered));
+
+    // NOT AN END: a `\r` inside a line, and a line end followed by a byte.
+    wrapped.state = waiting();
+    wrapped.observe(b"GET / HTTP/1.1\r\nHost: x\rx\r\nX: \n\ry");
+    assert!(
+        matches!(
+            wrapped.state,
+            HeadState::Awaiting {
+                progress: 0,
+                partial: true,
+                ..
+            }
+        ),
+        "{:?}",
+        wrapped.state
+    );
+}
+
+/// **A write that moves no byte does not end a stall.** A response whose
+/// writes have made no progress since a known instant keeps that instant
+/// through an empty write: nothing went, so the stall clock still runs from
+/// when progress stopped. A write that moves a byte ends it. Kills `>`
+/// turned to `>=` at `n > 0` in `HeadDeadline::wrote` (server.rs:17647),
+/// under which an empty write restarted the stall clock of a reader that
+/// had stopped.
+#[tokio::test]
+async fn a_write_that_moves_no_byte_does_not_end_a_stall() {
+    let (server, mut client) = socket_pair().await;
+    let (_slots, mut wrapped) = answering(server, "cloudestall", HeadState::Delivered);
+    let since = tokio::time::Instant::now();
+    wrapped.stalled_since = Some(since);
+    wrapped.written = 5;
+
+    let none = tokio::time::timeout(PATIENCE, wrapped.write(b""))
+        .await
+        .expect("an empty write answers at once")
+        .expect("an empty write");
+    assert_eq!(none, 0);
+    assert_eq!(wrapped.stalled_since, Some(since), "nothing went");
+    assert_eq!(wrapped.written, 5);
+
+    let wrote = tokio::time::timeout(PATIENCE, wrapped.write(b"ok"))
+        .await
+        .expect("a write answers at once")
+        .expect("a write");
+    assert_eq!(wrote, 2);
+    assert_eq!(wrapped.stalled_since, None, "a byte went");
+    assert_eq!(wrapped.written, 7);
+    let mut got = [0_u8; 2];
+    tokio::time::timeout(PATIENCE, client.read_exact(&mut got))
+        .await
+        .expect("the peer reads it at once")
+        .expect("the peer reads it");
+    assert_eq!(&got, b"ok");
+}
+
+/// **The stop line counts every request open across the speed table.** A
+/// fresh process has none open; two stages started are two, and each one
+/// that ends takes one away. Run in a child process, because the table is
+/// the process's own and every test beside this one in a `cargo test`
+/// process writes to it. Kills `open_requests -> 1` (server.rs:17943),
+/// which the one serve test of the "stop started" line could not tell
+/// apart: it stops with exactly one request open.
+#[test]
+fn the_stop_counts_every_request_open_across_the_speed_table() {
+    const CHILD: &str = "BRUTEX_CLOUDE_OPEN_REQUESTS_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(open_requests(), 0, "a fresh process has none open");
+        let one = crate::speed::stage_start("cloude open one");
+        let two = crate::speed::stage_start("cloude open two");
+        assert_eq!(open_requests(), 2);
+        drop(one);
+        assert_eq!(open_requests(), 1);
+        drop(two);
+        assert_eq!(open_requests(), 0);
+        println!();
+        println!("CLOUDE-OPEN-REQUESTS=checked");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::the_stop_counts_every_request_open_across_the_speed_table",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDE-OPEN-REQUESTS=checked"),
+        "{stdout}"
+    );
+}
+
+/// **The banner says why a universe was not read whole, and says nothing
+/// more of a clean one.** A read whose only fault is one decline nobody chose
+/// prints its status, each of its notes, and the exit it has earned; a clean
+/// read prints its status alone. Run in a child process, because the banner
+/// is this process's standard output. Kills deleting the `!` of `if !clean`
+/// in `announce_universe` (server.rs:18983), which printed a clean read's
+/// notes and the degraded exit, and kept a degraded read's to itself.
+#[test]
+fn a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more() {
+    const CHILD: &str = "BRUTEX_CLOUDE_ANNOUNCE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let read = |notes: Vec<String>, non_routine| {
+            Read::new(
+                crate::merge::Merged::default(),
+                notes,
+                Vec::new(),
+                0,
+                0,
+                non_routine,
+            )
+        };
+        println!();
+        println!("CLOUDE-CLEAN-BEGIN");
+        assert!(announce_universe(&read(Vec::new(), 0)));
+        println!("CLOUDE-CLEAN-END");
+        println!("CLOUDE-DEGRADED-BEGIN");
+        assert!(!announce_universe(&read(
+            vec!["CLOUDE one master did not read".to_owned()],
+            1
+        )));
+        println!("CLOUDE-DEGRADED-END");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::a_degraded_universe_says_why_on_the_banner_and_a_clean_one_says_no_more",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    let between = |begin: &str, end: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .skip_while(|line| *line != begin)
+            .skip(1)
+            .take_while(|line| *line != end)
+            .map(str::to_owned)
+            .collect()
+    };
+    let clean = between("CLOUDE-CLEAN-BEGIN", "CLOUDE-CLEAN-END");
+    assert_eq!(clean, ["  universe: ok"], "{stdout}");
+    let degraded = between("CLOUDE-DEGRADED-BEGIN", "CLOUDE-DEGRADED-END");
+    assert_eq!(
+        degraded.first().map(String::as_str),
+        Some("  universe: DEGRADED")
+    );
+    assert!(
+        degraded
+            .iter()
+            .any(|line| line == "            CLOUDE one master did not read"),
+        "{stdout}"
+    );
+    assert!(
+        degraded
+            .last()
+            .is_some_and(|line| line.contains("this process will exit")),
+        "{stdout}"
+    );
+}
+
+/// **Ending a served process with no engine work running says none was
+/// abandoned.** `end_served` is the binary's own end: it asks every engine
+/// task in the process to stop, waits for the runtime, has the last word
+/// said and releases what was held, then answers how many engine tasks it
+/// abandoned. Run in a child process, because the stop it asks for is the
+/// whole process's and would stop every test beside this one. Kills
+/// `end_served -> 1` (server.rs:18089), which no test reached before.
+#[test]
+fn ending_a_served_process_with_no_engine_work_abandons_none() {
+    const CHILD: &str = "BRUTEX_CLOUDE_END_SERVED_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let mut outlived = None;
+        let abandoned = end_served(
+            runtime,
+            std::time::Duration::from_millis(200),
+            Held::default(),
+            |said| outlived = Some(said),
+        );
+        assert_eq!(abandoned, 0);
+        assert_eq!(
+            outlived,
+            Some(false),
+            "the last word was said, of an idle pool"
+        );
+        println!();
+        println!("CLOUDE-END-SERVED=checked");
+        return;
+    }
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::ending_a_served_process_with_no_engine_work_abandons_none",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "CLOUDE-END-SERVED=checked"),
+        "{stdout}"
+    );
+}
+
+/// **A stop says how much engine work it abandons, and says nothing when it
+/// abandons none.** The count of running engine tasks is handed in: none
+/// running ends quietly, and one that never finishes is abandoned when the
+/// grace runs out, by count and grace on one `api.main` line. Each case has
+/// a grace no other test uses, so the lines found are this test's own.
+/// Kills `>` turned to `==` at `abandoned > 0` in `wait_then_end_counting`
+/// (server.rs:19521), which said the quiet stop abandoned work and kept the
+/// real abandonment to itself.
+#[test]
+fn a_stop_names_the_engine_work_it_abandons_and_only_then() {
+    let _sink = crate::emitted::sink();
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    };
+    let abandoned_with = |from: u64, grace_ms: u64| {
+        crate::emitted::landed(from, "api.main", "engine tasks abandoned at shutdown")
+            .into_iter()
+            .filter(|record| crate::emitted::counts(record, "grace_ms", grace_ms))
+            .collect::<Vec<_>>()
+    };
+
+    let from = crate::emitted::mark();
+    let quiet = wait_then_end_counting(runtime(), std::time::Duration::from_millis(47), || 0);
+    assert_eq!(quiet.engine, 0);
+    assert!(abandoned_with(from, 47).is_empty());
+
+    let from = crate::emitted::mark();
+    let cut = wait_then_end_counting(runtime(), std::time::Duration::from_millis(53), || 1);
+    assert_eq!(cut.engine, 1);
+    let said = abandoned_with(from, 53);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(crate::emitted::counts(&said[0], "abandoned", 1));
+}
+
+/// **The binary's entry answers a command it cannot parse as misused, and
+/// keeps nothing.** `run_held` is the entry `main` calls: the same answer as
+/// [`run`], with what a serve kept left in `held`, and a command that never
+/// served keeps nothing there. Kills `run_held -> 1` (server.rs:19601),
+/// which no test reached: `main` is its only caller.
+#[tokio::test]
+async fn the_entry_answers_a_command_it_cannot_parse_as_misused_and_keeps_nothing() {
+    let mut held = Held::default();
+    let code = run_held(
+        &["--wat".to_owned()],
+        Box::pin(std::future::ready(Ok(()))),
+        &mut held,
+    )
+    .await;
+    assert_eq!(code, MISUSED);
+    assert!(!held.holds(), "a command that never served keeps nothing");
+}
+
+/// **A serve holds its store only when it keeps both its lock and its port.**
+/// A `Held` with the port and no lock got as far as binding, not as far as
+/// serving the store, and does not hold; nor does one with neither. Kills
+/// `&&` turned to `||` in `Held::holds` (server.rs:18002): every `Held` a
+/// test built before kept both or neither.
+#[test]
+fn a_serve_holds_only_with_both_its_lock_and_its_port() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let half = Held {
+        log: None,
+        lock: None,
+        port: Some(port),
+    };
+    assert!(!half.holds(), "a port without the store's lock");
+    assert!(!Held::default().holds(), "neither");
+}
+
+/// **The index map lists a feed's own indexes and nothing else it holds.** A
+/// universe holding NIFTY (an index) and RELIANCE (a share), each with a
+/// Groww id, is mapped for Groww against a catalogue naming NIFTY 50: NIFTY
+/// has a row and RELIANCE has none. Run in a child process, because the
+/// route reads the catalogue from the masters directory the environment
+/// names. Kills `&&` turned to `||` in `indexmap_reading`'s filter
+/// (server.rs:35956), which handed every key with a Groww id, share or
+/// index, to the join.
+#[test]
+fn the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds() {
+    const CHILD: &str = "BRUTEX_CLOUDE_INDEXMAP_CHILD";
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = PathBuf::from(dir);
+        let store = dir.join("store");
+        std::fs::create_dir_all(&store).expect("an empty store");
+        let site = Site::load(&dir, &store);
+        let (status, body) = indexmap_reading(&site, Vendor::Groww);
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let symbols: Vec<&str> = doc["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["symbol"].as_str().expect("a symbol"))
+            .collect();
+        assert_eq!(symbols, ["NIFTY"], "{body}");
+        println!();
+        println!("CLOUDE-INDEXMAP=checked");
+        return;
+    }
+    let dir = super::tests::agreeing("cloude-indexmap");
+    std::fs::write(
+        dir.join("nse_indices.csv"),
+        "index_name,category\nNIFTY 50,broad\n",
+    )
+    .expect("the exchange's catalogue");
+    let stdout = crate::isolated::rerun(
+        "server::cloud_mutant_tests_e::the_index_map_lists_a_feeds_own_indexes_and_nothing_else_it_holds",
+        &[
+            (CHILD, dir.as_os_str()),
+            ("BRUTEX_MASTERS", dir.as_os_str()),
+        ],
+    );
+    assert!(
+        stdout.lines().any(|line| line == "CLOUDE-INDEXMAP=checked"),
+        "{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

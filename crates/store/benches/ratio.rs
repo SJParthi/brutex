@@ -71,6 +71,9 @@ mod safe_files;
 #[path = "ratio/months.rs"]
 mod months;
 
+#[path = "ratio/quarantine.rs"]
+mod quarantine;
+
 use brutex_core::vendor::Vendor;
 use store::block;
 use store::crc::crc32c;
@@ -1537,6 +1540,8 @@ fn main() {
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
     ok &= safe_files::run();
     ok &= months::run();
+    ok &= quarantine::run();
+    quarantine::drop_is_linear();
     if ok {
         println!("all ratios within the ceiling");
     } else {

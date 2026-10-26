@@ -66,7 +66,9 @@ fn every_spot_and_fno_body_of_the_steps_list_parses() {
 
 /// S-48's planned body is one today's route refuses, by the field it lacks:
 /// when R4-28 builds the form this fails, and its builder makes the line a
-/// built one, which the test above then parses.
+/// built one, which the test above then parses. R4-28 repair 5 reconciled
+/// the rung (the second half below); the form for all underlyings at once is
+/// not built, so the line stays planned and the first half stands.
 #[test]
 fn the_planned_futures_body_is_refused_by_the_route_today() {
     let head = "\"planned: POST /pull/fno ";
@@ -84,20 +86,29 @@ fn the_planned_futures_body_is_refused_by_the_route_today() {
         format!("{refused:?}"),
         "Err(FieldMissing { field: \"underlying\" })"
     );
-    // With one underlying named, the route still refuses it: an expired
-    // contract is stored at 1min or not at all (the operator's rule of
-    // 2026-08-19, in `parse_fno`), so S-48's 1day futures pull is a form the
-    // route refuses by rule, not only one it lacks. R4-28 reconciles the two.
+    // With one underlying named, the route PARSES it at the futures route's
+    // own rung. This half refused it until R4-28 repair 5 (D-7191), which
+    // reconciled the two as this test asked: an expired contract is stored
+    // at 1min or not at all (the operator's rule of 2026-08-19, in
+    // `parse_fno`), except an expired future of a feed that routes futures
+    // through a token, Zerodha's, which is its route's 1day rung and no
+    // other. So S-48 waits for a form or a range verb that names all the
+    // F&O underlyings at once, not for the rule.
     let named = format!("underlying=NIFTY&{}", planned[0]);
-    let refused = api::ingest::parse_fno(&named, today());
+    let parsed = api::ingest::parse_fno(&named, today()).expect("one underlying named parses");
     assert_eq!(
-        format!("{refused:?}"),
-        "Err(ExpiredSeriesIsOneMinuteOnly { got: \"1day\" })",
+        parsed.granularity as u8,
+        pull::vendor::Granularity::Day1 as u8,
         "{named}"
     );
+    assert_eq!(parsed.feed, pull::vendor::Feed::Zerodha);
     let minute = named.replace("granularity=1day", "granularity=1min");
-    let parsed = api::ingest::parse_fno(&minute, today());
-    assert!(parsed.is_ok(), "{minute}: {parsed:?}");
+    let refused = api::ingest::parse_fno(&minute, today());
+    assert_eq!(
+        format!("{refused:?}"),
+        "Err(ExpiredFutureAtItsRouteRungOnly { got: \"1min\", rung: \"1day\" })",
+        "{minute}"
+    );
 }
 
 #[test]

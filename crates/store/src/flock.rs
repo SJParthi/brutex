@@ -133,8 +133,10 @@ pub fn patience() -> Duration {
     PATIENCE.with(Cell::get)
 }
 
-/// Takes `waited` out of this thread's patience.
-fn spend_patience(waited: Duration) {
+/// Takes `waited` out of this thread's patience: the shared month locks and
+/// the quarantine's readers, which wait for a writer's index image
+/// (`crate::quarantine`, R4-18), spend one budget.
+pub(crate) fn spend_patience(waited: Duration) {
     PATIENCE.with(|patience| patience.set(patience.get().saturating_sub(waited)));
 }
 

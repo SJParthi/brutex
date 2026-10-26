@@ -157,3 +157,80 @@ mod tests {
         assert_eq!(path("alpha"), a);
     }
 }
+
+/// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): the two
+/// early returns of the fixture planters, which no caller reached.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use brutex_core::vendor::Vendor;
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+
+    fn month() -> YearMonth {
+        YearMonth::new(2024, 3).expect("a month")
+    }
+
+    fn store_path(file: FileKind) -> StorePath<'static> {
+        StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "PLANTED",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(),
+            file,
+        })
+        .expect("a legal path")
+    }
+
+    /// No rows plant nothing, and a sort index already beside the month is
+    /// left byte for byte as it was.
+    #[test]
+    fn a_sort_index_is_never_planted_over_one_or_for_no_rows() {
+        let root = path("cloud-plant-sort");
+        let _ = std::fs::remove_dir_all(&root);
+        let bars = store_path(FileKind::Bars).to_path_buf(&root);
+        std::fs::create_dir_all(bars.parent().expect("a month directory")).expect("mkdir");
+        let shape = store::sort_index::Shape::of(month(), 60, 7);
+
+        plant_pre_rule_sort_index(&bars, &shape, &[], 4);
+        let srt = bars.with_extension("srt");
+        assert!(!srt.exists(), "no rows, no index");
+
+        std::fs::write(&srt, b"already here").expect("an index of its own");
+        let row = store::format::Bar {
+            ts_micros: 1,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        };
+        plant_pre_rule_sort_index(&bars, &shape, &[row], 4);
+        assert_eq!(std::fs::read(&srt).expect("read"), b"already here");
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    /// A time index already beside the month is left byte for byte as it was:
+    /// the rebuild door is never opened over it.
+    #[test]
+    fn a_time_index_is_never_planted_over_one() {
+        let root = path("cloud-plant-time");
+        let _ = std::fs::remove_dir_all(&root);
+        let bars = store_path(FileKind::Bars);
+        let tix = bars.with_file(FileKind::TimeIndex).to_path_buf(&root);
+        std::fs::create_dir_all(tix.parent().expect("a month directory")).expect("mkdir");
+        std::fs::write(&tix, b"kept").expect("an index of its own");
+        plant_pre_rule_time_index(&root, bars, 7);
+        assert_eq!(std::fs::read(&tix).expect("read"), b"kept");
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+}

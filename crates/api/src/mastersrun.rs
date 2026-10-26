@@ -241,12 +241,18 @@ fn attempts_json(tried: &Fetched) -> String {
 /// One source's outcome, as the page reads it.
 fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetched) -> String {
     let head = format!(
-        r#"{{"file":{},"url":{},"needs_token":{},"attempts":{},"waited_ms":{}"#,
+        r#"{{"file":{},"url":{},"needs_token":{},"attempts":{},"waited_ms":{},"snapshot":{}"#,
         crate::render::json_string(source.file),
         crate::render::json_string(source.url),
         source.needs_token,
         attempts_json(tried),
         tried.waited_ms(),
+        // R4-28 (DLY-09): the dated snapshot and, for the Kite dump, the diff's
+        // counts and every named change. `null` for a source not snapshotted.
+        tried.snapshot.as_ref().map_or_else(
+            || "null".to_owned(),
+            pull::master_snapshots::Snapshotted::json
+        ),
     );
     match *landed {
         Ok(Landed::Written { bytes, changed }) => format!(
@@ -433,9 +439,29 @@ async fn obtain<D: Discovery, P: masters::Pause>(
             Ok(body)
         }
     }
-    let tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
+    let mut tried = masters::fetch(&Validating { from, source, dir }, clock, source).await;
     let landed = match tried.body {
-        Some(ref body) => masters::land(dir, source, body),
+        Some(ref body) => {
+            // OFF THE ASYNC WORKERS (R4-28 repair 2): the landing and the
+            // snapshot write fsync, take the snapshots' flock and parse the dump.
+            let (landed, snapshot) = crate::server::off_the_workers(|| {
+                let landed = masters::land(dir, source, body);
+                // THE DATED SNAPSHOT AND THE DAY'S DIFF, after the landing and
+                // never over it: the one call R4-28 adds at the only
+                // `masters::land` call site (DLY-09, D-7185). A refused landing
+                // writes no snapshot.
+                let snapshot = pull::master_snapshots::after_land(
+                    dir,
+                    source,
+                    body,
+                    &landed,
+                    pull::master_snapshots::today_ist(),
+                );
+                (landed, snapshot)
+            });
+            tried.snapshot = snapshot;
+            landed
+        }
         // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
         // ledger travels beside this in `attempts`, so the sentence is free to
         // be the single most useful line rather than a digest of every step.
@@ -1073,6 +1099,78 @@ mod tests {
             ref other => format!("not a refusal: {other:?}"),
         };
         assert!(named.contains(&kept.display().to_string()), "{named}");
+    }
+
+    /// R4-28 repair 3 (verify r3 blocking): a snapshot write cut by a kill
+    /// leaves a body with no receipt. The next refresh names it in the
+    /// `/masters/refresh` outcome, and in a Warn `pull.masters.snapshot`
+    /// record in the file `/logs` reads. Every row is invented.
+    #[test]
+    fn a_refresh_after_a_cut_snapshot_names_it_in_the_outcome_and_the_log() {
+        struct Kite;
+        impl Discovery for Kite {
+            async fn get(&self, _url: &str) -> Result<String, Refusal> {
+                let rows: Vec<String> = (9_700_001..9_700_025_u64)
+                    .map(|token| {
+                        format!(
+                            "{token},{},ZQRS{token}26MARFUT,\"ZQRS{token}\",0,2026-03-26,0,0.05,75,FUT,NFO-FUT,NFO",
+                            token / 256
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "{}\n{}\n",
+                    pull::vendor::KITE_MASTER_HEADER,
+                    rows.join("\n")
+                ))
+            }
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = crate::scratch::path(&format!("masters-cut-snapshot-{nanos}"));
+        let snapshots = dir.join(pull::master_snapshots::SNAPSHOT_DIR);
+        std::fs::create_dir_all(&snapshots).expect("a new snapshots directory");
+        let cut = "instruments_20260304.csv.gz";
+        std::fs::write(snapshots.join(cut), b"a body cut before its receipt")
+            .expect("the residue of a cut write");
+        let source = masters::SOURCES
+            .iter()
+            .find(|source| source.vendor == Some(brutex_core::vendor::Vendor::Zerodha))
+            .expect("the Zerodha master is a source");
+        let from = crate::emitted::mark();
+        let (landed, tried) = block_on(obtain(&Kite, &NoWait, &dir, source));
+        assert!(landed.is_written(), "{landed:?}");
+        let json = outcome_json(source, &Ok(landed), &tried);
+        assert!(
+            json.contains(&format!("\"{cut}\"")),
+            "the refresh outcome names the cut body: {json}"
+        );
+        let named = crate::emitted::landed(
+            from,
+            pull::master_snapshots::EVENT_TARGET,
+            "an incomplete master snapshot entry is held and never read",
+        );
+        assert!(
+            named
+                .iter()
+                .any(|record| record.level == telemetry::Level::Warn
+                    && crate::emitted::says(record, "entry", cut)),
+            "one Warn record names the cut body: {named:?}"
+        );
+        // AND THE SNAPSHOT'S OWN LINE COUNTS IT.
+        let written = crate::emitted::landed(
+            from,
+            pull::master_snapshots::EVENT_TARGET,
+            "a dated master snapshot was written",
+        );
+        assert!(
+            written
+                .iter()
+                .any(|record| crate::emitted::says(record, "kind", "instruments")
+                    && crate::emitted::counts(record, "incomplete", 1)),
+            "{written:?}"
+        );
     }
 
     /// A clock that does not wait.
@@ -1864,6 +1962,7 @@ mod tests {
                 step(4, refused(None, Verdict::Reprime)),
                 step(5, refused(Some(404), Verdict::Never)),
             ],
+            snapshot: None,
         };
         let from = crate::emitted::mark();
         super::record(

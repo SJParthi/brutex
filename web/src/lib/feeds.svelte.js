@@ -68,16 +68,18 @@ import { createFeedStartup, urlFeedOf } from '$lib/feed-startup.js';
 /**
  * HOW A FEED ADDRESSES DERIVATIVES, IN THE SERVER'S OWN WORDS.
  *
- * A union rather than `string`, because the four values are not free text: each
- * one selects a different request shape, and `/ingest` branches on them by
- * name. Measured across all five rows — `by_strike_offset` (Dhan),
- * `by_name` (Groww), `local_folder` (TrueData, GDFL), `none` (Zerodha).
+ * A union rather than `string`, because the five values are not free text:
+ * each one selects a different request shape, and `/ingest` branches on them
+ * through `$lib/fno-modes.js`. Across the five rows — `by_strike_offset`
+ * (Dhan), `by_name` (Groww), `local_folder` (TrueData, GDFL), `by_token`
+ * (Zerodha since D-7186; it said `none` before, R4-28 repair 5).
  *
  * `by_strike_offset` is the ATM-relative one: 21 index offsets — ATM and ten
  * either side — and 7 for stocks, ATM and three either side. See
- * `crates/pull/src/rolling.rs`.
+ * `crates/pull/src/rolling.rs`. `by_token` is futures day candles per
+ * contract through a token resolved by date: `crates/pull/src/fnowork.rs`.
  *
- * @typedef {'by_name' | 'by_strike_offset' | 'local_folder' | 'none'} FnoMode
+ * @typedef {'by_name' | 'by_strike_offset' | 'by_token' | 'local_folder' | 'none'} FnoMode
  */
 
 /**

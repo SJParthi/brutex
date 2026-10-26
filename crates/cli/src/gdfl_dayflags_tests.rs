@@ -145,10 +145,15 @@ fn only_imported_days_are_read_and_nothing_but_the_ledger_is_written() {
     assert!(out.contains("lineage records     0"), "{out}");
     // Nothing of the data was written: the journal and the bars are byte for
     // byte as they were. What the run's own locks leave (IA-16, D-6900) is
-    // its released claim (an empty lock file) and its one runs-ledger id.
+    // its released claim (an empty lock file) and its one runs-ledger id,
+    // which the ledger writes down twice: its record in `audit/runs.ledger`
+    // and its claims line in `audit/runs.claims` (D-6269), both asserted
+    // below.
     let locks = |path: &Path| {
         let name = path.to_string_lossy();
-        name.ends_with(".lock") || name.contains("runs.ledger")
+        name.ends_with(".lock")
+            || name.contains("runs.ledger")
+            || name.ends_with(pull::gdfl_run::ledger::CLAIMS)
     };
     let data = |all: Vec<(PathBuf, Vec<u8>)>| -> Vec<(PathBuf, Vec<u8>)> {
         all.into_iter().filter(|(path, _)| !locks(path)).collect()
@@ -168,6 +173,19 @@ fn only_imported_days_are_read_and_nothing_but_the_ledger_is_written() {
     assert_eq!(
         (last.mode.as_str(), last.kind.as_str()),
         ("dayflags", "options")
+    );
+    let claims = std::fs::read_to_string(store.join(pull::gdfl_run::ledger::CLAIMS)).unwrap();
+    // The line ends with its record's own CRC field (D-6269, IA-10c repair 3).
+    let record = last.record().unwrap();
+    let crc = std::str::from_utf8(record.get(114..126).unwrap()).unwrap();
+    assert!(crc.starts_with("crc="), "{crc}");
+    assert_eq!(
+        claims.lines().collect::<Vec<_>>(),
+        [format!(
+            "run {} dayflags options {} {} {} {crc}",
+            last.id, last.by, last.pid, last.started
+        )],
+        "the run's one id, and nothing else, in the claims (D-6269)"
     );
     std::fs::remove_dir_all(store).unwrap();
     std::fs::remove_dir_all(zips).unwrap();

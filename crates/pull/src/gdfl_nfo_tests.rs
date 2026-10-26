@@ -16,6 +16,14 @@ use std::sync::Arc;
 use super::*;
 use crate::gdfl_fixtures::{Method, bts, bts_stating, csv, hms, mon, put, row, scratch, zip};
 
+/// The refusal of a first line this reader does not know (ERR-11, D-7312):
+/// named by the shape of `first`, its CR stripped.
+fn unknown_header(first: &[u8]) -> NfoRefusal {
+    NfoRefusal::HeaderUnknown {
+        shape: crate::gdfl_cm::HeaderShape::of(first),
+    }
+}
+
 fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).unwrap()
 }
@@ -610,14 +618,16 @@ fn every_refusal_says_what_it_is() {
         NfoRefusal::UnderlyingRefused { ticker: "T".into() },
         NfoRefusal::ContractUnrenderable { ticker: "T".into() },
         NfoRefusal::DuplicateTicker { ticker: "T".into() },
-        NfoRefusal::HeaderUnknown,
+        unknown_header(b"Ticker"),
         NfoRefusal::TickerMismatch { line: 7 },
         NfoRefusal::DateMismatch { line: 7 },
         NfoRefusal::MalformedRow { line: 7 },
         NfoRefusal::PriceRefused { line: 7 },
         NfoRefusal::OpenInterestRefused { line: 7 },
         NfoRefusal::RowsOverCap { cap: 7 },
-        NfoRefusal::Source(CmRefusal::HeaderUnknown),
+        NfoRefusal::Source(CmRefusal::HeaderUnknown {
+            shape: crate::gdfl_cm::HeaderShape::of(b"Ticker"),
+        }),
     ];
     let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
     for (why, text) in all.iter().zip(&texts) {
@@ -626,9 +636,10 @@ fn every_refusal_says_what_it_is() {
     let unique: std::collections::HashSet<&String> = texts.iter().collect();
     assert_eq!(unique.len(), texts.len(), "each refusal reads differently");
     assert!(texts.iter().any(|t| t.contains("line 7")));
+    let shape = crate::gdfl_cm::HeaderShape::of(b"Ticker");
     assert_eq!(
-        NfoRefusal::from(CmRefusal::HeaderUnknown),
-        NfoRefusal::Source(CmRefusal::HeaderUnknown)
+        NfoRefusal::from(CmRefusal::HeaderUnknown { shape }),
+        NfoRefusal::Source(CmRefusal::HeaderUnknown { shape })
     );
 }
 
@@ -913,10 +924,10 @@ fn a_zero_price_is_admitted_only_on_a_row_with_no_trade() {
 
 #[test]
 fn the_header_and_the_row_bound_are_refused_by_name() {
-    assert_eq!(decode(b"", STEM, trade()), Err(NfoRefusal::HeaderUnknown));
+    assert_eq!(decode(b"", STEM, trade()), Err(unknown_header(b"")));
     assert_eq!(
         decode(b"Ticker,Date\r\n", STEM, trade()),
-        Err(NfoRefusal::HeaderUnknown)
+        Err(unknown_header(b"Ticker,Date"))
     );
     let three = csv(&rows(&[(1, "1", 1, 0), (2, "1", 1, 0), (3, "1", 1, 0)]));
     assert!(decode_capped(&three, STEM, trade(), 3).is_ok());
@@ -2452,7 +2463,7 @@ fn decode_by_field_vector(bytes: &[u8], stem: &str, day: Day) -> Result<NfoFile,
         Some(h)
             if h == HEADER_OPEN_INTEREST.as_bytes()
                 || h == HEADER_OPEN_INTEREST_SPACED.as_bytes() => {}
-        _ => return Err(NfoRefusal::HeaderUnknown),
+        other => return Err(unknown_header(other.unwrap_or_default())),
     }
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
     let mut rows = Vec::new();
@@ -2557,7 +2568,7 @@ fn definition_5_differs_only_where_4_refused(
                 && new.trailing_empty == 0
         }
         (Err(new), Err(old)) if new == old => true,
-        (Ok(new), Err(NfoRefusal::HeaderUnknown)) => new.trailing_empty > 0,
+        (Ok(new), Err(NfoRefusal::HeaderUnknown { .. })) => new.trailing_empty > 0,
         (Ok(new), Err(old)) => row_fault(old)
             .is_some_and(|at| new.refused.named.first().is_some_and(|row| row.line == at)),
         (Err(new), Err(old)) => row_fault(old).is_some_and(|at| match new {
@@ -3109,7 +3120,9 @@ fn a_header_with_empty_trailing_fields_is_read_when_every_row_matches() {
     let nine: Vec<String> = many(1).iter().map(|r| format!("{r},,,,,,,,,")).collect();
     assert_eq!(
         decode(&body(HEADER_OPEN_INTEREST, 9, &nine), STEM, trade()),
-        Err(NfoRefusal::HeaderUnknown)
+        Err(unknown_header(
+            format!("{HEADER_OPEN_INTEREST},,,,,,,,,").as_bytes()
+        ))
     );
     let mut broken = padded[..4].to_vec();
     broken[1] = plain[1].clone();
@@ -3135,7 +3148,7 @@ fn a_header_with_empty_trailing_fields_is_read_when_every_row_matches() {
     ] {
         assert_eq!(
             decode(&body(&bad, 0, &padded[..1]), STEM, trade()),
-            Err(NfoRefusal::HeaderUnknown),
+            Err(unknown_header(bad.as_bytes())),
             "{bad:?}"
         );
     }
@@ -3297,7 +3310,7 @@ fn the_row_bound_counts_refused_rows_too() {
 /// refused row between two of one second.
 #[test]
 fn per_row_refusal_keeps_every_good_row_in_file_order_at_the_extremes() {
-    assert_eq!(decode(b"", STEM, trade()), Err(NfoRefusal::HeaderUnknown));
+    assert_eq!(decode(b"", STEM, trade()), Err(unknown_header(b"")));
     let bare = decode(&csv(&[]), STEM, trade()).unwrap();
     assert_eq!((bare.rows.len(), bare.refused.total()), (0, 0));
     let one = many(1);

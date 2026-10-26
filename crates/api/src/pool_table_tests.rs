@@ -238,6 +238,28 @@ const ROUTES: &[(&str, Runs)] = &[
         "/dayflags.json",
         pool(Named::StoreRead, "dayflags.rs", "dayflags_json", STORE_READ),
     ),
+    (
+        "/feed-checks.json",
+        pool(
+            Named::StoreRead,
+            "feed_checks.rs",
+            "feed_checks_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/tick-checks.json",
+        pool(
+            Named::StoreRead,
+            "feed_checks.rs",
+            "tick_checks_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/calendar-days.json",
+        Runs::Memory("the compiled session calendar tables, no store read"),
+    ),
     ("/aliases.json", Runs::Memory("the compiled alias table")),
     (
         "/sources.json",
@@ -324,6 +346,26 @@ const ROUTES: &[(&str, Runs)] = &[
             "repair_route.rs",
             "repair_plan_json",
             STORE_READ,
+        ),
+    ),
+    // THE QUARANTINE (R4-18): its plan on the store-read pool, its press on
+    // the operations pool, one press at a time per server.
+    (
+        "/pull/quarantine.json",
+        pool(
+            Named::StoreRead,
+            "quarantine_route.rs",
+            "quarantine_plan_json",
+            STORE_READ,
+        ),
+    ),
+    (
+        "/pull/quarantine",
+        pool(
+            Named::OpsRead,
+            "quarantine_route.rs",
+            "quarantine_apply",
+            "crate::detail::run_ops_read(",
         ),
     ),
     (

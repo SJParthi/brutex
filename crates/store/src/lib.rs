@@ -86,6 +86,7 @@ pub mod path;
 /// written after the bars it names are committed and never touching them
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
+pub mod quarantine;
 pub mod repair;
 /// One way to open a file for reading (no link followed, never a wait,
 /// regular files only) and the writer's refusal of a store whose `bars` is a

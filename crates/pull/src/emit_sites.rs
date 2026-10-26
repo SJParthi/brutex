@@ -256,6 +256,7 @@ fn plan_over(request: &BarRequest) -> Plan<'_> {
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     }
 }
 
@@ -1413,7 +1414,111 @@ static SITES: &[Site] = &[
         says: ("code", Says::Holds("alert_kind_unknown")),
         drive: drive_alert_not_saved,
     },
+    // IA-10c repair 3 (D-6269): the runs ledger behind its claims, the
+    // claims' damaged tail, and a landing id no receipt can carry.
+    Site {
+        at: "crates/pull/src/gdfl_run_ledger.rs — note_behind_claims",
+        target: "gdfl.import.lifecycle",
+        message: "runs ledger behind its claims",
+        says: ("claims_run", Says::Signs(1_790_812_801)),
+        drive: drive_runs_ledger_behind_claims,
+    },
+    Site {
+        at: "crates/pull/src/gdfl_run_ledger.rs — note_claims_damaged",
+        target: "gdfl.import.lifecycle",
+        message: "runs claims tail damaged",
+        says: ("lines", Says::Signs(1)),
+        drive: drive_runs_claims_damaged,
+    },
+    Site {
+        at: "crates/pull/src/landing_run.rs — allocate_at, an id past a receipt",
+        target: "pull.landing_run",
+        message: "landing run id past a receipt",
+        says: ("run", Says::Signs(4_294_967_296)),
+        drive: drive_landing_id_past_a_receipt,
+    },
 ];
+
+/// The clock of the runs-ledger rows: 2026-10-01 00:00 UTC, inside the
+/// calendar's span.
+const RUNS_CLOCK: u64 = 1_790_812_800;
+
+/// A Zerodha spot landing's runs-ledger entry under [`RUNS_CLOCK`].
+fn runs_entry() -> crate::gdfl_run::ledger::Entry {
+    use crate::ingest::landing_run::{By, Mode, kind_of};
+    crate::gdfl_run::ledger::Entry {
+        id: 0,
+        mode: Mode::Spot.word().to_owned(),
+        kind: kind_of(Vendor::Zerodha).to_owned(),
+        by: By::Api.word().to_owned(),
+        pid: 4242,
+        started: RUNS_CLOCK,
+        resumes: 0,
+    }
+}
+
+/// Two ids, then the ledger cut at a record boundary (its last record lost
+/// whole, the claims kept): the next id is raised past the claims' last.
+fn drive_runs_ledger_behind_claims(scratch: &Scratch) {
+    use crate::gdfl_run::ledger;
+    for _ in 0..2 {
+        ledger::allocate(&scratch.root, &runs_entry()).expect("an id");
+    }
+    let path = scratch.root.join(ledger::LEDGER);
+    let len = fs::metadata(&path).expect("the ledger").len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("the ledger")
+        .set_len(len - ledger::RECORD)
+        .expect("cut at a record boundary");
+    ledger::allocate(&scratch.root, &runs_entry()).expect("the id past the claims");
+}
+
+/// Two ids, then the claims' last line rotted (its CRC fails): the next id
+/// is the ledger's own, and the rotted line is said.
+fn drive_runs_claims_damaged(scratch: &Scratch) {
+    use crate::gdfl_run::ledger;
+    for _ in 0..2 {
+        ledger::allocate(&scratch.root, &runs_entry()).expect("an id");
+    }
+    let path = scratch.root.join(ledger::CLAIMS);
+    let claims = fs::read_to_string(&path).expect("the claims");
+    let cut = claims
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .expect("two lines")
+        + 1;
+    let (head, last) = claims.split_at(cut);
+    fs::write(
+        &path,
+        format!("{head}{}", last.replacen("run 1", "run 9", 1)),
+    )
+    .expect("the rotted line");
+    ledger::allocate(&scratch.root, &runs_entry()).expect("the ledger's own next id");
+}
+
+/// A journal run of 4,294,967,295 seeds the ledger at it: the next landing's
+/// id would be past what a receipt holds, and is refused.
+fn drive_landing_id_past_a_receipt(scratch: &Scratch) {
+    use crate::ingest::landing_run::{By, Mode, allocate_at, kind_of};
+    let journal = crate::gdfl_import::journal_path(&scratch.root);
+    fs::create_dir_all(journal.parent().expect("a folder")).expect("the journal's folder");
+    fs::write(
+        &journal,
+        format!("run {} import options cli 4242 {RUNS_CLOCK}\n", u32::MAX),
+    )
+    .expect("the journal");
+    let refused = allocate_at(
+        &scratch.root,
+        Mode::Spot,
+        By::Api,
+        kind_of(Vendor::Zerodha),
+        RUNS_CLOCK,
+    )
+    .expect_err("an id past 32 bits");
+    assert_eq!(refused.code(), "runs_ledger_entry", "{refused}");
+}
 
 // ===========================================================================
 // The drivers — one shipped call each
@@ -2052,6 +2157,26 @@ fn every_emit_site_in_this_crate_reaches_a_file_body() {
             .all(|record| record.message != "census image built"),
         "a re-run over the same folder moves nothing, so it images nothing and \
          leaves the census byte for byte as it was"
+    );
+
+    // A HEALTHY RUNS LEDGER AND CLAIMS SAY NOTHING (IA-10c repair 3): the
+    // claims' tail is read on every allocation, and a ledger level with its
+    // claims, its tail whole, is neither behind them nor damaged. A tail read
+    // that warned on every id, or took a level claims line as a later one,
+    // would pass every row above.
+    let quiet = sink.health().next_seq;
+    let healthy = Scratch::new();
+    for _ in 0..3 {
+        crate::gdfl_run::ledger::allocate(&healthy.root, &runs_entry()).expect("an id");
+    }
+    assert!(
+        newer(home, sink, quiet, "gdfl.import.lifecycle")
+            .iter()
+            .all(|record| {
+                record.message != "runs ledger behind its claims"
+                    && record.message != "runs claims tail damaged"
+            }),
+        "three ids from a healthy ledger and claims must say neither"
     );
 }
 

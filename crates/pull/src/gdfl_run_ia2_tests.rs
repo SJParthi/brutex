@@ -244,6 +244,130 @@ fn a_damaged_last_record_that_a_run_used_is_never_handed_out_again() {
     assert_eq!(ids.last(), Some(&(lost + 1)), "{ids:?}");
 }
 
+/// **D-6269 (IA-10c repair 2, amended by repair 3): EVERY ID THE RUNS LEDGER
+/// GIVES IS WRITTEN DOWN TWICE.** Each allocation, of any feed and mode,
+/// appends one claims line `run <id> <mode> <kind> <by> <pid> <started>`
+/// (and ` resumes=<id>` when it resumes one), then its record's own
+/// ` crc=<8 hex>`, to `audit/runs.claims` after its record is synced and
+/// before the id is handed out, so a lost last record is raised past from
+/// the claims whether or not its run ever wrote a journal line. A torn
+/// claims line a crash left is closed before the next one and never joins
+/// it, and names no id. Claims that cannot be read (a directory at their
+/// name) refuse the allocation by name (`runs_ledger_io`) with nothing
+/// written, unborn (the seed cannot be raised past claims it cannot read)
+/// and born (their tail is read on every allocation since repair 3); claims
+/// that can be read and not written (read-only) refuse it by name with its
+/// id recorded, never handed out and never given later either.
+#[test]
+fn every_id_the_runs_ledger_gives_is_written_down_twice() {
+    let store = scratch("claims");
+    let claims_path = store.join("audit/runs.claims");
+    let import = allocate(&store, NOW).unwrap();
+    let merge = ledger::allocate(&store, &entry("verify-merge", "zerodha", "cli", NOW)).unwrap();
+    let mut resumed = entry("import", "options", "cli", NOW);
+    resumed.resumes = import;
+    let resuming = ledger::allocate(&store, &resumed).unwrap();
+    assert_eq!((import, merge, resuming), (NOW, NOW + 1, NOW + 2));
+    // The CRC field of the ledger's record `nth` (0 is the seed).
+    let crc_of = |nth: usize| {
+        let records = std::fs::read(store.join(ledger::LEDGER)).unwrap();
+        let field = String::from_utf8(records[nth * 128 + 114..nth * 128 + 126].to_vec()).unwrap();
+        assert!(field.starts_with("crc=") && field.len() == 12, "{field}");
+        field
+    };
+    let claims = std::fs::read_to_string(&claims_path).unwrap();
+    assert_eq!(
+        claims,
+        format!(
+            "run {import} import options cli 4242 {NOW} {}\n\
+             run {merge} verify-merge zerodha cli 4242 {NOW} {}\n\
+             run {resuming} import options cli 4242 {NOW} resumes={import} {}\n",
+            crc_of(1),
+            crc_of(2),
+            crc_of(3)
+        )
+    );
+
+    // A TORN CLAIMS LINE: closed first, its fragment a line of its own.
+    std::fs::write(&claims_path, format!("{claims}run 17")).unwrap();
+    let next = allocate(&store, NOW).unwrap();
+    assert_eq!(next, NOW + 3);
+    let claims = std::fs::read_to_string(&claims_path).unwrap();
+    assert!(
+        claims.ends_with(&format!(
+            "\nrun 17\nrun {next} import options cli 4242 {NOW} {}\n",
+            crc_of(4)
+        )),
+        "{claims}"
+    );
+    // ... and a lost last record is raised past the claims, not the torn
+    // fragment.
+    let path = store.join(ledger::LEDGER);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let len = bytes.len();
+    bytes[len - 60] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(allocate(&store, NOW).unwrap(), next + 1);
+
+    // CLAIMS THAT CANNOT BE READ (a directory at their name).
+    let blocked = scratch("claims-blocked");
+    let at = |name: &str| blocked.join("audit").join(name);
+    let ids = || -> Vec<u64> {
+        ledger::read_all(&blocked)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.unwrap().id)
+            .collect()
+    };
+    std::fs::create_dir_all(at("runs.claims")).unwrap();
+    // Unborn, the seed cannot be raised past claims it cannot read: refused
+    // by name, and no record is written.
+    let refused = allocate(&blocked, NOW).unwrap_err();
+    assert_eq!(refused.code(), "runs_ledger_io", "{refused}");
+    assert!(refused.to_string().contains("runs.claims"), "{refused}");
+    assert!(ids().is_empty(), "nothing written");
+    // Born, the claims' tail cannot be read either: refused by name before
+    // the record is written.
+    std::fs::rename(at("runs.claims"), at("runs.claims.moved")).unwrap();
+    let first = allocate(&blocked, NOW).unwrap();
+    std::fs::rename(at("runs.claims"), at("runs.claims.first")).unwrap();
+    std::fs::rename(at("runs.claims.moved"), at("runs.claims")).unwrap();
+    let refused = allocate(&blocked, NOW).unwrap_err();
+    assert_eq!(refused.code(), "runs_ledger_io", "{refused}");
+    assert!(
+        refused.to_string().contains("runs.claims")
+            && refused.to_string().contains("not a regular file"),
+        "{refused}"
+    );
+    assert_eq!(ids(), [0, first], "born: nothing written");
+    // CLAIMS THAT CAN BE READ AND NOT WRITTEN (read-only): an id whose
+    // claims line cannot be written is recorded and never handed out, now or
+    // later.
+    std::fs::rename(at("runs.claims"), at("runs.claims.dir")).unwrap();
+    std::fs::rename(at("runs.claims.first"), at("runs.claims")).unwrap();
+    let mut read_only = std::fs::metadata(at("runs.claims")).unwrap().permissions();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(at("runs.claims"), read_only).unwrap();
+    let refused = allocate(&blocked, NOW).unwrap_err();
+    assert_eq!(refused.code(), "runs_ledger_io", "{refused}");
+    assert!(
+        refused.to_string().contains("runs.claims")
+            && refused.to_string().contains("was not handed out"),
+        "{refused}"
+    );
+    assert_eq!(ids(), [0, first, first + 1], "recorded, never handed out");
+    std::fs::set_permissions(
+        at("runs.claims"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .unwrap();
+    assert_eq!(
+        allocate(&blocked, NOW).unwrap(),
+        first + 2,
+        "the refused id is never given later"
+    );
+}
+
 /// **L-IA-23: THE LEDGER IS SEEDED PAST EVERY ID THE JOURNAL HOLDS.** A store
 /// whose journal names run 1,900,000,000 gives its first ledger id past it.
 #[test]

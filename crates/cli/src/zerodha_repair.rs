@@ -54,6 +54,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use brutex_core::vendor::Vendor;
+use pull::gdfl_run::LogState;
 use pull::ingest::repair_plan::{self, Missing};
 use pull::session::{Day, Window};
 use store::format::{Bar, OI_NULL};
@@ -162,10 +163,16 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
     let apply = match (source, reason) {
         (None, None) => None,
         (Some(source), Some(reason)) => {
-            let reason = reason.trim().to_owned();
-            if reason.is_empty() || reason.len() > 200 || reason.chars().any(char::is_control) {
-                return Err("--reason is one line of at most 200 bytes".to_owned());
+            // THE ONE REPAIR-REASON RULE FOR BOTH FEEDS (D-4874, IA-GR-42;
+            // IA-10c, D-6264): judged as given, by the rule `POST /pull/repair`,
+            // `POST /gdfl/import` and `cli gdfl-import --repair-reason` apply.
+            if !pull::ingest::repair_reason_ok(&reason) {
+                return Err(format!(
+                    "--reason is one line of at most {} bytes with no control character",
+                    pull::ingest::MAX_REPAIR_REASON
+                ));
             }
+            let reason = reason.trim().to_owned();
             if instrument.is_none() {
                 return Err("a repair names one INSTRUMENT, never ALL".to_owned());
             }
@@ -211,11 +218,24 @@ fn parts<'a>(ask: &Ask, symbol: &'a str) -> Result<PathParts<'a>, String> {
     })
 }
 
-/// Runs the verb against the store root `store` names, so every arm is driven
-/// by a test without the process environment.
+/// Runs the verb against the store root `store` names with an installed
+/// event sink, so every arm is driven by a test without the process
+/// environment.
+#[cfg(test)]
 pub(crate) fn command_with(
     arguments: &[&str],
     store: &dyn Fn() -> Result<PathBuf, String>,
+    out: &mut String,
+) -> u8 {
+    let log = LogState::Installed(PathBuf::from("logs/test"));
+    command_in(arguments, (store, &log), out)
+}
+
+/// Runs the verb against the store root `store` names, with `log` the
+/// process's event sink as it was installed or refused.
+pub(crate) fn command_in(
+    arguments: &[&str],
+    (store, log): (&dyn Fn() -> Result<PathBuf, String>, &LogState),
     out: &mut String,
 ) -> u8 {
     let ask = match ask(arguments) {
@@ -236,7 +256,21 @@ pub(crate) fn command_with(
         }
     };
     match (&ask.instrument, &ask.apply) {
-        (Some(symbol), Some((source, reason))) => apply(&root, &ask, symbol, (source, reason), out),
+        (Some(symbol), Some((source, reason))) => {
+            // A RUN THAT WRITES THE STORE NEVER RUNS UNLOGGED (D-4903; IA-10c,
+            // D-6265): another cli process holding `logs/cli` refused this one
+            // its sink, so the repair is refused before the store is opened.
+            if let LogState::Refused(why) = log {
+                let _ = writeln!(
+                    out,
+                    "ZERODHA REPAIR REFUSED: log_unavailable: this run's events could not be \
+                     recorded ({why}), and a run that writes the store does not run unlogged \
+                     (D-4903). Nothing was read or written."
+                );
+                return FAILED;
+            }
+            apply(&root, &ask, symbol, (source, reason), out)
+        }
         (Some(symbol), None) => plan_one(&root, &ask, symbol, out),
         (None, _) => plan_all(&root, &ask, out),
     }
@@ -247,7 +281,10 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
     // A REPAIR (`--from-store`) BY AN UNSTAMPED BUILD IS REFUSED (DB-B71,
     // WP-81); a plan writes nothing and is not.
     let store = crate::store_write::root_for("zerodha-repair", arguments);
-    command_with(arguments, &store, out)
+    let log = LogState::of_process(
+        "no event sink is installed in this process; the line above the report says why",
+    );
+    command_in(arguments, (&store, &log), out)
 }
 
 fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
@@ -600,6 +637,50 @@ fn apply(
         );
         return MISUSED;
     };
+    // THE VENDOR'S LANDING CLAIM, EXCLUSIVE, THEN ONE RUNS-LEDGER ID, BEFORE
+    // THE STORE IS OPENED (IA-10c; D-4880, D-6260, D-6263; FM-163): an api
+    // pull landing Zerodha's months holds the claim shared, and this repair
+    // is refused naming it rather than landing beside it; the id goes into
+    // every repair-journal and gap line this run writes (`Plan::run`) and is
+    // the sink's run key for its events. No receipt and no spool: no Kite
+    // request is made, so these minutes are verified cold only
+    // (`no_response_kept`, `landed_from_store`).
+    let pid = std::process::id();
+    let claim = match pull::ingest::landing_run::claim(
+        root,
+        Vendor::Zerodha,
+        pull::gdfl_run::locks::Hold::Exclusive,
+        &format!("cli pid {pid} zerodha-repair {symbol} (taking its run id)"),
+    ) {
+        Ok(claim) => claim,
+        Err(fault) => {
+            let _ = writeln!(
+                out,
+                "  REFUSED: {fault}; another process is landing Zerodha's months, so nothing was read or written"
+            );
+            return FAILED;
+        }
+    };
+    let run = match pull::ingest::landing_run::allocate(
+        root,
+        pull::ingest::landing_run::Mode::StoreRepair,
+        pull::ingest::landing_run::By::Cli,
+        pull::ingest::landing_run::kind_of(Vendor::Zerodha),
+    ) {
+        Ok(run) => run,
+        Err(fault) => {
+            let _ = writeln!(
+                out,
+                "  REFUSED: {fault}; no repair runs without a run id, so nothing was read or written"
+            );
+            return FAILED;
+        }
+    };
+    claim.note(&format!(
+        "cli pid {pid} run {run} (zerodha-repair {symbol})"
+    ));
+    let sink_run = telemetry::global().filter(|sink| sink.claim_run(run));
+    let _ = writeln!(out, "  run {run} (zerodha-repair, runs ledger)");
     let mut clean = true;
     for month in repair_plan::plan(root, base, ask.window) {
         let Ok(first) = Day::new(month.month.year(), month.month.month(), 1) else {
@@ -618,10 +699,14 @@ fn apply(
         clean &= repair_one(
             root,
             (source, parts, window),
-            (ask, granularity, reason),
+            (ask, granularity, reason, run),
             out,
         );
     }
+    if let Some(sink) = sink_run {
+        sink.release_run(run);
+    }
+    drop(claim);
     let _ = writeln!(
         out,
         "  every repair is journaled in {}",
@@ -635,7 +720,7 @@ fn apply(
 fn repair_one(
     root: &Path,
     (source, parts, window): (&Path, PathParts<'_>, Window),
-    (ask, granularity, reason): (&Ask, pull::vendor::Granularity, &str),
+    (ask, granularity, reason, run): (&Ask, pull::vendor::Granularity, &str, u64),
     out: &mut String,
 ) -> bool {
     let rows = match source_rows(source, parts, window) {
@@ -678,8 +763,13 @@ fn repair_one(
         exchange: "NSE",
         segment: ask.segment,
         contract: None,
+        // THE RUN'S RUNS-LEDGER ID (IA-10c, D-6260): every repair-journal
+        // and gap line this landing writes says `run=` it, never run 0.
+        run,
     };
-    let origin = format!("store {}", source.display());
+    // ANOTHER STORE'S BARS, SAID SO (IA-10c, D-6261): the `repaired` gap
+    // lines this landing writes gain `origin=store`.
+    let origin = format!("{}{}", pull::ingest::STORE_ORIGIN, source.display());
     let done = pull::ingest::repair_window(
         &pull::fetch::RawWindow { rows },
         parts.symbol,

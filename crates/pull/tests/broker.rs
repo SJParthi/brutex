@@ -276,6 +276,7 @@ fn plan(request: &BarRequest) -> Plan<'_> {
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     }
 }
 

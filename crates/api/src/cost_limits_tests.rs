@@ -129,10 +129,38 @@ fn w1_api5_1_a_body_reads_the_whole_census_and_the_bullet_says_so() {
     );
     let body = item(SERVER, "fn land_bodies_observed(");
     let walk = body
-        .split_once("for (chunk, body) in bodies")
-        .expect("one from_window per body")
+        .split_once("for (nth, (chunk, body)) in bodies.iter().enumerate()")
+        .expect("one landing per body")
         .1;
-    assert!(walk.contains("pull::ingest::from_window("), "{body}");
+    // BOTH DOORS, EACH FOLLOWED BY THE KEEP AND THE SPOOL (IA-10b's pin
+    // widened by IA-10c, design §11, :4289; D-4859): the append door and the
+    // repair door are each called once per body, and the hook that keeps the
+    // answer and spools its verdicts runs after whichever returned, never
+    // before it (land, keep, spool).
+    let append = walk
+        .find("pull::ingest::from_window_with_refusals(")
+        .expect("the append door, once per body");
+    let repair = walk
+        .find("pull::ingest::repair_window_with_refusals(")
+        .expect("the repair door, once per body");
+    let hook = walk
+        .find("crate::pullrun::keep_and_spool(")
+        .expect("the keep and the spool, once per body");
+    assert!(append < hook && repair < hook, "{body}");
+    assert_eq!(
+        walk.matches("crate::pullrun::keep_and_spool(").count(),
+        1,
+        "{body}"
+    );
+    assert!(
+        walk[hook..].contains("(&landing, door)") && walk.contains("done.absorb(landing.ingested)"),
+        "the hook is handed the landing the door returned, and its receipt is absorbed after: {body}"
+    );
+    assert!(
+        item(INGEST, "pub fn from_window(").contains("from_window_with_refusals(")
+            && item(INGEST, "pub fn repair_window(").contains("repair_window_with_refusals("),
+        "`from_window` and `repair_window` are the same doors, answering their receipt alone"
+    );
     assert!(
         item(INGEST, "fn from_members_inner(").contains("target.load()"),
         "`fn from_members_inner(` reads the whole census on every call"

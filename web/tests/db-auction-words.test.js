@@ -117,7 +117,11 @@ test('a filed print also stored as this second is the auction print twice, never
 
 test('a no_sidecar day whose last cas bar is not at the official close still names the last print, and says the comparison is not 0 bps', () => {
   const v = auctionVerdict({ feed: GDFL, segment: 'CASH', t: lastT, phase: 'cas', tail, dayFacts: facts({ state: 'no_sidecar' }, 9) });
-  assert.equal(v?.short, 'closing auction print');
+  // NEVER LABELLED THE AUCTION'S PRINT away from the official close
+  // (SC-CLOSE-10, R3-13): the label is the session's, the text names the
+  // last print and the distance.
+  assert.notEqual(v?.short, 'closing auction print');
+  assert.match(v?.text ?? '', /the closing-auction session's last print \(15:29:19\) differs from the official day close by 9 bps/);
   assert.doesNotMatch(v?.text ?? '', /as it does on this day/);
 });
 

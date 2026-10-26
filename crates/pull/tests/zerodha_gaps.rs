@@ -80,6 +80,7 @@ fn plan<'a>(request: &'a pull::fetch::BarRequest, segment: &'a str) -> pull::ing
         exchange: "NSE",
         segment,
         contract: None,
+        run: 0,
     }
 }
 

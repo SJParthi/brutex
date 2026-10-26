@@ -2665,6 +2665,71 @@ const R4_07_LITERAL: &str = "007 01072019 0123456789a 02082019 1-1-1 1000000000 
 // path.
 const IA9_LITERAL: &str = "21 answer_short badbody body_unreadable damaged daycheck dup_minutes extreme faults fromstore generations impossible-kept impossible-same index_bucket_incomplete intent kept-diff landed_from_store landing_refused log log-index lost merge merge_log_damaged meta midhole month_busy month_refused neither_vendor_has_it no_such_word noledger not_regular observed origin out_of_order peer peer-absent peer-day-absent peer-day-held peer-minute-traded peer-torn placement pre_ledger progress-cold progress-link progress-merge pull_halted quality_differs receipts record_refused refusal repaired-differs repaired-match repull resumed root rung_day_absent spool spool_header_refused spools stop-between stray sweep sync threads torn_at torn_bytes underlying_files unkept unknown_stems unsynced_at vendor_hole vendor_shape vendor_shape_changed verify-merge vsp w0 w1 w4 w99 walk-stray width-0 width-1 width-4 width-99 width-stop window-shape zerodha-cold zerodha-merge zerodha-verify cover daycheck_not_run dayonly holder live live-many live_runs lock open orphan-log run_live_busy spool_full torn-detail torn-detail-extra cut-partial live-locks live_locks_peak refused-open";
 
+// R4-28 (dated Kite master snapshots, token_on and the Zerodha futures day
+// candles; D-7185 to D-7191), declared at its repair 5 (24 Oct 2026): the
+// 135 literals gate 1d named on its tree and not on feat/db-fix's, each read
+// before it was listed. Kite's public instrument-dump column names
+// (`tradingsymbol`, `tick_size`, `lot_size`, `instrument_type`, `expiry`;
+// docs/00-charter.md §4z, the instruments rows) and its `future` row kind;
+// the snapshot store's own names (`master-snapshots`,
+// `futures-first-listed`, `absorbed`, `nse_total_market`, the formats
+// `brutex-master-snapshot-v1`, `brutex-master-diff-v1` and `fl2`, the
+// generations `g0`, `g1`, `g2`, `g99` and the generation-name parse
+// fixtures `g-1`, `g01`, `g011`, `g10`, `g12`, `g7`, `gx`); the receipt,
+// diff and outcome fields (`body_bytes`, `body_sha256`, `compressed_bytes`,
+// `previous`, `current`, `change`, `named_total`, `unnamed`, `dropped_by`,
+// `isin_unknown`, `isin_unknown_total`, `delisting`, `diff`, `line`); the
+// refusal and outcome words (`no_snapshot`, `before_first_snapshot`,
+// `token_ambiguous`, `token_duplicated`, `token_expired`,
+// `token_not_listed`, `contract_duplicated`, `snapshot_unreadable`,
+// `history_ends`, `already_held`, `resolved`, `wrote`, `indexed`,
+// `unparseable`, `duplicated`, `garbled`, `flushed`, `idle`, `hook`,
+// `kill`); the bench id `c-ms-02`; the invented underlying `zqidx`, invented
+// tokens (`8000001`, `8100001`, `9100005`, `9100006`) and numbers (`65`,
+// `1000`), invented stamps (`20260102`, `20260102_`, `20260102_1`,
+// `20260102_2`, `20260102_02`, `2026010`) and the malformed dates
+// `20261302` and `26-05-2026` the parse refuses; and the tests' scratch
+// tags (`book-in-flight` to `two-tokens` below, `futures-events`,
+// `store-empty`, `real-size`, `future-dated`). None names an account, an
+// environment, a vendor credential or a field of a parameter path.
+const R4_28_LITERAL: &str = "1000 2026010 20260102 20260102_ 20260102_02 20260102_1 \
+    20260102_2 20261302 26-05-2026 65 8000001 8100001 9100005 9100006 absorbed already_held \
+    before_first_snapshot body_bytes body_sha256 book-in-flight brutex-master-diff-v1 \
+    brutex-master-snapshot-v1 c-ms-02 case-twin catalog-empty catalog-index change \
+    compressed_bytes contract_duplicated current cut-at-a-line cut-diff cut-many cut-mid-line \
+    cut-named damage-cut damage-cut-then-write damage-garbled damage-missing dated-today \
+    delisting diff diff-many diff-rename diff-rename-torn diff-unheld dropped_by drops-store \
+    duplicated ends-empty ends-masters ends-store expiry fl2 flushed future future-dated \
+    futures-events futures-first-listed g-1 g0 g01 g011 g1 g10 g12 g2 g7 g99 garbled gx \
+    held-bare held-indexed history_ends hook idle index-only indexed instrument_type io-fails \
+    isin_unknown isin_unknown_total kill kill-source late-flush line log-garbled lone-partial \
+    lot_size master-snapshots max-ordinal mt-masters mt-store named_total never-made \
+    never-rewritten next-ordinal next-ordinal-other no-live no-nse no-snapshot no_snapshot \
+    nse_total_market partial-source previous real-size receipt-held resolved reuse-masters \
+    reuse-store roll-masters roll-store rot-source rules-source snapshot_unreadable \
+    still-damaged store-empty tick_size token_ambiguous token_duplicated token_expired \
+    token_not_listed torn-diff tradingsymbol twice-alike twice-masters twice-store \
+    twice-unlike twin-diff-partial two-dates two-tokens unnamed unparseable wrote zqidx";
+
+// IA-10c (D-6260 to D-6268): `pull::ingest::landing_run` and the landing doors
+// it hooks. The hook's reason words for a window it kept or spooled nothing
+// of (`rung_unstored`, `run_too_wide`, `no_verifier_for_vendor`, `not_kept`,
+// `body_not_in_pack`), the `pull.member` event's field `causes` (how many
+// held months a window restates), the run ids `41` and `31337` its tests read
+// back as spool directories (`verify/spool/<run>`), the ledger kind
+// `nonsense` a test offers and sees refused, and its tests' scratch tags
+// (`gr41`, `held-differs`, `held-month`, `held-same`, `lines-repair`,
+// `noverifier`, `wide`, `z16`). Declared at its repair round 1 (23 Oct
+// 2026). Repair round 2 (24 Oct 2026, D-6269) adds the runs ledger's warn
+// field `claims_run` (the claims' largest id a lost last record is raised
+// past) and its tests' scratch tags `claims`, `claims-blocked` and
+// `unborn`. Repair round 3 (25 Oct 2026, D-6269 amended) adds the warn
+// field `ledger_run` (the ledger's last id when its claims name a later
+// one), the scratch tag `lost-whole` and the rot shapes `lifted` and
+// `lowered` of its claims test. None names an account, an environment, a
+// vendor credential or a field of a parameter path.
+const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-blocked claims_run gr41 held-differs held-month held-same ledger_run lifted lines-repair lost-whole lowered no_verifier_for_vendor nonsense not_kept noverifier run_too_wide rung_unstored unborn wide z16";
+
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
 // refusal codes `before_listing`, `in_session_jump`, `non_positive_price`
@@ -3015,7 +3080,10 @@ const IA_4_LITERAL: &str = "300 ia4-currency ia4-f44 ia4-resume";
 /// 75 -> 76 with BASE-REDS-1023's group of the 17..23 Oct merges (D-7147).
 /// 76 -> 77 with R4-27's group, declared at its merge (D-7147 addendum).
 /// 77 -> 78 with IA-4's group, declared at its merge (D-7147 addendum).
-const DECLARED: [&str; 78] = [
+/// 78 -> 79 with R4-28's group (repair 5, 24 Oct 2026).
+/// 79 -> 80 with IA-10c's group (merged into feat/db-fix 26 Oct 2026); both
+/// sides of the BASE-REDS-1023 merge of 26 Oct kept, none counted twice.
+const DECLARED: [&str; 80] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3094,6 +3162,8 @@ const DECLARED: [&str; 78] = [
     MERGED_17_23_OCT_LITERAL,
     R4_27_LITERAL,
     IA_4_LITERAL,
+    R4_28_LITERAL,
+    IA10C_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
