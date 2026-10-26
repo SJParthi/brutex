@@ -1318,7 +1318,7 @@ export const NOT_FIRST = Object.freeze({
  * when it was not this one (the read that proved the restart, for
  * `/speed.json`). Proved when this ask was this sheet's first of the route
  * in the pass (verify r11, 27 Oct: a later one, the `/bars/window.json`
- * extremes after the grid, timed an answer the first had woken, 4.06 ms
+ * extremes after the grid, timed an answer the first had warmed, 4.06 ms
  * against its own first's 100 to 212 ms), nobody had asked the route before
  * the pass and the server counted it exactly as often as this sheet's
  * answered asks; the route of the up wait is that wait's, and an answer that
@@ -1901,8 +1901,10 @@ export function renderSheet(result, args) {
     '|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|'
   ];
   // A cell from a capture may hold a '|' (a path or a query keeps it as
-  // written), which would end the cell there: it is written escaped.
-  const cell = (/** @type {string} */ s) => s.replaceAll('|', '\\|');
+  // written), which would end the cell there, or a capture's page a line
+  // break, which would end the row: the one is written escaped, the other
+  // as a space.
+  const cell = (/** @type {string} */ s) => s.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
   for (const r of result.rows) {
     const c = (/** @type {string} */ k) => String(r.classes[k] ?? 0);
     // Answers that named no build beside some that named one are a second build (verify r6).

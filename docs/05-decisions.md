@@ -79516,8 +79516,9 @@ Repair round 11 (27 Oct, after verify r11):
     ahead of this machine's, since the two cannot be told apart (verify
     r11's follow-up), and a captured request names its method and URL in
     the sheet's table ("captured from the page: GET ..."), with a `|` it
-    holds written escaped, so two of one route, each with its own firsts,
-    are told apart (found in this repair's self-check). Not done here: what
+    holds written escaped and a line break in its page as a space, so two
+    of one route, each with its own firsts, are told apart and each row
+    stays one line of the table (found in this repair's self-check). Not done here: what
     another route's earlier ask warmed for a route's first (a shared file
     or cache) is not told by a route's count (L-R315-33).
 
