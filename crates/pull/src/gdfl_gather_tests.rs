@@ -141,6 +141,16 @@ fn line_at(text: &str, head: &str) -> usize {
         .unwrap_or_else(|| panic!("no line starting {head:?} in {text}"))
 }
 
+/// The `files=` and `seconds=` fields of the first line of `text` starting
+/// with `head`: a close's own counts.
+fn counts_of(text: &str, head: &str) -> Vec<String> {
+    let line = &text.lines().collect::<Vec<_>>()[line_at(text, head)];
+    line.split(' ')
+        .filter(|field| field.starts_with("files=") || field.starts_with("seconds="))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// How many `repair` lines name `month`'s `instrument` (`NSE-INDEX-NIFTY`).
 fn repairs_of(store: &Path, instrument: &str, month: &str) -> usize {
     let head = format!("repair {instrument} 1s {month} ");
@@ -236,6 +246,26 @@ fn a_repair_reason_run_repairs_each_month_once() {
         closes.windows(2).all(|pair| pair[0] < pair[1]),
         "closed in day order: {closes:?}"
     );
+    // EACH DEFERRED CLOSE CARRIES ITS OWN DAY'S COUNTS (IA-RP-36, D-4899 (4)):
+    // the files and seconds an in-order import's close of the same day
+    // names, never what the run had taken by the time the month was
+    // repaired.
+    let whole_text = journal(&whole);
+    for on in [
+        "2024-04-01",
+        "2024-04-02",
+        "2024-04-03",
+        "2024-04-04",
+        "2024-05-02",
+        "2024-05-03",
+    ] {
+        let head = format!("done indices {on} * ");
+        assert_eq!(
+            counts_of(&text, &head),
+            counts_of(&whole_text, &head),
+            "{on}"
+        );
+    }
     // APRIL IS REPAIRED AND CLOSED BEFORE MAY IS BEGUN: the run left April.
     assert!(
         line_at(&text, "done indices 2024-04-04 * ") < line_at(&text, "begin indices 2024-05-02 *"),
