@@ -359,7 +359,8 @@ fn garbage_parameters_are_refused_by_name() {
             &*format!("symbol={}", "A".repeat(65)),
             "not a stored share name",
         ),
-        ("symbol=SPLITCO&day=2025-02-30", "not YYYY-MM-DD"),
+        // Well-formed, but no day of the calendar: named as that (D-7198).
+        ("symbol=SPLITCO&day=2025-02-30", "is no calendar day"),
         ("symbol=SPLITCO&day=yesterday", "not YYYY-MM-DD"),
         ("symbol=SPLITCO&symbol=OTHERCO", "given twice"),
         ("symbol=SPLITCO&limit=5", "not a field"),
