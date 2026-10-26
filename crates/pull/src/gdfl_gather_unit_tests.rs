@@ -345,3 +345,24 @@ fn a_close_is_left_only_with_the_day_that_waits() {
         Some(4)
     );
 }
+
+/// **A FILE THAT BEGINS ON THE OFFER'S LAST SECOND IS MERGED, NEVER APPENDED**
+/// (IA-RP-35, D-4899 (8), found by the mutant run on `merge_into`): the one
+/// second the two share is kept once when alike and refused, naming it,
+/// when read differently; only a file that begins after the last second
+/// follows by an append.
+#[test]
+fn a_file_that_begins_on_the_offers_last_second_is_merged_never_appended() {
+    let mut held = bars(100..110);
+    merge_into(&mut held, bars(109..112)).unwrap();
+    assert_eq!(held, bars(100..112), "the shared second kept once");
+
+    let mut changed = bars(111..113);
+    changed[0].close += 1;
+    let before = held.clone();
+    assert_eq!(merge_into(&mut held, changed), Err(111_000_000));
+    assert_eq!(held, before, "a refused merge changes nothing");
+
+    merge_into(&mut held, bars(112..114)).unwrap();
+    assert_eq!(held, bars(100..114), "a file after the last second follows");
+}
