@@ -1090,10 +1090,10 @@ export async function restartWithin(command, ms, log) {
  * The server's own start, from an answer of `GET /speed.json`: its
  * `started_ms`, the time the server's process began counting, which a new
  * process gives anew and the same process never changes (`api::speed`). Or
- * why it cannot be read, said after "could not be read: ". A restart is
- * proved by this stamp changing across the `--restart` command (verify r9,
- * 26 Oct: nothing proved one, so a command that restarted nothing published
- * warm answers as `first after restart` rows under a PASS).
+ * why it cannot be read, for the caller to say. A restart is proved by this
+ * stamp changing across the `--restart` command (verify r9, 26 Oct: nothing
+ * proved one, so a command that restarted nothing published warm answers as
+ * `first after restart` rows under a PASS).
  *
  * @param {Answer | NoAnswer} a
  * @returns {{started: number} | {why: string}}
