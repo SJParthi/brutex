@@ -2271,12 +2271,17 @@ const ALLOW_MEMBER: Allow = &[
     // `gdfl_format.rs`: `first_sight` asks a `HashSet` (one probe).
     // `store/src/quarantine.rs`: a line's scope against the one to three
     // scopes a caller names, and a cause against an instrument's causes (at
-    // most `Cause::ALL`). Reason in docs/06-limits.md, "Gate 11 —
+    // most `Cause::ALL`); and four hash probes in `judge` (the `dropped`,
+    // `dropping`, held and named stamp sets this package built in place of
+    // three binary searches). `store/src/repair.rs`: `outside_quarantine`
+    // asks the set-aside stamps, a `HashSet` built once, one probe an offered
+    // bar (in place of a binary search). Reason in docs/06-limits.md, "Gate 11 —
     // BASE-REDS-1023: the 24..26 Oct merges".
     ("crates/api/src/feed_checks.rs", 1),
     ("crates/api/src/quarantine_route.rs", 1),
     ("crates/pull/src/gdfl_format.rs", 1),
-    ("crates/store/src/quarantine.rs", 2),
+    ("crates/store/src/quarantine.rs", 6),
+    ("crates/store/src/repair.rs", 1),
 ];
 
 const ALLOWLISTS: Allowlists = Allowlists {

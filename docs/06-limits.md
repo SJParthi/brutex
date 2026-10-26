@@ -21728,6 +21728,7 @@ the walk holds every name in memory before the sort.
 | L-BRED23-06 | A Zerodha verify run in flight across a deploy that renames its lock directory | the old build's writer holds `verify/live/<run>` and the new merger probes `verify/running/<run>` (D-7148) | Deploy with no verify run spooling; the store held no `verify/` directory on 23 Oct (listed read-only) | the main session's deploy |
 | L-BRED23-07 | Three more cost claims say UNVERIFIED (R4-27's merge), and gate 12 reads `flat` before seven price-shape nouns as no claim | R4-27 brought them; timing each is a package of its own. The scrub (D-7149 addendum) is the gate's own rule for a non-cost `flat`, widened by the domain noun INT-15 named | `cli::research_policy::percentage_statistic` (one `match`), `store::month_summary::MonthSummary::padded_on` (at most 23 words a window), `store::repair::same_bar` (a fixed compare); each says UNVERIFIED beside its claim. A real cost claim written as "flat minute" or "flat carry" would be read as none: the scrub test pins the cost senses that stay claims, and a cost sentence must be written another way | a timing package per crate; the scrub list may only grow with a test |
 | L-BRED23-08 | A refused write reads its body before the `403`, at most `MAX_FORM_BYTES` (8 KiB) plus the frame that crosses it | answering from the head and closing lost the answer to the client's reset (gate 31, BRED23-F19); the drain is the bound every handler's extractor already has | O(body) once per refused request, never past 8 KiB plus one frame; a body that never arrives is cut by `BODY_READ_TIMEOUT` (10 s) as any body is; a body past the bound is left unread from there on, and its client can still lose the answer | — |
+| L-BRED23-09 | Five more cost claims say UNVERIFIED (the 24..26 Oct merges), and two "not O(1)" sentences were reworded | DATA-1w, R4-18 and R4-22 brought them with no test that times them; timing each is a package of its own. The two sentences (`api::quarantine_route`'s and `store::repair::publish_without`'s cost) denied a claim in words gate 12 reads as one | `api::feed_checks`'s calendar per year, `cli::zerodha_quarantine`'s listing lookup, `pull::gdfl_cm::RowWidths` per row, `pull::gdfl_cm::is_real_date` (ten bytes), `pull::gdfl_format::note_format_changed` (one lock, one probe); each says UNVERIFIED beside its claim. Six other claims name the test that proves them (`quarantine_tests::a_quarantine_probe_is_one_read_and_a_torn_tail_is_repaired`, `feed_checks_tests::a_held_month_answers_in_time_that_does_not_grow_with_its_shares`, `gdfl_series_code_tests::the_series_rule_costs_one_split_and_one_probe_measured`) | a timing package per crate |
 
 ### Gate 11 — BASE-REDS-1023: IA-16, IA-9 and IA-2, fixed or declared (23 October 2026)
 
@@ -21783,6 +21784,50 @@ Declared, 11, none on a request path (no route reaches this check):
   rule 7, tick_second_check.rs 0 -> 4: a RangeInclusive and three hash
     probes (HashSet of filed auction prints, of --symbols, of the days the
     --archive answered).
+~~~~
+
+### Gate 11 — BASE-REDS-1023: the 24..26 Oct merges, fixed or declared (26 October 2026)
+
+~~~~text
+R3-13, DATA-1w, R4-18, R4-22 and R4-28 merged into feat/db-fix after the
+24 Oct run without running the shell gates, and gate 11 refused 37 sites
+in eight files on the merge (state/fix/ci-gates-logs/bred1023-lp21).
+Fixed in code (D-7150 addendum), 9:
+  rule 1, 4 -> 0: store::repair::outside_quarantine holds back the
+    set-aside stamps by one probe of a HashSet built once (was a binary
+    search an offered bar); store::quarantine::judge asks four HashSets
+    built once per month applied (the stamps the month's `dropped` and
+    `dropping` lines name, the stamps the month holds, the named ones) in
+    place of three binary searches.
+  rule 3, 4 -> 0: Snapshot::load's month map is sized to the index's slots
+    (8,199, the most it can hold); Summary::load's month and cause maps to
+    the ledger's lines and its instrument map to the months.
+  rule 4, 1 -> 0: cli zerodha-quarantine finds a stamp a plan row lists
+    twice by one hash insert a stamp (was a sort and a window scan).
+Declared, 33 (28 of the merges' and the 5 hash probes the fixes above
+add), none per row of a read and each with its bound:
+  rule 3, feed_checks_files.rs 5: four process caches keyed by folder and
+    month or year (at most the archive's months, about 100), each entry
+    made once; a month's share slots before its rows are counted (at most
+    the F&O pool).
+  rule 4, feed_checks_files.rs 1 and quarantine.rs 4: one sort of a
+    month's shares once per load of a year; one month's set-aside stamps
+    once per door that offers it bars; an instrument's causes (at most
+    Cause::ALL); the named and owed stamps once per month applied (at most
+    the month's minutes). No request reaches the quarantine sorts.
+  rule 6, dayflags.rs 2 -> 5, feed_checks.rs 1, feed_checks_files.rs 2,
+    zerodha_quarantine.rs 1, master_snapshots.rs 1, quarantine.rs 5:
+    compile-time tables (ImportKind, four; NotTradable::ALL; FEED_KEPT;
+    Change::ALL; Cause::ALL; three scopes), one validation pass over a
+    plan's or a request's own stamps, and the ledger's line split (each
+    byte once).
+  rule 7, feed_checks.rs 1, quarantine_route.rs 1, gdfl_format.rs 1,
+    quarantine.rs 6, repair.rs 1: a query field against a compile-time
+    list of at most six fields; hash probes (first_sight, the five sets
+    above); a scope against the one to three a caller names; a cause
+    against an instrument's causes.
+The request paths among them (`/dayflags.json`, `/calendar-days.json`) are
+timed on the shadow server in L-BRED23-10.
 ~~~~
 
 ## The tick-to-second check (DATA-2, D-5181 to D-5186)

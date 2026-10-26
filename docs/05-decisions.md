@@ -83373,6 +83373,22 @@ declared `eprintln!` count 13 -> 18 in `ci.yml` (IA-4's bare-CR and
 newline counts); `IA_4_LITERAL` declares `300`, `ia4-currency`, `ia4-f44`
 and `ia4-resume`; gate 11 is D-7150's addendum. lp18: `RED none`.
 
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** The merge of feat/db-fix
+5901ec778 (178 commits, R3-13 to BASE-FIXTURE-1025) turned gates 1d, 23, 29
+and 30 red again (lp21), for D-7147's cause. 1d: R4-22's sixteen literals
+(eleven scratch-root names, three refusal causes, a lower-case series code
+and a format placeholder) declared as `R4_22_LITERAL`. 23: eight test-only
+print files declared in `ci.yml`, and the lineage timing in `core::alias`'s
+tests prints to stdout, since `core` has no telemetry dependency and a test
+measurement line is not a diagnostic. 29: `/pull/quarantine.json` (R4-18's
+plan, an operational read) and `/pull/quarantine` (its press, a write) are
+owed their growth bench by name, beside `/pull/repair.json` and
+`/pull/repair`. 30: IA-10c, R4-18, R4-22 and R4-28 marked merged; S-14,
+S-43 and S-48 now wait for the operator (the token, the approval), which is
+what is left of each; S-37 and S-41, whose only prerequisite was R4-22, are
+rehearsed on a private copy (their `rehearsed_*` fields say on what build
+and copy).
+
 ### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
 
 Gate 1c refused `pull::zerodha_spool`'s documented lock path
@@ -83440,6 +83456,12 @@ UNVERIFIED with docs/06-limits.md L-BRED23-07
 (`cli::research_policy::percentage_statistic`,
 `store::month_summary::MonthSummary::padded_on`, `store::repair::same_bar`).
 
+
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** Twelve more claims with
+no proof came with DATA-1w, R4-18 and R4-22 (lp23). Six name the test that
+proves them, five say UNVERIFIED beside the claim (L-BRED23-09), and two
+sentences that denied a claim ("NOT O(1)", "Not O(1)") are reworded as
+"linear", which says the same and is no claim.
 ### D-7150 — Gate 11: the IA-16, IA-9 and IA-2 sites fixed at their cause or declared with their bound (BASE-REDS-1023) — 2026-10-23
 
 Gate 11 was red after the IA-16 merge on five files. Fixed in code: the
@@ -83488,6 +83510,20 @@ file's one pinned unread site (`NFO_SUFFIXES`) stays pinned, so
 `ALLOW_SCAN_UNREAD` did not grow. Test:
 `pull::gdfl_nfo::tests::the_header_reader_answers_both_headers_at_every_trailing_edge`.
 
+
+**Addendum, 26 Oct 2026 (the 24..26 Oct merges).** R3-13, DATA-1w, R4-18,
+R4-22 and R4-28 merged without running gate 11, which refused 37 sites in
+eight files on this package's merge of feat/db-fix 5901ec778
+(state/fix/ci-gates-logs/bred1023-lp21). Nine were fixed in code: the
+binary searches of `store::repair::outside_quarantine` and
+`store::quarantine::judge` became probes of hash sets built once (rule 1, 4
+sites); the three maps of `Summary::load` and the one of `Snapshot::load`
+are pre-sized (rule 3, 4); `cli zerodha-quarantine` finds a stamp listed
+twice by one hash insert a stamp, not a sort (rule 4, 1). The other 28, and
+the five hash probes the fixes add, are declared in `.github/gates_ledger.rs`
+with their bound, none per row of a read; docs/06-limits.md "Gate 11 —
+BASE-REDS-1023: the 24..26 Oct merges" lists each. lp24 after the fix: gate
+11 green but for the five probes, then declared (lp25).
 ### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
 
 Two gaps verify-BASE-GATE11-r1 named in `.github/gates_ledger.rs`:

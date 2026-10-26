@@ -480,6 +480,51 @@ fn a_plan_whose_reason_is_the_apply_flag_is_a_plan_not_a_writer() {
     );
 }
 
+/// BASE-REDS-1023 (gate 11 rule 4, D-7150 addendum): a stamp listed twice is
+/// found by one hash insert a stamp, never a sort, so the stamp named is the
+/// first met a second time READING THE ROW, not the smallest repeated; extreme
+/// rows: out of order with two repeats, the repeat as the last stamp, three
+/// copies, and a row of one stamp (accepted).
+#[test]
+fn the_first_stamp_met_twice_in_the_row_is_the_one_named() {
+    let asked = ask(&[
+        SYMBOL,
+        "2018-12-01",
+        "2018-12-31",
+        "--cause",
+        "foreign_level",
+        "--reason",
+        "r",
+    ])
+    .expect("asked");
+    let (a, b, c) = (
+        minute(1, 400).ts_micros,
+        minute(1, 410).ts_micros,
+        minute(1, 420).ts_micros,
+    );
+    for (stamps, named) in [
+        (vec![c, b, c, a, a], c),
+        (vec![a, b, c, b], b),
+        (vec![b, b, b], b),
+        (vec![c, a, b, a, c], a),
+    ] {
+        let text = plan_text(&[(
+            "1min",
+            "2018-12",
+            "timestamps",
+            "foreign_level",
+            stamps.as_slice(),
+        )]);
+        let refused = rows_of(&text, &asked).expect_err("a repeat");
+        assert!(
+            refused.contains(&format!("lists stamp {named} twice")),
+            "{stamps:?}: {refused}"
+        );
+    }
+    let one = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[c])]);
+    assert_eq!(rows_of(&one, &asked).map(|rows| rows.len()), Ok(1));
+}
+
 /// R4-18 repair 1: a plan row listing one stamp twice is refused by name,
 /// never silently folded; a symbol typed in lower case is the core's
 /// canonical symbol (`brutex_core::symbol::Symbol`), never a silent

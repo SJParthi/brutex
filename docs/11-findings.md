@@ -1077,6 +1077,15 @@ confirmed by two skeptics; their corrections are applied.
   landed the same fix for `tick_second_check_tests.rs` on feat/db-fix (every
   row built by `cm_row`, D-7215); the merge of 26 Oct takes its version, so
   the file carries one way of building rows, not two.
+- **BRED23-F21: the 24..26 Oct merges turned gates 1d, 11, 12, 23, 29 and
+  30 red again** (`RED 1d 23 30 11 12 29` on the merge 428d39abf,
+  bred1023-lp21). FIXED: nine gate-11 sites in code (binary searches to
+  hash probes, maps pre-sized, a sort to a hash insert) and the rest
+  declared with their bound (D-7150 addendum, BRED-20, BRED-21); twelve
+  cost claims proved or UNVERIFIED (D-7149 addendum, L-BRED23-09); literals,
+  test prints, two owed benches and four merged flags (D-7147 addendum).
+  Same cause as F12, now for the sixth time: no merge of the 24..26 Oct
+  window ran the shell gates.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
