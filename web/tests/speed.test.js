@@ -4728,11 +4728,16 @@ test('a restart is proved by the server\'s own start before anything is timed: a
   let restarted = 0;
   /** @type {string[]} */
   const asks = [];
+  /** @type {number[]} the time each GET /speed.json after the first restart was answered in, made distinct */
+  const speedMs = [];
   const strict = standIn({ ignore: new Set(), started: () => starts });
   /** @param {string} b @param {string} path @param {{method?: string}} [o] */
   const spy = async (b, path, o = {}) => {
     if (restarted > 0) asks.push(`${o.method ?? 'GET'} ${path}`);
-    return strict.send(b, path, o);
+    const a = await strict.send(b, path, o);
+    if (restarted === 0 || path !== SPEED_ROUTE) return a;
+    speedMs.push(500 + speedMs.length);
+    return { ...a, ms: speedMs.at(-1) };
   };
   /** @type {string[]} */
   const lines = [];
@@ -4749,6 +4754,9 @@ test('a restart is proved by the server\'s own start before anything is timed: a
   assert.equal(count(`GET ${SPEED_ROUTE}`), 5, '/speed.json: the proof after each of the 3 restarts, and the start before restarts 2 and 3; never a third time');
   for (const r of requests.filter((x) => x.url !== UP_ROUTE && x.url !== SPEED_ROUTE)) assert.equal(count(`${r.method} ${r.url}`), 3, `${r.url} is asked once a restart`);
   assert.equal(asks.length, 3 + 5 + 3 * (requests.length - 2), 'and nothing else is asked after a restart');
+  // The /speed.json row is timed by the reads that proved each restart (the 1st, 3rd and 5th of those asks), never by the reads before a command.
+  const speedRow = firsts.find((x) => x.url === SPEED_ROUTE);
+  assert.deepEqual([speedRow?.p50, speedRow?.max], [speedMs[2], speedMs[4]], JSON.stringify({ speedMs, speedRow }));
   // (3) A start that cannot be read is said by name, and ends the pass before anything is timed.
   /** @param {(path: string, restarts: number) => object | null} answerOf what /speed.json answers instead, by the restarts run @param {object} [o] */
   const unreadable = async (answerOf, o = {}) => {
@@ -4981,15 +4989,18 @@ test('the commands\' log: a regular file only, appended to, each run of a comman
   } finally {
     closeSync(reader);
   }
-  // In a run: a log that cannot be opened refuses the writer and the restart by name.
-  const noWriter = await sheet.runSheet({ ...argsFor(), writer: 'echo never', commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  // In a run: a log that cannot be opened refuses the writer and the restart by name, and neither is run.
+  const ranAnyway = join(dir, 'ran-anyway');
+  const noWriter = await sheet.runSheet({ ...argsFor(), writer: `touch '${ranAnyway}'`, commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(noWriter.failures.some((f) => f.startsWith(`the --writer command was not run: what it prints could not be kept in ${dir}: EISDIR`)), noWriter.failures.join('\n'));
   assert.ok(noWriter.notMeasured.includes('warm+writer: the --writer command was not run (its FAILED line says why)'), noWriter.notMeasured.join('\n'));
   assert.ok(!noWriter.rows.some((x) => x.phase === 'warm+writer'));
   assert.ok(!noWriter.notes.some((n) => n.includes('printed is kept')), noWriter.notes.join('\n'));
-  const noRestart = await sheet.runSheet({ ...argsFor(), restart: 'echo never', restarts: 2, commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  const noRestart = await sheet.runSheet({ ...argsFor(), restart: `touch '${ranAnyway}'`, restarts: 2, commandLog: dir }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(noRestart.failures.some((f) => f.startsWith(`restart 1: the --restart command was not run: what it prints could not be kept in ${dir}: EISDIR`)), noRestart.failures.join('\n'));
   assert.ok(noRestart.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the --restart command failed at restart 1'), noRestart.notMeasured.join('\n'));
+  await nap(300);
+  assert.equal(existsSync(ranAnyway), false, 'neither command was run');
   // How a writer that ended early ended is named: its exit code, or the signal that ended it.
   const exits = await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'exit 3', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: () => {} });
   assert.ok(exits.failures.includes('the --writer command ended before the warm+writer pass did: it exited 3, so part of that pass ran with nothing writing'), exits.failures.join('\n'));
@@ -4997,6 +5008,12 @@ test('the commands\' log: a regular file only, appended to, each run of a comman
   const piped = await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'kill -PIPE $$', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 25 }).send, log: () => {} });
   assert.ok(piped.failures.includes('the --writer command ended before the warm+writer pass did: it was ended by SIGPIPE, so part of that pass ran with nothing writing'), piped.failures.join('\n'));
   assert.match(readFileSync(path, 'utf8'), /\n=== \S+ the --writer command: exit 3\n=== \S+ the --writer command: kill -PIPE \$\$\n$/);
+  // A run lets go of the log at its end: no descriptor of this process is left open by a run that ran a command.
+  const fds = () => readdirSync('/dev/fd').length;
+  const held = fds();
+  await sheet.runSheet({ ...argsFor(), clients: [1], writer: 'sleep 5', commandLog: path }, { send: standIn({ ignore: new Set(), delayMs: 5 }).send, log: () => {} });
+  for (let i = 0; i < 100 && fds() !== held; i += 1) await nap(20);
+  assert.equal(fds(), held, 'the log\'s descriptor was closed with the run');
   // A heading that cannot be written (a log opened read-only here, as a failing disk would leave the writes)
   // refuses each command by name, adds nothing, and the file is not named as their log.
   const ro = join(dir, 'read-only.log');

@@ -79366,8 +79366,56 @@ Repair round 8 (26 Oct, after verify r8):
     `/ingest` weighed 545,585, 545,589 and 545,593 B in the builds of 25
     and 26 Oct (L-R315-10).
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-38);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-30.
+Repair round 9 (26 Oct, after verify r9):
+
+42. **A restart is proved by the server's own start before anything is
+    timed** (R315-39; verify r9, blocking 1). The pass read only the
+    command's exit code, the up check and its build, so `--restart 'true'`,
+    or a stop refused before a start whose check reached the old server,
+    published warm answers as `first after restart` rows under a PASS. The
+    sheet now reads `started_ms` of the server's `/speed.json` before each
+    run of the command and again once the server is up after it; a start
+    that did not change fails that restart by name and ends the pass, as
+    another build does, and a start that cannot be read is said and ends it
+    before anything is timed. The read after the command is `/speed.json`'s
+    own sample and the up check that found the server up is the up route's,
+    so every `first after restart` row is its route's first ask after the
+    restart, and the sheet says each restart's proof. Not taken: asking a
+    route of its own for the start (`/speed.json` already carries it, and
+    the server is this repository's); and proving the restart after the
+    timed pass (warm answers would be asked as firsts, and a check that
+    reached the old server would not be caught).
+43. **What a command prints goes to a file of its own, never the sheet's
+    stderr** (R315-40; verify r9, blocking 2). `run` gave the `--writer`
+    and `--restart` commands the sheet's fd 2: with its reader gone they
+    died of SIGPIPE, which changed the verdict, and a child's start clears
+    O_NONBLOCK on its stdio, which an inherited stream shares, so a reader
+    alive and not reading froze the sheet inside a write past every timer,
+    against the bound L-R315-30 stated. Each command now prints to
+    `--command-log` (by default beside `--out`, else in the system's
+    temporary directory), a regular file opened to append, each run headed
+    by a line naming it; a log that cannot be kept refuses its command by
+    name; the sheet names the log, and how a writer ended. Not taken: pipes
+    relayed through the sheet's counted stderr, which the verifier offered,
+    because a process a `--restart` command leaves in the background (a
+    server started without a redirection of its own) would hold the pipe
+    and meet a broken pipe at its next line once the sheet had gone (probed:
+    gone 1.5 s after its parent exited, where with a file it ran on, L-R315-31),
+    and because a relay must hold or drop what a stalled stderr does not
+    take; and `'ignore'`, which would lose the reason a restart failed.
+44. **Verify r9's follow-ups.** The default settle bound at a run's end is
+    held by its behaviour, so a bound of 1 ms fails a test (mutant R9-M09
+    survived every test before); the stderr note says the lines stderr did
+    not take ("were not taken"), since a failed write is all the sheet knows,
+    not what a reader showed; a year before 0001 is refused by `--month`
+    and `--day` as the server refuses it (R315-41). Not done here: a held
+    session day for a month given alone (item 41), the real-browser tests'
+    temporary directories (the main session's cleanup), and the committed
+    `web/build` without the Speed page (the main session's rebuild at the
+    merge).
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-41);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-31.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
