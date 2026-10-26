@@ -2730,6 +2730,19 @@ const R4_28_LITERAL: &str = "1000 2026010 20260102 20260102_ 20260102_02 2026010
 // vendor credential or a field of a parameter path.
 const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-blocked claims_run gr41 held-differs held-month held-same ledger_run lifted lines-repair lost-whole lowered no_verifier_for_vendor nonsense not_kept noverifier run_too_wide rung_unstored unborn wide z16";
 
+// R4-19 (one not-owed authority; D-7315). The codes of `pull::gaps::NotOwed`
+// a month or a day carries, the four `web/src/lib/ingest-months.js`
+// (`REASON_CODES`, R4-01) already spells (`instrument_inactive`,
+// `after_delisting`, `unread`; `before_listing` is R4-17's and declared
+// there), and the words its gap runs read (`instrument-inactive`,
+// `before-listing`, `after-delisting`). Reason words of a gap audit; none
+// names an account, an environment, a vendor credential or a field of a
+// parameter path. Its tests add the seven month labels of the invented
+// FORCEMOT plan (`2023-09` to `2024-03`, `YearMonth`'s own spelling of the
+// window around NSE's 2023-10-26..=2024-02-13 withdrawal) and `readmitted`, a
+// word of an assertion's message: calendar months and prose, not segments.
+const R4_19_LITERAL: &str = "instrument_inactive after_delisting unread instrument-inactive before-listing after-delisting 2023-09 2023-10 2023-11 2023-12 2024-01 2024-02 2024-03 readmitted";
+
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
 // refusal codes `before_listing`, `in_session_jump`, `non_positive_price`
@@ -2956,7 +2969,7 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with R4-28's group (repair 5, 24 Oct 2026).
 /// 76 -> 77 with IA-10c's group (merged into feat/db-fix 26 Oct 2026).
-const DECLARED: [&str; 77] = [
+const DECLARED: [&str; 78] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3034,6 +3047,7 @@ const DECLARED: [&str; 77] = [
     IA9_LITERAL,
     R4_28_LITERAL,
     IA10C_LITERAL,
+    R4_19_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

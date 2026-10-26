@@ -61,24 +61,46 @@
 //! rung is refolded from the minutes a repair restores (D-3321), and its
 //! short buckets are the derive ledger's `partial` (D-3335).
 //!
+//! # Sessions the series did not owe (R4-19; G4, Z3, COR-07)
+//!
+//! **A session of record is not therefore owed by every series.** NSE withdrew
+//! FORCEMOT from trading for 2023-10-26..=2024-02-13 (CML58560; readmitted by
+//! CML60618), so the nine sessions of 2024-02 before its first held bar were
+//! no hole: they were planned `front`, a versioned repair, and a repair asks
+//! the feed for bars nobody traded. Each session is now asked of the ONE
+//! authority, [`crate::gaps::not_owed`], with the series' key built once per
+//! plan: a session it excuses — NSE's documented interruption, a day before
+//! the listing or after the delisting the store's receipted master states —
+//! is listed in [`Month::not_owed`] with why and the bars held on it anyway,
+//! and is never counted in [`Month::sessions`], never missing, never short,
+//! never a repair's. The plan states nothing about reading, so no session is
+//! excused as unread here: the plan's own `tail` and `absent` are its words
+//! for a session not yet read.
+//!
 //! # Cost
 //!
 //! Per month: one generation probe and one open; per day of the window: two
 //! time-indexed lookups, and at the minute rung two more per trading window
-//! (at most [`crate::calendar::MAX_WINDOWS`]) and at most two record reads;
-//! per series: one listing of its rung directory, to find its first held
-//! month. O(days asked + months held), never the month's bars. A lookup or a
+//! (at most [`crate::calendar::MAX_WINDOWS`]) and at most two record reads,
+//! and one [`crate::gaps::not_owed`] (constant compares, no file); per series:
+//! one listing of its rung directory, to find its first held month, and for
+//! an NSE cash share one probe of the store's listing table
+//! ([`crate::listing::for_store`], loaded once per store per process). O(days
+//! asked + months held), never the month's bars. A lookup or a
 //! read that fails refuses the month by name rather than reading the session
 //! as empty. Nothing is written, created or locked beyond a reader's shared
 //! lock.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use brutex_core::instrument::{Exchange, Segment};
 use store::file::{BarFile, StoreError};
 use store::path::{PathParts, StorePath, Timeframe, YearMonth};
 
 use crate::calendar::{CasEligibility, DayKind, MAX_WINDOWS, Session, exchange_kind_of};
+use crate::gaps::{Key, NotOwed};
+use crate::listing::Listing;
 use crate::session::{Day, IST_OFFSET_SECS, Window};
 use crate::vendor::{SessionKind, Venue};
 
@@ -307,18 +329,111 @@ pub struct Month {
     pub length_unjudged: Vec<Day>,
     /// Days inside the window the calendar of record cannot attest.
     pub unattested: Vec<Day>,
+    /// Sessions of record inside the window this series did not owe, and
+    /// why ([`crate::gaps::not_owed`], R4-19): never in [`Self::sessions`],
+    /// never missing or short, never a repair's.
+    pub not_owed: Vec<NotOwedSession>,
     /// Why the month could not be read, when it could not: nothing about it
     /// is then claimed.
     pub refused: Option<String>,
 }
 
+/// A session of record one series did not owe (R4-19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotOwedSession {
+    /// Which session.
+    pub day: Day,
+    /// Why it was not owed.
+    pub why: NotOwed,
+    /// Bars the served generation holds on it anyway: a bar on a session
+    /// nobody owed is evidence, named here, never dropped or planned.
+    pub bars: u64,
+}
+
+/// Consecutive sessions of one month not owed for one reason: what a page
+/// or a terminal prints, one line a run ([`Month::not_owed_runs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotOwedRun {
+    /// The first session of the run.
+    pub from: Day,
+    /// The last session of the run.
+    pub to: Day,
+    /// Sessions in the run.
+    pub sessions: u32,
+    /// Bars held on them anyway.
+    pub bars: u64,
+    /// Why none of them was owed.
+    pub why: NotOwed,
+}
+
 impl Month {
+    /// `month` before anything of it is read: generation 0, nothing held,
+    /// owed, missing, excused or refused.
+    const fn empty(month: YearMonth) -> Self {
+        Self {
+            month,
+            generation: 0,
+            bars: 0,
+            span: None,
+            sessions: 0,
+            held: 0,
+            missing: Vec::new(),
+            short: Vec::new(),
+            length_unjudged: Vec::new(),
+            unattested: Vec::new(),
+            not_owed: Vec::new(),
+            refused: None,
+        }
+    }
+
     /// Whether only a versioned repair can make this month whole.
     #[must_use]
     pub fn needs_repair(&self) -> bool {
         self.missing.iter().any(|(_, why)| why.needs_repair())
             || self.short.iter().any(|short| short.fill.needs_repair())
     }
+
+    /// [`Self::not_owed`] as runs of one reason, oldest first: consecutive
+    /// sessions excused alike are one run, whatever closed days lie between.
+    /// One pass, O(sessions of the month).
+    #[must_use]
+    pub fn not_owed_runs(&self) -> Vec<NotOwedRun> {
+        let mut runs: Vec<NotOwedRun> = Vec::new();
+        for session in &self.not_owed {
+            match runs.last_mut() {
+                Some(run) if run.why == session.why => {
+                    run.to = session.day;
+                    run.sessions = run.sessions.saturating_add(1);
+                    run.bars = run.bars.saturating_add(session.bars);
+                }
+                _ => runs.push(NotOwedRun {
+                    from: session.day,
+                    to: session.day,
+                    sessions: 1,
+                    bars: session.bars,
+                    why: session.why,
+                }),
+            }
+        }
+        runs
+    }
+}
+
+/// The listing table an NSE cash share's key asks, and no other series'
+/// (`listing::for_store`: loaded once per store per process once a master
+/// checks).
+fn listing_for(root: &Path, parts: &PathParts<'_>) -> Option<Arc<Listing>> {
+    (parts.exchange == "NSE" && parts.segment == "CASH" && parts.contract.is_none())
+        .then(|| crate::listing::for_store(root))
+}
+
+/// The key [`crate::gaps::not_owed`] is asked with for `parts`' series: a
+/// contract names no share, so it is excused nothing.
+fn key_of<'a>(parts: &PathParts<'a>, listing: Option<&'a Listing>) -> Key<'a> {
+    if parts.contract.is_some() {
+        return Key::NONE;
+    }
+    Key::series(parts.exchange, parts.segment, parts.symbol, listing)
 }
 
 /// The store's symbol id for `symbol`: the cross-check every bar header
@@ -335,15 +450,20 @@ pub fn symbol_id(symbol: &str) -> u32 {
 pub fn plan(root: &Path, parts: PathParts<'_>, window: Window) -> Vec<Month> {
     let symbol_id = symbol_id(parts.symbol);
     let first_held = first_held_month(root, parts);
+    // THE SERIES' KEY, BUILT ONCE (R4-19): one listing probe for the plan,
+    // whatever its months.
+    let listing = listing_for(root, &parts);
+    let key = key_of(&parts, listing.as_deref());
     let mut months = Vec::new();
     let mut at = window.from();
     while let Ok(month) = at.year_month() {
         let end = at.end_of_month().min(window.to());
-        months.push(plan_month(
+        months.push(plan_month_for(
             root,
             PathParts { month, ..parts },
             symbol_id,
             (at, end, first_held == Some(month)),
+            &key,
         ));
         if end >= window.to() {
             break;
@@ -397,26 +517,30 @@ pub fn held_months(root: &Path, parts: PathParts<'_>) -> Vec<YearMonth> {
 }
 
 /// One month of the plan: `parts.month` over `from..=to`, a window inside it;
-/// `series_first` when it is the series' first held month.
+/// `series_first` when it is the series' first held month. The series' key
+/// is built here, for a caller that plans one month at a time (the stored-
+/// month gap ledger, `super::gap_backfill`): the same authority as
+/// [`plan`]'s, so the ledger never owes a session the plan does not.
 pub(crate) fn plan_month(
     root: &Path,
     parts: PathParts<'_>,
     symbol_id: u32,
-    (from, to, series_first): (Day, Day, bool),
+    bounds: (Day, Day, bool),
 ) -> Month {
-    let mut out = Month {
-        month: parts.month,
-        generation: 0,
-        bars: 0,
-        span: None,
-        sessions: 0,
-        held: 0,
-        missing: Vec::new(),
-        short: Vec::new(),
-        length_unjudged: Vec::new(),
-        unattested: Vec::new(),
-        refused: None,
-    };
+    let listing = listing_for(root, &parts);
+    let key = key_of(&parts, listing.as_deref());
+    plan_month_for(root, parts, symbol_id, bounds, &key)
+}
+
+/// [`plan_month`] with the series' `key` already built.
+fn plan_month_for(
+    root: &Path,
+    parts: PathParts<'_>,
+    symbol_id: u32,
+    (from, to, series_first): (Day, Day, bool),
+    key: &Key<'_>,
+) -> Month {
+    let mut out = Month::empty(parts.month);
     let path = match StorePath::new(parts) {
         Ok(path) => path,
         Err(why) => {
@@ -454,12 +578,25 @@ pub(crate) fn plan_month(
             }
             DayKind::Open(_) | DayKind::OpenLengthUnmeasured => {}
         }
-        out.sessions += 1;
         let base = day_base(number);
-        let held = match &file {
-            None => Ok(false),
-            Some(file) => count(file, out.bars, base, base + DAY_MICROS).map(|(n, _)| n > 0),
+        let held_bars = || match &file {
+            None => Ok(0),
+            Some(file) => count(file, out.bars, base, base + DAY_MICROS).map(|(n, _)| n),
         };
+        // A SESSION THIS SERIES DID NOT OWE IS NOBODY'S TO FILL (R4-19):
+        // named with why and the bars held on it anyway, and nothing else.
+        if let Some(why) = crate::gaps::not_owed(key, i64::from(number)) {
+            match held_bars() {
+                Ok(bars) => out.not_owed.push(NotOwedSession { day, why, bars }),
+                Err(fault) => {
+                    out.refused = Some(format!("{day}: {fault}"));
+                    return out;
+                }
+            }
+            continue;
+        }
+        out.sessions += 1;
+        let held = held_bars().map(|n| n > 0);
         match held {
             Ok(true) => out.held += 1,
             Ok(false) => {
@@ -868,3 +1005,7 @@ mod tests {
         let _cleanup = std::fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+#[path = "repair_plan_not_owed_tests.rs"]
+mod not_owed_tests;
