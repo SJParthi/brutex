@@ -5381,3 +5381,16 @@ test('verify r10\'s follow-ups: a file is named, never empty; --out and the comm
     site.close();
   }
 });
+
+test('any answer of the up wait\'s route says the server answers: a 503 of /health is up, and the line says the status and the build it named', async () => {
+  // /health answers 503 while a vendor's masters were never read (api::server::health): the server answers all the same.
+  let starts = 0;
+  /** @type {string[]} */
+  const lines = [];
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1 }, { send: standIn({ ignore: new Set(), status: { [sheet.UP_WAIT_ROUTE]: 503 }, started: () => starts }).send, log: (l) => lines.push(l), restart: async () => ((starts += 1), 0) });
+  assert.equal(r.ok, true, r.failures.join('\n'));
+  assert.equal(r.rows.filter((x) => x.phase === 'first after restart').length, sheet.requestsFor(CTX).requests.length);
+  assert.ok(lines.some((l) => /^speed sheet: restart 1: up \d+ ms after the command \(HEAD \/health answered HTTP 503\), answered by c{40}$/.test(l)), lines.join('\n'));
+  assert.equal(sheet.UP_WAIT_METHOD, 'HEAD');
+  assert.equal(sheet.UP_WAIT_ROUTE, '/health');
+});
