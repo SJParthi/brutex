@@ -2053,3 +2053,27 @@ fn every_directory_made_is_synced_and_the_record_carries_its_time() {
         "nothing made, its directory synced"
     );
 }
+
+/// THE WALK STAYS UNDER THE ROOT: the directories the door names as made,
+/// whose parents it syncs, are only those under the root that do not exist
+/// yet, root-most first; a directory outside the root names nothing, even
+/// where none of it exists, and the root itself is never one.
+#[test]
+fn the_directory_walk_names_nothing_outside_the_root() {
+    let store = Store::new(2020, 3);
+    let inside = store.root.join("a").join("b");
+    assert_eq!(
+        super::missing_dirs(&store.root, &inside),
+        vec![store.root.join("a"), inside.clone()]
+    );
+    assert_eq!(
+        super::missing_dirs(&store.root, &store.root),
+        Vec::<PathBuf>::new()
+    );
+    let outside = store.root.with_extension("outside").join("a").join("b");
+    assert!(!outside.parent().unwrap().exists());
+    assert_eq!(
+        super::missing_dirs(&store.root, &outside),
+        Vec::<PathBuf>::new()
+    );
+}
