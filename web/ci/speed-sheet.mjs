@@ -1263,23 +1263,23 @@ const andText = (names) => (names.length < 2 ? names.join('') : `${names.slice(0
 
 /**
  * The asks of this sheet that went first on a request's route in the passes
- * where it went later (`by`, one a restart in `at`), each named once, with
- * its restarts when more than one did: the route's requests take turns
- * ({@link passOrder}). The read that proved a restart is named as that.
+ * where it went later (`by`, one a restart in `at`, never null for an
+ * `earlier` line), each named once, with its restarts when more than one
+ * did: the route's requests take turns ({@link passOrder}). The read that
+ * proved a restart is named as that.
  *
  * @param {{at: number[], by: (SheetRequest | null)[]}} l
  */
 const earlierText = (l) => {
-  /** @type {Map<string, {e: SheetRequest, at: number[]}>} */
+  /** @type {Map<string, {name: string, at: number[]}>} */
   const by = new Map();
   for (const [i, e] of l.by.entries()) {
-    if (e === null) continue;
-    const k = `${e.method} ${e.url}`;
-    const b = by.get(k) ?? { e, at: [] };
-    by.set(k, b);
+    const name = `${/** @type {SheetRequest} */ (e).method} ${/** @type {SheetRequest} */ (e).url}`;
+    const b = by.get(name) ?? { name, at: [] };
+    by.set(name, b);
     b.at.push(l.at[i]);
   }
-  return andText([...by.values()].map((b) => `${b.e.method} ${b.e.url}${b.e.route === SPEED_ROUTE && b.e.method === 'GET' && b.e.url === SPEED_ROUTE ? ' (the read that proved the restart)' : ''}${by.size > 1 ? ` (${restartsText(b.at)})` : ''}`));
+  return andText([...by.values()].map((b) => `${b.name}${b.name === `GET ${SPEED_ROUTE}` ? ' (the read that proved the restart)' : ''}${by.size > 1 ? ` (${restartsText(b.at)})` : ''}`));
 };
 
 /**
@@ -1294,7 +1294,7 @@ const earlierText = (l) => {
 export const NOT_FIRST = Object.freeze({
   'up wait': () => `its route is the one the up wait asks (${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}) after each restart before anything is timed, so its first ask after the restart is that wait's`,
   'no answer': () => 'it had no answer (its FAILED line says why), so there is no first to time',
-  'old server': () => `the up wait was answered before this server's own start (its ${SPEED_ROUTE} started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
+  'old server': () => `the up wait was answered before this server's own start by this machine's clock (its ${SPEED_ROUTE} started_ms is later than that answer): either the wait reached the server the command stopped, and this read, the new server's first, may have waited for its start, or the server's clock is ahead of this machine's; the two cannot be told apart`,
   earlier: (l) => `its route ${l.r.route} was asked first in ${l.at.length === 1 ? 'that pass' : 'each of those passes'} by this sheet's ${earlierText(l)}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`,
   before: (l) => `the server had already answered its route ${l.r.route} since its start when this sheet asked it (${timesText(l.seen)}: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
   during: (l) => `the server answered its route ${l.r.route} more often than this sheet asked it during the pass (by ${timesText(l.seen)}): another client asked it then, so this sheet's ask is not proved the first`,

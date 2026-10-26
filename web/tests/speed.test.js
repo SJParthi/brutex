@@ -946,7 +946,13 @@ test('every phase of the sheet is run or said NOT MEASURED, and every row is sta
   };
   const late = await sheet.runSheet({ ...argsFor(), restart: 'unused', restarts: 1 }, { send: flaky.send, log: () => {}, restart });
   assert.deepEqual(late.failures, ['restart 1: the first /aliases.json answered HTTP 500']);
-  assert.equal(late.rows.filter((r) => r.phase === 'first after restart').length, sheet.requestsFor(late.ctx ?? CTX).requests.length);
+  // Every request has its first after the restart but the extremes, asked after the grid on the grid's
+  // route (verify r11, 27 Oct): it is said NOT MEASURED, the grid named.
+  const { requests: all1 } = sheet.requestsFor(late.ctx ?? CTX);
+  const grid1 = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (all1.find((r) => r.label === 'the grid, newest first'));
+  const extremes1 = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (all1.find((r) => r.label === 'extremes'));
+  assert.deepEqual(late.rows.filter((r) => r.phase === 'first after restart').map((r) => r.url), all1.filter((r) => r !== extremes1).map((r) => r.url));
+  assert.ok(late.notMeasured.includes(`first after restart: GET ${extremes1.url} is not timed as a first after restart 1 (1 of the 1 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${grid1.url}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`), late.notMeasured.join('\n'));
 });
 
 test('the sheet fails a server that is down, unstamped, mixed, refusing or failing — each by name', async () => {
@@ -3919,7 +3925,8 @@ test('a restart that brings the server back as another build fails by name: the 
   const split = switching((p, n) => (n === 0 || p === UP_ROUTE || p === sheet.UP_WAIT_ROUTE ? A : B));
   const r2 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send: split.send, log: () => {}, restart: split.restart });
   const after = r2.rows.filter((x) => x.phase === 'first after restart');
-  assert.equal(after.length, sheet.requestsFor(r2.ctx ?? CTX).requests.length);
+  // One restart timed: every request but the extremes, asked after the grid on its route (verify r11).
+  assert.deepEqual(after.map((x) => x.label), sheet.requestsFor(r2.ctx ?? CTX).requests.filter((x) => x.label !== 'extremes').map((x) => x.label));
   const feeds = after.find((x) => x.url === '/feeds.json');
   assert.deepEqual(feeds?.builds, [B], 'the row is stamped with the build its answers named');
   assert.equal(feeds?.bytes, (await standIn({ ignore: new Set() }).send('', '/feeds.json')).bytes, "and its bytes are its largest answer's");
@@ -3946,7 +3953,9 @@ test('a restart that brings the server back as another build fails by name: the 
   const r5 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send: same.send, log: () => {}, restart: same.restart });
   assert.equal(r5.ok, true, r5.failures.join('\n'));
   const clean = r5.rows.filter((x) => x.phase === 'first after restart');
-  assert.ok(clean.length > 0 && clean.every((x) => x.builds.length === 1 && x.builds[0] === A && x.unnamed === 0 && x.n === 2 && (x.url === UP_ROUTE || x.bytes > 0)), JSON.stringify(clean.map((x) => [x.url, x.builds, x.bytes])));
+  // The grid and the extremes share a route, so each went first once in the two restarts (verify r11).
+  const runsOf = (/** @type {typeof clean[number]} */ x) => (x.route === '/bars/window.json' ? 1 : 2);
+  assert.ok(clean.length === sheet.requestsFor(r5.ctx ?? CTX).requests.length && clean.every((x) => x.builds.length === 1 && x.builds[0] === A && x.unnamed === 0 && x.n === runsOf(x) && (x.url === UP_ROUTE || x.bytes > 0)), JSON.stringify(clean.map((x) => [x.url, x.n, x.builds, x.bytes])));
 });
 
 test('a row whose answers named no build beside answers that named one is answered by two builds, and a run whose server named none fails a row another build answered', async () => {
@@ -4786,7 +4795,19 @@ test('a restart is proved by the server\'s own start before anything is timed: a
   const { requests } = sheet.requestsFor(proved.ctx ?? CTX);
   const firsts = proved.rows.filter((x) => x.phase === 'first after restart');
   assert.equal(firsts.length, requests.length);
-  assert.ok(firsts.every((x) => x.n === 3 && x.classes.answered === 3), JSON.stringify(firsts.map((x) => [x.url, x.n, x.classes])));
+  // The grid and the extremes share a route and take turns going first (verify r11, 27 Oct): the grid at
+  // restarts 1 and 3, the extremes at 2; every other request is its route's first after each restart.
+  const runs = (/** @type {typeof firsts[number]} */ x) => (x.label === 'the grid, newest first' ? 2 : x.label === 'extremes' ? 1 : 3);
+  assert.ok(firsts.every((x) => x.n === runs(x) && x.classes.answered === runs(x)), JSON.stringify(firsts.map((x) => [x.url, x.n, x.classes])));
+  const grid = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'the grid, newest first'));
+  const extremes = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'extremes'));
+  const placesOf = (/** @type {string} */ k) => asks.flatMap((a, i) => (a === k ? [i] : []));
+  const [g, e] = [placesOf(`GET ${grid.url}`), placesOf(`GET ${extremes.url}`)];
+  assert.deepEqual([g[0] + 1 === e[0], e[1] + 1 === g[1], g[2] + 1 === e[2]], [true, true, true], `the grid first at restarts 1 and 3, the extremes at 2, in the two places the pair holds: ${JSON.stringify({ g, e })}`);
+  assert.deepEqual(proved.notMeasured.filter((l) => l.includes(' is not timed as a first after ')), [
+    `first after restart: GET ${extremes.url} is not timed as a first after restarts 1, 3 (2 of the 3 timed): its route /bars/window.json was asked first in each of those passes by this sheet's GET ${grid.url}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`,
+    `first after restart: GET ${grid.url} is not timed as a first after restart 2 (1 of the 3 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${extremes.url}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`
+  ]);
   assert.ok(proved.notes.includes('first after restart: 3 restarts timed, each proved by the server\'s own start (/speed.json started_ms) changing across the --restart command: 100 to 105, 105 to 110, 110 to 115'), proved.notes.join('\n'));
   assert.ok(lines.includes('speed sheet: restart 2: the server restarted: started_ms 105 before the command, 110 after it'), lines.join('\n'));
   const count = (/** @type {string} */ k) => asks.filter((a) => a === k).length;
@@ -4799,8 +4820,7 @@ test('a restart is proved by the server\'s own start before anything is timed: a
   const speedRow = firsts.find((x) => x.url === SPEED_ROUTE);
   assert.deepEqual([speedRow?.p50, speedRow?.max], [speedMs[3], speedMs[6]], JSON.stringify({ speedMs, speedRow }));
   assert.equal(speedMs.length, 8);
-  assert.ok(proved.notes.some((n) => /^first after restart: after each --restart command the up wait asked HEAD \/health, which no request times, until the server answered it \(\d+(?: to \d+)? ms after the command\), so no first waits for the server's start; and an ask is timed as its route's first only when the server's own count \(\/speed\.json since_start\.n\), read with the proof and again after the pass, holds no ask of that route but this sheet's$/.test(n)), proved.notes.join('\n'));
-  assert.ok(!proved.notMeasured.some((l) => l.includes('is not timed as a first')), proved.notMeasured.join('\n'));
+  assert.ok(proved.notes.some((n) => /^first after restart: after each --restart command the up wait asked HEAD \/health, which no request times, until the server answered it \(\d+(?: to \d+)? ms after the command\), so no first waits for the server's start; and an ask is timed as its route's first only when it is this sheet's first ask of that route in the pass \(a route's requests take turns going first, one restart after another\) and the server's own count \(\/speed\.json since_start\.n\), read with the proof and again after the pass, holds no ask of that route but this sheet's$/.test(n)), proved.notes.join('\n'));
   // (3) A start that cannot be read is said by name, and ends the pass before anything is timed.
   /** @param {(path: string, restarts: number) => object | null} answerOf what /speed.json answers instead, by the restarts run @param {object} [o] */
   const unreadable = async (answerOf, o = {}) => {
@@ -5167,7 +5187,11 @@ test('after a restart the up wait asks a route no request times, over the networ
     assert.match(b1.stdout, /^# Speed sheet — PASS\n/);
     assert.equal(site.state.restarts, 2);
     const firsts1 = rowsOf(b1.stdout, 'first after restart');
+    // Every request has its first after restart: the grid and the extremes, which share a route, one each,
+    // the grid at restart 1 and the extremes at 2 (verify r11, 27 Oct: the extremes was timed after the grid
+    // at both, and published as a first both times).
     assert.equal(firsts1.size, sheet.requestsFor(CTX).requests.length, `every request has its first after restart\n${b1.stdout}`);
+    for (const [key, row] of firsts1) assert.equal(row.n, key.startsWith('/bars/window.json ') ? 1 : 2, `${key}: ${JSON.stringify(row)}`);
     const up = firsts1.get(`${UP_ROUTE} header-only up check`);
     assert.ok(up !== undefined && up.n === 2 && up.max < DELAY / 2, `the up route's first is its own time, never the server's start: ${JSON.stringify(up)}`);
     for (const [url, row] of firsts1) assert.ok(row.max < DELAY / 2, `${url}: ${JSON.stringify(row)}`);
@@ -5196,7 +5220,8 @@ test('a route the --restart command asked itself is not timed as a first, over t
     const firsts2 = rowsOf(b2.stdout, 'first after restart');
     assert.equal(firsts2.has('/feeds.json (no query)'), false, 'no /feeds.json first after restart: the command asked it first');
     assert.equal(firsts2.size, sheet.requestsFor(CTX).requests.length - 1);
-    assert.ok([...firsts2.values()].every((r) => r.n === 2));
+    // The grid and the extremes share a route: each went first once in the two restarts (verify r11).
+    assert.ok([...firsts2].every(([key, r]) => r.n === (key.startsWith('/bars/window.json ') ? 1 : 2)), JSON.stringify([...firsts2]));
     assert.ok(b2.stdout.includes('\n- NOT MEASURED: first after restart: GET /feeds.json is not timed as a first after restarts 1-2 (2 of the 2 timed): the server had already answered its route /feeds.json since its start when this sheet asked it (1 time each: the --restart command\'s asks or another client\'s), so the first ask after the restart was not this sheet\'s\n'), b2.stdout);
     assert.equal(site.counts.get('/feeds.json'), 2, 'the server answered /feeds.json twice after the last restart: the command\'s ask, then this sheet\'s');
   } finally {
@@ -5244,11 +5269,14 @@ test('an ask after a restart is timed as a first only when the server\'s own cou
   const both = 'restarts 1-2 (2 of the 2 timed)';
   const lines = [
     `first after restart: GET ${grid.url} is not timed as a first after ${both}: it had no answer (its FAILED line says why), so there is no first to time`,
-    `first after restart: GET ${extremes.url} is not timed as a first after ${both}: the server counted its route /bars/window.json more often than this sheet's answered asks of it (by 1 time each), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
+    // The extremes went after the grid at restart 1 and first at restart 2 (verify r11, 27 Oct: a route's
+    // requests take turns), where the grid's ask after it, counted, had no answer.
+    `first after restart: GET ${extremes.url} is not timed as a first after restart 1 (1 of the 2 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${grid.url}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`,
+    `first after restart: GET ${extremes.url} is not timed as a first after restart 2 (1 of the 2 timed): the server counted its route /bars/window.json more often than this sheet's answered asks of it (by 1 time), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
     `first after restart: GET ${dayflags.url} is not timed as a first after ${both}: the server answered its route /dayflags.json more often than this sheet asked it during the pass (by 1 time each): another client asked it then, so this sheet's ask is not proved the first`,
     `first after restart: GET ${calendar.url} is not timed as a first after ${both}: the server counted its route /calendar.json 0 times each by the end of the pass, fewer than this sheet's answered asks of it, so that row is not this route's count`,
     `first after restart: GET ${sources.url} is not timed as a first after ${both}: the server had already answered its route /sources.json since its start when this sheet asked it (1 time each: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
-    `first after restart: GET /speed.json is not timed as a first after ${both}: the up wait was answered before this server's own start (its /speed.json started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
+    `first after restart: GET /speed.json is not timed as a first after ${both}: the up wait was answered before this server's own start by this machine's clock (its /speed.json started_ms is later than that answer): either the wait reached the server the command stopped, and this read, the new server's first, may have waited for its start, or the server's clock is ahead of this machine's; the two cannot be told apart`,
     `first after restart: HEAD /health is not timed as a first after ${both}: its route is the one the up wait asks (HEAD /health) after each restart before anything is timed, so its first ask after the restart is that wait's`,
     'first after restart: GET /runs/7.json is not timed as a first after restarts 1-2 (2 of the 2 timed): the server\'s /speed.json has no row /runs/7.json after this sheet\'s answered ask of it (the server counts that path under another route), so its count cannot prove the ask its route\'s first'
   ];
@@ -5302,10 +5330,14 @@ test('the server\'s count, read with the proof and again after the pass: one tha
   assert.deepEqual(later.failures, ['restart 2: what the server answered since its start could not be read after the pass, so no ask of it could be proved its route\'s first: GET /speed.json answered ECONNRESET']);
   assert.ok(later.notMeasured.includes('first after restart: timed after 1 of the 2 restarts asked: the server\'s count could not be read after the pass of restart 2'), later.notMeasured.join('\n'));
   const firsts = later.rows.filter((x) => x.phase === 'first after restart');
-  assert.equal(firsts.length, sheet.requestsFor(CTX).requests.length);
+  // Every request of the restart timed, but the extremes, asked after the grid on its route (verify r11).
+  const { requests: all } = sheet.requestsFor(CTX);
+  assert.deepEqual(firsts.map((x) => x.label), all.filter((x) => x.label !== 'extremes').map((x) => x.label));
   assert.ok(firsts.every((x) => x.n === 1), JSON.stringify(firsts.map((x) => [x.url, x.n])));
   assert.ok(later.notes.includes('first after restart: 1 restart timed, each proved by the server\'s own start (/speed.json started_ms) changing across the --restart command: 0 to 1'), later.notes.join('\n'));
-  assert.ok(!later.notMeasured.some((l) => l.includes(' is not timed as a first after ')), later.notMeasured.join('\n'));
+  const grid = all.find((x) => x.label === 'the grid, newest first');
+  const extremes = all.find((x) => x.label === 'extremes');
+  assert.deepEqual(later.notMeasured.filter((l) => l.includes(' is not timed as a first after ')), [`first after restart: GET ${extremes?.url} is not timed as a first after restart 1 (1 of the 1 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${grid?.url}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`]);
 });
 
 test('what the server answered since its start is read from its /speed.json answer route by route, or why not is said; restarts are said as runs; and one ask is a first only by the server\'s count', () => {
@@ -5331,7 +5363,7 @@ test('what the server answered since its start is read from its /speed.json answ
   const req = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ ({ page: '/db', route: '/x.json', label: '', method: 'GET', url: '/x.json?a=1', builder: '' });
   const answered = { ...ok, body: '' };
   const none = { status: 0, error: 'reset', ms: 1, build: null, body: '', bytes: 0, headers: {} };
-  const o = { before: new Map(), after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 0 }, proofRead: false, startedAfterUp: false };
+  const o = { before: new Map(), after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 0 }, earlier: null, proofRead: false, startedAfterUp: false };
   const first = sheet.firstAfterRestart;
   assert.equal(first(req, answered, o), null, 'nobody before, and the server counted exactly this sheet\'s ask');
   assert.deepEqual(first({ ...req, route: sheet.UP_WAIT_ROUTE }, answered, { ...o, after: new Map([[sheet.UP_WAIT_ROUTE, 1]]) }), { kind: 'up wait', seen: 0 });
@@ -5345,7 +5377,7 @@ test('what the server answered since its start is read from its /speed.json answ
   assert.deepEqual(first(req, answered, { ...o, after: new Map([['/x.json', 3]]) }), { kind: 'during', seen: 2 });
   assert.deepEqual(first(req, answered, { ...o, after: new Map([['/x.json', 3]]), mine: { answered: 1, left: 1 } }), { kind: 'left', seen: 2 });
   assert.equal(first(req, answered, { ...o, after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 1 } }), null, 'an ask left unanswered that the server never counted');
-  assert.deepEqual(Object.keys(sheet.NOT_FIRST).sort(), ['before', 'during', 'fewer', 'left', 'no answer', 'old server', 'unnamed', 'up wait']);
+  assert.deepEqual(Object.keys(sheet.NOT_FIRST).sort(), ['before', 'during', 'earlier', 'fewer', 'left', 'no answer', 'old server', 'unnamed', 'up wait']);
   // A count of many restarts is its least and most.
   assert.match(sheet.NOT_FIRST.before({ r: req, seen: [1, 4, 2] }), /\(1 to 4 times: /);
   assert.match(sheet.NOT_FIRST.before({ r: req, seen: [2] }), /\(2 times: /);
@@ -5392,8 +5424,230 @@ test('any answer of the up wait\'s route says the server answers: a 503 of /heal
   const lines = [];
   const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 1 }, { send: standIn({ ignore: new Set(), status: { [sheet.UP_WAIT_ROUTE]: 503 }, started: () => starts }).send, log: (l) => lines.push(l), restart: async () => ((starts += 1), 0) });
   assert.equal(r.ok, true, r.failures.join('\n'));
-  assert.equal(r.rows.filter((x) => x.phase === 'first after restart').length, sheet.requestsFor(CTX).requests.length);
+  // Every request but the extremes, asked after the grid on its route at the one restart (verify r11).
+  assert.deepEqual(r.rows.filter((x) => x.phase === 'first after restart').map((x) => x.label), sheet.requestsFor(CTX).requests.filter((x) => x.label !== 'extremes').map((x) => x.label));
   assert.ok(lines.some((l) => /^speed sheet: restart 1: up \d+ ms after the command \(HEAD \/health answered HTTP 503\), answered by c{40}$/.test(l)), lines.join('\n'));
   assert.equal(sheet.UP_WAIT_METHOD, 'HEAD');
   assert.equal(sheet.UP_WAIT_ROUTE, '/health');
+});
+
+// ---------------------------------------------------------------------------
+// Repair round 11 (27 Oct): verify r11's blocking finding, failing on
+// bfdd4dd1e: the count proof took this sheet's own earlier asks as its own,
+// so a route's second and later asks in one restart pass were published as
+// 'first after restart', each timing an answer the route's first had warmed.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real server over the strict stand-in whose FIRST ask of each route since
+ * its start takes `coldMs` and every later ask of that route is fast, as the
+ * api's first `/bars/window.json` after a start (verify r11: 100 to 212 ms,
+ * and 2.2 to 11.1 ms right after the grid). `GET /__restart` (the
+ * `--restart` command's, never counted) gives it a new start.
+ *
+ * @param {number} coldMs
+ */
+async function coldFirstServer(coldMs) {
+  const state = { started: Date.now() - 1, restarts: 0 };
+  /** @type {Set<string>} the routes asked since the start */
+  const asked = new Set();
+  const strict = standIn({ ignore: new Set(), started: () => state.started });
+  const server = http.createServer(async (req, res) => {
+    const path = new URL(String(req.url), 'http://x').pathname;
+    if (path === '/__restart') {
+      state.restarts += 1;
+      state.started = Date.now();
+      asked.clear();
+      res.end('restarting\n');
+      return;
+    }
+    if (!asked.has(path)) {
+      asked.add(path);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, coldMs);
+    }
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(req.method === 'HEAD' ? undefined : a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  const command = `'${process.execPath}' -e "fetch('${base}/__restart').then((r) => r.text()).then(() => process.exit(0), () => process.exit(1))"`;
+  return { base, state, counts: strict.counts, command, close: () => server.close() };
+}
+
+/** Invented requests that share routes with the catalogue and with each other, as the deploy step's /db capture does. */
+const SHARED = Object.freeze({
+  facets2: '/census/facets.json?feed=zerodha&segment=INDEX',
+  facets3: '/census/facets.json?feed=zerodha&segment=FNO',
+  dayflags2: '/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2026-08-01&to=2026-08-31&order=asc',
+  storeA: '/store.json?feed=zerodha',
+  storeB: '/store.json?feed=gdfl'
+});
+
+/** The capture of {@link SHARED}, with a GET of the up route and a HEAD of /speed.json beside the catalogue's. */
+const sharedCapture = () => JSON.stringify({ requests: [
+  { page: '/db', method: 'GET', url: SHARED.facets2 },
+  { page: '/db', method: 'GET', url: SHARED.facets3 },
+  { page: '/db', method: 'GET', url: SHARED.dayflags2 },
+  { page: '/db', method: 'GET', url: UP_ROUTE },
+  { page: '/ingest', method: 'HEAD', url: SHARED.storeA },
+  { page: '/ingest', method: 'HEAD', url: SHARED.storeB },
+  { page: '/speed', method: 'HEAD', url: SPEED_ROUTE }
+] });
+
+/** The tail every 'earlier' line ends with. */
+const WARMED = 'so this ask was not its route\'s first since the server\'s start, and would time a route that ask had warmed';
+
+test('only a route\'s first ask after a restart is timed as its first, over the network as a command: on a server whose first ask of a route since its start takes 200 ms and every later ask is fast, no first row holds a fast time, the grid and the extremes go first in turn, and every later ask is NOT MEASURED naming the ask that went first', { timeout: 120_000 }, async () => {
+  // Before (verify r11, 27 Oct): the extremes request, asked right after the
+  // grid on its route, read 4.06 / 8.34 ms as a first after restart against
+  // its own first's 100 to 212 ms on the api; with the deploy step's /db
+  // capture, 13 of the 30 first rows were later asks so published.
+  const COLD = 200;
+  const site = await coldFirstServer(COLD);
+  const dir = mkdtempSync(join(tmpdir(), 'r315-r11-'));
+  try {
+    const capture = join(dir, 'capture.json');
+    writeFileSync(capture, sharedCapture());
+    const run = await sheetCommand(['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--timeout-ms', '10000', '--up-wait-ms', '10000', '--restart', site.command, '--restarts', '2', '--from-pages', capture, '--out', join(dir, 'sheet.md')], 110_000);
+    assert.equal(run.code, 0, `${run.stdout}\n${run.stderr}`);
+    assert.equal(site.state.restarts, 2);
+    // Every first row is its route's first since the start: with n at most 2, p50 is its least time.
+    const lines = run.stdout.split('\n').filter((l) => l.includes('| first after restart |'));
+    assert.equal(lines.length, 19, run.stdout);
+    for (const l of lines) {
+      const cells = l.split('|').map((c) => c.trim());
+      assert.ok(Number(cells[8]) >= COLD * 0.9, `a first after restart holds a later ask's time: ${l}`);
+    }
+    // The grid and the extremes, which share a route, one first each.
+    const firsts = rowsOf(run.stdout, 'first after restart');
+    assert.equal(firsts.get('/bars/window.json the grid, newest first')?.n, 1, run.stdout);
+    assert.equal(firsts.get('/bars/window.json extremes')?.n, 1, run.stdout);
+    assert.equal(firsts.get('/feeds.json (no query)')?.n, 2, run.stdout);
+    // Every later ask is said, once a request, naming the ask that went first.
+    const { requests } = sheet.requestsFor(CTX);
+    const grid = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((r) => r.label === 'the grid, newest first'));
+    const extremes = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((r) => r.label === 'extremes'));
+    const facets = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((r) => r.route === '/census/facets.json'));
+    const said = run.stdout.split('\n').filter((l) => l.includes(' is not timed as a first after '));
+    assert.equal(said.length, 12, said.join('\n'));
+    for (const line of [
+      `- NOT MEASURED: first after restart: GET ${extremes.url} is not timed as a first after restart 1 (1 of the 2 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${grid.url}, ${WARMED}`,
+      `- NOT MEASURED: first after restart: GET ${grid.url} is not timed as a first after restart 2 (1 of the 2 timed): its route /bars/window.json was asked first in that pass by this sheet's GET ${extremes.url}, ${WARMED}`,
+      `- NOT MEASURED: first after restart: GET ${SHARED.facets3} is not timed as a first after restarts 1-2 (2 of the 2 timed): its route /census/facets.json was asked first in each of those passes by this sheet's GET ${facets.url} (restart 1) and GET ${SHARED.facets2} (restart 2), ${WARMED}`,
+      `- NOT MEASURED: first after restart: HEAD /speed.json is not timed as a first after restarts 1-2 (2 of the 2 timed): its route /speed.json was asked first in each of those passes by this sheet's GET /speed.json (the read that proved the restart), ${WARMED}`
+    ]) assert.ok(said.includes(line), `${line}\n---\n${said.join('\n')}`);
+    assert.ok(run.stdout.includes('; and an ask is timed as its route\'s first only when it is this sheet\'s first ask of that route in the pass (a route\'s requests take turns going first, one restart after another) and '), run.stdout);
+  } finally {
+    site.close();
+  }
+});
+
+test('a route\'s later asks in a pass are never firsts, by request: with a first ask of each route since a start timed 300 ms and every later one 1 ms, each first row holds only 300 ms, each request goes first in its turn, and each later ask is said once, naming every ask that went first before it', async () => {
+  // Before (verify r11, 27 Oct): the second and later asks of a route in one pass passed the count proof,
+  // which held this sheet's own earlier asks, and were published with their warm times.
+  const state = { restarts: 0 };
+  const strict = standIn({ ignore: new Set(), started: () => state.restarts });
+  /** @type {Set<string>} the routes asked since the stand-in's start */
+  const asked = new Set();
+  let since = -1;
+  /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+  const send = async (b, path, o = {}) => {
+    if (since !== state.restarts) {
+      since = state.restarts;
+      asked.clear();
+    }
+    const route = new URL(path, 'http://x').pathname;
+    const firstOfRoute = !asked.has(route);
+    asked.add(route);
+    return { ...(await strict.send(b, path, o)), ms: firstOfRoute ? 300 : 1 };
+  };
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, capture: sharedCapture(), restart: async () => ((state.restarts += 1), 0) });
+  assert.equal(r.ok, true, r.failures.join('\n'));
+  const firsts = r.rows.filter((x) => x.phase === 'first after restart');
+  for (const x of firsts) assert.deepEqual([x.p50, x.max], [300, 300], `${x.method ?? 'GET'} ${x.url} holds a later ask's time: ${JSON.stringify(x)}`);
+  const { requests } = sheet.requestsFor(CTX, sheet.readCapture(sharedCapture()));
+  const byUrl = new Map(firsts.map((x) => [`${x.url} ${x.label}`, x.n]));
+  // Two restarts: a request alone on its route is first at both; of a route's two requests each goes first
+  // once; of the census's three the third never does; and of /speed.json's two the read that proved the
+  // restart always does.
+  for (const q of requests) {
+    const alone = requests.filter((x) => x.route === q.route).length === 1;
+    const expected = q.url === SPEED_ROUTE ? (q.method === 'GET' ? 2 : 0) : q.url === SHARED.facets3 ? 0 : alone ? 2 : 1;
+    assert.equal(byUrl.get(`${q.url} ${q.label}`) ?? 0, expected, `${q.method} ${q.url}`);
+  }
+  const extremes = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'extremes'));
+  const grid = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.label === 'the grid, newest first'));
+  const facets = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.route === '/census/facets.json'));
+  const dayflags = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (requests.find((x) => x.route === '/dayflags.json'));
+  const one = (/** @type {number} */ at) => `restart ${at} (1 of the 2 timed)`;
+  const both = 'restarts 1-2 (2 of the 2 timed)';
+  assert.deepEqual(r.notMeasured.filter((l) => l.includes(' is not timed as a first after ')).sort(), [
+    `first after restart: GET ${facets.url} is not timed as a first after ${one(2)}: its route /census/facets.json was asked first in that pass by this sheet's GET ${SHARED.facets2}, ${WARMED}`,
+    `first after restart: GET ${grid.url} is not timed as a first after ${one(2)}: its route /bars/window.json was asked first in that pass by this sheet's GET ${extremes.url}, ${WARMED}`,
+    `first after restart: GET ${extremes.url} is not timed as a first after ${one(1)}: its route /bars/window.json was asked first in that pass by this sheet's GET ${grid.url}, ${WARMED}`,
+    `first after restart: GET ${dayflags.url} is not timed as a first after ${one(2)}: its route /dayflags.json was asked first in that pass by this sheet's GET ${SHARED.dayflags2}, ${WARMED}`,
+    `first after restart: GET ${SHARED.facets2} is not timed as a first after ${one(1)}: its route /census/facets.json was asked first in that pass by this sheet's GET ${facets.url}, ${WARMED}`,
+    `first after restart: GET ${SHARED.facets3} is not timed as a first after ${both}: its route /census/facets.json was asked first in each of those passes by this sheet's GET ${facets.url} (restart 1) and GET ${SHARED.facets2} (restart 2), ${WARMED}`,
+    `first after restart: GET ${SHARED.dayflags2} is not timed as a first after ${one(1)}: its route /dayflags.json was asked first in that pass by this sheet's GET ${dayflags.url}, ${WARMED}`,
+    `first after restart: GET ${UP_ROUTE} is not timed as a first after ${one(1)}: its route ${UP_ROUTE} was asked first in that pass by this sheet's HEAD ${UP_ROUTE}, ${WARMED}`,
+    `first after restart: HEAD ${UP_ROUTE} is not timed as a first after ${one(2)}: its route ${UP_ROUTE} was asked first in that pass by this sheet's GET ${UP_ROUTE}, ${WARMED}`,
+    `first after restart: HEAD ${SHARED.storeA} is not timed as a first after ${one(2)}: its route /store.json was asked first in that pass by this sheet's HEAD ${SHARED.storeB}, ${WARMED}`,
+    `first after restart: HEAD ${SHARED.storeB} is not timed as a first after ${one(1)}: its route /store.json was asked first in that pass by this sheet's HEAD ${SHARED.storeA}, ${WARMED}`,
+    `first after restart: HEAD /speed.json is not timed as a first after ${both}: its route /speed.json was asked first in each of those passes by this sheet's GET /speed.json (the read that proved the restart), ${WARMED}`
+  ].sort());
+  // Three restarts: the census's third request goes first at the third.
+  state.restarts = 0;
+  const r3 = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 3 }, { send, log: () => {}, capture: sharedCapture(), restart: async () => ((state.restarts += 1), 0) });
+  const facets3 = r3.rows.find((x) => x.phase === 'first after restart' && x.url === SHARED.facets3);
+  assert.deepEqual([facets3?.n, facets3?.p50, facets3?.max], [1, 300, 300], JSON.stringify(facets3));
+  assert.ok(r3.notMeasured.includes(`first after restart: GET ${SHARED.facets3} is not timed as a first after restarts 1-2 (2 of the 3 timed): its route /census/facets.json was asked first in each of those passes by this sheet's GET ${facets.url} (restart 1) and GET ${SHARED.facets2} (restart 2), ${WARMED}`), r3.notMeasured.join('\n'));
+  assert.ok(r3.notMeasured.includes(`first after restart: GET ${facets.url} is not timed as a first after restarts 2-3 (2 of the 3 timed): its route /census/facets.json was asked first in each of those passes by this sheet's GET ${SHARED.facets2} (restart 2) and GET ${SHARED.facets3} (restart 3), ${WARMED}`), r3.notMeasured.join('\n'));
+});
+
+test('a restart\'s pass asks a route\'s requests in turn, each in a place one of them holds, /speed.json never turned; and an ask after its route\'s first in the pass is never a first, whatever the count says, said with every ask that went first', () => {
+  const R = (/** @type {string} */ route, /** @type {string} */ url, method = 'GET') => /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ ({ page: '/p', route, label: '', method, url, builder: '' });
+  const a1 = R('/a', '/a?1');
+  const a2 = R('/a', '/a?2');
+  const a3 = R('/a', '/a?3', 'HEAD');
+  const b = R('/b', '/b');
+  const s = R(SPEED_ROUTE, SPEED_ROUTE);
+  const s2 = R(SPEED_ROUTE, `${SPEED_ROUTE}?window=1h`, 'HEAD');
+  const c1 = R('/c', '/c?1');
+  const c2 = R('/c', '/c?2');
+  const requests = [a1, b, a2, s, c1, a3, s2, c2];
+  const order = (/** @type {number} */ at) => sheet.passOrder(requests, at);
+  assert.deepEqual(order(1), requests, 'the first restart asks them as given');
+  assert.deepEqual(order(2), [a2, b, a3, s, c2, a1, s2, c1]);
+  assert.deepEqual(order(3), [a3, b, a1, s, c1, a2, s2, c2]);
+  assert.deepEqual(order(7), order(1), 'and round again once every route has come round (3 and 2: at 7)');
+  assert.deepEqual([1, 2, 3, 4].map((at) => order(at).find((r) => r.route === '/a')), [a1, a2, a3, a1], 'each of a route\'s requests goes first in turn');
+  for (const at of [1, 2, 3, 10_000]) assert.deepEqual([order(at)[1], order(at)[3], order(at)[6]], [b, s, s2], 'a route of one, and /speed.json, keep their places');
+  assert.deepEqual(requests, [a1, b, a2, s, c1, a3, s2, c2], 'the requests given are left as they were');
+  assert.deepEqual(sheet.passOrder([], 5), []);
+  // An ask after its route's first in the pass, by kind and its place among the others.
+  const req = R('/x.json', '/x.json?a=1');
+  const went = R('/x.json', '/x.json?a=0');
+  const ok = { status: 200, headers: {}, ms: 1, bytes: 10, build: null, body: '' };
+  const none = { status: 0, error: 'reset', ms: 1, build: null, body: '', bytes: 0, headers: {} };
+  const o = { before: new Map(), after: new Map([['/x.json', 2]]), mine: { answered: 2, left: 0 }, earlier: went, proofRead: false, startedAfterUp: false };
+  const first = sheet.firstAfterRestart;
+  assert.deepEqual(first(req, ok, o), { kind: 'earlier', seen: 0 }, 'verify r11: the count holds this sheet\'s two asks and nobody else\'s, and the later one is still not a first');
+  assert.equal(first(went, ok, { ...o, earlier: null }), null, 'the ask that went first is');
+  assert.deepEqual(first(req, ok, { ...o, before: new Map([['/x.json', 3]]) }), { kind: 'earlier', seen: 0 }, 'a count before the pass is the first ask\'s to say');
+  assert.deepEqual(first(req, ok, { ...o, after: new Map() }), { kind: 'earlier', seen: 0 });
+  assert.deepEqual(first(req, ok, { ...o, after: new Map([['/x.json', 9]]) }), { kind: 'earlier', seen: 0 });
+  assert.deepEqual(first(req, none, o), { kind: 'no answer', seen: 0 }, 'no answer is said as that');
+  assert.deepEqual(first({ ...req, route: sheet.UP_WAIT_ROUTE }, ok, o), { kind: 'up wait', seen: 0 });
+  // Its line: one ask that went first, two in turn, three, and the read that proved the restart.
+  const t = (/** @type {number[]} */ at, /** @type {import('../ci/speed-sheet.mjs').SheetRequest[]} */ by) => sheet.NOT_FIRST.earlier({ r: req, seen: at.map(() => 0), at, by });
+  assert.equal(t([1], [went]), `its route /x.json was asked first in that pass by this sheet's GET /x.json?a=0, ${WARMED}`);
+  assert.equal(t([1, 3], [went, went]), `its route /x.json was asked first in each of those passes by this sheet's GET /x.json?a=0, ${WARMED}`);
+  const went2 = R('/x.json', '/x.json?a=2', 'HEAD');
+  assert.equal(t([1, 2, 4], [went, went2, went]), `its route /x.json was asked first in each of those passes by this sheet's GET /x.json?a=0 (restarts 1, 4) and HEAD /x.json?a=2 (restart 2), ${WARMED}`);
+  const went3 = R('/x.json', '/x.json?a=3');
+  assert.equal(t([2, 3, 4], [went2, went3, went]), `its route /x.json was asked first in each of those passes by this sheet's HEAD /x.json?a=2 (restart 2), GET /x.json?a=3 (restart 3) and GET /x.json?a=0 (restart 4), ${WARMED}`);
+  assert.equal(sheet.NOT_FIRST.earlier({ r: s2, seen: [0], at: [5], by: [s] }), `its route /speed.json was asked first in that pass by this sheet's GET /speed.json (the read that proved the restart), ${WARMED}`);
+  assert.equal(sheet.NOT_FIRST.earlier({ r: s, seen: [0], at: [5], by: [s2] }), `its route /speed.json was asked first in that pass by this sheet's HEAD /speed.json?window=1h, ${WARMED}`, 'only the GET of /speed.json itself is the proof read');
 });
