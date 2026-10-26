@@ -21966,3 +21966,46 @@ process, sequential:
 | L-R422-10 | MEASURED: the written series rule names every other-series day file of a stored share, so a stocks day holding one closes `done with refusals` and the cli exits FAILED: 56 `series_not_stored` refusals on 2024-04-02 (stored-scope stocks run over the real archive into a scratch store, 209 files read), 7 of them CHOLAFIN's debt series `N0`, `N4`, `N6`, `NA`, `NC`, `ND`, `NK`. Over the window the total is an EXTRAPOLATION (about 56 a day across about 2,000 stock days, of the order of 10^5 lines), not measured | G3: every series code is stored or refused by a written rule; a silent skip would hide a vendor file | one `refused` audit line per such file, O(1) per entry (a length bound, one split, two compares, one probe) | — |
 | L-R422-11 | A column-set change under a known header is named only past D-3318's bound (more than 64 refused rows and one in 1,000): a file of 64 or fewer rows whose every row has one other field count is still a bad file named by its first row (`malformed_row`, a closing cause) | one bent row of a small file (an illiquid contract's) cannot be told from a changed format; 64 is D-3318's own bound | a larger file of the same shape refuses `columns_changed`, an open cause, so a day holding one stays incomplete and is read again whole | — |
 | L-R422-12 | MEASURED (25 Oct 2026, store roots of R4-22's own holding APFS clones of the real months; the real files unchanged by mtime, size and sha256): a definition-5 re-read of an options day the store holds under definition 2 records `bars_differ_held` for every contract whose held bars carry another open interest (123 of BANKNIFTY's 261 files on 2018-11-06, 6 of AXISBANK's 57 on 2018-11-09; OHLCV identical), and that close keeps every later run off the day, so a run without a repair reason first strands the bad-row file D-7313 re-reads; and the repair door lands an inside-month day as ONE NEW GENERATION PER DAY (seven generations, 56 files, 64.8 MB of revision files for ANGELONE's 2021-11, whose original `.bin` is 3.7 MB) | a held bar is never changed (D-3350); the definition-2 option months are WP-80's to re-import as new generations (operator answer 10); one generation per repaired day is IA-16's door | the store steps of D-7311 and D-7313 run WITH `--repair-reason`, never `--retry-refused` or a plain run first; G2's projection is an EXTRAPOLATION, not measured whole: about 7,000 stock-days (the nine old stems' days from 2018-09-03 or their listing to each change, and the new symbols' unheld days), at about 200 KB a stock-day likely (the measured G2 months: 124 to 207 KB) and about 500 KB worst (ANGELONE's held 2021-11), plus about 57 repair generations of about 5 to 10 MB for the six held change months: likely about 2 GB and 2,900 files, worst about 5 GB | WP-80, IA-16 |
+
+## One not-owed authority (R4-19; D-7315)
+
+`pull::gaps::not_owed` is constant per call and the classification it joins
+stays constant per day; the one load it adds per process, and the reload a
+store with no checked master pays, are named here. Measured on 26 Oct 2026.
+
+**Bench rows** (`crates/api/benches/ratio/gaps.rs`, `cargo bench -p api --bench
+ratio -- --gaps-only`, n=200 rounds, each timing 1, 10 and 100 whole months the
+cash door's table measures, cycled from 2020-01; the key built once a
+request, as `/gaps.json` builds it):
+
+| Row | 1 month p50 / p99 / max | 10 months | 100 months | p99 ratio 1->10, 1->100 |
+|---|---|---|---|---|
+| gap classification per day (`classify_cash` with a key) | 1.364 / 1.544 / 1.919 µs | 1.240 / 1.463 / 1.592 µs | 1.311 / 1.411 / 1.556 µs | 0.947x, 0.913x |
+| `not_owed` per call | 12.1 / 14.8 / 16.1 ns | 12.3 / 13.4 / 27.9 ns | 12.5 / 14.5 / 17.1 ns | 0.906x, 0.983x |
+
+The first run of these rows took 100 months from 2018-01 and read 9.04x at
+1->100: the 1x and 10x spans lay wholly before the cash door's table
+(2019-12-02), every day one `unmeasured` run, while the 100x span was mostly
+sessions walked minute by minute. A difference of day kind, not of span
+length; the rows now cycle whole measured months.
+
+**Routes on the operator's store** (a shadow server on `:8451`, bars read
+through the link, n=200 sequential warm GETs after one cold one, curl's
+`time_total`; the machine loaded by other agents' builds throughout; base =
+feat/db-fix 5901ec778, a commit of the integration branch that `main`'s squash
+merge does not keep, built from a `git archive` of it, final = this change):
+
+| Route and selection | base p50 / p99 / max | final p50 / p99 / max |
+|---|---|---|
+| `/gaps.json` FORCEMOT CASH 1min 2023-10..2024-02 | 1.6 / 2.7 / 11.6 ms | 2.0 / 2.6 / 2.8 ms |
+| `/gaps.json` NIFTY INDEX 1min 2020-03 | 1.1 / 1.4 / 1.6 ms | 1.2 / 1.9 / 3.1 ms |
+| `/gaps.json` NIFTY INDEX GDFL 1s 2019-10..2019-12 | 103.7 / 129.4 / 137.3 ms | 105.3 / 134.1 / 137.4 ms |
+| `/pull/repair.json` FORCEMOT CASH 2023-09-01..2024-03-31 | 1.3 / 1.8 / 2.6 ms | 1.4 / 3.0 / 3.8 ms |
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R419-01 | The first NSE cash `/gaps.json` or `/pull/repair.json` of a process loads the store's listing table: measured 89.7 ms for the first FORCEMOT `/gaps.json` against 6.9 ms on the baseline build (the store's `session-masters`, 50 MB) | the key needs the master's span, and `pull::listing::for_store` loads it on first use rather than at start (R4-17) | once per process per store; off the async workers (the calendar walk's blocking task, the store-read pool); every later request reads the cached table (warm p50 2.0 ms above) | R4-17 |
+| L-R419-02 | A store whose `session-masters` holds no master that checks re-reads that directory on every NSE cash `/gaps.json` and `/pull/repair.json` (and on every `cli zerodha-repair` of a cash share) | `for_store` remembers a table only when a master loaded, so a master installed later is read on the next call (AF-03) | one directory listing and the masters it holds, per request; not measured here (the operator's store has a master that checks) | R4-17 |
+| L-R419-03 | `Ledger::not_owed` finds each run's answer among the answers already seen | a month names each answer once, with its days and minutes | O(runs x distinct answers): runs are bounded by `pull::gaps::MAX_GAPS`, and the distinct answers by one per documented interruption, one listing day, one removal day and unread | — |
+| L-R419-04 | NOT DONE here: `/gaps.json` never answers `unread` (every caller passes `Coverage::Unstated`); `calendar_record`, the day band, `calendar-owed.js` and `recovery.rs`'s own `inactive()` do not yet ask `not_owed` | the display wiring is R4-19d's, the `/store` rows' `not_owed` R4-03's and the FINNIFTY alias R4-02's (D-6900); each calls this door when it lands | — | R4-19d, R4-03, R4-02 |
+| L-R419-05 | At the minute rung a repair plan still names FORCEMOT's 2023-10 and 2024-02 repair months on the operator's store, for three SHORT owed sessions (2023-10-13 3 minutes, 2023-10-25 2, 2024-02-14 1), as the baseline did; none of the 76 sessions not owed is a repair's any more (2024-02's nine `front` sessions are gone), and the daily rung (Z3's) names no repair month at all (`cli zerodha-repair FORCEMOT 2023-09-01 2024-03-31 --segment CASH --rung 1day`: `0 month(s) need a versioned repair`, the baseline 1) | whether a share's minute with no bar is a vendor hole or a minute nobody traded is R3-18's short-session class to judge (UNVERIFIED here) | — | R3-18 |
