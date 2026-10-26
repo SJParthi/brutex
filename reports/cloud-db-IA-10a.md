@@ -303,3 +303,30 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
   it runs once the mutants stop loading the machine (its rows gate on ratios).
 - NEXT: the remaining 85 api/pull mutants (running, `--iterate`), the cli file's 17, bench
   C-LG-02, the final gates, NEEDS THE MAC, STATUS.
+
+### 2026-10-26 21:00 IST
+
+- api/pull mutants pass 2 (`--iterate`, 85 tested in 47 min): 72 caught, 11 unviable, 2 MISSED;
+  with pass 1, all 124: 109 caught, 13 unviable, 3 missed, each answered:
+  - `dayflags.rs:1501` (`<` to `<=` in `refusals_of`): caught in pass 2 by the new test.
+  - `imports.rs:904` (`>` to `>=` in `Walk::holes_note`): an answer with no hole carried the
+    holes sentence. `an_empty_or_absent_journal_says_zero_holes_by_name` now reads the notes of
+    an empty, an absent and a plain-incomplete (`reason=filing`) journal, on `/imports.json` and
+    the audit summary: none says "are store holes".
+  - `imports.rs:1144` (`<` to `<=` in `placed_of`): an EQUIVALENT mutant (an `event == close`
+    return came first, so the `(start, id)` tuples were never equal there). Removed, not
+    allowlisted (the precedent of `docs/06-limits.md`'s mutation section): one three-way
+    `cmp` places Before, Within and After; `cargo test -p api --lib --locked -- server::imports
+    server::dayflags server::import_journal server::provenance server::feeds_route audit_json
+    logs:: --skip the_window_is_refused_loudly_when_degraded_or_inverted`: `test result: ok.
+    372 passed; 0 failed; 7 ignored` (`ecafd565`).
+- Mutants method: `cargo mutants --in-diff <git diff origin/feat/db-fix -- crates/api/src
+  crates/pull/src ':!*_tests.rs'> -p api -p pull --test-package api -j 2 -- --lib --
+  server::imports server::dayflags server::import_journal server::provenance
+  server::feeds_route audit_json logs:: --skip the_window_is_refused_loudly_when_degraded_or_inverted`
+  (378 tests at baseline; the one skipped fails as root on the base too), with
+  `CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_PROFILE_DEV_INCREMENTAL=true` so each mutant rebuilds
+  in about 30 s instead of minutes (the dev profile is opt-level 3, non-incremental; a
+  mutant's outcome does not depend on it).
+- NEXT: the re-run of `holes_note` and `placed_of` (running), the cli file's 17 (running),
+  bench C-LG-02, the final gates, NEEDS THE MAC, STATUS.
