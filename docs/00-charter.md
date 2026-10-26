@@ -991,9 +991,12 @@ November 2023, December 2023 and January 2024 daily files therefore overlap
 a documented NSE trading interruption, not evidence that another identical
 vendor retry will produce bars. Acquisition may request the two available
 periods separately, retaining this interval as explicitly not applicable to
-NSE trading. No BSE substitution or synthetic bars is authorized. This dated
-evidence is not yet wired into general instrument-calendar classification;
-the whole-window application prerequisite still refuses the interior holes.
+NSE trading. No BSE substitution or synthetic bars is authorized. Since
+R4-19 (D-7315) this dated evidence is wired into the one not-owed authority,
+`pull::gaps::not_owed`: the gap audit's cash doors and the repair plan owe
+none of the interval's sessions and name both sources; the calendar and the
+day band follow it in R4-19d. The whole-window application prerequisite
+still refuses the interior holes.
 
 ## Calendar extension evidence reviewed 2026-09-06
 

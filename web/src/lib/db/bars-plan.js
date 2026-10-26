@@ -169,6 +169,74 @@ export const MAX_WINDOW_MONTHS = 240;
 /** The most rows the whole-query export writes. */
 export const EXPORT_CAP = 20_000;
 
+/* ======================================================================
+   THE CEILINGS IN FORCE ARE THE SERVER'S (R3-12; RA-259, RA-258)
+   ----------------------------------------------------------------------
+   `/settings.json` serves every ceiling of one request from the constant
+   that enforces it (`crates/api/src/settings_route.rs` `ceilings_json`,
+   R3-05). The five above are this build's copies, pinned to those
+   constants by `tests/settings-ceilings.test.js`, and in force only until
+   the server has answered: a page served by another build of the API then
+   plans against the API's own numbers, and says before a request leaves
+   how far the selection is from them ("412 of 1,024 series", `ceilingText`).
+   A ceiling the answer does not carry, or carries as no positive whole
+   number, keeps the build's copy and is named (`why`).
+   ====================================================================== */
+const BUILD_CEILINGS = Object.freeze({ max_series: MAX_SERIES, max_window_months: MAX_WINDOW_MONTHS, max_window_limit: WINDOW_PAGE_MAX,
+  browser_sort_budget: LOCAL_SORT_BUDGET, export_cap: EXPORT_CAP });
+
+/** @typedef {{values: Record<string, number>, from: 'build' | 'server', why: string | null}} CeilingsInForce */
+
+/** @type {CeilingsInForce} */
+let inForce = { values: { ...BUILD_CEILINGS }, from: 'build',
+  why: "/settings.json has not answered, so this build's copies of the ceilings are in force" };
+
+/** The ceilings in force, a copy. @returns {CeilingsInForce} */
+export const ceilingsInForce = () => ({ values: { ...inForce.values }, from: inForce.from, why: inForce.why });
+
+/** One ceiling in force, by the name `/settings.json` gives it. @param {keyof typeof BUILD_CEILINGS} name */
+export const ceilingOf = (name) => inForce.values[name];
+
+/**
+ * Adopt the ceilings a `/settings.json` answer serves; `null` (a failed
+ * read) keeps the build's copies and says why.
+ * @param {any} body the answer, or null
+ * @param {string | null} [failed] why the answer could not be read
+ * @returns {CeilingsInForce}
+ */
+export function adoptCeilings(body, failed = null) {
+  const served = Array.isArray(body?.ceilings) ? body.ceilings : null;
+  if (!served) {
+    inForce = { values: { ...BUILD_CEILINGS }, from: 'build',
+      why: `/settings.json ${failed ? `could not be read (${failed})` : 'serves no ceilings'}, so this build's copies are in force` };
+    return ceilingsInForce();
+  }
+  /** @type {Record<string, number>} */
+  const values = { ...BUILD_CEILINGS };
+  /** @type {string[]} */
+  const missing = [];
+  for (const name of Object.keys(BUILD_CEILINGS)) {
+    const row = served.find((/** @type {any} */ item) => item?.name === name);
+    if (row && Number.isSafeInteger(row.value) && row.value > 0) values[name] = row.value;
+    else missing.push(name);
+  }
+  inForce = { values, from: 'server',
+    why: missing.length ? `/settings.json serves no usable ${missing.join(', ')}, so this build's copy is in force for ${missing.length === 1 ? 'it' : 'them'}` : null };
+  return ceilingsInForce();
+}
+
+/**
+ * A window request against the ceilings in force, said before it is sent:
+ * `412 of 1,024 series · 30 of 240 months` (RA-259). Empty for a request
+ * that names nothing.
+ * @param {number} series @param {number} months @param {CeilingsInForce} [ceilings]
+ */
+export function ceilingText(series, months, ceilings = ceilingsInForce()) {
+  if (series <= 0) return '';
+  return `${fmt(series)} of ${fmt(ceilings.values.max_series)} series · ${fmt(months)} of ${fmt(ceilings.values.max_window_months)} months` +
+    ` (${ceilings.from === 'server' ? "the server's ceilings, /settings.json" : "this build's copies of the ceilings"})`;
+}
+
 /**
  * Months from `a` to `b` inclusive, both `YYYY-MM`; `0` when `b` is before `a`.
  * @param {string} a @param {string} b
@@ -226,12 +294,12 @@ export function seriesPlan(rows, fromDay, toDay) {
   if (keys.length === 0) return { keys, series, timeframe, from, to, why };
   if (rungs.size > 1) {
     why = `this selection reaches ${fmt(rungs.size)} rungs (${[...rungs].join(', ')}); a page is read at one rung, so choose one`;
-  } else if (keys.length > MAX_SERIES) {
-    why = `too_many_series: this selection reaches ${fmt(keys.length)} series and one window request reads at most ${fmt(MAX_SERIES)} — choose an expiry, a strike or a side`;
+  } else if (keys.length > ceilingOf('max_series')) {
+    why = `too_many_series: this selection reaches ${fmt(keys.length)} series and one window request reads at most ${fmt(ceilingOf('max_series'))} — choose an expiry, a strike or a side`;
   } else if (from > to) {
     why = `the date window ${fromDay || '…'} to ${toDay || '…'} lies outside the held months ${lo} to ${hi}, so there is nothing to read`;
-  } else if (monthSpan(from, to) > MAX_WINDOW_MONTHS) {
-    why = `the months ${from} to ${to} span ${fmt(monthSpan(from, to))}, past the ${fmt(MAX_WINDOW_MONTHS)} one window request reads — narrow the dates`;
+  } else if (monthSpan(from, to) > ceilingOf('max_window_months')) {
+    why = `the months ${from} to ${to} span ${fmt(monthSpan(from, to))}, past the ${fmt(ceilingOf('max_window_months'))} one window request reads — narrow the dates`;
   }
   return { keys, series, timeframe, from, to, why };
 }
@@ -489,51 +557,6 @@ export function paisaText(p) {
   const whole = (a - frac) / 100;
   return `${neg ? '−' : ''}${fmt(whole)}.${String(frac).padStart(2, '0')}`;
 }
-
-/**
- * THE DAYS THIS STORE ACTUALLY HOLDS — `[oldest, newest]` as `yyyy-mm-dd`,
- * or `['', '']` when nothing is loaded.
- *
- * # Why the calendar needs this and did not have it
- *
- * /ingest's day grid draws its bounds: days outside what the field may take
- * are struck through, and a paragraph under the grid names the window. /db's
- * grid drew every day plain, because it passed `$lib/DayField.svelte` no
- * `min` and no `max` — so the two calendars were the same COMPONENT showing
- * different amounts of truth.
- *
- * The bound here is a different fact from /ingest's and that is not an
- * inconsistency. /ingest's floor is the FEED's — how far back the vendor
- * answers, a rolling number that moves every day. This one is the STORE's:
- * the oldest and newest day actually on disk for the current selection. One
- * says what can be asked for, the other says what is held, which is the
- * standing difference between the two pages.
- *
- * ONE PASS over the rows already in memory, no sort and no new request —
- * `barRows` is what the table is about to draw anyway.
- */
-/**
- * THE SPAN THE DAY FIELDS MAY REACH — /ingest's, not the store's.
- *
- * `dayBounds` below is the first and last day the LOADED ROWS hold, and
- * handing that to `DayField` as `min`/`max` made the calendar unable to leave
- * the store: with one month on disk the year pad offered exactly one chip,
- * `2026`, where /ingest's offers twelve. A reader could not navigate to 2015
- * to ask whether anything was there, because the control refused the question
- * before it was asked.
- *
- * So the BOUNDS are the whole span — 01 Jan 2015, the floor the server's own
- * picker offers, to today in IST — and `dayBounds` keeps its other job: it is
- * still what the bounds SENTENCE reports, so the reader is still told exactly
- * where the store starts and stops. The two were one value doing two jobs and
- * only one of them wanted the narrow number.
- *
- * `FLOOR_YEAR` is 2015 here for the same reason it is 2015 on /ingest: it is
- * the floor `crates/api/src/calendar.rs` offers, and the two pages must not
- * disagree about how far back a day may be named.
- */
-export const FLOOR_YEAR = 2015;
-export const spanFloor = `${FLOOR_YEAR}-01-01`;
 
 /* ======================================================================
    WINDOWING — only the visible slice is in the DOM

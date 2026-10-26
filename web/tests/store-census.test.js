@@ -670,3 +670,44 @@ test('a busy or failing delta is a failed read with its reason, never a silent w
   assert.equal(degraded.degraded, 'recovered from an older generation');
   assert.match(degraded.reason ?? '', /refused rather than drawn/);
 });
+
+/* ----------------------------------------------------------------------
+   R3-12 merge-back (25 Oct 2026): the delta's refusals and torn answers the
+   merged tree's coverage named unrun, on the whole-census path other pages
+   still read (/db no longer does): a refusal that names no reason (with and
+   without a server note), a decode that throws a bare value, and an answer
+   that names no since at all.
+   ---------------------------------------------------------------------- */
+test('a delta refused with no reason, failing with only a note or nothing, or torn by a bare value is said in words', async () => {
+  const since = { 'x-brutex-census-since': '40', 'x-brutex-census-degraded': '' };
+  /** @type {[string, (api: ReturnType<typeof fixtureApi>) => any, string | null, RegExp | null][]} */
+  const cases = [
+    ['a 410 with no reason', () => new Response('', { status: 410, headers: since }), 'whole', /^the server refused a delta since 40 \(HTTP 410: no reason named\)$/],
+    ['a 500 with a note only', () => new Response('', { status: 500, headers: { ...since, 'x-brutex-census-note': 'the census is being re-read' } }), null, /the census is being re-read/],
+    ['a 500 with its own reason', () => Response.json({ error: 'census_unreadable' }, { status: 500, headers: { ...since, 'x-brutex-census-note': 'not this' } }), null, /^census_unreadable$/],
+    ['a 500 naming no reason and no note', () => new Response('', { status: 500, headers: since }), null, null],
+    ['an old API refusing with nothing', () => new Response('', { status: 500, headers: { 'x-brutex-census-degraded': '' } }), null, null],
+    ['a decode that throws a bare value', () => ({ ok: true, status: 200, headers: new Headers(since), json: async () => { throw 'torn mid-body'; } }), 'whole',
+      /^the delta since 40 could not be read \(torn mid-body\)$/],
+    ['an answer naming no since', () => Response.json(wire([], { held: { months: 4, rows: 100 } }), { headers: since }), 'whole', /names since null and no whole counters/]
+  ];
+  for (const [name, answer, kind, why] of cases) {
+    const api = fixtureApi(CENSUS);
+    const loader = createCensusLoader(api.request);
+    await loader.load('example', 0);
+    api.commit([['2019-04 NSE-INDEX-NIFTY 1min', 5]]);
+    api.answerWith((url) => (url.includes('since=') ? answer(api) : null));
+    const again = await loader.load('example', 1);
+    if (kind) {
+      assert.equal(again.how?.kind, kind, name);
+      assert.match(again.how?.why ?? '', /** @type {RegExp} */ (why), name);
+    } else {
+      // REFUSED, NOT PATCHED: the answer is the refusal, with its status, and
+      // the reason the server gave (none at all from an API that names none).
+      assert.equal(again.ok, false, name);
+      assert.equal(again.status, 500, name);
+      if (why) assert.match(String(again.reason), why, name);
+      else assert.equal(again.reason, null, `${name}: no reason is invented`);
+    }
+  }
+});

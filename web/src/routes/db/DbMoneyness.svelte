@@ -166,6 +166,8 @@
      */
     const strikeRefusal = $derived.by(() => {
       if (storeOptions > 0) return null;
+      // R3-12 merge-back: a scope that read no row is not an unread store.
+      if (db.deco.length === 0 && db.scopeEmptyWhy) return db.scopeEmptyWhy;
       if (db.deco.length === 0)
         return `nothing has been read for ${db.feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
       return `not one of the ${fmt(db.deco.length)} instrument-month(s) ${db.feedDisplay(feeds.active)} holds is named the way this repository names an option. crates/core/src/instrument.rs ends one “-<strike in paisa>-CE” or “-<strike in paisa>-PE”, and nothing in this store ends either way. /store.json sends no strike field, so a strike here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at.`;

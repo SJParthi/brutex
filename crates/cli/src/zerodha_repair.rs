@@ -332,6 +332,7 @@ fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
                 "      {day}  unattested: the calendar of record cannot say whether it traded"
             );
         }
+        not_owed_lines(out, month);
         if month.needs_repair() {
             needs.push(month.month);
         }
@@ -382,6 +383,23 @@ fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
         OK
     } else {
         FAILED
+    }
+}
+
+/// SESSIONS THE SERIES DID NOT OWE (R4-19, `pull::gaps::not_owed`): one line
+/// a run of `month`'s, with its evidence; never missing, never a repair's.
+fn not_owed_lines(out: &mut String, month: &repair_plan::Month) {
+    for run in month.not_owed_runs() {
+        let _ = writeln!(
+            out,
+            "      {}..{}  not owed: {} session(s), {} bar(s) held; {}: {}",
+            run.from,
+            run.to,
+            run.sessions,
+            run.bars,
+            run.why.code(),
+            run.why.evidence()
+        );
     }
 }
 
@@ -803,3 +821,7 @@ fn granularity_of(rung: Timeframe) -> Option<pull::vendor::Granularity> {
 #[cfg(test)]
 #[path = "zerodha_repair_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "zerodha_repair_owed_tests.rs"]
+mod owed_tests;

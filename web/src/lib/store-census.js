@@ -6,6 +6,9 @@ import { fetchWithBusyRetry } from '../../saved-backtest/requests.js';
 import { reasonOf } from './refusal.js';
 import { dayLabel, secondLabel } from './dates.js';
 import { group } from './money.js';
+import { selectionSegments } from './db/notes-labels.js';
+import { contractRungsOf, SEGMENT_KEYS } from './db/selection-model.js';
+import { parseKey } from './instrument.js';
 
 export const STORE_CENSUS_MS = 30_000;
 
@@ -523,14 +526,25 @@ export const FACETS_MS = 15_000;
 /* THE CEILING OF ONE REQUEST OF THE FIRST PAINT'S SCOPE (`readScope`), its
    own and shorter (WP-56b, the second check's follow-up): these answers are
    read off an index (p99 between 6 and 44 ms per selection, n=200 each on
-   the real store at machine load 19-21; the largest answer 285 KB), and a
-   scope that does not answer falls back to the whole census, so every
-   second waited here is a second before the first paint. Three seconds is
-   more than sixty times the worst p99 measured; past it the scope is given
-   up, the whole census is read, and the banner says why. */
+   the real store at machine load 19-21; the largest answer 285 KB), so
+   every second waited here is a second before the first paint. Three
+   seconds is more than sixty times the worst p99 measured; past it the scope
+   is given up and the page says why (R3-12: no whole census is read in its
+   place). */
 export const SCOPE_MS = 3_000;
-/** The longest one request of a scope waits before it is asked again after a 429. */
+/** The longest one request of a scope waits before it is asked again after a 429 or a warming 503. */
 export const SCOPE_RETRY_MAX_MS = 1_500;
+/* THE MOST TIMES ONE REQUEST OF A SCOPE IS ASKED AGAIN WHILE THE SERVER'S
+   INDEX IS STILL BEING BUILT (R3-12 merge-back, 26 Oct 2026). Right after a
+   start the API answers `503 index_warming` with `Retry-After: 1` until its
+   facet index is built (measured on the real store: "begun 2048 ms ago" on
+   the first /db open 3 s after a start). Before R3-12 a failed scope fell
+   back to the whole census; with no fallback, every /db opened in those
+   seconds showed the refusal until Refresh. Each warming answer is waited
+   out (its Retry-After, capped at SCOPE_RETRY_MAX_MS) and asked again, at
+   most this many times (about 12 s); past it the server's own sentence is
+   the page's error. */
+export const SCOPE_WARM_TRIES = 8;
 
 /**
  * @typedef {{feed: string, segment?: string | null, underlying?: string | null,
@@ -842,22 +856,106 @@ export function createFacetsLoader(request = ask, { keep = 8, ms = FACETS_MS, no
    whole census.
 
    IT ANSWERS THE CENSUS'S ROWS OR IT SAYS WHY NOT. A segment whose rows
-   pass the server's cap (an underlying's whole option chain) is asked again
-   at the expiry on screen, and is otherwise named in `unread`, never left
-   out in silence. Anything else that goes wrong (a refusal, answers read at
-   two generations, counts that do not add up) is `{ok: false, reason}`, and
-   the caller reads the census whole and says that it did and why.
+   pass the server's cap is named in `unread` with the server's sentence,
+   never left out in silence. Anything else that goes wrong (a refusal,
+   answers read at two generations, counts that do not add up) is
+   `{ok: false, reason}`, and the page says so.
+
+   EVERY PAINT AFTER THE FIRST TOO, AND ONLY WHAT THE VIEW READS (R3-12;
+   FM-621, DB-G59, DB-G70). The scope a view asks for names the segments
+   that view shows (`ScopeWanted.segments`, the page's own segment keys),
+   resolved against the root's own list by `viewSegments`:
+
+     - a SPOT view reads the rows of the spot segments only. It never asks a
+       contract segment for anything: a NIFTY spot view asked FNO's rows and
+       drew 400 rows_too_many (147,331 > 4,096) on nearly every open
+       (measured on :8080, 18 Oct).
+     - a CONTRACT view (options, futures) reads its segment's facets answer
+       for the underlying, and offers its expiries from it (`expiries`); its
+       rows are read only at a chosen expiry. The 12 Oct acceptance case,
+       NIFTY options with no expiry, read the whole census (53,131,576 B,
+       8 to 18 s, 465 MB of heap) to offer 404 expiries the facets answer
+       carries in 77,947 B.
+     - a segment the view does not read is never fetched and never named
+       unread; the root's count of it stays on its chip (`listed`).
+
+   The whole census is never read in place of a scope: a selection the
+   scope does not answer is read as its own scope (`scopeNeed`), and a
+   scope that fails is said, with its reason.
    ====================================================================== */
 
 /**
- * @typedef {{underlying: string, expiry?: string | null}} ScopeWanted
+ * @typedef {{underlying: string, expiry?: string | null, segments?: string[] | null}} ScopeWanted
+ *   `segments` names the segments the view reads in the page's own words (the
+ *   segment control's keys: `spot`, `options`, `futures`, a `-cut` or `-live`
+ *   key reading what its family reads); none named is every segment the root
+ *   lists.
  * @typedef {{segment: string, expiry: string | null, months: number, rows: number, generation: number}} ScopeRead
- * @typedef {{segment: string, why: string}} ScopeUnread
- * @typedef {{underlying: string, expiry: string | null, read: ScopeRead[], unread: ScopeUnread[], months: number}} CensusScope
+ * @typedef {{segment: string, expiry: string | null, why: string}} ScopeUnread
+ * @typedef {{segment: string, generation: number, expiries: number, contracts: number}} ScopeOffered
+ * @typedef {{segment: string, expiry: string, weekday: string, contracts: number, strikes: number, future: boolean,
+ *   rows: Record<string, number>, first_ts: number | null, last_ts: number | null}} ScopeExpiry
+ * @typedef {{segment: string, underlyings: number, rows: Record<string, number>, read: boolean}} ScopeListed
+ * @typedef {{underlying: string, expiry: string | null, views: string[], segments: string[], read: ScopeRead[],
+ *   unread: ScopeUnread[], offered: ScopeOffered[], expiries: ScopeExpiry[], listed: ScopeListed[],
+ *   unplaced: string[], months: number}} CensusScope
+ *   `views` the families asked (empty: every); `segments` the store segments read; `offered`
+ *   the contract segments whose facets answer was read; `listed` every segment the root lists,
+ *   with its own counts, and whether this scope read it; `unplaced` root segments no view of
+ *   this page can place.
  * @typedef {{fullest: Map<string, number>, support: Map<string, number>}} Observed
  * @typedef {{ok: true, rows: any[], observed: Observed, lag: CensusLag, readAt: number, scope: CensusScope, retried: number}
  *   | {ok: false, reason: string}} ScopeAnswer
  */
+
+/** A segment key's family: `options-cut` and `options-live` read what `options` reads. @param {unknown} key */
+export const viewFamily = (key) => String(key ?? '').replace(/-(cut|live)$/, '');
+
+/** Every family the segment control offers, in its order: `spot`, `futures`, `options`. */
+const FAMILIES = [...new Set(SEGMENT_KEYS.map(viewFamily))];
+
+/**
+ * The view keys this page cannot place: refused before any request leaves
+ * (an address's `seg=index` is not a segment this page has, and reading
+ * every segment for it would be the whole-list read R3-12 removes).
+ * @param {string[] | null | undefined} views
+ */
+export const unknownViews = (views) => (views ?? []).filter((key) => !FAMILIES.includes(viewFamily(key)));
+
+/**
+ * THE STORE SEGMENTS A VIEW READS, from the root's own list (R3-12; FM-621).
+ *
+ * `rows`: the segments whose census rows for an underlying are read whole (a
+ * series with no expiry). `contract`: the segments that hold contracts, whose
+ * expiries come from the facets answer and whose rows are read at a chosen
+ * expiry only. `unplaced`: segments the root lists that no family places,
+ * named rather than read. Each in the root's order.
+ *
+ * Which store segment a family shows is `selectionSegments`'s rule
+ * (notes-labels.js), the one place it is written: no list of store segments
+ * is kept here, so a segment the server adds is placed there or named here.
+ * Call `unknownViews` first: an unknown key places nothing.
+ *
+ * @param {Array<{segment: string, underlyings?: number}>} listed the root's `segments`
+ * @param {string[] | null | undefined} views
+ * @returns {{rows: string[], contract: string[], unplaced: string[]}}
+ */
+export function viewSegments(listed, views) {
+  const kinds = listed.map((row) => [row.segment, row.underlyings ?? 0]);
+  const asked = [...new Set((views ?? []).map(viewFamily))].filter((key) => FAMILIES.includes(key));
+  const contract = new Set();
+  const rows = new Set();
+  for (const family of asked.length ? asked : FAMILIES) {
+    const into = contractRungsOf(family).expiry ? contract : rows;
+    for (const segment of selectionSegments(kinds, family)) into.add(segment);
+  }
+  // A SEGMENT NEVER ASKED BOTH WAYS: its contracts' rows are never read unnarrowed.
+  for (const segment of contract) rows.delete(segment);
+  const placed = new Set(selectionSegments(kinds, ''));
+  const order = listed.map((row) => row.segment);
+  return { rows: order.filter((s) => rows.has(s)), contract: order.filter((s) => contract.has(s)),
+    unplaced: order.filter((s) => !placed.has(s)) };
+}
 
 /** The URL of one instrument's census rows. @param {FacetQuery} query */
 export const rowsUrl = (query) => `${facetsUrl(query)}&rows=${CENSUS_ENCODING}`;
@@ -905,18 +1003,37 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
      second 429 gives the scope up and says so. */
   let retried = 0;
   /** @param {string} url */
+  /** The wait an answer names, capped. @param {Response} answer */
+  const waitOf = (answer) => {
+    const named = Number(answer.headers.get('retry-after'));
+    return Math.min(SCOPE_RETRY_MAX_MS, Number.isFinite(named) && named > 0 ? named * 1000 : SCOPE_RETRY_MAX_MS);
+  };
+  /** @param {string} url */
   const get = async (url) => {
-    const first = await request(url, { cache: 'no-store', ms });
-    if (first.status !== 429 || signal.aborted) return first;
-    const named = Number(first.headers.get('retry-after'));
-    await pause(Math.min(SCOPE_RETRY_MAX_MS, Number.isFinite(named) && named > 0 ? named * 1000 : SCOPE_RETRY_MAX_MS));
-    retried += 1;
-    return request(url, { cache: 'no-store', ms });
+    let answer = await request(url, { cache: 'no-store', ms });
+    if (answer.status === 429 && !signal.aborted) {
+      await pause(waitOf(answer));
+      retried += 1;
+      answer = await request(url, { cache: 'no-store', ms });
+    }
+    // AN INDEX STILL BEING BUILT (503 with Retry-After) is waited out, a bounded number of times.
+    for (let tries = 0; answer.status === 503 && answer.headers.get('retry-after') !== null && tries < SCOPE_WARM_TRIES && !signal.aborted; tries++) {
+      await pause(waitOf(answer));
+      retried += 1;
+      answer = await request(url, { cache: 'no-store', ms });
+    }
+    return answer;
   };
   /** @param {string} reason @returns {ScopeAnswer} */
   const fail = (reason) => ({ ok: false, reason });
   const underlying = wanted.underlying;
   const expiry = wanted.expiry ?? null;
+  // A VIEW THIS PAGE CANNOT PLACE IS REFUSED BEFORE ANY REQUEST LEAVES (R3-12).
+  const unknown = unknownViews(wanted.segments);
+  if (unknown.length > 0) {
+    return fail(`segment ${unknown.map((key) => JSON.stringify(key)).join(', ')} is not one this page knows (it reads ${FAMILIES.join(', ')}); nothing was read for it`);
+  }
+  const views = [...new Set((wanted.segments ?? []).map(viewFamily))];
   /** A facets refusal's code and sentence (`{"error", "why"}`). @param {Response} response */
   const refusalOf = async (response) => {
     /** @type {any} */
@@ -926,18 +1043,26 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
       why: typeof refusal?.why === 'string' && refusal.why !== '' ? refusal.why
         : typeof refusal?.error === 'string' ? refusal.error : `HTTP ${response.status} and no reason named` };
   };
+  /* A BODY THAT IS NOT JSON IS NAMED, NEVER THROWN (R3-12): a torn answer
+     reached the page as an unnamed SyntaxError. */
+  const TORN = Symbol('not JSON');
+  /** @param {Response} response */
+  const jsonOf = async (response) => {
+    try { return await response.json(); } catch { return TORN; }
+  };
   const rootResponse = await get(facetsUrl({ feed, segment: /** @type {any} */ (null) }));
   if (!rootResponse.ok) {
     return fail(`/census/facets.json?feed=${feed} answered HTTP ${rootResponse.status}: ${(await refusalOf(rootResponse)).why}`);
   }
-  const root = await rootResponse.json();
-  const rootWhy = rootFault(root, feed);
+  const root = await jsonOf(rootResponse);
+  const rootWhy = root === TORN ? 'its body is not JSON' : rootFault(root, feed);
   if (rootWhy) return fail(`/census/facets.json?feed=${feed}: ${rootWhy}`);
   const lag = censusLag(rootResponse.headers);
   // A DEGRADED CENSUS IS NOT DRAWN FROM (CE-77): the whole read refuses it
   // in its own words, so the scope steps aside for it.
   if (lag.degraded || root.degraded) return fail(`the census is degraded (${lag.degraded ?? root.degraded})`);
   if (root.segments.length === 0) return fail(`${feed} holds no census row`);
+  const plan = viewSegments(root.segments, views);
 
   /** @param {string} segment @param {string | null} at */
   const rowsOf = async (segment, at) => {
@@ -945,167 +1070,390 @@ export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Da
     const query = { feed, segment, underlying, ...(at ? { expiry: at } : {}) };
     const response = await get(rowsUrl(query));
     if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
-    const body = await response.json();
-    const fault = rowsFault(body, query);
+    const body = await jsonOf(response);
+    const fault = body === TORN ? 'its body is not JSON' : rowsFault(body, query);
     return fault
       ? { ok: false, code: null, why: fault, query, body: null, headers: response.headers }
       : { ok: true, code: null, why: '', query, body, headers: response.headers };
   };
-  const answers = await Promise.all(root.segments.map(async (/** @type {any} */ row) => {
-    let answer = await rowsOf(row.segment, null);
-    // A CHAIN TOO LONG TO LIST WHOLE IS ASKED AT THE EXPIRY ON SCREEN.
-    if (!answer.ok && answer.code === 'rows_too_many' && expiry) answer = await rowsOf(row.segment, expiry);
-    return { row, answer };
-  }));
+  /** The facets answer of the underlying in a contract segment: its expiries, no rows. @param {string} segment */
+  const listingOf = async (segment) => {
+    /** @type {FacetQuery} */
+    const query = { feed, segment, underlying };
+    const response = await get(facetsUrl(query));
+    if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
+    const body = await jsonOf(response);
+    const fault = body === TORN ? 'its body is not JSON' : facetsFault(body, query);
+    return fault
+      ? { ok: false, code: null, why: fault, query, body: null, headers: response.headers }
+      : { ok: true, code: null, why: '', query, body, headers: response.headers };
+  };
+  // EVERY REQUEST OF THE SCOPE AT ONCE: the spot rows, each contract
+  // segment's listing and, with an expiry, its chain.
+  const [spotAnswers, contractAnswers] = await Promise.all([
+    Promise.all(plan.rows.map(async (segment) => ({ segment, answer: await rowsOf(segment, null) }))),
+    Promise.all(plan.contract.map(async (segment) => {
+      const [listing, chain] = await Promise.all([listingOf(segment), expiry ? rowsOf(segment, expiry) : Promise.resolve(null)]);
+      return { segment, listing, chain };
+    }))
+  ]);
+  const generationOf = new Map(root.segments.map((/** @type {any} */ row) => [row.segment, row.generation]));
+  /** ONE CENSUS, OR NONE: every answer is of the generation the root was, vendor-wide and for its own part. */
+  const movedWhy = (/** @type {string} */ segment, /** @type {Headers} */ headers, /** @type {number} */ generation) => {
+    if (generation !== generationOf.get(segment)) {
+      return `the census moved between the answers (${segment}: generation ${group(generationOf.get(segment))}, then ${group(generation)})`;
+    }
+    const at = censusLag(headers).generation;
+    return at !== lag.generation
+      ? `the census moved between the answers (the feed's generation ${lag.generation === null ? 'unnamed' : group(lag.generation)}, then ${at === null ? 'unnamed' : group(at)}, while ${segment} was read)`
+      : null;
+  };
 
   /** @type {ScopeRead[]} */
   const read = [];
   /** @type {ScopeUnread[]} */
   const unread = [];
+  /** @type {ScopeOffered[]} */
+  const offered = [];
+  /** @type {ScopeExpiry[]} */
+  const expiries = [];
   /** @type {any[]} */
   const rows = [];
   const fullest = new Map();
   const support = new Map();
-  for (const { row, answer } of answers) {
-    if (!answer.ok && answer.code === 'rows_too_many') {
-      // THE CHAIN AT THE EXPIRY ON SCREEN COULD NOT BE LISTED: the scope
-      // would be drawn without the selection it was read for, and a grid
-      // drawn from it would say the store holds no such instrument-month
-      // (the second check's blocking 2). No scope then: the whole census is
-      // read in the same flight and the page stays on its reading state.
-      if (expiry && answer.query.expiry) return fail(`${underlying} in ${row.segment} at ${expiry}: ${answer.why}`);
-      unread.push({ segment: row.segment, why: answer.why });
-      continue;
-    }
-    if (!answer.ok) return fail(`${underlying} in ${row.segment}: ${answer.why}`);
+  /** Decode, check and keep one rows answer. @returns {Promise<string | null>} why it is refused */
+  const take = async (/** @type {string} */ segment, /** @type {any} */ answer) => {
     const body = answer.body;
-    // ONE CENSUS, OR NONE: every answer must be of the generation the root
-    // was, vendor-wide and for its own part.
-    const at = censusLag(answer.headers).generation;
-    if (at !== lag.generation || body.generation !== row.generation) {
-      return fail(`the census moved between the answers (${row.segment}: generation ${group(row.generation)}, then ${group(body.generation)})`);
-    }
+    const moved = movedWhy(segment, answer.headers, body.generation);
+    if (moved) return moved;
     const decoded = await decodeCensus(body.census, feed, signal);
     let bars = 0;
-    const head = `${body.exchange}-${row.segment}-${underlying}`;
     for (const item of decoded) {
-      if (item.instrument !== head && !String(item.instrument).startsWith(`${head}-`)) {
-        return fail(`${row.segment} answered a row of ${item.instrument}, which is not ${underlying}`);
+      // ITS OWN ROWS, BY THE KEY'S GRAMMAR (R3-12): a bare prefix took
+      // `NSE-CASH-BAJAJ-AUTO` for a row of BAJAJ. The exchange, segment and
+      // underlying are read off the key, and a chain's rows carry its expiry.
+      const key = parseKey(String(item.instrument));
+      if (key.exchange !== body.exchange || key.segment !== segment || key.underlying !== underlying ||
+          (body.expiry && key.expiry !== body.expiry)) {
+        return `${segment} answered a row of ${item.instrument}, which is not ${underlying}${body.expiry ? ` at ${body.expiry}` : ''}`;
       }
       bars += item.rows;
     }
     if (decoded.length !== body.held.months || bars !== body.held.rows) {
-      return fail(`${row.segment} counts ${group(body.held.months)} row(s) of ${group(body.held.rows)} bars and carries ${group(decoded.length)} of ${group(bars)}`);
+      return `${segment} counts ${group(body.held.months)} row(s) of ${group(body.held.rows)} bars and carries ${group(decoded.length)} of ${group(bars)}`;
     }
     for (const [month, rung, most, keys] of body.denominators) {
       const key = denomKey(month, rung);
       if (fullest.has(key) && (fullest.get(key) !== most || support.get(key) !== keys)) {
-        return fail(`two answers disagree on the fullest row of ${month} at ${rung}`);
+        return `two answers disagree on the fullest row of ${month} at ${rung}`;
       }
       fullest.set(key, most);
       support.set(key, keys);
     }
     for (const item of decoded) {
       const most = fullest.get(denomKey(item.month, item.timeframe));
-      if (most === undefined || most < item.rows) return fail(`${row.segment} names no fullest row for ${item.month} at ${item.timeframe} that holds its own`);
+      if (most === undefined || most < item.rows) return `${segment} names no fullest row for ${item.month} at ${item.timeframe} that holds its own`;
     }
-    read.push({ segment: row.segment, expiry: body.expiry ?? null, months: decoded.length, rows: bars, generation: body.generation });
+    read.push({ segment, expiry: body.expiry ?? null, months: decoded.length, rows: bars, generation: body.generation });
     for (const item of decoded) rows.push(item);
+    return null;
+  };
+  /** A rows answer refused at its cap is NAMED, with the server's sentence; any other refusal fails the scope. */
+  const keep = async (/** @type {string} */ segment, /** @type {any} */ answer) => {
+    if (!answer.ok && answer.code === 'rows_too_many') {
+      unread.push({ segment, expiry: answer.query.expiry ?? null, why: answer.why });
+      return null;
+    }
+    if (!answer.ok) return `${underlying} in ${segment}${answer.query.expiry ? ` at ${answer.query.expiry}` : ''}: ${answer.why}`;
+    return take(segment, answer);
+  };
+  for (const { segment, answer } of spotAnswers) {
+    const why = await keep(segment, answer);
+    if (why) return fail(why);
   }
-  if (rows.length === 0) {
-    return fail(unread.length > 0
-      ? `${underlying}'s rows could not be listed (${unread.map((u) => `${u.segment}: ${u.why}`).join('; ')})`
-      : `${feed} holds no census row of ${underlying}`);
+  for (const { segment, listing, chain } of contractAnswers) {
+    if (!listing.ok) return fail(`${underlying} in ${segment}: ${listing.why}`);
+    const body = listing.body;
+    const moved = movedWhy(segment, listing.headers, body.generation);
+    if (moved) return fail(moved);
+    const own = body.underlyings[0] ?? null;
+    offered.push({ segment, generation: body.generation, expiries: body.expiries.length, contracts: own?.contracts ?? 0 });
+    for (const row of body.expiries) {
+      expiries.push({ segment, expiry: row.expiry, weekday: row.weekday, contracts: row.contracts, strikes: row.strikes,
+        future: row.future === true, rows: row.rows ?? {}, first_ts: row.first_ts ?? null, last_ts: row.last_ts ?? null });
+    }
+    if (chain) {
+      const why = await keep(segment, chain);
+      if (why) return fail(why);
+    }
   }
   // THE WHOLE BODY'S ORDER: newest month first, and within a month the
   // segments in the order the root listed them (each answer is already in
   // the census's order, and the sort is stable).
   rows.sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
+  expiries.sort((a, b) => (a.expiry < b.expiry ? -1 : a.expiry > b.expiry ? 1 : 0));
+  const segments = [...plan.rows, ...plan.contract];
+  const listed = root.segments.map((/** @type {any} */ row) => ({ segment: row.segment, underlyings: row.underlyings,
+    rows: row.rows, read: segments.includes(row.segment) }));
   return { ok: true, rows, observed: { fullest, support }, lag, readAt: now(), retried,
-    scope: { underlying, expiry, read, unread, months: rows.length } };
+    scope: { underlying, expiry: plan.contract.length ? expiry : null, views, segments, read, unread, offered, expiries, listed,
+      unplaced: plan.unplaced, months: rows.length } };
 }
 
 /**
- * WHAT THE SCOPE ON SCREEN CANNOT ANSWER (WP-56b), decided in one place so a
- * test holds it: `null` when one instrument's rows answer the page as it
- * stands, else `why` the whole census is needed and whether the selection
- * on screen is `missing` from the rows read.
+ * WHAT THE SCOPE ON SCREEN DOES NOT ANSWER (WP-56b; R3-12), decided in one
+ * place so a test holds it: `null` when the scope read answers the selection
+ * on screen, else `why` not, with `missing: true`. The page then shows its
+ * reading state and reads THAT selection's scope (`scopeWanted`, `syncStore`);
+ * it never reads the whole census for it.
  *
- * `missing` IS NOT 'THE STORE HOLDS NONE'. One instrument's rows cannot say
- * that an instrument-month they do not list is absent from the store: only
- * the whole census can. So while a scope is on screen and the selection is
- * missing from it, the page shows its reading state and the whole census is
- * read; the grid's 'No instrument-month matches this query' is drawn from
- * the whole census only. (The second check found it drawn from a scope for
- * 1.3 s over an option the store holds 277,359 bars of.)
+ * WITHIN WHAT IT READ, A SCOPE IS THE STORE'S ANSWER. A rows answer lists
+ * every census row of its underlying in its segment (or its chain at an
+ * expiry), so an empty match there is the store holding none, and the grid
+ * may say so. Outside it (another underlying, a segment the scope did not
+ * read, an expiry it did not list) it says nothing, and `missing` keeps 'No
+ * instrument-month matches' off the screen until that selection's own scope
+ * has landed. (The WP-56b second check found it drawn from a scope for 1.3 s
+ * over an option the store holds 277,359 bars of.) A chain the server would
+ * not list at the expiry on screen is not missing: it is refused by name
+ * (`scope.unread`).
  *
- * @param {{scope: CensusScope | null, view: string, defaultView: string, filter: string, kind: string,
- *   reconciling: boolean, matched: number}} page `matched` is how many rows
- *   of the scope the selection on screen matches.
+ * @param {{scope: CensusScope | null, filter: string, kind: string, expiry: string | null | undefined}} page
+ *   `kind` is the segment control's key ('' for every segment).
  * @returns {{why: string, missing: boolean} | null}
  */
-export function scopeNeed({ scope, view, defaultView, filter, kind, reconciling, matched }) {
+export function scopeNeed({ scope, filter, kind, expiry }) {
   if (!scope) return null;
-  if (view !== defaultView) return { why: 'the Coverage grid lists every instrument', missing: false };
   if (filter !== '' && filter !== scope.underlying) {
     return { why: `${filter} was chosen and only ${scope.underlying} had been read`, missing: true };
   }
-  if (filter !== '' && kind !== '' && !reconciling && matched === 0) {
-    return { why: `the rows read for ${scope.underlying} hold nothing for the selection on screen`, missing: true };
+  const family = viewFamily(kind);
+  const views = scope.views.length ? scope.views.join(', ') : 'every segment';
+  if (scope.views.length > 0 && (family === '' || !scope.views.includes(family))) {
+    return { why: `${family === '' ? 'every segment' : family} was chosen and only ${views} had been read for ${scope.underlying}`, missing: true };
+  }
+  const chained = family === '' || contractRungsOf(family).expiry;
+  if (expiry && chained && scope.offered.length > 0 && scope.expiry !== expiry) {
+    return { why: `the expiry ${expiry} was chosen and ${scope.expiry ? `only ${scope.expiry}` : 'no chain'} had been read for ${scope.underlying}`, missing: true };
   }
   return null;
 }
 
 /**
- * THE INSTRUMENT A FEED CHOSEN LATER IS READ FOR (WP-56b): the instrument
- * ON SCREEN, so a feed picked after the page opened is asked for what the
- * reader is looking at and not for the page's opening instrument (the
- * second check's follow-up: 'first' was read once, so the new feed's scope
- * missed the selection and its whole census was read). `null` when the page
- * needs every row (the Coverage grid): the whole census from the start.
+ * THE SCOPE THE SELECTION ON SCREEN READS (WP-56b; R3-12): its instrument
+ * (or the page's opening one, for a page with none chosen), the segments its
+ * segment control shows, and its expiry where that segment has one. The
+ * Coverage grid reads the same scope as the bars: both list the selection's
+ * own rows (`matched`), and neither needs every instrument's.
  *
- * @param {{view: string, defaultView: string, filter: string, expiry: string | null | undefined, fallback: string}} page
- *   `fallback` is the page's opening instrument, for a page with none chosen.
- * @returns {ScopeWanted | null}
+ * A feed picked after the page opened is asked for what the reader is looking
+ * at, not for the page's opening instrument (the WP-56b second check's
+ * follow-up).
+ *
+ * @param {{filter: string, kind: string, expiry: string | null | undefined, fallback: string}} page
+ * @returns {ScopeWanted}
  */
-export function scopeWanted({ view, defaultView, filter, expiry, fallback }) {
-  if (view !== defaultView) return null;
-  return { underlying: filter !== '' ? filter : fallback, expiry: expiry || null };
+export function scopeWanted({ filter, kind, expiry, fallback }) {
+  const family = viewFamily(kind);
+  const chained = family === '' || contractRungsOf(family).expiry;
+  return { underlying: filter !== '' ? filter : fallback, expiry: chained && expiry ? expiry : null, segments: family ? [family] : [] };
 }
 
 /**
- * WHAT ONE READ OF THE SHARED STORE DOES (WP-56b), decided in one place so
- * it can be held to its rules by a test:
+ * WHETHER A SCOPE ALREADY ASKED (`held`) ANSWERS ANOTHER (`want`) (R3-12), so
+ * a narrower selection costs no request: every segment covers spot, and a
+ * chain read at an expiry covers the same segment's listing with none.
+ * @param {ScopeWanted | null | undefined} held @param {ScopeWanted} want
+ */
+export function scopeCovers(held, want) {
+  if (!held || held.underlying !== want.underlying) return false;
+  const had = (held.segments ?? []).map(viewFamily);
+  const asks = (want.segments ?? []).map(viewFamily);
+  if (had.length > 0 && (asks.length === 0 || asks.some((family) => !had.includes(family)))) return false;
+  return !want.expiry || held.expiry === want.expiry;
+}
+
+/**
+ * WHAT ONE READ OF THE SHARED STORE DOES (WP-56b; R3-12), decided in one
+ * place so it can be held to its rules by a test:
  *
- *   - `scoped`: read one instrument's rows. Only when the caller named an
- *     instrument (`first`), no subscriber has asked this feed's WHOLE census
- *     (`wholeAsked`), and the store is cold for the feed or already holds a
- *     scope (a refresh of it).
+ *   - `scoped`: read one instrument's rows, exactly when the caller named an
+ *     instrument (`first`). A page that names one (/db) is never handed the
+ *     whole census, whatever another page asked before it (R3-12: no /db
+ *     view downloads the whole census).
  *   - `clear`: drop the value before the request leaves. Always on a feed
- *     change; and when the value is one instrument's rows and the caller
- *     wants the whole census, unless the caller is the page that drew them
- *     (`keep`). No other page is ever shown one instrument's rows as the
- *     store's.
- *   - `key`: what makes two calls the same request. A scope and a whole
- *     read of one (feed, generation) are different requests.
+ *     change, and when the read changes kind (a scope for a whole census or
+ *     back): no page is ever shown one instrument's rows as the store's, nor
+ *     the whole census as one instrument's. A scope replaced by another
+ *     scope of the same feed keeps its rows on screen meanwhile, under the
+ *     reading state `scopeNeed` decides.
+ *   - `key`: what makes two calls the same request: the feed, the
+ *     generation and, for a scope, its instrument, expiry and segments.
  *
  * @param {{feed: string, generation: number, first: ScopeWanted | null, valueFeed: string | null,
- *   valueScoped: boolean, wholeAsked: boolean, keep?: boolean}} call
+ *   valueScoped: boolean}} call
  */
-export function planRead({ feed, generation, first, valueFeed, valueScoped, wholeAsked, keep = false }) {
-  const scoped = first !== null && !wholeAsked && (valueFeed !== feed || valueScoped);
+export function planRead({ feed, generation, first, valueFeed, valueScoped }) {
+  const scoped = first !== null;
   const wholeKey = `${feed}#${generation}`;
+  const views = (first?.segments ?? []).map(viewFamily).join(',');
   return { scoped, wholeKey,
-    key: scoped ? `${wholeKey}#scope:${/** @type {ScopeWanted} */ (first).underlying}:${/** @type {ScopeWanted} */ (first).expiry ?? ''}` : wholeKey,
-    clear: valueFeed !== feed || (valueScoped && !scoped && !keep) };
+    key: first !== null ? `${wholeKey}#scope:${first.underlying}:${first.expiry ?? ''}:${views}` : wholeKey,
+    clear: valueFeed !== feed || valueScoped !== scoped };
 }
 
 /**
- * The scope as one clause: `INDEX 93 row(s)`, `FNO at 2019-06-27 412 row(s)`.
+ * @typedef {{key: string, exchanges: string[], months: number, bars: number, short: number, spotMonths: number,
+ *   contractMonths: number, expiries: number, contracts: number}} ListedUnderlying
+ */
+
+/**
+ * THE INSTRUMENTS THE SEGMENTS A SCOPE READ HOLD (R3-12; RA-005, RA-027,
+ * NEW-07), from the server's own lists (`/census/facets.json?feed=&segment=`,
+ * one answer per segment, kept and moved forward by deltas), so the
+ * instrument picker of /db offers every held name without the whole census.
+ * Only the segments the scope read are asked: a spot view's list is the spot
+ * segments' underlyings, and an underlying held only as contracts is offered
+ * where contracts are shown.
+ *
+ * Cost: one pass over the underlyings of those segments, once per census
+ * generation: the size of the instrument universe, never of the store.
+ *
+ * @param {CensusScope} scope
+ * @param {Array<{ok: boolean, reason?: string | null, body: any}>} answers one per `scope.segments`, in its order
+ * @returns {{rows: ListedUnderlying[], why: string | null}} `why` names every answer that could not be read
+ */
+export function scopeUnderlyings(scope, answers) {
+  const contract = new Set(viewSegments(scope.listed, []).contract);
+  /** @type {Map<string, ListedUnderlying>} */
+  const by = new Map();
+  /** @type {string[]} */
+  const faults = [];
+  answers.forEach((answer, at) => {
+    const segment = scope.segments[at];
+    if (!answer.ok || !Array.isArray(answer.body?.underlyings)) {
+      faults.push(`${segment}: ${answer.reason ?? 'its answer lists no underlyings'}`);
+      return;
+    }
+    for (const listed of answer.body.underlyings) {
+      let row = by.get(listed.symbol);
+      if (!row) {
+        row = { key: listed.symbol, exchanges: [], months: 0, bars: 0, short: 0, spotMonths: 0, contractMonths: 0, expiries: 0, contracts: 0 };
+        by.set(listed.symbol, row);
+      }
+      if (!row.exchanges.includes(listed.exchange)) row.exchanges.push(listed.exchange);
+      const months = Number.isSafeInteger(listed.months) ? listed.months : 0;
+      row.months += months;
+      for (const n of Object.values(listed.rows ?? {})) row.bars += Number.isSafeInteger(n) ? n : 0;
+      if (contract.has(segment)) {
+        row.contractMonths += months;
+        row.expiries += Number.isSafeInteger(listed.expiries) ? listed.expiries : 0;
+        row.contracts += Number.isSafeInteger(listed.contracts) ? listed.contracts : 0;
+      } else {
+        row.spotMonths += months;
+      }
+    }
+  });
+  return { rows: [...by.values()].sort((a, b) => textOrder(a.key, b.key)),
+    why: faults.length ? `the server's instrument list could not be read whole (${faults.join('; ')})` : null };
+}
+
+/* ======================================================================
+   THE COVERAGE ROLL-UP OF A SCOPE (R3-12; NEW-07, RA-029, DB-G59)
+   ----------------------------------------------------------------------
+   The Coverage grid's months, held and owed, per rung, as the server keeps
+   them (`/census/rollup.json`, R3-09: read off the facet index the census
+   moves forward, capped at 4,096 cells and refused by name past it). For
+   each segment the scope read, two answers: the instrument's own, and the
+   whole segment's, so "how much of the store holds this month" is the
+   server's count and never a fold of the whole census in the browser.
+   ====================================================================== */
+
+/** @param {{feed: string, segment: string, underlying?: string | null}} query */
+export const rollupUrl = ({ feed, segment, underlying = null }) =>
+  `/census/rollup.json?feed=${encodeURIComponent(feed)}&segment=${encodeURIComponent(segment)}${underlying ? `&underlying=${encodeURIComponent(underlying)}` : ''}`;
+
+/**
+ * Why a body is not the roll-up answer for `query`, or null.
+ * @param {any} body @param {{feed: string, segment: string, underlying?: string | null}} query @returns {string | null}
+ */
+export function rollupFault(body, query) {
+  if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 roll-up answer';
+  if (body.feed !== query.feed || body.segment !== query.segment) return `it answers ${body.feed}/${body.segment}, not ${query.feed}/${query.segment}`;
+  if ((body.underlying ?? null) !== (query.underlying ?? null)) return 'it answers another underlying';
+  if (!Array.isArray(body.rungs) || !Array.isArray(body.months)) return 'its rungs or months are not lists';
+  for (const rung of body.rungs) {
+    if (typeof rung?.timeframe !== 'string' || !Number.isSafeInteger(rung.months_held) || !Number.isSafeInteger(rung.instrument_months) ||
+        !Number.isSafeInteger(rung.rows)) return 'a rung does not count its months, instrument-months and rows';
+  }
+  return null;
+}
+
+/**
+ * @typedef {{segment: string, underlying: string | null, ok: boolean, why: string | null, rungs: any[], months: number,
+ *   basis: {days_owed: string, days_held: string} | null}} ScopeRollup
+ */
+
+/**
+ * The roll-ups of a scope: per segment read, the instrument's and the whole
+ * segment's, all asked at once. A refusal (`rollup_too_many` past its cap,
+ * a census that cannot be read) is kept beside the others with the server's
+ * sentence, never dropped.
+ * @param {typeof ask} request @param {string} feed @param {CensusScope} scope
+ * @param {{ms?: number}} [options]
+ * @returns {Promise<ScopeRollup[]>}
+ */
+export async function readRollups(request, feed, scope, { ms = SCOPE_MS } = {}) {
+  const queries = scope.segments.flatMap((segment) => [{ feed, segment, underlying: scope.underlying }, { feed, segment, underlying: null }]);
+  return Promise.all(queries.map(async (query) => {
+    const base = { segment: query.segment, underlying: query.underlying, rungs: [], months: 0, basis: null };
+    try {
+      const response = await request(rollupUrl(query), { cache: 'no-store', ms });
+      if (!response.ok) {
+        /** @type {any} */
+        let refusal = null;
+        try { refusal = await response.json(); } catch { refusal = null; }
+        const code = typeof refusal?.error === 'string' ? refusal.error : null;
+        /* THE INSTRUMENT IS NOT HELD IN THAT SEGMENT (404 `not_held`): the
+           server's count of it there is none, an answer and not a failure
+           (R3-12 merge-back: NIFTY's Coverage drew "NIFTY in CASH: not
+           counted" in red on the real store). Said as nothing held. */
+        if (response.status === 404 && code === 'not_held' && query.underlying !== null) return { ...base, ok: true, why: null };
+        const why = typeof refusal?.why === 'string' && refusal.why !== '' ? `${code ?? 'refused'}: ${refusal.why}` : code ?? `no reason named`;
+        return { ...base, ok: false, why: `/census/rollup.json answered HTTP ${response.status}: ${why}` };
+      }
+      const body = await response.json();
+      const fault = rollupFault(body, query);
+      if (fault) return { ...base, ok: false, why: `/census/rollup.json: ${fault}` };
+      return { ...base, ok: true, why: null, rungs: body.rungs, months: body.months.length, basis: body.basis ?? null };
+    } catch (thrown) {
+      return { ...base, ok: false, why: String(/** @type {any} */ (thrown)?.message ?? thrown) };
+    }
+  }));
+}
+
+/**
+ * A scope that could not be read, as the page's error (R3-12): what was asked,
+ * the scope's own reason, and that no whole census was read in its place.
+ * @param {ScopeWanted} wanted @param {string} reason
+ */
+export const scopeFailure = (wanted, reason) => {
+  const views = (wanted.segments ?? []).map(viewFamily);
+  return `the census rows of ${wanted.underlying} (${views.length ? views.join(', ') : 'every segment'}` +
+    `${wanted.expiry ? ` at ${wanted.expiry}` : ''}) could not be read from /census/facets.json: ${reason}. ` +
+    'This page never reads the whole census in their place; Refresh asks again';
+};
+
+/**
+ * The scope as one clause: `INDEX 93 row(s)`, `FNO at 2019-06-27 412 row(s)`,
+ * `FNO 404 expiry(ies) offered`; `no row held` when it read none.
  * @param {CensusScope} scope
  */
-export const scopeText = (scope) => scope.read.filter((part) => part.months > 0)
-  .map((part) => `${part.segment}${part.expiry ? ` at ${part.expiry}` : ''} ${group(part.months)} row(s)`).join(', ');
+export const scopeText = (scope) => [
+  ...scope.read.filter((part) => part.months > 0)
+    .map((part) => `${part.segment}${part.expiry ? ` at ${part.expiry}` : ''} ${group(part.months)} row(s)`),
+  ...scope.offered.map((part) => `${part.segment} ${group(part.expiries)} expiry(ies) offered`)
+].join(', ') || 'no row held';
 
 /* ======================================================================
    THE REFRESH LOG (WP-56b; the WP-56 second agent's follow-up 11)
@@ -1260,15 +1608,15 @@ const partsText = (parts) => Object.entries(parts).map(([segment, n]) => `${segm
  * `scope` (optional) is set while the page holds ONE INSTRUMENT'S rows and
  * not the whole census (`readScope`): the line then says exactly that, what
  * was and was not read, and that the lists below cover that instrument
- * alone. `scopeWhy` is why a first paint could not be drawn that way.
- * `reading` is true while the whole census is being read behind a scope.
+ * alone. `reading` is true while the scope of a new selection is read
+ * behind it.
  *
  * @param {{feed: string, at: number | null, lag: CensusLag | null, worker: string | null,
  *   head: HeadCheck | null, how?: CensusHow | null, scope?: CensusScope | null,
- *   scopeWhy?: string | null, reading?: boolean}} census
+ *   reading?: boolean}} census
  * @returns {BannerLine[]}
  */
-export function censusLines({ feed, at, lag, worker, head, how: read = null, scope = null, scopeWhy = null, reading = false }) {
+export function censusLines({ feed, at, lag, worker, head, how: read = null, scope = null, reading = false }) {
   /** @type {BannerLine[]} */
   const out = [];
   const moved = censusMoved({ feed, lag }, head);
@@ -1286,17 +1634,15 @@ export function censusLines({ feed, at, lag, worker, head, how: read = null, sco
       (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
       (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
       `: only the census rows of ${scope.underlying} (${scopeText(scope)}) from /census/facets.json, not the whole census.` +
-      ` Every list, total and offset on this page covers ${scope.underlying} alone until the whole census is read` +
-      `${reading ? ', which is being read now.' : ', which happens when a control outside the bar rows is used.'}` +
-      `${scope.unread.length > 0 ? ` Not read yet: ${scope.unread.map((part) => `${part.segment} (${part.why})`).join('; ')}.` : ''}${checked}` });
+      ` Every row, total and offset on this page covers ${scope.underlying} alone; this page never reads the whole census` +
+      `${reading ? ', and the scope of the selection now on screen is being read.' : '.'}` +
+      `${scope.unread.length > 0 ? ` Not listed by the server: ${scope.unread.map((part) => `${part.segment}${part.expiry ? ` at ${part.expiry}` : ''} (${part.why})`).join('; ')}.` : ''}` +
+      `${scope.unplaced.length > 0 ? ` Held and not read, because no segment of this page shows them: ${scope.unplaced.join(', ')}.` : ''}${checked}` });
   } else {
     out.push({ key: 'read', tone: 'info', text: verb +
       (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
       (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
       `: every list, total and offset on this page is that snapshot.${checked}` });
-  }
-  if (!scope && scopeWhy) {
-    out.push({ key: 'scope', tone: 'info', text: `This page read the whole census before its first paint, not only the instrument on screen: ${scopeWhy}.` });
   }
   if (read?.why && read.kind === 'unchanged') {
     // NO BODY WAS READ (WP-56b): the delta could not be asked or was not

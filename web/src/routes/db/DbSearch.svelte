@@ -427,7 +427,7 @@
       type="search"
       autocomplete="off"
       spellcheck="false"
-      placeholder="NIFTY28MAR1911500CE · NIFTY 11500 CE · 28 Mar 2019 · FINNIFTY · ZOMATO"
+      placeholder="e.g. NIFTY28MAR1911500CE · NIFTY 11500 CE · 28 Mar 2019 · FINNIFTY · ZOMATO"
       role="combobox"
       aria-autocomplete="list"
       aria-expanded={db.findShown}

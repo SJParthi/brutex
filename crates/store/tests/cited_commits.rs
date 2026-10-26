@@ -126,7 +126,7 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 54] = [
+const NOT_ON_MAIN: [(&str, Off); 55] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -157,6 +157,9 @@ const NOT_ON_MAIN: [(&str, Off); 54] = [
     // four AF-02 files are byte for byte the measured ones (D-5820).
     ("cde73992", Off::Neither),
     ("91ef0094", Off::Neither),
+    // R4-19's route measurements in docs/06-limits.md: the feat/db-fix
+    // head the package was measured against, which main's squash merge drops.
+    ("5901ec778", Off::Squashed),
     ("7f617f01", Off::Squashed),
     ("9fc9233b", Off::Squashed),
     ("f6716814", Off::Squashed),

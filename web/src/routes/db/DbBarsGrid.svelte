@@ -2375,9 +2375,11 @@
                   {/if}
                   <p>
                     A bar lives in an instrument-month file, so with none matched there is no
-                    file to open — this grid has made no bar request{db.withdrawn ? ' (the lineage line above is one /dayflags.json read)' : ''}. {db.feedName} holds {fmt(
-                      db.deco.length
-                    )} instrument-month(s) in total.
+                    file to open — this grid has made no bar request{db.withdrawn ? ' (the lineage line above is one /dayflags.json read)' : ''}. {db.censusScope
+                      ? db.deco.length === 0 && db.scopeEmptyWhy
+                        ? `${db.scopeEmptyWhy[0].toUpperCase()}${db.scopeEmptyWhy.slice(1)}.`
+                        : `The census rows read for ${db.censusScope.underlying} hold ${fmt(db.deco.length)} instrument-month(s); this page never reads the whole census (R3-12).`
+                      : `${db.feedName} holds ${fmt(db.deco.length)} instrument-month(s) in total.`}
                   </p>
                   <button class="btn" onclick={db.reset}>Clear the filters</button>
                 </div>

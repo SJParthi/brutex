@@ -223,7 +223,10 @@ fn render(
     // SHORT SESSIONS (R3-18): held, but fewer of their owed minutes than the
     // calendar owes; a front or interior one only a repair fills.
     let (mut short, mut short_minutes, mut repair_short) = (0usize, 0u64, 0usize);
+    // SESSIONS NOT OWED (R4-19), counted apart from the sessions owed.
+    let mut not_owed = 0usize;
     for month in months {
+        not_owed += month.not_owed.len();
         sessions += month.sessions;
         held += month.held;
         missing += month.missing.len();
@@ -281,6 +284,7 @@ fn render(
             "short_sessions": short,
             "short_minutes": short_minutes,
             "repair_short_sessions": repair_short,
+            "not_owed_sessions": not_owed,
         },
         "repair": repair_json(&ranges, (vendor, segment, timeframe), instrument),
         "journal": journal_lines(root, vendor, key),
@@ -312,6 +316,16 @@ fn month_json(month: &repair_plan::Month) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "length_unjudged": month.length_unjudged.iter().map(|day| day_text(*day)).collect::<Vec<_>>(),
         "unattested": month.unattested.iter().map(|day| day_text(*day)).collect::<Vec<_>>(),
+        // SESSIONS THE SERIES DID NOT OWE (R4-19), one row a run of one
+        // reason, each with its evidence: never missing, never a repair's.
+        "not_owed": month.not_owed_runs().iter().map(|run| serde_json::json!({
+            "from": day_text(run.from),
+            "to": day_text(run.to),
+            "sessions": run.sessions,
+            "bars": run.bars,
+            "code": run.why.code(),
+            "evidence": run.why.evidence(),
+        })).collect::<Vec<_>>(),
         "repair_needed": month.needs_repair(),
         "refused": month.refused,
     })

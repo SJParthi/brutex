@@ -251,7 +251,8 @@ test('the grid’s columns, groups and sentences are pinned, so a change to any 
   assert.deepEqual({ ...bp.WIRE_SORT }, { ts: 'ts', tod: 'tod', o: 'o', h: 'h', l: 'l', c: 'c', vol: 'v', oi: 'oi' });
   assert.equal(bp.wireSort('constructor'), null, 'no inherited name is a column');
   assert.deepEqual(bp.SKELETON, Array.from({ length: 24 }, (_, i) => i));
-  assert.equal(bp.spanFloor, '2015-01-01');
+  // R3-12 (RA-258): the unread floor year and its `spanFloor` left bars-plan.js; the day fields' bounds are the feed's era.
+  assert.equal('spanFloor' in bp || 'FLOOR_YEAR' in bp, false);
   assert.equal(bp.paisaText(0), '0.00');
 });
 

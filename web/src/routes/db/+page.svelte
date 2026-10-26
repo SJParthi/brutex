@@ -221,7 +221,14 @@
          store holds none of it, so the page reads on here until it lands;
          the grid's 'No instrument-month matches' is never drawn from a scope. -->
     {@render censusLoading(db)}
-  {:else if db.rows.length === 0}
+  {:else if db.rows.length === 0 && !db.censusScope}
+    <!-- R3-12 merge-back (26 Oct 2026; one line in a file R3-12 does not own, named in its report): a
+         SCOPE that read no row is the store's answer for that selection, not
+         an empty feed. NIFTY options with no expiry (the 12 Oct acceptance
+         case) reads the expiry listing and no contract row, and this branch
+         drew "Nothing stored for Global Datafeeds · never landed a bar" over
+         422 listed expiries on the real store; the board says what is true
+         instead ("no expiry chosen", "nothing stored for this selection"). -->
     <div class="blank fade-in">
       <h2>Nothing stored for {db.feedName}</h2>
       <p>This feed has never landed a bar in this store.</p>
