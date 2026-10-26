@@ -67,6 +67,19 @@
  * this sheet during the pass. Every other ask is a NOT MEASURED line naming
  * its restarts, the count and why.
  *
+ * # Only a route's first ask in a pass is its first (verify r11, 27 Oct)
+ *
+ * The count proof took this sheet's own earlier asks as its own, so the
+ * second and later asks of a route in one pass passed it: the
+ * `/bars/window.json` extremes request, asked right after the grid, read
+ * 4.06 / 8.34 ms as a first against its own first's 100 to 212 ms, and 13 of
+ * the 30 requests of the deploy step's `/db` capture were published the same
+ * way. Now an ask is timed as a first only when it was this sheet's first
+ * ask of its route in the pass ({@link firstAfterRestart}); a later one is a
+ * NOT MEASURED line naming the ask that went first. And a route's requests
+ * take turns going first, one restart after another ({@link passOrder}), so
+ * each still gets its own firsts.
+ *
  * # Usage (the deploy step runs this after every deploy)
  *
  *   node web/ci/speed-sheet.mjs --base http://127.0.0.1:8080 \
@@ -1242,17 +1255,47 @@ const timesText = (seen) => {
 };
 
 /**
+ * Names in a sentence: `a`, `a and b`, `a, b and c`.
+ *
+ * @param {string[]} names
+ */
+const andText = (names) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
+
+/**
+ * The asks of this sheet that went first on a request's route in the passes
+ * where it went later (`by`, one a restart in `at`), each named once, with
+ * its restarts when more than one did: the route's requests take turns
+ * ({@link passOrder}). The read that proved a restart is named as that.
+ *
+ * @param {{at: number[], by: (SheetRequest | null)[]}} l
+ */
+const earlierText = (l) => {
+  /** @type {Map<string, {e: SheetRequest, at: number[]}>} */
+  const by = new Map();
+  for (const [i, e] of l.by.entries()) {
+    if (e === null) continue;
+    const k = `${e.method} ${e.url}`;
+    const b = by.get(k) ?? { e, at: [] };
+    by.set(k, b);
+    b.at.push(l.at[i]);
+  }
+  return andText([...by.values()].map((b) => `${b.e.method} ${b.e.url}${b.e.route === SPEED_ROUTE && b.e.method === 'GET' && b.e.url === SPEED_ROUTE ? ' (the read that proved the restart)' : ''}${by.size > 1 ? ` (${restartsText(b.at)})` : ''}`));
+};
+
+/**
  * WHY AN ASK AFTER A RESTART IS NOT TIMED AS A FIRST, said after "is not
  * timed as a first after restart i (k of the n timed): " (verify r10, 26 Oct),
  * by the kind {@link firstAfterRestart} found and what the server's count
- * said at each of those restarts (`seen`).
+ * said at each of those restarts (`seen`); `earlier` names this sheet's ask
+ * that went first on the route at each (`by`, verify r11, 27 Oct).
  *
- * @type {Record<string, (l: {r: SheetRequest, seen: number[]}) => string>}
+ * @type {Record<string, (l: {r: SheetRequest, seen: number[], at: number[], by: (SheetRequest | null)[]}) => string>}
  */
 export const NOT_FIRST = Object.freeze({
   'up wait': () => `its route is the one the up wait asks (${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}) after each restart before anything is timed, so its first ask after the restart is that wait's`,
   'no answer': () => 'it had no answer (its FAILED line says why), so there is no first to time',
   'old server': () => `the up wait was answered before this server's own start (its ${SPEED_ROUTE} started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
+  earlier: (l) => `its route ${l.r.route} was asked first in ${l.at.length === 1 ? 'that pass' : 'each of those passes'} by this sheet's ${earlierText(l)}, so this ask was not its route's first since the server's start, and would time a route that ask had warmed`,
   before: (l) => `the server had already answered its route ${l.r.route} since its start when this sheet asked it (${timesText(l.seen)}: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
   during: (l) => `the server answered its route ${l.r.route} more often than this sheet asked it during the pass (by ${timesText(l.seen)}): another client asked it then, so this sheet's ask is not proved the first`,
   left: (l) => `the server counted its route ${l.r.route} more often than this sheet's answered asks of it (by ${timesText(l.seen)}), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
@@ -1267,24 +1310,32 @@ export const NOT_FIRST = Object.freeze({
  * read with the proof of the restart, before anything is timed, and `after`
  * once the pass has asked everything; `mine` is this sheet's asks of the
  * route in that pass: those answered, which the server counted before it
- * answered, and those left with no answer, which it may not have counted.
- * Proved when nobody had asked the route before the pass and the server
- * counted it exactly as often as this sheet's answered asks; the route of
- * the up wait is that wait's, and an answer that names a start after the up
- * wait's answer means the wait reached the old server (the read that proved
- * the restart, the new server's first, may then hold its start).
+ * answered, and those left with no answer, which it may not have counted;
+ * `earlier` is this sheet's ask that went first on the route in that pass
+ * when it was not this one (the read that proved the restart, for
+ * `/speed.json`). Proved when this ask was this sheet's first of the route
+ * in the pass (verify r11, 27 Oct: a later one, the `/bars/window.json`
+ * extremes after the grid, timed an answer the first had woken, 4.06 ms
+ * against its own first's 100 to 212 ms), nobody had asked the route before
+ * the pass and the server counted it exactly as often as this sheet's
+ * answered asks; the route of the up wait is that wait's, and an answer that
+ * names a start after the up wait's answer means the wait reached the old
+ * server (the read that proved the restart, the new server's first, may then
+ * hold its start).
  *
  * @param {SheetRequest} r
  * @param {Answer | NoAnswer} a this sheet's ask of `r` after the restart
  * @param {{before: Map<string, number>, after: Map<string, number>, mine: {answered: number, left: number},
- *   proofRead: boolean, startedAfterUp: boolean}} o `proofRead` when `a` is the read that proved the
- *   restart; `startedAfterUp` when that read named a start later than the up wait's answer
+ *   earlier: SheetRequest | null, proofRead: boolean, startedAfterUp: boolean}} o `proofRead` when `a` is
+ *   the read that proved the restart; `startedAfterUp` when that read named a start later than the up
+ *   wait's answer
  * @returns {{kind: keyof typeof NOT_FIRST, seen: number} | null}
  */
 export function firstAfterRestart(r, a, o) {
   if (r.route === UP_WAIT_ROUTE) return { kind: 'up wait', seen: 0 };
   if (a.status === 0) return { kind: 'no answer', seen: 0 };
   if (o.proofRead && o.startedAfterUp) return { kind: 'old server', seen: 0 };
+  if (o.earlier !== null) return { kind: 'earlier', seen: 0 };
   const before = o.before.get(r.route) ?? 0;
   if (before > 0) return { kind: 'before', seen: before };
   const n = o.after.get(r.route);
@@ -1292,6 +1343,42 @@ export function firstAfterRestart(r, a, o) {
   if (n < o.mine.answered) return { kind: 'fewer', seen: n };
   if (n > o.mine.answered) return { kind: o.mine.left > 0 ? 'left' : 'during', seen: n - o.mine.answered };
   return null;
+}
+
+/**
+ * THE ORDER A RESTART'S PASS ASKS ITS REQUESTS IN: a route's requests take
+ * turns going first (verify r11, 27 Oct). Only the first ask of a route after
+ * a restart is that route's first since the server's start, so a request
+ * asked after another of its route in one pass (the `/bars/window.json`
+ * extremes after the grid, a capture's other queries of one path) is never
+ * timed as a first ({@link firstAfterRestart}); in a fixed order it would
+ * never be timed at all. So at restart `at` a route's ((at - 1) mod g)-th of
+ * its g requests is asked first and the others after it in turn, each
+ * request of the route in a place one of them holds in `requests`: the routes
+ * asked before a route's first ask are the same at every restart, and over g
+ * restarts each request goes first once. `/speed.json` is not turned: its
+ * first after a restart is the read that proved it, before the pass. Linear
+ * in the requests, once a restart.
+ *
+ * @param {SheetRequest[]} requests
+ * @param {number} at the restart, from 1
+ * @returns {SheetRequest[]}
+ */
+export function passOrder(requests, at) {
+  /** @type {Map<string, number[]>} each route's places in `requests` */
+  const places = new Map();
+  for (const [i, r] of requests.entries()) {
+    const p = places.get(r.route);
+    if (p === undefined) places.set(r.route, [i]);
+    else p.push(i);
+  }
+  const order = [...requests];
+  for (const [route, p] of places) {
+    if (route === SPEED_ROUTE || p.length < 2) continue;
+    const turn = (at - 1) % p.length;
+    for (const [j, place] of p.entries()) order[place] = requests[p[(j + turn) % p.length]];
+  }
+  return order;
 }
 
 /**
@@ -1543,10 +1630,11 @@ export async function runSheet(args, deps = {}) {
     const firsts = new Map();
     /**
      * The asks after a restart not timed as firsts, by request and kind
-     * ({@link NOT_FIRST}): the restarts, and what the server's count said at
-     * each. Said once a request and kind, after the pass.
+     * ({@link NOT_FIRST}): the restarts, what the server's count said at
+     * each, and this sheet's ask that went first on the route there, if one
+     * did. Said once a request and kind, after the pass.
      *
-     * @type {Map<string, {r: SheetRequest, kind: keyof typeof NOT_FIRST, at: number[], seen: number[]}>}
+     * @type {Map<string, {r: SheetRequest, kind: keyof typeof NOT_FIRST, at: number[], seen: number[], by: (SheetRequest | null)[]}>}
      */
     const lost = new Map();
     let ran = 0;
@@ -1658,21 +1746,28 @@ export async function runSheet(args, deps = {}) {
       }
       // THE PASS: each request asked once, `/speed.json` by the read that
       // proved the restart (asked again, its row would time a second ask as a
-      // first). Its failures are said as they come; whether each ask is timed
-      // as a first is decided once the server's count after the pass is read.
+      // first), a route's requests in turn ({@link passOrder}). Its failures
+      // are said as they come; whether each ask is timed as a first is
+      // decided once the server's count after the pass is read.
       /** @type {Map<string, {answered: number, left: number}>} this sheet's asks of each route in this pass */
       const own = new Map();
-      /** @type {{r: SheetRequest, a: Answer | NoAnswer}[]} */
+      /** @type {Map<string, SheetRequest>} this sheet's first ask of each route after this restart: `/speed.json`'s is the read that proved it */
+      const firstOf = new Map(requests.filter((r) => keyOf(r) === speedKey).map((r) => [r.route, r]));
+      /** @type {{r: SheetRequest, a: Answer | NoAnswer, earlier: SheetRequest | null}[]} */
       const pass = [];
       let switched = false;
-      for (const r of requests) {
+      for (const r of passOrder(requests, at)) {
         if (stalled.has(keyOf(r))) continue;
+        // ONLY A ROUTE'S FIRST ASK IN THE PASS CAN BE ITS FIRST (verify r11,
+        // 27 Oct): a later one would time what the first had warmed.
+        const went = firstOf.get(r.route);
+        if (went === undefined) firstOf.set(r.route, r);
         const a = keyOf(r) === speedKey ? is.answer : await send(r.url, { method: r.method, keep: 'head' });
         const mine = own.get(r.route) ?? { answered: 0, left: 0 };
         own.set(r.route, mine);
         if (a.status === 0) mine.left += 1;
         else mine.answered += 1;
-        pass.push({ r, a });
+        pass.push({ r, a, earlier: went === undefined || went === r ? null : went });
         if (classOf(a) !== 'answered') failures.push(`restart ${at}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
         // EACH ANSWER NAMES ITS BUILD: one whose headers came from another
         // build than the run's fails by name, the restart with it.
@@ -1701,17 +1796,18 @@ export async function runSheet(args, deps = {}) {
       ran += 1;
       proved.push(`${was.started} to ${is.started}`);
       waited.push(upMs);
-      for (const { r, a } of pass) {
+      for (const { r, a, earlier } of pass) {
         const key = keyOf(r);
         const f = firsts.get(key) ?? { asked: 0, times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
         firsts.set(key, f);
         f.asked += 1;
-        const not = firstAfterRestart(r, a, { before: before.counts, after: after.counts, mine: own.get(r.route) ?? { answered: 0, left: 0 }, proofRead: key === speedKey, startedAfterUp: is.started > upAt });
+        const not = firstAfterRestart(r, a, { before: before.counts, after: after.counts, mine: own.get(r.route) ?? { answered: 0, left: 0 }, earlier, proofRead: key === speedKey, startedAfterUp: is.started > upAt });
         if (not !== null) {
-          const l = lost.get(`${key}\n${not.kind}`) ?? { r, kind: not.kind, at: [], seen: [] };
+          const l = lost.get(`${key}\n${not.kind}`) ?? { r, kind: not.kind, at: [], seen: [], by: [] };
           lost.set(`${key}\n${not.kind}`, l);
           l.at.push(at);
           l.seen.push(not.seen);
+          l.by.push(earlier);
           continue;
         }
         f.times.push(a.ms);
@@ -1734,7 +1830,7 @@ export async function runSheet(args, deps = {}) {
       notes.push(`first after restart: ${proved.length} restart${proved.length === 1 ? '' : 's'} timed, each proved by the server's own start (${SPEED_ROUTE} started_ms) changing across the --restart command: ${proved.join(', ')}`);
       const lo = Math.min(...waited);
       const hi = Math.max(...waited);
-      notes.push(`first after restart: after each --restart command the up wait asked ${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}, which no request times, until the server answered it (${lo === hi ? lo : `${lo} to ${hi}`} ms after the command), so no first waits for the server's start; and an ask is timed as its route's first only when the server's own count (${SPEED_ROUTE} since_start.n), read with the proof and again after the pass, holds no ask of that route but this sheet's`);
+      notes.push(`first after restart: after each --restart command the up wait asked ${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}, which no request times, until the server answered it (${lo === hi ? lo : `${lo} to ${hi}`} ms after the command), so no first waits for the server's start; and an ask is timed as its route's first only when it is this sheet's first ask of that route in the pass (a route's requests take turns going first, one restart after another) and the server's own count (${SPEED_ROUTE} since_start.n), read with the proof and again after the pass, holds no ask of that route but this sheet's`);
     }
     for (const r of requests) {
       const key = keyOf(r);
