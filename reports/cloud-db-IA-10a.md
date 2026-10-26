@@ -289,7 +289,7 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
 - NEXT: the api/pull mutants (running), then the cli file's, then bench C-LG-02 in release,
   then the final gates, NEEDS THE MAC, STATUS.
 
-### 2026-10-26 20:35 IST
+### 2026-10-26 20:07 IST
 
 - api/pull mutants, first pass (stopped by this container's 30-minute background limit after
   40 outcomes; resumed with `--iterate`): 37 caught, 2 unviable, 1 MISSED:
