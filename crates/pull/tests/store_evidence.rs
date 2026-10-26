@@ -123,6 +123,7 @@ fn replay(root: &Path, segment: &str, symbol: &str, month: YearMonth) -> Replay 
         exchange: "NSE",
         segment,
         contract: None,
+        run: 0,
     };
     let scratch = std::env::temp_dir().join(format!(
         "brutex-EVIDENCE-{symbol}-{month}-{}",

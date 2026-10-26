@@ -84992,6 +84992,414 @@ SC-CLOSE-8 to SC-CLOSE-12, CMP-06. **Decision.**
 L-R3-13-1 to L-R3-13-4 and "Gate 11 — R3-13" (`docs/06-limits.md`); CI gates
 10, 11, 12 and 23 through `state/fix/ci-shell-gates.sh`.
 
+### D-6260 — Every Zerodha landing takes one runs-ledger id, carried in `ingest::Plan.run` into every ledger line, the receipt, the spool and the sink's run key (IA-10c; amends D-4880's owner map per D-4919) — 2026-10-23
+
+From the block D-6260..D-6269 registered for IA-10c. D-4880 made the
+store-wide runs ledger the only giver of run ids and D-4919 split the Zerodha
+half of IA-10b into this part. Until this change a Zerodha landing had no
+durable id: its gap, derive and repair-journal lines read the telemetry sink's
+claimed run (`request_minutes.rs` `run_ordinal`, `ingest.rs` `journal_*`),
+which one api shares between overlapping requests and which restarts with the
+process, and `cli zerodha-repair` wrote `run=0` on every line (RA-190).
+
+**Decided.**
+
+1. **Who takes one.** `pull::ingest::landing_run::allocate` writes one
+   runs-ledger record per landing request: a `/pull/run` at its claim (mode
+   `pull`, `server::pull_run`, after the slot is held and off the shared
+   workers; refused, the slot is closed with the ledger's words and no vendor
+   is asked); each `/pull/spot`, `/pull/repair` and `/pull/fno` request after
+   its seat (modes `pull-spot`, `pull-repair`, `pull-fno`; in
+   `broker_run_by` and in `fno_walk` before `fno_land`); and `cli
+   zerodha-repair --from-store` before it opens the store (mode
+   `zerodha-repair`). A `/pull/run` leg takes none: the conductor hands the
+   slot's id to `pull_spot_leg` / `pull_fno_leg`, never through the form, so
+   no request can name another run's id. The autopilot's and a recovery's
+   spot runs land through `broker_run_by` too and so take a `pull-spot` id of
+   their own: the design named the routes, and "every Zerodha landing" is the
+   rule (a widening of the design's list, not of the engine surface).
+2. **Where it goes.** `ingest::Plan` gains `run`. A landing puts it in force
+   on its own thread for its length (`request_minutes::run_scope`, taken at
+   both doors and at `from_members_mode`), so every `gap`, `derive`,
+   `repairing`, `repair` and `refused` line it writes says `run=` it; `0` keeps
+   the sink's claimed run, as a GDFL folder import (which claims the sink with
+   its own ledger id) and the stored-month gap backfill do. For `cli
+   zerodha-repair` this supersedes AG02-05's `run=<attempt id>`: the
+   invocation's claim (AG-02) still names the run's events, and the `landing
+   run id taken` event, stamped with the invocation's run, carries the
+   ledger id, so either finds the other; AG-02's tests now read the claimed
+   run off a landing that holds no ledger id. The receipt's
+   offset 60 and the spool directory `verify/spool/<run>/` carry it; a run id
+   past 32 bits is refused by the hook by name, never truncated.
+3. **The sink.** `note_run_started` claims the sink's run with the landing's
+   id; a `/pull/run` holds the key under its id for its whole length
+   (`pullrun::conduct`), so its legs' events and lines agree. `Progress`
+   gains `run_id`, served as `runId` by `/pull/run.json` beside the in-process
+   `generation` (D-2760, F52).
+4. **No two share one across a restart**: the ledger is the only memory
+   (D-4880's `max(now, last + 1)` under its lock).
+
+**Proved by** `pull::ingest::landing_run::tests::every_zerodha_landing_takes_one_runs_ledger_id`,
+`a_landing_writes_its_own_run_on_every_ledger_line`,
+`every_landing_mode_is_a_word_the_runs_ledger_holds`,
+`api::server::tests::every_zerodha_landing_takes_one_runs_ledger_id`,
+`api::server::tests::a_pull_fno_window_is_kept_and_carries_its_run_id`,
+`cli::zerodha_repair::tests::every_zerodha_landing_takes_one_runs_ledger_id`
+(IA-GR-43).
+
+**Cost.** One runs-ledger allocation per landing request (C-GR-08's O(1):
+one or two 128-byte reads, one write, one sync), never per window; measured
+in `docs/06-limits.md` L-IA10C-01.
+
+### D-6261 — A `repaired` gap line of a landing from another store says `origin=store` (IA-10c) — 2026-10-23
+
+A landing whose origin starts with `ingest::STORE_ORIGIN` (`store `, the
+origin `cli zerodha-repair --from-store` names its rows by) made no vendor
+request. Each day such a landing filled gets ` origin=store` after D-3335's
+fields on its `why=repaired` line, a `name=value` field the ledger's readers
+pass over (`/dayflags.json`'s gap reader counts no fault for it). The
+verifier reads it (`zerodha_verify::GapLine::origin_store`) and answers those
+minutes `no_response_kept (landed_from_store)`, never `match` against an
+answer nobody kept (IA-ZV-11). A vendor landing never writes it.
+
+**Proved by** `pull::ingest::landing_run::tests::a_repair_from_another_store_says_origin_store`
+and `cli::zerodha_repair::tests::every_zerodha_landing_takes_one_runs_ledger_id`.
+
+### D-6262 — The keep-and-spool hook runs after BOTH landing doors, with the landing's own named refusals (IA-10c; D-4859, D-4881, IA-RK-07, §8 Z16) — 2026-10-23
+
+IA-8 built the keeper and IA-9 the spool and the verifier; nothing on the pull
+path called either, so every Zerodha minute verified cold as
+`no_response_kept`, and mode (i) of the Zerodha proof (a full re-pull with
+every answer kept) had no hook to keep with.
+
+**Decided.**
+
+1. `with_retry` asks `HttpSource::window_answered_async` (D-4920); the body
+   text, digest and status travel beside each body's rows
+   (`Chunks::answers`, `Fetched::Bodies`, `BrokerWindow::answers`), the rows
+   moved out so they are held once.
+2. `ingest::from_window_with_refusals` and `repair_window_with_refusals`
+   answer the receipt AND every row the landing refused by name, with its
+   cause (the screen's `off_grid_candle` and `conflicting_candles`, the
+   identity screen's `before_first_day_bar` and `foreign_level`, and
+   `fetch::land_rows`' own); `from_window` and `repair_window` are the same
+   doors answering the receipt alone. A record whose stamps and causes do not
+   pair is counted whole (`DoorLanding::unpaired`) with an error event.
+3. `land_bodies_observed` calls one of the two doors per body, then
+   `pullrun::keep_and_spool`, then absorbs the receipt (land, keep, spool):
+   `landing_run::RunHook::after_landing` keeps the answer
+   (`response_keep::append`) with the receipt's rows-refused field equal to
+   the landing's named refusals, the door byte (1 append, 2 repair), the run,
+   the rung and the landing rules version (`ingest::LANDING_RULES` = 1,
+   D-4843); then, for Zerodha (the one vendor with a verifier) and only when
+   the body is in its pack (`kept` 1 or 2), verifies the window's days
+   (`zerodha_verify::verify_window`) into the run's one spool writer. Every
+   refusal is an error event by name ("response not kept", "verdicts not
+   spooled"); a window reaching its door with no run, key or answer is one
+   too, never kept in silence.
+4. `/pull/fno` lands through the same door, so a contract's answer is kept in
+   its own contract's pack (`server::contract_key`, checked to render back to
+   the contract the walk files its bars under, else not kept, by name).
+5. The gap ledger the verifier reads is shared per store root per process and
+   refreshed by its new lines only; verification of one store is one at a
+   time while landings run side by side (L-IA10C-02).
+
+**Not this part** (IA-10b, after the backtest): `POST /verify/run`, the
+`/verify` pages, `cost_limits_tests.rs`' GDFL half, C-VD-03, C-VD-06. Also not
+here: the `verify-merge` child the api starts when a pull run ends (the
+spools wait for `cli verify-merge` or that trigger), and keeping the head of a
+2xx answer that was a refusal (`kept=4`, RA-299) on the pull path, whose
+error arm does not reach a door.
+
+**Proved by** `pull::ingest::landing_run::tests::both_landing_doors_keep_and_count_their_refusals`
+(IA-RK-07, this half), `a_repaired_window_is_kept_and_verified` (§8 Z16),
+`a_month_landed_through_the_pull_door_verifies_cold_as_match` (the end-to-end
+proof: one synthetic month through the pull's door with the hook, then IA-9's
+cold verification answers `match` for every day and never
+`no_response_kept`), `the_hook_says_why_it_kept_or_spooled_nothing`,
+`api::server::cost_limits_tests::w1_api5_1_a_body_reads_the_whole_census_and_the_bullet_says_so`
+(the call shape: both doors, the hook after each).
+
+**Cost.** Per window: the keep's O(body) (C-RK-02) and the window's
+verification, O(minutes × rungs) (L-IA-18); measured in L-IA10C-03.
+
+### D-6263 — The vendor's landing claim `imports/<vendor>.landing.lock`: api landings shared, `cli zerodha-repair --from-store` exclusive (IA-10c; FM-163; amends D-4822) — 2026-10-23
+
+D-4822 said no cross-process Zerodha pull lock was needed because `serve.lock`
+refuses a second api and no other process pulls. That was true of FETCHING
+and false of LANDING: `cli zerodha-repair --from-store` lands Zerodha months
+beside an api pull, and FM-163 asks that it refuse, naming the holder. Every
+api landing request takes `imports/<vendor>.landing.lock` SHARED before its id
+(`pullrun::open_landing`), so its requests run side by side; the cli repair
+takes it EXCLUSIVE before its id. Each holder writes who it is into the lock
+file (`api pid N run R (mode) since T`, `cli pid N run R (zerodha-repair
+SYMBOL)`), and the one refused (`run_busy`, after `PROBE_RETRY` tries, never
+waiting) names it; no id is spent and nothing is read or written. A store
+root that is gone takes no claim.
+
+**Proved by** `pull::ingest::landing_run::tests::zerodha_repair_refuses_while_a_pull_run_holds_the_vendor`,
+`cli::zerodha_repair::tests::zerodha_repair_refuses_while_a_pull_run_holds_the_vendor`,
+`api::server::tests::every_zerodha_landing_takes_one_runs_ledger_id`.
+
+### D-6264 — `POST /pull/repair` and `cli zerodha-repair --reason` judge the reason by `repair_reason_ok`, as given (IA-10c; D-4874, IA-GR-42) — 2026-10-23
+
+`pull_repair` kept its own copy of the rule (`MAX_REPAIR_REASON` = 200, trim,
+then `is_control`), so a reason led by a tab was taken by the Zerodha door
+and refused by the GDFL one. Both Zerodha doors now call
+`pull::ingest::repair_reason_ok` on the reason as the form or the argument
+gave it, the one rule `POST /gdfl/import` and `cli gdfl-import
+--repair-reason` apply; the route's private constant is removed.
+
+**Proved by** `api::server::repair_route::tests::one_repair_reason_rule_for_both_feeds`
+and `cli::zerodha_repair::tests::one_repair_reason_rule_for_both_feeds`
+(IA-GR-42, both Zerodha halves).
+
+### D-6265 — `cli zerodha-repair --from-store` refuses `log_unavailable` before it opens the store (IA-10c; D-4903) — 2026-10-23
+
+A run that writes the store does not run unlogged (D-4903). The verb reads
+the process's sink as `LogState::of_process`; a repair whose sink was refused
+(another cli holds `logs/cli`) answers `ZERODHA REPAIR REFUSED:
+log_unavailable` with the sink's words and writes nothing (no claim, no id,
+no file). A read-only plan is not refused for its sink.
+
+**Proved by** `cli::zerodha_repair::tests::a_repair_with_its_sink_refused_is_refused_before_the_store_opens`.
+
+### D-6266 — The gap ledger is appended through `audit_ledger::append` (IA-10c; D-4888; closes L-IA-38) — 2026-10-23
+
+`request_minutes::append_ledger`, the gap ledger's writer (its `gap` and
+`derive` lines), now calls `pull::ingest::audit_ledger::append(root, vendor,
+"gaps", lines)`: `audit/<vendor>.gaps.lock` within its bounded wait (D-4906),
+the torn-tail newline, the line rules, `sync_data`. The ledger file's own
+`flock` already kept two writers' batches apart (R3-18); the audit lock adds
+the bound. The stored-month backfill (`gap_backfill`, which picks its lines
+under the file's lock) still takes the file's lock alone and is named for its
+owner (L-IA10C-04).
+
+**Proved by** `pull::ingest::landing_run::tests::two_writers_of_an_audit_ledger_never_join_a_line`
+(IA-GR-41, the gap ledger's half: two writers, 80 landings, a torn tail
+closed and named once).
+
+### D-6267 — A window over held minutes is kept and spooled whatever the append answers, and a differing held month is refused by name, never overwritten (IA-10c; the no-fresh-root cut's correction 2, proposed as D-7135) — 2026-10-23
+
+A Zerodha re-pull into the existing store (the no-fresh-root cut, 23 Oct;
+mode (i) lands through these doors as a patch, never into a new root) offers
+mostly minutes the store already holds. Pinned, not changed: the hook runs
+after the door returns whatever `BarFile::append` answered, so a window the
+store holds byte for byte (`AlreadyPresent`: no bar byte written, the receipt
+`rows_landed` 0, `rows_refused` 0) is kept and spooled under the re-pull's
+run, and IA-9 then reads its day `match` where it read `no_response_kept`
+before. A window whose held minutes differ (a back-adjusted basis, FM-479) is
+refused by name through either door, the append door's and the repair
+door's alike (the store's `restates the record held at`, that month only),
+writes no bar byte, and is kept and spooled too, so IA-9 reads the day
+`value_mismatch` from the kept body. Such a month changes only as a new
+generation through an attended repair after the operator's yes; this part
+adds no door that overwrites one.
+
+What it does not yet do is named in L-IA10C-07: the receipt reads the same
+for the two cases, and the per-instrument count of differing months on the
+re-pull's receipts (no-fresh-root correction 3) is the follow-up's.
+
+**Proved by** `pull::ingest::landing_run::tests::a_window_over_identical_held_minutes_writes_no_bar_byte_and_is_kept_and_spooled`,
+`a_window_over_differing_held_minutes_is_refused_by_name_and_its_answer_is_kept`
+and `a_held_month_relanded_with_identical_answers_writes_no_bar_byte_and_verifies_cold_as_match`
+(docs/04 IA10C-14 to IA10C-16).
+
+### D-6268 — The landing claim's note is one whole-width record written one at a time per process, and the hook's maps are pre-sized to stated bounds (IA-10c repair round 1; amends D-6263) — 2026-10-23
+
+From the block D-6260..D-6269 registered for IA-10c. The second agent's
+check of round 1 found three things this entry settles.
+
+**The note.** D-6263 has each holder of `imports/<vendor>.landing.lock`
+write who it is into the file, and every shared holder is a request of the
+one api that serves the store. The note truncated the file and then wrote at
+offset 0, so two requests noting at once spliced their notes (18 of 30
+rounds in the second agent's probe) and a refusal could name a holder neither
+of them wrote. Now a note is one record of exactly `locks::PROBE_READ` bytes
+(the most a probe reads and the most a claim holds): the holder's words, cut
+at a character boundary to that width, padded with spaces; it is written by
+one positional write of the whole width, with no truncation first, under one
+process-wide lock (`landing_run::NOTING`). Two holders of one process
+therefore never splice, and a taker in another process never reads an
+emptied file between a truncate and a write. The reader (`locks::head_of`)
+already drops trailing spaces, so a refusal names the holder exactly as it
+wrote itself, and an empty note still reads as no holder. The exclusive
+holder (`cli zerodha-repair --from-store`) shares the file with no one.
+
+**The maps (gate 11 rule 3, docs/07 law 2: pre-size every map).** The
+process's shared gap-ledger map is pre-sized to `STORE_ROOTS` = 1: its one
+caller is the api, and an api serves one store root (`serve.lock`). A run's
+first-day map is pre-sized to the series its caller plans to land, which
+`pullrun::open_landing` now takes: a `/pull/spot` or `/pull/repair` request
+and a `/pull/run` leg pass their instruments, a `/pull/fno` walk the
+contract-months its discovery wanted (at least its contracts). Each is a list
+the caller already holds, so the map is never larger than what is in memory;
+a run that lands more series than it planned grows it, one amortised insert
+per series, never per window. Neither map is on gate 11's allowlist.
+
+**Declared, not changed.** The five println! of the `#[ignore]`d
+`ia10c_timings` are gate 23's declared print surface, and the seventeen
+segment-shaped literals this part's code and tests introduced (its reason
+words, a telemetry field, two run ids read back as spool directories, a
+refused ledger kind and eight scratch tags) are declared in
+`.github/gates_tree.rs` as `IA10C_LITERAL`. None is a path segment of any
+store, account or credential.
+
+**Proved by** `pull::ingest::landing_run::tests::shared_holders_noting_at_once_never_splice_their_notes`,
+`a_note_is_one_whole_width_record_cut_at_a_character` and
+`a_run_hook_is_presized_to_the_series_it_plans` (docs/04 IA10C-17 to
+IA10C-19), and by CI gates 11, 23 and 1d naming no file of this part.
+
+### D-6269 — Every id the runs ledger gives is written down twice, its record and a CRC-checked claims line in `audit/runs.claims`, and a rotted or wholly lost last record or an unborn ledger is raised past the claims, whose tail every allocation reads (IA-10c repair rounds 2 and 3; amends D-4880, D-5901 and L-IA-23's seed; D-4919) — 2026-10-24 (amended at repair round 3, 2026-10-25: the claims' tail read on every allocation, the line's own CRC, the readers' regular-file rule, and the refusal of a landing id past a receipt's 32 bits)
+
+From the block D-6260..D-6269 registered for IA-10c; the last of it. The
+second agent's check of repair round 1 found that a Zerodha landing's
+runs-ledger id could be given out a second time (verify-IA-10c-r2, blocking
+2).
+
+**What was wrong.** IA-2 repair 2 (D-5901) made a damaged last record of
+`audit/runs.ledger` not be assumed unused: the record may be one a run was
+given and then lost to bit rot, so the allocator raises the new id past the
+largest `run` id the GDFL journal holds, which every GDFL run writes a line
+under. An unborn ledger is seeded the same way (L-IA-23). D-6260 put a second
+feed's runs on the ledger, and a Zerodha landing writes no journal line: its
+id goes into its receipt (offset 60), its spool directory and its gap,
+derive and repair lines. So with a rotted last record and a clock at or
+behind the lost id (the second agent's probe: the same second, and 600 s
+behind), the next landing was given that id again and appended its spool
+records into the first landing's spool files; an unborn ledger gave the
+clock's own second again. That contradicted D-6260's "no two landings share
+one, across a restart too" and `landing_run::allocate`'s "never given twice".
+
+**The decision.** The ledger itself writes every id down twice, so its
+promise ("never given twice, whether or not the run ever writes a journal
+line") holds for every feed and mode without the ledger knowing who writes
+what where: `LedgerHold::allocate`, the one place every id is born, writes
+the id's record and syncs it, then appends one claims line
+`run <id> <mode> <kind> <by> <pid> <started>[ resumes=<id>]` (the record's
+own body, `run ` first) to `audit/runs.claims` and syncs it, under the
+ledger's lock, and only then hands the id out. The damaged-tail raise and the
+seed read the largest id of both the claims and the GDFL journal (the
+journal still answers for ids given before the claims existed). A claims
+line that cannot be written refuses the allocation `runs_ledger_io` naming
+the file; the id's record stays in the ledger, unused, and later ids go past
+it, as GDFL's claim already left "an id allocated before a claim write that
+failed ... unused in the ledger". The claims are appended through the text
+ledgers' one append (`audit_ledger::append_path`, the path form of
+`request_minutes::append_named_picking`): a regular file only, never through
+a link, a torn last line closed first, synced. No new lock: every writer
+holds `audit/runs.ledger.lock`.
+
+**Rejected.** Raising past the `run=` fields of `audit/zerodha.gaps` and
+`audit/zerodha.repairs`, as the second agent offered: the operator's store's
+gap ledger holds lines written before D-6260, whose `run=` is the telemetry
+sink's run key (`run=1791911856590`, unix milliseconds, `awk` over the real
+file read only on 24 Oct 2026), so the first damaged tail or unborn seed
+would lift every later id past a receipt's 32 bits and every Zerodha landing
+after it would refuse `run_too_wide`; and a receipt-only landing (`pack_full`,
+a spool that failed) writes no such line. Raising past `verify/spool/<run>`
+names: a merged spool is removed. Refusing every allocation after one bad
+last record (`runs_ledger_damaged`): the common cause is an append whose sync
+never finished, which IA-2's SF-12 recovers from on purpose.
+
+**Cost.** One more append and one more sync per id, under the ledger's lock:
+one id per landing request, never per window (L-IA10C-01, L-IA10C-09,
+measured in `docs/06-limits.md`). The claims are read only when the ledger
+cannot say its last id, one pass, O(claims), as L-IA-23's journal pass.
+
+**Proved by** `pull::gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice`,
+`pull::ingest::landing_run::tests::a_damaged_last_record_that_a_zerodha_landing_used_is_never_handed_out_again`
+and `an_unborn_ledger_is_seeded_past_every_id_a_zerodha_landing_used`
+(docs/04 IA10C-20 to IA10C-22), each failing before this entry; bytes in
+`docs/02-store-format.md` §37.5. The same round repaired the fixture of
+`shared_holders_noting_at_once_never_splice_their_notes` (D-6268's test,
+blocking 1: it compared the notes untrimmed, and its first note ends in a
+blank the reader drops with the padding), and gave the `run_busy` refusal of
+a `/pull/fno` walk the `409` a `/pull/spot` request answers (D-6263; docs/04
+IA10C-23); neither is a new choice.
+
+**And one follow-up of the same check, taken in the same round (amends
+D-6268).** The FM-163 refusal named the LAST sharer to note, which may have
+let go while an earlier sharer still held: the second agent's probe A2 named
+run 200 `pull-fno`, which had dropped, while run 100 `pull-spot` held; the
+pid was right, the run and mode stale. The process's one note lock
+(`landing_run::NOTING`) now also remembers each live holder's latest note,
+keyed by the lock file's device and inode, and a holder that lets go while
+others of its process still hold writes back the newest one's note (claim
+order), still under its own hold, so a refused taker names a holder that
+holds. The last to let go writes nothing: the file is then free. Rejected:
+noting the api's pid and a holder count instead, which names no run at all.
+O(holders in flight) per drop, at most the api's landing requests. Proved by
+`pull::ingest::landing_run::tests::a_sharer_that_lets_go_leaves_the_note_of_one_that_still_holds`
+(docs/04 IA10C-24), failing before.
+
+**Amended at repair round 3 (25 Oct 2026; the second agent's check of repair
+round 2, verify-IA-10c-r3: its blocking probe P1 and its follow-ups P4c and
+P6).** The claims were read only when the ledger's last record failed its
+CRC or the ledger was unborn. A ledger that lost its last record WHOLE (cut
+at a record boundary: a drive that dropped a flushed append, a ledger put
+back from a copy one record older) ends at a record that verifies, so the
+allocator took `max(now, last + 1)` from the record before the lost one: the
+lost id itself whenever the clock was at or behind it, which happens when
+several ids are given in one second, and the clock check accepts a clock up
+to a day behind. The second agent's probe gave a landing's id to a second
+landing, which appended its spool records into the first landing's spool.
+The four texts that said this could not happen (`landing_run::allocate`,
+docs/04 IA10C-01, docs/06 L-IA10C-09 and this entry's heading) were wrong
+for that case.
+
+**The decision, four parts.** (1) Every allocation reads the claims' TAIL
+(their last 512 bytes, one positional read) and takes as `last` the newer of
+the ledger's last record and the claims' last line whose CRC verifies. A
+claims line is synced after its record, so a later id in the claims can only
+mean the ledger lost records whole: that is said at `warn` (`runs ledger
+behind its claims`, with both ids) and by an alert of kind
+`runs_ledger_damaged` keyed `runs_ledger_behind_claims:<claimed id>`, and the
+new id is raised past it. (2) A claims line ends with its record's own CRC
+field (` crc=<8 hex>`) and names an id only when the record rebuilt from it
+verifies, so one rotted digit can neither lift every later id (past a
+receipt's 32 bits, which would stop every Zerodha landing) nor hide one;
+whole lines at the tail that fail it are said at `warn` (`runs claims tail
+damaged`) and never read. The whole-file pass of a damaged last record or a
+seed reads only verified lines too. (3) The claims and the GDFL journal are
+read through one opener, non-blocking and refused unless a regular file (the
+claims never through a link, as their one writer refuses one; the journal
+through one, as its writer opens it), so a pipe at either name answers at
+once instead of holding the ledger's lock waiting for a writer (P4c); claims
+that cannot be read refuse the allocation `runs_ledger_io` before anything
+is written. (4) `landing_run::allocate` refuses a landing id past
+4,294,967,295, the largest a receipt's run field (offset 60) holds,
+`runs_ledger_entry`, before the vendor is asked, the id spent (P6): such a
+landing stored its bars with no kept answer for every window.
+
+**Rejected.** Refusing every allocation while the ledger is behind its claims
+(`runs_ledger_damaged`): the claims say exactly which ids were given, so the
+raise loses nothing, and a refusal would stop both feeds until the operator
+looked; the alert asks for the look without the stop. Writing the lost
+records back into the ledger from the claims: the allocator would rewrite
+the ledger's history, which IA-2's rule (never repaired silently) and the
+append-only law keep out; the claims stay the record of those ids. Reading
+the claims whole on every allocation: O(claims) per id. Trusting a claims
+line that parses, without a CRC: one rotted byte would lift or hide ids.
+
+**Cost.** One more open, `fstat` and read of at most 512 bytes per id, under
+the ledger's lock, re-measured in `docs/06-limits.md` L-IA10C-09. A ledger
+and claims that lost the same tail together (the audit directory put back
+from an older copy, or both tails damaged at once) cannot be told from a
+store that never gave those ids, and the clock at or behind them then gives
+one again: named in L-IA10C-10, not proved.
+
+**Proved by** `pull::ingest::landing_run::tests::a_ledger_that_lost_its_last_records_whole_never_hands_their_ids_out_again`,
+`a_rotted_claims_line_neither_lifts_nor_hides_an_id`,
+`claims_that_are_not_a_regular_file_are_refused_at_once` and
+`a_landing_id_a_receipt_cannot_carry_is_refused_before_the_vendor_is_asked`
+(docs/04 IA10C-25 to IA10C-28), each failing before this amendment;
+`pull::gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice`
+(IA10C-20) now reads each line's CRC, refuses a directory at the claims'
+name before any record whether the ledger is unborn or born, and keeps the
+recorded-never-handed-out case with a read-only claims file; bytes in
+`docs/02-store-format.md` §37.5.
+
 ### D-7185 — R4-28 (DLY-09): the Kite instrument dump is kept by date, one receipted snapshot per refresh, diffed against the one before, and a token is resolved by date — 2026-10-22
 
 The number is the first of R4-28's own block D-7185..D-7194
@@ -85494,6 +85902,343 @@ D-7185).
    until the operator acts; making it complete needs an outcome the journal
    does not have (it has no partial outcome) or a rule that lets a known gap
    read as a complete leg, and D-7190 point 3 chose `Failed`.
+
+### D-7215 — BASE-FIXTURE-1025: the GDFL capital-market rows in `cli`'s tick-to-second-check tests are built, never pasted; the guard stays as it is — 2026-10-25
+
+**Number** the first of BASE-FIXTURE-1025's block D-7215..D-7224 in the
+decision-block registry; unused on `feat/db-fix` at `bf9b1c8ff` when taken.
+
+**Context.** Design §12 (revision 5) and D-0808 item 9 (the GDFL capital-market
+reader) say no GDFL row is committed: this repository is public
+(`CLAUDE.md` §8), a fixture in it is redistribution, and every test row is
+joined at run time from invented values. `pull`'s
+`gdfl_cm::tests::fixtures_are_built_not_pasted` enforces that: it walks every
+`.rs` file under `crates/` and fails on any text that holds a whole
+capital-market row after a `.NSE` or `.NSE_IDX` ticker (`holds_cm_row`: the
+comma, a `DD/MM/YYYY` date, an `HH:MM:SS` time and seven comma-led numeric
+fields).
+
+**The finding.** `crates/cli/src/tick_second_check_tests.rs`, which came in
+with DATA-2 (merged as `e851da1ca`; the newest commit touching it before this
+change is `4219faa2d`, DATA-2 repair 3), typed two such rows whole in
+`the_census_is_one_pass_and_its_work_grows_with_the_rows_alone` (an identical
+pair of `ZZ.NSE` trade rows the census counts as one identical line). So every
+head of `feat/db-fix` from `e851da1ca` on was red on the guard; the full gate
+on `666ddf7f7` (25 Oct 2026) was the first Mac gate to run to its end on such
+a head, and it blocked the app28 deploy. Re-checked on `bf9b1c8ff`: the guard
+fails naming that one file and no other. The rows were invented (ticker `ZZ`,
+price 5.00), so no vendor row was redistributed; the defect is that the guard
+cannot tell an invented literal from a quoted one, which is why the rule is
+"built", not "invented". Three more lines of the same test, one row of
+`alpha_d1` and the census's 10,000-line row maker were typed whole too; they
+escaped the detector only because a field held a minus sign, was missing, or
+was a `{}` placeholder.
+
+**The fix.** In that file alone, every capital-market row is joined by one
+builder, `cm_row(stem, day, second_of_day, [ltp, bid, bid_qty, ask, ask_qty,
+ltq, oi])`, from which the file's existing `row` and `trade` builders are now
+made; a short (torn) line is `first_fields` of a whole built row. Each test
+keeps its meaning and every assertion: the rows are the same values as
+before, field for field (the census still counts 5 lines, 1 identical,
+1 negative LTP, 1 negative quantity, 1 crossed and 1 one-sided quote; the
+nine-field line of `alpha_d1` is still the same nine fields). A new test,
+`the_row_builders_join_ten_fields_at_every_boundary`, pins the builder: ten
+fields in file order, year and clock boundaries, the Muhurat date, every cut
+length from none to past whole, empty fields, a negative LTP on a crossed
+quote cut short (a combination the census must count once and skip once),
+and a 4,096-digit LTP that is still one field of one line.
+
+**Why the guard stays as it is.** It was right: the file held whole rows.
+Narrowing it, an allowlist entry, a skip or a rename that hides the file from
+the walk would each let the next pasted row in unseen, which is the shape
+`CLAUDE.md` §4 bans ("a fallback that hides a failure"). No line of
+`crates/pull/src/gdfl_cm.rs` changes.
+
+**Proof:** `gdfl_cm::tests::fixtures_are_built_not_pasted` fails on
+`bf9b1c8ff` (pasted GDFL CM rows in `crates/cli/src/tick_second_check_tests.rs`)
+and passes on this change; every `tick_second_check` test in `cli` passes.
+No new invariant (the guard is the invariant); no limit changes.
+
+### D-7310 — G3: the written series rule — a share's EQ, BE and BZ day files are filed, every other series code is refused by name as `series_not_stored:<code>` — 2026-10-24
+
+**Implemented by** R4-22. **Findings** G3 (the GDFL capital-market reader's
+series files). D-7275 to D-7309 are left to the packages in flight that hold
+them (R4-18, R3-13); this package's entries start here, and the merge may
+renumber them at landing.
+
+**What was wrong.** WP-12f filed a share's `.BE` and `.BZ` day files under the
+share's key (D-4878 item 8) with the codes UNVERIFIED against an NSE source
+(L-WP12f-4), and every other series file of a share (`BL` block deals, `T0`,
+`N1` debt, `GS`, `TB`, `SM`, ...) was an unnamed skip, counted only in the
+census's unresolved total: a day whose share traded in another series said
+nothing of it.
+
+**What is decided.**
+
+1. The codes are sourced: NSE's "Legend of series" (read 24 Oct 2026,
+   `docs/00-charter.md`, "NSE equity series codes — read 24 Oct 2026") names
+   `EQ` the rolling series and `BE`/`BZ` the trade-for-trade series of fully
+   paid equity shares; the dated security masters on disk carry them in
+   `SctySrs`.
+2. THE WRITTEN RULE (`pull::gdfl_cm::CmScope::series_refusal`): under the
+   stored scope a share's own stem (`EQ`) and its `BE` and `BZ` files are
+   filed under the share's key, unchanged; a stem `<SHARE>.<CODE>.NSE` of a
+   share the scope files, whose code is anything else, seen before or not, is
+   refused BY NAME, `CmRefusal::SeriesNotStored`, its words
+   `series_not_stored:<code>: ...`, cause `series_not_stored` (a vendor rule:
+   it closes the day done with refusals, the same bytes refused the same way
+   every time), never filed. The refusal names the share's key that day, so a
+   filtered run refuses it only where it wants that share. A code is 1 to 8
+   ASCII letters or digits (`MAX_SERIES_CODE`); a longer or odd suffix is no
+   series name and stays a counted skip. The swept scope files no series and
+   refuses none (WP-12f's skip).
+3. A day holding a share's own file and its `BE` or `BZ` file stays refused
+   by name, both files (WP-12f's twins rule).
+
+**Proved by** `pull::gdfl_cm::series_code_tests::every_series_code_is_stored_or_refused_by_a_written_rule`,
+`a_bl_day_file_is_refused_series_not_stored`,
+`a_day_of_one_trade_for_trade_file_and_three_refused_series_files_the_be_alone`,
+`a_day_holding_a_plain_and_a_be_file_of_one_share_refuses_both`,
+`a_series_name_is_read_only_inside_its_bounds` and
+`an_old_symbols_series_file_names_the_newest_key`.
+
+**Store step.** G3's re-read is WP-12f's: `cli gdfl-import stocks zip
+2018-09-03 2026-07-31` unfiltered, stopping at 2026-07-31. A day closed `done`
+before this rule is not read again by it; its series files stay unnamed in
+that close until a re-read.
+
+### D-7311 — G2: nine dated symbol changes join `core::alias` from a new read of NSE's file and one circular; six rows of the same read are held back as re-key decisions — 2026-10-24
+
+**Implemented by** R4-22. **Findings** G2 (six stems in the archive stop the
+day before a new ticker starts), FM-288's join half.
+
+**What was wrong.** `core::alias::SYMBOL_CHANGES` held the 18 rows the 7 Oct
+read transcribed. `ANGELBRKG`, `RNAM`, `MINDAIND`, `GET&D` and `RUCHI` were
+each their own (unstored) key, so their days before each change never reached
+the series the store keys under the new symbol, and
+`LINEAGE.current("RUCHI")` was `RUCHI`.
+
+**What is decided.**
+
+1. NSE's `symbolchange.csv` is read again (24 Oct 2026, 69,403 bytes, sha256
+   `b080e538...`), recorded as a NEW dated citation
+   (`alias::SYMBOL_CHANGE_CSV_20261024`); the 7 Oct citation and every row
+   resting on it are unchanged.
+2. Applied, in date order: `BAJAJTEMPO -> FORCEMOT` 2019-08-19, `RNAM ->
+   NAM-INDIA` 2020-01-23, `ADANIGAS -> ATGL` 2021-01-13, `MAGMA -> POONAWALLA`
+   2021-08-05, `ANGELBRKG -> ANGELONE` 2021-11-11, `RUCHI -> PATANJALI`
+   2022-07-13 (NSE/CML/52890, the file has no row), `MINDAIND -> UNOMINDA`
+   2022-08-05, `TWL -> TITAGARH` 2023-06-19, `GET&D -> GVT&D` 2024-11-05: each
+   a row whose old symbol the store holds under no key of its own, so filing
+   it only adds days to a series already keyed under the new symbol, splits no
+   options contract (D-3354 item 4 finds no old directory) and changes no
+   PIT-1 membership (no option file carries an old symbol: the store's
+   `bars/gdfl/NSE/FNO/` holds none of the nine). 27 rows, `Lineage<27, 128>`,
+   worst probe 4 or fewer.
+3. Held back, read and not applied: `KPIT -> BSOFT`, `TATAGLOBAL ->
+   TATACONSUM`, `CENTURYTEX -> ABREL`, `INFIBEAM -> CCAVENUE`, `GUJGASLTD ->
+   GUJENERGY`, `ICICIPRULI -> ICICILIFE`. The store holds each old symbol under
+   its own key, so applying one re-keys stored months and refuses options runs
+   until the re-key records them (D-3354 item 4), and `ICICIPRULI` is an F&O
+   list share (`CLAUDE.md` §1). Each is a decision and a store step for the
+   operator; until then each keeps two keys, as D-3354 item 3 says of a rename
+   with no row. The 7 Oct statement that NSE's file has no row for `TATAGLOBAL`
+   or `KPIT` is contradicted by the 24 Oct bytes (charter); why is UNVERIFIED.
+
+**Proved by** `brutex_core::alias::tests::the_six_stem_handovers_are_sourced_rows`,
+`ruchi_is_filed_under_patanjali_only_on_the_days_each_stem_was_live`,
+`a_read_again_never_edits_the_first_read`,
+`the_held_back_rows_of_the_second_read_are_not_applied`,
+`every_index_option_underlying_joins_its_dated_spot_series`,
+`lineage_lookup_cost_is_flat_from_18_to_27_rows`,
+`pull::gdfl_cm::series_code_tests::an_old_stem_before_its_change_is_filed_under_the_newest_symbol_for_ruchi_patanjali`
+and `every_dated_handover_files_the_old_stem_under_the_new_symbol_the_day_before`.
+
+**Store step.** `cli gdfl-import stocks zip 2018-09-03 2026-07-31 ANGELONE
+NAM-INDIA UNOMINDA GVT&D PATANJALI FORCEMOT ATGL POONAWALLA TITAGARH
+--repair-reason "<reason>"`: the inside-month days go through the D-3350
+repair door, so the run carries a repair reason. Rehearsed on 25 Oct 2026
+with this build on a store root of this package's own holding APFS clones of
+the real store's months of the nine symbols (`shadow/R4-22-g2`; the real
+journal, dayflags, repairs ledger and ANGELONE's 2021-11 unchanged by mtime,
+size and sha256): a month the store holds from the change on (ANGELONE's
+2021-11 from 11-11; by the months the real store lists, NAM-INDIA's 2020-01,
+UNOMINDA's 2022-08, FORCEMOT's 2019-08, ATGL's 2021-01 and TITAGARH's 2023-06
+are the same case, not rehearsed one by one) takes its old stem's earlier
+days only as new generations. Without
+the reason the seven `ANGELBRKG` days of 2021-11 were each
+`needs_month_generation` (a hole a repair-reason run reads); with it they
+landed, one generation per day (2021-11 from 65,732 to 90,359 rows, 64.8 MB
+of revision files: L-R422-12). A month the store does not hold is created
+plainly: PATANJALI's 2022-07 from `RUCHI.BE` (07-01 to 07-12) and
+`PATANJALI.BE` (07-13), POONAWALLA's 2021-08 from MAGMA's days 08-02 to
+08-04 (MAGMA's and POONAWALLA's debt-series files refused
+`series_not_stored`, D-7310). The range stops at 2026-07-31: an auction-era
+day is refused `restated_auction_band` for the run's filter (D-4878 item 10;
+rehearsed on 2026-08-03 and 2026-08-04). The table is the compiled
+seed R3-30's loader serves while a store holds no `reference/v1/symbol_changes`
+generation (the real store holds none on 24 Oct 2026); a store that has
+seeded one takes these rows as its next generation, a store step of its own.
+
+### D-7312 — ERR-11, the GDFL half: an unknown header is named by the digest of its column names, refused under an OPEN cause, and said once per shape — 2026-10-24
+
+**Implemented by** R4-22. **Findings** ERR-11 (the GDFL half; the Kite half
+and the alert kind are R4-13's and R4-05's, cut from this package on 18 Oct
+2026). Changes D-3317's cause table for one code.
+
+**What was wrong.** A header neither GDFL reader knows was
+`CmRefusal::HeaderUnknown` / `NfoRefusal::HeaderUnknown`, a unit refusal whose
+cause CLOSED the day (`Cause::vendor`): one renamed column closed every day of
+the change `done with refusals`, so no later run read those days again, even
+after a build learned the header, and nothing named what the new header was.
+
+**What is decided.**
+
+1. Both refusals carry `pull::gdfl_cm::HeaderShape`: the BLAKE3 of the first
+   line's column names (each its `u32` length then its bytes; never a row,
+   never a value) and the column count. Their words name both, with the word
+   `vendor_format_changed`. A known header is never hashed.
+2. `header_unknown` is an OPEN cause (`Cause::open(Stage::Vendor, ..)`) in
+   `cm_cause` and `nfo_cause`: a day with a format-changed file is
+   `incomplete` (or `refused` when no file was read clean, D-3317 item 3),
+   never `done`, and the next run reads it again.
+3. `pull::gdfl_format::note_format_changed`: one `error` line at
+   `pull.gdfl.format`, "vendor format changed", per shape per process, naming
+   the tree, the day, the FIRST member that showed it, the column count and the
+   digest; audited, so `/logs` finds it by the digest. At most 1,024 shapes are
+   remembered; past that every new shape is said every time (bounded memory,
+   never a dropped line).
+4. NOT decided here: the durable alert keyed `vendor_format_changed:gdfl:<digest>`
+   (R4-05's kind, not in `pull::alerts::KINDS` at feat/db-fix 7b397bbe7) and
+   the GDFL run stopping at a format change. This build keeps reading the
+   other days, each format-changed file refused by name.
+5. THE COLUMN-COUNT HALF: the rows' column set changed under a KNOWN header.
+   A file past D-3318's bound (more than 64 refused rows and one in every
+   1,000) in which EVERY row read is of the file's own Ticker and Date and
+   has one same field count other than the header's (ten for the capital
+   market; ten plus D-4829's empty trailing fields for options) is
+   `CmRefusal::ColumnsChanged` / `NfoRefusal::ColumnsChanged` in place of
+   `too_many_bad_rows`, cause
+   `columns_changed`, OPEN like `header_unknown`, its shape
+   `HeaderShape::of_rows` (the BLAKE3 of `u32::MAX`, the rows' count and the
+   header's names, so never a header's own shape) said once per shape on the
+   same line with `code=columns_changed`. Until now every such row was a
+   malformed row and the file `too_many_bad_rows`, a cause that CLOSED the
+   day. Unchanged: one row of another count among the header's rows is a
+   refused row (D-3318); rows of two other counts, blank lines and lines of
+   another Ticker or Date are bad rows; a last line with no newline is a cut
+   file refused whole (CM-07) unless every row before it had its same count.
+   O(1) per row: one counter, one compare.
+
+**Proved by** `pull::gdfl_cm::format_change_tests::a_renamed_header_column_leaves_the_day_incomplete_and_alerts_once`,
+`every_row_of_one_other_field_count_is_a_column_set_change`,
+`a_few_bent_rows_or_two_counts_stay_bad_rows_never_a_format_change`,
+`the_options_reader_names_a_column_set_change_the_same_way`,
+`a_column_set_change_leaves_the_day_incomplete_and_is_said_once`,
+`the_same_header_digest_alerts_once`, `a_day_of_format_changed_files_is_never_closed_done`,
+`a_header_renamed_on_one_day_only_leaves_that_day_alone_incomplete`,
+`an_unknown_header_is_an_open_cause_in_both_readers`,
+`an_options_header_change_is_refused_by_its_shape_and_said_once` and
+`crates/pull/tests/gdfl_bad_row_audit.rs::a_renamed_header_is_named_once_by_its_shape_in_the_audit_stream`.
+
+### D-7313 — IMPORT-BAD-ROW: the refused rows' one line per file is an `error`, so every named row reaches the durable audit stream with its file and line — 2026-10-24
+
+**Implemented by** R4-22. **Findings** IMPORT-BAD-ROW (the residual after
+IA-4's per-row options decode, D-4816), FM-077's audit half,
+docs/06-limits.md L-IA4-02. Changes D-3318's and D-3341's level for one line.
+
+**What was wrong.** Both GDFL readers name a file's refused rows in one line,
+"rows refused, file read" (`pull::gdfl_cm::note_refused_rows`), with the file
+and the first 16 rows as `line:fault` words. At `warn` that line reached the
+rolling ring alone (`telemetry::is_audited` takes every `error` and, at `warn`,
+only lifecycle and state lines), which a pull's flood rolls in seconds, and it
+was rationed with every other `warn` of its pair: the file and line of
+2018-11-06's lettered LTP or 2018-11-09's bad time could be gone before anyone
+looked.
+
+**What is decided.** The line is emitted at `error`: still one line per file,
+never one per row, its first `NAMED_ROWS` named and every row counted; it is
+now in the durable audit stream and outside the `warn` ration. Nothing about
+which rows are refused, or the day's close, changes.
+
+**Proved by** `crates/pull/tests/gdfl_bad_row_audit.rs::a_bad_options_row_is_named_with_file_and_line_in_the_audit_stream`
+(the two measured options shapes, invented), `an_index_files_zero_ltp_rows_are_named_in_the_audit_stream`
+(NIFTY 50 2022-03-07's four zero-LTP rows, invented) and
+`pull::gdfl_cm::format_change_tests::the_refused_rows_line_and_the_format_line_are_audited`.
+
+**Store steps.** The days that lost a file to one bad row are re-read under
+definition 5 (IA-4), filtered (unfiltered options runs are refused
+`underlying_split` until R4-21 applies) and WITH a repair reason:
+`cli gdfl-import options zip 2018-11-06 2018-11-06 BANKNIFTY --repair-reason
+"<reason>"` and `cli gdfl-import options zip 2018-11-09 2018-11-09 AXISBANK
+--repair-reason "<reason>"`. Each refused file's contract-month is held from
+the contract's other days, so its day lands only as a new generation,
+through the repair door. NEVER `--retry-refused` or a plain run first:
+rehearsed on 25 Oct 2026 with this build on store roots of this package's
+own holding APFS clones of the 318 real contract directories the two days
+touch (`shadow/R4-22-retry`, `shadow/R4-22-retry2`; the real journal,
+dayflags, lots, repairs ledger and three of the months unchanged by mtime,
+size and sha256), a run without the reason records the refused contract
+`needs_month_generation` and every contract whose held definition-2 bars
+carry another open interest than definition 5 reads (123 of BANKNIFTY's 261
+files, 6 of AXISBANK's 57; OHLCV identical, the open interest of a few
+seconds differs: operator answer 10's bar-close open interest) as
+`bars_differ_held`, which closes the day for every later run: a repair-reason
+run after it read 0 files, so the refused files would never land. With the
+reason first, BANKNIFTY 2018-11-15 26700 CE's 2018-11 took the day's 2,871
+seconds as generation 1 (16,558 + 2,871 = 19,429 rows) and AXISBANK
+2018-11-29 580 PE's took 501 (6,118 + 501 = 6,619), and this build's
+`/bars.json` served them so; both days then close `incomplete` with the
+`bars_differ_held` contracts, which WP-80's re-import of the definition-2
+option months as new generations owns (L-R422-12). The second is AXISBANK, not
+BANKNIFTY: the store's own audit stream (`logs/cli/audit.ndjson`, seq 4072,
+2026-10-06) names 2018-11-09's one refusal as `AXISBANK18NOV580PE`, "line 451:
+not ten well-formed fields", a row of ten fields whose Time holds a letter
+(read 24 Oct 2026 from the vendor's `NOV_2018/GFDLNFO_TICK_09112018.zip`,
+field classes only, no value copied). The store's journal shows both days
+`incomplete` under definition 2, so the filtered run reads them again.
+Rehearsed on 24 Oct 2026 into an EMPTY scratch store over the real archives
+with this build (the naming, not the store step): 2018-11-06 BANKNIFTY `done`, 261 files,
+`BANKNIFTY15NOV1826700CE.NFO.csv` named `13668:malformed` in the audit stream;
+2018-11-09 AXISBANK `done`, 57 files, `AXISBANK18NOV580PE.NFO.csv` named
+`451:malformed`. `/imports.json?feed=gdfl&kind=indices&from=2022-03-07&to=2022-03-07`
+shows that day `done` under definition 3 with no failure (24 Oct 2026), so it
+needs no step; its four zero-LTP NIFTY 50 rows (lines 4820, 4821, 44168,
+44169) were refused rows already, and the rehearsal names them in the audit
+stream.
+
+### D-7314 — FM-101: a capital-market row dated another real day and stamped outside the session is refused by name as a row; inside the session it still refuses the file — 2026-10-24
+
+**Implemented by** R4-22. **Findings** FM-101 (IMPORT-BAD-ROW), the mirror of
+D-3318's zero-LTP case.
+
+**What was wrong.** `pull::gdfl_cm::parse_row` refused the WHOLE file at the
+first row whose Date was not the folder's (`CmRefusal::DateMismatch`), and the
+cause closes the day: one trailing housekeeping row dated the next day, or a
+first row carrying the day before's close, lost the day's NIFTY 50 file and
+every option bar's spot that day, for good.
+
+**What is decided.** A row whose Date is a REAL `DD/MM/YYYY` of another day
+and whose Time is a real time OUTSIDE the day's session (before the first
+window's first second, or at or after the last window's end; a special
+session's own windows, D-3319) is refused by name, `RowFault::WrongDate`
+(`wrong_date`), counted in `RowsRefused::wrong_date` and in D-3335's
+`rows_refused`, named with its line in the refused-rows line (D-7313); the
+file's other rows are read. A row of another date INSIDE the session, a Date
+that is not a real `DD/MM/YYYY`, or a Time that does not read still refuses the
+whole file, as does a file every row of which is refused (its first refusal)
+and one past D-3318's bound (`TooManyBadRows`). The options reader is
+unchanged (its Date check stays file-level). A dedicated dayflags field
+`rows_refused_wrong_date` is not added: the day ledger's line is R4-25's (v=3)
+to version (docs/06-limits.md L-R422-08).
+
+**Proved by** `pull::gdfl_cm::format_change_tests::a_trailing_row_with_the_next_days_date_is_refused_as_a_row`
+and `a_file_with_a_next_day_trailing_row_lands_its_day`; the in-session
+refusal still by `pull::gdfl_cm::tests::date_mismatch_refuses` and
+`admission_tests::a_row_of_another_file_still_refuses_the_whole_file`.
+
+**Store step.** None of its own: a day closed `done with refusals` for
+`date_mismatch` is read again only by `--retry-refused`, as any closed day.
 
 ### D-7195 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
 

@@ -1208,6 +1208,12 @@ pub struct SpotRequest {
     /// the field (`repair_reason`); `POST /pull/spot` refuses a body that
     /// carries it, so an ordinary pull never repairs by accident.
     pub repair: Option<String>,
+    /// The landing's runs-ledger id (D-4880; IA-10c, D-6260). Never parsed
+    /// from the form, so no request can name another run's id: `0` as
+    /// parsed, and the broker run takes its own `pull-spot` or `pull-repair`
+    /// id after its seat; a `/pull/run` leg is handed its run's id by the
+    /// conductor (`server::pull_spot_leg`) and takes none.
+    pub run: u64,
 }
 
 /// One expired-derivative pull, validated.
@@ -1280,6 +1286,11 @@ pub struct FnoRequest {
     /// future of a feed that routes futures through a token, which is its
     /// route's own rung (`1day` for Zerodha; R4-28 repair 5, D-7191).
     pub granularity: pull::vendor::Granularity,
+    /// The landing's runs-ledger id (D-4880; IA-10c, D-6260). Never parsed
+    /// from the form: `0` as parsed, and the walk takes its own `pull-fno` id
+    /// after its seat and before its first window lands; a `/pull/run` leg is
+    /// handed its run's id by the conductor (`server::pull_fno_leg`).
+    pub run: u64,
 }
 
 /// One `YYYY-MM-DD` form field, as a validated day.
@@ -1603,6 +1614,7 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
         repair: Some(param(body, "repair_reason"))
             .map(|reason| reason.trim().to_owned())
             .filter(|reason| !reason.is_empty()),
+        run: 0,
     })
 }
 
@@ -1856,6 +1868,7 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
             // feed, so this second read of it only finds the feed again.
             expired_rung(rung, absent, series, parse_feed(&param(body, "vendor")))?
         },
+        run: 0,
     })
 }
 

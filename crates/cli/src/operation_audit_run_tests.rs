@@ -129,6 +129,7 @@ fn land(root: &Path, symbol: &str, from: Day, to: Day) {
         exchange: "NSE",
         segment: "INDEX",
         contract: None,
+        run: 0,
     };
     let done = pull::ingest::from_window(
         &RawWindow {
@@ -142,14 +143,38 @@ fn land(root: &Path, symbol: &str, from: Day, to: Day) {
     assert!(done.failures.is_empty(), "{:#?}", done.failures);
 }
 
+/// The `run=` that ends each line of `text`.
+fn runs_of(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| {
+            line.rsplit(' ')
+                .find(|field| field.starts_with("run="))
+                .unwrap_or_else(|| panic!("a line with no run=: {line:?}"))
+                .to_owned()
+        })
+        .collect()
+}
+
 /// One `cli zerodha-repair` back-fill of December 2020's first half from a
-/// second store, and the `run=` of every line it appended to the store's
-/// `audit/zerodha.repairs`.
+/// second store, and the `run=` of every line the FIXTURE LANDING before it
+/// appended to the store's `audit/zerodha.gaps`: a landing that holds no
+/// runs-ledger id of its own (`Plan::run` 0) stamps its lines from the sink,
+/// so they name the invocation's claimed run (AG-02).
+///
+/// The repair's OWN lines name its own `zerodha-repair` id from the store's
+/// runs ledger (IA-10c, D-6260, amending AG02-05 for this verb): every line
+/// of `audit/zerodha.repairs` says it, whatever run the invocation holds, and
+/// that id is never the sink's.
 fn repair_runs(symbol: &str) -> Vec<String> {
     let store = Root::new();
     let source = Root::new();
     land(&store.0, symbol, day(2020, 12, 16), day(2020, 12, 31));
     land(&source.0, symbol, day(2020, 12, 1), day(2020, 12, 31));
+    let landed = runs_of(&fs::read_to_string(store.0.join("audit").join("zerodha.gaps")).unwrap());
+    assert!(
+        !landed.is_empty(),
+        "the fixture landing wrote its derive lines"
+    );
     let source_root = source.0.display().to_string();
     let mut out = String::new();
     let root = store.0.clone();
@@ -167,25 +192,32 @@ fn repair_runs(symbol: &str) -> Vec<String> {
         &mut out,
     );
     assert_eq!(code, OK, "{out}");
-    let journal = fs::read_to_string(store.0.join("audit").join("zerodha.repairs")).unwrap();
-    let runs: Vec<String> = journal
-        .lines()
-        .map(|line| {
-            line.rsplit(' ')
-                .next()
-                .filter(|last| last.starts_with("run="))
-                .unwrap_or_else(|| panic!("a line with no run= last: {line:?}"))
-                .to_owned()
-        })
+    let ledger: Vec<u64> = pull::gdfl_run::ledger::read_all(&store.0)
+        .unwrap()
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.mode == "zerodha-repair")
+        .map(|entry| entry.id)
         .collect();
-    assert!(runs.len() >= 2, "a repairing and a repair line: {journal}");
-    runs
+    let [own] = ledger.as_slice() else {
+        panic!("one zerodha-repair run: {ledger:?}");
+    };
+    let journal = fs::read_to_string(store.0.join("audit").join("zerodha.repairs")).unwrap();
+    let repaired = runs_of(&journal);
+    assert!(!repaired.is_empty(), "the repair journaled: {journal}");
+    for run in &repaired {
+        assert_eq!(run, &format!("run={own}"), "{journal}");
+    }
+    landed
 }
 
 /// THE FINDING'S LINE, NAMING ITS RUN: the attempt id the cli computes for a
 /// command (`run_with_sink`: the durable invocation's id, else one reserved
-/// from the sink), claimed for the command, is the `run=` of every repair
-/// line the command writes, and the sink's run is zero again after it.
+/// from the sink), claimed for the command, is the `run=` of every ledger
+/// line a landing with no runs-ledger id of its own writes under it, and the
+/// sink's run is zero again after it. (`cli zerodha-repair`'s own lines name
+/// its `zerodha-repair` runs-ledger id since IA-10c, D-6260: [`repair_runs`]
+/// asserts that on every call.)
 #[test]
 fn a_cli_written_repair_line_carries_the_invocations_run() {
     let _turn = SERIAL

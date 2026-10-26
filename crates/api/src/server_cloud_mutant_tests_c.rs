@@ -503,6 +503,7 @@ fn window_of(
     BrokerWindow {
         listing: pull::vendor::Listing::Index,
         contract: None,
+        answers: crate::pullrun::Answers::default(),
         bodies: Vec::new(),
         unfetched: None,
         before_first_bar: None,
@@ -659,6 +660,7 @@ async fn a_hand_pull_naming_an_unknown_feed_is_refused_by_name() {
     let (code, header, axum::response::Html(page)) = spot_pull_held(
         &site,
         "target=swept&vendor=dahn&from=2026-08-03&to=2026-08-05",
+        0,
     )
     .await;
     assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
@@ -1661,6 +1663,7 @@ fn no_dated_floor_cannot_show_nothing_is_held_earlier() {
         ],
         leading: 1,
         total: 2,
+        answers: Vec::new(),
     };
     assert_eq!(
         nothing_held_before_first_bar(
@@ -2022,6 +2025,21 @@ async fn a_store_that_takes_no_write_trips_the_store_breaker() {
     std::fs::write(fx.root.join("bars"), b"not a directory").expect("a file where bars/ goes");
     let audit_dir = fx.root.join("audit");
     std::fs::create_dir_all(&audit_dir).expect("audit dir");
+    // THE RUNS LEDGER IS BORN FIRST (IA-10c, D-6260): a landing takes a run id
+    // before it asks the vendor, and an `audit/` that refuses the ledger's
+    // first files refuses the landing by name before the breaker is reached.
+    // One id taken here creates them, so the read-only `audit/` below still
+    // refuses only the probe's new file, which is what this test is about.
+    drop(
+        crate::pullrun::open_landing(
+            &fx.root,
+            brutex_core::vendor::Vendor::Dhan,
+            pull::ingest::landing_run::Mode::Spot,
+            0,
+            1,
+        )
+        .expect("a run id on a writable audit/"),
+    );
     std::fs::set_permissions(&audit_dir, std::fs::Permissions::from_mode(0o555))
         .expect("read-only audit");
     let site = fx.serving(&script);
@@ -2824,7 +2842,7 @@ async fn the_first_attempt_is_not_charged_here_and_a_retry_is() {
     let answered = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
         .await
         .expect("the first attempt is asked whatever the budget says");
-    assert_eq!(answered.rows.len(), 1);
+    assert_eq!(answered.window.rows.len(), 1);
     assert_eq!(vendor.seen().len(), 1);
 
     let busy = FakeVendor::answering(|nth, _| {
@@ -3021,14 +3039,14 @@ async fn a_repair_reason_of_exactly_the_bound_is_taken_and_one_byte_more_is_not(
     let asked = |bytes: usize| format!("{DHAN_DAY}&repair_reason={}", "a".repeat(bytes));
     let (code, _, axum::response::Html(page)) = pull_repair(
         axum::extract::State(Loaded::clone(&site)),
-        asked(MAX_REPAIR_REASON),
+        asked(pull::ingest::MAX_REPAIR_REASON),
     )
     .await;
     assert_ne!(code, axum::http::StatusCode::BAD_REQUEST, "{page}");
     assert!(!page.contains(refusal), "{page}");
     let (code, _, axum::response::Html(page)) = pull_repair(
         axum::extract::State(Loaded::clone(&site)),
-        asked(MAX_REPAIR_REASON + 1),
+        asked(pull::ingest::MAX_REPAIR_REASON + 1),
     )
     .await;
     assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{page}");

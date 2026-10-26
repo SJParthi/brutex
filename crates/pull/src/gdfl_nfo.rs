@@ -113,8 +113,8 @@ use crate::gdfl_archive::{
     MONTHS, ReadAt, ZipEntry, ZipLocator, member_bytes, stored_span, zip_entries,
 };
 use crate::gdfl_cm::{
-    BAD_ROWS_PER, CmRefusal, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED, ListedFile,
-    MAX_BAD_ROWS, RefusedRow, RowFault, RowsRefused,
+    BAD_ROWS_PER, CmRefusal, ColumnSet, HEADER_OPEN_INTEREST, HEADER_OPEN_INTEREST_SPACED,
+    HeaderShape, ListedFile, MAX_BAD_ROWS, RefusedRow, RowFault, RowWidths, RowsRefused,
 };
 use crate::gdfl_tickstore::{IndexEntry, read_index, rebuild};
 use crate::session::Day;
@@ -266,8 +266,21 @@ pub enum NfoRefusal {
         /// The ticker.
         ticker: String,
     },
-    /// The first line is neither observed header.
-    HeaderUnknown,
+    /// The first line is neither observed header, nor one followed by at most
+    /// [`MAX_TRAILING_EMPTY`] empty fields (D-4829). ERR-11 (D-7312): an OPEN
+    /// cause, never closing the day; `shape` names the line by digest, never
+    /// its bytes.
+    HeaderUnknown {
+        /// The first line's column names, digested.
+        shape: HeaderShape,
+    },
+    /// Every row under a known header has one same OTHER field count than
+    /// the header's, past D-3318's bound (ERR-11, D-7312 item 5): the vendor
+    /// changed the rows' column set. An OPEN cause, as
+    /// [`NfoRefusal::HeaderUnknown`]; one such row among the header's is a
+    /// refused row, and a file of a few such rows names its first, never
+    /// this.
+    ColumnsChanged(ColumnSet),
     /// The Ticker field is not the file's own stem.
     TickerMismatch {
         /// One-based line number.
@@ -372,7 +385,10 @@ impl core::fmt::Display for NfoRefusal {
             Self::DuplicateTicker { ticker } => {
                 write!(f, "{ticker}: two entries of one day name this ticker")
             }
-            Self::HeaderUnknown => f.write_str("the first line is not the GDFL header"),
+            Self::HeaderUnknown { shape } => {
+                crate::gdfl_cm::header_unknown_text(f, "not the GDFL header", shape)
+            }
+            Self::ColumnsChanged(set) => write!(f, "{set}"),
             Self::TickerMismatch { line } => {
                 write!(f, "line {line}: the Ticker field is not the file's stem")
             }
@@ -1646,6 +1662,10 @@ enum RowError {
         sod: Option<u32>,
         refusal: NfoRefusal,
     },
+    /// A row of this file's Ticker and Date with `count` fields, not the
+    /// header's (ERR-11, D-7312 item 5): refused by name as a malformed row
+    /// and counted toward a column-set change.
+    Width { count: u32, refusal: NfoRefusal },
 }
 
 /// One row's fields, checked in column order, under a header followed by
@@ -1668,9 +1688,21 @@ fn parse_row(
     let width = FIELDS.saturating_add(trailing);
     let mut fields = [""; FIELDS + MAX_TRAILING_EMPTY];
     let mut count = 0_usize;
+    // ERR-11 (D-7312 item 5): a row of this file and day with another field
+    // count is counted toward a column-set change; any other line (blank,
+    // foreign, cut short of its Date) is a plain malformed row. The count of
+    // a long row is its commas, one pass over bytes the line split read.
+    let width_error = |fields: &[&str], count: usize| match fields {
+        [ticker, row_date, ..] if *ticker == stem && *row_date == date => RowError::Width {
+            count: u32::try_from(count).unwrap_or(u32::MAX),
+            refusal: NfoRefusal::MalformedRow { line },
+        },
+        _ => malformed(None),
+    };
     for field in text.split(',') {
         if count >= width {
-            return Err(malformed(None));
+            let all = text.bytes().filter(|&byte| byte == b',').count();
+            return Err(width_error(&fields, all.saturating_add(1)));
         }
         let Some(slot) = fields.get_mut(count) else {
             return Err(malformed(None));
@@ -1678,10 +1710,13 @@ fn parse_row(
         *slot = field;
         count = count.saturating_add(1);
     }
+    if count != width {
+        return Err(width_error(fields.get(..count).unwrap_or_default(), count));
+    }
     let tail_empty = fields
         .get(FIELDS..width)
         .is_some_and(|tail| tail.iter().all(|field| field.is_empty()));
-    if count != width || !tail_empty {
+    if !tail_empty {
         return Err(malformed(None));
     }
     let [
@@ -1755,11 +1790,15 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
     let final_newline = bytes.ends_with(b"\n");
     let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let mut lines = body.split(|&b| b == b'\n').peekable();
-    let trailing = lines
+    let first = lines
         .next()
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-        .and_then(header_trailing)
-        .ok_or(NfoRefusal::HeaderUnknown)?;
+        .unwrap_or_default();
+    // ERR-11 (D-7312): an unknown first line is named by its shape, digested
+    // once; a header this reader reads is never hashed.
+    let trailing = header_trailing(first).ok_or_else(|| NfoRefusal::HeaderUnknown {
+        shape: HeaderShape::of(first),
+    })?;
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
     // RESERVED ONCE, FROM THE BODY, as `csv::decode_rows` is (D-1203): every
     // row is one line after the header, so the body's newlines bound the
@@ -1770,6 +1809,7 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
     let mut refused = RowsRefused::default();
     let mut first_refusal = None;
     let mut read = 0_u32;
+    let mut widths = RowWidths::default();
     let mut index = 0_usize;
     while let Some(raw) = lines.next() {
         // Line 1 is the header, so the row at `index` 0 is line 2.
@@ -1814,10 +1854,40 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
                     first_refusal = Some(refusal);
                 }
             }
+            // ERR-11 (D-7312 item 5), as the capital-market reader: a row of
+            // another field count is a malformed row counted toward a
+            // column-set change; a last line with no newline is a cut file
+            // unless every row before it had its same count.
+            Err(RowError::Width { count, refusal }) => {
+                if last_without_newline && !widths.continues(count, read.saturating_sub(1)) {
+                    return Err(refusal);
+                }
+                widths.note(count);
+                let fault = RowFault::Malformed;
+                refused.note(RefusedRow {
+                    line,
+                    sod: None,
+                    fault,
+                });
+                if first_refusal.is_none() {
+                    first_refusal = Some(refusal);
+                }
+            }
         }
     }
     let total = refused.total();
     if total > MAX_BAD_ROWS && u64::from(total) * u64::from(BAD_ROWS_PER) > u64::from(read) {
+        // ERR-11 (D-7312 item 5): past the bound, a file whose EVERY row is
+        // of one same other field count is the vendor's column set changed
+        // under a known header, an open cause, never the closing bad-row
+        // refusal.
+        if let Some(columns) = widths.changed(read) {
+            return Err(NfoRefusal::ColumnsChanged(ColumnSet {
+                shape: HeaderShape::of_rows(first, columns),
+                header: u32::try_from(FIELDS.saturating_add(trailing)).unwrap_or(u32::MAX),
+                rows: read,
+            }));
+        }
         return Err(NfoRefusal::TooManyBadRows {
             refused: total,
             rows: read,
@@ -1880,7 +1950,22 @@ pub fn read_file<S: NfoSource>(
     listing.check_strike(&ticker, name)?;
     let bytes = source.fetch(file)?;
     crate::gdfl_cm::verify(file, &bytes)?;
-    let decoded = decode(&bytes, &format!("{name}{ROW_SUFFIX}"), listing.day())?;
+    let decoded = decode(&bytes, &format!("{name}{ROW_SUFFIX}"), listing.day())
+        // ERR-11 (D-7312): an unknown header, and rows whose column set
+        // changed under a known one (item 5), are said once per shape,
+        // naming this file as the first options member that showed it.
+        .inspect_err(|why| {
+            let (day, member) = (listing.day(), &*file.entry);
+            let _said = match why {
+                NfoRefusal::HeaderUnknown { shape } => {
+                    crate::gdfl_format::note_format_changed("options", day, member, shape)
+                }
+                NfoRefusal::ColumnsChanged(set) => {
+                    crate::gdfl_format::note_columns_changed("options", day, member, &set.shape)
+                }
+                _ => false,
+            };
+        })?;
     Ok(NfoDayFile {
         ticker,
         name: name.to_owned(),
