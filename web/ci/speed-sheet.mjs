@@ -1251,7 +1251,7 @@ const timesText = (seen) => {
  */
 export const NOT_FIRST = Object.freeze({
   'up wait': () => `its route is the one the up wait asks (${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}) after each restart before anything is timed, so its first ask after the restart is that wait's`,
-  'no answer': () => 'it had no answer (its FAILED line says why), so it is no time of a first',
+  'no answer': () => 'it had no answer (its FAILED line says why), so there is no first to time',
   'old server': () => `the up wait was answered before this server's own start (its ${SPEED_ROUTE} started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
   before: (l) => `the server had already answered its route ${l.r.route} since its start when this sheet asked it (${timesText(l.seen)}: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
   during: (l) => `the server answered its route ${l.r.route} more often than this sheet asked it during the pass (by ${timesText(l.seen)}): another client asked it then, so this sheet's ask is not proved the first`,

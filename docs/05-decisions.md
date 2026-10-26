@@ -79378,13 +79378,16 @@ Repair round 9 (26 Oct, after verify r9):
     that did not change fails that restart by name and ends the pass, as
     another build does, and a start that cannot be read is said and ends it
     before anything is timed. The read after the command is `/speed.json`'s
-    own sample and the up check that found the server up is the up route's,
-    so every `first after restart` row is its route's first ask after the
-    restart, and the sheet says each restart's proof. Not taken: asking a
-    route of its own for the start (`/speed.json` already carries it, and
-    the server is this repository's); and proving the restart after the
-    timed pass (warm answers would be asked as firsts, and a check that
-    reached the old server would not be caught).
+    own sample, and the sheet says each restart's proof. This item also
+    took the up check that found the server up as the up route's sample
+    and said every `first after restart` row was its route's first ask
+    after the restart; item 45 withdraws both (verify r10): that check had
+    waited for the server's start, and a route the command had asked was
+    published as a first. Not taken: asking a route of its own for the
+    start (`/speed.json` already carries it, and the server is this
+    repository's); and proving the restart after the timed pass (warm
+    answers would be asked as firsts, and a check that reached the old
+    server would not be caught).
 43. **What a command prints goes to a file of its own, never the sheet's
     stderr** (R315-40; verify r9, blocking 2). `run` gave the `--writer`
     and `--restart` commands the sheet's fd 2: with its reader gone they
@@ -79414,8 +79417,56 @@ Repair round 9 (26 Oct, after verify r9):
     `web/build` without the Speed page (the main session's rebuild at the
     merge).
 
-**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-41);
-measurements in `docs/06-limits.md` L-R315-01 to L-R315-31.
+Repair round 10 (26 Oct, after verify r10):
+
+45. **A first after a restart is its route's first since the server's
+    start, proved by the server's own count, and none waits for that start**
+    (R315-42; verify r10, blockings 1 and 2). Item 42 took the up check
+    that found the server up as the up route's sample: a `--restart`
+    command that returned before the server answered (the api says
+    `listening`, then starts for about 5 s) left that check in the listen
+    queue, so `HEAD /inspection.json`'s first after restart read 4,515 /
+    6,566 ms against the server's own 42 µs. And nothing looked at what the
+    server had answered before the sheet asked: serve.sh's readiness
+    `GET /feeds.json` in the documented command was that route's first, so
+    the sheet's warm ask was published as one (1.32 / 51.1 ms against the
+    server's own 5.3 s). Now the up wait asks `HEAD /health`, which no page
+    asks and no request times, until the server gives any answer, so the
+    wait for the start is that route's; and an ask after a restart is timed
+    as a first only when the server's own `/speed.json` counts
+    (`since_start.n` by route), read with the proof and again after the
+    pass, show nobody asked its route before it and nobody but this sheet
+    during the pass. Every other ask is a NOT MEASURED line naming its
+    restarts, the count and why, never a FAIL: the server answered nothing
+    wrong, a first was not this sheet's to take (an open tab's up check on
+    the live app after a deploy would otherwise fail every run). The read
+    that proves a restart stays `/speed.json`'s first unless the server's
+    start is later than the up wait's answer, when that wait reached the
+    server the command stopped. Not taken: asking the up route once more
+    after the proof, as the sheet before repair 9 did (that ask is the
+    route's second, published as its first); the server's own
+    `first_after_start_micros` as the row (a server-side time beside
+    end-to-end times in one table); telling a check that waited for the
+    start by how long it took (a threshold is a guess); a check after the
+    pass alone (the command's asks come before the pass); and a FAIL for an
+    ask not proved a first. A route asked by two URLs in one pass (the
+    `/bars/window.json` grid and its extremes) gives each URL's first ask
+    since the start, the later one after the route's first (L-R315-32).
+46. **Verify r10's follow-ups.** `--month` and `--day` before 1970 are
+    refused by name, sharing the server's bound (`store::path::YearMonth`,
+    1970 to 9999), so R315-41's "as the server refuses it" holds; an empty
+    `--out`, `--command-log` or `--from-pages` is refused at the command
+    line; `--out` that is the commands' log by its device and inode once the
+    run has made it is not written (exit 2, the log kept whole); each
+    heading in the commands' log names the sheet's pid (R315-43). Not done
+    here: waiting within `--up-wait-ms` for a start that has not changed
+    yet (item 42's loud failure stands); the hidden-tab test's wall bound,
+    which machine load can break, as verify r10 saw once under coverage at
+    a load near 170; and the real-browser tests' temporary directories (the
+    main session's cleanup).
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-43);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-32.
 
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 

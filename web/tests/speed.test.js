@@ -3794,10 +3794,10 @@ test('the up wait after a restart is --up-wait-ms in all: each check within it w
   assert.equal(aliases, 1, 'asked after the first restart, and no more');
   assert.ok(r2.failures.includes('restart 1: the first /aliases.json answered no whole answer within 60000 ms (its headers came, then 0 bytes of its body)'), r2.failures.join('\n'));
   assert.ok(r2.notMeasured.includes('first after restart: GET /aliases.json was asked after 1 of the 3 restarts run: it had no whole answer within --timeout-ms 60000 in the first ask after restart 1, and is asked no more'), r2.notMeasured.join('\n'));
-  // Repair 10: an ask with no answer is no time of a first (the server may not have counted it, so its
+  // Repair 10: an ask with no answer is not timed as a first (the server may not have counted it, so its
   // count cannot prove it the route's first); its FAILED line says it, and its NOT MEASURED line why.
   assert.equal(r2.rows.find((x) => x.url === '/aliases.json' && x.phase === 'first after restart'), undefined);
-  assert.ok(r2.notMeasured.includes('first after restart: GET /aliases.json is not timed as a first after restart 1 (1 of the 3 timed): it had no answer (its FAILED line says why), so it is no time of a first'), r2.notMeasured.join('\n'));
+  assert.ok(r2.notMeasured.includes('first after restart: GET /aliases.json is not timed as a first after restart 1 (1 of the 3 timed): it had no answer (its FAILED line says why), so there is no first to time'), r2.notMeasured.join('\n'));
   assert.equal(r2.rows.find((x) => x.url === '/feeds.json' && x.phase === 'first after restart')?.n, 3, 'every other request is asked after every restart');
 });
 
@@ -4733,7 +4733,7 @@ async function startedServer(startFile, delayMs) {
   return { base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`, close: () => server.close() };
 }
 
-test('a restart is proved by the server\'s own start before anything is timed: a --restart that restarted nothing fails by name and times nothing, and the two asks a restart needs are their routes\' first after it', async () => {
+test('a restart is proved by the server\'s own start before anything is timed: a --restart that restarted nothing fails by name and times nothing, and the read that proved it is /speed.json\'s first after it, never asked twice', async () => {
   // Before (verify r9, 26 Oct): the pass read only the command's exit code,
   // the up check and the build it named, so a command that exited 0 and
   // restarted nothing published warm answers as 'first after restart' rows
@@ -5240,7 +5240,7 @@ test('an ask after a restart is timed as a first only when the server\'s own cou
   const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, capture, restart: async () => ((state.restarts += 1), (state.started = Date.now() + 3_600_000 + state.restarts), 0) });
   const both = 'restarts 1-2 (2 of the 2 timed)';
   const lines = [
-    `first after restart: GET ${grid.url} is not timed as a first after ${both}: it had no answer (its FAILED line says why), so it is no time of a first`,
+    `first after restart: GET ${grid.url} is not timed as a first after ${both}: it had no answer (its FAILED line says why), so there is no first to time`,
     `first after restart: GET ${extremes.url} is not timed as a first after ${both}: the server counted its route /bars/window.json more often than this sheet's answered asks of it (by 1 time each), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
     `first after restart: GET ${dayflags.url} is not timed as a first after ${both}: the server answered its route /dayflags.json more often than this sheet asked it during the pass (by 1 time each): another client asked it then, so this sheet's ask is not proved the first`,
     `first after restart: GET ${calendar.url} is not timed as a first after ${both}: the server counted its route /calendar.json 0 times each by the end of the pass, fewer than this sheet's answered asks of it, so that row is not this route's count`,
