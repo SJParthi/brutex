@@ -326,7 +326,7 @@ pub struct LifecycleEvidence<'a> {
 /// One independently documented NSE trading interruption. This is distinct
 /// from a current master's incomplete lifecycle fields and contains no inferred
 /// pre-listing interval. Sources name the exact symbol and ISIN.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InactiveInterval {
     /// First inactive date, inclusive.
     pub from: Day,

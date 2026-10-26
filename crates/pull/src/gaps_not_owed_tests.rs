@@ -703,3 +703,111 @@ fn every_reason_has_one_word_and_only_a_vendor_hole_is_lost() {
         assert_eq!((reason.word(), reason.is_loss()), (word, lost));
     }
 }
+
+/// A ledger of `count` one-minute runs on consecutive days, run `i` excused by
+/// `answer(i)`. Invented days; no bar is read.
+fn ledger_of(count: usize, answer: impl Fn(usize) -> NotOwed) -> Ledger {
+    let gaps = (0..count)
+        .map(|i| Gap {
+            day: i64::try_from(i).unwrap(),
+            from: 0,
+            to: 0,
+            reason: Reason::NotOwed(answer(i)),
+        })
+        .collect();
+    Ledger {
+        gaps,
+        ..Ledger::default()
+    }
+}
+
+/// A distinct listing day for each `i` below 4,096 (2000-01-01 onward).
+fn listing_answer(i: usize) -> NotOwed {
+    let year = 2000 + u16::try_from(i / (12 * 28)).unwrap();
+    let month = 1 + u8::try_from((i / 28) % 12).unwrap();
+    let date = 1 + u8::try_from(i % 28).unwrap();
+    NotOwed::BeforeListing {
+        listed_on: day_of(year, month, date),
+    }
+}
+
+/// **Gate 11 rule 6 at `Ledger::not_owed` (BASE-REDS-1023, 27 Oct 2026):
+/// every answer is named once, first seen first, whatever the count.** Three
+/// extremes at once: a ledger of exactly `MAX_GAPS` runs, every run a
+/// different answer, and answers that interleave on one day. The rows are the
+/// ones the earlier linear search gave; only the cost of finding a row moved.
+#[test]
+fn not_owed_names_every_distinct_answer_once_in_first_seen_order_at_max_gaps() {
+    let ledger = ledger_of(MAX_GAPS, listing_answer);
+    let named = ledger.not_owed();
+    assert_eq!(named.len(), MAX_GAPS);
+    for (i, row) in named.iter().enumerate() {
+        let day = i64::try_from(i).unwrap();
+        assert_eq!(
+            (row.why, row.days, row.minutes, row.first_day, row.last_day),
+            (listing_answer(i), 1, 1, day, day)
+        );
+    }
+
+    // Interleaved on one day, then a second day: A B A on day 7, A on day 8.
+    let a = NotOwed::Unread;
+    let b = listing_answer(3);
+    let mut ledger = ledger_of(0, listing_answer);
+    for (day, from, why) in [(7, 0, a), (7, 5, b), (7, 9, a), (8, 0, a)] {
+        ledger.gaps.push(Gap {
+            day,
+            from,
+            to: from + 1,
+            reason: Reason::NotOwed(why),
+        });
+    }
+    // A run that is not excused is not named.
+    ledger.gaps.push(Gap {
+        day: 9,
+        from: 0,
+        to: 0,
+        reason: Reason::VendorHole,
+    });
+    let named = ledger.not_owed();
+    assert_eq!(
+        named
+            .iter()
+            .map(|row| (row.why, row.days, row.minutes, row.first_day, row.last_day))
+            .collect::<Vec<_>>(),
+        vec![(a, 2, 6, 7, 8), (b, 1, 2, 7, 7)]
+    );
+
+    // Empty and one-run ledgers.
+    assert!(Ledger::default().not_owed().is_empty());
+    assert_eq!(ledger_of(1, listing_answer).not_owed().len(), 1);
+}
+
+/// **The cost of `Ledger::not_owed` does not grow with the number of distinct
+/// answers.** The same `MAX_GAPS` runs, once all one answer and once all
+/// different, timed in the same run (the best of 31 tries each, so a loaded
+/// machine slows both sides alike). A search through the answers seen so far
+/// made the second ~`MAX_GAPS`/2 comparisons per run, thousands of times the
+/// first; one hash probe per run keeps them within a small factor.
+#[test]
+fn not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers() {
+    let one = ledger_of(MAX_GAPS, |_| NotOwed::Unread);
+    let many = ledger_of(MAX_GAPS, listing_answer);
+    let best = |ledger: &Ledger| {
+        (0..31)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let named = ledger.not_owed();
+                let took = start.elapsed();
+                assert!(!named.is_empty());
+                took
+            })
+            .min()
+            .unwrap()
+    };
+    let (one_took, many_took) = (best(&one), best(&many));
+    assert!(
+        many_took <= one_took.saturating_mul(16).max(std::time::Duration::from_micros(200)),
+        "{MAX_GAPS} distinct answers took {many_took:?} against {one_took:?} for one: \
+         the cost grew with the answers"
+    );
+}
