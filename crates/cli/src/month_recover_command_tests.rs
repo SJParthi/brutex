@@ -534,7 +534,13 @@ fn refusals_clean_months_and_another_feed_are_each_said_by_name() {
     zerodha.tear(false);
     let (code, out) = zerodha.run("--plan");
     assert_eq!(code, OK, "{out}");
-    assert!(out.contains("zerodha keeps no import journal"), "{out}");
+    assert!(
+        out.contains(
+            "  re-read   zerodha keeps no import journal; re-pull the dropped days through its \
+             own door: 2020-03-03\n"
+        ),
+        "{out}"
+    );
     let (code, out) = zerodha.run("--yes");
     assert_eq!(code, OK, "{out}");
     assert!(
@@ -652,8 +658,12 @@ fn a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand() {
     store.tear(false);
     let (code, out) = store.run("--plan");
     assert_eq!(code, OK, "{out}");
+    // THE DAYS ARE NAMED, not only the reason: the cut drops day three.
     assert!(
-        out.contains("no GDFL import kind files the segment BOGUS"),
+        out.contains(
+            "  re-read   no GDFL import kind files the segment BOGUS; read the dropped days \
+             again by hand: 2020-03-03\n"
+        ),
         "{out}"
     );
     let (code, out) = store.run("--yes");
