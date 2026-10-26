@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-5 — Copies register (cloud build report)
 
@@ -306,3 +306,34 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   `--exact` name with `--test-threads=1` (each one red there too, or a fix here); then
   `cargo deny check`; coverage (`cargo +nightly llvm-cov --branch`) and `cargo mutants --in-diff`
   on the touched modules (clear `target/` between, 11 GB free); the CI shell gates; the final report.
+
+### 2026-10-26 — new container (new account), save point 9 (GO, no HOLD; base `06af67c3`)
+
+- 19:3x IST: new container, branch tip `2b251358` checked out; `GO` with no `HOLD` on the base.
+  Reinstalled `cargo-deny` 0.20.2, `cargo-llvm-cov` 0.9.1, `cargo-mutants` 27.1.0 from crates.io and
+  nightly with `llvm-tools-preview`.
+- Merged the newest `origin/feat/db-fix` (`5901ec77`, Merge BASE-FIXTURE-1025; brings IA-10c, R4-22):
+  one conflict, `docs/06-limits.md` (both sides appended a section at the end), resolved by keeping
+  both whole, the base's first (D-4891 (2)). Merge commit `e7f5311c`, pushed.
+- `cargo build --workspace --locked --all-targets -j 4`: `Finished`, 20 m 28 s, 0 warnings.
+- `cargo fmt --all --check`: exit 0.
+- `cargo deny check`: `advisories FAILED, bans ok, licenses ok, sources ok`, the one error
+  RUSTSEC-2026-0386 (tokio). The same on an unmodified worktree of `origin/feat/db-fix` `5901ec77`
+  (`Cargo.lock` byte-identical): the BASE item BASE-DENY-1024 owns.
+- CI shell gates (the `run:` blocks of ci.yml's `language-purity` job, `GITHUB_ENV` and
+  `RUNNER_TEMP` emulated; gate 1e not run, it builds and tests the whole workspace a second time),
+  on this branch and on an unmodified worktree of `5901ec77`: the SAME ten red on both: 1c, 1d, 10,
+  11, 12, 19, 23, 27b, 29, 30. Gate 29 is new on the base (R4-18's `/pull/quarantine.json` and
+  `/pull/quarantine` have no growth bench; the tool's main run names those two on both, 102 routes
+  here against 101, `/disk/copies.json` with no finding). 1c identical; 10, 11, 12, 19, 23, 27b, 30
+  differ only in scanned counts and test order. Gate 1d named 543 undeclared literals here against
+  482 on the base: the 61 more are all this part's, each read, now declared in
+  `.github/gates_tree.rs` (`CC5_LITERAL`, `DECLARED` 77 -> 78, as R4-28 and IA-10c declared theirs):
+  after it gate 1d's undeclared list is the base's own, 482, the same set. Gate 0 (the tool's own
+  tests) exit 0; gate 6c's `rustfmt --check` and `clippy-driver -D warnings` (both builds) clean on
+  the file. Commit `3d683d38`. Every other gate: exit 0 here.
+- `cargo mutants --list --in-diff` (the diff of `crates/*/src/*.rs` against `origin/feat/db-fix`):
+  270 mutants (copies_register.rs 210, copies_route.rs 21, settings.rs 14, disk_copies_command.rs
+  11, settings_route.rs 8, server.rs 4, cli lib.rs 2).
+- NEXT: the workspace test run (running); clippy; the new reds on an unmodified worktree of
+  `5901ec77` by `--exact` name with `--test-threads=1`; web W1-W5; coverage; mutants; the report.
