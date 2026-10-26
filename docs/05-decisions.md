@@ -83387,7 +83387,13 @@ owed their growth bench by name, beside `/pull/repair.json` and
 S-43 and S-48 now wait for the operator (the token, the approval), which is
 what is left of each; S-37 and S-41, whose only prerequisite was R4-22, are
 rehearsed on a private copy (their `rehearsed_*` fields say on what build
-and copy).
+and copy). The rehearsals found two things the steps did not say: S-41's
+two option days are read again and refused by name (211 files whose month
+holds a bar of the day read differently, `bars_differ_held`), so the step
+as written does not close OWED-15; and S-37's dry run filed three of the
+five names (GVT&D, NAM-INDIA, UNOMINDA) and nothing for ANGELONE or
+PATANJALI on 2018-09-03 to 07, why UNVERIFIED. Both stay pending with
+those results recorded beside them.
 
 ### D-7148 — Gate 1c: the Zerodha verify run's live-lock directory is `verify/running`, never `verify/live` (BASE-REDS-1023) — 2026-10-23
 
