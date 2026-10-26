@@ -1233,8 +1233,8 @@ export const NOT_FIRST = Object.freeze({
   'no answer': () => 'it had no answer (its FAILED line says why), so it is no time of a first',
   'old server': () => `the up wait was answered before this server's own start (its ${SPEED_ROUTE} started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
   before: (l) => `the server had already answered its route ${l.r.route} since its start when this sheet asked it (${timesText(l.seen)}: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
-  during: (l) => `the server answered its route ${l.r.route} during the pass more often than this sheet asked it (${timesText(l.seen)} more): another client asked it then, so this sheet's ask is not proved the first`,
-  left: (l) => `the server counted its route ${l.r.route} more often than this sheet's answered asks of it (${timesText(l.seen)} more), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
+  during: (l) => `the server answered its route ${l.r.route} more often than this sheet asked it during the pass (by ${timesText(l.seen)}): another client asked it then, so this sheet's ask is not proved the first`,
+  left: (l) => `the server counted its route ${l.r.route} more often than this sheet's answered asks of it (by ${timesText(l.seen)}), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
   unnamed: (l) => `the server's ${SPEED_ROUTE} has no row ${l.r.route} after this sheet's answered ask of it (the server counts that path under another route), so its count cannot prove the ask its route's first`,
   fewer: (l) => `the server counted its route ${l.r.route} ${timesText(l.seen)} by the end of the pass, fewer than this sheet's answered asks of it, so that row is not this route's count`
 });
@@ -1610,10 +1610,8 @@ export async function runSheet(args, deps = {}) {
       // command that restarted nothing ('true', or a stop refused before a
       // start that found the old server listening) exits 0 and the old
       // server answers. Its start that did not change ends the pass, as
-      // another build does: what it would time is a warm server. The same
-      // answer says what the server had answered since that start (verify
-      // r10), which the pass's asks are proved against.
-      const is = await speedNow(answeredOf);
+      // another build does: what it would time is a warm server.
+      const is = await speedNow(startedOf);
       if ('why' in is) {
         failures.push(`restart ${at}: the server's start could not be read after the --restart command, so a restart could not be told from none: ${is.why}`);
         ended = `the server's start could not be read at restart ${at}`;
@@ -1625,6 +1623,15 @@ export async function runSheet(args, deps = {}) {
         break;
       }
       log(`speed sheet: restart ${at}: the server restarted: started_ms ${was.started} before the command, ${is.started} after it`);
+      // THE SAME ANSWER SAYS WHAT THE SERVER HAD ANSWERED SINCE THAT START
+      // (verify r10, 26 Oct), which every ask of the pass is proved against:
+      // counts that cannot be read time nothing after this restart.
+      const before = answeredOf(is.answer);
+      if ('why' in before) {
+        failures.push(`restart ${at}: what the server answered since its start could not be read with the proof of the restart, so no ask after it could be proved its route's first: ${before.why}`);
+        ended = `the server's count could not be read at restart ${at}`;
+        break;
+      }
       // THE PASS: each request asked once, `/speed.json` by the read that
       // proved the restart (asked again, its row would time a second ask as a
       // first). Its failures are said as they come; whether each ask is timed
@@ -1675,7 +1682,7 @@ export async function runSheet(args, deps = {}) {
         const f = firsts.get(key) ?? { asked: 0, times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
         firsts.set(key, f);
         f.asked += 1;
-        const not = firstAfterRestart(r, a, { before: is.counts, after: after.counts, mine: own.get(r.route) ?? { answered: 0, left: 0 }, proofRead: key === speedKey, startedAfterUp: is.started > upAt });
+        const not = firstAfterRestart(r, a, { before: before.counts, after: after.counts, mine: own.get(r.route) ?? { answered: 0, left: 0 }, proofRead: key === speedKey, startedAfterUp: is.started > upAt });
         if (not !== null) {
           const l = lost.get(`${key}\n${not.kind}`) ?? { r, kind: not.kind, at: [], seen: [] };
           lost.set(`${key}\n${not.kind}`, l);

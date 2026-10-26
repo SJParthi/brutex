@@ -5094,3 +5094,250 @@ test('no command the sheet or the harness starts is given either one\'s own stdo
   }
   assert.match(source('ci/speed-sheet.mjs'), /spawn\(command, \{ shell: true, stdio: \['ignore', log, log\], detached: true \}\)/);
 });
+
+// ---------------------------------------------------------------------------
+// Repair round 10 (26 Oct): verify r10's two blocking findings, each failing
+// on 9f1f7c2c6: the up check that found the server up was the up route's
+// 'first after restart' sample, so it timed the server's start; and a route
+// the --restart command (or another client) had asked was published as a
+// first with a warm time.
+// ---------------------------------------------------------------------------
+
+/**
+ * A real server over the strict stand-in that restarts as the api does: `GET
+ * /__restart` (the `--restart` command's, never counted) gives it a new start
+ * (`started_ms`, the time of the restart) and clears its counts, then blocks
+ * its event loop `delayMs` once that answer has gone, so the next connection
+ * waits in the listen queue: listening at once, answering only later, as the
+ * api says `listening` and then starts for about 5 s.
+ *
+ * @param {number} delayMs
+ */
+async function restartingServer(delayMs) {
+  const state = { started: Date.now() - 1, restarts: 0 };
+  const strict = standIn({ ignore: new Set(), started: () => state.started });
+  const server = http.createServer(async (req, res) => {
+    if (new URL(String(req.url), 'http://x').pathname === '/__restart') {
+      state.restarts += 1;
+      state.started = Date.now();
+      res.on('finish', () => setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs)));
+      res.end('restarting\n');
+      return;
+    }
+    const a = await strict.send('', String(req.url), { method: req.method });
+    if (a.status === 0) return void res.socket?.destroy();
+    res.writeHead(a.status, { 'content-type': 'application/json', ...(a.build ? { 'x-brutex-build': a.build } : {}) });
+    res.end(req.method === 'HEAD' ? undefined : a.body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(undefined)));
+  const base = `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`;
+  /** A --restart command that restarts this server, then asks each of `then` itself. @param {string[]} [then] */
+  const command = (then = []) => `'${process.execPath}' -e "fetch('${base}/__restart').then((r) => r.text())${then.map((p) => `.then(() => fetch('${base}${p}')).then((r) => r.text())`).join('')}.then(() => process.exit(0), () => process.exit(1))"`;
+  return { base, state, counts: strict.counts, command, close: () => server.close() };
+}
+
+/** A sheet's rows of one phase, by route and label (the table names a request by both), from its Markdown. @param {string} md @param {string} phase */
+const rowsOf = (md, phase) => new Map(md.split('\n').filter((l) => l.includes(`| ${phase} |`)).map((l) => {
+  const cells = l.split('|').map((c) => c.trim());
+  return [`${cells[3].replaceAll('`', '')} ${cells[4]}`, { n: Number(cells[7]), p50: Number(cells[8]), p99: Number(cells[9]), max: Number(cells[10]) }];
+}));
+
+test('after a restart the up wait asks a route no request times, over the network as a command: a server that listens at once and answers 1,500 ms later gives the up route its own time as its first, never that wait, and the sheet says where the wait went', { timeout: 120_000 }, async () => {
+  // Before (verify r10, 26 Oct, B1): on the real api the HEAD /inspection.json
+  // first after restart read 4,515 / 6,566 ms against the server's own 42 µs:
+  // the up check that found the server up was its sample, and it had waited
+  // in the listen queue for the server's start.
+  const DELAY = 1500;
+  const site = await restartingServer(DELAY);
+  const dir = mkdtempSync(join(tmpdir(), 'r315-r10-'));
+  try {
+    const argv = ['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--timeout-ms', '10000', '--up-wait-ms', '10000', '--restarts', '2'];
+    // The command returns before the server answers.
+    const b1 =await sheetCommand([...argv, '--restart', site.command(), '--out', join(dir, 'b1.md')]);
+    assert.equal(b1.code, 0, `${b1.stdout}\n${b1.stderr}`);
+    assert.match(b1.stdout, /^# Speed sheet — PASS\n/);
+    assert.equal(site.state.restarts, 2);
+    const firsts1 = rowsOf(b1.stdout, 'first after restart');
+    assert.equal(firsts1.size, sheet.requestsFor(CTX).requests.length, `every request has its first after restart\n${b1.stdout}`);
+    const up = firsts1.get(`${UP_ROUTE} header-only up check`);
+    assert.ok(up !== undefined && up.n === 2 && up.max < DELAY / 2, `the up route's first is its own time, never the server's start: ${JSON.stringify(up)}`);
+    for (const [url, row] of firsts1) assert.ok(row.max < DELAY / 2, `${url}: ${JSON.stringify(row)}`);
+    // The wait for the start was the up wait's, and the sheet says so.
+    const said = /\n- first after restart: after each --restart command the up wait asked HEAD \/health, which no request times, until the server answered it \((\d+)(?: to (\d+))? ms after the command\)/.exec(b1.stdout);
+    assert.ok(said !== null && Number(said[1]) >= DELAY / 4, b1.stdout);
+    assert.match(b1.stderr, /speed sheet: restart 1: up \d+ ms after the command \(HEAD \/health answered HTTP 200\), answered by c{40}\n/);
+    assert.equal(site.counts.get('/health'), 1, 'the up wait asked /health once after the last restart: it waited in the listen queue');
+  } finally {
+    site.close();
+  }
+});
+
+test('a route the --restart command asked itself is not timed as a first, over the network as a command: serve.sh\'s readiness GET /feeds.json is NOT MEASURED by name with the count, and every other request keeps its first', { timeout: 120_000 }, async () => {
+  // Before (verify r10, 26 Oct, B2): with serve.sh's readiness GET /feeds.json
+  // in the documented --restart command, the /feeds.json first after restart
+  // read 1.32 / 51.1 ms against the server's own 5.3 s: the command's ask was
+  // its route's first, and the sheet's warm ask was published as one.
+  const site = await restartingServer(300);
+  const dir = mkdtempSync(join(tmpdir(), 'r315-r10-'));
+  try {
+    const argv = ['--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--timeout-ms', '10000', '--up-wait-ms', '10000', '--restarts', '2'];
+    // The command asks GET /feeds.json itself once it has restarted the server, as serve.sh's readiness check does.
+    const b2 =await sheetCommand([...argv, '--restart', site.command(['/feeds.json']), '--out', join(dir, 'b2.md')]);
+    assert.equal(b2.code, 0, `${b2.stdout}\n${b2.stderr}`);
+    const firsts2 = rowsOf(b2.stdout, 'first after restart');
+    assert.equal(firsts2.has('/feeds.json (no query)'), false, 'no /feeds.json first after restart: the command asked it first');
+    assert.equal(firsts2.size, sheet.requestsFor(CTX).requests.length - 1);
+    assert.ok([...firsts2.values()].every((r) => r.n === 2));
+    assert.ok(b2.stdout.includes('\n- NOT MEASURED: first after restart: GET /feeds.json is not timed as a first after restarts 1-2 (2 of the 2 timed): the server had already answered its route /feeds.json since its start when this sheet asked it (1 time each: the --restart command\'s asks or another client\'s), so the first ask after the restart was not this sheet\'s\n'), b2.stdout);
+    assert.equal(site.counts.get('/feeds.json'), 2, 'the server answered /feeds.json twice after the last restart: the command\'s ask, then this sheet\'s');
+  } finally {
+    site.close();
+  }
+});
+
+test('an ask after a restart is timed as a first only when the server\'s own count proves it; every other ask is NOT MEASURED once a request and reason, with its restarts and the count: another client\'s ask before the pass and during it, a path the server counts under another route, a count below this sheet\'s own, an ask with no answer and one beside it the server may have counted, the up wait\'s own route, and the proof read when the up wait reached the old server', async () => {
+  // Before (verify r10, 26 Oct): every ask after a restart was published as
+  // its route's first, whatever the server had answered before it or beside it.
+  const { requests: catalogue } = sheet.requestsFor(CTX);
+  const by = (/** @type {(r: any) => boolean} */ f) => /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ (catalogue.find(f));
+  const grid = by((r) => r.label === 'the grid, newest first');
+  const extremes = by((r) => r.label === 'extremes');
+  const dayflags = by((r) => r.route === '/dayflags.json');
+  const calendar = by((r) => r.route === '/calendar.json');
+  const sources = by((r) => r.route === '/sources.json');
+  const state = { restarts: 0, started: 1 };
+  const strict = standIn({ ignore: new Set(), started: () => state.started });
+  /** @param {string} b @param {string} path @param {{method?: string, keep?: string}} [o] */
+  const send = async (b, path, o = {}) => {
+    const u = new URL(path, 'http://x');
+    if (state.restarts > 0) {
+      // Another client asks /sources.json while the up wait waits, before the proof is read.
+      if (u.pathname === sheet.UP_WAIT_ROUTE && o.keep === undefined) await strict.send(b, sources.url, {});
+      // Another client asks /dayflags.json during the pass, once this sheet has asked /aliases.json.
+      if (o.keep === 'head' && u.pathname === '/aliases.json') await strict.send(b, dayflags.url, {});
+      // The grid's ask is counted by the server, and its answer never reaches the sheet.
+      if (o.keep === 'head' && path === grid.url) {
+        await strict.send(b, path, o);
+        return { status: 0, error: 'reset', ms: 1, build: null, body: '', bytes: 0, headers: {} };
+      }
+    }
+    const a = await strict.send(b, path, o);
+    if (u.pathname !== SPEED_ROUTE || a.status !== 200) return a;
+    // The server counts /runs/7.json under its route's pattern, and /calendar.json once less than it answered it.
+    const body = JSON.parse(a.body);
+    body.rows = body.rows.map((/** @type {any} */ x) => (x.route === '/runs/7.json' ? { ...x, route: '/runs/{id}.json' } : x.route === '/calendar.json' ? { ...x, since_start: { ...x.since_start, n: x.since_start.n - 1 } } : x));
+    const text = JSON.stringify(body);
+    return { ...a, body: text, bytes: text.length };
+  };
+  const capture = JSON.stringify({ requests: [{ page: '/db', method: 'HEAD', url: sheet.UP_WAIT_ROUTE }, { page: '/db', method: 'GET', url: '/runs/7.json' }] });
+  // Each restart's server starts an hour after the up wait was answered: the up wait reached the old server.
+  const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, capture, restart: async () => ((state.restarts += 1), (state.started = Date.now() + 3_600_000 + state.restarts), 0) });
+  const both = 'restarts 1-2 (2 of the 2 timed)';
+  const lines = [
+    `first after restart: GET ${grid.url} is not timed as a first after ${both}: it had no answer (its FAILED line says why), so it is no time of a first`,
+    `first after restart: GET ${extremes.url} is not timed as a first after ${both}: the server counted its route /bars/window.json more often than this sheet's answered asks of it (by 1 time each), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
+    `first after restart: GET ${dayflags.url} is not timed as a first after ${both}: the server answered its route /dayflags.json more often than this sheet asked it during the pass (by 1 time each): another client asked it then, so this sheet's ask is not proved the first`,
+    `first after restart: GET ${calendar.url} is not timed as a first after ${both}: the server counted its route /calendar.json 0 times each by the end of the pass, fewer than this sheet's answered asks of it, so that row is not this route's count`,
+    `first after restart: GET ${sources.url} is not timed as a first after ${both}: the server had already answered its route /sources.json since its start when this sheet asked it (1 time each: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
+    `first after restart: GET /speed.json is not timed as a first after ${both}: the up wait was answered before this server's own start (its /speed.json started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
+    `first after restart: HEAD /health is not timed as a first after ${both}: its route is the one the up wait asks (HEAD /health) after each restart before anything is timed, so its first ask after the restart is that wait's`,
+    'first after restart: GET /runs/7.json is not timed as a first after restarts 1-2 (2 of the 2 timed): the server\'s /speed.json has no row /runs/7.json after this sheet\'s answered ask of it (the server counts that path under another route), so its count cannot prove the ask its route\'s first'
+  ];
+  for (const line of lines) assert.ok(r.notMeasured.includes(line), `${line}\n---\n${r.notMeasured.join('\n')}`);
+  assert.equal(r.notMeasured.filter((l) => l.includes(' is not timed as a first after ')).length, lines.length, r.notMeasured.join('\n'));
+  // Every other request is timed as a first after both restarts, and nothing it lost has a row.
+  const lostUrls = new Set([grid.url, extremes.url, dayflags.url, calendar.url, sources.url, SPEED_ROUTE, sheet.UP_WAIT_ROUTE, '/runs/7.json']);
+  const firsts = r.rows.filter((x) => x.phase === 'first after restart');
+  assert.deepEqual(firsts.map((x) => x.url).sort(), [...catalogue.map((x) => x.url)].filter((url) => !lostUrls.has(url)).sort());
+  assert.ok(firsts.every((x) => x.n === 2 && x.classes.answered === 2), JSON.stringify(firsts));
+  assert.ok(r.failures.includes(`restart 1: the first ${grid.url} answered reset`) && r.failures.includes(`restart 2: the first ${grid.url} answered reset`), r.failures.join('\n'));
+  assert.equal(r.failures.length, 2, r.failures.join('\n'));
+  assert.ok(r.notes.some((n) => /^first after restart: 2 restarts timed, each proved by the server's own start \(\/speed\.json started_ms\) changing across the --restart command: 1 to (\d+), \1 to \d+$/.test(n)), r.notes.join('\n'));
+});
+
+test('the server\'s count, read with the proof and again after the pass: one that cannot be read, and a start that changed during the pass, fail that restart by name and time nothing of it; what an earlier restart timed stands', async () => {
+  /**
+   * A run of two restarts whose /speed.json answers, after a restart, are
+   * changed by `change(k, restarts, answer)`, `k` counting the asks of
+   * /speed.json since that restart (1 the proof, 2 the count after the pass).
+   *
+   * @param {(k: number, restarts: number, a: any) => any} change
+   */
+  const runWith = async (change) => {
+    const state = { restarts: 0, k: 0 };
+    const strict = standIn({ ignore: new Set(), started: () => state.restarts });
+    /** @param {string} b @param {string} path @param {{method?: string}} [o] */
+    const send = async (b, path, o = {}) => {
+      const a = await strict.send(b, path, o);
+      if (state.restarts === 0 || new URL(path, 'http://x').pathname !== SPEED_ROUTE) return a;
+      state.k += 1;
+      return change(state.k, state.restarts, a);
+    };
+    return sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, restart: async () => ((state.restarts += 1), (state.k = 0), 0) });
+  };
+  const noRows = await runWith((k, _n, a) => (k === 1 ? { ...a, body: JSON.stringify({ started_ms: 1 }) } : a));
+  assert.deepEqual(noRows.failures, ['restart 1: what the server answered since its start could not be read with the proof of the restart, so no ask after it could be proved its route\'s first: GET /speed.json answered without a rows list']);
+  assert.ok(noRows.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the server\'s count could not be read at restart 1'), noRows.notMeasured.join('\n'));
+  const after503 = await runWith((k, _n, a) => (k === 2 ? { ...a, status: 503, body: 'busy' } : a));
+  assert.deepEqual(after503.failures, ['restart 1: what the server answered since its start could not be read after the pass, so no ask of it could be proved its route\'s first: GET /speed.json answered HTTP 503']);
+  assert.ok(after503.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the server\'s count could not be read after the pass of restart 1'), after503.notMeasured.join('\n'));
+  const again = await runWith((k, _n, a) => (k === 2 ? { ...a, body: a.body.replace('"started_ms":1', '"started_ms":7') } : a));
+  assert.deepEqual(again.failures, ['restart 1: the server started again during the pass: its /speed.json said started_ms 1 before the pass and 7 after it, so its answers are not one start\'s']);
+  assert.ok(again.notMeasured.includes('first after restart: timed after 0 of the 2 restarts asked: the server started again during the pass of restart 1'), again.notMeasured.join('\n'));
+  for (const r of [noRows, after503, again]) {
+    assert.ok(!r.rows.some((x) => x.phase === 'first after restart'), 'nothing of that restart is timed');
+    assert.ok(!r.notes.some((n) => n.startsWith('first after restart')), 'and no restart is said timed');
+  }
+  // A later restart's count that cannot be read ends the pass there; the earlier restart's firsts stand, with its proof.
+  const later = await runWith((k, n, a) => (n === 2 && k === 2 ? { ...a, status: 0, error: 'ECONNRESET', body: '' } : a));
+  assert.deepEqual(later.failures, ['restart 2: what the server answered since its start could not be read after the pass, so no ask of it could be proved its route\'s first: GET /speed.json answered ECONNRESET']);
+  assert.ok(later.notMeasured.includes('first after restart: timed after 1 of the 2 restarts asked: the server\'s count could not be read after the pass of restart 2'), later.notMeasured.join('\n'));
+  const firsts = later.rows.filter((x) => x.phase === 'first after restart');
+  assert.equal(firsts.length, sheet.requestsFor(CTX).requests.length);
+  assert.ok(firsts.every((x) => x.n === 1), JSON.stringify(firsts.map((x) => [x.url, x.n])));
+  assert.ok(later.notes.includes('first after restart: 1 restart timed, each proved by the server\'s own start (/speed.json started_ms) changing across the --restart command: 0 to 1'), later.notes.join('\n'));
+  assert.ok(!later.notMeasured.some((l) => l.includes(' is not timed as a first after ')), later.notMeasured.join('\n'));
+});
+
+test('what the server answered since its start is read from its /speed.json answer route by route, or why not is said; restarts are said as runs; and one ask is a first only by the server\'s count', () => {
+  const ok = { status: 200, headers: {}, ms: 1, bytes: 10, build: null, kept: /** @type {const} */ ('text') };
+  /** @param {unknown} rows */
+  const of = (rows) => sheet.answeredOf({ ...ok, body: JSON.stringify({ started_ms: 5, rows }) });
+  assert.deepEqual(of([{ route: '/a', since_start: { n: 2 } }, { route: '/b', since_start: { n: 0 } }]), { started: 5, counts: new Map([['/a', 2], ['/b', 0]]) });
+  assert.deepEqual(of([]), { started: 5, counts: new Map() });
+  assert.deepEqual(sheet.answeredOf({ ...ok, status: 404, body: '' }), { why: 'GET /speed.json answered HTTP 404' }, 'the start\'s own reasons first');
+  assert.deepEqual(sheet.answeredOf({ ...ok, body: '{"rows":[]}' }), { why: 'GET /speed.json answered without a whole started_ms' });
+  for (const rows of [undefined, null, {}, 'rows']) assert.deepEqual(of(rows), { why: 'GET /speed.json answered without a rows list' }, JSON.stringify(rows));
+  for (const bad of [{ since_start: { n: 1 } }, { route: 7, since_start: { n: 1 } }, { route: '/a' }, { route: '/a', since_start: {} }, { route: '/a', since_start: { n: -1 } }, { route: '/a', since_start: { n: 1.5 } }, { route: '/a', since_start: { n: '1' } }, { route: '/a', since_start: { n: 2 ** 53 } }, null]) {
+    assert.deepEqual(of([{ route: '/z', since_start: { n: 0 } }, bad]), { why: 'GET /speed.json answered a row (its 1) without a route and a whole since_start.n' }, JSON.stringify(bad));
+  }
+  assert.deepEqual(of([{ route: '/a', since_start: { n: 1 } }, { route: '/a', since_start: { n: 3 } }]), { why: 'GET /speed.json answered the route /a in two rows' });
+  // Restarts as runs.
+  assert.equal(sheet.restartsText([1]), 'restart 1');
+  assert.equal(sheet.restartsText([4]), 'restart 4');
+  assert.equal(sheet.restartsText([1, 2]), 'restarts 1-2');
+  assert.equal(sheet.restartsText([2, 4]), 'restarts 2, 4');
+  assert.equal(sheet.restartsText([1, 2, 3, 5, 7, 8]), 'restarts 1-3, 5, 7-8');
+  // One ask, by kind: the first that applies, in order.
+  const req = /** @type {import('../ci/speed-sheet.mjs').SheetRequest} */ ({ page: '/db', route: '/x.json', label: '', method: 'GET', url: '/x.json?a=1', builder: '' });
+  const answered = { ...ok, body: '' };
+  const none = { status: 0, error: 'reset', ms: 1, build: null, body: '', bytes: 0, headers: {} };
+  const o = { before: new Map(), after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 0 }, proofRead: false, startedAfterUp: false };
+  const first = sheet.firstAfterRestart;
+  assert.equal(first(req, answered, o), null, 'nobody before, and the server counted exactly this sheet\'s ask');
+  assert.deepEqual(first({ ...req, route: sheet.UP_WAIT_ROUTE }, answered, { ...o, after: new Map([[sheet.UP_WAIT_ROUTE, 1]]) }), { kind: 'up wait', seen: 0 });
+  assert.deepEqual(first(req, none, o), { kind: 'no answer', seen: 0 });
+  assert.deepEqual(first(req, answered, { ...o, proofRead: true, startedAfterUp: true }), { kind: 'old server', seen: 0 });
+  assert.equal(first(req, answered, { ...o, proofRead: true }), null, 'the proof read whose start came before the up wait\'s answer');
+  assert.equal(first(req, answered, { ...o, startedAfterUp: true }), null, 'only the proof read waits for a new server');
+  assert.deepEqual(first(req, answered, { ...o, before: new Map([['/x.json', 3]]) }), { kind: 'before', seen: 3 });
+  assert.deepEqual(first(req, answered, { ...o, after: new Map() }), { kind: 'unnamed', seen: 0 });
+  assert.deepEqual(first(req, answered, { ...o, after: new Map([['/x.json', 0]]) }), { kind: 'fewer', seen: 0 });
+  assert.deepEqual(first(req, answered, { ...o, after: new Map([['/x.json', 3]]) }), { kind: 'during', seen: 2 });
+  assert.deepEqual(first(req, answered, { ...o, after: new Map([['/x.json', 3]]), mine: { answered: 1, left: 1 } }), { kind: 'left', seen: 2 });
+  assert.equal(first(req, answered, { ...o, after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 1 } }), null, 'an ask left unanswered that the server never counted');
+  assert.deepEqual(Object.keys(sheet.NOT_FIRST).sort(), ['before', 'during', 'fewer', 'left', 'no answer', 'old server', 'unnamed', 'up wait']);
+  // A count of many restarts is its least and most.
+  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [1, 4, 2] }), /\(1 to 4 times: /);
+  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [2] }), /\(2 times: /);
+});
