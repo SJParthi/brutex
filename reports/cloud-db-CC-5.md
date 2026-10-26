@@ -261,7 +261,7 @@ Prerequisites: none (spec section 1). FILES_ONLY links: none.
   (the two skipped hang on the base, save point 7): `EXIT=101`; red targets: api lib (12 failed of 2,945),
   cli lib (29 of 2,406), cli `--test gdfl_run_logs` (2 of 4), pull lib (12 of 2,108), store lib (5 of 431),
   store `--test sealed_door` (1 of 1), telemetry lib (4 of 225). None is in a file of this part.
-  The 24 named at save point 7 recur (shown red on the base there). NEW since the merges of
+  The 29 named at save point 7 recur (shown red on the base there). NEW since the merges of
   `13dcf5e5` (CLOUD-MUTAPIB and the parts before it), NOT YET shown red on an unmodified base:
   - `a_run_whose_sink_is_held_refuses_before_any_lock`
   - `audit::cloud_mutant_tests::an_unreadable_journal_refuses_the_index_build_and_says_so`
