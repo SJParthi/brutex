@@ -48,9 +48,24 @@
  * `/speed.json`) is read before each run of the command and again once the
  * server is up after it; a start that did not change fails that restart by
  * name and ends the pass, as another build does, and a start that cannot be
- * read is said and ends it too. The two asks a restart needs anyway are
- * their routes' first after it: the up check that found the server up is the
- * up route's, and the read that proved the restart is `/speed.json`'s.
+ * read is said and ends it too.
+ *
+ * # A first is its route's first, and none waits for the start (verify r10)
+ *
+ * The up check that found the server up was the up route's sample, so a
+ * `--restart` command that returned before the server answered timed the
+ * server's start as `HEAD /inspection.json`'s first (4.5 to 6.6 s against
+ * the server's own 42 µs); and a route the command asked itself (serve.sh's
+ * readiness `GET /feeds.json`) was published as a first with a warm time
+ * (1.3 ms against the server's own 5.3 s). Now the up wait asks
+ * {@link UP_WAIT_ROUTE}, which no request times, until the server answers
+ * it, so the wait for the start is that route's; the read that proves the
+ * restart is `/speed.json`'s first; and an ask after a restart is timed as a
+ * first only when the server's own count proves it ({@link answeredOf}:
+ * `since_start.n` of its `/speed.json`, read with the proof and again after
+ * the pass): nobody asked its route before this sheet did, and nobody but
+ * this sheet during the pass. Every other ask is a NOT MEASURED line naming
+ * its restarts, the count and why.
  *
  * # Usage (the deploy step runs this after every deploy)
  *
@@ -1087,6 +1102,47 @@ export async function restartWithin(command, ms, log) {
 }
 
 /**
+ * THE ROUTE THE UP WAIT ASKS AFTER A RESTART, WHICH NO REQUEST TIMES (verify
+ * r10, 26 Oct). Whatever is asked first after a `--restart` command that
+ * returned before the server answers waits in the server's listen queue for
+ * its start (the api says `listening`, then starts for about 5 s), so that
+ * ask's time is the start's and not its route's: the up check that found the
+ * server up was the up route's sample, and `HEAD /inspection.json`'s first
+ * after restart read 4,515 ms against the server's own 42 µs. `/health` is
+ * the server's word on itself (`api::server::health`, a read of what is
+ * already in memory); no page asks it (`+layout.svelte` says why), so no
+ * timed row is its; any answer it gives, a 503 too, says the server answers;
+ * and every answer names its build. A request of a capture on this route is
+ * never timed as a first: its first ask after a restart is this wait's.
+ */
+export const UP_WAIT_ROUTE = '/health';
+
+/** The up wait's method: headers only, as the pages' own up check asks. */
+export const UP_WAIT_METHOD = 'HEAD';
+
+/**
+ * An answer of `GET /speed.json` read as JSON with its `started_ms`, or why
+ * it cannot be: the one parse {@link startedOf} and {@link answeredOf} share.
+ *
+ * @param {Answer | NoAnswer} a
+ * @returns {{started: number, body: {rows?: unknown}} | {why: string}}
+ */
+function speedOf(a) {
+  if (a.status !== 200) return { why: `GET ${SPEED_ROUTE} answered ${'error' in a ? a.error : `HTTP ${a.status}`}` };
+  if ('kept' in a && a.kept !== undefined && a.kept !== 'text') return { why: `GET ${SPEED_ROUTE} answered ${a.bytes} bytes, past the ${MAX_TEXT_BYTES} the sheet keeps as text` };
+  /** @type {unknown} */
+  let body;
+  try {
+    body = JSON.parse(a.body);
+  } catch (why) {
+    return { why: `GET ${SPEED_ROUTE} answered HTTP 200 with a body that is not JSON (${/** @type {Error} */ (why).message})` };
+  }
+  const started = /** @type {{started_ms?: unknown} | null} */ (body)?.started_ms;
+  if (typeof started !== 'number' || !Number.isSafeInteger(started) || started < 0) return { why: `GET ${SPEED_ROUTE} answered without a whole started_ms` };
+  return { started, body: /** @type {{rows?: unknown}} */ (body) };
+}
+
+/**
  * The server's own start, from an answer of `GET /speed.json`: its
  * `started_ms`, the time the server's process began counting, which a new
  * process gives anew and the same process never changes (`api::speed`). Or
@@ -1099,18 +1155,122 @@ export async function restartWithin(command, ms, log) {
  * @returns {{started: number} | {why: string}}
  */
 export function startedOf(a) {
-  if (a.status !== 200) return { why: `GET ${SPEED_ROUTE} answered ${'error' in a ? a.error : `HTTP ${a.status}`}` };
-  if ('kept' in a && a.kept !== undefined && a.kept !== 'text') return { why: `GET ${SPEED_ROUTE} answered ${a.bytes} bytes, past the ${MAX_TEXT_BYTES} the sheet keeps as text` };
-  /** @type {unknown} */
-  let body;
-  try {
-    body = JSON.parse(a.body);
-  } catch (why) {
-    return { why: `GET ${SPEED_ROUTE} answered HTTP 200 with a body that is not JSON (${/** @type {Error} */ (why).message})` };
+  const read = speedOf(a);
+  return 'why' in read ? read : { started: read.started };
+}
+
+/**
+ * What the server answered since its own start, route by route, with that
+ * start: each row's `since_start.n` of an answer of `GET /speed.json` —
+ * every ask the server answered, refused, failed or saw cancelled since its
+ * process began counting, each counted when it ended (so not the ask that
+ * reads it), under the route the server matched: one row for a path's `HEAD`
+ * and `GET`, its query no part of it (`api::speed`). Or why it cannot be read.
+ * An ask after a restart is timed as a first only when these counts prove it
+ * its route's first (verify r10, 26 Oct: a route the `--restart` command had
+ * asked itself was published as a first with a warm time). Linear in the
+ * rows, which the server holds to `ROUTE_CAP` (256).
+ *
+ * @param {Answer | NoAnswer} a
+ * @returns {{started: number, counts: Map<string, number>} | {why: string}}
+ */
+export function answeredOf(a) {
+  const read = speedOf(a);
+  if ('why' in read) return read;
+  const rows = read.body.rows;
+  if (!Array.isArray(rows)) return { why: `GET ${SPEED_ROUTE} answered without a rows list` };
+  /** @type {Map<string, number>} */
+  const counts = new Map();
+  for (const [i, row] of rows.entries()) {
+    const route = row?.route;
+    const n = row?.since_start?.n;
+    if (typeof route !== 'string' || typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) return { why: `GET ${SPEED_ROUTE} answered a row (its ${i}) without a route and a whole since_start.n` };
+    if (counts.has(route)) return { why: `GET ${SPEED_ROUTE} answered the route ${route} in two rows` };
+    counts.set(route, n);
   }
-  const started = /** @type {{started_ms?: unknown} | null} */ (body)?.started_ms;
-  if (typeof started !== 'number' || !Number.isSafeInteger(started) || started < 0) return { why: `GET ${SPEED_ROUTE} answered without a whole started_ms` };
-  return { started };
+  return { started: read.started, counts };
+}
+
+/**
+ * Restart numbers as runs: `[1, 2, 3, 5]` is `1-3, 5`, so a line that names
+ * the restarts of a request stays short at any `--restarts`.
+ *
+ * @param {number[]} at ascending
+ */
+export function restartsText(at) {
+  /** @type {string[]} */
+  const runs = [];
+  for (let i = 0; i < at.length; i += 1) {
+    let j = i;
+    while (j + 1 < at.length && at[j + 1] === at[j] + 1) j += 1;
+    runs.push(j === i ? String(at[i]) : `${at[i]}-${at[j]}`);
+    i = j;
+  }
+  return `restart${at.length === 1 ? '' : 's'} ${runs.join(', ')}`;
+}
+
+/**
+ * A count over some restarts: one number, or the least and the most.
+ *
+ * @param {number[]} seen
+ */
+const timesText = (seen) => {
+  const lo = Math.min(...seen);
+  const hi = Math.max(...seen);
+  return lo === hi ? `${lo} time${lo === 1 ? '' : 's'}${seen.length > 1 ? ' each' : ''}` : `${lo} to ${hi} times`;
+};
+
+/**
+ * WHY AN ASK AFTER A RESTART IS NOT TIMED AS A FIRST, said after "is not
+ * timed as a first after restart i (k of the n timed): " (verify r10, 26 Oct),
+ * by the kind {@link firstAfterRestart} found and what the server's count
+ * said at each of those restarts (`seen`).
+ *
+ * @type {Record<string, (l: {r: SheetRequest, seen: number[]}) => string>}
+ */
+export const NOT_FIRST = Object.freeze({
+  'up wait': () => `its route is the one the up wait asks (${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}) after each restart before anything is timed, so its first ask after the restart is that wait's`,
+  'no answer': () => 'it had no answer (its FAILED line says why), so it is no time of a first',
+  'old server': () => `the up wait was answered before this server's own start (its ${SPEED_ROUTE} started_ms is later than that answer), so by the server the command stopped, and this read, the new server's first, may have waited for its start`,
+  before: (l) => `the server had already answered its route ${l.r.route} since its start when this sheet asked it (${timesText(l.seen)}: the --restart command's asks or another client's), so the first ask after the restart was not this sheet's`,
+  during: (l) => `the server answered its route ${l.r.route} during the pass more often than this sheet asked it (${timesText(l.seen)} more): another client asked it then, so this sheet's ask is not proved the first`,
+  left: (l) => `the server counted its route ${l.r.route} more often than this sheet's answered asks of it (${timesText(l.seen)} more), and this sheet left an ask of it with no answer, which the server may or may not have counted, so whether another client asked it first cannot be told`,
+  unnamed: (l) => `the server's ${SPEED_ROUTE} has no row ${l.r.route} after this sheet's answered ask of it (the server counts that path under another route), so its count cannot prove the ask its route's first`,
+  fewer: (l) => `the server counted its route ${l.r.route} ${timesText(l.seen)} by the end of the pass, fewer than this sheet's answered asks of it, so that row is not this route's count`
+});
+
+/**
+ * Whether one ask after a restart is its route's first since the server's
+ * start, by the server's own counts (verify r10, 26 Oct), or the kind of
+ * {@link NOT_FIRST} it is instead and the count that says so. `before` is
+ * read with the proof of the restart, before anything is timed, and `after`
+ * once the pass has asked everything; `mine` is this sheet's asks of the
+ * route in that pass: those answered, which the server counted before it
+ * answered, and those left with no answer, which it may not have counted.
+ * Proved when nobody had asked the route before the pass and the server
+ * counted it exactly as often as this sheet's answered asks; the route of
+ * the up wait is that wait's, and an answer that names a start after the up
+ * wait's answer means the wait reached the old server (the read that proved
+ * the restart, the new server's first, may then hold its start).
+ *
+ * @param {SheetRequest} r
+ * @param {Answer | NoAnswer} a this sheet's ask of `r` after the restart
+ * @param {{before: Map<string, number>, after: Map<string, number>, mine: {answered: number, left: number},
+ *   proofRead: boolean, startedAfterUp: boolean}} o `proofRead` when `a` is the read that proved the
+ *   restart; `startedAfterUp` when that read named a start later than the up wait's answer
+ * @returns {{kind: keyof typeof NOT_FIRST, seen: number} | null}
+ */
+export function firstAfterRestart(r, a, o) {
+  if (r.route === UP_WAIT_ROUTE) return { kind: 'up wait', seen: 0 };
+  if (a.status === 0) return { kind: 'no answer', seen: 0 };
+  if (o.proofRead && o.startedAfterUp) return { kind: 'old server', seen: 0 };
+  const before = o.before.get(r.route) ?? 0;
+  if (before > 0) return { kind: 'before', seen: before };
+  const n = o.after.get(r.route);
+  if (n === undefined) return { kind: 'unnamed', seen: 0 };
+  if (n < o.mine.answered) return { kind: 'fewer', seen: n };
+  if (n > o.mine.answered) return { kind: o.mine.left > 0 ? 'left' : 'during', seen: n - o.mine.answered };
+  return null;
 }
 
 /**
@@ -1350,72 +1510,99 @@ export async function runSheet(args, deps = {}) {
   if (args.restart === null) notMeasured.push(`first after restart: no --restart command was given (${args.restarts} restarts asked)`);
   else {
     /**
-     * Each request's answers after the restarts, kept as a timed row keeps
-     * its own: times, classes, the builds they named, the bytes.
+     * Each request after the restarts: how many it was asked after, and its
+     * asks proved firsts, kept as a timed row keeps its answers: times,
+     * classes, the builds they named, the bytes.
      *
-     * @type {Map<string, {times: number[], classes: Record<string, number>, builds: Set<string>, unnamed: number, bytes: number, said: string | null}>}
+     * @type {Map<string, {asked: number, times: number[], classes: Record<string, number>, builds: Set<string>, unnamed: number, bytes: number, said: string | null}>}
      */
     const firsts = new Map();
+    /**
+     * The asks after a restart not timed as firsts, by request and kind
+     * ({@link NOT_FIRST}): the restarts, and what the server's count said at
+     * each. Said once a request and kind, after the pass.
+     *
+     * @type {Map<string, {r: SheetRequest, kind: keyof typeof NOT_FIRST, at: number[], seen: number[]}>}
+     */
+    const lost = new Map();
     let ran = 0;
     /** @type {string | null} why the pass ended before its last restart */
     let ended = null;
-    const upKey = `${UP_METHOD} ${UP_ROUTE}`;
     const speedKey = `GET ${SPEED_ROUTE}`;
     /** @type {string[]} each restart timed, as the server's start before and after its command */
     const proved = [];
+    /** @type {number[]} each restart timed, how long after its command the server answered the up wait, ms */
+    const waited = [];
     /**
-     * The server's start now, with the answer that said it, or why it cannot
-     * be read; a `/speed.json` asked no more this run is not asked again.
+     * The server's `/speed.json` now, read by `of`, with the answer it was
+     * read from, or why it cannot be read; one asked no more this run is not
+     * asked again.
      *
-     * @returns {Promise<{started: number, answer: Answer | NoAnswer} | {why: string}>}
+     * @template {object} T
+     * @param {(a: Answer | NoAnswer) => T | {why: string}} of
+     * @returns {Promise<(T & {answer: Answer | NoAnswer}) | {why: string}>}
      */
-    const startNow = async () => {
+    const speedNow = async (of) => {
       if (stalled.has(speedKey)) return { why: `GET ${SPEED_ROUTE} is asked no more this run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(speedKey)}` };
       const answer = await send(SPEED_ROUTE);
-      const read = startedOf(answer);
-      return 'why' in read ? read : { started: read.started, answer };
+      const read = of(answer);
+      return 'why' in read ? read : { ...read, answer };
     };
     for (let i = 0; i < args.restarts; i += 1) {
-      log(`speed sheet: restart ${i + 1} of ${args.restarts}`);
+      const at = i + 1;
+      log(`speed sheet: restart ${at} of ${args.restarts}`);
       // THE SERVER'S OWN START, READ BEFORE THE COMMAND (verify r9, 26 Oct):
       // the restart it runs is proved below by this stamp changing.
-      const was = await startNow();
+      const was = await speedNow(startedOf);
       if ('why' in was) {
-        failures.push(`restart ${i + 1}: the server's start could not be read before the --restart command, so a restart could not be told from none: ${was.why}`);
-        ended = `the server's start could not be read at restart ${i + 1}`;
+        failures.push(`restart ${at}: the server's start could not be read before the --restart command, so a restart could not be told from none: ${was.why}`);
+        ended = `the server's start could not be read at restart ${at}`;
         break;
       }
-      const code = await restartOnce(args.restart, args.restartWaitMs, i + 1);
+      const code = await restartOnce(args.restart, args.restartWaitMs, at);
       if (code !== 0) {
-        failures.push(`restart ${i + 1}: the --restart command ${typeof code === 'number' ? `exited ${code}` : code}`);
-        ended = `the --restart command failed at restart ${i + 1}`;
+        failures.push(`restart ${at}: the --restart command ${typeof code === 'number' ? `exited ${code}` : code}`);
+        ended = `the --restart command failed at restart ${at}`;
         break;
       }
-      // THE UP WAIT IS --up-wait-ms IN ALL, on a clock that never steps
-      // back: each check within it waits at most the time left.
+      // THE UP WAIT ASKS A ROUTE NO REQUEST TIMES (verify r10, 26 Oct;
+      // UP_WAIT_ROUTE): what is asked first after a command that returned
+      // before the server answers waits for the server's start, so the up
+      // check that found the server up timed that start as the up route's
+      // first. Any answer says the server answers. --up-wait-ms in all, on a
+      // clock that never steps back: each check within it waits at most the
+      // time left.
       const t0 = performance.now();
-      /** @type {Answer | NoAnswer | null} the up check that found the server up */
+      /** @type {Answer | null} the up wait's answer */
       let up = null;
+      /** what the last check met when none was answered */
+      let met = '';
       for (let left = args.upWaitMs; left > 0 && up === null; left = args.upWaitMs - (performance.now() - t0)) {
-        const a = await send(UP_ROUTE, { method: UP_METHOD, timeoutMs: Math.max(1, Math.min(args.timeoutMs, Math.ceil(left))) });
-        if (a.status === 200) up = a;
-        else await sleep(Math.max(0, Math.min(250, args.upWaitMs - (performance.now() - t0))));
+        const a = await send(UP_WAIT_ROUTE, { method: UP_WAIT_METHOD, timeoutMs: Math.max(1, Math.min(args.timeoutMs, Math.ceil(left))) });
+        if (a.status !== 0) up = /** @type {Answer} */ (a);
+        else {
+          met = /** @type {NoAnswer} */ (a).error;
+          await sleep(Math.max(0, Math.min(250, args.upWaitMs - (performance.now() - t0))));
+        }
       }
       if (up === null) {
-        failures.push(`restart ${i + 1}: the server was not up ${args.upWaitMs} ms after the restart`);
-        ended = `the server was not up after restart ${i + 1}`;
+        failures.push(`restart ${at}: the server was not up ${args.upWaitMs} ms after the restart: ${UP_WAIT_METHOD} ${UP_WAIT_ROUTE} had no answer (${met})`);
+        ended = `the server was not up after restart ${at}`;
         break;
       }
+      // When the up wait was answered, on the clock the server stamps its start with.
+      const upAt = Date.now();
+      const upMs = Math.round(performance.now() - t0);
       // THE BUILD THAT CAME BACK IS NAMED (verify r6, 24 Oct): the up check
       // read only the status, so a restart that brought the server back as
       // another build passed, every row stamped with the run's commit. A
       // server back as another build ends the pass: what it would time is not
       // the run's build.
-      log(`speed sheet: restart ${i + 1}: up ${Math.round(performance.now() - t0)} ms after the command, answered by ${up.build ?? 'no named build'}`);
+      log(`speed sheet: restart ${at}: up ${upMs} ms after the command (${UP_WAIT_METHOD} ${UP_WAIT_ROUTE} answered HTTP ${up.status}), answered by ${up.build ?? 'no named build'}`);
       const back = otherBuild(up.build, commit);
       if (back !== null) {
-        failures.push(`restart ${i + 1}: the server came back as ${back} (its ${UP_METHOD} ${UP_ROUTE} said so)`);
-        ended = `the server came back as another build than the run's at restart ${i + 1}`;
+        failures.push(`restart ${at}: the server came back as ${back} (its ${UP_WAIT_METHOD} ${UP_WAIT_ROUTE} said so)`);
+        ended = `the server came back as another build than the run's at restart ${at}`;
         break;
       }
       // THE RESTART IS PROVED BEFORE ANYTHING IS TIMED (verify r9, 26 Oct):
@@ -1423,60 +1610,101 @@ export async function runSheet(args, deps = {}) {
       // command that restarted nothing ('true', or a stop refused before a
       // start that found the old server listening) exits 0 and the old
       // server answers. Its start that did not change ends the pass, as
-      // another build does: what it would time is a warm server.
-      const is = await startNow();
+      // another build does: what it would time is a warm server. The same
+      // answer says what the server had answered since that start (verify
+      // r10), which the pass's asks are proved against.
+      const is = await speedNow(answeredOf);
       if ('why' in is) {
-        failures.push(`restart ${i + 1}: the server's start could not be read after the --restart command, so a restart could not be told from none: ${is.why}`);
-        ended = `the server's start could not be read at restart ${i + 1}`;
+        failures.push(`restart ${at}: the server's start could not be read after the --restart command, so a restart could not be told from none: ${is.why}`);
+        ended = `the server's start could not be read at restart ${at}`;
         break;
       }
       if (is.started === was.started) {
-        failures.push(`restart ${i + 1}: the server at ${args.base} did not restart: its ${SPEED_ROUTE} said started_ms ${was.started} before the --restart command and after it`);
-        ended = `the server did not restart at restart ${i + 1}`;
+        failures.push(`restart ${at}: the server at ${args.base} did not restart: its ${SPEED_ROUTE} said started_ms ${was.started} before the --restart command and after it`);
+        ended = `the server did not restart at restart ${at}`;
         break;
       }
-      log(`speed sheet: restart ${i + 1}: the server restarted: started_ms ${was.started} before the command, ${is.started} after it`);
-      proved.push(`${was.started} to ${is.started}`);
-      ran += 1;
-      // THE TWO ASKS THE RESTART NEEDED ARE THEIR ROUTES' FIRST AFTER IT: the
-      // up check that found the server up, and the read that proved the
-      // restart. Asked again, either row would time a second ask as a first.
-      /** @type {Map<string, Answer | NoAnswer>} */
-      const already = new Map([[upKey, up], [speedKey, is.answer]]);
+      log(`speed sheet: restart ${at}: the server restarted: started_ms ${was.started} before the command, ${is.started} after it`);
+      // THE PASS: each request asked once, `/speed.json` by the read that
+      // proved the restart (asked again, its row would time a second ask as a
+      // first). Its failures are said as they come; whether each ask is timed
+      // as a first is decided once the server's count after the pass is read.
+      /** @type {Map<string, {answered: number, left: number}>} this sheet's asks of each route in this pass */
+      const own = new Map();
+      /** @type {{r: SheetRequest, a: Answer | NoAnswer}[]} */
+      const pass = [];
       let switched = false;
       for (const r of requests) {
         if (stalled.has(keyOf(r))) continue;
-        const a = already.get(keyOf(r)) ?? (await send(r.url, { method: r.method, keep: 'head' }));
-        const key = keyOf(r);
-        const f = firsts.get(key) ?? { times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
-        firsts.set(key, f);
-        f.times.push(a.ms);
-        const k = classOf(a);
-        f.classes[k] = (f.classes[k] ?? 0) + 1;
-        if (a.build !== null) f.builds.add(a.build);
-        else if (a.status !== 0) f.unnamed += 1;
-        f.bytes = Math.max(f.bytes, a.bytes);
-        if (k !== 'answered') {
-          failures.push(`restart ${i + 1}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
-          f.said ??= 'error' in a ? a.error : `HTTP ${a.status}: ${a.body.slice(0, 300)}`;
-        }
+        const a = keyOf(r) === speedKey ? is.answer : await send(r.url, { method: r.method, keep: 'head' });
+        const mine = own.get(r.route) ?? { answered: 0, left: 0 };
+        own.set(r.route, mine);
+        if (a.status === 0) mine.left += 1;
+        else mine.answered += 1;
+        pass.push({ r, a });
+        if (classOf(a) !== 'answered') failures.push(`restart ${at}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
         // EACH ANSWER NAMES ITS BUILD: one whose headers came from another
         // build than the run's fails by name, the restart with it.
         const by = a.status === 0 && a.build === null ? null : otherBuild(a.build, commit);
         if (by !== null) {
-          failures.push(`restart ${i + 1}: ${r.method} ${r.url} was answered by ${by}`);
+          failures.push(`restart ${at}: ${r.method} ${r.url} was answered by ${by}`);
           switched = true;
         }
-        if ('timedOut' in a && a.timedOut) stall(r, `the first ask after restart ${i + 1}`, a.error);
+        if ('timedOut' in a && a.timedOut) stall(r, `the first ask after restart ${at}`, a.error);
+      }
+      // THE SERVER'S OWN COUNT, AGAIN AFTER THE PASS (verify r10, 26 Oct): an
+      // ask of the route by another client during the pass is in it. One
+      // that cannot be read times nothing of this restart, and a start that
+      // changed during the pass makes its answers two servers'.
+      const after = await speedNow(answeredOf);
+      if ('why' in after) {
+        failures.push(`restart ${at}: what the server answered since its start could not be read after the pass, so no ask of it could be proved its route's first: ${after.why}`);
+        ended = `the server's count could not be read after the pass of restart ${at}`;
+        break;
+      }
+      if (after.started !== is.started) {
+        failures.push(`restart ${at}: the server started again during the pass: its ${SPEED_ROUTE} said started_ms ${is.started} before the pass and ${after.started} after it, so its answers are not one start's`);
+        ended = `the server started again during the pass of restart ${at}`;
+        break;
+      }
+      ran += 1;
+      proved.push(`${was.started} to ${is.started}`);
+      waited.push(upMs);
+      for (const { r, a } of pass) {
+        const key = keyOf(r);
+        const f = firsts.get(key) ?? { asked: 0, times: [], classes: {}, builds: new Set(), unnamed: 0, bytes: 0, said: null };
+        firsts.set(key, f);
+        f.asked += 1;
+        const not = firstAfterRestart(r, a, { before: is.counts, after: after.counts, mine: own.get(r.route) ?? { answered: 0, left: 0 }, proofRead: key === speedKey, startedAfterUp: is.started > upAt });
+        if (not !== null) {
+          const l = lost.get(`${key}\n${not.kind}`) ?? { r, kind: not.kind, at: [], seen: [] };
+          lost.set(`${key}\n${not.kind}`, l);
+          l.at.push(at);
+          l.seen.push(not.seen);
+          continue;
+        }
+        f.times.push(a.ms);
+        const k = classOf(a);
+        f.classes[k] = (f.classes[k] ?? 0) + 1;
+        if (a.build !== null) f.builds.add(a.build);
+        else f.unnamed += 1;
+        f.bytes = Math.max(f.bytes, a.bytes);
+        if (k !== 'answered') f.said ??= 'error' in a ? a.error : `HTTP ${a.status}: ${a.body.slice(0, 300)}`;
       }
       if (switched) {
-        ended = `an answer after restart ${i + 1} came from another build than the run's`;
+        ended = `an answer after restart ${at} came from another build than the run's`;
         break;
       }
     }
     if (ended !== null) notMeasured.push(`first after restart: timed after ${ran} of the ${args.restarts} restarts asked: ${ended}`);
-    // EACH RESTART TIMED IS SAID WITH ITS PROOF, in the sheet (verify r9: only stderr said anything of it).
-    if (proved.length > 0) notes.push(`first after restart: ${proved.length} restart${proved.length === 1 ? '' : 's'} timed, each proved by the server's own start (${SPEED_ROUTE} started_ms) changing across the --restart command: ${proved.join(', ')}`);
+    // EACH RESTART TIMED IS SAID WITH ITS PROOF, in the sheet (verify r9: only
+    // stderr said anything of it), and how its firsts were taken (verify r10).
+    if (proved.length > 0) {
+      notes.push(`first after restart: ${proved.length} restart${proved.length === 1 ? '' : 's'} timed, each proved by the server's own start (${SPEED_ROUTE} started_ms) changing across the --restart command: ${proved.join(', ')}`);
+      const lo = Math.min(...waited);
+      const hi = Math.max(...waited);
+      notes.push(`first after restart: after each --restart command the up wait asked ${UP_WAIT_METHOD} ${UP_WAIT_ROUTE}, which no request times, until the server answered it (${lo === hi ? lo : `${lo} to ${hi}`} ms after the command), so no first waits for the server's start; and an ask is timed as its route's first only when the server's own count (${SPEED_ROUTE} since_start.n), read with the proof and again after the pass, holds no ask of that route but this sheet's`);
+    }
     for (const r of requests) {
       const key = keyOf(r);
       const f = firsts.get(key);
@@ -1484,13 +1712,17 @@ export async function runSheet(args, deps = {}) {
         if (ran > 0) notMeasured.push(skipLine('first after restart', r));
         continue;
       }
+      if (f.asked < ran) notMeasured.push(`first after restart: ${r.method} ${r.url} was asked after ${f.asked} of the ${ran} restarts run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(key)}, and is asked no more`);
+      // An ask not timed as a first is said by its own line, below.
+      if (f.times.length === 0) continue;
       const s = summary(f.times);
-      if (s.n < ran) notMeasured.push(`first after restart: ${r.method} ${r.url} was asked after ${s.n} of the ${ran} restarts run: it had no whole answer within --timeout-ms ${args.timeoutMs} in ${stalled.get(key)}, and is asked no more`);
       // EACH RESTART ROW IS ITS OWN ANSWERS' (verify r6, 24 Oct): it was
       // stamped with the run's commit and 0 bytes whatever answered it. Its
       // classes, builds and bytes are counted as every other row's are.
       rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: f.classes, builds: [...f.builds], unnamed: f.unnamed, bytes: f.bytes, said: f.said, cut: null, notAsked: 0 });
     }
+    // EVERY ASK NOT TIMED AS A FIRST IS SAID, with its restarts, the server's count and why (verify r10).
+    for (const l of lost.values()) notMeasured.push(`first after restart: ${l.r.method} ${l.r.url} is not timed as a first after ${restartsText(l.at)} (${l.at.length} of the ${ran} timed): ${NOT_FIRST[l.kind](l)}`);
   }
   for (const row of rows) {
     // AN ANSWER THAT NAMED NO BUILD IS ONE BUILD MORE beside those that named
