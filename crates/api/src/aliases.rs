@@ -344,7 +344,9 @@ mod tests {
         let table = parsed(&render_table());
         assert_eq!(table["decision"], "D-3332");
         assert_eq!(table["counts"]["index"], 9);
-        assert_eq!(table["counts"]["symbol_changes"], 18);
+        // 18 rows of the 7 Oct read, eight of the 24 Oct read and RUCHI's
+        // circular (R4-22, D-7311).
+        assert_eq!(table["counts"]["symbol_changes"], 27);
         assert_eq!(table["counts"]["not_aliased"], 2);
         assert_eq!(table["counts"]["unverified"], 0);
         assert_eq!(table["keyed_feeds"], serde_json::json!(["zerodha", "gdfl"]));
@@ -399,6 +401,19 @@ mod tests {
         let lti = changes.iter().find(|row| row["old"] == "LTI").expect("LTI");
         assert_eq!(lti["new"], "LTIM");
         assert_eq!(lti["current"], "LTM", "the chain's newest symbol");
+        // R4-22 (G2): RUCHI's hand-over rests on its own circular alone.
+        let ruchi = changes
+            .iter()
+            .find(|row| row["old"] == "RUCHI")
+            .expect("RUCHI");
+        assert_eq!(ruchi["new"], "PATANJALI");
+        assert_eq!(ruchi["effective"], "2022-07-13");
+        assert_eq!(ruchi["sources"].as_array().map(Vec::len), Some(1));
+        assert!(
+            ruchi["sources"][0]["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("CML52890.pdf"))
+        );
         let refused = table["not_aliased"].as_array().expect("not aliased");
         assert_eq!(refused[0]["symbol"], "HDFC");
         assert_eq!(refused[0]["key"], "NSE-CASH-HDFC");

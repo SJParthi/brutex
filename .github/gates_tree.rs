@@ -2711,6 +2711,25 @@ const R4_28_LITERAL: &str = "1000 2026010 20260102 20260102_ 20260102_02 2026010
     token_not_listed torn-diff tradingsymbol twice-alike twice-masters twice-store \
     twice-unlike twin-diff-partial two-dates two-tokens unnamed unparseable wrote zqidx";
 
+// IA-10c (D-6260 to D-6268): `pull::ingest::landing_run` and the landing doors
+// it hooks. The hook's reason words for a window it kept or spooled nothing
+// of (`rung_unstored`, `run_too_wide`, `no_verifier_for_vendor`, `not_kept`,
+// `body_not_in_pack`), the `pull.member` event's field `causes` (how many
+// held months a window restates), the run ids `41` and `31337` its tests read
+// back as spool directories (`verify/spool/<run>`), the ledger kind
+// `nonsense` a test offers and sees refused, and its tests' scratch tags
+// (`gr41`, `held-differs`, `held-month`, `held-same`, `lines-repair`,
+// `noverifier`, `wide`, `z16`). Declared at its repair round 1 (23 Oct
+// 2026). Repair round 2 (24 Oct 2026, D-6269) adds the runs ledger's warn
+// field `claims_run` (the claims' largest id a lost last record is raised
+// past) and its tests' scratch tags `claims`, `claims-blocked` and
+// `unborn`. Repair round 3 (25 Oct 2026, D-6269 amended) adds the warn
+// field `ledger_run` (the ledger's last id when its claims name a later
+// one), the scratch tag `lost-whole` and the rot shapes `lifted` and
+// `lowered` of its claims test. None names an account, an environment, a
+// vendor credential or a field of a parameter path.
+const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-blocked claims_run gr41 held-differs held-month held-same ledger_run lifted lines-repair lost-whole lowered no_verifier_for_vendor nonsense not_kept noverifier run_too_wide rung_unstored unborn wide z16";
+
 // R4-17 (Zerodha series identity; D-5839, D-4991 to D-4995). Every word is
 // the package's own and none a path segment of any store or credential: the
 // refusal codes `before_listing`, `in_session_jump`, `non_positive_price`
@@ -2957,8 +2976,9 @@ const IA17B_LITERAL: &str = "gather_deferred gather_repaired gather_unclosed fil
 /// 74 -> 75 with IA-9's group, which feat/db-fix already counted; the
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with R4-28's group (repair 5, 24 Oct 2026).
-/// 76 -> 77 with IA-17b's group (24 Oct 2026; merged after R4-28, 25 Oct).
-const DECLARED: [&str; 77] = [
+/// 76 -> 77 with IA-10c's group (merged into feat/db-fix 26 Oct 2026).
+/// 77 -> 78 with IA-17b's group (24 Oct 2026; merged after IA-10c, 26 Oct).
+const DECLARED: [&str; 78] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3035,6 +3055,7 @@ const DECLARED: [&str; 77] = [
     CAL1_CIRCULAR_SERIAL,
     IA9_LITERAL,
     R4_28_LITERAL,
+    IA10C_LITERAL,
     IA17B_LITERAL,
 ];
 

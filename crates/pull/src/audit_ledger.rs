@@ -21,10 +21,13 @@
 //!    reader names and is never joined to the next; the line rules are
 //!    checked; the write is synced.
 //!
-//! The gap ledger's writers (`audit/<vendor>.gaps`) move here with IA-10b,
-//! which owns `request_minutes.rs`; until then they take the ledger file's own
-//! `flock` (R3-18), which this append takes too, inside the lock above, so the
-//! two never interleave a batch.
+//! The gap ledger's landing writer (`audit/<vendor>.gaps`,
+//! `request_minutes::append_ledger`: every `gap` and `derive` line a landing
+//! writes) moved here with IA-10c (D-6266, closing L-IA-38). The stored-month
+//! backfill (`gap_backfill`, which picks its lines under the file's lock)
+//! still takes the ledger file's own `flock` (R3-18) alone, which this append
+//! takes too, inside the lock above, so the two never interleave a batch
+//! (L-IA10C-04).
 //!
 //! # Cost
 //!
@@ -100,6 +103,24 @@ pub(crate) fn append_within(
         )
     })?;
     super::request_minutes::append_named(store_root, vendor, name, lines)
+}
+
+/// Appends `lines` to the text ledger at `path`, whose directory exists, by
+/// the rules of [`append`] (a regular file only, never through a link; a
+/// torn last line closed first; the line rules; synced), for a ledger whose
+/// writers a lock of its own already serialises: the runs ledger's claims,
+/// `audit/runs.claims`, written under `audit/runs.ledger.lock` (D-6269), so
+/// no audit lock is taken here.
+///
+/// # Errors
+///
+/// The ledger's own refusal (a line breaking the line rules, something other
+/// than a regular file at the path, the host); nothing is written on any.
+pub(crate) fn append_path(path: &Path, lines: &[String]) -> Result<(), String> {
+    super::request_minutes::append_path_picking(path, |_ledger| {
+        Ok(std::borrow::Cow::Borrowed(lines))
+    })
+    .map(drop)
 }
 
 #[cfg(test)]

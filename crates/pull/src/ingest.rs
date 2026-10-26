@@ -144,6 +144,10 @@ pub mod failkind;
 pub mod gap_backfill;
 #[path = "identity_screen.rs"]
 pub mod identity_screen;
+/// Every Zerodha landing's runs-ledger id, the vendor's landing claim, and the
+/// keep-and-spool hook after both doors (IA-10c, D-6260..D-6266).
+#[path = "landing_run.rs"]
+pub mod landing_run;
 /// What a versioned repair of a series' months would do, read-only: the one
 /// answer `/pull/repair.json` and `cli zerodha-repair` give. D-3350, WP-13c.
 #[path = "repair_plan.rs"]
@@ -430,6 +434,18 @@ pub struct Plan<'a> {
     /// to arrive here would file an option's bars in the underlying's own
     /// directory, where the next month's spot pull would append to them.
     pub contract: Option<brutex_core::instrument::Contract>,
+    /// The landing's id from the store-wide runs ledger (D-4880; IA-10c,
+    /// D-6260): a `/pull/run`'s (each leg carries its run's), a `/pull/spot`,
+    /// `/pull/fno` or `/pull/repair` request's, or a `cli zerodha-repair
+    /// --from-store` run's. Every gap, derive and repair-journal line the
+    /// landing writes says `run=` this id, in place of the telemetry sink's
+    /// claimed run, which two overlapping requests of one process share.
+    ///
+    /// `0` is a caller that holds no ledger id: a GDFL folder import, which
+    /// claims the sink's run with its own ledger id, and a test. Its lines
+    /// name the sink's claimed run as before, so a line never names a run
+    /// its events do not.
+    pub run: u64,
 }
 
 impl Plan<'_> {
@@ -881,6 +897,9 @@ fn from_members_inner(
     mode: Mode<'_>,
 ) -> (Ingested, request_minutes::Refusals) {
     let Plan { vendor, .. } = plan;
+    // EVERY LINE THIS LANDING WRITES NAMES ITS RUN (D-6260), whichever door
+    // it came through.
+    let _run = request_minutes::run_scope(plan.run);
     let mut done = Ingested {
         members: members.len(),
         ..Ingested::default()
@@ -979,6 +998,9 @@ fn from_members_inner(
                 // WHAT THE LANDING REFUSED AFTER THE VENDOR SENT IT, for the
                 // gap ledger (D-3351): each source a list in time order.
                 refusals.seconds.append(&mut landed.refused_seconds);
+                // AND EACH WITH ITS CAUSE, FOR THE KEEPER (IA-RK-07).
+                refusals.rows.append(&mut landed.refused_named.0);
+                refusals.unpaired = refusals.unpaired.saturating_add(landed.refused_named.1);
                 refusals.fronts.append(&mut landed.fronts);
                 refusals.repaired.append(&mut landed.repaired_days);
                 // ONE EVENT PER MEMBER, WHICH IS THE GRANULARITY THAT WAS
@@ -1194,8 +1216,85 @@ pub fn from_window(
     store_root: &Path,
     plan: Plan<'_>,
 ) -> Ingested {
+    from_window_with_refusals(raw, instrument, origin, store_root, plan).ingested
+}
+
+/// [`from_window`], answering beside its receipt every row it refused by
+/// name, each with its cause (IA-10c, D-6262): what the keeper's receipt
+/// counts at offset 56 and keeps in the pack's `.rsx`, so the receipt's
+/// rows-refused field IS the landing's named refusals (IA-RK-07), never a
+/// second count of them.
+#[must_use]
+pub fn from_window_with_refusals(
+    raw: &crate::fetch::RawWindow,
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+) -> DoorLanding {
     from_window_mode(raw, instrument, origin, store_root, plan, Mode::Append)
 }
+
+/// [`repair_window`], answering its refused rows as
+/// [`from_window_with_refusals`] does.
+#[must_use]
+pub fn repair_window_with_refusals(
+    raw: &crate::fetch::RawWindow,
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+    reason: &str,
+) -> DoorLanding {
+    from_window_mode(
+        raw,
+        instrument,
+        origin,
+        store_root,
+        plan,
+        Mode::Repair { reason },
+    )
+}
+
+/// What one window's landing did: its receipt, and every row it refused by
+/// name with that row's cause (D-3351's per-row refusals: `off_grid_candle`,
+/// `conflicting_candles`, `price_off_grid`, `timestamp_refused`,
+/// `cash_eligibility_unknown`; WP-13d's `before_first_day_bar` and
+/// `foreign_level`), in the order the landing named them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoorLanding {
+    /// The receipt [`from_window`] and [`repair_window`] answer.
+    pub ingested: Ingested,
+    /// Each row refused by name, with its cause.
+    pub refused: Vec<crate::response_keep::RefusedRow>,
+    /// Rows refused by name whose cause list did not pair with their stamps
+    /// (`response_keep::ListsDiffer`): counted, never dropped, so
+    /// [`Self::rows_refused`] still says how many the landing refused.
+    pub unpaired: u32,
+}
+
+impl DoorLanding {
+    /// How many rows the landing refused by name: the receipt's offset 56.
+    #[must_use]
+    pub fn rows_refused(&self) -> u32 {
+        u32::try_from(self.refused.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(self.unpaired)
+    }
+}
+
+/// The origin a landing from another store's bars names its rows by: `store
+/// <ROOT>` (`cli zerodha-repair --from-store`). A landing whose origin starts
+/// with it made no vendor request, so its `repaired` gap lines say
+/// `origin=store` (IA-10c, D-6261) and its minutes are verified cold only.
+pub const STORE_ORIGIN: &str = "store ";
+
+/// The landing rules a Zerodha window lands under, written in each kept
+/// answer's receipt (offset 69, D-4843): rule set 1 is D-3351's per-row
+/// refusals as WP-13c merged them, with WP-13d's identity screen. A change to
+/// what the landing refuses is a new number, so an older receipt is never
+/// judged by rules it was not landed under.
+pub const LANDING_RULES: u8 = 1;
 
 /// One window fetched from a broker, landed as a VERSIONED REPAIR of every
 /// month it touches that holds bars around a hole (D-3350, WP-13c; DB-N20,
@@ -1220,14 +1319,7 @@ pub fn repair_window(
     plan: Plan<'_>,
     reason: &str,
 ) -> Ingested {
-    from_window_mode(
-        raw,
-        instrument,
-        origin,
-        store_root,
-        plan,
-        Mode::Repair { reason },
-    )
+    repair_window_with_refusals(raw, instrument, origin, store_root, plan, reason).ingested
 }
 
 /// Whether a landing appends, or repairs a month the append door refuses.
@@ -1250,7 +1342,10 @@ fn from_window_mode(
     store_root: &Path,
     plan: Plan<'_>,
     mode: Mode<'_>,
-) -> Ingested {
+) -> DoorLanding {
+    // THE LANDING'S RUN, IN FORCE FOR EVERY LINE IT WRITES (D-6260): the gap
+    // ledger's, the derive ledger's and the repair journal's `run=`.
+    let _run = request_minutes::run_scope(plan.run);
     // This door receives vendor candles. Archive members bypass it and retain
     // all legitimate snapshots, including identical rows within one second.
     //
@@ -1275,6 +1370,18 @@ fn from_window_mode(
         .extend(refused_row_failures(instrument, &screened, plan.encoding));
     done.failures
         .extend(refused_row_failures(instrument, &foreign, plan.encoding));
+    // EVERY ROW REFUSED BY NAME, WITH ITS CAUSE, FOR THE KEEPER (IA-RK-07):
+    // the screen's, the identity screen's and `fetch::land_rows`'s, which
+    // `from_members_mode` gathered from each member.
+    let mut refused = Vec::with_capacity(
+        screened.local_seconds.len() + foreign.local_seconds.len() + refusals.rows.len(),
+    );
+    let mut unpaired = 0_u32;
+    for named in [&screened, &foreign] {
+        pair_refused(named, &mut refused, &mut unpaired);
+    }
+    refused.append(&mut refusals.rows);
+    unpaired = unpaired.saturating_add(refusals.unpaired);
     refusals.seconds.push(screened.local_seconds);
     // Its own time-ordered list: the gap ledger merges one list per source.
     refusals.seconds.push(foreign.local_seconds);
@@ -1289,7 +1396,7 @@ fn from_window_mode(
         store_root,
         plan,
         &mut done,
-        &refusals,
+        (&refusals, origin.starts_with(STORE_ORIGIN)),
     );
     done.rows_read += duplicates;
     done.rows_folded += duplicates;
@@ -1303,7 +1410,51 @@ fn from_window_mode(
             .with("duplicates", telemetry::Value::Uint(duplicates as u64)),
         );
     }
-    done
+    DoorLanding {
+        ingested: done,
+        refused,
+        unpaired,
+    }
+}
+
+/// Every row one landing refused by name with its cause, and how many it
+/// refused whose cause could not be paired with its stamp.
+type NamedRefusals = (Vec<crate::response_keep::RefusedRow>, u32);
+
+/// `named`'s rows refused by name, each with its cause ([`pair_refused`]).
+fn named_refusals(named: &fetch::Refused) -> NamedRefusals {
+    let mut rows = Vec::new();
+    let mut unpaired = 0_u32;
+    pair_refused(named, &mut rows, &mut unpaired);
+    (rows, unpaired)
+}
+
+/// Appends `named`'s rows, each with its cause, to `into`; a record whose
+/// stamps and causes are not one per row each is counted into `unpaired`
+/// whole (its rows were refused; which cause each had cannot be said), with
+/// an error event naming the two lengths, never dropped silently.
+fn pair_refused(
+    named: &fetch::Refused,
+    into: &mut Vec<crate::response_keep::RefusedRow>,
+    unpaired: &mut u32,
+) {
+    match crate::response_keep::RefusedRow::all_of(named) {
+        Ok(mut rows) => into.append(&mut rows),
+        Err(differ) => {
+            *unpaired = unpaired.saturating_add(
+                u32::try_from(named.local_seconds.len().max(named.causes.len()))
+                    .unwrap_or(u32::MAX),
+            );
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error(
+                    "pull.refused",
+                    "refused rows whose causes do not pair with their stamps",
+                )
+                .with("seconds", telemetry::Value::Uint(differ.seconds as u64))
+                .with("causes", telemetry::Value::Uint(differ.causes as u64)),
+            );
+        }
+    }
 }
 
 /// The broker's candles a landing may take: each on the requested grid, and
@@ -2214,6 +2365,9 @@ struct Landed {
     /// IST-local seconds, one time-ordered list per source: rows refused by
     /// name, and rows of months the store refused (D-3351).
     refused_seconds: Vec<Vec<i64>>,
+    /// Each row `fetch::land_rows` refused by name with its cause, and how
+    /// many whose cause did not pair with their stamp (IA-10c).
+    refused_named: NamedRefusals,
     /// IST day numbers the store refused before a month's first held bar, in
     /// order: the ledger's `refused_front` days.
     fronts: Vec<u32>,
@@ -2343,7 +2497,7 @@ fn nothing_landed(
     census: DropCensus,
     folded: usize,
     outside_session: u32,
-    (failures, refused_seconds): (Vec<Failure>, Vec<Vec<i64>>),
+    (failures, refused_seconds, refused_named): (Vec<Failure>, Vec<Vec<i64>>, NamedRefusals),
 ) -> Landed {
     Landed {
         failures,
@@ -2356,6 +2510,7 @@ fn nothing_landed(
         derived_expected: 0,
         outside_session,
         refused_seconds,
+        refused_named,
         fronts: Vec::new(),
         repaired_days: Vec::new(),
     }
@@ -3362,7 +3517,7 @@ fn journal_intent(
         parts.month,
         bars.len(),
         ledger_field(reason),
-        telemetry::global().map_or(0, telemetry::Sink::run)
+        request_minutes::run_ordinal()
     );
     audit_ledger::append(store_root, parts.vendor, "repairs", &[line])
 }
@@ -3434,7 +3589,7 @@ fn journal_repair(
         header.first_ts_micros,
         header.last_ts_micros,
         ledger_field(reason),
-        telemetry::global().map_or(0, telemetry::Sink::run)
+        request_minutes::run_ordinal()
     );
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.repair", "month repaired to a new generation")
@@ -3482,7 +3637,7 @@ fn journal_refusal(
         parts.month,
         ledger_field(why),
         ledger_field(reason),
-        telemetry::global().map_or(0, telemetry::Sink::run)
+        request_minutes::run_ordinal()
     );
     audit_ledger::append(store_root, parts.vendor, "repairs", &[line])
 }
@@ -3557,6 +3712,8 @@ fn one(
     // Carried on every return below, so a window holding nothing but the
     // refused day still says why it stored nothing.
     let mut failures = landing_failures(&member.instrument, &landed, encoding);
+    // EACH NAMED REFUSAL'S CAUSE, FOR THE KEEPER (IA-RK-07): before the take.
+    let refused_named = named_refusals(&landed.refused);
     let mut refused_seconds = vec![std::mem::take(&mut landed.refused.local_seconds)];
 
     // THE FOLD. Without it a real run produced 354,675 rows and ZERO bars:
@@ -3589,7 +3746,7 @@ fn one(
             landed.census,
             folded,
             outside_session,
-            (failures, refused_seconds),
+            (failures, refused_seconds, refused_named),
         ));
     }
     // ONE RUN PER MONTH, RATHER THAN A REFUSAL IF THE BARS CROSS ONE.
@@ -3708,6 +3865,7 @@ fn one(
         derived_expected,
         outside_session,
         refused_seconds,
+        refused_named,
         fronts: not_held.fronts,
         repaired_days: not_held.repaired,
     })

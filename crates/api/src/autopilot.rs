@@ -3902,6 +3902,8 @@ async fn tick(
         // THE AUTOPILOT APPENDS; IT NEVER REPAIRS. A versioned repair is the
         // operator's act, on `POST /pull/repair` (D-3350).
         repair: None,
+        // THE BROKER RUN TAKES ITS OWN `pull-spot` ID (IA-10c, D-6260).
+        run: 0,
     };
     let now = std::time::SystemTime::now();
     let started = std::time::Instant::now();
