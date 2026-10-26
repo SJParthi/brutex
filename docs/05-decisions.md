@@ -78952,6 +78952,579 @@ Tests: `seal_tests::a_census_whose_receipt_cannot_be_read_is_still_kept`,
 failed on the code before it. Invariants AG05-12 to AG05-17; limits
 L-AG05-06 and L-AG05-07.
 
+### D-5915 — R3-15: the page targets, the page budgets, the header-only up check, the shared reporter's ration, the speed sheet's ignored-field rule and the harness's read-only mode — 2026-10-20
+
+**Why.** R3-14 made the server keep p50, p99 and the max per route
+(`/speed.json`) and a route for a page's own failure (`POST /page-report`);
+nothing drew the first or called the second. The only speed sheet was a
+hand-run script outside the app, a build behind, naming its own URLs; no
+browser measured a page; nothing stopped a page's code from growing; and every
+open tab asked a whole `GET /feeds.json` every 8 s to learn that the server was
+up. Built in the cloud (16 to 17 Oct) and finished on the Mac (18 to 20 Oct).
+The decision number is taken at landing from the ledger's head (round 3
+amendment A6): the part's spec assigned no block.
+
+1. **The four page-side targets** are first content p99 under 300 ms, no pause
+   over 50 ms, heap under 100 MB and under 400 KB on the wire, bytes decimal
+   (1 KB = 1,000 B, the stricter reading), for `/db`, `/ingest`, `/gaps`,
+   `/audit`, `/markets`, `/sources` and `/speed` (`web/src/lib/speed.js`
+   `PAGE_TARGETS`, `MEASURED_PAGES`). Whether they hold is a measurement,
+   recorded in `docs/06-limits.md` L-R315-01 to L-R315-04; a target that is
+   not met is said there, never relaxed here.
+2. **Each page's first-load script and style is budgeted at build time**
+   (`BUNDLE_BUDGETS`), and a page past its budget fails `vite build`. The
+   default is the 400 KB wire target. `/backtest`, `/db` and `/ingest` already
+   ship more, and the server sends them uncompressed
+   (`crates/api/src/assets.rs`), so their budgets are held just above their
+   size on the merged tree, rounded up to 25 KB, and every budget line says
+   they are over the target. Raising a budget is a decision with its reason,
+   never an edit to make a build pass. The figures: on the 16 Oct cloud cut
+   1,091,954 / 726,909 / 482,536 B (budgets 1,100,000 / 750,000 / 500,000);
+   on the 18 Oct merged tree `/db` 754,201 B, past 750,000, so `/db` was raised
+   to 775,000; on the 20 Oct merged tree (`feat/db-fix` after AH-05, with
+   R3-15) 1,115,769 / 790,331 / 510,266 B, all three past the 18 Oct budgets
+   before R3-15's 4.2 KB was added (the committed build alone: 1,111,563 /
+   786,109 / 506,027 B), so the budgets are now **1,125,000 / 800,000 /
+   525,000 B**. `/db` grew with R3-02's controls and R3-03's pager and Go to;
+   `/backtest` and `/ingest` changed no file of their own route, so their
+   growth is shared `$lib` code. Each raise is the budget doing its job: the
+   build said a page grew, and this entry says why it is allowed.
+3. **The header's probe is `HEAD /inspection.json`**, a constant answer the
+   server builds from its commit stamp alone, in place of a whole
+   `GET /feeds.json` (a census read, a settings stat and a held-span walk per
+   probe per tab). The content-type check that catches a dev server's HTML
+   fallback is kept: a HEAD answer carries the header.
+4. **One shared reporter on every page** (`$lib/page-report.js`, one import in
+   `+layout.svelte`) wraps `window.fetch` and listens for `error`,
+   `unhandledrejection` and `brutex:fallback`. The server's own outcome classes
+   decide what is a failure (a 5xx that is not busy, or no answer); a refusal,
+   a busy and the page's own cancel are not. Rationed per tab: one report per
+   distinct failure a minute and ten a minute, what was held back carried on
+   the next; the report route never reports itself.
+5. **The speed sheet fails its run on a field the server ignored**, by three
+   signals of the server's own: an `ignored` list in the answer, a 400 saying
+   the route does not read the field, or the field garbled and answered 2xx
+   with the same bytes. Signal 3 is a lower bound for answers that carry their
+   own clock. Every row is stamped with the one build (`x-brutex-build`) that
+   answered it.
+6. **The browser harness has no npm dependency**: it drives Chrome over the
+   DevTools protocol on Node's own WebSocket. `--no-sandbox` only when the
+   operator asks. **`--read-only`** (found needed on the Mac, 19 Oct: the
+   standing rule is that no agent POSTs to a server, and a page that meets a
+   failed request reports it on its own) blocks the report address in the
+   browser with the DevTools Fetch domain, names each blocked report as a
+   note, fails the run on any other write that leaves the browser, and skips
+   the reporter check; `--no-report-check` alone does not make a run read
+   only.
+7. **The four interactions are measured on `/db` as it is drawn** (found on
+   the Mac, 20 Oct: two of the cloud's four selectors named controls the
+   real page does not have, and the sort clicked a server-side column of a
+   5.4 million-bar selection): the feed and expiry pickers are the shared
+   `Picker`; the page turn chooses the newest expiry the picker offers; each
+   sample opens in a browser context of its own, because the feed switch
+   persists the feed it chose; each click is timed to the last network event
+   it caused, or two frames after it when later, never including the settle
+   window's 500 ms of quiet; and the 20,000-row sort edge is FOUND
+   (`sortEdge`), never typed: the longest newest-ending range of days whose
+   bars are at or under `LOCAL_SORT_BUDGET`, on the opening instrument's
+   first stored rung where one day fits.
+8. **The sheet bounds a large answer**: past `--max-answer-bytes`
+   (16,000,000 B) it is timed at one client, each skipped client count said;
+   past 64,000,000 B it is kept as its length and sha256. The page capture
+   replays `/gaps`' 184 MB census, which sixty clients would hold at once.
+9. **A load waits at most 2,000 ms for a paint the browser has not yet
+   delivered**, so a page that painted is never read as unpainted under load,
+   and one that never paints is still said not painted.
+
+Repair round 1 (20 Oct, after the re-check of the committed work):
+
+10. **`/db`'s budget is 825,000 B.** On the merged tree after AG-05, `/db`
+    weighed 804,033 B on its first load, past 800,000: R3-04's Coverage tab
+    and the counts that agree (D-5870) added 13,702 B. Held just above its
+    size, rounded up to 25 KB, by item 2's rule. `/backtest` (1,118,393 B)
+    and `/ingest` (512,891 B) are inside theirs.
+11. **The harness starts the browser before it times a page** (R315-14). The
+    first page a new browser draws pays for the browser's own start, and
+    that cost landed on the first cold sample of each run (L-R315-15); a
+    reader's browser is already running, so it is not the page's. The
+    warm-up is a `data:` page, so the server is asked nothing, in a browser
+    context thrown away, so every timed cold load stays cold.
+12. **A browser the harness starts is the harness's to stop, and its profile
+    the harness's to remove** (R315-13): on `close()`, on a failed launch,
+    and on exit, an uncaught error, SIGINT, SIGTERM and SIGHUP. Only a path
+    `mkdtempSync` made for the harness's prefix is ever removed; what earlier
+    runs left is not touched (L-R315-14).
+13. **The reporter never changes a page's answer** (R315-12): a lone
+    surrogate is written as U+FFFD, every reporting step is guarded, and a
+    fault is counted and said on the console at most once a minute rather
+    than thrown into the page's request.
+14. **The page budget fails a build it did not weigh** (R315-15), and the
+    harness's instrument is the app's own default unless `--instrument`
+    names another (R315-17): neither is typed in the harness or skipped in
+    silence.
+
+Repair round 2 (21 to 22 Oct, after the second re-check of the committed work):
+
+15. **The Speed page's own line is watched, not read once** (R315-19). A
+    page is not told when its own load has ended, and the one read the line
+    took, in a `setTimeout(0)` at mount, came before the client-rendered page
+    had painted and before its last fetches ended: it called a figure Chrome
+    reports unreported, and drew a load over the 400 KB target as under it.
+    A buffered `PerformanceObserver` hands over what the browser reported
+    before the page mounted and every entry after, once each, at O(1) per
+    entry (the browser's own resource buffer stops at 250 entries; an
+    observer does not). The line says when it was read and whether the load
+    had ended, so no reading is passed off as the final one, and it says
+    "not reported by this browser" only for an entry type the browser does
+    not support.
+16. **The reporter cuts a failure's text before it cleans, keys or sends
+    it** (R315-20): one code point past the largest report that can be sent,
+    so what can never be sent is never walked and a report's cost does not
+    grow with the text.
+17. **The reporter's ration runs on a clock that only moves forward**
+    (R315-21): `performance.now()`, not `Date.now()`; a clock a caller
+    injects that goes back starts a new window rather than holding every
+    report back until it catches up.
+18. **`--n` stops at 10,000 in the harness and the sheet, and a page is
+    measured once a run** (R315-22). Fifty times the n = 200 the targets
+    are measured at: the ceiling bounds an argument and does not choose a
+    sample size (n = 200 stays the default). A run past it would take days
+    (an extrapolation from the pace of the n = 200 runs, not a
+    measurement), so a typo such as `--n 2000000` is refused by name rather
+    than started; a page named twice would be timed twice, as two rows for
+    one page, and its requests captured twice.
+19. **Only a profile the harness made in this process is removed** (R315-13,
+    amended): a path that merely carries the profile prefix is refused and
+    left as it was, so the guard is exactly what item 12 states.
+20. **The browser is started detached and stopped as a whole process group**
+    (R315-13, amended; L-R315-18). Killing the browser alone left its
+    helpers to end on their own schedule, and one wrote into the profile
+    after it was removed (22 Oct, at a load average near 140). A group of
+    its own is the only handle on every helper that needs no outside
+    program to list them: SIGTERM and SIGKILL go to the group, and a stop
+    waits, bounded, for helpers that outlived the browser. A real signal
+    is sent to the group only while it is known to be the browser's: the
+    browser not yet reaped, or signal 0 having just found the group's
+    processes there.
+21. **A page mounted again in one document says its figures are the tab's**
+    (R315-19, amended at repair 3; verify r3, 22 Oct). A buffered observer
+    hands a page mounted after a link inside the app every entry since the
+    tab opened, so a tab that opened on /speed, went to /db and came back
+    drew the tab's 1.2 MB over 63 fetches as this page's own. Whether this
+    document already watched once is the document's own fact, held in a
+    `WeakSet` of watched windows; SvelteKit's `afterNavigate` was the other
+    choice and was not taken: it adds its callback in the page's `onMount`,
+    so whether a page hears the load's `'enter'` turns on the router's
+    timing, which this page does not own. A sum missing entries is said as a
+    floor ("at least").
+22. **Every wait an argument sets stops at `MAX_WAIT_MS`, and the idle row
+    prints the clock's reading** (R315-22 and R315-23, repair 3). Past
+    2,147,483,647 ms Node fires a `setTimeout` after 1 ms and cuts a socket's
+    timeout to 2,147,483,647 ms, so a longer wait is
+    refused by name, not chained into several timers: no run needs a wait of
+    24.8 days, and a refusal states the bound where a chain would hide it.
+    The idle row is `performance.now()` across the wait, and a wait more than
+    1 ms short of the time asked is NOT MEASURED and fails the run.
+23. **A number on the command line is decimal digits, a page is one page
+    however it is spelled, and `--restarts` stops at `MAX_N`** (R315-22,
+    repair 3). `Number` alone read `0x10` as 16 and `' 12'` as 12; an
+    exponent (`1e3`) stays allowed, as it is decimal. A page's path is
+    folded (lower case, trailing slashes dropped) and its query never is,
+    since a query value such as an instrument key is case sensitive.
+24. **Every wait on the browser has a bound, and a page that cannot finish
+    one load is not loaded again** (R315-24, repair 4; verify r4, 23 Oct). A
+    DevTools command waits at most `CDP_WAIT_MS` (30,000 ms) unless its
+    caller sets a bound; a load at most `--load-wait-ms` (`LOAD_WAIT_MS`,
+    30,000 ms, the settle cap and the step wait already used); two frames
+    `FRAME_WAIT_MS` (2,000 ms, the paint wait of item 9) in the page and
+    `FRAME_SLACK_MS` (1,000 ms) more here, because a hidden headless tab
+    answered a 1.5 s page-side wait after 6.7 s (measured 23 Oct); the paint
+    wait of item 9 the same way, so it stays "at most 2,000 ms" plus that
+    slack whatever the page's clock does. A page
+    whose load did not end is not loaded n times more: n = 200 stalled loads
+    would hold a run for 200 bounds per phase with one fact to say. A
+    command not answered elsewhere ends the run, with its sheet: a browser
+    that answers nothing more cannot be asked about the next page. The other
+    choice, a bound only on the whole run, was not taken: it names no page
+    and no command.
+25. **A page is the app's when the build that answered routes it**
+    (R315-25, repair 4; verify r4, 23 Oct). The api answers every path it
+    has no file for with the shell and 200 (`crates/api/src/assets.rs`, not
+    R3-15's file), so no status can tell. The route list is the served
+    build's own: the app entry its document names, whose `dictionary` the
+    kit's own start reads (SvelteKit 2.70.2, `node_modules/@sveltejs/kit`
+    `src/runtime/client/client.js` and `src/utils/routing.js`: a route
+    matches the decoded path case-sensitively, ending `/?$`, the root `^/$`),
+    imported again in the page, which fetches nothing. Not taken: the
+    harness's own `web/src/routes`, which can be another build than the one
+    served; the drawn not-found page's words, which are the kit's default
+    page and no contract; a 404 from the server, which is the assets
+    owner's change. A route with a parameter is not matched here (the app
+    has none on 23 Oct): a page that could be one is said, never passed.
+26. **Item 23's fold is withdrawn: a page's path is read as the app's router
+    reads it** (R315-22 as amended, repair 4; verify r4, 23 Oct). Folding
+    the case made `/SPEED` the Speed page's key though the router draws its
+    not-found page there, and folding every trailing slash made `//` the
+    root's. `pageKey` now resolves the address as the browser does (dot
+    segments, a fragment, an empty query) and reads the path by
+    `$lib/speed.js` `routePath` (escapes decoded as `decode_pathname`
+    decodes them, case kept, ONE trailing slash), the rule `selfWhose`
+    compares by too, so the Speed page's own line and the harness's pages
+    are one reading: a tab opened at `/speed/` is the page's own load.
+27. **The harness's sheet names its build, and an output is checked before
+    the run** (R315-26, repair 4; verify r4 follow-ups). The commit is each
+    document's `x-brutex-build`, as the speed sheet stamps each row; two
+    builds in one run fail it; an unstamped server is a note, not a failure,
+    because the harness also runs against stand-ins and a dev server that
+    stamp nothing (the speed sheet's `--allow-unstamped` default differs on
+    purpose: its rows are the deploy record). `--out` and `--capture` are
+    checked before the browser starts, so no run is thrown away at its end.
+28. **The speed sheet's field check asks a HEAD as a HEAD and says what a
+    status cannot tell** (R315-27, repair 4; verify r4 follow-ups). A whole
+    GET of a HEAD's route read 591,200,898 B per ask from the served app; a
+    body bound was the other choice and was not taken, since signal 3
+    compares whole answers and a cut one compares nothing. A capture page is
+    matched by `pagePathOf`; `--max-answer-bytes` stops at `MAX_TEXT_BYTES`;
+    `--clients` names each count once.
+29. **The spec's "speed tile of the health page" is drawn on `/speed`.**
+    The app has no health page (its routes on 23 Oct: `/`, `/audit`,
+    `/autopilot`, `/backtest`, `/db`, `/gaps`, `/ingest`, `/mapping`,
+    `/markets`, `/selection`, `/sources`, `/speed`, `/terminal`), so the tile
+    (`speedTile`: the slowest route and every failure, over the last hour or
+    since the start) heads the Speed page, which every page links from the
+    nav. A health page is not R3-15's to add; if one is made, the tile is
+    one import.
+30. **Every wait of the speed sheet is bounded, and a request that ran its
+    bound is asked no more** (R315-28, repair 5; verify r5, 23 Oct). The
+    bound is on the whole answer, from its send to its last byte: the
+    socket's idle time let an answer that sends a byte every 500 ms run
+    forever. A request that ran it is not asked again in the run, as item
+    24 does for a page: n asks a row, each a whole bound, would hold a
+    deploy step for hours with one fact to say, and a warm row's kept
+    connection ended with the first. Not taken, as in item 24: a bound only
+    on the whole run, which names no request. The `--restart` command has
+    `--restart-wait-ms`, by default `--up-wait-ms` (one budget for the
+    server to come back, so the verifier's own `--up-wait-ms 2000` case
+    ends in 2 s); past it its process group is ended, SIGTERM and then
+    SIGKILL after `COMMAND_STOP_MS` (5,000 ms, the harness's wait for a
+    browser), because a command run through the shell starts processes of
+    its own. A command that exits in time is not followed into its group: a
+    server it started in the background is the deploy's. The up wait is
+    `--up-wait-ms` in all, each check at most the time left, and a server
+    not up ends the restart pass, since every request asked of it would wait
+    a bound with nothing to time. Commands run detached, so the terminal's
+    signal no longer reaches them: the sheet sends its own signal to every
+    command still running when it ends first, and the writer is ended with
+    its group. `groupRunning`, `signalGroup` and `GROUP_POLL_MS` move to
+    the sheet, the module the harness already imports, so one rule stops a
+    browser and a command. A capture is read only as a regular file
+    (`readCapturedFile`, opened without blocking): a named pipe that nobody
+    writes blocked the whole process for good, the same class of wait.
+31. **A garbled ask that tells nothing is said, never passed** (R315-29,
+    repair 5; verify r5 follow-up). A garbled field answered 5xx, or not
+    answered, fails the run by name: the server failed on a value it should
+    refuse, and nothing says whether it reads the field. Busy is NOT
+    MEASURED, the run's other rows already saying busy is not a failure.
+    Only a request whose own ask was answered 2xx is asked garbled: only a
+    2xx original can be compared, so a garbled ask of any other told
+    nothing and cost one ask a field.
+32. **The harness bounds the browser's handshake, hears every tab's errors,
+    and no command writes its sheet over its own input** (R315-30, repair
+    5; verify r5 follow-ups). The handshake waits the launch's wait, the one
+    the DevTools address already had. An uncaught error is heard from every
+    tab and counted by where, so 200 cold loads that each throw are one line
+    with its count, not 200. `--out` naming the `--capture` file, or the
+    sheet's `--out` naming its `--from-pages` file, is refused before
+    anything runs. (This item said the paths were compared resolved, so a
+    link to the same file was not caught; item 35 compares the files.)
+33. **A restart row is its own answers', and another build that comes back
+    ends the restart pass** (R315-31, repair 6; verify r6, 24 Oct). Each
+    `first after restart` row counts what its answers said — classes,
+    builds, bytes — as every other row does; the up check after a restart
+    names the build it found. A server back as another build than the run's
+    fails by name and ends the pass rather than timing it: what it would
+    time is not the build the sheet measures, and twenty restarts of it
+    would print 280 lines for one fact. Not taken: going on and stamping
+    each row with the other build, which the verifier's wording allowed but
+    which measures a build the deploy did not ship. An answer that named no
+    build beside answers that named one counts as a second build, and a run
+    whose server named none fails a row another build answered: the api
+    stamps every answer (`api::server::never_framed`), so either is a server
+    swapped mid-run.
+34. **What the sheet keeps of an answer has a bound in bytes; a timed row
+    keeps only its start** (R315-32, repair 6; verify r6). A timed row reads
+    no body but the first words of a refusal, so it keeps `HEAD_BYTES`
+    (4,096 B) and counts the rest; discovery and the field check keep up to
+    `MAX_TEXT_BYTES` and past it hash as the bytes come, so a 591 MB
+    `/store.json` still has its exact length and sha256. One buffer grown by
+    doubling replaces the list of chunks, so a stream of tiny chunks costs no
+    object a chunk either. Not taken: a ceiling on the bytes of an answer,
+    which would cut a real 591 MB answer; the time bound already ends one
+    that never ends. `--max-answer-bytes` stays, and its reason is now the
+    server's load and the wire's, since a timed row no longer holds its
+    answers (L-R315-08).
+35. **Verify r6's follow-ups** (R315-33, repair 6). An output and an input
+    are one file by device and inode (`sameFile`), so a link, `/tmp` and
+    `/private/tmp`, or another case on a volume that folds case is caught;
+    a day and a month must be ones the calendar has; the sheet's `--out` is
+    checked before the run, as the harness's outputs are; both commands exit
+    only once stdout has the whole sheet, waiting at most `STDOUT_WAIT_MS`
+    (60 s) and saying so, because a piped sheet past 64 KB was cut at the
+    exit and the FAILED lines, printed last, were the ones lost; a writer the
+    sheet had to SIGKILL is a FAILED line, since its import was ended by
+    force; the harness keeps only the last `STDERR_TAIL` characters of the
+    browser's stderr and reads on keeping nothing once it has the address,
+    taken only from a whole line; the shared reporter check's tab and a
+    hook's tabs are heard for uncaught errors, as R315-30 said of every tab.
+
+Repair round 7 (25 Oct, after verify r7):
+
+36. **`/ingest`'s budget is 550,000 B** (verify r7, blocking 2). On the tree
+    merged with `feat/db-fix` at `cc0a3a0d`, `/ingest` weighed 545,589 B on
+    its first load, past 525,000: its page loads every panel on the first
+    load (`import.meta.glob('./panels/*.svelte', { eager: true })`), and
+    DATA-1w's feed checks added about 22.6 KB and R4-18's quarantine about
+    9.0 KB (verify r7 weighed them merge by merge), R4-28's F&O modes about
+    0.8 KB. No R3-15 file grew. Held just above its size, rounded up to
+    25 KB, by item 2's rule (items 2 and 10 hold the earlier figures);
+    `/db` (816,361 B) and `/backtest` (1,118,725 B) are inside theirs. Not
+    taken: shrinking the page, whose panels are other parts' files; and a
+    budget with more room, which would let a page grow unseen. 4,411 B of
+    room is left, so the next panel on `/ingest`'s first load may fail the
+    build again: the budget doing its job, and the merge that lands must
+    weigh it again.
+37. **A test that drives a real browser asserts only what does not depend
+    on how busy the machine is** (R315-34; verify r7, blocking 1). A real
+    Chrome's first content and longest pause are this machine's clock, so
+    a row it measured is checked for being measured — over its loads, each
+    figure a reading, its targets cell agreeing with its failures — and for
+    failing, if at all, only on those timed judgements; the targets are
+    proved on fixed figures (`judge`), the same on every machine. A
+    command's exit is the verdict its own sheet states, whichever that is.
+    The stall test's loads that must end get a 10,000 ms bound, about 69
+    times the slowest stand-in load end measured on this Mac (L-R315-28),
+    and `/later?paint=400` fails its first-content target on purpose every
+    run, so the warm stall is shown said beside a failing cold row. Not
+    taken: looser targets for tests, which would put a second set of
+    targets in the harness; retrying a test, which hides the slow run it
+    retries; and a fake browser with a fixed clock, which would not be the
+    browser the harness drives.
+38. **Verify r7's follow-ups** (R315-35). A reader that closed the pipe is
+    said on stderr and the command keeps its run's exit code, since the
+    sheet and an `--out` file were never the reader's to fail; `written`
+    hears the stream's failure with one listener a stream. The browser's
+    stderr is searched a chunk at a time before the tail is cut. Each
+    `--idle-tabs` count is one row. A day is one of its month's: given
+    together they must agree; a day given alone is read in its own month;
+    a month given alone takes the rung's newest day only when it is in that
+    month, else starts at its first day, as a rung that names no day does.
+    `L-R315-26` now says the peak at many clients (verify r7's 60- and
+    512-client figures), which is above the one-client bound the test
+    holds. Each new step is bounded and measured (L-R315-29).
+
+Repair round 8 (26 Oct, after verify r8):
+
+39. **A closed stderr is counted, never thrown, and the sheet says it**
+    (R315-36; verify r8, blocking 1). Neither command listened on
+    `process.stderr`, and Node's console keeps no listener there, so the
+    EPIPE of a line written after the reader had gone killed a sheet
+    mid-run (exit 1, no `--out`, nothing said) and turned either command's
+    end into exit 1. Each `main` now takes `saidOn(process.stderr)` first: one
+    persistent listener and one count a stream, every line of the command's
+    own said through it, a line stderr did not take counted and none
+    written after a failure. The run goes on, `--out` is written whole, the
+    exit stays the run's verdict, and the sheet names the first line stderr
+    did not show and how many after it, as a note. Not taken: dropping the
+    run's progress lines when stderr is not a terminal, which would hide
+    what a run is doing from every reader; ignoring EPIPE with a bare
+    listener, which keeps the process alive and says nothing; and writing
+    the note to stderr, the one place a reader cannot see.
+40. **Every sheet still waiting on a stream hears its failure** (R315-37;
+    verify r8, blocking 2, mutant R8-M12). The one listener told only the
+    newest sheet, and no test could tell: deleting the line that handed it
+    over left every test green. Each stream now keeps the set of the sheets
+    whose writes have not ended; a failure ends every one of them, each
+    said once by its own size, and each leaves the set as it ends. Verify
+    r8's case (a sheet's write in flight behind another when the stream
+    fails) is a test that kills that mutant on the old code, and the
+    mutants of this round's code are each killed (L-R315-30). Not taken:
+    removing the line and its claim, since a sheet whose write was in
+    flight would then wait out its whole bound and say the wrong reason.
+41. **Verify r8's follow-ups.** A day the sheet took rather than found (a
+    month's first day) is said as not known to be a session, since nothing
+    the sheet asks during discovery says which days hold one; asking the
+    calendar for a held session was not taken here, as it adds a request
+    with its own build-in-progress protocol to every run that names a
+    month alone. Figures that round to one are said to the byte. The heap
+    target is the page's script heap, said so beside L-R315-01, not the
+    renderer's memory. A polling stand-in's capped settle and an
+    interaction's click that drew no frame or did not settle are the
+    machine's clock in a test, named, never pinned (R315-38). The byte
+    figures of item 36 are one build's: SvelteKit names each build afresh
+    (its version string and its `__sveltekit_<id>` global), whose lengths
+    vary, so builds differ by a few bytes on every page, nothing else changed:
+    `/ingest` weighed 545,585, 545,589 and 545,593 B in the builds of 25
+    and 26 Oct (L-R315-10).
+
+Repair round 9 (26 Oct, after verify r9):
+
+42. **A restart is proved by the server's own start before anything is
+    timed** (R315-39; verify r9, blocking 1). The pass read only the
+    command's exit code, the up check and its build, so `--restart 'true'`,
+    or a stop refused before a start whose check reached the old server,
+    published warm answers as `first after restart` rows under a PASS. The
+    sheet now reads `started_ms` of the server's `/speed.json` before each
+    run of the command and again once the server is up after it; a start
+    that did not change fails that restart by name and ends the pass, as
+    another build does, and a start that cannot be read is said and ends it
+    before anything is timed. The read after the command is `/speed.json`'s
+    own sample, and the sheet says each restart's proof. This item also
+    took the up check that found the server up as the up route's sample
+    and said every `first after restart` row was its route's first ask
+    after the restart; item 45 withdraws both (verify r10): that check had
+    waited for the server's start, and a route the command had asked was
+    published as a first. Not taken: asking a route of its own for the
+    start (`/speed.json` already carries it, and the server is this
+    repository's); and proving the restart after the timed pass (warm
+    answers would be asked as firsts, and a check that reached the old
+    server would not be caught).
+43. **What a command prints goes to a file of its own, never the sheet's
+    stderr** (R315-40; verify r9, blocking 2). `run` gave the `--writer`
+    and `--restart` commands the sheet's fd 2: with its reader gone they
+    died of SIGPIPE, which changed the verdict, and a child's start clears
+    O_NONBLOCK on its stdio, which an inherited stream shares, so a reader
+    alive and not reading froze the sheet inside a write past every timer,
+    against the bound L-R315-30 stated. Each command now prints to
+    `--command-log` (by default beside `--out`, else in the system's
+    temporary directory), a regular file opened to append, each run headed
+    by a line naming it; a log that cannot be kept refuses its command by
+    name; the sheet names the log, and how a writer ended. Not taken: pipes
+    relayed through the sheet's counted stderr, which the verifier offered,
+    because a process a `--restart` command leaves in the background (a
+    server started without a redirection of its own) would hold the pipe
+    and meet a broken pipe at its next line once the sheet had gone (probed:
+    gone 1.5 s after its parent exited, where with a file it ran on, L-R315-31),
+    and because a relay must hold or drop what a stalled stderr does not
+    take; and `'ignore'`, which would lose the reason a restart failed.
+44. **Verify r9's follow-ups.** The default settle bound at a run's end is
+    held by its behaviour, so a bound of 1 ms fails a test (mutant R9-M09
+    survived every test before); the stderr note says the lines stderr did
+    not take ("were not taken"), since a failed write is all the sheet knows,
+    not what a reader showed; a year before 0001 is refused by `--month`
+    and `--day` as the server refuses it (R315-41). Not done here: a held
+    session day for a month given alone (item 41), the real-browser tests'
+    temporary directories (the main session's cleanup), and the committed
+    `web/build` without the Speed page (the main session's rebuild at the
+    merge).
+
+Repair round 10 (26 Oct, after verify r10):
+
+45. **A first after a restart is its route's first since the server's
+    start, proved by the server's own count, and none waits for that start**
+    (R315-42; verify r10, blockings 1 and 2). Item 42 took the up check
+    that found the server up as the up route's sample: a `--restart`
+    command that returned before the server answered (the api says
+    `listening`, then starts for about 5 s) left that check in the listen
+    queue, so `HEAD /inspection.json`'s first after restart read 4,515 /
+    6,566 ms against the server's own 42 µs. And nothing looked at what the
+    server had answered before the sheet asked: serve.sh's readiness
+    `GET /feeds.json` in the documented command was that route's first, so
+    the sheet's warm ask was published as one (1.32 / 51.1 ms against the
+    server's own 5.3 s). Now the up wait asks `HEAD /health`, which no page
+    asks and no request times, until the server gives any answer, so the
+    wait for the start is that route's; and an ask after a restart is timed
+    as a first only when the server's own `/speed.json` counts
+    (`since_start.n` by route), read with the proof and again after the
+    pass, show nobody asked its route before it and nobody but this sheet
+    during the pass. Every other ask is a NOT MEASURED line naming its
+    restarts, the count and why, never a FAIL: the server answered nothing
+    wrong, a first was not this sheet's to take (an open tab's up check on
+    the live app after a deploy would otherwise fail every run). The read
+    that proves a restart stays `/speed.json`'s first unless the server's
+    start is later than the up wait's answer, when that wait reached the
+    server the command stopped. Not taken: asking the up route once more
+    after the proof, as the sheet before repair 9 did (that ask is the
+    route's second, published as its first); the server's own
+    `first_after_start_micros` as the row (a server-side time beside
+    end-to-end times in one table); telling a check that waited for the
+    start by how long it took (a threshold is a guess); a check after the
+    pass alone (the command's asks come before the pass); and a FAIL for an
+    ask not proved a first. A route asked by two URLs in one pass (the
+    `/bars/window.json` grid and its extremes) gave each URL's first ask
+    since the start, the later one after the route's first (L-R315-32);
+    item 48 withdraws that (verify r11): the count proof held this sheet's
+    own earlier asks, so the later one was published as a first.
+46. **Verify r10's follow-ups.** `--month` and `--day` before 1970 are
+    refused by name, sharing the server's bound (`store::path::YearMonth`,
+    1970 to 9999), so R315-41's "as the server refuses it" holds; an empty
+    `--out`, `--command-log` or `--from-pages` is refused at the command
+    line; `--out` that is the commands' log by its device and inode once the
+    run has made it is not written (exit 2, the log kept whole); each
+    heading in the commands' log names the sheet's pid (R315-43). Not done
+    here: waiting within `--up-wait-ms` for a start that has not changed
+    yet (item 42's loud failure stands); the hidden-tab test's wall bound,
+    which machine load can break, as verify r10 saw once under coverage at
+    a load near 170; and the real-browser tests' temporary directories (the
+    main session's cleanup).
+47. **`/backtest`, `/db` and `/ingest` are budgeted 1,175,000 / 850,000 /
+    600,000 B** (repair 10, on the tree merged with `feat/db-fix` after
+    R3-12). The merged build weighed 1,164,100 / 831,220 / 590,976 B, all
+    three past items 10 and 36's budgets, and every other page grew too:
+    R3-12 made `$lib/store-census.js`, which every page loads first through
+    `$lib/store.svelte.js`, import `./db/notes-labels.js`,
+    `./db/selection-model.js` and `./instrument.js`, which bring
+    `./db/notes-controls.js` and `./db/input-check.js`, so a page that
+    loaded none of them gained 65,144 B (`/`, `/speed`, `/selection`,
+    `/autopilot`, `/mapping`, `/audit`, `/markets`, within 4 B) and the
+    three gained 45,375 / 14,859 / 45,387 B (they loaded some already). No
+    R3-15 file grew. Held just above their size, rounded up to 25 KB, by
+    item 2's rule (10,900 / 18,780 / 9,024 B of room). Not taken: moving
+    those imports off the shared path, which is R3-12's file (said to its
+    owner and the main session); and a budget for the pages under the
+    target, which keep the 400,000 B one: `/audit` 399,082 B and `/markets`
+    399,780 B hold 918 and 220 B of room, so the next shared byte fails the
+    build at them, as the budget is meant to.
+
+Repair round 11 (27 Oct, after verify r11):
+
+48. **Only a route's first ask in a restart's pass is timed as its first,
+    and a route's requests take turns going first** (R315-44; verify r11,
+    blocking X1). Item 45's count proof took an ask as its route's first
+    when the server had counted the route exactly as often as this sheet's
+    answered asks of it in the pass, and those asks included this sheet's
+    own earlier ones, so every later ask of a route in one pass passed it:
+    on the api the `/bars/window.json` extremes request, asked right after
+    the grid, read 4.06 / 8.34 ms as a first against its own first's 100 to
+    212 ms, and with the deploy step's `/db` capture 13 of the 30 requests
+    were published so. Now an ask is timed as a first only when it was this
+    sheet's first ask of its route in the pass (`/speed.json`'s is the read
+    that proved the restart), checked before the count; every later one is
+    a NOT MEASURED line naming the ask that went first ("its route
+    /bars/window.json was asked first in that pass by this sheet's GET
+    ..."), with each such ask and its restarts when they differ. And
+    `passOrder` turns a route's requests from one restart to the next, each
+    in a place one of them holds, so over g restarts each of a route's g
+    requests goes first once and every request still gets its own firsts;
+    `/speed.json`'s first stays the read that proved the restart, made
+    before the pass. The verifier's way (a) with its optional
+    turns. Not taken: its way (b), a later ask published under a phase or
+    mark of its own (a time of a warmed route beside first-after-restart
+    rows, which is what the warm rows already time); asking a shared
+    route's requests after restarts of their own (more restarts for the
+    same rows); and a fixed order (a later request would never be timed).
+    Taken with it: the old-server line now says the server's clock may be
+    ahead of this machine's, since the two cannot be told apart (verify
+    r11's follow-up), and a captured request names its method and URL in
+    the sheet's table ("captured from the page: GET ..."), with a `|` it
+    holds written escaped and a line break in its page as a space, so two
+    of one route, each with its own firsts, are told apart and each row
+    stays one line of the table (found in this repair's self-check). Not done here: what
+    another route's earlier ask warmed for a route's first (a shared file
+    or cache) is not told by a route's count (L-R315-33).
+
+**Proof.** `web/tests/speed.test.js` (invariants R315-01 to R315-44);
+measurements in `docs/06-limits.md` L-R315-01 to L-R315-33.
+
 ### D-4885 — `admit` is one ordered table, owned by IA-16: rows 2 to 4b a pure function, a hole named and never read unasked (IA-16; with D-4910's skip classes and D-4912's row 4b) — 2026-10-20
 
 **Number** reserved for IA-16 by the ingest automation design (§15, round 4,
@@ -81917,6 +82490,63 @@ docs/04-invariants.md R319-01..R319-12), the updated
 and `an_epoch_install_through_the_door_costs_a_constant_number_of_calls_measured`,
 `api::census::epoch_link_tests::api_census_refuses_a_symlinked_epoch_by_name`,
 and gate 28's own test with the ingest row struck.
+
+### D-5916 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 to clear two RustSec advisories published on 19 and 20 Oct; `Cargo.lock` only — 2026-10-21
+
+**Context** (R3-15 repair, the gate re-run after its merge of `feat/db-fix`).
+`cargo deny check` was green on this tree at 00:07 IST on 21 Oct and red at
+02:24 IST the same night, with no file changed between the two runs: the
+advisory database it fetched had gained two entries. Both reach the native TLS
+path `hyper-rustls -> reqwest -> pull -> api, cli`:
+
+- **RUSTSEC-2026-0382** (dated 2026-10-20), "Certificate verification may
+  accept distrusted intermediates", <https://rustsec.org/advisories/RUSTSEC-2026-0382>,
+  against `rustls-webpki` 0.103.15 (through `rustls` 0.23.46), patched
+  `>= 0.103.16, < 0.104.0-alpha.1`: affected versions may accept certificate
+  paths through emSign intermediates whose private keys are now well known.
+- **RUSTSEC-2026-0381** (dated 2026-10-19), "Bundled root certificates allow
+  trust in distrusted emSign intermediates", <https://rustsec.org/advisories/RUSTSEC-2026-0381>,
+  against `webpki-roots` 1.0.9, patched `>= 1.0.10`, which removes the root
+  `emSign ECC Root CA - G3`.
+
+**Decision.**
+
+1. **Both are patch releases inside every manifest's existing range**, so only
+   `Cargo.lock` moves (`cargo update -p rustls-webpki --precise 0.103.16`,
+   `cargo update -p webpki-roots --precise 1.0.10`): two version and two
+   checksum lines. No manifest line, no dependency list and no feature moved;
+   the lock still holds 195 `[[package]]` entries, and the count the
+   dependency-set test asserts stays 192. Merged onto `rustix` (D-5240, at
+   `feat/db-fix` `a5d0bea8a`, R3-15 repair 2) the lock holds 197 and the test
+   asserts 194, and the merged lock differs from that branch's by these two
+   version and two checksum lines alone.
+2. **The scan `the_dependency_set_has_not_moved_without_review` demands was
+   run before its pin moved** (`crates/vocab/tests/workspace_is_rust.rs`,
+   re-pinned to `0x79FE_A712_E0CC_24EC` on this branch alone, and to
+   `0x57F8_69FF_1E0D_4A5C` merged onto `rustix`, the same two bumps and no
+   package unscanned): neither crate ships a `build.rs` or
+   any `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.s` or `.asm`. `webpki-roots`
+   1.0.10's files outside `.rs`, `.md`, `.toml` and `.json` are the same set as
+   1.0.9's; `rustls-webpki` 0.103.16 adds exactly eight `.spki.der` files
+   under `src/data/distrusted/`, the public keys it now refuses: data, not
+   code. Licences unchanged: ISC, and CDLA-Permissive-2.0 under the existing
+   `deny.toml` exception for `webpki-roots` by name.
+3. **What the bump refuses that 1.0.9 and 0.103.15 accepted, stated rather
+   than hidden**: a vendor or service certificate chain that passes through
+   one of the distrusted emSign intermediates, or that chains only to
+   `emSign ECC Root CA - G3`, now fails the TLS handshake. That is a loud
+   failure of the pull, never a silent one. Whether any host `crates/pull`
+   reaches chains to emSign is **UNVERIFIED**: no vendor host was contacted
+   for this entry.
+4. **Merged into `feat/db-fix`'s own copy of the same bumps** (repair 3,
+   23 Oct). `feat/db-fix` made the same two bumps as D-7120, with IA-16's
+   arrow `pull -> rustix`; merging it at `0dc8361c3` gave its `Cargo.lock`
+   byte for byte, so the pin asserted is its `0xADFB_F4EE_30AF_1851` and this
+   entry moves nothing more.
+
+**Proof.** `cargo deny check`: advisories, bans, licences and sources ok on
+the bumped lock; `the_dependency_set_has_not_moved_without_review` fails on the
+bumped lock under the old pin and passes under the new one.
 
 ### D-7120 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 in `Cargo.lock` only, clearing RUSTSEC-2026-0382 and RUSTSEC-2026-0381; and the C-HA-01 cost row R4-09a named and never landed (BASE-REDS-1021) — 2026-10-21
 

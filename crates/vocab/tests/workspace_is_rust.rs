@@ -646,6 +646,10 @@ fn the_dependency_set_has_not_moved_without_review() {
     // R3-24 repair round 3 (D-5890) made the same two bumps and its own scan
     // of both registry sources independently, and reached this same pin: its
     // repair round 2 had bumped the lock without the re-pin (B10).
+    // R3-15 repair 2 (D-5916) made the same two bumps on its own branch, merged
+    // onto `rustix` (0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C, the pin
+    // above), with the same scan result; merging feat/db-fix at repair 3 gave
+    // feat/db-fix's `Cargo.lock` byte for byte, so the pin asserted below stands.
     // 0x57F8_69FF_1E0D_4A5C -> 0xADFB_F4EE_30AF_1851 IS THE TWO CHANGES ABOVE,
     // TOGETHER, NOT A THIRD (IA-16 repair 2, merging feat/db-fix): the two bumps
     // (D-7120) and IA-16's one arrow `pull -> rustix`. No package was added,
