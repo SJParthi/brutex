@@ -34,7 +34,15 @@ pub(crate) const MILLIS_PER_DAY: i64 = 86_400_000;
 /// Now, as milliseconds since the Unix epoch, negative before it.
 #[must_use]
 pub fn now_millis() -> i64 {
-    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+    millis_since_epoch(SystemTime::now())
+}
+
+/// `at` as milliseconds since the Unix epoch, negative before it: the one
+/// conversion [`now_millis`] routes the host clock through, so both sides
+/// of the epoch are reached by a test with a constructed instant (D-7322;
+/// docs/06-limits.md section 54 named the routing as the dark line).
+pub(crate) fn millis_since_epoch(at: SystemTime) -> i64 {
+    match at.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(since) => millis_of(&since, false),
         // A clock set before 1970. Not a failure and not a refusal: the event
         // happened, and the honest record of when is a negative number.
@@ -173,9 +181,38 @@ pub(crate) fn push_i64(out: &mut Vec<u8>, value: i64) {
 )]
 mod tests {
     use super::{
-        Duration, MILLIS_PER_DAY, civil_from_days, millis_of, now_millis, push_i64, push_padded,
-        push_rfc3339,
+        Duration, MILLIS_PER_DAY, SystemTime, civil_from_days, millis_of, millis_since_epoch,
+        now_millis, push_i64, push_padded, push_rfc3339,
     };
+
+    /// D-7322: the routing of a host clock either side of the epoch, which
+    /// a test could not reach while `now_millis` read the clock itself.
+    #[test]
+    fn an_instant_either_side_of_the_epoch_routes_to_its_signed_millis() {
+        let epoch = SystemTime::UNIX_EPOCH;
+        // 1-2. The epoch itself, and one millisecond after it.
+        assert_eq!(millis_since_epoch(epoch), 0);
+        assert_eq!(millis_since_epoch(epoch + Duration::from_millis(1)), 1);
+        // 3. One millisecond before it: negative, not an error.
+        assert_eq!(millis_since_epoch(epoch - Duration::from_millis(1)), -1);
+        // 4. A sub-millisecond instant either side truncates towards zero.
+        assert_eq!(millis_since_epoch(epoch + Duration::from_micros(999)), 0);
+        assert_eq!(millis_since_epoch(epoch - Duration::from_micros(999)), 0);
+        // 5. A day before the epoch, formatted: the last day of 1969.
+        assert_eq!(
+            stamp(millis_since_epoch(epoch - Duration::from_millis(86_400_000))),
+            "1969-12-31T00:00:00.000Z"
+        );
+        // 6. COMBINED: a whole century before the epoch AND a millisecond
+        //    remainder.
+        let century = Duration::from_secs(36_524 * 86_400) + Duration::from_millis(7);
+        assert_eq!(millis_since_epoch(epoch - century), -3_155_673_600_007);
+        // 7. COMBINED: the same span after the epoch is the exact negation.
+        assert_eq!(millis_since_epoch(epoch + century), 3_155_673_600_007);
+        // 8. OUT OF THE BOX: the live clock goes through the same door and
+        //    lands after 2026-01-01, whatever host runs this.
+        assert!(now_millis() > 1_767_225_600_000);
+    }
 
     fn stamp(millis: i64) -> String {
         let mut out = Vec::new();

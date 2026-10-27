@@ -3886,6 +3886,51 @@ mod tests {
         }
     }
 
+    /// BASE-COV-LIBS (D-7320): the string grammar at the edges the decode
+    /// test above does not reach, and key paths that only look like a
+    /// dependency table. Each case is one package name, decoded exactly.
+    #[test]
+    fn the_manifest_reader_holds_at_the_edges_of_its_string_grammar() {
+        let root = include_str!("../../../Cargo.toml");
+        let one = |value: &str| {
+            crate::manifest::linked_packages(&format!("[dependencies]\nx = {{ package = {value} }}"), root)
+        };
+        // 1. CRLF straight after a multi-line literal's opening delimiter is trimmed.
+        assert_eq!(one("'''\r\nz'''"), Ok(names(&["z"])));
+        // 2. A bare CR after the opener is not a line end: it is kept.
+        assert_eq!(one("'''\rz'''"), Ok(names(&["\rz"])));
+        // 3. One quote inside a multi-line basic string is text.
+        assert_eq!(one("\"\"\"a\"b\"\"\""), Ok(names(&["a\"b"])));
+        // 4. Two quotes inside it are text too: only three close it.
+        assert_eq!(one("\"\"\"a\"\"b\"\"\""), Ok(names(&["a\"\"b"])));
+        // 5. A backslash in a literal string is a backslash, not an escape.
+        assert_eq!(one("'a\\b'"), Ok(names(&["a\\b"])));
+        // 6. COMBINED: a literal multi-line string with CRLF after the opener
+        //    AND a backslash AND a lone quote of the other kind inside.
+        assert_eq!(one("'''\r\na\\\"b'''"), Ok(names(&["a\\\"b"])));
+        // 7. Four-part paths that are not `target.CFG.<deps>.NAME`: a first
+        //    part other than `target`, and `target` over a non-dependency
+        //    table. Neither links anything.
+        assert_eq!(
+            crate::manifest::linked_packages("[foo.bar.baz]\nq = 1", root),
+            Ok(names(&[]))
+        );
+        assert_eq!(
+            crate::manifest::linked_packages("[target.x.notdeps]\nq = 1", root),
+            Ok(names(&[]))
+        );
+        // 8. COMBINED: the real form beside them still links its package.
+        assert_eq!(
+            crate::manifest::linked_packages(
+                "[foo.bar.baz]\nq = 1\n[target.x.dependencies]\nvocab = \"1\"",
+                root
+            ),
+            Ok(names(&["vocab"]))
+        );
+        // 9. OUT OF THE BOX: an empty multi-line literal names the empty package.
+        assert_eq!(one("''''''"), Ok(names(&[""])));
+    }
+
     #[test]
     fn the_type_carries_no_depth_field() {
         // CLAUDE.md §6: "There is no k parameter. Not a default, not a token,

@@ -2960,9 +2960,11 @@ mod tests {
     }
 
     /// BASE-COV-LIBS (D-7320): rounding a paisa figure to the rupee, at its
-    /// extremes. The callers hand it levies far below the type, so the
-    /// top-of-type refusal is reached by a direct call: half-up at
-    /// `i64::MAX` paisa is 93 paisa above the type and must refuse, never wrap.
+    /// extremes. Measured: no `i64` leaves the type. `i64::MAX` ends in 07
+    /// paisa and rounds DOWN; the largest figure that rounds up (…799) lands
+    /// on …800; `i64::MIN` ends in 92 (Euclidean) and rounds towards zero. So
+    /// the narrowing refusal in `to_rupee` is unreachable, listed (U) in
+    /// state/fix/round2/base-cov-libs-fu.txt with this test as its proof.
     #[test]
     fn rounding_to_the_rupee_holds_at_both_ends_of_the_type() {
         // 1-2. Zero, and the half-paisa boundary either side of 50.
@@ -2979,11 +2981,16 @@ mod tests {
             to_rupee(rs(9_223_372_036_854_775_800)).unwrap(),
             rs(9_223_372_036_854_775_800)
         );
-        // 6. COMBINED: the top of the type AND a half that rounds up: refused.
-        assert!(matches!(
-            to_rupee(rs(i64::MAX)),
-            Err(ChargeError::Cost(CostError::Overflow { .. }))
-        ));
+        // 6. COMBINED: the top of the type rounds down, and the largest
+        //    figure that rounds up still fits.
+        assert_eq!(
+            to_rupee(rs(i64::MAX)).unwrap(),
+            rs(9_223_372_036_854_775_800)
+        );
+        assert_eq!(
+            to_rupee(rs(9_223_372_036_854_775_799)).unwrap(),
+            rs(9_223_372_036_854_775_800)
+        );
         // 7. COMBINED: the bottom of the type rounds towards zero and fits.
         assert_eq!(
             to_rupee(rs(i64::MIN)).unwrap(),

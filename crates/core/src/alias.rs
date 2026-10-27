@@ -1043,6 +1043,38 @@ mod tests {
     /// as the charter writes it.
     const PRODUCT: &str = "https://www.nseindia.com/static/products-services/";
 
+    /// BASE-COV-LIBS (D-7320): the three `const fn` row builders, run at
+    /// run time rather than only in the constant tables they fill, give the
+    /// rows those tables hold, field for field.
+    #[test]
+    fn the_const_row_builders_give_the_rows_the_tables_hold() {
+        // 1. A product citation carries the charter's read day and its digest.
+        assert_eq!(
+            product("u", "s", "w"),
+            Citation {
+                url: "u",
+                read: "2026-10-07",
+                sha256: Some("s"),
+                says: "w",
+            }
+        );
+        // 2. Rebuilt from its own parts, a shipped page is the shipped page.
+        let digest = FINNIFTY_PAGE.sha256.expect("a product page has a digest");
+        assert_eq!(product(FINNIFTY_PAGE.url, digest, FINNIFTY_PAGE.says), FINNIFTY_PAGE);
+        // 3. A product row is sourced by exactly its five citations, and applies.
+        let row = product_row(&FINNIFTY_SOURCES);
+        assert_eq!(row, Status::Sourced(&FINNIFTY_SOURCES));
+        assert!(row.applies());
+        // 4. A row read again carries its symbols, its day and the re-read file.
+        let again = read_again("BAJAJTEMPO", "FORCEMOT", Ymd::new(2019, 8, 19));
+        assert_eq!(again.old, "BAJAJTEMPO");
+        assert_eq!(again.new, "FORCEMOT");
+        assert_eq!(again.effective, Ymd::new(2019, 8, 19));
+        assert_eq!(again.status, Status::Sourced(IN_THE_FILE_READ_AGAIN));
+        // 5. OUT OF THE BOX: empty parts are carried, not filled in.
+        assert_eq!(product("", "", "").sha256, Some(""));
+    }
+
     /// A name's ASCII letters and digits, upper-cased: the oracle the
     /// production collapse is checked against.
     fn collapse(name: &str) -> String {

@@ -2779,4 +2779,62 @@ mod tests {
         );
         assert!(first.reconciles());
     }
+
+    /// BASE-COV-LIBS (D-7320): a reference reads back exactly what it was
+    /// built from, and the census refuses each of its four balances alone.
+    #[test]
+    fn a_reference_reads_back_its_bar_and_the_census_refuses_each_imbalance() {
+        // 1-4. The bar, its IST day, its range and its eligibility, as built.
+        let built = eligible(20_000, 50_000);
+        assert_eq!(built.bar(), daily_bar(20_000, 50_000));
+        assert_eq!(built.ist_day(), 20_000);
+        assert_eq!(built.range(), 2_000);
+        assert_eq!(built.eligibility(), DailyEligibility::Eligible);
+        assert_eq!(excluded(20_001, 50_000).eligibility(), DailyEligibility::Excluded);
+        // 5. COMBINED: the first IST day (day 0) at the lowest price whose
+        //    range still fits: range is high minus low exactly.
+        let low = eligible(0, 1_001);
+        assert_eq!((low.ist_day(), low.range()), (0, 2_000));
+        // A census that balances, as the control.
+        let sound = DailyReferenceCensus {
+            offered: 5,
+            eligible: 3,
+            excluded: 2,
+            consumed: 4,
+            installed: 3,
+            skipped_excluded: 1,
+            ..DailyReferenceCensus::default()
+        };
+        assert!(sound.reconciles());
+        // 6-9. Each balance broken alone.
+        for broken in [
+            DailyReferenceCensus { offered: 6, ..sound },
+            DailyReferenceCensus { consumed: 5, offered: 5, ..sound },
+            DailyReferenceCensus {
+                offered: 7,
+                excluded: 4,
+                consumed: 8,
+                installed: 3,
+                skipped_excluded: 5,
+                ..sound
+            },
+            DailyReferenceCensus { installed: 4, skipped_excluded: 0, ..sound },
+        ] {
+            assert!(!broken.reconciles(), "{broken:?}");
+        }
+        // 10. COMBINED: every counter at its maximum: the saturating sums
+        //     still balance only the way the counts do.
+        let full = DailyReferenceCensus {
+            offered: u64::MAX,
+            eligible: u64::MAX,
+            excluded: 0,
+            consumed: u64::MAX,
+            installed: u64::MAX,
+            skipped_excluded: 0,
+            ..DailyReferenceCensus::default()
+        };
+        assert!(full.reconciles());
+        // 11. OUT OF THE BOX: the empty census balances (nothing was offered).
+        assert!(DailyReferenceCensus::default().reconciles());
+    }
 }

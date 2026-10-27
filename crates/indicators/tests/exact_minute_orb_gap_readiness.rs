@@ -411,3 +411,84 @@ fn combined_bridge_rejects_late_missing_mismatched_corrupt_and_unaligned_minutes
         );
     }
 }
+
+/// BASE-COV-LIBS (D-7320): every refusal the bridge makes BEFORE it reads a
+/// close, each at its extreme, and a signal shorter than the column it
+/// overlays. Every refusal leaves the column untouched.
+#[test]
+fn the_bridge_refuses_bad_lengths_empty_unaligned_and_repeated_minutes_and_a_short_signal() {
+    let exact = minutes(FIRST_DAY, 0);
+    let signal = aggregate(&exact, 2);
+    let original = column(&signal);
+    let run = |signal: &[Candle], minutes: &[Candle], length: i64| {
+        let mut offered = original.clone();
+        let got = overlay_exact_minute_gapfib(
+            signal,
+            minutes,
+            length,
+            widths(),
+            Calendar::all_regular(),
+            |_| Some(15 * 60 + 29),
+            &mut offered,
+        );
+        assert_eq!(offered, original, "a refusal replaces nothing");
+        got
+    };
+    // 1-4. A signal length below a minute (zero, negative, the type's floor)
+    //      and one that is not a whole number of minutes.
+    for length in [0, -MINUTE, i64::MIN, MINUTE - 1, MINUTE + 1, 2 * MINUTE + 7] {
+        assert_eq!(
+            run(&signal, &exact, length),
+            Err(ExactMinuteGapRefusal::InvalidSignalLength(length)),
+            "{length}"
+        );
+    }
+    // 5. No minutes at all.
+    assert_eq!(
+        run(&signal, &[], 2 * MINUTE),
+        Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index: 0 })
+    );
+    // 6. A first minute one microsecond off the minute grid.
+    let mut unaligned = exact.clone();
+    unaligned.first_mut().expect("a first minute").ts_micros += 1;
+    assert_eq!(
+        run(&signal, &unaligned, 2 * MINUTE),
+        Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index: 0 })
+    );
+    // 7. A repeated minute (a step of zero) and a step backwards.
+    for (at, step) in [(1_usize, 0_i64), (5, -MINUTE)] {
+        let mut repeated = exact.clone();
+        let earlier = repeated.get(at - 1).expect("a minute").ts_micros;
+        repeated.get_mut(at).expect("a minute").ts_micros = earlier + step;
+        assert_eq!(
+            run(&signal, &repeated, 2 * MINUTE),
+            Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index: at }),
+            "{at} {step}"
+        );
+    }
+    // 8. COMBINED: a bad length AND no minutes: the length is refused first.
+    assert_eq!(
+        run(&signal, &[], 0),
+        Err(ExactMinuteGapRefusal::InvalidSignalLength(0))
+    );
+    // 9. COMBINED: an unaligned first minute AND a repeated later one: the
+    //    first fault in the stream is the one named.
+    let mut both = unaligned.clone();
+    let earlier = both.get(2).expect("a minute").ts_micros;
+    both.get_mut(3).expect("a minute").ts_micros = earlier;
+    assert_eq!(
+        run(&signal, &both, 2 * MINUTE),
+        Err(ExactMinuteGapRefusal::MalformedMinuteCadence { index: 0 })
+    );
+    // 10. OUT OF THE BOX: a signal shorter than the column it overlays. The
+    //     column's row 10 names signal bar 10, which is not offered.
+    let short = signal.get(..10).expect("ten signal bars");
+    assert_eq!(original.sources().get(10), Some(&10));
+    assert_eq!(
+        run(short, &exact, 2 * MINUTE),
+        Err(ExactMinuteGapRefusal::SignalSourceOutOfBounds {
+            row: 10,
+            source: 10
+        })
+    );
+}
