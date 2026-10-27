@@ -1560,6 +1560,7 @@ mod tests {
             ", , poon"
         );
         assert_eq!(s("a flat JSON object here"), "a  here");
+        assert_eq!(s("a flat json object here"), "a  here");
         assert_eq!(s("came out flat; is charged Flat; rA flat"), "; ; r");
         // A trade's outcome is not a cost (D-1930, D-1939).
         assert_eq!(
