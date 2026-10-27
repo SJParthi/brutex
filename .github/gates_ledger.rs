@@ -4022,7 +4022,11 @@ mod tests {
                     refused(&one, "6");
                     let split = format!(
                         "fn a() {{\n    let p = xs\n        .{base}()\n{}        .{search}(f);\n}}\n",
-                        if rev.is_empty() { "" } else { "        .rev()\n" }
+                        if rev.is_empty() {
+                            ""
+                        } else {
+                            "        .rev()\n"
+                        }
                     );
                     let (ok, text) = g11(&[("crates/a/src/x.rs", &split)], &lists());
                     assert!(!ok, "{split}");
@@ -4032,12 +4036,15 @@ mod tests {
         }
         // The reversal is optional, never a wildcard: another adapter between
         // the opener and the search is not this rule's spelling (named in
-        // docs/06-limits.md L-BRED23-02), and a near word is not a search.
+        // docs/06-limits.md L-BRED23-12), a near word is not a search, and a
+        // search word the regex's `\.` does not lead is not a call.
         for clean in [
             "let p = xs.iter_mut().rev().map(f);\n",
             "let p = xs.iter_mut().rev().rev_find(f);\n",
             "let p = xs.iter_mut().rev().finder();\n",
             "let p = xs.iter_mut().reverse().find(f);\n",
+            "let p = xs.iter_mut().rev()find(f);\n",
+            "let p = xs.iter()position(f);\n",
         ] {
             let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
             assert!(ok, "{clean}: {text}");
