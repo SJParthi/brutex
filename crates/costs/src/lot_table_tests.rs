@@ -369,3 +369,91 @@ fn a_lookup_is_flat_in_the_table() {
         "a lookup in a table 750 times larger stays within ten times the p99"
     );
 }
+
+/// BASE-COV-LIBS (D-7320): the wire words, the absences' own text, the
+/// grouped row order and the digest's length, each at its extremes. The
+/// standing words are what `pull::reference_data` stores and reads back, so
+/// a word that stops parsing would refuse every stored lot row.
+#[test]
+fn the_wire_words_the_absence_text_and_the_grouped_rows_hold_at_their_extremes() {
+    // 1. Both standings round-trip through their wire words.
+    for standing in [LotStanding::Sourced, LotStanding::Unverified] {
+        assert_eq!(LotStanding::parse(standing.word()), Some(standing));
+    }
+    assert_eq!(LotStanding::Sourced.word(), "sourced");
+    assert_eq!(LotStanding::Unverified.word(), "unverified");
+    // 2. Garbage, a changed case, padding and the empty word parse to nothing.
+    for garbage in ["", "Sourced", " sourced", "sourced\n", "verified", "unverified!"] {
+        assert_eq!(LotStanding::parse(garbage), None, "{garbage:?}");
+    }
+    // 3. Before the first row, for an underlying that is not swept: its own
+    //    word, and a sentence naming the underlying, the day and the first row.
+    let table = LotTable::from_rows(vec![sourced("SBIN", day(2024, 12, 27), 750)]).unwrap();
+    let before = table.lot_on("SBIN", day(2018, 1, 1)).unwrap_err();
+    assert_eq!(before.word(), "before_first_row");
+    let text = before.to_string();
+    assert!(text.starts_with("no sourced lot for SBIN on "), "{text}");
+    assert!(text.contains("its first row is"), "{text}");
+    assert!(text.contains("none is stretched backwards"), "{text}");
+    // 4. An unverified row in force: shown with its units and its citation.
+    let listed = LotTable::from_rows(vec![unverified("TCS", day(2020, 1, 1), 1)])
+        .unwrap()
+        .lot_on("TCS", TradeDay::MAX)
+        .unwrap_err();
+    let text = listed.to_string();
+    assert!(text.contains("(1 units)"), "{text}");
+    assert!(text.ends_with("is unverified and is not applied: no circular read"), "{text}");
+    // 5. Rows handed in interleaved come back grouped by underlying, each
+    //    underlying ascending, in the order each was handed in.
+    let grouped = LotTable::from_rows(vec![
+        sourced("ZZ", day(2020, 1, 1), 5),
+        sourced("AA", day(2019, 1, 1), 7),
+        sourced("ZZ", day(2021, 1, 1), 6),
+        sourced("AA", day(2022, 1, 1), 8),
+    ])
+    .unwrap();
+    let order: Vec<(&str, u32)> = grouped
+        .rows()
+        .iter()
+        .map(|row| (row.underlying.as_str(), row.units))
+        .collect();
+    assert_eq!(order, vec![("AA", 7), ("AA", 8), ("ZZ", 5), ("ZZ", 6)]);
+    // 6. COMBINED: interleaved rows AND a descending pair; the refusal names
+    //    the row by its position as handed in (the fourth), not as sorted.
+    let refused = LotTable::from_rows(vec![
+        sourced("ZZ", day(2020, 1, 1), 5),
+        sourced("AA", day(2022, 1, 1), 7),
+        sourced("ZZ", day(2021, 1, 1), 6),
+        sourced("AA", day(2019, 1, 1), 8),
+    ]);
+    assert_eq!(refused.unwrap_err(), LotTableError::NotAscending { row: 4 });
+    // 7. A digest one character short, one long, and 64 upper-case hex: each
+    //    is not a receipt.
+    for digest in ["a".repeat(63), "a".repeat(65), "AB".repeat(32)] {
+        let mut row = sourced("SBIN", day(2024, 12, 27), 750);
+        row.source_sha256 = Some(digest.clone());
+        assert_eq!(
+            LotTable::from_rows(vec![row]).unwrap_err(),
+            LotTableError::SourcedWithoutReceipt { row: 1 },
+            "{digest}"
+        );
+    }
+    // 8. COMBINED: an unverified row needs no receipt even with a malformed
+    //    digest, and it is still never applied.
+    let mut odd = unverified("TCS", day(2020, 1, 1), 1);
+    odd.source_sha256 = Some("x".to_owned());
+    let table = LotTable::from_rows(vec![odd]).unwrap();
+    assert!(matches!(
+        table.lot_on("TCS", day(2020, 1, 1)),
+        Err(LotAbsence::Unverified { units: 1, .. })
+    ));
+    // 9. OUT OF THE BOX: an underlying spelled in another script is a name
+    //    like any other; the table neither folds nor refuses it.
+    let name = "\u{928}\u{93f}\u{92b}\u{94d}\u{91f}\u{940}";
+    let table = LotTable::from_rows(vec![sourced(name, day(2020, 1, 1), 3)]).unwrap();
+    assert_eq!(table.lot_on(name, day(2020, 1, 2)).unwrap().lot.units(), 3);
+    assert!(matches!(
+        table.lot_on("NIFTY", day(2020, 1, 2)),
+        Err(LotAbsence::NoRow { .. })
+    ));
+}

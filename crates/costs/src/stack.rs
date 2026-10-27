@@ -2958,4 +2958,41 @@ mod tests {
         assert_eq!(page.square_off_fee(), rs(20_00));
         assert_eq!(page.lines()[9], ("broker square-off fee", rs(20_00)));
     }
+
+    /// BASE-COV-LIBS (D-7320): rounding a paisa figure to the rupee, at its
+    /// extremes. The callers hand it levies far below the type, so the
+    /// top-of-type refusal is reached by a direct call: half-up at
+    /// `i64::MAX` paisa is 93 paisa above the type and must refuse, never wrap.
+    #[test]
+    fn rounding_to_the_rupee_holds_at_both_ends_of_the_type() {
+        // 1-2. Zero, and the half-paisa boundary either side of 50.
+        assert_eq!(to_rupee(rs(0)).unwrap(), rs(0));
+        assert_eq!(to_rupee(rs(49)).unwrap(), rs(0));
+        assert_eq!(to_rupee(rs(50)).unwrap(), rs(100));
+        // 3. A whole rupee is unchanged.
+        assert_eq!(to_rupee(rs(100)).unwrap(), rs(100));
+        // 4. Negative: half-up is towards plus infinity, -50 rounds to 0.
+        assert_eq!(to_rupee(rs(-50)).unwrap(), rs(0));
+        assert_eq!(to_rupee(rs(-51)).unwrap(), rs(-100));
+        // 5. The last whole rupee inside the type is exact.
+        assert_eq!(
+            to_rupee(rs(9_223_372_036_854_775_800)).unwrap(),
+            rs(9_223_372_036_854_775_800)
+        );
+        // 6. COMBINED: the top of the type AND a half that rounds up: refused.
+        assert!(matches!(
+            to_rupee(rs(i64::MAX)),
+            Err(ChargeError::Cost(CostError::Overflow { .. }))
+        ));
+        // 7. COMBINED: the bottom of the type rounds towards zero and fits.
+        assert_eq!(
+            to_rupee(rs(i64::MIN)).unwrap(),
+            rs(-9_223_372_036_854_775_800)
+        );
+        // 8. OUT OF THE BOX: rounding is idempotent on every answer above.
+        for raw in [0, 49, 50, 100, -50, -51, 9_223_372_036_854_775_800] {
+            let once = to_rupee(rs(raw)).unwrap();
+            assert_eq!(to_rupee(once).unwrap(), once, "{raw}");
+        }
+    }
 }

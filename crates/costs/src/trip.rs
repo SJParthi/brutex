@@ -3250,22 +3250,18 @@ mod tests {
                 value: -i64::MAX,
             })
         );
-        // The worst case on the same bars answers `Ok` or a named refusal, and
-        // where it prices, its sell is the one-tick floor and the charge stack
-        // computes without leaving `i64`.
-        match crate::fill::fills_at(
-            entry,
-            exit,
-            Direction::Long,
-            crate::fill::Anchor::AdverseExtreme,
-        ) {
-            Ok(fills) => {
-                assert_eq!(fills.sell(), TICK_HELPER);
-                let charges = charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day()))
-                    .expect("in range");
-                assert_eq!(charges.sell_notional(), TICK_HELPER);
-            }
-            Err(refused) => assert!(matches!(refused, CostError::Overflow { .. })),
-        }
+        // The worst case on the same bars is a named refusal too, never a
+        // wrapped price: its adverse sell lies a full `i64` below the entry,
+        // so the fill arithmetic refuses with `Overflow` (measured; the arm
+        // that priced it never ran, BASE-COV-LIBS D-7320).
+        assert!(matches!(
+            crate::fill::fills_at(
+                entry,
+                exit,
+                Direction::Long,
+                crate::fill::Anchor::AdverseExtreme,
+            ),
+            Err(CostError::Overflow { .. })
+        ));
     }
 }

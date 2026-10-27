@@ -547,7 +547,9 @@ mod tests {
             for candidate in (floor - 1)..=(floor + 2) {
                 let here = (numerator - candidate * divisor).abs();
                 let there = (numerator - best * divisor).abs();
-                if here < there || (here == there && candidate < best) {
+                // Candidates ascend from below `best`'s start, so a tie keeps
+                // the earlier, smaller one: strictly nearer is the only move.
+                if here < there {
                     best = candidate;
                 }
             }

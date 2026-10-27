@@ -930,26 +930,19 @@ impl LotTable {
                 return Err(LotTableError::SourcedWithoutReceipt { row: number });
             }
         }
-        // Stable by underlying, so each underlying's rows keep the order they
-        // were handed in, which must already ascend.
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        order.sort_by(|a, b| {
-            let (left, right) = (rows.get(*a), rows.get(*b));
-            left.map(|r| r.underlying.as_str())
-                .cmp(&right.map(|r| r.underlying.as_str()))
-                .then(a.cmp(b))
-        });
-        let mut slots: Vec<Option<LotRow>> = rows.into_iter().map(Some).collect();
-        let mut sorted = Vec::with_capacity(slots.len());
+        // Stable by underlying (`sort_by` is a stable sort), so each
+        // underlying's rows keep the order they were handed in, which must
+        // already ascend; each row keeps its one-based number for a refusal.
+        // D-7321: the rows move once, by value, so no slot can be found empty.
+        let mut numbered: Vec<(usize, LotRow)> = rows.into_iter().enumerate().collect();
+        numbered.sort_by(|(_, left), (_, right)| left.underlying.cmp(&right.underlying));
+        let mut sorted = Vec::with_capacity(numbered.len());
         // Sized once for what it can hold: every row naming its own
         // underlying, at most MAX_LOT_ROWS (refused above), so no insert
         // rehashes (docs/07 law 2; BASE-GATE11, D-6629's addendum).
         let mut by_underlying: std::collections::HashMap<String, core::ops::Range<usize>> =
-            std::collections::HashMap::with_capacity(slots.len());
-        for at in order {
-            let Some(row) = slots.get_mut(at).and_then(Option::take) else {
-                continue;
-            };
+            std::collections::HashMap::with_capacity(numbered.len());
+        for (at, row) in numbered {
             let number = at + 1;
             let range = by_underlying
                 .entry(row.underlying.clone())
@@ -1057,16 +1050,18 @@ impl LotTable {
 #[must_use]
 pub fn compiled_rows() -> Vec<LotRow> {
     let mut out = Vec::new();
-    for (slot, table) in LOT_SIZES.iter().enumerate() {
-        let Some((_, underlying)) = InstrumentKey::SWEPT.get(slot) else {
-            continue;
-        };
-        let rules = CONTRACT_RULES.get(slot);
+    // D-7321: the three arrays have one length, `SweptSlot::COUNT`, which
+    // is `InstrumentKey::SWEPT.len()` by definition, so the zip is total.
+    for (((_, underlying), table), rules) in InstrumentKey::SWEPT
+        .iter()
+        .zip(LOT_SIZES.iter())
+        .zip(CONTRACT_RULES.iter())
+    {
         for row in std::iter::once(&table.anchor).chain(table.later.iter().flatten()) {
             let Dated::Verified(lot) = row.value else {
                 continue;
             };
-            let rule = rules.and_then(|rules| rules.iter().find(|rule| rule.boundary == row.start));
+            let rule = rules.iter().find(|rule| rule.boundary == row.start);
             let (standing, source, sha, read) = match rule {
                 Some(rule) => (
                     LotStanding::Sourced,

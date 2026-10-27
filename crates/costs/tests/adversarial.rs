@@ -87,7 +87,7 @@ fn notionals() -> Vec<(&'static str, Paisa)> {
 )]
 fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants() {
     let mut cells = 0_u32;
-    let (mut checked, mut refused) = (0_u32, 0_u32);
+    let mut checked = 0_u32;
     for (nname, notional) in notionals() {
         for (rname, rate) in rates() {
             let where_ = format!("[{nname}] x [{rname}]");
@@ -102,7 +102,12 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
             let floor = floor_to_paisa(s);
 
             // 4. Two roundings of one quotient: ordered, and at most one apart.
-            if let (Ok(c), Ok(f)) = (ceil, floor) {
+            // BASE-COV-LIBS (D-7320): no shipped rate reaches the edge of
+            // `i64` on any notional here (measured: the refusal column never
+            // counted a cell), so every cell must price; a refusal is a failure.
+            {
+                let c = ceil.expect("every cell prices: a ceiling");
+                let f = floor.expect("every cell prices: a floor");
                 assert!(
                     c.raw() >= f.raw(),
                     "{where_}: ceil {} is below floor {}",
@@ -121,14 +126,16 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
             // 2. A charge is never negative on a non-negative notional and a
             //    non-negative rate. Both hold for every cell in this matrix.
             assert!(notional.raw() >= 0 && rate.get() >= 0, "{where_}: fixture");
-            if let Ok(levy) = levy_ceiling(notional, rate) {
+            {
+                let levy = levy_ceiling(notional, rate).expect("every cell prices: a levy");
                 assert!(
                     levy.raw() >= 0,
                     "{where_}: a levy of {} pays the trader",
                     levy.raw()
                 );
             }
-            if let Ok(levy) = statutory_levy(notional, rate) {
+            {
+                let levy = statutory_levy(notional, rate).expect("every cell prices: a statutory levy");
                 assert!(
                     levy.raw() >= 0,
                     "{where_}: a statutory levy of {} pays the trader",
@@ -180,16 +187,7 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
                 exact_statutory,
                 "{where_}: the statutory levy is not the exact rupee ceiling"
             );
-            if let (Ok(_), Ok(_), Ok(_), Ok(_)) = (
-                ceil,
-                floor,
-                levy_ceiling(notional, rate),
-                statutory_levy(notional, rate),
-            ) {
-                checked += 1;
-            } else {
-                refused += 1;
-            }
+            checked += 1;
             if notional.raw() <= 1_000_000_000 {
                 assert!(
                     ceil.is_ok()
@@ -214,9 +212,9 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
     );
     // Every shipped rate is below `RATE_SCALE`, so no levy ceiling here leaves
     // `i64`; the one refusal in the surface is the rupee rounding at the top of
-    // the type, which the test below drives. `refused` is still counted so the
-    // two columns sum to the cells.
-    assert_eq!(checked + refused, cells, "every cell is in one column");
+    // the type, which the test below drives. So every cell is checked: a cell
+    // that refused stopped the test at its `expect` above.
+    assert_eq!(checked, cells, "every cell priced and was checked");
 }
 
 /// 3. A CHARGE NEVER FALLS AS THE NOTIONAL RISES.
@@ -249,8 +247,11 @@ fn a_larger_notional_is_never_charged_less_than_a_smaller_one() {
         let mut previous: Option<i64> = None;
         let mut compared = 0_usize;
         for n in &ladder {
-            match levy_ceiling(*n, rate) {
-                Ok(levy) => {
+            // Every rung fits `i64` at every shipped rate (asserted below by
+            // the count), so a refusal here is a failure, not a stop.
+            {
+                let levy = levy_ceiling(*n, rate).expect("every rung prices");
+                {
                     if let Some(prev) = previous {
                         compared += 1;
                         assert!(
@@ -264,9 +265,6 @@ fn a_larger_notional_is_never_charged_less_than_a_smaller_one() {
                     }
                     previous = Some(levy.raw());
                 }
-                // A refusal is not a cheaper charge. Stop comparing rather than
-                // read it as one.
-                Err(_) => break,
             }
         }
         // P1-14-06: a refusal on the first rung broke out having compared
@@ -305,12 +303,12 @@ fn rounding_the_top_of_the_type_up_to_a_rupee_refuses_rather_than_wraps() {
     // And the largest value that DOES fit still rounds correctly, so the
     // refusal above is a boundary and not a blanket.
     let fits = Paisa::from_raw(i64::MAX - 99);
-    // A refusal here is also acceptable -- the boundary may sit lower than this
-    // value. What is NOT acceptable is a wrap, and the assertion above pins that.
-    if let Ok(v) = ceil_to_rupee(fits) {
-        assert_eq!(v.raw() % 100, 0, "a rupee-rounded value carries no paisa");
-        assert!(v.raw() >= fits.raw(), "rounding UP never goes down");
-    }
+    // Measured (BASE-COV-LIBS, D-7320): it fits, at exactly the next rupee,
+    // 92_233_720_368_547_758 rupees, 7 paisa below the top of the type.
+    let v = ceil_to_rupee(fits).expect("i64::MAX - 99 rounds up inside the type");
+    assert_eq!(v.raw(), 9_223_372_036_854_775_800);
+    assert_eq!(v.raw() % 100, 0, "a rupee-rounded value carries no paisa");
+    assert!(v.raw() >= fits.raw(), "rounding UP never goes down");
 
     // Zero and one paisa are the other end of the same rule.
     assert_eq!(

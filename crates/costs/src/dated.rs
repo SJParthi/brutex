@@ -641,6 +641,10 @@ mod tests {
         assert!(!str_eq("NIFTY", "BANKNIFTY"), "different lengths");
         assert!(!str_eq("NIFTY", "NIFTZ"), "same length, one byte apart");
         assert!(!str_eq("NIFTY", "NIFTYY"));
+        // BASE-COV-LIBS (D-7320): the right side a prefix of the left, and
+        // the empty right against a non-empty left.
+        assert!(!str_eq("NIFTYY", "NIFTY"));
+        assert!(!str_eq("N", ""));
         // The property the compile-time asserts rest on, over every pair of
         // swept symbols: equal iff the same slot.
         for (i, &(_, left)) in brutex_core::instrument::InstrumentKey::SWEPT

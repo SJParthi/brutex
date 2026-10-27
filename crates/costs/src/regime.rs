@@ -1008,6 +1008,10 @@ mod tests {
             )
             .rows_ascend()
         );
+        // BASE-COV-LIBS (D-7320): two later rows that ascend between
+        // themselves, but the first of them does not follow the anchor.
+        assert!(!build(later, [Some(good), Some(later)]).rows_ascend());
+        assert!(!build(later, [Some(later), Some(later)]).rows_ascend());
         // A hole: `rows()` would close it silently, so the shape is refused.
         assert!(!build(good, [None, Some(later)]).rows_ascend());
         assert!(!build(good, [None, Some(later)]).is_shipping_shape());

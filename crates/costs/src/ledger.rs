@@ -753,8 +753,14 @@ fn precise_order_lines(
 /// inferred parameter is then ambiguous — a compile error — exactly for a
 /// type that has a `Default`.
 trait NoDefault<Marker> {
-    /// The item the check names.
-    fn witness() {}
+    /// The item the check names: the type it was named for, so a call
+    /// says which impl answered.
+    fn witness() -> &'static str
+    where
+        Self: Sized,
+    {
+        core::any::type_name::<Self>()
+    }
 }
 
 // Two markers, any two distinct types: `()` for the impl every type gets,
@@ -1690,5 +1696,17 @@ mod tests {
         assert_eq!(NetTrade::of_days(&dhan, &precise).err(), not_a_net);
         assert_eq!(NetTrade::of_days(&precise, &dhan).err(), not_a_net);
         assert!(NetTrade::of_day(&precise).is_ok());
+    }
+
+    /// BASE-COV-LIBS (D-7320): the item the compile-time `Default` check
+    /// names is an ordinary function on its every-type impl, callable for
+    /// both checked types; a type WITH a `Default` has a second impl, so the
+    /// same call names two items and does not compile (the check itself).
+    #[test]
+    fn the_no_default_witness_is_the_every_type_item_for_both_checked_types() {
+        assert!(<DayLedger as NoDefault<()>>::witness().ends_with("::DayLedger"));
+        assert!(<RateSelector as NoDefault<()>>::witness().ends_with("::RateSelector"));
+        // A `Default` type answers to the second marker as well.
+        assert_eq!(<u8 as NoDefault<u8>>::witness(), "u8");
     }
 }
