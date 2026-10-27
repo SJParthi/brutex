@@ -89,28 +89,34 @@ reconcile. FM-071: `not_fixed`, dropped by D-6900 (not applicable).
 ## Gates
 
 The final run: 27 Oct 2026, this container (4 cores, 13.4 GiB memory limit, root), on the
-branch after merging `origin/feat/db-fix` `a32722c4`. The code's last change is `943d5918`
-(`DayRow::hole`'s spelling, for clippy); fmt, clippy, deny, the CI shell gates, the mutants and
-coverage ran on it, the workspace tests on `2f5b9cd5` just before it (that one function's
-change was then covered by `api`'s 378 tests of the touched modules, green at the mutants'
-baseline on `943d5918`, and by the coverage run). Commits after `943d5918` change only this
-report. Each red is shown on a worktree of the unmodified `origin/feat/db-fix` `a32722c4`
-(`/home/user/base`, its own build of every workspace crate).
+branch after merging the newest `origin/feat/db-fix` `f01d7a0e` (`bb4ace19`). The code's last
+change is `943d5918` (`DayRow::hole`'s spelling, for clippy); after the merge only docs/06's
+wording changed (`0c06ff7a`, below). fmt, clippy and deny ran on `0c06ff7a`; the workspace
+tests and the CI shell gates on `bb4ace19`/`f8a84e8d` (the same code), and the one test the
+`0c06ff7a` change answers again on `0c06ff7a`. Each red is shown on a worktree of the
+unmodified `origin/feat/db-fix` (`/home/user/base`, with its own build of every workspace
+crate): `a32722c4` for the 33 failures, the hangers and the bench, `f01d7a0e` for R4-26's one
+new failure and the CI shell gates. (The same gates ran once before on `a32722c4`'s merge, with
+the same results but for R4-26's test.)
 
 | Gate | Command | Result |
 |---|---|---|
 | fmt | `cargo fmt --all --check` | clean |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean (`Finished`, exit 0) |
 | deny | `cargo deny check` (cargo-deny 0.19.0, as CI pins) | `advisories ok, bans ok, licenses ok, sources ok` (two `duplicate` warnings, `getrandom` and `syn`, as on the base) |
-| tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | 11,779 passed, 33 failed, 99 ignored; the same 33 fail on the base (below); the two hangers hang on both (below) |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | 11,845 passed, 35 failed, 99 ignored. One failure was this branch's and is fixed: `store` `tests/cited_commits.rs` refused the feat/db-fix sha docs/06 cited (`0c06ff7a`; `cargo test -p store --test cited_commits`: `6 passed; 0 failed`). The other 34 fail on the base too (below); the two hangers hang on both (below) |
 | CI shell gates | gates 0 to 29b of `.github/workflows/ci.yml`'s `language-purity` job, each step as `checks_all` plans it (gate 1e skipped, below) | the same exit as the base for every gate; the reds (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30) are the base's, line for line (below) |
 | bench (gate 8) | `cargo bench -p api --bench ratio` (release) | every C-LG-01 and C-LG-02 row `ok`; the run exits 1 on two rows that are not this part's (below) |
 | coverage | below | below |
 | mutants | `cargo mutants --in-diff` (method below) | every mutant of the diff tested: 0 missed (below) |
 
-**The 33 test failures are environmental, the same set on the base.** `cargo test --locked
---no-fail-fast -p api -p cli -p pull -p store -p telemetry --lib -- --exact <the 33 names>` on the
-base worktree: 12 + 3 + 9 + 5 + 4 fail, and `diff` of the two sorted FAILED lists is empty.
+**The 34 other test failures are environmental, the same on the base.** 33 of them were the
+whole failing set on `a32722c4`'s merge: `cargo test --locked --no-fail-fast -p api -p cli -p
+pull -p store -p telemetry --lib -- --exact <the 33 names>` on the base worktree at `a32722c4`:
+12 + 3 + 9 + 5 + 4 fail, and `diff` of the two sorted FAILED lists is empty. The 34th came with
+R4-26: `api` `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`
+says "the test needs a reader the mode refuses (not root)"; on the base at `f01d7a0e`:
+the same panic, the same words (`cargo test --locked -p api --lib -- --exact <it>`: `0 passed; 1 failed`).
 Causes, from their own messages: this container runs as root, so every "a read-only /
 unwritable / unreadable directory" test fails (pull `census_store` x2, `gdfl_dropbox` x2,
 `zerodha_verify` x2, `alerts`, `gdfl_import::ia16`, `gdfl_run::ia2_tests`; store `quarantine` x2,
@@ -134,8 +140,9 @@ full ... below the free-space floor of 10737418240 bytes (CONC-031)". That is th
 not a defect; with space freed all 78 pass (the final run had 13 GiB free).
 
 **CI shell gates, compared line by line.** Each `language-purity` step was run on both trees
+(the merged branch at `f8a84e8d` and the base at `f01d7a0e`; earlier, the same on `a32722c4`)
 by a loop over `checks_all plan` (the plan's own commands; `CHECKS_BIN` a scratch directory),
-and each log compared after taking out line numbers: gate 10's red (docs/04 line 8835, a ✓ row
+and each log compared after taking out line numbers: gate 10's red (docs/04, a ✓ row
 naming no test, `R427-11`), gate 12's 85 refused blocks, gate 27b's two `D-6247` headings,
 gate 29's `/pull/quarantine*` routes, and 1c, 1d, 19, 23, 30 are the base's, unchanged. Two
 differences this branch had made, both fixed here: gate 11 rule 7 refused `DayRow::hole`'s
