@@ -5000,7 +5000,7 @@ fn forgetting_one_stores_flags_keeps_the_others_and_reads_its_day_again() {
         let flag = CasFlags::of(root, "RELIANCE", true).on(on);
         assert_eq!(flag.eligibility, CasEligibility::Eligible);
     }
-    let [a, b] = roots.map(|root| root.join("session-masters"));
+    let [a, b] = roots.clone().map(|root| root.join("session-masters"));
     assert!(kept_flag(&a, on, "RELIANCE").0 && kept_flag(&b, on, "RELIANCE").0);
     forget_flags(&a);
     forget_flags(&a);
