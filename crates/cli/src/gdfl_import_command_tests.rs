@@ -1392,6 +1392,36 @@ fn the_calendar_horizon_is_warned_on_the_receipt_before_it_passes() {
     );
 }
 
+/// **THE RECEIPT'S TODAY IS THE HOST CLOCK'S IST DAY** (FM-080; IA-10a item
+/// 7b): the day the horizon is seen from is the calendar day in IST of the
+/// host's clock, by `pull::session`'s own offset and day length, so a sane
+/// clock is never said as "not checked" (the receipt tests above compare a
+/// receipt with `render_horizon(today_ist())`, which the two would agree on
+/// even if `today_ist` named no day). The clock is read before and after,
+/// so a midnight between the reads names one of the two days, never fails.
+#[test]
+fn the_receipts_today_is_the_host_clocks_ist_day() {
+    let ist_day = || {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let secs = i64::try_from(secs).unwrap() + pull::session::IST_OFFSET_SECS;
+        u32::try_from(secs.div_euclid(pull::session::SECS_PER_DAY)).unwrap()
+    };
+    let before = ist_day();
+    let today = today_ist().expect("a host clock after 1970 names a day");
+    let after = ist_day();
+    assert!(
+        (before..=after).contains(&today.days_from_epoch()),
+        "today {today} is day {} from the epoch, not {before}..={after}",
+        today.days_from_epoch()
+    );
+    let mut out = String::new();
+    render_horizon(&mut out, Some(today));
+    assert!(!out.contains("not checked"), "{out}");
+}
+
 /// **A SOURCE GONE BETWEEN THE PLAN AND THE RUN IS SAID, NEVER COUNTED AS
 /// EMPTY** (D-4817, FM-080; crash-and-resume's cousin: the outer zip is
 /// planned, then removed before the run opens it): the census says the

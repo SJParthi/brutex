@@ -580,10 +580,20 @@ struct Counted {
     reason: &'static str,
     /// Every entry of the reason, counted.
     count: usize,
+    /// Its names, or why the source keeps none.
+    names: Names,
+}
+
+/// A reason's names on the receipt: the ones the source kept, or why it
+/// keeps none for that reason. One or the other, never both: a reason the
+/// source counts without naming has no list to print beside its why, so the
+/// type holds no such pair (a guard that tested for one could never fail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Names {
     /// The first entries by name, as the source kept them.
-    named: Vec<String>,
-    /// Why the source keeps no names for this reason, when it keeps none.
-    unnamed: Option<&'static str>,
+    Kept(Vec<String>),
+    /// Why the source keeps no names for this reason.
+    Unkept(&'static str),
 }
 
 /// A source's census for the receipt (D-4817; IA-10a item 7a): what the
@@ -606,22 +616,19 @@ impl Census {
             Counted {
                 reason: "ignored",
                 count: census.ignored,
-                named: Vec::new(),
-                unnamed: Some(
+                names: Names::Unkept(
                     "the archive counts an entry that is not a day zip and keeps no name",
                 ),
             },
             Counted {
                 reason: "misfiled",
                 count: census.misfiled,
-                named: census.misfiled_named.clone(),
-                unnamed: None,
+                names: Names::Kept(census.misfiled_named.clone()),
             },
             Counted {
                 reason: "invalid",
                 count: census.invalid,
-                named: census.invalid_named.clone(),
-                unnamed: None,
+                names: Names::Kept(census.invalid_named.clone()),
             },
         ])
     }
@@ -635,22 +642,19 @@ impl Census {
             Counted {
                 reason: "misfiled",
                 count: table.misfiled_count,
-                named: Vec::new(),
-                unnamed: Some("each is named on its own day's refusal, day_file_misfiled"),
+                names: Names::Unkept("each is named on its own day's refusal, day_file_misfiled"),
             },
             Counted {
                 reason: "stray",
                 count: table.stray,
-                named: table.stray_named.clone(),
-                unnamed: None,
+                names: Names::Kept(table.stray_named.clone()),
             },
         ];
         if let Some(fault) = &table.fault {
             reasons.push(Counted {
                 reason: "walk stopped",
                 count: 1,
-                named: vec![fault.to_string()],
-                unnamed: None,
+                names: Names::Kept(vec![fault.to_string()]),
             });
         }
         Self::Counted(reasons)
@@ -713,29 +717,30 @@ fn render_census(out: &mut String, source: gdfl_run::SourceId, census: &Census) 
         counts.join(", ")
     );
     for counted in reasons.iter().filter(|counted| counted.count > 0) {
-        let named: Vec<String> = counted
-            .named
-            .iter()
-            .take(CENSUS_NAMED)
-            .map(|name| guard::plain(name))
-            .collect();
-        let more = counted.count.saturating_sub(named.len());
-        let _ = match counted.unnamed {
-            Some(why) if named.is_empty() => {
+        let _ = match &counted.names {
+            Names::Unkept(why) => {
                 writeln!(out, "    {:<17} {} ({why})", counted.reason, counted.count)
             }
-            _ => writeln!(
-                out,
-                "    {:<17} {}: {}{}",
-                counted.reason,
-                counted.count,
-                named.join(" "),
-                if more > 0 {
-                    format!(" and {more} more, counted")
-                } else {
-                    String::new()
-                }
-            ),
+            Names::Kept(kept) => {
+                let named: Vec<String> = kept
+                    .iter()
+                    .take(CENSUS_NAMED)
+                    .map(|name| guard::plain(name))
+                    .collect();
+                let more = counted.count.saturating_sub(named.len());
+                writeln!(
+                    out,
+                    "    {:<17} {}: {}{}",
+                    counted.reason,
+                    counted.count,
+                    named.join(" "),
+                    if more > 0 {
+                        format!(" and {more} more, counted")
+                    } else {
+                        String::new()
+                    }
+                )
+            }
         };
     }
 }
