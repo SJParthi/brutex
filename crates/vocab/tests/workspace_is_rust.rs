@@ -646,12 +646,30 @@ fn the_dependency_set_has_not_moved_without_review() {
     // R3-24 repair round 3 (D-5890) made the same two bumps and its own scan
     // of both registry sources independently, and reached this same pin: its
     // repair round 2 had bumped the lock without the re-pin (B10).
+    // R3-15 repair 2 (D-5916) made the same two bumps on its own branch, merged
+    // onto `rustix` (0x8070_52EA_72E5_1027 -> 0x57F8_69FF_1E0D_4A5C, the pin
+    // above), with the same scan result; merging feat/db-fix at repair 3 gave
+    // feat/db-fix's `Cargo.lock` byte for byte, so the pin asserted below stands.
     // 0x57F8_69FF_1E0D_4A5C -> 0xADFB_F4EE_30AF_1851 IS THE TWO CHANGES ABOVE,
     // TOGETHER, NOT A THIRD (IA-16 repair 2, merging feat/db-fix): the two bumps
     // (D-7120) and IA-16's one arrow `pull -> rustix`. No package was added,
     // no version moved beyond D-7120's, and both scans stand as recorded.
+    // 0xADFB_F4EE_30AF_1851 -> 0xB0FF_8621_DDCD_6A2F IS ONE VERSION BUMP, NOT A
+    // NEW PACKAGE (D-7205): `tokio` 1.53.1 -> 1.53.3 (RUSTSEC-2026-0386), in
+    // `Cargo.lock` only: its `version` and `checksum` lines, two out and two
+    // in. The count is still 194 and no `dependencies` list moved (`cargo
+    // update -p tokio --precise 1.53.3` also re-chose `windows-sys` 0.52.0 for
+    // `errno` and `rustix`, both Windows-only and both inside their declared
+    // `>=0.52, <0.62`; that choice was kept at 0.61.2, which `cargo metadata
+    // --locked` accepts). The scan, over both registry sources: neither ships
+    // a `build.rs` or any .c/.cc/.cpp/.h/.S/.s/.asm/.js file; the file set
+    // moves from 564 to 565 files, all `.rs` tests (adds
+    // `src/runtime/io/driver/uring/tests.rs` and `tests/task_trace_wake.rs`,
+    // drops `tests/io_async_fd_memory_leak.rs`); the manifest moves only
+    // `version` and those `[[test]]` targets: same features, same 16 non-dev
+    // dependencies. DECLARED is unchanged.
     assert_eq!(
-        h, 0xADFB_F4EE_30AF_1851,
+        h, 0xB0FF_8621_DDCD_6A2F,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \
@@ -858,20 +876,23 @@ fn a_version_only_bump_changes_the_fingerprint() {
 }
 
 // ---------------------------------------------------------------------------
-// Advisory floors (D-7120, BASE-REDS-1021).
+// Advisory floors (D-7120, BASE-REDS-1021; D-7205, BASE-DENY-1024).
 // ---------------------------------------------------------------------------
 
 /// A package a `RustSec` advisory names, and the versions that advisory clears.
 ///
 /// `cargo deny check` (CI gate 3) reads the advisory database when it runs and
 /// is the authority on what is vulnerable. This table is the offline half of
-/// the two bumps D-7120 made: it holds the lock above their floors, so a merge
-/// that settles a `Cargo.lock` conflict by taking the older side, or a
-/// `cargo update --precise` downgrade, fails `cargo test` on a machine where
-/// `cargo deny` is not installed or cannot fetch. The ranges are the advisory
-/// files' own `patched` and `unaffected` lines, recorded with their digests in
-/// `docs/00-charter.md`. A row is added by the decision that bumps for a new
-/// advisory and is never edited to fit a lock.
+/// the two bumps D-7120 made and the one D-7205 made: it holds the lock above
+/// their floors, so a merge that settles a `Cargo.lock` conflict by taking the
+/// older side, or a `cargo update --precise` downgrade, fails `cargo test` on a
+/// machine where `cargo deny` is not installed, cannot fetch, or is a version
+/// that does not refuse an informational advisory (cargo-deny 0.19.0 passes
+/// RUSTSEC-2026-0386, an `unsound` one, that 0.20.2 refuses: D-7205). The
+/// ranges are the advisory files' own `patched` and `unaffected` lines,
+/// recorded with their digests in `docs/00-charter.md`. A row is added by the
+/// decision that bumps for a new advisory and is never edited to fit a lock.
+#[derive(Clone, Copy)]
 struct Floor {
     package: &'static str,
     advisory: &'static str,
@@ -897,7 +918,33 @@ const FLOORS: &[Floor] = &[
         patched: &[&[">= 1.0.10"]],
         unaffected: &[&["= 0.26.11"]],
     },
+    // D-7205: `crates/tokio/RUSTSEC-2026-0386.md`, `[versions]`, copied as the
+    // file writes them: `patched = [">= 1.51.6, < 1.52.0", ">= 1.53.3"]`,
+    // `unaffected = ["< 0.3.2"]`.
+    Floor {
+        package: "tokio",
+        advisory: "RUSTSEC-2026-0386",
+        patched: &[&[">= 1.51.6", "< 1.52.0"], &[">= 1.53.3"]],
+        unaffected: &[&["< 0.3.2"]],
+    },
 ];
+
+/// The rows a decision added, found by their advisories rather than by their
+/// position, so a later row never changes what an earlier decision's test
+/// judges against. Every advisory named must have its row.
+fn rows_for(advisories: &[&str]) -> Vec<Floor> {
+    let rows: Vec<Floor> = FLOORS
+        .iter()
+        .filter(|f| advisories.contains(&f.advisory))
+        .copied()
+        .collect();
+    assert_eq!(
+        rows.len(),
+        advisories.len(),
+        "every advisory in {advisories:?} has exactly one FLOORS row"
+    );
+    rows
+}
 
 /// One pre-release identifier. The derived order is the one semver 2.0.0 §11
 /// gives: a numeric identifier sorts below an alphanumeric one, numbers by
@@ -1073,16 +1120,18 @@ fn floors_not_held<'a>(pkgs: &[LockPackage], floors: &'a [Floor]) -> Vec<&'a str
         .collect()
 }
 
-/// **The real lock is above both floors**, and holds both packages. It fails
-/// on `feat/db-fix` at 8c67456ac (`rustls-webpki` 0.103.15, `webpki-roots`
-/// 1.0.9) and passes after D-7120's bump.
+/// **The real lock is above every floor**, and holds every floored package.
+/// It fails on `feat/db-fix` at 8c67456ac (`rustls-webpki` 0.103.15,
+/// `webpki-roots` 1.0.9) and passes after D-7120's bump; with D-7205's row it
+/// fails on `feat/db-fix` at 4cd50042d (`tokio` 1.53.1, inside
+/// RUSTSEC-2026-0386) and passes after D-7205's bump to 1.53.3.
 #[test]
 fn the_lock_is_above_every_advisory_floor() {
     let pkgs = parse_lock(&lock_text());
     let below = below_floor(&pkgs, FLOORS);
     assert!(
         below.is_empty(),
-        "Cargo.lock holds versions a RustSec advisory names (D-7120). Bump them \
+        "Cargo.lock holds versions a RustSec advisory names (D-7120, D-7205). Bump them \
          with `cargo update -p <name>`, never by editing this table: {below:#?}"
     );
     let gone = floors_not_held(&pkgs, FLOORS);
@@ -1095,14 +1144,26 @@ fn the_lock_is_above_every_advisory_floor() {
 
 /// The versions D-7120 bumped from are refused, each naming its advisory, and
 /// the versions it bumped to are cleared. Fields in either order are read.
+///
+/// Judged against D-7120's two rows only (D-7205): the synthetic lock holds
+/// those two packages and nothing else, so a later row over a package it does
+/// not hold would be named by `floors_not_held` without anything about these
+/// two having changed. The rows are found by their advisories, never by
+/// position.
 #[test]
 fn the_floors_refuse_the_versions_d7120_bumped_from() {
+    let d7120 = rows_for(&["RUSTSEC-2026-0382", "RUSTSEC-2026-0381"]);
     let before = synthetic(
         "name = \"rustls-webpki\"\nversion = \"0.103.15\"\nSRC\n\n\
          version = \"1.0.9\"\nname = \"webpki-roots\"\nSRC",
     );
-    let below = below_floor(&parse_lock(&before), FLOORS);
+    let below = below_floor(&parse_lock(&before), &d7120);
     assert_eq!(below.len(), 2, "{below:#?}");
+    assert_eq!(
+        below,
+        below_floor(&parse_lock(&before), FLOORS),
+        "a row for another package changes nothing about these two"
+    );
     assert!(
         below
             .iter()
@@ -1117,8 +1178,139 @@ fn the_floors_refuse_the_versions_d7120_bumped_from() {
     let after = before
         .replace("0.103.15", "0.103.16")
         .replace("1.0.9", "1.0.10");
+    assert!(below_floor(&parse_lock(&after), &d7120).is_empty());
+    assert!(floors_not_held(&parse_lock(&after), &d7120).is_empty());
+}
+
+/// The version D-7205 bumped from, `tokio` 1.53.1, is refused naming
+/// RUSTSEC-2026-0386, and the version it bumped to, 1.53.3, is cleared,
+/// judged against D-7205's row alone and against the whole table.
+#[test]
+fn the_floor_refuses_the_version_d7205_bumped_from() {
+    let d7205 = rows_for(&["RUSTSEC-2026-0386"]);
+    let before = synthetic("name = \"tokio\"\nversion = \"1.53.1\"\nSRC");
+    for rows in [&d7205[..], FLOORS] {
+        let below = below_floor(&parse_lock(&before), rows);
+        assert_eq!(below.len(), 1, "{below:#?}");
+        assert!(
+            below
+                .iter()
+                .all(|b| b.starts_with("tokio 1.53.1 is inside RUSTSEC-2026-0386")),
+            "{below:#?}"
+        );
+    }
+    let after = before.replace("1.53.1", "1.53.3");
+    assert!(below_floor(&parse_lock(&after), &d7205).is_empty());
     assert!(below_floor(&parse_lock(&after), FLOORS).is_empty());
-    assert!(floors_not_held(&parse_lock(&after), FLOORS).is_empty());
+    assert!(floors_not_held(&parse_lock(&after), &d7205).is_empty());
+}
+
+/// All three bumped-from versions at once are three refusals, one per
+/// advisory, whatever the stanza order; all three bumped-to versions are none;
+/// and a lock that bumped two of the three is refused for the third alone.
+#[test]
+fn every_bumped_from_version_at_once_is_one_refusal_each() {
+    let from = synthetic(
+        "name = \"tokio\"\nversion = \"1.53.1\"\nSRC\n\n\
+         name = \"webpki-roots\"\nversion = \"1.0.9\"\nSRC\n\n\
+         name = \"rustls-webpki\"\nversion = \"0.103.15\"\nSRC",
+    );
+    let below = below_floor(&parse_lock(&from), FLOORS);
+    assert_eq!(below.len(), 3, "{below:#?}");
+    for (package, advisory) in [
+        ("rustls-webpki 0.103.15", "RUSTSEC-2026-0382"),
+        ("webpki-roots 1.0.9", "RUSTSEC-2026-0381"),
+        ("tokio 1.53.1", "RUSTSEC-2026-0386"),
+    ] {
+        let line = format!("{package} is inside {advisory}");
+        assert!(
+            below.iter().any(|b| b.starts_with(&line)),
+            "{line}: {below:#?}"
+        );
+    }
+    let to = from
+        .replace("1.53.1", "1.53.3")
+        .replace("1.0.9", "1.0.10")
+        .replace("0.103.15", "0.103.16");
+    assert!(below_floor(&parse_lock(&to), FLOORS).is_empty());
+    assert!(floors_not_held(&parse_lock(&to), FLOORS).is_empty());
+    let tokio_left_behind = to.replace("1.53.3", "1.53.2");
+    let below = below_floor(&parse_lock(&tokio_left_behind), FLOORS);
+    assert_eq!(below.len(), 1, "{below:#?}");
+    assert!(
+        below
+            .iter()
+            .all(|b| b.starts_with("tokio 1.53.2 is inside RUSTSEC-2026-0386")),
+        "{below:#?}"
+    );
+}
+
+/// `tokio`'s floor judges `tokio` and nothing else: the real lock holds
+/// `tokio-macros` 2.7.2, `tokio-rustls` 0.26.4 and `tokio-util` 0.7.19, each
+/// below 1.53.3 as a number, and none is the floored package. Three copies of
+/// `tokio` (one of them unaffected, below 0.3.2), a pre-release, a stanza with
+/// no version, build metadata and the largest version a `u64` holds are each
+/// judged on their own.
+#[test]
+fn the_tokio_floor_judges_tokio_alone_and_every_copy_of_it() {
+    let relatives = synthetic(
+        "name = \"tokio-macros\"\nversion = \"2.7.2\"\nSRC\n\n\
+         name = \"tokio-rustls\"\nversion = \"0.26.4\"\nSRC\n\n\
+         name = \"tokio-util\"\nversion = \"0.7.19\"\nSRC\n\n\
+         name = \"tokio\"\nversion = \"1.53.3\"\nSRC",
+    );
+    let pkgs = parse_lock(&relatives);
+    assert_eq!(pkgs.len(), 4);
+    assert!(below_floor(&pkgs, FLOORS).is_empty());
+    assert_eq!(
+        floors_not_held(&pkgs, FLOORS),
+        ["rustls-webpki", "webpki-roots"]
+    );
+
+    let three_copies = synthetic(
+        "name = \"tokio\"\nversion = \"1.53.3\"\nSRC\n\n\
+         name = \"tokio\"\nversion = \"0.2.25\"\nSRC\n\n\
+         name = \"tokio\"\nversion = \"1.0.0\"\nSRC",
+    );
+    let below = below_floor(&parse_lock(&three_copies), FLOORS);
+    assert_eq!(below.len(), 1, "{below:#?}");
+    assert!(
+        below
+            .iter()
+            .all(|b| b.starts_with("tokio 1.0.0 is inside RUSTSEC-2026-0386")),
+        "{below:#?}"
+    );
+
+    for (version, why) in [
+        ("1.54.0-alpha.1", "is a pre-release"),
+        ("", "cannot be judged against RUSTSEC-2026-0386"),
+        ("1.53", "cannot be judged against RUSTSEC-2026-0386"),
+    ] {
+        let lock = synthetic(&format!("name = \"tokio\"\nversion = \"{version}\"\nSRC"));
+        let below = below_floor(&parse_lock(&lock), FLOORS);
+        assert_eq!(below.len(), 1, "`{version}`: {below:#?}");
+        assert!(
+            below.iter().all(|b| b.contains(why)),
+            "`{version}`: {below:#?}"
+        );
+    }
+
+    let tokio = rows_for(&["RUSTSEC-2026-0386"]);
+    for (version, cleared) in [
+        ("1.53.3+local.build", true),
+        ("1.53.1+local.build", false),
+        (
+            "18446744073709551615.18446744073709551615.18446744073709551615",
+            true,
+        ),
+        ("0.0.0", true),
+    ] {
+        assert_eq!(
+            tokio.iter().map(|f| clears(f, version)).collect::<Vec<_>>(),
+            [Ok(cleared)],
+            "tokio {version}"
+        );
+    }
 }
 
 /// Each range is cut exactly at its published bounds, the older lines below
@@ -1166,6 +1358,27 @@ fn each_range_is_cut_at_its_published_bounds() {
             "webpki-roots {version}"
         );
     }
+    // D-7205: unaffected below 0.3.2 (the version `AsyncFd` arrived in), the
+    // 1.51 backport line patched from 1.51.6 and cut at 1.52.0, the 1.52 line
+    // and 1.53.0 to 1.53.2 refused, 1.53.3 onwards cleared.
+    for (version, cleared) in [
+        ("0.3.1", true),
+        ("0.3.2", false),
+        ("1.37.0", false),
+        ("1.51.5", false),
+        ("1.51.6", true),
+        ("1.51.999", true),
+        ("1.52.0", false),
+        ("1.52.9", false),
+        ("1.53.0", false),
+        ("1.53.1", false),
+        ("1.53.2", false),
+        ("1.53.3", true),
+        ("1.54.0", true),
+        ("2.0.0", true),
+    ] {
+        assert_eq!(judge("tokio", version), Ok(cleared), "tokio {version}");
+    }
     assert!(
         judge("webpki", "0.22.4").is_err(),
         "an unfloored name is not judged"
@@ -1206,6 +1419,19 @@ fn semver_precedence_is_the_specs() {
     let bounds = bounds.unwrap_or_default();
     assert_eq!(bounds.len(), 4);
     for pair in bounds.windows(2) {
+        if let [a, b] = pair {
+            assert!(a < b, "{a:?} must sort below {b:?}");
+        }
+    }
+    // D-7205's bounds in order: the advisory's own, and 1.37.0 from its
+    // affected functions.
+    let tokio: Result<Vec<Semver>, String> = ["0.3.2", "1.37.0", "1.51.6", "1.52.0", "1.53.3"]
+        .iter()
+        .map(|v| parse_semver(v))
+        .collect();
+    let tokio = tokio.unwrap_or_default();
+    assert_eq!(tokio.len(), 5);
+    for pair in tokio.windows(2) {
         if let [a, b] = pair {
             assert!(a < b, "{a:?} must sort below {b:?}");
         }
@@ -1298,11 +1524,11 @@ fn every_locked_copy_is_judged_not_only_the_first() {
     assert!(below_floor(&pkgs, FLOORS).is_empty());
     assert_eq!(
         floors_not_held(&pkgs, FLOORS),
-        ["rustls-webpki", "webpki-roots"]
+        ["rustls-webpki", "webpki-roots", "tokio"]
     );
 }
 
-/// An empty lock holds nothing below a floor, and that is named as both floors
+/// An empty lock holds nothing below a floor, and that is named as every floor
 /// checking nothing rather than passed in silence.
 #[test]
 fn an_empty_lock_is_named_as_checking_nothing() {
@@ -1311,7 +1537,7 @@ fn an_empty_lock_is_named_as_checking_nothing() {
     assert!(below_floor(&pkgs, FLOORS).is_empty());
     assert_eq!(
         floors_not_held(&pkgs, FLOORS),
-        ["rustls-webpki", "webpki-roots"]
+        ["rustls-webpki", "webpki-roots", "tokio"]
     );
 }
 
@@ -1333,7 +1559,10 @@ fn every_comparator_in_the_table_is_read_and_others_are_refused() {
             }
         }
     }
-    assert_eq!(read, 5, "the table holds five comparators");
+    assert_eq!(
+        read, 9,
+        "the table holds nine comparators: five of D-7120's, four of D-7205's"
+    );
     for foreign in [
         "> 1.0.0", "<= 1.0.0", "~1.0", "^1", "1.0.0", ">=1.0.0", "= 1.0",
     ] {

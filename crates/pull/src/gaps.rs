@@ -17,15 +17,40 @@
 //!
 //! # The taxonomy is exhaustive by construction
 //!
-//! An absent minute is in exactly one of four states, and [`Reason`] has exactly
-//! four variants because there is no fifth. A minute is either on a day the
+//! An absent minute is in exactly one of five states, and [`Reason`] has exactly
+//! five variants because there is no sixth. A minute is either on a day the
 //! exchange did not trade, or on a traded day but outside its windows, or inside
-//! a window and simply not there, or on a day this build has never measured.
-//! `match` is therefore total and a new case cannot be added without the
-//! compiler naming every site that must handle it.
+//! a window and simply not there, or on a day this build has never measured, or
+//! inside a session this series did not owe ([`NotOwed`], R4-19). `match` is
+//! therefore total and a new case cannot be added without the compiler naming
+//! every site that must handle it.
 //!
-//! **Only the third is a loss.** Conflating it with the other three is what made
+//! **Only the third is a loss.** Conflating it with the other four is what made
 //! six complete series report `SHORT`, and separating them is the whole point.
+//!
+//! # A session the series did not owe (R4-19; G4, Z3, TC-04, COR-07)
+//!
+//! The fifth state was a fourth-state answer before it had a name: the exchange
+//! traded, the minute was inside the window, no bar was stored, so the minute
+//! was `vendor-hole`. Measured on the operator's store, `/gaps.json` answered
+//! FORCEMOT CASH 2023-12 `expected 7500, held 0, lost_minutes 7500`, and the
+//! repair plan named 2024-02 a versioned repair for the nine sessions before
+//! the 14th, while NSE had withdrawn the share from trading for all of them
+//! (CML58560; readmitted from 2024-02-14 by the circular CML60618 a company
+//! filing carries, `docs/00-charter.md`, "FORCEMOT NSE interruption"). No
+//! vendor holds a bar NSE never traded, so no retry or repair can fill one.
+//!
+//! [`not_owed`] is the ONE authority that says so, for every owed path: each
+//! classifier door here ([`classify_owed`]) and the repair plan
+//! ([`crate::ingest::repair_plan::plan`]). It answers, in order, NSE's
+//! independent record of an interruption, a day before the listing or after
+//! the delisting the store's receipted NSE security master states
+//! ([`crate::listing`], R4-17), and a day no stored reading covers
+//! ([`Coverage`], TC-04). The calendar still decides whether a SESSION
+//! happened; [`not_owed`] decides only whether this series owed it, so a
+//! closed day stays `closed`, and a day the calendar cannot attest stays
+//! `unmeasured` unless the instrument's own sourced fact — withdrawn, not yet
+//! listed, delisted — excuses it whatever the exchange did.
 //!
 //! # Cost
 //!
@@ -50,7 +75,12 @@
 //! `classify` at 1x/10x/100x the minute count, beside the rows that already
 //! exist for the manifest.
 
+use brutex_core::isin::Isin;
+
 use crate::calendar::{self, Calendar, DayKind};
+use crate::cash_auction::InactiveInterval;
+use crate::listing::{Listing, Span};
+use crate::session::Day;
 
 /// The most gaps one classification will report.
 ///
@@ -64,8 +94,9 @@ pub const MAX_GAPS: usize = 4_096;
 
 /// Why a minute is not in the store.
 ///
-/// Four variants and no fifth: see the module header for why the taxonomy is
-/// exhaustive by construction.
+/// Five variants and no sixth: see the module header for why the taxonomy is
+/// exhaustive by construction. Until R4-19 there were four, and the fifth's
+/// minutes were answered as [`Self::VendorHole`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     /// The exchange did not trade that day at all — a weekend or a holiday.
@@ -93,6 +124,10 @@ pub enum Reason {
     /// and "nobody has looked" are different facts, and reporting the second as
     /// the first is the invention `CLAUDE.md` §3 rule 1 bans.
     Unmeasured,
+    /// Inside a session of record that this series did not owe, and why
+    /// ([`not_owed`], R4-19): never a loss, never counted in what a ledger
+    /// owes, and each carries its evidence.
+    NotOwed(NotOwed),
 }
 
 impl Reason {
@@ -110,8 +145,303 @@ impl Reason {
             Self::OutsideWindow => "outside-window",
             Self::VendorHole => "vendor-hole",
             Self::Unmeasured => "unmeasured",
+            Self::NotOwed(why) => why.word(),
         }
     }
+}
+
+/// Why a session of record is not owed by one series: the answer of the ONE
+/// authority every owed path asks ([`not_owed`]; R4-19, findings G4, Z3,
+/// COR-07 and TC-04).
+///
+/// **None is a loss and none is a guess.** The first three are facts about the
+/// instrument, each from a named source; the fourth is a fact about this
+/// store. A session owed by nobody cannot be filled by a retry, a repair or
+/// another vendor, and counting it lost is what sent the operator after bars
+/// NSE never traded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotOwed {
+    /// NSE independently documents that this exact symbol and ISIN did not
+    /// trade that day: the interval and its two sources, as
+    /// [`crate::cash_auction::independently_inactive`] states them (FORCEMOT
+    /// 2023-10-26..=2024-02-13: the withdrawal circular CML58560, and the
+    /// company filing carrying the readmission circular CML60618;
+    /// `docs/00-charter.md`, "FORCEMOT NSE interruption").
+    InstrumentInactive(InactiveInterval),
+    /// Before the listing day the store's receipted NSE security master
+    /// states for this share ([`crate::listing::Span::before_listing`],
+    /// R4-17). A listing day the master does not state excuses nothing.
+    BeforeListing {
+        /// The listing day the master states.
+        listed_on: Day,
+    },
+    /// Strictly after the removal day that master states, with no
+    /// readmission after it: the share's history ended
+    /// ([`crate::listing::Span::history_ended`], R4-17). The removal day
+    /// itself is still owed.
+    AfterDelisting {
+        /// The removal day the master states.
+        delisted_on: Day,
+    },
+    /// No stored reading covers the day ([`Coverage`], TC-04): nobody read
+    /// it, so its absence says nothing about the vendor, either way.
+    Unread,
+}
+
+impl NotOwed {
+    /// The code a month or a day carries for it, the four `web/` already
+    /// spells (`ingest-months.js`, `REASON_CODES`, R4-01).
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InstrumentInactive(_) => "instrument_inactive",
+            Self::BeforeListing { .. } => crate::listing::BEFORE_LISTING,
+            Self::AfterDelisting { .. } => "after_delisting",
+            Self::Unread => "unread",
+        }
+    }
+
+    /// The word a run of its minutes is reported with, in the family of
+    /// [`Reason::word`].
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::InstrumentInactive(_) => "instrument-inactive",
+            Self::BeforeListing { .. } => "before-listing",
+            Self::AfterDelisting { .. } => "after-delisting",
+            Self::Unread => "unread",
+        }
+    }
+
+    /// Its evidence in the words a terminal and a page print, one wording for
+    /// every consumer: the interval and both NSE circulars by number beside
+    /// the documents that carry them, the day the master states, or that no
+    /// reading covers the day.
+    #[must_use]
+    pub fn evidence(self) -> String {
+        match self {
+            Self::InstrumentInactive(interval) => format!(
+                "NSE documents the share as not trading {}..={}: withdrawal circular {} ({}), \
+                 readmission circular {} (in {})",
+                interval.from,
+                interval.through,
+                interval.withdrawal_circular,
+                interval.withdrawal_source,
+                interval.readmission_circular,
+                interval.readmission_source
+            ),
+            Self::BeforeListing { listed_on } => format!(
+                "before its listing on {listed_on}, as the store's receipted NSE security \
+                 master states"
+            ),
+            Self::AfterDelisting { delisted_on } => format!(
+                "after its removal on {delisted_on}, as the store's receipted NSE security \
+                 master states, with no readmission after it"
+            ),
+            Self::Unread => "no stored reading covers the day".to_owned(),
+        }
+    }
+}
+
+/// Days a feed's gap ledger records as requested (`audit/<feed>.gaps`), one
+/// bit a day from [`Self::from`]: the half of TC-04's evidence a held span
+/// does not carry. O(1) a probe, whatever the span: measured as part of
+/// `not_owed` per call by `crates/api/benches/ratio.rs` (the gap rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requested<'a> {
+    /// The day bit 0 of the first word stands for, days since the epoch.
+    pub from: i64,
+    /// Bit `i % 64` of word `i / 64` is day `from + i`; a day past the last
+    /// word, or before `from`, is not recorded.
+    pub bits: &'a [u64],
+}
+
+impl Requested<'_> {
+    /// No day recorded as requested.
+    pub const NONE: Requested<'static> = Requested { from: 0, bits: &[] };
+
+    /// Whether the ledger records `day` (days since the epoch) as requested.
+    #[must_use]
+    pub fn holds(&self, day: i64) -> bool {
+        let Some(offset) = day
+            .checked_sub(self.from)
+            .and_then(|at| u64::try_from(at).ok())
+        else {
+            return false;
+        };
+        usize::try_from(offset / 64)
+            .ok()
+            .and_then(|word| self.bits.get(word))
+            .is_some_and(|word| (word >> (offset % 64)) & 1 == 1)
+    }
+}
+
+/// Which days a stored reading covers: the evidence [`NotOwed::Unread`]
+/// rests on (TC-04), the same `calendar_record::walk` reads beside the
+/// calendar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Coverage<'a> {
+    /// The caller states nothing about reading, so no day is called unread:
+    /// every day is judged as read, which is what every door answered before
+    /// R4-19. Never a default that hides a loss: it claims one exactly as
+    /// before.
+    #[default]
+    Unstated,
+    /// What reading covers the series: a day is unread when it lies after
+    /// `held_through` (or nothing is held) and `requested` does not record
+    /// it. A day on or before the last held one was read; a hole there is
+    /// the vendor's.
+    Stated {
+        /// The series' last held day (days since the epoch), or `None` when
+        /// its month file is absent.
+        held_through: Option<i64>,
+        /// The days the feed's gap ledger records as requested.
+        requested: Requested<'a>,
+    },
+}
+
+impl Coverage<'_> {
+    /// Whether no stored reading covers `day` (days since the epoch).
+    #[must_use]
+    pub fn unread(&self, day: i64) -> bool {
+        match self {
+            Self::Unstated => false,
+            Self::Stated {
+                held_through,
+                requested,
+            } => held_through.is_none_or(|last| day > last) && !requested.holds(day),
+        }
+    }
+}
+
+/// The series [`not_owed`] is asked about, and the evidence it reads.
+///
+/// Built once per series ([`Key::series`]), so the one listing probe is paid
+/// once and each day after it is a handful of compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key<'a> {
+    /// The exchange, exactly as the store names it.
+    pub exchange: &'a str,
+    /// The segment, exactly as the store names it.
+    pub segment: &'a str,
+    /// The exact symbol, never an alias.
+    pub symbol: &'a str,
+    /// The share's exact ISIN ([`brutex_core::universe::nse_isin`]), when the
+    /// universe holds one.
+    pub isin: Option<Isin>,
+    /// The span the store's receipted NSE security master states for the
+    /// share ([`Listing::span`]), when one does.
+    pub span: Option<Span<'a>>,
+    /// What stored reading covers which day.
+    pub coverage: Coverage<'a>,
+}
+
+impl<'a> Key<'a> {
+    /// A key that names no series: no instrument fact and no reading
+    /// evidence, so [`not_owed`] excuses nothing. The doors that take no key
+    /// pass this, and answer exactly what they answered before R4-19.
+    pub const NONE: Key<'static> = Key {
+        exchange: "",
+        segment: "",
+        symbol: "",
+        isin: None,
+        span: None,
+        coverage: Coverage::Unstated,
+    };
+
+    /// The key of `exchange`/`segment`/`symbol`, as every owed path builds it.
+    ///
+    /// For an NSE cash share: its exact ISIN from the universe (the table the
+    /// closing-auction schedule and the listing rule are keyed by; no second
+    /// symbol-to-ISIN map) and the span `listing` states for that identity,
+    /// probed once here. Any other series carries its names alone, and the
+    /// instrument facts, which are the NSE cash market's, excuse none of its
+    /// days. `listing` is `None` for a caller that reads no master.
+    #[must_use]
+    pub fn series(
+        exchange: &'a str,
+        segment: &'a str,
+        symbol: &'a str,
+        listing: Option<&'a Listing>,
+    ) -> Self {
+        let cash = exchange == "NSE" && segment == "CASH";
+        let isin = if cash {
+            brutex_core::universe::nse_isin(symbol)
+        } else {
+            None
+        };
+        let span = listing
+            .filter(|_| cash)
+            .and_then(|table| table.span(exchange, symbol, isin.as_ref().map(Isin::as_str)));
+        Self {
+            exchange,
+            segment,
+            symbol,
+            isin,
+            span,
+            coverage: Coverage::Unstated,
+        }
+    }
+
+    /// This key, with `coverage` as its reading evidence (TC-04).
+    #[must_use]
+    pub const fn read(self, coverage: Coverage<'a>) -> Self {
+        Self { coverage, ..self }
+    }
+}
+
+/// Whether `key`'s series does not owe `day` (days since the epoch), and why:
+/// the ONE door every owed path asks (R4-19). Each classifier door here calls
+/// it through [`classify_owed`], and the repair plan per session.
+///
+/// The first that holds, in this order:
+///
+/// 1. NSE independently records the share as not trading that day
+///    ([`NotOwed::InstrumentInactive`]).
+/// 2. The day is before the listing day, or strictly after the removal day,
+///    that the store's receipted master states ([`NotOwed::BeforeListing`],
+///    [`NotOwed::AfterDelisting`]). An unknown listing day (`0`, blank,
+///    conflicting), a span inferred from the vendor's own bars, or no master
+///    at all excuses nothing: the day is owed exactly as before.
+/// 3. No stored reading covers the day ([`NotOwed::Unread`]).
+///
+/// The first two are the NSE cash market's facts, so any other exchange or
+/// segment, and a symbol or ISIN that is not exactly the documented one, gets
+/// neither. A day that is no calendar day gets neither either; it can still be
+/// unread.
+///
+/// # Cost
+///
+/// O(1) and no allocation, no file, no lock: a handful of constant compares
+/// ([`crate::cash_auction::independently_inactive`]), at most two compares
+/// against the span the key already holds, and one bit probe of the reading
+/// evidence. The listing probe is [`Key::series`]'s, once per series.
+/// Measured, per call at 1x, 10x and 100x months, by
+/// `crates/api/benches/ratio.rs` (its `/gaps.json` rows,
+/// `benches/ratio/gaps.rs`).
+#[must_use]
+pub fn not_owed(key: &Key<'_>, day: i64) -> Option<NotOwed> {
+    if key.exchange == "NSE"
+        && key.segment == "CASH"
+        && let Some(date) = u32::try_from(day)
+            .ok()
+            .and_then(|number| Day::from_days(number).ok())
+    {
+        if let Some(interval) = key.isin.and_then(|isin| {
+            crate::cash_auction::independently_inactive(key.symbol, isin.as_str(), date)
+        }) {
+            return Some(NotOwed::InstrumentInactive(interval));
+        }
+        if let Some(span) = key.span {
+            if let (true, Some(listed_on)) = (span.before_listing(date), span.listed_on()) {
+                return Some(NotOwed::BeforeListing { listed_on });
+            }
+            if let Some(delisted_on) = span.history_ended(date) {
+                return Some(NotOwed::AfterDelisting { delisted_on });
+            }
+        }
+    }
+    key.coverage.unread(day).then_some(NotOwed::Unread)
 }
 
 /// One run of consecutive absent minutes sharing a reason.
@@ -204,6 +534,66 @@ impl Ledger {
             .map(|gap| gap.minutes())
             .fold(0_u32, u32::saturating_add)
     }
+
+    /// Minutes inside sessions this series did not owe ([`Reason::NotOwed`],
+    /// R4-19): neither a loss nor counted in [`Self::expected`].
+    #[must_use]
+    pub fn not_owed_minutes(&self) -> u32 {
+        self.gaps
+            .iter()
+            .filter(|g| matches!(g.reason, Reason::NotOwed(_)))
+            .map(|gap| gap.minutes())
+            .fold(0_u32, u32::saturating_add)
+    }
+
+    /// Each distinct not-owed answer the ledger holds, first seen first, with
+    /// the days and the minutes it covers: what a page names beside the loss,
+    /// so it states every class and its source rather than a bare total.
+    ///
+    /// One pass over the runs, at most a few distinct answers (one interval
+    /// per documented interruption, one listing day, one removal day, unread):
+    /// O(runs), bounded by [`MAX_GAPS`].
+    #[must_use]
+    pub fn not_owed(&self) -> Vec<Excused> {
+        let mut out: Vec<Excused> = Vec::new();
+        for gap in &self.gaps {
+            let Reason::NotOwed(why) = gap.reason else {
+                continue;
+            };
+            if let Some(seen) = out.iter_mut().find(|seen| seen.why == why) {
+                if seen.last_day != gap.day {
+                    seen.days = seen.days.saturating_add(1);
+                    seen.last_day = gap.day;
+                }
+                seen.minutes = seen.minutes.saturating_add(gap.minutes());
+            } else {
+                out.push(Excused {
+                    why,
+                    days: 1,
+                    minutes: gap.minutes(),
+                    first_day: gap.day,
+                    last_day: gap.day,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// One not-owed answer of a [`Ledger`], and how much of it the ledger holds
+/// ([`Ledger::not_owed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Excused {
+    /// The answer.
+    pub why: NotOwed,
+    /// The days it covers.
+    pub days: u32,
+    /// The minutes it covers.
+    pub minutes: u32,
+    /// The first day it covers, days since the epoch.
+    pub first_day: i64,
+    /// The last day it covers, days since the epoch.
+    pub last_day: i64,
 }
 
 /// Minutes since IST midnight for a micros-since-epoch stamp, and its day.
@@ -278,7 +668,14 @@ pub fn classify_against(
     last: i64,
     against: Option<&Calendar>,
 ) -> Ledger {
-    classify_with_subject(stored, first, last, against, Subject::ExchangeSession)
+    classify_owed(
+        stored,
+        first,
+        last,
+        against,
+        Door::ExchangeSession,
+        &Key::NONE,
+    )
 }
 
 /// Classify an NSE equity-derivatives series against that venue's dated hours.
@@ -298,7 +695,7 @@ pub fn classify_derivative_against(
     last: i64,
     against: Option<&Calendar>,
 ) -> Ledger {
-    classify_with_subject(stored, first, last, against, Subject::Derivatives)
+    classify_owed(stored, first, last, against, Door::Derivatives, &Key::NONE)
 }
 
 /// Classify a spot-index series without inventing index publication during the
@@ -317,7 +714,7 @@ pub fn classify_spot_index_against(
     last: i64,
     against: Option<&Calendar>,
 ) -> Ledger {
-    classify_with_subject(stored, first, last, against, Subject::SpotIndex)
+    classify_owed(stored, first, last, against, Door::SpotIndex, &Key::NONE)
 }
 
 /// Audit NSE cash minutes against the independently verified exchange calendar
@@ -328,47 +725,68 @@ pub fn classify_spot_index_against(
 /// only full verified sessions with exact dated eligibility get a denominator;
 /// missing eligibility and exceptional / unknown sessions remain unmeasured.
 /// No metadata is fetched and no source bars are altered by this function.
+///
+/// **`key` names the share (R4-19).** A session [`not_owed`] excuses for it —
+/// NSE withdrew it, it was not yet listed or had been delisted, or no reading
+/// covers the day — owes nothing and loses nothing: its minutes read the
+/// reason, never `vendor-hole`. [`Key::series`] builds it; [`Key::NONE`]
+/// excuses nothing and answers what this door answered before.
 #[must_use]
 pub fn classify_cash(
     stored: &[i64],
     first: i64,
     last: i64,
     schedule: Option<&crate::cash_auction::Schedule>,
+    key: &Key<'_>,
 ) -> Ledger {
-    classify_with_subject(stored, first, last, None, Subject::Cash(schedule))
+    classify_owed(stored, first, last, None, Door::Cash(schedule), key)
 }
 
-#[derive(Clone, Copy)]
-enum Subject<'a> {
+/// Which session authority a classification owes a series against.
+#[derive(Debug, Clone, Copy)]
+pub enum Door<'a> {
+    /// The exchange calendar's session ([`classify_against`]).
     ExchangeSession,
+    /// The exchange session, less the 2021-02-24 outage day no source sizes
+    /// for an index ([`classify_spot_index_against`]).
     SpotIndex,
+    /// The derivatives venue's dated hours ([`classify_derivative_against`]).
     Derivatives,
+    /// The cash venue's dated hours under this share's dated closing-auction
+    /// eligibility ([`classify_cash`]).
     Cash(Option<&'a crate::cash_auction::Schedule>),
 }
 
-fn cash_kind(day: i64, kind: DayKind, schedule: Option<&crate::cash_auction::Schedule>) -> DayKind {
-    let Some(date) = u32::try_from(day)
-        .ok()
-        .and_then(|number| crate::session::Day::from_days(number).ok())
-    else {
-        return DayKind::Unmeasured;
-    };
-    if !crate::vendor::cash_auction_eligibility_required(date) || kind == DayKind::Closed {
-        return kind;
-    }
-    if kind != DayKind::Open(calendar::Session::full()) {
-        return DayKind::Unmeasured;
-    }
-    crate::fold::minute_session(day, kind, crate::vendor::Venue::NseCash, schedule)
-        .unwrap_or(DayKind::Unmeasured)
-}
-
-fn classify_with_subject(
+/// Classify every minute `door` owes across `first ..= last`, excusing each
+/// session [`not_owed`] excuses for `key` (R4-19): the one walk every door
+/// above is.
+///
+/// A session of record — open, or open with a length no record states — that
+/// `key`'s series does not owe adds nothing to [`Ledger::expected`], and each
+/// of its minutes that would have been owed and held no bar reads
+/// [`Reason::NotOwed`]; a minute outside its windows is still
+/// `outside-window`, and a stored bar on it is still held. A closed day keeps
+/// `closed`: [`not_owed`] says what a series owed, never whether the exchange
+/// traded. A day the calendar cannot attest keeps `unmeasured` unless the
+/// instrument owed nothing on it whatever the exchange did (withdrawn, not
+/// yet listed, delisted): then one run of that reason; `unread` is never
+/// taken there, as no session was there to read.
+///
+/// # Cost
+///
+/// [`classify`]'s two-cursor merge, plus one [`not_owed`] per session: O(1)
+/// per minute and per bar, no set, no map, no allocation beyond the answer.
+/// Measured per day at 1x, 10x and 100x months, with a key, by
+/// `crates/api/benches/ratio.rs` (its `/gaps.json` rows); the merge alone is
+/// still UNVERIFIED as a measurement (the module's Cost note).
+#[must_use]
+pub fn classify_owed(
     stored: &[i64],
     first: i64,
     last: i64,
     against: Option<&Calendar>,
-    subject: Subject<'_>,
+    door: Door<'_>,
+    key: &Key<'_>,
 ) -> Ledger {
     let mut ledger = Ledger {
         held: u32::try_from(stored.len()).unwrap_or(u32::MAX),
@@ -404,17 +822,32 @@ fn classify_with_subject(
         // the still-trading morning, and no source read here states the exact
         // BANKNIFTY or VIX interval. Calling absent index bars vendor holes
         // would therefore invent the denominator this audit exists to supply.
-        if matches!(subject, Subject::SpotIndex) && day == calendar::SYSTEMS_OUTAGE_DAY {
+        if matches!(door, Door::SpotIndex) && day == calendar::SYSTEMS_OUTAGE_DAY {
             kind = DayKind::OpenLengthUnmeasured;
         }
-        if let Subject::Cash(schedule) = subject {
+        // A SESSION THIS SERIES DID NOT OWE (R4-19), asked of the ONE
+        // authority once a day and before any venue's hours refine the day:
+        // a share NSE withdrew owes none of a session whose closing-auction
+        // eligibility nobody recorded, either. A closed day keeps its word.
+        // A day no calendar attests keeps `unmeasured` unless the INSTRUMENT
+        // owed nothing on it whatever the exchange did — withdrawn, not yet
+        // listed, delisted — which is a sourced fact and more than no claim
+        // (IRFC's 2018 months, before its 2021 listing, read before-listing,
+        // not unmeasured). `unread` needs a session to be read, so it is not
+        // taken there.
+        let excused = match kind {
+            DayKind::Open(_) | DayKind::OpenLengthUnmeasured => not_owed(key, day),
+            DayKind::Unmeasured => not_owed(key, day).filter(|why| !matches!(why, NotOwed::Unread)),
+            DayKind::Closed => None,
+        };
+        if let Door::Cash(schedule) = door {
             kind = cash_kind(day, kind, schedule);
         }
         // THE DERIVATIVES VENUE'S DATED HOURS on a regular day, by the one
         // authority the fold uses (D-1529). Exceptional days keep the
         // calendar's own shape, and a day whose hours this build cannot state
         // is unmeasured rather than given the fixed session.
-        if matches!(subject, Subject::Derivatives) {
+        if matches!(door, Door::Derivatives) {
             kind =
                 crate::fold::minute_session(day, kind, crate::vendor::Venue::NseDerivatives, None)
                     .unwrap_or(DayKind::Unmeasured);
@@ -425,7 +858,15 @@ fn classify_with_subject(
             cursor = cursor.saturating_add(1);
         }
 
-        match kind {
+        match (kind, excused) {
+            // NOT OWED, AND NO WINDOWS TO PLACE IT IN: a session no record
+            // sizes (a Muhurat before 2025, a cash day without dated
+            // eligibility), or a day no calendar attests on which the
+            // instrument owed nothing, that the series did not owe at all.
+            // One run of the reason, as `Unmeasured` is one run.
+            (DayKind::Unmeasured | DayKind::OpenLengthUnmeasured, Some(why)) => {
+                push(&mut ledger, &mut run, day, 0, 1_439, Reason::NotOwed(why));
+            }
             // BOTH REPORT `Unmeasured`, AND NEITHER ADDS TO `expected`.
             //
             // `Unmeasured` is a day outside the calendar's range.
@@ -435,16 +876,16 @@ fn classify_with_subject(
             // this build cannot state, and calling them `Closed` would deny a
             // session the daily bar proves happened. They are flagged, and the
             // caller decides.
-            DayKind::Unmeasured | DayKind::OpenLengthUnmeasured => {
+            (DayKind::Unmeasured | DayKind::OpenLengthUnmeasured, None) => {
                 push(&mut ledger, &mut run, day, 0, 1_439, Reason::Unmeasured);
             }
-            DayKind::Closed => {
+            (DayKind::Closed, _) => {
                 // A closed day owes nothing, so it produces one run and no
                 // expected bars. Reported rather than skipped: an operator
                 // asking "where did February go" deserves the answer.
                 push(&mut ledger, &mut run, day, 0, 1_439, Reason::Closed);
             }
-            DayKind::Open(session) => {
+            (DayKind::Open(session), excused) => {
                 // A RECORDED HALT IS NOT OWED, whatever calendar sized the
                 // day (R3-06, DB-G47): the record carves it already, but the
                 // typed table a cash stock reads, the derivatives venue's
@@ -463,9 +904,14 @@ fn classify_with_subject(
                         .count();
                     u16::try_from(held).unwrap_or(u16::MAX)
                 });
-                ledger.expected = ledger
-                    .expected
-                    .saturating_add(u32::from(session.bars().saturating_sub(carved)));
+                // A SESSION NOT OWED OWES NO BAR: nothing of it is expected,
+                // and a minute of it with no bar reads why (R4-19).
+                if excused.is_none() {
+                    ledger.expected = ledger
+                        .expected
+                        .saturating_add(u32::from(session.bars().saturating_sub(carved)));
+                }
+                let absent = excused.map_or(Reason::VendorHole, Reason::NotOwed);
                 let mut minute = 0_u16;
                 while minute <= 1_439 {
                     let held = stored
@@ -476,14 +922,7 @@ fn classify_with_subject(
                     if held {
                         cursor = cursor.saturating_add(1);
                     } else if session.expects(minute) && !halted(minute) {
-                        push(
-                            &mut ledger,
-                            &mut run,
-                            day,
-                            minute,
-                            minute,
-                            Reason::VendorHole,
-                        );
+                        push(&mut ledger, &mut run, day, minute, minute, absent);
                     } else {
                         push(
                             &mut ledger,
@@ -508,6 +947,23 @@ fn classify_with_subject(
     }
     flush(&mut ledger, &mut run);
     ledger
+}
+
+fn cash_kind(day: i64, kind: DayKind, schedule: Option<&crate::cash_auction::Schedule>) -> DayKind {
+    let Some(date) = u32::try_from(day)
+        .ok()
+        .and_then(|number| crate::session::Day::from_days(number).ok())
+    else {
+        return DayKind::Unmeasured;
+    };
+    if !crate::vendor::cash_auction_eligibility_required(date) || kind == DayKind::Closed {
+        return kind;
+    }
+    if kind != DayKind::Open(calendar::Session::full()) {
+        return DayKind::Unmeasured;
+    }
+    crate::fold::minute_session(day, kind, crate::vendor::Venue::NseCash, schedule)
+        .unwrap_or(DayKind::Unmeasured)
 }
 
 /// Extend the open run, or close it and start another.
@@ -669,7 +1125,7 @@ mod tests {
                 "derivatives",
                 classify_derivative_against(&held, day, day, None),
             ),
-            ("cash", classify_cash(&held, day, day, None)),
+            ("cash", classify_cash(&held, day, day, None, &Key::NONE)),
         ];
         let owed = 375 - u32::from(halt.halted.bars());
         for (door, ledger) in doors {
@@ -777,7 +1233,7 @@ mod tests {
                 .filter(|minute| *minute != 763)
                 .map(|minute| at(last, minute)),
         );
-        let checked = classify_cash(&bars, first, last, Some(&schedule));
+        let checked = classify_cash(&bars, first, last, Some(&schedule), &Key::NONE);
         assert_eq!(checked.held, 734);
         assert_eq!(checked.expected, 735);
         assert_eq!(checked.lost_minutes(), 1);
@@ -791,7 +1247,7 @@ mod tests {
                 .iter()
                 .any(|gap| gap.day == first && gap.reason == Reason::VendorHole)
         );
-        let unknown = classify_cash(&bars, first, last, None);
+        let unknown = classify_cash(&bars, first, last, None, &Key::NONE);
         assert_eq!(unknown.expected, 0);
         assert_eq!(unknown.lost_minutes(), 0);
         assert_eq!(unknown.held, 734);
@@ -800,7 +1256,7 @@ mod tests {
         one_date
             .insert(eligible, true)
             .expect("only one day verified");
-        let partial = classify_cash(&bars, first, last, Some(&one_date));
+        let partial = classify_cash(&bars, first, last, Some(&one_date), &Key::NONE);
         assert_eq!(partial.expected, 360);
         assert_eq!(
             partial.unmeasured_minutes(),
@@ -816,7 +1272,7 @@ mod tests {
         let mut schedule = crate::cash_auction::Schedule::default();
         schedule.insert(date, false).expect("explicit ineligible");
         let prefix: Vec<_> = (555..915).map(|minute| at(day, minute)).collect();
-        let tail = classify_cash(&prefix, day, day, Some(&schedule));
+        let tail = classify_cash(&prefix, day, day, Some(&schedule), &Key::NONE);
         assert_eq!(tail.expected, 375);
         assert_eq!(tail.lost_minutes(), 15);
         assert!(
@@ -824,7 +1280,7 @@ mod tests {
                 .iter()
                 .any(|gap| gap.from == 915 && gap.to == 929 && gap.reason == Reason::VendorHole)
         );
-        let absent = classify_cash(&[], day, day, Some(&schedule));
+        let absent = classify_cash(&[], day, day, Some(&schedule), &Key::NONE);
         assert_eq!(absent.expected, 375);
         assert_eq!(absent.lost_minutes(), 375);
     }
@@ -836,10 +1292,10 @@ mod tests {
                 .expect("date")
                 .days_from_epoch(),
         );
-        let normal = classify_cash(&full_day(pre), pre, pre, None);
+        let normal = classify_cash(&full_day(pre), pre, pre, None, &Key::NONE);
         assert_eq!(normal.expected, 375);
         assert_eq!(normal.lost_minutes(), 0);
-        let holiday = classify_cash(&[], 20479, 20479, None);
+        let holiday = classify_cash(&[], 20479, 20479, None, &Key::NONE);
         assert_eq!(holiday.expected, 0);
         assert_eq!(holiday.unmeasured_minutes(), 0);
         let future = calendar::LAST_DAY + 1;
@@ -850,20 +1306,26 @@ mod tests {
                 false,
             )
             .expect("flag");
-        let unknown = classify_cash(&full_day(future), future, future, Some(&schedule));
+        let unknown = classify_cash(
+            &full_day(future),
+            future,
+            future,
+            Some(&schedule),
+            &Key::NONE,
+        );
         assert_eq!(
             unknown.expected, 0,
             "a master is not a trading-calendar extension"
         );
         assert_eq!(unknown.unmeasured_minutes(), 1440);
-        let dr = classify_cash(&[], 19784, 19784, None);
+        let dr = classify_cash(&[], 19784, 19784, None, &Key::NONE);
         assert_eq!(
             dr.expected, 105,
             "verified pre-change exceptional windows remain intact"
         );
         assert_eq!(dr.lost_minutes(), 105);
         for outside in [i64::MIN, -1, i64::MAX] {
-            let invalid_day = classify_cash(&[], outside, outside, None);
+            let invalid_day = classify_cash(&[], outside, outside, None, &Key::NONE);
             assert_eq!(invalid_day.expected, 0);
             assert_eq!(invalid_day.unmeasured_minutes(), 1440);
         }
@@ -1221,3 +1683,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gaps_not_owed_tests.rs"]
+mod not_owed_tests;
