@@ -366,3 +366,33 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
 - NEXT: read the coverage run (nightly `--branch`, store `recover` then cli `month_recover store_write`)
   and the workspace clippy; then the workspace tests, each failure rerun here and on the base worktree;
   then the final report (STATUS: DONE only if every gate is green but the named base items).
+
+### 27 Oct 08:0x–08:14 IST — new session (27 Oct account); merge a32722c45, final gates
+
+- GO present, HOLD lifted (`ede2909bd`). Started from the branch tip `1dcd890b`: the coverage run the
+  NEXT line names had finished and is recorded (Gates table, coverage row, at `6f092cca`), so it was not
+  rerun. A fresh container: cargo-deny 0.20.2 and 0.19.0 (CI's pin) from their release downloads.
+- Merged `origin/feat/db-fix` `a32722c45` (Merge R3-15; also BASE-DENY-1024, R3-12, R4-19), clean, no
+  conflict: merge `656e9f4a`. It touches none of this part's files (`git diff origin/feat/db-fix HEAD
+  --stat`: exactly this part's 18 files; `Cargo.lock` and every `Cargo.toml` equal the base's).
+- `cargo fmt --all --check`: `EXIT 0`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: `Finished`, `EXIT 0`, no warning.
+- `cargo deny check`: `advisories ok, bans ok, licenses ok, sources ok`, `EXIT 0`, under cargo-deny
+  0.20.2 and 0.19.0 alike (BASE-DENY-1024's tokio 1.53.3 closed RUSTSEC-2026-0386).
+- CI shell gates: every run step of `language-purity` but 1e, and build-job 13a, 13b, 6c, 5, on this
+  branch and on a worktree of the unmodified base `a32722c45`, steps extracted by a small Rust tool
+  (scratch, untracked) and run with `bash --noprofile --norc -eo pipefail`, `RUNNER_TEMP`, `GITHUB_ENV`
+  emulated. Exit codes identical on both: red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 (101); green 0, 1,
+  1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b, 13a, 13b, 6c, 5.
+  Within each red gate the sorted output equals the base's but for counts and this part's two declared
+  lines (gate 11 `store_write.rs — 8 of 8`; gate 30's `S-52 | pending | waits for R3-20` row). No
+  refusal names a file of this part.
+- One slip, recorded: the step names were first listed once with the container's `/usr/bin/yq`, which
+  turned out to be a script in the banned language; nothing else ran through it, and the steps were then
+  extracted with the Rust tool above. (The 26 Oct session's "read with `yq`" was probably the same tool.)
+- Workspace tests running (`cargo test --workspace --locked --no-fail-fast -- --skip
+  a_full_calendar_pool_refuses_the_census_and_the_audit --skip
+  spot_json_is_refused_by_name_when_every_store_read_slot_is_held`: the two tests that hung at 0% CPU on
+  branch and base on 26 Oct; each is run apart under `timeout`, here and on the base worktree).
+- NEXT: read the workspace run; rerun each failure here and on the base worktree `a32722c45`; the two
+  skipped tests under `timeout` on both; gate 13c; then the final report.
