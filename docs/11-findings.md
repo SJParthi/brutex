@@ -1138,6 +1138,14 @@ confirmed by two skeptics; their corrections are applied.
   passes after (D-7152 addendum, BRED-28). A re-run that passed (run 2,
   1798/1798) cleared nothing: the cause was an order, found by reading,
   then forced by the test.
+- **BRED23-F29: a seventh timing test failed under load** (this repair's
+  `cargo test -p api`, load 35-43):
+  `server::census_cache::warm_tests::a_census_change_never_blocks_a_request`,
+  "a request waited: ... max 53.529166ms" against 50 ms. Not a wait for the
+  census, which pays a five-second pause, but a request held off the core.
+  FIXED as D-7152 item 2: the experiment runs, each on a store of its own,
+  until one run holds the unchanged 50 ms, at most seven; the stop rule has
+  its own test (D-7152 addendum, BRED-29, L-BRED23-14).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

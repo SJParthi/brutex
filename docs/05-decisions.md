@@ -84445,6 +84445,25 @@ every time; it failed before on both ("and the command it had just started
 was ended with it", then, with only the sheet fixed, "and the browser it
 had just started was ended with it") and passes after (BRED-28).
 
+**Addendum, 27 Oct 2026 (repair 1: a seventh timing test).** This repair's
+own `cargo test -p api` at load 35-43 failed
+`server::census_cache::warm_tests::a_census_change_never_blocks_a_request`:
+"a request waited: p50 531.459µs, p99 3.796917ms, max 53.529166ms". The
+bound is there to tell a request that waited for the census from one that
+did not, and a request that waits pays the census read's five-second pause;
+this one paid 53 ms, a request the scheduler held off the core. Made
+load-robust as item 2 was, by runs: the experiment (a store of its own, the
+change beside 1,000 requests under the five-second pause, every other
+assertion held) runs until one run's slowest request is under the
+UNCHANGED 50 ms, at most seven runs. Interference only adds time; a design
+that makes a request wait for the read pays five seconds in every run and
+fails all seven, with each run's (p50, p99, max) in the message. The stop
+rule is its own test,
+`the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with_every_run`
+(it stops at the first run that holds, fails with every run when none does,
+and a time at the bound does not hold) (BRED-29). Failing first: the run
+above, under load; NOT forced on demand.
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed
