@@ -1,6 +1,6 @@
 STATUS: IN PROGRESS
 
-NEXT: the new code's own 46 mutants (running at `3f2388c9`, two in-place worktrees), then coverage at the final head, gate 1e, bench C-RP-02, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), two base merges.
+NEXT: the new code's own mutants (44 of 46 left after a container restart cut the first try; running at `3f2388c9`), then coverage at the final head, gate 1e, bench C-RP-02, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), two base merges.
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
@@ -290,16 +290,24 @@ printed all three: `Merge IA-16: ...`, `Merge IA-17: ...`, `Merge WP-12d: ...`. 
    orphaned print and unreadable pointer (IA-RP-19 to IA-RP-26, IA-AUC-04, IA-AUC-05). The CASH step
    lost a no-op arm: it now exists only for a share whose month is named. The inject seam gained
    `plant_gathered_lost` (test-only).
+9. **The coverage pass, 27 Oct: every added line run and every arm taken.** Thirteen more tests
+   (IA-RP-37 to IA-RP-44, IA-AUC-10 to IA-AUC-13, and IA-RP-33's front-door proof) and six
+   conditions removed because nothing could make them true; each item is in "The coverage pass,
+   27 Oct" below. `Filed::Gathered` carries the month the door addressed; `Gather::take` makes a
+   new month's offer aside and joins it only with its file; one pair compare says which day waits
+   (`Deferred::is`); `widen_window` uses the total `Window::holding`; `flush_gather` takes its
+   first waiting day up front; the `.auc` writer's torn-tail cut and directory sync have per-thread
+   test seams beside `FAIL_AFTER`; the gathered-repair seam can plant a failure no door names. The
+   one front-door path to a gathered day with no close waiting (a source that says it holds no
+   file of a day yet hands one) is named in the code, in IA-RP-33 and in D-4899 (9), and tested.
 
 ## What is left
 
-- The whole mutant run (264 mutants, about 14.5 hours of this host); a sample of 27 ran here, none
-  missed.
-- 100% coverage: 43 added lines stay unrun, 35 of them unreachable by construction and 8 with no seam
-  to time them. Closing them needs a seam (a source that vanishes between two files of one day; a
-  `set_len` that fails) or a ruling that a named defensive arm may stay unrun.
-- The runs this host cannot make: as a non-root user, on 8 or more cores, with more than 10 GiB free,
-  and the shadow-server and real-store checks of spec §6 (M0 to M2, (a) to (j)).
+Nothing of this part's code (27 Oct). The whole mutant run and 100% coverage of the added lines,
+left on 24 Oct, are done (fifth leg, above). What remains is the runs this host cannot make: as a
+non-root user, on 8 or more cores, with more than 10 GiB free, and the shadow-server and
+real-store checks of spec §6 (M0 to M2, (a) to (j)), each under NEEDS THE MAC; and the base's own
+red CI shell gates, which are red the same way on `feat/db-fix`.
 
 Not built here (BACKTEST-FIRST, spec §4b): the plan's generation and byte count per month (FM-092's
 first sentence) and the "rewrites used of the 1,024" view (RA-266) are `plan.json`'s (IA-10a) and
@@ -340,6 +348,50 @@ Gates), 49 ignored. Of this part's tests: all 25 in `gdfl_import::tests::gather`
 tests that drive the import (`cargo test -p cli --locked --no-fail-fast -- gdfl_import tick_second
 scrub_blocks watchdog_command gdfl_run`, `TMPDIR` on the tmpfs): 152 passed, 3 failed (the chmod
 tests root ignores).
+
+## The coverage pass, 27 Oct
+
+Measured at `9a186f42`: `TMPDIR=<tmpfs> CARGO_LLVM_COV_TARGET_DIR=<disk> RUSTC_BOOTSTRAP=1 cargo
+llvm-cov -p pull --lib --branch --locked --no-report --ignore-run-fail`, then `cargo llvm-cov report
+--branch --lcov` (0.8.4; `RUSTC_BOOTSTRAP=1` for `--branch` on the stable 1.97.1, for the
+measurement only, nothing committed). The lines this part adds are `git diff
+--diff-algorithm=histogram -U0 origin/feat/db-fix` of `ingest.rs`, `gdfl_import_filing.rs`,
+`gdfl_import_day.rs`, `gdfl_cm_auction.rs` and `gdfl_import.rs` (histogram, because the default
+diff paired `gathered_repair`'s new `if added_at.is_empty()` with the base's identical one in
+`back_fill_or_append` and so blamed the base's line), matched to the lcov's `DA` and `BRDA`
+records by an `awk` script. **34 lines never ran and 18 arms were never taken.** Each, and what
+closed it:
+
+| Where | Never run or taken | Closed by |
+|---|---|---|
+| `gdfl_import_filing.rs` `Filing::file` | a gathered file whose day has no month (8 lines) | removed: `Filed::Gathered` now carries the month the door addressed the bars to, so nothing works it out again |
+| `gdfl_import_filing.rs` `Filing::file` | the provenance check's `landed == Appended` false arm | removed: after the gathered return every landing is an append (the judge door yields `Appended` or `Gathered` only) |
+| `gdfl_import_filing.rs` `Filing::file` | a carried print with a door refusal (the `door_kind.is_none()` false arm) | IA-AUC-13: `a_carried_print_whose_bars_the_door_refused_waits_for_the_read_that_lands_them` |
+| `gdfl_import_filing.rs` `DayFiler::fold` | `Ok(false) => {}` | `self.gathered += usize::from(gathered)`: one statement for both |
+| `gdfl_import_filing.rs` `Gather::take` | `get_mut` after a push (2 lines, 1 arm); the day compare's false arm under an equal key | the new month's offer is made aside (`Option::insert`) and joins the gather with its file; `Deferred::is`, one pair compare (a key names its day) |
+| `gdfl_import_filing.rs` `widen_window` | `Window::new` failing on `min..max` (never backwards) | `Window::holding` (`session.rs`), total; IA-RP-44 |
+| `gdfl_import_filing.rs` `repair_gathered_months` | a repair failure no door names (5 lines); `landed == NewGeneration` false | IA-RP-41 (`plant_gathered_unnamed`, the address step's refusal planted) and IA-RP-42 (another writer lands the day first: `NothingNew`) |
+| `gdfl_import_filing.rs` `name_on_each_file` | a file whose day is not waiting | IA-RP-43, at the unit (as `give_added`'s was) |
+| `gdfl_import_filing.rs` `inject::gathered` | the probe's `&&` | one pair compare |
+| `gdfl_import_day.rs` `run_days` | a stop first seen at a day's top | IA-RP-37 |
+| `gdfl_import_day.rs` `widen` | a member's pass that closed nothing and waits for nothing | `widened.deferred \|= waits(..)` |
+| `gdfl_import_day.rs` `defer_day` | a lost source, a store that takes no writes, the held-back cap (6 lines, 4 arms) | IA-RP-38 |
+| `gdfl_import_day.rs` `flush_gather` | a deferred day with no close at a repair that ends the run; a census refusal with no waiting day (6 lines); its first day with no close (1 line) | `Option::map_or_else`; the flush takes its first waiting day up front (none: nothing was gathered); IA-RP-39 and IA-RP-40, the one front-door path (a source that disowns a day after handing a gathered file) |
+| `gdfl_cm_auction.rs` `file_or_carry` | the sidecar's other refusals | IA-AUC-10 |
+| `gdfl_cm_auction.rs` `write_day_held` | a torn tail the host will not cut (2 lines); a directory sync the host refuses (2 lines) | `seam::FAIL_CUT`, `seam::FAIL_SYNC` (per thread, beside `FAIL_AFTER`); IA-AUC-11, IA-AUC-12 |
+| `ingest.rs` `gathered_repair` | `added_at.is_empty()`: a repair that adds nothing | IA-RP-42 |
+| `ingest.rs` tests | a `matches!` guard's false arm | the pattern holds the kind; then read off the `Debug` rendering, with no arm of its own |
+
+At `f39f40ce` (the same command, the same five files plus `session.rs`): **0 lines never run and
+0 arms never taken in the five production files**; three items were test code (an `&&` inside a
+new test's `assert!`, and the rewritten `matches!` whose no-match arm never runs), rewritten at
+`8adad281`. The final measurement at the head is under "Gates, 27 Oct" below.
+
+**Fails before, honestly.** These are coverage tests: most pin behaviour the part already had
+and no test pinned, so on the code before this pass they would pass too, and only the four that
+need a new seam or API (`plant_gathered_unnamed`, `FAIL_CUT`, `FAIL_SYNC`, `Window::holding`)
+fail there, by not compiling. Their teeth are shown by mutants instead: every mutant on the lines
+they reach is caught (the 149 at `9a186f42`, and the new code's own, below).
 
 ## Gates
 
