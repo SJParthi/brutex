@@ -3922,6 +3922,13 @@ impl FactorIndex {
         Ok(index)
     }
 
+    /// Every share the file holds a row for, in no stated order (a caller
+    /// sorts). R4-26's `cli basis-runs` walks them; the factor of each day
+    /// stays this module's ([`Self::factor_of`]).
+    pub fn symbols(&self) -> impl Iterator<Item = &str> {
+        self.slots.keys().map(String::as_str)
+    }
+
     /// The factor of `symbol` on `day`, or why there is none. O(1): one hash
     /// and one fixed-stride index (FR-16). Timed by `factor --repeat`
     /// (`docs/06-limits.md` §"Feed reconcile"); no test or bench gates that

@@ -632,6 +632,8 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
             ctx.record(*day, &held.day(at), bar, (flag, auc))
         })
         .collect();
+    // A SHARE'S CORPORATE ACTIONS ON THEIR OWN DAYS (R4-26).
+    let corporate_actions = share_corporate_actions(root, inst, &days, &mut records);
     if asked.newest_first {
         records.reverse();
     }
@@ -670,6 +672,7 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
             "zerodha_1day_start",
             start.map_or(Value::Null, SeriesStart::json),
         ),
+        ("corporate_actions", corporate_actions),
         ("days", Value::Array(records)),
         ("sources", sources),
         ("derive", derive_json(gaps.as_ref().ok(), inst, first, last)),
@@ -694,6 +697,103 @@ fn asked_json(asked: &Asked, band: rules::Band) -> Value {
         "timeframe": band.rung.map(Timeframe::as_str),
         "expiry": band.expiry.map(|expiry| expiry.to_string()),
     })
+}
+
+/// A share's corporate actions on their own days (R4-26): one note per row
+/// in the day's `notes` array, created when absent and kept when present
+/// ([`corporate_action_notes`]), and the table they came from, served or
+/// refused, as the answer's `corporate_actions`; `null` for an index or a
+/// contract, which carries none.
+fn share_corporate_actions(
+    root: &Path,
+    inst: &Instrument,
+    days: &[Day],
+    records: &mut [Value],
+) -> Value {
+    if inst.segment == Segment::Cash {
+        corporate_action_notes(root, inst.symbol.as_str(), days, records)
+    } else {
+        Value::Null
+    }
+}
+
+/// Puts one `corporate_action` note per action row whose ex-date is the
+/// record's day into that record's `notes` array (created when absent, its
+/// other notes kept; a `notes` value that is not an array is left as it was
+/// and the actions go in `corporate_action_notes` beside it). A measured row
+/// whose window holds a session with no basis says "on one session between",
+/// never "at this session" (`pull::corporate_actions::Action::day_known`,
+/// a walk of at most `MAX_WINDOW_WALK` calendar days). It answers the table
+/// the rows came from: served with its receipt, or its refusal by name
+/// (absent, checksum, ...). A measured
+/// row LABELS: its note says it excuses nothing (R4-26, `CLAUDE.md` §3
+/// rule 1). O(days in the page): one hash and two indexes into the share's
+/// day table a day, no search.
+pub(crate) fn corporate_action_notes(
+    root: &Path,
+    symbol: &str,
+    days: &[Day],
+    records: &mut [Value],
+) -> Value {
+    let tables = super::basis_route::tables(root);
+    let said = super::basis_route::slot_json(&tables.actions);
+    let Ok(table) = tables.actions.table() else {
+        return said;
+    };
+    for (day, record) in days.iter().zip(records.iter_mut()) {
+        let rows = table.labels(symbol, None, *day);
+        if rows.is_empty() {
+            continue;
+        }
+        let closed = matches!(
+            pull::calendar::kind_of(i64::from(day.days_from_epoch())),
+            pull::calendar::DayKind::Closed
+        );
+        let Some(fields) = record.as_object_mut() else {
+            continue;
+        };
+        // KEPT, NEVER RESHAPED: a reader that put something other than an
+        // array in `notes` keeps it as it was, and the actions go in
+        // `corporate_action_notes` beside it.
+        let key = if fields.get("notes").is_none_or(Value::is_array) {
+            "notes"
+        } else {
+            "corporate_action_notes"
+        };
+        let Some(list) = fields
+            .entry(key)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+        else {
+            continue;
+        };
+        for row in rows {
+            let mut note = super::basis_route::action_json(row);
+            if let Some(object) = note.as_object_mut() {
+                object.insert("note".to_owned(), json!("corporate_action"));
+                // NEVER "at this session" ON A DAY THE DATA DID NOT SEE: a
+                // measured row whose window holds a session with no basis
+                // (a missing month, unmeasured days) names its window.
+                let applies = match (row.day_known(), row.after) {
+                    (false, Some(after)) => format!(
+                        "on one session between {after} (excluded) and {} (included); the day \
+                         is unknown: the data holds no basis between them, and this is the first \
+                         day it saw the new basis",
+                        row.ex_date
+                    ),
+                    _ if closed => {
+                        "at the next session: the exchange held no session on the ex-date"
+                            .to_owned()
+                    }
+                    _ => "at this session".to_owned(),
+                };
+                object.insert("applies".to_owned(), json!(applies));
+                object.insert("label_only".to_owned(), json!(!row.excuses()));
+            }
+            list.push(note);
+        }
+    }
+    said
 }
 
 /// The answer's `rungs`: what `held` counts, the feed's finest beside it, the

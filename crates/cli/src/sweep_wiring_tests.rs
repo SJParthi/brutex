@@ -193,6 +193,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 // The point-in-time F&O membership (PIT-1, D-5163): a reference
                 // table built from the tick store's listings, never a sweep.
                 | "fno-membership"
+                // The measured basis runs and corporate-action ledger (R4-26,
+                // D-6892): reference tables folded from DATA-1's factor.
+                | "basis-runs"
                 // The tradable-day page (D-5153): reads tables, never a sweep.
                 | "calendar-days"
                 // The upkeep runner (R3-17, D-6270): a store verb.
