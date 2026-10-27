@@ -1228,12 +1228,14 @@ fn the_free_space_floor_is_read_at_the_edge_and_refused_when_not_a_count() {
 /// ones counted where they are named; a walk that stopped says why; and a
 /// source that keeps no census says so rather than printing an empty one.
 /// End to end, a tick store holding a stray file names it on the receipt
-/// of a run that read nothing. Every name is invented.
-#[test]
+/// of a run that read nothing. Every name is invented. (`#[test]` sits
+/// directly above the `fn`: gate 12 reads a test by its attribute line, and a
+/// many-line `#[expect]` between the two hid this one from it.)
 #[expect(
     clippy::too_many_lines,
     reason = "every census reason of every source, then the end-to-end receipt, in the order the doc states them"
 )]
+#[test]
 fn a_source_census_is_named_on_the_receipt() {
     let archive = pull::gdfl_archive::ArchiveCensus {
         ignored: 2,

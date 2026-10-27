@@ -188,11 +188,11 @@ fn member_day_journal() -> String {
 /// Before IA-10a `/imports.json` counted the two holes as plain
 /// `incomplete`, the day band and provenance served NIFTYIT the `*` close's
 /// `done`, and the member-only day gained a refused `*` row from the log.
-#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one fixture read by the four readers IA-JR-01 names, each asserted against the same journal"
 )]
+#[test]
 fn the_api_journal_reader_names_member_keys_and_holes() {
     let ring = [
         // The member run's own whole-day refusal of the member-only day:
@@ -441,11 +441,11 @@ fn the_api_journal_reader_names_member_keys_and_holes() {
 ///
 /// Before D-4896 the clock placed every one of them, so A's and C's were
 /// B's own and B's was history of no run.
-#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "three runs and their refusals on one journal, each placement asserted in the order the doc states them"
 )]
+#[test]
 fn a_day_bands_refusal_names_its_run_from_the_event_not_the_clock() {
     const A: u64 = 1_792_100_000;
     const B: u64 = 1_792_100_600;
