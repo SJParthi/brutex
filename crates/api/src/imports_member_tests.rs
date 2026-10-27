@@ -911,7 +911,11 @@ fn an_empty_or_absent_journal_says_zero_holes_by_name() {
 /// **AN OPEN MEMBER KEY IS ONE MEMBER'S DAY, NOT THE SEGMENT'S** (item 4,
 /// D-TBD-IA-10a-1): the open-day scan keeps its answer for base keys, an
 /// open `*` day is listed and an open member key is not, and the reach's
-/// `from` counts the open member keys and names the first.
+/// `from` counts the open member keys and names the first. What the base's
+/// scan skipped it still skips, and none of it is counted as a member's: an
+/// open day of another kind in the same range, a `*` day begun again after
+/// a close that wrote its bars (a re-run, not an unimported day), and an
+/// open list key, which names symbols and no member.
 #[test]
 fn an_open_member_key_is_named_and_is_not_the_segments_open_day() {
     let journal = [
@@ -919,6 +923,11 @@ fn an_open_member_key_is_named_and_is_not_the_segments_open_day() {
         "begin indices 2019-07-02 *\n".to_owned(),
         "begin indices 2019-07-03 *+NSE-INDEX-NIFTYIT\n".to_owned(),
         "begin indices 2019-07-04 *+NSE-INDEX-NIFTYNEXT50\n".to_owned(),
+        "begin stocks 2019-07-05 *\n".to_owned(),
+        "begin stocks 2019-07-05 *+NSE-CASH-ZZINVENTED\n".to_owned(),
+        key("done", "2019-07-08", "*", ""),
+        "begin indices 2019-07-08 *\n".to_owned(),
+        "begin indices 2019-07-09 BANKNIFTY,NIFTY\n".to_owned(),
     ]
     .concat();
     let root = store("open-member", &journal, "");
