@@ -3,8 +3,8 @@ STATUS: IN PROGRESS
 # CC-5 — Copies register (cloud build report)
 
 Branch `cloud/db-CC-5-20261024`, cut from `origin/feat/db-fix` at `e851da1ca` (Merge DATA-2); the
-newest `origin/feat/db-fix`, `5901ec77` (Merge BASE-FIXTURE-1025), merged in at `e7f5311c` before the
-final gates. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md` (FM-607).
+newest `origin/feat/db-fix`, `a32722c45` (Merge R3-15), merged in at `48e4cdb09` before the final
+gates (27 Oct; the earlier final merge was `5901ec77` at `e7f5311c`). Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md` (FM-607).
 Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY links: none.
 
 ## Done
@@ -64,7 +64,7 @@ target and run with the same commands.
 | web W2 | `node --test web/tests/*.test.js` (Node 24.22.1) | `tests 1611, pass 1611, fail 0` | `tests 1601, pass 1601` (this part adds 10) |
 | web W3 | `npm --prefix web run check` + `gates_jobs w3 ... 0` | `svelte-check errors: 44 (ceiling 0)`, none in this part's files | the same 44 errors, line for line |
 | web W4, W5, W6 | as ci.yml | exit 0 (`distinct unused CSS selectors: 0`, `no comment swallows a rule`) | exit 0 |
-| coverage | PENDING | PENDING | — |
+| coverage | `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo +nightly llvm-cov --branch --no-report --locked -j 2` with `-p pull --lib -- copies_register`; `-p store --lib -- settings` (skipping the three root-permission tests); `-p api --lib -- copies_route settings_route`; `-p cli --lib -- disk_copies`; then `cargo +nightly llvm-cov report --branch` (27 Oct, on `da59d4853`) | `copies_register.rs` lines 1005/1005, branches 138/138, functions 118/118, regions 1009/1010 (the one left: `entry?` in `Host::list`, a directory stream that fails after it opened, which no test can stage without a failing device); `copies_route.rs` 261/261 lines, 10/10 branches, 335/335 regions; `disk_copies_command.rs` 417/417 lines, 16/16 branches, 481/481 regions; every line and both sides of every branch this part added to `settings.rs` (129-150, 166, 184, 220, 528-586, 664-668, 808-810) and `settings_route.rs` (240, 425-428) executed | — |
 | mutants | PENDING | PENDING | — |
 
 **Why the 35 are not this part's.** None is in a file of this part, and each fails or hangs alone on
@@ -506,3 +506,33 @@ operator's own `POST /settings` (or the operator's yes) at merge-back.
   outside ownership, D-numbers, NEEDS THE MAC).
 - NEXT: coverage (`cargo +nightly llvm-cov --branch`, running), then the served bench on the final
   tree, then `cargo mutants --in-diff` over the 270 mutants, then STATUS.
+
+### 2026-10-27 — new container (new account), save point 11 (GO, no HOLD; base `ede2909b`)
+
+- 08:0x IST: new container, branch tip `29d0808a` checked out; `GO` with no `HOLD`. The coverage run
+  of save point 10 was cut with no saved result, so it is re-run here from the start. Reinstalled
+  `cargo-deny` 0.20.2, `cargo-llvm-cov` 0.9.1, `cargo-mutants` 27.1.0 from crates.io; nightly
+  (`rustc 1.101.0-nightly 2026-10-26`) with `llvm-tools-preview`.
+- Merged the newest `origin/feat/db-fix` (`a32722c45`, Merge R3-15; brings R4-19, R3-12,
+  BASE-DENY-1024, R3-15). Two conflicts, both sides appending: `docs/06-limits.md` (R4-19's and
+  R3-12's sections beside L-CC5-1..4; both kept whole, the base's first) and `.github/gates_tree.rs`
+  (R4-19 and CC-5 each raised gate 1d's `DECLARED` 77 -> 78 for their own group; both groups kept,
+  `DECLARED` 78 -> 79). No new verb, route or settings key on the base side, so `COMMANDS`, the
+  route lists and `KEYS` are unchanged. Merge commit `48e4cdb09`, pushed.
+- `cargo fmt --all --check`: exit 0. `cargo deny check`: `advisories ok, bans ok, licenses ok,
+  sources ok` (tokio 1.53.3 from BASE-DENY-1024): GREEN.
+- `cargo build --workspace --locked --all-targets -j 4`: `Finished` in 22 m 06 s, exit 0, no warning.
+- CI shell gates (34 `run:` blocks of ci.yml's `language-purity` job, split by a bash read loop,
+  `RUNNER_TEMP`/`GITHUB_ENV` emulated, gate 1e not run) on this branch and on an unmodified worktree
+  of `a32722c45`: the same ten red on both (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30); every other gate
+  exit 0 on both. Each red gate's output, sorted with digits normalised and test lines dropped, is
+  IDENTICAL on the two trees (0 lines differ); gate 1d's undeclared set is 482 on both, the same set.
+- Coverage (`CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo +nightly llvm-cov --branch --no-report --locked`
+  per package with this part's test filters, then `cargo +nightly llvm-cov report --branch`): first
+  read `copies_register.rs` 100% lines and branches with 17 regions unexecuted, all `?` early returns
+  (`SourceIdentity::parse` at each field; two `?`s re-deriving a receipt's kind that could not fail;
+  `Host::list`'s refusals). Fixed in `da59d4853` (behaviour unchanged): the identity's seven fields
+  are read into a fixed array so every exit is reachable, the walk keeps each receipt's kind beside
+  its path, and a new test drives every exit. Re-run on that commit: see the gates table.
+- NEXT: the workspace test run (running), web W2 with a browser (running), the served bench, and
+  `cargo mutants` per package (`pull` running; then `store`, `cli`, `api`).
