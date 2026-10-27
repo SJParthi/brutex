@@ -560,16 +560,17 @@ fn a_receipt_naming_a_hard_linked_archive_proves_its_twin_and_a_tick_file_never_
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A FILE WITH ONE NAME IS HELD AS A COUNT, never by its path: the walk keeps
-/// O(1) memory per such file (a tick store's millions of files cost one sum),
-/// and only a file with a second name is held with its names, for the merge.
+/// A FILE WITH ONE NAME IS HELD AS A COUNT, never by its path: the walk adds
+/// its size to one sum and keeps nothing else of it (a tick store's millions
+/// of files cost one number), and only a file with a second name is held with
+/// its names, for the merge.
 #[test]
 fn a_file_with_one_name_is_counted_and_only_a_shared_file_is_held_by_name() {
     let fs = Fake::default();
     fs.dir("/copy", 1, 1);
     fs.file("/copy/a", 1, 2, 1, b"abc");
-    fs.file("/copy/b", 1, 3, 1, b"de");
-    fs.file("/copy/c", 1, 4, 2, b"fghi");
+    fs.file("/copy/b", 1, 3, 1, b"DE");
+    fs.file("/copy/c", 1, 4, 2, b"FGHI");
     let walked = walk_root(&fs, Path::new("/copy"), &HashSet::new(), false).unwrap();
     assert_eq!((walked.files, walked.single_bytes), (3, 5));
     assert_eq!(
