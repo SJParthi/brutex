@@ -1927,7 +1927,8 @@ mod month_boundary {
             assert_eq!(window.holding(inside), window, "{inside}");
         }
         let wider = window.holding(day(2023, 12, 31));
-        assert!(wider.contains(day(2023, 12, 31)) && wider.contains(day(2024, 4, 12)));
+        assert!(wider.contains(day(2023, 12, 31)), "the day it must hold");
+        assert!(wider.contains(day(2024, 4, 12)), "and its old last day");
         assert_eq!(
             wider.days(),
             104,

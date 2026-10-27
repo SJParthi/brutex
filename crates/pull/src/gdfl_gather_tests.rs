@@ -2074,6 +2074,50 @@ fn a_day_the_source_disowns_after_a_gathered_file_keeps_its_own_close_when_the_r
     std::fs::remove_dir_all(&store).unwrap();
 }
 
+/// **OUT OF THE BOX: THE SAME DISOWNED DAY, ITS MONTH REPAIRED** (D-4899
+/// (4)): the 1st's NIFTY file is gathered and the day closed `refused` by its
+/// pass, so no close waits for the month. The month is repaired once and
+/// serves the day's bars; the flush invents no second close, so the pass's
+/// `refused` line is the day's one close (a `--retry-refused` run reads it
+/// again), and nothing is left begun.
+#[test]
+fn a_day_the_source_disowns_after_a_gathered_file_keeps_its_own_close_when_its_month_is_repaired() {
+    let on = day(2024, 4, 1);
+    let later = day(2024, 4, 4);
+    let store = holding("ia17b-disowned-landed", &[later]);
+    let nifty_only = |at: Day| vec![invented("NIFTY", at, 4)];
+
+    let got = drive_saying(
+        &store,
+        (on, on),
+        &mut census::StoreCensus::default(),
+        (&nifty_only, false),
+    )
+    .unwrap();
+
+    assert_eq!(got.months_repaired, 1, "{got:?}");
+    assert_eq!(got.days_missing, vec![on], "{got:?}");
+    let nifty = month_of("INDEX", "NIFTY", later);
+    assert_eq!(generation(&store, nifty), 1);
+    assert_eq!(
+        served(&store, nifty, "NIFTY").len(),
+        8,
+        "the 1st's 4 and the 4th's 4"
+    );
+    let text = journal(&store);
+    let closes: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.starts_with("begin ") && line.contains(" indices 2024-04-01 * "))
+        .collect();
+    assert_eq!(closes.len(), 1, "{text}");
+    assert!(
+        closes[0].starts_with("refused indices 2024-04-01 * "),
+        "{text}"
+    );
+    assert!(begun_not_closed(&text).is_empty(), "{text}");
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
 /// **OUT OF THE BOX: THE SAME DISOWNED DAY, AND A CENSUS THAT REFUSES THE
 /// REPAIRED ROWS** (D-4899 (9)). Both of the 1st's files are gathered and
 /// the day closes `refused` by its pass; both months are repaired and served,

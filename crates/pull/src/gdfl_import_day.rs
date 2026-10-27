@@ -2569,15 +2569,18 @@ fn close_deferred(ctx: &Ctx<'_>, one: super::filing::Deferred, report: &mut Repo
         committed,
     } = one;
     let Some(close) = close else {
-        // A PASS THAT GATHERED AND NEVER REACHED ITS CLOSE (it returned
-        // before it, and the run went on): the day stays begun, and is read
-        // again by the next run. Said, never silent.
+        // A PASS THAT GATHERED AND LEFT NO CLOSE TO WAIT (it returned before
+        // its deferral and the run went on: a source that said it holds no
+        // file of the day, yet handed one, has its day closed `refused` by
+        // the pass): no close is invented here, so the pass's own line, or
+        // the day's `begin`, stands. Said, never silent.
         name_staged(report, repaired);
         let day_text = day.to_string();
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::warn(
                 TARGET,
-                "a gathered day has no close to write; it stays begun and is read again",
+                "a gathered day has no close waiting; the close its pass wrote, or its begin, \
+                 stands",
             )
             .with("kind", ctx.run.kind.as_str())
             .with("day", day_text.as_str())

@@ -1,6 +1,7 @@
-//! The day module's own arms, at the unit (IA-17b): what no run through the
-//! import's front door reaches, because a pass that gathers a file always
-//! writes its close or ends the run.
+//! The day module's own arms, at the unit (IA-17b): a gathered day with no
+//! close waiting, which through the import's front door only a source that
+//! says it holds no file of a day, yet hands one, reaches
+//! (`gdfl_gather_tests.rs` drives that one; this reads the arm alone).
 
 #![expect(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
 
@@ -9,10 +10,10 @@ use crate::gdfl_fixtures::scratch;
 
 /// **A GATHERED DAY WHOSE PASS LEFT NO CLOSE STAYS BEGUN, ITS FAILURES NAMED**
 /// (IA-RP-33, D-4899 (4)). Should a day reach its months' repair with no close
-/// (its pass returned before it, and the run went on), its close is never
-/// invented: no line is written, no day counted closed, and the failures its
-/// months' repairs gave its files are each named in the report, so the next
-/// run reads the day again and nothing it met is silent.
+/// waiting (its pass returned before it, and the run went on), its close is
+/// never invented: no line is written, no day counted closed, and the
+/// failures its months' repairs gave its files are each named in the report,
+/// so a day its pass left begun is read again and nothing it met is silent.
 #[test]
 fn a_gathered_day_whose_pass_left_no_close_stays_begun_and_its_failures_are_named() {
     let store = scratch("ia17b-unclosed");

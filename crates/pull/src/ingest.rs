@@ -6569,20 +6569,15 @@ mod tests {
         let judge = |bars: &[Bar]| super::judge_back_fill(bars, &root, symbol_id, (parts(), entry));
 
         let reader = store::file::BarFile::open_existing(&root, path, symbol_id).expect("a reader");
-        let lacked = judge(&[bar(1), bar(3)]);
+        // Lacked, under the busy append's own kind, judged against the
+        // original (generation 0): read off its one rendering, so the test
+        // has no arm of its own that a passing run never takes.
+        let lacked = format!("{:?}", judge(&[bar(1), bar(3)]));
         assert!(
-            matches!(
-                &lacked,
-                Ok(super::BackFill::Lacked(
-                    super::DoorRefusal {
-                        kind: super::FailKind::MonthBusy,
-                        ..
-                    },
-                    0
-                ))
-            ),
-            "{lacked:?}"
+            lacked.starts_with("Ok(Lacked(DoorRefusal { kind: MonthBusy, why: "),
+            "{lacked}"
         );
+        assert!(lacked.ends_with(" }, 0))"), "{lacked}");
         let busy = judge(&[bar(5), bar(15)]).expect_err("a held bar inside the span");
         assert_eq!(busy.kind, super::FailKind::MonthBusy, "{busy}");
         drop(reader);

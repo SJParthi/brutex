@@ -87137,7 +87137,10 @@ was served from a revision every later day it lacked was one more
    is stopped. Each day was judged alone when it was gathered, so a month
    holding a day between the days it lacks is never refused for a span that
    crosses it; the store merges held and offered bars in order and refuses
-   the whole month only if a held bar would change.
+   the whole month only if a held bar would change. An offer every bar of
+   which the month already serves when it is repaired (another writer
+   landed them after the gather) adds nothing: no generation, no
+   `months_repaired`, and its days close as the bars stand.
 3. **With or without a repair reason.** The rule binds every generation the
    back-fill door publishes: a sealed or revision-served month's successor
    (D-6247, D-7131), which reaches that door without a reason, is gathered
@@ -87160,10 +87163,15 @@ was served from a revision every later day it lacked was one more
    refused (`bars_differ_held`), and alike is kept once.
 9. **A census refusal at the flush** (the month published and served, the
    census refusing its rows) ends the run `stage=census`: the first waiting
-   day closes `incomplete stage=census`, the others stay begun, none `done`;
-   with no day waiting the run is refused by name all the same. The next run
-   finds every bar served, repairs nothing and closes every day, with no
-   second generation.
+   day closes `incomplete stage=census`, the others stay begun, none `done`.
+   A row is published only for an offer, and an offer only with a file whose
+   day waits, so a refusal always has its first waiting day (the flush takes
+   it before anything else; with none, nothing was gathered and nothing is
+   done). That day closes by the census's cause even when its pass already
+   wrote its own close (a source that said it holds no file of the day yet
+   handed one: its `refused` line, then the census's `incomplete`, so it is
+   read again). The next run finds every bar served, repairs nothing and
+   closes every day, with no second generation.
 
 **Proof.** `pull::gdfl_import::tests::gather` (IA-RP-03, IA-RP-04, IA-RP-05,
 FM-092, FM-098 and the extreme cases; `docs/04-invariants.md`), bench C-RP-02
