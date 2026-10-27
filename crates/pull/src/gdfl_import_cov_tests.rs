@@ -152,7 +152,10 @@ fn the_tick_store_walk_stops_past_its_cap_and_says_so() {
     );
     assert_eq!(over.digest, None, "a stopped walk claims no digest");
     let zero = measure_tick_store_within(&ts, 0);
-    assert!(zero.fault.is_some_and(|why| why.contains("more than 0 entries")));
+    assert!(
+        zero.fault
+            .is_some_and(|why| why.contains("more than 0 entries"))
+    );
     assert_eq!(zero.bytes, 0);
     // Production passes the documented cap.
     assert_eq!(measure_tick_store(&ts).fault, None);
@@ -189,7 +192,11 @@ fn a_format_file_over_its_cap_is_refused_by_size() {
 /// another case are not repairable (D-6900 keep item 2).
 #[test]
 fn only_the_three_repairable_holes_are_repairable() {
-    for reason in ["needs_month_generation", "month_superseded", "repair_refused"] {
+    for reason in [
+        "needs_month_generation",
+        "month_superseded",
+        "repair_refused",
+    ] {
         assert!(hole_is_repairable(reason), "{reason}");
     }
     for reason in [
@@ -244,7 +251,11 @@ fn a_rescan_refuses_options_from_a_cm_source_and_a_backwards_range() {
 fn the_journal_reader_keys_every_line_it_can_and_passes_over_the_rest() {
     let root = scratch("cov-journal-reader");
     let store = root.join("S");
-    assert!(imported_days(&store, ImportKind::Indices).unwrap().is_empty());
+    assert!(
+        imported_days(&store, ImportKind::Indices)
+            .unwrap()
+            .is_empty()
+    );
     std::fs::create_dir_all(journal_path(&store)).unwrap();
     let refused = imported_days(&store, ImportKind::Indices).unwrap_err();
     assert!(
@@ -286,7 +297,11 @@ fn the_journal_reader_keys_every_line_it_can_and_passes_over_the_rest() {
         .into_iter()
         .collect();
     assert_eq!(stocks, [day(2019, 5, 29)]);
-    assert!(imported_days(&store, ImportKind::Options).unwrap().is_empty());
+    assert!(
+        imported_days(&store, ImportKind::Options)
+            .unwrap()
+            .is_empty()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -345,9 +360,8 @@ fn a_rescan_names_a_declined_day_a_missing_day_and_a_refused_file() {
     let root = scratch("cov-rescan-days");
     let store = root.join("S");
     let (sunday, missing, held) = (day(2019, 6, 2), day(2019, 5, 30), day(2019, 5, 31));
-    let journal = format!(
-        "done indices {sunday} *\ndone indices {missing} *\ndone indices {held} *\n"
-    );
+    let journal =
+        format!("done indices {sunday} *\ndone indices {missing} *\ndone indices {held} *\n");
     put(&store, "imports/gdfl.journal", journal.as_bytes());
     let mut asked: Vec<Day> = Vec::new();
     let done = rescan_core(
@@ -382,7 +396,10 @@ fn a_rescan_names_a_declined_day_a_missing_day_and_a_refused_file() {
     assert_eq!(asked, [missing, held], "the Sunday is never read");
     assert_eq!(done.days_missing, [missing]);
     assert_eq!(done.days_read, 1);
-    assert_eq!(done.days_not_imported, 1, "June 1st, a Saturday, was never imported");
+    assert_eq!(
+        done.days_not_imported, 1,
+        "June 1st, a Saturday, was never imported"
+    );
     assert_eq!((done.files, done.files_refused), (1, 2), "{done:?}");
     let named: Vec<(String, String)> = done
         .failures

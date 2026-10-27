@@ -41,7 +41,10 @@ fn every_alert_error_has_its_own_code() {
     let p = PathBuf::from("/invented");
     words(
         &[
-            (E::Unavailable { root: p.clone() }.code(), "alerts_unavailable"),
+            (
+                E::Unavailable { root: p.clone() }.code(),
+                "alerts_unavailable",
+            ),
             (E::KindUnknown { kind: 255 }.code(), "alert_kind_unknown"),
             (E::KeyEmpty.code(), "alert_key_empty"),
             (E::Damaged { offset: 0 }.code(), "alerts_damaged"),
@@ -53,11 +56,20 @@ fn every_alert_error_has_its_own_code() {
                 .code(),
                 "alert_record_damaged",
             ),
-            (E::VersionUnknown { found: u16::MAX }.code(), "alerts_version_unknown"),
+            (
+                E::VersionUnknown { found: u16::MAX }.code(),
+                "alerts_version_unknown",
+            ),
             (E::NotAFile { path: p }.code(), "alerts_not_a_file"),
             (E::NoSuchAlert { ordinal: 0 }.code(), "no_such_alert"),
-            (E::AlreadyAcknowledged { ordinal: 1 }.code(), "already_acknowledged"),
-            (E::AckOutsideWindow { ordinal: 2 }.code(), "ack_outside_window"),
+            (
+                E::AlreadyAcknowledged { ordinal: 1 }.code(),
+                "already_acknowledged",
+            ),
+            (
+                E::AckOutsideWindow { ordinal: 2 }.code(),
+                "ack_outside_window",
+            ),
             (E::NotDamaged.code(), "alerts_not_damaged"),
             (E::Full.code(), "alerts_full"),
         ],
@@ -70,11 +82,31 @@ fn every_fno_membership_day_status_has_a_word_and_a_reason() {
     use crate::fno_membership::DayStatus as S;
     let table = [
         (S::Known, "known", "known"),
-        (S::NotSession, "not_a_session", "not a session (the IST calendar says closed)"),
-        (S::NoSource, "no_source", "no GDFL options day file for this session"),
-        (S::SourceRefused, "source_refused", "the GDFL options day file was refused"),
-        (S::NoCalendar, "no_calendar", "the IST calendar does not cover this day"),
-        (S::NoShareOptions, "no_share_options", "the options day file lists no share option"),
+        (
+            S::NotSession,
+            "not_a_session",
+            "not a session (the IST calendar says closed)",
+        ),
+        (
+            S::NoSource,
+            "no_source",
+            "no GDFL options day file for this session",
+        ),
+        (
+            S::SourceRefused,
+            "source_refused",
+            "the GDFL options day file was refused",
+        ),
+        (
+            S::NoCalendar,
+            "no_calendar",
+            "the IST calendar does not cover this day",
+        ),
+        (
+            S::NoShareOptions,
+            "no_share_options",
+            "the options day file lists no share option",
+        ),
         (
             S::SourceOnClosedDay,
             "source_on_closed_day",
@@ -191,9 +223,27 @@ fn every_start_gate_and_stop_refusal_has_its_own_word() {
     );
     words(
         &[
-            (S::NotLive { asked: String::new() }.code(), "run_not_live"),
-            (S::ClaimBeingWritten { lock: String::new() }.code(), "claim_being_written"),
-            (S::ByUnknown { by: "nobody".to_owned() }.code(), "stop_by_unknown"),
+            (
+                S::NotLive {
+                    asked: String::new(),
+                }
+                .code(),
+                "run_not_live",
+            ),
+            (
+                S::ClaimBeingWritten {
+                    lock: String::new(),
+                }
+                .code(),
+                "claim_being_written",
+            ),
+            (
+                S::ByUnknown {
+                    by: "nobody".to_owned(),
+                }
+                .code(),
+                "stop_by_unknown",
+            ),
             (
                 S::NotStoppable {
                     lock: String::new(),
@@ -216,9 +266,15 @@ fn every_snapshot_answer_has_its_own_word() {
         day: day(2031, 2, 3),
         ordinal: 2,
     };
-    assert_eq!((Wrote::New(stamp).word(), Wrote::New(stamp).stamp()), ("new", stamp));
     assert_eq!(
-        (Wrote::AlreadyHeld(stamp).word(), Wrote::AlreadyHeld(stamp).stamp()),
+        (Wrote::New(stamp).word(), Wrote::New(stamp).stamp()),
+        ("new", stamp)
+    );
+    assert_eq!(
+        (
+            Wrote::AlreadyHeld(stamp).word(),
+            Wrote::AlreadyHeld(stamp).stamp()
+        ),
         ("already_held", stamp)
     );
     words(
@@ -233,7 +289,10 @@ fn every_snapshot_answer_has_its_own_word() {
             ),
             (T::NotListed { snapshot: stamp }.word(), "token_not_listed"),
             (T::Duplicated { snapshot: stamp }.word(), "token_duplicated"),
-            (T::BeforeFirst { first: stamp }.word(), "before_first_snapshot"),
+            (
+                T::BeforeFirst { first: stamp }.word(),
+                "before_first_snapshot",
+            ),
             (T::NoSnapshot.word(), "no_snapshot"),
             (
                 T::Unreadable {
@@ -286,7 +345,13 @@ fn every_refusal_axis_repair_gap_and_claim_standing_has_its_own_word() {
     use crate::ingest::repair_plan::Missing as M;
     use crate::refusal::Axis as A;
     use crate::vendor::ClaimStanding as C;
-    words(&[(A::Status.word(), "status"), (A::ErrorName.word(), "error_name")], &[]);
+    words(
+        &[
+            (A::Status.word(), "status"),
+            (A::ErrorName.word(), "error_name"),
+        ],
+        &[],
+    );
     words(
         &[
             (M::Front.code(), "front"),
@@ -412,7 +477,13 @@ fn every_keep_reason_and_keep_error_has_its_own_word() {
                 .word(),
                 "body_mismatch",
             ),
-            (K::NotKept { reason: R::LaterMonth }.word(), "body_not_kept"),
+            (
+                K::NotKept {
+                    reason: R::LaterMonth,
+                }
+                .word(),
+                "body_not_kept",
+            ),
             (
                 K::Io {
                     op: "open",
