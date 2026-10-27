@@ -1510,7 +1510,13 @@ async fn assess(site: &Loaded, body: &str, lifecycle: &Lifecycle) -> Result<Asse
     let ledger = if is_index(&name) {
         pull::gaps::classify_spot_index_against(&bounded, first, last, None)
     } else {
-        pull::gaps::classify_cash(&bounded, first, last, schedule.as_ref())
+        pull::gaps::classify_cash(
+            &bounded,
+            first,
+            last,
+            schedule.as_ref(),
+            &pull::gaps::Key::series("NSE", "CASH", &name, None),
+        )
     };
     if ledger.truncated || ledger.invalid_timestamps != 0 {
         return Err("source gap audit is truncated or has invalid timestamps".to_owned());
@@ -1567,7 +1573,13 @@ fn outside_session_count(
     let shape = if is_index(name) {
         pull::gaps::classify_spot_index_against(&[], first, last, None)
     } else {
-        pull::gaps::classify_cash(&[], first, last, schedule)
+        pull::gaps::classify_cash(
+            &[],
+            first,
+            last,
+            schedule,
+            &pull::gaps::Key::series("NSE", "CASH", name, None),
+        )
     };
     if shape.truncated || shape.invalid_timestamps > 0 {
         return Err("independent session shape could not be fully checked".to_owned());

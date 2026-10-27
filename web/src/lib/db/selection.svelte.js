@@ -71,6 +71,7 @@ import { page } from '$app/state';
 import { ask } from '../ask.js';
 import { askCalendar } from '../calendar-owed.js';
 import { createPageRequests } from '../page-requests.js';
+import { viewFamily, viewSegments } from '../store-census.js';
 import { encodeDb, decodeDb, addressNow, dbHistory } from '../urlstate.js';
 import { vetAddress, vetDayWindow, pageWhy, quote, dayText } from './input-check.js';
 import { BAR_COLS } from './notes-bars.js';
@@ -87,6 +88,7 @@ import {
   calendarOf,
   dayCode,
   keepOffered,
+  listedOf,
   linkedContract,
   rebound,
   timeBound,
@@ -767,6 +769,11 @@ export function selectionState(db) {
   const heldUnderlyings = $derived.by(() => {
     const s = new Set();
     for (const r of db.deco) s.add(r.underlying);
+    /* UNDER A SCOPE, THE SERVER'S LIST TOO (R3-12): the rows read are one
+       instrument's, and "is this name held" is the server's to answer for
+       the segments the scope read (`censusUnderlyings`). */
+    const listed = db.censusScope ? db.censusUnderlyings?.rows : null;
+    if (listed) for (const r of listed) s.add(r.key);
     return s;
   });
   const universeCount = $derived.by(() => {
@@ -850,7 +857,16 @@ export function selectionState(db) {
    */
   const instrumentIndex = $derived(foldInstruments(universed));
 
-  const instrumentRows = $derived([...instrumentIndex.values()].sort((a, b) => txt(a.key, b.key)));
+  /* UNDER A SCOPE THE INSTRUMENT LIST IS THE SERVER'S (R3-12; RA-005,
+     RA-027): the rows read are one instrument's, so the fold of them names
+     one name, and offering the others read the whole census on the first
+     click. `censusUnderlyings` is every underlying of the segments the
+     scope read, from the facets answers; until it lands (or where it
+     failed, said on the banner) the fold of what was read is offered. */
+  /** @type {any[]} */
+  const instrumentRows = $derived(db.censusScope && db.censusUnderlyings?.rows?.length
+    ? db.censusUnderlyings.rows
+    : [...instrumentIndex.values()].sort((a, b) => txt(a.key, b.key)));
 
   /**
    * O(1): the STORE'S OWN SPELLING of the instrument the text box currently
@@ -1053,13 +1069,18 @@ export function selectionState(db) {
 
   /**
    * HOW THIS FEED'S CONTRACTS GOT INTO THE STORE, in the descriptor's words
-   * (DB-050). A folder feed was imported from the vendor's archive files by
-   * `cli gdfl-import` (D-2804); a REST feed was pulled through its API.
+   * (DB-050). A folder feed was imported from the vendor's archive files; a
+   * REST feed was pulled through its API. R3-12: the importer was typed here
+   * against one feed word, and no `/feeds.json` field names an importer: the
+   * archive's `source` says how its SPAN was measured (on the real store, 26
+   * Oct 2026: "the widest of the descriptor's dated measurement, the import
+   * journal and the store's census; ..."), so it is not quoted as the way the
+   * contracts arrived. The descriptor's `kind` is what this sentence states.
    */
   const contractSource = $derived.by(() => {
     const f = /** @type {any} */ (activeFeed);
     if (!f) return '';
-    if (f.kind === 'folder') return `imported from ${f.display}'s archive files${f.wire === 'gdfl' ? ' by cli gdfl-import (D-2804)' : ''}`;
+    if (f.kind === 'folder') return `imported from ${f.display}'s archive files`;
     return `pulled through ${f.display}'s API`;
   });
 
@@ -1074,9 +1095,33 @@ export function selectionState(db) {
       const k = segOf(r);
       n.set(k, (n.get(k) ?? 0) + 1);
     }
+    /* UNDER A SCOPE (R3-12; FM-621): a contract segment's expiries are the
+       server's listing, read before any of its rows, and a segment the scope
+       did not read is NOT READ, never "nothing stored": its chip keeps the
+       root answer's own count of the feed, and choosing it reads it. */
+    const scope = db.censusScope;
+    const own = scope !== null && scope.underlying === picked;
+    const listed = new Map();
+    if (own) for (const s of SEG_VIEW) listed.set(s.key, listedOf(scope.expiries, s.key, (/** @type {any} */ e, /** @type {string} */ family) =>
+      segOf({ expiry: e.expiry, instrument: family === 'futures' ? 'x-FUT' : 'x-CE' })).length);
     const name = /** @type {any} */ (activeFeed)?.display ?? feedDisplay(feeds.active);
-    return SEG_VIEW.filter((s) => s.always || (feedSegments.get(s.key) ?? 0) > 0 || s.key === kind).map((s) => {
+    return SEG_VIEW.filter((s) => s.always || (feedSegments.get(s.key) ?? 0) > 0 || (listed.get(s.key) ?? 0) > 0 || s.key === kind).map((s) => {
       const c = n.get(s.key) ?? 0;
+      const e = listed.get(s.key) ?? 0;
+      if (scope !== null && scope.views.length > 0 && !scope.views.includes(viewFamily(s.key))) {
+        const plan = viewSegments(scope.listed, [s.key]);
+        const theirs = scope.listed.filter((/** @type {any} */ row) => plan.rows.includes(row.segment) || plan.contract.includes(row.segment));
+        const rootSays = theirs.length
+          ? ` ${name} holds ${theirs.map((/** @type {any} */ row) => `${fmt(row.underlyings)} underlying(s) in ${row.segment}`).join(' and ')} (/census/facets.json, the feed's root).`
+          : ` ${name} lists no segment this one shows.`;
+        return {
+          key: s.key,
+          name: s.name,
+          detail: 'not read',
+          title: `Not read for ${scope.underlying}: the census rows on screen were read for ${scope.views.join(', ')} only, from /census/facets.json. Choosing ${s.name} reads its own.${rootSays}`,
+          why: `not read for this instrument yet; choosing it reads its census rows`
+        };
+      }
       const all = feedSegments.get(s.key) ?? 0;
       const contract = s.key !== 'spot';
       /* WHAT THE STORE HOLDS, never a build note. A contract segment the feed
@@ -1089,6 +1134,16 @@ export function selectionState(db) {
             ? ` ${name} holds ${fmt(all)} such instrument-month(s), ${contractSource}.`
             : ` ${name} holds none${/** @type {any} */ (activeFeed)?.fno === 'none' ? ' — /feeds.json says it serves no expired F&O (fno: none)' : ''}.`;
       const off = hidden.bySegment.get(s.key) ?? 0;
+      /* EXPIRIES LISTED, NO ROW READ YET (R3-12): held, in the listing's own
+         unit, never "nothing stored". */
+      if (c === 0 && e > 0)
+        return {
+          key: s.key,
+          name: s.name,
+          detail: `${fmt(e)} expiries listed${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+          title: `${fmt(e)} expiries of this instrument listed by the server; a contract's rows are read once its expiry is chosen. ${s.note}.${feedSays}${hiddenText(off, /** @type {any} */ (activeFeed)?.window, fmt)}`,
+          why: undefined
+        };
       return {
         key: s.key,
         name: s.name,
@@ -1143,7 +1198,7 @@ export function selectionState(db) {
       return {
         key: tf,
         name: tf,
-        detail: `${fmt(n)} held${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
+        detail: `${fmt(n)} ${tfListed.has(tf) ? 'expiries listed' : 'held'}${off > 0 ? ` · ${fmt(off)} hidden` : ''}`,
         title: timeframeTitle(tfNote(tf), off, win, fmt)
       };
     });
@@ -1165,10 +1220,34 @@ export function selectionState(db) {
   const tfAll = $derived.by(() => {
     const c = new Map();
     for (const it of segmented) c.set(it.timeframe, (c.get(it.timeframe) ?? 0) + 1);
+    /* A CONTRACT VIEW WHOSE CHAIN IS NOT READ YET (R3-12 merge-back, 26 Oct
+       2026): its scope holds no row, so no row names a rung, and the rung
+       list read "nothing has been read" over a listing the server answered.
+       The listing names the rungs each expiry holds (`rows`), counted here
+       in expiries (`tfListed`), never as instrument-months. */
+    if (c.size === 0) for (const e of listedExpiries) for (const tf of Object.keys(e.rows ?? {})) c.set(tf, (c.get(tf) ?? 0) + 1);
     /* BY LENGTH, NEVER BY TEXT — see `tfCmp`. As text these read `15min`,
        `1day`, `1min`, which is an ordering by first character and not by
        anything a bar length has. */
     return [...c.entries()].sort((a, b) => tfCmp(a[0], b[0]));
+  });
+
+  /** The rungs `tfAll` took from the server's expiry listing, not from rows read (R3-12 merge-back). */
+  const tfListed = $derived(new Set(segmented.length === 0 ? tfAll.map(([tf]) => tf) : []));
+
+  /**
+   * WHY THE SELECTION HOLDS NO ROW UNDER A SCOPE, said as what was read (R3-12
+   * merge-back): a scope that read no row is the store's answer for that
+   * selection, so "nothing has been read for this feed yet" is false of it.
+   * `null` when no scope is on screen.
+   */
+  const scopeEmptyWhy = $derived.by(() => {
+    const scope = db.censusScope;
+    if (scope === null) return null;
+    const views = scope.views.length ? scope.views.join(', ') : 'every segment';
+    return listedExpiries.length > 0
+      ? `no contract row of ${scope.underlying} is read until its expiry is chosen: ${fmt(listedExpiries.length)} expiries are listed by the server (/census/facets.json) for ${views}`
+      : `the census rows of ${scope.underlying} read for ${views} from /census/facets.json hold no row here — the store's own answer for this selection, not an unread store`;
   });
 
   /**
@@ -1195,6 +1274,7 @@ export function selectionState(db) {
    */
   const tfRefusal = $derived.by(() => {
     if (tfAll.length > 0) return null;
+    if (db.deco.length === 0 && scopeEmptyWhy) return scopeEmptyWhy;
     if (db.deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no row has named a rung — this is an unread store, not a store without bar lengths`;
     /* NAME THE CONTROL THAT ACTUALLY NARROWED IT, AND NEVER ADVISE WIDENING
@@ -1371,10 +1451,26 @@ export function selectionState(db) {
      many rows each one would return is a property of the selection.
      ====================================================================== */
 
+  /* THE EXPIRIES THE SERVER LISTS FOR THE PICKED UNDERLYING (R3-12; FM-621,
+     the 12 Oct acceptance case). A contract view reads its segment's facets
+     answer and no contract row until an expiry is chosen, so its expiries
+     are the listing's, kept to the segment on screen: an option view offers
+     an expiry with strikes, a futures view one with a future, and a cut or
+     live key the expiries filed under it today (`segOf`). */
+  const listedExpiries = $derived.by(() => {
+    const scope = db.censusScope;
+    if (!scope || scope.underlying !== picked) return [];
+    return listedOf(scope.expiries, kind, (/** @type {any} */ e, /** @type {string} */ family) =>
+      segOf({ expiry: e.expiry, instrument: family === 'futures' ? 'x-FUT' : 'x-CE' }));
+  });
+  /** A listed expiry's row, by its day. */
+  const expiryListed = $derived(new Map(listedExpiries.map((/** @type {any} */ e) => [e.expiry, e])));
+
   /** Every expiry the store names, ascending. Raw ISO days, so `txt` IS chronological. */
   const expiriesAll = $derived.by(() => {
     const s = new Set();
     for (const r of db.deco) if (r.expiry !== null) s.add(r.expiry);
+    for (const e of listedExpiries) s.add(e.expiry);
     return [...s].sort(txt);
   });
 
@@ -1404,6 +1500,7 @@ export function selectionState(db) {
   const expiryOffered = $derived.by(() => {
     const seen = new Set();
     for (const r of matchedPreContract) if (r.expiry !== null) seen.add(r.expiry);
+    for (const e of listedExpiries) seen.add(e.expiry);
     return [...seen].sort();
   });
 
@@ -1417,6 +1514,10 @@ export function selectionState(db) {
     const own = picked ? instrumentIndex.get(picked)?.rows ?? [] : [];
     const set = new Set();
     for (const r of own) if (r.expiry !== null) set.add(r.expiry);
+    /* THE LISTING'S EXPIRIES TOO (R3-12): every expiry of the underlying the
+       server lists, so a weekly is told from a monthly without its rows. */
+    const scope = db.censusScope;
+    if (scope && scope.underlying === picked) for (const e of scope.expiries) set.add(e.expiry);
     const cal = calendar;
     return expiryTags(set, (iso) => dayCode(cal, iso));
   });
@@ -1486,6 +1587,16 @@ export function selectionState(db) {
    */
   const expiryRefusal = $derived.by(() => {
     if (expiriesAll.length > 0) return null;
+    /* UNDER A SCOPE, WHAT WAS LISTED AND WHAT WAS NOT (R3-12): a contract
+       segment's expiries are the server's listing for the underlying, and a
+       view that read none has none to offer until one is chosen. */
+    const scope = db.censusScope;
+    if (scope !== null) {
+      const offered = scope.offered.map((/** @type {any} */ part) => part.segment);
+      return offered.length > 0
+        ? `the server lists no expiry of ${scope.underlying} in ${offered.join(', ')} for this segment (/census/facets.json), so there is no contract here to choose`
+        : `the census rows on screen were read for ${scope.views.join(', ') || 'every segment'} of ${scope.underlying}, and no contract segment was read: choose Expired options or Expired futures and its expiries are listed`;
+    }
     if (db.deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without contracts`;
     /* WHAT THE STORE HOLDS, AND WHAT THE FEED SAYS — never a build note. The
@@ -1577,9 +1688,10 @@ export function selectionState(db) {
    */
   const sideRefusal = $derived.by(() => {
     if (sidesAll.length > 0) return null;
+    if (db.deco.length === 0 && scopeEmptyWhy) return scopeEmptyWhy;
     if (db.deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
-    return `${feedDisplay(feeds.active)} holds no option. A side is the last two characters of an option's name — crates/core/src/instrument.rs ends one “-CE” or “-PE” — and not one of the ${fmt(db.deco.length)} instrument-month(s) here ends either way. /store.json sends no side field, so a side can only ever be READ OFF A NAME.`;
+    return `${feedDisplay(feeds.active)} holds no option. A side is the last two characters of an option's name — crates/core/src/instrument.rs ends one “-CE” or “-PE” — and not one of the ${fmt(db.deco.length)} instrument-month(s) here ends either way. The census sends no side field, so a side can only ever be READ OFF A NAME.`;
   });
 
   /**
@@ -2263,11 +2375,27 @@ export function selectionState(db) {
       };
     if (db.error)
       return {
-        tsub: 'the manifest failed',
-        why: `/store.json could not be read — ${db.error}. Nothing was counted, including the zeroes.`
+        tsub: 'the census failed',
+        why: `The census could not be read — ${db.error}. Nothing was counted, including the zeroes.`
       };
     if (db.loading && db.rows.length === 0)
-      return { tsub: 'not read yet', why: 'The store manifest is still being read.' };
+      return { tsub: 'not read yet', why: 'The census is still being read.' };
+    /* A SCOPE THAT LISTED EXPIRIES AND READ NO ROW IS A CHOICE NOT YET MADE
+       (R3-12; FM-621, the 12 Oct acceptance case): the contract view read the
+       server's listing of the underlying, and a contract's rows are read once
+       its expiry is chosen. Neither "this feed holds nothing" nor "nothing
+       matches" is true of it. */
+    const scope = db.censusScope;
+    if (scope !== null && matched.length === 0 && !expiry && listedExpiries.length > 0)
+      return {
+        tsub: 'no expiry chosen',
+        why: `${fmt(listedExpiries.length)} expiries of ${scope.underlying} are listed by the server (/census/facets.json) for this segment. A contract's rows are read once its expiry is chosen, and a bar belongs to ONE contract, so blending expiries into a single table would show a series no contract ever traded. Choose an expiry on the Contract strip and its rows are read.`
+      };
+    if (db.rows.length === 0 && scope !== null)
+      return {
+        tsub: 'nothing stored for this selection',
+        why: `${feedName} holds no census row of ${scope.underlying} in ${scope.segments.join(', ') || 'any segment this view shows'}, read from /census/facets.json for it alone. This is the store's own answer for this instrument and segment, not an unread store.`
+      };
     if (db.rows.length === 0)
       return {
         tsub: 'this feed holds nothing',
@@ -2288,12 +2416,12 @@ export function selectionState(db) {
            that cannot be the cause when it is already at its widest. */
         why:
           universe === ''
-            ? `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them survives the rungs below the universe — which is already at Everything, so it is not the universe narrowing this. Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+            ? `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them survives the rungs below the universe — which is already at Everything, so it is not the universe narrowing this. Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question the census can answer.`
             : `${feedName} holds ${fmt(db.deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}. ${
                 universeCount.get(universe)
                   ? `${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) are held.`
                   : 'Membership was not counted — see the note beside the universe row.'
-              } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+              } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question the census can answer.`
       };
     /* THE GATE GETS ITS OWN BRANCH, ABOVE THE GENERIC ONE, for the same
        reason the universe does: "none of them match the current selection" is
@@ -2518,6 +2646,8 @@ export function selectionState(db) {
     segmentRows: { get: () => segmentRows },
     segmented: { get: () => segmented },
     tfAll: { get: () => tfAll },
+    tfListed: { get: () => tfListed },
+    scopeEmptyWhy: { get: () => scopeEmptyWhy },
     timeframeRows: { get: () => timeframeRows },
     hidden: { get: () => hidden },
     leftOut: { get: () => leftOut },
@@ -2530,6 +2660,7 @@ export function selectionState(db) {
     holed: { get: () => holed },
     matchedPreContract: { get: () => matchedPreContract },
     expiriesAll: { get: () => expiriesAll },
+    expiryListed: { get: () => expiryListed },
     expiryCount: { get: () => expiryCount },
     expiryOffered: { get: () => expiryOffered },
     contractHere: { get: () => contractHere },
@@ -2870,7 +3001,7 @@ export function selectionSeeds(db) {
    * held by another instrument is not evidence the selected one has it.
    */
   $effect(() => {
-    if (db.kind === '' && db.deco.length > 0 && db.filter !== '' && db.segmentRows.length > 0) {
+    if (db.kind === '' && (db.deco.length > 0 || db.censusSettled) && db.filter !== '' && db.segmentRows.length > 0) {
       const held = db.segmentRows.filter((/** @type {any} */ s) => s.why === undefined);
       db.kind = (held.find((/** @type {any} */ s) => s.key === 'spot') ?? held[0] ?? db.segmentRows[0]).key;
     }
@@ -2885,7 +3016,7 @@ export function selectionSeeds(db) {
    * choice.
    */
   $effect(() => {
-    if (db.filter === '' && db.deco.length > 0 && db.instrumentOffered.length > 0) {
+    if (db.filter === '' && (db.deco.length > 0 || db.censusSettled) && db.instrumentOffered.length > 0) {
       const held =
         db.instrumentOffered.find((/** @type {any} */ r) => r.key === 'NIFTY' && r.months > 0) ??
         db.instrumentOffered.find((/** @type {any} */ r) => r.months > 0);
