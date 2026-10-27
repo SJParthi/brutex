@@ -2010,14 +2010,13 @@ where
             member: Some(member),
         };
         let state = (&mut *report, &mut *flags);
-        match day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
-            Some(outcome) => {
-                widened.closed += 1;
-                widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
-            }
+        if let Some(outcome) = day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
+            widened.closed += 1;
+            widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
+        } else {
             // A pass that closed nothing: its key waits for its month's
             // repair, or it wrote nothing (a stop before its first write).
-            None => widened.deferred |= ctx.gather.borrow().waits(&member_key, day),
+            widened.deferred |= ctx.gather.borrow().waits(&member_key, day);
         }
     }
     if examined {

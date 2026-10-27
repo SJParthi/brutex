@@ -341,6 +341,13 @@ fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
         wide.months_repaired, 1,
         "both days landed in one generation of the month"
     );
+    // EACH WIDENED DAY IS COUNTED ONCE, though its member key's close waited
+    // for the month's repair (IA-RP-45, D-4899 (4)): the day is counted when
+    // it is widened, the member's close told when it is written.
+    assert_eq!(
+        wide.days_imported, 2,
+        "the two days read again for the new member, each counted"
+    );
     let in_order = run_on(&root, ImportKind::Indices, range, &whole, Some(stored())).unwrap();
     assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
     let full = month(&whole, "INDEX", "INDIAVIX");
