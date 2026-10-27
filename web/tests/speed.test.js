@@ -3759,6 +3759,93 @@ test('a --restart command that does not exit within --restart-wait-ms is ended w
   }
 });
 
+/**
+ * Runs `body` in a new node process whose `child_process.spawn` sends that
+ * process SIGTERM the moment a spawn returns, before the caller's next line
+ * (BASE-REDS-1023 repair 1). No wall-clock race: the signal is sent from
+ * inside the call that starts the command, every time. What it reports: how
+ * the process ended, what it printed, and the pid the spawn started.
+ *
+ * @param {string} body ES module code; `process.env.SPAWN_PROBE_*` carries its paths
+ * @param {Record<string, string>} env
+ */
+const signalledInsideSpawn = async (body, env) => {
+  const dir = mkdtempSync(join(tmpdir(), 'spawn-probe-'));
+  const pidFile = join(dir, 'spawned.pid');
+  const prelude = [
+    "import cp from 'node:child_process';",
+    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { writeFileSync } from 'node:fs';",
+    'const real = cp.spawn;',
+    'cp.spawn = (...a) => {',
+    '  const c = real(...a);',
+    '  writeFileSync(process.env.SPAWN_PROBE_PID, String(c.pid));',
+    "  process.kill(process.pid, 'SIGTERM');",
+    '  return c;',
+    '};',
+    'syncBuiltinESMExports();'
+  ].join('\n');
+  const { spawn } = await import('node:child_process');
+  // The paths go by the environment, never argv: the sheet runs its main() when argv[1] names it.
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `${prelude}\n${body}`], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env, SPAWN_PROBE_PID: pidFile } });
+  let said = '';
+  child.stdout.on('data', (b) => (said += b));
+  child.stderr.on('data', (b) => (said += b));
+  /** @type {{code: number | null, signal: string | null}} */
+  const ended = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+  return { ended, said, pid: await pidIn(pidFile) };
+};
+
+test('a sheet or a harness sent a signal the moment its command or browser has started, inside the call that started it, still ends that whole group: the guards are installed before the spawn (BASE-REDS-1023 repair 1)', { timeout: 60_000 }, async () => {
+  // Before: run() and launch() spawned first and installed the exit and signal
+  // guards after, so a SIGTERM in between ended the sheet by its default
+  // action and the detached group was never signalled (verify-BASE-REDS-1023-r1:
+  // a `sleep 1000` left running under load at speed.test.js's "and the command
+  // it was waiting on was ended with it").
+  const dir = mkdtempSync(join(tmpdir(), 'guard-first-'));
+  const sheetRun = await signalledInsideSpawn(
+    [
+      'const sheet = await import(process.env.SPAWN_PROBE_MODULE);',
+      "sheet.run('exec sleep 1000', sheet.openCommandLog(process.env.SPAWN_PROBE_LOG));",
+      'setTimeout(() => {}, 30_000);'
+    ].join('\n'),
+    { SPAWN_PROBE_MODULE: new URL('ci/speed-sheet.mjs', web).href, SPAWN_PROBE_LOG: join(dir, 'commands.log') }
+  );
+  try {
+    assert.deepEqual(sheetRun.ended, { code: null, signal: 'SIGTERM' }, `the sheet still ends by the signal it was sent\n${sheetRun.said}`);
+    assert.ok(await endsWithin(sheetRun.pid), 'and the command it had just started was ended with it');
+  } finally {
+    try {
+      process.kill(-sheetRun.pid, 'SIGKILL');
+    } catch {
+      // already gone: the case the assertion above asks for
+    }
+  }
+  const chrome = join(dir, 'browser');
+  writeFileSync(chrome, '#!/bin/sh\nexec sleep 1000\n', { mode: 0o755 });
+  const profiles = join(dir, 'profiles');
+  mkdirSync(profiles);
+  const launched = await signalledInsideSpawn(
+    [
+      'const harness = await import(process.env.SPAWN_PROBE_MODULE);',
+      'harness.launch(process.env.SPAWN_PROBE_CHROME, false, 30_000, process.env.SPAWN_PROBE_ROOT).catch(() => {});',
+      'setTimeout(() => {}, 30_000);'
+    ].join('\n'),
+    { SPAWN_PROBE_MODULE: new URL('ci/browser-harness.mjs', web).href, SPAWN_PROBE_CHROME: chrome, SPAWN_PROBE_ROOT: profiles }
+  );
+  try {
+    assert.deepEqual(launched.ended, { code: null, signal: 'SIGTERM' }, `the harness still ends by the signal it was sent\n${launched.said}`);
+    assert.ok(await endsWithin(launched.pid), 'and the browser it had just started was ended with it');
+    assert.deepEqual(readdirSync(profiles), [], 'and its profile was removed');
+  } finally {
+    try {
+      process.kill(-launched.pid, 'SIGKILL');
+    } catch {
+      // already gone: the case the assertion above asks for
+    }
+  }
+});
+
 test('the up wait after a restart is --up-wait-ms in all: each check within it waits at most the time left, and a server not up ends the restart pass by name; a first ask that runs out after a restart is asked no more', { timeout: 60_000 }, async () => {
   // Before: each up check was bounded by --timeout-ms (60 s by default), so
   // an up check that was never answered held the wait 60 s past its 400 ms,

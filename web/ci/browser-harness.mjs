@@ -888,6 +888,13 @@ export const STDERR_TAIL = 8_192;
  */
 export async function launch(chrome, noSandbox = false, waitMs = 30_000, root = tmpdir()) {
   if (!chrome || !existsSync(chrome)) throw new Error(`no browser at ${JSON.stringify(chrome)}: pass --chrome or set BRUTEX_CHROME`);
+  // THE GUARDS FIRST, BEFORE THE PROFILE AND THE SPAWN (BASE-REDS-1023
+  // repair 1, the sheet's run() had the same order): installed after the
+  // spawn, a SIGTERM in between ended this process by its default action and
+  // left the detached browser running and its profile behind. Installed
+  // first, the signal is only queued until the code below has registered
+  // the browser in LIVE.
+  guardProcess();
   const profile = mkdtempSync(join(root, PROFILE_PREFIX));
   MADE.add(profile);
   // `--no-sandbox` only when the operator asks (a browser run as root, in a

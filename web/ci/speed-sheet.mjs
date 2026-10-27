@@ -1067,9 +1067,14 @@ export function heading(fd, line) {
  * @returns {{child: import('node:child_process').ChildProcess, wait: Promise<number | string>, stop: () => Promise<string>}}
  */
 export function run(command, log) {
+  // THE GUARDS FIRST, THEN THE SPAWN (BASE-REDS-1023 repair 1): installed
+  // after it, a SIGTERM that came in between ended the sheet by its default
+  // action and the detached group was never signalled (a `sleep 1000` left
+  // running under load). Installed first, the signal is only queued until
+  // this call returns, by when the command is in COMMANDS.
+  guardCommands();
   const child = spawn(command, { shell: true, stdio: ['ignore', log, log], detached: true });
   COMMANDS.add(child);
-  guardCommands();
   let exited = false;
   /** @type {Promise<number | string>} */
   const wait = new Promise((resolve) => {

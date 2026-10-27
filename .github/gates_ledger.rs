@@ -2388,18 +2388,25 @@ fn rule5d(r: &str) -> bool {
 /// cannot see `.any(`/`.all(` (a predicate over a compile-time table is the
 /// common, bounded use and the workspace holds hundreds) or a hand-written
 /// loop; both are named in docs/06-limits.md L-BRED23-02.
+///
+/// THE OPENERS ARE THE REGEX'S PARTS, NOT A HAND LIST (repair 1, D-7151
+/// addendum). A hand list of five openers left out `.iter_mut().rev().`,
+/// which the regex above names (verify-BASE-REDS-1023-r1, attacks A1 and
+/// A11). Each base is read, then the one optional `.rev()`, then `.` and a
+/// search word, so the matcher and its doc cannot disagree again;
+/// `gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not` checks
+/// every base crossed with every search word, reversed or not.
 fn rule6(r: &str) -> bool {
-    const OPENERS: [&str; 5] = [
-        ".iter().",
-        ".into_iter().",
-        ".iter_mut().",
-        ".iter().rev().",
-        ".into_iter().rev().",
-    ];
+    const BASES: [&str; 3] = [".iter()", ".into_iter()", ".iter_mut()"];
+    const REV: &str = ".rev()";
     const SEARCHES: [&str; 4] = ["find(", "find_map(", "position(", "rposition("];
-    OPENERS.iter().any(|open| {
-        r.match_indices(open)
-            .any(|(at, _)| SEARCHES.iter().any(|s| r[at + open.len()..].starts_with(s)))
+    BASES.iter().any(|base| {
+        r.match_indices(base).any(|(at, _)| {
+            let tail = &r[at + base.len()..];
+            let tail = tail.strip_prefix(REV).unwrap_or(tail);
+            tail.strip_prefix('.')
+                .is_some_and(|t| SEARCHES.iter().any(|s| t.starts_with(s)))
+        })
     })
 }
 
@@ -3997,6 +4004,44 @@ mod tests {
         let (ok, text) = g11(&[("crates/a/src/x.rs", src)], &lists());
         assert!(!ok);
         assert!(text.contains("rule 6: 1 occurrence(s)"), "{text}");
+    }
+
+    /// BASE-REDS-1023 repair 1 (D-7151 addendum, verify-BASE-REDS-1023-r1
+    /// attacks A1 and A11): rule 6's own regex reads
+    /// `(iter|into_iter|iter_mut)(.rev())?` and the openers are now built
+    /// from those parts, so a reversed MUTABLE iterator is a search like the
+    /// other five openers, on one line or over a formatted chain, for every
+    /// search word. Every opener crossed with every search word is checked,
+    /// so a part added to one list and not the other fails here.
+    #[test]
+    fn gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not() {
+        for base in ["iter", "into_iter", "iter_mut"] {
+            for rev in ["", ".rev()"] {
+                for search in ["find", "find_map", "position", "rposition"] {
+                    let one = format!("let p = xs.{base}(){rev}.{search}(|x| **x == 3);\n");
+                    refused(&one, "6");
+                    let split = format!(
+                        "fn a() {{\n    let p = xs\n        .{base}()\n{}        .{search}(f);\n}}\n",
+                        if rev.is_empty() { "" } else { "        .rev()\n" }
+                    );
+                    let (ok, text) = g11(&[("crates/a/src/x.rs", &split)], &lists());
+                    assert!(!ok, "{split}");
+                    assert!(text.contains("rule 6: 1 occurrence(s)"), "{split}\n{text}");
+                }
+            }
+        }
+        // The reversal is optional, never a wildcard: another adapter between
+        // the opener and the search is not this rule's spelling (named in
+        // docs/06-limits.md L-BRED23-02), and a near word is not a search.
+        for clean in [
+            "let p = xs.iter_mut().rev().map(f);\n",
+            "let p = xs.iter_mut().rev().rev_find(f);\n",
+            "let p = xs.iter_mut().rev().finder();\n",
+            "let p = xs.iter_mut().reverse().find(f);\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
+            assert!(ok, "{clean}: {text}");
+        }
     }
 
     #[test]
