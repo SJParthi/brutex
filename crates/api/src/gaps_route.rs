@@ -682,6 +682,11 @@ async fn audit_span(
     // reader of what the walk returns — has been dropped, so the months it
     // stops short of are read by nobody, and nothing partial is ever served.
     crate::detail::cancellable_in(crate::detail::Named::Calendar, move |cancel| {
+        // THE SERIES' NOT-OWED KEY, BUILT ONCE A REQUEST (R4-19): an NSE cash
+        // share's one listing probe is paid here, off the async workers, and
+        // each month after it asks `pull::gaps::not_owed` in constant time.
+        let listing = owed_listing(&audit_site, &asked);
+        let key = owed_key(&asked, listing.as_deref());
         let months = walk_until(&span, cancel, |month| {
             let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, month));
             let mut audited = audit_one(
@@ -691,6 +696,7 @@ async fn audit_span(
                 denominator.calendar.as_ref(),
                 schedule.as_ref().ok().and_then(Option::as_ref),
                 min_run,
+                &key,
             );
             audited.evidence_error = schedule.err();
             audited
@@ -698,6 +704,27 @@ async fn audit_span(
         (months, denominator)
     })
     .await
+}
+
+/// The store's listing table, for an NSE cash share's own series and no
+/// other (R4-19, R4-17): `pull::listing::for_store` loads it once per store
+/// per process once a master checks.
+fn owed_listing(site: &Site, asked: &Addressed) -> Option<std::sync::Arc<pull::listing::Listing>> {
+    (asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none())
+        .then(|| pull::listing::for_store(&site.store_root))
+}
+
+/// The key `pull::gaps::not_owed` is asked with for `asked`'s series: its
+/// exact names, and for an NSE cash share its ISIN and the span `listing`
+/// states. A contract names no share and is excused nothing.
+fn owed_key<'a>(
+    asked: &'a Addressed,
+    listing: Option<&'a pull::listing::Listing>,
+) -> pull::gaps::Key<'a> {
+    if asked.contract.is_some() {
+        return pull::gaps::Key::NONE;
+    }
+    pull::gaps::Key::series(&asked.exchange, &asked.segment, &asked.symbol, listing)
 }
 
 /// `each` month of `span` in order, until `cancel` says the reader left: one
@@ -762,6 +789,9 @@ fn gaps_body(
         .join(",");
 
     let unmeasured: u64 = months.iter().map(|m| u64::from(m.unmeasured)).sum();
+    // NOT OWED, SUMMED AS THE MONTHS STATE IT (R4-19): beside the loss, never
+    // in it, and never in `expected`.
+    let not_owed: u64 = months.iter().map(|m| u64::from(m.not_owed)).sum();
 
     // THE CALENDAR THAT DECIDED THESE NUMBERS, NAMED IN THE ANSWER.
     //
@@ -811,7 +841,7 @@ fn gaps_body(
     };
 
     format!(
-        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"months_being_written":{being_written},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
+        r#"{{{},"timeframe":"{timeframe}"{fold},"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"not_owed_minutes":{not_owed},"months":{},"months_absent":{absent_files},"months_being_written":{being_written},"summaries":{{"kept":{summaries_kept},"built":{summaries_built},"bar_records_read":{records_read}}},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}],"unreadable":[{unreadable}]}},"month":[{rows}]}}"#,
         identity.json,
         months.len(),
         day_text(first_bound),
@@ -1227,6 +1257,9 @@ struct AuditedMonth {
     /// it beside them, that pair reads as an arithmetic bug rather than as the
     /// calendar running out.
     unmeasured: u32,
+    /// Minutes inside sessions the series did not owe (R4-19): never lost and
+    /// never owed; the month row names each answer and its source.
+    not_owed: u32,
     /// Why this month could not be opened at all, if it could not be.
     ///
     /// **A finding, not a failure.** Across a range, a month with no file is
@@ -1310,6 +1343,9 @@ impl AuditedMonth {
             lost: _,
             absent: _,
             unmeasured: _,
+            // A SESSION THE SERIES DID NOT OWE is a finding with its source
+            // (R4-19), never damage of the month.
+            not_owed: _,
             runs: _,
             // A CAP THE ANSWER STATES (`MAX_GAPS`), not damage.
             truncated: _,
@@ -1394,6 +1430,62 @@ impl AuditedMonth {
     }
 }
 
+/// Each not-owed answer `ledger` holds, as the month names it (R4-19): its
+/// code, the days and minutes it covers, and its evidence — the interval,
+/// both NSE sources and both circulars' numbers, or the day and the master
+/// that states it.
+///
+/// One pass over the runs (`pull::gaps::Ledger::not_owed`), bounded by
+/// `pull::gaps::MAX_GAPS`; the master is the key's, probed once a request.
+fn not_owed_json(ledger: &pull::gaps::Ledger, key: &pull::gaps::Key<'_>) -> String {
+    let master = key.span.and_then(|span| match span.source {
+        pull::listing::Source::NseSecurityMaster { file, sha256 } => Some(serde_json::json!({
+            "file": file,
+            "sha256": pull::listing::sha256_hex(sha256),
+        })),
+        _ => None,
+    });
+    let rows: Vec<serde_json::Value> = ledger
+        .not_owed()
+        .iter()
+        .map(|excused| {
+            // THE ANSWER'S OWN EVIDENCE, beside what every answer states.
+            let own = match excused.why {
+                pull::gaps::NotOwed::InstrumentInactive(interval) => serde_json::json!({
+                    "symbol": key.symbol,
+                    "from": interval.from.to_string(),
+                    "through": interval.through.to_string(),
+                    "sources": [interval.withdrawal_source, interval.readmission_source],
+                    "circulars": [interval.withdrawal_circular, interval.readmission_circular],
+                }),
+                pull::gaps::NotOwed::BeforeListing { listed_on: day }
+                | pull::gaps::NotOwed::AfterDelisting { delisted_on: day } => serde_json::json!({
+                    "date": day.to_string(),
+                    "master": master,
+                }),
+                pull::gaps::NotOwed::Unread => serde_json::json!({}),
+            };
+            let mut row = serde_json::Map::new();
+            for (name, value) in [
+                ("code", serde_json::json!(excused.why.code())),
+                ("reason", serde_json::json!(excused.why.word())),
+                ("days", serde_json::json!(excused.days)),
+                ("minutes", serde_json::json!(excused.minutes)),
+                ("first", serde_json::json!(iso(excused.first_day))),
+                ("last", serde_json::json!(iso(excused.last_day))),
+                ("evidence", serde_json::json!(excused.why.evidence())),
+            ] {
+                row.insert(name.to_owned(), value);
+            }
+            if let serde_json::Value::Object(own) = own {
+                row.extend(own);
+            }
+            serde_json::Value::Object(row)
+        })
+        .collect();
+    serde_json::Value::Array(rows).to_string()
+}
+
 /// Restore only local, receipted session metadata for this exact cash stock.
 /// A gap-page read never downloads a master, widens a pull, or borrows another
 /// instrument's flag. A missing date names its evidence error and leaves the
@@ -1411,7 +1503,10 @@ async fn audit_cash_schedule(
 
 /// The word a run is rendered with.
 ///
-/// `pull::gaps` has four reasons and no fifth. Three more are this route's,
+/// `pull::gaps` has five reasons and no sixth; the fifth, a session the series
+/// did not owe, carries its own word (`instrument-inactive`,
+/// `before-listing`, `after-delisting`, `unread`; R4-19) and is never
+/// renamed here. Three more are this route's,
 /// and none of them is a loss: a minute inside a recorded halt's window is
 /// `halted` (sourced) or `halt-suspected` (UNVERIFIED, D-3320) rather than
 /// `outside-window`; a minute with no print in a trade-driven series (a `1s`
@@ -1493,6 +1588,16 @@ fn expiry_of(contract: Option<&brutex_core::instrument::Contract>) -> Option<i64
 /// audited too ([`second_audit`]). A share or an option is trade-driven: it
 /// owes no count, a minute with no print is `no-print`, never a loss, and the
 /// month says how many of its sessions it holds a print on.
+///
+/// # A session the series did not owe (R4-19)
+///
+/// `key` names the series to `pull::gaps::not_owed`. An NSE cash share's
+/// door — the minute rung's dated cash audit and the one-second rung's
+/// exchange session — passes it, so a session NSE withdrew, or one before
+/// the listing or after the delisting the store's master states, owes and
+/// loses nothing and its minutes read why; the month names each answer with
+/// its source (`not_owed`). The index and derivative doors carry no
+/// instrument fact and are unchanged.
 #[expect(
     clippy::too_many_lines,
     reason = "one open and one classification for both rungs, the fold and the two \
@@ -1505,6 +1610,7 @@ fn audit_one(
     calendar: Option<&pull::calendar::Calendar>,
     cash_schedule: Option<&pull::cash_auction::Schedule>,
     min_run: u32,
+    key: &pull::gaps::Key<'_>,
 ) -> AuditedMonth {
     let empty = |absent_file: Option<String>| AuditedMonth {
         month,
@@ -1514,6 +1620,7 @@ fn audit_one(
         lost: 0,
         absent: 0,
         unmeasured: 0,
+        not_owed: 0,
         absent_file,
         being_written: None,
         evidence_error: None,
@@ -1604,10 +1711,19 @@ fn audit_one(
         }
     } else if trade_driven && asked.segment == "CASH" {
         // NOTHING IS OWED, so the dated cash schedule decides nothing: a
-        // minute of the exchange session with no print is `no-print`.
-        pull::gaps::classify_against(&stamps, first, last, calendar)
+        // minute of the exchange session with no print is `no-print`. A
+        // session the share did not owe at all still says why (R4-19), as
+        // the minute rung's door does: one class for one day on every rung.
+        pull::gaps::classify_owed(
+            &stamps,
+            first,
+            last,
+            calendar,
+            pull::gaps::Door::ExchangeSession,
+            key,
+        )
     } else if asked.exchange == "NSE" && asked.segment == "CASH" && asked.contract.is_none() {
-        pull::gaps::classify_cash(&stamps, first, last, cash_schedule)
+        pull::gaps::classify_cash(&stamps, first, last, cash_schedule, key)
     } else if asked.segment == "INDEX" {
         pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
     } else if asked.exchange == "NSE" && (asked.contract.is_some() || asked.segment == "FNO") {
@@ -1717,6 +1833,14 @@ fn audit_one(
             .join(","),
     );
     members.push(']');
+    // THE SESSIONS THE SERIES DID NOT OWE, EACH ANSWER NAMED WITH ITS SOURCE
+    // (R4-19): never lost, never owed, and never a bare total, so a page that
+    // shows the month can say why and on whose word.
+    let not_owed_minutes = ledger.not_owed_minutes();
+    members.push_str(r#","not_owed_minutes":"#);
+    members.push_str(&not_owed_minutes.to_string());
+    members.push_str(r#","not_owed":"#);
+    members.push_str(&not_owed_json(&ledger, key));
     if one_second {
         let no_print = minutes_of("no-print", false);
         // THE SESSION MINUTES AFTER EXPIRY, not every minute of those days:
@@ -1750,6 +1874,7 @@ fn audit_one(
         lost: lost_minutes,
         absent: ledger.absent_minutes(),
         unmeasured: ledger.unmeasured_minutes(),
+        not_owed: not_owed_minutes,
         // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more
         // than on the drawing route: a bar `page` could not read is a bar this
         // audit did not see, so it is scored as a HOLE. Reported beside the
@@ -2562,6 +2687,7 @@ mod tests {
             Some(&calendar),
             None,
             MIN_RUN_DEFAULT,
+            &pull::gaps::Key::NONE,
         );
         assert!(absent.absent_file.is_some());
         assert_eq!(absent.held, 0);
@@ -2593,6 +2719,7 @@ mod tests {
             Some(&calendar),
             None,
             MIN_RUN_DEFAULT,
+            &pull::gaps::Key::NONE,
         );
         assert!(empty.absent_file.is_none());
         assert_eq!(empty.expected, absent.expected);
@@ -2636,6 +2763,7 @@ mod tests {
                 Some(&calendar),
                 None,
                 MIN_RUN_DEFAULT,
+                &pull::gaps::Key::NONE,
             );
             assert!(audit.absent_file.is_some(), "{query}");
             assert_eq!(audit.expected, owed, "{query}");
@@ -2724,7 +2852,15 @@ mod tests {
                 "the forged legacy month opens and holds every off-grid row"
             );
             let before = std::fs::read(&source_path).unwrap();
-            let audit = audit_one(&site, &asked, asked.month, None, None, MIN_RUN_DEFAULT);
+            let audit = audit_one(
+                &site,
+                &asked,
+                asked.month,
+                None,
+                None,
+                MIN_RUN_DEFAULT,
+                &pull::gaps::Key::NONE,
+            );
             assert_eq!(audit.invalid_timestamps, if extra { 1 } else { 375 });
             assert_eq!(audit.expected, 0, "no coverage claim on invalid input");
             assert_eq!(audit.lost, 0, "no invented downstream holes");
@@ -2802,7 +2938,15 @@ mod tests {
             )]);
         assert_eq!(calendar.expected_bars(day), Some(220));
 
-        let verdict = audit_one(&site, &asked, month, Some(&calendar), None, MIN_RUN_DEFAULT);
+        let verdict = audit_one(
+            &site,
+            &asked,
+            month,
+            Some(&calendar),
+            None,
+            MIN_RUN_DEFAULT,
+            &pull::gaps::Key::NONE,
+        );
         assert_eq!(verdict.held, 54, "stored evidence remains visible");
         assert_eq!(verdict.expected, 0, "no invented index denominator");
         assert_eq!(verdict.lost, 0, "no invented vendor loss");
@@ -4287,6 +4431,7 @@ mod tests {
             lost: 0,
             absent: 0,
             unmeasured: 0,
+            not_owed: 0,
             absent_file: None,
             being_written: None,
             evidence_error: None,
@@ -5671,3 +5816,7 @@ mod cloud_mutant_tests {
         assert_eq!(words(day + 1), vec!["vendor-hole".to_owned()]);
     }
 }
+
+#[cfg(test)]
+#[path = "owed_tests.rs"]
+mod owed_tests;

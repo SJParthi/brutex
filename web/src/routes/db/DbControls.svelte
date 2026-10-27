@@ -35,6 +35,7 @@
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { feedPickerRow, offeredFeeds, excludedSentence } from '$lib/feed-row.js';
   import { SECONDS } from '$lib/db/selection-model.js';
+  import { ceilingText, monthSpan } from '$lib/db/bars-plan.js';
   import { survey } from '$lib/store.svelte.js';
   import DbSearch from './DbSearch.svelte';
   import DbMoneyness from './DbMoneyness.svelte';
@@ -140,10 +141,17 @@
       rows={UNIVERSES.map((u) => ({
         key: u.key,
         name: u.label,
-        detail: db.censusScope
+        detail: db.censusScope && !db.censusUnderlyings?.rows?.length
           /* ONE INSTRUMENT WAS READ, NOT THE STORE (WP-56b): a count of names
-             held from its rows alone would be a statement about the store. */
-          ? `only ${db.censusScope.underlying} read so far; counted when the whole census is read`
+             held from its rows alone would be a statement about the store.
+             R3-12: the count is the server's list's, once it has answered. */
+          ? `counted from the server's list of names once it answers (only ${db.censusScope.underlying} read so far)`
+          : db.censusScope && u.key
+          ? db.universeCount.get(u.key)
+            ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held in ${db.censusScope.segments.join(', ')} (the server's list)`
+            : 'not counted'
+          : db.censusScope
+          ? `${fmt(db.censusUnderlyings.rows.length)} held in ${db.censusScope.segments.join(', ')} (the server's list)`
           : u.key
           ? db.universeCount.get(u.key)
             ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held`
@@ -272,14 +280,19 @@
                like a spot series, and the counts are split by segment —
                "11,668 month(s) held, 4,84,12,39,862 short" summed a 1s index
                denominator over option contract-months. */
-            detail:
-              r.months === 0
+            /* UNDER A SCOPE THE ROW IS THE SERVER'S LIST OF THE SEGMENTS READ
+               (R3-12 merge-back): "contracts only" claimed a share held no
+               spot because the options view had read FNO's list alone. */
+            detail: db.censusScope
+              ? `${fmt(r.months)} month(s) in ${db.censusScope.segments.join(', ') || 'no segment read'}`
+              : r.months === 0
                 ? 'nothing stored'
                 : r.spotMonths === 0
                   ? 'contracts only'
                   : r.kind || (r.contractMonths > 0 ? 'spot + contracts' : 'spot'),
-            title:
-              r.months === 0
+            title: db.censusScope
+              ? `${r.sym} — ${r.key}. ${fmt(r.months)} month(s) held in ${db.censusScope.segments.join(', ') || 'no segment read'}, from the server's list of the segments this view reads (/census/facets.json); the other segments are read when they are chosen.`
+              : r.months === 0
                 ? `${r.sym} — ${r.key}. Nothing stored for it at this selection.`
                 : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot instrument-month(s)${shortfallText(r.shortBy, tfCmp, fmt)} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
           }))
@@ -433,6 +446,14 @@
          emptied one paints a bare `·` under the control. -->
     {#if db.tfRefusal}
       <span class="note warn" use:wholeTitle>No bar length — {db.tfRefusal}</span>
+    {/if}
+    <!-- THE REQUEST AGAINST THE SERVER'S CEILINGS, BEFORE IT IS SENT (R3-12;
+         RA-259): the series and months the next window request names, of the
+         most one request reads, as /settings.json serves them. -->
+    {#if db.barQueryPlan?.keys?.length && db.ceilings}
+      <span class="note" class:warn={Boolean(db.ceilings.why)} title={db.ceilings.why ?? undefined} use:wholeTitle data-ceilings
+        >{ceilingText(db.barQueryPlan.keys.length, monthSpan(db.barQueryPlan.from, db.barQueryPlan.to), db.ceilings)}</span
+      >
     {/if}
   </div>
   <!-- ==================================================================
@@ -669,11 +690,11 @@
         {#if db.oow}
           Showing months <b>outside your window</b> ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}): {fmt(db.oowHere)} of this selection's, {fmt(db.oowMonths)}
-          instrument-month(s) across {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}.
+          instrument-month(s) across {db.censusScope ? `${db.censusScope.underlying}, the instrument read` : 'the feed'}.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = false)}>Hide them</button>
         {:else}
           {fmt(db.oowHere)} of this selection's months ({fmt(db.oowHidden)} instrument-month(s) across
-          {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}) lie outside your window ({db.activeFeed?.window?.from} to
+          {db.censusScope ? `${db.censusScope.underlying}, the instrument read` : 'the feed'}) lie outside your window ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}); they are held and hidden.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = true)}>Show them, labelled</button>
         {/if}
@@ -931,7 +952,9 @@
                no contract ever traded. */
             key: '',
             name: 'None chosen',
-            detail: `${fmt(db.contractHere)} contract row(s) held back`,
+            detail: db.contractHere === 0 && db.expiryListed.size > 0
+              ? `${fmt(db.expiryListed.size)} expiries listed; choosing one reads its contracts`
+              : `${fmt(db.contractHere)} contract row(s) held back`,
             why:
               db.contractHere > 0
                 ? 'This is a refusal, not an empty store. Indices and equities carry no expiry and are unaffected — they are in the table below already.'
@@ -942,10 +965,14 @@
              of record (`expiryTags`) — never a written weekday rule. */
           ...db.expiryOffered.map((/** @type {any} */ d) => {
             const t = db.expiryTagMap.get(d);
+            /* AN EXPIRY THE SERVER LISTS AND WHOSE ROWS ARE NOT READ YET
+               (R3-12) is counted in the listing's own unit, its contracts:
+               "0 instrument-month(s)" would claim a count nobody took. */
+            const listed = db.expiryCount.has(d) ? null : db.expiryListed.get(d);
             return {
               key: d,
               name: dayLabel(d),
-              detail: `${t ? `${t.weekday} · ${t.cadence} · ` : ''}${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`,
+              detail: `${t ? `${t.weekday} · ${t.cadence} · ` : ''}${listed ? `${fmt(listed.contracts)} contract(s) listed` : `${fmt(db.expiryCount.get(d) ?? 0)} instrument-month(s)`}`,
               why: t?.shift ? `${t.shift.from ? 'Shifted' : 'Off its neighbours'}: ${t.shift.why}.` : undefined,
               title: `Contracts expiring ${dayLabel(d)}${t ? `, a ${t.weekday}, the ${t.cadence} expiry (${t.cadence === 'monthly' ? 'the last stored expiry of its month' : 'not the last stored expiry of its month'})` : ''} — the store's own key for it is ${d}.`
             };
@@ -960,10 +987,13 @@
         {:else if db.expiry}
           {fmt(db.expiryCount.get(db.expiry) ?? 0)} row(s) on this contract{#if db.expiryHeld > 0}
             · {fmt(db.expiryHeld)} on another expiry are not shown{/if}{#if db.censusScope?.read.some((/** @type {any} */ part) => part.expiry !== null)}
-            · the other expiries are not read yet{/if}
+            · the other expiries are listed, and read when chosen{/if}
         {:else if db.expiryHeld > 0}
           {fmt(db.expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
           belongs to one contract, so nothing here blends two
+        {:else if db.expiryListed.size > 0}
+          {fmt(db.expiryListed.size)} expiries listed by the server · a contract's rows are read once its
+          expiry is chosen
         {:else}
           {fmt(db.expiriesAll.length)} expiry/expiries stored · no contract row is in this selection,
           so nothing is being held back
@@ -1074,7 +1104,7 @@
         filter
         label="sides"
         disabled={Boolean(db.sideRefusal)}
-        summary={db.sideRefusal ? 'No option stored' : db.side ? db.side : `Both \u00b7 ${fmt(db.sideOffered.length)}`}
+        summary={db.sideRefusal ? (db.deco.length === 0 && db.expiryListed.size > 0 ? 'Choose an expiry' : 'No option stored') : db.side ? db.side : `Both \u00b7 ${fmt(db.sideOffered.length)}`}
         rows={[
           { key: '', name: 'Both', detail: `${fmt(db.mnyFilteredCount)} row(s)` },
           ...db.sideOffered.map((/** @type {any} */ s) => ({
@@ -1226,7 +1256,7 @@
       single
       filter
       label="feeds"
-      title={`${db.feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
+      title={`${db.feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from its census (/census/facets.json?feed=${feeds.active ?? ''}, the instrument on screen) and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
       summary={feeds.error
         ? 'Feed list unread'
         : feeds.all.length === 0

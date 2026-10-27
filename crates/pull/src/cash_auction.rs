@@ -336,6 +336,13 @@ pub struct InactiveInterval {
     pub withdrawal_source: &'static str,
     /// Company filing containing the NSE readmission circular/end boundary.
     pub readmission_source: &'static str,
+    /// The withdrawal circular's NSE number, as `docs/00-charter.md` names it
+    /// (R4-19: every page that excuses a session names both circulars, not
+    /// only their documents).
+    pub withdrawal_circular: &'static str,
+    /// The readmission circular's NSE number, which the company filing
+    /// [`Self::readmission_source`] carries (`docs/00-charter.md`).
+    pub readmission_circular: &'static str,
 }
 
 /// Inspect independently sourced inactivity for exactly this symbol/ISIN/date.
@@ -358,6 +365,8 @@ pub fn independently_inactive(symbol: &str, isin: &str, day: Day) -> Option<Inac
         through: Day::new(2024, 2, 13).ok()?,
         withdrawal_source: "https://archives.nseindia.com/content/circulars/CML58560.pdf",
         readmission_source: "https://www.forcemotors.com/wp-content/uploads/2025/02/Announcement-under-Regulation-30-for-Listing-on-NSE.pdf",
+        withdrawal_circular: "CML58560",
+        readmission_circular: "CML60618",
     };
     (day >= interval.from && day <= interval.through).then_some(interval)
 }
@@ -751,6 +760,11 @@ mod tests {
             assert_eq!(
                 interval.readmission_source,
                 "https://www.forcemotors.com/wp-content/uploads/2025/02/Announcement-under-Regulation-30-for-Listing-on-NSE.pdf"
+            );
+            assert_eq!(
+                (interval.withdrawal_circular, interval.readmission_circular),
+                ("CML58560", "CML60618"),
+                "the two circulars docs/00-charter.md names"
             );
         }
         for date in [

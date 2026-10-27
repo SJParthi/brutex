@@ -194,3 +194,164 @@ test('a worker that never answers is given up on at the ceiling, named, and no t
   assert.equal(timers3[0].cleared, true);
   assert.equal(quiet.broken, null);
 });
+
+/* ----------------------------------------------------------------------
+   R3-12 (RA-043, the fix plan's goal item 2): THE PAGE STILL SHOWS ROWS
+   ---------------------------------------------------------------------- */
+import { mock } from 'node:test';
+import { storeModule, tuples, HEADERS } from './store-module.js';
+import { censusLines } from '../src/lib/store-census.js';
+
+test('a_silent_worker_is_dropped_and_the_page_says_so', async () => {
+  // A WORKER THAT TAKES THE MESSAGE AND NEVER ANSWERS, in the store module
+  // itself: the whole census another page reads is decoded on the page at
+  // the ceiling, its rows are published, and the banner says why.
+  /** @type {any[]} */
+  const sent = [];
+  let terminated = false;
+  const realWorker = /** @type {any} */ (globalThis).Worker;
+  const realFetch = globalThis.fetch;
+  /** @type {any} */ (globalThis).Worker = class { postMessage(/** @type {any} */ m) { sent.push(m); } terminate() { terminated = true; } };
+  const body = tuples('example', [['NSE-INDEX-ALPHA', '2019-03', '1min', 60], ['NSE-INDEX-ALPHA', '2019-02', '1min', 55]]);
+  globalThis.fetch = /** @type {any} */ (async () => new Response(JSON.stringify(body), { status: 200, headers: HEADERS }));
+  const turn = () => new Promise((done) => setImmediate(done));
+  try {
+    const { store, syncStore } = await storeModule();
+    mock.timers.enable({ apis: ['setTimeout'] });
+    syncStore('example', null);
+    for (let i = 0; i < 200 && sent.length === 0; i++) await turn();
+    assert.equal(sent.length, 1, 'the census went to the worker');
+    assert.equal(store.state, 'reading', 'nothing is shown before the ceiling');
+    mock.timers.tick(9_999);
+    for (let i = 0; i < 20; i++) await turn();
+    assert.equal(store.state, 'reading', 'nothing gives up before the ceiling');
+    mock.timers.tick(1);
+    // The page's own decode yields with zero-delay timers, run as they fall due.
+    for (let i = 0; i < 400 && store.state === 'reading'; i++) {
+      mock.timers.tick(0);
+      await turn();
+    }
+    // DROPPED AT ITS CEILING: terminated, and the page decoded the census itself.
+    assert.equal(terminated, true);
+    assert.equal(store.state, 'ready', String(store.error));
+    assert.deepEqual(store.rows.map((/** @type {any} */ row) => `${row.instrument}|${row.month}|${row.rows}`), ['NSE-INDEX-ALPHA|2019-03|60', 'NSE-INDEX-ALPHA|2019-02|55']);
+    assert.equal(store.worker, 'the census worker failed (the census worker did not answer within 10 s), so this page decoded the census on its own thread');
+    // AND THE PAGE SAYS SO, in the banner's own line.
+    const lines = censusLines({ feed: 'example', at: store.at, lag: store.lag, worker: store.worker, head: null, how: store.how });
+    assert.deepEqual(lines.filter((line) => line.key === 'worker').map((line) => line.text),
+      ['The census worker failed (the census worker did not answer within 10 s), so this page decoded the census on its own thread.']);
+    assert.equal(store.refreshes.at(-1)?.worker, store.worker, 'the refresh log keeps why');
+  } finally {
+    mock.timers.reset();
+    /** @type {any} */ (globalThis).Worker = realWorker;
+    globalThis.fetch = realFetch;
+  }
+});
+
+/* ----------------------------------------------------------------------
+   R3-12 merge-back (25 Oct 2026): the yield's hold, and every branch of
+   this module the merged tree's coverage named unrun.
+   ---------------------------------------------------------------------- */
+import { spawnSync } from 'node:child_process';
+
+test('a_yield_with_nothing_else_pending_resumes', () => {
+  // A YIELD HOLDS THE PROCESS UNTIL IT RESUMES (R3-12's `hold`): with the port
+  // left unref'd, node ended the loop with the yield still waiting ("unsettled
+  // top-level await", exit 13), and the work behind it never resumed. The hand
+  // mutation probe found no test that saw the hold removed under Node 24.
+  const module = new URL('../src/lib/census-worker.js', import.meta.url).href;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { yieldTask } from ${JSON.stringify(module)}; await yieldTask(); await yieldTask(); console.log('resumed');`], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout.trim(), 'resumed');
+});
+
+test('a yield where no MessageChannel exists is a zero-delay timer', async () => {
+  const real = globalThis.MessageChannel;
+  /** @type {any} */ (globalThis).MessageChannel = undefined;
+  try {
+    let timerRan = false;
+    setTimeout(() => { timerRan = true; }, 0);
+    await yieldTask();
+    assert.equal(timerRan, true, 'the timer queued first ran before the yield resumed');
+  } finally {
+    globalThis.MessageChannel = real;
+  }
+});
+
+test('a message with no body, and a thrown value that is no Error, are refused in words', () => {
+  assert.deepEqual(answerMessage(undefined).reply, { op: 'error', id: undefined, message: 'unknown census worker request undefined' });
+  assert.deepEqual(answerMessage(null).reply.message, 'unknown census worker request undefined');
+  // A read that throws a bare value (no Error, no message) is said as it is.
+  const { reply } = answerMessage({ op: 'decode', id: 3, feed: 'example', get buffer() { throw 'a bare refusal'; } });
+  assert.deepEqual(reply, { op: 'error', id: 3, message: 'a bare refusal' });
+});
+
+test('inside a worker the module answers each message and posts its reply', () => {
+  // IN A PROCESS OF ITS OWN, so the worker scope is the module's from its
+  // first line and the module is loaded once under its own URL (a second
+  // copy under a query string is counted as another file).
+  const module = new URL('../src/lib/census-worker.js', import.meta.url).href;
+  const body = JSON.stringify(census());
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', [
+    'globalThis.WorkerGlobalScope = { [Symbol.hasInstance]: () => true };',
+    'const posted = []; globalThis.postMessage = (reply, transfer) => posted.push({ reply, transfer });',
+    `await import(${JSON.stringify(module)});`,
+    `const buffer = new TextEncoder().encode(${JSON.stringify(body)}).buffer;`,
+    "globalThis.onmessage({ data: { op: 'decode', id: 9, feed: 'example', buffer } });",
+    'console.log(JSON.stringify(posted.map((p) => [p.reply.op, p.reply.id, p.transfer.length])));'
+  ].join('\n')], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), [['decoded', 9, 11]], 'the worker side listens, decodes and posts its reply with its buffers');
+});
+
+test('a worker that cannot start for a thrown value, refuses a read, or fails with no message is named each way', async () => {
+  const bare = createCensusWorker(() => { throw 'no worker'; }, immediate);
+  await assert.rejects(bare.decode(bytesOf(census()), 'example'), /could not start: no worker/);
+  // The worker's own refusal (op error) rejects that read and breaks nothing.
+  const refusing = new FakeWorker();
+  const client = createCensusWorker(() => /** @type {any} */ (refusing), immediate);
+  await assert.rejects(client.decode(bytesOf({ schema: 9 }), 'example'), (why) => why instanceof Error && why.message.length > 0);
+  assert.equal(client.broken, null, 'a refused census is the census\'s fault, not the worker\'s');
+  // A worker that fails with an empty message is named in this module's words.
+  /** @type {any} */
+  let silent = null;
+  const quiet = createCensusWorker(() => {
+    silent = { postMessage() { setImmediate(() => silent.onerror({ message: '' })); }, terminate() {} };
+    return silent;
+  }, immediate);
+  await assert.rejects(quiet.decode(bytesOf(census()), 'example'), /the census worker failed: it could not load or run/);
+});
+
+test('a read cancelled before it is sent is refused with the cancel\'s reason, and one cancelled after its answer settles nothing twice', async () => {
+  const worker = new FakeWorker();
+  const client = createCensusWorker(() => /** @type {any} */ (worker), immediate);
+  const controller = new AbortController();
+  controller.abort(new Error('already superseded'));
+  await assert.rejects(client.decode(bytesOf(census()), 'example', controller.signal), /already superseded/);
+  assert.equal(worker.sent.length, 0, 'nothing was posted for a read already cancelled');
+  // ANSWERED, THEN CANCELLED: the listener is gone with the answer, so the
+  // cancel finds nothing waiting and rejects nothing.
+  const late = new AbortController();
+  const rows = await client.decode(bytesOf(census()), 'example', late.signal);
+  late.abort(new Error('too late'));
+  assert.equal(rows.length, 3);
+});
+
+test('a worker reply that names no order and no ranks is measured with none', async () => {
+  /** @type {any} */
+  let fake = null;
+  const client = createCensusWorker(() => {
+    fake = { postMessage(/** @type {any} */ message) {
+      setImmediate(() => {
+        const { reply } = answerMessage(structuredClone(message));
+        delete reply.order;
+        delete reply.ranks;
+        fake.onmessage({ data: structuredClone(reply) });
+      });
+    }, terminate() {} };
+    return fake;
+  }, immediate);
+  const rows = await client.decode(bytesOf(census()), 'example');
+  assert.equal(rows.length, 3);
+});
