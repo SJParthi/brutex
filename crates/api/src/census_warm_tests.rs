@@ -476,7 +476,7 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
         (
             Duration::from_micros(500),
             Duration::from_micros(990),
-            Duration::from_micros(1_000)
+            Duration::from_millis(1)
         )
     );
 }
