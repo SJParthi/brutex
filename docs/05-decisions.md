@@ -87534,11 +87534,29 @@ table and every uncovered line and branch are in
 `state/fix/round2/base-cov-libs-gaps-a1.txt`; the (F)/(U) list is
 `state/fix/round2/base-cov-libs-fu.txt`.
 
-**Before (tip `f01d7a0e430e`, measured 27 Oct 2026 18:35-, figures as
-measured).** See the gaps file's TOTALS block; the six crates read first:
-`engine` lines 5,154/5,195, branches 508/572; `indicators` 16,275/16,357,
-1,894/2,178; `costs` 11,148/11,366, 481/514; `lake` 4,795/5,452, 252/342;
-`core` 7,302/7,375, 582/658; `greeks` 1,918/1,921, 93/96.
+**Before (tip `f01d7a0e430e`, measured 27 Oct 2026 18:35-21:03 IST, figures
+as measured; lines covered/counted, branches covered/counted).**
+
+| crate | lines | branches | uncovered lines | uncovered branch sides |
+|---|---|---|---|---|
+| `core` | 7,302/7,375 | 582/658 | 73 | 76 |
+| `costs` | 11,148/11,366 | 481/514 | 218 | 33 |
+| `engine` | 5,154/5,195 | 508/572 | 41 | 64 |
+| `greeks` | 1,918/1,921 | 93/96 | 3 | 3 |
+| `indicators` | 16,275/16,357 | 1,894/2,178 | 82 | 284 |
+| `lake` | 4,795/5,452 | 252/342 | 657 | 90 |
+| `runner` | 44,019/45,694 | 3,156/4,188 | 1,675 | 1,032 |
+| `store` | 48,226/50,087 | 3,196/3,872 | 1,861 | 676 |
+| `telemetry` | 9,024/9,091 | 626/676 | 67 | 50 |
+| `vocab` | 7,636/7,741 | 1,124/1,286 | 105 | 162 |
+| **all ten** | **155,497/160,279** | **11,912/14,382** | **4,782** | **2,470** |
+
+294 files read; 19 not read by the route (13 `benches/` files and 6 `lib.rs`
+files with no executable line). A first pass sorts the 7,252 uncovered items
+into 1,572 (F) candidates (failing arms of asserts and panics inside test
+code) and 5,680 GAP items. 4,782 uncovered lines is past the about-2,000
+the specification names as the point where the operator may split this part
+(D6, not decided).
 
 **What the route cannot read (named, never counted covered).** Every
 `benches/` file of the ten crates (13 files, 7,928 lines): each crate declares
