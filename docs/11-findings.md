@@ -1098,6 +1098,15 @@ confirmed by two skeptics; their corrections are applied.
   nothing waiting. FIXED in the test, not by a looser bound: 100 ms or 20
   times a same-run baseline (a regular file swapped in the same way); a
   blocking check substituted still fails (D-7152 addendum, BRED-23).
+- **BRED23-F24: the 26 Oct merges turned the web job red** (`RED W1 W3`,
+  bred1023-web16): R3-15 committed `web/src` without its bundle, and
+  DATA-1w's and R3-15's tests carried 26 svelte-check errors past a ceiling
+  of 0. FIXED at the roots, bundle rebuilt, no ceiling raised (D-7154
+  addendum, BRED-24). Same cause as F12: the merges did not run the web job.
+- **BRED23-F25: a fifth timing test failed under load.** The /db
+  keystroke test took the p99 of every sample (20.29 ms against 16 ms with
+  the gate suite running). FIXED by minima, each keystroke's fastest of
+  ten, the bound unchanged (D-7152 addendum, BRED-25).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

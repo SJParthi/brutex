@@ -1872,11 +1872,14 @@ export async function runSheet(args, deps = {}) {
   }
   // THE COMMANDS' LOG IS NAMED IN THE SHEET, and this run's hold on it let go:
   // a process a command left running keeps its own.
-  if (kept !== null && 'fd' in kept) {
-    closeSync(kept.fd);
-    if (kept.names.size > 0) notes.push(`what the ${[...kept.names].join(' and ')} command${kept.names.size > 1 ? 's' : ''} printed is kept in ${kept.path}, each run under a line that names it`);
+  // `kept` is set inside `loggedFor`, a closure, so the checker narrows it
+  // to its `null` initialiser here; read it again under its declared type.
+  const held = /** @type {{fd: number, path: string, names: Set<string>} | {why: string} | null} */ (kept);
+  if (held !== null && 'fd' in held) {
+    closeSync(held.fd);
+    if (held.names.size > 0) notes.push(`what the ${[...held.names].join(' and ')} command${held.names.size > 1 ? 's' : ''} printed is kept in ${held.path}, each run under a line that names it`);
   }
-  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes, ...(kept !== null && 'fd' in kept ? { commandLog: kept.path } : {}) };
+  return { ok: failures.length === 0, rows, ignored, failures, notMeasured, skipped, ctx, commit, notes, ...(held !== null && 'fd' in held ? { commandLog: held.path } : {}) };
 }
 
 /** @param {number} ms */

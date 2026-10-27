@@ -84293,6 +84293,21 @@ lets it pass. Proved both ways: with a check that opens without
 regular file's swap took 26.95 ms)" (round2/logs-BASE-REDS-1023-t17.log);
 with the real check it passes (t18) (BRED-23).
 
+**Addendum, 27 Oct 2026 (a fifth timing test).** `npm test` on this
+branch with the gate suite running beside it failed web
+`tests/db-search.test.js` "a keystroke never walks the census, and its p99
+over a GDFL-sized census is inside one frame (16 ms)": "p99 20.29 ms is
+over one 60 Hz frame". The p99 was over every sample, so a keystroke the
+scheduler held off the core counted as the search's cost. Made
+load-robust as item 2 was, by minima: each of the 174 keystrokes is timed
+in ten passes and its fastest is its cost; the p99 is over the keystrokes,
+and the 16 ms bound is unchanged. A search that walked the census would pay
+it in every pass, so in its fastest too, and the census reads are still
+counted (0). After, with the same suite running: fastest-of-10 p50 0.012
+ms, p99 3.148 ms, max 4.937 ms; every sample (1,740) p50 0.017 ms, p99
+9.832 ms, max 33.946 ms (BRED-25). `search` holds no cache, so a later pass
+is not a cache hit.
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed
@@ -84344,6 +84359,24 @@ edited):
    NUL-delimited (`tr '\n' '\0' | xargs -0`), which both xargs read alike.
 The web suite: 1,570 of 1,570 pass (two new tests:
 `web/tests/export-agrees-with-the-server.test.js`, D-7153).
+
+**Addendum, 27 Oct 2026 (DATA-1w and R3-15).** The web job on this
+package's merge of feat/db-fix a32722c45 (state/fix/ci-gates-logs/bred1023-web16)
+said `RED W1 W3`. W1: R3-15 changed `web/src` (the layout, `api-status.js`,
+the new speed page) and committed no rebuilt bundle; `npm --prefix web run
+build`, then `web/build` committed. W3: svelte-check counted 26 errors at a
+ceiling of 0, each fixed at its root: `tests/feed-checks.test.js`'s `fake`
+had no types (12 errors at its readers), now typed as the
+`(url: string) => Promise<Response>` that `read` takes, its stand-in cast
+through `unknown` and its `error` matches read `?? ''`; `ci/speed-sheet.mjs`
+read `kept` after a closure set it, which the checker narrows to its `null`
+initialiser (4 errors), now read once under its declared type;
+`tests/speed.test.js` (9): a JSDoc that sat above the wrong `const`, a
+stand-in whose `build` may answer `null` typed as never doing so, a union
+read without its cast, a piped `stdout` read as possibly null, two `before`
+lines given the `at` and `by` their type names, and a failure message that
+read a `method` no sheet row carries (it names the row's page now). The
+gate (`--only W3`, bred1023-web17): 0 errors. No ceiling was raised.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 

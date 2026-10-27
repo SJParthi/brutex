@@ -2329,7 +2329,7 @@ function argsFor() {
  * pages' up check's answer (503 while false) and the up wait's (none while
  * false).
  *
- * @param {{ignore: Set<string>, build?: string | null | (() => string), status?: Record<string, number>,
+ * @param {{ignore: Set<string>, build?: string | null | (() => string | null), status?: Record<string, number>,
  *   drop?: string, up?: () => boolean, failFirstOf?: string, failWhen?: () => boolean, delayMs?: number,
  *   started?: () => unknown}} o
  */
@@ -3300,8 +3300,8 @@ test('the sheet asks only its own server, asks a HEAD as a HEAD, says each page 
   // A HEAD is asked as a HEAD; what its status cannot tell is said, never passed and never failed.
   /** @type {string[]} */
   const asked = [];
-  /** @param {string} path @param {{method?: string}} [o] */
   const garbledFeed = new URLSearchParams({ feed: GARBLED }).toString();
+  /** @param {string} path @param {{method?: string}} [o] */
   const send = async (path, o = {}) => {
     asked.push(`${o.method} ${path}`);
     if (path.includes(garbledFeed)) return answer(400, '{"error":"no such feed"}');
@@ -4868,7 +4868,7 @@ test('the server\'s start is read from its /speed.json answer, or why not is sai
   assert.deepEqual(sheet.startedOf({ ...ok, status: 404 }), { why: 'GET /speed.json answered HTTP 404' });
   assert.deepEqual(sheet.startedOf({ status: 0, error: 'ECONNREFUSED', ms: 1, build: null, body: '', bytes: 0, headers: {} }), { why: 'GET /speed.json answered ECONNREFUSED' });
   assert.deepEqual(sheet.startedOf({ ...ok, kept: 'digest', bytes: 70_000_000 }), { why: 'GET /speed.json answered 70000000 bytes, past the 64000000 the sheet keeps as text' });
-  assert.match(sheet.startedOf({ ...ok, body: 'not json' }).why ?? '', /^GET \/speed\.json answered HTTP 200 with a body that is not JSON \(/);
+  assert.match(/** @type {{why?: string}} */ (sheet.startedOf({ ...ok, body: 'not json' })).why ?? '', /^GET \/speed\.json answered HTTP 200 with a body that is not JSON \(/);
   for (const body of ['null', '[]', '{}', '{"started_ms":"1"}', '{"started_ms":-1}', '{"started_ms":1.5}', '{"started_ms":9007199254740993}']) {
     assert.deepEqual(sheet.startedOf({ ...ok, body }), { why: 'GET /speed.json answered without a whole started_ms' }, body);
   }
@@ -4967,7 +4967,8 @@ test('a stderr reader that is alive and not reading neither stalls a --writer no
     const child = spawn(process.execPath, [SHEET, '--base', site.base, '--n', '1', '--clients', '1', ...CTX_ARGS, '--writer', "head -c 400000 /dev/zero | tr '\\0' w; sleep 100", '--out', out], { stdio: ['ignore', 'pipe', end] });
     closeSync(end);
     let stdout = '';
-    child.stdout.on('data', (d) => (stdout += d));
+    // stdio[1] is 'pipe', so the child has a stdout.
+    /** @type {import('node:stream').Readable} */ (child.stdout).on('data', (d) => (stdout += d));
     let open = true;
     const leave = setTimeout(() => {
       open = false;
@@ -5379,8 +5380,8 @@ test('what the server answered since its start is read from its /speed.json answ
   assert.equal(first(req, answered, { ...o, after: new Map([['/x.json', 1]]), mine: { answered: 1, left: 1 } }), null, 'an ask left unanswered that the server never counted');
   assert.deepEqual(Object.keys(sheet.NOT_FIRST).sort(), ['before', 'during', 'earlier', 'fewer', 'left', 'no answer', 'old server', 'unnamed', 'up wait']);
   // A count of many restarts is its least and most.
-  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [1, 4, 2] }), /\(1 to 4 times: /);
-  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [2] }), /\(2 times: /);
+  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [1, 4, 2], at: [1, 2, 3], by: [null, null, null] }), /\(1 to 4 times: /);
+  assert.match(sheet.NOT_FIRST.before({ r: req, seen: [2], at: [1], by: [null] }), /\(2 times: /);
 });
 
 test('verify r10\'s follow-ups: a file is named, never empty; --out and the commands\' log one file by two spellings is refused at the end, the log kept whole; and each heading in the log names the sheet that wrote it', { timeout: 60_000 }, async () => {
@@ -5566,7 +5567,7 @@ test('a route\'s later asks in a pass are never firsts, by request: with a first
   const r = await sheet.runSheet({ ...argsFor(), restart: 'x', restarts: 2 }, { send, log: () => {}, capture: sharedCapture(), restart: async () => ((state.restarts += 1), 0) });
   assert.equal(r.ok, true, r.failures.join('\n'));
   const firsts = r.rows.filter((x) => x.phase === 'first after restart');
-  for (const x of firsts) assert.deepEqual([x.p50, x.max], [300, 300], `${x.method ?? 'GET'} ${x.url} holds a later ask's time: ${JSON.stringify(x)}`);
+  for (const x of firsts) assert.deepEqual([x.p50, x.max], [300, 300], `${x.page} ${x.url} holds a later ask's time: ${JSON.stringify(x)}`);
   const { requests } = sheet.requestsFor(CTX, sheet.readCapture(sharedCapture()));
   const byUrl = new Map(firsts.map((x) => [`${x.url} ${x.label}`, x.n]));
   // Two restarts: a request alone on its route is first at both; of a route's two requests each goes first
