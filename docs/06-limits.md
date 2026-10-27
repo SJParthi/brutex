@@ -17031,8 +17031,9 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   0.620 ms, max 0.620 ms. Flat: the band no longer tracks the journal. The
   runs page beside it in the same run: p50 0.082, 0.080 and 0.080 ms. The
   before-figures above were the operator's M4 Pro with other builds running;
-  on THIS container the same bench built from `feat/db-fix` `a32722c4`
-  (before D-4896, its own build, run alone the same way the same morning)
+  on THIS container the same bench built from `feat/db-fix` as it stood on
+  27 Oct 2026 before IA-10a merged (before D-4896; its own build, run alone
+  the same way the same morning)
   read the day band at 1,000 lines p50 1.93 ms, p99 2.20 ms; 10,000 lines
   p50 17.03 ms, p99 19.98 ms; 100,000 lines p50 294.5 ms, p99 344.6 ms. So on
   one machine the band at 100,000 `run` lines went from 294.5 ms to 0.50 ms
