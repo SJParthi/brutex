@@ -771,7 +771,20 @@ fn render_horizon(out: &mut String, today: Option<Day>) {
         );
         return;
     };
-    let horizon = pull::calendar::record_horizon(i64::from(today.days_from_epoch()));
+    say_horizon(
+        out,
+        today,
+        &pull::calendar::record_horizon(i64::from(today.days_from_epoch())),
+    );
+}
+
+/// The horizon's line from the record's own two flags, each read on its
+/// own: an ended record is said as `ENDED` whatever `ends_soon` says.
+/// `pull` sets `ends_soon` on every day from 1 January of the last sourced
+/// year, ended days included, so today the second test never decides; a
+/// line keyed on `ends_soon` alone would go silent past the record the day
+/// `pull` narrowed that flag to the year itself. A few comparisons.
+fn say_horizon(out: &mut String, today: Day, horizon: &pull::calendar::RecordHorizon) {
     if !horizon.ends_soon && !horizon.ended {
         return;
     }

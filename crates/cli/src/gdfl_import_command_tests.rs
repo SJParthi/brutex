@@ -1394,6 +1394,36 @@ fn the_calendar_horizon_is_warned_on_the_receipt_before_it_passes() {
     );
 }
 
+/// **AN ENDED RECORD IS SAID ENDED WHATEVER `ends_soon` SAYS** (FM-080; the
+/// out-of-the-box pair no day gives today): past the record `pull` sets both
+/// `ended` and `ends_soon`, and the receipt reads each flag on its own, so a
+/// horizon that has ended but is not said to end soon (a `pull` that one day
+/// narrows `ends_soon` to the last year itself) still prints its `ENDED`
+/// line with the days since; one that neither ends soon nor has ended prints
+/// nothing. Every day derived from `pull::calendar`'s constants.
+#[test]
+fn an_ended_record_is_said_ended_whatever_ends_soon_says() {
+    use pull::calendar::SOURCED_LAST_DAY;
+    let today = Day::from_days(u32::try_from(SOURCED_LAST_DAY + 3).unwrap()).unwrap();
+    let mut horizon = pull::calendar::record_horizon(SOURCED_LAST_DAY + 3);
+    assert!(
+        horizon.ended && horizon.ends_soon,
+        "pull's own pair past the record: {horizon:?}"
+    );
+    horizon.ends_soon = false;
+    let mut out = String::new();
+    say_horizon(&mut out, today, &horizon);
+    assert!(
+        out.starts_with("  calendar horizon    ENDED: the calendar of record ended "),
+        "{out}"
+    );
+    assert!(out.contains(", 3 day(s) before today ("), "{out}");
+    horizon.ended = false;
+    let mut quiet = String::new();
+    say_horizon(&mut quiet, today, &horizon);
+    assert_eq!(quiet, "", "neither ending soon nor ended says nothing");
+}
+
 /// **THE RECEIPT'S TODAY IS THE HOST CLOCK'S IST DAY** (FM-080; IA-10a item
 /// 7b): the day the horizon is seen from is the calendar day in IST of the
 /// host's clock, by `pull::session`'s own offset and day length, so a sane
