@@ -222,6 +222,13 @@ fn a_cash_file_decodes_to_paisa_and_the_layout_is_detected() {
     let f = LakeFile::from_bytes(bytes).expect("a file this test just wrote must open");
     assert_eq!(f.layout(), Layout::Cash);
     assert_eq!(f.num_rows(), 3);
+    // BASE-COV-LIBS (D-7320): what wrote the file, as its footer says: the
+    // writer this test used names itself.
+    assert!(
+        f.created_by().is_some_and(|by| by.starts_with("parquet-rs")),
+        "{:?}",
+        f.created_by()
+    );
     assert_eq!(f.row_groups(), 1);
 
     let b = f.read_row_group(0).expect("decode");
@@ -1223,4 +1230,137 @@ fn a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw() {
     // refusal above is the codec's and not some other fault of the fixture.
     let sound = LakeFile::from_bytes(sound_cash_file()).expect("open");
     assert_eq!(sound.read_row_group(0).expect("decodes").len(), 3);
+}
+
+/// Copies an UNCOMPRESSED file page by page, handing every page header to
+/// `edit` before it is written back, and moves every offset the footer holds
+/// to where the (possibly resized) headers now put the pages: the same walk
+/// as [`zstd_copy`], with the body left as it was.
+fn edit_pages(original: &[u8], mut edit: impl FnMut(&mut PageHeader)) -> Vec<u8> {
+    let (mut meta, _) = read_footer(original);
+    let mut out: Vec<u8> = b"PAR1".to_vec();
+    for group in &mut meta.row_groups {
+        let group_start = out.len();
+        for column in &mut group.columns {
+            let chunk = column.meta_data.as_mut().expect("chunk metadata");
+            let first = unsigned(chunk.dictionary_page_offset.unwrap_or(chunk.data_page_offset));
+            let end = first + unsigned(chunk.total_compressed_size);
+            let data_at = unsigned(chunk.data_page_offset);
+            let chunk_start = out.len();
+            let mut moved_data_at = None;
+            let mut pos = first;
+            while pos < end {
+                let mut cursor = Cursor::new(&original[pos..end]);
+                let mut header = {
+                    let mut proto = TCompactInputProtocol::new(&mut cursor, end - pos);
+                    PageHeader::read_from_in_protocol(&mut proto).expect("a header parses")
+                };
+                let body_at = pos + usize::try_from(cursor.position()).expect("fits");
+                let body = &original[body_at..body_at + unsigned(header.compressed_page_size.into())];
+                edit(&mut header);
+                if pos == data_at {
+                    moved_data_at = Some(out.len());
+                }
+                {
+                    let mut proto = TCompactOutputProtocol::new(&mut out);
+                    header.write_to_out_protocol(&mut proto).expect("a header serialises");
+                }
+                out.extend_from_slice(body);
+                pos = body_at + body.len();
+            }
+            chunk.data_page_offset = signed(moved_data_at.expect("a data page was crossed"));
+            if chunk.dictionary_page_offset.is_some() {
+                chunk.dictionary_page_offset = Some(signed(chunk_start));
+            }
+            chunk.total_compressed_size = signed(out.len() - chunk_start);
+            column.offset_index_offset = None;
+            column.offset_index_length = None;
+            column.column_index_offset = None;
+            column.column_index_length = None;
+        }
+        if group.file_offset.is_some() {
+            group.file_offset = Some(signed(group_start));
+        }
+        if group.total_compressed_size.is_some() {
+            group.total_compressed_size = Some(signed(out.len() - group_start));
+        }
+    }
+    close_with_footer(out, &meta)
+}
+
+/// BASE-COV-LIBS (D-7320): every page header the reader cannot use is a
+/// refusal that names the page's fault, never a page skipped or read as
+/// another kind.
+#[test]
+fn a_page_header_the_reader_cannot_use_is_refused_by_name() {
+    let refusal = |bytes: Vec<u8>| {
+        let file = LakeFile::from_bytes(bytes).expect("the footer still parses");
+        match file.read_row_group(0) {
+            Err(e) => e.to_string(),
+            Ok(rows) => panic!("decoded {} rows from a broken page", rows.len()),
+        }
+    };
+    // The control: the copy with no edit decodes exactly like the original.
+    let same = edit_pages(&sound_cash_file(), |_| {});
+    assert_eq!(
+        LakeFile::from_bytes(same).expect("open").read_row_group(0).expect("decodes").len(),
+        3
+    );
+    let cases: [(&str, Box<dyn FnMut(&mut PageHeader)>); 6] = [
+        (
+            "data page carries no header",
+            Box::new(|h: &mut PageHeader| {
+                if h.type_ == PageType::DATA_PAGE {
+                    h.data_page_header = None;
+                }
+            }),
+        ),
+        (
+            "data page value count is negative",
+            Box::new(|h: &mut PageHeader| {
+                if let Some(d) = h.data_page_header.as_mut() {
+                    d.num_values = -1;
+                }
+            }),
+        ),
+        (
+            "dictionary page carries no header",
+            Box::new(|h: &mut PageHeader| {
+                if h.type_ == PageType::DICTIONARY_PAGE {
+                    h.dictionary_page_header = None;
+                }
+            }),
+        ),
+        (
+            "dictionary page value count is negative",
+            Box::new(|h: &mut PageHeader| {
+                if let Some(d) = h.dictionary_page_header.as_mut() {
+                    d.num_values = -1;
+                }
+            }),
+        ),
+        (
+            "not one this reader implements",
+            Box::new(|h: &mut PageHeader| {
+                if h.type_ == PageType::DATA_PAGE {
+                    h.type_ = PageType::DATA_PAGE_V2;
+                }
+            }),
+        ),
+        // COMBINED: an unknown page type AND a negative count on the same
+        // page: the type is judged first, so the type is what is named.
+        (
+            "not one this reader implements",
+            Box::new(|h: &mut PageHeader| {
+                if let Some(d) = h.data_page_header.as_mut() {
+                    d.num_values = -1;
+                    h.type_ = PageType::INDEX_PAGE;
+                }
+            }),
+        ),
+    ];
+    for (named, edit) in cases {
+        let why = refusal(edit_pages(&sound_cash_file(), edit));
+        assert!(why.contains(named), "expected {named:?}, got {why:?}");
+    }
 }
