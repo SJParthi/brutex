@@ -4512,6 +4512,10 @@ jobs:
           # docs/06-limits.md §54 already accounts for. D-1327: that line is
           # gone (`resume_point` has none), so `sink.rs` is declared 20.
           #
+          # D-7322 (BASE-COV-LIBS, 27 Oct 2026): `clock.rs` 1 -> 0. The pre-epoch
+          # arm of `now_millis` moved into `millis_since_epoch`, which a test hands
+          # an instant before 1970; so the line is covered and its row is gone.
+          #
           # docs/06-limits.md §54 measured the earlier set with
           # `cargo llvm-cov -p telemetry`; this gate runs after the workspace
           # coverage step and therefore reads a workspace profile. The two are
@@ -4519,7 +4523,6 @@ jobs:
           # crate-scoped run compiles the test module differently. §54 now says
           # which one it is quoting.
           declared='
-          clock.rs 1
           level.rs 1
           lib.rs 6
           record.rs 1

@@ -87511,3 +87511,99 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7320 — BASE-COV-LIBS: the ten library crates measured whole (core, costs, engine, greeks, indicators, lake, runner, store, telemetry, vocab); the bar is NOT yet met, so D-7250's narrow reading still holds for them — 2026-10-27
+
+**Status: IN PROGRESS, not a landing record.** Operator decision D2 part A
+(27 Oct 2026) asks for line and branch coverage 100% on the old code of these
+ten crates, so that `CLAUDE.md` §9's whole-crate rule applies to them again;
+this part's merge commit `Merge BASE-COV-LIBS:` on `feat/db-fix` is the named
+event that would end D-7250's narrow reading for them. **That merge must not
+happen until the bar holds on the final tip.** Until then the narrow reading
+of D-7250 stands for these crates, and this entry records the measurement and
+the work done so far so a later attempt continues it.
+
+**Instrument and route.** D3 recipe v4, Route B (`d3-route-b.sh`): the pinned
+nightly `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)` with `-C
+instrument-coverage -Z coverage-options=branch`, its own `llvm-profdata` and
+`llvm-cov` (LLVM 23.1.0-rust-1.99.0-nightly), opt-level 0, `cargo test -p
+<crate> --locked --no-fail-fast` per crate, a new empty profile folder, figures
+read by `d3-covset.mjs`. The coverage set is every source file of the ten
+crates (`src/`, `tests/`, `benches/`), whole. The before figures, the per-file
+table and every uncovered line and branch are in
+`state/fix/round2/base-cov-libs-gaps-a1.txt`; the (F)/(U) list is
+`state/fix/round2/base-cov-libs-fu.txt`.
+
+**Before (tip `f01d7a0e430e`, measured 27 Oct 2026 18:35-, figures as
+measured).** See the gaps file's TOTALS block; the six crates read first:
+`engine` lines 5,154/5,195, branches 508/572; `indicators` 16,275/16,357,
+1,894/2,178; `costs` 11,148/11,366, 481/514; `lake` 4,795/5,452, 252/342;
+`core` 7,302/7,375, 582/658; `greeks` 1,918/1,921, 93/96.
+
+**What the route cannot read (named, never counted covered).** Every
+`benches/` file of the ten crates (13 files, 7,928 lines): each crate declares
+its `ratio` bench `test = false`, so `cargo test --no-run` builds no bench
+object and Route B prints NOT PROVED for each. A `lib.rs` that holds only
+`mod` and `use` lines (for example `crates/lake/src/lib.rs`) has no executable
+line and appears in no object's mapping, so the route also prints NOT PROVED
+for it: it is 0/0, not a gap. Both are recorded in `docs/06-limits.md`
+L-BCL-1 and L-BCL-2.
+
+**Done so far (each a test that reaches the line and asserts its behaviour).**
+`costs`: the lot table's wire words, absence text, grouped order and digest
+lengths; the no-`Default` witness; the regime and `str_eq` edges; a test
+oracle's dead tie clause removed; the printed-extreme worst case pinned to its
+measured `Overflow`; `to_rupee` at both ends of `i64` (measured: it never
+leaves the type, so its narrowing refusal is (U)); the adversarial matrix's
+refusal column, which never counted a cell, made a failure. `telemetry`: the
+clock's routing (D-7322). `engine`: the manifest reader's string-grammar
+edges. `indicators`: the exact-minute bridge's pre-read refusals and a short
+signal; the daily reference read-back and each census imbalance; the
+known-at ladder and three single-condition near misses; the column's shared
+acceptance bitmap and index convention. `core`: the three `const fn` row
+builders run at run time; two member-probe walks asserted; a test-local month
+length replaced by the crate's own Gregorian rule. D-7321 restructures two
+`costs::lot` guards that could not fail.
+
+**NOT DONE.** Every other GAP in the gaps file, the `benches/` files, and the
+`#[ignore]`d tests (timing measurements and real-lake or real-store readers),
+whose bodies count as uncovered under the route; the operator's call is named
+in `docs/06-limits.md` L-BCL-3. Mutants of this part's own diff (D3 v4) are
+not yet run.
+
+### D-7321 — `costs::lot`: the table's build and the compiled rows walk their inputs by value and by `zip`, so neither holds a guard that cannot fail (BASE-COV-LIBS) — 2026-10-27
+
+**Decision.** `LotTable::from_rows` sorted a list of indices and then took
+each row out of an `Option` slot with `let Some(row) = .. else { continue }`;
+the indices are a permutation of the slots, so every slot was full when read
+and the `continue` could not run. It now numbers the rows once
+(`enumerate`), sorts the numbered rows with the same stable key (the
+underlying), and walks them by value: same order, same one-based row number in
+every refusal, nothing to find empty. `compiled_rows` indexed
+`InstrumentKey::SWEPT` and `CONTRACT_RULES` by the slot of `LOT_SIZES` with
+`get(slot)`, whose `None` arm could not run because all three arrays have
+length `SweptSlot::COUNT`, which `crates/costs/src/venue.rs` defines as
+`InstrumentKey::SWEPT.len()`; it now walks the three with `zip`.
+
+**Proof.** `costs::lot::table_tests::the_wire_words_the_absence_text_and_the_grouped_rows_hold_at_their_extremes`
+(interleaved rows come back grouped and ascending; an interleaved descending
+pair is refused as the FOURTH row handed in, not its sorted place),
+`every_malformed_table_is_refused_by_name` and
+`the_compiled_rows_move_into_the_table_unchanged`, unchanged and green.
+
+**Cost.** `from_rows` is still one sort of the rows and one pass; the index
+vector is gone.
+
+### D-7322 — `telemetry::clock::now_millis` routes the host clock through one conversion a test can hand any instant (BASE-COV-LIBS) — 2026-10-27
+
+**Decision.** `now_millis` matched `SystemTime::now().duration_since(UNIX_EPOCH)`
+itself, so its pre-epoch arm needed a host clock set before 1970 and was
+declared dark in `docs/06-limits.md` §54 (`clock.rs` 1) and gate 20. The match
+now lives in `millis_since_epoch(at: SystemTime)`, which `now_millis` calls
+with the host clock; behaviour is unchanged (negative milliseconds before the
+epoch, truncation towards zero, saturation past `i64`).
+
+**Proof.** `clock::tests::an_instant_either_side_of_the_epoch_routes_to_its_signed_millis`:
+the epoch, one millisecond either side, sub-millisecond instants either side
+(truncate to 0), the last day of 1969, a century and seven milliseconds either
+side (exact negation), and the live clock after 2026-01-01.

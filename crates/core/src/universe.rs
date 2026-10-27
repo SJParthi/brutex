@@ -4829,7 +4829,13 @@ mod tests {
             let start = mask(fnv1a(m), N);
             let mut at = start;
             let mut steps = 1;
-            while let Some(held) = idx.slots[at] {
+            // Every walked name IS a member, so the walk ends on it; an
+            // empty slot before it is an index that lost a member, and fails
+            // here rather than ending the count early (BASE-COV-LIBS, D-7320).
+            loop {
+                let Some(held) = idx.slots[at] else {
+                    panic!("{m} is a member, yet its probe reached an empty slot");
+                };
                 if held == *m {
                     break;
                 }

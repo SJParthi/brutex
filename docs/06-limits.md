@@ -3911,7 +3911,7 @@ in their own rows.
 | `lib.rs` 178, 187–191 | the concurrent-`install` arm | Needs two `install` calls to interleave inside a few instructions. `OnceLock` is per **process**, so a test cannot retry — it gets one attempt per binary. Already named in the source. |
 | `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. **Retired 2026-10-02 (D-1327):** `resume_seq` became `resume_point`, which has no such line. |
 | `tail.rs` 401–403 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is on the path that opened it, which IS tested. **Was 378–380** — the same three lines, moved down by growth above them. |
-| `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
+| ~~`clock.rs` 41~~ | `now_millis`'s pre-epoch arm | **Retired 2026-10-27 (D-7322, BASE-COV-LIBS):** the routing moved into `millis_since_epoch(at)`, which `clock::tests::an_instant_either_side_of_the_epoch_routes_to_its_signed_millis` hands an instant before 1970; the line is covered and gate 20 no longer declares `clock.rs`. |
 
 **Every one is a backstop or a diagnostic.** Making them execute would mean
 either deleting the backstop or committing a failing test, and both are worse
@@ -3940,7 +3940,7 @@ zero-count lines under `crates/telemetry/src` against this declaration:
 
 | File | Uncovered | What they are |
 |---|---|---|
-| `clock.rs` | 1 | the pre-epoch branch of a monotonic clock |
+| `clock.rs` | 0 (was 1; D-7322) | the pre-epoch branch is now reached through `millis_since_epoch` |
 | `level.rs` | 1 | a rank past the last variant, which `of_rank` cannot be handed |
 | `lib.rs` | 6 | backstops behind the process-wide sink already being set |
 | `sink.rs` | 8 | I/O failure arms, and the `rotation_broken` latch's second visit |

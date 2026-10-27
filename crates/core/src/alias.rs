@@ -1505,13 +1505,12 @@ mod tests {
             let Ymd { year, month, day } = row.effective;
             assert!((2000..=2100).contains(&year));
             assert!((1..=12).contains(&month));
-            let days = match month {
-                2 if year % 4 == 0 => 29,
-                2 => 28,
-                4 | 6 | 9 | 11 => 30,
-                _ => 31,
-            };
-            assert!((1..=days).contains(&day), "{row:?}");
+            // A real calendar day, leap years included, by the crate's own
+            // Gregorian rule rather than a second copy of it here.
+            assert!(
+                crate::instrument::Expiry::new(year, month, day).is_ok(),
+                "{row:?}"
+            );
             for later in &SYMBOL_CHANGES[at + 1..] {
                 assert_ne!(row.old, later.old, "an old symbol twice");
                 assert_ne!(row.new, later.new, "a new symbol twice");
