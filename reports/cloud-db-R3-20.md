@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # R3-20 (cloud): month recovery after a power cut
 
@@ -26,13 +26,16 @@ merged: `5901ec77` (Merge BASE-FIXTURE-1025; also R4-22, IA-10c), merge commit `
 
 ## Left
 
-1. Coverage once more after the mutant fixes (nightly `--branch`; running, 26 Oct 19:5x IST).
-2. The final gates on the merged tree (`20cb5151` + this part's commits): clippy (running), workspace
-   tests, compared with a worktree of the unmodified base `5901ec77` for every failure.
+Code complete. HELD at 10:3x IST 27 Oct (`b34f6a16a`, HOLD until about 12:50 IST). After the hold:
 
-Done since the last session (26 Oct): the cli mutants' last survivor killed; store mutants on
-`812136f5`'s edit (0 missed); merge of `5901ec77`; fmt; deny; every CI shell gate of the
-language-purity job plus 6c and 5, branch against base (Gates table).
+1. Re-measure C-RC-01 / C-RC-02 on the final code: `cargo bench -p store --bench ratio --locked`, alone on
+   the machine (the figures below are of 24 Oct, before the later edits of `recover.rs`).
+2. Gate 13c (`cargo build --workspace --locked --offline --all-targets` + `gates-jobs gate-13c`).
+3. Merge `origin/feat/db-fix` again if it moved; the final report.
+
+Done 27 Oct: merges of `a32722c45` and `f01d7a0e4` (R4-26: the `WRITERS` / `COMMANDS` lengths), fmt,
+clippy, deny (green: tokio 1.53.3), the CI shell gates against the base, the workspace tests with every
+failure rerun here, on the base and as a non-root user (progress log, 27 Oct entries).
 
 ## Gates (commands and results)
 
@@ -474,3 +477,13 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   11 ok.
 - NEXT: re-measure C-RC-01/C-RC-02 on the final code (`cargo bench -p store --bench ratio --locked`,
   alone on the machine: the 24 Oct figures predate later edits of `recover.rs`); gate 13c; final report.
+
+### 27 Oct 10:4x IST — HELD (HOLD of 10:29 IST, `b34f6a16a`)
+
+- HOLD found on the base branch at this save point ("HOLD all cloud parts until the 12:50 IST 5-hour
+  reset"; no GO-R3-20). The step in hand (the final gates on the `f01d7a0e4` merge) is finished and pushed
+  (`ff9100290`). Waiting as README step 1 says.
+- NEXT: when HOLD is gone (or GO-R3-20 appears): merge `origin/feat/db-fix` if it moved (then fmt, clippy,
+  and the tests of what it touched); re-measure C-RC-01/C-RC-02 alone on the machine
+  (`cargo bench -p store --bench ratio --locked`); gate 13c; then the final report (STATUS line, Gates
+  table, Measurements, NEEDS THE MAC).
