@@ -87583,6 +87583,37 @@ builders run at run time; two member-probe walks asserted; a test-local month
 length replaced by the crate's own Gregorian rule. D-7321 restructures two
 `costs::lot` guards that could not fail.
 
+**After this attempt (tip `5ad554601835`, Route B, 21:08-21:50 IST; the seven
+touched crates re-measured, the other three unchanged), uncovered lines /
+branch sides:** `core` 56/75 (was 73/76), `costs` 175/22 (218/33), `engine`
+40/56 (41/64), `indicators` 42/271 (82/284), `lake` 637/93 (657/90; the new
+page-editing test adds its own branches), `store` 1,820/673 (1,861/676),
+`telemetry` 51/52 (67/50); `greeks` 3/3, `runner` 1,675/1,032, `vocab`
+105/162 untouched. All ten: **4,604 uncovered lines and 2,439 uncovered branch
+sides**, from 4,782 and 2,470. Files fully closed by this attempt include
+`costs/src/{dated,moneyness,regime,trip}.rs`, `engine/src/manifest.rs` and
+`telemetry/src/clock.rs` (lines); every remaining item of `costs/src/lot.rs`,
+`ledger.rs`, `stack.rs` and `tests/adversarial.rs` is an (F) or (U) row of
+the list. `state/fix/round2/base-cov-libs-gaps-a1-after.txt` holds the after
+table and every remaining item.
+
+**D3 mutants of this part's own diff** (recipe v4 step 5, the D2 set: the six
+production functions it changed, `LotTable::from_rows`, `compiled_rows`,
+`NoDefault::witness`, `now_millis`, `millis_since_epoch`, `parse_month`):
+37 of 296 listed mutants selected, 2 shards in one lane. At `6d03e350ec45` two
+survived (`from_rows` row cap `>` to `>=`, and `compiled_rows`' digest
+choice `==` to `!=`); the test
+`each_sourced_row_carries_its_own_circulars_digest_and_the_row_cap_is_exact`
+kills both. At `5ad554601835`: caught 35, unviable 2, missed 0, timeout 0
+(per-mutant test p50 0.5 s, p99 8.2 s, max 8.2 s).
+
+**Gates on `5ad554601835`:** `cargo fmt --all --check` clean; `cargo clippy -p
+core -p costs -p engine -p indicators -p lake -p store -p telemetry
+--all-targets --locked -- -D warnings` clean; `cargo test` of the same crates
+`--locked`: 2,599 passed, 0 failed, 17 ignored. Each new test was shown red
+with its behaviour changed by hand (four production changes at once, four
+tests failed), then restored.
+
 **NOT DONE.** Every other GAP in the gaps file, the `benches/` files, and the
 `#[ignore]`d tests (timing measurements and real-lake or real-store readers),
 whose bodies count as uncovered under the route; the operator's call is named
