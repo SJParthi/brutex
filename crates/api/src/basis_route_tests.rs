@@ -626,3 +626,172 @@ fn a_basis_step_is_one_threshold_on_sources_and_in_the_runs() {
         i128::from(pull::corporate_actions::STEP_PERMILLE)
     );
 }
+
+// ───────────────────── BASE-COV-API (D-7340): the handler and the compiled arm ─────────────────────
+
+/// `GET /basis.json` through its handler, as the router calls it.
+async fn through(store: &Path, query: &str) -> (axum::http::StatusCode, String) {
+    let site: super::Loaded = Arc::new(crate::server::Site::load(
+        &store.join("masters-none"),
+        store,
+    ));
+    let uri: axum::http::Uri = format!("/basis.json?{query}").parse().unwrap();
+    let (status, headers, body) = super::basis_json(axum::extract::State(site), uri).await;
+    // Every answer, served or refused, is JSON that no cache keeps.
+    assert_eq!(headers[0].1, "application/json; charset=utf-8");
+    assert_eq!(headers[1].1, "no-store");
+    let _: Value = serde_json::from_str(&body).unwrap();
+    (status, body)
+}
+
+/// **THE HANDLER SERVES `answer` WHOLE, AND REFUSES A BAD QUERY BEFORE IT
+/// TAKES A SLOT.** Extremes: no query at all, a repeated field, an overlong
+/// symbol, a day of a month that has no such day, a year boundary, a share
+/// the tables do not hold.
+#[tokio::test]
+async fn the_handler_serves_the_answer_and_refuses_a_bad_query_by_name() {
+    let store = root("handler");
+    install(&store, &[measured_split()]);
+    let (status, body) = through(&store, "symbol=SPLITCO&day=2025-03-04").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let served: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        served,
+        answer(
+            &tables(&store),
+            &asked("symbol=SPLITCO&day=2025-03-04").unwrap()
+        ),
+        "the handler adds nothing to and drops nothing from the answer"
+    );
+    assert_eq!(served["day"]["factor"], "2/1");
+    for (query, said) in [
+        ("", "symbol is required"),
+        ("symbol=SPLITCO&symbol=SPLITCO", "given twice"),
+        (
+            &*format!("symbol={}", "Z".repeat(65)),
+            "not a stored share name",
+        ),
+        ("symbol=SPLITCO&day=2025-02-29", "is no calendar day"),
+        ("symbol=SPLITCO&day=2025-13-01", "day"),
+    ] {
+        let (status, body) = through(&store, query).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{query:?}: {body}"
+        );
+        let error: Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            error["error"].as_str().unwrap().contains(said),
+            "{query:?}: {body}"
+        );
+    }
+    // A year boundary and a share no table holds: served, and named outside.
+    let (status, body) = through(&store, "symbol=NOSUCHCO&day=2024-12-31").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let none: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        none["day"]["outside"]
+            .as_str()
+            .unwrap()
+            .starts_with("no_basis_run")
+    );
+    assert_eq!(none["day"]["actions"], serde_json::json!([]));
+}
+
+/// **A FULL OPERATIONS POOL IS A 429 THAT NAMES THE LOOKUP AND ITS BOUND,
+/// AND A BAD QUERY IS STILL A 400 WHILE IT IS FULL** (a combination of
+/// extremes: every slot taken and a garbage parameter at once).
+#[tokio::test]
+async fn a_full_operations_pool_refuses_the_lookup_by_name_and_a_bad_query_first() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let store = root("crowded");
+    install(&store, &[measured_split()]);
+    let crowd = crate::detail::crowd(crate::detail::Named::OpsRead);
+    let refused = through(&store, "symbol=SPLITCO").await;
+    let garbage = through(&store, "symbol=splitco").await;
+    drop(crowd);
+    assert_eq!(
+        refused.0,
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        refused.1
+    );
+    assert!(
+        refused.1.contains("a basis lookup not admitted"),
+        "{}",
+        refused.1
+    );
+    assert!(refused.1.contains("retry"), "{}", refused.1);
+    assert_eq!(
+        garbage.0,
+        axum::http::StatusCode::BAD_REQUEST,
+        "{}",
+        garbage.1
+    );
+    // Freed, the same lookup is served.
+    let (status, body) = through(&store, "symbol=SPLITCO").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+}
+
+/// **A COMPILED TABLE IS LABELLED `compiled`, WITH THE DIRECTORY THAT HELD
+/// NO GENERATION AND ITS OWN RECEIPT** (`slot_json`'s third shape; the two
+/// basis tables have no compiled copy, so only a direct call reaches it).
+/// Extremes at once: generation 0 and the largest row count and generation.
+#[test]
+fn a_compiled_slot_is_served_labelled_with_the_folder_it_looked_in() {
+    use pull::reference_data::{Receipt, Slot};
+    for (generation, rows) in [(0_u64, 0_usize), (u64::MAX, usize::MAX)] {
+        let slot: Slot<()> = Slot::Compiled {
+            receipt: Receipt {
+                table: Table::CorporateActions,
+                generation,
+                source: "an invented compiled table".to_owned(),
+                source_sha256: Some("ab".repeat(32)),
+                fetched: day(2026, 1, 1),
+                standing: Standing::Unverified,
+                decision: "D-7340".to_owned(),
+                rows,
+                sha256: "cd".repeat(32),
+            },
+            looked_in: PathBuf::from("/nowhere/reference/v1/corporate_actions"),
+            table: Arc::new(()),
+        };
+        let said = super::slot_json(&slot);
+        assert_eq!(said["served"], true);
+        assert_eq!(said["origin"], "compiled");
+        assert_eq!(said["path"], "/nowhere/reference/v1/corporate_actions");
+        assert_eq!(said["receipt"]["generation"], generation);
+        assert_eq!(said["receipt"]["rows"], rows);
+        assert_eq!(said["receipt"]["status"], "unverified");
+        assert_eq!(said["receipt"]["fetched"], "2026-01-01");
+        assert_eq!(said["receipt"]["decision"], "D-7340");
+    }
+}
+
+/// **OUT OF THE BOX: AN ANSWER IS AN OBJECT WHATEVER IT IS ASKED** — the
+/// map is built as one (D-7341), so every shape a reader can ask for, with
+/// a day or without, over present or absent tables, carries every key.
+#[test]
+fn every_answer_is_an_object_with_its_four_keys() {
+    let present = root("shape-present");
+    install(&present, &[measured_split()]);
+    let absent = root("shape-absent");
+    for store in [&present, &absent] {
+        for query in [
+            "symbol=SPLITCO",
+            "symbol=SPLITCO&day=2025-03-06",
+            "symbol=M%26M",
+        ] {
+            let body = answer(&tables(store), &asked(query).unwrap());
+            let object = body.as_object().unwrap();
+            for key in ["symbol", "tables", "law"] {
+                assert!(object.contains_key(key), "{query}: {body}");
+            }
+            assert!(
+                object.contains_key("day") != object.contains_key("runs"),
+                "{query}: a day answer or a whole-share answer, never both: {body}"
+            );
+        }
+    }
+}

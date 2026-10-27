@@ -4974,3 +4974,46 @@ fn a_run_is_judged_by_its_longest_stretch_outside_the_windows() {
     assert_eq!(outside_of((300, 400), [halt, auction]), (100, 100));
     assert_eq!(outside_of((0, 0), [halt, auction]), (0, 0));
 }
+
+/// **FORGETTING ONE STORE'S FLAGS LEAVES EVERY OTHER STORE'S KEPT, AND THE
+/// FORGOTTEN DAY IS READ AGAIN ONCE** (`forget_flags`, the timing runs' cold
+/// start; BASE-COV-API, D-7340). Two stores with the same day and share at
+/// once: forgetting one twice is the same as once, and a store never asked
+/// is forgotten without effect.
+#[test]
+fn forgetting_one_stores_flags_keeps_the_others_and_reads_its_day_again() {
+    let on = day("2026-08-11");
+    let csv = format!(
+        "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n7,RELIANCE,EQ,{},1\n",
+        brutex_core::universe::nse_isin("RELIANCE")
+            .expect("an F&O share")
+            .as_str(),
+    );
+    let roots = [root_of("forget-a"), root_of("forget-b")];
+    for root in &roots {
+        pull::cash_session_cache::install(
+            &root.join("session-masters"),
+            on,
+            &stored_gzip(csv.as_bytes()),
+        )
+        .expect("the master lands");
+        let flag = CasFlags::of(root, "RELIANCE", true).on(on);
+        assert_eq!(flag.eligibility, CasEligibility::Eligible);
+    }
+    let [a, b] = roots.map(|root| root.join("session-masters"));
+    assert!(kept_flag(&a, on, "RELIANCE").0 && kept_flag(&b, on, "RELIANCE").0);
+    forget_flags(&a);
+    forget_flags(&a);
+    forget_flags(&root_of("forget-never-asked").join("session-masters"));
+    assert!(!kept_flag(&a, on, "RELIANCE").0, "a's flag is forgotten");
+    assert!(
+        kept_flag(&b, on, "RELIANCE").0,
+        "b's flag is another store's"
+    );
+    assert_eq!(reads_of(&a, on), 1);
+    let again = CasFlags::of(&roots[0], "RELIANCE", true).on(on);
+    assert_eq!(again.eligibility, CasEligibility::Eligible);
+    assert_eq!(again.basis, CasBasis::DatedMaster);
+    assert_eq!(reads_of(&a, on), 2, "read again, once");
+    assert_eq!(reads_of(&b, on), 1, "b was never read again");
+}

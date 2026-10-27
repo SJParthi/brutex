@@ -328,17 +328,20 @@ pub(crate) fn answer(tables: &Tables, asked: &Asked) -> Value {
     let symbol = asked.symbol.as_str();
     let runs = tables.runs.table().ok();
     let actions = tables.actions.table().ok();
-    let mut body = json!({
-        "symbol": symbol,
-        "tables": {
+    // Built as a map, never as a `Value` asked back for its map: the answer
+    // is an object by construction, so no branch can find it is not one
+    // (BASE-COV-API, D-7341: the old `let Some(object) = ... else` arm was
+    // unreachable).
+    let mut object = serde_json::Map::new();
+    object.insert("symbol".to_owned(), json!(symbol));
+    object.insert(
+        "tables".to_owned(),
+        json!({
             "basis_runs": slot_json(&tables.runs),
             "corporate_actions": slot_json(&tables.actions),
-        },
-        "law": LAW,
-    });
-    let Some(object) = body.as_object_mut() else {
-        return body;
-    };
+        }),
+    );
+    object.insert("law".to_owned(), json!(LAW));
     if let Some(day) = asked.day {
         let run = runs.map(|runs| runs.run_on(symbol, day));
         let rows = actions.map(|table| table.labels(symbol, None, day));
@@ -374,7 +377,7 @@ pub(crate) fn answer(tables: &Tables, asked: &Asked) -> Value {
             }),
         );
     }
-    body
+    Value::Object(object)
 }
 
 /// `GET /basis.json`.

@@ -1449,22 +1449,6 @@ fn not_owed_json(ledger: &pull::gaps::Ledger, key: &pull::gaps::Key<'_>) -> Stri
         .not_owed()
         .iter()
         .map(|excused| {
-            // THE ANSWER'S OWN EVIDENCE, beside what every answer states.
-            let own = match excused.why {
-                pull::gaps::NotOwed::InstrumentInactive(interval) => serde_json::json!({
-                    "symbol": key.symbol,
-                    "from": interval.from.to_string(),
-                    "through": interval.through.to_string(),
-                    "sources": [interval.withdrawal_source, interval.readmission_source],
-                    "circulars": [interval.withdrawal_circular, interval.readmission_circular],
-                }),
-                pull::gaps::NotOwed::BeforeListing { listed_on: day }
-                | pull::gaps::NotOwed::AfterDelisting { delisted_on: day } => serde_json::json!({
-                    "date": day.to_string(),
-                    "master": master,
-                }),
-                pull::gaps::NotOwed::Unread => serde_json::json!({}),
-            };
             let mut row = serde_json::Map::new();
             for (name, value) in [
                 ("code", serde_json::json!(excused.why.code())),
@@ -1477,8 +1461,39 @@ fn not_owed_json(ledger: &pull::gaps::Ledger, key: &pull::gaps::Key<'_>) -> Stri
             ] {
                 row.insert(name.to_owned(), value);
             }
-            if let serde_json::Value::Object(own) = own {
-                row.extend(own);
+            // THE ANSWER'S OWN EVIDENCE, beside what every answer states,
+            // written into the row itself: no object is built to be asked
+            // back for its members (BASE-COV-API, D-7341: the old
+            // `if let Value::Object(own)` had a side no answer reached).
+            let own: Vec<(&str, serde_json::Value)> = match excused.why {
+                pull::gaps::NotOwed::InstrumentInactive(interval) => vec![
+                    ("symbol", serde_json::json!(key.symbol)),
+                    ("from", serde_json::json!(interval.from.to_string())),
+                    ("through", serde_json::json!(interval.through.to_string())),
+                    (
+                        "sources",
+                        serde_json::json!([
+                            interval.withdrawal_source,
+                            interval.readmission_source
+                        ]),
+                    ),
+                    (
+                        "circulars",
+                        serde_json::json!([
+                            interval.withdrawal_circular,
+                            interval.readmission_circular
+                        ]),
+                    ),
+                ],
+                pull::gaps::NotOwed::BeforeListing { listed_on: day }
+                | pull::gaps::NotOwed::AfterDelisting { delisted_on: day } => vec![
+                    ("date", serde_json::json!(day.to_string())),
+                    ("master", serde_json::json!(master)),
+                ],
+                pull::gaps::NotOwed::Unread => Vec::new(),
+            };
+            for (name, value) in own {
+                row.insert(name.to_owned(), value);
             }
             serde_json::Value::Object(row)
         })
@@ -2493,15 +2508,11 @@ mod tests {
 
         let (cancel, guard) = crate::bars::Cancel::pair();
         drop(guard);
-        let mut read = 0_u32;
-        let none = walk_until(&span, &cancel, |month| {
-            read += 1;
-            month
+        // A walk whose reader left first never calls its reader at all.
+        let none = walk_until(&span, &cancel, |_month| -> store::path::YearMonth {
+            panic!("a reader gone first: no month is read")
         });
-        assert!(
-            none.is_empty() && read == 0,
-            "a reader gone first: no month is read"
-        );
+        assert!(none.is_empty(), "a reader gone first: no month is returned");
 
         let (cancel, guard) = crate::bars::Cancel::pair();
         let mut guard = Some(guard);
@@ -4028,28 +4039,29 @@ mod tests {
     /// `body` without the members that say HOW it was had, so a kept and a
     /// built answer can be compared for WHAT they say.
     fn what_it_says(mut body: serde_json::Value) -> serde_json::Value {
-        if let Some(object) = body.as_object_mut() {
-            object.remove("summaries");
-        }
-        if let Some(months) = body["month"].as_array_mut() {
-            for month in months {
-                if let Some(object) = month.as_object_mut() {
-                    // HOW, NOT WHAT: a kept month read no record and counts
-                    // none (`null`); a built one counts what it read. Each is
-                    // checked against its source, then set aside.
-                    let unread = object.remove("unreadable_records");
-                    let kept =
-                        object.get("summary").and_then(serde_json::Value::as_str) == Some("kept");
-                    assert_eq!(
-                        unread.as_ref().is_some_and(serde_json::Value::is_null),
-                        kept,
-                        "unreadable_records is null exactly when the summary was kept: {unread:?}"
-                    );
-                    object.remove("summary");
-                    object.remove("summary_fallback");
-                    object.remove("bar_records_read");
-                }
-            }
+        // Every answer compared is an object with a month array of objects:
+        // a body of another shape is a failed comparison, said here.
+        body.as_object_mut()
+            .expect("a /gaps.json answer is an object")
+            .remove("summaries");
+        let months = body["month"]
+            .as_array_mut()
+            .expect("a /gaps.json answer carries its month array");
+        for month in months {
+            let object = month.as_object_mut().expect("a month row is an object");
+            // HOW, NOT WHAT: a kept month read no record and counts none
+            // (`null`); a built one counts what it read. Each is checked
+            // against its source, then set aside.
+            let unread = object.remove("unreadable_records");
+            let kept = object.get("summary").and_then(serde_json::Value::as_str) == Some("kept");
+            assert_eq!(
+                unread.as_ref().is_some_and(serde_json::Value::is_null),
+                kept,
+                "unreadable_records is null exactly when the summary was kept: {unread:?}"
+            );
+            object.remove("summary");
+            object.remove("summary_fallback");
+            object.remove("bar_records_read");
         }
         body
     }
