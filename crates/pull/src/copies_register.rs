@@ -1313,10 +1313,7 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
         .copy_roots
         .iter()
         .chain(config.live.iter().map(|root| &root.path))
-        .map(|path| match fs.lstat(path) {
-            Ok(meta) if meta.kind == Kind::Dir => Some(meta.id()),
-            _ => None,
-        })
+        .map(|path| fs.lstat(path).ok().map(|meta| meta.id()))
         .collect();
     let copies = config.copy_roots.len();
     let (copy_walks, live_walks) = walk_all(fs, config, &ids);
@@ -1341,9 +1338,11 @@ pub fn walk(fs: &dyn Fs, config: &Config, walked_at_micros: i64) -> Register {
     }
 }
 
-/// Every root other than `own` that is a folder, by its `(st_dev, st_ino)`:
-/// what `own`'s walk skips where it meets one, so each root is walked as
-/// itself only and no file is two roots'.
+/// Every root other than `own`, by its `(st_dev, st_ino)` as `lstat` reads
+/// it: what `own`'s walk skips where it meets one as a folder, so each root
+/// is walked as itself only and no file is two roots'. A root that is not a
+/// folder (a file, a link) can never be met as one, so its id here skips
+/// nothing.
 fn skip_for(ids: &[Option<(u64, u64)>], own: usize) -> HashSet<(u64, u64)> {
     let mine = ids.get(own).copied().flatten();
     let mut skip = HashSet::with_capacity(ids.len());

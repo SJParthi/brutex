@@ -251,7 +251,13 @@ fn a_request_during_the_first_walk_is_a_503_naming_it() {
         let (slow, cache, store) = (slow.clone(), cache.clone(), store.clone());
         std::thread::spawn(move || answer(&store, &cache, slow.as_ref(), &no_env, &|| 1))
     };
+    // A first request that ends without its walk reaching the held file is a
+    // failure here, at once, never a wait that lasts for ever.
     while !slow.held.load(Ordering::SeqCst) {
+        assert!(
+            !first.is_finished(),
+            "the first request ended without its walk reaching the held file"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let began = std::time::Instant::now();

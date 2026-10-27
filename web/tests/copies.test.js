@@ -239,7 +239,7 @@ test('the retirement text is passed through verbatim, keeps its sentence, and th
   assert.ok(v.retirementText.includes(SENTENCE));
   const command = /\b(rm|delete|unlink|mv|rename)\b/i;
   assert.doesNotMatch(v.retirementText, command);
-  for (const file of ['../src/routes/ingest/panels/Copies.svelte', '../src/lib/copies.js']) {
+  for (const file of ['../src/routes/ingest/panels/Copies.svelte', '../src/lib/CopiesTables.svelte', '../src/lib/copies.js']) {
     const src = readFileSync(new URL(file, import.meta.url), 'utf8');
     assert.doesNotMatch(src, command, file);
   }
@@ -281,6 +281,27 @@ test('the panel keeps the contract: order, title, its own poll, titled control, 
   assert.match(src, /answerLine\(ROUTE, r\.status, body\?\.error/);
   assert.match(src, /new Blob\(\[walked\.retirementText\], \{ type: 'text\/plain' \}\)/);
   for (const button of src.match(/<button[^>]*>/g) ?? []) assert.match(button, /title="[^"]+"/, button);
+  assert.doesNotMatch(src, /width:\s*(3[89]\d|[4-9]\d\d|\d{4,})px/);
+  // NOTHING OF IT ON /ingest's FIRST LOAD (R3-15's page budget): the reading
+  // code and the tables are imported when needed, never statically, and a
+  // part that fails to load is said with its reason.
+  assert.doesNotMatch(src, /^\s*import [^(]*\$lib\/(copies\.js|CopiesTables\.svelte)/m);
+  assert.match(src, /lib \?\?= await import\('\$lib\/copies\.js'\)/);
+  assert.match(src, /Tables = \(await import\('\$lib\/CopiesTables\.svelte'\)\)\.default;/);
+  assert.match(src, /reading code did not load \(asked again at the next poll\): \$\{words\(why\)\}/);
+  assert.match(src, /tablesWhy = `\$\{words\(why\)\} \(asked again at the next poll\)`;/);
+  assert.match(src, /\{:else if tablesWhy\}\s*<p class="line bad">The register's tables did not load: \{tablesWhy\}<\/p>/);
+  // No `{#await}` block: its runtime would move into a chunk every page
+  // loads (it grew /markets' first load past its budget when tried).
+  assert.doesNotMatch(src, /\{#await/);
+});
+
+test('the tables hold no control, put the hazards first and fit 375 px', () => {
+  const src = readFileSync(new URL('../src/lib/CopiesTables.svelte', import.meta.url), 'utf8');
+  // The panel contract checks the controls of panels/*.svelte only, so the
+  // tables it imports hold none: the panel's one control stays in the panel.
+  assert.doesNotMatch(src, /<(button|input|select|textarea)\b/);
+  assert.doesNotMatch(src, /\bfetch\(|setInterval\(|\bask\(/, 'the panel reads; the tables draw');
   // The hazards come first, before every other table.
   const labels = [...src.matchAll(/aria-label="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(labels, ['Hazards', 'Copy roots', 'Live roots', 'Retirement list']);

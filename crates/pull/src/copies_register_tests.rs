@@ -492,6 +492,120 @@ fn a_receipt_in_a_copy_root_is_named_as_its_proof() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A RECEIPT NAMING A HARD-LINKED LIVE ARCHIVE still proves its twin: the
+/// operator's year zips each have a second name (nlink 2, a `.zip.part` in
+/// the queue), so the live walk holds them among its shared files, and a
+/// `source_identity` must find them there. A tick-store file with a second
+/// name is never an archive: a receipt naming it proves nothing.
+/// COMBINATION: a hazard, a proven twin and an unproven one in one walk.
+#[test]
+fn a_receipt_naming_a_hard_linked_archive_proves_its_twin_and_a_tick_file_never_does() {
+    use std::os::unix::fs::MetadataExt as _;
+    let identity_of = |path: &Path| {
+        let meta = std::fs::metadata(path).unwrap();
+        format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            meta.dev(),
+            meta.ino(),
+            meta.size(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec()
+        )
+    };
+    let base = scratch("hazard");
+    let archive = base.join("Options");
+    let year = archive.join("2024.zip");
+    put(&year, b"invented year zip, 2024");
+    let queue = base.join("options-queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    std::fs::hard_link(&year, queue.join("2024.preserved.1.zip.part")).unwrap();
+    let ticks = base.join("tickstore");
+    let tick = ticks.join("cm/d.bts");
+    put(&tick, b"an invented tick day");
+    std::fs::hard_link(&tick, ticks.join("cm/d.again.bts")).unwrap();
+    // Each identity is read AFTER its link, since a link changes the ctime.
+    let proof = base.join("options-nested-proof");
+    put(
+        &proof.join("2024/VERIFIED.tsv"),
+        format!("day\tsource_identity\n2024-01-01\t{}\n", identity_of(&year)).as_bytes(),
+    );
+    let scans = base.join("scans");
+    put(
+        &scans.join("2024/VERIFIED.tsv"),
+        format!("day\tsource_identity\n2024-01-01\t{}\n", identity_of(&tick)).as_bytes(),
+    );
+    let register = host_walk(&config_of(
+        &[&queue, &proof, &scans],
+        vec![
+            live(LiveKind::NfoArchives, &archive),
+            live(LiveKind::TickStore, &ticks),
+        ],
+    ));
+    assert_eq!(
+        register
+            .hazards
+            .iter()
+            .map(|hazard| (&hazard.path, &hazard.live))
+            .collect::<Vec<_>>(),
+        vec![(&queue.join("2024.preserved.1.zip.part"), &year)],
+        "the queue's name is red; the tick store's own two names are not"
+    );
+    assert_eq!(register.roots[1].twin, Twin::Proven { sources: 1 });
+    let Twin::NotProven(why) = &register.roots[2].twin else {
+        panic!("a tick file is no archive: {:?}", register.roots[2].twin);
+    };
+    assert!(why.contains("0 of 1 source rows match"), "{why}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A FILE WITH ONE NAME IS HELD AS A COUNT, never by its path: the walk keeps
+/// O(1) memory per such file (a tick store's millions of files cost one sum),
+/// and only a file with a second name is held with its names, for the merge.
+#[test]
+fn a_file_with_one_name_is_counted_and_only_a_shared_file_is_held_by_name() {
+    let fs = Fake::default();
+    fs.dir("/copy", 1, 1);
+    fs.file("/copy/a", 1, 2, 1, b"abc");
+    fs.file("/copy/b", 1, 3, 1, b"de");
+    fs.file("/copy/c", 1, 4, 2, b"fghi");
+    let walked = walk_root(&fs, Path::new("/copy"), &HashSet::new(), false).unwrap();
+    assert_eq!((walked.files, walked.single_bytes), (3, 5));
+    assert_eq!(
+        walked.shared.keys().collect::<Vec<_>>(),
+        vec![&(1, 4)],
+        "only the file with a second name is held by name"
+    );
+    assert!(
+        walked.identities.is_empty(),
+        "a copy root keeps no identity"
+    );
+}
+
+/// THE MERGE'S TABLES ARE SIZED ONCE from the walks' own counts, so no insert
+/// while the walks are merged rehashes (the pre-sized sets of `CLAUDE.md` §3
+/// rule 4): the archive table at what it is asked for, and the name tables at
+/// every file the live walks hold.
+#[test]
+fn the_merge_tables_are_sized_once_from_the_walks_counts() {
+    assert!(Archives::with_capacity(64).by_ino_size.capacity() >= 64);
+    let mut walked = Walked::default();
+    for ino in 0..40 {
+        walked.identities.push((
+            PathBuf::from(format!("/arch/{ino}.zip")),
+            meta(Kind::File, 1, ino, 1, 4),
+        ));
+    }
+    let config = config_of(&[], vec![live(LiveKind::NfoArchives, Path::new("/arch"))]);
+    let (reports, links) = live_side(&config, vec![Some(Ok(walked))]);
+    assert_eq!(reports.len(), 1);
+    assert!(links.live_names.capacity() >= 40);
+    assert!(links.all_names.capacity() >= 40);
+    assert!(links.counted_in.capacity() >= 40);
+    assert!(links.archives.by_ino_size.capacity() >= 40);
+}
+
 /// The register never removes, moves, renames, creates or writes a file:
 /// every touch of the disk is one of the seam's three reads, and the tree,
 /// hazard names and receipts included, is the same after a walk, a
@@ -1303,7 +1417,13 @@ fn twenty_requests_during_a_cold_walk_take_one_walk() {
         let (fs, cache, config) = (fs.clone(), cache.clone(), config.clone());
         std::thread::spawn(move || answer(&cache, fs.as_ref(), &config, &|| 5))
     };
+    // A walk that ends without reaching the held file is a failure here, at
+    // once, never a wait that lasts for ever.
     while !fs.held.load(Ordering::SeqCst) {
+        assert!(
+            !first.is_finished(),
+            "the first request's walk ended without reaching /copy/a"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let others: Vec<_> = (0..20)
