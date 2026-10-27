@@ -183,14 +183,10 @@ fn quantile(sorted: &[Duration], per_mille: usize) -> Duration {
     sorted[rank - 1]
 }
 
-/// Every pooled page route the 32 looping clients ask, in turn, and a seek
-/// of the month a writer holds for the whole run: it waits the read's
-/// patience (`api::detail::READ_PATIENCE_MS`, 200 ms) where the pools hold
-/// it, so a worker that held it instead would be held 200 ms a seek.
+/// Every pooled page route the 32 looping clients ask, in turn.
 const EVERY_POOLED_ROUTE: &[&str] = &[
     MONTH,
     WINDOW,
-    WINDOW_FEBRUARY,
     SCAN,
     "/store.json?feed=zerodha",
     "/verify.json?feed=zerodha",
@@ -208,18 +204,32 @@ const EVERY_POOLED_ROUTE: &[&str] = &[
     "/disk.json",
 ];
 
-/// `/feeds.json` asked `asked` times one after another while `clients`
-/// threads loop over `routes`: every answer's time, sorted, and how many
-/// requests the clients made meanwhile.
+/// The seek of the month a writer holds for the whole run, asked in a loop by
+/// [`HELD_MONTH_SEEKERS`] clients beside the 32 in the loaded phase: it
+/// waits the read's patience (`api::detail::READ_PATIENCE_MS`, 200 ms) where
+/// the pools hold it, so a worker that held it instead would be held 200 ms
+/// a seek.
+const HELD_MONTH: &[&str] = &[WINDOW_FEBRUARY];
+
+/// As many held-month seekers as the server has async workers (the test
+/// runtime's four), and half the store-read pool's eight slots, so R3-08's
+/// routes keep the other half.
+const HELD_MONTH_SEEKERS: usize = 4;
+
+/// `/feeds.json` asked `asked` times one after another while each group's
+/// clients loop over its routes (a group is its routes and its number of
+/// clients): every answer's time, sorted, and how many requests the clients
+/// made meanwhile.
 async fn feeds_beside(
     addr: SocketAddr,
-    routes: &'static [&'static str],
-    clients: usize,
+    groups: &[(&'static [&'static str], usize)],
     asked: usize,
 ) -> (Vec<Duration>, u64) {
     let stop = Arc::new(AtomicBool::new(false));
-    let looping: Vec<std::thread::JoinHandle<u64>> = (0..clients)
-        .map(|client| {
+    let looping: Vec<std::thread::JoinHandle<u64>> = groups
+        .iter()
+        .flat_map(|&(routes, clients)| (0..clients).map(move |client| (routes, client)))
+        .map(|(routes, client)| {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 let mut done = 0_u64;
@@ -283,10 +293,13 @@ async fn feeds_beside(
 /// microseconds, too little to starve anything: with `spawn_blocking` taken
 /// out of `api::detail`'s `admitted`, every pooled read on an async worker,
 /// this test passed 3 of 3 on its first run (p99 2.76 ms to 6.19 ms). So a
-/// writer holds February for the whole run and the clients seek it too: the
-/// seek waits the read's 200 ms patience in the store-read pool, and the
-/// feed list's own pool never waits on it; on an async worker the same wait
-/// would hold that worker 200 ms a seek.
+/// writer holds February for the whole run, and in the loaded phase
+/// [`HELD_MONTH_SEEKERS`] more clients seek it beside the 32: the seek waits
+/// the read's 200 ms patience in the store-read pool, and the feed list's
+/// own pool never waits on it; on an async worker the same wait would hold
+/// that worker 200 ms a seek. The 32 clients' routes stay R3-08's, at their
+/// rate: in the round robin the seek held each of them 200 ms a turn and
+/// cut their requests from about 15,000 a phase to 363.
 ///
 /// **THE BOUND HOLDS IN ONE OF UP TO [`FEEDS_FAST_RUNS`] RUNS, EACH ON A
 /// SERVER AND A STORE OF ITS OWN, AND IS UNCHANGED** (BASE-REDS-1023 repair
@@ -372,15 +385,16 @@ where
 /// One run of [`the_feed_list_stays_fast_while_32_clients_loop_each_route`]
 /// on a server and a store of its own, February held by a writer for the
 /// whole run: the control, a seek of February that must wait the read's
-/// patience and say "being written", then the loaded phase; every
-/// non-timing assertion held, the figures printed and handed back.
+/// patience and say "being written", then the loaded phase, the 32 clients
+/// looping every pooled route and [`HELD_MONTH_SEEKERS`] seeking February;
+/// every non-timing assertion held, the figures printed and handed back.
 async fn feeds_fast_run(run: u32) -> FeedsRun {
     const CLIENTS: usize = 32;
     const ASKED: usize = 200;
     let root = one_month(&format!("feeds-fast-{run}"));
     let february = write_month(&root, 2, 19_754);
     let measured = live(&root, |addr| async move {
-        let (control, by_control) = feeds_beside(addr, &["/health"], CLIENTS, ASKED).await;
+        let (control, by_control) = feeds_beside(addr, &[(&["/health"], CLIENTS)], ASKED).await;
         let held = tokio::task::spawn_blocking(move || get_blocking(addr, WINDOW_FEBRUARY))
             .await
             .expect("the client thread")
@@ -390,7 +404,11 @@ async fn feeds_fast_run(run: u32) -> FeedsRun {
             held.status == 503 && held.retry_after && held.took >= patience,
             "a seek of the held month waits the read's patience and says when: {held:?}"
         );
-        let (took, loaded) = feeds_beside(addr, EVERY_POOLED_ROUTE, CLIENTS, ASKED).await;
+        let loaded_groups = [
+            (EVERY_POOLED_ROUTE, CLIENTS),
+            (HELD_MONTH, HELD_MONTH_SEEKERS),
+        ];
+        let (took, loaded) = feeds_beside(addr, &loaded_groups, ASKED).await;
         assert!(loaded > CLIENTS as u64, "the clients looped: {loaded}");
         let figures = |sorted: &[Duration]| {
             (
@@ -409,7 +427,8 @@ async fn feeds_fast_run(run: u32) -> FeedsRun {
             "R3-08 /feeds.json run {run} of at most {FEEDS_FAST_RUNS}, n={ASKED} sequential, \
              fresh connections: beside {CLIENTS} clients looping /health ({by_control} requests \
              by them) p50={control_median:?} p99={control_tail:?} max={control_worst:?}; beside \
-             {CLIENTS} clients looping every pooled route ({loaded} requests by them) \
+             {CLIENTS} clients looping every pooled route and {HELD_MONTH_SEEKERS} seeking the \
+             held month ({loaded} requests by them) \
              p50={p50:?} p99={p99:?} max={max:?}; {}; {}",
             if measured.measurable() {
                 "the 10 ms target is measurable on this host now".to_owned()
