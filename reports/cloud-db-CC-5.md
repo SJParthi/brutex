@@ -1,11 +1,29 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED
+
+**Code complete; every red left is a base or environment item, each named below.** This part's own
+gates are green: build, fmt, clippy, `cargo deny`, this part's tests, coverage (100% lines and
+branches on its three modules), mutants (267 mutants, none missed, none timed out), web W2, W4, W5,
+W6 and R3-15's page budget. What stays red is red on the unmodified base too, with the same findings,
+or needs a machine that is not root: (1) the workspace test run's 33 root-only permission tests, R4-26's
+`basis_route` mode test (root-only by its own message) and two full-pool tests that hang, all on the
+base; (2) the ten CI shell gates red on the base (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30), identical
+findings here; (3) web W1 (the base's committed `web/build` is stale) and W3 (the base's 58
+svelte-check errors, none in this part's files); (4) one intermittent test of another part's file
+under load (`a_run_whose_sink_is_held_refuses_before_any_lock`, `crates/cli/tests/gdfl_run_logs.rs`),
+which passed 20 of 20 runs of its file on each tree when quiet. NEEDS THE MAC lists the real-data,
+shadow-server and non-root runs.
 
 # CC-5 — Copies register (cloud build report)
 
 Branch `cloud/db-CC-5-20261024`, cut from `origin/feat/db-fix` at `e851da1ca` (Merge DATA-2); the
-newest `origin/feat/db-fix`, `a32722c45` (Merge R3-15), merged in at `48e4cdb09` before the final
-gates (27 Oct; the earlier final merge was `5901ec77` at `e7f5311c`). Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md` (FM-607).
-Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY links: none.
+newest `origin/feat/db-fix`, `f01d7a0e4` (Merge R4-26), merged in at `a00f30dac` before the final
+gates (27 Oct; `a32722c45` was merged at `48e4cdb09` earlier the same day). Spec:
+`origin/cloud/db-base-20261024:reports/db-specs-20261024/CC-5.md` (FM-607). Decision block
+D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY links: none.
+
+ONE COMMON PATH (the spec's NIFTY-FIRST rule, as it applies here): CC-5 reads no bar and no
+instrument; it walks folders. Every copy root and every live root goes through the same walk, the
+same reader rule and the same proof rule; no folder, archive kind or name has a case of its own.
 
 ## Done
 
@@ -17,7 +35,7 @@ Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY 
 - `crates/api/src/settings_route.rs`: the two arms a new `Key` needs to compile (`default_of`:
   `(None, UNSET_WAIT)`, a named wait; `reader_of`: names `pull::copies_register`,
   `GET /disk/copies.json` and `cli disk-copies`).
-- `crates/pull/src/copies_register.rs` + `copies_register_tests.rs` (35 tests): a read-only `Fs` seam
+- `crates/pull/src/copies_register.rs` + `copies_register_tests.rs` (39 tests): a read-only `Fs` seam
   (no writing method exists); the live roots read through `gdfl_run::source_root` and the settings
   (D-7041); one walk that enters every directory once by `(st_dev, st_ino)`, follows no link, types no
   cap and runs on `available_parallelism` workers (D-7043); hazards by `(st_dev, st_ino)` within one
@@ -26,6 +44,8 @@ Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY 
   `*.prove.out` with `ALL-PROVED`) and twins (D-7045); the cache, re-walked only when the roots or a
   root's own stat change, no request waiting on another's walk (D-7046); the retirement list as text
   with no command (D-7047); the audited events (D-7048); `total()` for R4-29.
+- `crates/pull/tests/copies_register_events.rs` (1 test, its own binary because `telemetry::install`
+  is a process singleton): every walk's notes reach the log, one line each (D-7048, CC5-17).
 - `crates/api/src/copies_route.rs` + `copies_route_tests.rs` (8 tests): `GET /disk/copies.json` in the
   ops-read pool; unset = `200 waiting` naming the key; the first walk since start = `503 walking` with
   `Retry-After` to any other request; the register rendered once per walk, joined to each request's
@@ -34,68 +54,94 @@ Decision block D-7040..D-7049. Prerequisites: none (spec section 1). FILES_ONLY 
   only with no hazard and every root walked whole, 1 on a hazard, a partial root, the key unset or a
   refused store root, 2 on any argument.
 - The /ingest panel `web/src/routes/ingest/panels/Copies.svelte` (order 95, R4-01's registry; hazards
-  red; the retirement list downloadable as text) with `web/src/lib/copies.js` and
-  `web/tests/copies.test.js` (10 tests).
+  red; the retirement list downloadable as text), its tables `web/src/lib/CopiesTables.svelte` (no
+  control), `web/src/lib/copies.js` and `web/tests/copies.test.js` (11 tests). The panel carries none
+  of the register's code on `/ingest`'s first load (R3-15's page budget; D-7049): `/ingest` 595.0 KB
+  of its 600.0 KB budget, the base 591.0 KB.
 - The gate-8 bench `crates/api/benches/ratio/copies.rs` (`/disk/copies.json`, n = 200, 1x/10x/100x).
-- `docs/02-store-format.md` §42 row; `docs/04-invariants.md` CC5-01..CC5-16; `docs/05-decisions.md`
-  D-7040..D-7048; `docs/06-limits.md` L-CC5-1..4.
-- Final merge of `origin/feat/db-fix` `5901ec77`; every gate run on the merged tree (below).
+- `docs/02-store-format.md` §42 row; `docs/04-invariants.md` CC5-01..CC5-19; `docs/05-decisions.md`
+  D-7040..D-7049; `docs/06-limits.md` L-CC5-1..4.
+- Final merge of `origin/feat/db-fix` `f01d7a0e4`; every gate run on the merged tree (below).
 
 ## Left
 
-- PENDING
+- Nothing of this part's code. The base and environment items in the STATUS paragraph, and the
+  NEEDS THE MAC runs.
 
-## Gates (final run, 26 Oct 2026, on the merge with `origin/feat/db-fix` `5901ec77`)
+## Gates (final run, 27 Oct 2026, on `a00f30dac`, the merge with `origin/feat/db-fix` `f01d7a0e4`)
 
-The base comparison is an unmodified worktree of `origin/feat/db-fix` `5901ec77`, built in its own
-target and run with the same commands.
+The base comparison is an unmodified worktree of `origin/feat/db-fix` (`f01d7a0e4` for the shell
+gates and the web build; `a32722c45` and `5901ec77` for the earlier rows named), run with the same
+commands. This container runs as root.
 
-| Gate | Command | This branch | Unmodified base `5901ec77` |
+| Gate | Command | This branch | Unmodified base |
 |---|---|---|---|
-| build | `cargo build --workspace --locked --all-targets -j 4` | `Finished`, 0 warnings (20 m 28 s) | — |
+| build | `CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --locked --all-targets -j 4` (no debug info, so the target leaves the disk room the GDFL tests' 10 GiB floor needs; the same opt-level and checks) | `Finished` in 14 m 23 s, exit 0, 0 warnings (the default profile on `48e4cdb09`: 22 m 06 s, 0 warnings) | — |
 | fmt | `cargo fmt --all --check` | exit 0 | — |
-| clippy | `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings` | `Finished`, no warning | — |
-| tests | `cargo test --workspace --locked -j 4 --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` | exit 101: 33 failed in five lib targets (api 12 of 2,950, cli 3 of 2,411, pull 9 of 2,158, store 5 of 431, telemetry 4 of 225), every other target ok; the two skipped hang (below) | — |
-| the 35, alone | each test binary `--exact <name> --test-threads=1`, `timeout 300`, from its crate's root | 33 FAILED, 2 TIMEOUT | the SAME 33 FAILED and the same 2 TIMEOUT |
-| deny | `cargo deny check` | `advisories FAILED, bans ok, licenses ok, sources ok`: RUSTSEC-2026-0386 (tokio 1.53.1) only | identical (`Cargo.lock` byte-identical): BASE-DENY-1024 |
-| CI shell gates | the `run:` blocks of ci.yml's `language-purity` job, `GITHUB_ENV`/`RUNNER_TEMP` emulated | red: 1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30; all others exit 0 | red: the same ten, with the same findings (counts aside); gate 1d's undeclared list equal after `CC5_LITERAL` |
-| gate 1e | (builds and tests the whole workspace a second time with the front end moved aside) | not run here; the build and test rows above cover the engine, and no crate reads `web/` | — |
+| clippy | `cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings` | exit 0, no warning | — |
+| tests | `CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked -j 4 --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held` | exit 101 in 1,728 s, free disk 19-20 GB throughout: 35 failed in six targets (api lib 13, cli lib 3, cli `--test gdfl_run_logs` 1 of 4, pull lib 9, store lib 5, telemetry lib 4), every other target ok, every test of this part's files ok | the 33 known: each FAILED alone on `5901ec77` too (save point 10); R4-26's `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired` fails alone here with its own message "the test needs a reader the mode refuses (not root)"; `gdfl_run_logs`'s `a_run_whose_sink_is_held_refuses_before_any_lock` passes alone 3 of 3 and its file passes 20 of 20 runs (`--test-threads=4`, the same build settings) on this branch and on `f01d7a0e4` alike: an intermittent failure under load, below |
+| this part's tests | `cargo test -p pull --lib copies_register`, `-p pull --test copies_register_events`, `-p api --lib copies_route`, `-p cli --lib disk_copies`, `-p store --lib settings::tests::the_extra_copy_roots_key_is_checked_and_stored_canonically`, `-p pull --test no_scheduler_delete` | all pass (39, 1, 8, 4, 1, 5) | — |
+| deny | `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` (tokio 1.53.3, BASE-DENY-1024) | — |
+| CI shell gates | the 34 `run:` blocks of ci.yml's `language-purity` job, split by a bash read loop, `RUNNER_TEMP`/`GITHUB_ENV` emulated | red: 1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30; every other exit 0 | the same ten red, the same exits for all; each red gate's output (sorted, digits normalised, test lines dropped) identical; gate 1d's undeclared set 481 on both, the same set |
+| gate 1e | (builds and tests the whole workspace a second time with the front end moved aside) | not run here; the build and test rows cover the engine, and no crate reads `web/` | — |
 | web W1 | `npm --prefix web run build` + `gates_jobs w1` (Node 24.22.1) | red: the committed `web/build` is stale | red, the same: the base's own source does not build its committed bundle |
-| web W2 | `node --test web/tests/*.test.js` (Node 24.22.1) | `tests 1611, pass 1611, fail 0` | `tests 1601, pass 1601` (this part adds 10) |
-| web W3 | `npm --prefix web run check` + `gates_jobs w3 ... 0` | `svelte-check errors: 44 (ceiling 0)`, none in this part's files | the same 44 errors, line for line |
-| web W4, W5, W6 | as ci.yml | exit 0 (`distinct unused CSS selectors: 0`, `no comment swallows a rule`) | exit 0 |
-| coverage | `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo +nightly llvm-cov --branch --no-report --locked -j 2` with `-p pull --lib -- copies_register`; `-p store --lib -- settings` (skipping the three root-permission tests); `-p api --lib -- copies_route settings_route`; `-p cli --lib -- disk_copies`; then `cargo +nightly llvm-cov report --branch` (27 Oct, on `da59d4853`) | `copies_register.rs` lines 1005/1005, branches 138/138, functions 118/118, regions 1009/1010 (the one left: `entry?` in `Host::list`, a directory stream that fails after it opened, which no test can stage without a failing device); `copies_route.rs` 261/261 lines, 10/10 branches, 335/335 regions; `disk_copies_command.rs` 417/417 lines, 16/16 branches, 481/481 regions; every line and both sides of every branch this part added to `settings.rs` (129-150, 166, 184, 220, 528-586, 664-668, 808-810) and `settings_route.rs` (240, 425-428) executed | — |
-| mutants | PENDING | PENDING | — |
+| web W2 | `BRUTEX_CHROME=/opt/pw-browsers/chromium node --test web/tests/*.test.js` (Node 24.22.1; R3-15's browser tests need a browser) | `tests 1807, pass 1807, fail 0` | 1,796 tests on `a32722c45` (this part adds 11); one timing test failed under load there and passes alone |
+| web W3 | `npm --prefix web run check` + `gates_jobs w3 ... 0` | `svelte-check errors: 58 (ceiling 0)`, none in this part's files | the same 58, line for line |
+| web W4, W5, W6 | as ci.yml | exit 0 (`distinct unused CSS selectors: 0 (ceiling 0)`; no comment swallows a rule; W6 ok) | exit 0 |
+| page budget (R3-15, inside W1/W4's build) | the `brutex-page-budget` plugin of `npm --prefix web run build` | every page within its budget; `/ingest` 595.0 KB on first load (budget 600.0 KB) | `/ingest` 591.0 KB; every other page the same as here (`/speed` 310.2 against 310.3 KB, the per-build naming variance `$lib/speed.js` records) |
+| coverage | `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo +nightly llvm-cov --branch --no-report --locked -j 2` with `-p pull --lib -- copies_register` and `-p pull --test copies_register_events`; `-p store --lib -- settings` (skipping the three root-permission tests); `-p api --lib -- copies_route settings_route`; `-p cli --lib -- disk_copies`; then `cargo +nightly llvm-cov report --branch` | `copies_register.rs` lines 1003/1003, branches 136/136, functions 119/119, regions 1006/1007 (the one left: `entry?` in `Host::list`, a directory stream that fails after it opened, which no test can stage without a failing device); `copies_route.rs` 261/261 lines, 10/10 branches, 335/335 regions; `disk_copies_command.rs` 417/417 lines, 16/16 branches, 481/481 regions; every line and both sides of every branch this part added to `settings.rs` (129-150, 166, 184, 220, 528-586, 664-668, 808-810) and `settings_route.rs` (240, 425-428) executed | — |
+| mutants | `cargo mutants --in-diff <git diff origin/feat/db-fix -- 'crates/*/src/*.rs'> -p <crate> --test-workspace=false --cap-lints=true --cargo-arg=--locked -j 2 --minimum-test-timeout 120` with `CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_PROFILE_DEV_INCREMENTAL=true CARGO_PROFILE_DEV_DEBUG=0` (environment only; checks and assertions as the dev profile), each crate's tests filtered to keep its baseline green past the root-only reds | 267 mutants, 0 missed, 0 timeouts: `pull` 207 (177 caught, 30 unviable; the final run on `8e498d3c8`), `api` 33 (25 caught, 8 unviable), `cli` 13 (12 caught, 1 unviable), `store` 14 (14 caught); the same 267 on the merged tree's diff | — |
 
-**Why the 35 are not this part's.** None is in a file of this part, and each fails or hangs alone on
-the unmodified base with the same command. They are tests of a refused permission or a read-only
-folder, which this container cannot refuse because it runs as root (store `settings::tests` x3,
-`quarantine::tests` x2, telemetry `sink::tests` x4, pull `alerts`, `gdfl_dropbox` x2, `gdfl_import`,
-`gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice` (a read-only claims
-file), `census_store::link_tests` x2, `zerodha_verify` x2, cli `scrub_blocks`, `watchdog_command`
-x2, api `audit::cloud_mutant_tests`, `pullrun::cloud_mutant_tests`, `pullrun::restart_tests`,
-`server::cloud_mutant_tests_c` x2, `feeds_route`, `detail`), the five slow-reader socket tests of
-`server::head_deadline_body_tests`, and the two full-pool children that hang
-(`server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`,
+**Why the 35 are not this part's.** None is in a file of this part. 33 are tests of a refused
+permission or a read-only folder, which this container cannot refuse because it runs as root (store
+`settings::tests` x3, `quarantine::tests` x2, telemetry `sink::tests` x4, pull `alerts`,
+`gdfl_dropbox` x2, `gdfl_import`, `gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice`,
+`census_store::link_tests` x2, `zerodha_verify` x2, cli `scrub_blocks`, `watchdog_command` x2, api
+`audit::cloud_mutant_tests`, `pullrun::cloud_mutant_tests`, `pullrun::restart_tests`,
+`server::cloud_mutant_tests_c` x2, `feeds_route`, `detail`) and the five slow-reader socket tests of
+`server::head_deadline_body_tests`; each failed alone on the unmodified base `5901ec77` (save point 10).
+R4-26 adds one more of the first kind (`basis_route`, its message says so). The two skipped hang alone
+on the base too (`server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`,
 `cloud_mutants_bars` `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`).
-Every test of this part's files passes in the workspace run.
+The 35th, `a_run_whose_sink_is_held_refuses_before_any_lock` (`crates/cli/tests/gdfl_run_logs.rs`,
+not a file of this part: it holds a GDFL run's log lock, runs `cli`, drops the lock and runs again),
+failed in the workspace run and in one run of its file right after it, while the web tests ran
+beside it. It passes alone 3 of 3, and its file passed 20 of 20 runs with four threads on this
+branch and 20 of 20 on an unmodified worktree of `f01d7a0e4` (both built with
+`CARGO_PROFILE_DEV_DEBUG=0`, opt-level 3, as the workspace run; also 10 of 10 each at opt-level 0).
+Not reproduced quietly on either tree; named for the Mac to watch (NEEDS THE MAC 15).
+
+**The 31 of save point 12 do not recur.** That run (on `da59d4853`) had 64 failures; 31 were GDFL
+import tests that stopped before reading a file because `pull::gdfl_import::DEFAULT_FREE_FLOOR`
+(10 GiB) was above the disk's 6.6 GB free while the mutants' build folders grew beside the run. With
+19-20 GB free they pass in the workspace run, and each passed alone before.
 
 ## Measurements (p50 / p99 / max)
 
 - `/disk/copies.json` served from memory (the gate-8 bench, `crates/api/benches/ratio/copies.rs`,
   `cargo bench -p api --bench ratio --locked -j 2 -- --served-only`, release, this cloud container,
-  4 cores, 25 Oct 2026; n = 200 sequential requests per size, one copy root, a hundred invented files
-  to a folder): 125,975 / 386,666 / 1,457,036 ns at 100 files; 131,601 / 257,489 / 679,429 ns at
-  1,000; 140,852 / 419,218 / 1,139,531 ns at 10,000. p50 ratio 1x -> 100x 1.118x (ceiling 3,000 per
-  mille: ok). `docs/06-limits.md` L-CC5-2.
-- The walk (not O(1), O(entries), L-CC5-1), the first request, n = 1 each: 1.495 ms at 100 files,
-  3.920 ms at 1,000, 20.511 ms at 10,000. The real `tools-work/` tree is UNMEASURED here
-  (NEEDS THE MAC 8).
-- PENDING (re-measure on the final tree)
+  4 cores, 27 Oct 2026, on `a00f30dac`, the final tree; n = 200 sequential requests per size, one
+  copy root of 100, 1,000 and 10,000 invented files, a hundred to a folder):
+  p50 / p99 / max **139,549 / 424,923 / 2,110,758 ns** at 100 files; **116,180 / 238,465 /
+  2,318,178 ns** at 1,000; **121,061 / 307,306 / 1,315,208 ns** at 10,000. p50 ratio 1x -> 10x
+  0.832x, 1x -> 100x 0.867x (ceiling 3,000 per mille: ok); p99 1x -> 100x 0.723x (printed, not
+  gated). The run reaches the copies rows only with the base's `reads` row skipped, in a local
+  uncommitted edit restored at once after (`git status` clean): unmodified it stops at that row
+  (`too_many_rows`: 102,400 bars past `/bars.json`'s 60,000-row answer), on the base as here, as on
+  25 Oct. The same run on `7f861a620` earlier the same day: 94,719 / 227,284 / 356,565,
+  108,061 / 307,029 / 860,941, 109,486 / 255,025 / 2,463,316 ns, p50 ratio 1x -> 100x 1.155x.
+  `docs/06-limits.md` L-CC5-1 and L-CC5-2 hold these figures.
+- The walk (not O(1), O(entries), L-CC5-1), the first request after start, n = 1 each, the same
+  run: 1,598 µs at 100 files, 3,679 µs at 1,000, 17,389 µs at 10,000. The real `tools-work/` tree
+  is UNMEASURED here (NEEDS THE MAC 8).
+- `/ingest`'s first load (the page budget plugin, `npm --prefix web run build`, Node 24.22.1, 27 Oct):
+  595.0 KB with this part, 591.0 KB on the base; the register's reading code and tables load after
+  the page (D-7049). Their own sizes, built: 5,890 B and 8,189 B of script.
 
 ## Extreme cases (each a test that fails before this part: the module did not exist)
 
-46 tests across the four Rust files; the 8 the spec names first, then:
+52 Rust tests in this part's four test files (39 + 1 + 8 + 4), the settings key's own test in
+`settings_tests.rs`, and 11 in `web/tests/copies.test.js`; the 8 the spec names first, then:
 
 1. Empty root and one-file root, counted exactly (`an_empty_root_and_a_one_file_root_are_counted_exactly`).
 2. A root that vanishes mid-walk, or is a file, a link or unreadable (`a_root_that_vanishes_or_is_not_a_folder_is_refused_by_name`, `a_root_that_is_a_file_a_link_or_unreadable_is_named_in_its_stamp`).
@@ -104,45 +150,56 @@ Every test of this part's files passes in the workspace run.
 5. A symlink loop and a folder met twice through a bind-style second name are walked once (`a_link_loop_and_a_folder_met_twice_are_walked_once`).
 6. Names with a comma, a line break or bytes that are not UTF-8 stay one line, quoted (`names_with_a_comma_a_line_break_or_no_utf8_stay_one_line`, `a_name_that_is_not_utf8_is_served_escaped_and_a_refused_root_has_no_figures`).
 7. An unreadable subfolder is a named fault that keeps the root off the retirement list (`an_unreadable_subfolder_is_a_named_fault`).
-8. Twenty requests during a cold walk take one walk; the others are answered `Walking` at once (`twenty_requests_during_a_cold_walk_take_one_walk`, `a_request_during_the_first_walk_is_a_503_naming_it`).
+8. Twenty requests during a cold walk take one walk; the others are answered `Walking` at once (`twenty_requests_during_a_cold_walk_take_one_walk`, `a_request_during_the_first_walk_is_a_503_naming_it`); a walk that never reaches its held file fails at once, never a wait.
 9. A torn, empty, silent or misspelled receipt proves nothing (`a_torn_empty_or_silent_receipt_is_no_proof`, `a_torn_or_misspelled_verified_tsv_proves_no_twin`, `a_receipt_read_that_fails_mid_file_is_the_hosts_refusal`).
 10. A receipt written before a remount (another `st_dev`, the same inode, size and times) still matches (`a_receipt_from_before_a_remount_still_matches_by_inode_size_and_times`).
 11. A copy root inside a live root (as `prove-20261004` sits in the tick store) is read only where that root's reader reads; one that is or holds a live root is never offered (`a_copy_root_inside_a_live_root_is_read_only_where_that_root_reads`, `a_copy_root_that_is_or_holds_a_live_root_is_never_offered`).
 12. Clock edges: walk times at, just before and a day before the 1970 epoch are written exactly (`walk_times_at_the_clock_edges_are_written_exactly`, `a_wall_clock_before_1970_is_negative_micros`).
 13. A full ops-read pool is refused by name (`a_full_pool_is_refused_by_name_and_an_admitted_answer_passes`).
 14. The setting at its byte ceiling exactly is read, one byte past it refused (`the_extra_copy_roots_key_is_checked_and_stored_canonically`).
+15. A `source_identity` torn at any of its seven fields, holding one that is not a number, or an eighth, is refused; the extremes each field holds (`u64::MAX` device and inode, `i64::MIN` and a time before 1970) are read exactly; a folder the host cannot list is the host's refusal (`a_torn_identity_is_refused_at_every_field_and_an_unlistable_folder_is_the_hosts_refusal`).
+16. A file with one name is held as a count, never by its path (a tick store's millions of files), and the merge's tables are sized once (`a_file_with_one_name_is_counted_and_only_a_shared_file_is_held_by_name`, `the_merge_tables_are_sized_once_from_the_walks_counts`).
+17. Every walk reaches the log, one line per note, nothing dropped (`pull/tests/copies_register_events.rs`).
 
 Combinations: `hazards_of_two_kinds_a_shared_file_and_an_outside_link_in_one_walk` (a `.tmp` second
 name of a CM archive file (partial), a second name of a tick-store file, a file shared by two copy
 roots and a link to a file outside every root, in one walk); `a_partial_root_a_proven_twin_and_a_folder_inside_a_live_root_are_served` (a
 partial root, a proven twin and a folder inside a live root in one answer);
 `a_changed_configuration_walks_and_a_held_lock_serves_the_last_walk` (a changed configuration while
-another walk holds the lock).
+another walk holds the lock); `a_receipt_naming_a_hard_linked_archive_proves_its_twin_and_a_tick_file_never_does`
+(a hazard, a proven twin of a hard-linked live archive and an unproven receipt naming a hard-linked
+tick-store file, in one walk).
 
 Out of the box: `a_pipe_named_like_a_receipt_is_never_opened` (a FIFO named `VERIFIED.tsv` would block
 a reader for ever; it is never opened); `a_socket_in_a_copy_root_is_counted_never_opened`;
 `the_retirement_list_contains_no_delete_command` over a folder whose own name holds `rm -rf` (the
-words are quoted as a path, never read as a command).
+words are quoted as a path, never read as a command); the panel whose code does not load says why
+and asks again at the next poll, never a blank panel (`web/tests/copies.test.js`, D-7049).
 
 ## Files outside ownership (each minimal)
 
 The spec's section 4.2 list: `crates/pull/src/lib.rs` (one `pub mod` and its test module),
 `crates/api/src/server.rs` (one `mod` line, one `.route`), `crates/api/src/operation_audit_tests.rs`
 (EXEMPT row, DATA), `crates/api/src/pool_table_tests.rs` (OpsRead row), `crates/cli/src/lib.rs`
-(`mod`, one dispatch arm, `COMMANDS` 63 -> 64, one usage entry, the zero-argument exemption),
-`crates/cli/src/store_write.rs` (reader list), `crates/cli/src/sweep_wiring_tests.rs` (non-sweep
-list), `crates/pull/tests/no_scheduler_delete.rs` (`DECLARED` 12 -> 15, `LISTED` 4 -> 7: the register,
-the route and the verb), `crates/store/src/settings.rs` + `settings_tests.rs` (the appended key),
+(`mod`, one dispatch arm, `COMMANDS` 64 -> 65 on the final merge beside R4-26's `basis-runs`, one
+usage entry, the zero-argument exemption), `crates/cli/src/store_write.rs` (reader list),
+`crates/cli/src/sweep_wiring_tests.rs` (non-sweep list), `crates/pull/tests/no_scheduler_delete.rs`
+(`DECLARED` 12 -> 15, `LISTED` 4 -> 7: the register, the route and the verb),
+`crates/store/src/settings.rs` + `settings_tests.rs` (the appended key),
 `crates/api/src/settings_route.rs` (the two required arms, nothing else), `docs/02-store-format.md`
 §42 (the key's row), `crates/api/benches/ratio.rs` (`#[path]` mount and the call), and this part's own
 rows in `docs/04`, `05`, `06`. Beyond that list: `web/vite.config.js` (one dev-proxy line for the new
-route: `web/tests/proxy.test.js` requires one for every route a page fetches) and
-`.github/gates_tree.rs` (`CC5_LITERAL`, gate 1d's declaration of this part's 61 literals,
-`DECLARED` 77 -> 78, as R4-28 and IA-10c declared theirs).
+route: `web/tests/proxy.test.js` requires one for every route a page fetches);
+`.github/gates_tree.rs` (`CC5_LITERAL`, gate 1d's declaration of this part's 61 literals; `DECLARED`
+79 -> 80 on the final merge, beside R4-19's and R4-26's groups); two new files of this part's own,
+`crates/pull/tests/copies_register_events.rs` (the audited events need their own process, as
+`request_gap_events.rs` does) and `web/src/lib/CopiesTables.svelte` (the panel's tables, off
+`/ingest`'s first load; a `.svelte` file under `panels/` would be mounted as a panel of its own).
 
 ## D-numbers used
 
-D-7040, D-7041, D-7042, D-7043, D-7044, D-7045, D-7046, D-7047, D-7048 (CC-5's block). D-7049 unused.
+D-7040, D-7041, D-7042, D-7043, D-7044, D-7045, D-7046, D-7047, D-7048, D-7049 (CC-5's whole block;
+D-7049, the panel off `/ingest`'s first load, added 27 Oct).
 
 ## NEEDS THE MAC
 
@@ -169,13 +226,14 @@ shadow port (the second agent's 8610). `W=/Volumes/WD_BLACK/brutex/fresh-2026091
 4. The register over the real tree:
    `curl -s http://127.0.0.1:8510/disk/copies.json | jq '{walked_at, age_ms, roots: [.roots[] | {path, state, bytes, files, reader, proof, duplicates_live}], hazards: .hazard_count, extra: .extra_copies_bytes}'`.
    Expected within the 13 Oct measurement: options-nested-proof about 426.8 GiB, proof its
-   `ALL_VERIFIED.txt` / `VERIFIED.tsv` receipts, reader `none found`; options-queue's six partials
-   81,481,744,630 B, no reader; extracted about 12.68 GiB, 82,073 files, no reader; prove-20261004
-   about 5.30 GiB, fullscan about 18.94 GiB, optrescan about 17.66 GiB, no reader; the `_v3` ledger
-   about 2.38 GiB WITH reader `v3_ledger` and absent from `retirement_list`; `hazard_count` 7, one
-   `hazards[]` row per hard-linked `.zip.part` name naming its archive, `dev`, `ino`, `nlink` 2,
-   `partial` true. (Count with `.hazard_count` or `.hazards | length`: a retirement entry also
-   carries a `hazard` field.)
+   `ALL_VERIFIED.txt` / `VERIFIED.tsv` receipts (twin proven: the year zips' receipts match by inode,
+   size and times even though each zip has a second name), reader `none found`; options-queue's six
+   partials 81,481,744,630 B, no reader; extracted about 12.68 GiB, 82,073 files, no reader;
+   prove-20261004 about 5.30 GiB, fullscan about 18.94 GiB, optrescan about 17.66 GiB, no reader; the
+   `_v3` ledger about 2.38 GiB WITH reader `v3_ledger` and absent from `retirement_list`;
+   `hazard_count` 7, one `hazards[]` row per hard-linked `.zip.part` name naming its archive, `dev`,
+   `ino`, `nlink` 2, `partial` true. (Count with `.hazard_count` or `.hazards | length`: a retirement
+   entry also carries a `hazard` field.)
 5. The verb: `BRUTEX_STORE=<the private root> $W/tgt/bin-CC-5/release/cli disk-copies; echo "exit=$?"`.
    Expected: the same seven `HAZARD` lines, the roots of step 4, a fresh `walked_at`, the last line
    `DISK COPIES: 7 name(s) of live files are hard-linked under another name (exit 1)`, `exit=1`.
@@ -184,19 +242,29 @@ shadow port (the second agent's 8610). `W=/Volumes/WD_BLACK/brutex/fresh-2026091
 7. The cache on the real tree: two GETs in a row, the second with the same `walked_at` and a larger
    `age_ms`, `fresh` false; `touch` a NEW file in a private copy root the check owns (never in
    `tools-work/`), GET again: a new `walked_at`, `why` naming the changed root.
-8. The bench: `cargo bench -p api --bench ratio --locked -j 2 -- --served-only` (the `copies` rows),
-   and n >= 200 sequential `curl` GETs of `/disk/copies.json` on 8510 after step 4: p50, p99, max;
-   the cold walk's time over the real roots written into `docs/06-limits.md` L-CC5-1.
+8. The bench: `cargo bench -p api --bench ratio --locked -j 2 -- --served-only` (the `copies` rows; on
+   the base the run stops at the `reads` row before them, `too_many_rows` at 100x, as here), and
+   n >= 200 sequential `curl` GETs of `/disk/copies.json` on 8510 after step 4: p50, p99, max; the
+   cold walk's time over the real roots written into `docs/06-limits.md` L-CC5-1.
 9. The /ingest panel on `http://127.0.0.1:8510/ingest`: the Copies panel mounts through the
-   registry, shows the groups and seven red rows, the retirement list downloads as text with no
-   command and says "the operator removes these by hand; the app never does"; it fits 375 px.
+   registry; its tables appear after the first poll (they load after the page, D-7049) with no
+   console error; it shows the groups and seven red rows, the retirement list downloads as text
+   with no command and says "the operator removes these by hand; the app never does"; it fits 375 px.
 10. After merge, on :8080 (the main session's redeploy): steps 2, 4 and 9 again; a screenshot to the
     operator.
 11. Rebuild `web/build` at merge-back (`npm --prefix web run build`, commit): W1 is red on the base
-    itself (its committed bundle is stale); this part does not commit `web/build`.
-12. The permission-bit tests (store `settings::tests` x3 among the 35 above) as a non-root user:
-    expected green on both the base and this branch.
-13. `cargo deny check` after BASE-DENY-1024 bumps tokio: expected green.
+    itself (its committed bundle is stale); this part does not commit `web/build`. The same build
+    prints `page budget  /ingest: 595.0 KB ... budget 600.0 KB` here: expected within the budget on
+    the merged tree (about 4 KB above the base's `/ingest`).
+12. The permission-bit tests (the 33 root-only tests above and R4-26's `basis_route` mode test) as a
+    non-root user: expected green on both the base and this branch.
+13. `cargo deny check`: green here (tokio 1.53.3); expected green on the Mac.
+14. The workspace test run needs more than 10 GiB free on the disk the tests' temp folders use
+    (`pull::gdfl_import::DEFAULT_FREE_FLOOR`): below it the GDFL import tests stop before reading a
+    file and fail (save point 12).
+15. Watch `cargo test -p cli --test gdfl_run_logs` (not this part's file) in the Mac's workspace run:
+    its `a_run_whose_sink_is_held_refuses_before_any_lock` failed twice here under load and 0 of 20
+    runs quietly on either tree. Expected: green.
 
 Store writes needed: none by code. The settings generation of step 3 on the REAL store is the
 operator's own `POST /settings` (or the operator's yes) at merge-back.
@@ -583,3 +651,21 @@ operator's own `POST /settings` (or the operator's yes) at merge-back.
   and `--test copies_register_events`), in the background.
 - NEXT (after HOLD lifts): read that run's result; W2 whole on the final tree; the gates table, the
   measurements and NEEDS THE MAC at the top of this report; STATUS.
+
+### 2026-10-27 — resumed after the 12:50 IST reset, save point 13: final merge, final gates, STATUS
+
+- 12:53 IST: `GO`, `HOLD` lifted (base `0521e9e15`). The whole `pull` mutant set on `8e498d3c8`
+  (started before the hold): 207 mutants, 177 caught, 30 unviable, 0 missed, 0 timeouts (34 min).
+- `origin/feat/db-fix` had moved to `f01d7a0e4` (Merge R4-26). Merged at `a00f30dac`: four conflicts,
+  both sides adding one entry at the same place (`operation_audit_tests.rs`, `pool_table_tests.rs`,
+  `pull/src/lib.rs`, gate 1d's `DECLARED` 79 -> 80), each kept whole, the base's first; and `cli`
+  `COMMANDS` 64 -> 65 beside R4-26's `basis-runs`, which the text merge could not see. No web file
+  changed on the base side. The diff's mutants on the merged tree: the same 267 as run.
+- Final gates on `a00f30dac`: the table at the top. Build (no debug info) 14 m 23 s, 0 warnings;
+  fmt 0; clippy 0; tests 35 failed (the 33 known, R4-26's root-only `basis_route` test, and the
+  intermittent `gdfl_run_logs` test: 20 of 20 quiet runs of its file on each tree); deny green;
+  shell gates the base's ten with identical findings; W2 1,807 of 1,807; the served bench in the
+  measurements.
+- `docs/06-limits.md` L-CC5-1 and L-CC5-2 carry the final tree's figures.
+- STATUS: BLOCKED, code complete: what is left is the base's and the environment's, each named at the
+  top, and the NEEDS THE MAC runs.
