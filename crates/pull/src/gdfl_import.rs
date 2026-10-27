@@ -798,6 +798,14 @@ fn measure_zips(path: &Path) -> Measured {
 /// skipped and links not followed, so a link cycle cannot loop the walk) and
 /// the SHA-256 of its `FORMAT.md` ([`Origin::digest`]).
 fn measure_tick_store(root: &Path) -> Measured {
+    measure_tick_store_within(root, ORIGIN_WALK_CAP)
+}
+
+/// [`measure_tick_store`] with the walk stopped, and the fault named, past
+/// `cap` directory entries (D-7331: the cap is an argument so a test reaches
+/// its refusal with three entries, not a million; production passes
+/// [`ORIGIN_WALK_CAP`] and nothing else).
+fn measure_tick_store_within(root: &Path, cap: usize) -> Measured {
     use sha2::Digest as _;
     let mut measured = Measured {
         bytes: 0,
@@ -816,9 +824,9 @@ fn measure_tick_store(root: &Path) -> Measured {
         };
         for entry in entries {
             visited += 1;
-            if visited > ORIGIN_WALK_CAP {
+            if visited > cap {
                 measured.fault = Some(format!(
-                    "{}: more than {ORIGIN_WALK_CAP} entries; the walk stopped there",
+                    "{}: more than {cap} entries; the walk stopped there",
                     root.display()
                 ));
                 break 'walk;
@@ -3667,6 +3675,12 @@ mod wp12e_tests;
 #[cfg(test)]
 #[path = "gdfl_import_tests.rs"]
 mod tests;
+
+// BASE-COV-PULL (D-7331): the origin measure's caps and faults, the
+// rescan's refusals and the journal reader's skipped lines.
+#[cfg(test)]
+#[path = "gdfl_import_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 #[path = "gdfl_seconds_attack_tests.rs"]
