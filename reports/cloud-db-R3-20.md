@@ -430,3 +430,47 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   `sweep_wiring_tests.rs`), `ci.yml`, `gates_tree.rs` and the ledgers. Rerun after that merge.
 - NEXT: merge `f01d7a0e4`, resolve keeping both sides, then the final gates once more on that tree: fmt,
   clippy, deny, the CI shell gates (ci.yml changed), the workspace tests (cli changed), 13c.
+
+### 27 Oct 09:40–10:36 IST — merge of f01d7a0e4 (R4-26); the final gates on it
+
+- Merged `origin/feat/db-fix` `f01d7a0e4` (Merge R4-26): one textual conflict, `crates/cli/src/store_write.rs`
+  (both sides added a writer's paragraph above `WRITERS`): both kept, R4-26's `basis-runs` first. Both
+  sides had raised the same three lengths by one, so git's clean merge left them one short: `WRITERS`
+  `[&str; 22]`, the linked-root test's `writing` table `22`, `COMMANDS` `[&str; 65]`. Merge `5167fb82f`.
+  `git diff origin/feat/db-fix HEAD --stat`: exactly this part's 18 files again.
+- `cargo fmt --all --check`: `EXIT 0`. `cargo clippy --workspace --all-targets --locked -- -D warnings`:
+  `EXIT 0` (the first try, before the two lengths were fixed, refused `[&str; 21]` against `[&str; 22]`).
+  `cargo test -p cli --lib --locked -- store_write sweep_wiring month_recover basis_runs`:
+  `ok. 52 passed; 0 failed`.
+- `cargo deny check`: `advisories ok, bans ok, licenses ok, sources ok` (R4-26 changes no manifest or lock).
+- CI shell gates re-extracted (R4-26 changed `ci.yml`'s gate 23 step) and run on this branch and on the
+  base worktree moved to `f01d7a0e4`: exit codes identical on both and identical to the run on the
+  `a32722c45` merge (the same ten red, everything else green); within each red gate the sorted output
+  equals the base's but for counts and this part's two declared lines. Build-job 13a, 13b, 6c, 5 and the
+  `has_crates` probe (`GITHUB_OUTPUT` now emulated): `EXIT 0` on both.
+- Workspace tests on `5167fb82f` (same command, the two hangers skipped): `EXIT 101`, 66 failures: the 33
+  of the first run, plus 33 more. 31 of those were my own disk: my build output had taken the container
+  under the GDFL importer's free-space floor (`7806947328 bytes free of 270553174016, below the
+  free-space floor of 10737418240 bytes (CONC-031)`), so every test that runs an import got `disk_full`
+  (cli `gdfl_import_command` 19, `tick_second_check` 11 of them with pull `gdfl_run` 3 and cli
+  `tests/gdfl_run_logs.rs` 2, by suite). I deleted only build output and test temp folders my own runs
+  had made in this container (stale single-crate test binaries, the stopped 13c build's bench binaries,
+  `/tmp/brutex*`): 13 GB free. Then all 66 rerun by exact name (`cargo test --workspace --locked
+  --no-fail-fast -- --exact <66 names>`): 31 pass, 35 fail = the first run's 33, plus api
+  `server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`
+  (R4-26's new test: "the test needs a reader the mode refuses (not root)") and api
+  `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code` (asserts
+  `audited_from < ring_from` in milliseconds; here both were `1793077271952`, all 201 events inside one
+  millisecond; run alone 8 times: 7 clean passes, 1 failure; api's `logs.rs`, which this part does not touch).
+- The 35, run as an unprivileged user (`useradd tester`; each lib test binary of that run, `runuser -u
+  tester`, `--exact <names>`, cwd the crate): cli `ok. 3 passed`, pull `ok. 9 passed`, store
+  `ok. 5 passed`, telemetry `ok. 4 passed`, api `8 passed; 6 failed`. So 29 of the 35 fail only because
+  this container runs as uid 0. The 6 api tests left are the slow-reader timing ones,
+  `head_deadline_body_tests` 5 (the server cuts the body at about 5.37 MB, 1.27 s) and
+  `detail::tests::a_refused_admission_names_what_its_bound_and_why` (`Saturated`), which failed the same
+  way on the base `a32722c45` worktree. The two hangers run as that user under `timeout -k 5 240`:
+  `EXIT 124` both, so they are not a uid-0 effect either: api base items.
+- This part's own tests in that run: store `recover::tests` 35 ok, cli `month_recover_command::tests`
+  11 ok.
+- NEXT: re-measure C-RC-01/C-RC-02 on the final code (`cargo bench -p store --bench ratio --locked`,
+  alone on the machine: the 24 Oct figures predate later edits of `recover.rs`); gate 13c; final report.
