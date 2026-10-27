@@ -1,6 +1,40 @@
 STATUS: IN PROGRESS
 
-NEXT: the 149 mutants left (below), running at the head `0c18505b` in two in-place worktrees, each MISSED fixed as found; then coverage again, gate 1e, the final report.
+NEXT: the 149 mutants left (below), running at the head `9a186f42` (the seventh base merge; this part's diff is byte for byte `0c18505b`'s) in two in-place worktrees, each MISSED fixed as found; then the new code's own mutants, coverage again, gate 1e, the final report.
+
+## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
+
+The fourth leg was cut by the usage limit before any of the 149 left a saved result, so all 149
+run again; nothing it lists as done is redone.
+
+- **Seventh base merge.** `origin/feat/db-fix` moved to `a32722c4` (Merge R4-19, Merge R3-12, Merge
+  BASE-DENY-1024, Merge R3-15); merged as `9a186f42`. `.github/gates_tree.rs` conflicted on
+  `DECLARED`: R4-19's group first, IA-17b's after, the length 78 -> 79; gate 0's tool tests pass on
+  it (`rustc --edition=2024 --test -D warnings .github/gates_tree.rs`: 49 passed). `docs/04`, `05`
+  and `06` conflicted only where both sides appended at the end: feat/db-fix's file is the exact
+  byte prefix (`cmp -n`), IA-17b's block after it, each block checked byte for byte against its own
+  side's tail. Nothing the base moved under `crates/pull` (`gaps.rs`, `repair_plan.rs`,
+  `cash_auction.rs` and their tests) is this part's: `git diff 5901ec77 0c18505b -- crates/pull/src`
+  and `git diff origin/feat/db-fix 9a186f42 -- crates/pull/src` are byte-identical (`cmp`), so the
+  head's mutant list is `0c18505b`'s, line for line. `Cargo.lock` is the base's byte for byte
+  (tokio 1.53.3, BASE-DENY-1024).
+- **The 149, rebuilt from the branch and matched, never restarted.** In a worktree of `8954122f`:
+  `cargo mutants --list --in-diff <git diff bf9b1c8f cf6034d7 -- crates/pull/src> -p pull` prints
+  264, and `--shard k/20 --sharding round-robin --list` for k = 0..19 partitions them (no name
+  twice; shard 0 is the first session's 14 exactly). At the head, `--list --in-diff <git diff
+  origin/feat/db-fix HEAD -- crates/pull/src>` prints 255. Matched by file and description, line and
+  column dropped, the k-th of a key to the k-th: **106** done (shards 0..6, 9, 10, 11), **107** of
+  shards 7, 8, 12..19, **39** new, **3** rerun (`>` -> `==`, `<`, `>=` at `gdfl_cm_auction.rs:1041`
+  in `write_revision`, whose description's count went 2 -> 1): the fourth leg's numbers exactly.
+  The 149 split alternately (75 and 74) into two `examine_re` lists, each anchored and escaped;
+  `--list` with each prints exactly the intended names (`sort | cmp`).
+- **How they run.** As the fourth leg: `cargo mutants` 26.2.0 `--in-place --in-diff <the head diff>
+  -p pull --cargo-arg=--lib --config <the list> -- -- gdfl_import:: gdfl_cm:: ingest::`, the same
+  three root tests skipped by name, `CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_INCREMENTAL=true`
+  in the environment only, `TMPDIR` on a world-writable tmpfs, each in its own worktree of
+  `9a186f42` under `/home/user`, started detached from the session so no session timeout can stop
+  one with a mutation applied. Baselines: `ok Unmutated baseline in 0s build + 26s test`, test
+  timeout auto-set to 133 s and 135 s.
 
 ## Session of 26 Oct 2026, fourth leg (a new cloud session, continuing from `b847a810`)
 
