@@ -5156,6 +5156,53 @@ refused by name with its kind (`read`, `too_large`, `not_text`, `magic`,
 `version`, `wrong_table`, `generation`, `header`, `columns`, `row`,
 `duplicate`, `row_count`, `checksum`, `too_many`, `absent`).
 
+## Corporate actions and basis runs, two more reference tables (R4-26, D-6892)
+
+Both are reference tables in the format above, in their own directories,
+written and read by the same writer and loader (`pull::reference_data::write`
+and `load_one`), and neither has a compiled copy: a store with no generation
+of one serves nothing from it and says `absent`, never an empty table.
+
+`<store>/reference/v1/basis_runs/<generation:020>.ref` — status always
+`measured` (a `sourced` or `unverified` file is refused by name). Columns
+`symbol|first|last|ratio|low|high|days|end`: one maximal run of one
+Zerodha/GDFL close ratio of a share, folded by `cli basis-runs` from DATA-1's
+per stock-day factor intervals (`cli::feed_reconcile::FactorPair::basis`).
+`first` and `last` are the run's first and last days with a basis; `low` and
+`high` the run's band (the intersection of those days' allowance intervals,
+each widened by D-3339's 0.2%) and `ratio` the simplest fraction inside it,
+each `num/den` reduced (terms at most 10^18); `days` the days with a basis it
+holds; `end` is `step` (the next day's interval lies more than 0.2% from the
+last day's: D-3339's `basis_step`), `drift` (the ratio walked out of the band) or `open` (the last run read). Rows ascend by symbol, then by
+`first`; a row out of that order, or two runs of one share that overlap,
+is refused by name (the loader sorts nothing). At most 4,096 runs a share,
+and the per-share day tables a load builds (one `u16` per day of a share's
+span) at most 2^22 share-days in all. The receipt's `source` names the
+commit of the `cli` build that folded the runs (`unstamped` for a build with
+no stamp; D-7198), then the feed-reconcile directory, canonical, and the
+months read (and how many were missing), and
+`source_sha256` is the SHA-256 of the list `<month> <file> <blake3>\n` of
+every file read.
+
+`<store>/reference/v1/corporate_actions/<generation:020>.ref` — columns
+`symbol|isin|ex_date|kind|num|den|tag|after|evidence`. `kind` is `split`,
+`bonus`, `rights`, `demerger`, `merger`, `dividend` or `unclassed`; `num/den`
+the price factor (one old share becomes `num/den` new ones); `tag` is `nse`
+or `measured`; `after` (`-` for an `nse` row) is the last day seen on the old
+basis, so a measured ex-date lies in `(after, ex_date]`; `evidence` the
+circular or basis-run step the row rests on. An `nse` row needs a file whose
+status is `sourced` and must name its kind; a `measured` row is always
+`unclassed`. Rows ascend by symbol, then by `ex_date`, then by `kind` in
+the order listed above; a row out of that order is refused as `row` and two
+rows of one (symbol, ex-date, kind) as `duplicate`; at most 4,096 rows a
+share, and its day table (one `u16` per day from its first ex-date to its
+last) within the same 2^22 share-days in all. A measured row is written
+only for a LASTING step (D-7195, D-7196): a proven step, one whose factor
+interval excludes 1, that `pull::corporate_actions::judge` does not name a
+basis anomaly (`basis_reversed`, `basis_short` or `basis_within_wobble`);
+proven is necessary, not sufficient. An ex-date on a day with no session
+applies at the next session: a reader asks for `(previous session, session]`.
+
 ## F&O membership month files, version 1 (PIT-1; D-5163)
 
 `pull::fno_membership` writes and reads them; `cli fno-membership build`,

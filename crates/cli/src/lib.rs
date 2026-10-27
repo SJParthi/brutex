@@ -61,6 +61,10 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// `cli basis-runs`: the measured Zerodha/GDFL basis runs per share, folded
+/// from DATA-1's factor, and the measured corporate-action ledger their
+/// steps make (R4-26: Z8, COR-06, FM-260).
+pub mod basis_runs;
 /// `cli calendar-days`: the days the tradable-day rule excludes, per year, and
 /// the calendar held against the store (D-5153, D-5158).
 mod calendar_days;
@@ -629,6 +633,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the span's census-refused gdfl import days
                                    with a `recounted` journal line each. DAY is
                                    YYYY-MM-DD (D-3316, D-3317).
+       cli basis-runs --dir DIR [--from YYYY-MM] [--to YYYY-MM] [--apply] [--ledger]
+                                   per share, the maximal runs of one Zerodha/GDFL
+                                   ratio folded from DATA-1's feed-reconcile
+                                   files in DIR, every step and the checker's
+                                   findings; --apply lands a new basis_runs
+                                   generation, --ledger the measured
+                                   corporate_actions one (R4-26).
        cli feed-reconcile YYYY-MM --out DIR [--symbols A,B] [--workers N]
                                    read-only over the bars: per stock-day held by
                                    either feed, GDFL 1s volume vs Zerodha day bar
@@ -3079,6 +3090,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["series-identity", arguments @ ..] if !arguments.is_empty() => {
             series_identity::command(arguments, out)
         }
+        ["basis-runs", arguments @ ..] if !arguments.is_empty() => {
+            basis_runs::command(arguments, out)
+        }
         ["feed-reconcile", arguments @ ..] if !arguments.is_empty() => {
             feed_reconcile::command(arguments, out)
         }
@@ -3162,7 +3176,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 64] = [
+const COMMANDS: [&str; 65] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -3170,6 +3184,7 @@ const COMMANDS: [&str; 64] = [
     "audit-stored",
     "auto",
     "auto-stored",
+    "basis-runs",
     "boolean-campaign-stored",
     "boolean-catalog-stored",
     "boolean-grammar-campaign-stored",

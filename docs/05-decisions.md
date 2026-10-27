@@ -82548,6 +82548,84 @@ path `hyper-rustls -> reqwest -> pull -> api, cli`:
 the bumped lock; `the_dependency_set_has_not_moved_without_review` fails on the
 bumped lock under the old pin and passes under the new one.
 
+### D-6892 — R4-26: the share corporate-action table and the measured basis runs are reference tables; a measured row labels and never excuses — 2026-10-22
+
+**Context.** Zerodha back-adjusts a share's prices for splits and bonuses and
+GDFL does not, so the ratio of the two feeds' closes is one constant between
+two actions and steps at each ex-date (Z8). The engine disclosed "corporate
+actions unchecked" (D-0694) while the evidence sat in DATA-1's per stock-day
+factor, and no stage kept an ex-date ledger (FM-260, COR-06). The NSE
+corporate-actions endpoint is cookie-gated and UNVERIFIED as fetchable
+unattended.
+
+**Decision.**
+
+1. **Two more reference tables, through R3-30's one loader.** `basis_runs`
+   and `corporate_actions` are generations under `<store>/reference/v1/`
+   in D-6246's format (docs/02 §"Corporate actions and basis runs"), with a
+   receipt, a checksum and a refusal by name. Neither has a compiled copy:
+   absent is `absent`, never an empty table. They are not in `Reference`'s
+   import-time slots; a consumer reads each with `reference_data::load_one`.
+2. **One owner of the factor.** `cli basis-runs` folds DATA-1's own day
+   intervals (`FactorPair::basis`, D-5179) and measures no price. A run ends
+   `step` where the next day's interval lies more than 0.2% from the last
+   day's: D-3339 item 3's `basis_step` threshold, the one `/sources` already
+   judges by (`pull::corporate_actions::STEP_PERMILLE`, pinned equal to
+   `api::sources::FACTOR_THRESHOLD_PERMILLE` by a test). DATA-1's own
+   `ex_date` column (consecutive disjoint intervals, no threshold) fired on
+   4,504 stock-days of 102 shares in the full 2018-01..2026-09 run, most of
+   them a 0.03% wobble of an adjusted series on a grid finer than its own;
+   a ledger drawn from it would name thousands of actions that never were.
+   Otherwise a run grows while its band (its days' intervals, each widened
+   by 0.2%, intersected) is not empty, and ends `drift` where it empties. A
+   run's ratio is the simplest fraction in its band; a step's factor the
+   simplest inside `[new.low / old.high, new.high / old.low]`. Exact, no
+   float.
+3. **The law (`CLAUDE.md` §3 rule 1).** A `measured` row (one step between
+   two runs, always `unclassed`) LABELS a day and never suppresses a refusal
+   or decides a class; only an `nse` row in a `sourced` file does. The loader
+   refuses an `nse` row in a measured file and a measured row that names a
+   kind. The measured ledger never replaces a sourced table.
+4. **The checker** flags a step with no row in its window (`no_row`), rows
+   whose factors' product lies outside the step's interval
+   (`factor_differs`), and a price-moving row inside one run
+   (`row_without_step`). An ex-date on a day with no session applies at the
+   next session; two rows on one day multiply.
+5. **Readers.** `/basis.json` (new), `/dayflags.json` (a `corporate_action`
+   note in the day's `notes`, created when absent, and the table's
+   `corporate_actions` receipt or refusal), `/sources/day.json`
+   (`measured_run` per share day: the factor only inside its run, else
+   `null` with the reason; `measured_basis` per answer). The tables are kept
+   per store root and read again when a directory or served file changes.
+6. **The day universe** (`pull::day_universe`) is a pure function: the
+   members on the day (read by the caller from PIT-1), the frozen surface and
+   every series with its own past, entrants and leavers named. Nothing
+   registers it with a scheduler (the one-command cut, D-6900 in the run
+   state); R4-26 builds no membership module of its own.
+7. **Canonical files, an O(1) run lookup, a listed writer.** Both tables'
+   rows ascend by symbol, then by ex-date and kind (actions) or first day
+   (runs); a row out of that order is refused by name and the load sorts
+   nothing. A run lookup is one hash and one index into the share's day
+   table (how many of its rows start on or before each day of its span),
+   bounded in all by `MAX_INDEXED_DAYS` (2^22 share-days), and so is an
+   action lookup: the measured ledger reached 121 rows for one share on real
+   data, so a walk would not be the bound; at most 4,096 rows a share. `cli basis-runs` writes only with `--apply`
+   (the flag `gdfl-rekey` and `zerodha-gaps` already use) and is in the
+   cli's `WRITERS`, so an unstamped run or a store whose bars folder is a
+   link is refused before anything is written.
+8. **A measured row only for a proven step.** A step whose factor interval
+   (from the two runs' bands) still holds 1 ends a run but writes no ledger
+   row, and the checker asks none of it: the measurement cannot tell it from
+   no action. On DATA-1's full run (105 months) 101 of 208 shares carry a
+   proven step, the count D-3323 recorded. A few shares still carry many
+   proven steps on that run (UNIONBANK 121, BANKBARODA 101, VEDL 60); why
+   their ratio moves that often is NOT PROVED here, and every such row is
+   measured: it labels and never excuses.
+
+**Not done here.** The NSE file itself (an operator download, then a charter
+row); the refusal on `/health` and `/ingest` (L-R426-07); `restatement.rs`'s
+label seam, which R4-23 takes from `CorporateActions::labels` when it lands.
+
 ### D-7120 — `rustls-webpki` 0.103.15 → 0.103.16 and `webpki-roots` 1.0.9 → 1.0.10 in `Cargo.lock` only, clearing RUSTSEC-2026-0382 and RUSTSEC-2026-0381; and the C-HA-01 cost row R4-09a named and never landed (BASE-REDS-1021) — 2026-10-21
 
 **Context** (BASE-REDS-1021). The full gate on `feat/db-fix` at 8c67456ac
@@ -87178,6 +87256,334 @@ server's `/settings.json` names R3-33 as the reader of `open.instrument`, so
 R312-01 to R312-20 (R312-12 to R312-19 from the merge-back on the Mac, 26 Oct
 2026, and R312-20 from its repair 1); bounds: docs/06-limits.md L-R312-01 to
 L-R312-20 (L-R312-17 to L-R312-20 from repair 1).
+
+### D-7195 — R4-26: a measured corporate-action row is drawn only from a LASTING basis step; every other proven step is a named basis anomaly; a row whose window holds a session with no basis never says "at this session" — 2026-10-23
+
+**Context.** D-6892 drew one measured `corporate_actions` row from every
+PROVEN step between two basis runs (the factor interval excludes one). The
+first check of R4-26 (`state/fix/round2/verify-R4-26-r1.json`) ran it over
+DATA-1's full input (105 months, 2018-01..2026-09): 979 steps, 770 proven,
+770 rows. 289 of them had a factor below one, and the 17 shares with any
+down-step carried 648 rows that alternate around one (one share 121 rows:
+170/171, 128/129, 66/65, 154/153 ...), each shown on `/dayflags.json` as an
+action "at this session". Separately, a month missing from the input put a
+row's ex-date on the first day of the next month read, and the `/db` note
+claimed that day.
+
+**Decision.**
+
+1. `pull::corporate_actions::judge` is the one owner of the rule, used by
+   the ledger (`measured_rows`), the checker (`check`) and `cli basis-runs`'
+   report. A proven step is LASTING only when (a) no proven step the other
+   way lies within `REVERSAL_DAYS` = 90 calendar days of its ex-date, either
+   side (`basis_reversed`); (b) each of its runs holds at least `HOLD_DAYS`
+   = 5 days with a basis (`basis_short`); and (c) the near end of its factor
+   interval lies farther from one than the far end of every reversed step of
+   the same share within `WOBBLE_DAYS` = 365 days (`basis_within_wobble`):
+   the share's own noise, generated from its own steps. Only a lasting step
+   makes a row.
+2. Every other proven step is a named basis anomaly: printed by
+   `cli basis-runs` as `basis_anomaly <SYMBOL> (after, ex] ...; <reason>`,
+   counted on the summary line, logged once a run as a `warn` event
+   (`cli.basis_runs`, "basis anomalies", with the counts by reason) that
+   `/logs` shows, and reported by the checker as `Finding::BasisAnomaly`.
+   It is never a row and never dropped without a word.
+3. `Action::day_known`: a measured row whose window `(after, ex_date]` may
+   hold a session (`session_between`: a day the canonical calendar does not
+   call closed, or more than `MAX_WINDOW_WALK` = 14 days) does not know its
+   day. `/dayflags.json` says "on one session between <after> (excluded) and
+   <ex_date> (included); the day is unknown ...", never "at this session";
+   `/basis.json` and `/sources/day.json` carry `day_known`; the row's evidence
+   and the `cli` step line say the ex-date is UNKNOWN inside the window and
+   name the months of it missing from `DIR`.
+4. `cli basis-runs --apply` keeps the receipt day of a stored generation
+   whose source text and source SHA-256 are this run's, so a rerun on another
+   day over the same files renders the same bytes and lands nothing.
+5. A per-day `notes` value that is not an array is left as it was; the
+   corporate-action notes go in `corporate_action_notes` beside it.
+
+**Chosen, not sourced.** The three spans are chosen, as `STEP_PERMILLE` is
+(D-3339). They were chosen against the measurement above, not tuned to a
+vendor claim: nothing here asserts which way, or for which events, a vendor
+adjusts. The cost of the rule is stated in `docs/06-limits.md` L-R426-09: a
+genuine action inside a share's own wobble, or within 90 days of a step the
+other way, is a named anomaly and not a row until an NSE file
+(`docs/00-charter.md`, UNVERIFIED as fetchable unattended) sources it.
+
+**Proof.** `pull::corporate_actions::tests::a_ratio_that_alternates_around_one_over_sixty_days_ledgers_no_row`,
+`a_one_session_two_percent_excursion_ledgers_no_row`,
+`a_step_inside_the_shares_own_wobble_is_named_and_one_beyond_it_is_ledgered`,
+`a_step_with_a_short_side_is_named_short_and_ledgers_no_row`,
+`a_two_for_one_step_across_a_missing_month_does_not_know_its_day`,
+`a_session_between_two_days_is_found_within_a_bounded_walk`;
+`cli::basis_runs::tests::a_ratio_that_alternates_is_named_as_basis_anomalies_and_never_ledgered`,
+`a_step_across_a_missing_month_says_its_day_is_unknown_and_a_rerun_lands_nothing`;
+`api::basis_route::tests::a_two_for_one_step_across_a_missing_month_is_never_at_this_session`,
+`a_notes_value_that_is_not_an_array_keeps_its_shape`. Their assertions are
+the two failures the check reproduced on the D-6892 code (a row from every
+alternating or one-session proven step; "at this session" across a missing
+month); the tests call `judge` and `day_known`, which that code lacks, so
+they were not compiled against it. NOT PROVED as a run of the new tests on
+the old code.
+
+**Measured, before and after (24 Oct 2026, release builds, one run each).**
+The check's own build of the D-6892 code (`tgt/bin-R4-26-v`, tip 27078d23)
+printed `steps 979, proven 770` over DATA-1's full input and ledgered 770
+rows. This rule's build over the same files prints `steps 979, lasting 179
+(a ledger row each), basis anomalies 591 (reversed 509, short 60,
+within_wobble 22) on 17 share(s), within_noise 209` and ledgers 179 rows;
+the share the check named keeps 2 rows of its 121 (28/27 on 2025-07-25,
+31/30 on 2026-07-03, each with runs of hundreds of days a side). With the
+input's 2019-09 file removed, the 2:1 row of the share split that month
+keeps ex-date 2019-10-01 after 2019-08-30, says its ex-date is UNKNOWN
+inside the window and names 2019-09 as missing; served on a shadow,
+`/dayflags.json` says "on one session between 2019-08-30 (excluded) and
+2019-10-01 (included)" and never "at this session". A rerun over the same
+files lands nothing (`already held these bytes`).
+
+**Cost.** `judge` is O(steps) per share: one pass each way for the nearest
+step the other way and one monotone window maximum each way for the wobble.
+`session_between` is at most 14 calendar lookups. L-R426-08.
+
+### D-7196 — R4-26 repair 2: a basis step is crossed back by the ratio's LEVELS, never by one step's size alone; a side holds its basis across short runs; only a reversed step feeds the wobble; the ledger reads back the runs generation it names — 2026-10-24
+
+**Context.** D-7195 decision 1 (a) called a proven step `basis_reversed`
+when ANY proven step the other way lay within 90 days, whatever its size,
+and (b) measured a side's hold by the single adjacent run's days. The second
+check of R4-26 (`state/fix/round2/verify-R4-26-r2.json`) ran it over
+DATA-1's full input (105 months, 2018-01..2026-09) and found it dropping the
+largest real steps of noisy shares with a false reason: TATASTEEL
+(2022-07-26, 2022-07-29], ratio 14/149 to 67/71, factor 161/16, judged
+reversed by a 145/146 step (about 0.7%) on 2022-05-27, its old run holding
+4 days on a share whose runs break up at 0.2%; GAIL 159/80 (2019-07-11),
+GAIL 3/2 (2022-09-06) and IOC 27/19 (2022-07-26) the same way. None had a
+row, a `/db` note, a `/basis.json` action or a `/sources/day.json` action.
+Being "reversed", the tenfold step then fed TATASTEEL's wobble for 365 days:
+its 262/263 step of 2021-09-22 was reported within a wobble of about 10.06.
+
+**Decision.** It supersedes D-7195 decision 1 (a) and (b); 1 (c) and
+decisions 2 to 5 stand. `pull::corporate_actions::judge` stays the one owner.
+
+1. CROSSED BACK BY LEVELS. A proven step is `basis_reversed` when the ratio
+   crosses it the other way within `REVERSAL_DAYS` = 90 calendar days of its
+   ex-date: a LATER run starting in that span whose band reaches the old
+   run's band or lies beyond it (the ratio came back, in one step or in
+   several), or an EARLIER run whose band reached the new run's band or lay
+   beyond it and which the ratio left in that span (the step only returns
+   the ratio where it stood). The day named is that later run's first day,
+   or the first day after that earlier run, the nearer either side. A step
+   the other way counts only through the level it leaves: a 0.7% step does
+   not cross a tenfold one, and four smaller steps that together walk a
+   fourfold one back do. This is the verifier's "an opposite step that could
+   undo it", read on the levels so that a walk back in several steps, which
+   no single step could undo, is also caught.
+2. ONLY A REVERSED STEP FEEDS THE WOBBLE (D-7195 1 (c), now with its reason
+   stated): a step judged lasting is never reversed, so it never becomes the
+   share's wobble.
+3. A SIDE HOLDS ACROSS RUNS. `basis_short` means a side holds fewer than
+   `HOLD_DAYS` = 5 days with a basis on its own basis: the runs outward from
+   the step, however short each is, while each lies farther than the share's
+   wobble from the other side's adjacent run in the step's direction, counted
+   to 5. A side whose ratio comes back within the wobble stops there. The
+   order is: proven, reversed, within the wobble, held; `basis_short` names
+   the two counts.
+4. A run ending `step` whose factor terms pass `MAX_TERM` (10^18) makes no
+   step; `steps_skipped` counts it, and `cli basis-runs` prints it on its own
+   line and in its `warn` event. Rows whose ratios multiply past 10^18 are
+   the checker's `product_too_large`, never "the rows multiply to 1/1".
+5. `cli basis-runs --apply --ledger` draws the ledger from the basis-runs
+   generation its own write answered, read back at that generation's name
+   (`pull::reference_data::load_written`: the file's checksum and the
+   write's SHA-256 both checked), never from the newest generation, which a
+   second writer may land between the two writes.
+
+**Chosen, not sourced.** The three spans stay D-7195's. The level test and
+the hold walk are definitions over the data, not vendor claims; nothing here
+says which way or for which events a vendor adjusts. A verdict depends on
+the months read: `--from 2025-08 --to 2025-08` leaves HDFCBANK's 2:1 of
+2025-08-26 `basis_short` (16 and 3 days), lasting over the full input
+(L-R426-09).
+
+**Proof.** `pull::corporate_actions::tests::a_tenfold_step_beside_a_small_opposite_wobble_is_ledgered`,
+`a_lasting_large_step_never_becomes_the_shares_wobble`,
+`a_large_step_walked_back_in_smaller_steps_within_90_days_is_reversed`,
+`a_step_most_of_the_way_back_is_not_shown_to_hold`,
+`a_step_whose_factor_would_pass_the_bound_is_counted_never_dropped_silently`,
+`rows_whose_factors_multiply_past_the_bound_are_named_never_called_one`,
+`a_generation_is_read_back_at_its_own_name_never_the_newest`;
+`cli::basis_runs::tests::a_run_cut_between_the_runs_and_the_ledger_is_finished_by_a_rerun`,
+`a_step_too_large_to_measure_is_counted_on_its_own_line`. The first four,
+run on D-7195's code (a scratch worktree at fd61e5858 with them appended,
+the two `held` assertions left out because that code has no such field),
+FAIL, 0 passed and 4 failed: the tenfold step has no lasting verdict (0 for
+1); the tenfold step of the wobble test is `Reversed { by: 2021-11-04 }`,
+not lasting; the walked-back step is reversed by 2024-02-26, the first step
+back, not by 2024-03-18, the day the ratio stands at the old level again;
+the 20% step most of the way back is `Reversed`, not `Short { 30, 1 }`.
+
+**Measured, before and after (24 Oct 2026, release builds, one run each).**
+D-7195's build over DATA-1's full input printed `steps 979, lasting 179 (a
+ledger row each), basis anomalies 591 (reversed 509, short 60,
+within_wobble 22) on 17 share(s), within_noise 209`. This rule's build
+prints `steps 979, lasting 196 (a ledger row each), basis anomalies 574
+(reversed 450, short 19, within_wobble 105) on 17 share(s), within_noise
+209` and ledgers 196 rows: TATASTEEL 161/16 (2022-07-29), GAIL 159/80
+(2019-07-11), GAIL 3/2 (2022-09-06) and IOC 27/19 (2022-07-26) each have a
+row, a `/dayflags.json` note ("on one session between ..."; each window
+holds sessions with no basis), a `/basis.json` action and a
+`/sources/day.json` action on a shadow; TATASTEEL's 262/263 of 2021-09-22 is
+now `basis_reversed` by the ratio crossing it on 2021-07-30, not within a
+wobble of 10. 20 steps became lasting (among them those four, UNIONBANK
+36/35 of 2024-07-19, VEDL 22/21 of 2023-12-27 and 2024-09-10, BPCL 21/20 of
+2023-12-12) and 3 small ones stopped being lasting (HEROMOTOCO 152/151 and
+TECHM 206/205 within their wobble, TECHM 300/301 crossed back). The
+alternating shares stay anomalies: UNIONBANK 4 rows and 117 anomalies (was
+2 and 119), BANKBARODA 4 and 97 (unchanged). The final build's run lands
+basis_runs generation 1 (SHA-256 ccce733c..., the same bytes as before: the
+runs did not change) and corporate_actions generation 1 with 196 rows; a
+rerun lands nothing, and over a store holding the earlier ledger it lands
+generation 2. Served from a shadow of that store (n = 300 sequential GETs
+each, load about 60 on 14 cores): `/basis.json?symbol=TATASTEEL` p50 0.72
+ms, p99 6.40 ms, max 9.63 ms; `/dayflags.json` for TATASTEEL over 8 days p50
+1.79 ms, p99 6.04 ms, max 10.53 ms; `/sources/day.json` for its day p50 1.64
+ms, p99 4.50 ms, max 4.81 ms. The routes read the tables; none runs `judge`.
+
+**Cost.** `judge` is O(steps) per share with a constant per step: rule 1
+reads at most the runs starting within 90 days either side (fewer than 92 a
+side), rule 3 at most 5 runs a side, and the wobble is one monotone window
+maximum each way. L-R426-08.
+
+### D-7197 — R4-26 repair 3: a basis-runs window is at most 1,200 months and a wider one is refused by name; a step's missing months are two reads of a prefix count, never a search — 2026-10-26
+
+**Context.** The third check of R4-26 (`state/fix/round2/verify-R4-26-r3.json`)
+found CI gate 11 rule 1 (docs/07 layer 4: never `binary_search`) refusing
+`crates/cli/src/basis_runs.rs`: `window_note` found the months missing
+inside a step's window with two `partition_point` calls over the run's list
+of missing months, and no allowlist line in `.github/gates_ledger.rs` and no
+gate-11 reason in `docs/06-limits.md` covered them. Its attack A9 found that
+list bounded only by `YearMonth`'s 1970..9999: `--from 1970-01 --to 9999-12`
+made the walk 96,360 months, 96,358 of them missing, although `MAX_MONTHS`
+(1,200) already bounded the files a directory may hold.
+
+**Decision.**
+
+1. A run's window, first month to last (as asked, or as held when a flag is
+   left out), is at most `MAX_MONTHS` (1,200) months, 2000-01 to 2099-12
+   wide. A wider one is refused by name: by the argument parser when both
+   flags are given (`refused: --from A --to B: the window A..B spans N
+   months, more than the 1200 one run reads; name a narrower --from/--to`,
+   exit 2), and by the fold on the resolved window before any file is read
+   (`BASIS RUNS REFUSED: the window ...`, exit 1), so a directory holding a
+   1970-01 file and a 9999-12 file is refused with no flag at all.
+2. The months missing are held as `Gaps`: the ascending list, and one prefix
+   count per month of the window walked (`before[i]` is how many lie before
+   the window's month `i`). A step's missing months are the slice between
+   two reads of the counts: O(1) to find, no search, so gate 11 rule 1 holds
+   on the file with no allowlist line. A month outside the window is
+   clamped to its edge, which is exact: no month outside the window is
+   missing.
+3. **Not taken:** an allowlist line for the two calls with a docs/06 reason.
+   The walk already passes every month of the window once, so recording the
+   counts as it goes costs nothing a search saves, and an allowlist would
+   keep a search on a path the law names.
+4. **Gate 12 too.** Every cost claim in R4-26's doc blocks names its proof
+   inside the block: the five in `basis_runs.rs` (`ordinal`,
+   `window_months`, `Gaps::count_before`, `Gaps::between`, `window_note`)
+   name the tests below, `session_between` and `Action::day_known` name
+   `pull::corporate_actions::tests::a_session_between_two_days_is_found_within_a_bounded_walk`,
+   and `crossed_back`, whose per-step read count no test measures, says
+   UNVERIFIED and L-R426-08 says so too. At the merge of `feat/db-fix`
+   13dcf5e59 gate 12 refused those eight blocks and nothing else of
+   R4-26's.
+
+**Proof.** `cli::basis_runs::tests::a_window_wider_than_twelve_hundred_months_is_refused_by_name_before_anything_is_read`,
+`cli::basis_runs::tests::the_months_missing_inside_a_steps_window_are_two_reads_never_a_search`
+(every pair of months around windows of 1, 2, 3, 12 and 25 months under six
+patterns, and a 1,200-month window at a stride and at its edges, against
+the list filtered directly),
+`cli::basis_runs::tests::basis_runs_finds_its_missing_months_without_a_search_on_the_production_path`
+and `cli::basis_runs::tests::a_steps_missing_months_cost_the_same_at_12_120_and_1200_months_measured`
+(per lookup p50 1 ns and p99 3 ns at 1,200 months, as at 12 and 120); CI
+gates 11 and 12 through `state/fix/ci-shell-gates.sh`, whose refusals on the
+merged tree are `feat/db-fix`'s own. R426-25 to R426-27
+(`docs/04-invariants.md`); L-R426-11 (`docs/06-limits.md`).
+
+**Cost.** The walk is one step a month of the window, at most 1,200, and the
+counts one word a month, at most 1,201; each step's lookup is two reads and
+the slice of the months it names.
+
+### D-7198 — R4-26 repair 4: R4-26's gate-1d literals and measured-test prints are declared; `/basis.json`'s `factor` is D-3339's direction; a basis-runs generation names its commit and its directory canonically; a run that stops says why on `/logs` — 2026-10-26
+
+**Context.** The fourth check of R4-26 (`state/fix/round2/verify-R4-26-r4.json`)
+ran CI gates the repair-3 comparison had not looked at. Gate 1d ("every
+segment-shaped literal in crates/pull is declared") named 121 literals on
+R4-26's tree and not on `feat/db-fix`'s (603 against 482): the corporate-action
+table's columns, kinds and source tag, the checker's finding words, the
+anomaly classes, the halves of the tests' invented ratios split on their
+slash, and 52 scratch tags. Gate 23 ("stderr is not a log") refused the four
+`println!` of R4-26's measured tests, which ci.yml's gate 23 says a test's
+print needs declared too. Its follow-ups found `/basis.json`'s day `factor`
+in the opposite direction to `/sources/day.json`'s `measured_run.factor` for
+the same run (67/71 against 71/67 for TATASTEEL 2022-07-29); a kept table
+not read again when it lived behind a symbolic link (attack E7) or when its
+mode was repaired (attack E16); `day=1969-12-31` answered "is not
+YYYY-MM-DD"; no receipt, event or audit row naming the commit that folded a
+generation although `cli::store_write::WRITERS` says each must; a trailing
+slash, a link or a relative spelling of `--dir` landing a generation of its
+own (attack E1); and every refusal or failure of a run said on stdout alone.
+
+**Decision.**
+
+1. The 121 literals are `R4_26_LITERAL` in `.github/gates_tree.rs`, each read
+   at its site, with the reason for each kind, and so is `no_row`, the
+   checker's finding word, which R4-26 writes too and which gate 1d already
+   named on `feat/db-fix` for `pull::reference_data`'s tests: 122 words.
+   `DECLARED` is 79 groups once R4-19's has landed beside it. The four
+   prints are declared in ci.yml gate 23 with what each prints. Gate 1d's
+   undeclared list on R4-26's tree is `feat/db-fix`'s own less `no_row`, and
+   gate 23's refusals are `feat/db-fix`'s own. **Not taken:** writing the tests' ratios through
+   `Ratio::new` and their scratch tags through `format!` to keep them out of
+   the gate's sight: that hides the literals rather than declaring them, the
+   act the gate exists to make deliberate.
+2. `/basis.json`'s day `factor` is GDFL ÷ Zerodha, D-3339's direction and the
+   word `/sources/day.json` uses, and the run's own Zerodha/GDFL ratio rides
+   beside it as `zerodha_over_gdfl` on both routes. A run's `ratio` stays the
+   stored column, Zerodha/GDFL, as `docs/02-store-format.md` names it.
+3. The kept tables' stamp holds the ctime as well as identity, mtime and
+   size, and follows a name that is a symbolic link with one more `stat`.
+4. A well-formed `YYYY-MM-DD` the calendar does not hold is answered as
+   that, with the calendar's range; only a malformed text is "not
+   YYYY-MM-DD".
+5. A `basis_runs` receipt's `source` begins `cli basis-runs at commit <sha>`
+   (`unstamped` for a build with no stamp), ahead of the directory a long
+   name may be cut from; the `basis runs written` and `measured ledger
+   written` events carry the commit too. `--dir` is made canonical before it
+   is read or named, so the same files spelled another way land nothing. A
+   build of another commit lands a generation of its own over the same
+   files: the receipt is where a reader of the table finds which code folded
+   it (L-R426-13).
+6. Every refusal and failure of `cli basis-runs` is one `cli.basis_runs`
+   event carrying the line stdout prints: an error for exit 1, a warning
+   for a misuse (exit 2), whose line holds the reason and not the usage
+   text. A share the fold refuses is counted on a warning naming the first
+   32 (L-R426-12).
+
+**Proof.** `gate_1d_declares_the_r4_26_reference_words` (run by gate 0) and
+CI gates 1d and 23 through `state/fix/ci-shell-gates.sh` on R4-26's tree and
+on `feat/db-fix`'s;
+`api::server::basis_route::tests::basis_json_answers_the_run_holding_a_day_and_names_every_outside`,
+`api::server::basis_route::tests::a_compare_inside_a_run_applies_its_factor`,
+`api::server::basis_route::tests::a_generation_landing_inside_a_linked_table_directory_is_read`,
+`api::server::basis_route::tests::a_table_refused_as_unreadable_is_read_again_once_its_mode_is_repaired`,
+`api::server::basis_route::tests::a_well_formed_day_the_calendar_does_not_hold_is_named_as_such`,
+`cli::basis_runs::tests::a_measured_basis_run_ends_on_the_day_the_ratio_steps`
+and the binary's `a_refused_run_says_why_on_its_log_as_well_as_on_stdout` and
+`a_misused_run_says_why_on_its_log_as_a_warning`. R426-28 to R426-33
+(`docs/04-invariants.md`); L-R426-03, L-R426-12 and L-R426-13
+(`docs/06-limits.md`).
+
+**Cost.** A kept answer is four `stat`s, eight at most when every name is a
+link; canonicalising `--dir` is one call a run.
 
 ### D-7205 — `tokio` 1.53.1 → 1.53.3 in `Cargo.lock` only, clearing RUSTSEC-2026-0386 under every cargo-deny, and its offline advisory floor (BASE-DENY-1024) — 2026-10-25
 

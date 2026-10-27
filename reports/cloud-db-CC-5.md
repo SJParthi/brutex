@@ -1,4 +1,4 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
 # CC-5 — Copies register (cloud build report)
 

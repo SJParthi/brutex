@@ -93,8 +93,15 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// it publishes its quarantine plan under `audit/series-identity/`, and what
 /// a later generation leaves out is read from that plan, so the plan must name
 /// the code that measured it. It was listed as a reader while it wrote there.
-pub(crate) const WRITERS: [&str; 20] = [
+///
+/// `basis-runs` (R4-26, D-6892) is one with `--apply`: it lands a
+/// `basis_runs` generation (and with `--ledger` a measured
+/// `corporate_actions` one) under `reference/`, which `/basis.json`,
+/// `/dayflags.json` and `/sources/day.json` serve, so each must name the
+/// commit that folded it. Without `--apply` it prints and writes nothing.
+pub(crate) const WRITERS: [&str; 21] = [
     "alerts",
+    "basis-runs",
     "census-migrate",
     "census-recount",
     "feed-reconcile",
@@ -122,7 +129,8 @@ pub(crate) const WRITERS: [&str; 20] = [
 /// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
 /// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, `zerodha-gaps`
 /// without `--apply`, `zerodha-quarantine` without `--apply` (R4-18),
-/// `zerodha-repair` without `--from-store`, and
+/// `basis-runs` without `--apply` (R4-26), `zerodha-repair` without
+/// `--from-store`, and
 /// `feed-reconcile` without `--out` (its `factor` and `months` forms, which
 /// take no `--out`: one reads a version file, the other the census) each
 /// state in their own module that they write nothing; `alerts` writes only as
@@ -143,7 +151,9 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
             !arguments.contains(&"--dry-run")
         }
         "upkeep" => matches!(arguments.first(), Some(&("run" | "resume"))),
-        "gdfl-rekey" | "zerodha-gaps" | "zerodha-quarantine" => arguments.contains(&"--apply"),
+        "basis-runs" | "gdfl-rekey" | "zerodha-gaps" | "zerodha-quarantine" => {
+            arguments.contains(&"--apply")
+        }
         "feed-reconcile" => arguments.contains(&"--out"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         "verify-merge" => !arguments.contains(&"--list"),
@@ -340,6 +350,8 @@ mod tests {
                 true,
             ),
             ("census-recount", &["gdfl", "--from", "2019-11-14"], true),
+            ("basis-runs", &["--dir", "DIR"], false),
+            ("basis-runs", &["--dir", "DIR", "--apply", "--ledger"], true),
             ("feed-reconcile", &["2025-03", "--out", "audit"], true),
             ("feed-reconcile", &["factor", "M&M", "2025-03-03"], false),
             ("feed-reconcile", &["months"], false),
@@ -479,8 +491,9 @@ mod tests {
         // (PIT-1) does not ask for it either: it writes month files under its
         // own `--out DIR` and refuses a typed window inside the operator's
         // store (`a_typed_window_inside_the_operators_store_is_refused`).
-        let writing: [(&str, &[&str]); 20] = [
+        let writing: [(&str, &[&str]); 21] = [
             ("alerts", &["--ack", "1"]),
+            ("basis-runs", &["--dir", "DIR", "--apply"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
             ("feed-reconcile", &["2025-03", "--out", "audit"]),
@@ -521,6 +534,7 @@ mod tests {
         }
         for (verb, arguments) in [
             ("alerts", &[][..]),
+            ("basis-runs", &["--dir", "DIR"][..]),
             ("gdfl-rekey", &["--plan"][..]),
             ("msum-build", &["--dry-run"][..]),
             ("series-identity", &["ALL", "--dry-run"][..]),

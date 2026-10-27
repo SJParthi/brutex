@@ -70,6 +70,9 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/chain.json", DATA),
     ("/imports.json", DATA),
     ("/disk.json", DATA),
+    // A share's measured basis runs and corporate actions (R4-26): a store
+    // reference read, no state change.
+    ("/basis.json", DATA),
     // The copies register (CC-5): a read of folders the operator names; it
     // changes nothing, and its walk is logged by `pull.copies`.
     ("/disk/copies.json", DATA),
