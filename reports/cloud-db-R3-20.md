@@ -396,3 +396,37 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   branch and base on 26 Oct; each is run apart under `timeout`, here and on the base worktree).
 - NEXT: read the workspace run; rerun each failure here and on the base worktree `a32722c45`; the two
   skipped tests under `timeout` on both; gate 13c; then the final report.
+
+### 27 Oct 08:14–09:40 IST — workspace tests on the merge of a32722c45; feat/db-fix moved again
+
+- Workspace tests on merge `656e9f4a` (`cargo test --workspace --locked --no-fail-fast -- --skip <the two
+  hangers>`): `EXIT 101`, 33 failures in five lib suites: api 12, cli 3, pull 9, store 5, telemetry 4.
+  Every one of this part's tests passed in that run: store `recover::tests` 35 ok, cli
+  `month_recover_command::tests` 11 ok, the `store_write` and `sweep_wiring` tests 27 ok.
+- Each of the 33 rerun by exact name, crate by crate (`cargo test -p <crate> --lib --locked -- --exact
+  <names>`): on this branch `FAILED. 0 passed; N failed` for every crate (12, 3, 9, 5, 4: none flaky),
+  and on a worktree of the unmodified base `a32722c45` the same (12, 3, 9, 5, 4; the base's
+  filtered-out counts are lower by exactly this part's 11 cli and 35 store tests). The 33 are the
+  container's, the families the 26 Oct run named: a refusal the test makes by removing a file mode, which
+  uid 0 ignores (each panics on an `Ok` where it wanted the refusal: store `settings` and `quarantine`
+  index-publish, cli `watchdog_command` and `scrub_blocks`, telemetry `sink`, pull `alerts`,
+  `gdfl_dropbox`, `gdfl_import` ia16, `gdfl_run` ia2, `census_store` link_tests, `zerodha_verify`, api
+  `audit`, `pullrun`, `server::cloud_mutant_tests_c`) and the api slow-reader timing tests
+  (`head_deadline_body_tests` 5, `feeds_route` window, `detail` admission). No refusal names a file of
+  this part.
+- The two skipped tests, run alone under `timeout -k 5 600` (the test binary itself, in `crates/api`):
+  `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` and
+  `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (`tests/cloud_mutants_bars.rs`):
+  `EXIT 124` on the base and on this branch alike, each process at 0% CPU with every tokio worker parked
+  on a futex. Base items (api), not this part's.
+- A trap met and handled: the base worktree was first built into this checkout's `target/` to share the
+  dependencies, and cargo gives a workspace crate the same artifact name at either path, so the base's
+  build replaced this branch's crates (the Mac's OPS-10 hazard). The branch's runs above were all taken
+  before it; after it, every tracked file was touched and the branch rebuilt (`Compiling store`, `cli`,
+  `api`) before the branch's timeout runs. The base worktree is not built again here.
+- Gate 13c (`cargo build --workspace --locked --offline --all-targets` + `gates-jobs gate-13c`): stopped
+  by me part-way, because `origin/feat/db-fix` moved to `f01d7a0e4` (Merge R4-26) at 09:3x IST, which
+  edits three of this part's shared files (`crates/cli/src/lib.rs`, `store_write.rs`,
+  `sweep_wiring_tests.rs`), `ci.yml`, `gates_tree.rs` and the ledgers. Rerun after that merge.
+- NEXT: merge `f01d7a0e4`, resolve keeping both sides, then the final gates once more on that tree: fmt,
+  clippy, deny, the CI shell gates (ci.yml changed), the workspace tests (cli changed), 13c.
