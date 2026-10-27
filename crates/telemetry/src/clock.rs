@@ -200,14 +200,12 @@ mod tests {
         assert_eq!(millis_since_epoch(epoch - Duration::from_micros(999)), 0);
         // 5. A day before the epoch, formatted: the last day of 1969.
         assert_eq!(
-            stamp(millis_since_epoch(
-                epoch - Duration::from_millis(86_400_000)
-            )),
+            stamp(millis_since_epoch(epoch - Duration::from_hours(24))),
             "1969-12-31T00:00:00.000Z"
         );
         // 6. COMBINED: a whole century before the epoch AND a millisecond
         //    remainder.
-        let century = Duration::from_secs(36_524 * 86_400) + Duration::from_millis(7);
+        let century = Duration::from_hours(36_524 * 24) + Duration::from_millis(7);
         assert_eq!(millis_since_epoch(epoch - century), -3_155_673_600_007);
         // 7. COMBINED: the same span after the epoch is the exact negation.
         assert_eq!(millis_since_epoch(epoch + century), 3_155_673_600_007);

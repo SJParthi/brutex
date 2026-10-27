@@ -4788,9 +4788,10 @@ mod tests {
     fn the_keep_nothing_doubles_accept_every_call_of_the_trait() {
         let mut null = NullTarget;
         let mut discard = super::tests_support::Discard;
+        let long = vec![b'y'; 70_000];
         for target in [&mut null as &mut dyn Target, &mut discard] {
             // Empty, one byte, and a line longer than any record.
-            for bytes in [&b""[..], b"x", &[b'y'; 70_000][..]] {
+            for bytes in [&b""[..], b"x", long.as_slice()] {
                 assert!(target.append(bytes).is_ok());
             }
             assert!(target.sync().is_ok());
