@@ -2333,6 +2333,24 @@ pub(super) mod tests {
             "a length-only projection must refuse every execution lookup rather \
              than silently pretending local checks cover stateful corruption"
         );
+        // BASE-COV-LIBS (D-7320): the shared bitmap and the index convention,
+        // read back. The signal column's indices are signal bars; a
+        // reprojection's are the bars to fill on.
+        assert_eq!(signal.sourced(), Sourced::Signal);
+        assert_eq!(checked.sourced(), Sourced::Fill);
+        assert_eq!(unchecked.sourced(), Sourced::Fill);
+        assert_eq!(
+            checked.acceptance().as_deref(),
+            Some([true, false, true].as_slice())
+        );
+        assert_eq!(
+            signal.acceptance().map(|accepted| accepted.len()),
+            Some(signal.bits().len())
+        );
+        assert!(unchecked.acceptance().is_none());
+        // The bitmap is shared, never copied: two reads are one allocation.
+        let (one, two) = (checked.acceptance(), checked.acceptance());
+        assert!(one.zip(two).is_some_and(|(a, b)| Arc::ptr_eq(&a, &b)));
     }
 
     #[test]

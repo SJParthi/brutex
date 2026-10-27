@@ -3202,3 +3202,82 @@ mod exemplars {
         );
     }
 }
+
+/// BASE-COV-LIBS (D-7320): the known-at ladder run at run time, and three
+/// three-bar shapes each missed by exactly the one condition the suite never
+/// failed alone, beside the control that fires.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod near_misses {
+    use super::*;
+
+    fn last_mask(bars: &[(i64, i64, i64, i64)]) -> ConditionMask {
+        let mut p = Patterns::new(Thresholds::CLASSICAL);
+        let mut mask = ConditionMask::ZERO;
+        for (minute, &(open, high, low, close)) in (0_i64..).zip(bars) {
+            let ts = (30_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000;
+            let bar = Candle {
+                ts_micros: ts,
+                open,
+                high,
+                low,
+                close,
+                volume: 0,
+                open_interest: i64::MIN,
+            };
+            mask = p.step(&bar).expect("a sane fixture bar");
+        }
+        mask
+    }
+
+    #[test]
+    fn the_known_ladder_grows_with_depth_and_stops_at_the_pattern_block() {
+        // 1. Nothing is known with no history, and every position is known
+        //    at full depth: 153..=177 and 198..=234, 62 positions.
+        assert!(known_at(0).is_empty());
+        assert_eq!(known_at(LOOKBACK).popcount(), 62);
+        assert_eq!(known_at(LOOKBACK), KNOWN_AT_5);
+        // 2. Depth one knows exactly the one-bar shapes.
+        assert_eq!(known_at(1).popcount(), 13);
+        for position in [153, 154, 171, 175, 204, 205, 224, 227] {
+            assert!(known_at(1).get(position), "{position}");
+            assert_eq!(lookback_of(position), 1, "{position}");
+        }
+        // 3. The ladder never shrinks with depth.
+        for depth in 0..LOOKBACK {
+            let (now, next) = (known_at(depth), known_at(depth + 1));
+            assert_eq!(now.intersect(&next), now, "{depth}");
+        }
+        // 4. COMBINED: the gap between the two blocks is never known, even
+        //    though its lookback is the deepest.
+        for position in 178..=197 {
+            assert_eq!(lookback_of(position), 5);
+            assert!(!known_at(LOOKBACK).get(position), "{position}");
+        }
+        // 5. OUT OF THE BOX: a depth past the deepest lookback adds nothing.
+        assert_eq!(known_at(usize::MAX), known_at(LOOKBACK));
+    }
+
+    #[test]
+    fn each_shape_misses_by_its_one_condition_and_fires_without_it() {
+        // 198: bearish, a doji gapped below it, then a bullish bar whose low
+        // must clear the doji's high.
+        let base = [(200, 210, 140, 150), (120, 125, 115, 121)];
+        let fires = [base[0], base[1], (126, 131, 126, 130)];
+        let misses = [base[0], base[1], (124, 131, 124, 130)];
+        assert!(last_mask(&fires).get(198));
+        assert!(!last_mask(&misses).get(198), "a low at or below the doji's high");
+        // 215: three bullish bars, the third opening with the second and its
+        // body equal to the second's.
+        let fires = [(100, 112, 98, 110), (120, 132, 115, 130), (120, 132, 118, 130)];
+        let misses = [(100, 112, 98, 110), (120, 132, 115, 130), (120, 133, 118, 131)];
+        assert!(last_mask(&fires).get(215));
+        assert!(!last_mask(&misses).get(215), "a body one paisa longer");
+        // 221: a long black bar, a black bar opening at or below its open,
+        // then a small white bar.
+        let fires = [(200, 201, 99, 100), (190, 191, 90, 150), (100, 120, 95, 105)];
+        let misses = [(200, 201, 99, 100), (201, 202, 90, 150), (100, 120, 95, 105)];
+        assert!(last_mask(&fires).get(221));
+        assert!(!last_mask(&misses).get(221), "a second open above the first");
+    }
+}
