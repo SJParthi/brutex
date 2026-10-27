@@ -404,10 +404,21 @@ impl Kind {
         }
     }
 
-    /// The kind a word names.
+    /// The kind a word names: one `match`, no search (gate 11 rule 6,
+    /// D-7150). Every kind's word reads back as that kind
+    /// (`every_wire_word_reads_back_as_its_own_value_and_nothing_else_does`).
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.word() == word)
+        match word {
+            "split" => Some(Self::Split),
+            "bonus" => Some(Self::Bonus),
+            "rights" => Some(Self::Rights),
+            "demerger" => Some(Self::Demerger),
+            "merger" => Some(Self::Merger),
+            "dividend" => Some(Self::Dividend),
+            "unclassed" => Some(Self::Unclassed),
+            _ => None,
+        }
     }
 }
 
@@ -430,12 +441,14 @@ impl Tag {
         }
     }
 
-    /// The tag a word names.
+    /// The tag a word names: one `match`, no search (gate 11 rule 6).
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
-        [Self::Nse, Self::Measured]
-            .into_iter()
-            .find(|tag| tag.word() == word)
+        match word {
+            "nse" => Some(Self::Nse),
+            "measured" => Some(Self::Measured),
+            _ => None,
+        }
     }
 }
 
@@ -907,9 +920,10 @@ impl CorporateActions {
     /// measured rows (or none) lie there.
     #[must_use]
     pub fn class_of(&self, symbol: &str, after: Option<Day>, through: Day) -> Option<Kind> {
-        self.labels(symbol, after, through)
-            .iter()
-            .find_map(Action::class)
+        // The first row that decides a class is the first `nse` row, which is
+        // the row `excuse` finds: one walk of the window, not a second one
+        // (gate 11 rule 6, D-7150; the walk's bound is L-BRED23-11).
+        self.excuse(symbol, after, through).and_then(Action::class)
     }
 }
 
@@ -940,12 +954,15 @@ impl RunEnd {
         }
     }
 
-    /// The end a word names.
+    /// The end a word names: one `match`, no search (gate 11 rule 6).
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
-        [Self::Step, Self::Drift, Self::Open]
-            .into_iter()
-            .find(|end| end.word() == word)
+        match word {
+            "step" => Some(Self::Step),
+            "drift" => Some(Self::Drift),
+            "open" => Some(Self::Open),
+            _ => None,
+        }
     }
 }
 

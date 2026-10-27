@@ -305,7 +305,7 @@ title = "option day-ledger v=3"
 
 [[package]]
 name = "R4-26"
-merged = false
+merged = true
 title = "reference tables: corporate actions, F&O membership, basis runs"
 
 [[package]]
@@ -1340,19 +1340,20 @@ disk = "one ledger line a day and underlying (a few MB in all; to be measured on
 id = "S-46"
 title = "The reference tables: corporate actions installed with its receipt, F&O membership inferred, basis runs recorded"
 state = "pending"
-writes = "reference/corporate_actions.csv with its receipt, the F&O membership table, the basis-run records; no bar."
+writes = "New generations under reference/v1/: basis_runs/<generation>.ref and a measured corporate_actions/<generation>.ref, each with its receipt (docs/02-store-format.md, R4-26, D-6892); the F&O membership month files under reference/fno-membership-v1/ (PIT-1, D-5163); later an NSE-sourced corporate_actions generation; no bar."
 command = [
-  "planned: cli corporate-actions-install <FILE> (R4-26: the file installed with its receipt)",
-  "planned: cli fno-membership --infer (R4-26)",
-  "planned: cli basis-runs (R4-26)",
+  "cli basis-runs --dir DIR --apply --ledger (DIR: the directory of DATA-1's feed-reconcile version files, one a month, read whole, landing basis_runs generation 1 and the measured corporate_actions generation 1, D-6892, D-7195, D-7196)",
+  "cli fno-membership build --out DIR (PIT-1's verb, D-5163, DIR the store's reference/fno-membership-v1, inferred from the tick store's options day-file indexes, labelled inferred_gdfl_options, never an NSE circular)",
+  "planned: cli corporate-actions-install <FILE> (the NSE-sourced rows: no reader of NSE's corporate-actions file is built and its format is UNVERIFIED, R4-26's report and VERIFY-R4-26-r2-F7 leave it to an operator download plus a charter row)",
 ]
-dry_run = ["planned: the three with BRUTEX_STORE on a private copy (R4-26's rehearsal)"]
+dry_run = ["the three with BRUTEX_STORE on a private copy (a NEW private store for basis-runs, as R4-26's rehearsal in the note, and a NEW --out directory for fno-membership build)"]
 env = ["BRUTEX_STORE", "BRUTEX_MASTERS"]
-prerequisites = ["R4-26"]
+prerequisites = ["R4-26", "operator: NSE's corporate-actions file downloaded by the operator and its format recorded in docs/00-charter.md, so a reader for it can be built (this repository fetches nothing from NSE on its own)"]
 check = ["the three tables answer their receipts' row counts, and the F&O membership of NIFTY's and BANKNIFTY's underlyings is inferred for 2018-09 to 2026-09"]
 closes = ["OWED-26"]
-not_rehearsed = "waits for R4-26: the three reference verbs are not built"
-disk = "a few MB of reference tables (to be measured on the rehearsal)"
+not_rehearsed = "waits for operator: the NSE corporate-actions file and a reader for it. R4-26 merged into feat/db-fix on 27 Oct 2026 (BASE-REDS-1023 set it merged and wrote its two built verbs here); the basis-runs line alone is rehearsed, by R4-26, in the note; fno-membership build is not rehearsed here"
+note = "R4-26's rehearsal of the basis-runs line (its report state/fix/round2/fix-R4-26.json, store_writes_needed): 26 Oct 2026 22:16 IST, release cli of R4-26's tip 6a561a89d, on a NEW private store, with DIR DATA-1's full feed-reconcile run: basis_runs generation 1 landed (109,890 bytes) and corporate_actions generation 1 landed (196 measured rows, 64,133 bytes), 2.27 s wall; a rerun with DIR spelled three other ways landed nothing (already held these bytes). Disk: 2 files, about 174 KB. A build of the merged commit names that commit in each receipt, so the sha256 differ while the rows do not. Figures are R4-26's, not measured by BASE-REDS-1023."
+disk = "basis-runs: 2 files, about 174 KB (R4-26's rehearsal); fno-membership: not measured here; the NSE-sourced generation: not built"
 
 [[step]]
 id = "S-47"

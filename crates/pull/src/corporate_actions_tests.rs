@@ -1754,3 +1754,99 @@ fn rows_whose_factors_multiply_past_the_bound_are_named_never_called_one() {
         "{said}"
     );
 }
+
+// ─────────────────────── gate 11 rule 6 (BASE-REDS-1023) ───────────────────────
+
+/// The three `parse`s are one `match` each now, not a search of a table
+/// (D-7150): every wire word reads back as its own value, and a word that is
+/// none of them, a case change, a padded word, the empty word and another
+/// enum's word all read as nothing.
+#[test]
+fn every_wire_word_reads_back_as_its_own_value_and_nothing_else_does() {
+    for kind in Kind::ALL {
+        assert_eq!(Kind::parse(kind.word()), Some(kind), "{kind:?}");
+        assert_eq!(Kind::parse(&kind.word().to_uppercase()), None);
+        assert_eq!(Kind::parse(&format!(" {}", kind.word())), None);
+    }
+    for tag in [Tag::Nse, Tag::Measured] {
+        assert_eq!(Tag::parse(tag.word()), Some(tag), "{tag:?}");
+    }
+    for end in [RunEnd::Step, RunEnd::Drift, RunEnd::Open] {
+        assert_eq!(RunEnd::parse(end.word()), Some(end), "{end:?}");
+    }
+    for garbage in ["", "Split", "nse ", "OPEN", "\u{0}", "split\n"] {
+        assert_eq!(Kind::parse(garbage), None, "{garbage:?}");
+        assert_eq!(Tag::parse(garbage), None, "{garbage:?}");
+        assert_eq!(RunEnd::parse(garbage), None, "{garbage:?}");
+    }
+    // Another enum's word is not this enum's word.
+    assert_eq!(Kind::parse("nse"), None);
+    assert_eq!(Tag::parse("split"), None);
+    assert_eq!(RunEnd::parse("unclassed"), None);
+    // The seven kinds' words are seven different words.
+    let words: std::collections::HashSet<&str> = Kind::ALL.iter().map(|k| k.word()).collect();
+    assert_eq!(words.len(), Kind::ALL.len());
+}
+
+/// `class_of` is `excuse`'s row's class (one walk of the window, D-7150), and
+/// that is the first `nse` row's class: a measured row before it, between
+/// two `nse` rows or alone never decides; an empty window, a window before
+/// the first row, after the last and an unknown share decide nothing.
+#[test]
+fn class_of_is_the_class_of_the_first_nse_row_in_the_window_and_measured_rows_never_decide() {
+    let (d1, d2, d3, d4) = (
+        day(2024, 2, 1),
+        day(2024, 2, 5),
+        day(2024, 2, 8),
+        day(2024, 2, 12),
+    );
+    let measured = |on: Day, after: Day| Action {
+        symbol: "MIXCO".to_owned(),
+        isin: None,
+        ex_date: on,
+        kind: Kind::Unclassed,
+        ratio: r("2"),
+        tag: Tag::Measured,
+        after: Some(after),
+        evidence: "basis_runs generation 1".to_owned(),
+    };
+    let rows = [
+        measured(d1, day(2024, 1, 31)),
+        nse("MIXCO", d2, Kind::Bonus, "2"),
+        nse("MIXCO", d3, Kind::Split, "5"),
+        measured(d4, day(2024, 2, 9)),
+    ];
+    let store = scratch("cor-class-of-mixed");
+    write(&store, &actions_draft(Standing::Sourced, &rows)).unwrap();
+    let table = load_actions(&store).table().unwrap().clone();
+    let before = day(2024, 1, 1);
+    let cases = [
+        (Some(before), d4, Some(Kind::Bonus)), // measured, nse, nse, measured
+        (Some(before), d1, None),              // the measured row alone
+        (Some(d1), d4, Some(Kind::Bonus)),     // nse first
+        (Some(d2), d4, Some(Kind::Split)),     // the second nse row
+        (Some(d3), d4, None),                  // a measured row after the nse rows
+        (Some(d4), d4, None),                  // an empty window
+        (None, d3, Some(Kind::Split)),         // the day alone
+        (None, d4, None),                      // a measured day alone
+        (Some(d4), day(2024, 3, 1), None),     // after the last row
+        (Some(before), day(2024, 1, 15), None), // before the first row
+    ];
+    for (after, through, want) in cases {
+        assert_eq!(
+            table.class_of("MIXCO", after, through),
+            want,
+            "{after:?}..{through:?}"
+        );
+        // The same answer the window's rows give when read one by one.
+        let mut first = None;
+        for row in table.labels("MIXCO", after, through) {
+            if let Some(kind) = row.class() {
+                first = Some(kind);
+                break;
+            }
+        }
+        assert_eq!(first, want, "{after:?}..{through:?}");
+    }
+    assert_eq!(table.class_of("NOSUCHCO", Some(before), d4), None);
+}

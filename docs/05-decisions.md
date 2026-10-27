@@ -84254,6 +84254,27 @@ and their order are unchanged. Measured in the same run, best of 31, at
 (`pull::gaps::not_owed_tests::not_owed_costs_the_same_with_one_answer_and_with_max_gaps_answers`).
 lp30 after the fix: language-purity --fast RED none (BRED-22).
 
+**Addendum, 27 Oct 2026 (R4-26).** R4-26 merged without this package's
+widened rule 6, which refused four new sites in `pull::corporate_actions` on
+this package's merge of feat/db-fix after R4-26 (state/fix/ci-gates-logs/bred1023-lp34).
+Three were `Kind::parse`, `Tag::parse` and `RunEnd::parse`, each a search of
+its enum's few variants for a word: each is one `match` now, no search, with
+every wire word read back as its own value and garbage, case and another
+enum's word refused
+(`pull::corporate_actions::tests::every_wire_word_reads_back_as_its_own_value_and_nothing_else_does`).
+The fourth was `Table::class_of`, a second walk of the window's rows by
+`find_map` beside `excuse`'s: it is `excuse`'s row's class now, the same
+first `nse` row, one walk, not two
+(`pull::corporate_actions::tests::class_of_is_the_class_of_the_first_nse_row_in_the_window_and_measured_rows_never_decide`,
+ten windows, each also read row by row). The walk that remains, `excuse`'s
+hand-written loop, gate 11 cannot see (L-BRED23-02); its bound is
+L-BRED23-11. No allowlist was widened. Gate 30 on the same merge: R4-26 is
+merged (set true), and S-46, which waited for it, names the two built verbs
+(`cli basis-runs`, `cli fno-membership build`) and waits for the operator
+for the third (an NSE corporate-actions file, its format UNVERIFIED, no
+reader built), with R4-26's own rehearsal of the basis-runs line cited in
+its note (BRED-26, BRED23-F26).
+
 ### D-7151 — Gate 11 reads an inner allow and every spelling of a linear search; the 108 sites that surfaced are pinned unread (BASE-REDS-1023) — 2026-10-23
 
 Two gaps verify-BASE-GATE11-r1 named in `.github/gates_ledger.rs`:

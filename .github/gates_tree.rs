@@ -3126,6 +3126,14 @@ const R4_27_LITERAL: &str = "as_trade keep_flat match rate_before_series rate_ca
 // an account, an environment, a vendor credential or a parameter-path field.
 const IA_4_LITERAL: &str = "300 ia4-currency ia4-f44 ia4-resume";
 
+// BASE-REDS-1023's merge of R4-26 (27 Oct 2026, D-7150 addendum):
+// `cor-class-of-mixed` is the invented scratch-root name of
+// `pull::corporate_actions`' test
+// `class_of_is_the_class_of_the_first_nse_row_in_the_window_and_measured_rows_never_decide`.
+// It names no account, environment, vendor credential or parameter-path
+// field, and is none of gate 1c's ten environment words.
+const BRED_1027_LITERAL: &str = "cor-class-of-mixed";
+
 // R4-22's merge (26 Oct 2026; declared by BASE-REDS-1023 at its merge of that
 // day, D-7147 addendum, each read first): the eleven `r422-*` words are
 // scratch-root names of `pull::gdfl_format_change_tests` and
@@ -3156,7 +3164,8 @@ const R4_22_LITERAL: &str = "bl columns_changed r422-all-renamed r422-bl r422-co
 /// 82 -> 83 with R4-26's group (repair 4, 26 Oct 2026; merged into
 /// feat/db-fix 27 Oct 2026, where its side counted 79): both sides of the
 /// BASE-REDS-1023 merge of 27 Oct (second) kept, none counted twice.
-const DECLARED: [&str; 83] = [
+/// 83 -> 84 with BASE-REDS-1023's group of that merge (D-7150 addendum).
+const DECLARED: [&str; 84] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3240,6 +3249,7 @@ const DECLARED: [&str; 83] = [
     R4_22_LITERAL,
     R4_19_LITERAL,
     R4_26_LITERAL,
+    BRED_1027_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

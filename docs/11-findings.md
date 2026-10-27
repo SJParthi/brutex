@@ -1107,6 +1107,14 @@ confirmed by two skeptics; their corrections are applied.
   keystroke test took the p99 of every sample (20.29 ms against 16 ms with
   the gate suite running). FIXED by minima, each keystroke's fastest of
   ten, the bound unchanged (D-7152 addendum, BRED-25).
+- **BRED23-F26: R4-26's merge turned gates 11 and 30 red** (bred1023-lp34):
+  rule 6 refused three enum `parse`s that searched their variants and a
+  second `find_map` walk in `class_of`, and R4-26 merged with `merged =
+  false` while S-46 waited for it with planned commands. FIXED in code (one
+  `match` each, `class_of` through `excuse`) and in config/store-steps.toml
+  (R4-26 merged; S-46 names the two built verbs and waits for the operator
+  for the NSE file), no allowlist widened (D-7150 addendum, BRED-26). Same
+  cause as F12: a merge that did not run the full gate set.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
