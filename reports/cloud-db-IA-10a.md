@@ -3,8 +3,8 @@ STATUS: IN PROGRESS
 # IA-10a (cloud): the api's journal readers name member keys and holes, the day band's run from the event (D-4896), the receipt's census and horizon
 
 Branch `cloud/db-IA-10a-20261024`, cut from `origin/feat/db-fix` at `e851da1ca`; the newest
-`origin/feat/db-fix` (`a32722c4`, R3-15, with BASE-DENY-1024 and IA-10c under it) merged in on
-27 Oct 2026 (`25159490`), no conflict.
+`origin/feat/db-fix` (`f01d7a0e`, R4-26, with R3-15, BASE-DENY-1024 and IA-10c under it) merged
+in on 27 Oct 2026 (`25159490` for `a32722c4`, then `bb4ace19` for `f01d7a0e`), no conflict.
 Scope in force: `reports/db-specs-20261024/IA-10a.md` section 3.2 (the read side only, D-6900).
 Nothing of the dropped half is built: no api child mode, no `/gdfl/*` route, no alerts route,
 no restart scan, no alert put.
@@ -125,7 +125,8 @@ that predates this part and fails identically on the base); 4 cores make api's t
 **Two hangers, on both trees.** `api::server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
 and `api` `tests/cloud_mutants_bars.rs`
 `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`, each run alone
-under `timeout 300`: HANG_RESULTS. Neither file is this part's.
+under `timeout 300`: each was killed by the limit (exit 124) after 300 s having used about
+0.01 s of CPU, on the branch and on the base alike. Neither file is this part's.
 
 **A disk-space fact for whoever reruns this here.** With the container's allowance below 10 GiB
 free, 15 `cli` `gdfl_import_command` tests fail with the importer's own refusal "the disk is
@@ -146,7 +147,13 @@ allowlist entries this change made loose (warnings, NEEDS THE MAC 8). Gate 1e (a
 workspace build and test with `web/` moved aside) was not run: it repeats the test gate above
 with no front-end toolchain, and this part touches no build script and nothing under `web/`.
 
-**The bench's two red rows are not this part's.** BENCH_RESULTS
+**The bench's two red rows are not this part's.** The same bench built from the base
+`a32722c4` (its own release build, from its own sources) and run alone the same morning:
+R3-24's C-LG-03 `span alone 200->2000` breaches there too (ratio 3.988x; 3.670x on the branch),
+and both runs stop with exit 1 at the `reads` row, where `/bars.json` for the whole month at
+102,400 bars answers 400 `too_many_rows ... past the 60000 one /bars.json answer serves`: a
+bench fixture past the route's row cap, the same on both trees. Every row this part's text
+touches (C-LG-01, C-LG-02) is `ok` on both.
 
 **Coverage, on the added lines.** `cargo llvm-cov` here is stable, so `--branch` (nightly only)
 was not run: branch coverage is under NEEDS THE MAC. Line coverage of every line this branch
@@ -249,8 +256,10 @@ load average below 1, nothing else running). Single calls, sorted; p50, p99, max
 | `/imports.json?feed=gdfl` runs page (C-LG-02) | 300 each | 0.082 / 0.113 / 0.122 ms | 0.080 / 0.113 / 0.140 ms | 0.080 / 0.106 / 0.113 ms |
 | `/imports.json?feed=gdfl&run=<id>` (C-LG-02) | 300 each | 0.097 / 0.146 / 0.163 ms | 0.097 / 0.134 / 0.332 ms | 0.093 / 0.132 / 0.237 ms |
 
-The day band is flat: before D-4896 the same rows read 1.17, 8.69 and 97.5 ms at p50 (the
-operator's M4 Pro, 11 Oct; a different machine, so compare the shape). C-LG-02's gated ratios:
+The day band is flat. Before D-4896, on this same container, the same bench built from the base
+`a32722c4` and run alone the same morning read the band at p50 1.93 ms (p99 2.20), 17.03 ms
+(p99 19.98) and 294.5 ms (p99 344.6) at 1,000, 10,000 and 100,000 lines: at 100,000 lines about
+580 times the branch's 0.50 ms (the operator's M4 Pro read 1.17, 8.69 and 97.5 ms on 11 Oct). C-LG-02's gated ratios:
 runs page 0.991x and 0.972x, `run=<id>` 0.969x and 0.977x, all `ok`; C-LG-01's three `ok`
 (1.334x, 1.015x, 1.012x). Written into `docs/06-limits.md` L-IA-39 ("measured after D-4896").
 The first read of each journal (the parse, once a process): 0.9, 4.1 and 53.4 ms.
@@ -458,3 +467,19 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
   now one at a time.
 - NEXT: bench C-LG-02 (building), then the workspace tests, clippy, the CI shell gates,
   NEEDS THE MAC, STATUS.
+
+### 2026-10-27 10:25 IST
+
+- Bench C-LG-02 in release (Measurements), on the branch and, built from its own sources, on
+  the base `a32722c4`: the day band at 100,000 `run` lines p50 0.50 ms against 294.5 ms; docs/06
+  L-IA-39's after-row written with both (`2f5b9cd5`, this commit).
+- Final gates on `2f5b9cd5`/`943d5918` (Gates): tests 11,779 passed, 33 failed, the same 33 on
+  the base; the two hangers hang on both; clippy clean after `943d5918` (`DayRow::hole` in
+  `pull`'s own `find` form: clippy's `manual_contains` refused `.iter().any`, gate 11 rule 7
+  refuses `.contains(&)`), its four mutants 3 caught, 1 unviable; CI shell gates the base's line
+  for line after `da5df5c8` (gate 12) and `aba23431` (gate 11).
+- `origin/feat/db-fix` moved to `f01d7a0e` (R4-26, which adds `corporate_actions` to
+  `dayflags.rs`): merged, `bb4ace19`, no conflict, no line of this part's touched.
+- NEXT: the workspace tests, clippy, deny and the CI shell gates again on the merged tree;
+  branch coverage (`RUSTC_BOOTSTRAP=1 cargo llvm-cov --branch` on the pinned 1.97.1 works
+  here); NEEDS THE MAC; STATUS.

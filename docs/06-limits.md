@@ -17028,13 +17028,16 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   container of 4 cores at a load average below 1, nothing else running:
   1,000 lines p50 0.524 ms, p99 0.635 ms, max 0.635 ms; 10,000 lines p50
   0.520 ms, p99 0.589 ms, max 0.589 ms; 100,000 lines p50 0.504 ms, p99
-  0.620 ms, max 0.620 ms. Flat: the band no longer tracks the journal (before,
-  97.5 ms at 100,000 lines, about 190 times this). The runs page beside it in
-  the same run: p50 0.082, 0.080 and 0.080 ms. Measured on a different
-  machine from the before-figures above (those were the operator's M4 Pro,
-  with other builds running), so the two sets compare in shape, not in
-  milliseconds. Printed by the bench at
-  every run and gated by nothing. The HTTP figures on a shadow of the
+  0.620 ms, max 0.620 ms. Flat: the band no longer tracks the journal. The
+  runs page beside it in the same run: p50 0.082, 0.080 and 0.080 ms. The
+  before-figures above were the operator's M4 Pro with other builds running;
+  on THIS container the same bench built from `feat/db-fix` `a32722c4`
+  (before D-4896, its own build, run alone the same way the same morning)
+  read the day band at 1,000 lines p50 1.93 ms, p99 2.20 ms; 10,000 lines
+  p50 17.03 ms, p99 19.98 ms; 100,000 lines p50 294.5 ms, p99 344.6 ms. So on
+  one machine the band at 100,000 `run` lines went from 294.5 ms to 0.50 ms
+  at p50, about 580 times less, and from linear in the journal to flat.
+  Printed by the bench at every run and gated by nothing. The HTTP figures on a shadow of the
   operator's store with 100,000 `run` lines appended are the Mac's to take
   (IA-10a's NEEDS THE MAC, section 13.4): UNVERIFIED here.
 - **`/imports.json`'s day rows are still a walk of the asked range**
