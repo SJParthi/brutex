@@ -2343,10 +2343,12 @@ pub(super) mod tests {
             checked.acceptance().as_deref(),
             Some([true, false, true].as_slice())
         );
+        // One verdict per bar OFFERED to the build, not per row it kept.
         assert_eq!(
             signal.acceptance().map(|accepted| accepted.len()),
-            Some(signal.bits().len())
+            Some(warm_run().len())
         );
+        assert!(signal.acceptance_covers(warm_run().len()));
         assert!(unchecked.acceptance().is_none());
         // The bitmap is shared, never copied: two reads are one allocation.
         let (one, two) = (checked.acceptance(), checked.acceptance());
