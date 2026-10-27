@@ -1,6 +1,6 @@
 STATUS: IN PROGRESS
 
-NEXT: (HOLD lifted at 12:52 IST, `0521e9e1`) coverage at the final head, gate 1e, bench C-RP-02, workspace clippy, the CI shell gates again, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), the new code's 46 mutants (2 missed, both fixed), two base merges.
+NEXT: (HOLD lifted at 12:52 IST, `0521e9e1`) gate 1e (building), then the final report. Done this leg: the 149 (0 missed), the coverage pass (100% of the added lines and arms), the new code's 46 mutants (2 missed, both fixed), two base merges, workspace clippy, the CI shell gates (the base's exit codes, nothing new), bench C-RP-02 (ratio 0.897).
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
@@ -234,20 +234,17 @@ again.
 
 # IA-17b: D-4875 remainder: the once-per-month gather and the CASH .auc writer
 
-**Where it stands (24 Oct 2026).** The part is built as the spec says and pushed. fmt, clippy,
-`cargo deny` (CI's pinned 0.19.0) and gate 6c are green. Every CI shell gate has the base's exit
-code, with no new finding. Every test this part adds passes. Every workspace test failure is this
-host's (root, 4 cores, 5.7 GB free) and shown red on the base or independent of the diff. **It is not
-`STATUS: DONE`**, because two of the README's gates are not green here:
+**Where it stands (27 Oct 2026).** The part's code is complete and pushed, on the newest
+`feat/db-fix` (`f01d7a0e`). Green here: `cargo fmt --all --check`; `cargo clippy --workspace
+--all-targets --locked -- -D warnings`; `cargo deny check` (CI's 0.19.0); gate 0 and gate 6c;
+**100% of the added lines run and every added branch arm taken** (1,273 lines, 140 arms, six
+files); **no surviving mutant** of this part's diff (the 106, the 149 and the new code's 46, every
+one with a saved result). What is not green here is the host's and the base's, each named under
+"Gates, 27 Oct" and NEEDS THE MAC: the workspace tests root, 4 cores and the free-space floor
+defeat (red on the base alike), and the CI shell gates red on `feat/db-fix` the same way, with no
+new finding inside them. That is the README's `STATUS: BLOCKED` with the code complete.
 
-- line and branch coverage of the touched modules is not 100%: 95.0% of the added lines and 85.0% of
-  their branch arms run, and the rest is named below;
-- the mutant run is a sample, not the whole diff: 27 of 264 mutants (two round-robin shards of 20),
-  19 caught, 8 unviable, none missed.
-
-Both are under NEEDS THE MAC with what they need.
-
-Cloud session, branch `cloud/db-IA-17b-20261024`, cut from `origin/feat/db-fix` at `e851da1c`
+**The first leg (24 Oct 2026), as it was written.** Cloud session, branch `cloud/db-IA-17b-20261024`, cut from `origin/feat/db-fix` at `e851da1c`
 (Merge DATA-2). `origin/feat/db-fix` moved twice during the session, and both were merged in:
 
 - `d39e789e` (Merge IA-4, R4-27, CLOUD-MUTSTORE) as `af3746f8`. The three ledgers conflicted only
@@ -419,7 +416,43 @@ need a new seam or API (`plant_gathered_unnamed`, `FAIL_CUT`, `FAIL_SYNC`, `Wind
 fail there, by not compiling. Their teeth are shown by mutants instead: every mutant on the lines
 they reach is caught (the 149 at `9a186f42`, and the new code's own, below).
 
-## Gates
+## Gates, 27 Oct (the head, on `feat/db-fix` `f01d7a0e`)
+
+This host: root (uid 0), 4 cores, 15 GB of memory, 16 GB of tmpfs. Code at `66a53c71` (every
+later commit is the report).
+
+| Gate | Command | Branch | Base `f01d7a0e` |
+|---|---|---|---|
+| fmt | `cargo fmt --all --check` | green | — |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | green (exit 0) | — |
+| deny | `cargo deny check` (0.19.0, CI's pin) | green: `advisories ok, bans ok, licenses ok, sources ok` (after the seventh merge; `Cargo.lock` has been the base's since) | — |
+| tests, pull | `TMPDIR=<tmpfs> cargo test -p pull --lib --locked` (inside the coverage run below) | 2,230 passed, 9 failed: `alerts` 1, `gdfl_dropbox::repair_r1` 2, `ia16::an_immutable_month_stops_the_run_by_name`, `census_store::link_tests` 2, `zerodha_verify` 2, and IA-10c's `gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice` (a read-only file root writes anyway); every one a permission root ignores, none this part's | the same tests are the base's, unchanged by this part |
+| tests, workspace | gate 1e's test phase, below | running at this save point | — |
+| gate 1e | the step as `ci.yml` writes it (`gates-tree gate-1e prepare`: a worktree of the head with `web/` deleted, every toolchain, interpreter and shell shadowed by a stub; `cargo build --workspace --locked --all-targets`, then `cargo test --workspace --locked`, each read by `gate-1e verdict`), with three differences for this host: the outputs kept in files, the test phase `--no-fail-fast`, and the two tests that hang on 4 cores skipped by name under a two-hour bound | running at this save point | — |
+| gate 0 | `rustc --edition=2024 --test -D warnings .github/gates_tree.rs` and the rest of the step | green: 50 passed | — |
+| gate 6c | `rustfmt --edition 2024 --check` and `clippy-driver -D warnings` (with and without `--test`) over every tool `gates-jobs tools` lists | green | — |
+| CI shell gates | every step of the language-purity job, each tree's own `ci.yml`, run as written (extracted by an `awk` script, `RUNNER_TEMP` and `GITHUB_ENV` as on a runner), but 1e (above) | **the base's exit code at every step**: green 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b; red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 | the same: red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 |
+| coverage | `cargo llvm-cov -p pull --lib --branch` (as "The coverage pass, 27 Oct") | **100%**: 1,273 added executable lines all run and 140 added arms all taken (`ingest.rs` 303 and 12, `gdfl_import_filing.rs` 440 and 48, `gdfl_import_day.rs` 241 and 50, `gdfl_cm_auction.rs` 250 and 30, `gdfl_import.rs` 16 and 0, `session.rs` 23 and 0) | — |
+| mutants | `cargo mutants` 26.2.0 `--in-diff`, as above | **none survived**: the 264 of the first list matched to the head's 255 (106 done by the first four legs, 149 here: 111 caught, 36 unviable, 2 timeouts), and the coverage pass's own 46 (38 caught, 6 unviable, 2 missed and fixed, the fix's own caught) | — |
+
+**Inside the red shell gates, nothing new.** Each red step's output on the branch and the base,
+line numbers stripped and lines sorted, differs only in counts (files walked, headings read,
+lines in scope, blocks with a cost claim, test timings): gate 1d's set of undeclared words is the
+base's exactly (with this part's labels declared in `IA17B_LITERAL`), gate 12's refused claims are
+the base's (179 claims name a test that exists, the base 178), gate 11's banned constructs are the
+base's, and gate 29 fails the same `tests::every_route_has_a_limits_row_and_a_growth_bench` on
+both (a base red since R3-15 or R3-12; this part adds no route). Gate 14 was red on the base at
+`a32722c4` only because the base already pinned this part's bench row (C-RP-02) and was green
+on the branch; at `f01d7a0e` it is green on both.
+
+**Whole files, the branch** (the same coverage run; the README asks 100% of the touched modules,
+and the earlier legs read that as the lines a part adds, the reading kept here): `ingest.rs`
+84.18% of lines, 70.99% of branches; `gdfl_import_filing.rs` 95.34%, 89.89%; `gdfl_import_day.rs`
+93.44%, 86.01%; `gdfl_cm_auction.rs` 92.61%, 96.36%; `gdfl_import.rs` 91.95%, 87.96%;
+`session.rs` 94.57%, 86.84%. The rest of each file is base code this part does not change; on the
+first leg's base `d39e789e` the four files it measured were 78.11% to 94.38% of lines.
+
+## Gates, 24 Oct (the first leg's)
 
 Run on the branch after merging `d39e789e`. Where a gate is red, the same command was run on a
 worktree of the unmodified base `d39e789e` and the outputs compared with line numbers stripped and
@@ -547,6 +580,17 @@ engine; the tests above build with no front-end toolchain) and 7 (skips permanen
 
 ## Measurements
 
+**C-RP-02 at the head (27 Oct).** `cargo bench -p pull --locked --bench ratio`, the code of
+`66a53c71`, this host (4 cores; `TMPDIR` on a tmpfs), nothing else building but the CI shell gates'
+small tools: 2 gathered days, one run, n = 5: p50 67,152,675 ns, p99 68,436,954 ns, max
+73,190,417 ns; 22 gathered days, n = 5: p50 682,705,847 ns, p99 695,901,577 ns, max 776,534,707
+ns; per gathered day, the fastest run, 31,209,315,000 ps at 2 days and 28,012,423,363 ps at 22:
+**ratio 0.897**, gate 8's ceiling 3.0; peak resident set of the five 22-day runs 274,698,240 B
+(printed, never gated); every other ratio of the pull bench within its ceiling (`all ratios
+within the ceiling`, exit 0). The coverage pass changed nothing on that path but how a new
+month's offer is made (aside, then pushed: the same allocations), so the numbers are the first
+leg's within this host's spread. With n = 5, the p99 is the slowest sample but one.
+
 **C-RP-02** (`crates/pull/benches/ratio.rs`, `gathered_repair_is_flat_per_day`). Method: `cargo bench
 -p pull --locked --bench ratio` (the bench profile, release with debuginfo), this cloud host (Linux,
 4 cores; `TMPDIR` on a tmpfs), on the branch after merging `d39e789e`. Each run is one repair-reason
@@ -610,6 +654,20 @@ run time; `gdfl_cm::tests::fixtures_are_built_not_pasted` walks both files.
 | 24 | **Combination**: a later day closed before an earlier day waiting for its month, both incomplete: the report's day lists stay in order | `a_deferred_close_after_a_later_days_close_keeps_the_report_in_day_order` (IA-RP-25) | out of order × refusal |
 | 25 | **Out of the box**: a sidecar holding a later day whose bars never landed: the carried print is named, never dropped | `a_print_carried_for_a_generation_its_bars_never_needed_is_named_never_dropped` (IA-AUC-04) | inconsistent store |
 | 26 | A month whose served generation cannot be told (its pointer a directory): the print refused, nothing written | `revision_tests::a_month_whose_served_generation_cannot_be_told_takes_no_print` (IA-AUC-05) | garbage store state |
+| 27 | **Combination**: a stop first seen at a day's top, the day before it gathered: the months repaired once each, the gathered day closed `done`, nothing of the next day read | `a_stop_seen_at_a_days_top_closes_the_gathered_days_before_it_and_reads_no_more` (IA-RP-37) | stop × month repair × day boundary |
+| 28 | **Combination**: a gathered day whose own pass ends the run by a store that takes no writes, by the held-back set at its cap, and by the source's root gone: begun each time, nothing repaired, the next run converges | `a_gathered_day_whose_pass_ends_the_run_stays_begun_whatever_ends_it` (IA-RP-38) | gather × unwritable volume; gather × maximum (the cap); gather × unplugged source |
+| 29 | **Out of the box**: a source that says it holds no file of a day yet hands one, which is gathered, and a full disk at the month's repair: the run ends `disk_full`, the day's one close is its pass's | `a_day_the_source_disowns_after_a_gathered_file_keeps_its_own_close_when_the_repair_ends_the_run` (IA-RP-39) | inconsistent source × full disk |
+| 30 | **Out of the box**: the same disowned day and a census that refuses the repaired rows: closed `incomplete stage=census` after its `refused` line, read again, converges | `a_disowned_day_that_waited_first_is_closed_by_a_census_refusal_and_read_again` (IA-RP-40) | inconsistent source × census refusal |
+| 31 | The same disowned day, its month repaired: the pass's `refused` line stands, no second close | `a_day_the_source_disowns_after_a_gathered_file_keeps_its_own_close_when_its_month_is_repaired` (IA-RP-33) | inconsistent source |
+| 32 | A gathered repair's failure no door names: named on each gathered file under its own day, the month not counted, the next run repairs it once | `a_gathered_repairs_failure_no_door_names_is_named_on_each_gathered_file` (IA-RP-41) | an unaddressable batch |
+| 33 | **Two writers**: another writer repairs the gathered day into the month before the run's end: no second generation, nothing counted, each bar served once | `a_gathered_day_another_writer_lands_first_costs_no_second_generation` (IA-RP-42) | two writers |
+| 34 | A carried print whose bars the door refused (no repair reason): neither filed nor named dropped; the read that lands the day carries it into the new `.auc` | `a_carried_print_whose_bars_the_door_refused_waits_for_the_read_that_lands_them` (IA-AUC-13) | refusal × CASH sidecar |
+| 35 | **Two writers**: a day the original sidecar holds differently is refused, never carried | `revision_tests::a_day_the_original_holds_differently_is_refused_never_carried` (IA-AUC-10) | two writers |
+| 36 | **Combination**: a torn `.auc` the host will not cut back: refused by name, the file unchanged, the next append cuts and lands | `revision_tests::a_torn_tail_the_host_will_not_cut_back_refuses_the_append_and_keeps_the_file` (IA-AUC-11) | torn file × unwritable volume |
+| 37 | A fresh sidecar whose directory the host will not sync: named, and a retry files nothing twice | `revision_tests::a_fresh_sidecar_whose_directory_will_not_sync_is_refused_by_name` (IA-AUC-12) | crash durability, empty store |
+| 38 | A refusal named on each gathered file under its own day, a stray file under none | `gather_unit_tests::a_refusal_is_named_on_each_gathered_file_under_its_own_day` (IA-RP-43) | out-of-order index |
+| 39 | A window widened to hold a day across a month and a year boundary, and never for a day inside it | `session::month_boundary::a_window_widens_only_as_far_as_the_day_it_must_hold` (IA-RP-44) | month and year boundaries |
+| 40 | A widened day whose member key's close waits for its month is counted once | `scope_reopen::a_new_member_holding_only_a_later_day_takes_its_earlier_done_days` (IA-RP-45) | renamed / new member × gather |
 
 ## Files outside ownership
 
@@ -620,18 +678,23 @@ Each kept minimal (spec §4b):
   `before_promote` step through `repair_month_with`), `judge_back_fill` split out of
   `back_fill_or_append` with its behaviour unchanged, and `repair_after` taking the step (every other
   caller passes `None`, so their bytes on disk are unchanged).
+  On 27 Oct (the coverage pass): `Filed::Gathered` gained `month` (the month the door addressed),
+  and one test's `matches!` became a pattern read off its `Debug` rendering.
+- `crates/pull/src/session.rs` — 27 Oct: `Window::holding`, a pure total addition (the window
+  widened to hold a day), and its test. No caller but `widen_window`.
 - `crates/pull/src/gdfl_import.rs` — minimal, as the spec allows: `FileFacts.auction` and `cm_read`
   calling `file_or_carry`.
 - `crates/pull/src/gdfl_ia16_tests.rs` — one line: `auction: None` in a `FileFacts` literal.
 - `crates/pull/src/gdfl_scope_tests.rs` — the `Ctx` literal's `gather` field, and `months_repaired`
   2 → 1 with a D-4899 comment (that test measured the old per-file repair; one generation is the new
-  rule).
+  rule); 27 Oct: the same test asserts `days_imported == 2` (IA-RP-45, the mutant run's find).
 - `crates/pull/src/gdfl_import_tests.rs` — the `#[path = "gdfl_gather_tests.rs"] mod gather;` mount.
 - `.github/workflows/ci.yml` — gate 14's `pull` pin 38 → 39 and `C-RP-02` added (the shared exact
   line, recounted after merging `d39e789e`, which did not change it).
 - `.github/gates_tree.rs` — gate 1d's `IA17B_LITERAL` group (event codes, test folder labels,
-  `clear_refs`), `DECLARED` 75 → 76. None names an account, an environment, a vendor credential or a
-  field of a parameter path.
+  `clear_refs`), `DECLARED` 75 → 76 (80 after the eighth merge, each base group first); 27 Oct: the
+  coverage tests' fourteen folder labels. None names an account, an environment, a vendor
+  credential or a field of a parameter path.
 
 Not touched: `crates/store/**` (the step is only called), `crates/api/**` (`auction::path` keeps its
 signature), `crates/cli/**`, `web/**`, `Cargo.toml`, `Cargo.lock`.
@@ -710,17 +773,24 @@ untracked configuration and are never written into a file):
 
 **Gate runs this cloud session could not finish, or could not make honestly:**
 
-- **Mutants, the whole diff.** `cargo mutants --in-diff <git diff d39e789e -- crates/pull/src>`
-  (26.2.0, CI's pin) lists **264 mutants** in this part's code: 100 in `gdfl_import_filing.rs`, 62
-  in `gdfl_cm_auction.rs`, 51 in `ingest.rs`, 49 in `gdfl_import_day.rs`, 2 in `gdfl_import.rs`. The
-  sample here took 90 min for 27 (about 3.3 min a mutant: one incremental rebuild of pull's test
-  binary, then the tests), so the whole run is about 14.5 hours of this host. Only that sample ran
-  here (Gates, above): 19 caught, 8 unviable, 0 missed. Expected of the rest: no surviving mutant;
-  any `MISSED` is a missing test of this part's.
-- **Coverage to 100%.** The 43 added lines that are unreachable or have no timing seam (Gates,
-  above) need either a seam or a ruling that they stay as named defensive arms.
-  `cargo llvm-cov -p pull --lib --branch` on a nightly toolchain (this session used
-  `RUSTC_BOOTSTRAP=1` on stable 1.97.1).
+- **Mutants, the whole diff: done here (27 Oct), none survived** (Gates, 27 Oct). To confirm at
+  merge-back, on the merge-back tree: `cargo mutants --in-diff <(git diff feat/db-fix HEAD --
+  crates/pull/src) -p pull -- --lib -- gdfl_import:: gdfl_cm:: ingest:: session::month_boundary::`
+  (26.2.0); expected: no `MISSED`, every mutant caught, unviable or timed out (two time out: the
+  `name_in_order` and `give_added` loops a mutation makes endless). About 1.3 min a mutant on 4
+  cores with `CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_INCREMENTAL=true` and
+  `--cargo-arg=--lib`.
+- **A base finding the mutant run met (not this part's, not blocking):**
+  `crates/pull/src/gdfl_import_day.rs` `widen_key`, `widened.closed += 1` -> `*= 1` survives. It is
+  WP-12f's line, unchanged against `feat/db-fix`: the `members` count a widened day's summary event
+  carries is read by no test (`tests::summary_emitted` keeps only the event's text fields). Its
+  owner's fix: keep numeric fields in the summaries capture and assert `members` in a widened-day
+  test.
+- **Coverage: done here (27 Oct), 100% of the added lines and arms** (Gates, 27 Oct). To confirm
+  on a nightly toolchain: `cargo llvm-cov -p pull --lib --branch`, its lcov matched to `git diff
+  --diff-algorithm=histogram -U0 feat/db-fix HEAD` of `ingest.rs`, `gdfl_import_filing.rs`,
+  `gdfl_import_day.rs`, `gdfl_cm_auction.rs`, `gdfl_import.rs` and `session.rs`; expected: every
+  added line run, every added arm taken (this session used `RUSTC_BOOTSTRAP=1` on stable 1.97.1).
 - **The tests root defeats**, run as a non-root user: `cargo test --workspace --locked`. Expected:
   the 9 `pull`, 3 `cli`, 3 `store`, 4 `telemetry` and the 2 root-dependent `api` permission tests
   green (they fail here because root reads and writes through 0o000, 0o444 and 0o555).
