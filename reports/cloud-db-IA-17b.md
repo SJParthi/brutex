@@ -1,6 +1,6 @@
 STATUS: IN PROGRESS
 
-NEXT: the 149 mutants left (below), running at the head `9a186f42` (the seventh base merge; this part's diff is byte for byte `0c18505b`'s) in two in-place worktrees, each MISSED fixed as found; then the new code's own mutants, coverage again, gate 1e, the final report.
+NEXT: the new code's own 46 mutants (running at `3f2388c9`, two in-place worktrees), then coverage at the final head, gate 1e, bench C-RP-02, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), two base merges.
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
@@ -35,6 +35,28 @@ run again; nothing it lists as done is redone.
   `9a186f42` under `/home/user`, started detached from the session so no session timeout can stop
   one with a mutation applied. Baselines: `ok Unmutated baseline in 0s build + 26s test`, test
   timeout auto-set to 133 s and 135 s.
+- **The 149, every one with a result: 0 missed.** `75 mutants tested in 2h: 56 caught, 17
+  unviable, 2 timeouts` and `74 mutants tested in 2h: 55 caught, 19 unviable`: **111 caught, 36
+  unviable, 2 timeouts, 0 missed**; every name of the 149 has exactly one outcome (`comm` of the
+  list and the four outcome files: empty), and both worktrees were clean after. The two timeouts
+  are infinite loops the mutation makes, which no test survives (each hit the 133 s limit):
+  `gdfl_import_day.rs` `-=` -> `/=` in `name_in_order` (`at /= 1` never moves back) and
+  `gdfl_import_filing.rs` `+=` -> `*=` in `give_added` (`cursor *= 1` never moves on). With the
+  106 of the finished shards, **all 255 mutants of the head's diff have a saved result and none
+  survived.**
+- **The coverage pass (the arms no test reached).** Coverage at `9a186f42` (`cargo llvm-cov`
+  0.8.4 `-p pull --lib --branch`, matched to `git diff --diff-algorithm=histogram -U0
+  origin/feat/db-fix`): of this part's added executable lines, **34 never ran and 18 branch arms
+  were never taken**. Each is now run, or its condition is gone because nothing could make it
+  true (`f39f40ce`, `8adad281`, gate 1d `2abd7a43`); the details are under "The coverage pass,
+  27 Oct" below. Coverage at `f39f40ce`: every added line run and every arm taken in the five
+  production files; the three items left were test code, rewritten at `8adad281`.
+- **Eighth base merge.** `origin/feat/db-fix` moved to `f01d7a0e` (Merge R4-26); merged as
+  `3f2388c9`. `.github/gates_tree.rs` conflicted on `DECLARED`: R4-26's group first, IA-17b's
+  after, the length 79 -> 80; gate 0's tool tests pass (50 passed). The three ledgers merged
+  cleanly, feat/db-fix's file the exact byte prefix of each. Nothing R4-26 moved under
+  `crates/pull` (`corporate_actions.rs`, `day_universe.rs`, `reference_data.rs`, `lib.rs`) is this
+  part's; `Cargo.lock` is the base's byte for byte.
 
 ## Session of 26 Oct 2026, fourth leg (a new cloud session, continuing from `b847a810`)
 
