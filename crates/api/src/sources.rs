@@ -3547,6 +3547,8 @@ pub fn day_table(root: &Path, asked: &DayAsk) -> Result<Value, Refusal> {
             .zip(feed_holding(Timeframe::SECOND_1))
             .and_then(|((z, _), (g, _))| bases_differ(inst.segment, z, g)),
         series: &series,
+        measured: (inst.segment == Segment::Cash)
+            .then(|| (super::basis_route::tables(root), inst.symbol.as_str())),
     };
     let mut tally = DayTally::default();
     let mut rows = Vec::with_capacity(days.len());
@@ -3608,6 +3610,12 @@ pub fn day_table(root: &Path, asked: &DayAsk) -> Result<Value, Refusal> {
         "records_read": budget.used(),
         "tolerances": tolerances_json(),
         "notes": day_notes(inst, flags.get("notes").and_then(Value::as_array)),
+        // THE MEASURED BASIS-RUN TABLE the day rows' `measured_run` read
+        // (R4-26): served with its receipt, or refused by name.
+        "measured_basis": context
+            .measured
+            .as_ref()
+            .map(|(tables, _)| super::basis_route::slot_json(&tables.runs)),
     }))
 }
 
@@ -3725,6 +3733,67 @@ struct DayContext<'a> {
     segment: Segment,
     bases: Option<bool>,
     series: &'a DaySeries,
+    /// A share's measured basis runs and corporate actions, and its symbol
+    /// (R4-26); `None` for anything that is not a share.
+    measured: Option<(super::basis_route::Tables, &'a str)>,
+}
+
+/// THE /sources FACTOR FROM THE MEASURED RUN (R4-26, Z8): the run of the
+/// share's basis-run table that holds `day`, its factor both ways and its
+/// edge days, applied ONLY inside its run; outside every run the factor is
+/// `null` and the reason is named, never borrowed from a neighbour; a table
+/// that is absent or refused says so by name. The day's corporate actions
+/// ride beside it, each with what it may do (a measured row labels only).
+/// O(1): one hash and one or two indexes into the share's day table on each
+/// table, no search.
+/// Measured by `pull::corporate_actions::tests::an_action_lookup_is_one_index_at_1_64_and_4096_rows_measured`
+/// and `pull::corporate_actions::tests::a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured`.
+fn measured_run_json(context: &DayContext<'_>, day: Day) -> Value {
+    let Some((tables, symbol)) = &context.measured else {
+        return Value::Null;
+    };
+    let actions = match tables.actions.table() {
+        Ok(table) => Value::Array(
+            table
+                .labels(symbol, None, day)
+                .iter()
+                .map(super::basis_route::action_json)
+                .collect(),
+        ),
+        Err(why) => json!({ "served": false, "refusal": why.to_string() }),
+    };
+    let runs = match tables.runs.table() {
+        Ok(runs) => runs,
+        Err(why) => {
+            return json!({
+                "served": false,
+                "refusal": why.to_string(),
+                "factor": null,
+                "corporate_actions": actions,
+            });
+        }
+    };
+    match runs.run_on(symbol, day) {
+        Ok(run) => json!({
+            "served": true,
+            "standing": "measured",
+            // D-3339's direction (GDFL ÷ Zerodha), and the run's own.
+            "factor": pull::corporate_actions::Ratio::ONE.over(run.ratio).map(|f| f.to_string()),
+            "zerodha_over_gdfl": run.ratio.to_string(),
+            "interval": [run.low.to_string(), run.high.to_string()],
+            "first": run.first.to_string(),
+            "last": run.last.to_string(),
+            "ends": run.end.word(),
+            "edge_day": (run.end == pull::corporate_actions::RunEnd::Step).then(|| run.last.to_string()),
+            "corporate_actions": actions,
+        }),
+        Err(why) => json!({
+            "served": true,
+            "factor": null,
+            "outside": why.to_string(),
+            "corporate_actions": actions,
+        }),
+    }
 }
 
 /// Why `held` holds no record of `day`, as a code a page words: no offered
@@ -4031,6 +4100,7 @@ fn day_row(
             "volume_not_scaled_with_price": volume_unscaled,
             "grid_paisa": { "zerodha_minutes": zerodha_grid, "gdfl_seconds": gdfl_grid },
             "quantised": quantised,
+            "measured_run": measured_run_json(context, day),
         })
     });
     let mut flags: Vec<&str> = Vec::new();
