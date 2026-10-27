@@ -388,9 +388,104 @@ fn twenty_restarts(store: &Store, feeds: &[Vendor], caches: usize) {
 /// answered from the previous read and says so, none takes 50 ms, no request
 /// thread reads the census, and once the background re-read lands the
 /// change is served, current.
+///
+/// THE 50 MS BOUND HOLDS IN ONE OF UP TO [`NEVER_BLOCKS_RUNS`] RUNS, EACH A
+/// STORE OF ITS OWN, AND IS UNCHANGED (BASE-REDS-1023 repair 1, D-7152
+/// addendum). One run at load 35-43 failed with "a request waited: p50
+/// 531µs, p99 3.80ms, max 53.5ms": a request the scheduler held off the core
+/// for 53 ms, while a request that waited for the census would have waited
+/// for its five-second read. Interference only adds time, and a design that
+/// makes a request wait for the read pays the five seconds in every run, so
+/// it fails them all; every other assertion holds in every run.
 #[tokio::test(flavor = "current_thread")]
 async fn a_census_change_never_blocks_a_request() {
-    let mut store = Store::new("never-blocks", 64);
+    let held = first_run_within(
+        Duration::from_millis(50),
+        NEVER_BLOCKS_RUNS,
+        one_change_beside_a_thousand_requests,
+    )
+    .await;
+    assert!(
+        held.is_ok(),
+        "a request waited in every run, (p50, p99, max) each: {held:?}"
+    );
+}
+
+/// How many runs [`a_census_change_never_blocks_a_request`] may make before
+/// it fails: each run that does not hold costs about the census read's five
+/// seconds more.
+const NEVER_BLOCKS_RUNS: u32 = 7;
+
+/// A run's (p50, p99, max) of `took`, sorted: the 500th, 990th and last of
+/// 1,000, the same ranks scaled for any other count.
+fn ranks(took: &[Duration]) -> (Duration, Duration, Duration) {
+    let at = |per_mille: usize| {
+        took.get((took.len() * per_mille / 1_000).saturating_sub(1))
+            .copied()
+            .unwrap_or_default()
+    };
+    (at(500), at(990), at(1_000))
+}
+
+/// Runs `run` (its argument is the run's number, from 0) until one run's
+/// slowest time is under `bound`, at most `runs` times: that run's number,
+/// or every run's [`ranks`] when none held. Each run's times must come back
+/// sorted.
+async fn first_run_within<F, R>(
+    bound: Duration,
+    runs: u32,
+    mut run: F,
+) -> Result<u32, Vec<(Duration, Duration, Duration)>>
+where
+    F: FnMut(u32) -> R,
+    R: std::future::Future<Output = Vec<Duration>>,
+{
+    let mut every = Vec::new();
+    for n in 0..runs {
+        let took = run(n).await;
+        let measured = ranks(&took);
+        if measured.2 < bound {
+            return Ok(n);
+        }
+        every.push(measured);
+    }
+    Err(every)
+}
+
+/// [`first_run_within`] stops at the first run that holds, fails with every
+/// run's ranks when none does, and a time exactly at the bound does not hold.
+#[tokio::test(flavor = "current_thread")]
+async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with_every_run() {
+    let ms = Duration::from_millis;
+    let mut made = Vec::new();
+    let held = first_run_within(ms(50), 7, |n| {
+        made.push(n);
+        let max = if n == 0 { ms(53) } else { ms(3) };
+        async move { vec![ms(1), max] }
+    })
+    .await;
+    assert_eq!(held, Ok(1));
+    assert_eq!(made, vec![0, 1], "no run after the one that held");
+    let blocked = first_run_within(ms(50), 7, |_| async { vec![ms(1), ms(5_000)] }).await;
+    assert_eq!(blocked, Err(vec![(ms(1), ms(1), ms(5_000)); 7]));
+    let at_bound = first_run_within(ms(50), 1, |_| async { vec![ms(50)] }).await;
+    assert_eq!(at_bound, Err(vec![(ms(50), ms(50), ms(50))]));
+    let thousand: Vec<Duration> = (1..=1_000).map(Duration::from_micros).collect();
+    assert_eq!(
+        ranks(&thousand),
+        (
+            Duration::from_micros(500),
+            Duration::from_micros(990),
+            Duration::from_micros(1_000)
+        )
+    );
+}
+
+/// One run of [`a_census_change_never_blocks_a_request`] over a store of its
+/// own, its every assertion but the bound held: its 1,000 request times,
+/// sorted.
+async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
+    let mut store = Store::new(&format!("never-blocks-{run}"), 64);
     let site = store.site();
     start(&site, &[Vendor::Gdfl]).expect("the warm thread starts");
     let _ready = wait_ready(&site);
@@ -420,13 +515,7 @@ async fn a_census_change_never_blocks_a_request() {
     }
     slow_read::set(&store.root, 0);
     took.sort_unstable();
-    let p99 = took[989];
-    let max = took[999];
-    assert!(
-        max < Duration::from_millis(50),
-        "a request waited: p50 {:?}, p99 {p99:?}, max {max:?}",
-        took[499]
-    );
+    assert_eq!(took.len(), 1_000, "every request was timed");
     assert!(
         stale >= 800,
         "the requests after the change were answered from the previous read: {stale}"
@@ -462,6 +551,7 @@ async fn a_census_change_never_blocks_a_request() {
             .census()
             .and_then(census::VendorCensus::generation)
     );
+    took
 }
 
 /// **TWENTY IMPORTED OPTION DAYS REFRESH WITHOUT A WHOLE READ** (R3-09;
