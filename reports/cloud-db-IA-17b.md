@@ -1,6 +1,11 @@
-STATUS: IN PROGRESS
+STATUS: BLOCKED
 
-NEXT: (HOLD lifted at 12:52 IST, `0521e9e1`) gate 1e (building), then the final report. Done this leg: the 149 (0 missed), the coverage pass (100% of the added lines and arms), the new code's 46 mutants (2 missed, both fixed), two base merges, workspace clippy, the CI shell gates (the base's exit codes, nothing new), bench C-RP-02 (ratio 0.897).
+BLOCKED ON (base and environment items only; this part's code is complete, on `feat/db-fix` `f01d7a0e`):
+1. **Environment (this host is root, 4 cores):** `cargo test --workspace --locked` and gate 1e's test phase are red here on 37 tests of `pull` 9, `cli` 3, `store` 5, `telemetry` 4 and `api` 16, none this part's: 28 permission tests root defeats, one 4-core pool test, five slow-reader timings (table under "Gates, 27 Oct"). Needs a non-root run on 8 or more cores (NEEDS THE MAC).
+2. **Base:** the CI shell gates red on `feat/db-fix` the same way (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30), with no new finding inside any; gate 1e's test phase also fails on the base's two `api` `bars_export` tests that read `web/` at test time; one `api` autopilot test is not classified here (`crates/api` untouched). Each under NEEDS THE MAC.
+3. **The Mac's own runs:** spec §6 M0 to M2, (a) to (j): real data, shadow server, store writes on a private root.
+
+Green here: fmt, workspace clippy, `cargo deny` (0.19.0), gate 0, gate 6c, gate 1e's build phase (`web/` deleted, no stub invoked), 100% of the added lines and arms, no surviving mutant of the part's diff (106 + 149 + 46), bench C-RP-02 (ratio 0.897).
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
@@ -82,7 +87,15 @@ run again; nothing it lists as done is redone.
   result, and none survived.**
 - **HELD at 11:5x IST.** `HOLD` returned on `cloud/db-base-20261024` at `b34f6a16` (10:29 IST,
   `GO-IA-17b` removed for it, lifting about 12:50 IST). The step in flight (these mutants and their
-  fixes) was finished, committed and pushed; nothing new starts until GO.
+  fixes) was finished, committed and pushed; nothing new started until GO came back at `0521e9e1`
+  (12:52 IST).
+- **After GO:** coverage at the head (100%), workspace clippy (green), the CI shell gates on the
+  head and on `f01d7a0e` (the base's exit codes, nothing new), bench C-RP-02 (ratio 0.897) and
+  gate 1e (the build phase green, the test phase red for this host), each under "Gates, 27 Oct".
+- **HOLD again at 14:20 IST** (`2b294f6c`, until 17:50 IST), met when gate 1e's test phase ended.
+  That step was finished and recorded; nothing of this part's is left to build, so the report is
+  `STATUS: BLOCKED` on the base's and the host's items alone and the session ends, rather than
+  holding for work it does not have.
 
 ## Session of 26 Oct 2026, fourth leg (a new cloud session, continuing from `b847a810`)
 
@@ -427,13 +440,26 @@ later commit is the report).
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | green (exit 0) | — |
 | deny | `cargo deny check` (0.19.0, CI's pin) | green: `advisories ok, bans ok, licenses ok, sources ok` (after the seventh merge; `Cargo.lock` has been the base's since) | — |
 | tests, pull | `TMPDIR=<tmpfs> cargo test -p pull --lib --locked` (inside the coverage run below) | 2,230 passed, 9 failed: `alerts` 1, `gdfl_dropbox::repair_r1` 2, `ia16::an_immutable_month_stops_the_run_by_name`, `census_store::link_tests` 2, `zerodha_verify` 2, and IA-10c's `gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice` (a read-only file root writes anyway); every one a permission root ignores, none this part's | the same tests are the base's, unchanged by this part |
-| tests, workspace | gate 1e's test phase, below | running at this save point | — |
-| gate 1e | the step as `ci.yml` writes it (`gates-tree gate-1e prepare`: a worktree of the head with `web/` deleted, every toolchain, interpreter and shell shadowed by a stub; `cargo build --workspace --locked --all-targets`, then `cargo test --workspace --locked`, each read by `gate-1e verdict`), with three differences for this host: the outputs kept in files, the test phase `--no-fail-fast`, and the two tests that hang on 4 cores skipped by name under a two-hour bound | **build phase green**: `cargo build --workspace --locked --all-targets` finished (`Finished dev profile ... in 34m 41s`, exit 0) with web/ deleted, `gate-1e verdict build` exit 0, and no stub of the 21 ever invoked (no stub left a log); a first attempt with 4 build jobs was killed by the host's out-of-memory killer (`api`'s optimised test build beside three others on 15 GB), so the run that counts set `CARGO_BUILD_JOBS=2` in the environment, the command unchanged. Test phase: running at this save point | — |
+| tests, workspace | gate 1e's test phase, below | 190 test binaries: **185 pass**; 5 fail, **37 tests, none this part's and none hung** (under the two-hour bound, `TMPDIR` on a tmpfs so the free-space floor is met): `pull` 9 and `cli` 3, `store` 5 and `telemetry` 4, and `api` 16, by cause in "The workspace tests at the head" below | — |
+| gate 1e | the step as `ci.yml` writes it (`gates-tree gate-1e prepare`: a worktree of the head with `web/` deleted, every toolchain, interpreter and shell shadowed by a stub; `cargo build --workspace --locked --all-targets`, then `cargo test --workspace --locked`, each read by `gate-1e verdict`), with three differences for this host: the outputs kept in files, the test phase `--no-fail-fast`, and the two tests that hang on 4 cores skipped by name under a two-hour bound | **build phase green**: `cargo build --workspace --locked --all-targets` finished (`Finished dev profile ... in 34m 41s`, exit 0) with web/ deleted, `gate-1e verdict build` exit 0, and no stub of the 21 ever invoked (no stub left a log); a first attempt with 4 build jobs was killed by the host's out-of-memory killer (`api`'s optimised test build beside three others on 15 GB), so the run that counts set `CARGO_BUILD_JOBS=2` in the environment, the command unchanged. Test phase: `cargo test --workspace --locked --no-fail-fast` exit 101 (the 37 below), `gate-1e verdict test` 1 for that status alone; no stub was invoked in either phase. **The gate is red here for this host and the base, not for this part** | — |
 | gate 0 | `rustc --edition=2024 --test -D warnings .github/gates_tree.rs` and the rest of the step | green: 50 passed | — |
 | gate 6c | `rustfmt --edition 2024 --check` and `clippy-driver -D warnings` (with and without `--test`) over every tool `gates-jobs tools` lists | green | — |
 | CI shell gates | every step of the language-purity job, each tree's own `ci.yml`, run as written (extracted by an `awk` script, `RUNNER_TEMP` and `GITHUB_ENV` as on a runner), but 1e (above) | **the base's exit code at every step**: green 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b; red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 | the same: red 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 |
 | coverage | `cargo llvm-cov -p pull --lib --branch` (as "The coverage pass, 27 Oct") | **100%**: 1,273 added executable lines all run and 140 added arms all taken (`ingest.rs` 303 and 12, `gdfl_import_filing.rs` 440 and 48, `gdfl_import_day.rs` 241 and 50, `gdfl_cm_auction.rs` 250 and 30, `gdfl_import.rs` 16 and 0, `session.rs` 23 and 0) | — |
 | mutants | `cargo mutants` 26.2.0 `--in-diff`, as above | **none survived**: the 264 of the first list matched to the head's 255 (106 done by the first four legs, 149 here: 111 caught, 36 unviable, 2 timeouts), and the coverage pass's own 46 (38 caught, 6 unviable, 2 missed and fixed, the fix's own caught) | — |
+
+**The workspace tests at the head, every failure by cause** (gate 1e's test phase, above). This
+part touches no file of `api`, `cli`, `store` or `telemetry` (`git diff --stat feat/db-fix HEAD --
+crates/api crates/cli crates/store crates/telemetry` is empty); `store` and `telemetry` do not
+depend on `pull` at all.
+
+| Crate | Failed | Cause, in the test's own words where it gives them |
+|---|---|---|
+| `pull` lib | 9 | root ignores permissions: `alerts` 1, `gdfl_dropbox::repair_r1` 2, `ia16::an_immutable_month_stops_the_run_by_name`, `census_store::link_tests` 2, `zerodha_verify` 2, IA-10c's `gdfl_run::ia2_tests::every_id_the_runs_ledger_gives_is_written_down_twice`; the coverage run above met the same 9 |
+| `cli` lib | 3 | root: `scrub_blocks::...an_unwritable_ledger`, `watchdog_command` 2 (0o444, 0o555 written through). With `TMPDIR` on a tmpfs the free-space floor refuses none (the first leg's 25 `disk_full` runs) |
+| `store` lib | 5 | root: `settings::tests` 3 ("a directory that stops being readable", "a disk that refuses the write", "a read-back that cannot look"), `quarantine::tests` 2 (an index publish refused for a line the host will not let it write; the publish succeeds as root) |
+| `telemetry` lib | 4 | root: `sink::tests` 4 (a delete, a rename aside, an audit stream that cannot be looked for, a coverage file) |
+| `api` lib | 16 | root, 7: `feeds_route` ("this host reads a 000 directory (root?)"), `basis_route` ("the test needs a reader the mode refuses (not root)"), `cloud_mutant_tests_c` 2 ("a read-only root takes no audit dir", and the store breaker's read-only probe), `audit::cloud_mutant_tests` (an unreadable journal read), `pullrun` 2 (a 000 journal read: "interrupted", not "not_known"); 4 cores, 1: `detail::tests::a_refused_admission_names_what_its_bound_and_why` ("at most 4 run at once": the pool clamps 8 to the cores); slow-reader timings, 5: `head_deadline_body_tests`, red on the base alike since the first leg; **gate 1e's own deletion, 2**: `bars_export::tests::the_ceiling_is_the_browsers_and_a_larger_query_is_refused_before_a_byte` and `the_columns_are_the_browsers_bar_csv_columns` read `web/src/lib/db/bars-plan.js` and `export.js` at test time, which gate 1e deletes, so they fail there on any host (a base finding, NEEDS THE MAC); **not classified here, 1**: `cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused` answers "BANKNIFTY: the broker did not answer with a window" where the test expects "no instrument in the universe could be reached" (its loop chooses the day rung's oldest month, so the answer may follow the date; the broker path is not this part's), listed under NEEDS THE MAC |
 
 **Inside the red shell gates, nothing new.** Each red step's output on the branch and the base,
 line numbers stripped and lines sorted, differs only in counts (files walked, headings read,
@@ -791,9 +817,23 @@ untracked configuration and are never written into a file):
   --diff-algorithm=histogram -U0 feat/db-fix HEAD` of `ingest.rs`, `gdfl_import_filing.rs`,
   `gdfl_import_day.rs`, `gdfl_cm_auction.rs`, `gdfl_import.rs` and `session.rs`; expected: every
   added line run, every added arm taken (this session used `RUSTC_BOOTSTRAP=1` on stable 1.97.1).
-- **The tests root defeats**, run as a non-root user: `cargo test --workspace --locked`. Expected:
-  the 9 `pull`, 3 `cli`, 3 `store`, 4 `telemetry` and the 2 root-dependent `api` permission tests
-  green (they fail here because root reads and writes through 0o000, 0o444 and 0o555).
+- **Gate 1e and the workspace tests, at merge-back** (27 Oct: the build phase green here, the
+  test phase red for this host): gate 1e as `ci.yml` writes it, on the merge-back tree, as a
+  non-root user on 8 or more cores. Expected: build green, no stub invoked; tests green but for
+  the two `api` `bars_export` tests below.
+- **A base finding gate 1e met (not this part's):** `crates/api/src/bars_export.rs`'s tests
+  `the_ceiling_is_the_browsers_and_a_larger_query_is_refused_before_a_byte` and
+  `the_columns_are_the_browsers_bar_csv_columns` read `web/src/lib/db/bars-plan.js` and
+  `web/src/lib/db/export.js` at test time (`bars_export.rs:1165`), so gate 1e's test phase, which
+  deletes `web/`, fails on them on every host, CI's included. Their owner's fix, outside this part.
+- **One `api` test not classified here:**
+  `cargo test -p api --lib --locked -- server::cloud_mutant_tests_c::an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused`
+  on `feat/db-fix` and on the merge-back tree; expected the same answer on both (here:
+  "BANKNIFTY: the broker did not answer with a window", the test expecting "no instrument in the
+  universe could be reached"). This part touches no file of `crates/api` and no broker path.
+- **The tests root defeats**, run as a non-root user: `cargo test --workspace --locked`. Expected
+  green: `pull` 9, `cli` 3, `store` 5, `telemetry` 4 and `api` 7 (the table under "Gates, 27 Oct";
+  they fail here because root reads and writes through 0o000, 0o444 and 0o555).
 - **The tests the free-space floor refused** (25 `cli` and 2 `gdfl_run_logs` and 3 `pull`), on a
   volume with more than 10 GiB free: green here only with `TMPDIR` on a tmpfs.
 - **The 4-core pool tests**, on a host with at least 8 cores (`MAX_STORE_READ_CONCURRENT` and
