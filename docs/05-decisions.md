@@ -84464,6 +84464,64 @@ rule is its own test,
 and a time at the bound does not hold) (BRED-29). Failing first: the run
 above, under load; NOT forced on demand.
 
+**Addendum, 27 Oct 2026 (repair 2: an eighth timing test, a load test that
+could not see the defect it names, and a stop rule that held on nothing).**
+verify-BASE-REDS-1023-r2 found `cargo test -p api` red under load on R3-08's
+`crates/api/tests/pool_load.rs` test
+`the_feed_list_stays_fast_while_32_clients_loop_each_route`: 3 of 7 suites
+at load 19-26 and 2 of 6 direct runs at load about 19.5, for example
+"/feeds.json p99 35.14825ms (p50 1.341292ms, max 58.004542ms) ...; the
+control was 2.291708ms". One run decided the test; its p99 is the
+third-slowest of 200 answers, and its control was a separate, earlier
+phase. Reproduced here with one run deciding: 2 of 50 runs at load 20-27
+(loaded p99 13.75 ms and 232.77 ms beside controls of 4.50 ms and 4.49 ms;
+round2/logs-BRED1023-r2-before-more.log). Three changes; no bound was
+loosened.
+1. By runs, as item 2 and the seventh test: a run is the control and the
+   loaded phase back to back on a server and a store of its own, read by
+   R3-08's rule UNCHANGED (`FeedsRun::holds`: the loaded p99 strictly
+   under 10 ms while the control's p99 is under 5 ms, otherwise at most
+   twice the control's p99); runs repeat until one holds, at most seven,
+   and every non-timing assertion holds in every run. The stop rule is its
+   own test,
+   `the_first_feed_run_that_holds_ends_the_runs_and_none_holding_fails_with_every_run`,
+   which replays the verifier's failing figures: with one run deciding
+   (`FEEDS_FAST_RUNS = 1`, the old design) it failed, "a noisy run, then
+   one that holds", left `Err([FeedsRun { ..., loaded: (1.341292ms,
+   35.14825ms, 58.004542ms) }])`; with seven it passes
+   (round2/logs-BRED1023-r2-before.log, round2/logs-BRED1023-r2-after.log).
+2. A starved worker shows now; it did not before. The verifier asked that
+   a starved worker still fail every run, so that was measured first: with
+   `spawn_blocking` taken out of `api::detail`'s `admitted` (every pooled
+   read inline on an async worker) the test as it stood passed 3 of 3 on
+   its FIRST run, loaded p99 2.76 to 6.19 ms
+   (round2/logs-BRED1023-r2-starved.log). A five-bar month reads in
+   microseconds, so R3-08's sentence "a starved async worker (a file read
+   on it) costs far more than that" was never measured and is false at
+   this fixture, and no run count could have made the test see one. Now a
+   writer holds February for the whole run, as R3-08's own repair-plan test
+   does; one seek of it per run must wait the read's 200 ms patience and
+   answer 503 with Retry-After; and in the loaded phase four more clients
+   (as many as the test runtime's async workers, half the store-read
+   pool's eight slots) seek it beside R3-08's 32, whose routes and rate are
+   unchanged. Each seek waits in the store-read pool, and the feed list's
+   own pool never waits on it; on an async worker the wait holds that
+   worker 200 ms a seek. With the same mutant the test failed 3 of 3,
+   every one of its 21 runs, loaded p99 191.9 to 209.3 ms beside controls
+   of 1.4 to 6.8 ms, about 110 s a test
+   (round2/logs-BRED1023-r2-seekers-starved.log); with the real code it
+   passed 30 of 30 at load 13-15, each on its first run, loaded p99 2.19
+   to 6.25 ms, the 36 clients making 8,794 to 16,276 requests a loaded
+   phase (round2/logs-BRED1023-r2-seekers.log). (The first
+   form put the seek in the 32 clients' round robin: the mutant failed all
+   21 runs of 3 tests, p99 208 to 391 ms, but the seek held each client
+   200 ms a turn and cut their requests from about 15,000 a phase to 363,
+   round2/logs-BRED1023-r2-starved-held.log and -held.log; not kept.)
+3. The census stop rule `first_run_within` read a run that timed nothing as
+   holding: `ranks` of an empty run is zero, under any bound (the
+   verifier's follow-up). A run with no time now never holds; its test
+   failed before ("left: Ok(0)") and passes after (BRED-31).
+
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 
 Gate 1e builds and tests the workspace in a worktree with `web/` removed

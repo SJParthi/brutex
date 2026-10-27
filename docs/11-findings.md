@@ -1160,6 +1160,21 @@ confirmed by two skeptics; their corrections are applied.
   with one run deciding and passes with seven (D-7152 addendum, BRED-30,
   L-BRED23-15). R3-08 is the code owner; the test is the same on
   `feat/db-fix`, so this repair fixes it there too when it lands.
+- **BRED23-F32: R3-08's feed-list load test could not see a starved async
+  worker, the defect it names** (found by this repair while checking that
+  the runs keep it): with `spawn_blocking` taken out of `api::detail`'s
+  `admitted`, every pooled read inline on an async worker, the test passed
+  3 of 3 on its first run (p99 2.76 to 6.19 ms): a five-bar month reads in
+  microseconds, so its sentence "a starved async worker ... costs far more
+  than that" was never measured and was false at its fixture. FIXED: a
+  writer holds February for the whole run and four more clients seek it in
+  the loaded phase (R3-08's repair-plan test holds a month the same way),
+  so a pooled wait on a worker holds it 200 ms a seek; with the same mutant
+  the test fails all seven runs (D-7152 addendum, BRED-30). The thread
+  rule itself is asserted by `api::detail`'s unit test
+  `a_store_read_runs_off_the_worker_and_refuses_past_its_bound` (the read
+  answers a thread id other than the worker's); that it fails under this
+  mutant is read from its code, NOT run here (UNVERIFIED).
 - **BRED23-F31: the census stop rule read a run that timed nothing as
   holding** (verify-BASE-REDS-1023-r2 follow-up, minor): `ranks` of an
   empty run is zero, under any bound. The experiment always times 1,000
