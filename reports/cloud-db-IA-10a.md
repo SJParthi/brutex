@@ -1,6 +1,25 @@
-STATUS: HELD
+STATUS: BLOCKED
 
 # IA-10a (cloud): the api's journal readers name member keys and holes, the day band's run from the event (D-4896), the receipt's census and horizon
+
+**Code complete; blocked only by base and environment items, each named and each shown on the
+unmodified `feat/db-fix`.** On the merged tree every gate this part can turn green is green:
+fmt, clippy (`--workspace --all-targets -D warnings`), deny, every mutant of the diff
+(137, 0 missed), line and branch coverage of every added line (all reached but two outcomes,
+each unreachable by construction and named), the CI shell gates where they read this part's
+files, and bench C-LG-02 (the day band at 100,000 `run` lines: p50 294.5 ms on the base, 0.50 ms
+here). What stays red is not this part's:
+
+1. **Tests:** 34 fail because this container runs as root or has 4 cores, and 2 hang; the same
+   on the base. One more, R3-24's `a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`,
+   fails about half its runs on both trees (a same-millisecond race in its assertion).
+2. **CI shell gates** 1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30: red on the base, line for line
+   (BASE-REDS-1023's); this branch adds only three gate 11 "allowlist is loose" warnings for
+   constructs it removed. Gate 1e was not run (it repeats the test gate).
+3. **Bench gate 8** exits 1 on R3-24's C-LG-03 `span alone` ratio and on the `/bars.json`
+   row-cap fixture, both on the base too.
+4. **Checks only the Mac can run** (real journal, shadow server at 8405, HTTP timings, the
+   receipt on a store root of its own): NEEDS THE MAC.
 
 Branch `cloud/db-IA-10a-20261024`, cut from `origin/feat/db-fix` at `e851da1ca`; the newest
 `origin/feat/db-fix` (`f01d7a0e`, R4-26, with R3-15, BASE-DENY-1024 and IA-10c under it) merged
@@ -92,13 +111,10 @@ shadow server at 8405, the HTTP timings, the receipt on a store root of its own)
 ## Gates
 
 The final run: 27 Oct 2026, this container (4 cores, 13.4 GiB memory limit, root), on the
-branch after merging the newest `origin/feat/db-fix` `f01d7a0e` (`bb4ace19`). The workspace
-tests ran on `bb4ace19`/`f8a84e8d`; three commits followed, each with its own runs: `0c06ff7a`
-(docs/06's wording; `cited_commits` again), `72f490d6` (an `api` test widened; `api`'s lib
-tests again, 2,961 passed, under the coverage run) and `ab0748ed` (the cli horizon split and
-its test; the `gdfl_import_command` tests again, 79 passed, under the coverage run; its
-mutants). fmt, clippy and the CI shell gates ran on `ab0748ed`, the last code change (the shell gates on `43e6420e`, its report commit: the base's line for line);
-deny on `0c06ff7a` (no dependency changed after it). Each red is shown on a worktree of the
+branch after merging the newest `origin/feat/db-fix` `f01d7a0e` (`bb4ace19`). The last code
+change is `ab0748ed` (the cli horizon split and its test); fmt, clippy, the CI shell gates
+(on `43e6420e`, its report commit) and one last full workspace test run (on `43e6420e`) ran
+after it, deny on `0c06ff7a` (no dependency changed after it). Each red is shown on a worktree of the
 unmodified `origin/feat/db-fix` (`/home/user/base`, with its own build of every workspace
 crate): `a32722c4` for the 33 failures, the hangers and the bench, `f01d7a0e` for R4-26's one
 new failure and the CI shell gates. (The same gates ran once before on `a32722c4`'s merge, with
@@ -109,7 +125,7 @@ the same results but for R4-26's test.)
 | fmt | `cargo fmt --all --check` | clean |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean (`Finished`, exit 0) |
 | deny | `cargo deny check` (cargo-deny 0.19.0, as CI pins) | `advisories ok, bans ok, licenses ok, sources ok` (two `duplicate` warnings, `getrandom` and `syn`, as on the base) |
-| tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | 11,845 passed, 35 failed, 99 ignored. One failure was this branch's and is fixed: `store` `tests/cited_commits.rs` refused the feat/db-fix sha docs/06 cited (`0c06ff7a`; `cargo test -p store --test cited_commits`: `6 passed; 0 failed`). The other 34 fail on the base too (below); the two hangers hang on both (below) |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | on `43e6420e`: 11,846 passed, 35 failed, 99 ignored: the 34 environmental failures that fail on the base too, and R3-24's `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`, flaky on the base too (below); the two hangers hang on both (below). The run before it (`bb4ace19`) had one failure of this branch's, fixed: `store` `tests/cited_commits.rs` refused the feat/db-fix sha docs/06 cited (`0c06ff7a`; `cargo test -p store --test cited_commits`: `6 passed; 0 failed`) |
 | CI shell gates | gates 0 to 29b of `.github/workflows/ci.yml`'s `language-purity` job, each step as `checks_all` plans it (gate 1e skipped, below) | the same exit as the base for every gate; the reds (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30) are the base's, line for line (below) |
 | bench (gate 8) | `cargo bench -p api --bench ratio` (release) | every C-LG-01 and C-LG-02 row `ok`; the run exits 1 on two rows that are not this part's (below) |
 | coverage | `RUSTC_BOOTSTRAP=1 cargo llvm-cov --branch` on `api` and `cli` (below) | every added line and branch outcome reached but two, each unreachable by construction and named (below) |
@@ -132,6 +148,17 @@ that predates this part and fails identically on the base); 4 cores make api's t
 (`head_deadline_body_tests` x5, `detail::a_refused_admission_names_what_its_bound_and_why`,
 `pullrun::restart_tests::the_journals_own_extremes`). The 25 Oct list's
 `gdfl_cm::tests::fixtures_are_built_not_pasted` passes now (BASE-FIXTURE-1025).
+
+**One flaky test, R3-24's, flaky on the base too.**
+`api` `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code` failed in
+the last run and passed in the two before it. It writes one refusal and then 200 lines that
+roll its ring, all within milliseconds, and asserts `audited_from < ring_from` (the audited
+history starts strictly before the ring's oldest line); when both land in the same
+millisecond the assertion fails. Its test binary run alone, 10 times each from `crates/api`:
+built from the base `f01d7a0e`, 5 failed (each in about 0.20 s) and 5 passed (0.00 to 0.01 s);
+built from this branch, 6 failed (0.21 to 0.37 s) and 4 passed (0.01 s). Same assertion, same
+values equal, same split by duration; `logs.rs` is not this part's file and no line this part
+changed is on its path. For R3-24's owner; three clean reruns were not possible on either tree.
 
 **Two hangers, on both trees.** `api::server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
 and `api` `tests/cloud_mutants_bars.rs`
@@ -351,7 +378,8 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
    `stop.sh`/`shadow.sh`/`serve.sh IA-10a 8405`. Expected: every gate green (the 34 failures and
    two hangers listed under Gates are this container's root user and 4 cores, the same on the
    unmodified `feat/db-fix` here; on the Mac, as a normal user, they pass as they do on
-   `feat/db-fix`); `OURS`. And bench gate 8 (`cargo bench -p api --bench ratio`): expected the
+   `feat/db-fix`; R3-24's `a_two_week_old_refusal_is_found_by_run_day_symbol_and_code` fails
+   about half its runs here on both trees, a same-millisecond race for its owner); `OURS`. And bench gate 8 (`cargo bench -p api --bench ratio`): expected the
    C-LG-01 and C-LG-02 rows `ok` and the day band's three rows flat; its C-LG-03 `span alone`
    and `/bars.json` row-cap reds are the base's (Gates), for their owners.
 2. **Branch coverage: done here** (Gates: every added line and branch outcome reached but two,
@@ -555,3 +583,15 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
 - NEXT (once GO-IA-10a is back or HOLD is lifted): read that run (expected: the 34
   environmental failures of Gates, nothing else); write its line into Gates; STATUS: BLOCKED
   (code complete; base and environment items named) unless the run shows more; push; end.
+
+### 2026-10-27 14:17 IST (STATUS: BLOCKED, code complete)
+
+- The HOLD lifted at 12:52 IST (`0521e9e1`, GO-IA-10a back); `origin/feat/db-fix` still
+  `f01d7a0e`.
+- The last full workspace test run, on `43e6420e`: 11,846 passed, 35 failed, 99 ignored: the 34
+  environmental failures and R3-24's `a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`,
+  which passed in both earlier runs. Its binary run alone 10 times on each tree: 5 of 10 fail
+  on the base `f01d7a0e`, 6 of 10 on the branch, every failure at about 0.2 s and every pass at
+  about 0.01 s (Gates). Not this part's.
+- STATUS: BLOCKED with the code complete; the four named items are the base's and the
+  container's, and what the Mac runs is under NEEDS THE MAC. Pushed; this session ends here.
