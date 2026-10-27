@@ -2790,7 +2790,10 @@ mod tests {
         assert_eq!(built.ist_day(), 20_000);
         assert_eq!(built.range(), 2_000);
         assert_eq!(built.eligibility(), DailyEligibility::Eligible);
-        assert_eq!(excluded(20_001, 50_000).eligibility(), DailyEligibility::Excluded);
+        assert_eq!(
+            excluded(20_001, 50_000).eligibility(),
+            DailyEligibility::Excluded
+        );
         // 5. COMBINED: the first IST day (day 0) at the lowest price whose
         //    range still fits: range is high minus low exactly.
         let low = eligible(0, 1_001);
@@ -2808,8 +2811,15 @@ mod tests {
         assert!(sound.reconciles());
         // 6-9. Each balance broken alone.
         for broken in [
-            DailyReferenceCensus { offered: 6, ..sound },
-            DailyReferenceCensus { consumed: 5, offered: 5, ..sound },
+            DailyReferenceCensus {
+                offered: 6,
+                ..sound
+            },
+            DailyReferenceCensus {
+                consumed: 5,
+                offered: 5,
+                ..sound
+            },
             DailyReferenceCensus {
                 offered: 7,
                 excluded: 4,
@@ -2818,7 +2828,11 @@ mod tests {
                 skipped_excluded: 5,
                 ..sound
             },
-            DailyReferenceCensus { installed: 4, skipped_excluded: 0, ..sound },
+            DailyReferenceCensus {
+                installed: 4,
+                skipped_excluded: 0,
+                ..sound
+            },
         ] {
             assert!(!broken.reconciles(), "{broken:?}");
         }

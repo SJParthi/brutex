@@ -1060,7 +1060,10 @@ mod tests {
         );
         // 2. Rebuilt from its own parts, a shipped page is the shipped page.
         let digest = FINNIFTY_PAGE.sha256.expect("a product page has a digest");
-        assert_eq!(product(FINNIFTY_PAGE.url, digest, FINNIFTY_PAGE.says), FINNIFTY_PAGE);
+        assert_eq!(
+            product(FINNIFTY_PAGE.url, digest, FINNIFTY_PAGE.says),
+            FINNIFTY_PAGE
+        );
         // 3. A product row is sourced by exactly its five citations, and applies.
         let row = product_row(&FINNIFTY_SOURCES);
         assert_eq!(row, Status::Sourced(&FINNIFTY_SOURCES));

@@ -135,7 +135,8 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
                 );
             }
             {
-                let levy = statutory_levy(notional, rate).expect("every cell prices: a statutory levy");
+                let levy =
+                    statutory_levy(notional, rate).expect("every cell prices: a statutory levy");
                 assert!(
                     levy.raw() >= 0,
                     "{where_}: a statutory levy of {} pays the trader",

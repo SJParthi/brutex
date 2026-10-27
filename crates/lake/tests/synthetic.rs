@@ -225,7 +225,8 @@ fn a_cash_file_decodes_to_paisa_and_the_layout_is_detected() {
     // BASE-COV-LIBS (D-7320): what wrote the file, as its footer says: the
     // writer this test used names itself.
     assert!(
-        f.created_by().is_some_and(|by| by.starts_with("parquet-rs")),
+        f.created_by()
+            .is_some_and(|by| by.starts_with("parquet-rs")),
         "{:?}",
         f.created_by()
     );
@@ -1243,7 +1244,11 @@ fn edit_pages(original: &[u8], mut edit: impl FnMut(&mut PageHeader)) -> Vec<u8>
         let group_start = out.len();
         for column in &mut group.columns {
             let chunk = column.meta_data.as_mut().expect("chunk metadata");
-            let first = unsigned(chunk.dictionary_page_offset.unwrap_or(chunk.data_page_offset));
+            let first = unsigned(
+                chunk
+                    .dictionary_page_offset
+                    .unwrap_or(chunk.data_page_offset),
+            );
             let end = first + unsigned(chunk.total_compressed_size);
             let data_at = unsigned(chunk.data_page_offset);
             let chunk_start = out.len();
@@ -1256,14 +1261,17 @@ fn edit_pages(original: &[u8], mut edit: impl FnMut(&mut PageHeader)) -> Vec<u8>
                     PageHeader::read_from_in_protocol(&mut proto).expect("a header parses")
                 };
                 let body_at = pos + usize::try_from(cursor.position()).expect("fits");
-                let body = &original[body_at..body_at + unsigned(header.compressed_page_size.into())];
+                let body =
+                    &original[body_at..body_at + unsigned(header.compressed_page_size.into())];
                 edit(&mut header);
                 if pos == data_at {
                     moved_data_at = Some(out.len());
                 }
                 {
                     let mut proto = TCompactOutputProtocol::new(&mut out);
-                    header.write_to_out_protocol(&mut proto).expect("a header serialises");
+                    header
+                        .write_to_out_protocol(&mut proto)
+                        .expect("a header serialises");
                 }
                 out.extend_from_slice(body);
                 pos = body_at + body.len();
@@ -1303,10 +1311,15 @@ fn a_page_header_the_reader_cannot_use_is_refused_by_name() {
     // The control: the copy with no edit decodes exactly like the original.
     let same = edit_pages(&sound_cash_file(), |_| {});
     assert_eq!(
-        LakeFile::from_bytes(same).expect("open").read_row_group(0).expect("decodes").len(),
+        LakeFile::from_bytes(same)
+            .expect("open")
+            .read_row_group(0)
+            .expect("decodes")
+            .len(),
         3
     );
-    let cases: [(&str, Box<dyn FnMut(&mut PageHeader)>); 6] = [
+    type Edit = Box<dyn FnMut(&mut PageHeader)>;
+    let cases: [(&str, Edit); 6] = [
         (
             "data page carries no header",
             Box::new(|h: &mut PageHeader| {

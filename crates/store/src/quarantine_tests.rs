@@ -1998,13 +1998,20 @@ fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() 
 /// bucket, a held lock, a linked index) need a store state the writer tests
 /// reach elsewhere, and their sentence is what `/logs` and the operator read.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of every variant and its words, read top to bottom"
+)]
 fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
     let path = PathBuf::from("/a store/quarantine/gdfl.quarantine");
     let shown = path.display().to_string();
     let offsets = |n: u64| (0..n).map(|at| at * 100).collect::<Vec<u64>>();
     let cases: Vec<(QuarantineError, &str, Vec<String>)> = vec![
         (
-            QuarantineError::Torn { path: path.clone(), len: 7 },
+            QuarantineError::Torn {
+                path: path.clone(),
+                len: 7,
+            },
             "quarantine_index_torn",
             vec![format!("is 7 bytes, not {INDEX_LEN}")],
         ),
@@ -2014,19 +2021,33 @@ fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
             vec!["the header of".to_owned()],
         ),
         (
-            QuarantineError::Damaged { path: path.clone(), slot: 4_095 },
+            QuarantineError::Damaged {
+                path: path.clone(),
+                slot: 4_095,
+            },
             "quarantine_slot_damaged",
             vec!["slot 4095 of".to_owned()],
         ),
         // Both readings of a stale image: the ledger behind the image, and
         // an act ledgered and not indexed.
         (
-            QuarantineError::Stale { path: path.clone(), built_from: 10, ledger_len: 9 },
+            QuarantineError::Stale {
+                path: path.clone(),
+                built_from: 10,
+                ledger_len: 9,
+            },
             "quarantine_index_stale",
-            vec!["which holds only 9".to_owned(), "quarantine_ledger_cut".to_owned()],
+            vec![
+                "which holds only 9".to_owned(),
+                "quarantine_ledger_cut".to_owned(),
+            ],
         ),
         (
-            QuarantineError::Stale { path: path.clone(), built_from: 9, ledger_len: 10 },
+            QuarantineError::Stale {
+                path: path.clone(),
+                built_from: 9,
+                ledger_len: 10,
+            },
             "quarantine_index_stale",
             vec!["which holds 10, and no writer is at work".to_owned()],
         ),
@@ -2042,24 +2063,40 @@ fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
         ),
         // No damaged line, eight (all listed) and nine (eight and an ellipsis).
         (
-            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(0) },
+            QuarantineError::LedgerDamaged {
+                path: path.clone(),
+                offsets: offsets(0),
+            },
             "quarantine_ledger_damaged",
             vec!["0 complete line(s)".to_owned(), "at byte ;".to_owned()],
         ),
         (
-            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(8) },
+            QuarantineError::LedgerDamaged {
+                path: path.clone(),
+                offsets: offsets(8),
+            },
             "quarantine_ledger_damaged",
             vec!["at byte 0, 100, 200, 300, 400, 500, 600, 700;".to_owned()],
         ),
         (
-            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(9) },
+            QuarantineError::LedgerDamaged {
+                path: path.clone(),
+                offsets: offsets(9),
+            },
             "quarantine_ledger_damaged",
             vec!["9 complete line(s)".to_owned(), "600, 700, ...;".to_owned()],
         ),
         (
-            QuarantineError::LedgerCut { path: path.clone(), described: u64::MAX, ledger_len: 0 },
+            QuarantineError::LedgerCut {
+                path: path.clone(),
+                described: u64::MAX,
+                ledger_len: 0,
+            },
             "quarantine_ledger_cut",
-            vec![format!("describes {} bytes", u64::MAX), "holds only 0".to_owned()],
+            vec![
+                format!("describes {} bytes", u64::MAX),
+                "holds only 0".to_owned(),
+            ],
         ),
         (
             QuarantineError::Full { path: path.clone() },
@@ -2067,7 +2104,10 @@ fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
             vec!["nothing was written".to_owned()],
         ),
         (
-            QuarantineError::Held { path: path.clone(), holder: "pid 42".to_owned() },
+            QuarantineError::Held {
+                path: path.clone(),
+                holder: "pid 42".to_owned(),
+            },
             "quarantine_held",
             vec!["(pid 42)".to_owned()],
         ),

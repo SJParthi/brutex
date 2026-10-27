@@ -383,7 +383,14 @@ fn the_wire_words_the_absence_text_and_the_grouped_rows_hold_at_their_extremes()
     assert_eq!(LotStanding::Sourced.word(), "sourced");
     assert_eq!(LotStanding::Unverified.word(), "unverified");
     // 2. Garbage, a changed case, padding and the empty word parse to nothing.
-    for garbage in ["", "Sourced", " sourced", "sourced\n", "verified", "unverified!"] {
+    for garbage in [
+        "",
+        "Sourced",
+        " sourced",
+        "sourced\n",
+        "verified",
+        "unverified!",
+    ] {
         assert_eq!(LotStanding::parse(garbage), None, "{garbage:?}");
     }
     // 3. Before the first row, for an underlying that is not swept: its own
@@ -402,7 +409,10 @@ fn the_wire_words_the_absence_text_and_the_grouped_rows_hold_at_their_extremes()
         .unwrap_err();
     let text = listed.to_string();
     assert!(text.contains("(1 units)"), "{text}");
-    assert!(text.ends_with("is unverified and is not applied: no circular read"), "{text}");
+    assert!(
+        text.ends_with("is unverified and is not applied: no circular read"),
+        "{text}"
+    );
     // 5. Rows handed in interleaved come back grouped by underlying, each
     //    underlying ascending, in the order each was handed in.
     let grouped = LotTable::from_rows(vec![

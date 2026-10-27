@@ -3893,7 +3893,10 @@ mod tests {
     fn the_manifest_reader_holds_at_the_edges_of_its_string_grammar() {
         let root = include_str!("../../../Cargo.toml");
         let one = |value: &str| {
-            crate::manifest::linked_packages(&format!("[dependencies]\nx = {{ package = {value} }}"), root)
+            crate::manifest::linked_packages(
+                &format!("[dependencies]\nx = {{ package = {value} }}"),
+                root,
+            )
         };
         // 1. CRLF straight after a multi-line literal's opening delimiter is trimmed.
         assert_eq!(one("'''\r\nz'''"), Ok(names(&["z"])));

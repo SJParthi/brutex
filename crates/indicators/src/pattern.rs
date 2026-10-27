@@ -3266,18 +3266,40 @@ mod near_misses {
         let fires = [base[0], base[1], (126, 131, 126, 130)];
         let misses = [base[0], base[1], (124, 131, 124, 130)];
         assert!(last_mask(&fires).get(198));
-        assert!(!last_mask(&misses).get(198), "a low at or below the doji's high");
+        assert!(
+            !last_mask(&misses).get(198),
+            "a low at or below the doji's high"
+        );
         // 215: three bullish bars, the third opening with the second and its
         // body equal to the second's.
-        let fires = [(100, 112, 98, 110), (120, 132, 115, 130), (120, 132, 118, 130)];
-        let misses = [(100, 112, 98, 110), (120, 132, 115, 130), (120, 133, 118, 131)];
+        let fires = [
+            (100, 112, 98, 110),
+            (120, 132, 115, 130),
+            (120, 132, 118, 130),
+        ];
+        let misses = [
+            (100, 112, 98, 110),
+            (120, 132, 115, 130),
+            (120, 133, 118, 131),
+        ];
         assert!(last_mask(&fires).get(215));
         assert!(!last_mask(&misses).get(215), "a body one paisa longer");
         // 221: a long black bar, a black bar opening at or below its open,
         // then a small white bar.
-        let fires = [(200, 201, 99, 100), (190, 191, 90, 150), (100, 120, 95, 105)];
-        let misses = [(200, 201, 99, 100), (201, 202, 90, 150), (100, 120, 95, 105)];
+        let fires = [
+            (200, 201, 99, 100),
+            (190, 191, 90, 150),
+            (100, 120, 95, 105),
+        ];
+        let misses = [
+            (200, 201, 99, 100),
+            (201, 202, 90, 150),
+            (100, 120, 95, 105),
+        ];
         assert!(last_mask(&fires).get(221));
-        assert!(!last_mask(&misses).get(221), "a second open above the first");
+        assert!(
+            !last_mask(&misses).get(221),
+            "a second open above the first"
+        );
     }
 }

@@ -770,6 +770,13 @@ mod tests {
     /// fixed width, every month name in every case, and a writer that fails.
     #[test]
     fn the_expiry_token_and_the_rendering_hold_at_their_edges() {
+        /// A writer that refuses every write.
+        struct Refusing;
+        impl core::fmt::Write for Refusing {
+            fn write_str(&mut self, _: &str) -> core::fmt::Result {
+                Err(core::fmt::Error)
+            }
+        }
         // 1. Seven bytes whose second byte starts a two-byte character: the
         //    day cannot be cut there, so the token is refused, never guessed.
         let split = "NSE-NIFTY-0\u{e9}Apr2-10000-CE";
@@ -786,7 +793,10 @@ mod tests {
         }
         // 4. Not a month, including the empty token and a fourth letter.
         for bad in ["", "Ja", "Janu", "Jxn", "13"] {
-            assert!(matches!(parse_month(bad), Err(ContractError::BadMonth { .. })), "{bad}");
+            assert!(
+                matches!(parse_month(bad), Err(ContractError::BadMonth { .. })),
+                "{bad}"
+            );
         }
         // 5-6. The first and the last day of the window this convention reads.
         assert!(ContractName::parse("NSE-NIFTY-01Jan00-FUT").is_ok());
@@ -795,20 +805,24 @@ mod tests {
         //    non-leap year is named, 29 Feb of a leap year parses.
         assert!(matches!(
             ContractName::parse("NSE-NIFTY-29Feb23-FUT"),
-            Err(ContractError::ImpossibleDate { day: 29, month: 2, year: 2023 })
+            Err(ContractError::ImpossibleDate {
+                day: 29,
+                month: 2,
+                year: 2023
+            })
         ));
         assert!(ContractName::parse("NSE-NIFTY-29Feb24-FUT").is_ok());
         // 8. OUT OF THE BOX: rendering into a writer that refuses every write
         //    reports the writer's error rather than a partial name.
-        struct Refusing;
-        impl core::fmt::Write for Refusing {
-            fn write_str(&mut self, _: &str) -> core::fmt::Result {
-                Err(core::fmt::Error)
-            }
-        }
         let c = ContractName::parse("NSE-NIFTY-01Apr20-10000-CE").expect("a real name");
-        assert_eq!(core::fmt::write(&mut Refusing, format_args!("{c}")), Err(core::fmt::Error));
+        assert_eq!(
+            core::fmt::write(&mut Refusing, format_args!("{c}")),
+            Err(core::fmt::Error)
+        );
         let f = ContractName::parse("NSE-NIFTY-24Dec24-FUT").expect("a real name");
-        assert_eq!(core::fmt::write(&mut Refusing, format_args!("{f}")), Err(core::fmt::Error));
+        assert_eq!(
+            core::fmt::write(&mut Refusing, format_args!("{f}")),
+            Err(core::fmt::Error)
+        );
     }
 }
