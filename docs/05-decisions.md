@@ -87511,3 +87511,96 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7330 — BASE-COV-PULL (operator decision D2, part A): the pull crate measured whole by Route B; the bar is NOT yet held, so D-7250's narrow reading does not end for `pull` at this attempt — 2026-10-28
+
+**What was asked.** Operator decision D2 part A (27 Oct 2026): bring the old
+code of `crates/pull` to line AND branch coverage 100%, so CLAUDE.md section
+9's whole-crate rule applies there again. The merge commit
+`Merge BASE-COV-PULL:` on `feat/db-fix` is the named event that ends D-7250's
+narrow reading for `pull`: a tip that contains it is measured with the whole
+crate.
+
+**The instrument.** Recipe v4 of D3 (`state/decisions-20261027/d3-recipe.txt`),
+Route B (`d3-route-b.sh`): rustc 1.99.0-nightly (1a98b1e13 2026-08-07) with
+`-C instrument-coverage -Z coverage-options=branch`, opt-level 0, and the
+same toolchain's llvm-profdata and llvm-cov (LLVM 23.1.0-rust-1.99.0-nightly),
+a new empty profile folder, `cargo test -p pull --locked --no-fail-fast`, the
+objects that build reported, read by `d3-covset.mjs`. Route A (cargo-llvm-cov
+0.8.4) was not tried (recipe step 4).
+
+**Before (measured).** `feat/db-fix` f01d7a0e4, 27 Oct 2026 21:51-22:14 IST,
+2,710 tests passed, 0 failed, 54 ignored: lines 146,532/154,762 (8,230
+uncovered), branches 11,245/14,160 (2,915 uncovered sides), over the 180 files
+the tool reports, 163 of them with a gap. The per-file table and every
+uncovered line and branch, with its text, are in
+`state/fix/round2/base-cov-pull-gaps-a1.txt`. The 8 files under
+`crates/pull/benches/` are in no test object (the bench target is
+`test = false`, D-0034), so the tool reports nothing for them; the set
+override names "every source file the tool reports". That is about four times
+the 2,000-line mark at which the operator said the part may be split (D6 is not
+decided); nothing was skipped, sampled or lowered.
+
+**What this attempt closed.** D-7331 (`gdfl_import`'s origin measure, rescan
+and journal reader) and D-7332 (every refusal code and state word of nineteen
+tables). The (F)/(U) list is `state/fix/round2/base-cov-pull-fu.txt`.
+
+**What it does not do.** The bar is not held on this attempt's tip, so this
+branch is NOT the named event: a merge of it would make every later landing
+check `pull` whole against a crate that is not at 100% (`docs/06-limits.md`
+L-BCP-1). D-7250's narrow reading ends for `pull` at the merge of the attempt
+whose tip holds the bar, measured with this instrument and written as
+measured; that entry carries the after-figures. D-7333 to D-7339 are unused.
+
+### D-7331 — BASE-COV-PULL: the tick store's origin walk takes its cap as an argument; `gdfl_import`'s caps, faults, rescan refusals and journal reader each driven by a test — 2026-10-28
+
+1. **`measure_tick_store_within(root, cap)`.** The walk cap
+   `ORIGIN_WALK_CAP` (1,000,000 entries) could only be reached by a tree of a
+   million entries, so its refusal had no test. The walk now takes the cap as
+   an argument; `measure_tick_store` (the one production caller, through
+   `Origin::measure`) passes `ORIGIN_WALK_CAP` and nothing else, and the fault
+   names `{cap}`, which is the same text in production. No behaviour changes.
+2. **Tests** (`crates/pull/src/gdfl_import_cov_tests.rs`, 11): a central
+   directory one byte over `CENTRAL_DIRECTORY_CAP` refused by name and one at
+   the cap not; a single outer file that is no zip, and an empty one, measured
+   for their bytes and named; a zip source that is a character device
+   (`/dev/null`, out of the box) named, not walked; a yearly zip that is a
+   dangling link as the first fault, the year beside it still counted; the walk
+   past its cap, at it (boundary) and at zero, and a stopped walk claiming no
+   digest though `FORMAT.md` reads (the fault is kept); `FORMAT.md` one byte
+   over `FORMAT_CAP` refused by size and one at it hashed; `hole_is_repairable`
+   true for exactly its three codes; `rescan_cm` refusing `options` and a
+   backwards range before the journal is read (the journal path is then a
+   directory, a combination); the journal reader (missing, a directory, short,
+   other-kind, non-day and non-closing lines, the last closing line deciding);
+   `rescan_nfo` without lineage; and one rescan holding a declined Sunday, a
+   day the source does not hold with a refused member, a file stamped at second
+   86,400 and a held day at 86,399 (a combination of extremes).
+3. **Red first.** With the behaviour changed by hand (`>` to `>=` at each of
+   the three caps, `contains` negated in `hole_is_repairable`, `refused`
+   recorded as imported) exactly the matching tests failed, and passed again
+   restored.
+
+Invariants BCP-01 and BCP-03. Limit L-BCP-2: three I/O-fault regions of the
+same functions no test drives (GAPs, not exceptions).
+
+### D-7332 — BASE-COV-PULL: every refusal code, state word and reason word of nineteen tables stated, variant by variant, and distinct — 2026-10-28
+
+A code is a contract: pages, events, the journal and `/logs` carry it, and the
+tables say "never renamed or reused". Seventy-one of the crate's uncovered lines
+on 27 Oct were arms of such tables no test named; this closes those of the
+nineteen below and leaves open `corporate_actions`' `Anomaly` and `Finding`
+words (their variants hold a basis step) and `TokenOn::Resolved` (it holds a
+listed row).
+`crates/pull/src/base_cov_codes_tests.rs` (12 tests, registered in `lib.rs`
+under `cfg(test)`) states every variant's word of `AlertError`, `DayStatus`
+(word and reason, and that the table is `DayStatus::ALL`),
+`ImportRefusal::StoredIndexAbsent`, `RunState`, `LockFault` and
+`RunsLedgerFault` (a ledger's lock fault named by the lock's own code),
+`Gate`, `StopRefusal`, `Wrote` (word and stamp), `TokenOn` (every answer that
+holds no listed row), `Standing`, `RefusalKind`, `Axis`, `Missing`,
+`ClaimStanding`, the rehearsal `Refusal` (code and part), `Reason`,
+`KeepError` and `SpoolError`, with extreme field values (0, `u32::MAX`,
+`u64::MAX`, `i64::MIN`, empty strings), and checks no word is used twice in
+its table. Red first: one word of each table changed by hand failed exactly
+its test (12 of 12). Invariant BCP-02.
