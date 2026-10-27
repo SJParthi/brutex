@@ -1,11 +1,35 @@
-STATUS: HELD
+STATUS: BLOCKED
+
+Code complete: every gate this part's code can move is green. What is not green is the base's or this
+container's, each named below, each shown the same on the unmodified base, none in a file of this part:
+
+1. **Workspace tests, 8 api tests (base / environment).** `server::head_deadline_body_tests` (5) and
+   `detail::tests::a_refused_admission_names_what_its_bound_and_why` fail on this container's loopback
+   timing (the server cuts a slow reader's body at about 5.37 MB; the admission answers `Saturated`), also
+   when run as a non-root user, and the same on the base `a32722c45`.
+   `server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` and
+   `spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (`tests/cloud_mutants_bars.rs`)
+   hang at 0% CPU, every tokio worker parked: `timeout 600` ends them on the base and on this branch alike,
+   `timeout 240` as a non-root user too.
+2. **Workspace tests that fail only as uid 0 (environment).** 28 more fail here because this container runs
+   as root, which ignores the file modes they remove to provoke a refusal; run as an unprivileged user
+   (`runuser -u tester`) every one passes (cli 3, pull 9, store 5, telemetry 4, api 7, among them
+   `feeds_route`'s window test, which the 26 Oct run had filed under timing). One api timing test,
+   `logs::r3_24_tests::a_two_week_old_refusal_is_found_by_run_day_symbol_and_code`, is flaky at
+   millisecond resolution here (7 clean passes in 8 runs alone; it passed as the unprivileged user too).
+3. **CI shell gates 1c, 1d, 10, 11, 12, 19, 23, 27b, 30, 29 (base).** Red on the unmodified base
+   `f01d7a0e4` with identical exit codes; within each, the sorted output equals the base's but for counts
+   and this part's two declared lines. BASE-REDS-1023's.
+
+The Mac's own gate (non-root, its drive) is expected to show 1 and 2 as on its base: NEEDS THE MAC 13.
 
 # R3-20 (cloud): month recovery after a power cut
 
 Branch `cloud/db-R3-20-20261024`. Spec: `origin/cloud/db-base-20261024:reports/db-specs-20261024/R3-20.md`.
 Prerequisites IA-16, R3-16, R3-36 (and SC-4) are merged on `feat/db-fix`. Newest `origin/feat/db-fix`
-merged: `5901ec77` (Merge BASE-FIXTURE-1025; also R4-22, IA-10c), merge commit `20cb5151` (26 Oct,
-19:3x IST), clean.
+merged: `f01d7a0e4` (Merge R4-26), merge commit `5167fb82f` (27 Oct, 09:5x IST); before it `a32722c45`
+(Merge R3-15; also BASE-DENY-1024, R3-12, R4-19), merge `656e9f4a`. `git diff origin/feat/db-fix HEAD
+--stat`: this part's 18 files only; `Cargo.lock` and every `Cargo.toml` equal the base's.
 
 ## Done
 
@@ -22,45 +46,40 @@ merged: `5901ec77` (Merge BASE-FIXTURE-1025; also R4-22, IA-10c), merge commit `
 - Bench rows C-RC-01 / C-RC-02 (`crates/store/benches/ratio/recover.rs`), store step S-52, the D-7093
   entry, L-IA-40 and L-R320-01..05, store format §44, invariants R320-01..10 (texts for the Mac to land).
 - 25 Oct: three workspace-test refusals of this part fixed (sweep-wiring list, S-52's writers-stopped
-  prerequisite wording, a D-4911 citation in a crate with no docs/05 heading); coverage work (below).
+  prerequisite wording, a D-4911 citation in a crate with no docs/05 heading); coverage work.
+- 26 Oct: every mutant survivor killed; coverage 100% of lines and branches of the touched modules.
+- 27 Oct: merges of `a32722c45` and `f01d7a0e4` (R4-26 added a writer too: `WRITERS` 22, `COMMANDS` 65);
+  the final gates (table below); C-RC-01/02 re-measured on the final code.
 
 ## Left
 
-Code complete. HELD at 10:3x IST 27 Oct (`b34f6a16a`, HOLD until about 12:50 IST). After the hold:
+Nothing in code. The Mac's runs at merge-back: NEEDS THE MAC below.
 
-1. Re-measure C-RC-01 / C-RC-02 on the final code: `cargo bench -p store --bench ratio --locked`, alone on
-   the machine (the figures below are of 24 Oct, before the later edits of `recover.rs`).
-2. Gate 13c (`cargo build --workspace --locked --offline --all-targets` + `gates-jobs gate-13c`).
-3. Merge `origin/feat/db-fix` again if it moved; the final report.
-
-Done 27 Oct: merges of `a32722c45` and `f01d7a0e4` (R4-26: the `WRITERS` / `COMMANDS` lengths), fmt,
-clippy, deny (green: tokio 1.53.3), the CI shell gates against the base, the workspace tests with every
-failure rerun here, on the base and as a non-root user (progress log, 27 Oct entries).
-
-## Gates (commands and results)
+## Gates (commands and results, on the final tree unless dated otherwise)
 
 | gate | command | result |
 |---|---|---|
-| fmt | `cargo fmt --all --check` | clean (26 Oct, at `6f092cca`) |
-| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean, `EXIT 0` (26 Oct, at `32fd8584`: the merged tree `20cb5151` plus this session's cli test edits) |
-| tests | `cargo test --workspace --locked --no-fail-fast` | 33 failures on the merged tree; 3 were this part's and are fixed (each rerun green: `sweep_wiring_tests` 22 pass, `decision_citations` 4 pass, `rehearsal` 16 pass). The other 30 are the container's: tests that `chmod` a file or directory and expect a refusal (this container runs as uid 0, which ignores modes: settings, sink, census link_tests, gdfl_dropbox, gdfl_import ia16, alerts, scrub_blocks, watchdog, zerodha_verify, quarantine index-publish, pullrun journal extremes), slow-reader timing tests (head_deadline_body_tests, feeds_route window, detail admission), `gdfl_cm::fixtures_are_built_not_pasted` (names DATA-1w's `tick_second_check_tests.rs`), and two tests that hang at 0% CPU (`gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`, `cloud_mutants_bars::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`; stopped by me). The hangs, the api timing failures and the pull permission failures were reproduced on a worktree of the unmodified base `bf9b1c8f` (same result); none touches this part's files (`crates/api` is not in the diff). |
-| store suite | `cargo test -p store --lib --locked recover` | `ok. 35 passed; 0 failed` (26 Oct, `6f092cca`, under the nightly coverage build) |
-| cli suite | `cargo test -p cli --lib --locked month_recover` | `ok. 11 passed; 0 failed` (26 Oct, `32fd8584`); with `store_write`: `ok. 17 passed; 0 failed` |
-| deny | `cargo deny check` (cargo-deny 0.20.2) | 26 Oct, on the merged tree: `advisories FAILED, bans ok, licenses ok, sources ok`, the one error RUSTSEC-2026-0386 (tokio 1.53.1, `AsyncFd::new` unsound). The unmodified base `5901ec77` (a worktree) fails the same way with the same id. A BASE item: BASE-DENY-1024 bumps tokio; `git diff origin/feat/db-fix HEAD -- Cargo.lock` is empty and no `Cargo.toml` differs |
-| gate 30 | `rustc --edition=2024 -D warnings .github/gates_store_steps.rs` then `check config/store-steps.toml --merges … --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md --owed config/owed-runs.toml` | no refusal names S-52 or R3-20; the 5 refusals left are the base's own `merged = false` flags (IA-1, IA-4, R4-18, R4-27, R3-17) |
-| CI shell gates | every run step of ci.yml's `language-purity` job (read with `yq`, run with `bash --noprofile --norc -eo pipefail`, `RUNNER_TEMP` and `GITHUB_ENV` emulated), on this branch and on a worktree of the unmodified base `5901ec77`; plus build-job gates 6c and 5 (26 Oct) | the same gates red on both: 1c, 1d, 10, 11, 12, 19, 23, 27b, 30, and 29 (exit 101, the same `every_route_has_a_limits_row_and_a_growth_bench` panic on both); green on both: 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b, 6c, 5. Within every red gate the output, sorted, equals the base's but for file and line counts and this part's two declared lines: gate 11 `allowed crates/cli/src/store_write.rs — 8 of 8` (base 7 of 7, raised in `.github/gates_ledger.rs`) and gate 30's `S-52 pending, waits for R3-20` row (no refusal names S-52 or R3-20; its 8 refusals are the base's `merged = false` flags: IA-1, IA-4, IA-10c, R4-18, R4-22, R4-27, R4-28, R3-17). Not run here: 1e (a no-front-end build), 13a/13b/13c/4/4a, 6d, 20, 18, 8, 31, W* |
-| coverage | `cargo +nightly llvm-cov clean --workspace`, `cargo +nightly llvm-cov --branch --no-report -p store --lib -- recover`, then `-p cli --lib -- month_recover store_write`, then `cargo +nightly llvm-cov report --branch` (and `--text` for the line view) (26 Oct, at `6f092cca`; cargo-llvm-cov 0.9.1) | recover.rs: branches **102/102 (100%)**, every line executed in the line view; month_recover_command.rs: branches **30/30 (100%)**, every line executed; file.rs: every line of this branch's 37 added lines executed and both arms of its 2 branch locations; store_write.rs: every one of its 27 added lines executed (no branch in them). The summary table counts recover.rs 908/914 and month_recover_command.rs 396/399 lines: zero-count copies of closures in the other test binary, on lines the line view shows executed; store_write.rs's 6 unreached lines and 3 branches are base code outside the diff. The run before (at `32fd8584`) counted recover.rs 101/102: `missing_dirs`' while-let exit (812136f5 made the walk end at an existing directory), now reached by `the_directory_walk_names_nothing_outside_the_root` (`6f092cca`) |
-| mutants | store: `CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo mutants --in-diff <diff> -p store -j 4 -C --lib -- -- recover` | first run at `d6afa13e` (diff of recover.rs and file.rs vs feat/db-fix): 243 mutants, 175 caught, 46 unviable, 22 missed; each of the 22 caught by a named test or its code removed (`b3fc883c`). Second run at `b3fc883c`: 232 mutants, 184 caught, 46 unviable, 2 missed, both equivalent and their code removed (`812136f5`). Third run on `812136f5`'s own diff (`git diff b3fc883c 812136f5 -- crates/store/src/recover.rs`), 26 Oct, cargo-mutants 27.1.0: `5 mutants tested in 5m: 3 caught, 2 unviable` (0 missed) |
+| fmt | `cargo fmt --all --check` | `EXIT 0` (27 Oct, merge `5167fb82f`) |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | `Finished`, `EXIT 0`, no warning (27 Oct, `5167fb82f`) |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit --skip spot_json_is_refused_by_name_when_every_store_read_slot_is_held`, then every failure rerun by exact name: here, on a worktree of the unmodified base, and as a non-root user (`runuser -u tester <test binary> --exact <names>`) | 27 Oct, `5167fb82f`: this part's tests all pass (store `recover::tests` 35, cli `month_recover_command::tests` 11, the `store_write` / `sweep_wiring` / `basis_runs` filter 52). Not green: the 8 api base items and the uid-0 and timing environment items of STATUS 1 and 2. Detail: progress log, 27 Oct entries (31 of the run's 66 failures were this container's disk under the importer's 10 GiB floor, from my own build output; with the space freed all 31 pass) |
+| deny | `cargo deny check` (cargo-deny 0.20.2, and 0.19.0 as CI pins) | `advisories ok, bans ok, licenses ok, sources ok`, `EXIT 0` under both (27 Oct, both merges; BASE-DENY-1024's tokio 1.53.3 closed RUSTSEC-2026-0386) |
+| CI shell gates | every run step of ci.yml's `language-purity` job but 1e, and build-job 13a, 13b, 6c, 5 and the probe, extracted by a small Rust tool (scratch, untracked), run with `bash --noprofile --norc -eo pipefail`, `RUNNER_TEMP`, `GITHUB_ENV`, `GITHUB_OUTPUT` emulated, on this branch and on a worktree of the unmodified base | 27 Oct, base `f01d7a0e4`: exit codes identical. Red on both: 1c, 1d, 23, 27b, 30, 19, 10, 11, 12, 29 (exit 101, the same `every_route_has_a_limits_row_and_a_growth_bench` panic). Green on both: 0, 1, 1b, 1g, 1f, 2, 9, 9b, 10b, 7, 13, 15, 16, 17, 21, 22, 24, 28, 25, 27, 26, 14, 29b, 13a, 13b, 6c, 5. Within every red gate the sorted output equals the base's but for counts and this part's two declared lines: gate 11 `allowed crates/cli/src/store_write.rs — 8 of 8` (base 7 of 7; raised in `.github/gates_ledger.rs`) and gate 30's `S-52 | pending | waits for R3-20 | RA-280 FM-062` row (no refusal names S-52 or R3-20). Gate 12 counts one more cost claim and proves it (798 / 797 claims; its refusal list is the base's). Not run here: 1e, 4, 4a, 6d, 3 (the cargo-deny install step; deny itself is above), 20, 18, 8, 31, W* |
+| gate 13c | `cargo build --workspace --locked --offline --all-targets --message-format=json` then `gates-jobs gate-13c` | `EXIT 0` (27 Oct, `5167fb82f`, on this branch): `Finished` in 10m 12s, `read 26 build-script run(s)`, `OK — no build script linked or compiled native code.` Its build is gate 4's command (`--locked --offline --all-targets`), which therefore passes too |
+| coverage | `cargo +nightly llvm-cov clean --workspace`, `cargo +nightly llvm-cov --branch --no-report -p store --lib -- recover`, then `-p cli --lib -- month_recover store_write`, then `cargo +nightly llvm-cov report --branch` (and `--text` for the line view) (26 Oct, at `6f092cca`; cargo-llvm-cov 0.9.1) | recover.rs: branches **102/102 (100%)**, every line executed in the line view; month_recover_command.rs: branches **30/30 (100%)**, every line executed; file.rs: every line of this branch's 37 added lines executed and both arms of its 2 branch locations; store_write.rs: every one of its 27 added lines executed (no branch in them). The summary table counts recover.rs 908/914 and month_recover_command.rs 396/399 lines: zero-count copies of closures in the other test binary, on lines the line view shows executed; store_write.rs's 6 unreached lines and 3 branches are base code outside the diff. Not rerun on 27 Oct: since `6f092cca` no line of recover.rs, file.rs or month_recover_command.rs changed (`git diff 6f092cca HEAD -- <those three>` is empty) and store_write.rs changed only by R4-26's own `basis-runs` lines and the two array lengths the merge raised |
+| mutants | store: `CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo mutants --in-diff <diff> -p store -j 4 -C --lib -- -- recover` | first run at `d6afa13e` (diff of recover.rs and file.rs vs feat/db-fix): 243 mutants, 175 caught, 46 unviable, 22 missed; each of the 22 caught by a named test or its code removed (`b3fc883c`). Second run at `b3fc883c`: 232 mutants, 184 caught, 46 unviable, 2 missed, both equivalent and their code removed (`812136f5`). Third run on `812136f5`'s own diff, 26 Oct, cargo-mutants 27.1.0: `5 mutants tested in 5m: 3 caught, 2 unviable` (0 missed) |
 | mutants | cli: `cargo mutants --in-diff <diff of month_recover_command.rs vs feat/db-fix> -p cli -j 2 -C --lib -- -- month_recover` | at `00aea160`: `41 mutants tested in 2h: 3 missed, 33 caught, 5 unviable`. The 3 are killed: the two `Ask::named` ones by the header assertion in `the_days_dropped_by_recovery_are_read_again` (`897e6d4c`); `month_recover_command.rs:254:17: delete field open from struct Reread expression in journal_view` by the whole re-read line now asserted in `a_segment_no_import_kind_files_names_its_days_for_a_re_read_by_hand` and `refusals_clean_months_and_another_feed_are_each_said_by_name` (`32fd8584`): with that mutant applied by hand both fail (`FAILED. 9 passed; 2 failed`), restored `ok. 11 passed; 0 failed`. The later commits change tests only, so no new mutant |
 
 ## Measurements (p50 / p99 / max, n, method)
 
-- C-RC-01, recover a torn month (22,500 kept bars, 100 torn) with 1x / 10x / 100x months stored:
-  p50 49.2 / 46.2 / 48.2 ms, p99 64.5 / 55.7 / 60.6 ms, max 73.5 / 57.8 / 71.4 ms, n = 20 each;
-  min-of-5 ratio 0.991x (10x) and 1.039x (100x) against the 3.0x ceiling. Method: `Instant` around one
-  `recover` call, a fresh copy of the torn month put back outside the timer; invented fixtures on the
-  cloud runner's disk (24 Oct, `cargo bench -p store --bench ratio --locked`, EXIT 0).
-- C-RC-02, one kept bar: 1,894,661 ps at 22,500 bars, 1,503,131 ps at 90,000 bars, ratio 0.793x.
+- C-RC-01, recover a torn month (22,500 kept bars, 100 torn) with 1x / 10x / 100x months stored, on the
+  final code (27 Oct, `5167fb82f`, `cargo bench -p store --bench ratio --locked`, alone on the machine,
+  `all ratios within the ceiling`, EXIT 0): p50 32.1 / 30.0 / 30.0 ms, p99 39.1 / 39.1 / 37.7 ms, max
+  52.6 / 39.3 / 66.1 ms, n = 20 each; min-of-5 ratio 1.118x (10x) and 0.968x (100x) against the 3.0x
+  ceiling. Method: `Instant` around one `recover` call, a fresh copy of the torn month put back outside
+  the timer; invented fixtures on the cloud runner's disk. (24 Oct, before the later edits of
+  `recover.rs`: p50 49.2 / 46.2 / 48.2 ms, p99 64.5 / 55.7 / 60.6 ms, ratios 0.991x and 1.039x.)
+- C-RC-02, one kept bar: 1,239,111 ps at 22,500 bars, 1,074,024 ps at 90,000 bars, ratio 0.866x (27 Oct;
+  24 Oct: 1,894,661 ps and 1,503,131 ps, 0.793x).
 - The door is NOT O(1) and says so (L-IA-40): O(the month's bytes) per run, one attended run per month,
   never a read path. The months stored beside it do not enter it (C-RC-01 flat). The full one-second
   NIFTY month on the operator's drive is NOT MEASURED (NEEDS THE MAC 7).
@@ -94,8 +113,9 @@ failure rerun here, on the base and as a non-root user (progress log, 27 Oct ent
 
 ## Files outside ownership (kept minimal)
 
-`crates/cli/src/lib.rs` (module, usage, dispatch, `COMMANDS` 64), `crates/cli/src/store_write.rs`
-(`WRITERS` 21, `--plan` read-only, test rows), `crates/cli/src/sweep_wiring_tests.rs` (month-recover is a
+`crates/cli/src/lib.rs` (module, usage, dispatch, `COMMANDS` 65 with R4-26's `basis-runs`),
+`crates/cli/src/store_write.rs` (`WRITERS` 22 with R4-26's `basis-runs`, `--plan` read-only, test rows;
+the linked-root test's `writing` table 22), `crates/cli/src/sweep_wiring_tests.rs` (month-recover is a
 store verb), `crates/store/src/lib.rs` (`pub mod recover`), `crates/store/benches/ratio.rs` and
 `crates/store/benches/ratio/recover.rs`, `config/store-steps.toml` (package R3-20, step S-52),
 `.github/gates_ledger.rs` (gate 11 `ALLOW_MEMBER` store_write.rs 7 -> 8), `docs/02-store-format.md` §44,
@@ -146,11 +166,23 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
 9. The real store untouched: `imports/gdfl.journal`, `audit/` and the five months keep length and mtime.
 10. No write on the real store: a refused real month is recovered only as step S-52, on the operator's
     yes, after a rehearsal on a copy.
-11. Coverage and mutants on the Mac's toolchain if the cloud's runs are incomplete at merge-back:
-    `cargo llvm-cov --branch -p store --lib -- recover` and `-p cli --lib -- month_recover` (expected 100%
-    lines and branches of recover.rs, month_recover_command.rs and file.rs's diff);
-    `cargo mutants --in-diff <diff of this branch> -p store -p cli` (expected: no surviving mutant).
-12. `cargo deny check` after BASE-DENY-1024 lands (expected green; this branch does not touch Cargo.lock).
+11. Coverage and mutants on the Mac's toolchain (the cloud's runs are complete, Gates table; these
+    repeat them): `cargo +nightly llvm-cov clean --workspace && cargo +nightly llvm-cov --branch
+    --no-report -p store --lib -- recover && cargo +nightly llvm-cov --branch --no-report -p cli --lib --
+    month_recover store_write && cargo +nightly llvm-cov report --branch` (expected: recover.rs 102/102
+    branches, month_recover_command.rs 30/30, every line of both and of file.rs's 37 added lines
+    executed in the `--text` line view); `git diff origin/feat/db-fix...HEAD -- crates/store/src/recover.rs
+    crates/store/src/file.rs crates/cli/src/month_recover_command.rs > $W/state/r320.diff && cargo mutants
+    --in-diff $W/state/r320.diff -p store -p cli` (expected: 0 missed).
+12. `cargo deny check` on the merged tree (expected `advisories ok, bans ok, licenses ok, sources ok`, as
+    here on 27 Oct; this branch does not touch `Cargo.lock`).
+13. The workspace tests on the merged tree as the Mac's own (non-root) user with its drive's free space
+    (`cargo test --workspace --locked`). Expected: every test of this part passes, and the failures, if
+    any, are the base's own, the same on a gate of `feat/db-fix` without R3-20: the api slow-reader
+    timing tests (`head_deadline_body_tests`, `detail` admission) and the two api tests that hang here
+    (`a_full_calendar_pool_refuses_the_census_and_the_audit`,
+    `spot_json_is_refused_by_name_when_every_store_read_slot_is_held`). The 28 uid-0 failures of this
+    container are expected to pass there (they did here as a non-root user).
 
 ## Progress log
 
@@ -487,3 +519,20 @@ Never against the real store or `:8080`; `W=/Volumes/WD_BLACK/brutex/fresh-20260
   and the tests of what it touched); re-measure C-RC-01/C-RC-02 alone on the machine
   (`cargo bench -p store --bench ratio --locked`); gate 13c; then the final report (STATUS line, Gates
   table, Measurements, NEEDS THE MAC).
+
+### 27 Oct 12:52–13:06 IST — HOLD lifted; bench re-measured, gate 13c, final report
+
+- HOLD lifted at 12:52 IST (`0521e9e15`); GO present. `origin/feat/db-fix` still `f01d7a0e4`, already merged.
+- `cargo bench -p store --bench ratio --locked` on `5167fb82f`, alone on the machine (load 0.00 at start):
+  `all ratios within the ceiling`, EXIT 0. C-RC-01 p50 32.1 / 30.0 / 30.0 ms, p99 39.1 / 39.1 / 37.7 ms,
+  max 52.6 / 39.3 / 66.1 ms at 1x / 10x / 100x months stored, n = 20 each; ratios 1.118x and 0.968x.
+  C-RC-02 1,239,111 ps at 22,500 bars, 1,074,024 ps at 90,000 bars, 0.866x. L-IA-40 quotes no figure, so
+  no ledger text changes; the Measurements section carries the new figures.
+- Gate 13c on this branch: `EXIT 0`, `read 26 build-script run(s)`, `OK — no build script linked or
+  compiled native code.` (build `Finished` in 10m 12s; it is gate 4's build command too).
+- Correction to the 10:36 entry: of the 29 that passed as the unprivileged user, 28 fail here only as
+  uid 0 and one is the api `logs` millisecond flake. `feeds_route`'s window test is one of the 28
+  (the 26 Oct run had filed it under timing).
+- Final report written: STATUS: BLOCKED with the code complete, each remaining item named (the base's
+  8 api tests and CI shell reds, the container's uid 0); NEEDS THE MAC 11-13 updated.
+- NEXT: none in the cloud. The Mac's merge-back runs NEEDS THE MAC 1-13.
