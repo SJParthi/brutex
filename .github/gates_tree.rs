@@ -2730,6 +2730,48 @@ const R4_28_LITERAL: &str = "1000 2026010 20260102 20260102_ 20260102_02 2026010
 // vendor credential or a field of a parameter path.
 const IA10C_LITERAL: &str = "31337 41 body_not_in_pack causes claims claims-blocked claims_run gr41 held-differs held-month held-same ledger_run lifted lines-repair lost-whole lowered no_verifier_for_vendor nonsense not_kept noverifier run_too_wide rung_unstored unborn wide z16";
 
+// R4-26 (the reference tables: the share corporate-action table, the
+// measured basis runs and the day universe; D-6892, D-6900, D-7195 to
+// D-7197), declared at its repair 4 (26 Oct 2026): the 121 literals gate 1d
+// named on its tree and not on feat/db-fix's, each read at its site in
+// `pull::corporate_actions`, its tests and `pull::reference_data` before it
+// was listed. The corporate-action table's columns `ex_date`, `num`, `den`
+// and `tag`; its source tag `nse`; its kinds `split`, `bonus`, `rights`,
+// `demerger`, `merger`, `dividend` and `unclassed`, and the kind `spinoff`
+// a test offers and sees refused; the table names `corporate_actions` and
+// `basis_runs` and the nouns `corporate-action` and `basis-run` a refusal
+// names; a basis run's end `drift`; the checker's finding words
+// `factor_differs`, `product_too_large`, `row_without_step` and
+// `basis_anomaly`, and the anomaly classes `basis_reversed`, `basis_short`
+// and `basis_within_wobble`; the lookup's answer `no_basis_run`; the noun
+// `share-days` of the day tables' bound; every number below, each one half
+// of an invented ratio of the tests split on its slash (for example
+// `1001/1000` to `1007/1000`, `1999/2000`, `2001/2000`, `10000/10481`,
+// `4765/10000`, `999999999999999877/3`, the overflowing
+// `10000000000000000000/1` and the negative `1/-2` the parse refuses) or
+// the level `100000` a test converts, none a date, a token or a price; and
+// the tests' scratch tags (`cor-absent` to `cor-wrong-factor`). And
+// `no_row`, the checker's finding for a ratio step no row explains, which
+// R4-26 writes too and which gate 1d already named on feat/db-fix, where
+// `pull::reference_data`'s tests write it: 122 words. None names an
+// account, an environment, a vendor credential or a field of a parameter
+// path.
+const R4_26_LITERAL: &str = "-2 100000 10000000000000000000 10005 10007 1001 1002 1003 1004 \
+    1005 1006 1007 1012 102 104 10481 106 118 125 16 1993 1999 2000 2001 2007 253 280 32 33 \
+    34 40 4000 47 472 4765 4767 49 4995 500 5005 503 560 63 81 998 9993 9995 \
+    999999999999999877 999999999999999989 basis-run basis_anomaly basis_reversed basis_runs \
+    basis_short basis_within_wobble bonus cor-absent cor-alternate cor-alternate-ca cor-bad \
+    cor-checksum cor-compare cor-deep cor-edges cor-empty cor-every-run cor-every-run-nse \
+    cor-excursion cor-excursion-end cor-excursion-end-ca cor-fm260 cor-gap-split cor-holiday \
+    cor-inside cor-law cor-law-class cor-law-nse cor-law-refuse cor-law-unclassed \
+    cor-load-written cor-no-row cor-noise cor-order cor-partly-back cor-product-runs \
+    cor-product-too-large cor-scale cor-short cor-short-held cor-span-one cor-span-two \
+    cor-swapped cor-tenfold cor-tenfold-ca cor-torn cor-walk-back cor-weekend-split \
+    cor-wide-wobble cor-wobble cor-wobble-ca cor-wrong-factor corporate-action \
+    corporate_actions demerger den dividend drift ex_date factor_differs merger no_basis_run \
+    no_row nse num product_too_large rights row_without_step share-days spinoff split tag \
+    unclassed";
+
 // R4-19 (one not-owed authority; D-7315). The codes of `pull::gaps::NotOwed`
 // a month or a day carries, the four `web/src/lib/ingest-months.js`
 // (`REASON_CODES`, R4-01) already spells (`instrument_inactive`,
@@ -2969,7 +3011,11 @@ const CLOUD_MUT_PULL_LITERAL: &str = "proc self 08 msg linux";
 /// BASE-GATE11 merge (23 Oct 2026) keeps 75, the entries counted, none twice.
 /// 75 -> 76 with R4-28's group (repair 5, 24 Oct 2026).
 /// 76 -> 77 with IA-10c's group (merged into feat/db-fix 26 Oct 2026).
-const DECLARED: [&str; 78] = [
+/// 77 -> 78 with R4-19's group (merged into feat/db-fix 26 Oct 2026).
+/// 78 -> 79 with R4-26's group (repair 4, 26 Oct 2026), at its merge of
+/// feat/db-fix c53812824: both groups raised 77 -> 78 for their own, and
+/// both landed, so the joined list holds 79.
+const DECLARED: [&str; 79] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -3048,6 +3094,7 @@ const DECLARED: [&str; 78] = [
     R4_28_LITERAL,
     IA10C_LITERAL,
     R4_19_LITERAL,
+    R4_26_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4749,6 +4796,40 @@ mod tests {
         ] {
             assert!(d.contains(w), "{w}");
         }
+        assert!(!d.contains("acmeorg"));
+    }
+
+    #[test]
+    fn gate_1d_declares_the_r4_26_reference_words() {
+        // R4-26 repair 4: the 121 words its second agent named as
+        // undeclared, one of each kind read at its site, and the checker's
+        // `no_row`; the group holds exactly those 122, each once.
+        let d = declared();
+        for w in [
+            "ex_date",
+            "den",
+            "nse",
+            "demerger",
+            "spinoff",
+            "basis_runs",
+            "corporate-action",
+            "drift",
+            "row_without_step",
+            "basis_within_wobble",
+            "no_basis_run",
+            "no_row",
+            "share-days",
+            "10481",
+            "999999999999999877",
+            "-2",
+            "cor-fm260",
+            "cor-wrong-factor",
+        ] {
+            assert!(d.contains(w), "{w}");
+        }
+        let group: BTreeSet<&str> = R4_26_LITERAL.split_whitespace().collect();
+        assert_eq!(group.len(), 122);
+        assert_eq!(R4_26_LITERAL.split_whitespace().count(), 122);
         assert!(!d.contains("acmeorg"));
     }
 
