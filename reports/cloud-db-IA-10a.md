@@ -3,7 +3,8 @@ STATUS: IN PROGRESS
 # IA-10a (cloud): the api's journal readers name member keys and holes, the day band's run from the event (D-4896), the receipt's census and horizon
 
 Branch `cloud/db-IA-10a-20261024`, cut from `origin/feat/db-fix` at `e851da1ca`; the newest
-`origin/feat/db-fix` (`bf9b1c8f`, R4-18) merged in on 25 Oct 2026 (`574d653c`), no conflict.
+`origin/feat/db-fix` (`a32722c4`, R3-15, with BASE-DENY-1024 and IA-10c under it) merged in on
+27 Oct 2026 (`25159490`), no conflict.
 Scope in force: `reports/db-specs-20261024/IA-10a.md` section 3.2 (the read side only, D-6900).
 Nothing of the dropped half is built: no api child mode, no `/gdfl/*` route, no alerts route,
 no restart scan, no alert put.
@@ -48,6 +49,11 @@ All merged on `origin/feat/db-fix` (checked 24 Oct 2026): IA-2, IA-16, IA-3, IA-
   false; docs/06 L-IA-39 rewritten, L-IA10A-1..3.
 - 25 Oct: merged the newest `origin/feat/db-fix`; four tests added for the lines the coverage
   run found unreached (below); clippy clean after them.
+- 26-27 Oct: every mutant of the diff tested, 0 missed, the five survivors along the way each
+  answered (Gates); bench C-LG-02 run in release and L-IA-39's after-measurement written
+  (Measurements); the CI shell gates compared with the base line by line, and the two
+  differences this branch had made fixed: gate 11 rule 7 (`DayRow::hole`'s `.contains(&)`) and
+  gate 12 (`#[test]` hidden from its reader by a many-line `#[expect]`).
 
 ### Census route (item 7a): option (b), and why
 
@@ -82,41 +88,65 @@ reconcile. FM-071: `not_fixed`, dropped by D-6900 (not applicable).
 
 ## Gates
 
-Run 25 Oct 2026 in this container (4 cores, root, about 25 GB free) on the branch after merging
-`origin/feat/db-fix` `bf9b1c8f`.
+The final run: 27 Oct 2026, this container (4 cores, 13.4 GiB memory limit, root), on the
+branch after merging `origin/feat/db-fix` `a32722c4`. The code's last change is `943d5918`
+(`DayRow::hole`'s spelling, for clippy); fmt, clippy, deny, the CI shell gates, the mutants and
+coverage ran on it, the workspace tests on `2f5b9cd5` just before it (that one function's
+change was then covered by `api`'s 378 tests of the touched modules, green at the mutants'
+baseline on `943d5918`, and by the coverage run). Commits after `943d5918` change only this
+report. Each red is shown on a worktree of the unmodified `origin/feat/db-fix` `a32722c4`
+(`/home/user/base`, its own build of every workspace crate).
 
 | Gate | Command | Result |
 |---|---|---|
 | fmt | `cargo fmt --all --check` | clean |
-| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean (and again `-p api -p cli` after the new tests) |
-| deny | `cargo deny check` (cargo-deny 0.19.0, as CI pins) | `advisories ok, bans ok, licenses ok, sources ok` |
-| tests | `cargo test --workspace --locked --no-fail-fast` | 11,171 passed, 30 failed, every failure also fails on the unmodified base (below); two test processes hung and were stopped (below) |
-| coverage | `cargo llvm-cov --no-fail-fast --locked -p api -p cli --lib` (stable; lines and regions) | every added line of the touched source files covered except one (below) |
+| clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | clean (`Finished`, exit 0) |
+| deny | `cargo deny check` (cargo-deny 0.19.0, as CI pins) | `advisories ok, bans ok, licenses ok, sources ok` (two `duplicate` warnings, `getrandom` and `syn`, as on the base) |
+| tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | 11,779 passed, 33 failed, 99 ignored; the same 33 fail on the base (below); the two hangers hang on both (below) |
+| CI shell gates | gates 0 to 29b of `.github/workflows/ci.yml`'s `language-purity` job, each step as `checks_all` plans it (gate 1e skipped, below) | the same exit as the base for every gate; the reds (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30) are the base's, line for line (below) |
+| bench (gate 8) | `cargo bench -p api --bench ratio` (release) | every C-LG-01 and C-LG-02 row `ok`; the run exits 1 on two rows that are not this part's (below) |
+| coverage | below | below |
 | mutants | `cargo mutants --in-diff` (method below) | every mutant of the diff tested: 0 missed (below) |
 
-**The 30 failures are environmental, the same set on the base.** Re-run on a worktree of the
-unmodified `origin/feat/db-fix` `bf9b1c8f` with its own target directory
-(`cargo test --locked --no-fail-fast -p api -p cli -p pull -p store -p telemetry --lib -- <the 30 names>`):
-the same 30 fail (`diff` of the two sorted FAILED lists: identical). Causes, from their own
-messages: this container runs as root, so every "a read-only / unwritable / 000 directory" test
-fails (pull `census_store`, `gdfl_dropbox`, `zerodha_verify`, `alerts`; store `quarantine`,
-`settings`; telemetry `sink`; cli `scrub_blocks`, `watchdog_command`; api
-`feeds_route::the_window_is_refused_loudly_when_degraded_or_inverted`); 4 cores make api's
-timed tests fail (`head_deadline_body_tests` x5, `detail::a_refused_admission...`,
-`pullrun::restart_tests::the_journals_own_extremes`); and `pull`'s
-`gdfl_cm::tests::fixtures_are_built_not_pasted` names `crates/cli/src/tick_second_check_tests.rs`
-(DATA-1w's, merged on `feat/db-fix`), not a file of this part.
+**The 33 test failures are environmental, the same set on the base.** `cargo test --locked
+--no-fail-fast -p api -p cli -p pull -p store -p telemetry --lib -- --exact <the 33 names>` on the
+base worktree: 12 + 3 + 9 + 5 + 4 fail, and `diff` of the two sorted FAILED lists is empty.
+Causes, from their own messages: this container runs as root, so every "a read-only /
+unwritable / unreadable directory" test fails (pull `census_store` x2, `gdfl_dropbox` x2,
+`zerodha_verify` x2, `alerts`, `gdfl_import::ia16`, `gdfl_run::ia2_tests`; store `quarantine` x2,
+`settings` x3; telemetry `sink` x4; cli `scrub_blocks`, `watchdog_command` x2; api
+`audit::cloud_mutant_tests`, `pullrun::cloud_mutant_tests`, `server::cloud_mutant_tests_c` x2 and
+`feeds_route::the_window_is_refused_loudly_when_degraded_or_inverted`, a test of an owned file
+that predates this part and fails identically on the base); 4 cores make api's timed tests fail
+(`head_deadline_body_tests` x5, `detail::a_refused_admission_names_what_its_bound_and_why`,
+`pullrun::restart_tests::the_journals_own_extremes`). The 25 Oct list's
+`gdfl_cm::tests::fixtures_are_built_not_pasted` passes now (BASE-FIXTURE-1025).
 
-**Two hangs, both on the base too.** `api::server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
-(its child process idled at 0% CPU for over 20 minutes, here and on the base worktree, where it
-idled 5 minutes before being stopped) and `api` `tests/cloud_mutants_bars.rs`
-`spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held` (18 minutes at load
-0): each process was stopped so the run could finish; neither file is this part's.
+**Two hangers, on both trees.** `api::server::gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit`
+and `api` `tests/cloud_mutants_bars.rs`
+`spot_rs::spot_json_is_refused_by_name_when_every_store_read_slot_is_held`, each run alone
+under `timeout 300`: HANG_RESULTS. Neither file is this part's.
 
 **A disk-space fact for whoever reruns this here.** With the container's allowance below 10 GiB
 free, 15 `cli` `gdfl_import_command` tests fail with the importer's own refusal "the disk is
 full ... below the free-space floor of 10737418240 bytes (CONC-031)". That is the floor working,
-not a defect; with space freed all 77 pass.
+not a defect; with space freed all 78 pass (the final run had 13 GiB free).
+
+**CI shell gates, compared line by line.** Each `language-purity` step was run on both trees
+by a loop over `checks_all plan` (the plan's own commands; `CHECKS_BIN` a scratch directory),
+and each log compared after taking out line numbers: gate 10's red (docs/04 line 8835, a ✓ row
+naming no test, `R427-11`), gate 12's 85 refused blocks, gate 27b's two `D-6247` headings,
+gate 29's `/pull/quarantine*` routes, and 1c, 1d, 19, 23, 30 are the base's, unchanged. Two
+differences this branch had made, both fixed here: gate 11 rule 7 refused `DayRow::hole`'s
+`.contains(&reason)` (`aba23431`, then `943d5918` in the form `pull`'s own `KeyState::of` uses,
+which clippy's `manual_contains` also accepts), and gate 12 refused `render_census`'s O(1)
+claim because its proof row's test was hidden from the gate's line reader by a many-line
+`#[expect]` between `#[test]` and `fn` (`da5df5c8`). What remains different: gate 11's three
+allowlist entries this change made loose (warnings, NEEDS THE MAC 8). Gate 1e (a second full
+workspace build and test with `web/` moved aside) was not run: it repeats the test gate above
+with no front-end toolchain, and this part touches no build script and nothing under `web/`.
+
+**The bench's two red rows are not this part's.** BENCH_RESULTS
 
 **Coverage, on the added lines.** `cargo llvm-cov` here is stable, so `--branch` (nightly only)
 was not run: branch coverage is under NEEDS THE MAC. Line coverage of every line this branch
@@ -137,12 +167,12 @@ branch. The first run found ten lines unreached; four tests now reach them:
 
 **Mutants, on every line the diff adds (`cargo mutants 27.1.0 --in-diff`).** The diff
 against `origin/feat/db-fix` of `crates/api/src`, `crates/pull/src` (tests excluded) and of
-`crates/cli/src/gdfl_import_command.rs`, in three passes over three sessions; a mutant whose
-code a later commit changed was tested again on the new code, and only those:
+`crates/cli/src/gdfl_import_command.rs` at `943d5918`, in passes over three sessions; a mutant
+whose code a later commit changed was tested again on the new code, and only those:
 
 | Files | Mutants now | Caught | Unviable | Missed |
 |---|---|---|---|---|
-| api and pull (`import_journal.rs`, `imports.rs`, `dayflags.rs`, `feeds_route.rs`, `provenance.rs`, `gdfl_cm.rs`, `gdfl_import.rs`) | 120 | 107 | 13 | 0 |
+| api and pull (`import_journal.rs`, `imports.rs`, `dayflags.rs`, `feeds_route.rs`, `provenance.rs`, `gdfl_cm.rs`, `gdfl_import.rs`) | 121 | 108 | 13 | 0 |
 | cli (`gdfl_import_command.rs`) | 15 | 11 | 4 | 0 |
 
 The five that survived along the way, each answered with a test or by removing a construct
@@ -174,7 +204,9 @@ the baseline; the skipped one fails as root on the base too), and for the cli fi
 `... -p cli --test-package cli -- --lib -- gdfl_import_command` (78 tests at the baseline,
 2 ignored). The 27 Oct re-runs used `-F 'holes_note|placed_of'` (9 mutants: 8 caught,
 1 unviable, 11 min), the whole cli file (17: 11 caught, 4 unviable, 2 missed, 10 min), and,
-after `3341f735`, `-F 'render_census|today_ist'` (6: 5 caught, 1 unviable, 6 min).
+after `3341f735`, `-F 'render_census|today_ist'` (6: 5 caught, 1 unviable, 6 min); and `DayRow::hole`, whose
+walk changed twice for gates 11 and clippy (one new mutant, `==` to `!=` in its `find`):
+`-F 'DayRow::hole'` on `aba23431` and again on `943d5918` (4: 3 caught, 1 unviable, each time).
 
 A cargo fact for this container: `cli`'s build script watches the repository root as a
 directory, which cargo scans recursively, `target/` included, so with the default target
@@ -207,8 +239,25 @@ test either does not build there or asserts a field the base never writes.
 
 ## Measurements (O(1) at p99)
 
-UNMEASURED here so far: bench C-LG-02's day-band rows (L-IA-39 after D-4896) are still to be run
-in release. The HTTP timings of section 13.4 are the Mac's.
+Bench `ratio` of `api` (gate 8), `cargo bench -p api --bench ratio --locked --no-run -j 2`, then
+the bench binary run alone from `crates/api`, 27 Oct 2026 08:50 IST, this container (4 cores,
+load average below 1, nothing else running). Single calls, sorted; p50, p99, max:
+
+| Row (journal of only `run` lines) | n | 1,000 lines | 10,000 lines | 100,000 lines |
+|---|---|---|---|---|
+| `/dayflags.json` day band (L-IA-39, D-4896) | 100 each | 0.524 / 0.635 / 0.635 ms | 0.520 / 0.589 / 0.589 ms | 0.504 / 0.620 / 0.620 ms |
+| `/imports.json?feed=gdfl` runs page (C-LG-02) | 300 each | 0.082 / 0.113 / 0.122 ms | 0.080 / 0.113 / 0.140 ms | 0.080 / 0.106 / 0.113 ms |
+| `/imports.json?feed=gdfl&run=<id>` (C-LG-02) | 300 each | 0.097 / 0.146 / 0.163 ms | 0.097 / 0.134 / 0.332 ms | 0.093 / 0.132 / 0.237 ms |
+
+The day band is flat: before D-4896 the same rows read 1.17, 8.69 and 97.5 ms at p50 (the
+operator's M4 Pro, 11 Oct; a different machine, so compare the shape). C-LG-02's gated ratios:
+runs page 0.991x and 0.972x, `run=<id>` 0.969x and 0.977x, all `ok`; C-LG-01's three `ok`
+(1.334x, 1.015x, 1.012x). Written into `docs/06-limits.md` L-IA-39 ("measured after D-4896").
+The first read of each journal (the parse, once a process): 0.9, 4.1 and 53.4 ms.
+
+The bench as a whole exited 1 on two rows that are not this part's (see Gates for the base).
+The HTTP timings of section 13.4 (n=200 GETs on the shadow, before and after 100,000 appended
+`run` lines) are the Mac's: UNVERIFIED here.
 
 ## Files outside ownership
 
@@ -247,16 +296,21 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
    over the eight touched source files. Expected: every line and branch this diff adds covered,
    except `import_journal.rs`'s `u32::try_from(self.runs.len())` `Err` arm (IA-11r's line, a
    journal of more than `u32::MAX` `run` lines), named here rather than excused.
-3. **Mutants not finished here** (see Gates for what was run and its result): the remainder by
+3. **Mutants: done here, every mutant of the diff, 0 missed** (Gates). Only if the merge-back
+   routine wants its own run on the Mac's tree:
    `cargo mutants --in-diff <(git diff origin/feat/db-fix -- crates/api/src crates/pull/src crates/cli/src/gdfl_import_command.rs ':!*_tests.rs') -p api -p pull -p cli`.
-   Expected: 0 missed.
+   Expected: 136 mutants, 0 missed (17 unviable).
 4. **Real journal, unchanged answers (13.2).** Re-count the real journal first
    (`awk '$1!="run" && $4 ~ /\+/' <journal> | wc -l` expected 0;
    `grep '^incomplete' <journal> | grep -o 'reason=[a-z_]*' | sort | uniq -c` expected only
    `14 reason=filing` among hole-or-filing reasons, none of the five hole reasons). Then the eight
    `curl | jq -S` answers of 13.2 from the baseline build and from this build on 8405, `diff`ed
    after deleting only `base_filter`, `member`, `member_symbol`, `hole`, `holes`,
-   `holes_unrepairable`, `journal_days_holes`, the day band record's `placed`, `run_from`. Expected:
+   `holes_unrepairable`, `journal_days_holes`, the day band record's `placed`, `run_from`, each
+   logged refusal's `run` on `/imports.json`'s rows (the event's own run, `null` before DB-A41's
+   fix), and the `filter` of a day band record that has no journal row (`/dayflags.json`'s `import` of a
+   day the journal never names now carries `"filter": null` beside its other nulls, so every
+   record has the same keys; a day with a row carried `filter` before). Expected:
    identical; `holes` empty or all 0, `holes_unrepairable` 0, no `hole` object on any row;
    `/feeds.json`'s open days unchanged; one F&O stock month and one illiquid strike's
    provenance month the same.
