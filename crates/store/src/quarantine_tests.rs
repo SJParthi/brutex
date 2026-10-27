@@ -1991,3 +1991,116 @@ fn a_month_dropped_then_recorded_whole_counts_every_bar_and_names_every_cause() 
     assert_eq!((row.months, row.whole_months, row.bars), (1, 1, 6));
     assert_eq!(row.causes, vec![Cause::ForeignLevel, Cause::ZeroPrice]);
 }
+
+/// BASE-COV-LIBS (D-7320): every refusal renders its own code first, names
+/// the path it is about and the figures it carries; the code and the words
+/// can never disagree. Each variant is built directly: several (a full
+/// bucket, a held lock, a linked index) need a store state the writer tests
+/// reach elsewhere, and their sentence is what `/logs` and the operator read.
+#[test]
+fn every_quarantine_refusal_renders_its_code_its_path_and_its_figures() {
+    let path = PathBuf::from("/a store/quarantine/gdfl.quarantine");
+    let shown = path.display().to_string();
+    let offsets = |n: u64| (0..n).map(|at| at * 100).collect::<Vec<u64>>();
+    let cases: Vec<(QuarantineError, &str, Vec<String>)> = vec![
+        (
+            QuarantineError::Torn { path: path.clone(), len: 7 },
+            "quarantine_index_torn",
+            vec![format!("is 7 bytes, not {INDEX_LEN}")],
+        ),
+        (
+            QuarantineError::HeaderDamaged { path: path.clone() },
+            "quarantine_index_torn",
+            vec!["the header of".to_owned()],
+        ),
+        (
+            QuarantineError::Damaged { path: path.clone(), slot: 4_095 },
+            "quarantine_slot_damaged",
+            vec!["slot 4095 of".to_owned()],
+        ),
+        // Both readings of a stale image: the ledger behind the image, and
+        // an act ledgered and not indexed.
+        (
+            QuarantineError::Stale { path: path.clone(), built_from: 10, ledger_len: 9 },
+            "quarantine_index_stale",
+            vec!["which holds only 9".to_owned(), "quarantine_ledger_cut".to_owned()],
+        ),
+        (
+            QuarantineError::Stale { path: path.clone(), built_from: 9, ledger_len: 10 },
+            "quarantine_index_stale",
+            vec!["which holds 10, and no writer is at work".to_owned()],
+        ),
+        (
+            QuarantineError::BeingWritten {
+                path: path.clone(),
+                built_from: 1,
+                ledger_len: 2,
+                waited_ms: 250,
+            },
+            "quarantine_being_written",
+            vec!["for all 250 ms".to_owned()],
+        ),
+        // No damaged line, eight (all listed) and nine (eight and an ellipsis).
+        (
+            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(0) },
+            "quarantine_ledger_damaged",
+            vec!["0 complete line(s)".to_owned(), "at byte ;".to_owned()],
+        ),
+        (
+            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(8) },
+            "quarantine_ledger_damaged",
+            vec!["at byte 0, 100, 200, 300, 400, 500, 600, 700;".to_owned()],
+        ),
+        (
+            QuarantineError::LedgerDamaged { path: path.clone(), offsets: offsets(9) },
+            "quarantine_ledger_damaged",
+            vec!["9 complete line(s)".to_owned(), "600, 700, ...;".to_owned()],
+        ),
+        (
+            QuarantineError::LedgerCut { path: path.clone(), described: u64::MAX, ledger_len: 0 },
+            "quarantine_ledger_cut",
+            vec![format!("describes {} bytes", u64::MAX), "holds only 0".to_owned()],
+        ),
+        (
+            QuarantineError::Full { path: path.clone() },
+            "quarantine_index_full",
+            vec!["nothing was written".to_owned()],
+        ),
+        (
+            QuarantineError::Held { path: path.clone(), holder: "pid 42".to_owned() },
+            "quarantine_held",
+            vec!["(pid 42)".to_owned()],
+        ),
+        (
+            QuarantineError::Reason(String::new()),
+            "quarantine_reason",
+            vec![],
+        ),
+        (
+            QuarantineError::Linked(path.clone()),
+            "quarantine_linked",
+            vec!["is a symbolic link".to_owned()],
+        ),
+        (
+            QuarantineError::Io {
+                path: path.clone(),
+                operation: "read",
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+            "quarantine_io",
+            vec!["read ".to_owned(), "PermissionDenied".to_owned()],
+        ),
+    ];
+    assert_eq!(cases.len(), 15, "every variant, and both stale readings");
+    for (error, code, words) in cases {
+        let text = error.to_string();
+        assert_eq!(error.code(), code, "{text}");
+        assert!(text.starts_with(&format!("{code}: ")), "{text}");
+        if !matches!(error, QuarantineError::Reason(_)) {
+            assert!(text.contains(&shown), "the path is named: {text}");
+        }
+        for word in words {
+            assert!(text.contains(&word), "{word:?} in {text}");
+        }
+    }
+}

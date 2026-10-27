@@ -4780,6 +4780,30 @@ mod tests {
         }
     }
 
+    /// BASE-COV-LIBS (D-7320; docs/06-limits.md section 54 listed such
+    /// methods as dark): the keep-nothing doubles accept EVERY call of the
+    /// trait, not only the one a given test drives, so a test that leans on
+    /// one of them for `sync` or `reopen` is never refused by the double.
+    #[test]
+    fn the_keep_nothing_doubles_accept_every_call_of_the_trait() {
+        let mut null = NullTarget;
+        let mut discard = super::tests_support::Discard;
+        for target in [&mut null as &mut dyn Target, &mut discard] {
+            // Empty, one byte, and a line longer than any record.
+            for bytes in [&b""[..], b"x", &[b'y'; 70_000][..]] {
+                assert!(target.append(bytes).is_ok());
+            }
+            assert!(target.sync().is_ok());
+            // A path that does not exist, and the root: neither is touched.
+            assert!(target.reopen(Path::new("/no/such/telemetry.log")).is_ok());
+            assert!(target.reopen(Path::new("/")).is_ok());
+            // COMBINED: a reopen between two appends and a sync after.
+            assert!(target.append(b"a").is_ok());
+            assert!(target.reopen(Path::new("")).is_ok());
+            assert!(target.append(b"b").is_ok() && target.sync().is_ok());
+        }
+    }
+
     /// **`report` runs with the emit mutex RELEASED, proved by parking it.**
     ///
     /// The hazard is that `report` writes to stderr, and stderr blocks: piped
