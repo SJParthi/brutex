@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # IA-10a (cloud): the api's journal readers name member keys and holes, the day band's run from the event (D-4896), the receipt's census and horizon
 
@@ -97,7 +97,7 @@ tests ran on `bb4ace19`/`f8a84e8d`; three commits followed, each with its own ru
 (docs/06's wording; `cited_commits` again), `72f490d6` (an `api` test widened; `api`'s lib
 tests again, 2,961 passed, under the coverage run) and `ab0748ed` (the cli horizon split and
 its test; the `gdfl_import_command` tests again, 79 passed, under the coverage run; its
-mutants). fmt, clippy and the CI shell gates ran on `ab0748ed`, the last code change (FINAL_SG);
+mutants). fmt, clippy and the CI shell gates ran on `ab0748ed`, the last code change (the shell gates on `43e6420e`, its report commit: the base's line for line);
 deny on `0c06ff7a` (no dependency changed after it). Each red is shown on a worktree of the
 unmodified `origin/feat/db-fix` (`/home/user/base`, with its own build of every workspace
 crate): `a32722c4` for the 33 failures, the hangers and the bench, `f01d7a0e` for R4-26's one
@@ -526,7 +526,7 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
 - NEXT: bench C-LG-02 (building), then the workspace tests, clippy, the CI shell gates,
   NEEDS THE MAC, STATUS.
 
-### 2026-10-27 10:25 IST
+### 2026-10-27 10:42 IST
 
 - Bench C-LG-02 in release (Measurements), on the branch and, built from its own sources, on
   the base `a32722c4`: the day band at 100,000 `run` lines p50 0.50 ms against 294.5 ms; docs/06
@@ -541,3 +541,17 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
 - NEXT: the workspace tests, clippy, deny and the CI shell gates again on the merged tree;
   branch coverage (`RUSTC_BOOTSTRAP=1 cargo llvm-cov --branch` on the pinned 1.97.1 works
   here); NEEDS THE MAC; STATUS.
+
+### 2026-10-27 12:48 IST (HELD)
+
+- The Mac set HOLD at 10:29 IST (`b34f6a16`, GO-IA-10a removed until the 12:50 IST reset). This
+  session did not test the switch between its 08:5x save point and 12:48 and worked through the
+  hold: the merged tree's gates, the store test `cited_commits` fixed (`0c06ff7a`), branch
+  coverage measured and its three gaps closed (`72f490d6`, `ab0748ed`), the horizon mutants
+  (5 caught), clippy clean on `ab0748ed`, the CI shell gates on `43e6420e` the base's line for
+  line. Every one of those is recorded above. Held now at a save point.
+- Running in the background, no edit needed: one last full `cargo test --workspace --locked
+  --no-fail-fast -- --skip <the two hangers>` on `43e6420e` (logs in the container's scratch).
+- NEXT (once GO-IA-10a is back or HOLD is lifted): read that run (expected: the 34
+  environmental failures of Gates, nothing else); write its line into Gates; STATUS: BLOCKED
+  (code complete; base and environment items named) unless the run shows more; push; end.
