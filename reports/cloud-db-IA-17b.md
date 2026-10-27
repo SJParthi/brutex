@@ -1,6 +1,6 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
-NEXT: the new code's own mutants (44 of 46 left after a container restart cut the first try; running at `3f2388c9`), then coverage at the final head, gate 1e, bench C-RP-02, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), two base merges.
+NEXT: (held: `HOLD` on the base branch since 10:29 IST, lifting about 12:50 IST) coverage at the final head, gate 1e, bench C-RP-02, workspace clippy, the CI shell gates again, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), the new code's 46 mutants (2 missed, both fixed), two base merges.
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
@@ -57,6 +57,32 @@ run again; nothing it lists as done is redone.
   cleanly, feat/db-fix's file the exact byte prefix of each. Nothing R4-26 moved under
   `crates/pull` (`corporate_actions.rs`, `day_universe.rs`, `reference_data.rs`, `lib.rs`) is this
   part's; `Cargo.lock` is the base's byte for byte.
+- **Mutants, the new code (the coverage pass's own lines).** `git diff 9a186f42 HEAD` of the files
+  the pass touched (`new.diff`; unchanged by the eighth merge, `cmp`) lists **46** mutants. Run at
+  `3f2388c9` as the 149 were, two worktrees of 23 (the filter adding
+  `session::month_boundary::a_window`). A first try was cut twice (the kernel's out-of-memory
+  killer took a build while a coverage build ran beside them; then the container restarted, which
+  left one worktree with a mutation applied, restored from git before anything else ran, and one
+  incremental cache corrupt, cleared): 2 results were saved (unviable) and the other 44 ran again.
+  **Result: 38 caught, 6 unviable, 2 missed**, both in `widen_key` and both fixed at `66a53c71`:
+  - `|=` -> `&=` on the new `widened.deferred |= waits(..)`: nothing read the count of a widened
+    day whose member key's close waits for the month. The widened-member test
+    (`scope_reopen::a_new_member_holding_only_a_later_day_takes_its_earlier_done_days`, outside
+    ownership, the file the earlier legs already touched) now asserts `days_imported == 2`
+    (IA-RP-45), shown failing on the mutant by hand (`left: 0, right: 2`).
+  - `+=` -> `*=` on `widened.closed += 1`: WP-12f's line, which the pass's rewrite had only
+    re-indented into this part's diff. `widen_key` keeps the base's `if let` shape again, so the
+    line is the base's byte for byte and the pass's change is the `else` arm alone.
+  - The fix's own mutants (`git diff 3f2388c9 66a53c71`, 5, at `66a53c71`): `|=` -> `&=` caught,
+    `widen_key` -> `Ok(true)`/`Ok(false)` caught, `closed +=` -> `-=` caught, and **`closed +=` ->
+    `*=` missed**: that line is unchanged against `feat/db-fix`, so it is not this part's mutant;
+    it is a base finding, named for the Mac under NEEDS THE MAC (the `members` count of a widened
+    day's summary event is read by no test; the summaries capture keeps only text fields).
+  With the 149 and the 106: **every mutant of this part's diff against `feat/db-fix` has a saved
+  result, and none survived.**
+- **HELD at 11:5x IST.** `HOLD` returned on `cloud/db-base-20261024` at `b34f6a16` (10:29 IST,
+  `GO-IA-17b` removed for it, lifting about 12:50 IST). The step in flight (these mutants and their
+  fixes) was finished, committed and pushed; nothing new starts until GO.
 
 ## Session of 26 Oct 2026, fourth leg (a new cloud session, continuing from `b847a810`)
 
