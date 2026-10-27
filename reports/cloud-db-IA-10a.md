@@ -53,7 +53,11 @@ All merged on `origin/feat/db-fix` (checked 24 Oct 2026): IA-2, IA-16, IA-3, IA-
   answered (Gates); bench C-LG-02 run in release and L-IA-39's after-measurement written
   (Measurements); the CI shell gates compared with the base line by line, and the two
   differences this branch had made fixed: gate 11 rule 7 (`DayRow::hole`'s `.contains(&)`) and
-  gate 12 (`#[test]` hidden from its reader by a many-line `#[expect]`).
+  gate 12 (`#[test]` hidden from its reader by a many-line `#[expect]`); the store test
+  `cited_commits` green again (docs/06 had cited a feat/db-fix sha); branch coverage measured
+  here, and the gaps it found closed: the open-day scan's three skips tested, and the
+  receipt's horizon line split from the clock (`say_horizon`) and tested on a horizon that has
+  ended without being said to end soon.
 
 ### Census route (item 7a): option (b), and why
 
@@ -82,18 +86,19 @@ reconcile. FM-071: `not_fixed`, dropped by D-6900 (not applicable).
 
 ## Left
 
-- Bench C-LG-02 in release for L-IA-39's after-measurement (placeholder
-  `L-IA39-AFTER-PLACEHOLDER` in `docs/06-limits.md`).
-- The final gate run on the merged tree, and the final report.
+Nothing of the code. What only the Mac can run is under NEEDS THE MAC (the real journal, the
+shadow server at 8405, the HTTP timings, the receipt on a store root of its own).
 
 ## Gates
 
 The final run: 27 Oct 2026, this container (4 cores, 13.4 GiB memory limit, root), on the
-branch after merging the newest `origin/feat/db-fix` `f01d7a0e` (`bb4ace19`). The code's last
-change is `943d5918` (`DayRow::hole`'s spelling, for clippy); after the merge only docs/06's
-wording changed (`0c06ff7a`, below). fmt, clippy and deny ran on `0c06ff7a`; the workspace
-tests and the CI shell gates on `bb4ace19`/`f8a84e8d` (the same code), and the one test the
-`0c06ff7a` change answers again on `0c06ff7a`. Each red is shown on a worktree of the
+branch after merging the newest `origin/feat/db-fix` `f01d7a0e` (`bb4ace19`). The workspace
+tests ran on `bb4ace19`/`f8a84e8d`; three commits followed, each with its own runs: `0c06ff7a`
+(docs/06's wording; `cited_commits` again), `72f490d6` (an `api` test widened; `api`'s lib
+tests again, 2,961 passed, under the coverage run) and `ab0748ed` (the cli horizon split and
+its test; the `gdfl_import_command` tests again, 79 passed, under the coverage run; its
+mutants). fmt, clippy and the CI shell gates ran on `ab0748ed`, the last code change (FINAL_SG);
+deny on `0c06ff7a` (no dependency changed after it). Each red is shown on a worktree of the
 unmodified `origin/feat/db-fix` (`/home/user/base`, with its own build of every workspace
 crate): `a32722c4` for the 33 failures, the hangers and the bench, `f01d7a0e` for R4-26's one
 new failure and the CI shell gates. (The same gates ran once before on `a32722c4`'s merge, with
@@ -107,7 +112,7 @@ the same results but for R4-26's test.)
 | tests | `cargo test --workspace --locked --no-fail-fast -- --skip <the two hangers>` | 11,845 passed, 35 failed, 99 ignored. One failure was this branch's and is fixed: `store` `tests/cited_commits.rs` refused the feat/db-fix sha docs/06 cited (`0c06ff7a`; `cargo test -p store --test cited_commits`: `6 passed; 0 failed`). The other 34 fail on the base too (below); the two hangers hang on both (below) |
 | CI shell gates | gates 0 to 29b of `.github/workflows/ci.yml`'s `language-purity` job, each step as `checks_all` plans it (gate 1e skipped, below) | the same exit as the base for every gate; the reds (1c, 1d, 10, 11, 12, 19, 23, 27b, 29, 30) are the base's, line for line (below) |
 | bench (gate 8) | `cargo bench -p api --bench ratio` (release) | every C-LG-01 and C-LG-02 row `ok`; the run exits 1 on two rows that are not this part's (below) |
-| coverage | below | below |
+| coverage | `RUSTC_BOOTSTRAP=1 cargo llvm-cov --branch` on `api` and `cli` (below) | every added line and branch outcome reached but two, each unreachable by construction and named (below) |
 | mutants | `cargo mutants --in-diff` (method below) | every mutant of the diff tested: 0 missed (below) |
 
 **The 34 other test failures are environmental, the same on the base.** 33 of them were the
@@ -162,14 +167,48 @@ and both runs stop with exit 1 at the `reads` row, where `/bars.json` for the wh
 bench fixture past the route's row cap, the same on both trees. Every row this part's text
 touches (C-LG-01, C-LG-02) is `ok` on both.
 
-**Coverage, on the added lines.** `cargo llvm-cov` here is stable, so `--branch` (nightly only)
-was not run: branch coverage is under NEEDS THE MAC. Line coverage of every line this branch
-adds to `import_journal.rs`, `imports.rs`, `dayflags.rs`, `feeds_route.rs`, `provenance.rs`,
-`gdfl_import_command.rs`, `gdfl_cm.rs` and `gdfl_import.rs` (from `git diff -U0` against
-`origin/feat/db-fix`, joined with the lcov `DA` records): all covered but
-`import_journal.rs:582`, the `Err` arm of `u32::try_from(self.runs.len())` (a journal holding
-more than `u32::MAX` `run` lines), which is IA-11r's line moved into a new block, not a new
-branch. The first run found ten lines unreached; four tests now reach them:
+**Coverage, lines and branches, on every added line (27 Oct).** On the pinned 1.97.1 with
+`RUSTC_BOOTSTRAP=1`, which admits the `-Z coverage-options=branch` that `--branch` passes (the
+toolchain file pins a stable compiler; no nightly is installed here):
+`RUSTC_BOOTSTRAP=1 CARGO_TARGET_DIR=<scratch> cargo llvm-cov --branch --locked -p api --lib
+--ignore-run-fail --lcov --output-path cov-api.lcov -j 3 -- --skip a_full_calendar_pool_refuses_the_census_and_the_audit`
+(2,961 passed, 13 failed, every one of them in the environmental set above), and the same for
+`-p cli --lib ... -- gdfl_import_command` (79 passed). Each line `git diff -U0
+origin/feat/db-fix` adds was joined with the lcov `DA` (line) and `BRDA` (branch outcome)
+records (a shell and `awk` join over the two files):
+
+| File | Added lines with a counter | Branch outcomes on them | Not reached |
+|---|---|---|---|
+| `import_journal.rs` | 68 | 4 | line 587 (below) |
+| `imports.rs` | 103 | 22 | one outcome at 896 (below) |
+| `dayflags.rs` | 112 | 10 | none |
+| `feeds_route.rs` | 21 | 14 | none (after `72f490d6`) |
+| `provenance.rs` | 37 | 10 | none |
+| `gdfl_import_command.rs` | 142 | 12 | none (after `ab0748ed`) |
+
+The two not reached, both unreachable by construction and named rather than excused:
+`import_journal.rs:587`, the `Err` arm of `u32::try_from(self.runs.len())` (a journal of more
+than `u32::MAX` `run` lines: IA-11r's arm, moved into this part's block); and the `None`
+outcome of `imports.rs:896`'s `if let Some(n) = slot` in `Walk::count`, which only a hole
+reason outside `pull`'s five (`DayRow::hole` returns only those) or an outcome outside
+`DayOutcome::ALL` (it lists every one) could take: the base counted outcomes with the same
+`if let Some(..)` around the same lookup. `pull`'s two added lines (`member_share` made `pub`,
+`hole_reasons`' body) hold no branch and run under `api`'s tests (`member_symbol` and
+`DayRow::hole`, both covered; `hole_reasons`' two mutants are caught); `cargo llvm-cov -p api`
+reports `api`'s files only. The branch run found three more, now closed: the open-day scan's
+three skips (an open day of another kind, a `*` day begun again after a close that wrote, an
+open list key), untested since this part rewrote the scan's condition, now in
+`an_open_member_key_is_named_and_is_not_the_segments_open_day` (`72f490d6`); and the horizon's
+`!ended` test, which no day `pull` names can decide (`ended` implies `ends_soon` today): the
+line is now `say_horizon`, given the record by `render_horizon`, and
+`an_ended_record_is_said_ended_whatever_ends_soon_says` hands it a horizon that has ended
+without being said to end soon (`ab0748ed`; its five mutants caught). A cargo-llvm-cov fact:
+its report reads every test binary left in the target directory, so a stale `api` binary
+linking the previous `cli` code put old line numbers with no counts into the first `cli`
+report; with it moved aside, `cargo llvm-cov report --branch -p cli` gives the table's row.
+
+Line coverage on 25 Oct (stable, lines and regions) had found ten lines unreached; four tests
+reach them:
 
 - `api::server::imports::member_tests::a_share_members_hole_is_its_shares_and_an_options_member_key_is_shown_not_read`
   (a share member and its `.BE` series on the share's day band; the out-of-the-box options close
@@ -181,13 +220,13 @@ branch. The first run found ten lines unreached; four tests now reach them:
 
 **Mutants, on every line the diff adds (`cargo mutants 27.1.0 --in-diff`).** The diff
 against `origin/feat/db-fix` of `crates/api/src`, `crates/pull/src` (tests excluded) and of
-`crates/cli/src/gdfl_import_command.rs` at `943d5918`, in passes over three sessions; a mutant
+`crates/cli/src/gdfl_import_command.rs` at `ab0748ed`, in passes over three sessions; a mutant
 whose code a later commit changed was tested again on the new code, and only those:
 
 | Files | Mutants now | Caught | Unviable | Missed |
 |---|---|---|---|---|
 | api and pull (`import_journal.rs`, `imports.rs`, `dayflags.rs`, `feeds_route.rs`, `provenance.rs`, `gdfl_cm.rs`, `gdfl_import.rs`) | 121 | 108 | 13 | 0 |
-| cli (`gdfl_import_command.rs`) | 15 | 11 | 4 | 0 |
+| cli (`gdfl_import_command.rs`) | 16 | 12 | 4 | 0 |
 
 The five that survived along the way, each answered with a test or by removing a construct
 no test could tell apart (the precedent of `docs/06-limits.md`'s mutation section, never an
@@ -220,7 +259,8 @@ the baseline; the skipped one fails as root on the base too), and for the cli fi
 1 unviable, 11 min), the whole cli file (17: 11 caught, 4 unviable, 2 missed, 10 min), and,
 after `3341f735`, `-F 'render_census|today_ist'` (6: 5 caught, 1 unviable, 6 min); and `DayRow::hole`, whose
 walk changed twice for gates 11 and clippy (one new mutant, `==` to `!=` in its `find`):
-`-F 'DayRow::hole'` on `aba23431` and again on `943d5918` (4: 3 caught, 1 unviable, each time).
+`-F 'DayRow::hole'` on `aba23431` and again on `943d5918` (4: 3 caught, 1 unviable, each time);
+and, after `ab0748ed` split the horizon line into `say_horizon`, `-F horizon` (5: 5 caught, 5 min).
 
 A cargo fact for this container: `cli`'s build script watches the repository root as a
 directory, which cargo scans recursively, `target/` included, so with the default target
@@ -250,6 +290,9 @@ test either does not build there or asserts a field the base never writes.
 14. Out of the box: an `options` close under a member key, which no writer makes, is shown under its own key and never read as a member tree (test 12's second half); an open member key is not the segment's open day (`an_open_member_key_is_named_and_is_not_the_segments_open_day`).
 15. Every hole reason is a hole, by `pull`'s list, and nothing else is (`every_hole_reason_is_a_hole_and_nothing_else_is`).
 16. The census at its bounds: 17 misfiled, 16 named and 1 counted as more; a stopped walk; a source with none (`a_source_census_is_named_on_the_receipt`).
+17. Clock edge, the host's own: the receipt's today is the IST day of the host clock, read before and after so a midnight between the reads names one of the two (`the_receipts_today_is_the_host_clocks_ist_day`).
+18. Combination in one range: an open day of another kind, a `*` day begun again after a close that wrote, an open list key and two open member keys; only the open `*` day is listed and only the two member keys of the asked kind are counted (`an_open_member_key_is_named_and_is_not_the_segments_open_day`, widened 27 Oct).
+19. Out of the box: a horizon that has ended without being said to end soon, a pair no day gives today, is said `ENDED`; one that does neither says nothing (`an_ended_record_is_said_ended_whatever_ends_soon_says`).
 
 ## Measurements (O(1) at p99)
 
@@ -305,17 +348,21 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
 1. **Gates on the Mac (13.1).** `cargo fmt --all --check`;
    `cargo clippy -p pull -p api -p cli --all-targets -- -D warnings`;
    `cargo test -p pull -p api -p cli --locked`; `cargo build --release -p api -p cli`; then
-   `stop.sh`/`shadow.sh`/`serve.sh IA-10a 8405`. Expected: every gate green (the 30 failures and
-   two hangs listed under Gates are this container's root user and 4 cores; on the Mac, as a
-   normal user, they pass as they do on `feat/db-fix`); `OURS`.
-2. **Branch coverage.** `cargo +nightly llvm-cov --branch --no-fail-fast --locked -p api -p cli -p pull --lib`
-   over the eight touched source files. Expected: every line and branch this diff adds covered,
-   except `import_journal.rs`'s `u32::try_from(self.runs.len())` `Err` arm (IA-11r's line, a
-   journal of more than `u32::MAX` `run` lines), named here rather than excused.
+   `stop.sh`/`shadow.sh`/`serve.sh IA-10a 8405`. Expected: every gate green (the 34 failures and
+   two hangers listed under Gates are this container's root user and 4 cores, the same on the
+   unmodified `feat/db-fix` here; on the Mac, as a normal user, they pass as they do on
+   `feat/db-fix`); `OURS`. And bench gate 8 (`cargo bench -p api --bench ratio`): expected the
+   C-LG-01 and C-LG-02 rows `ok` and the day band's three rows flat; its C-LG-03 `span alone`
+   and `/bars.json` row-cap reds are the base's (Gates), for their owners.
+2. **Branch coverage: done here** (Gates: every added line and branch outcome reached but two,
+   each unreachable by construction and named). Only if the merge-back routine wants its own
+   run: `cargo +nightly llvm-cov --branch --locked -p api -p cli --lib --ignore-run-fail --lcov
+   --output-path <file>`, joined with `git diff -U0 origin/feat/db-fix` over the six touched
+   source files. Expected: the same two, nothing else.
 3. **Mutants: done here, every mutant of the diff, 0 missed** (Gates). Only if the merge-back
    routine wants its own run on the Mac's tree:
    `cargo mutants --in-diff <(git diff origin/feat/db-fix -- crates/api/src crates/pull/src crates/cli/src/gdfl_import_command.rs ':!*_tests.rs') -p api -p pull -p cli`.
-   Expected: 136 mutants, 0 missed (17 unviable).
+   Expected: 137 mutants, 0 missed (17 unviable).
 4. **Real journal, unchanged answers (13.2).** Re-count the real journal first
    (`awk '$1!="run" && $4 ~ /\+/' <journal> | wc -l` expected 0;
    `grep '^incomplete' <journal> | grep -o 'reason=[a-z_]*' | sort | uniq -c` expected only
@@ -354,8 +401,12 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
    true, `owed_year` 2027; `days_left` is 68 on 24 Oct, so 31 Dec minus the run's day); the real
    store's journal size and mtime unchanged. And `indices tickstore` if configured.
 8. **Gate 11's three loose allowlist entries** (dayflags rule 4 and rule 6, imports rule 6):
-   warnings, not failures; for the allowlist's owner to drop at merge-back if wanted.
+   warnings, not failures; for the allowlist's owner to drop at merge-back if wanted
+   (`.github/gates_ledger.rs`, not this part's file).
 9. **Store writes:** none (13.6).
+10. **CI shell gate 1e** (the workspace built and tested with `web/` moved aside), not run here
+    because it repeats the whole test gate a second time: expected the same as on
+    `feat/db-fix` (this part touches no build script, no manifest and nothing under `web/`).
 
 ## Log
 
