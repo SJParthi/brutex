@@ -3791,7 +3791,6 @@ const signalledInsideSpawn = async (body, env) => {
   let said = '';
   child.stdout.on('data', (b) => (said += b));
   child.stderr.on('data', (b) => (said += b));
-  /** @type {{code: number | null, signal: string | null}} */
   const ended = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
   return { ended, said, pid: await pidIn(pidFile) };
 };

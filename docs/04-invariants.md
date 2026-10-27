@@ -8807,6 +8807,8 @@ here because this file is tracked and the rule applies to it. Proofs in
 | BRED-24 | **The web job types clean at 0 after the 26 Oct merges, at the roots**: the fake `ask` of the feed-checks tests is the `(url: string) => Promise<Response>` `read` takes; the speed sheet reads a closure-set `kept` under its declared type; the speed tests' stand-ins and lines carry the types their callees name (D-7154 addendum) | `web/tests/feed-checks.test.js` · *a refusal is shown in the server words, and garbage is named*, under gate W3 (svelte-check, ceiling 0) | ✓ |
 | BRED-25 | **A /db keystroke's cost is measured, not the machine's load**: each keystroke's fastest of ten passes, p99 over the keystrokes inside one 60 Hz frame (16 ms), no census row read (D-7152 addendum) | `web/tests/db-search.test.js` · *a keystroke never walks the census, and its p99 over a GDFL-sized census is inside one frame (16 ms)* | ✓ |
 | BRED-26 | **A corporate-action wire word is read by one `match`, and a window's class is the class of `excuse`'s row, one walk**: every `Kind`, `Tag` and `RunEnd` word reads back as its own value and any other word as nothing; `class_of` is the first `nse` row's class, a measured row never decides (D-7150 addendum) | `pull::corporate_actions::tests::every_wire_word_reads_back_as_its_own_value_and_nothing_else_does` · `pull::corporate_actions::tests::class_of_is_the_class_of_the_first_nse_row_in_the_window_and_measured_rows_never_decide` | ✓ |
+| BRED-27 | **Gate 11 rule 6's openers are its regex's parts**: each of `.iter()`, `.into_iter()` and `.iter_mut()`, with or without one `.rev()`, then `.find(`, `.find_map(`, `.position(` or `.rposition(` is refused, on one line and as a formatted chain; another adapter or a near word between them is not this rule's spelling (was a hand list of five openers without `.iter_mut().rev().`; D-7151 addendum) | `gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not` in `.github/gates_ledger.rs` | ✓ |
+| BRED-28 | **A sheet or a harness sent a signal the moment its command or browser has started ends that whole group**: the exit and signal guards are installed before the spawn, so a SIGTERM inside the call that started the command is queued until the command is registered, its group is signalled, and the process still ends by the signal it was sent (was spawn first, guards after; D-7152 addendum) | `web/tests/speed.test.js` · *a sheet or a harness sent a signal the moment its command or browser has started, inside the call that started it, still ends that whole group: the guards are installed before the spawn (BASE-REDS-1023 repair 1)* | ✓ |
 
 The gate-side halves of D-7148 and D-7151 are proved by tests of the gate
 tools themselves, which no crate holds: in .github/gates_tree.rs,
@@ -8815,7 +8817,10 @@ whose segment is an environment word is refused, the renamed directory
 passes); in .github/gates_ledger.rs,
 gate11_reads_an_inner_allow_and_every_spelling_of_a_linear_search (an inner
 allow of a denied lint is rule 5c's, and rule 6 reads the owned, mutable and
-reversed searches and `find_map`). Gate 0 runs the first suite before gate 1c
+reversed searches and `find_map`) and
+gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not (repair 1: every
+base of rule 6's regex crossed with every search word, reversed or not, BRED-27).
+Gate 0 runs the first suite before gate 1c
 uses its tool, and gate 25 the second before gates 27, 27b, 26, 19, 10 and 11 use theirs.
 
 ## The tick-to-second check (DATA-2; D-5180 to D-5186)

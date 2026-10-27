@@ -84298,6 +84298,23 @@ files (it asserted empty) and may only shrink. Reading each into
 `ALLOW_SCAN` with its bound, or removing the search, is the follow-up
 L-BRED23-02 names.
 
+**Addendum, 27 Oct 2026 (repair 1: the opener item 2 left out).** Item 2's
+own regex, in rule 6's doc comment, reads
+`\.(iter|into_iter|iter_mut)\(\)(\.rev\(\))?\.(find|find_map|position|rposition)\(`,
+but the matcher was a hand list of five openers and left out
+`.iter_mut().rev().`, so `xs.iter_mut().rev().find(` passed unseen, on one
+line or as a formatted chain (verify-BASE-REDS-1023-r1, attacks A1 and A11).
+The openers are now built from the regex's parts: each of the three bases,
+then the one optional `.rev()`, then `.` and a search word, so the list and
+the regex cannot disagree again. The gate test
+`gate11_rule6_reads_every_opener_of_its_regex_reversed_or_not` checks every
+base crossed with every search word, reversed or not, on one line and as a
+chain; it failed before at `xs.iter_mut().rev().find(` and passes after
+(BRED-27). No workspace code used the spelling: gate 11 on this branch is
+`OK` with rule 6 at 269 occurrences, as before. A search through another
+adapter (`.iter().copied().find(`, `.iter().enumerate().find(`) is not this
+regex's spelling and stays unread; L-BRED23-02 now names it.
+
 ### D-7152 — Three timing tests hold under load by an order or a same-run baseline, never a looser bound (BASE-REDS-1023) — 2026-10-23
 
 1. `api::server::scrub_route` FIFO/symlink/directory refusal ("answered
@@ -84406,6 +84423,27 @@ counted (0). After, with the same suite running: fastest-of-10 p50 0.012
 ms, p99 3.148 ms, max 4.937 ms; every sample (1,740) p50 0.017 ms, p99
 9.832 ms, max 33.946 ms (BRED-25). `search` holds no cache, so a later pass
 is not a cache hit.
+
+**Addendum, 27 Oct 2026 (repair 1: a sixth failure under load, and it was a
+race, not a bound).** verify-BASE-REDS-1023-r1 ran `npm test` at load 30-59:
+`tests/speed.test.js` "a --restart command that does not exit within
+--restart-wait-ms ..." failed at "and the command it was waiting on was
+ended with it", and its `sleep 1000` was still running minutes later with
+parent 1. The cause is an order, not a time: `run()` in
+`web/ci/speed-sheet.mjs` spawned the detached command and installed the
+exit and signal guards AFTER it, so a SIGTERM that reached the sheet in
+between ended it by the default action and the command's group, which a
+terminal's signal no longer reaches, was never signalled. The browser
+harness's `launch()` had the same order (spawn, then `tracked()` installs
+`guardProcess()`). Both now install their guards first: once Node has a
+listener, a signal is only queued until the running JavaScript returns, by
+when the command is in `COMMANDS` (the browser in `LIVE`). There is no bound
+to loosen and none was. The proof has no wall-clock race either: the test
+runs the sheet and the harness in a new node process whose
+`child_process.spawn` sends that process SIGTERM from inside the spawn,
+every time; it failed before on both ("and the command it had just started
+was ended with it", then, with only the sheet fixed, "and the browser it
+had just started was ended with it") and passes after (BRED-28).
 
 ### D-7153 — Gate 1e: no crate test reads `web/`; the export's two browser cross-checks live in the web suite (BASE-REDS-1023) — 2026-10-23
 

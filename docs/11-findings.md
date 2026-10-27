@@ -1117,6 +1117,27 @@ confirmed by two skeptics; their corrections are applied.
   `pull::rehearsal::tests::a_persons_decision_is_met_only_by_a_recorded_yes`
   requires), no allowlist widened (D-7150 addendum, BRED-26). Same
   cause as F12: a merge that did not run the full gate set.
+- **BRED23-F27: rule 6's matcher left out an opener its own regex names**
+  (verify-BASE-REDS-1023-r1, attacks A1 and A11): `xs.iter_mut().rev().find(`
+  passed gate 11 unseen, on one line or as a chain, because the openers
+  were a hand list of five. FIXED: the openers are built from the regex's
+  parts (three bases, an optional `.rev()`, four search words) and every
+  combination is tested; it failed before at that spelling (D-7151
+  addendum, BRED-27). No workspace code used it, so the gap was latent and
+  gate 11's count is unchanged (269). Adapter spellings and `cfg_attr`
+  allows stay unread, named in L-BRED23-12.
+- **BRED23-F28: the speed sheet could leave its command running when it
+  was signalled under load** (verify-BASE-REDS-1023-r1, run 1 at load
+  30-59, `speed.test.js` "and the command it was waiting on was ended with
+  it", a `sleep 1000` left with parent 1). Cause: `run()` spawned the
+  detached command before it installed the exit and signal guards, so a
+  SIGTERM in between ended the sheet by its default action. The browser
+  harness's `launch()` had the same order. FIXED in both: guards first,
+  then the spawn; proved by a test that sends the SIGTERM from inside the
+  spawn, so it has no wall-clock race; it failed before on each and
+  passes after (D-7152 addendum, BRED-28). A re-run that passed (run 2,
+  1798/1798) cleared nothing: the cause was an order, found by reading,
+  then forced by the test.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
