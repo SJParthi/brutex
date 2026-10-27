@@ -82,7 +82,7 @@
 //! (D-7044, D-7045); the retirement list is [`retirement`] and
 //! [`retirement_text`] (D-7047).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
 use std::io::{self, BufRead};
@@ -647,8 +647,9 @@ struct Walked {
     single_bytes: u64,
     /// Every file with more than one name: its names in this root.
     shared: HashMap<(u64, u64), Vec<Named>>,
-    /// Receipt names, in path order.
-    receipts: BTreeSet<PathBuf>,
+    /// Receipt names, in path order, each with the kind its name spelt when
+    /// the walk met it (read once, never derived again).
+    receipts: BTreeMap<PathBuf, ReceiptKind>,
     /// Faults, in path order: `(path, why)`.
     faults: BTreeSet<(PathBuf, String)>,
     /// Other roots met inside this one and not walked here, in path order.
@@ -740,8 +741,8 @@ fn file_met(walked: &mut Walked, path: PathBuf, meta: Meta, name: &OsStr, keep: 
             .newest_mtime_s
             .map_or(meta.mtime_s, |newest| newest.max(meta.mtime_s)),
     );
-    if receipt_kind(name).is_some() {
-        walked.receipts.insert(path.clone());
+    if let Some(kind) = receipt_kind(name) {
+        walked.receipts.insert(path.clone(), kind);
     }
     if keep {
         walked.identities.push((path.clone(), meta));
@@ -852,18 +853,31 @@ impl SourceIdentity {
     /// The identity `text` spells, or `None`.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        let mut fields = text.trim().split(':');
-        let mut next = || fields.next();
-        let identity = Self {
-            dev: next()?.parse().ok()?,
-            ino: next()?.parse().ok()?,
-            size: next()?.parse().ok()?,
-            mtime_s: next()?.parse().ok()?,
-            mtime_ns: next()?.parse().ok()?,
-            ctime_s: next()?.parse().ok()?,
-            ctime_ns: next()?.parse().ok()?,
-        };
-        next().is_none().then_some(identity)
+        // The seven fields the format names, in its order. A field past the
+        // seventh is refused here; a missing one stays empty and is refused
+        // by its own parse, as a field that is not a number is.
+        let mut fields = [""; 7];
+        for (index, field) in text.trim().split(':').enumerate() {
+            *fields.get_mut(index)? = field;
+        }
+        let [
+            dev,
+            ino,
+            size,
+            modified,
+            modified_nanos,
+            changed,
+            changed_nanos,
+        ] = fields;
+        Some(Self {
+            dev: dev.parse().ok()?,
+            ino: ino.parse().ok()?,
+            size: size.parse().ok()?,
+            mtime_s: modified.parse().ok()?,
+            mtime_ns: modified_nanos.parse().ok()?,
+            ctime_s: changed.parse().ok()?,
+            ctime_ns: changed_nanos.parse().ok()?,
+        })
     }
 
     /// Whether `meta` is the file this identity recorded: inode, size and
@@ -1577,10 +1591,7 @@ fn copy_root_of(
     let receipts: Vec<Receipt> = walked
         .receipts
         .iter()
-        .filter_map(|receipt| {
-            let kind = receipt_kind(receipt.file_name()?)?;
-            Some(read_receipt(fs, receipt, kind, &links.archives))
-        })
+        .map(|(receipt, kind)| read_receipt(fs, receipt, *kind, &links.archives))
         .collect();
     let proof = receipts
         .iter()

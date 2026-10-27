@@ -1701,6 +1701,87 @@ fn a_torn_or_misspelled_verified_tsv_proves_no_twin() {
     );
 }
 
+/// A `source_identity` TORN AT ANY FIELD proves nothing: each of its seven
+/// fields missing, or not a number, or an eighth field, is refused; the
+/// extremes each type holds are read exactly (a time before 1970, the
+/// largest device and inode). And a folder the host cannot list is the
+/// host's refusal, never an empty folder.
+#[test]
+fn a_torn_identity_is_refused_at_every_field_and_an_unlistable_folder_is_the_hosts_refusal() {
+    let whole = [77_i64, 9, 4, 1_700_000_000, 7, 1_700_000_001, 9].map(|field| field.to_string());
+    assert_eq!(
+        SourceIdentity::parse(&format!(" {}\n", whole.join(":"))),
+        Some(SourceIdentity {
+            dev: 77,
+            ino: 9,
+            size: 4,
+            mtime_s: 1_700_000_000,
+            mtime_ns: 7,
+            ctime_s: 1_700_000_001,
+            ctime_ns: 9,
+        })
+    );
+    for kept in 0..whole.len() {
+        let torn = whole[..kept].join(":");
+        assert_eq!(
+            SourceIdentity::parse(&torn),
+            None,
+            "{kept} field(s): {torn:?}"
+        );
+    }
+    for bad in 0..whole.len() {
+        let mut fields = whole.clone();
+        fields[bad] = "not a number".to_owned();
+        let spelt = fields.join(":");
+        assert_eq!(
+            SourceIdentity::parse(&spelt),
+            None,
+            "field {bad}: {spelt:?}"
+        );
+    }
+    let eight = format!("{}:1", whole.join(":"));
+    assert_eq!(SourceIdentity::parse(&eight), None, "an eighth field");
+    let edges = format!(
+        "{}:{}:0:-1:{}:{}:-1",
+        u64::MAX,
+        u64::MAX,
+        i64::MIN,
+        i64::MAX
+    );
+    assert_eq!(
+        SourceIdentity::parse(&edges),
+        Some(SourceIdentity {
+            dev: u64::MAX,
+            ino: u64::MAX,
+            size: 0,
+            mtime_s: -1,
+            mtime_ns: i64::MIN,
+            ctime_s: i64::MAX,
+            ctime_ns: -1,
+        })
+    );
+    assert_eq!(
+        SourceIdentity::parse("-1:9:4:1:2:3:4"),
+        None,
+        "a negative device"
+    );
+
+    let base = scratch("went-away");
+    put(&base.join("abcd"), b"abcd");
+    let mut names = Vec::new();
+    Host.list(&base, &mut |name| names.push(name)).unwrap();
+    assert_eq!(names, vec![OsString::from("abcd")]);
+    let mut met = 0;
+    let gone = Host.list(&base.join("went-away"), &mut |_| met += 1);
+    assert_eq!(
+        gone.map_err(|error| error.kind()),
+        Err(io::ErrorKind::NotFound)
+    );
+    assert!(Host.list(&base.join("abcd"), &mut |_| met += 1).is_err());
+    assert_eq!(met, 0, "a refused listing names nothing");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// WHAT TO TAKE CARE OF is said on the retirement list: a folder inside a
 /// live root its reader does not read names that root and says to retire
 /// only the folder; a folder holding a second name of a live file says its
