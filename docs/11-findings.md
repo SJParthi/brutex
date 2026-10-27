@@ -1146,6 +1146,26 @@ confirmed by two skeptics; their corrections are applied.
   FIXED as D-7152 item 2: the experiment runs, each on a store of its own,
   until one run holds the unchanged 50 ms, at most seven; the stop rule has
   its own test (D-7152 addendum, BRED-29, L-BRED23-14).
+- **BRED23-F30: an eighth timing test failed under load, R3-08's feed-list
+  test** (verify-BASE-REDS-1023-r2, its one blocking item): `cargo test -p
+  api` failed `the_feed_list_stays_fast_while_32_clients_loop_each_route`
+  in 3 of 7 suites at load 19-26, "/feeds.json p99 35.14825ms (p50
+  1.341292ms, max 58.004542ms) ...; the control was 2.291708ms". One run
+  decided it, and its p99 is the third-slowest of 200 answers, while the
+  control was a separate, earlier phase. Reproduced here with one run
+  deciding: 2 of 50 runs failed at load 20-27. FIXED as D-7152 item 2 and
+  BRED-29: a run is the control and the loaded phase on a server and a
+  store of its own, read by R3-08's rule unchanged, and runs repeat until
+  one holds, at most seven; the stop rule has its own test, which failed
+  with one run deciding and passes with seven (D-7152 addendum, BRED-30,
+  L-BRED23-15). R3-08 is the code owner; the test is the same on
+  `feat/db-fix`, so this repair fixes it there too when it lands.
+- **BRED23-F31: the census stop rule read a run that timed nothing as
+  holding** (verify-BASE-REDS-1023-r2 follow-up, minor): `ranks` of an
+  empty run is zero, under any bound. The experiment always times 1,000
+  requests, so no run was ever empty, but the rule did not say so. FIXED:
+  an empty run never holds; its test failed before ("left: Ok(0)") and
+  passes after (D-7152 addendum, BRED-31).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

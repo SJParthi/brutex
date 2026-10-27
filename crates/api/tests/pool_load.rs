@@ -183,10 +183,14 @@ fn quantile(sorted: &[Duration], per_mille: usize) -> Duration {
     sorted[rank - 1]
 }
 
-/// Every pooled page route the 32 looping clients ask, in turn.
+/// Every pooled page route the 32 looping clients ask, in turn, and a seek
+/// of the month a writer holds for the whole run: it waits the read's
+/// patience (`api::detail::READ_PATIENCE_MS`, 200 ms) where the pools hold
+/// it, so a worker that held it instead would be held 200 ms a seek.
 const EVERY_POOLED_ROUTE: &[&str] = &[
     MONTH,
     WINDOW,
+    WINDOW_FEBRUARY,
     SCAN,
     "/store.json?feed=zerodha",
     "/verify.json?feed=zerodha",
@@ -274,6 +278,16 @@ async fn feeds_beside(
 /// worker (a file read on it) costs far more than that. Both figures are
 /// printed for `docs/06-limits.md`.
 ///
+/// **A SEEK OF A MONTH A WRITER HOLDS, SO THAT A STARVED WORKER SHOWS**
+/// (BASE-REDS-1023 repair 2). The routes above read a five-bar month in
+/// microseconds, too little to starve anything: with `spawn_blocking` taken
+/// out of `api::detail`'s `admitted`, every pooled read on an async worker,
+/// this test passed 3 of 3 on its first run (p99 2.76 ms to 6.19 ms). So a
+/// writer holds February for the whole run and the clients seek it too: the
+/// seek waits the read's 200 ms patience in the store-read pool, and the
+/// feed list's own pool never waits on it; on an async worker the same wait
+/// would hold that worker 200 ms a seek.
+///
 /// **THE BOUND HOLDS IN ONE OF UP TO [`FEEDS_FAST_RUNS`] RUNS, EACH ON A
 /// SERVER AND A STORE OF ITS OWN, AND IS UNCHANGED** (BASE-REDS-1023 repair
 /// 2, D-7152 addendum). A run is the control and the loaded phase above, back
@@ -285,8 +299,8 @@ async fn feeds_beside(
 /// p99 2.5-6.0 ms. That p99 is the third-slowest of 200 answers, so three
 /// answers the host held off a core in the loaded phase alone failed the
 /// run, and the control, an earlier phase, never saw them. Interference only
-/// adds time and comes and goes; a file read on an async worker starves the
-/// feed list in every run and fails all of them, each run's figures in the
+/// adds time and comes and goes; a worker held by the seeks of the held month
+/// is held in every run and fails all of them, each run's figures in the
 /// message. Every assertion that is not a time holds in every run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_feed_list_stays_fast_while_32_clients_loop_each_route() {
@@ -356,14 +370,26 @@ where
 }
 
 /// One run of [`the_feed_list_stays_fast_while_32_clients_loop_each_route`]
-/// on a server and a store of its own: the control, then the loaded phase,
-/// every non-timing assertion held, the figures printed and handed back.
+/// on a server and a store of its own, February held by a writer for the
+/// whole run: the control, a seek of February that must wait the read's
+/// patience and say "being written", then the loaded phase; every
+/// non-timing assertion held, the figures printed and handed back.
 async fn feeds_fast_run(run: u32) -> FeedsRun {
     const CLIENTS: usize = 32;
     const ASKED: usize = 200;
     let root = one_month(&format!("feeds-fast-{run}"));
+    let february = write_month(&root, 2, 19_754);
     let measured = live(&root, |addr| async move {
         let (control, by_control) = feeds_beside(addr, &["/health"], CLIENTS, ASKED).await;
+        let held = tokio::task::spawn_blocking(move || get_blocking(addr, WINDOW_FEBRUARY))
+            .await
+            .expect("the client thread")
+            .expect("an answer");
+        let patience = Duration::from_millis(api::detail::READ_PATIENCE_MS);
+        assert!(
+            held.status == 503 && held.retry_after && held.took >= patience,
+            "a seek of the held month waits the read's patience and says when: {held:?}"
+        );
         let (took, loaded) = feeds_beside(addr, EVERY_POOLED_ROUTE, CLIENTS, ASKED).await;
         assert!(loaded > CLIENTS as u64, "the clients looped: {loaded}");
         let figures = |sorted: &[Duration]| {
@@ -402,6 +428,7 @@ async fn feeds_fast_run(run: u32) -> FeedsRun {
         measured
     })
     .await;
+    drop(february);
     let _ = std::fs::remove_dir_all(&root);
     measured
 }
