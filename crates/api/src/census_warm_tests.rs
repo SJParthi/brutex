@@ -430,7 +430,7 @@ fn ranks(took: &[Duration]) -> (Duration, Duration, Duration) {
 /// Runs `run` (its argument is the run's number, from 0) until one run's
 /// slowest time is under `bound`, at most `runs` times: that run's number,
 /// or every run's [`ranks`] when none held. Each run's times must come back
-/// sorted.
+/// sorted. A run that timed nothing measured nothing, so it never holds.
 async fn first_run_within<F, R>(
     bound: Duration,
     runs: u32,
@@ -444,7 +444,7 @@ where
     for n in 0..runs {
         let took = run(n).await;
         let measured = ranks(&took);
-        if measured.2 < bound {
+        if !took.is_empty() && measured.2 < bound {
             return Ok(n);
         }
         every.push(measured);
@@ -470,6 +470,12 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
     assert_eq!(blocked, Err(vec![(ms(1), ms(1), ms(5_000)); 7]));
     let at_bound = first_run_within(ms(50), 1, |_| async { vec![ms(50)] }).await;
     assert_eq!(at_bound, Err(vec![(ms(50), ms(50), ms(50))]));
+    let timed_nothing = first_run_within(ms(50), 2, |_| async { Vec::new() }).await;
+    assert_eq!(
+        timed_nothing,
+        Err(vec![(Duration::ZERO, Duration::ZERO, Duration::ZERO); 2]),
+        "a run that timed no request measured nothing and does not hold"
+    );
     let thousand: Vec<Duration> = (1..=1_000).map(Duration::from_micros).collect();
     assert_eq!(
         ranks(&thousand),
