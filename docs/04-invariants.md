@@ -9093,3 +9093,14 @@ report, NEEDS THE MAC).
 | R312-18 | **A ceiling of zero is no ceiling**: a served `0` keeps the build's copy and is named, as a negative or non-number one is | `web/tests/no-typed-lists.test.js` (the ceilings test) | ✓ |
 | R312-19 | **Every branch of the touched modules the merged tree left unrun has a test or is named unreachable**: the edges of the scope, the answers' checks, the facets loader, the refresh log, the moved lines, the worker side and `selection-model.js` | `web/tests/census-scope-edges.test.js`, `web/tests/selection-model-edges.test.js`, `web/tests/census-worker.test.js`, `web/tests/store-census.test.js` (the delta refusal test); the unreachable branches are L-R312-11 | ✓ |
 | R312-20 | **The Coverage drawer of an imported contract reads the import journal over one day, the contract's own expiry, never the journal's whole span**: both ends are always named and taken from the data on screen, a value that is not a day asks nothing, and no /db page file builds an `/imports.json` request of its own (R3-12 repair 1; the whole span was 11,508 rows and 253,074 B a contract opened on the real store, L-R312-18) | `web/tests/census-scope.test.js`: `a_contract_reads_the_import_journal_over_one_day` | ✓ |
+
+## The api crate's old code under the whole-crate coverage bar: what BASE-COV-API attempt 1 proves (D-7340, D-7341)
+
+Every value in these tests is invented (SPLITCO, NOSUCHCO, `/nowhere/...`); no vendor row is copied.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| BCA-01 | **`GET /basis.json` serves `answer` whole through its handler, refuses a bad query with a 400 naming the field before it takes a slot, and answers a full operations pool with a 429 naming "a basis lookup" and its bound**; every answer, served or refused, is JSON marked `no-store`; a bad query is still a 400 while the pool is full | `api::server::basis_route::tests::the_handler_serves_the_answer_and_refuses_a_bad_query_by_name`, `a_full_operations_pool_refuses_the_lookup_by_name_and_a_bad_query_first` | ✓ |
+| BCA-02 | **A compiled table is labelled `compiled` with the directory that held no generation and its own receipt** (generation 0 and `u64::MAX`, rows 0 and `usize::MAX`) | `api::server::basis_route::tests::a_compiled_slot_is_served_labelled_with_the_folder_it_looked_in` | ✓ |
+| BCA-03 | **A `/basis.json` answer is an object by construction** with `symbol`, `tables`, `law` and exactly one of `day` / `runs`, over present and absent tables (D-7341) | `api::server::basis_route::tests::every_answer_is_an_object_with_its_four_keys` | ✓ |
+| BCA-04 | **Forgetting one store's closing-auction flags keeps every other store's**, is idempotent, is harmless on a store never asked, and the forgotten day is read again exactly once | `api::server::dayflags::rules::tests::forgetting_one_stores_flags_keeps_the_others_and_reads_its_day_again` | ✓ |

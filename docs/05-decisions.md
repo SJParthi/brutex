@@ -87511,3 +87511,48 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7340 — The api crate's old code measured whole under CLAUDE.md §9 (operator decision D2, part A; BASE-COV-API attempt 1): figures before and after, the (F)/(U) list, and the end of D-7250's narrow reading for api — 2026-10-28
+
+**Status: locked as a record; the bar is NOT met.** Operator decision D2 part A (27 Oct 2026) brings the old
+code of `crates/api` to line and branch coverage 100% so that §9's whole-crate rule applies to it again.
+
+1. **The instrument and the route.** D3 recipe v4, Route B (`state/decisions-20261027/d3-route-b.sh`):
+   rustc 1.99.0-nightly (1a98b1e13 2026-08-07) with `-C instrument-coverage -Z coverage-options=branch`,
+   its own `llvm-profdata` and `llvm-cov` (LLVM 23.1.0-rust-1.99.0-nightly), a new empty profile folder per
+   measurement, the machine-wide deep target dir `tgt/deep-2`. The set: every `.rs` file of `crates/api`
+   (`src/`, `tests/`, `benches/`), whole: 201 files (reading `whole:api`).
+2. **Before** (tip `f01d7a0e430e`, `feat/db-fix` at the branch cut; 23:23-23:41 IST, 18.4 min): lines
+   168,010 / 174,417 (6,407 uncovered), branches 12,448 / 15,372 (2,924 uncovered sides), 178 files read.
+   **After** (tip `e730d3b193fc`; 01:09-01:29 IST): lines 168,223 / 174,561 (6,338 uncovered), branches
+   12,447 / 15,362 (2,915 uncovered sides). `src/basis_route.rs` is whole: 233/233 lines, 30/30 branches.
+   Files, every uncovered line and side with its text: the operator's work folder,
+   `state/fix/round2/base-cov-api-gaps-a1.txt` and `base-cov-api-gaps-a1-after.txt`.
+3. **The (F)/(U) list** is `state/fix/round2/base-cov-api-fu.txt` (the landing gate reads it): 1,857
+   provisional (F) rows classified by rule (the failing arm of `assert!`/`assert_eq!`/`assert_ne!`/
+   `panic!`/`unreachable!` inside test code; each still to be read by hand) and three (U) items in
+   `gaps_route.rs` (`span_of`'s `next_month` else and `audit_one`'s `Day::new` else), each proved by the
+   ranges of `store::path::YearMonth` and `pull::session::Day`.
+4. **NOT measured by the route**: the 22 `benches/` files (L-BCA-2); the 16 ignored tests' lines count as
+   uncovered (L-BCA-3).
+5. **D-7250's narrow reading ends for `api` at this part's merge commit `Merge BASE-COV-API:`**: a tip that
+   contains it is measured with the whole crate, and every landing after it checks `api` whole on the
+   merged tree. Because the bar is not met (L-BCA-1), that merge must not happen on this attempt's figures:
+   the narrow reading holds for `api` until a later attempt of this part meets the bar.
+
+**Proof.** The two Route B logs (`scratch/deep-BASE-COV-API-logs/f01d7a0e430e-routeb-a1.log`,
+`e730d3b193fc-routeb-after.log`), each ending `EXIT 3` only for the bench files' NOT READ lines; invariants
+BCA-01 to BCA-04. D-7342 to D-7349 are unused.
+
+### D-7341 — Two answers built as objects are no longer asked back for their object (BASE-COV-API) — 2026-10-28
+
+**Status: locked.** `api::server::basis_route::answer` built a `json!` object and then took
+`body.as_object_mut()` behind a `let ... else { return body; }`, and `gaps_route::not_owed_json` built each
+reason's own evidence as a `json!` object and merged it only `if let Value::Object(own)`. Both else sides were
+unreachable by construction and showed as uncovered branches no input can reach. The answer is now built as a
+`serde_json::Map` and returned as `Value::Object`; the evidence fields are written into the row as name/value
+pairs. Output is unchanged: the same keys and values (serde_json's map is ordered by key here; no
+`preserve_order`). Proof: every existing `basis_route` and `gaps_route` test unchanged and green, plus
+`every_answer_is_an_object_with_its_four_keys` (BCA-03). Test-only: `gaps_route`'s `what_it_says` helper
+now `expect`s the shape it compares instead of skipping a body of another shape, and the cancelled-walk test's
+reader panics if called.
