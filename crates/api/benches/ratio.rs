@@ -753,6 +753,20 @@ fn main() {
         );
         std::process::exit(2);
     }
+    // `--gaps-only` (R4-19): the `/gaps.json` rows and nothing else, for a
+    // builder's own loop; like `--served-only`, never a gate result.
+    if std::env::args().any(|arg| arg == "--gaps-only") {
+        let ok = gaps::answers_are_flat();
+        println!(
+            "PARTIAL RUN (--gaps-only): the /gaps.json rows only, {} -- not a gate result",
+            if ok {
+                "all within the ceiling"
+            } else {
+                "A RATIO BREACHED ITS CEILING"
+            }
+        );
+        std::process::exit(2);
+    }
     let started = Instant::now();
     let f = Fixtures {
         small: read_of(SMALL),

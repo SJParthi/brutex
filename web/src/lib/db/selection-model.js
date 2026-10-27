@@ -80,6 +80,28 @@ export function contractRungsOf(seg) {
   return { expiry: false, strike: false, money: false, side: false };
 }
 
+/**
+ * THE LISTED EXPIRIES A SEGMENT KEY OFFERS (R3-12; FM-621): a facets answer's
+ * expiries (`readScope`'s `scope.expiries`), kept to the segment on screen. A
+ * key with a strike rung (options) offers an expiry with strikes, one without
+ * (futures) an expiry with a future, a cut or live key the expiries filed
+ * under it today (`filedAs`), the empty key every one, and spot none. One
+ * pass over the listing.
+ *
+ * @template {{expiry: string, strikes: number, future: boolean}} E
+ * @param {E[]} expiries
+ * @param {string} kind the segment control's key
+ * @param {(expiry: E, family: string) => string} filedAs the key a listed expiry is filed under today
+ * @returns {E[]}
+ */
+export function listedOf(expiries, kind, filedAs) {
+  const family = String(kind ?? '').replace(/-(cut|live)$/, '');
+  if (family === '') return [...expiries];
+  const rungs = contractRungsOf(family);
+  if (!rungs.expiry) return [];
+  return expiries.filter((e) => (rungs.strike ? e.strikes > 0 : e.future) && filedAs(e, family) === kind);
+}
+
 /* ======================================================================
    THE EXACT INSTRUMENT (DB-001)
    ----------------------------------------------------------------------
@@ -220,6 +242,57 @@ export function eraOf(feed, oow = false) {
     return { from: '', to: '', kind: 'refused', label: `the server refused your window: ${window.why}` };
   }
   return { from: '', to: '', kind: 'none', label: '' };
+}
+
+/**
+ * THE LAST MONTH A SERIES IS OWED IN (DB-B47, the page half of the window
+ * route's `life_of`, `crates/api/src/bars_series.rs`). A series that never
+ * expires (an index) is owed every month to the end of the feed's own span,
+ * the WIDER of its archive and the operator's window (D-3338), as the
+ * route's `served_end` takes the widest (`/feeds.json`'s `archive.to` is
+ * already the widest of the descriptor, the import journal and the census):
+ * a month after its newest file is a month not yet pulled or imported, a
+ * hole, never "outside its life". Every other series keeps its newest held
+ * month (a share's delisting looks like a missing pull from the store, and
+ * a contract ends at expiry), as on the route. The start is never moved.
+ *
+ * @param {string} last the newest month the series holds, `YYYY-MM`
+ * @param {boolean} neverExpires whether the series is owed as an index
+ * @param {any} feed the `/feeds.json` row
+ * @returns {string}
+ */
+export function owedTo(last, neverExpires, feed) {
+  if (!neverExpires) return last;
+  let end = last;
+  for (const to of [feed?.archive?.to, feed?.window?.to]) {
+    const month = typeof to === 'string' ? to.slice(0, 7) : '';
+    if (/^\d{4}-\d{2}$/.test(month) && month > end) end = month;
+  }
+  return end;
+}
+
+/**
+ * THE IMPORT JOURNAL, READ OVER ONE DAY (R3-12 repair 1; the second agent's
+ * blocking 2). The Coverage drawer of an imported contract reads only the
+ * journal's `kinds[].last_day`, which the route answers from the journal's
+ * last line per kind whatever days are asked (`kinds_json`,
+ * `crates/api/src/imports.rs`), while the rows it walks are the asked
+ * range's, one evidence probe each; with no `from` and no `to` that range is
+ * the journal's whole span (`body()`): 11,508 rows and 253,074 B a contract
+ * opened on the real store (26 Oct 2026), growing with every import day. So
+ * both ends are always named, and they are one day taken from the data on
+ * screen (the opened contract's own expiry), never a day typed into the page:
+ * the route walks that one day's rows, a few a kind. A day that passes the
+ * check is digits and hyphens only, which a query carries as they are.
+ *
+ * @param {string} feed the feed's wire value
+ * @param {unknown} day the opened contract's expiry, `YYYY-MM-DD`
+ * @returns {string | null} the request, or `null` when `day` is not a day:
+ *          nothing is asked, and the caller leaves the import's end unread
+ */
+export function importDayUrl(feed, day) {
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  return `/imports.json?feed=${encodeURIComponent(feed)}&from=${day}&to=${day}`;
 }
 
 /**
@@ -602,9 +675,11 @@ export function linkedSegment(seg, exp, today, archiveTo) {
   if (!seg) return { seg: undefined, why: null };
   if (!SEGMENT_KEYS.includes(seg)) {
     const shown = seg.length > 40 ? `${JSON.stringify(seg.slice(0, 24))}… (${seg.length} characters)` : JSON.stringify(seg);
+    /* REFUSED BY NAME, AND NOTHING IS READ FOR IT (R3-12): the census is
+       asked for the segment chosen in its place, never every segment. */
     return {
       seg: undefined,
-      why: `seg ${shown} is not one this page knows (it reads ${SEGMENT_KEYS.join(', ')}); the segment is chosen as if the link named none`
+      why: `seg ${shown} is refused: it is not one this page knows (it reads ${SEGMENT_KEYS.join(', ')}), so nothing is read for it and the segment is chosen as if the link named none`
     };
   }
   if (!contractRungsOf(seg).expiry || !exp) return { seg, why: null };

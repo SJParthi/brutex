@@ -1,4 +1,7 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { builtPages, budgetVerdict } from './src/lib/speed.js';
 
 /**
  * `/api` proxies to the Rust server in development so the browser talks to one
@@ -77,6 +80,12 @@ const ROUTES = [
 	// instrument on screen; and one underlying's months and rungs for
 	// /backtest's rung switcher, in place of the whole census (DB-B58, WP-81).
 	'/census/facets.json',
+	// THE COVERAGE ROLL-UP (R3-09) /db's Coverage tab reads in place of the
+	// whole census (R3-12, NEW-07).
+	'/census/rollup.json',
+	// THE OPERATOR'S SETTINGS AND THE REQUEST CEILINGS (R3-05), whose ceilings
+	// /db plans its window requests against (R3-12, RA-259).
+	'/settings.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
@@ -324,11 +333,126 @@ const ROUTES = [
 	// Both EXACTLY, for the reason above: `/sources` itself is the All sources
 	// page and must stay with the dev server.
 	'/sources.json',
-	'/sources/bars.json'
+	'/sources/bars.json',
+	// THE SERVER'S OWN SPEED AND A PAGE'S OWN FAILURE (R3-14 serves both; R3-15
+	// reads them): the Speed page draws `/speed.json`, and `$lib/page-report.js`
+	// posts a failed request, an uncaught error or a fallback to
+	// `/page-report`. Without them `npm run dev` answers the HTML fallback: the
+	// Speed page refuses it on the content type, and a report is lost in
+	// silence. `/speed` itself is a Svelte route and stays with the dev server.
+	'/speed.json',
+	'/page-report'
 ];
 
+/**
+ * THE PAGE BUDGET — what each page ships on its first load, and a build that
+ * fails when one is past its budget (R3-15).
+ *
+ * Nothing stopped a page's code from growing: `/db` reached 790 KB of script
+ * and style on its first load, every byte of it on the wire (the server
+ * compresses nothing), against a 400 KB target nobody checked. The rule is
+ * `$lib/speed.js` (`builtPages`, `budgetVerdict`, `BUNDLE_BUDGETS`), read over
+ * the client build's own output once it is written, so the build and
+ * `web/tests/speed.test.js` (over the committed `web/build`) apply one rule.
+ *
+ * Only the client build is weighed: it ships what a browser loads, and its
+ * output carries `_app/immutable/entry`. A build the rule cannot read is an
+ * error naming what was missing, never a pass.
+ *
+ * AND A BUILD THAT WEIGHED NOTHING FAILS (the R3-15 re-check, 20 Oct): the
+ * rule used to return in silence for any output without an entry, so a
+ * client build that wrote its entry somewhere else passed unweighed.
+ * `vite build` is SvelteKit's server build, which starts the client build
+ * inside itself (a second `vite.build` reading this file again, so a second
+ * instance of this plugin). The client instance now refuses an output
+ * without the entry, by name; it keeps what it weighed, or why it refused, on
+ * `globalThis` (the one object both instances share in the process); and the
+ * server instance, when it closes after the client build it started, fails a
+ * build that weighed no client output. A client refusal is repeated by the
+ * server's close in its own words, so the build's last error is the page
+ * past its budget, never a vaguer one over it (found building the 20 Oct
+ * merged tree: `/db` past 800,000 B surfaced only as "weighed no page").
+ */
+const WEIGHED = Symbol.for('brutex.page-budget.weighed');
+
+/** The weighing both instances share: pages weighed and the client's refusal, if any. */
+const weighing = () => /** @type {{pages: number, refused: string | null}} */ (/** @type {any} */ (globalThis)[WEIGHED] ??= { pages: 0, refused: null });
+
+export function pageBudget() {
+	let server = false;
+	return {
+		name: 'brutex-page-budget',
+		apply: /** @type {'build'} */ ('build'),
+		/** @param {{build: {ssr?: unknown}}} config */
+		configResolved(config) {
+			server = Boolean(config.build.ssr);
+			// The server build is the outer one: it starts the count.
+			if (server) /** @type {any} */ (globalThis)[WEIGHED] = { pages: 0, refused: null };
+		},
+		// Each refusal THROWS: a hook that throws fails the build under Rollup
+		// and Rolldown alike, with this plugin's name on the error.
+		/** @param {{dir?: string}} options */
+		writeBundle(options) {
+			if (server) return;
+			try {
+				weighing().pages += weigh(options.dir);
+			} catch (why) {
+				weighing().refused = /** @type {Error} */ (why).message;
+				throw why;
+			}
+		},
+		closeBundle() {
+			if (!server) return;
+			const { pages, refused } = weighing();
+			if (refused !== null) throw new Error(refused);
+			if (pages === 0) {
+				throw new Error('the page budget weighed no page: the server build closed and no client build it started was weighed, so no page is known to be inside its budget');
+			}
+		}
+	};
+}
+
+/**
+ * Weighs one client build's output against the budgets; the pages weighed.
+ * Throws, by name, for an output it cannot read or a page past its budget.
+ *
+ * @param {string | undefined} dir
+ * @returns {number}
+ */
+function weigh(dir) {
+	if (!dir || !existsSync(join(dir, '_app/immutable/entry'))) {
+		throw new Error(`the page budget found no client build to weigh: ${dir ?? 'the build named no output directory'} holds no _app/immutable/entry`);
+	}
+	const root = dir;
+	/** @type {Map<string, {size: number, text?: string}>} */
+	const files = new Map();
+	/** @param {string} at */
+	const walk = (at) => {
+		for (const name of readdirSync(at)) {
+			const full = join(at, name);
+			const stat = statSync(full);
+			if (stat.isDirectory()) walk(full);
+			else if (!name.endsWith('.map')) {
+				const path = relative(root, full).split(sep).join('/');
+				files.set(path, { size: stat.size, text: name.endsWith('.js') ? readFileSync(full, 'utf8') : undefined });
+			}
+		}
+	};
+	walk(root);
+	const verdict = budgetVerdict(builtPages(files));
+	for (const v of verdict) console.log(`page budget  ${v.line}`);
+	const over = verdict.filter((v) => v.over);
+	if (over.length > 0) {
+		throw new Error(
+			`${over.length} page(s) past their budget in $lib/speed.js BUNDLE_BUDGETS: ` +
+				over.map((v) => v.line).join('; ')
+		);
+	}
+	return verdict.length;
+}
+
 export default {
-	plugins: [sveltekit()],
+	plugins: [sveltekit(), pageBudget()],
 	// SOURCE MAPS ARE BUILT AND NOT COMMITTED, AND `hidden` IS WHY THAT WORKS.
 	//
 	// The bundle is minified and `web/build` is committed, so the artifact in
