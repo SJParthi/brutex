@@ -1995,6 +1995,28 @@ jobs:
           #     its probes at 1, 100 and 1,000 snapshots (L-R428-13).
           declared="$declared pull/src/fnowork_futures_tests.rs:println!:2
           pull/src/master_snapshots_tests.rs:println!:3"
+          # THREE MORE FILES, one kind, declared by R4-26 (repair 4, 26 Oct
+          # 2026; its decisions D-6892, D-7195 to D-7197): the printed lines
+          # of measured tests in
+          # `#[cfg(test)]` `#[path]` test modules (of `pull::corporate_actions`,
+          # `cli::basis_runs` and `api::basis_route`); no production path
+          # reaches them. Each prints one line a size and then asserts its
+          # medians flat, so the line is the measurement docs/06-limits.md
+          # cites, read with `--nocapture`:
+          #   pull/src/corporate_actions_tests.rs println! 2: the n=2,000 p50,
+          #     p99 and max of one run-and-action lookup at 10, 100 and 1,000
+          #     shares, and of one action lookup at 1, 64 and 4,096 rows of a
+          #     share (L-R426-01, R426-14).
+          #   cli/src/basis_runs_tests.rs println! 1: the per-lookup p50, p99
+          #     and max (n=2,000 samples of 64 lookups) of a step's missing
+          #     months in a 12-, 120- and 1,200-month window (R426-27,
+          #     L-R426-11).
+          #   api/src/basis_route_tests.rs println! 1: the n=400 p50, p99 and
+          #     max of a kept `/basis.json` answer at 10, 100 and 1,000 shares
+          #     (L-R426-03).
+          declared="$declared pull/src/corporate_actions_tests.rs:println!:2
+          cli/src/basis_runs_tests.rs:println!:1
+          api/src/basis_route_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
