@@ -330,3 +330,19 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
   mutant's outcome does not depend on it).
 - NEXT: the re-run of `holes_note` and `placed_of` (running), the cli file's 17 (running),
   bench C-LG-02, the final gates, NEEDS THE MAC, STATUS.
+
+### 2026-10-27 08:09 IST (a new account's session; the 26 Oct session stopped at a usage limit)
+
+- GO-IA-10a present, HOLD absent (lifted at `ede2909b`). Found the branch at `a50d69e5`, as the
+  26 Oct report left it; no saved mutants output survived the old container, so the runs its NEXT
+  line names are re-run here, and only those.
+- Merged the newest `origin/feat/db-fix` `a32722c4` (R4-19, R3-12, BASE-DENY-1024, R3-15):
+  `25159490`, no conflict; underneath, only `docs/04`, `docs/05` and `docs/06` of this part's files
+  changed (appended sections); `### D-4896` heads one entry.
+- Tools reinstalled (cargo-mutants 27.1.0; cargo-deny 0.19.0 and cargo-llvm-cov 0.9.1 installing).
+  `cargo mutants --list --in-diff` now gives 120 mutants on the api and pull files (124 before
+  `ecafd565` made `placed_of`'s compare one three-way `cmp`) and 17 on the cli file.
+- Running: the 9 mutants of `Walk::holes_note` and `placed_of` (`-F 'holes_note|placed_of'`,
+  the 26 Oct method and test filter) and the cli file's 17
+  (`--test-package cli -- --lib -- gdfl_import_command`).
+- NEXT: their results; bench C-LG-02 in release; the final gates; NEEDS THE MAC; STATUS.
