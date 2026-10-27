@@ -230,14 +230,17 @@ impl DayRow {
     /// one of the five store-hole reasons, by `pull`'s one list
     /// (`pull::gdfl_import::hole_reasons`); `repairable` is `admit` row 4a's
     /// answer (`pull::gdfl_import::hole_is_repairable`). At most five
-    /// compares of a short word.
+    /// compares of a short word: the list is `pull`'s compile-time
+    /// `[&str; 5]`, walked whole, its bound in its type (gate 11 rule 6's
+    /// "bounded by a compile-time table, never by the data").
     pub(crate) fn hole(&self) -> Option<Hole<'_>> {
         if self.outcome != DayOutcome::Incomplete {
             return None;
         }
         let reason = self.reason.as_deref()?;
         pull::gdfl_import::hole_reasons()
-            .contains(&reason)
+            .iter()
+            .any(|held| *held == reason)
             .then(|| Hole {
                 reason,
                 repairable: pull::gdfl_import::hole_is_repairable(reason),
