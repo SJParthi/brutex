@@ -1121,6 +1121,18 @@ impl Window {
         self.to.days_from_epoch() - self.from.days_from_epoch() + 1
     }
 
+    /// The window widened, where it must be, to hold `day`: from the earlier
+    /// of its first day and `day` to the later of its last day and `day`.
+    /// Total, unlike [`Window::new`]: a window runs forwards, so the widened
+    /// one does too (IA-17b's gathered offer widens its window day by day).
+    #[must_use]
+    pub fn holding(self, day: Day) -> Self {
+        Self {
+            from: self.from.min(day),
+            to: self.to.max(day),
+        }
+    }
+
     /// Whether a date is inside the window.
     #[must_use]
     pub const fn contains(self, day: Day) -> bool {
@@ -1893,6 +1905,34 @@ mod month_boundary {
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).expect("a real calendar date")
+    }
+
+    /// **A WINDOW WIDENED TO HOLD A DAY** (IA-17b): a day before it moves its
+    /// first day back, one after it moves its last day on, across a month
+    /// and a year boundary; a day inside it, or on either end, changes
+    /// nothing; and the widened window holds the day and its old days.
+    #[test]
+    fn a_window_widens_only_as_far_as_the_day_it_must_hold() {
+        let window = Window::new(day(2024, 4, 10), day(2024, 4, 12)).expect("forwards");
+        let ends = |held: Window| (held.from(), held.to());
+        assert_eq!(
+            ends(window.holding(day(2024, 3, 29))),
+            (day(2024, 3, 29), day(2024, 4, 12))
+        );
+        assert_eq!(
+            ends(window.holding(day(2025, 1, 2))),
+            (day(2024, 4, 10), day(2025, 1, 2))
+        );
+        for inside in [day(2024, 4, 10), day(2024, 4, 11), day(2024, 4, 12)] {
+            assert_eq!(window.holding(inside), window, "{inside}");
+        }
+        let wider = window.holding(day(2023, 12, 31));
+        assert!(wider.contains(day(2023, 12, 31)) && wider.contains(day(2024, 4, 12)));
+        assert_eq!(
+            wider.days(),
+            104,
+            "31 Dec 2023 to 12 Apr 2024, both included"
+        );
     }
 
     /// **A chunk fills the vendor's cap, and the store splits it afterwards.**

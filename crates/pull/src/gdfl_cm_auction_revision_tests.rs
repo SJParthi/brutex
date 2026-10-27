@@ -527,6 +527,105 @@ fn a_day_before_a_record_on_its_next_ist_midnight_is_never_inserted() {
     std::fs::remove_dir_all(store).unwrap();
 }
 
+/// **A DAY THE ORIGINAL HOLDS DIFFERENTLY IS REFUSED, NEVER CARRIED**
+/// (IA-AUC-10, D-TBD-IA-17b-1 (2); two writers): the month is served as its
+/// original, whose sidecar holds the 24th's print; [`file_or_carry`] offered
+/// other prints for the 24th answers the sidecar's own refusal by name, as
+/// [`append`] does: it neither carries them for a new generation nor writes
+/// a byte anywhere.
+#[test]
+fn a_day_the_original_holds_differently_is_refused_never_carried() {
+    let store = original_holding("ia17b-auc-differs", day(24));
+    append(&store, &key(), day(24), &[print(712_365, 40)]).unwrap();
+    let before = tree(&store);
+
+    let refused = file_or_carry(&store, &key(), day(24), &[print(712_399, 40)]).unwrap_err();
+
+    let said = refused.to_string();
+    assert!(said.starts_with("auction sidecar refused: "), "{said}");
+    assert!(
+        said.contains("2026-09-24 holds 1 records and 1 different ones were offered"),
+        "{said}"
+    );
+    assert_eq!(tree(&store), before, "no byte anywhere");
+    std::fs::remove_dir_all(store).unwrap();
+}
+
+/// **A TORN TAIL THE HOST WILL NOT CUT BACK REFUSES THE APPEND BY NAME**
+/// (IA-AUC-11; COMBINATION: a torn file × a volume that refuses the cut):
+/// a killed append left 17 bytes of the 24th's record after the 23rd's;
+/// the next append's cut is refused by the host, so the append is refused
+/// naming the tail's bytes and why, the file is the byte it was (nothing cut,
+/// nothing written), and once the host takes the cut the same append cuts
+/// the tail and lands.
+#[test]
+fn a_torn_tail_the_host_will_not_cut_back_refuses_the_append_and_keeps_the_file() {
+    let store = scratch("ia17b-auc-uncut");
+    append(&store, &key(), day(23), &[print(712_165, 22)]).unwrap();
+    let file = path(&store, &key(), day(23)).unwrap();
+    let mut torn = std::fs::read(&file).unwrap();
+    torn.extend_from_slice(&Record::of(day(24), &print(712_365, 40)).encode(VERSION, 1)[..17]);
+    std::fs::write(&file, &torn).unwrap();
+    seam::FAIL_CUT.with(|fail| fail.set(true));
+
+    let refused = append(&store, &key(), day(24), &[print(712_365, 40)]).unwrap_err();
+
+    let said = refused.to_string();
+    assert!(said.contains("its torn tail (17 of "), "{said}");
+    assert!(
+        said.contains("could not be cut back: the file was not cut back (injected)"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        torn,
+        "nothing cut, nothing written"
+    );
+    assert_eq!(
+        append(&store, &key(), day(24), &[print(712_365, 40)])
+            .unwrap()
+            .written,
+        1
+    );
+    assert_eq!(read(&file).unwrap().unwrap().records.len(), 2);
+    std::fs::remove_dir_all(store).unwrap();
+}
+
+/// **A FRESH SIDECAR WHOSE DIRECTORY THE HOST WILL NOT SYNC IS REFUSED BY
+/// NAME** (IA-AUC-12; a crash's durability × an empty store): the month's
+/// first append writes and syncs the file, then its directory; a sync the
+/// host refuses is named with the file and the directory, and the same
+/// day offered again is found held (`written` 0), so a retry never files a
+/// print twice.
+#[test]
+fn a_fresh_sidecar_whose_directory_will_not_sync_is_refused_by_name() {
+    let store = scratch("ia17b-auc-unsynced");
+    seam::FAIL_SYNC.with(|fail| fail.set(true));
+
+    let refused = append(&store, &key(), day(23), &[print(712_165, 22)]).unwrap_err();
+
+    let said = refused.to_string();
+    let file = path(&store, &key(), day(23)).unwrap();
+    assert!(
+        said.contains(&format!(
+            "{}: written and synced, but its directory {} was not synced: the directory was \
+             not synced (injected)",
+            file.display(),
+            file.parent().unwrap().display()
+        )),
+        "{said}"
+    );
+    assert_eq!(read(&file).unwrap().unwrap().records.len(), 1);
+    assert_eq!(
+        append(&store, &key(), day(23), &[print(712_165, 22)])
+            .unwrap()
+            .written,
+        0,
+        "held: never filed twice"
+    );
+    std::fs::remove_dir_all(store).unwrap();
+}
+
 thread_local! {
     /// Every "auction file written for a new generation" event the steps of
     /// THIS thread told, in order, each field as its text: the step runs on

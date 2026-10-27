@@ -366,3 +366,72 @@ fn a_file_that_begins_on_the_offers_last_second_is_merged_never_appended() {
     merge_into(&mut held, bars(112..114)).unwrap();
     assert_eq!(held, bars(100..114), "a file after the last second follows");
 }
+
+/// **A REFUSAL IS NAMED ON EACH GATHERED FILE, UNDER ITS OWN DAY**, once a
+/// file (D-4899 (4)): the 1st's two files name it twice on the 1st, the
+/// 2nd's one file once on the 2nd, and a file whose day is not in the
+/// waiting list names it on no day, never on another day's.
+#[test]
+fn a_refusal_is_named_on_each_gathered_file_under_its_own_day() {
+    let store = crate::gdfl_fixtures::scratch("ia17b-named-each");
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: day(2024, 4, 1),
+        to: day(2024, 4, 2),
+        only: &[],
+        store_root: &store,
+    };
+    let offered = |at: usize, span: (i64, i64)| OfferedFile {
+        at,
+        name: format!("file-{at}-{}", span.0),
+        span,
+    };
+    let offer = Offer {
+        key: april(),
+        bars: Vec::new(),
+        appended: FailKind::NotHeld,
+        files: vec![
+            offered(0, (10, 20)),
+            offered(0, (30, 40)),
+            offered(1, (50, 60)),
+            offered(5, (70, 80)),
+        ],
+        auction: Vec::new(),
+        request: request(day(2024, 4, 1), day(2024, 4, 30)),
+    };
+    let mut deferred = vec![waiting(day(2024, 4, 1)), waiting(day(2024, 4, 2))];
+    let refusal = ImportRefusal::Filing {
+        why: "a test's refusal of the month".to_owned(),
+    };
+
+    name_on_each_file(&run, &offer, &mut deferred, &refusal);
+
+    let named: Vec<Vec<String>> = deferred
+        .iter()
+        .map(|one| {
+            one.failures
+                .iter()
+                .map(|staged| staged.failure.instrument.clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            vec![
+                "2024-04-01 file-0-10".to_owned(),
+                "2024-04-01 file-0-30".to_owned()
+            ],
+            vec!["2024-04-02 file-1-50".to_owned()],
+        ],
+        "each file named under its own day, the stray file under none"
+    );
+    assert!(
+        deferred
+            .iter()
+            .flat_map(|one| &one.failures)
+            .all(|staged| staged.failure.why.contains("a test's refusal of the month")),
+        "{deferred:?}"
+    );
+    let _ = std::fs::remove_dir_all(&store);
+}

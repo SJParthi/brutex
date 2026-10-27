@@ -687,30 +687,18 @@ impl Filing<'_> {
         // (3), D-4899): nothing was written, and its bars, with its prints a
         // CASH month's sidecar could not take, are gathered for the month's
         // one repair of the run. Its day closes once that repair is done.
-        if let Landed::Gathered { appended } = landed {
-            match self.day.year_month() {
-                Ok(month) => {
-                    filed.held_key = Some((file.symbol.clone(), file.contract, month));
-                    filed.gathered = Some(Box::new(GatheredFile {
-                        key: (file.symbol.clone(), file.contract, month),
-                        name: file.name.clone(),
-                        seconds: converted.seconds,
-                        appended,
-                        auction: handed.facts.auction.clone(),
-                        request: self.request.clone(),
-                    }));
-                }
-                // A day with no month cannot be gathered: named, never a
-                // file silently left out of every month.
-                Err(why) => {
-                    let refusal = ImportRefusal::Filing {
-                        why: format!("{} was not gathered: {}", file.name, why),
-                    };
-                    filed
-                        .failures
-                        .push(note_staged(run, self.day, &file.name, &refusal));
-                }
-            }
+        // The month is the one the door addressed the bars to, so a gathered
+        // file always has the month whose offer it joins.
+        if let Landed::Gathered { appended, month } = landed {
+            filed.held_key = Some((file.symbol.clone(), file.contract, month));
+            filed.gathered = Some(Box::new(GatheredFile {
+                key: (file.symbol.clone(), file.contract, month),
+                name: file.name.clone(),
+                seconds: converted.seconds,
+                appended,
+                auction: handed.facts.auction.clone(),
+                request: self.request.clone(),
+            }));
             return (filed, false);
         }
         // PRINTS CARRIED FOR A GENERATION THE FILE DID NOT NEED (IA-17b): its
@@ -734,8 +722,9 @@ impl Filing<'_> {
                 .failures
                 .push(note_staged(run, self.day, &file.name, &refusal));
         }
+        // Every file here was appended: a new generation is only ever the
+        // gathered repair's (above, IA-17b), so bars committed are an append's.
         if done.bars_committed > 0
-            && landed == Landed::Appended
             && let Some(held) = done.pending.as_ref()
         {
             match self.provenance(handed, held, done.bars_committed, begin_line) {
@@ -1401,8 +1390,7 @@ impl DayFiler<'_> {
                 .borrow_mut()
                 .take(*gathered, (self.key, self.day));
             match taken {
-                Ok(true) => self.gathered += 1,
-                Ok(false) => {}
+                Ok(gathered) => self.gathered += usize::from(gathered),
                 Err(refusal) => {
                     self.failures
                         .push(note_staged(self.ctx.run, self.day, &name, &refusal));
@@ -1626,6 +1614,14 @@ pub(super) struct Deferred {
     pub(super) committed: usize,
 }
 
+impl Deferred {
+    /// Whether this is `key`'s `day`: one compare of the pair (a key names
+    /// its day, and the day is kept beside it so no reader parses it back).
+    fn is(&self, key: &str, day: Day) -> bool {
+        (self.key.as_str(), self.day) == (key, day)
+    }
+}
+
 /// A deferred day's close as its pass left it.
 #[derive(Debug)]
 pub(super) struct DeferredClose {
@@ -1664,9 +1660,11 @@ impl Gather {
             .map(|offer| offer.bars.len())
     }
 
-    /// Whether nothing is gathered and no close waits: one test, because an
-    /// offer is made only with a file whose day then waits ([`Self::take`]),
-    /// and a day waits only for a file an offer holds.
+    /// Whether nothing is gathered and no close waits, for the gather's own
+    /// tests: one test, because an offer is made only with a file whose day
+    /// then waits ([`Self::take`]), and a day waits only for a file an offer
+    /// holds (the flush's own probe is its first waiting day).
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.deferred.is_empty()
     }
@@ -1680,16 +1678,14 @@ impl Gather {
 
     /// Whether `key`'s `day` is the day whose close waits last.
     pub(super) fn waits(&self, key: &str, day: Day) -> bool {
-        self.deferred
-            .last()
-            .is_some_and(|last| last.key == key && last.day == day)
+        self.deferred.last().is_some_and(|last| last.is(key, day))
     }
 
     /// The close of `key`'s `day`, left for when its gathered months are
     /// repaired; `false` when no file of the day was gathered.
     pub(super) fn defer_close(&mut self, (key, day): (&str, Day), close: DeferredClose) -> bool {
         match self.deferred.last_mut() {
-            Some(last) if last.key == key && last.day == day => {
+            Some(last) if last.is(key, day) => {
                 last.close = Some(close);
                 true
             }
@@ -1726,13 +1722,26 @@ impl Gather {
             return Ok(false);
         };
         let span = (first.ts_micros, last.ts_micros);
-        let known = self.index.get(&month_key).copied();
-        // Judged before an offer is made, so a refused file leaves no empty
-        // offer behind: an offer exists only with a file a waiting day gathered.
-        let held = known
-            .and_then(|at| self.offers.get(at))
-            .map_or(0, |offer| offer.bars.len());
-        if held.saturating_add(seconds.len()) > store::repair::MAX_ROWS {
+        // The month's offer, or a new one held aside until the file is
+        // gathered whole: a refused file leaves no empty offer behind, so an
+        // offer exists only with a file a waiting day gathered.
+        let mut fresh: Option<Offer> = None;
+        let offer = match self
+            .index
+            .get(&month_key)
+            .and_then(|&at| self.offers.get_mut(at))
+        {
+            Some(offer) => offer,
+            None => fresh.insert(Offer {
+                key: month_key.clone(),
+                bars: Vec::with_capacity(seconds.len()),
+                appended,
+                files: Vec::new(),
+                auction: Vec::new(),
+                request: request.clone(),
+            }),
+        };
+        if offer.bars.len().saturating_add(seconds.len()) > store::repair::MAX_ROWS {
             return Err(ImportRefusal::Store {
                 kind: FailKind::RepairRefused,
                 why: format!(
@@ -1744,24 +1753,6 @@ impl Gather {
                 ),
             });
         }
-        let place = if let Some(place) = known {
-            place
-        } else {
-            self.offers.push(Offer {
-                key: month_key.clone(),
-                bars: Vec::with_capacity(seconds.len()),
-                appended,
-                files: Vec::new(),
-                auction: Vec::new(),
-                request: request.clone(),
-            });
-            let place = self.offers.len() - 1;
-            let _first = self.index.insert(month_key.clone(), place);
-            place
-        };
-        let Some(offer) = self.offers.get_mut(place) else {
-            return Ok(false);
-        };
         merge_into(&mut offer.bars, seconds).map_err(|at| ImportRefusal::Store {
             kind: FailKind::Differs,
             why: format!(
@@ -1773,7 +1764,7 @@ impl Gather {
         widen_window(&mut offer.request, &request, day);
         offer.auction.extend(auction);
         let at = match self.deferred.last() {
-            Some(last) if last.key == key && last.day == day => self.deferred.len() - 1,
+            Some(last) if last.is(key, day) => self.deferred.len() - 1,
             _ => {
                 self.deferred.push(Deferred {
                     key: key.to_owned(),
@@ -1787,6 +1778,11 @@ impl Gather {
         };
         offer.files.push(OfferedFile { at, name, span });
         self.month = Some(month_key.2);
+        // A new month's offer joins the gather only now, with its file.
+        if let Some(made) = fresh {
+            let _first = self.index.insert(month_key, self.offers.len());
+            self.offers.push(made);
+        }
         Ok(true)
     }
 }
@@ -1839,13 +1835,10 @@ fn widen_window(offer: &mut BarRequest, request: &BarRequest, day: Day) {
     if window.contains(day) {
         return;
     }
-    let (from, to) = (
-        window.from().min(request.window.from()).min(day),
-        window.to().max(request.window.to()).max(day),
-    );
-    if let Ok(wider) = crate::session::Window::new(from, to) {
-        offer.window = wider;
-    }
+    offer.window = window
+        .holding(request.window.from())
+        .holding(request.window.to())
+        .holding(day);
 }
 
 /// What repairing the gathered months came to (IA-17b).
@@ -2255,9 +2248,12 @@ pub(super) mod inject {
     }
 
     /// The answers planted for a GATHERED REPAIR (IA-17b): the store root,
-    /// the instrument, the kind its repair answers with, and whether the
-    /// root is renamed to `<root>.gone` before it answers.
-    static GATHERED: Mutex<Vec<(PathBuf, String, FailKind, bool)>> = Mutex::new(Vec::new());
+    /// the instrument, the kind its repair answers with (`None`: a failure
+    /// no door names), and whether the root is renamed to `<root>.gone`
+    /// before it answers.
+    type PlantedRepair = (PathBuf, String, Option<FailKind>, bool);
+
+    static GATHERED: Mutex<Vec<PlantedRepair>> = Mutex::new(Vec::new());
 
     /// Plants `kind` as the answer of `symbol`'s next gathered repair under
     /// `root`: a full disk at publication, which a test cannot make on
@@ -2266,7 +2262,18 @@ pub(super) mod inject {
         GATHERED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((root.to_path_buf(), symbol.to_owned(), kind, false));
+            .push((root.to_path_buf(), symbol.to_owned(), Some(kind), false));
+    }
+
+    /// Plants a failure NO DOOR NAMES as the answer of `symbol`'s next
+    /// gathered repair under `root`: what `ingest`'s address step answers
+    /// for a batch the store cannot address, which a gathered offer (whose
+    /// files the same step addressed when they were gathered) never meets.
+    pub(in crate::gdfl_import) fn plant_gathered_unnamed(root: &Path, symbol: &str) {
+        GATHERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), symbol.to_owned(), None, false));
     }
 
     /// Plants `kind` as the answer of `symbol`'s next gathered repair under
@@ -2276,7 +2283,7 @@ pub(super) mod inject {
         GATHERED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((root.to_path_buf(), symbol.to_owned(), kind, true));
+            .push((root.to_path_buf(), symbol.to_owned(), Some(kind), true));
     }
 
     /// The answer planted for `symbol`'s gathered repair under `root`,
@@ -2287,7 +2294,7 @@ pub(super) mod inject {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let at = planted
             .iter()
-            .position(|(r, name, _, _)| r == root && name == symbol)?;
+            .position(|(r, name, _, _)| (r.as_path(), name.as_str()) == (root, symbol))?;
         let (_, _, kind, lose_root) = planted.remove(at);
         drop(planted);
         if lose_root {
@@ -2300,9 +2307,12 @@ pub(super) mod inject {
         Some(Ingested {
             failures: vec![Failure::new(
                 symbol,
-                format!("{}: planted by the test", kind.code()),
+                format!(
+                    "{}: planted by the test",
+                    kind.map_or("unnamed", FailKind::code)
+                ),
             )],
-            door_kind: Some(kind),
+            door_kind: kind,
             ..Ingested::default()
         })
     }

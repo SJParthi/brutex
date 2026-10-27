@@ -877,15 +877,13 @@ fn write_day_held(
     // the exclusive lock, and never a record the file held whole.
     if let Some(keep) = torn_tail(&bytes) {
         let had = bytes.len();
-        file.set_len(u64::try_from(keep).unwrap_or(u64::MAX))
-            .and_then(|()| file.sync_data())
-            .map_err(|why| {
-                other(format!(
-                    "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
-                    path.display(),
-                    had - keep
-                ))
-            })?;
+        cut_back(file, u64::try_from(keep).unwrap_or(u64::MAX)).map_err(|why| {
+            other(format!(
+                "{}: its torn tail ({} of {had} bytes) could not be cut back: {why}",
+                path.display(),
+                had - keep
+            ))
+        })?;
         bytes.truncate(keep);
         note_torn_cut(path, had, keep);
     }
@@ -1153,12 +1151,26 @@ fn put_bytes(file: &File, bytes: &[u8]) -> io::Result<()> {
 fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(test)]
     seam::SYNCED.with(|synced| synced.borrow_mut().push(dir.to_path_buf()));
+    #[cfg(test)]
+    if seam::FAIL_SYNC.with(std::cell::Cell::take) {
+        return Err(io::Error::other("the directory was not synced (injected)"));
+    }
     File::open(dir)?.sync_all()
 }
 
+/// Cuts `file` back to `len` bytes and syncs it: a torn tail's removal.
+fn cut_back(file: &File, len: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if seam::FAIL_CUT.with(std::cell::Cell::take) {
+        return Err(io::Error::other("the file was not cut back (injected)"));
+    }
+    file.set_len(len).and_then(|()| file.sync_data())
+}
+
 /// The test seams: a write that fails after so many bytes, as a full disk
-/// does, and the directories synced, in order. Per thread, so tests running
-/// at once never see each other's.
+/// does, a torn tail's cut and a directory's sync that the host refuses
+/// (which no test can make it do on demand), and the directories synced, in
+/// order. Per thread, so tests running at once never see each other's.
 #[cfg(test)]
 pub(crate) mod seam {
     use std::cell::{Cell, RefCell};
@@ -1167,6 +1179,10 @@ pub(crate) mod seam {
     thread_local! {
         /// The next append's write stops after this many bytes and fails.
         pub(crate) static FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+        /// The next torn tail's cut is refused by the host.
+        pub(crate) static FAIL_CUT: Cell<bool> = const { Cell::new(false) };
+        /// The next directory sync is refused by the host.
+        pub(crate) static FAIL_SYNC: Cell<bool> = const { Cell::new(false) };
         /// Every directory synced on this thread.
         pub(crate) static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }

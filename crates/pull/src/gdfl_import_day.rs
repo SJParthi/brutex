@@ -2010,11 +2010,14 @@ where
             member: Some(member),
         };
         let state = (&mut *report, &mut *flags);
-        if let Some(outcome) = day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
-            widened.closed += 1;
-            widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
-        } else if ctx.gather.borrow().waits(&member_key, day) {
-            widened.deferred = true;
+        match day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
+            Some(outcome) => {
+                widened.closed += 1;
+                widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
+            }
+            // A pass that closed nothing: its key waits for its month's
+            // repair, or it wrote nothing (a stop before its first write).
+            None => widened.deferred |= ctx.gather.borrow().waits(&member_key, day),
         }
     }
     if examined {
@@ -2484,21 +2487,26 @@ fn flush_gather(
     census: &mut dyn Census,
 ) -> Result<(), ImportRefusal> {
     let gather = std::mem::take(&mut *ctx.gather.borrow_mut());
-    if gather.is_empty() {
-        return Ok(());
-    }
     let super::filing::Repaired {
         held,
         deferred,
         ended,
     } = super::filing::repair_gathered_months(ctx, gather, report);
+    // NOTHING WAITS, NOTHING WAS GATHERED: an offer is made only with a file
+    // whose day then waits, so with no waiting day there was no repair, no
+    // row and no end (one probe; the common flush at a stop or a run's end).
+    let mut waiting = deferred.into_iter();
+    let Some(first) = waiting.next() else {
+        return Ok(());
+    };
     let kind = ctx.run.kind;
     if let Some((code, day, why)) = ended {
-        for one in deferred {
+        for one in std::iter::once(first).chain(waiting) {
             name_staged(report, one.failures);
-            if let Some(close) = one.close {
-                name_staged(report, close.failures);
-            }
+            name_staged(
+                report,
+                one.close.map_or_else(Vec::new, |close| close.failures),
+            );
         }
         let done = Box::new(std::mem::take(report));
         return Err(match code {
@@ -2526,16 +2534,6 @@ fn flush_gather(
         && let Some(why) = census.publish(ctx.run.store_root, &held)
     {
         let room = census.room(ctx.run.store_root, &held);
-        let Some(first) = deferred.into_iter().next() else {
-            // No day waits to carry the refusal: the run ends by it alone,
-            // no line written under a key no day has.
-            return Err(super::census::census_refusal(
-                (kind, ctx.run.to),
-                why,
-                room,
-                std::mem::take(report),
-            ));
-        };
         let (before, max_back_s, mut failures) = match first.close {
             Some(close) => (
                 rebased(close.before, close.after, Mark::of(report), first.committed),
@@ -2553,7 +2551,7 @@ fn flush_gather(
             (why, room),
         ));
     }
-    for one in deferred {
+    for one in std::iter::once(first).chain(waiting) {
         close_deferred(ctx, one, report);
     }
     Ok(())

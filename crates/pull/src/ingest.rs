@@ -1796,6 +1796,9 @@ pub enum Filed {
         /// [`FailKind::MonthBusy`], or [`FailKind::Sealed`] for a month's
         /// successor, D-6247).
         appended: FailKind,
+        /// The month the door addressed the batch to (one month per file):
+        /// the month whose offer it joins, never worked out again.
+        month: store::path::YearMonth,
     },
 }
 
@@ -2097,7 +2100,11 @@ fn rows_mode(
         // and no census row, for the caller's one repair of the month.
         Ok(Wrote::Gathered(appended)) => {
             done.bars_stored = bars.len();
-            return (done, Filed::Gathered { appended }, Vec::new());
+            let filed = Filed::Gathered {
+                appended,
+                month: ym,
+            };
+            return (done, filed, Vec::new());
         }
         Err(refusal) => {
             note_not_filed(instrument, "bars", &refusal.why);
@@ -6566,7 +6573,13 @@ mod tests {
         assert!(
             matches!(
                 &lacked,
-                Ok(super::BackFill::Lacked(why, 0)) if why.kind == super::FailKind::MonthBusy
+                Ok(super::BackFill::Lacked(
+                    super::DoorRefusal {
+                        kind: super::FailKind::MonthBusy,
+                        ..
+                    },
+                    0
+                ))
             ),
             "{lacked:?}"
         );
