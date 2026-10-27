@@ -1348,10 +1348,10 @@ command = [
 ]
 dry_run = ["the three with BRUTEX_STORE on a private copy (a NEW private store for basis-runs, as R4-26's rehearsal in the note, and a NEW --out directory for fno-membership build)"]
 env = ["BRUTEX_STORE", "BRUTEX_MASTERS"]
-prerequisites = ["R4-26", "operator: NSE's corporate-actions file downloaded by the operator and its format recorded in docs/00-charter.md, so a reader for it can be built (this repository fetches nothing from NSE on its own)"]
+prerequisites = ["R4-26", "operator: a decision and an owner for NSE-sourced corporate actions: the operator downloads NSE's corporate-actions file, records its format in docs/00-charter.md and names the package that builds its reader (this repository fetches nothing from NSE on its own)"]
 check = ["the three tables answer their receipts' row counts, and the F&O membership of NIFTY's and BANKNIFTY's underlyings is inferred for 2018-09 to 2026-09"]
 closes = ["OWED-26"]
-not_rehearsed = "waits for operator: the NSE corporate-actions file and a reader for it. R4-26 merged into feat/db-fix on 27 Oct 2026 (BASE-REDS-1023 set it merged and wrote its two built verbs here); the basis-runs line alone is rehearsed, by R4-26, in the note; fno-membership build is not rehearsed here"
+not_rehearsed = "waits for operator: the decision and owner for the NSE corporate-actions file and its reader. R4-26 merged into feat/db-fix on 27 Oct 2026 (BASE-REDS-1023 set it merged and wrote its two built verbs here); the basis-runs line alone is rehearsed, by R4-26, in the note; fno-membership build is not rehearsed here"
 note = "R4-26's rehearsal of the basis-runs line (its report state/fix/round2/fix-R4-26.json, store_writes_needed): 26 Oct 2026 22:16 IST, release cli of R4-26's tip 6a561a89d, on a NEW private store, with DIR DATA-1's full feed-reconcile run: basis_runs generation 1 landed (109,890 bytes) and corporate_actions generation 1 landed (196 measured rows, 64,133 bytes), 2.27 s wall; a rerun with DIR spelled three other ways landed nothing (already held these bytes). Disk: 2 files, about 174 KB. A build of the merged commit names that commit in each receipt, so the sha256 differ while the rows do not. Figures are R4-26's, not measured by BASE-REDS-1023."
 disk = "basis-runs: 2 files, about 174 KB (R4-26's rehearsal); fno-membership: not measured here; the NSE-sourced generation: not built"
 

@@ -1113,7 +1113,9 @@ confirmed by two skeptics; their corrections are applied.
   false` while S-46 waited for it with planned commands. FIXED in code (one
   `match` each, `class_of` through `excuse`) and in config/store-steps.toml
   (R4-26 merged; S-46 names the two built verbs and waits for the operator
-  for the NSE file), no allowlist widened (D-7150 addendum, BRED-26). Same
+  for the NSE file, a person's decision and owner, as
+  `pull::rehearsal::tests::a_persons_decision_is_met_only_by_a_recorded_yes`
+  requires), no allowlist widened (D-7150 addendum, BRED-26). Same
   cause as F12: a merge that did not run the full gate set.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
