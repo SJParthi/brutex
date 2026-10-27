@@ -320,6 +320,11 @@ mod emit_sites;
 #[cfg(test)]
 mod gdfl_fixtures;
 
+/// BASE-COV-PULL (D-7332): every refusal code, state word and reason word
+/// stated, variant by variant, and distinct within its table.
+#[cfg(test)]
+mod base_cov_codes_tests;
+
 /// Test-only: re-runs a test where the permission bits bind, even as root. The
 /// same file serves this crate's integration tests. D-0995.
 #[cfg(all(test, unix))]
