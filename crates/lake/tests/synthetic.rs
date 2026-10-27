@@ -1233,6 +1233,9 @@ fn a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw() {
     assert_eq!(sound.read_row_group(0).expect("decodes").len(), 3);
 }
 
+/// One page-header edit of [`edit_pages`], boxed so several sit in one table.
+type Edit = Box<dyn FnMut(&mut PageHeader)>;
+
 /// Copies an UNCOMPRESSED file page by page, handing every page header to
 /// `edit` before it is written back, and moves every offset the footer holds
 /// to where the (possibly resized) headers now put the pages: the same walk
@@ -1318,7 +1321,6 @@ fn a_page_header_the_reader_cannot_use_is_refused_by_name() {
             .len(),
         3
     );
-    type Edit = Box<dyn FnMut(&mut PageHeader)>;
     let cases: [(&str, Edit); 6] = [
         (
             "data page carries no header",

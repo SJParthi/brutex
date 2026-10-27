@@ -467,3 +467,56 @@ fn the_wire_words_the_absence_text_and_the_grouped_rows_hold_at_their_extremes()
         Err(LotAbsence::NoRow { .. })
     ));
 }
+
+/// BASE-COV-LIBS D3 mutants (D-7320): two survivors of `cargo mutants` on
+/// this part's changed functions. A sourced row carries the digest of ITS
+/// circular, not merely one of the two; and the row cap is exact: a table of
+/// exactly [`MAX_LOT_ROWS`] rows builds, one more is refused.
+#[test]
+fn each_sourced_row_carries_its_own_circulars_digest_and_the_row_cap_is_exact() {
+    let rows = compiled_rows();
+    let (mut first, mut second) = (0, 0);
+    for row in rows
+        .iter()
+        .filter(|row| row.standing == LotStanding::Sourced)
+    {
+        let sha = row
+            .source_sha256
+            .as_deref()
+            .expect("a sourced row has a digest");
+        if row.source.contains("NSE/FAOP/64625") {
+            assert_eq!(sha, FAOP64625_SHA256, "{}", row.source);
+            first += 1;
+        } else {
+            assert_eq!(sha, FAOP70616_SHA256, "{}", row.source);
+            second += 1;
+        }
+    }
+    assert_eq!((first, second), (2, 2), "two rows rest on each circular");
+
+    // COMBINED: the most rows a table holds, spread over the fewest
+    // underlyings the per-underlying cap allows.
+    let full: Vec<LotRow> = (0..MAX_LOT_ROWS)
+        .map(|at| {
+            let step = at % MAX_LOT_ROWS_PER_UNDERLYING;
+            let ordinal = day(2018, 1, 1).ordinal() + i32::try_from(step).unwrap();
+            sourced(
+                &format!("U{:05}", at / MAX_LOT_ROWS_PER_UNDERLYING),
+                TradeDay::from_ordinal(ordinal).unwrap(),
+                1,
+            )
+        })
+        .collect();
+    let mut over = full.clone();
+    over.push(sourced("ZZZZZ", day(2018, 1, 1), 1));
+    assert_eq!(
+        LotTable::from_rows(full).unwrap().rows().len(),
+        MAX_LOT_ROWS
+    );
+    assert_eq!(
+        LotTable::from_rows(over).unwrap_err(),
+        LotTableError::TooManyRows {
+            rows: MAX_LOT_ROWS + 1
+        }
+    );
+}
