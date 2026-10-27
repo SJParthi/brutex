@@ -85359,6 +85359,30 @@ state change of the store (it writes nothing), so no `lifecycle` row is
 added to `telemetry::run_dirs::state_events::TABLE`; the settings generation
 that names the roots is the audited state change (`POST /settings`).
 
+### D-7049 — CC-5: the /ingest Copies panel carries none of the register's code on the page's first load — 2026-10-27
+
+**Implemented by** CC-5 (`web/src/routes/ingest/panels/Copies.svelte`,
+`web/src/lib/CopiesTables.svelte`, `web/src/lib/copies.js`). **Why.** The
+merge of `feat/db-fix` `a32722c45` brought R3-15's page budgets
+(`$lib/speed.js` `BUNDLE_BUDGETS`, D-5915): a page past its budget fails the
+build. `/ingest` mounts every panel on its first load
+(`import.meta.glob('./panels/*.svelte', { eager: true })`, R4-01), and with
+the Copies panel as first built it weighed 608.0 KB against its 600.0 KB
+budget (591.0 KB without it). D-5915 makes raising a budget a decision with
+its reason, never an edit to make a build pass, and the panel is the page's
+last (order 95), below every other. **Decision.** The panel keeps the panel
+contract (its order and title, its own poll, its lines and its one control,
+the titled Save button) and nothing else on the first load: it imports
+`$lib/copies.js` on its first poll and `$lib/CopiesTables.svelte` (the four
+tables, no control) when it first has a walk to draw. A part that does not
+load is a line naming why, asked for again at the next poll, never a blank
+panel. No `{#await}` block: its runtime moved into a chunk every page loads
+and put `/markets` 0.4 KB past its 400.0 KB budget when tried. **Measured**
+(27 Oct, `npm --prefix web run build`, Node 24.22.1, the budget plugin's own
+figures): `/ingest` 595.0 KB on first load against the base's 591.0 KB;
+every other page as on the base (`/speed` 310.3 against 310.2 KB, the
+per-build naming variance `$lib/speed.js` records). **Proofs:** CC5-19.
+
 ### D-7300 — R3-13: the /db day band counts the grid's rung, reads a share's dated closing-auction flag and its day's sidecar, and judges frozen index values, late rows on a recounted day and the bar definition of a day at read time — 2026-10-20
 
 **Number** taken at landing from the ledger's head (amendment A6): first
