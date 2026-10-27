@@ -17021,7 +17021,22 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   and gated by nothing.
   The journal's `Parsed` is also copied once per new batch of journal lines
   while an answer is kept against it, the cost it had before this change.
-- **L-IA-39, measured after D-4896.** L-IA39-AFTER-PLACEHOLDER
+- **L-IA-39, measured after D-4896.** The same bench rows (C-LG-02's day
+  band, the same request through `api::logs::dayflags_json_over`, single
+  calls, n=100 each, over journals holding only `run` lines), `cargo bench -p
+  api --bench ratio` in release on IA-10a's branch, 27 Oct 2026, in a cloud
+  container of 4 cores at a load average below 1, nothing else running:
+  1,000 lines p50 0.524 ms, p99 0.635 ms, max 0.635 ms; 10,000 lines p50
+  0.520 ms, p99 0.589 ms, max 0.589 ms; 100,000 lines p50 0.504 ms, p99
+  0.620 ms, max 0.620 ms. Flat: the band no longer tracks the journal (before,
+  97.5 ms at 100,000 lines, about 190 times this). The runs page beside it in
+  the same run: p50 0.082, 0.080 and 0.080 ms. Measured on a different
+  machine from the before-figures above (those were the operator's M4 Pro,
+  with other builds running), so the two sets compare in shape, not in
+  milliseconds. Printed by the bench at
+  every run and gated by nothing. The HTTP figures on a shadow of the
+  operator's store with 100,000 `run` lines appended are the Mac's to take
+  (IA-10a's NEEDS THE MAC, section 13.4): UNVERIFIED here.
 - **`/imports.json`'s day rows are still a walk of the asked range**
   (`imports::walk`), unchanged here: O(rows in range) per request.
 - **Measured on the operator's store (a shadow of it, GET only).** 200
