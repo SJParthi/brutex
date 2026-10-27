@@ -305,12 +305,10 @@ fn parse_expiry(text: &str) -> Result<Expiry, ContractError> {
 
 /// The three-letter month, matched case-insensitively. See the module header.
 fn parse_month(text: &str) -> Result<u8, ContractError> {
-    for (i, m) in MONTHS.iter().enumerate() {
+    // D-7323: the month number is counted alongside the names, so there is
+    // no index to convert and no conversion that could fail.
+    for (n, m) in (1_u8..).zip(MONTHS.iter()) {
         if m.eq_ignore_ascii_case(text) {
-            // The index is 0..12, so this cannot truncate.
-            let n = u8::try_from(i + 1).map_err(|_| ContractError::BadMonth {
-                found: text.to_owned(),
-            })?;
             return Ok(n);
         }
     }
@@ -766,5 +764,51 @@ mod tests {
             let c = ContractName::parse(name).expect("an upper-case underlying parses");
             assert_eq!(c.to_string(), name);
         }
+    }
+
+    /// BASE-COV-LIBS (D-7320, D-7323): the expiry token at the edges of its
+    /// fixed width, every month name in every case, and a writer that fails.
+    #[test]
+    fn the_expiry_token_and_the_rendering_hold_at_their_edges() {
+        // 1. Seven bytes whose second byte starts a two-byte character: the
+        //    day cannot be cut there, so the token is refused, never guessed.
+        let split = "NSE-NIFTY-0\u{e9}Apr2-10000-CE";
+        assert_eq!(split.split('-').nth(2).map(str::len), Some(7));
+        assert!(matches!(
+            ContractName::parse(split),
+            Err(ContractError::BadExpiryShape { found }) if found == "0\u{e9}Apr2"
+        ));
+        // 2-3. Every month by its number, in upper and lower case.
+        for (n, m) in (1_u8..).zip(MONTHS.iter()) {
+            assert_eq!(parse_month(m), Ok(n));
+            assert_eq!(parse_month(&m.to_ascii_uppercase()), Ok(n));
+            assert_eq!(parse_month(&m.to_ascii_lowercase()), Ok(n));
+        }
+        // 4. Not a month, including the empty token and a fourth letter.
+        for bad in ["", "Ja", "Janu", "Jxn", "13"] {
+            assert!(matches!(parse_month(bad), Err(ContractError::BadMonth { .. })), "{bad}");
+        }
+        // 5-6. The first and the last day of the window this convention reads.
+        assert!(ContractName::parse("NSE-NIFTY-01Jan00-FUT").is_ok());
+        assert!(ContractName::parse("NSE-NIFTY-31Dec99-FUT").is_ok());
+        // 7. COMBINED: an impossible date in a leap-year month: 29 Feb of a
+        //    non-leap year is named, 29 Feb of a leap year parses.
+        assert!(matches!(
+            ContractName::parse("NSE-NIFTY-29Feb23-FUT"),
+            Err(ContractError::ImpossibleDate { day: 29, month: 2, year: 2023 })
+        ));
+        assert!(ContractName::parse("NSE-NIFTY-29Feb24-FUT").is_ok());
+        // 8. OUT OF THE BOX: rendering into a writer that refuses every write
+        //    reports the writer's error rather than a partial name.
+        struct Refusing;
+        impl core::fmt::Write for Refusing {
+            fn write_str(&mut self, _: &str) -> core::fmt::Result {
+                Err(core::fmt::Error)
+            }
+        }
+        let c = ContractName::parse("NSE-NIFTY-01Apr20-10000-CE").expect("a real name");
+        assert_eq!(core::fmt::write(&mut Refusing, format_args!("{c}")), Err(core::fmt::Error));
+        let f = ContractName::parse("NSE-NIFTY-24Dec24-FUT").expect("a real name");
+        assert_eq!(core::fmt::write(&mut Refusing, format_args!("{f}")), Err(core::fmt::Error));
     }
 }

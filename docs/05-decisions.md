@@ -87607,3 +87607,18 @@ epoch, truncation towards zero, saturation past `i64`).
 the epoch, one millisecond either side, sub-millisecond instants either side
 (truncate to 0), the last day of 1969, a century and seven milliseconds either
 side (exact negation), and the live clock after 2026-01-01.
+
+### D-7323 — `lake::contract::parse_month` counts the month number beside the names, so it holds no conversion that could fail (BASE-COV-LIBS) — 2026-10-27
+
+**Decision.** `parse_month` enumerated `MONTHS` and converted `index + 1` to
+`u8` with a `BadMonth` refusal on failure; the index is 0..12, so the refusal
+could not run. It now walks `(1_u8..).zip(MONTHS.iter())`: the same answer for
+every token, no conversion. A token that is no month is still `BadMonth`.
+
+**Proof.** `contract::tests::the_expiry_token_and_the_rendering_hold_at_their_edges`:
+every month in its own, upper and lower case maps to its number; the empty
+token, a short, a long, a misspelt and a numeric token are `BadMonth`; a
+seven-byte expiry whose day would cut a two-byte character is
+`BadExpiryShape`; 29 Feb is `ImpossibleDate` in 2023 and parses in 2024; the
+window's first and last days parse; rendering into a writer that refuses
+every write returns the writer's error for an option and a future.
