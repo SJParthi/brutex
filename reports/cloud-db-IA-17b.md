@@ -1,6 +1,6 @@
-STATUS: HELD
+STATUS: IN PROGRESS
 
-NEXT: (held: `HOLD` on the base branch since 10:29 IST, lifting about 12:50 IST) coverage at the final head, gate 1e, bench C-RP-02, workspace clippy, the CI shell gates again, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), the new code's 46 mutants (2 missed, both fixed), two base merges.
+NEXT: (HOLD lifted at 12:52 IST, `0521e9e1`) coverage at the final head, gate 1e, bench C-RP-02, workspace clippy, the CI shell gates again, the final report. Done this leg: the 149 (0 missed), the coverage pass (34 lines and 18 arms closed), the new code's 46 mutants (2 missed, both fixed), two base merges.
 
 ## Session of 27 Oct 2026, fifth leg (a new cloud session, continuing from `bcac42ad`)
 
