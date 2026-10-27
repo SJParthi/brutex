@@ -1,4 +1,4 @@
-STATUS: IN PROGRESS
+STATUS: HELD
 
 # CC-5 — Copies register (cloud build report)
 
@@ -536,3 +536,50 @@ operator's own `POST /settings` (or the operator's yes) at merge-back.
   its path, and a new test drives every exit. Re-run on that commit: see the gates table.
 - NEXT: the workspace test run (running), web W2 with a browser (running), the served bench, and
   `cargo mutants` per package (`pull` running; then `store`, `cli`, `api`).
+
+### 2026-10-27 — save point 12, then HELD (HOLD at 10:3x IST until the 12:50 IST reset)
+
+- `cargo clippy --workspace --all-targets --locked -j 3 -- -D warnings` on `da59d4853`: exit 0, no
+  warning; again on `0e2cdec48` (target `target/quick`): exit 0.
+- `cargo test --workspace --locked -j 3 --no-fail-fast -- --skip <the two hangers>` on `da59d4853`:
+  `EXIT=101`, 3,275 s; 64 failed: the 33 known root-only reds (all present) and 31 more
+  (`gdfl_import_command` x15, `tick_second_check` x11, `gdfl_run` x3, `gdfl_run_logs` x2: save point
+  8's list). Cause found: `pull::gdfl_import::DEFAULT_FREE_FLOOR` is 10 GiB, checked before a run's
+  first day, and the disk had 6.6 GB free during the run (the mutants' build folders grew beside
+  it), so every GDFL import those tests run stopped before its first file ("files read 0").
+  All 31 pass alone (`--exact`, `--test-threads=1`, `timeout 300`, from the crate root, a clean
+  committed tree, 19 GB free): 31 of 31 exit 0. Not this part's.
+- Web on Node 24.22.1 with `BRUTEX_CHROME=/opt/pw-browsers/chromium` (R3-15's browser tests need one):
+  W2 here 1,805 of 1,806, the base 1,795 of 1,796; each tree's one failure a timing test under the
+  load of the mutants runs (here `a keystroke never walks the census...`, the base `the Speed
+  page's own line in a real browser...`), and both pass alone on both trees.
+- **R3-15's page budget, met by this part** (D-7049): with the Copies panel as first built `/ingest`
+  weighed 608.0 KB on first load against its 600.0 KB budget and the web build failed (W4 red here,
+  green on the base). The panel now carries none of the register's code on the first load
+  (`$lib/copies.js` on the first poll, `$lib/CopiesTables.svelte` when a walk is drawn): `/ingest`
+  595.0 KB, the base 591.0 KB; every other page as on the base. Web gates on that tree: W4, W5, W6
+  exit 0; W3 the same 58 svelte-check errors as the base, none in this part's files; W1 red on both
+  (the committed bundle is stale on the base itself).
+- Served bench (`cargo bench -p api --bench ratio --locked -j 2 -- --served-only`, release, on
+  `7f861a620`): the run stops at the base's `reads` row (`too_many_rows`: 102,400 bars past
+  `/bars.json`'s 60,000) before the copies rows, as on 25 Oct; re-run with that one line skipped in
+  a local uncommitted edit (restored at once, `git status` clean after): copies rows n = 200,
+  p50 / p99 / max 94,719 / 227,284 / 356,565 ns at 1x, 108,061 / 307,029 / 860,941 at 10x,
+  109,486 / 255,025 / 2,463,316 at 100x; p50 ratio 1x->100x 1.155x (ceiling 3x: ok), cold walk
+  1,558 / 2,362 / 19,079 µs. The later commits change no code on the served path.
+- `cargo mutants` (27.1.0, `--cap-lints true`, `CARGO_PROFILE_DEV_OPT_LEVEL=0`
+  `CARGO_PROFILE_DEV_INCREMENTAL=true` `CARGO_PROFILE_DEV_DEBUG=0` by environment, per package with
+  test filters that keep the baseline green): `store` 14 caught of 14; `cli` 12 caught, 1 unviable;
+  `api` 23 caught, 8 unviable, 2 timeouts; `pull` (on `da59d4853`) 168 caught, 30 unviable,
+  6 missed, 6 timeouts. Every miss and timeout answered in `0e2cdec48` (commit message): five
+  missed now killed by new tests, one equivalent guard removed; the hangs fail at once. Rechecks:
+  the 32 mutants of the touched `pull` functions 28 caught, 4 unviable; `note_walked` caught by the
+  new events test; both `api` `answer` mutants caught.
+- Coverage of `copies_register.rs` again on the final code: lines 1003/1003, branches 136/136,
+  functions 119/119, regions 1006/1007 (the one left: `entry?` in `Host::list`).
+- Ledgers: CC5-03 widened, CC5-17..19 added (`docs/04`); D-7049 (`docs/05`). Gates 1d, 10, 12, 27,
+  27b re-run on the final docs: the base's own findings, nothing added.
+- RUNNING when HOLD came: the whole `pull` mutant set on the final code (207 mutants, `--lib`
+  and `--test copies_register_events`), in the background.
+- NEXT (after HOLD lifts): read that run's result; W2 whole on the final tree; the gates table, the
+  measurements and NEEDS THE MAC at the top of this report; STATUS.
