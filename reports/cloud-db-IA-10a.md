@@ -76,10 +76,9 @@ reconcile. FM-071: `not_fixed`, dropped by D-6900 (not applicable).
 
 ## Left
 
-- Mutation testing on the diff (141 mutants): in progress (see Gates).
 - Bench C-LG-02 in release for L-IA-39's after-measurement (placeholder
   `L-IA39-AFTER-PLACEHOLDER` in `docs/06-limits.md`).
-- Final report.
+- The final gate run on the merged tree, and the final report.
 
 ## Gates
 
@@ -93,7 +92,7 @@ Run 25 Oct 2026 in this container (4 cores, root, about 25 GB free) on the branc
 | deny | `cargo deny check` (cargo-deny 0.19.0, as CI pins) | `advisories ok, bans ok, licenses ok, sources ok` |
 | tests | `cargo test --workspace --locked --no-fail-fast` | 11,171 passed, 30 failed, every failure also fails on the unmodified base (below); two test processes hung and were stopped (below) |
 | coverage | `cargo llvm-cov --no-fail-fast --locked -p api -p cli --lib` (stable; lines and regions) | every added line of the touched source files covered except one (below) |
-| mutants | `cargo mutants --in-diff` | in progress |
+| mutants | `cargo mutants --in-diff` (method below) | every mutant of the diff tested: 0 missed (below) |
 
 **The 30 failures are environmental, the same set on the base.** Re-run on a worktree of the
 unmodified `origin/feat/db-fix` `bf9b1c8f` with its own target directory
@@ -135,6 +134,47 @@ branch. The first run found ten lines unreached; four tests now reach them:
 - `api::server::imports::member_tests::a_member_only_day_owns_its_own_members_file_and_no_other`;
 - `cli::gdfl_import_command::tests::a_source_gone_after_the_plan_is_said_on_the_receipt_with_the_horizon`
   (the census of an archive removed after the plan; the horizon on an unopened receipt).
+
+**Mutants, on every line the diff adds (`cargo mutants 27.1.0 --in-diff`).** The diff
+against `origin/feat/db-fix` of `crates/api/src`, `crates/pull/src` (tests excluded) and of
+`crates/cli/src/gdfl_import_command.rs`, in three passes over three sessions; a mutant whose
+code a later commit changed was tested again on the new code, and only those:
+
+| Files | Mutants now | Caught | Unviable | Missed |
+|---|---|---|---|---|
+| api and pull (`import_journal.rs`, `imports.rs`, `dayflags.rs`, `feeds_route.rs`, `provenance.rs`, `gdfl_cm.rs`, `gdfl_import.rs`) | 120 | 107 | 13 | 0 |
+| cli (`gdfl_import_command.rs`) | 15 | 11 | 4 | 0 |
+
+The five that survived along the way, each answered with a test or by removing a construct
+no test could tell apart (the precedent of `docs/06-limits.md`'s mutation section, never an
+allowlist):
+
+- `dayflags.rs refusals_of` `<` to `<=` (26 Oct): no test held more superseded refusals than
+  `MAX_REFUSALS_NAMED`; caught by
+  `superseded_refusals_past_the_named_bound_are_counted_not_named` (`ba036668`).
+- `imports.rs Walk::holes_note` `>` to `>=` (26 Oct): an answer with no hole carried the holes
+  sentence; caught (27 Oct) by `an_empty_or_absent_journal_says_zero_holes_by_name` reading the
+  notes of an empty, an absent and a plain-incomplete journal (`ecafd565`).
+- `imports.rs placed_of` `<` to `<=` (26 Oct): equivalent (an earlier `==` return); the
+  compare is one three-way `cmp` (`ecafd565`); its three mutants now: 2 caught, 1 unviable.
+- `gdfl_import_command.rs render_census` guard `named.is_empty()` to `true` (27 Oct):
+  equivalent, since every reason a source counts without naming carried an empty list; a
+  reason's names are now `Names::Kept(list)` or `Names::Unkept(why)`, so the pair the guard
+  tested for cannot be built and the guard is gone (`3341f735`).
+- `gdfl_import_command.rs today_ist` to `None` (27 Oct): the receipt tests compared a receipt
+  against `render_horizon(today_ist())`, which agree when both say "not checked"; caught by the
+  new `the_receipts_today_is_the_host_clocks_ist_day` (the IST day of the host clock by
+  `pull::session::IST_OFFSET_SECS`, read before and after) (`3341f735`).
+
+Method (the same each pass): `CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_PROFILE_DEV_INCREMENTAL=true
+cargo mutants --in-diff <the diff> -p api -p pull --test-package api -- --lib --
+server::imports server::dayflags server::import_journal server::provenance server::feeds_route
+audit_json logs:: --skip the_window_is_refused_loudly_when_degraded_or_inverted` (378 tests at
+the baseline; the skipped one fails as root on the base too), and for the cli file
+`... -p cli --test-package cli -- --lib -- gdfl_import_command` (78 tests at the baseline,
+2 ignored). The 27 Oct re-runs used `-F 'holes_note|placed_of'` (9 mutants: 8 caught,
+1 unviable, 11 min), the whole cli file (17: 11 caught, 4 unviable, 2 missed, 10 min), and,
+after `3341f735`, `-F 'render_census|today_ist'` (6: 5 caught, 1 unviable, 6 min).
 
 A cargo fact for this container: `cli`'s build script watches the repository root as a
 directory, which cargo scans recursively, `target/` included, so with the default target
@@ -346,3 +386,21 @@ this container could not do. `W=/Volumes/WD_BLACK/brutex/fresh-20260919/work-202
   the 26 Oct method and test filter) and the cli file's 17
   (`--test-package cli -- --lib -- gdfl_import_command`).
 - NEXT: their results; bench C-LG-02 in release; the final gates; NEEDS THE MAC; STATUS.
+
+### 2026-10-27 08:36 IST
+
+- Mutants, the leftover runs: `-F 'holes_note|placed_of'`: `9 mutants tested in 11m: 8 caught,
+  1 unviable`; the cli file: `17 mutants tested in 10m: 2 missed, 11 caught, 4 unviable`
+  (the `render_census` guard `named.is_empty()` to `true`, equivalent; `today_ist` to `None`).
+  Both answered in `3341f735` (`Names::Kept`/`Names::Unkept`; the test
+  `the_receipts_today_is_the_host_clocks_ist_day`); re-run `-F 'render_census|today_ist'`:
+  `6 mutants tested in 6m: 5 caught, 1 unviable`. Every mutant of the diff: 0 missed (Gates).
+  `cargo test -p cli --lib --locked -- gdfl_import_command`: `test result: ok. 78 passed;
+  0 failed; 2 ignored`. docs/04 IA-GR-34 names the new test.
+- `cargo deny check` (0.19.0): `advisories ok, bans ok, licenses ok, sources ok`;
+  `cargo fmt --all --check`: clean.
+- The release bench build and the workspace test build, started together, were both killed by
+  this container's memory limit (13.4 GiB cgroup: two `pull` builds at opt-level 3 at once);
+  now one at a time.
+- NEXT: bench C-LG-02 (building), then the workspace tests, clippy, the CI shell gates,
+  NEEDS THE MAC, STATUS.
