@@ -231,8 +231,9 @@ impl DayRow {
     /// (`pull::gdfl_import::hole_reasons`); `repairable` is `admit` row 4a's
     /// answer (`pull::gdfl_import::hole_is_repairable`). At most five
     /// compares of a short word: the list is `pull`'s compile-time
-    /// `[&str; 5]`, walked whole, its bound in its type (gate 11 rule 6's
-    /// "bounded by a compile-time table, never by the data").
+    /// `[&str; 5]`, its bound in its type (gate 11 rule 6's "bounded by a
+    /// compile-time table, never by the data"), found the way `pull`'s own
+    /// journal reader finds a key's hole reason (`KeyState::of`).
     pub(crate) fn hole(&self) -> Option<Hole<'_>> {
         if self.outcome != DayOutcome::Incomplete {
             return None;
@@ -240,8 +241,9 @@ impl DayRow {
         let reason = self.reason.as_deref()?;
         pull::gdfl_import::hole_reasons()
             .iter()
-            .any(|held| *held == reason)
-            .then(|| Hole {
+            .copied()
+            .find(|held| *held == reason)
+            .map(|reason| Hole {
                 reason,
                 repairable: pull::gdfl_import::hole_is_repairable(reason),
             })
