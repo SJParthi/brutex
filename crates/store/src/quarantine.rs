@@ -710,7 +710,7 @@ fn slot_crc(bytes: &[u8], slot: u64) -> u32 {
 
 fn field<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
     let mut out = [0u8; N];
-    if let Some(src) = bytes.get(at..at + N) {
+    if let Some(src) = at.checked_add(N).and_then(|end| bytes.get(at..end)) {
         out.copy_from_slice(src);
     }
     out
@@ -770,15 +770,23 @@ fn encode_slot(hash: &[u8; 16], month: u32, entry: &Entry, slot: u64) -> [u8; SL
         ),
     ];
     for (at, value) in fields {
-        if let Some(dst) = bytes.get_mut(at..at + value.len()) {
-            dst.copy_from_slice(value);
-        }
+        write_at(&mut bytes, at, value);
     }
     let crc = slot_crc(&bytes, slot);
-    if let Some(dst) = bytes.get_mut(60..64) {
-        dst.copy_from_slice(&crc.to_le_bytes());
-    }
+    write_at(&mut bytes, 60, &crc.to_le_bytes());
     bytes
+}
+
+/// Copies `value` into `bytes` at `at`, or writes nothing when it would not
+/// fit: the ONE bounded write every slot, header and image field goes
+/// through (D-7324), so no write here can run past its buffer.
+fn write_at(bytes: &mut [u8], at: usize, value: &[u8]) {
+    if let Some(dst) = at
+        .checked_add(value.len())
+        .and_then(|end| bytes.get_mut(at..end))
+    {
+        dst.copy_from_slice(value);
+    }
 }
 
 /// Answers whether `path`'s month is quarantined. O(1): the header and the
@@ -1387,42 +1395,39 @@ fn note_rebuilt(feed: Vendor, why: &str, done: &Rebuilt) {
 }
 
 /// One event for a ledger that holds damaged lines: every refusal that reads
-/// it says so on `/logs`, by offset.
-fn note_damaged(feed: Vendor, refused: &QuarantineError) {
-    if let QuarantineError::LedgerDamaged { offsets, .. } = refused {
-        let first = offsets.first().copied().unwrap_or(0);
-        let text = refused.to_string();
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("store.quarantine", "quarantine ledger damaged")
-                .with("feed", telemetry::Value::Str(feed.as_str()))
-                .with(
-                    "damaged_lines",
-                    telemetry::Value::Uint(offsets.len() as u64),
-                )
-                .with("first_at", telemetry::Value::Uint(first))
-                .with("why", telemetry::Value::Str(&text)),
-        );
-    }
+/// it says so on `/logs`, by offset. Its one caller passes the refusal's own
+/// offsets and sentence (D-7324: no arm for another refusal is left to miss).
+fn note_damaged(feed: Vendor, offsets: &[u64], text: &str) {
+    let first = offsets.first().copied().unwrap_or(0);
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("store.quarantine", "quarantine ledger damaged")
+            .with("feed", telemetry::Value::Str(feed.as_str()))
+            .with(
+                "damaged_lines",
+                telemetry::Value::Uint(offsets.len() as u64),
+            )
+            .with("first_at", telemetry::Value::Uint(first))
+            .with("why", telemetry::Value::Str(text)),
+    );
 }
 
 /// One event for a ledger cut below what its index describes: the refusal
-/// says so on `/logs`, with both lengths.
-fn note_cut(feed: Vendor, refused: &QuarantineError) {
-    if let QuarantineError::LedgerCut {
+/// says so on `/logs`, with both lengths. Answers the refusal it noted.
+fn note_cut(feed: Vendor, path: PathBuf, described: u64, ledger_len: u64) -> QuarantineError {
+    let refused = QuarantineError::LedgerCut {
+        path,
         described,
         ledger_len,
-        ..
-    } = refused
-    {
-        let text = refused.to_string();
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("store.quarantine", "quarantine ledger cut")
-                .with("feed", telemetry::Value::Str(feed.as_str()))
-                .with("described", telemetry::Value::Uint(*described))
-                .with("ledger_len", telemetry::Value::Uint(*ledger_len))
-                .with("why", telemetry::Value::Str(&text)),
-        );
-    }
+    };
+    let text = refused.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("store.quarantine", "quarantine ledger cut")
+            .with("feed", telemetry::Value::Str(feed.as_str()))
+            .with("described", telemetry::Value::Uint(described))
+            .with("ledger_len", telemetry::Value::Uint(ledger_len))
+            .with("why", telemetry::Value::Str(&text)),
+    );
+    refused
 }
 
 fn audit_dir(root: &Path) -> Result<PathBuf, QuarantineError> {
@@ -1910,7 +1915,7 @@ fn refuse_damage(ledger: &Ledger, root: &Path, feed: Vendor) -> Result<(), Quara
         path: ledger_path(root, feed),
         offsets: ledger.damaged.clone(),
     };
-    note_damaged(feed, &refused);
+    note_damaged(feed, &ledger.damaged, &refused.to_string());
     Err(refused)
 }
 
@@ -1957,9 +1962,7 @@ fn empty_image() -> Vec<u8> {
         (24, &BUCKET.to_le_bytes()),
     ];
     for (at, value) in fields {
-        if let Some(dst) = image.get_mut(at..at + value.len()) {
-            dst.copy_from_slice(value);
-        }
+        write_at(&mut image, at, value);
     }
     seal_header(&mut image);
     image
@@ -1967,9 +1970,7 @@ fn empty_image() -> Vec<u8> {
 
 fn seal_header(image: &mut [u8]) {
     let crc = crc32c(image.get(..60).unwrap_or(&[]));
-    if let Some(dst) = image.get_mut(60..64) {
-        dst.copy_from_slice(&crc.to_le_bytes());
-    }
+    write_at(image, 60, &crc.to_le_bytes());
 }
 
 /// Whether an image's header and every slot check.
@@ -2076,24 +2077,21 @@ fn put(
     entry: Entry,
 ) {
     let entry = before.map_or(entry, |held| merged(held, entry));
-    let at = slot_at(slot);
-    if let Some(dst) = image.get_mut(at..at + SLOT) {
-        dst.copy_from_slice(&encode_slot(hash, month, &entry, slot));
-    }
+    write_at(
+        image,
+        slot_at(slot),
+        &encode_slot(hash, month, &entry, slot),
+    );
     if before.is_none() {
         let held = u64::from_le_bytes(field(image, 32)).saturating_add(1);
-        if let Some(dst) = image.get_mut(32..40) {
-            dst.copy_from_slice(&held.to_le_bytes());
-        }
+        write_at(image, 32, &held.to_le_bytes());
     }
     seal_header(image);
 }
 
 /// Records in the header the ledger bytes the image describes, and seals it.
 fn set_described(image: &mut [u8], ledger_len: u64) {
-    if let Some(dst) = image.get_mut(40..48) {
-        dst.copy_from_slice(&ledger_len.to_le_bytes());
-    }
+    write_at(image, 40, &ledger_len.to_le_bytes());
     seal_header(image);
 }
 
@@ -2162,13 +2160,7 @@ fn level(root: &Path, feed: Vendor, ledger_len: u64) -> Result<Level, Quarantine
         Ok(Some(image)) => match described(&image) {
             None => "its header did not check".to_owned(),
             Some(built) if built > ledger_len => {
-                let refused = QuarantineError::LedgerCut {
-                    path: index,
-                    described: built,
-                    ledger_len,
-                };
-                note_cut(feed, &refused);
-                return Err(refused);
+                return Err(note_cut(feed, index, built, ledger_len));
             }
             Some(built) if built != ledger_len => {
                 format!("it described {built} of the ledger's {ledger_len} bytes")
@@ -2365,13 +2357,7 @@ impl Summary {
         if let Some(described) = described
             && described > ledger.len
         {
-            let refused = QuarantineError::LedgerCut {
-                path: index,
-                described,
-                ledger_len: ledger.len,
-            };
-            note_cut(feed, &refused);
-            return Err(refused);
+            return Err(note_cut(feed, index, described, ledger.len));
         }
         let mut months: HashMap<(String, String), Entry> = HashMap::new();
         let mut causes: HashMap<String, Vec<Cause>> = HashMap::new();
@@ -2784,3 +2770,7 @@ fn apply_locked(
 #[cfg(test)]
 #[path = "quarantine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "quarantine_cover_tests.rs"]
+mod cover_tests;
