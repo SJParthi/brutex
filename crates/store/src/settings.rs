@@ -1461,3 +1461,7 @@ fn landed(reader: &mut Reader, dir: &Path, generation: Generation) -> Saved {
 #[cfg(test)]
 #[path = "settings_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_cover_tests.rs"]
+mod cover_tests;

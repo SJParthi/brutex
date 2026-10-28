@@ -1361,3 +1361,7 @@ pub fn read_kept(bars_path: &Path, n_valid: u64) -> Result<MonthSummary, Refused
 #[cfg(test)]
 #[path = "month_summary_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "month_summary_cover_tests.rs"]
+mod cover_tests;

@@ -1340,25 +1340,39 @@ impl fmt::Display for StoreError {
                 sidecar,
                 field,
             } => write_misfiled(f, path, sidecar, field),
-            refusal @ Self::SealedRefused { .. } => write_sealed_refused(f, refusal),
-            refusal @ Self::Sealed { .. } => write_sealed(f, refusal),
+            Self::SealedRefused {
+                path,
+                reason,
+                detail,
+            } => write_sealed_refused(f, path, reason, detail),
+            Self::Sealed {
+                path,
+                n_valid,
+                last_ts_micros,
+                at,
+                ts_micros,
+                offer,
+            } => write_sealed(
+                f,
+                path,
+                (*n_valid, *last_ts_micros),
+                (*at, *ts_micros),
+                *offer,
+            ),
         }
     }
 }
 
-/// [`StoreError::Sealed`]'s sentence (SC-4, D-5904).
-fn write_sealed(f: &mut fmt::Formatter<'_>, refusal: &StoreError) -> fmt::Result {
-    let StoreError::Sealed {
-        path,
-        n_valid,
-        last_ts_micros,
-        at,
-        ts_micros,
-        offer,
-    } = refusal
-    else {
-        return Ok(());
-    };
+/// [`StoreError::Sealed`]'s sentence (SC-4, D-5904): the held bars
+/// `(n_valid, last_ts_micros)` and the batch record `(at, ts_micros)`. It takes
+/// the variant's fields, so it holds no arm for another refusal (D-7324).
+fn write_sealed(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    (n_valid, last_ts_micros): (u64, i64),
+    (at, ts_micros): (u64, i64),
+    offer: SealedOffer,
+) -> fmt::Result {
     write!(
         f,
         "{}: the month is sealed and is never appended to; it holds {n_valid} bars through \
@@ -1377,16 +1391,14 @@ fn write_sealed(f: &mut fmt::Formatter<'_>, refusal: &StoreError) -> fmt::Result
     )
 }
 
-/// [`StoreError::SealedRefused`]'s sentence (SC-3, D-5899).
-fn write_sealed_refused(f: &mut fmt::Formatter<'_>, refusal: &StoreError) -> fmt::Result {
-    let StoreError::SealedRefused {
-        path,
-        reason,
-        detail,
-    } = refusal
-    else {
-        return Ok(());
-    };
+/// [`StoreError::SealedRefused`]'s sentence (SC-3, D-5899), from the
+/// variant's fields (D-7324).
+fn write_sealed_refused(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    reason: &str,
+    detail: &str,
+) -> fmt::Result {
     write!(
         f,
         "{}: the sealed month is refused ({reason}): {detail}; it is not served, in part or \

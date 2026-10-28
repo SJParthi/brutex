@@ -741,7 +741,7 @@ pub fn build_run_as(
     let blocks = rows.div_ceil(FENCE);
     let mut sections: Vec<u8> = Vec::new();
     let mut columns = [ColumnInfo::default(); 6];
-    for column in Column::ALL {
+    for (column, slot) in Column::ALL.into_iter().zip(columns.iter_mut()) {
         let (entries, nulls) = ordered(column, bars, &secs);
         let values = entries.get(usize::try_from(nulls).unwrap_or(usize::MAX)..);
         let (base, max) = values
@@ -789,9 +789,7 @@ pub fn build_run_as(
         sections.extend_from_slice(&crcs);
         sections.extend_from_slice(&table_crc.to_le_bytes());
         sections.extend_from_slice(&body);
-        if let Some(slot) = columns.get_mut(column.index()) {
-            *slot = info;
-        }
+        *slot = info;
     }
     let len = RUN_HEADER_LEN + sections.len() as u64;
     let run = RunInfo {
@@ -900,7 +898,7 @@ pub fn decode_run_header(
     let blocks = rows.div_ceil(FENCE);
     let mut columns = [ColumnInfo::default(); 6];
     let mut next = RUN_HEADER_LEN;
-    for column in Column::ALL {
+    for (column, slot) in Column::ALL.into_iter().zip(columns.iter_mut()) {
         let o = usize::try_from(COLUMNS_AT + column.index() as u64 * COLUMN_LEN).unwrap_or(0);
         let info = ColumnInfo {
             width: take::<1>(bytes, o)[0],
@@ -925,9 +923,7 @@ pub fn decode_run_header(
         next = next
             .checked_add(info.section_len(rows))
             .ok_or_else(|| refuse("its columns overflow"))?;
-        if let Some(slot) = columns.get_mut(column.index()) {
-            *slot = info;
-        }
+        *slot = info;
     }
     if next != len {
         return Err(refuse("its columns do not fill its stated length"));
@@ -1517,7 +1513,7 @@ impl SortIndex {
 /// asks inside a buffer whose length it fixed.
 fn take<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
     let mut out = [0u8; N];
-    if let Some(src) = bytes.get(at..at + N) {
+    if let Some(src) = at.checked_add(N).and_then(|end| bytes.get(at..end)) {
         out.copy_from_slice(src);
     }
     out
@@ -1526,7 +1522,10 @@ fn take<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
 /// Copies `src` into `out` at `at`; a write past the end is dropped, and no
 /// caller makes one.
 fn put(out: &mut [u8], at: usize, src: &[u8]) {
-    if let Some(dst) = out.get_mut(at..at + src.len()) {
+    if let Some(dst) = at
+        .checked_add(src.len())
+        .and_then(|end| out.get_mut(at..end))
+    {
         dst.copy_from_slice(src);
     }
 }
@@ -1534,3 +1533,7 @@ fn put(out: &mut [u8], at: usize, src: &[u8]) {
 #[cfg(test)]
 #[path = "sort_index_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sort_index_cover_tests.rs"]
+mod cover_tests;

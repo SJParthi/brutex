@@ -96,7 +96,10 @@ fn bytes_no_writer_wrote_are_none_and_a_cause_set_says_itself() {
     assert_eq!(Scope::of_byte(0), None);
     assert_eq!(Scope::of_byte(3), None);
     assert_eq!(Scope::Dropping.byte(), 0);
-    assert_eq!(Scope::of_byte(Scope::WholeMonth.byte()), Some(Scope::WholeMonth));
+    assert_eq!(
+        Scope::of_byte(Scope::WholeMonth.byte()),
+        Some(Scope::WholeMonth)
+    );
     assert_eq!(Scope::of_byte(Scope::Dropped.byte()), Some(Scope::Dropped));
     assert_eq!(Causes::of_byte(0), None);
     assert_eq!(Causes::of_byte(0b1000), None);
@@ -222,7 +225,10 @@ fn a_run_answers_clear_past_other_months_and_damage_for_a_slot_without_scope() {
     // answers, then the key's own month is found behind the foreign one.
     let mut image = empty_image();
     put(&mut image, home, &other, month, None, held);
-    assert_eq!(find_slot(&image, &hash, month, &index), Ok((home + 1, None)));
+    assert_eq!(
+        find_slot(&image, &hash, month, &index),
+        Ok((home + 1, None))
+    );
     let own = entry(Scope::WholeMonth, Cause::ZeroPrice, 9);
     put(&mut image, home + 1, &hash, month, None, own);
     assert_eq!(
@@ -237,7 +243,10 @@ fn a_run_answers_clear_past_other_months_and_damage_for_a_slot_without_scope() {
     );
     assert_eq!(
         find_slot(&image, &hash, month, &index),
-        Err(QuarantineError::Damaged { path: index, slot: home })
+        Err(QuarantineError::Damaged {
+            path: index,
+            slot: home
+        })
     );
     assert!(!image_trusted(&image));
 }
@@ -364,7 +373,9 @@ fn an_audit_name_that_is_no_directory_is_refused_by_the_host() {
     // No lock to open is no writer.
     assert!(!writer_active(&gone, FEED));
     assert_eq!(
-        impatient_kind(&Impatient::Host(io::Error::from(io::ErrorKind::Unsupported))),
+        impatient_kind(&Impatient::Host(io::Error::from(
+            io::ErrorKind::Unsupported
+        ))),
         io::ErrorKind::Unsupported
     );
     assert_eq!(
@@ -430,7 +441,10 @@ fn an_act_with_a_bad_writer_or_unordered_stamps_is_refused_before_a_byte() {
             "{who:?} {stamps:?}: {refused:?}"
         );
     }
-    assert!(!store.0.join(DIR).exists(), "nothing written, not even the lock");
+    assert!(
+        !store.0.join(DIR).exists(),
+        "nothing written, not even the lock"
+    );
     assert!(ascending(&[]));
     assert!(ascending(&[7]));
     assert!(ascending(&[i64::MIN, 0, i64::MAX]));
@@ -459,7 +473,11 @@ fn a_ledger_start_that_is_no_head_is_damage_at_its_offset() {
         ("prefix", b"brutex quarantine".to_vec(), Ok(false)),
         ("garbage", b"garbage\n".to_vec(), Err(0)),
         ("torn-then-garbage", b"x\ttorn\ngarbage\n".to_vec(), Err(7)),
-        ("torn-then-head", format!("x\ttorn\n{head}").into_bytes(), Ok(true)),
+        (
+            "torn-then-head",
+            format!("x\ttorn\n{head}").into_bytes(),
+            Ok(true),
+        ),
         ("no-prefix", b"zzz".to_vec(), Err(0)),
     ];
     for (name, bytes, want) in cases {
@@ -588,7 +606,13 @@ fn an_image_built_from_a_line_whose_month_is_no_month_takes_no_slot() {
     let image = image_of(&ledger, &store.0, FEED).expect("an image");
     assert_eq!(described(&image), Some(99));
     assert_eq!(u64::from_le_bytes(field(&image, 32)), 0);
-    assert!(image.get(HEADER..).expect("slots").iter().all(|byte| *byte == 0));
+    assert!(
+        image
+            .get(HEADER..)
+            .expect("slots")
+            .iter()
+            .all(|byte| *byte == 0)
+    );
 }
 
 #[test]
@@ -672,7 +696,9 @@ fn two_months_of_one_instrument_list_every_cause_once() {
     assert_eq!(row.causes, vec![Cause::ForeignLevel, Cause::ZeroPrice]);
     assert!(summary.instrument("NSE", "CASH", "QFIXT").is_none());
     assert_eq!(
-        summary.month(minute("QFIXS", april)).map(|entry| entry.bars),
+        summary
+            .month(minute("QFIXS", april))
+            .map(|entry| entry.bars),
         Some(2)
     );
     let snapshot = Snapshot::load(&store.0, FEED).expect("a snapshot");

@@ -141,14 +141,10 @@ impl Pointer {
             (48, &self.promoted_at_micros.to_le_bytes()),
         ];
         for (at, field) in fields {
-            if let Some(slot) = bytes.get_mut(at..at + field.len()) {
-                slot.copy_from_slice(field);
-            }
+            put_field(&mut bytes, at, field);
         }
         let crc = seal(&bytes, self.record);
-        if let Some(slot) = bytes.get_mut(60..64) {
-            slot.copy_from_slice(&crc.to_le_bytes());
-        }
+        put_field(&mut bytes, 60, &crc.to_le_bytes());
         bytes
     }
 
@@ -187,6 +183,17 @@ impl Pointer {
             promoted_at_micros: i64_at(48)?,
             record,
         })
+    }
+}
+
+/// Copies `field` into `bytes` at `at`, or nothing when it would not fit: the
+/// one bounded write a record's fields go through (D-7324).
+fn put_field(bytes: &mut [u8], at: usize, field: &[u8]) {
+    if let Some(slot) = at
+        .checked_add(field.len())
+        .and_then(|end| bytes.get_mut(at..end))
+    {
+        slot.copy_from_slice(field);
     }
 }
 
@@ -623,3 +630,7 @@ pub(crate) fn refuse_superseded(root: &Path, path: StorePath<'_>) -> Result<(), 
 #[cfg(test)]
 #[path = "generation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "generation_cover_tests.rs"]
+mod cover_tests;

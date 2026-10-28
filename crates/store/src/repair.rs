@@ -1524,3 +1524,7 @@ fn io_at<T>(
 #[cfg(test)]
 #[path = "repair_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "repair_cover_tests.rs"]
+mod cover_tests;
