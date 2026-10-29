@@ -2375,9 +2375,7 @@ mod tests {
         assert_eq!((whole.kind, whole.data.as_slice()), ("blob", &b"hello"[..]));
 
         let mut not_a_pack = pack(&blob);
-        if let Some(byte) = not_a_pack.get_mut(3) {
-            *byte = b'X';
-        }
+        *not_a_pack.get_mut(3).expect("the magic's last byte") = b'X';
         assert!(read(&not_a_pack).is_none(), "not a pack");
 
         // An offset delta at distance 0 names its own offset as its base.
