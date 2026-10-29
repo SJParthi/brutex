@@ -115,6 +115,9 @@ pub(super) struct Frame {
     retained_bytes: u64,
     replayed_nodes: u64,
 }
+/// Inline bytes of one `Frame`; a regression test bounds it (D-7410).
+#[cfg(test)]
+pub(super) const FRAME_INLINE_BYTES: usize = std::mem::size_of::<Frame>();
 impl Frame {
     pub(super) fn declaration(declaration: Vec<u8>, cursor: Cursor, scope: u8) -> Self {
         Self {

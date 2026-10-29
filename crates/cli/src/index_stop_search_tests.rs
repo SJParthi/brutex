@@ -50,13 +50,29 @@ fn request<'a>(
     })
 }
 
+// D-7410: the whole end-to-end search (three invocations, the ancestry walk,
+// a refused replay and a restored reservation) runs on a thread whose stack
+// is HALF the harness default, in every build including the instrumented
+// opt-level-0 coverage build, so a value that creeps back onto the stack
+// fails here by name instead of aborting a coverage run. It lowers the
+// budget; nothing here or anywhere raises one (docs/06-limits.md).
+const END_TO_END_STACK: usize = 1 << 20;
+
 #[test]
+fn complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch()
+-> Result<(), String> {
+    crate::boolean_grammar_batch::on_bounded_stack(
+        "native-search-end-to-end",
+        END_TO_END_STACK,
+        complete_native_search,
+    )?
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one generated end-to-end sequence proves frozen ancestry, rejected replay, exact resume and pending restoration together"
 )]
-fn complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch()
--> Result<(), String> {
+fn complete_native_search() -> Result<(), String> {
     let fixture = Fixture::new()?;
     fixture.prepare("NIFTY")?;
     let configuration = config(&fixture)?;

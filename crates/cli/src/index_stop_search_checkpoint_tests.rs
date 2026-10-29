@@ -351,3 +351,249 @@ fn resealed_history_forks_and_missing_selected_evidence_are_not_completed_resear
         "resealed reset omits acknowledged ancestry"
     );
 }
+
+// D-7410: recovery walks the acknowledged ancestry in a loop and every frame
+// holds its cursor on the heap, so the walk fits a stack far below the 2 MiB
+// harness default at any ancestry depth, in every build. The bound is the
+// measured instrumented opt-level-0 peak with margin (docs/06-limits.md).
+const CHECKPOINT_STACK: usize = 512 << 10;
+const DEEP: u64 = 60;
+const FULL: u64 = 64;
+const CHAIN_NODES: u64 = 100_000;
+
+fn deep_budget() -> ReadBudget {
+    ReadBudget {
+        bytes: 64 * BYTES,
+        records: 1000,
+        nodes: 1000 * CHAIN_NODES,
+    }
+}
+fn fake_links() -> [Option<Link>; 8] {
+    let link = Link {
+        identity: [1; 32],
+        pin: [2; 32],
+    };
+    std::array::from_fn(|n| (SCOPE & (1 << n) != 0).then_some(link))
+}
+/// The declaration plus `batches` reserved-then-completed batches of
+/// `programs` each, every completion carrying generated (unverifiable) links.
+fn chain(journal: &mut Journal, batches: u64, programs: u64) -> Frame {
+    let mut frame = first(journal);
+    for _ in 0..batches {
+        let batch = Batch::prepare(
+            frame.cursor.clone(),
+            frame.work,
+            frame.programs,
+            Budget {
+                programs,
+                nodes: CHAIN_NODES,
+                bytes: BYTES,
+            },
+        )
+        .unwrap();
+        let mut pending = Frame::pending(&frame, batch).unwrap();
+        pending
+            .publish(journal, BYTES, deep_budget(), CHAIN_NODES)
+            .unwrap();
+        frame = Frame::done(pending, &fake_links()).unwrap();
+        frame
+            .publish(journal, BYTES, deep_budget(), CHAIN_NODES)
+            .unwrap();
+    }
+    frame
+}
+fn restore_full(
+    journal: &Journal,
+    root: &Path,
+    allowance: ReadBudget,
+    programs: u64,
+) -> Result<Option<Frame>, String> {
+    recover(
+        journal,
+        DECLARATION,
+        root,
+        allowance.bytes,
+        allowance.records,
+        allowance.nodes,
+        SCOPE,
+        &Cursor::new(&[30, 31]).unwrap(),
+        programs,
+        CHAIN_NODES,
+        &verification(),
+    )
+}
+fn bounded<T: Send>(name: &str, body: impl FnOnce() -> T + Send) -> T {
+    crate::boolean_grammar_batch::on_bounded_stack(name, CHECKPOINT_STACK, body).unwrap()
+}
+
+#[test]
+fn a_checkpoint_frame_holds_its_cursor_off_the_stack() {
+    let cursor = std::mem::size_of::<Cursor>();
+    assert!(
+        FRAME_INLINE_BYTES <= 2048,
+        "Frame is {FRAME_INLINE_BYTES} bytes inline"
+    );
+    assert!(FRAME_INLINE_BYTES < cursor / 4, "cursor {cursor} bytes");
+}
+
+#[test]
+fn ancestries_of_one_and_two_frames_recover_exactly_on_a_bounded_stack() {
+    bounded("checkpoint-shallow", || {
+        let scratch = Scratch::new().unwrap();
+        let id = hash(DECLARATION);
+        let mut journal = Journal::open(&scratch.0, NAMESPACE, id).unwrap();
+        let declaration = first(&mut journal);
+        let one = restore(&journal, &scratch.0, budget()).unwrap().unwrap();
+        assert_eq!(one.encode().unwrap(), declaration.encode().unwrap());
+        assert_eq!(one.location, declaration.location);
+        assert!(one.batch.is_none() && !one.pending);
+        let mut pending = next(&declaration);
+        pending
+            .publish(&mut journal, BYTES, budget(), NODES)
+            .unwrap();
+        let two = restore(&journal, &scratch.0, budget()).unwrap().unwrap();
+        assert_eq!(two.encode().unwrap(), pending.encode().unwrap());
+        assert!(two.pending);
+        assert_eq!(two.previous, declaration.location);
+        assert_eq!(journal.acknowledged(), 2);
+    });
+}
+
+#[test]
+fn the_deepest_ancestry_is_walked_in_a_loop_and_refused_at_its_oldest_unverified_child() {
+    let refusals = bounded("checkpoint-deepest", || {
+        let mut refusals = Vec::new();
+        for depth in [1, DEEP] {
+            let scratch = Scratch::new().unwrap();
+            let mut journal = Journal::open(&scratch.0, NAMESPACE, hash(DECLARATION)).unwrap();
+            let latest = chain(&mut journal, depth, 2);
+            assert_eq!(latest.completed_batches, depth);
+            let why = restore_full(&journal, &scratch.0, deep_budget(), 2)
+                .err()
+                .unwrap();
+            // Nothing is rewritten by a refused recovery.
+            assert_eq!(journal.acknowledged(), 2 * depth + 1);
+            assert_eq!(
+                journal.latest(64 * BYTES).unwrap().unwrap().seal,
+                latest.location.unwrap().1
+            );
+            refusals.push(why);
+        }
+        refusals
+    });
+    // The deepest chain reaches the same evidence refusal as a one-batch
+    // chain: every ancestor decoded, the first completed child refused.
+    assert_eq!(refusals[0], refusals[1]);
+    assert!(!refusals[0].contains("admission"), "{}", refusals[0]);
+}
+
+#[test]
+fn a_deep_ancestry_of_full_batches_at_exact_record_and_byte_admission_fits_a_bounded_stack() {
+    // Combination of extremes: the deepest chain, every batch full, and the
+    // read admissions at exactly the chain's own size and one below it.
+    bounded("checkpoint-deep-full", || {
+        let scratch = Scratch::new().unwrap();
+        let mut journal = Journal::open(&scratch.0, NAMESPACE, hash(DECLARATION)).unwrap();
+        let latest = chain(&mut journal, DEEP, FULL);
+        assert_eq!(latest.programs, DEEP * FULL);
+        let frames = journal.acknowledged();
+        assert_eq!(frames, 2 * DEEP + 1);
+        let evidence = restore_full(&journal, &scratch.0, deep_budget(), FULL)
+            .err()
+            .unwrap();
+        assert!(!evidence.contains("admission"), "{evidence}");
+        let exact = ReadBudget {
+            records: frames,
+            ..deep_budget()
+        };
+        assert_eq!(
+            restore_full(&journal, &scratch.0, exact, FULL).err().unwrap(),
+            evidence
+        );
+        let short = ReadBudget {
+            records: frames - 1,
+            ..deep_budget()
+        };
+        assert!(
+            restore_full(&journal, &scratch.0, short, FULL)
+                .err()
+                .unwrap()
+                .contains("cold record admission")
+        );
+        let tight = ReadBudget {
+            bytes: latest.retained_bytes - 1,
+            ..deep_budget()
+        };
+        assert!(
+            restore_full(&journal, &scratch.0, tight, FULL)
+                .err()
+                .unwrap()
+                .contains("admission")
+        );
+        let starved = ReadBudget {
+            nodes: 2 * DEEP * CHAIN_NODES - 1,
+            ..deep_budget()
+        };
+        assert!(
+            restore_full(&journal, &scratch.0, starved, FULL)
+                .err()
+                .unwrap()
+                .contains("admission")
+        );
+    });
+}
+
+#[test]
+fn a_pending_reservation_cut_and_reopened_twice_recovers_the_same_bytes_on_a_bounded_stack() {
+    bounded("checkpoint-cut-twice", || {
+        let scratch = Scratch::new().unwrap();
+        let id = hash(DECLARATION);
+        let mut journal = Journal::open(&scratch.0, NAMESPACE, id).unwrap();
+        let declaration = first(&mut journal);
+        let mut pending = next(&declaration);
+        pending
+            .publish(&mut journal, BYTES, budget(), NODES)
+            .unwrap();
+        drop(journal);
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let reopened = Journal::open(&scratch.0, NAMESPACE, id).unwrap();
+            let recovered = restore(&reopened, &scratch.0, budget()).unwrap().unwrap();
+            assert!(recovered.pending);
+            assert_eq!(reopened.acknowledged(), 2);
+            seen.push((recovered.encode().unwrap(), recovered.location));
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[0], (pending.encode().unwrap(), pending.location));
+    });
+}
+
+#[test]
+fn concurrent_bounded_stack_recoveries_of_one_deep_journal_agree() {
+    // Out of the box: two readers recover the same deep journal at once, each
+    // on its own small stack, and neither changes what the other reads.
+    let scratch = Scratch::new().unwrap();
+    let id = hash(DECLARATION);
+    let mut journal = Journal::open(&scratch.0, NAMESPACE, id).unwrap();
+    chain(&mut journal, DEEP, 2);
+    drop(journal);
+    let root = &scratch.0;
+    let refusals: Vec<String> = std::thread::scope(|scope| {
+        let readers: Vec<_> = (0..2)
+            .map(|reader| {
+                scope.spawn(move || {
+                    bounded(&format!("checkpoint-reader-{reader}"), || {
+                        let journal = Journal::open(root, NAMESPACE, id).unwrap();
+                        restore_full(&journal, root, deep_budget(), 2).err().unwrap()
+                    })
+                })
+            })
+            .collect();
+        readers.into_iter().map(|reader| reader.join().unwrap()).collect()
+    });
+    assert_eq!(refusals[0], refusals[1]);
+    assert_eq!(
+        Journal::open(root, NAMESPACE, id).unwrap().acknowledged(),
+        2 * DEEP + 1
+    );
+}

@@ -39,6 +39,33 @@ pub(crate) struct Batch {
 #[cfg(test)]
 pub(crate) const BATCH_INLINE_BYTES: usize = std::mem::size_of::<Batch>();
 
+/// Runs `body` on its own thread whose stack is exactly `bytes`, SMALLER than
+/// the harness's 2 MiB default, so a test proves the code fits with margin in
+/// every build (instrumented opt-level 0 included) instead of hoping the
+/// default suffices (D-7410). A panic in `body` is re-raised unchanged. A
+/// stack overflow is not a panic: it aborts the whole test process, which is
+/// the loud failure this bound exists to produce. Never raises a budget.
+///
+/// # Errors
+/// The OS would not start the thread.
+#[cfg(test)]
+pub(crate) fn on_bounded_stack<T: Send>(
+    name: &str,
+    bytes: usize,
+    body: impl FnOnce() -> T + Send,
+) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name(name.to_owned())
+            .stack_size(bytes)
+            .spawn_scoped(scope, body)
+            .map_err(|why| format!("bounded-stack thread {name} did not start: {why}"))?;
+        Ok(handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    })
+}
+
 impl Batch {
     pub(crate) fn prepare(
         before: impl Into<Box<Cursor>>,
