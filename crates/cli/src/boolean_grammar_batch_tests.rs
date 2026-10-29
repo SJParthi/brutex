@@ -343,9 +343,10 @@ fn batch_count_and_exact_length_admission_precede_cursor_parsing() {
 
 // D-7410: a `Batch` keeps its cursors on the heap, so every function holding
 // one stays small even at opt-level 0, and the replay path fits a stack far
-// below the harness's 2 MiB default in every build. The bound is the
-// measured instrumented opt-level-0 peak with margin (docs/06-limits.md).
-const BATCH_STACK: usize = 256 << 10;
+// below the harness's 2 MiB default in every build. Measured peak of these
+// tests in the instrumented opt-level-0 build: over 208 KiB, at most 224 KiB
+// (L-STACK1028-02); the bound is twice that.
+const BATCH_STACK: usize = 448 << 10;
 const MANY: u64 = 300;
 
 fn many_budget(programs: u64, nodes: u64) -> Budget {

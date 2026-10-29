@@ -354,9 +354,10 @@ fn resealed_history_forks_and_missing_selected_evidence_are_not_completed_resear
 
 // D-7410: recovery walks the acknowledged ancestry in a loop and every frame
 // holds its cursor on the heap, so the walk fits a stack far below the 2 MiB
-// harness default at any ancestry depth, in every build. The bound is the
-// measured instrumented opt-level-0 peak with margin (docs/06-limits.md).
-const CHECKPOINT_STACK: usize = 512 << 10;
+// harness default at any ancestry depth, in every build. Measured peak of
+// these tests in the instrumented opt-level-0 build: over 176 KiB, at most
+// 192 KiB (L-STACK1028-02); the bound is twice that.
+const CHECKPOINT_STACK: usize = 384 << 10;
 const DEEP: u64 = 60;
 const FULL: u64 = 64;
 const CHAIN_NODES: u64 = 100_000;
