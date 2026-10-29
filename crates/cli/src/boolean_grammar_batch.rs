@@ -17,9 +17,16 @@ pub(crate) struct Budget {
     pub bytes: u64,
 }
 
+/// Both cursors live on the heap (D-7410). A `Cursor` is about 13 KiB inline
+/// (`offered` plus four `MAX_INSTRUCTIONS`-long arrays), and at opt-level 0
+/// every move or temporary of a value gets its own stack slot, so an inline
+/// pair made each function that holds a `Batch` (or a checkpoint frame
+/// holding one) reserve tens of copies: the instrumented native search
+/// overflowed the 2 MiB test thread. Boxed, a `Batch` is a few machine words
+/// and its size no longer scales with the grammar's capacity.
 pub(crate) struct Batch {
-    before: Cursor,
-    after: Cursor,
+    before: Box<Cursor>,
+    after: Box<Cursor>,
     work_before: u64,
     work_after: u64,
     programs_before: u64,
@@ -28,9 +35,13 @@ pub(crate) struct Batch {
     exhausted: bool,
 }
 
+/// Inline bytes of one `Batch`; a regression test bounds it (D-7410).
+#[cfg(test)]
+pub(crate) const BATCH_INLINE_BYTES: usize = std::mem::size_of::<Batch>();
+
 impl Batch {
     pub(crate) fn prepare(
-        before: Cursor,
+        before: impl Into<Box<Cursor>>,
         work_before: u64,
         programs_before: u64,
         budget: Budget,
@@ -50,6 +61,7 @@ impl Batch {
         programs
             .try_reserve_exact(usize::try_from(budget.programs).map_err(display)?)
             .map_err(display)?;
+        let before: Box<Cursor> = before.into();
         let mut after = before.clone();
         let mut work_after = work_before;
         let mut exhausted = false;
@@ -90,6 +102,12 @@ impl Batch {
     }
 
     pub(crate) fn next_cursor(&self) -> Cursor {
+        Cursor::clone(&self.after)
+    }
+
+    /// The next cursor already on the heap, for a holder that keeps it boxed;
+    /// no `Cursor`-sized temporary passes through the caller's frame.
+    pub(crate) fn next_cursor_boxed(&self) -> Box<Cursor> {
         self.after.clone()
     }
 

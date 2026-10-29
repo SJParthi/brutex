@@ -103,7 +103,8 @@ pub(super) struct Frame {
     pub location: Option<(u64, [u8; 32])>,
     pub pending: bool,
     pub completed_batches: u64,
-    pub cursor: Cursor,
+    /// Boxed for the same reason as the cursors inside `Batch` (D-7410).
+    pub cursor: Box<Cursor>,
     pub work: u64,
     pub programs: u64,
     pub exhausted: bool,
@@ -123,7 +124,7 @@ impl Frame {
             location: None,
             pending: false,
             completed_batches: 0,
-            cursor,
+            cursor: Box::new(cursor),
             work: 0,
             programs: 0,
             exhausted: false,
@@ -194,7 +195,7 @@ impl Frame {
                 .completed_batches
                 .checked_add(1)
                 .ok_or("single-stop batch counter overflow")?,
-            cursor: batch.next_cursor(),
+            cursor: batch.next_cursor_boxed(),
             work: batch.work(),
             programs: batch.cumulative_programs()?,
             exhausted: batch.exhausted(),
@@ -351,7 +352,7 @@ impl Frame {
             pending: flags[0] == 1,
             exhausted: flags[1] == 1,
             completed_batches,
-            cursor,
+            cursor: Box::new(cursor),
             work,
             programs,
             batch,
@@ -536,7 +537,7 @@ pub(super) fn transition(prior: Option<&Frame>, next: &Frame) -> Result<(), Stri
             || Some(next.completed_batches) != prior.completed_batches.checked_add(1)
             || next.work != batch.work()
             || next.programs != batch.cumulative_programs()?
-            || next.cursor.encode() != batch.next_cursor().encode()
+            || next.cursor.encode() != batch.next_cursor_boxed().encode()
             || next.exhausted != batch.exhausted()
         {
             return Err("single-stop completion changed the reserved programs or counters".into());
