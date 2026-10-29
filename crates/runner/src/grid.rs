@@ -11037,3 +11037,7 @@ fn thin_to_budget(targets: Ladder, stops: usize, trails: usize) -> Ladder {
     let thinned: Vec<Ppm> = targets.rungs().iter().step_by(stride).copied().collect();
     Ladder::new(thinned).unwrap_or(targets)
 }
+
+#[cfg(test)]
+#[path = "grid_cover_tests.rs"]
+mod cover_tests;

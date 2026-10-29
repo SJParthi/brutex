@@ -359,6 +359,8 @@ macro_rules! walk_forward_tests {
                     // Nothing profitable, yet a gain.
                     (3, 0, 1),
                     // Every decided fold profitable, yet no gain.
+                    // One fold decided, profitable, and no gain: the smallest such walk.
+                    (1, 1, 0),
                     (3, 3, 0),
                     (3, 3, i64::MIN),
                 ] {
