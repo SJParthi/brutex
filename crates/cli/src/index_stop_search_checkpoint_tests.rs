@@ -768,13 +768,16 @@ fn an_empty_batch_completes_without_children_and_keeps_the_last_saved_table() {
         empty.location = Some((6, [10; 32]));
     }
     let carried = empty.latest_saved;
-    let reserved = copy(&empty, empty.location.unwrap());
+    assert!(carried.is_some(), "the earlier completions saved a table");
+    // The saved table is rebuilt from ancestors, never decoded, so the prior
+    // for the transition is a codec copy and the completion takes the original.
+    let prior = copy(&empty, empty.location.unwrap());
     assert!(Frame::done(copy(&empty, empty.location.unwrap()), &fake_links()).is_err());
-    let mut completed = Frame::done(reserved, &[None; 8]).unwrap();
+    let mut completed = Frame::done(empty, &[None; 8]).unwrap();
     assert!(completed.links.iter().all(Option::is_none));
     assert_eq!(completed.latest_saved, carried);
     completed.location = Some((7, [11; 32]));
-    assert!(transition(Some(&empty), &completed).is_ok());
+    assert!(transition(Some(&prior), &completed).is_ok());
 }
 
 #[test]
