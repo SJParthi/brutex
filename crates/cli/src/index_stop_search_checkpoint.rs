@@ -2,7 +2,7 @@
 //! never advances the cursor; acknowledged predecessors are verified by pin.
 use super::{
     AdmissionPolicyV1, Batch, Cursor, Journal, Path, PopulationStatisticsProcedureV2,
-    PreparedSources, Request, allocation_for, debug, display, hash, month_days, qualification,
+    PreparedSources, Request, allocation_for, display, hash, month_days, qualification,
 };
 use crate::search_checkpoint::Saved;
 use vocab::expression_search::CURSOR_BYTES;
@@ -115,9 +115,6 @@ pub(super) struct Frame {
     retained_bytes: u64,
     replayed_nodes: u64,
 }
-/// Inline bytes of one `Frame`; a regression test bounds it (D-7410).
-#[cfg(test)]
-pub(super) const FRAME_INLINE_BYTES: usize = std::mem::size_of::<Frame>();
 impl Frame {
     pub(super) fn declaration(
         declaration: Vec<u8>,

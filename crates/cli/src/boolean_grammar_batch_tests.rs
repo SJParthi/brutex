@@ -348,6 +348,7 @@ fn batch_count_and_exact_length_admission_precede_cursor_parsing() {
 // (L-STACK1028-02); the bound is twice that.
 const BATCH_STACK: usize = 448 << 10;
 const MANY: u64 = 300;
+const MANY_PROGRAMS: usize = 300;
 
 fn many_budget(programs: u64, nodes: u64) -> Budget {
     Budget {
@@ -370,15 +371,14 @@ fn replays_exactly(batch: &Batch, bytes: u64, nodes: u64) -> Vec<u8> {
 
 #[test]
 fn a_batch_holds_its_cursors_off_the_stack_whatever_the_grammar_capacity() {
-    let cursor = std::mem::size_of::<Cursor>();
+    let start = Cursor::new(&[30, 31]).unwrap();
+    let cursor = std::mem::size_of_val(&start);
+    let batch = Batch::prepare(start, 0, 0, budget(3, 1000)).unwrap();
+    let inline = std::mem::size_of_val(&batch);
     // Two inline cursors were 2 * 13 KiB; boxed, a batch is a few words.
     assert!(cursor > 8 * 1024, "the cursor itself is {cursor} bytes");
-    assert!(
-        BATCH_INLINE_BYTES <= 256,
-        "Batch is {BATCH_INLINE_BYTES} bytes inline"
-    );
-    assert!(BATCH_INLINE_BYTES < cursor / 32);
-    let batch = Batch::prepare(Cursor::new(&[30, 31]).unwrap(), 0, 0, budget(3, 1000)).unwrap();
+    assert!(inline <= 256, "Batch is {inline} bytes inline");
+    assert!(inline < cursor / 32);
     assert_eq!(
         batch.next_cursor_boxed().encode(),
         batch.next_cursor().encode()
@@ -431,7 +431,7 @@ fn empty_single_many_and_terminal_batches_replay_exactly_on_a_bounded_stack() {
     let one = runner::expression::ENCODED_LEN;
     assert_eq!(
         sizes,
-        [HEADER, HEADER + one, HEADER + MANY as usize * one, HEADER]
+        [HEADER, HEADER + one, HEADER + MANY_PROGRAMS * one, HEADER]
     );
 }
 
@@ -462,7 +462,7 @@ fn many_programs_paused_by_nodes_then_resumed_twice_match_one_whole_batch_on_a_b
                 piece
                     .programs()
                     .iter()
-                    .take(MANY as usize - seen.len())
+                    .take(MANY_PROGRAMS - seen.len())
                     .map(Expression::encode),
             );
             cursor = piece.next_cursor_boxed();
@@ -519,7 +519,7 @@ fn a_bounded_stack_body_keeps_its_panic_and_its_value() {
     // a pass or as a different message.
     let panicked = std::panic::catch_unwind(|| {
         on_bounded_stack("batch-panics", BATCH_STACK, || -> u8 {
-            panic!("generated refusal")
+            std::panic::resume_unwind(Box::new("generated refusal"))
         })
     });
     let message = panicked.err().unwrap();

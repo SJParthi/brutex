@@ -44,10 +44,6 @@ pub(crate) fn decode_boxed(bytes: &[u8; CURSOR_BYTES]) -> Result<Box<Cursor>, St
     Cursor::decode(bytes).map(Box::new).map_err(debug)
 }
 
-/// Inline bytes of one `Batch`; a regression test bounds it (D-7410).
-#[cfg(test)]
-pub(crate) const BATCH_INLINE_BYTES: usize = std::mem::size_of::<Batch>();
-
 /// Runs `body` on its own thread whose stack is exactly `bytes`, SMALLER than
 /// the harness's 2 MiB default, so a test proves the code fits with margin in
 /// every build (instrumented opt-level 0 included) instead of hoping the

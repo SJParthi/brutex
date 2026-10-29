@@ -429,12 +429,19 @@ fn bounded<T: Send>(name: &str, body: impl FnOnce() -> T + Send) -> T {
 
 #[test]
 fn a_checkpoint_frame_holds_its_cursor_off_the_stack() {
-    let cursor = std::mem::size_of::<Cursor>();
-    assert!(
-        FRAME_INLINE_BYTES <= 2048,
-        "Frame is {FRAME_INLINE_BYTES} bytes inline"
+    let start = Cursor::new(&[30, 31]).unwrap();
+    let cursor = std::mem::size_of_val(&start);
+    let frame = Frame::declaration(DECLARATION.to_vec(), start, SCOPE);
+    let inline = std::mem::size_of_val(&frame);
+    assert!(inline <= 2048, "Frame is {inline} bytes inline");
+    assert!(inline < cursor / 4, "cursor {cursor} bytes");
+    // A boxed and an owned cursor declare the same frame.
+    let boxed = Frame::declaration(
+        DECLARATION.to_vec(),
+        Box::new(Cursor::new(&[30, 31]).unwrap()),
+        SCOPE,
     );
-    assert!(FRAME_INLINE_BYTES < cursor / 4, "cursor {cursor} bytes");
+    assert_eq!(boxed.encode().unwrap(), frame.encode().unwrap());
 }
 
 #[test]
@@ -484,8 +491,10 @@ fn the_deepest_ancestry_is_walked_in_a_loop_and_refused_at_its_oldest_unverified
     });
     // The deepest chain reaches the same evidence refusal as a one-batch
     // chain: every ancestor decoded, the first completed child refused.
-    assert_eq!(refusals[0], refusals[1]);
-    assert!(!refusals[0].contains("admission"), "{}", refusals[0]);
+    assert_eq!(refusals.len(), 2);
+    let (shallow, deepest) = (refusals.first().unwrap(), refusals.last().unwrap());
+    assert_eq!(shallow, deepest);
+    assert!(!shallow.contains("admission"), "{shallow}");
 }
 
 #[test]
@@ -566,8 +575,12 @@ fn a_pending_reservation_cut_and_reopened_twice_recovers_the_same_bytes_on_a_bou
             assert_eq!(reopened.acknowledged(), 2);
             seen.push((recovered.encode().unwrap(), recovered.location));
         }
-        assert_eq!(seen[0], seen[1]);
-        assert_eq!(seen[0], (pending.encode().unwrap(), pending.location));
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.first(), seen.last());
+        assert_eq!(
+            seen.first().unwrap(),
+            &(pending.encode().unwrap(), pending.location)
+        );
     });
 }
 
@@ -608,6 +621,11 @@ fn a_second_owner_is_refused_while_a_deep_recovery_holds_the_journal_and_then_ag
     assert_eq!(second, (first, 2 * DEEP + 1));
 }
 
+/// One edit of a first frame, given the reservation and completion to borrow from.
+type FirstChange = fn(&mut Frame, &Frame, &Frame);
+/// One edit of a (prior, next) pair, given the completion to borrow from.
+type Change = fn(&mut Frame, &mut Frame, &Frame);
+
 /// An independent copy of `frame` saved at `at`, through the canonical codec.
 fn copy(frame: &Frame, at: (u64, [u8; 32])) -> Frame {
     let saved = Saved {
@@ -647,7 +665,7 @@ fn triple() -> (Frame, Frame, Frame) {
 fn every_first_frame_field_that_is_not_an_empty_declaration_is_refused() {
     let (declaration, pending, done) = triple();
     assert!(transition(None, &declaration).is_ok());
-    let changes: [(&str, fn(&mut Frame, &Frame, &Frame)); 9] = [
+    let edits: [(&str, FirstChange); 9] = [
         ("predecessor", |f, _, _| f.previous = Some((0, [1; 32]))),
         ("pending", |f, _, _| f.pending = true),
         ("exhausted", |f, _, _| f.exhausted = true),
@@ -662,7 +680,7 @@ fn every_first_frame_field_that_is_not_an_empty_declaration_is_refused() {
         ("links", |f, _, _| f.links = fake_links()),
         ("cursor", |f, _, d| f.cursor = d.cursor.clone()),
     ];
-    for (name, change) in changes {
+    for (name, change) in edits {
         let mut changed = copy(&declaration, (1, [5; 32]));
         change(&mut changed, &pending, &done);
         assert_eq!(
@@ -681,8 +699,7 @@ fn every_reservation_and_completion_field_that_does_not_follow_is_refused() {
     let ancestry = "single-stop checkpoint ancestry or terminal transition differs";
     let reserve = "single-stop reservation changed or skipped its acknowledged cursor";
     let complete = "single-stop completion changed the reserved programs or counters";
-    // (refusal, which pair, change to the prior, change to the next)
-    type Change = fn(&mut Frame, &mut Frame, &Frame);
+    // (refusal, which pair, change to the prior and the next)
     let cases: [(&str, bool, Change); 22] = [
         (ancestry, false, |_, n, _| n.previous = Some((9, [9; 32]))),
         (ancestry, false, |_, n, _| n.declaration = b"other".to_vec()),
