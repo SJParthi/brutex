@@ -79,7 +79,7 @@ fn a_v1_header_is_refused_by_its_first_wrong_field() {
     );
     // Empty and one-byte buffers that claim to be complete: the magic read
     // itself runs out, so the refusal is a length at the read's end.
-    for short in [&[][..], &[b'B'][..], &good[..11]] {
+    for short in [&[][..], &b"B"[..], &good[..11]] {
         assert_eq!(
             open(short, short.len(), EVIDENCE_DOMAIN_V1, 3),
             Some(if short.len() < 4 {
@@ -557,3 +557,193 @@ later_reader_tests!(
     ADMISSION_VERSION_V3,
     ADMISSION_VERSION_V1
 );
+
+/// Verdict bytes with each partition and the status written as given.
+fn verdict_bytes(parts: [u64; 4], status: u8) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for part in parts {
+        payload.extend_from_slice(&part.to_le_bytes());
+    }
+    payload.push(status);
+    record(super::VERDICT_DOMAIN_V1, ADMISSION_VERSION_V1, &payload)
+}
+
+#[test]
+fn a_verdict_decodes_only_when_its_partitions_union_and_status_agree() {
+    use super::{AdmissionStatusV1, AdmissionVerdictPartitionV1, AdmissionVerdictV1};
+    let decode = |parts: [u64; 4], status: u8| {
+        AdmissionVerdictV1::from_canonical_bytes(&verdict_bytes(parts, status))
+    };
+    // Every status decodes from the partitions that make it.
+    assert_eq!(
+        decode([0, 0, 0, 0], 0).map(AdmissionVerdictV1::status),
+        Ok(AdmissionStatusV1::Admitted)
+    );
+    assert_eq!(
+        decode([1, 1, 0, 0], 1).map(AdmissionVerdictV1::status),
+        Ok(AdmissionStatusV1::Rejected)
+    );
+    assert_eq!(
+        decode([3, 1, 2, 0], 2).map(AdmissionVerdictV1::status),
+        Ok(AdmissionStatusV1::Unmeasured)
+    );
+    assert_eq!(
+        decode([7, 1, 2, 4], 3).map(AdmissionVerdictV1::status),
+        Ok(AdmissionStatusV1::Refused)
+    );
+    // Overlapping partitions: failed with unmeasured, failed with refused,
+    // unmeasured with refused. Each is inconsistent, never decoded.
+    for parts in [[1, 1, 1, 0], [1, 1, 0, 1], [2, 0, 2, 2]] {
+        assert_eq!(
+            decode(parts, 3),
+            Err(AdmissionCanonicalRefusalV1::VerdictInconsistent),
+            "{parts:?}"
+        );
+    }
+    // A status no partition set makes, and a union that is not the reasons.
+    assert_eq!(
+        decode([1, 1, 0, 0], 3),
+        Err(AdmissionCanonicalRefusalV1::VerdictInconsistent)
+    );
+    assert_eq!(
+        decode([3, 1, 0, 0], 1),
+        Err(AdmissionCanonicalRefusalV1::VerdictInconsistent)
+    );
+    // Bits past the known set are refused by the partition that holds them.
+    let unknown = 1_u64 << 63;
+    assert_eq!(
+        decode([0, 0, 0, unknown], 0),
+        Err(AdmissionCanonicalRefusalV1::UnknownReasonBits {
+            partition: AdmissionVerdictPartitionV1::Refused,
+        })
+    );
+    assert_eq!(
+        decode([0, 0, 0, 0], 4),
+        Err(AdmissionCanonicalRefusalV1::Tag {
+            record: AdmissionCanonicalRecordV1::Verdict,
+            offset: CANONICAL_HEADER_LEN + 32,
+            actual: 4,
+        })
+    );
+    let short = verdict_bytes([0; 4], 0);
+    assert!(matches!(
+        AdmissionVerdictV1::from_canonical_bytes(&short[..44]),
+        Err(AdmissionCanonicalRefusalV1::Length {
+            record: AdmissionCanonicalRecordV1::Verdict,
+            expected: 45,
+            actual: 44,
+        })
+    ));
+    // A refused verdict encodes its status as 3 and round-trips.
+    let refused = decode([4, 0, 0, 4], 3).unwrap();
+    assert_eq!(refused.canonical_bytes().last(), Some(&3));
+    assert_eq!(
+        AdmissionVerdictV1::from_canonical_bytes(&refused.canonical_bytes()),
+        Ok(refused)
+    );
+}
+
+#[test]
+fn reconciliation_checks_each_status_against_its_own_partitions() {
+    use super::{AdmissionStatusV1, AdmissionVerdictV1, ReasonBits};
+    let bits = |b: u64| ReasonBits::from_bits(b).unwrap();
+    let verdict = |failed: u64, unmeasured: u64, refused: u64, status| AdmissionVerdictV1 {
+        reasons: bits(failed | unmeasured | refused),
+        failed: bits(failed),
+        unmeasured: bits(unmeasured),
+        refused: bits(refused),
+        status,
+    };
+    use AdmissionStatusV1::{Admitted, Refused, Rejected, Unmeasured};
+    for (failed, unmeasured, refused, status, holds) in [
+        (0, 0, 0, Admitted, true),
+        (1, 0, 0, Admitted, false),
+        (1, 0, 0, Rejected, true),
+        // Rejected with no failure, and rejected while something is unmeasured
+        // or refused: no partition set a decoder builds says that.
+        (0, 0, 0, Rejected, false),
+        (1, 2, 0, Rejected, false),
+        (1, 0, 2, Rejected, false),
+        (0, 2, 0, Unmeasured, true),
+        (0, 0, 0, Unmeasured, false),
+        (0, 2, 4, Unmeasured, false),
+        (0, 0, 4, Refused, true),
+        (0, 0, 0, Refused, false),
+        // Overlaps, each pair alone.
+        (1, 1, 0, Unmeasured, false),
+        (1, 0, 1, Refused, false),
+        (0, 1, 1, Refused, false),
+    ] {
+        assert_eq!(
+            verdict(failed, unmeasured, refused, status).reconciles(),
+            holds,
+            "{failed} {unmeasured} {refused} {status:?}"
+        );
+    }
+    let mut wrong_union = verdict(1, 0, 0, Rejected);
+    wrong_union.reasons = bits(3);
+    assert!(!wrong_union.reconciles());
+}
+
+#[test]
+fn a_rate_whose_count_overflows_its_projection_is_a_mismatch_never_a_wrap() {
+    use super::{
+        AdmissionEvidenceFieldV1, AdmissionEvidenceRefusalKindV1, AdmissionEvidenceRefusalV1,
+        validate_count_rate,
+    };
+    let m = ObservedU64V1::Measured;
+    let field = AdmissionEvidenceFieldV1::WinRate;
+    assert_eq!(
+        validate_count_rate(m(1), m(u64::MAX), m(0), field),
+        Err(AdmissionEvidenceRefusalV1 {
+            field,
+            kind: AdmissionEvidenceRefusalKindV1::RateCountMismatch,
+        })
+    );
+    // The largest count whose projection still fits is checked, not refused.
+    let fits = u64::MAX / 1_000_000;
+    assert_eq!(
+        validate_count_rate(m(1), m(fits), m(fits * 1_000_000), field),
+        Ok(())
+    );
+    assert_eq!(validate_count_rate(m(4), m(1), m(250_000), field), Ok(()));
+}
+
+#[test]
+fn a_decision_seal_of_the_wrong_length_is_refused_before_any_field() {
+    use super::{ADMISSION_DECISION_CANONICAL_LEN_V1, AdmissionDecisionSealV1};
+    for len in [
+        0,
+        1,
+        ADMISSION_DECISION_CANONICAL_LEN_V1 - 1,
+        ADMISSION_DECISION_CANONICAL_LEN_V1 + 1,
+    ] {
+        assert_eq!(
+            AdmissionDecisionSealV1::from_canonical_bytes(&vec![0; len]).err(),
+            Some(AdmissionCanonicalRefusalV1::Length {
+                record: AdmissionCanonicalRecordV1::Decision,
+                expected: ADMISSION_DECISION_CANONICAL_LEN_V1,
+                actual: len,
+            })
+        );
+    }
+}
+
+#[test]
+fn an_exact_probability_needs_a_denominator_at_least_its_numerator() {
+    use super::{AdmissionExactProbabilityV2, AdmissionProbabilityRefusalV2};
+    assert_eq!(
+        AdmissionExactProbabilityV2::new(0, 0),
+        Err(AdmissionProbabilityRefusalV2::ZeroDenominator)
+    );
+    assert_eq!(
+        AdmissionExactProbabilityV2::new(u64::MAX, 0),
+        Err(AdmissionProbabilityRefusalV2::ZeroDenominator)
+    );
+    assert_eq!(
+        AdmissionExactProbabilityV2::new(2, 1),
+        Err(AdmissionProbabilityRefusalV2::NumeratorExceedsDenominator)
+    );
+    assert!(AdmissionExactProbabilityV2::new(u64::MAX, u64::MAX).is_ok());
+    assert!(AdmissionExactProbabilityV2::new(0, 1).is_ok());
+}

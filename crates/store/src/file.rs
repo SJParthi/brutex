@@ -1243,6 +1243,10 @@ fn write_locked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
 }
 
 impl fmt::Display for StoreError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per StoreError variant; each sealed arm hands its own fields to its sentence (D-7324)"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
