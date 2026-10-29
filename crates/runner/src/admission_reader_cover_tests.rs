@@ -646,6 +646,7 @@ fn a_verdict_decodes_only_when_its_partitions_union_and_status_agree() {
 #[test]
 fn reconciliation_checks_each_status_against_its_own_partitions() {
     use super::{AdmissionStatusV1, AdmissionVerdictV1, ReasonBits};
+    use AdmissionStatusV1::{Admitted, Refused, Rejected, Unmeasured};
     let bits = |b: u64| ReasonBits::from_bits(b).unwrap();
     let verdict = |failed: u64, unmeasured: u64, refused: u64, status| AdmissionVerdictV1 {
         reasons: bits(failed | unmeasured | refused),
@@ -654,7 +655,6 @@ fn reconciliation_checks_each_status_against_its_own_partitions() {
         refused: bits(refused),
         status,
     };
-    use AdmissionStatusV1::{Admitted, Refused, Rejected, Unmeasured};
     for (failed, unmeasured, refused, status, holds) in [
         (0, 0, 0, Admitted, true),
         (1, 0, 0, Admitted, false),

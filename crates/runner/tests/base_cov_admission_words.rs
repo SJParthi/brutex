@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, reason = "a test states its expectation")]
 //! BASE-COV-LIBS: every admission field has its own wire name, in the
 //! table's order, and no two fields share one.
 

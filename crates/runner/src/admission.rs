@@ -9562,3 +9562,7 @@ mod tests {
 #[cfg(test)]
 #[path = "admission_reader_cover_tests.rs"]
 mod reader_cover_tests;
+
+#[cfg(test)]
+#[path = "admission_statistics_cover_tests.rs"]
+mod statistics_cover_tests;
