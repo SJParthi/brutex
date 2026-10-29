@@ -1942,3 +1942,7 @@ mod tests {
         assert_eq!(ids, [Some(7), Some(-3)]);
     }
 }
+
+#[cfg(test)]
+#[path = "reader_cover_tests.rs"]
+mod reader_cover_tests;
