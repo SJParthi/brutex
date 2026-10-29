@@ -87542,12 +87542,12 @@ reserved tens of `Frame`-sized copies.
 **Decision.** Fix it at the cause, never by a stack raise in the recipe, CI, a
 script, a test or the environment. `Batch` keeps `before` and `after` as
 `Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
-changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded, and an
-alphabet's first cursor built, straight into a box in a frame of its own
-(`decode_boxed`, `initial_boxed`). After (the same build): those five frames
-are 36,144, 92,768, 28,992, 80,608 and 75,808 B, and the whole end-to-end body
-needs over 736 KiB and at most 752 KiB; `Batch` and `Frame` are a few hundred
-bytes inline. No byte format, identity, report, progress record, refusal or
+changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded
+straight into a box in a frame of its own (`decode_boxed`). After (the same
+build, this tip): those five frames are 36,144, 92,768, 28,992, 19,168 and
+14,384 B, and the end-to-end test overflows a 704 KiB test thread and passes on
+768 KiB, so its peak is over 704 KiB and at most 768 KiB, under the 2 MiB
+default 2.6 times; `Batch` and `Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
 admission changes: `encode` and `decode` are untouched apart from where the
 decoded cursor lives, and every existing round-trip and refusal test of the
 batch, the checkpoint, the reader and the end-to-end search passes unchanged.
@@ -87567,9 +87567,9 @@ inline retention is the D-0648 shape; boxing them is a wider change left for
 the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
 
 **Held by tests, smaller than the default, never larger.** The end-to-end
-test is unchanged and runs on the harness's default thread (2.7 times its
-measured peak; it was measured once on a 1.25 MiB thread, which it fits, and
-that wrapper was not kept, so the unchanged test body adds no lines to the D2
+test is unchanged and runs on the harness's default thread (2.6 times its
+measured peak; an earlier draft ran it on a 1.25 MiB thread, which it fits,
+and that wrapper was not kept, so the unchanged test adds no lines to the D2
 set); the batch and checkpoint tests run their bodies on 448 KiB and 384 KiB
 threads (twice their measured peaks); and `Batch` and `Frame` sizes are
 bounded. A value that creeps back onto the stack overflows there, in every
