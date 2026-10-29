@@ -418,8 +418,7 @@ fn empty_single_many_and_terminal_batches_replay_exactly_on_a_bounded_stack() {
                 .to_le_bytes(),
         );
         *raw.get_mut(14).unwrap() = 1;
-        let terminal =
-            Batch::prepare(Cursor::decode(&raw).unwrap(), 9, 4, budget(2, 100)).unwrap();
+        let terminal = Batch::prepare(Cursor::decode(&raw).unwrap(), 9, 4, budget(2, 100)).unwrap();
         assert!(terminal.exhausted() && terminal.programs().is_empty());
         [
             replays_exactly(&empty, BYTES, 1).len(),
@@ -452,13 +451,20 @@ fn many_programs_paused_by_nodes_then_resumed_twice_match_one_whole_batch_on_a_b
         let (mut work, mut count, mut seen) = (0, 0, Vec::new());
         let mut pieces = 0;
         while (seen.len() as u64) < MANY {
-            let piece = Batch::prepare(cursor, work, count, many_budget(MANY, whole.work() / 3 + 1))
-                .unwrap();
+            let piece =
+                Batch::prepare(cursor, work, count, many_budget(MANY, whole.work() / 3 + 1))
+                    .unwrap();
             // Replay admits exactly the declared capacity, never one byte less.
             let capacity = MANY * runner::expression::ENCODED_LEN as u64 + HEADER as u64;
             replays_exactly(&piece, capacity, whole.work());
             assert!(Batch::decode(&piece.encode().unwrap(), capacity - 1, whole.work()).is_err());
-            seen.extend(piece.programs().iter().take(MANY as usize - seen.len()).map(Expression::encode));
+            seen.extend(
+                piece
+                    .programs()
+                    .iter()
+                    .take(MANY as usize - seen.len())
+                    .map(Expression::encode),
+            );
             cursor = piece.next_cursor_boxed();
             work = piece.work();
             count = piece.cumulative_programs().unwrap();
@@ -467,7 +473,11 @@ fn many_programs_paused_by_nodes_then_resumed_twice_match_one_whole_batch_on_a_b
         assert!(pieces >= 3, "the node allowance paused {pieces} times");
         assert_eq!(
             seen,
-            whole.programs().iter().map(Expression::encode).collect::<Vec<_>>()
+            whole
+                .programs()
+                .iter()
+                .map(Expression::encode)
+                .collect::<Vec<_>>()
         );
     })
     .unwrap();
@@ -485,13 +495,19 @@ fn concurrent_bounded_stack_replays_of_one_batch_agree_byte_for_byte() {
                 let raw = &raw;
                 scope.spawn(move || {
                     on_bounded_stack(&format!("batch-reader-{reader}"), BATCH_STACK, || {
-                        Batch::decode(raw, BYTES, 100_000).unwrap().encode().unwrap()
+                        Batch::decode(raw, BYTES, 100_000)
+                            .unwrap()
+                            .encode()
+                            .unwrap()
                     })
                     .unwrap()
                 })
             })
             .collect();
-        workers.into_iter().map(|worker| worker.join().unwrap()).collect()
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
     });
     assert_eq!(replays.len(), 8);
     assert!(replays.iter().all(|bytes| *bytes == raw));
@@ -502,7 +518,9 @@ fn a_bounded_stack_body_keeps_its_panic_and_its_value() {
     // A refusal inside the bounded body surfaces as the same panic, never as
     // a pass or as a different message.
     let panicked = std::panic::catch_unwind(|| {
-        on_bounded_stack("batch-panics", BATCH_STACK, || -> u8 { panic!("generated refusal") })
+        on_bounded_stack("batch-panics", BATCH_STACK, || -> u8 {
+            panic!("generated refusal")
+        })
     });
     let message = panicked.err().unwrap();
     assert_eq!(message.downcast_ref::<&str>(), Some(&"generated refusal"));

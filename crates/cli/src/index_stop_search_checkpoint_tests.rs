@@ -508,7 +508,9 @@ fn a_deep_ancestry_of_full_batches_at_exact_record_and_byte_admission_fits_a_bou
             ..deep_budget()
         };
         assert_eq!(
-            restore_full(&journal, &scratch.0, exact, FULL).err().unwrap(),
+            restore_full(&journal, &scratch.0, exact, FULL)
+                .err()
+                .unwrap(),
             evidence
         );
         let short = ReadBudget {
@@ -597,7 +599,9 @@ fn a_second_owner_is_refused_while_a_deep_recovery_holds_the_journal_and_then_ag
     let second = bounded("checkpoint-second-owner-after", || {
         let journal = Journal::open(root, NAMESPACE, id).unwrap();
         (
-            restore_full(&journal, root, deep_budget(), 2).err().unwrap(),
+            restore_full(&journal, root, deep_budget(), 2)
+                .err()
+                .unwrap(),
             journal.acknowledged(),
         )
     });
