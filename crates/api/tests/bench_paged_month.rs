@@ -70,7 +70,7 @@ fn june() -> String {
 /// One month a store holds: its year-month, its first second, its rows.
 struct Month {
     year: u16,
-    month: u8,
+    number: u8,
     start_s: i64,
     rows: usize,
 }
@@ -79,7 +79,7 @@ struct Month {
 fn june_of(rows: usize) -> Month {
     Month {
         year: 2024,
-        month: 6,
+        number: 6,
         start_s: JUNE_START_S,
         rows,
     }
@@ -104,7 +104,7 @@ fn symbol_id() -> u32 {
 
 /// Writes one month of NIFTY index one-second bars under `root`.
 fn write_month(root: &Path, month: &Month) -> Entry {
-    let ym = YearMonth::new(month.year, month.month).expect("a real month");
+    let ym = YearMonth::new(month.year, month.number).expect("a real month");
     let path = StorePath::new(PathParts {
         vendor: Vendor::Gdfl,
         exchange: "NSE",
@@ -366,7 +366,7 @@ fn a_window_across_a_month_edge_pages_on_through_it() {
                 june_of(june_rows),
                 Month {
                     year: 2024,
-                    month: 7,
+                    number: 7,
                     start_s: JULY_START_S,
                     rows: july_rows,
                 },
@@ -396,7 +396,7 @@ fn a_missing_month_mid_range_is_refused_not_read_as_empty() {
             june_of(10),
             Month {
                 year: 2024,
-                month: 8,
+                number: 8,
                 start_s: AUGUST_START_S,
                 rows: 10,
             },
