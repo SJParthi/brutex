@@ -87511,3 +87511,57 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7410 — The instrumented cli tests' stack overflow is fixed at its cause: the grammar cursors a batch and a checkpoint frame hold live on the heap, and no stack budget is raised anywhere (BASE-STACK-1028) — 2026-10-29
+
+**Context** (BASE-STACK-1028, found 28 Oct 2026 by TESTTIME-1025's D3 deep
+step). D3 coverage Route B (`state/decisions-20261027/d3-route-b.sh`) builds
+the `cli` lib unit tests instrumented at opt-level 0. That binary aborted
+with SIGABRT: `index_stop_search::tests::complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch`
+overflowed the 2 MiB test thread, and a process ended by a signal writes no
+profile, so no `cli` file of any D2 set could be read and D3 coverage of every
+`cli` part was NOT PROVED. Some agents worked around it with a raised
+`RUST_MIN_STACK`; the D3 recipe forbids that, and so does this decision.
+
+**Measured on 29 Oct 2026, before** (the tip `f01d7a0e4`, the exact Route B
+build): the test overflows at 2 MiB and passes at 2176 KiB and every larger
+size tried, so its peak is over 2048 KiB and at most 2176 KiB (a
+`RUST_MIN_STACK` sweep used only to measure). No frame recursed on data depth:
+`index_stop_search_checkpoint::recover` already walks the acknowledged
+ancestry in a loop. The depth was frame SIZE. Read from the instrumented
+binary's own prologues (llvm-objdump of the nightly's llvm-tools), one call
+chain held `execute_observed_with` 650,064 B, `open_checkpoint` 424,288 B,
+`recover` 471,024 B, `Frame::decode` 227,936 B and `Batch::decode` 198,560 B:
+1,971,872 B before the test's own frame and the qualification replay. The
+reason is `vocab::expression_search::Cursor`, about 13 KiB inline (`offered`
+plus four `MAX_INSTRUCTIONS`-long arrays): a `Batch` held two, a checkpoint
+`Frame` one plus an `Option<Batch>`, and at opt-level 0 every move and every
+temporary of a value gets its own stack slot, so each of those functions
+reserved tens of `Frame`-sized copies.
+
+**Decision.** Fix it at the cause, never by a stack raise in the recipe, CI, a
+script, a test or the environment. `Batch` keeps `before` and `after` as
+`Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
+changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded, and an
+alphabet's first cursor built, straight into a box in a frame of its own
+(`decode_boxed`, `initial_boxed`). After (the same build): those five frames
+are 36,144, 92,768, 28,992, 80,608 and 75,808 B, and the whole end-to-end body
+needs over 736 KiB and at most 752 KiB; `Batch` and `Frame` are a few hundred
+bytes inline. No byte format, identity, report, progress record, refusal or
+admission changes: `encode` and `decode` are untouched apart from where the
+decoded cursor lives, and every existing round-trip and refusal test of the
+batch, the checkpoint, the reader and the end-to-end search passes unchanged.
+
+**Held by tests, smaller than the default, never larger.** The end-to-end
+body runs on a thread of 1.25 MiB (1.7 times its measured peak, 0.6 times the
+default); the batch and checkpoint tests run their bodies on 448 KiB and
+384 KiB threads (twice their measured peaks); and `Batch` and `Frame` sizes
+are bounded. A value that creeps back onto the stack overflows there, in every
+plain `cargo test`, with the thread named. That a lower explicit stack is the
+only stack size a test states is the rule: an explicit raise stays forbidden
+(docs/06-limits.md L-STACK1028-01..03, docs/04-invariants.md STACK1028-01..04).
+
+**Cost.** One heap allocation per cursor a batch or frame keeps (one per batch
+prepared or decoded, one per frame), against tens of 13 KiB stack copies per
+call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
+unused.
