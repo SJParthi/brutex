@@ -260,9 +260,8 @@ impl Placement {
         // into a number about nothing.
         let last = i64::try_from(self.candidates.saturating_sub(1)).ok()?;
         let rank = i64::try_from(self.winner_rank).ok()?;
-        if last <= 0 {
-            return None;
-        }
+        // `last` is at least 1 here: two or more candidates were checked above
+        // (D-7326; a `last <= 0` arm no count could reach is gone).
         Some(rank.saturating_mul(1_000_000) / last)
     }
 

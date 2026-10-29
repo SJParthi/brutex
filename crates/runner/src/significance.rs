@@ -1387,3 +1387,7 @@ mod tail_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "significance_cover_tests.rs"]
+mod cover_tests;

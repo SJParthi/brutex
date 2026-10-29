@@ -121,8 +121,15 @@ fn a_summary_spans_its_months_days_and_keeps_no_second_outside_them() {
 
 #[test]
 fn a_summary_describes_only_the_header_it_was_built_for() {
-    let summary = summary_of(60, &[bar(at(3, 0), 70_000), bar(at(3, 1), 70_010)]);
-    let header = header_of(&summary);
+    let rows = [bar(at(3, 0), 70_000), bar(at(3, 1), 70_010)];
+    let header = Header {
+        generation: 4,
+        n_valid: 2,
+        first_ts_micros: rows[0].ts_micros,
+        last_ts_micros: rows[1].ts_micros,
+        ..Header::genesis(SYMBOL, 60, 0)
+    };
+    let summary = MonthSummary::build(&header, may(), &rows);
     assert_eq!(summary.describes(&header, may()), Ok(()));
     let rung = Header {
         timeframe_secs: 300,

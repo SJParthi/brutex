@@ -87671,3 +87671,75 @@ seven-byte expiry whose day would cut a two-byte character is
 `BadExpiryShape`; 29 Feb is `ImpossibleDate` in 2023 and parses in 2024; the
 window's first and last days parse; rendering into a writer that refuses
 every write returns the writer's error for an option and a future.
+
+### D-7324 — `store`: a byte field is written through one bounded helper, and a refusal's sentence takes its own variant's fields, so no arm is left that no input reaches (BASE-COV-LIBS attempt 2) — 2026-10-28
+
+**Decision.** Five small restructures, each behaviour-preserving, each
+removing an arm that only an impossible input could reach and that Route B
+therefore counted as a gap:
+
+- `quarantine`: every slot, header and image field (`encode_slot`,
+  `empty_image`, `seal_header`, `put`, `set_described`) is written by
+  `write_at`, one `checked_add` and one `get_mut`, instead of six private
+  `if let Some(dst) = bytes.get_mut(at..at + n)` copies; `field` reads with
+  the same `checked_add`. A write past a buffer, or an offset whose end
+  overflows `usize` (`slot_at` answers `usize::MAX` for a slot past the
+  address space), now writes nothing where `at + n` would have panicked in a
+  debug build. `note_damaged` and `note_cut` take the refusal's own figures
+  (`note_cut` builds and answers the `LedgerCut` it notes), so neither holds an
+  `if let` for another refusal: their three callers only ever passed the
+  matching variant.
+- `generation`: `Pointer::encode` writes through `put_field`, the same
+  bounded write.
+- `file`: `write_sealed` and `write_sealed_refused` take the variant's fields
+  from `Display`'s match instead of re-matching the whole `StoreError` with a
+  `let .. else { return Ok(()) }` that no caller could reach.
+- `catalog`: `classify` reads a spot path's six components with one slice
+  pattern, `let [v, exchange, segment, symbol, rung, file] = parts.as_slice()
+  else { wrong depth }`, which is the depth check and the destructure at once;
+  the `SPOT_DEPTH` constant and the `get(0..5)` tuple whose `else` no
+  six-component path could reach are gone.
+
+**Proof.** `store::quarantine::cover_tests` (16 tests, among them
+`a_field_read_or_write_never_reaches_past_its_buffer`,
+`a_header_wrong_in_any_one_field_does_not_check`,
+`a_run_answers_clear_past_other_months_and_damage_for_a_slot_without_scope`,
+`a_ledger_start_that_is_no_head_is_damage_at_its_offset`,
+`a_ledger_line_in_any_shape_no_writer_wrote_is_no_line`),
+`store::generation::cover_tests::a_record_field_is_never_written_past_its_buffer`,
+`store::catalog::cover_tests::every_depth_lands_in_its_own_bucket_and_a_foreign_path_is_never_filed`,
+and every existing test of the four modules, unchanged and green.
+
+**Cost.** None: the same writes, one `checked_add` each.
+
+### D-7325 — `store::sort_index`: a run's six column descriptions are walked beside the columns by `zip`, and its byte helpers are bounded (BASE-COV-LIBS attempt 2) — 2026-10-28
+
+**Decision.** `build_run_as` and `decode_run_header` walked `Column::ALL` and
+stored each column's description with `if let Some(slot) =
+columns.get_mut(column.index())`, whose `None` arm could not run (`columns`
+has six slots and `Column::ALL[i].index() == i`). Both now walk
+`Column::ALL.into_iter().zip(columns.iter_mut())`: the same slot for every
+column, no arm. `take` and `put` use `checked_add` for the end of the range,
+as `quarantine::write_at` does.
+
+**Proof.** `store::sort_index::cover_tests::every_column_has_its_word_and_its_place`
+(pins `Column::ALL[i].index() == i`, the property the `zip` relies on),
+`every_run_header_refusal_names_its_rule`,
+`the_byte_helpers_never_reach_past_their_buffer`, and the module's existing
+round-trip tests, unchanged and green.
+
+### D-7326 — `runner::pbo::Placement::relative` holds no `last <= 0` arm: the count was already checked at two or more (BASE-COV-LIBS attempt 2) — 2026-10-28
+
+**Decision.** `relative` returns `None` for fewer than two candidates before
+it converts anything, so `last = candidates - 1` is at least 1 when the
+division runs; the second `if last <= 0 { return None }` no count could reach
+is gone. The conversions that can fail (`usize` counts no `i64` holds) stay
+and answer `None`, never a wrapped figure.
+
+**Proof.** `runner` `tests/base_cov_admission_words.rs`
+`a_placement_is_relative_only_among_two_or_more_countable_candidates`
+(0 and 1 candidates `None`; 2, 3 candidates exact parts per million;
+`usize::MAX` candidates and `usize::MAX` rank `None`; a rank past the last
+saturates, never panics), and the module's existing tests, unchanged.
+
+**Cost.** None.

@@ -424,9 +424,9 @@ fn bars_present(bars: &Path) -> Result<bool, CatalogError> {
     }
 }
 
-/// Files a spot path has below `bars/`: exchange, segment, symbol, rung, month.
-const SPOT_DEPTH: usize = 6;
-/// The same with a contract level between symbol and rung.
+/// Components a contract path has below `bars/`: vendor, exchange, segment,
+/// symbol, contract, rung, month. A spot path has six, the one slice pattern
+/// in [`classify`] (D-7324).
 const CONTRACT_DEPTH: usize = 7;
 
 /// Sorts one file into the census, and into [`Holdings::held`] if it is a spot
@@ -458,20 +458,10 @@ fn classify(bars: &Path, path: &Path, out: &mut Holdings) {
         out.census.with_contract = out.census.with_contract.saturating_add(1);
         return;
     }
-    if depth != SPOT_DEPTH {
-        out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
-        return;
-    }
-    // `get`, never `[]`: the workspace denies `indexing_slicing`, and a length
-    // check one edit away from the index is exactly the pairing that rots.
-    let (Some(v), Some(exchange), Some(segment), Some(symbol), Some(rung), Some(file)) = (
-        parts.first(),
-        parts.get(1),
-        parts.get(2),
-        parts.get(3),
-        parts.get(4),
-        parts.get(5),
-    ) else {
+    // ONE SLICE PATTERN IS THE DEPTH CHECK AND THE DESTRUCTURE AT ONCE (D-7324):
+    // never `[]` (the workspace denies `indexing_slicing`), and no length check
+    // one edit away from the index, nor an arm no depth could reach.
+    let [v, exchange, segment, symbol, rung, file] = parts.as_slice() else {
         out.census.wrong_depth = out.census.wrong_depth.saturating_add(1);
         return;
     };
@@ -557,3 +547,7 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
 #[cfg(test)]
 #[path = "catalog_tests.rs"]
 mod catalog_tests;
+
+#[cfg(test)]
+#[path = "catalog_cover_tests.rs"]
+mod cover_tests;
