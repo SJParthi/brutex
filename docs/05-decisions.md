@@ -87552,6 +87552,20 @@ admission changes: `encode` and `decode` are untouched apart from where the
 decoded cursor lives, and every existing round-trip and refusal test of the
 batch, the checkpoint, the reader and the end-to-end search passes unchanged.
 
+**The second overflow behind the first.** With the native search fixed, the
+same Route B run aborted later, on
+`step3_orchestrator::tests::stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes`:
+that ONE test frame reserved 2,837,264 B, more than the whole 2 MiB thread.
+Each Committed* value of the Step 3 chain holds its predecessor inline (the
+family 10,488 B, observation-statistics 30,304, lineage 31,432, admission
+35,344, finalization 36,344, Population V5 37,296, Execution V3 38,696 B,
+measured with `size_of` in that build), and the test made two chains with every
+move, `Result` and `?` a slot of its own. The test now builds each chain value
+through a small `boxed` helper and holds boxes: its frame is 611,584 B and it
+passes on the default test thread. Production types are unchanged here (their
+inline retention is the D-0648 shape; boxing them is a wider change left for
+the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
+
 **Held by tests, smaller than the default, never larger.** The end-to-end
 body runs on a thread of 1.25 MiB (1.7 times its measured peak, 0.6 times the
 default); the batch and checkpoint tests run their bodies on 448 KiB and
