@@ -4,9 +4,15 @@
 //!
 //! TWO OF THESE ARE NOT O(1) A REQUEST, BY DESIGN, and are gated per row:
 //!
-//! * `/bars.json` answers a whole window, the month or the days asked (the
-//!   paged reader is `/bars/window.json`, timed in `window`): its cost per
-//!   answered bar is gated, for the whole month and for one day;
+//! * a whole month, read the way a client must: page by page through
+//!   `/bars/window.json` (`paged`), its cost per row read gated; and one day
+//!   of it in one `/bars.json` answer, its cost per answered bar gated. One
+//!   `/bars.json` answer serves at most 60,000 rows (R3-08), so the whole
+//!   month, 102,400 bars at 100x, is never asked of it: that ask was this
+//!   module's, the route refused it and gate 8 exited 1 (BASE-BENCH-1028,
+//!   D-7400). The refusal is timed instead (`refusals_are_flat`): `400
+//!   too_many_rows` naming the 60,000 cap, its p50 per request gated from
+//!   60,001 rows to 102,400 and to 2,592,000;
 //! * `/gaps.json` audits the month's seconds where an index owes them: its
 //!   cost per bar of the month is gated.
 //!
@@ -29,8 +35,9 @@
 //! (gate 8): it prints p50, p99 and max at 1x, 10x and 100x and fails on a
 //! ratio past its ceiling.
 
-use super::refuse;
-use super::served::{Per, Served, Target, flat, ok_per, ok_with};
+use super::paged::{self, MONTH_ANSWER_CAP_ROWS};
+use super::served::{Per, Served, Target, flat, lone_month, ok_per, ok_with};
+use super::{RATIO_CEILING_PERMILLE, ratio, refuse};
 
 /// The routes this module times, read by `.github/gates_routes.rs`.
 pub(crate) const ROUTES: &[&str] = &[
@@ -43,6 +50,16 @@ pub(crate) const ROUTES: &[&str] = &[
 
 /// The month the reads ask.
 const MONTH: &str = "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2024-06";
+
+/// The same month as the window's query, which [`paged::read_month`] pages.
+const WINDOW: &str =
+    "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&from=2024-06&to=2024-06";
+
+/// The months the `/bars.json` refusal is timed on, in rows: one row past
+/// the cap, the bench's own 100x month, and every second of June (30 x
+/// 86,400, the fullest one-second month the store files). Every one is
+/// past [`MONTH_ANSWER_CAP_ROWS`], so every one is refused; 1x to 43.2x.
+const REFUSED_SIZES: [usize; 3] = [MONTH_ANSWER_CAP_ROWS + 1, 102_400, 30 * 86_400];
 
 /// The revalidation of `path`: its `ETag`, asked back. A route that sends no
 /// `ETag` STOPS the bench (R3-14 repair 2): it used to be timed whole per row
@@ -78,11 +95,17 @@ fn revalidated(served: &mut Served, label: &str, path: &str) -> Target {
 pub(crate) fn reads_are_flat(stores: &mut [Served]) -> bool {
     flat("reads", stores, |served| {
         vec![
+            // THE WHOLE MONTH, READ THE WAY A CLIENT MUST (BASE-BENCH-1028,
+            // D-7400): page by page through `/bars/window.json`, 1,000 rows a
+            // page. It was one `/bars.json` answer, which serves at most
+            // 60,000 rows (R3-08) and refused the 102,400-bar month, so the
+            // 100x case measured nothing and gate 8 exited 1. The refusal
+            // itself is timed below, in [`refusals_are_flat`].
             ok_per(
-                "bars, the whole month",
-                format!("/bars.json?{MONTH}"),
-                "\"c\":",
-                Per::Row("\"t\":"),
+                "bars, the whole month, paged",
+                WINDOW.to_owned(),
+                "\"total\":",
+                Per::Paged,
             ),
             ok_per(
                 "bars, its first day",
@@ -105,4 +128,77 @@ pub(crate) fn reads_are_flat(stores: &mut [Served]) -> bool {
             revalidated(served, "instrument list", "/instruments.json?feed=gdfl"),
         ]
     })
+}
+
+/// THE CAP IS KEPT, AND ITS REFUSAL IS O(1) (BASE-BENCH-1028, D-7400): a
+/// whole-month `/bars.json` ask of a month past the 60,000 rows one answer
+/// serves is refused `400 too_many_rows`, naming that cap, and the refusal
+/// costs the same however large the month is.
+///
+/// The refusal cannot be timed on the 1x and 10x stores the other rows use
+/// (1,024 and 10,240 bars answer whole, as they should), so it has stores of
+/// its own: one month each of [`REFUSED_SIZES`] rows and no census. Its p50
+/// per request is gated at [`RATIO_CEILING_PERMILLE`] from the smallest
+/// refused month to each larger one; the labels name the sizes, not 1x / 10x
+/// / 100x, because the largest month a one-second June can hold is 43.2x the
+/// smallest one refused.
+pub(crate) fn refusals_are_flat() -> bool {
+    let needle = paged::cap_sentence(MONTH_ANSWER_CAP_ROWS);
+    let mut p50s = Vec::with_capacity(REFUSED_SIZES.len());
+    for rows in REFUSED_SIZES {
+        let mut served = lone_month(rows);
+        let path = format!("/bars.json?{MONTH}");
+        let first = served.ask(&path, "");
+        if first.status != 400
+            || !first.body.contains("too_many_rows")
+            || !first.body.contains(&needle)
+        {
+            let shown: String = first.body.chars().take(400).collect();
+            refuse(&format!(
+                "the whole-month /bars.json ask of {rows} rows answered {} without \
+                 too_many_rows and {needle:?}: {shown}",
+                first.status
+            ));
+        }
+        let mut times = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let asked = std::time::Instant::now();
+            let answer = served.ask(&path, "");
+            times.push(asked.elapsed().as_nanos());
+            if answer.status != 400 {
+                refuse(&format!(
+                    "the {rows}-row refusal answered {} while timed",
+                    answer.status
+                ));
+            }
+        }
+        times.sort_unstable();
+        let (p50, p99, max) = (
+            times.get(99).copied().unwrap_or(0),
+            times.get(197).copied().unwrap_or(0),
+            times.last().copied().unwrap_or(0),
+        );
+        println!(
+            "  reads refused /bars.json month {rows:>8} rows  p50 {p50:>9} ns  p99 {p99:>9} ns  \
+             max {max:>9} ns  n=200  answered 400 too_many_rows: {}",
+            first.body.chars().take(120).collect::<String>()
+        );
+        p50s.push(p50 * 1_000);
+        let _ignored = std::fs::remove_dir_all(&served.root);
+    }
+    let mut ok = true;
+    if let Some((&base, rest)) = p50s.split_first() {
+        for (&at, rows) in rest.iter().zip(REFUSED_SIZES.iter().skip(1)) {
+            ok &= ratio(
+                &format!(
+                    "reads /bars.json refusal p50 {}->{rows} rows",
+                    MONTH_ANSWER_CAP_ROWS + 1
+                ),
+                base,
+                at,
+                RATIO_CEILING_PERMILLE,
+            );
+        }
+    }
+    ok
 }

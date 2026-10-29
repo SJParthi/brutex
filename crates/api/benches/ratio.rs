@@ -91,6 +91,8 @@ mod logs_dirs;
 mod months;
 #[path = "ratio/options.rs"]
 mod options;
+#[path = "ratio/paged.rs"]
+mod paged;
 #[path = "ratio/provenance.rs"]
 mod provenance;
 #[path = "ratio/reads.rs"]
@@ -722,6 +724,7 @@ fn served_routes_are_flat() -> bool {
     ok &= provenance::provenance_is_flat(&mut stores);
     ok &= calendar::calendars_are_flat(&mut stores);
     ok &= reads::reads_are_flat(&mut stores);
+    ok &= reads::refusals_are_flat();
     ok &= db_page::page_reads_are_flat(&mut stores);
     ok &= settings::settings_are_flat(&mut stores);
     ok &= rollup::rollups_are_flat(&mut stores);
