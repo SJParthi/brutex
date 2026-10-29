@@ -396,7 +396,7 @@ fn open_checkpoint(
     declaration: &[u8],
     observation: checkpoint::ReadBudget,
 ) -> Result<(Journal, Frame), String> {
-    let initial = crate::boolean_grammar_batch::initial_boxed(request.alphabet)?;
+    let initial = Cursor::new(request.alphabet).map_err(debug)?;
     let verification = checkpoint::Verification::new(request, prepared)?;
     let mut journal = Journal::open(request.root, NAMESPACE, hash(declaration))?;
     let current = checkpoint::recover(

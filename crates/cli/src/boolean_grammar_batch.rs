@@ -44,13 +44,6 @@ pub(crate) fn decode_boxed(bytes: &[u8; CURSOR_BYTES]) -> Result<Box<Cursor>, St
     Cursor::decode(bytes).map(Box::new).map_err(debug)
 }
 
-/// The initial cursor of an alphabet, built straight into a box for the same
-/// reason as [`decode_boxed`].
-#[inline(never)]
-pub(crate) fn initial_boxed(alphabet: &[u32]) -> Result<Box<Cursor>, String> {
-    Cursor::new(alphabet).map(Box::new).map_err(debug)
-}
-
 /// Inline bytes of one `Batch`; a regression test bounds it (D-7410).
 #[cfg(test)]
 pub(crate) const BATCH_INLINE_BYTES: usize = std::mem::size_of::<Batch>();
