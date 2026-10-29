@@ -154,10 +154,8 @@ fn write_month(root: &Path, month: &Month) -> Entry {
 
 /// Builds a store of `months` and serves it from a runtime of its own.
 fn served(tag: &str, months: &[Month]) -> Served {
-    let root = std::env::temp_dir().join(format!(
-        "brutex-bench-paged-{tag}-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("brutex-bench-paged-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("manifest")).expect("a scratch root");
     let mut manifest = Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
@@ -191,7 +189,9 @@ fn served(tag: &str, months: &[Month]) -> Served {
             .expect("a runtime");
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("a listener");
-            axum::serve(listener, router).await.expect("the server runs");
+            axum::serve(listener, router)
+                .await
+                .expect("the server runs");
         });
     });
     Served { root, addr }
@@ -251,13 +251,14 @@ fn dechunk(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut at = 0;
     loop {
-        let end = at + raw[at..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .expect("a chunk size line");
+        let end = at
+            + raw[at..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .expect("a chunk size line");
         let text = std::str::from_utf8(&raw[at..end]).expect("ASCII");
-        let size = usize::from_str_radix(text.split(';').next().unwrap().trim(), 16)
-            .expect("a hex size");
+        let size =
+            usize::from_str_radix(text.split(';').next().unwrap().trim(), 16).expect("a hex size");
         at = end + 2;
         if size == 0 {
             return out;
@@ -342,7 +343,9 @@ fn the_cap_is_kept_at_60_000_rows_and_the_pager_reads_past_it() {
     assert_eq!(refused.status, 400);
     assert!(
         refused.body.contains("too_many_rows")
-            && refused.body.contains(&paged::cap_sentence(MONTH_ANSWER_CAP_ROWS)),
+            && refused
+                .body
+                .contains(&paged::cap_sentence(MONTH_ANSWER_CAP_ROWS)),
         "{}",
         refused.body
     );
@@ -459,104 +462,84 @@ fn run(from: i64, n: usize) -> Vec<i64> {
     (0..n).map(|i| from + i64::try_from(i).unwrap()).collect()
 }
 
+/// A `200` page of `total` rows held, carrying `stamps`.
+fn ok(total: usize, stamps: &[i64]) -> Page {
+    Page {
+        status: 200,
+        body: body(total, stamps, 0, 0),
+    }
+}
+
+/// A page answering `status` with `body`.
+fn answer(status: u16, body: &str) -> Page {
+    Page {
+        status,
+        body: body.to_owned(),
+    }
+}
+
 /// OUT OF THE BOX: a server that answers wrong is caught, never timed as a
 /// read. Each fake below answers page by page; what the reader must say is
 /// named beside it.
 #[test]
 fn a_server_answering_wrong_is_refused_by_name() {
     let limit = api::bars::MAX_WINDOW_LIMIT;
+    let not_a_number =
+        "{\"total\":1,\"months_missing\":0,\"faulted_records\":0,\"bars\":[{\"t\":x}]}";
     let cases: Vec<(&str, Vec<Page>, &str)> = vec![
         (
             "a short page mid-month",
-            vec![Page {
-                status: 200,
-                body: body(2_000, &run(0, 10), 0, 0),
-            }],
+            vec![ok(2_000, &run(0, 10))],
             "short page",
         ),
         (
             "a page repeating the last row of the one before",
-            vec![
-                Page {
-                    status: 200,
-                    body: body(2_000, &run(0, limit), 0, 0),
-                },
-                Page {
-                    status: 200,
-                    body: body(2_000, &run(999, limit), 0, 0),
-                },
-            ],
+            vec![ok(2_000, &run(0, limit)), ok(2_000, &run(999, limit))],
             "repeated or out of order",
         ),
         (
             "rows appended while the month is paged",
-            vec![
-                Page {
-                    status: 200,
-                    body: body(2_000, &run(0, limit), 0, 0),
-                },
-                Page {
-                    status: 200,
-                    body: body(2_001, &run(1_000, limit), 0, 0),
-                },
-            ],
+            vec![ok(2_000, &run(0, limit)), ok(2_001, &run(1_000, limit))],
             "changed under the read",
         ),
         (
             "more rows than the page asked",
-            vec![Page {
-                status: 200,
-                body: body(5_000, &run(0, limit + 1), 0, 0),
-            }],
+            vec![ok(5_000, &run(0, limit + 1))],
             "more rows than",
         ),
         (
             "more rows than the month holds",
-            vec![Page {
-                status: 200,
-                body: body(5, &run(0, 6), 0, 0),
-            }],
+            vec![ok(5, &run(0, 6))],
             "past the 5 rows",
         ),
         (
             "a refusal",
-            vec![Page {
-                status: 400,
-                body: "{\"error\":\"no\"}".to_owned(),
-            }],
+            vec![answer(400, "{\"error\":\"no\"}")],
             "answered 400",
         ),
         (
             "an answer with no total",
-            vec![Page {
-                status: 200,
-                body: "{\"bars\":[]}".to_owned(),
-            }],
+            vec![answer(200, "{\"bars\":[]}")],
             "\"total\":",
         ),
         (
+            "a total that is not a number",
+            vec![answer(200, "{\"total\":-1,\"bars\":[]}")],
+            "not a whole number",
+        ),
+        (
             "a missing month",
-            vec![Page {
-                status: 200,
-                body: body(0, &[], 1, 0),
-            }],
+            vec![answer(200, &body(0, &[], 1, 0))],
             "months_missing",
         ),
         (
             "a faulted record",
-            vec![Page {
-                status: 200,
-                body: body(1, &[7], 0, 1),
-            }],
+            vec![answer(200, &body(1, &[7], 0, 1))],
             "faulted_records",
         ),
         (
             "a stamp that is not a number",
-            vec![Page {
-                status: 200,
-                body: "{\"total\":1,\"months_missing\":0,\"faulted_records\":0,\"bars\":[{\"t\":x}]}"
-                    .to_owned(),
-            }],
+            vec![answer(200, not_a_number)],
             "a stamp",
         ),
     ];
@@ -565,13 +548,19 @@ fn a_server_answering_wrong_is_refused_by_name() {
         let mut asked = Vec::new();
         let refused = read_month(&june(), |path| {
             asked.push(path.to_owned());
-            pages.next().expect("the reader asked past the fake's pages")
+            pages
+                .next()
+                .expect("the reader asked past the fake's pages")
         });
         let why = refused.expect_err(what);
         assert!(why.contains(says), "{what}: {why}");
         assert!(
-            asked[0].starts_with("/bars/window.json?") && asked[0].contains("&offset=0"),
+            asked[0].starts_with("/bars/window.json?")
+                && asked[0].ends_with("&dir=asc&limit=1000&offset=0"),
             "{what}: {asked:?}"
         );
+        if let Some(second) = asked.get(1) {
+            assert!(second.ends_with("&offset=1000"), "{what}: {asked:?}");
+        }
     }
 }

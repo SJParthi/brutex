@@ -92,10 +92,11 @@ fn number_after(body: &str, key: &str) -> Result<usize, String> {
         .find(key)
         .ok_or_else(|| format!("no {key} in the answer: {}", excerpt(body)))?;
     let rest = body.get(at + key.len()..).unwrap_or("");
-    let digits: &str = rest
-        .get(..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len()))
-        .unwrap_or("");
-    digits
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest.get(..end)
+        .unwrap_or("")
         .parse()
         .map_err(|_| format!("{key} is not a whole number: {}", excerpt(rest)))
 }
