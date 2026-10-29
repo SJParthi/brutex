@@ -87575,7 +87575,10 @@ state inlined `read_bytes` reserved 54,096 B per level, about 6.9 MB for the
 chain. Inflation now happens in its own `#[inline(never)] fn inflate`, a leaf
 called after the base is resolved: `read_bytes` is 496 B, `inflate` 53,808 B
 once, and the test passes on a 256 KiB thread in the release build. The
-recursion stays bounded by `MAX_DELTA_DEPTH`; its behaviour is unchanged.
+recursion stays bounded by `MAX_DELTA_DEPTH`; its behaviour is unchanged. The
+entry reader's own refusals (not a pack, a self-naming delta, an overlong
+size, a reserved kind) gain a test, so every line of the changed functions is
+run.
 
 **Held by tests, smaller than the default, never larger.** The end-to-end
 test is unchanged and runs on the harness's default thread (2.6 times its

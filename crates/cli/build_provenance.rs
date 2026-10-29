@@ -2347,6 +2347,63 @@ mod tests {
         }
     }
 
+    /// D-7410: the entry reader's own refusals, read straight off raw pack
+    /// bytes: a buffer that is not a pack, an offset delta that names itself
+    /// (a cycle), a size whose varint runs past 64 bits, and a kind that is
+    /// neither an object nor a delta. Each is `None`; a well-formed entry of
+    /// the same bytes reads.
+    #[test]
+    fn an_entry_that_is_no_pack_a_cycle_an_overlong_size_or_no_kind_refuses() {
+        let store = ObjectStore::new(Path::new("/nonexistent-brutex-objects"));
+        let zlib = |data: &[u8]| {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(data).expect("compress");
+            encoder.finish().expect("finish")
+        };
+        let pack = |entry: &[u8]| {
+            let mut out = b"PACK".to_vec();
+            out.extend_from_slice(&2_u32.to_be_bytes());
+            out.extend_from_slice(&1_u32.to_be_bytes());
+            out.extend_from_slice(entry);
+            out
+        };
+        let read = |bytes: &[u8]| store.object_at(bytes, 12, 0, &mut BTreeSet::new());
+        let mut blob = Vec::new();
+        write_pack_header(&mut blob, 3, 5);
+        blob.extend_from_slice(&zlib(b"hello"));
+        let whole = read(&pack(&blob)).expect("a well-formed blob entry reads");
+        assert_eq!((whole.kind, whole.data.as_slice()), ("blob", &b"hello"[..]));
+
+        let mut not_a_pack = pack(&blob);
+        if let Some(byte) = not_a_pack.get_mut(3) {
+            *byte = b'X';
+        }
+        assert!(read(&not_a_pack).is_none(), "not a pack");
+
+        // An offset delta at distance 0 names its own offset as its base.
+        let mut cycle = Vec::new();
+        write_pack_header(&mut cycle, 6, 5);
+        cycle.push(0);
+        cycle.extend_from_slice(&zlib(b"hello"));
+        assert!(
+            read(&pack(&cycle)).is_none(),
+            "a delta that is its own base"
+        );
+
+        // Nine continuation groups put the size's shift past 64 bits.
+        let mut overlong = vec![0x80 | (3 << 4)];
+        overlong.extend_from_slice(&[0x80; 9]);
+        overlong.push(0);
+        overlong.extend_from_slice(&zlib(b"hello"));
+        assert!(read(&pack(&overlong)).is_none(), "an overlong size");
+
+        // Kind 5 is reserved: neither an object nor a delta.
+        let mut reserved = Vec::new();
+        write_pack_header(&mut reserved, 5, 5);
+        reserved.extend_from_slice(&zlib(b"hello"));
+        assert!(read(&pack(&reserved)).is_none(), "a reserved kind");
+    }
+
     /// A whole object whose entry header misstates its inflated size, a delta
     /// whose header misstates the delta's own length, and a pack of an
     /// unsupported version are each refused rather than read.
