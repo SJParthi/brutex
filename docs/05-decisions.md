@@ -87555,15 +87555,35 @@ the number and checks it against the route's own refusal sentence each run
 (L-BBENCH-3).
 
 **Proof.** `crates/api/tests/bench_paged_month.rs` mounts the same module and
-proves it against the production router: `the_benchs_whole_month_read_answers_every_size_it_times`
-failed on the one-answer read (`answered 400: {"error":"too_many_rows: NIFTY
-1s 2024-06 holds 102400 rows ...`) and passes on the pager; the page edges
-1, 999, 1,000, 1,001, 2,000, 2,001; an empty month; 60,000 and 60,001 rows with
-the cap kept; a window across a month edge on and inside a page edge; a
-missing month mid-range refused; two readers at once; a query with its own
-paging keys refused; ten wrong answers from a fake server each refused by
-name. Invariants BBENCH-01 to BBENCH-04; limits L-BBENCH-1 to L-BBENCH-4.
-Measured figures: MEASURED-BELOW. D-7401 to D-7409 are unused.
+proves it against the production router. Written first against a port of
+the one-answer read, all nine tests failed (0 passed, 9 failed); on the pager
+all nine pass: `the_benchs_whole_month_read_answers_every_size_it_times`
+(1,024, 10,240 and 102,400 rows, largest first, the 102,400 the one-answer
+read lost to `400 too_many_rows`); the page edges 1, 999, 1,000, 1,001,
+2,000, 2,001; an empty month; 60,000 and 60,001 rows with the cap kept; a
+window across a month edge on and inside a page edge; a missing month
+mid-range refused; two readers at once; a query with its own paging keys
+refused; eleven wrong answers from a fake server each refused by name.
+Invariants BBENCH-01 to BBENCH-04; limits L-BBENCH-1 to L-BBENCH-4.
+
+**Measured** (CI's complexity step run whole on the final tip, 29 Oct 2026,
+load 35 to 40; `state/fix/round2/logs-BENCH1028/complexity2.log`): the gate-8
+count (46 bench files), the planted probe caught (C-09 508.546x BREACH, the
+file restored), then `cargo bench --workspace --locked`, whose api bench
+printed `all ratios within the ceiling`: the paged whole month p50 1.119 ms
+at 1,024 rows, 9.899 ms at 10,240, 95.092 ms at 102,400, per row 0.884x and
+0.849x; the refusal p50 79.833 µs at 60,001 rows, 80.375 µs at 102,400 and
+80.125 µs at 2,592,000, ratios 1.006x and 1.003x, n = 200 each. The refusal
+case was first timed one store after another, straight after each server
+started, and its 60,001-row p50 came out 9.1 ms against 0.12 ms for the
+others: start-up and load, which would have let any refusal pass. It now
+builds all three, asks each 200 times untimed, and times 200 rounds that ask
+every store once. On the real store through a shadow server (GETs only):
+NIFTY 1s 2018-09 holds 400,200 rows, `/bars.json` refuses it naming the
+60,000 cap (200 refusals: p50 0.588 ms, p99 0.952 ms, max 4.691 ms) and the
+pager reads all 400,200 in 401 pages (a page p50 2.220 ms, p99 2.828 ms);
+BANKNIFTY, a NIFTY option, an illiquid strike and an F&O share the same
+(`docs/06-limits.md` L-BBENCH-1). D-7401 to D-7409 are unused.
 
 **Cost.** No served route changes and no store file changes: the change is
 the bench and a test. The bench's own run grows by the paged reads (about
