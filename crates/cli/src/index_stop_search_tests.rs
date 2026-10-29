@@ -54,7 +54,8 @@ fn request<'a>(
 // a refused replay and a restored reservation) runs on a thread whose stack
 // is HALF the harness default, in every build including the instrumented
 // opt-level-0 coverage build, so a value that creeps back onto the stack
-// fails here by name instead of aborting a coverage run. It lowers the
+// overflows HERE, in every build and every plain `cargo test`, with this
+// thread named in the abort, long before it reaches the default. It lowers the
 // budget; nothing here or anywhere raises one (docs/06-limits.md).
 const END_TO_END_STACK: usize = 1 << 20;
 

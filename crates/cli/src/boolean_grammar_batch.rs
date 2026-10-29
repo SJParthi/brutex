@@ -35,6 +35,22 @@ pub(crate) struct Batch {
     exhausted: bool,
 }
 
+/// Decodes a saved cursor straight into a box. The `Cursor`-sized
+/// temporaries of the decode (its `Result`, the `?` and the move into the
+/// box, each its own stack slot at opt-level 0) live only in this frame, which
+/// has returned before the caller goes deeper (D-7410).
+#[inline(never)]
+pub(crate) fn decode_boxed(bytes: &[u8; CURSOR_BYTES]) -> Result<Box<Cursor>, String> {
+    Cursor::decode(bytes).map(Box::new).map_err(debug)
+}
+
+/// The initial cursor of an alphabet, built straight into a box for the same
+/// reason as [`decode_boxed`].
+#[inline(never)]
+pub(crate) fn initial_boxed(alphabet: &[u32]) -> Result<Box<Cursor>, String> {
+    Cursor::new(alphabet).map(Box::new).map_err(debug)
+}
+
 /// Inline bytes of one `Batch`; a regression test bounds it (D-7410).
 #[cfg(test)]
 pub(crate) const BATCH_INLINE_BYTES: usize = std::mem::size_of::<Batch>();
@@ -212,7 +228,7 @@ impl Batch {
         {
             return Err("grammar batch count or replay work admission refused".into());
         }
-        let before = Cursor::decode(&field(raw, 64)?).map_err(debug)?;
+        let before = decode_boxed(&field(raw, 64)?)?;
         let expected = Self::prepare(
             before,
             number(raw, 8)?,

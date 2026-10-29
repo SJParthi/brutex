@@ -119,7 +119,11 @@ pub(super) struct Frame {
 #[cfg(test)]
 pub(super) const FRAME_INLINE_BYTES: usize = std::mem::size_of::<Frame>();
 impl Frame {
-    pub(super) fn declaration(declaration: Vec<u8>, cursor: Cursor, scope: u8) -> Self {
+    pub(super) fn declaration(
+        declaration: Vec<u8>,
+        cursor: impl Into<Box<Cursor>>,
+        scope: u8,
+    ) -> Self {
         Self {
             declaration,
             scope,
@@ -127,7 +131,7 @@ impl Frame {
             location: None,
             pending: false,
             completed_batches: 0,
-            cursor: Box::new(cursor),
+            cursor: cursor.into(),
             work: 0,
             programs: 0,
             exhausted: false,
@@ -326,7 +330,7 @@ impl Frame {
         let programs = raw.word()?;
         let declaration_bytes = raw.word()?;
         let batch_bytes = raw.word()?;
-        let cursor = Cursor::decode(&raw.array::<CURSOR_BYTES>()?).map_err(debug)?;
+        let cursor = crate::boolean_grammar_batch::decode_boxed(&raw.array::<CURSOR_BYTES>()?)?;
         let mut links = [None; 8];
         for slot in &mut links {
             let identity = raw.array()?;
@@ -355,7 +359,7 @@ impl Frame {
             pending: flags[0] == 1,
             exhausted: flags[1] == 1,
             completed_batches,
-            cursor: Box::new(cursor),
+            cursor,
             work,
             programs,
             batch,

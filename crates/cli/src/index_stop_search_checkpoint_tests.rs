@@ -569,31 +569,36 @@ fn a_pending_reservation_cut_and_reopened_twice_recovers_the_same_bytes_on_a_bou
 }
 
 #[test]
-fn concurrent_bounded_stack_recoveries_of_one_deep_journal_agree() {
-    // Out of the box: two readers recover the same deep journal at once, each
-    // on its own small stack, and neither changes what the other reads.
+fn a_second_owner_is_refused_while_a_deep_recovery_holds_the_journal_and_then_agrees() {
+    // Out of the box: two invocations reach one deep journal at once. The
+    // second is refused by name while the first recovers on its small stack,
+    // and once released it recovers to the same refusal; nothing is changed.
     let scratch = Scratch::new().unwrap();
     let id = hash(DECLARATION);
     let mut journal = Journal::open(&scratch.0, NAMESPACE, id).unwrap();
     chain(&mut journal, DEEP, 2);
     drop(journal);
     let root = &scratch.0;
-    let refusals: Vec<String> = std::thread::scope(|scope| {
-        let readers: Vec<_> = (0..2)
-            .map(|reader| {
-                scope.spawn(move || {
-                    bounded(&format!("checkpoint-reader-{reader}"), || {
-                        let journal = Journal::open(root, NAMESPACE, id).unwrap();
-                        restore_full(&journal, root, deep_budget(), 2).err().unwrap()
-                    })
-                })
+    let held = Journal::open(root, NAMESPACE, id).unwrap();
+    let (blocked, first) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| {
+            bounded("checkpoint-second-owner", || {
+                Journal::open(root, NAMESPACE, id).err().unwrap()
             })
-            .collect();
-        readers.into_iter().map(|reader| reader.join().unwrap()).collect()
+        });
+        let first = bounded("checkpoint-first-owner", || {
+            restore_full(&held, root, deep_budget(), 2).err().unwrap()
+        });
+        (second.join().unwrap(), first)
     });
-    assert_eq!(refusals[0], refusals[1]);
-    assert_eq!(
-        Journal::open(root, NAMESPACE, id).unwrap().acknowledged(),
-        2 * DEEP + 1
-    );
+    assert!(blocked.contains("already owned"), "{blocked}");
+    drop(held);
+    let second = bounded("checkpoint-second-owner-after", || {
+        let journal = Journal::open(root, NAMESPACE, id).unwrap();
+        (
+            restore_full(&journal, root, deep_budget(), 2).err().unwrap(),
+            journal.acknowledged(),
+        )
+    });
+    assert_eq!(second, (first, 2 * DEEP + 1));
 }
