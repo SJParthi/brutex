@@ -87583,7 +87583,7 @@ NIFTY 1s 2018-09 holds 400,200 rows, `/bars.json` refuses it naming the
 60,000 cap (200 refusals: p50 0.588 ms, p99 0.952 ms, max 4.691 ms) and the
 pager reads all 400,200 in 401 pages (a page p50 2.220 ms, p99 2.828 ms);
 BANKNIFTY, a NIFTY option, an illiquid strike and an F&O share the same
-(`docs/06-limits.md` L-BBENCH-1). D-7401 to D-7409 are unused.
+(`docs/06-limits.md` L-BBENCH-1). The workspace run did NOT exit 0: past the api bench it stopped on `crates/telemetry`'s C-AU-01 (48.705x, then 6.341x BREACH), a red the api one hid, in a file this part does not own (L-BBENCH-5). D-7401 to D-7409 are unused.
 
 **Cost.** No served route changes and no store file changes: the change is
 the bench and a test. The bench's own run grows by the paged reads (about
