@@ -9558,3 +9558,7 @@ mod tests {
         v3
     }
 }
+
+#[cfg(test)]
+#[path = "admission_reader_cover_tests.rs"]
+mod reader_cover_tests;
