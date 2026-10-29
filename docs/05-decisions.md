@@ -87511,3 +87511,61 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7400 — Gate 8 reads a whole month the way a client must, page by page through `/bars/window.json`, and the 60,000-row `/bars.json` cap is kept, its refusal timed as O(1) (BASE-BENCH-1028) — 2026-10-29
+
+**Context** (BASE-BENCH-1028). The quiet-Mac re-run of CI gate 8 on 28 Oct
+2026 (`state/decisions-20261027/slow-checks-a32722c4.result`, line
+`gate8-bench-quiet FAIL`; its `run.log` line 3450) stopped in the api ratio
+bench: the `reads` row "bars, the whole month" asked `/bars.json` for NIFTY's
+one-second June at 1,024, 10,240 and 102,400 bars, and since R3-08 (merged
+18 Oct 2026) one `/bars.json` answer serves at most `MAX_MONTH_ANSWER_ROWS`
+= 60,000 rows and refuses more `400 too_many_rows`, pointing at
+`/bars/window.json`. The 100x case measured nothing and the bench exited 1,
+so the complexity job's step "Per-operation cost at 1x / 10x / 100x" was red
+on the base. The earlier gate-8 run of 27 Oct timed out under load before it
+reached the row, which hid it.
+
+**Decision.** The cap stays at 60,000 and the 102,400 size stays. A whole
+one-second month of real data is 36 to 71 MB of JSON; the cap is what keeps
+one request from carrying it, and raising it to fit a bench would make the
+bench the reason a client can ask for 71 MB again. The bench now reads the
+whole month the way a client must: `crates/api/benches/ratio/paged.rs`
+`read_month` asks page 0 of `/bars/window.json` oldest first at
+`MAX_WINDOW_LIMIT` (1,000) rows, learns the month's `total` from it, and asks
+each next page until it holds every row; every page must answer `200`, keep
+the same `total`, report no missing month and no faulted record, hold no more
+rows than asked or than the month holds, be full unless it is the last, and
+continue the stamps of the page before it. One timed sample is the whole
+read; its p50 per row read is gated at the shared 3.0x ceiling 1x→10x and
+1x→100x, as the one-answer row was. The refusal is its own gated case: three
+stores of one month each, 60,001, 102,400 and 2,592,000 rows (every second of
+June, the fullest one-second month), each asked `/bars.json` whole, each
+required to answer `400 too_many_rows` naming the 60,000 cap, the p50 per
+request gated from the smallest to each larger one at 3.0x. Labels name the
+sizes, because no refused month can be 100x the smallest refused one
+(`docs/06-limits.md` L-BBENCH-2).
+
+**Rejected.** Raising or removing the cap, dropping or shrinking the 102,400
+size, loosening a ceiling, or skipping the case: each turns the gate green by
+measuring less. Reading through `/bars/export.csv`: one export writes at
+most 20,000 rows and refuses more, so it cannot read the month whole either
+(L-BBENCH-4). Exposing `MAX_MONTH_ANSWER_ROWS` to the bench: the bench mirrors
+the number and checks it against the route's own refusal sentence each run
+(L-BBENCH-3).
+
+**Proof.** `crates/api/tests/bench_paged_month.rs` mounts the same module and
+proves it against the production router: `the_benchs_whole_month_read_answers_every_size_it_times`
+failed on the one-answer read (`answered 400: {"error":"too_many_rows: NIFTY
+1s 2024-06 holds 102400 rows ...`) and passes on the pager; the page edges
+1, 999, 1,000, 1,001, 2,000, 2,001; an empty month; 60,000 and 60,001 rows with
+the cap kept; a window across a month edge on and inside a page edge; a
+missing month mid-range refused; two readers at once; a query with its own
+paging keys refused; ten wrong answers from a fake server each refused by
+name. Invariants BBENCH-01 to BBENCH-04; limits L-BBENCH-1 to L-BBENCH-4.
+Measured figures: MEASURED-BELOW. D-7401 to D-7409 are unused.
+
+**Cost.** No served route changes and no store file changes: the change is
+the bench and a test. The bench's own run grows by the paged reads (about
+103 requests a sample at 100x, 200 samples) and three lone-month stores, the
+largest 2,592,000 rows built once.
