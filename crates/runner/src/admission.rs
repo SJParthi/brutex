@@ -9563,7 +9563,10 @@ mod tests {
     /// count the Statistics did not count; a joined evidence reads back its
     /// parts and digests its own canonical bytes.
     #[test]
-    #[allow(clippy::type_complexity, reason = "a table of edits and the two names they earn")]
+    #[allow(
+        clippy::type_complexity,
+        reason = "a table of edits and the two names they earn"
+    )]
     fn evidence_joins_refuse_a_prefilled_authority_slot_and_a_foreign_trade_count() {
         use super::{
             AdmissionAuthorityOwnedFieldV2 as F2, AdmissionAuthorityOwnedFieldV3 as F3,

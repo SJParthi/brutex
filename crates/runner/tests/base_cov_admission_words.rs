@@ -142,8 +142,8 @@ fn a_streamed_sweep_tallies_the_same_levels_as_the_retained_one() {
 #[test]
 fn a_placement_of_too_few_candidates_is_unrankable_and_counted_so() {
     use runner::pbo::{
-        AnchoredWalkForwardBottomHalfRateV1, PlacementV1, anchored_walk_forward_bottom_half_rate_v1,
-        place_v1,
+        AnchoredWalkForwardBottomHalfRateV1, PlacementV1,
+        anchored_walk_forward_bottom_half_rate_v1, place_v1,
     };
 
     assert_eq!(PlacementV1::unrankable(2), None);
@@ -186,7 +186,11 @@ fn a_placement_of_too_few_candidates_is_unrankable_and_counted_so() {
         (1, 1, true),
         (usize::MAX, usize::MAX, true),
     ] {
-        assert_eq!(of(folds, bottom).at_or_above_half(), above, "{folds} {bottom}");
+        assert_eq!(
+            of(folds, bottom).at_or_above_half(),
+            above,
+            "{folds} {bottom}"
+        );
     }
 }
 
