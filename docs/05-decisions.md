@@ -87566,6 +87566,17 @@ passes on the default test thread. Production types are unchanged here (their
 inline retention is the D-0648 shape; boxing them is a wider change left for
 the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
 
+**A third overflow, in the release test build.** `cargo test -p cli
+--release` aborted on `build_provenance::tests::a_delta_chain_resolves_to_exactly_max_delta_depth_and_no_further`
+(feat/db-fix's code, unchanged by this part before this paragraph): the
+commit-stamp git reader resolves a chain of `MAX_DELTA_DEPTH` (128) reference
+deltas by recursion, bounded by that constant, and with the zlib decoder's
+state inlined `read_bytes` reserved 54,096 B per level, about 6.9 MB for the
+chain. Inflation now happens in its own `#[inline(never)] fn inflate`, a leaf
+called after the base is resolved: `read_bytes` is 496 B, `inflate` 53,808 B
+once, and the test passes on a 256 KiB thread in the release build. The
+recursion stays bounded by `MAX_DELTA_DEPTH`; its behaviour is unchanged.
+
 **Held by tests, smaller than the default, never larger.** The end-to-end
 test is unchanged and runs on the harness's default thread (2.6 times its
 measured peak; an earlier draft ran it on a 1.25 MiB thread, which it fits,
