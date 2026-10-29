@@ -50,32 +50,13 @@ fn request<'a>(
     })
 }
 
-// D-7410: the whole end-to-end search (three invocations, the ancestry walk,
-// a refused replay and a restored reservation) runs on a thread whose stack
-// is 1.25 MiB, BELOW the harness's 2 MiB default, in every build. Measured in
-// the instrumented opt-level-0 coverage build: before D-7410 the test thread
-// overflowed 2 MiB (peak over 2048 KiB, at most 2176 KiB); after it this body
-// needs over 736 KiB, at most 752 KiB (L-STACK1028-01). So a value that
-// creeps back onto the stack overflows HERE, in every build and every plain
-// `cargo test`, with this thread named in the abort, before it reaches the
-// default. It lowers the budget; nothing here or anywhere raises one.
-const END_TO_END_STACK: usize = 1280 << 10;
-
 #[test]
-fn complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch()
--> Result<(), String> {
-    crate::boolean_grammar_batch::on_bounded_stack(
-        "native-search-end-to-end",
-        END_TO_END_STACK,
-        complete_native_search,
-    )?
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "one generated end-to-end sequence proves frozen ancestry, rejected replay, exact resume and pending restoration together"
 )]
-fn complete_native_search() -> Result<(), String> {
+fn complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch()
+-> Result<(), String> {
     let fixture = Fixture::new()?;
     fixture.prepare("NIFTY")?;
     let configuration = config(&fixture)?;

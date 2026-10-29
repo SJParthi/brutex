@@ -87567,10 +87567,12 @@ inline retention is the D-0648 shape; boxing them is a wider change left for
 the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
 
 **Held by tests, smaller than the default, never larger.** The end-to-end
-body runs on a thread of 1.25 MiB (1.7 times its measured peak, 0.6 times the
-default); the batch and checkpoint tests run their bodies on 448 KiB and
-384 KiB threads (twice their measured peaks); and `Batch` and `Frame` sizes
-are bounded. A value that creeps back onto the stack overflows there, in every
+test is unchanged and runs on the harness's default thread (2.7 times its
+measured peak; it was measured once on a 1.25 MiB thread, which it fits, and
+that wrapper was not kept, so the unchanged test body adds no lines to the D2
+set); the batch and checkpoint tests run their bodies on 448 KiB and 384 KiB
+threads (twice their measured peaks); and `Batch` and `Frame` sizes are
+bounded. A value that creeps back onto the stack overflows there, in every
 plain `cargo test`, with the thread named. That a lower explicit stack is the
 only stack size a test states is the rule: an explicit raise stays forbidden
 (docs/06-limits.md L-STACK1028-01..03, docs/04-invariants.md STACK1028-01..04).

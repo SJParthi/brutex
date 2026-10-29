@@ -607,3 +607,248 @@ fn a_second_owner_is_refused_while_a_deep_recovery_holds_the_journal_and_then_ag
     });
     assert_eq!(second, (first, 2 * DEEP + 1));
 }
+
+/// An independent copy of `frame` saved at `at`, through the canonical codec.
+fn copy(frame: &Frame, at: (u64, [u8; 32])) -> Frame {
+    let saved = Saved {
+        sequence: at.0,
+        payload: frame.encode().unwrap(),
+        seal: at.1,
+    };
+    Frame::decode(&saved, DECLARATION, BYTES, 1000, SCOPE).unwrap()
+}
+fn foreign_batch() -> Batch {
+    Batch::prepare(
+        Cursor::new(&[30]).unwrap(),
+        0,
+        0,
+        Budget {
+            programs: 2,
+            nodes: NODES,
+            bytes: BYTES,
+        },
+    )
+    .unwrap()
+}
+/// A declaration, its reservation and its completion, each at its own place.
+fn triple() -> (Frame, Frame, Frame) {
+    let mut declaration =
+        Frame::declaration(DECLARATION.to_vec(), Cursor::new(&[30, 31]).unwrap(), SCOPE);
+    declaration.location = Some((1, [5; 32]));
+    let mut pending = next(&declaration);
+    pending.location = Some((2, [6; 32]));
+    let reserved = copy(&pending, (2, [6; 32]));
+    let mut done = Frame::done(reserved, &fake_links()).unwrap();
+    done.location = Some((3, [7; 32]));
+    (declaration, pending, done)
+}
+
+#[test]
+fn every_first_frame_field_that_is_not_an_empty_declaration_is_refused() {
+    let (declaration, pending, done) = triple();
+    assert!(transition(None, &declaration).is_ok());
+    let changes: [(&str, fn(&mut Frame, &Frame, &Frame)); 9] = [
+        ("predecessor", |f, _, _| f.previous = Some((0, [1; 32]))),
+        ("pending", |f, _, _| f.pending = true),
+        ("exhausted", |f, _, _| f.exhausted = true),
+        ("batches", |f, _, _| f.completed_batches = 1),
+        ("work", |f, _, _| f.work = 1),
+        ("programs", |f, _, _| f.programs = 1),
+        ("batch", |f, p, _| {
+            f.batch = Some(
+                Batch::decode(&p.batch.as_ref().unwrap().encode().unwrap(), BYTES, 1000).unwrap(),
+            );
+        }),
+        ("links", |f, _, _| f.links = fake_links()),
+        ("cursor", |f, _, d| f.cursor = d.cursor.clone()),
+    ];
+    for (name, change) in changes {
+        let mut changed = copy(&declaration, (1, [5; 32]));
+        change(&mut changed, &pending, &done);
+        assert_eq!(
+            transition(None, &changed).err().unwrap(),
+            "single-stop first checkpoint is not an empty initial declaration",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn every_reservation_and_completion_field_that_does_not_follow_is_refused() {
+    let (declaration, pending, done) = triple();
+    assert!(transition(Some(&declaration), &pending).is_ok());
+    assert!(transition(Some(&pending), &done).is_ok());
+    let ancestry = "single-stop checkpoint ancestry or terminal transition differs";
+    let reserve = "single-stop reservation changed or skipped its acknowledged cursor";
+    let complete = "single-stop completion changed the reserved programs or counters";
+    // (refusal, which pair, change to the prior, change to the next)
+    type Change = fn(&mut Frame, &mut Frame, &Frame);
+    let cases: [(&str, bool, Change); 22] = [
+        (ancestry, false, |_, n, _| n.previous = Some((9, [9; 32]))),
+        (ancestry, false, |_, n, _| n.declaration = b"other".to_vec()),
+        (ancestry, false, |_, n, _| n.scope = 1),
+        (ancestry, false, |p, _, _| p.exhausted = true),
+        (reserve, false, |p, _, _| p.pending = true),
+        (reserve, false, |_, n, _| n.completed_batches = 1),
+        (reserve, false, |_, n, _| n.work = 5),
+        (reserve, false, |_, n, _| n.programs = 5),
+        (reserve, false, |_, n, _| n.exhausted = true),
+        (reserve, false, |_, n, d| n.cursor = d.cursor.clone()),
+        (reserve, false, |_, n, _| n.links = fake_links()),
+        (reserve, false, |_, n, _| n.batch = Some(foreign_batch())),
+        (complete, true, |p, _, _| p.pending = false),
+        (complete, true, |_, n, _| n.batch = Some(foreign_batch())),
+        (complete, true, |_, n, _| n.completed_batches = 5),
+        (complete, true, |_, n, _| n.work = 999),
+        (complete, true, |_, n, _| n.programs = 999),
+        (complete, true, |p, n, _| n.cursor = p.cursor.clone()),
+        (complete, true, |_, n, _| n.exhausted = true),
+        (
+            "single-stop completion has missing or foreign timeframe evidence",
+            true,
+            |_, n, _| n.links[2] = None,
+        ),
+        (
+            "single-stop continuation omitted its grammar body",
+            true,
+            |_, n, _| n.batch = None,
+        ),
+        (
+            "single-stop completion has no previous batch",
+            true,
+            |p, _, _| p.batch = None,
+        ),
+    ];
+    for (index, (refusal, completion, change)) in cases.into_iter().enumerate() {
+        let (mut prior, mut next) = if completion {
+            (copy(&pending, (2, [6; 32])), copy(&done, (3, [7; 32])))
+        } else {
+            (
+                copy(&declaration, (1, [5; 32])),
+                copy(&pending, (2, [6; 32])),
+            )
+        };
+        change(&mut prior, &mut next, &done);
+        assert_eq!(
+            transition(Some(&prior), &next).err().unwrap(),
+            refusal,
+            "case {index}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_batch_completes_without_children_and_keeps_the_last_saved_table() {
+    let (_, _, done) = triple();
+    let one_node = Budget {
+        programs: 2,
+        nodes: 1,
+        bytes: BYTES,
+    };
+    // After the one-instruction program the next needs more than one node,
+    // so this reservation holds no program at all.
+    let batch = Batch::prepare(done.cursor.clone(), done.work, done.programs, one_node).unwrap();
+    let mut first = Frame::pending(&done, batch).unwrap();
+    first.location = Some((4, [8; 32]));
+    let mut empty = first;
+    loop {
+        if empty.batch.as_ref().unwrap().programs().is_empty() {
+            break;
+        }
+        let mut finished = Frame::done(empty, &fake_links()).unwrap();
+        finished.location = Some((5, [9; 32]));
+        let batch = Batch::prepare(
+            finished.cursor.clone(),
+            finished.work,
+            finished.programs,
+            one_node,
+        )
+        .unwrap();
+        empty = Frame::pending(&finished, batch).unwrap();
+        empty.location = Some((6, [10; 32]));
+    }
+    let carried = empty.latest_saved;
+    let reserved = copy(&empty, empty.location.unwrap());
+    assert!(Frame::done(copy(&empty, empty.location.unwrap()), &fake_links()).is_err());
+    let mut completed = Frame::done(reserved, &[None; 8]).unwrap();
+    assert!(completed.links.iter().all(Option::is_none));
+    assert_eq!(completed.latest_saved, carried);
+    completed.location = Some((7, [11; 32]));
+    assert!(transition(Some(&empty), &completed).is_ok());
+}
+
+#[test]
+fn a_completion_needs_a_held_reservation_and_whole_nonzero_child_links() {
+    let (declaration, pending, _) = triple();
+    assert_eq!(
+        Frame::done(copy(&declaration, (1, [5; 32])), &fake_links())
+            .err()
+            .unwrap(),
+        "single-stop completion lacks its acknowledged reservation"
+    );
+    for (identity, pin) in [([0; 32], [2; 32]), ([1; 32], [0; 32])] {
+        let links =
+            std::array::from_fn(|n| (SCOPE & (1 << n) != 0).then_some(Link { identity, pin }));
+        assert_eq!(
+            Frame::done(copy(&pending, (2, [6; 32])), &links)
+                .err()
+                .unwrap(),
+            "single-stop completion does not cover exactly its selected timeframes"
+        );
+    }
+}
+
+#[test]
+fn the_decoder_refuses_oversize_unscoped_unpinned_later_and_half_linked_frames() {
+    let (declaration, pending, _) = triple();
+    let at = |frame: &Frame, sequence: u64| Saved {
+        sequence,
+        payload: frame.encode().unwrap(),
+        seal: [3; 32],
+    };
+    let saved = at(&pending, 2);
+    let exact = saved.payload.len() as u64;
+    assert!(Frame::decode(&saved, DECLARATION, exact, 1000, SCOPE).is_ok());
+    assert_eq!(
+        Frame::decode(&saved, DECLARATION, exact - 1, 1000, SCOPE)
+            .err()
+            .unwrap(),
+        "single-stop checkpoint byte admission refused"
+    );
+    let unscoped = Frame::declaration(DECLARATION.to_vec(), Cursor::new(&[30, 31]).unwrap(), 0);
+    assert_eq!(
+        Frame::decode(&at(&unscoped, 1), DECLARATION, BYTES, 1000, 0)
+            .err()
+            .unwrap(),
+        "single-stop checkpoint scope or flags refused"
+    );
+    let earlier = "single-stop checkpoint predecessor is not earlier and pinned";
+    // The predecessor is sequence 1: a frame saved at 1 or before is refused.
+    for sequence in [0, 1] {
+        assert_eq!(
+            Frame::decode(&at(&pending, sequence), DECLARATION, BYTES, 1000, SCOPE)
+                .err()
+                .unwrap(),
+            earlier
+        );
+    }
+    let mut unpinned = at(&pending, 2);
+    unpinned.payload.get_mut(24..56).unwrap().fill(0);
+    assert_eq!(
+        Frame::decode(&unpinned, DECLARATION, BYTES, 1000, SCOPE)
+            .err()
+            .unwrap(),
+        earlier
+    );
+    let links = 96 + CURSOR_BYTES;
+    for (from, to) in [(links, links + 32), (links + 32, links + 64)] {
+        let mut half = at(&declaration, 1);
+        half.payload.get_mut(from..to).unwrap().fill(1);
+        assert_eq!(
+            Frame::decode(&half, DECLARATION, BYTES, 1000, SCOPE)
+                .err()
+                .unwrap(),
+            "single-stop child has only half an identity/pin pair"
+        );
+    }
+}
