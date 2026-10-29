@@ -381,11 +381,7 @@ impl ObjectStore {
         let hex = encode_oid(oid);
         let loose = self.objects.join(hex.get(..2)?).join(hex.get(2..)?);
         if loose.is_file() {
-            let compressed = fs::read(loose).ok()?;
-            let mut decoded = Vec::new();
-            ZlibDecoder::new(compressed.as_slice())
-                .read_to_end(&mut decoded)
-                .ok()?;
+            let decoded = inflate(&fs::read(loose).ok()?)?;
             let nul = decoded.iter().position(|byte| *byte == 0)?;
             let (header, rest) = decoded.split_at(nul);
             let data = rest.get(1..)?;
@@ -480,10 +476,7 @@ impl ObjectStore {
             }
             _ => None,
         };
-        let mut inflated = Vec::new();
-        ZlibDecoder::new(pack.get(cursor..)?)
-            .read_to_end(&mut inflated)
-            .ok()?;
+        let inflated = inflate(pack.get(cursor..)?)?;
         let result = match kind {
             1..=4 => Object {
                 kind: object_kind_code(kind)?,
@@ -504,6 +497,21 @@ impl ObjectStore {
         visiting.remove(&offset);
         ((kind == 6 || kind == 7) || result.data.len() == size).then_some(result)
     }
+}
+
+/// Inflates one zlib stream, in a frame of its own (D-7410). The decoder's
+/// state is tens of KiB inline; inlined into `read_bytes`, it made that frame
+/// 54,096 B in the release test build, and a chain of `MAX_DELTA_DEPTH`
+/// reference deltas recurses through it 128 times, overflowing the 2 MiB
+/// test thread. Here the state lives only while one stream inflates, after
+/// the base of a delta is already resolved, so the recursion holds none of it.
+#[inline(never)]
+fn inflate(compressed: &[u8]) -> Option<Vec<u8>> {
+    let mut inflated = Vec::new();
+    ZlibDecoder::new(compressed)
+        .read_to_end(&mut inflated)
+        .ok()?;
+    Some(inflated)
 }
 
 fn pack_offset(path: &Path, wanted: [u8; OID_LEN]) -> Option<usize> {
