@@ -3,6 +3,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::too_many_lines,
+    clippy::type_complexity,
     reason = "tests state their expectations"
 )]
 //! BASE-COV-LIBS: every refusal of the detached Statistics V2 and V3 field

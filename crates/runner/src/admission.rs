@@ -9557,6 +9557,114 @@ mod tests {
         v3.bootstrap_draws = legacy.bootstrap_draws;
         v3
     }
+
+    /// BASE-COV-LIBS: the Evidence V2 and V3 joins refuse a slot either
+    /// authority owns that the base already filled, and a trade or winning
+    /// count the Statistics did not count; a joined evidence reads back its
+    /// parts and digests its own canonical bytes.
+    #[test]
+    #[allow(clippy::type_complexity, reason = "a table of edits and the two names they earn")]
+    fn evidence_joins_refuse_a_prefilled_authority_slot_and_a_foreign_trade_count() {
+        use super::{
+            AdmissionAuthorityOwnedFieldV2 as F2, AdmissionAuthorityOwnedFieldV3 as F3,
+            AdmissionEvidenceRefusalV2 as R2, AdmissionEvidenceRefusalV3 as R3,
+        };
+        let base = v2_base_values();
+        let fields2 = AdmissionStatisticsFieldsV2::verify_detached(&statistics_v2(1))
+            .expect("fixture statistics reconcile");
+        let walk2 = AnchoredWalkForwardAuthorityV2::from_opaque(&anchored_v2())
+            .expect("fixture walk reconciles");
+        let fields3 = AdmissionStatisticsFieldsV3::verify_detached(&statistics_v3(1))
+            .expect("fixture V3 statistics reconcile");
+        let walk3 = AnchoredWalkForwardAuthorityV3::from_opaque(&anchored_v3())
+            .expect("fixture V3 walk reconciles");
+        let join2 = |edit: &dyn Fn(&mut AdmissionEvidenceValuesV1)| {
+            let mut values = base;
+            edit(&mut values);
+            AdmissionEvidenceV2::new(values, &fields2, walk2).err()
+        };
+        let join3 = |edit: &dyn Fn(&mut AdmissionEvidenceValuesV1)| {
+            let mut values = base;
+            edit(&mut values);
+            AdmissionEvidenceV3::new(values, &fields3, walk3).err()
+        };
+        let edits: [(fn(&mut AdmissionEvidenceValuesV1), F2, F3); 5] = [
+            (
+                |v| v.spa_p_value_ppm = ObservedU64V1::Measured(0),
+                F2::Spa,
+                F3::Spa,
+            ),
+            (
+                |v| v.romano_wolf_p_value_ppm = ObservedU64V1::Refused,
+                F2::CandidateRomanoWolfPValue,
+                F3::CandidateRomanoWolfPValue,
+            ),
+            (
+                |v| v.oos_pessimistic_return_paisa = ObservedI64V1::Measured(i64::MIN),
+                F2::OosPessimisticReturn,
+                F3::OosPessimisticReturn,
+            ),
+            (
+                |v| v.romano_wolf_decision = HypothesisDecisionV1::RejectedNull,
+                F2::CandidateRomanoWolfDecision,
+                F3::CandidateRomanoWolfDecision,
+            ),
+            (
+                |v| v.full_precision_statistics_complete = CompletenessV1::Complete,
+                F2::FullPrecisionStatisticsCompleteness,
+                F3::FullPrecisionStatisticsCompleteness,
+            ),
+        ];
+        for (edit, f2, f3) in edits {
+            assert_eq!(
+                join2(&edit),
+                Some(R2::AuthorityFieldAlreadySet(f2)),
+                "{f2:?}"
+            );
+            assert_eq!(
+                join3(&edit),
+                Some(R3::AuthorityFieldAlreadySet(f3)),
+                "{f3:?}"
+            );
+        }
+        // A pre-filled slot and a foreign trade count at once: the slot.
+        let both = |v: &mut AdmissionEvidenceValuesV1| {
+            v.spa_p_value_ppm = ObservedU64V1::Measured(1);
+            v.trades = ObservedU64V1::Measured(u64::MAX);
+        };
+        assert_eq!(join2(&both), Some(R2::AuthorityFieldAlreadySet(F2::Spa)));
+        assert_eq!(join3(&both), Some(R3::AuthorityFieldAlreadySet(F3::Spa)));
+        for trades in [ObservedU64V1::Measured(49), ObservedU64V1::Unmeasured] {
+            let edit = |v: &mut AdmissionEvidenceValuesV1| v.trades = trades;
+            assert_eq!(join2(&edit), Some(R2::TradeCountSourceMismatch));
+            assert_eq!(join3(&edit), Some(R3::TradeCountSourceMismatch));
+        }
+        let wins =
+            |v: &mut AdmissionEvidenceValuesV1| v.winning_trades = ObservedU64V1::Measured(31);
+        assert_eq!(join2(&wins), Some(R2::WinningTradeCountSourceMismatch));
+        assert_eq!(join3(&wins), Some(R3::WinningTradeCountSourceMismatch));
+
+        let evidence2 = AdmissionEvidenceV2::new(base, &fields2, walk2).expect("joins");
+        assert_eq!(evidence2.values().trades, ObservedU64V1::Measured(50));
+        assert_eq!(evidence2.statistics(), fields2);
+        assert_eq!(evidence2.walk_forward(), walk2);
+        assert_eq!(
+            evidence2.digest(),
+            brutex_core::blake3::hash(&evidence2.canonical_bytes())
+        );
+        let evidence3 = AdmissionEvidenceV3::new(base, &fields3, walk3).expect("joins");
+        assert_eq!(
+            evidence3.values().winning_trades,
+            ObservedU64V1::Measured(30)
+        );
+        assert_eq!(evidence3.statistics(), fields3);
+        assert_eq!(evidence3.walk_forward(), walk3);
+        assert_eq!(
+            evidence3.digest(),
+            brutex_core::blake3::hash(&evidence3.canonical_bytes())
+        );
+        assert_ne!(evidence2.digest(), evidence3.digest());
+    }
 }
 
 #[cfg(test)]
