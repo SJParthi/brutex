@@ -87743,3 +87743,45 @@ and answer `None`, never a wrapped figure.
 saturates, never panics), and the module's existing tests, unchanged.
 
 **Cost.** None.
+
+### D-7327 — BASE-COV-LIBS attempt 3: runner's admission readers and refusals, exit-grid and grid constructors, lake's bounded read covered by tests; the bar is still NOT met, so D-7250's narrow reading still holds for these ten crates — 2026-10-29
+
+**Status: IN PROGRESS, not a landing record** (as D-7320). No production
+behaviour changed in this attempt; one attribute was added
+(`store::file`'s `Display for StoreError` carries
+`#[allow(clippy::too_many_lines)]` with its reason: attempt 2's sealed arms,
+D-7324, hand their own fields to their sentences and grew the match past the
+lint's 100 lines, as `store::sealed` already allows for the same shape).
+
+**What the new tests reach.** `runner::admission`: every arm of the three
+canonical readers (V1, V2, V3: `take` past the buffer and past `usize::MAX`,
+every tag byte 0..=255, a reserved payload naming its first nonzero byte,
+every header refusal in order) by direct call
+(`admission_reader_cover_tests.rs`); verdict reconciliation for each status
+and each overlap, the rate projection that overflows `u64`, and
+`AdmissionExactProbabilityV2::new`'s two refusals; every Statistics V2 and V3
+`verify_detached` refusal and accessor, and every walk-forward V2 and V3
+canonical-field rule (`admission_statistics_cover_tests.rs`); the Evidence V2
+and V3 joins' pre-filled authority slots and foreign trade counts (a test in
+the module's own `tests`). `runner::exit_grid_policy`: the three
+constructors' zero, inverted and non-positive refusals and every accessor.
+`runner::grid`: tradeless and loserless cells, `trades_needed_for`, the two
+cell pickers, `entry_fills`' two refusals. `lake::reader::read_bounded`: an
+unopenable path, a source whose metadata declares zero bytes and then yields
+more than the cap (`/dev/zero`), a file of exactly its cap, a directory.
+
+**Red checks** (hand changes, then restored with `git checkout`, logs
+`scratch/deep-BASE-COV-LIBS-logs/a3-red1.log` and `a3-red2.log`): V1
+`read_bool` `1 => false`, Statistics V2 `bootstrap_periods < 2` to `< 1`,
+`RatioLimitsV1`'s `ZeroLimit("max_ratio_pairs")` renamed: each new test FAILED.
+Walk-forward V3 `decided_folds > 0` to `> 1` first PASSED: no case had exactly
+one decided fold. The case `(1, 1, 0)` was added and the same change then
+FAILED.
+
+**Figures.** The last Route B measurement stands as D-7320 gives it (tip
+5ad554601835: 4,604 uncovered lines and 2,439 uncovered branch sides over the
+ten crates). Attempts 2 and 3 were not re-measured by Route B: both deep
+target dirs were held by other steps for the whole attempt and the build
+queue held this part's commands for up to 143 minutes each. The gaps list is
+`state/fix/round2/base-cov-libs-gaps-a1-after.txt`, the (F)/(U) list
+`state/fix/round2/base-cov-libs-fu.txt` (provisional, attempt 1).
