@@ -7728,3 +7728,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "exit_grid_policy_cover_tests.rs"]
+mod policy_cover_tests;
