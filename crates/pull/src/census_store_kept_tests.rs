@@ -1174,3 +1174,30 @@ fn the_kept_publish_on_a_copy_of_a_real_epoch_measured() {
          whole read {whole} us"
     );
 }
+
+/// **THE HARNESS CATCHES A CHECK THAT WAITS** (BASE-REDS-1023 repair 3,
+/// verify r3's side no test took): the stub check's pre-R3-19 shape, an open
+/// after the look that waits for a writer when a FIFO was swapped in, does
+/// not answer within its bound, and [`check_after_swap`] releases it by
+/// opening the FIFO for writing, so the suite ends and the caller reads no
+/// answer, which is how the FIFO test fails on that shape.
+#[test]
+fn a_check_that_waits_on_a_swapped_fifo_reads_as_no_answer_and_is_released() {
+    fn opens_and_waits(at: &Path) -> bool {
+        stub_hook::before_open(at);
+        std::fs::File::open(at).is_ok()
+    }
+    let scratch = Scratch::new("STUBWAITS");
+    let root = scratch.root();
+    let stub = manifest_path(root, Vendor::Gdfl);
+    std::fs::write(&stub, sealed_stub(Vendor::Gdfl)).unwrap();
+    let fifo = root.join("swapped.fifo");
+    mkfifo(&fifo);
+    let bound = std::time::Duration::from_millis(200);
+    let (got, took) = check_after_swap(&stub, &fifo, opens_and_waits, bound);
+    assert_eq!(
+        got, None,
+        "a check that waits for a writer never answers in its bound"
+    );
+    assert!(took >= bound, "{took:?}");
+}

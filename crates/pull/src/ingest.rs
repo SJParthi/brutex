@@ -7220,4 +7220,158 @@ mod tests {
         );
         assert_eq!(one_month(&[row(8), row(9)]), None);
     }
+
+    /// **THE REPAIR DOOR'S DERIVE RETURNS FOR WHAT IT NEVER DERIVES AND NAMES
+    /// EVERY REFUSAL** (BASE-REDS-1023 repair 3, verify r3's sides no test
+    /// took), on its own scratch root each: a vendor that does not derive,
+    /// an option contract and a non-minute source give no failure and write
+    /// nothing; a source month that cannot be read is one failure under its
+    /// month; a fold that refuses (volumes that overflow one bucket) is a
+    /// failure per rung; a fold with no bar is no failure and no write; and a
+    /// held derived bar the fold has no bar for is refused by name, the
+    /// repair journal's own refusal named beside it when that line cannot be
+    /// written.
+    #[test]
+    fn derive_repair_returns_for_what_it_never_derives_and_names_every_refusal() {
+        use store::file::BarFile;
+        use store::path::{FileKind, PathParts, StorePath, YearMonth};
+        let month = YearMonth::new(2026, 1).expect("a legal month");
+        let nifty = brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol");
+        let into = |vendor, contract| DeriveInto {
+            calendar: crate::calendar::Runtime::default(),
+            cash_schedule: None,
+            contract,
+            vendor,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: nifty,
+            month,
+        };
+        let parts = |timeframe| PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe,
+            month,
+            file: FileKind::Bars,
+        };
+        let policy = store::repair::Policy {
+            open_interest_applies: false,
+            basis_witness: false,
+        };
+        // 09:15 IST on Friday 2026-01-02 plus `n` minutes, and a bar there.
+        let at = |n: i64| (20_455_i64 * 86_400 - 19_800 + 33_300 + n * 60) * 1_000_000;
+        let minute = |n: i64, volume: i64| Bar {
+            ts_micros: at(n),
+            open: 100,
+            high: 110,
+            low: 95,
+            close: 105,
+            volume,
+            open_interest: i64::MIN,
+        };
+        let store_minutes = |root: &std::path::Path, bars: &[Bar]| {
+            let path = StorePath::new(parts(Timeframe::MINUTE_1)).expect("a path");
+            let mut file = BarFile::open_or_create(root, path, 7).expect("the source opens");
+            file.append(bars).expect("the source minutes commit");
+        };
+        let repair = |root: &std::path::Path, into: DeriveInto<'_>, source: Timeframe| {
+            let mut entries = Vec::new();
+            let failures = super::derive_repair(
+                "NIFTY",
+                root,
+                7,
+                source,
+                (into, policy, "derive repair sides"),
+                &mut entries,
+            );
+            (failures, entries)
+        };
+        let option = brutex_core::instrument::Contract::parse("2026-01-29-2400000-CE");
+        assert!(option.is_some_and(|c| c.is_option()));
+        for (case, into, source) in [
+            (
+                "a vendor that does not derive",
+                into(Vendor::Gdfl, None),
+                Timeframe::MINUTE_1,
+            ),
+            (
+                "an option contract",
+                into(Vendor::Zerodha, option),
+                Timeframe::MINUTE_1,
+            ),
+            (
+                "a non-minute source",
+                into(Vendor::Zerodha, None),
+                Timeframe::DAY_1,
+            ),
+        ] {
+            let root = scratch("DeriveNever");
+            let (failures, entries) = repair(&root, into, source);
+            assert!(
+                failures.is_empty() && entries.is_empty(),
+                "{case}: {failures:?}"
+            );
+            assert!(!root.join("bars").exists(), "{case}: nothing written");
+        }
+        // NO SOURCE MONTH: one failure, under its month, and no rung.
+        let root = scratch("DeriveUnread");
+        let (failures, entries) = repair(&root, into(Vendor::Zerodha, None), Timeframe::MINUTE_1);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(entries.is_empty());
+        // A FOLD THAT REFUSES: two minutes of one bucket whose volumes overflow.
+        let root = scratch("DeriveOverflow");
+        store_minutes(&root, &[minute(0, i64::MAX), minute(1, 1)]);
+        let (failures, entries) = repair(&root, into(Vendor::Zerodha, None), Timeframe::MINUTE_1);
+        assert!(entries.is_empty(), "no rung was written: {entries:?}");
+        assert_eq!(
+            failures.len(),
+            super::derived_count(Timeframe::MINUTE_1),
+            "{failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|f| f.why.starts_with(|c: char| c.is_ascii_digit())),
+            "{failures:?}"
+        );
+        // A FOLD WITH NO BAR: one minute completes no bucket of any rung.
+        let root = scratch("DeriveEmpty");
+        store_minutes(&root, &[minute(0, 10)]);
+        let (_, entries) = repair(&root, into(Vendor::Zerodha, None), Timeframe::MINUTE_1);
+        assert!(entries.is_empty(), "no rung month was written: {entries:?}");
+        for rung in super::derived_from(Timeframe::MINUTE_1) {
+            let path = StorePath::new(parts(rung)).expect("a path");
+            assert!(!path.to_path_buf(&root).exists(), "{}", rung.as_str());
+        }
+        // A HELD DERIVED BAR THE FOLD HAS NO BAR FOR, on Monday 2026-01-05
+        // at 09:15, with the repair journal's file a directory.
+        let root = scratch("DeriveHeld");
+        store_minutes(&root, &[minute(0, 10), minute(1, 10)]);
+        let held = StorePath::new(parts(Timeframe::MINUTE_2)).expect("a path");
+        let mut file = BarFile::open_or_create(&root, held, 7).expect("the held month");
+        file.append(&[Bar {
+            ts_micros: at(3 * 1_440),
+            ..minute(0, 20)
+        }])
+        .expect("the held derived bar");
+        drop(file);
+        std::fs::create_dir_all(root.join("audit").join("zerodha.repairs"))
+            .expect("a directory where the repair journal goes");
+        let (failures, _) = repair(&root, into(Vendor::Zerodha, None), Timeframe::MINUTE_1);
+        let refused: Vec<&super::Failure> = failures
+            .iter()
+            .filter(|f| f.why.starts_with("2min: historical derived bar"))
+            .collect();
+        assert_eq!(refused.len(), 1, "{failures:?}");
+        assert!(
+            refused[0]
+                .why
+                .contains("and the repair journal line was not written"),
+            "{}",
+            refused[0].why
+        );
+    }
 }

@@ -170,12 +170,23 @@ pub enum Live {
 pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
     let path = live_lock_path(root, run);
     let file = open_live(root, &path)?;
-    match store::flock::Flock::try_lock(file, path.clone()) {
+    probed(&path, store::flock::Flock::try_lock(file, path.clone()))
+}
+
+/// What one `flock` attempt on the live lock at `path` says: taken, still
+/// spooling with its holder in words, or the host's refusal by name, never
+/// read as free. Apart from [`live_probe`] so a test hands it the refusal no
+/// lock file gives on request (BASE-REDS-1023 repair 3, verify r3).
+pub(super) fn probed(
+    path: &Path,
+    attempt: Result<store::flock::Flock<File>, std::fs::TryLockError>,
+) -> Result<Live, SpoolError> {
+    match attempt {
         Ok(lock) => Ok(Live::Taken(lock)),
         Err(std::fs::TryLockError::WouldBlock) => {
-            Ok(Live::Spooling(store::flock::holder_note(&path)))
+            Ok(Live::Spooling(store::flock::holder_note(path)))
         }
-        Err(std::fs::TryLockError::Error(why)) => Err(SpoolError::io(&path, "lock", why)),
+        Err(std::fs::TryLockError::Error(why)) => Err(SpoolError::io(path, "lock", why)),
     }
 }
 

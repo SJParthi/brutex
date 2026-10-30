@@ -2570,18 +2570,15 @@ fn judge(
             .flat_map(|line| line.stamps.iter().copied())
             .collect()
     };
+    // The two sets are read directly: a `match` over the scope here had an
+    // arm for a whole month that no caller could reach (BASE-REDS-1023
+    // repair 3, verify r3 follow-up).
     let (dropped, dropping) = (stamps_named(Scope::Dropped), stamps_named(Scope::Dropping));
-    let named_by = |at: i64, scope: Scope| match scope {
-        Scope::Dropped => dropped.contains(&at),
-        Scope::Dropping => dropping.contains(&at),
-        Scope::WholeMonth => false,
-    };
     let unfinished: Vec<&Line> = mine
         .iter()
         .copied()
         .filter(|line| {
-            line.scope == Scope::Dropping
-                && line.stamps.iter().all(|at| !named_by(*at, Scope::Dropped))
+            line.scope == Scope::Dropping && line.stamps.iter().all(|at| !dropped.contains(at))
         })
         .collect();
     let mut wanted = named.to_vec();
@@ -2597,9 +2594,10 @@ fn judge(
         held.iter().map(|bar| bar.ts_micros).collect();
     let holds = |at: i64| held_stamps.contains(&at);
     let named_set: std::collections::HashSet<i64> = named.iter().copied().collect();
-    if let Some(at) = named.iter().find(|at| {
-        !holds(**at) && !named_by(**at, Scope::Dropped) && !named_by(**at, Scope::Dropping)
-    }) {
+    if let Some(at) = named
+        .iter()
+        .find(|at| !holds(**at) && !dropped.contains(*at) && !dropping.contains(*at))
+    {
         return Err(crate::repair::RepairError::UnheldStamp(*at).into());
     }
     let held_named = held

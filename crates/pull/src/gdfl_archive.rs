@@ -2490,4 +2490,29 @@ mod tests {
             }
         }
     }
+
+    /// **THE END OF A ZIP, EVERY SIDE OF ITS TWO O(1) CHECKS**
+    /// (BASE-REDS-1023 repair 3, verify r3's sides no test took): an end
+    /// record nearer the start than a locator and a ZIP64 record can be
+    /// holds no ZIP64 record; bytes there without its signature hold none
+    /// either; and a directory stated short of where the next record starts
+    /// that holds no entry at all is a prefix by its count alone.
+    #[test]
+    fn a_short_tail_a_tail_without_the_zip64_record_and_an_empty_prefixed_directory() {
+        let bytes = vec![0_u8; 200];
+        let span = Span::of(&bytes, 200);
+        assert!(matches!(
+            zip64_record_at(&span, 20 + ZIP64_RECORD_LEN - 1),
+            Ok(None)
+        ));
+        assert!(matches!(zip64_record_at(&span, 150), Ok(None)));
+        assert!(matches!(
+            unprefixed(&span, 100, (10, 20, 0)),
+            Err(CmRefusal::ArchivePrefixed { bytes: 70 })
+        ));
+        assert!(
+            unprefixed(&span, 100, (10, 90, 0)).is_ok(),
+            "a directory that ends where the next record starts is not a prefix"
+        );
+    }
 }

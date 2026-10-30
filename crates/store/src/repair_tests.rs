@@ -937,3 +937,150 @@ fn the_restate_policy_publishes_corrected_values_and_keeps_the_old_generation() 
     let refused = super::restate_month(&fixture.root, path(), SYMBOL, &[rows[0]], policy, "");
     assert!(matches!(refused, Err(RepairError::Reason(_))));
 }
+
+/// **A RESERVED REVISION THAT HOLDS ANOTHER REQUEST IS A CONFLICT, BY EACH
+/// TEST THE DROP DOOR MAKES** (BASE-REDS-1023 repair 3, verify r3's sides no
+/// test took): a revision written from an EARLIER source header, though it
+/// holds the same kept bars, and a revision holding as many bars as the
+/// request keeps but other ones. Neither is reused and neither is replaced.
+#[test]
+fn a_reserved_revision_from_another_source_or_with_other_bars_is_a_conflict() {
+    let fixture = Fixture::new("drop-conflict");
+    let first = fixture.source(&[bar(0), bar(1), bar(2)]);
+    let edges = [bar(0).ts_micros];
+    assert_eq!(
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            first,
+            &edges,
+            "first edge"
+        ),
+        Ok(Published::Created)
+    );
+    let written = files_under(&fixture.root);
+    // OTHER BARS, AS MANY: the same source, the last bar dropped instead.
+    assert_eq!(
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            first,
+            &[bar(2).ts_micros],
+            "last edge"
+        ),
+        Err(RepairError::Conflict),
+        "two kept bars, but not these two"
+    );
+    // ANOTHER SOURCE: the month grew by one bar, and the request drops it
+    // too, so the kept bars are the revision's own; its source is not.
+    let grown = fixture.source(&[bar(3)]);
+    assert_ne!(grown, first);
+    assert_eq!(
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            grown,
+            &[bar(0).ts_micros, bar(3).ts_micros],
+            "both edges"
+        ),
+        Err(RepairError::Conflict),
+        "the same kept bars, from another source header"
+    );
+    let reader = fixture.read().expect("the first revision is intact");
+    assert_eq!(reader.source_header(), first);
+    assert_eq!(reader.header().n_valid, 2);
+    drop(reader);
+    let after: Vec<_> = files_under(&fixture.root)
+        .into_iter()
+        .filter(|(p, _)| p.to_string_lossy().contains("bar-revisions-v1"))
+        .collect();
+    let before: Vec<_> = written
+        .into_iter()
+        .filter(|(p, _)| p.to_string_lossy().contains("bar-revisions-v1"))
+        .collect();
+    assert_eq!(after, before, "the revision is never replaced");
+}
+
+/// **A REFUSED SOURCE RELEASE ON THE DROP DOOR'S REUSE SAYS THE PUBLICATION
+/// MAY BE VISIBLE** (BASE-REDS-1023 repair 3, verify r3): as for `publish`,
+/// with the reader's own release let through first (its open releases its
+/// revision lock before the door releases the source's).
+#[test]
+fn a_refused_source_release_on_a_reused_drop_says_the_publication_may_be_visible() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new("drop-release");
+    let header = fixture.source(&[bar(0), bar(1), bar(2)]);
+    let drop = [bar(1).ts_micros];
+    let ask = || {
+        super::publish_without(
+            &fixture.root,
+            path(),
+            SYMBOL,
+            revision(),
+            header,
+            &drop,
+            "middle",
+        )
+    };
+    assert_eq!(ask(), Ok(Published::Created));
+    refuse_unlock(1, io::ErrorKind::PermissionDenied);
+    let source_lock = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
+    assert_eq!(
+        ask(),
+        Err(RepairError::Io {
+            path: source_lock.clone(),
+            operation: "release shared lock",
+            kind: io::ErrorKind::PermissionDenied,
+            publication_may_be_visible: true,
+        })
+    );
+    assert!(free(&source_lock), "the refusal kept nothing locked");
+    assert_eq!(ask(), Ok(Published::Reused));
+}
+
+/// **`same_bar` COMPARES EVERY FIELD, AND OPEN INTEREST'S ONE EXCUSE IS AN
+/// ABSENCE WHERE IT IS NO MEASUREMENT** (D-3322): a bar differing in one
+/// field alone is another bar whether or not open interest applies; a held
+/// `0` and an offered null (or the reverse) are one absence only where it
+/// does not apply; a held measurement is never excused by an offered null
+/// (BASE-REDS-1023 repair 3, verify r3's sides no test took).
+#[test]
+fn same_bar_compares_every_field_and_excuses_only_an_absent_open_interest() {
+    let held = bar(2);
+    assert!(super::same_bar(&held, &held, true));
+    assert!(super::same_bar(&held, &held, false));
+    let one_off: [(&str, fn(&mut Bar)); 7] = [
+        ("ts_micros", |b| b.ts_micros += 60_000_000),
+        ("open", |b| b.open += 1),
+        ("high", |b| b.high += 1),
+        ("low", |b| b.low -= 1),
+        ("close", |b| b.close += 1),
+        ("volume", |b| b.volume += 1),
+        ("open_interest", |b| b.open_interest = 5),
+    ];
+    for (field, change) in one_off {
+        let mut offered = held;
+        change(&mut offered);
+        for applies in [true, false] {
+            assert!(
+                !super::same_bar(&held, &offered, applies),
+                "{field} differs (open interest applies: {applies})"
+            );
+        }
+    }
+    let with = |open_interest: i64| Bar {
+        open_interest,
+        ..held
+    };
+    assert!(super::same_bar(&with(0), &with(OI_NULL), false));
+    assert!(super::same_bar(&with(OI_NULL), &with(0), false));
+    assert!(!super::same_bar(&with(0), &with(OI_NULL), true));
+    assert!(!super::same_bar(&with(5), &with(OI_NULL), false));
+    assert!(!super::same_bar(&with(0), &with(5), false));
+}

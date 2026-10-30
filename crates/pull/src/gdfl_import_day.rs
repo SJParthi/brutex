@@ -600,13 +600,14 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
             return false;
         }
         Admit::Skip(skip @ (Skip::Hole(reason) | Skip::Unrepairable(reason))) => {
-            if matches!(skip, Skip::Hole(_)) {
+            let repairable = matches!(skip, Skip::Hole(_));
+            if repairable {
                 report.holes_skipped += 1;
             } else {
                 report.holes_unrepairable += 1;
             }
             report.holes_in_range.push((day, reason.to_owned()));
-            note_hole_skipped(ctx, (key, day), skip);
+            note_hole_skipped(ctx, (key, day), (reason, repairable));
             return false;
         }
     }
@@ -815,13 +816,11 @@ pub(super) fn admit_rule(state: &KeyState, asks: Asks) -> Admit {
 
 /// Says a hole day was passed over unread (D-4851): at `warn`, with its
 /// reason and whether a repair reason could fill it, so a search for the
-/// day finds why no run reads it.
-fn note_hole_skipped(ctx: &Ctx<'_>, (key, day): (&str, Day), skip: Skip) {
-    let (reason, repairable) = match skip {
-        Skip::Hole(reason) => (reason, true),
-        Skip::Unrepairable(reason) => (reason, false),
-        Skip::Done | Skip::Restated => return,
-    };
+/// day finds why no run reads it. Handed the hole's reason and that answer,
+/// never a [`Skip`]: its one caller holds a hole, and a `Skip` parameter made
+/// an arm for a done or restated day that no call could reach
+/// (BASE-REDS-1023 repair 3, verify r3).
+fn note_hole_skipped(ctx: &Ctx<'_>, (key, day): (&str, Day), (reason, repairable): (&str, bool)) {
     let day_text = day.to_string();
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn(

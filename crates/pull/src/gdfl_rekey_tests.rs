@@ -2801,3 +2801,95 @@ fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
     );
     assert_eq!(view(root).2.pending(), 0);
 }
+
+/// **EVERY CONTRADICTION OF THE LEDGER IS LEFT BY NAME** (BASE-REDS-1023
+/// repair 3, verify r3's sides no test took): a survey key holding another
+/// rung is unresolved by name; and against the ledger, a recorded move whose
+/// key holds the same bars in another number of months, a key the decoder
+/// keeps where the ledger supersedes it, and a recorded retirement whose key
+/// holds the same bars on another number of days are each left, named, never
+/// recorded, kept, moved or retired again.
+#[test]
+fn every_contradiction_of_the_ledger_is_left_by_name() {
+    let fixture = Scratch::new("contradictions");
+    let other = Survey {
+        other_rungs: vec!["NSE-FNO-NIFTY-2023-06-28-1000000-PE 1day".to_owned()],
+        root: fixture.root().to_path_buf(),
+        ..Survey::default()
+    };
+    let decided = plan(&other, &Withdrawn::default());
+    assert_eq!(decided.unresolved.len(), 1, "{:?}", decided.unresolved);
+    assert_eq!(decided.unresolved[0].key, other.other_rungs[0]);
+    assert!(
+        decided.unresolved[0]
+            .why
+            .starts_with("holds a rung other than"),
+        "{}",
+        decided.unresolved[0].why
+    );
+    const OLD: &str = "2023-06-29-1000000-PE";
+    const NEW: &str = "2023-06-28-1000000-PE";
+    let ledger = |line: String| Withdrawn::parse(&format!("{line}\n")).unwrap();
+    let key = Stored {
+        underlying: sym("NIFTY"),
+        contract: c(OLD),
+        expiry: d(2023, 6, 29),
+        strike: 1_000_000,
+        side: OptionSide::Put,
+        months: [6, 7, 8]
+            .into_iter()
+            .map(|m| Month {
+                month: YearMonth::new(2020, m).unwrap(),
+                rows: 1,
+                first_ts_micros: 0,
+                last_ts_micros: 0,
+            })
+            .collect(),
+        days: BTreeMap::new(),
+    };
+    // The ledger's move: 3 bars in 2 months. The key: 3 bars in 3 months.
+    let moved = ledger(pointer(OLD, NEW).line());
+    let mut out = Plan::default();
+    against_ledger(
+        &mut out,
+        &key,
+        Verdict::Move(c(NEW), AliasKind::VendorRedated),
+        &moved,
+    );
+    assert!(out.recorded_moves.is_empty() && out.moves.is_empty());
+    assert!(
+        out.unresolved[0]
+            .why
+            .contains("with 3 bar(s) in 2 month(s), and it holds 3 bar(s) in 3 month(s) now"),
+        "{}",
+        out.unresolved[0].why
+    );
+    let mut out = Plan::default();
+    against_ledger(&mut out, &key, Verdict::Keep, &moved);
+    assert_eq!(out.kept, 0);
+    assert_eq!(
+        out.unresolved[0].why,
+        "the decoder now files it where it is, and ledger line 1 supersedes it by \
+         NSE-FNO-NIFTY-2023-06-28-1000000-PE"
+    );
+    // The ledger's retirement: 1 bar on 1 day. The key now: 1 bar on 2 days.
+    let retired = ledger(refusal_of(OLD).line());
+    let mut out = Plan::default();
+    against_ledger(
+        &mut out,
+        &key,
+        Verdict::Retire(RetiredRecord {
+            days: 2,
+            ..refusal_of(OLD)
+        }),
+        &retired,
+    );
+    assert!(out.recorded_retired.is_empty() && out.retired.is_empty());
+    assert!(
+        out.unresolved[0].why.contains(
+            "retires it with 1 bar(s) on 1 day(s), and it holds 1 bar(s) on 2 day(s) now"
+        ),
+        "{}",
+        out.unresolved[0].why
+    );
+}

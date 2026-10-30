@@ -5156,3 +5156,118 @@ fn a_busy_merge_names_its_lock_and_holder_apart() {
         "{busy}"
     );
 }
+
+/// **A RESUMED WRITER, A DEAD LIVE LOCK AND A REFUSED `flock`, EACH BY NAME**
+/// (BASE-REDS-1023 repair 3, verify r3's sides no test took). A resumed
+/// writer of a spool that holds its HEADER ALONE (a run stopped after making
+/// it) appends straight after the header; one whose tail is details all the
+/// way back to the header (the verdict record before them cut out) walks that
+/// window to its start and appends after it, writing nothing over. A run
+/// whose live lock would not open (a file where `verify/running` goes) keeps
+/// its spools waiting, named in the faults, never read as free; and the
+/// host's refusal of the lock's `flock` is an error by name, never free.
+#[test]
+fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
+    let on = regular();
+    let id = |run: u64| SpoolId {
+        run,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_1,
+        month: on.year_month().unwrap(),
+    };
+    let header = usize::try_from(spool::HEADER_LEN).unwrap();
+    let record = usize::try_from(spool::RECORD_LEN).unwrap();
+    // HEADER ALONE.
+    let root = scratch("bare-header");
+    let before = SpoolWriter::new(&root, 35, Mode::ZerodhaMerge, 1);
+    before
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-A", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(before);
+    let path = id(35).path(&root);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(spool::HEADER_LEN)
+        .unwrap();
+    let after = SpoolWriter::new(&root, 35, Mode::ZerodhaMerge, 1);
+    after
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-B", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(after);
+    let read = spool::read_spool(&path, &id(35)).unwrap();
+    let keys: Vec<String> = read.records.iter().map(|r| r.key.to_string()).collect();
+    assert_eq!(keys, ["NSE-INDEX-B"], "appended straight after the header");
+    assert_eq!(std::fs::read(&path).unwrap().len(), header + record);
+    // A TAIL OF DETAILS: a verdict record with two details, the verdict cut.
+    let root = scratch("detail-tail");
+    let mut with = spooled(on, "NSE-INDEX-A", Code::Match, 1);
+    with.details.push(Detail {
+        kind: 4,
+        payload: vec![1; 8],
+    });
+    with.details.push(Detail {
+        kind: 5,
+        payload: vec![2; 8],
+    });
+    let before = SpoolWriter::new(&root, 36, Mode::ZerodhaMerge, 1);
+    before
+        .append(Segment::Index, Timeframe::MINUTE_1, &[with])
+        .unwrap();
+    drop(before);
+    let path = id(36).path(&root);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        bytes.len(),
+        header + 3 * record,
+        "a verdict and two details"
+    );
+    let mut cut = bytes[..header].to_vec();
+    cut.extend_from_slice(&bytes[header + record..]);
+    std::fs::write(&path, &cut).unwrap();
+    let after = SpoolWriter::new(&root, 36, Mode::ZerodhaMerge, 1);
+    after
+        .append(
+            Segment::Index,
+            Timeframe::MINUTE_1,
+            &[spooled(on, "NSE-INDEX-B", Code::Match, 1)],
+        )
+        .unwrap();
+    drop(after);
+    let grown = std::fs::read(&path).unwrap();
+    assert_eq!(grown.len(), header + 3 * record, "after the two details");
+    assert_eq!(&grown[..cut.len()], &cut[..], "nothing written over");
+    // A LIVE LOCK THAT WOULD NOT OPEN.
+    let root = scratch("dead-live");
+    std::fs::create_dir_all(root.join("verify")).unwrap();
+    std::fs::write(root.join("verify").join("running"), b"a file, not a folder").unwrap();
+    let mut faults = Vec::new();
+    let (free, held) = super::not_live(&root, vec![id(37)], &mut faults);
+    assert!(free.is_empty() && held.is_empty());
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        faults[0].starts_with("run 37's live lock would not open, so its spools wait: "),
+        "{}",
+        faults[0]
+    );
+    // THE HOST'S REFUSAL OF THE `flock` itself.
+    let refused = spool::probed(
+        Path::new("verify/running/38.lock"),
+        Err(std::fs::TryLockError::Error(std::io::Error::other(
+            "refused by the host",
+        ))),
+    );
+    assert!(
+        matches!(&refused, Err(SpoolError::Io { action: "lock", .. })),
+        "{refused:?}"
+    );
+}

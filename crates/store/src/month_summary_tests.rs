@@ -721,6 +721,22 @@ fn padded_minutes_are_carries_inside_a_window_after_its_first_held_minute() {
         backwards.padded_on(day, &two),
         Err(NotCounted::InvalidStamps)
     );
+    // Counts that name a decreasing stamp and no invalid one: the fold never
+    // makes them (a decreasing stamp is an invalid one too), a section read
+    // back can carry them, and the guard's second half refuses them by name
+    // (BASE-REDS-1023 repair 3, verify r3's side no test took).
+    let mut decreasing_only = summary.clone();
+    decreasing_only.counts.invalid = 0;
+    decreasing_only.counts.decreasing = 1;
+    assert_eq!(
+        decreasing_only.padded_on(day, &two),
+        Err(NotCounted::InvalidStamps)
+    );
+    let read_back = MonthSummary::from_section(&decreasing_only.section()).unwrap();
+    assert_eq!(
+        read_back.padded_on(day, &two),
+        Err(NotCounted::InvalidStamps)
+    );
     for why in [
         NotCounted::Version1,
         NotCounted::NotMinutes,
