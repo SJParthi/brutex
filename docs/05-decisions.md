@@ -84615,9 +84615,11 @@ edited.
    `:1165`) and green here; its twelve tests run in gate 0 (three of them pin
    its readers' exact answers, after a pre-check of every mutant of the
    set found survivors there, BRED23-F37). The bound and
-   what it cannot see are L-BRED23-17. Gate 1e itself ran whole on the
-   final tip (state/fix/round2/, named in this repair's report), and the
-   moved web test was shown to bind the server: a ceiling of 20,001 and a
+   what it cannot see are L-BRED23-17. Gate 1e itself has NOT yet run
+   whole on this repair's tip: the full gate run waited for a cargo slot
+   until the drain of 30 Oct 15:18 IST and was not started under it (this
+   repair's report, NOT DONE); the next check or the landing gate runs it.
+   The moved web test was shown to bind the server: a ceiling of 20,001 and a
    first column `feed_x` in a scratch copy of `bars_export.rs` each failed
    it.
 2. **D-7152 item 4 and its addendum: no test asks again where its caller
@@ -84637,8 +84639,10 @@ edited.
    written in L-BRED23-16 with their loads: a refusal rate above zero under
    load is a stated limit, not a retry.
 3. **D3 (operator decisions D2 and D3, D-7250) on this part's set, narrow
-   reading.** Each coverage gap verify r3 measured has a test that reaches
-   it (BRED-33 to BRED-39), or its code was removed as redundant, never
+   reading.** Each coverage gap verify r3 measured has a test written to
+   reach it (BRED-33 to BRED-39; Route B's measurement of the crates on
+   this tip is owed: this repair's report), or its code was
+   removed as redundant, never
    covered by weakening: `quarantine::judge` reads its two stamp sets
    directly (its `named_by` closure had a whole-month arm no caller
    reached); `note_hole_skipped` takes the hole's reason and whether it is

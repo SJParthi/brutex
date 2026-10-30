@@ -1189,11 +1189,13 @@ confirmed by two skeptics; their corrections are applied.
   `cargo test` exited 101 in 1e's worktree with `web/` deleted. Repair 1
   (D-7153) moved the cross-check to
   `web/tests/export-agrees-with-the-server.test.js`, and verify r3 ran only
-  `--fast`, which skips 1e. FIXED twice over: gate 1h (`source_scan
-  web-reads`, BRED-32) refuses any crate test that reads a path into `web/`
-  in seconds, red on f01d7a0e4's file at its two lines and green here; and
-  gate 1e itself ran WHOLE on this repair's final tip (D-7153 addendum of 30
-  Oct). The moved web test still binds the server: with `EXPORT_CEILING`
+  `--fast`, which skips 1e. FIXED at the cause, and guarded: gate 1h
+  (`source_scan web-reads`, BRED-32) refuses any crate test that reads a
+  path into `web/` in seconds, red on f01d7a0e4's file at its two lines and
+  green here. Gate 1e itself has NOT yet run whole on this repair's tip:
+  its full gate run waited for a cargo slot until the drain of 30 Oct
+  15:18 IST (D-7153 addendum of 30 Oct); the next check or the landing
+  gate runs it. The moved web test still binds the server: with `EXPORT_CEILING`
   20,000 changed to 20,001, or the first column `feed` to `feed_x`, in a
   scratch copy of `bars_export.rs`, it failed, and passed again restored
   (`state/fix/round2/bred1023-r3-evidence/bind-*.log`).
@@ -1222,8 +1224,10 @@ confirmed by two skeptics; their corrections are applied.
   window), sides of this part's own tests that only a loaded machine took,
   two `#[ignore]` measurements, and survivors in `gates_bounds.rs`
   `flat_spaces` and `gates_ledger.rs` `disarms`/`opens_disarm`. FIXED by a
-  test reaching each side (BRED-33 to BRED-39, BRED-32's gate tests, the
-  M2 kill tests) and by removing three redundancies rather than covering
+  test written to reach each side (BRED-33 to BRED-39, BRED-32's gate
+  tests, the M2 kill tests; Route C measured the `.github` files whole on
+  this tip, and Route B's measurement of the crates is owed) and by
+  removing three redundancies rather than covering
   them: `judge`'s unreachable whole-month arm, `note_hole_skipped`'s done
   and restated arm (its parameter is now the hole's reason), and a second
   spelling an assertion accepted that no page writes. Every survivor was
