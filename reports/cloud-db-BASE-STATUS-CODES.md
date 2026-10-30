@@ -87,3 +87,25 @@ be read (assurance 29 Oct n=31).
   `cargo deny check`: advisories, bans, licenses, sources ok, EXIT 0 (this branch and the base).
 - NEXT: clippy, the full workspace test on both trees, the web gates on both trees, the table's
   red-before on the base, coverage of the D2 set.
+
+### 2026-10-30 15:41 IST
+
+- Switches checked at 15:41 IST: `HOLD` absent, `GO` and `GO-BASE-STATUS-CODES` present;
+  `origin/feat/db-fix` still `f01d7a0e4`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: EXIT 0 (after fixing 10 of this
+  part's: `candidatejson::render` over 100 lines, a 113-line test split in two, 7 `Value[...]`
+  indexings in tests, one complex type named).
+- The 33 language-purity gates (1e not run) on both trees: the same 10 red on each (1c 1d 23 27b 30 19
+  10 11 12 29), the same refusal lines, counts aside; gate 23 had also refused this part's 8 `println!`,
+  now gone. The six web gates on both trees: W4 W5 W6 green; W1 W2 W3 red on each, W2 the same 13
+  browser-harness and 3 `ask.test.js` tests, W3 the same 58 svelte-check errors, none in this part's files.
+- `cargo test --workspace --locked --no-fail-fast` on this branch (`6a3cec6a`): EXIT 101, 67 failing
+  tests in 7 binaries. One is this part's: `pool_table_tests::every_store_route_names_its_pool` read
+  each handler for `crate::detail::run(`, which now runs inside `status_rule::serve`; the table now holds
+  the nine routes to `crate::status_rule::serve(` and `serve` to `crate::detail::run(` (to be re-run).
+  Two tests hung at 0% CPU past 20 minutes and were stopped (CONTEXT's 20-minute rule):
+  `gaps_route::cloud_mutant_tests::a_full_calendar_pool_refuses_the_census_and_the_audit` and
+  `cloud_mutants_bars` `spot_json_is_refused_by_name_when_every_store_read_slot_is_held`.
+- Disk: 7.4 GB free beside the 19 GB target, so the base's comparison builds the failing crates' test
+  binaries only, in the same target (registry dependencies shared), and runs the 67 tests by name there.
+- NEXT: the base's run of the 67, the pool table re-run, the table's red-before on the base.

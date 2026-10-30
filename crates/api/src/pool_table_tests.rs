@@ -62,6 +62,11 @@ const fn pool(
 
 const RUN: &str = "crate::detail::run(";
 const STORE_READ: &str = "crate::detail::run_store_read(";
+/// THE ONE STATUS RULE'S PATH (D-7550): a handler that answers through
+/// `status_rule::serve` takes the detail pool through it, and `serve`'s own
+/// body is held to [`RUN`] by [`every_store_route_names_its_pool`], so the
+/// chain from route to pool is checked whole.
+const SERVE: &str = "crate::status_rule::serve(";
 
 /// Every registered route and where it runs.
 const ROUTES: &[(&str, Runs)] = &[
@@ -460,15 +465,15 @@ const ROUTES: &[(&str, Runs)] = &[
     ),
     (
         "/frontier.json",
-        pool(Named::Detail, "frontierjson.rs", "frontier_json", RUN),
+        pool(Named::Detail, "frontierjson.rs", "frontier_json", SERVE),
     ),
     (
         "/sweep-evidence.json",
-        pool(Named::Detail, "sweepevidence.rs", "evidence_json", RUN),
+        pool(Named::Detail, "sweepevidence.rs", "evidence_json", SERVE),
     ),
     (
         "/candidate-trades.json",
-        pool(Named::Detail, "candidatejson.rs", "candidate_json", RUN),
+        pool(Named::Detail, "candidatejson.rs", "candidate_json", SERVE),
     ),
     (
         "/expression-search.json",
@@ -476,24 +481,24 @@ const ROUTES: &[(&str, Runs)] = &[
             Named::Detail,
             "expressionsearchjson.rs",
             "expression_search_json",
-            RUN,
+            SERVE,
         ),
     ),
     (
         "/boolean-candidates.json",
-        pool(Named::Detail, "booleanjson.rs", "boolean_json", RUN),
+        pool(Named::Detail, "booleanjson.rs", "boolean_json", SERVE),
     ),
     (
         "/boolean-statistics.json",
-        pool(Named::Detail, "booleanevidencejson.rs", "serve", RUN),
+        pool(Named::Detail, "booleanevidencejson.rs", "serve", SERVE),
     ),
     (
         "/boolean-admission.json",
-        pool(Named::Detail, "booleanevidencejson.rs", "serve", RUN),
+        pool(Named::Detail, "booleanevidencejson.rs", "serve", SERVE),
     ),
     (
         "/boolean-qualification.json",
-        pool(Named::Detail, "booleanevidencejson.rs", "serve", RUN),
+        pool(Named::Detail, "booleanevidencejson.rs", "serve", SERVE),
     ),
     (
         "/boolean-campaign.json",
@@ -546,7 +551,7 @@ const ROUTES: &[(&str, Runs)] = &[
     ),
     (
         "/index-stop.json",
-        pool(Named::Detail, "indexstopjson.rs", "index_stop_json", RUN),
+        pool(Named::Detail, "indexstopjson.rs", "index_stop_json", SERVE),
     ),
     (
         "/index-stop-candles.json",
@@ -731,6 +736,15 @@ fn every_store_route_names_its_pool() {
         "the pool table names routes no longer registered: {gone:?}"
     );
 
+    // THE ONE STATUS RULE'S PATH TAKES THE POOL ITS ROUTES NAME (D-7550): a row
+    // held to `SERVE` is a handler that answers through `status_rule::serve`,
+    // and `serve` itself must still call `RUN`.
+    let rule = source("status_rule.rs");
+    assert!(
+        body_of(&rule, "serve").is_some_and(|body| body.contains(RUN)),
+        "status_rule.rs's fn serve no longer calls {RUN}, so no route held to {SERVE} takes the \
+         detail pool"
+    );
     let mut sources = std::collections::HashMap::new();
     for (route, runs) in ROUTES {
         match *runs {
