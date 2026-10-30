@@ -87553,6 +87553,12 @@ sent its required `attempt` (and `200` `"missing"` once it was).
      folded (`/frontier.json` folded it, through `detail::Selector`, and
      answered a run). All zeros is the null value: the single-stop routes
      refused it and the others did not, so one input had two statuses.
+     Four routes outside this part read their identity through
+     `hex_param` and take the same rule with it: `/boolean-campaign.json`,
+     `/boolean-qualified-campaign.json`, `/boolean-oos.json` and
+     `/boolean-qualified-search.json` now refuse an all-zero identity `400`
+     where the base answered `503` (the table test's run over the base's
+     routes, 30 October 2026); nothing else of theirs moves.
 3. **The not-found status is `404`.** A `200` is an answer: a page read the
    empty "missing" body as data, and a run that ranked nothing looked like a
    run never recorded. A `503` blames the server for the client's question
