@@ -778,32 +778,29 @@ fn anchors_at_repo(text: &str) -> bool {
 
 /// The names a literal's inline format arguments read: `{root}` and
 /// `{root:?}` read `root`; `{}`, `{0}` and `{{` read none.
+///
+/// Read as the pieces that follow each `{`, so every step consumes one: an
+/// empty piece is a `{{` (or a `{` that ends the text), and the piece after
+/// an escape is text (BASE-REDS-1023 repair 3: the index loop this replaced
+/// had four mutants that looped forever instead of failing a test).
 fn format_names(text: &str) -> Vec<String> {
-    let b = text.as_bytes();
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != b'{' {
-            i += 1;
+    let mut pieces = text.split('{').skip(1);
+    while let Some(piece) = pieces.next() {
+        if piece.is_empty() {
+            pieces.next();
             continue;
         }
-        if b.get(i + 1) == Some(&b'{') {
-            i += 2;
-            continue;
-        }
-        let start = i + 1;
-        let mut j = start;
-        while b
-            .get(j)
-            .is_some_and(|c| *c == b'_' || c.is_ascii_alphanumeric())
+        let len = piece
+            .find(|c: char| c != '_' && !c.is_ascii_alphanumeric())
+            .unwrap_or(piece.len());
+        let (name, tail) = piece.split_at(len);
+        if !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && tail.starts_with(['}', ':'])
         {
-            j += 1;
+            out.push(name.to_owned());
         }
-        if j > start && !b[start].is_ascii_digit() && matches!(b.get(j), Some(b'}' | b':')) {
-            out.push(text[start..j].to_owned());
-        }
-        // `j` began at `start`, one past the `{`, so the scan moves on.
-        i = j;
     }
     out
 }
@@ -5803,6 +5800,10 @@ mod tests {
             ("{{root}}", &[][..]),
             ("x{{y}}", &[][..]),
             ("{a}{{b}}{c:?}", &["a", "c"][..]),
+            ("{a{b}", &["b"][..]),
+            ("{{{a}", &["a"][..]),
+            ("{a b} {abc", &[][..]),
+            ("{\u{e9}}", &[][..]),
         ] {
             assert_eq!(within_deadline(move || format_names(text)), names, "{text}");
         }
