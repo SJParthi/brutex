@@ -1204,11 +1204,19 @@ mod tests {
 
         let query = format!("identity={}", "94".repeat(32));
         let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::OK);
-        assert_body_identity(&body, &"94".repeat(32));
+        // THE ONE NOT-FOUND (D-7550): a run the receipts do not name is a
+        // 404 for that run alone, beside another run's committed frontier.
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(parsed["identity"], "94".repeat(32));
+        assert_eq!(parsed["status"], "not_found");
         assert!(body.contains(r#""rows":[]"#), "{body}");
-        assert!(body.contains("no committed result-set receipt"), "{body}");
+        assert!(body.contains("Run frontier not held"), "{body}");
         assert!(!body.contains(r#""rank":1"#), "foreign row leaked: {body}");
+        // AND THE KNOWN RUN BESIDE IT STILL ANSWERS ITS ROW.
+        let (status, _, known_body) = respond(Ok(dir.clone()), &format!("identity={}", "93".repeat(32)));
+        assert_eq!(status, axum::http::StatusCode::OK, "{known_body}");
+        assert!(known_body.contains(r#""rank":1"#), "{known_body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

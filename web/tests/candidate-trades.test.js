@@ -53,9 +53,12 @@ test('candidate and trade mutation matrix refuses mixed pages and winner substit
   ]){const body=tradePage();change(body);await assert.rejects(fetchCandidatePage({identity,attempt,digest,rank:'1',direction:'short'},request(body)));}
 });
 test('missing captures and no-cell candidates remain explicit and paginated requests cannot fall back',async()=>{
-  const missing={model:"and-mask",expression:null,schema_version:1,status:'missing',identity,attempt,rows:[],refusal:null,why:'No sealed capture.'};
-  assert.equal((await fetchCandidatePage({identity,attempt},request(missing))).status,'missing');
-  await assert.rejects(fetchCandidatePage({identity,attempt,digest},request(missing)));
+  // No capture is the one not-found of D-7550 (HTTP 404), never a 200 "missing".
+  const missing={schema_version:1,status:'not_found',identity,refusal:'No sealed capture.',rows:[],path:'x',error_kind:'NotFound',rule:'D-7550'};
+  const notFound=async()=>({ok:false,status:404,json:async()=>missing});
+  assert.equal((await fetchCandidatePage({identity,attempt},notFound)).status,'missing');
+  await assert.rejects(fetchCandidatePage({identity,attempt,digest},notFound));
+  await assert.rejects(fetchCandidatePage({identity,attempt},request({model:"and-mask",expression:null,schema_version:1,status:'missing',identity,attempt,rows:[],refusal:null,why:'No sealed capture.'})));
   const body=page();body.rows[0].cell=/** @type {any} */(null);
   assert.equal((await fetchCandidatePage({identity,attempt},request(body))).rows[0].cell,null);
   body.rows[0].cell_rules_pass=true;await assert.rejects(fetchCandidatePage({identity,attempt},request(body)));

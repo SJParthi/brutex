@@ -20,8 +20,12 @@ test('child identity and expression links remain exact while malformed pages ref
  }
 });
 test('missing searches and exhausted cursors never become complete historical assurance',async()=>{
- const missing={schema_version:1,status:'missing',identity,why:'No saved search.',rows:[],refusal:null};assert.equal((await fetchExpressionSearch({identity},response(missing))).status,'missing');
- await assert.rejects(fetchExpressionSearch({identity,snapshot},response(missing)));
+ // No saved search is the one not-found of D-7550 (HTTP 404), never a 200 "missing".
+ const missing={schema_version:1,status:'not_found',identity,refusal:'No saved search.',rows:[],path:'x',error_kind:'NotFound',rule:'D-7550'};
+ const notFound=async()=>({ok:false,status:404,json:async()=>missing});
+ assert.equal((await fetchExpressionSearch({identity},notFound)).status,'missing');
+ await assert.rejects(fetchExpressionSearch({identity,snapshot},notFound));
+ await assert.rejects(fetchExpressionSearch({identity},response({schema_version:1,status:'missing',identity,why:'No saved search.',rows:[],refusal:null})));
  const exhausted={...page(),state:'exhausted-observed',exhausted:true};assert.equal((await fetchExpressionSearch({identity},response(exhausted))).state,'exhausted-observed');
  await assert.rejects(fetchExpressionSearch({identity,cursor:next},response(page())));
  await assert.rejects(fetchExpressionSearch({identity},async()=>({ok:false,status:503})),/503/);

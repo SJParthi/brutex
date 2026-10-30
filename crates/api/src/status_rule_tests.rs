@@ -632,7 +632,7 @@ const ROWS: &[Row] = &[
         "calendar_json",
         Takes::Symbol("feed=zerodha&symbol={sym}&timeframe=1min"),
         "crates/api/src/calendar_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/vocab.json", "vocab_json"),
     neither("/indexmap.json", "indexmap_json"),
@@ -644,7 +644,7 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&month=2026-09",
         ),
         "crates/api/src/bars_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/gaps.json",
@@ -653,41 +653,41 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&month=2026-09",
         ),
         "crates/api/src/gaps_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/bars/window.json",
         "bars_window_json",
         Takes::Symbol(
-            "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09-01&to=2026-09-30",
+            "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09&to=2026-09",
         ),
         "crates/api/src/bars_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/bars/export.csv",
         "bars_export::bars_export_csv",
         Takes::Symbol(
-            "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09-01&to=2026-09-30",
+            "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09&to=2026-09",
         ),
         "crates/api/src/bars_export.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/spot.json",
         "spot::spot_json",
-        Takes::Symbol("feed=gdfl&exchange=NSE&symbol={sym}&timeframe=1s&month=2026-09"),
+        Takes::Symbol("feed=gdfl&exchange=NSE&symbol={sym}&timeframe=1s&month=2026-09&t=1790000000"),
         "crates/api/src/spot.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/greeks.json",
         "optiongreeks::greeks_json",
         Takes::Symbol(
-            "feed=gdfl&exchange=NSE&segment=FNO&symbol={sym}&contract=2026-09-24-2400000-CE&timeframe=1s&month=2026-09",
+            "feed=gdfl&exchange=NSE&segment=FNO&symbol={sym}&contract=2026-09-24-2400000-CE&timeframe=1s&month=2026-09&t=1790000000",
         ),
         "crates/api/src/optiongreeks.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/census/facets.json", "facets::facets_json"),
     neither("/census/warm.json", "census_cache::census_warm_json"),
@@ -699,7 +699,7 @@ const ROWS: &[Row] = &[
         "basis_route::basis_json",
         Takes::Symbol("symbol={sym}"),
         "crates/api/src/basis_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/disk.json", "disk_route::disk_json"),
     neither("/scrub.json", "scrub_route::scrub_json"),
@@ -738,10 +738,10 @@ const ROWS: &[Row] = &[
         "/pull/quarantine.json",
         "quarantine_plan_json",
         Takes::Symbol(
-            "feed=gdfl&segment={seg}&symbol={sym}&from=2026-09-01&to=2026-09-30&cause=gap&reason=x",
+            "segment={seg}&symbol={sym}&from=2026-09-01&to=2026-09-30&cause=gap",
         ),
         "crates/api/src/quarantine_route.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/pull/recovery.json", "crate::recovery::recent"),
     neither("/pull/run.json", "pull_run_json"),
@@ -754,14 +754,14 @@ const ROWS: &[Row] = &[
         "store_get",
         Takes::Symbol("symbol={sym}"),
         "crates/api/src/server.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/bars",
         "bars_get",
         Takes::Symbol("feed=zerodha&symbol={sym}&timeframe=1min&month=2026-09"),
         "crates/api/src/server.rs",
-        &[0, 0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/logs", "crate::logs::logs_page"),
     neither("/logs.json", "crate::logs::logs_json"),
@@ -771,7 +771,7 @@ const ROWS: &[Row] = &[
         "crate::trades::trades_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/trades.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     mine(
         "/frontier.json",
@@ -818,28 +818,28 @@ const ROWS: &[Row] = &[
         "crate::booleancampaignjson::campaign_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleancampaignjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/boolean-qualified-campaign.json",
         "crate::booleancampaignjson::qualified_campaign_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleancampaignjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/boolean-qualified-search.json",
         "crate::booleansearchjson::search_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleansearchjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/boolean-oos.json",
         "crate::booleanoosjson::later_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleanoosjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/selection-v6.json", "crate::selectionv6json::selection_v6_json"),
     neither("/live.json", "crate::livejson::live_json"),
@@ -856,7 +856,7 @@ const ROWS: &[Row] = &[
             "identity={id}&pin=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&setting=0&kind=source",
         ),
         "crates/api/src/indexstopcandlesjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/engine/index-stop-launch.json", "crate::indexstoplaunch::metadata"),
     outside(
@@ -864,14 +864,14 @@ const ROWS: &[Row] = &[
         "crate::indexstopqualificationjson::index_stop_qualification_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/indexstopqualificationjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/index-stop-ranking.json",
         "crate::indexstoprankingjson::index_stop_ranking_json",
         Takes::Identity("identity={id}&timeframe=1min"),
         "crates/api/src/indexstoprankingjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     outside(
         "/index-stop-vix.json",
@@ -880,7 +880,7 @@ const ROWS: &[Row] = &[
             "identity={id}&pin=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&setting=0",
         ),
         "crates/api/src/indexstopvixjson.rs",
-        &[0, 0, 0, 0, 0, 0, 0],
+        &[1, 1, 1, 1, 1, 1, 1],
     ),
     neither("/engine/top.json", "crate::sweeprun::top_json"),
     neither("/masters", "crate::mastersrun::page"),
@@ -1075,9 +1075,11 @@ async fn table_child(file_root: bool) {
     let mut wrong = Vec::new();
     let mut asked = 0_usize;
     for row in ROWS {
+        let mut observed = Vec::new();
         for (name, query, expect) in cases(row, file_root) {
             let (status, body, _) = get(addr, format!("{}?{query}", row.path)).await;
             asked += 1;
+            observed.push(status);
             if !answers(status, expect) {
                 let said: String = body.chars().take(220).collect();
                 wrong.push(format!(
@@ -1093,6 +1095,11 @@ async fn table_child(file_root: bool) {
                     wrong.push(format!("{} [{name}] 404 is not the one body: {body}", row.path));
                 }
             }
+        }
+        // WHAT AN OUTSIDE ROUTE ANSWERS, in case order, so its `today` is
+        // copied from a measured run and never guessed.
+        if row.today.is_some() {
+            println!("OBSERVED {} {observed:?}", row.path);
         }
     }
     let _ = stop.send(());

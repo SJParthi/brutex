@@ -1,8 +1,13 @@
 /** The refusal words a detail body may carry: a route's own `refused`, and the
- * one status rule's classes (D-7550): `not_found` (404, one probe's NotFound),
- * `unreadable` (503, what exists could not be read) and `malformed` (400).
- * A result word such as `saved` is never quoted as a refusal. */
-export const REFUSAL_STATUSES = Object.freeze(['refused', 'malformed', 'not_found', 'unreadable']);
+ * seven words of the one status rule's classes (D-7550, `Class::word` in
+ * `crates/api/src/status_rule.rs`, which the reader tests read): `malformed`
+ * (400), `not_found` (404, one probe's NotFound), `retired` (410),
+ * `out_of_range` (416), `over_bound` (422), `saturated` (429) and `unreadable`
+ * (503, what exists could not be read). A result word such as `saved` is never
+ * quoted as a refusal. */
+export const REFUSAL_STATUSES = Object.freeze([
+  'refused', 'malformed', 'not_found', 'retired', 'out_of_range', 'over_bound', 'saturated', 'unreadable'
+]);
 
 /** The one not-found answer every identity route gives (D-7550): HTTP 404,
  * `status: "not_found"`, the asked identity, no rows and a bounded sentence.

@@ -4,6 +4,7 @@
 // here is market data: identities are repeated bytes, sentences are invented.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { detailRefusal, notFoundWhy, REFUSAL_STATUSES } from '../src/lib/detail-refusal.js';
 import { fetchExpressionSearch } from '../src/lib/expression-search.js';
 import { fetchCandidatePage } from '../src/lib/candidate-trades.js';
@@ -48,11 +49,17 @@ test('the not-found sentence is read only from the exact not-found answer', () =
 });
 
 test('refusal detail quotes the rule classes and a route refusal, never a result word', async () => {
-  assert.deepEqual(REFUSAL_STATUSES, ['refused', 'malformed', 'not_found', 'unreadable']);
+  // GENERATED, NEVER TYPED: the class words are read from the classifier's own
+  // `Class::word`, so a class the server gains and this reader lacks fails here.
+  const rule = readFileSync(new URL('../../crates/api/src/status_rule.rs', import.meta.url), 'utf8');
+  const arms = rule.slice(rule.indexOf('pub const fn word'), rule.indexOf('// ══ Parameters'));
+  const words = [...arms.matchAll(/Self::[A-Za-z]+ => "([a-z_]+)",/g)].map((arm) => arm[1]);
+  assert.equal(words.length, 7, 'the seven classes of D-7550');
+  assert.deepEqual(REFUSAL_STATUSES, ['refused', ...words]);
   for (const status of REFUSAL_STATUSES) {
     assert.equal(await detailRefusal(answer(503, body({ status })), 'HTTP 503.'), 'HTTP 503. ' + why);
   }
-  for (const status of ['saved', 'observed', 'missing', 'out_of_range']) {
+  for (const status of ['saved', 'observed', 'missing', 'complete', 'NOT_FOUND', 'not found', '']) {
     assert.equal(await detailRefusal(answer(503, body({ status })), 'HTTP 503.'), 'HTTP 503.');
   }
 });
