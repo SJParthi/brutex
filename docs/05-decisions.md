@@ -84612,7 +84612,9 @@ edited.
    `web/`. The rule is the shape every such read has taken, not a list of
    files: a fixture's own `web/` under a temp root, a comment and a
    production read pass. It is red on f01d7a0e4 (`bars_export.rs:1162` and
-   `:1165`) and green here; its seven tests run in gate 0. The bound and
+   `:1165`) and green here; its twelve tests run in gate 0 (three of them pin
+   its readers' exact answers, after a pre-check of every mutant of the
+   set found survivors there, BRED23-F37). The bound and
    what it cannot see are L-BRED23-17. Gate 1e itself ran whole on the
    final tip (state/fix/round2/, named in this repair's report), and the
    moved web test was shown to bind the server: a ceiling of 20,001 and a

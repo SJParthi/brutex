@@ -1233,6 +1233,25 @@ confirmed by two skeptics; their corrections are applied.
   `limit=50`, which the route answers 400 for 2024 (20 excluded days besides
   weekends). FIXED: timed again on answered requests (`limit=20`, and
   `reason=Holiday&limit=16`), the old figures named as a 400's.
+- **BRED23-F37: the M2 shards verify r3 never ran held more survivors,
+  and gate 1h's own readers held 33** (BASE-REDS-1023 repair 3): verify r3
+  ran 19 of `gates_bounds.rs`'s 75 selected mutants, and gate 1h was new.
+  A pre-check of every selected mutant (each diff applied to a copy,
+  `rustc --test`, the tests run under a 60 s limit; no cargo) found 4 more
+  survivors in `claim_scrub` (`Xlat (`, a `flat (` at a line's start,
+  `worst c`, `flat JSON` without ` object`) and, in `source_scan.rs`, 29
+  survivors and 4 mutants of `format_names` that looped forever. FIXED:
+  four assertions in `the_scrub_removes_only_the_named_senses`; three
+  `source_scan` tests that pin each reader's exact answer
+  (`climbs_format_names_and_statements_answer_exactly`,
+  `web_stmt_binds_reads_and_joins_exactly`,
+  `a_literal_on_the_byte_a_test_item_ends_is_outside_it`); three redundant
+  offsets removed with equivalent code; and `format_names` rewritten over
+  the pieces after each `{`, so every step consumes one and no mutant of it
+  can hang. The pre-check of the final lists: `gates_bounds` 75 of 75,
+  `gates_ledger` 18 of 18 and `source_scan` 132 of 133 caught (1
+  unviable). The cargo-mutants run of the same lists (Route M2) is the
+  proof; this repair's report says whether it ran.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
