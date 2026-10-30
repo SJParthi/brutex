@@ -2811,6 +2811,8 @@ fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
 /// recorded, kept, moved or retired again.
 #[test]
 fn every_contradiction_of_the_ledger_is_left_by_name() {
+    const OLD: &str = "2023-06-29-1000000-PE";
+    const NEW: &str = "2023-06-28-1000000-PE";
     let fixture = Scratch::new("Contradictions");
     let other = Survey {
         other_rungs: vec!["NSE-FNO-NIFTY-2023-06-28-1000000-PE 1day".to_owned()],
@@ -2827,8 +2829,6 @@ fn every_contradiction_of_the_ledger_is_left_by_name() {
         "{}",
         decided.unresolved[0].why
     );
-    const OLD: &str = "2023-06-29-1000000-PE";
-    const NEW: &str = "2023-06-28-1000000-PE";
     let ledger = |line: String| Withdrawn::parse(&format!("{line}\n")).unwrap();
     let key = Stored {
         underlying: sym("NIFTY"),

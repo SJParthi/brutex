@@ -482,7 +482,7 @@ fn eight_appenders_at_one_ten_and_a_hundred_times_the_records_held() {
             .collect();
         std::fs::create_dir_all(journal.path.parent().expect("the audit directory"))
             .expect("the audit directory");
-        std::fs::write(&journal.path, &images).expect("the held records");
+        std::fs::write(&journal.path, images).expect("the held records");
         let appended = eight_appenders(&journal, "m");
         assert_exactly(&journal, held, &appended);
         eprintln!("{}", wait_line("measure", held, &appended));

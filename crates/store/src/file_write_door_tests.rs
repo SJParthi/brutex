@@ -1284,7 +1284,7 @@ fn the_door_measurement_misses_by_name_and_stops_at_the_first_that_holds() {
             "refusal p99: 9000.0 us at 100x against 10.0 us at 1x".to_owned(),
         ]
     );
-    let mut runs = vec![vec!["a miss".to_owned()], Vec::new()].into_iter();
+    let mut runs = [vec!["a miss".to_owned()], Vec::new()].into_iter();
     assert_eq!(
         first_measurement_that_holds(3, || runs.next().unwrap_or_default()),
         Ok(1)

@@ -7232,6 +7232,10 @@ mod tests {
     /// repair journal's own refusal named beside it when that line cannot be
     /// written.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture walked through the seven ways out of one function"
+    )]
     fn derive_repair_returns_for_what_it_never_derives_and_names_every_refusal() {
         use store::file::BarFile;
         use store::path::{FileKind, PathParts, StorePath, YearMonth};
@@ -7290,7 +7294,7 @@ mod tests {
             (failures, entries)
         };
         let option = brutex_core::instrument::Contract::parse("2026-01-29-2400000-CE");
-        assert!(option.is_some_and(|c| c.is_option()));
+        assert!(matches!(option, Some(c) if c.is_option()));
         for (case, into, source) in [
             (
                 "a vendor that does not derive",
@@ -7367,11 +7371,10 @@ mod tests {
             .collect();
         assert_eq!(refused.len(), 1, "{failures:?}");
         assert!(
-            refused[0]
+            refused.iter().all(|f| f
                 .why
-                .contains("and the repair journal line was not written"),
-            "{}",
-            refused[0].why
+                .contains("and the repair journal line was not written")),
+            "{refused:?}"
         );
     }
 }
