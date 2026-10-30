@@ -169,6 +169,114 @@ fn authenticated_catalog_projects_exact_program_coordinate_trade_session_and_gri
     fs::remove_dir_all(root).unwrap();
 }
 
+/// **A completion pin the catalog no longer holds is the one `404`, and a
+/// candidate or a page past the saved extent is the client's `416`** (D-7550,
+/// D-7551): each decided by the step that refused, before a row of it is read,
+/// and never the `503` every one of them answered before. The fixture holds 2
+/// coordinates, 1 program, and for candidate 0 one trade, one session and one
+/// level per grid axis.
+#[test]
+fn a_stale_pin_is_not_found_and_a_page_past_the_saved_extent_is_out_of_range() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let root = fixture("boolean-api-status-rule-extents");
+    let first = render(&root, &Asked::parse(&format!("identity={ID}")).unwrap()).unwrap();
+    let pin = first["completion"].as_str().unwrap().to_owned();
+    let answered = |suffix: &str| -> (StatusCode, String) {
+        let asked = Asked::parse(&format!("identity={ID}&{suffix}")).unwrap();
+        match answer(Ok(root.clone()), &asked) {
+            Ok(body) => (StatusCode::OK, body.to_string()),
+            Err(fault) => (fault.status(), fault.why),
+        }
+    };
+    let past = StatusCode::RANGE_NOT_SATISFIABLE;
+    for (suffix, status, says) in [
+        // AT the extent is the empty last page; one past it is the client's.
+        (
+            format!("completion={pin}&offset=2"),
+            StatusCode::OK,
+            "\"rows\":[]",
+        ),
+        (
+            format!("completion={pin}&offset=3"),
+            past,
+            "offset 3 is past the 2 saved coordinates",
+        ),
+        (
+            format!("completion={pin}&offset={}", usize::MAX),
+            past,
+            "saved coordinates",
+        ),
+        (
+            format!("completion={pin}&kind=programs&offset=2"),
+            past,
+            "past the 1 saved rows",
+        ),
+        (
+            format!("completion={pin}&kind=trades&candidate=2"),
+            past,
+            "candidate 2 is past the 2",
+        ),
+        (
+            format!("completion={pin}&kind=trades&candidate=0&offset=2"),
+            past,
+            "1 saved trades",
+        ),
+        (
+            format!("completion={pin}&kind=sessions&candidate=0&offset=2"),
+            past,
+            "1 saved sessions",
+        ),
+        (
+            format!("completion={pin}&kind=grid&side=short&axis=stop&offset=2"),
+            past,
+            "saved rows",
+        ),
+        (
+            format!("completion={pin}&kind=trades&candidate=0"),
+            StatusCode::OK,
+            "\"total\":\"1\"",
+        ),
+        // A completion the catalog never had is the pin not held: `404`.
+        (
+            format!("completion={ID}&offset=1"),
+            StatusCode::NOT_FOUND,
+            "pinned catalog completion",
+        ),
+        // COMBINATION: a stale pin beside a page past the extent is the pin's
+        // `404`; a candidate past the count beside a page past it names the
+        // candidate, the first step to refuse.
+        (
+            format!("completion={ID}&offset=9"),
+            StatusCode::NOT_FOUND,
+            "is not held",
+        ),
+        (
+            format!("completion={pin}&kind=trades&candidate=9&offset=9"),
+            past,
+            "candidate 9",
+        ),
+        // OUT OF THE BOX: the largest candidate a client can name is past the
+        // count, never an overflow or a reader's refusal.
+        (
+            format!("completion={pin}&kind=sessions&candidate={}", usize::MAX),
+            past,
+            "candidate",
+        ),
+    ] {
+        let (got, why) = answered(&suffix);
+        assert_eq!(got, status, "{suffix}: {why}");
+        assert!(why.contains(says), "{suffix}: {why}");
+    }
+    // The client's refusal evicted nothing: the held catalog answers warm.
+    let warm = COLD_ADMISSIONS.with(std::cell::Cell::get);
+    assert_eq!(
+        answered(&format!("completion={pin}&offset=1")).0,
+        StatusCode::OK
+    );
+    assert_eq!(COLD_ADMISSIONS.with(std::cell::Cell::get), warm);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn a_smaller_server_budget_cannot_reuse_a_previously_admitted_catalog() {
     let _cache = CACHE_TEST.lock().unwrap();
@@ -188,7 +296,9 @@ fn a_smaller_server_budget_cannot_reuse_a_previously_admitted_catalog() {
         first["completion"].as_str().unwrap()
     ))
     .unwrap();
-    let why = render_with_budget(&root, &asked, tiny).unwrap_err();
+    let why = render_with_budget(&root, &asked, tiny)
+        .unwrap_err()
+        .to_string();
     assert!(why.contains("1 bytes") && why.contains("BRUTEX_BOOLEAN_OBSERVATION_BYTES"));
     let reopened = render_with_budget(&root, &asked, admitted).unwrap();
     assert_eq!(reopened["completion"], first["completion"]);

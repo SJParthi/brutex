@@ -103,7 +103,10 @@ pub async fn frontier_json(uri: axum::http::Uri) -> (axum::http::StatusCode, Jso
 /// identity route refuses, so the same input got two statuses -- then the
 /// configured root (`503`: a server with no store root is no client's fault,
 /// where the selector called it a `400`), then the selector's own fields.
-fn selected(root: Result<std::path::PathBuf, String>, query: &str) -> Result<crate::detail::Selector, Reply> {
+fn selected(
+    root: Result<std::path::PathBuf, String>,
+    query: &str,
+) -> Result<crate::detail::Selector, Reply> {
     if let Err(why) = crate::status_rule::identity(query, "identity") {
         return Err(refuse(json_headers(), &why.to_string()));
     }
@@ -983,7 +986,11 @@ mod tests {
 
         let query = format!("identity={}", "6b".repeat(32));
         let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "a corrupt row is the store's: {body}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "a corrupt row is the store's: {body}"
+        );
         assert!(body.contains(r#""rows":null"#), "no prefix: {body}");
         assert!(body.contains("No partial frontier"), "cause: {body}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1013,7 +1020,11 @@ mod tests {
 
         let query = format!("identity={}", "6c".repeat(32));
         let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "lost rows are the store's: {body}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "lost rows are the store's: {body}"
+        );
         assert!(body.contains(r#""rows":null"#), "not empty: {body}");
         assert!(
             body.contains("committed for 1 frontier row"),
@@ -1039,7 +1050,11 @@ mod tests {
             .expect("malformed child");
         let query = format!("identity={}", "6d".repeat(32));
         let (status, _, body) = respond(Ok(dir.join("empty")), &query);
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "an unreadable file is the store's: {body}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "an unreadable file is the store's: {body}"
+        );
         assert!(body.contains(r#""rows":null"#), "not absent: {body}");
         assert!(body.contains("still exists"), "cause: {body}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1070,7 +1085,9 @@ mod tests {
             assert_eq!(body["identity"], "b".repeat(64));
             assert_eq!(body["rows"], serde_json::json!([]), "an empty list: {body}");
             assert!(
-                body["refusal"].as_str().is_some_and(|why| why.contains("Run frontier not held")),
+                body["refusal"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("Run frontier not held")),
                 "and it says why: {body}"
             );
         }
@@ -1214,7 +1231,8 @@ mod tests {
         assert!(body.contains("Run frontier not held"), "{body}");
         assert!(!body.contains(r#""rank":1"#), "foreign row leaked: {body}");
         // AND THE KNOWN RUN BESIDE IT STILL ANSWERS ITS ROW.
-        let (status, _, known_body) = respond(Ok(dir.clone()), &format!("identity={}", "93".repeat(32)));
+        let (status, _, known_body) =
+            respond(Ok(dir.clone()), &format!("identity={}", "93".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{known_body}");
         assert!(known_body.contains(r#""rank":1"#), "{known_body}");
         let _ = std::fs::remove_dir_all(&dir);

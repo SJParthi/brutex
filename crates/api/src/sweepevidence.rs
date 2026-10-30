@@ -1,6 +1,7 @@
 //! Bounded sweep attempt evidence. Pages bind identity and attempt; lifecycle
 //! completion is distinct from institutional admission or arbitrary trade replay.
 
+use crate::status_rule::Refused;
 use cli::sweep_evidence::{self, Evidence};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -99,10 +100,11 @@ const WHAT: &str = "Sweep attempt evidence";
 /// The page, or the one status rule's fault (D-7550): a configured root, then
 /// ONE probe of the identity's evidence folder before the reader opens
 /// anything -- an identity that names nothing is `404`, on page zero or later
-/// -- then the read. Evidence the reader finds absent (no `starts.bin`, or no
-/// event in it) and an attempt pin the saved attempt is not are the same
-/// `404`, decided by their typed absence; any other refusal of an entry the
-/// probe found is `503`, naming it.
+/// -- then the read, typed by the step that refused: evidence the reader
+/// finds absent (no `starts.bin`, or no event in it) and an attempt pin the
+/// saved attempt is not are the same `404`; a page past the saved extent
+/// `416` (D-7551); and only the read's own refusal of an entry the probe
+/// found `503`, naming it.
 fn answer(
     root: Result<PathBuf, String>,
     asked: &Asked,
@@ -114,49 +116,24 @@ fn answer(
         asked.identity,
         WHAT,
     )?;
-    match render(&root, asked) {
-        Ok(Read::Page(body)) => Ok(body),
-        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, held.shown, WHAT)),
-        Ok(Read::AttemptNotHeld(saved)) => Err(crate::status_rule::Fault {
-            class: crate::status_rule::Class::NotFound,
-            why: format!(
-                "the pinned attempt is not held: this identity's saved attempt is {saved}; restart \
-                 at page zero, no replacement page was served"
-            ),
-            path: Some(held.shown),
-            kind: None,
-        }),
-        Ok(Read::OutOfRange(why)) => Err(crate::status_rule::Fault {
-            class: crate::status_rule::Class::OutOfRange,
-            why,
-            path: Some(held.shown),
-            kind: None,
-        }),
-        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(held.shown), why)),
-    }
+    render(&root, asked).map_err(|refused| refused.fault(&root, held.shown, WHAT))
 }
 
-/// What one read found: a page, the reader's typed absence, an attempt pin
-/// that is not the saved attempt (which it names), or a page the saved total
-/// does not reach.
-enum Read {
-    Page(String),
-    Absent,
-    AttemptNotHeld(u64),
-    OutOfRange(String),
-}
-
-fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
+fn render(root: &Path, asked: &Asked) -> Result<String, Refused> {
     let identity = crate::server::hex32(asked.identity);
     let Some(evidence) = sweep_evidence::read(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
     else {
-        return Ok(Read::Absent);
+        return Err(Refused::Absent);
     };
     if asked
         .attempt
         .is_some_and(|attempt| evidence.attempt != attempt)
     {
-        return Ok(Read::AttemptNotHeld(evidence.attempt));
+        return Err(Refused::NotHeld(format!(
+            "the pinned attempt is not held: this identity's saved attempt is {}; restart at page \
+             zero, no replacement page was served",
+            evidence.attempt
+        )));
     }
     // A STOCK'S SAVED ATTEMPT SAYS WHAT ITS FIGURES ARE MADE OF. A ranked
     // page is a sweep's retained combinations with their hits, means, wins and
@@ -180,13 +157,11 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     // past the extent, or a limit too small to reach it. That is the client's
     // page, never the store's fault: `416`, as `/frontier.json` answers it
     // (D-7551), decided by which step refused and not by its words.
-    let window = match crate::detail::seek_window(
+    let window = crate::detail::seek_window(
         usize::try_from(total).map_err(|why| why.to_string())?,
         asked.page,
-    ) {
-        Ok(window) => window,
-        Err(why) => return Ok(Read::OutOfRange(why)),
-    };
+    )
+    .map_err(Refused::OutOfRange)?;
     let limit = window.end - window.start;
     let offset = asked.page.offset();
     let mut rows = String::new();
@@ -222,20 +197,19 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     if sweep_evidence::read(root, asked.identity, crate::detail::MAX_SCAN_BYTES)? != Some(evidence)
     {
         return Err(
-            "saved evidence changed during the bounded read; no mixed snapshot was exposed"
-                .to_owned(),
+            "saved evidence changed during the bounded read; no mixed snapshot was exposed".into(),
         );
     }
     let kind = if asked.ranked { "ranked" } else { "depth" };
     let next = window
         .next_page
         .map_or_else(|| "null".to_owned(), |next| next.to_string());
-    Ok(Read::Page(format!(
+    Ok(format!(
         r#"{{"schema_version":1,"identity":"{identity}"{note},"status":"saved","evidence":{},"kind":"{kind}","page":{},"limit":{},"total_count":"{total}","next_page":{next},"page_complete":true,"rows":[{rows}],"refusal":null}}"#,
         metadata(evidence),
         asked.page.number,
         asked.page.limit
-    )))
+    ))
 }
 
 fn metadata(e: Evidence) -> String {

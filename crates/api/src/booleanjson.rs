@@ -5,6 +5,7 @@
 //! (`detail::must_admit`); a new key or a changed generation is cold, and the
 //! one slot makes alternating keys cold every time. `docs/06-limits.md`,
 //! D-1444, states that cost, which is UNVERIFIED as a measurement.
+use crate::status_rule::Refused;
 use axum::http::{StatusCode, Uri};
 use cli::boolean_observation::{
     Cell, Coordinate, ExecutionRefusalBitsV1 as Refusal, ExitGridSelectorV1, ForcedStopV1,
@@ -161,11 +162,15 @@ struct Cached {
     budget: crate::detail::BooleanObservationBudget,
     reader: Reader,
 }
+/// What the catalog names nothing of, as the not-found sentence says it.
+const WHAT: &str = "Boolean catalog";
 /// The page, or the one status rule's fault (D-7550): a configured root, then
 /// ONE probe of the catalog's entry before the cache or the reader is touched
 /// -- so an identity that names nothing is `404` and never evicts the held
-/// catalog -- then the read, whose refusal of an entry the probe found is
-/// `503`, naming the entry.
+/// catalog -- then the read, typed by the step that refused: a completion pin
+/// the catalog no longer holds is the same `404`, a page or a candidate past
+/// the saved extent `416` (D-7551), and only the read's own refusal of the
+/// entry the probe found `503`, naming it.
 fn answer(
     root: Result<PathBuf, String>,
     asked: &Asked,
@@ -175,11 +180,11 @@ fn answer(
         &root,
         crate::status_rule::namespace::BOOLEAN_CANDIDATES,
         asked.identity,
-        "Boolean catalog",
+        WHAT,
     )?;
-    render(&root, asked).map_err(|why| crate::status_rule::Fault::unreadable(Some(held.shown), why))
+    render(&root, asked).map_err(|refused| refused.fault(&root, held.shown, WHAT))
 }
-fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
+fn render(root: &Path, asked: &Asked) -> Result<Value, Refused> {
     render_with_budget(
         root,
         asked,
@@ -190,7 +195,7 @@ fn render_with_budget(
     root: &Path,
     asked: &Asked,
     budget: crate::detail::BooleanObservationBudget,
-) -> Result<Value, String> {
+) -> Result<Value, Refused> {
     // One bounded catalog, including all decoded child observations. No scan of
     // other identities and no accumulation of a process-wide unbounded history.
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
@@ -231,11 +236,15 @@ fn render_with_budget(
     Ok(body)
 }
 
-fn project(reader: &Reader, asked: &Asked) -> Result<Value, String> {
+fn project(reader: &Reader, asked: &Asked) -> Result<Value, Refused> {
     reader.require_current()?;
     let completion = reader.completion_digest();
     if asked.completion.is_some_and(|pin| pin != completion) {
-        return Err("catalog completion changed; no replacement page returned".to_owned());
+        return Err(Refused::NotHeld(
+            "the pinned catalog completion is not held: the catalog completion changed; restart \
+             at its first page, no replacement page returned"
+                .to_owned(),
+        ));
     }
     let (total, selected, rows) = page(reader, asked, completion)?;
     let next = next_offset(total, asked.offset, asked.limit, rows.len())?;
@@ -264,15 +273,23 @@ fn page(
     reader: &Reader,
     asked: &Asked,
     pin: [u8; 32],
-) -> Result<(usize, Value, Vec<Value>), String> {
+) -> Result<(usize, Value, Vec<Value>), Refused> {
     let candidate = asked
         .candidate
-        .map(|index| -> Result<Coordinate, String> {
-            reader
+        .map(|index| -> Result<Coordinate, Refused> {
+            // A CANDIDATE PAST THE SAVED COUNT is the client's selector, `416`,
+            // decided before the reader is asked for it (D-7551).
+            if index >= reader.coordinate_count() {
+                return Err(Refused::OutOfRange(format!(
+                    "candidate {index} is past the {} saved coordinates; no row was served",
+                    reader.coordinate_count()
+                )));
+            }
+            Ok(reader
                 .coordinates(pin, index, 1)?
                 .first()
                 .copied()
-                .ok_or("selected coordinate absent".to_owned())
+                .ok_or("selected coordinate absent")?)
         })
         .transpose()?;
     let selected = candidate
@@ -282,26 +299,62 @@ fn page(
         .unwrap_or(Value::Null);
     let start = asked.offset;
     let limit = asked.limit;
+    // EVERY PAGE IS MEASURED AGAINST ITS SAVED EXTENT before a row of it is
+    // read (`status_rule::reach`): past it is the client's page, `416`.
     let (total, rows) = match asked.kind.as_str() {
-        "coordinates" => (reader.coordinate_count(), reader.coordinates(pin,start,limit)?.iter().enumerate().map(|(n,row)|coordinate(reader,start+n,row)).collect::<Result<Vec<_>,_>>()?),
-        "programs" => (reader.programs().len(), window(reader.programs(),start,limit)?.iter().enumerate().map(|(n,row)|json!({"index":(start+n).to_string(),"expression":row.to_string()})).collect()),
+        "coordinates" => {
+            let total = reader.coordinate_count();
+            crate::status_rule::reach(start, total, "coordinates")?;
+            (
+                total,
+                reader
+                    .coordinates(pin, start, limit)?
+                    .iter()
+                    .enumerate()
+                    .map(|(n, row)| coordinate(reader, start + n, row))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        "programs" => (
+            reader.programs().len(),
+            window(reader.programs(), start, limit)?
+                .iter()
+                .enumerate()
+                .map(|(n, row)| json!({"index":(start+n).to_string(),"expression":row.to_string()}))
+                .collect(),
+        ),
         "trades" => {
             let row = candidate.ok_or("trade coordinate missing")?;
-            (usize::try_from(row.cell.trades).map_err(|why|why.to_string())?, reader.trades(pin,asked.candidate.ok_or("trade coordinate missing")?,start,limit)?.into_iter().enumerate().map(|(n,row)|trade(start+n,row)).collect())
+            let total = usize::try_from(row.cell.trades).map_err(|why| why.to_string())?;
+            crate::status_rule::reach(start, total, "trades")?;
+            (
+                total,
+                reader
+                    .trades(
+                        pin,
+                        asked.candidate.ok_or("trade coordinate missing")?,
+                        start,
+                        limit,
+                    )?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, row)| trade(start + n, row))
+                    .collect(),
+            )
         }
-        "sessions" => (reader.sessions().len(),reader.periods(pin,asked.candidate.ok_or("session coordinate missing")?,start,limit)?.into_iter().enumerate().map(|(n,row)|json!({"index":(start+n).to_string(),"day":row.day.to_string(),"return_paisa":row.return_paisa.to_string(),"trades":row.trades.to_string(),"wins":row.wins.to_string()})).collect()),
-        "grid" => grid_page(reader,asked)?,
-        _ => return Err("unsupported catalog page".to_owned()),
+        "sessions" => {
+            let total = reader.sessions().len();
+            crate::status_rule::reach(start, total, "sessions")?;
+            (total,reader.periods(pin,asked.candidate.ok_or("session coordinate missing")?,start,limit)?.into_iter().enumerate().map(|(n,row)|json!({"index":(start+n).to_string(),"day":row.day.to_string(),"return_paisa":row.return_paisa.to_string(),"trades":row.trades.to_string(),"wins":row.wins.to_string()})).collect())
+        }
+        "grid" => grid_page(reader, asked)?,
+        _ => return Err("unsupported catalog page".into()),
     };
     Ok((total, selected, rows))
 }
-fn window<T>(rows: &[T], start: usize, limit: usize) -> Result<&[T], String> {
-    let end = start
-        .checked_add(limit)
-        .ok_or("catalog page overflow")?
-        .min(rows.len());
-    rows.get(start..end)
-        .ok_or("catalog page outside saved extent".to_owned())
+fn window<T>(rows: &[T], start: usize, limit: usize) -> Result<&[T], Refused> {
+    let rows = crate::status_rule::tail(rows, start, "rows")?;
+    Ok(rows.get(..limit).unwrap_or(rows))
 }
 pub(crate) fn next_offset(
     total: usize,
@@ -401,7 +454,7 @@ pub(crate) fn grid_summary(grid: &GridContext) -> Value {
         "ratio_min_hundredths":policy.ratios().min_hundredths().to_string(),"ratio_max_hundredths":policy.ratios().max_hundredths().to_string(),"max_pairs":policy.ratios().max_pairs().to_string(),"max_cells":policy.max_cells().to_string(),"max_levels_per_axis":policy.rungs().max_levels_per_axis().to_string(),
         "cost_model":crate::server::hex32(policy.cost_model_id()),"forced_stop":forced,"max_ambiguous_bars":policy.max_ambiguous_bars().to_string(),"max_gap_fills":policy.max_gap_fills().to_string()})
 }
-fn grid_page(reader: &Reader, asked: &Asked) -> Result<(usize, Vec<Value>), String> {
+fn grid_page(reader: &Reader, asked: &Asked) -> Result<(usize, Vec<Value>), Refused> {
     let grid = reader
         .grids()
         .iter()
@@ -413,7 +466,7 @@ fn grid_page(reader: &Reader, asked: &Asked) -> Result<(usize, Vec<Value>), Stri
             "stop" => grid.policy.rungs().stop(),
             "target" => grid.policy.rungs().target(),
             "trail" => grid.policy.rungs().trail(),
-            _ => return Err("saved requested axis missing".to_owned()),
+            _ => return Err("saved requested axis missing".into()),
         };
         Ok((values.len(),window(values,asked.offset,asked.limit)?.iter().enumerate().map(|(n,value)|json!({"index":(asked.offset+n).to_string(),"numerator":value.numerator().to_string(),"denominator":value.denominator().to_string()})).collect()))
     } else {
@@ -421,7 +474,7 @@ fn grid_page(reader: &Reader, asked: &Asked) -> Result<(usize, Vec<Value>), Stri
             "stop" => &grid.stops,
             "target" => &grid.targets,
             "trail" => &grid.trails,
-            _ => return Err("saved resolved axis missing".to_owned()),
+            _ => return Err("saved resolved axis missing".into()),
         };
         Ok((values.len(),window(values,asked.offset,asked.limit)?.iter().enumerate().map(|(n,value)|json!({"index":(asked.offset+n).to_string(),"ppm":value.to_string()})).collect()))
     }

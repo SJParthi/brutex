@@ -1,4 +1,5 @@
 //! Bounded, read-only views of immutable single-stop candidate observations.
+use crate::status_rule::Refused;
 use axum::http::{StatusCode, Uri};
 use cli::index_stop_store::{Direction, Event, Metrics, Period, Policy, Reader, Record, Trade};
 use serde_json::{Value, json};
@@ -113,11 +114,15 @@ struct Cached {
     budget: crate::detail::BooleanObservationBudget,
     reader: Reader,
 }
+/// What the store names nothing of, as the not-found sentence says it.
+const WHAT: &str = "Single-stop candidate";
 /// The page, or the one status rule's fault (D-7550): a configured root, then
 /// ONE probe of the candidate's entry under `cli`'s own namespace before the
 /// held reader or a cold open is touched -- an identity that names nothing is
-/// `404` -- then the read, whose refusal of an entry the probe found is
-/// `503`, naming the entry.
+/// `404` -- then the read, typed by the step that refused: a completion pin
+/// the store no longer holds is the same `404`, a setting or a page past the
+/// saved extent `416` (D-7551), and only the read's own refusal of the entry
+/// the probe found `503`, naming it.
 fn answer(
     root: Result<PathBuf, String>,
     asked: &Asked,
@@ -127,11 +132,11 @@ fn answer(
         &root,
         crate::status_rule::namespace::INDEX_STOP,
         asked.identity,
-        "Single-stop candidate",
+        WHAT,
     )?;
-    render(&root, asked).map_err(|why| crate::status_rule::Fault::unreadable(Some(held.shown), why))
+    render(&root, asked).map_err(|refused| refused.fault(&root, held.shown, WHAT))
 }
-fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
+fn render(root: &Path, asked: &Asked) -> Result<Value, Refused> {
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
     let budget = crate::detail::BooleanObservationBudget::load()?;
     // Taken out for this request and put back afterwards; never held
@@ -159,25 +164,34 @@ fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
         });
     }
     let cached = held.as_ref().ok_or("single-stop cache admission absent")?;
+    // The lease's own refusal is the store's; the projection's typed refusal
+    // inside it is carried out whole.
     cached
         .reader
-        .with_current(|| project(&cached.reader, asked, budget.bytes()))
+        .with_current(|| Ok(project(&cached.reader, asked, budget.bytes())))?
 }
-fn project(reader: &Reader, asked: &Asked, budget: u64) -> Result<Value, String> {
+fn project(reader: &Reader, asked: &Asked, budget: u64) -> Result<Value, Refused> {
     let pin = reader.completion_digest();
     if asked.completion.is_some_and(|expected| expected != pin) {
-        return Err("single-stop completion changed; no replacement page returned".into());
+        return Err(Refused::NotHeld(
+            "the pinned single-stop completion is not held: the completion changed; restart at \
+             its first page, no replacement page returned"
+                .into(),
+        ));
     }
     let selected = asked
         .setting
         // render() already holds the publication lease through this projection.
         // A nested record()->require_current() would acquire then release the
         // same file lock before this complete projection has finished.
+        // A SETTING PAST THE SAVED COUNT is the client's selector, `416`.
         .map(|index| {
-            reader
-                .records()
-                .get(index)
-                .ok_or("single-stop setting is outside saved extent")
+            reader.records().get(index).ok_or_else(|| {
+                Refused::OutOfRange(format!(
+                    "setting {index} is past the {} saved settings; no row was served",
+                    reader.records().len()
+                ))
+            })
         })
         .transpose()?;
     let (total, rows) = match asked.kind.as_str() {
@@ -229,14 +243,9 @@ fn project(reader: &Reader, asked: &Asked, budget: u64) -> Result<Value, String>
         json!({"schema_version":1,"status":"saved","model":"index-stop","authority":"authenticated-saved-observations","identity":hex(reader.identity()),"completion":hex(pin),"kind":asked.kind,"setting":asked.setting.map(|n|n.to_string()),"selected":selected.zip(asked.setting).map(|(row,n)|setting(n,row)),"offset":asked.offset.to_string(),"limit":asked.limit,"total":total.to_string(),"next":next.map(|n|n.to_string()),"rows":rows,"refusal":null,"admitted_bytes":reader.admitted_bytes().to_string(),"observation_byte_limit":budget.to_string(),"policy":policy()}),
     )
 }
-fn window<'a, T>(rows: &'a [T], asked: &Asked) -> Result<&'a [T], String> {
-    let end = asked
-        .offset
-        .checked_add(asked.limit)
-        .ok_or("single-stop page overflow")?
-        .min(rows.len());
-    rows.get(asked.offset..end)
-        .ok_or_else(|| "single-stop page outside saved extent".into())
+fn window<'a, T>(rows: &'a [T], asked: &Asked) -> Result<&'a [T], Refused> {
+    let rows = crate::status_rule::tail(rows, asked.offset, "rows")?;
+    Ok(rows.get(..asked.limit).unwrap_or(rows))
 }
 fn policy() -> Value {
     json!({"digest":hex(Policy::V1.digest()),"model":"completed_signal_candle_stop","entry":"immediate_next_1min_open","long_stop":"completed_signal_candle_low","short_stop":"completed_signal_candle_high","forced_exit_ist":"15:10","target":false,"trail":false,"horizon":false,"costs_included":false,"institutional_admission":"not_assessed_in_this_view"})

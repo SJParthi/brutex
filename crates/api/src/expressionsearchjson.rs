@@ -1,5 +1,6 @@
 //! Bounded read-only observed expression-search progress and exact child links.
 
+use crate::status_rule::Refused;
 use axum::http::{StatusCode, Uri};
 use cli::expression_search::reader::{Anchor, Page, Progress, Reader};
 use serde_json::{Value, json};
@@ -123,26 +124,15 @@ fn answer(
         asked.identity,
         WHAT,
     )?;
-    match render(&root, asked) {
-        Ok(Read::Page(body)) => Ok(body),
-        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, held.shown, WHAT)),
-        Ok(Read::Unpinned) => Err(crate::status_rule::Fault {
-            class: crate::status_rule::Class::NotFound,
-            why: "search snapshot is not admitted or expired; refresh its first page".to_owned(),
-            path: Some(held.shown),
-            kind: None,
-        }),
-        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(held.shown), why)),
-    }
+    render(&root, asked).map_err(|refused| refused.fault(&root, held.shown, WHAT))
 }
-/// What one read found: a page, the reader's typed absence of the namespace,
-/// or a snapshot pin no held session names.
-enum Read {
-    Page(String),
-    Absent,
-    Unpinned,
+/// A snapshot pin no held session names: the pin is not held.
+fn unpinned() -> Refused {
+    Refused::NotHeld(
+        "search snapshot is not admitted or expired; refresh its first page".to_owned(),
+    )
 }
-fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
+fn render(root: &Path, asked: &Asked) -> Result<String, Refused> {
     static SESSIONS: OnceLock<Mutex<VecDeque<Session>>> = OnceLock::new();
     let mut sessions = SESSIONS
         .get_or_init(|| Mutex::new(VecDeque::new()))
@@ -154,13 +144,13 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
                 && held.identity == asked.identity
                 && held.reader.progress().checkpoint == Some(snapshot)
         }) else {
-            return Ok(Read::Unpinned);
+            return Err(unpinned());
         };
         index
     } else {
         let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
         else {
-            return Ok(Read::Absent);
+            return Err(Refused::Absent);
         };
         sessions.retain(|held| {
             held.root != root
@@ -183,7 +173,7 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     let page = held
         .reader
         .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
-    Ok(Read::Page(body(held.reader.progress(), &page, asked.limit)))
+    Ok(body(held.reader.progress(), &page, asked.limit))
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -231,7 +221,7 @@ mod tests {
                     &crate::scratch::path("unadmitted-expression-snapshot"),
                     &asked
                 ),
-                Ok(Read::Unpinned)
+                Err(Refused::NotHeld(_))
             ),
             "unadmitted snapshot cannot splice a path"
         );
@@ -244,7 +234,11 @@ mod tests {
         std::fs::create_dir_all(&held).map_err(|why| why.to_string())?;
         let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
         assert_eq!(fault.class, crate::status_rule::Class::NotFound);
-        assert!(fault.why.contains("not admitted or expired"), "{}", fault.why);
+        assert!(
+            fault.why.contains("not admitted or expired"),
+            "{}",
+            fault.why
+        );
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
@@ -254,7 +248,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("brutex-expression-api-{}", std::process::id()));
         let asked = Asked::parse(&format!("identity={}", "ab".repeat(32)))?;
-        assert!(matches!(render(&root, &asked)?, Read::Absent));
+        assert_eq!(render(&root, &asked), Err(Refused::Absent));
         // THE ROUTE'S ANSWER IS THE ONE NOT-FOUND (D-7550), never a 200.
         let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
         assert_eq!(fault.status(), StatusCode::NOT_FOUND);

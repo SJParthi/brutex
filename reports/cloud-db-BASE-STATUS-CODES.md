@@ -62,3 +62,28 @@ be read (assurance 29 Oct n=31).
   the 12 browser-harness tests are being compared with the base the same way.
 - `frontierjson.rs`'s unknown-identity test now asserts the one 404; the table test prints what
   every outside route answers so its expectation is copied from a run.
+
+### 2026-10-30 14:20 IST
+
+- Switches checked at 14:20 IST: `HOLD` absent, `GO` and `GO-BASE-STATUS-CODES` present;
+  `origin/feat/db-fix` still `f01d7a0e4`.
+- Refusals inside a found result are typed by their step (`status_rule::Refused`, `reach`, `tail`,
+  `beyond`; D-7550 item 8a, D-7551): a stale completion pin on `/boolean-candidates.json` and
+  `/index-stop.json` is the one 404; a page, candidate, setting, tier or rank past the saved extent
+  is 416 there and on `/candidate-trades.json` (all were 503). The per-route outcome enums of
+  `sweepevidence.rs`, `candidatejson.rs` and `expressionsearchjson.rs` are gone: one
+  `Refused::fault`.
+- The outside rows of the table hold their measured answers (both roots); the quarantine row's
+  `cause` was not a valid cause and is now `zero_price`.
+- Gate 23 refused the 8 `println!` of `status_rule_tests.rs` (the print surface is declared in
+  `.github/workflows/ci.yml`, a file this part never edits): every child now says what it found
+  through a file, and the figures go to `<temp>/brutex-<pid>-status-rule-figures.txt`.
+- `saved_response_boundary_tests.rs` moved with D-7550 for `/frontier.json` only (the identity
+  rule's sentence, generated; a missing store root 503); `/trades.json`'s bytes unchanged.
+- `cargo test -p api --locked --lib -- status_rule sources booleanjson booleanevidencejson
+  indexstop frontierjson expressionsearchjson sweepevidence candidatejson saved_response_boundary`:
+  `180 passed; 0 failed` (14:19 IST). docs/06 L-STATUS-01..03 written with the measured figures.
+- Tools installed here: cargo-deny 0.19.0, cargo-mutants 26.2.0, cargo-llvm-cov 0.8.4.
+  `cargo deny check`: advisories, bans, licenses, sources ok, EXIT 0 (this branch and the base).
+- NEXT: clippy, the full workspace test on both trees, the web gates on both trees, the table's
+  red-before on the base, coverage of the D2 set.

@@ -29,9 +29,9 @@ fn hex_of(byte: u8) -> String {
 
 // ══ The table ═══════════════════════════════════════════════════════════════
 
-/// **EVERY CLASS HAS EXACTLY ONE STATUS, AND NO TWO CLASSES BUT THE TWO 503s
-/// SHARE ONE** — the table in the module header, as code: `400`, `404`, `410`,
-/// `422`, `429`, `503`, and a distinct word for each.
+/// **EVERY CLASS HAS EXACTLY ONE STATUS, AND NO TWO CLASSES SHARE ONE** — the
+/// table in the module header, as code: `400`, `404`, `410`, `416`, `422`,
+/// `429`, `503`, and a distinct word for each.
 #[test]
 fn every_class_has_its_one_status_and_its_own_word() {
     let statuses: Vec<u16> = Class::ALL.iter().map(|c| c.status().as_u16()).collect();
@@ -149,7 +149,10 @@ fn a_symbol_both_too_long_and_lower_case_is_refused_for_its_length_first() {
 fn a_symbol_whose_unicode_fold_is_ascii_is_malformed_never_folded() {
     // The folds are real: this is what a Unicode-aware reader would do.
     assert_eq!("N\u{131}FTY".to_uppercase(), "NIFTY");
-    assert_eq!("BAN\u{212a}NIFTY".to_uppercase().to_lowercase(), "banknifty");
+    assert_eq!(
+        "BAN\u{212a}NIFTY".to_uppercase().to_lowercase(),
+        "banknifty"
+    );
     assert_eq!(
         segment_rule("N\u{131}FTY"),
         Some(Rule::Segment(PathError::IllegalByte {
@@ -303,13 +306,27 @@ fn one_probe_decides_held_not_found_or_unreadable() {
     assert_eq!(fault.class, Class::NotFound);
     assert_eq!(fault.status(), StatusCode::NOT_FOUND);
     assert_eq!(fault.kind, Some(ErrorKind::NotFound));
-    assert_eq!(fault.path.as_deref(), Some(absent.display().to_string().as_str()));
-    assert!(fault.why.starts_with("Thing not held: one probe of "), "{}", fault.why);
-    assert!(fault.why.contains("found nothing (NotFound)"), "{}", fault.why);
+    assert_eq!(
+        fault.path.as_deref(),
+        Some(absent.display().to_string().as_str())
+    );
+    assert!(
+        fault.why.starts_with("Thing not held: one probe of "),
+        "{}",
+        fault.why
+    );
+    assert!(
+        fault.why.contains("found nothing (NotFound)"),
+        "{}",
+        fault.why
+    );
 
     // A WHOLE KIND NEVER SAVED is the same not-found: nothing is listed.
     let never = Path::new("never-written").join(hex_of(3));
-    assert_eq!(probe(&root, &never, "Thing").unwrap_err().class, Class::NotFound);
+    assert_eq!(
+        probe(&root, &never, "Thing").unwrap_err().class,
+        Class::NotFound
+    );
 
     // THE ROOT ITSELF IS MISSING: still ONE probe's NotFound -- nothing is
     // there -- and the sentence names the root, so a dashboard pointed at the
@@ -318,8 +335,15 @@ fn one_probe_decides_held_not_found_or_unreadable() {
     let fault = probe(&missing, &relative, "Thing").unwrap_err();
     assert_eq!(fault.class, Class::NotFound);
     assert_eq!(fault.kind, Some(ErrorKind::NotFound));
-    assert_eq!(fault.path.as_deref(), Some(relative.display().to_string().as_str()));
-    assert!(fault.why.contains(&missing.display().to_string()), "{}", fault.why);
+    assert_eq!(
+        fault.path.as_deref(),
+        Some(relative.display().to_string().as_str())
+    );
+    assert!(
+        fault.why.contains(&missing.display().to_string()),
+        "{}",
+        fault.why
+    );
     assert!(fault.why.contains("BRUTEX_STORE"), "{}", fault.why);
 
     // A FILE WHERE A FOLDER SHOULD BE, at the root and below it.
@@ -349,7 +373,11 @@ fn a_root_that_points_nowhere_is_not_found_naming_the_root() {
     assert_eq!(fault.class, Class::NotFound);
     assert_eq!(fault.kind, Some(ErrorKind::NotFound));
     assert_eq!(fault.path.as_deref(), Some("x"));
-    assert!(fault.why.contains(&link_root.display().to_string()), "{}", fault.why);
+    assert!(
+        fault.why.contains(&link_root.display().to_string()),
+        "{}",
+        fault.why
+    );
 }
 
 /// **A DANGLING SYMBOLIC LINK WHERE THE ENTRY SHOULD BE IS HELD, NOT ABSENT**
@@ -363,7 +391,10 @@ fn a_dangling_link_at_the_entry_is_held_and_never_not_found() {
     let entry = Path::new("research").join(hex_of(5));
     std::os::unix::fs::symlink(root.join("gone"), root.join(&entry)).expect("symlink");
     let held = probe(&root, &entry, "Thing").expect("the link is held");
-    assert!(std::fs::metadata(&held.path).is_err(), "it points at nothing");
+    assert!(
+        std::fs::metadata(&held.path).is_err(),
+        "it points at nothing"
+    );
 }
 
 /// **A ROOT WHOSE MODE IS 000 IS UNREADABLE, NEVER NOT FOUND** — run where the
@@ -396,7 +427,10 @@ fn a_root_whose_mode_is_000_is_unreadable_never_not_found() {
 fn no_configured_root_is_unreadable() {
     let fault = configured(Err("BRUTEX_STORE is empty".to_owned())).unwrap_err();
     assert_eq!(fault.class, Class::Unreadable);
-    assert_eq!(fault.why, "no store root is configured: BRUTEX_STORE is empty");
+    assert_eq!(
+        fault.why,
+        "no store root is configured: BRUTEX_STORE is empty"
+    );
     let root = scratch("configured");
     assert_eq!(configured(Ok(root.clone())), Ok(root));
 }
@@ -448,6 +482,106 @@ fn every_identity_fault_has_one_body_shape() {
     assert_eq!(
         Fault::unreadable(Some("p".to_owned()), "torn").identity_body(None)["status"],
         "unreadable"
+    );
+}
+
+/// **INSIDE A FOUND RESULT, A REFUSAL IS CLASSED BY ITS STEP, NEVER BY ITS
+/// WORDS** (D-7550, D-7551): the reader's typed absence and a pin the store no
+/// longer holds are the one not-found, a page past the extent `416`, and a
+/// reader's own words — even words that sound like a client's — the store's
+/// `503`. Every fault names the entry the probe found.
+#[test]
+fn a_refusal_inside_a_found_result_is_classed_by_its_step() {
+    let root = Path::new("/a-store-root");
+    for (refused, class, says, kind) in [
+        (
+            Refused::Absent,
+            Class::NotFound,
+            "Thing not held: one probe of ns/aa under the configured store root /a-store-root",
+            Some(ErrorKind::NotFound),
+        ),
+        (
+            Refused::NotHeld("the pin is not held".into()),
+            Class::NotFound,
+            "the pin is not held",
+            None,
+        ),
+        (
+            Refused::OutOfRange("offset 9 is past".into()),
+            Class::OutOfRange,
+            "offset 9 is past",
+            None,
+        ),
+        (
+            Refused::Unreadable("torn".into()),
+            Class::Unreadable,
+            "torn",
+            None,
+        ),
+        // A reader's sentence about a page is still the store's refusal: a
+        // client's refusal is typed before the read, never read back from words.
+        (
+            Refused::from("candidate page is outside its exact recorded extent"),
+            Class::Unreadable,
+            "outside its exact",
+            None,
+        ),
+        (
+            Refused::from(String::from("Boolean page bounds refused")),
+            Class::Unreadable,
+            "bounds refused",
+            None,
+        ),
+    ] {
+        let fault = refused.fault(root, "ns/aa".to_owned(), "Thing");
+        assert_eq!(fault.class, class, "{}", fault.why);
+        assert!(fault.why.contains(says), "{}", fault.why);
+        assert_eq!(fault.path.as_deref(), Some("ns/aa"));
+        assert_eq!(fault.kind, kind);
+    }
+    assert_eq!(Refused::Absent.to_string(), "nothing saved for this key");
+    for refused in [
+        Refused::NotHeld("a".into()),
+        Refused::OutOfRange("a".into()),
+        Refused::Unreadable("a".into()),
+    ] {
+        assert_eq!(refused.to_string(), "a");
+    }
+}
+
+/// **THE EXTENT STEP** (D-7551): an offset AT the saved extent is the empty
+/// last page; one past it, up to the largest a client can send, is the
+/// client's `416`, with one sentence naming the offset and the extent.
+#[test]
+fn the_extent_step_passes_the_empty_last_page_and_refuses_one_past_it() {
+    let sentence =
+        "offset 4 is past the 3 saved rows; restart within the extent, no row was served";
+    assert_eq!(reach(0, 0, "rows"), Ok(()));
+    assert_eq!(reach(2, 3, "rows"), Ok(()));
+    assert_eq!(reach(3, 3, "rows"), Ok(()));
+    assert_eq!(
+        reach(4, 3, "rows"),
+        Err(Refused::OutOfRange(sentence.to_owned()))
+    );
+    assert_eq!(reach(usize::MAX, usize::MAX, "rows"), Ok(()));
+    assert!(reach(usize::MAX, usize::MAX - 1, "rows").is_err());
+    assert!(reach(1, 0, "rows").is_err());
+    let rows = [1_u8, 2, 3];
+    assert_eq!(tail(&rows, 0, "rows"), Ok(&rows[..]));
+    assert_eq!(tail(&rows, 2, "rows"), Ok(&rows[2..]));
+    assert_eq!(tail(&rows, 3, "rows"), Ok(&[][..]));
+    assert_eq!(
+        tail(&rows, 4, "rows"),
+        Err(Refused::OutOfRange(sentence.to_owned()))
+    );
+    assert_eq!(
+        tail(&rows, usize::MAX, "rows"),
+        Err(beyond(&usize::MAX, &3, "rows"))
+    );
+    assert_eq!(tail::<u8>(&[], 0, "rows"), Ok(&[][..]));
+    assert_eq!(
+        beyond(&4, &3, "rows"),
+        Refused::OutOfRange(sentence.to_owned())
     );
 }
 
@@ -632,7 +766,7 @@ const ROWS: &[Row] = &[
         "calendar_json",
         Takes::Symbol("feed=zerodha&symbol={sym}&timeframe=1min"),
         "crates/api/src/calendar_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 200, 200, 200, 200, 200, 200, 503],
     ),
     neither("/vocab.json", "vocab_json"),
     neither("/indexmap.json", "indexmap_json"),
@@ -644,7 +778,7 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&month=2026-09",
         ),
         "crates/api/src/bars_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[404, 400, 400, 400, 400, 400, 400, 500],
     ),
     outside(
         "/gaps.json",
@@ -653,7 +787,7 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&month=2026-09",
         ),
         "crates/api/src/gaps_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 400, 400, 400, 400, 400, 400, 200],
     ),
     outside(
         "/bars/window.json",
@@ -662,7 +796,7 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09&to=2026-09",
         ),
         "crates/api/src/bars_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[400, 400, 400, 400, 400, 400, 400, 400],
     ),
     outside(
         "/bars/export.csv",
@@ -671,14 +805,16 @@ const ROWS: &[Row] = &[
             "feed=zerodha&exchange=NSE&segment={seg}&symbol={sym}&timeframe=1min&from=2026-09&to=2026-09",
         ),
         "crates/api/src/bars_export.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[400, 400, 400, 400, 400, 400, 400, 400],
     ),
     outside(
         "/spot.json",
         "spot::spot_json",
-        Takes::Symbol("feed=gdfl&exchange=NSE&symbol={sym}&timeframe=1s&month=2026-09&t=1790000000"),
+        Takes::Symbol(
+            "feed=gdfl&exchange=NSE&symbol={sym}&timeframe=1s&month=2026-09&t=1790000000",
+        ),
         "crates/api/src/spot.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 400, 400, 400, 200, 400, 400, 206],
     ),
     outside(
         "/greeks.json",
@@ -687,7 +823,7 @@ const ROWS: &[Row] = &[
             "feed=gdfl&exchange=NSE&segment=FNO&symbol={sym}&contract=2026-09-24-2400000-CE&timeframe=1s&month=2026-09&t=1790000000",
         ),
         "crates/api/src/optiongreeks.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 400, 400, 400, 200, 400, 400, 206],
     ),
     neither("/census/facets.json", "facets::facets_json"),
     neither("/census/warm.json", "census_cache::census_warm_json"),
@@ -699,7 +835,7 @@ const ROWS: &[Row] = &[
         "basis_route::basis_json",
         Takes::Symbol("symbol={sym}"),
         "crates/api/src/basis_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 400, 400, 400, 200, 400, 400, 200],
     ),
     neither("/disk.json", "disk_route::disk_json"),
     neither("/scrub.json", "scrub_route::scrub_json"),
@@ -737,11 +873,9 @@ const ROWS: &[Row] = &[
     outside(
         "/pull/quarantine.json",
         "quarantine_plan_json",
-        Takes::Symbol(
-            "segment={seg}&symbol={sym}&from=2026-09-01&to=2026-09-30&cause=gap",
-        ),
+        Takes::Symbol("segment={seg}&symbol={sym}&from=2026-09-01&to=2026-09-30&cause=zero_price"),
         "crates/api/src/quarantine_route.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[422, 422, 422, 400, 400, 400, 400, 422],
     ),
     neither("/pull/recovery.json", "crate::recovery::recent"),
     neither("/pull/run.json", "pull_run_json"),
@@ -754,14 +888,14 @@ const ROWS: &[Row] = &[
         "store_get",
         Takes::Symbol("symbol={sym}"),
         "crates/api/src/server.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[200, 200, 200, 200, 200, 200, 200, 200],
     ),
     outside(
         "/bars",
         "bars_get",
         Takes::Symbol("feed=zerodha&symbol={sym}&timeframe=1min&month=2026-09"),
         "crates/api/src/server.rs",
-        &[1, 1, 1, 1, 1, 1, 1, 1],
+        &[400, 400, 400, 400, 400, 400, 400, 503],
     ),
     neither("/logs", "crate::logs::logs_page"),
     neither("/logs.json", "crate::logs::logs_json"),
@@ -771,7 +905,7 @@ const ROWS: &[Row] = &[
         "crate::trades::trades_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/trades.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[200, 400, 400, 200, 200, 400, 503],
     ),
     mine(
         "/frontier.json",
@@ -818,32 +952,38 @@ const ROWS: &[Row] = &[
         "crate::booleancampaignjson::campaign_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleancampaignjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     outside(
         "/boolean-qualified-campaign.json",
         "crate::booleancampaignjson::qualified_campaign_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleancampaignjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     outside(
         "/boolean-qualified-search.json",
         "crate::booleansearchjson::search_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleansearchjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     outside(
         "/boolean-oos.json",
         "crate::booleanoosjson::later_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/booleanoosjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
-    neither("/selection-v6.json", "crate::selectionv6json::selection_v6_json"),
+    neither(
+        "/selection-v6.json",
+        "crate::selectionv6json::selection_v6_json",
+    ),
     neither("/live.json", "crate::livejson::live_json"),
-    neither("/engine/boolean-launch.json", "crate::booleanlaunch::metadata"),
+    neither(
+        "/engine/boolean-launch.json",
+        "crate::booleanlaunch::metadata",
+    ),
     mine(
         "/index-stop.json",
         "crate::indexstopjson::index_stop_json",
@@ -856,22 +996,25 @@ const ROWS: &[Row] = &[
             "identity={id}&pin=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&setting=0&kind=source",
         ),
         "crates/api/src/indexstopcandlesjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
-    neither("/engine/index-stop-launch.json", "crate::indexstoplaunch::metadata"),
+    neither(
+        "/engine/index-stop-launch.json",
+        "crate::indexstoplaunch::metadata",
+    ),
     outside(
         "/index-stop-qualification.json",
         "crate::indexstopqualificationjson::index_stop_qualification_json",
         Takes::Identity("identity={id}"),
         "crates/api/src/indexstopqualificationjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     outside(
         "/index-stop-ranking.json",
         "crate::indexstoprankingjson::index_stop_ranking_json",
         Takes::Identity("identity={id}&timeframe=1min"),
         "crates/api/src/indexstoprankingjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     outside(
         "/index-stop-vix.json",
@@ -880,7 +1023,7 @@ const ROWS: &[Row] = &[
             "identity={id}&pin=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&setting=0",
         ),
         "crates/api/src/indexstopvixjson.rs",
-        &[1, 1, 1, 1, 1, 1, 1],
+        &[503, 400, 400, 400, 400, 400, 503],
     ),
     neither("/engine/top.json", "crate::sweeprun::top_json"),
     neither("/masters", "crate::mastersrun::page"),
@@ -1067,12 +1210,53 @@ const fn answers(status: u16, expect: u16) -> bool {
 /// that reads which root it was given.
 const TABLE_CHILD: &str = "BRUTEX_STATUS_RULE_TABLE";
 
+/// The file a child test writes what it says for its parent, named in the
+/// child's environment. A FILE, NEVER A PRINT: a test's print surface is the
+/// one `.github/workflows/ci.yml` declares for gate 23, and this file has none.
+const SAID: &str = "BRUTEX_STATUS_RULE_SAID";
+
+/// Appends `line` to `path`.
+fn append(path: &std::path::Path, line: &str) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("a file to append to");
+    writeln!(file, "{line}").expect("a line appended");
+}
+
+/// What a child says to its parent: one line of the file [`SAID`] names.
+fn say(line: &str) {
+    append(
+        std::path::Path::new(&std::env::var_os(SAID).expect("the parent names the file")),
+        line,
+    );
+}
+
+/// One measured figure, kept where a reader of the run finds it:
+/// `<temp>/brutex-<pid>-status-rule-figures.txt`, the report's source.
+fn figure(line: &str) {
+    append(&crate::scratch::path("status-rule-figures.txt"), line);
+}
+
+/// [`crate::isolated::rerun`] of `test` with `env`, and what the child said.
+fn rerun_saying(test: &str, name: &str, env: &[(&str, &std::ffi::OsStr)]) -> String {
+    let said = scratch(name).join("said.txt");
+    let mut env = env.to_vec();
+    env.push((SAID, said.as_os_str()));
+    let _ = crate::isolated::rerun(test, &env);
+    std::fs::read_to_string(&said).expect("the child said what it found")
+}
+
 /// The child's run: every row's cases over the real router, every mismatch
 /// gathered before the one assertion, so a run names all of them at once.
 async fn table_child(file_root: bool) {
     let root = PathBuf::from(std::env::var_os("BRUTEX_STORE").expect("the child's store root"));
-    let (addr, stop, served) = serving(&root, if file_root { "table-file" } else { "table-dir" }).await;
+    let (addr, stop, served) =
+        serving(&root, if file_root { "table-file" } else { "table-dir" }).await;
     let mut wrong = Vec::new();
+    let mut seen = Vec::new();
     let mut asked = 0_usize;
     for row in ROWS {
         let mut observed = Vec::new();
@@ -1091,29 +1275,37 @@ async fn table_child(file_root: bool) {
             // part's routes, and the not-found is the one body (D-7550).
             if row.owner == Owner::ThisPart && status == 404 {
                 let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-                if body["status"] != "not_found" || body["rows"] != json!([]) || body["rule"] != DECISION {
-                    wrong.push(format!("{} [{name}] 404 is not the one body: {body}", row.path));
+                if body["status"] != "not_found"
+                    || body["rows"] != json!([])
+                    || body["rule"] != DECISION
+                {
+                    wrong.push(format!(
+                        "{} [{name}] 404 is not the one body: {body}",
+                        row.path
+                    ));
                 }
             }
         }
         // WHAT AN OUTSIDE ROUTE ANSWERS, in case order, so its `today` is
         // copied from a measured run and never guessed.
         if row.today.is_some() {
-            println!("OBSERVED {} {observed:?}", row.path);
+            seen.push(format!("OBSERVED {} {observed:?}", row.path));
         }
     }
     let _ = stop.send(());
     let _ = served.await;
     assert!(
         wrong.is_empty(),
-        "{} of {asked} answers differ:\n{}",
+        "{} of {asked} answers differ:\n{}\n{}",
         wrong.len(),
-        wrong.join("\n")
+        wrong.join("\n"),
+        seen.join("\n")
     );
-    println!(
+    say(&seen.join("\n"));
+    say(&format!(
         "STATUS TABLE {} OK {asked}",
         if file_root { "file" } else { "dir" }
-    );
+    ));
 }
 
 /// **THE TABLE, OVER THE REAL ROUTE TABLE (D-7550)** — every route taking a
@@ -1142,8 +1334,9 @@ fn every_symbol_and_identity_route_answers_the_one_status_rule() {
     let file = scratch("table-file-parent").join("store-is-a-file");
     std::fs::write(&file, b"not a store").expect("a file root");
     for (kind, root) in [("dir", &dir), ("file", &file)] {
-        let said = crate::isolated::rerun(
+        let said = rerun_saying(
             "status_rule::tests::every_symbol_and_identity_route_answers_the_one_status_rule",
+            &format!("table-{kind}-said"),
             &[
                 ("BRUTEX_STORE", root.as_os_str()),
                 (TABLE_CHILD, std::ffi::OsStr::new(kind)),
@@ -1223,8 +1416,12 @@ async fn sixty_four_parallel_malformed_clients_each_get_their_exact_refusal() {
     let _ = served.await;
     let (s50, s99, smax, n) = spread(&mut series);
     let (p50, p99, pmax, m) = spread(&mut parallel);
-    println!("STATUS 400 series p50 {s50} us p99 {s99} us max {smax} us n {n}");
-    println!("STATUS 400 burst-of-64 p50 {p50} us p99 {p99} us max {pmax} us n {m}");
+    figure(&format!(
+        "STATUS 400 series p50 {s50} us p99 {s99} us max {smax} us n {n}"
+    ));
+    figure(&format!(
+        "STATUS 400 burst-of-64 p50 {p50} us p99 {p99} us max {pmax} us n {m}"
+    ));
     assert!(
         p99 <= 64 * s50 + 50_000,
         "the burst's p99 {p99} us is worse than 64 asked in series at their median {s50} us"
@@ -1248,7 +1445,10 @@ async fn a_lower_case_symbol_beside_a_malformed_date_is_refused_for_the_symbol()
         assert_eq!(status, 400, "{target}: {body}");
         let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
         let said = body["error"].as_str().expect("the refusal");
-        assert!(said.starts_with("symbol=\"nifty\" is malformed"), "{target}: {said}");
+        assert!(
+            said.starts_with("symbol=\"nifty\" is malformed"),
+            "{target}: {said}"
+        );
         assert!(!said.contains("2026-13"), "one refusal, not two: {said}");
     }
     let _ = stop.send(());
@@ -1272,14 +1472,10 @@ async fn call(path: &str, query: &str) -> (StatusCode, String) {
         "/boolean-candidates.json" => crate::booleanjson::boolean_json(uri).await,
         "/boolean-statistics.json" => crate::booleanevidencejson::statistics_json(uri).await,
         "/boolean-admission.json" => crate::booleanevidencejson::admission_json(uri).await,
-        "/boolean-qualification.json" => {
-            crate::booleanevidencejson::qualification_json(uri).await
-        }
+        "/boolean-qualification.json" => crate::booleanevidencejson::qualification_json(uri).await,
         "/index-stop.json" => crate::indexstopjson::index_stop_json(uri).await,
         "/frontier.json" => crate::frontierjson::frontier_json(uri).await,
-        "/expression-search.json" => {
-            crate::expressionsearchjson::expression_search_json(uri).await
-        }
+        "/expression-search.json" => crate::expressionsearchjson::expression_search_json(uri).await,
         "/sweep-evidence.json" => crate::sweepevidence::evidence_json(uri).await,
         "/candidate-trades.json" => crate::candidatejson::candidate_json(uri).await,
         other => panic!("{other} is not an identity route of this part"),
@@ -1407,9 +1603,9 @@ async fn timing_child() {
                 .get_mut(&(route.clone(), kind, size))
                 .expect("every size measured");
             let (p50, p99, max, n) = spread(samples);
-            println!(
+            say(&format!(
                 "STATUS TIMING {route} {kind} store {size}: p50 {p50} us p99 {p99} us max {max} us n {n}"
-            );
+            ));
             p50s.push(p50);
         }
         // FLAT: the hundredfold store's median within three times the
@@ -1419,7 +1615,7 @@ async fn timing_child() {
         }
     }
     assert!(flat.is_empty(), "not flat:\n{}", flat.join("\n"));
-    println!("STATUS TIMING OK");
+    say("STATUS TIMING OK");
 }
 
 /// **EACH 400 AND EACH NOT-FOUND COSTS THE SAME AT ONE, TEN AND A HUNDRED
@@ -1445,15 +1641,19 @@ fn a_refusal_and_a_not_found_cost_the_same_at_one_ten_and_a_hundred_times_the_st
     }
     let current = dir.join("current");
     point(&current, &dir.join(format!("size-{}", SIZES[0])));
-    let said = crate::isolated::rerun(
+    let said = rerun_saying(
         "status_rule::tests::a_refusal_and_a_not_found_cost_the_same_at_one_ten_and_a_hundred_times_the_store",
+        "timing-said",
         &[
             ("BRUTEX_STORE", current.as_os_str()),
             (TIMING_CHILD, std::ffi::OsStr::new("1")),
         ],
     );
-    for line in said.lines().filter(|line| line.starts_with("STATUS TIMING")) {
-        println!("{line}");
+    for line in said
+        .lines()
+        .filter(|line| line.starts_with("STATUS TIMING"))
+    {
+        figure(line);
     }
     assert!(said.contains("STATUS TIMING OK"), "{said}");
 }
@@ -1475,10 +1675,26 @@ fn refusal(status: StatusCode, why: &str) -> Reply {
 /// sentence, no prefix.
 #[test]
 fn a_page_is_served_its_fault_answered_and_an_oversized_page_refused_whole() {
-    let ok = page(Ok("{}".to_owned()), Some([1; 32]), "application/x-test", refusal, "big");
-    assert_eq!(ok, (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/x-test")], "{}".to_owned()));
+    let ok = page(
+        Ok("{}".to_owned()),
+        Some([1; 32]),
+        "application/x-test",
+        refusal,
+        "big",
+    );
+    assert_eq!(
+        ok,
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/x-test")],
+            "{}".to_owned()
+        )
+    );
     let at_bound = "x".repeat(crate::detail::MAX_RESPONSE_BYTES);
-    assert_eq!(page(Ok(at_bound), None, "a/b", refusal, "big").0, StatusCode::OK);
+    assert_eq!(
+        page(Ok(at_bound), None, "a/b", refusal, "big").0,
+        StatusCode::OK
+    );
     let over = "x".repeat(crate::detail::MAX_RESPONSE_BYTES + 1);
     let (status, _, body) = page(Ok(over), None, "a/b", refusal, "too big; no prefix");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1517,7 +1733,10 @@ fn serve_refuses_before_admission_runs_the_work_and_names_a_lost_task() {
         },
     ));
     assert_eq!(refused.0, StatusCode::BAD_REQUEST);
-    assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "the work never ran");
+    assert!(
+        !ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the work never ran"
+    );
     let served = runtime.block_on(serve(Ok(7_u8), refusal, "full", |n| {
         refusal(StatusCode::OK, &n.to_string())
     }));
@@ -1539,8 +1758,9 @@ const POOL_CHILD: &str = "BRUTEX_STATUS_RULE_POOL";
 #[test]
 fn a_full_detail_pool_is_429_with_the_routes_sentence() {
     if std::env::var_os(POOL_CHILD).is_none() {
-        let said = crate::isolated::rerun(
+        let said = rerun_saying(
             "status_rule::tests::a_full_detail_pool_is_429_with_the_routes_sentence",
+            "pool-said",
             &[(POOL_CHILD, std::ffi::OsStr::new("1"))],
         );
         assert!(said.contains("STATUS POOL OK"), "{said}");
@@ -1572,7 +1792,11 @@ fn a_full_detail_pool_is_429_with_the_routes_sentence() {
         })
         .await;
         assert_eq!(full.0, StatusCode::TOO_MANY_REQUESTS, "{}", full.2);
-        assert!(full.2.contains("capacity full; nothing queued"), "{}", full.2);
+        assert!(
+            full.2.contains("capacity full; nothing queued"),
+            "{}",
+            full.2
+        );
         for release in releases {
             let _ = release.send(());
         }
@@ -1580,7 +1804,7 @@ fn a_full_detail_pool_is_429_with_the_routes_sentence() {
             assert!(slot.await.expect("a held task").is_ok());
         }
     });
-    println!("STATUS POOL OK");
+    say("STATUS POOL OK");
 }
 
 // ══ Every namespace is the one its reader opens ════════════════════════════
@@ -1607,9 +1831,15 @@ fn every_probed_namespace_is_the_one_its_reader_opens() {
     let max = crate::detail::MAX_SCAN_BYTES;
 
     let root = scratch("bind-expression");
-    assert!(matches!(cli::expression_search::reader::Reader::open(&root, id, max), Ok(None)));
+    assert!(matches!(
+        cli::expression_search::reader::Reader::open(&root, id, max),
+        Ok(None)
+    ));
     std::fs::create_dir_all(root.join(namespace::EXPRESSION_SEARCH).join(&hex)).expect("dir");
-    assert!(!matches!(cli::expression_search::reader::Reader::open(&root, id, max), Ok(None)));
+    assert!(!matches!(
+        cli::expression_search::reader::Reader::open(&root, id, max),
+        Ok(None)
+    ));
 
     let root = scratch("bind-sweep");
     assert_eq!(cli::sweep_evidence::read(&root, id, max), Ok(None));
@@ -1619,15 +1849,28 @@ fn every_probed_namespace_is_the_one_its_reader_opens() {
     assert_ne!(cli::sweep_evidence::read(&root, id, max), Ok(None));
 
     for (model, space) in [
-        (cli::candidate_trades::Model::And, namespace::CANDIDATE_TRADES),
-        (cli::candidate_trades::Model::Expression, namespace::EXPRESSION_CANDIDATE_TRADES),
+        (
+            cli::candidate_trades::Model::And,
+            namespace::CANDIDATE_TRADES,
+        ),
+        (
+            cli::candidate_trades::Model::Expression,
+            namespace::EXPRESSION_CANDIDATE_TRADES,
+        ),
     ] {
         let root = scratch(&format!("bind-candidates-{}", model.as_str()));
-        assert!(matches!(cli::candidate_trades::read_model(&root, id, 3, model, max), Ok(None)));
+        assert!(matches!(
+            cli::candidate_trades::read_model(&root, id, 3, model, max),
+            Ok(None)
+        ));
         let entry = root.join(space).join(&hex).join("3");
         std::fs::create_dir_all(&entry).expect("dir");
-        std::fs::write(entry.join("catalog.bin"), [0xde_u8; 64]).expect("bytes that are no catalog");
-        assert!(!matches!(cli::candidate_trades::read_model(&root, id, 3, model, max), Ok(None)));
+        std::fs::write(entry.join("catalog.bin"), [0xde_u8; 64])
+            .expect("bytes that are no catalog");
+        assert!(!matches!(
+            cli::candidate_trades::read_model(&root, id, 3, model, max),
+            Ok(None)
+        ));
     }
 
     let opened: [(&str, fn(&Path, [u8; 32], u64) -> Result<(), String>); 4] = [
@@ -1651,7 +1894,10 @@ fn every_probed_namespace_is_the_one_its_reader_opens() {
         std::fs::create_dir_all(root.join(space)).expect("namespace");
         std::fs::write(root.join(space).join(&hex), b"a file where the folder goes").expect("file");
         let after = open(&root, id, max).expect_err("a file is no saved result");
-        assert!(after.contains(&not_a_directory()), "{space} reads elsewhere: {after}");
+        assert!(
+            after.contains(&not_a_directory()),
+            "{space} reads elsewhere: {after}"
+        );
         // AND THE PROBE CALLS THE SAME ENTRY HELD: there is something there.
         assert!(probe_identity(&root, space, id, "Thing").is_ok());
     }

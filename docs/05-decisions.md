@@ -87597,8 +87597,18 @@ sent its required `attempt` (and `200` `"missing"` once it was).
    `/sweep-evidence.json` and `/candidate-trades.json`.
 8. **A pin that names nothing held is the same `404`:** an expression-search
    snapshot no session holds, a sweep attempt pin that is not the saved
-   attempt, a candidate digest pin that is not the saved catalog's. They were
-   `503`.
+   attempt, a candidate digest pin that is not the saved catalog's, a Boolean
+   catalog completion or a single-stop completion that is not the saved one.
+   They were `503`.
+8a. **Inside a found result, one refusal type** (`status_rule::Refused`):
+   `Absent` (the reader's typed absence), `NotHeld` (a pin), `OutOfRange` (a
+   page or a selector past the saved extent, D-7551) and `Unreadable` (the
+   read's own refusal). Every identity route of this part reads into it, and
+   `Refused::fault` is the one place each becomes its class: the three
+   per-route outcome enums of `sweepevidence.rs`, `candidatejson.rs` and
+   `expressionsearchjson.rs` are gone. A reader's own sentence converts to
+   `Unreadable` (`From<String>`), so a client's refusal is typed by its step
+   before the read and never recovered from words.
 9. **The request line is unchanged** (`logs.rs`, BASE-LOG-SEARCH's): a `5xx`
    is written at `error`, a `4xx` at `warn`. The specification said "5xx
    warn, 4xx info"; the code at the head is the fact. This part picks the
@@ -87616,7 +87626,7 @@ route of `route_table`, read from its source
 `every_symbol_and_identity_route_answers_the_one_status_rule`), the extreme
 cases, the 64-client burst, the timings at one, ten and a hundred times the
 store, and the namespace bindings; `web/tests/status-rule-readers.test.js`.
-Invariants STATUS-01 to STATUS-12; limits L-STATUS-01 to L-STATUS-03.
+Invariants STATUS-01 to STATUS-13; limits L-STATUS-01 to L-STATUS-03.
 
 ### D-7551 — A page past a found result's extent is `416` on every identity route of this part, as `/frontier.json` answered it (BASE-STATUS-CODES) — 2026-10-30
 
@@ -87627,4 +87637,21 @@ client's page, not the store's fault: `Class::OutOfRange`, `416`, decided by
 which step refused (the page-window step, `detail::seek_window`), never by
 its sentence. `sweepevidence_tests` (in `sweepevidence.rs`) moves its two
 `503` expectations to `416`; every other assertion of those cases is kept.
-D-7552 to D-7559 are unused.
+
+The same holds on the other identity routes of this part, where it was `503`:
+the extent step (`status_rule::reach` for a count, `status_rule::tail` for
+rows held in memory, one sentence, `status_rule::beyond`) runs before a row is
+read. `/boolean-candidates.json`: a page past its coordinates, programs,
+trades, sessions or grid levels, and a candidate past the saved count.
+`/index-stop.json`: a page past its settings, trades, events or days, and a
+setting past the count. `/candidate-trades.json`: a tier or a rank past the
+saved count, a page past its candidate sides or trades, and any page but the
+first of an empty catalog. Each route keeps its own page contract: an offset
+AT the extent is the empty last page on the Boolean and single-stop routes,
+and a candidate page must start on a saved row (`candidatejson::first_row`,
+the range half of its `validate_window`); nothing a client could ask before
+is refused now, and nothing refused before is answered. Not typed here, and
+named in `docs/06-limits.md` L-STATUS-03: a grid side the Boolean catalog
+holds no grid for (no fixture of this part builds a one-sided catalog), and
+the three Boolean evidence routes' projections, which live in files this part
+does not own. D-7552 to D-7559 are unused.

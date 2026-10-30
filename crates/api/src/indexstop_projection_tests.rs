@@ -257,6 +257,7 @@ fn saved_stop_pages_keep_exact_links_pins_and_unassessed_policy() {
     assert!(
         render(&fixture.root, &foreign)
             .unwrap_err()
+            .to_string()
             .contains("completion changed")
     );
     let mut changed = fixture.saved.clone();
@@ -267,6 +268,97 @@ fn saved_stop_pages_keep_exact_links_pins_and_unassessed_policy() {
     let reopened = render(&fixture.root, &Asked::parse(&base).unwrap()).unwrap();
     assert_eq!(reopened["completion"], first["completion"]);
     assert_eq!(fs::read(&fixture.body).unwrap(), fixture.saved);
+}
+
+/// **A completion pin the store no longer holds is the one `404`, and a
+/// setting or a page past the saved extent is the client's `416`** (D-7550,
+/// D-7551), each decided by its own step, never the `503` they answered
+/// before. The fixture holds 2 settings; setting 1 holds one trade, one event
+/// and one day.
+#[test]
+fn a_stale_stop_pin_is_not_found_and_a_page_past_the_saved_extent_is_out_of_range() {
+    let fixture = fixture();
+    let base = format!("identity={}", hex(ID));
+    let pin = render(&fixture.root, &Asked::parse(&base).unwrap()).unwrap()["completion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let answered = |suffix: &str| -> (StatusCode, String) {
+        let asked = Asked::parse(&format!("{base}&{suffix}")).unwrap();
+        match answer(Ok(fixture.root.clone()), &asked) {
+            Ok(body) => (StatusCode::OK, body.to_string()),
+            Err(fault) => (fault.status(), fault.why),
+        }
+    };
+    let past = StatusCode::RANGE_NOT_SATISFIABLE;
+    for (suffix, status, says) in [
+        // AT the extent is the empty last page; one past it is the client's.
+        (
+            format!("completion={pin}&offset=2"),
+            StatusCode::OK,
+            "\"rows\":[]",
+        ),
+        (
+            format!("completion={pin}&offset=3"),
+            past,
+            "offset 3 is past the 2 saved rows",
+        ),
+        (
+            format!("completion={pin}&offset={}", usize::MAX),
+            past,
+            "saved rows",
+        ),
+        (
+            format!("completion={pin}&kind=trades&setting=2"),
+            past,
+            "setting 2 is past the 2",
+        ),
+        (
+            format!("completion={pin}&kind=events&setting=1&offset=2"),
+            past,
+            "1 saved rows",
+        ),
+        (
+            format!("completion={pin}&kind=days&setting=1&offset=2"),
+            past,
+            "1 saved rows",
+        ),
+        (
+            format!("completion={pin}&kind=trades&setting=1&offset=1"),
+            StatusCode::OK,
+            "\"rows\":[]",
+        ),
+        // A completion the store never had is the pin not held: `404`.
+        (
+            format!("completion={}&offset=1", hex([0x71; 32])),
+            StatusCode::NOT_FOUND,
+            "not held",
+        ),
+        // COMBINATION: a stale pin beside a setting past the count is the
+        // pin's `404`; a setting past the count beside a page past it names
+        // the setting, the first step to refuse.
+        (
+            format!("completion={}&kind=days&setting=9", hex([0x71; 32])),
+            StatusCode::NOT_FOUND,
+            "completion changed",
+        ),
+        (
+            format!("completion={pin}&kind=days&setting=9&offset=9"),
+            past,
+            "setting 9",
+        ),
+        // OUT OF THE BOX: the largest setting a client can name is past the
+        // count, never an overflow.
+        (
+            format!("completion={pin}&kind=trades&setting={}", usize::MAX),
+            past,
+            "setting",
+        ),
+    ] {
+        let (got, why) = answered(&suffix);
+        assert_eq!(got, status, "{suffix}: {why}");
+        assert!(why.contains(says), "{suffix}: {why}");
+    }
 }
 
 #[tokio::test]

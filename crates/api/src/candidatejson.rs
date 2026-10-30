@@ -1,5 +1,6 @@
 //! Bounded exact priced-candidate pages pinned to a sealed capture catalog.
 
+use crate::status_rule::Refused;
 use cli::candidate_trades::{self, Candidate, Key, Model, Summary, Tier, TradeReader};
 use cli::trades::Direction;
 use serde_json::{Value, json};
@@ -156,10 +157,11 @@ const WHAT: &str = "Priced candidate catalog";
 /// The page, or the one status rule's fault (D-7550): a configured root, then
 /// ONE probe of the identity's folder of this model's catalogs before the
 /// reader opens anything -- an identity that names nothing is `404`, pinned
-/// or not -- then the read. A catalog the reader finds absent for this
-/// attempt, and a digest pin that is not the saved catalog's, are the same
-/// `404`, decided by their typed absence; any other refusal of an entry the
-/// probe found is `503`, naming it.
+/// or not -- then the read, typed by the step that refused: a catalog the
+/// reader finds absent for this attempt and a digest pin that is not the
+/// saved catalog's are the same `404`; a tier, a rank or a page past the
+/// saved extent `416` (D-7551); and only the read's own refusal of an entry
+/// the probe found `503`, naming it.
 fn answer(
     root: Result<PathBuf, String>,
     asked: &Asked,
@@ -171,30 +173,10 @@ fn answer(
     };
     let held = crate::status_rule::probe_identity(&root, namespace, asked.identity, WHAT)?;
     let attempt = format!("{} (attempt {})", held.shown, asked.attempt);
-    match render(&root, asked) {
-        Ok(Read::Page(body)) => Ok(body),
-        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, attempt, WHAT)),
-        Ok(Read::PinNotHeld) => Err(crate::status_rule::Fault {
-            class: crate::status_rule::Class::NotFound,
-            why: "the pinned candidate catalog digest is not the saved catalog's; restart from \
-                  its first page, no replacement page was exposed"
-                .to_owned(),
-            path: Some(attempt),
-            kind: None,
-        }),
-        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(attempt), why)),
-    }
+    render(&root, asked).map_err(|refused| refused.fault(&root, attempt, WHAT))
 }
 
-/// What one read found: a page, the reader's typed absence of this attempt's
-/// catalog, or a digest pin that is not the saved catalog's.
-enum Read {
-    Page(String),
-    Absent,
-    PinNotHeld,
-}
-
-fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
+fn render(root: &Path, asked: &Asked) -> Result<String, Refused> {
     let Some(summary) = candidate_trades::read_model(
         root,
         asked.identity,
@@ -203,10 +185,14 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
         crate::detail::MAX_SCAN_BYTES,
     )?
     else {
-        return Ok(Read::Absent);
+        return Err(Refused::Absent);
     };
     if asked.digest.is_some_and(|digest| digest != summary.digest) {
-        return Ok(Read::PinNotHeld);
+        return Err(Refused::NotHeld(
+            "the pinned candidate catalog digest is not the saved catalog's; restart from its \
+             first page, no replacement page was exposed"
+                .to_owned(),
+        ));
     }
     // A STOCK AUDIT'S PRICED CANDIDATES SAY WHAT THEY ARE MADE OF. Each page
     // serves per-trade best, worst, adverse and favourable figures, and a
@@ -222,11 +208,25 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
         Model::Expression => String::new(),
     };
     if summary.tiers == 0 {
-        return empty_catalog(&summary, asked, note).map(Read::Page);
+        return empty_catalog(&summary, asked, note);
+    }
+    // A TIER OR A RANK PAST THE SAVED COUNT is the client's selector, `416`,
+    // decided before the reader is asked for it (D-7551).
+    if asked.tier >= summary.tiers {
+        return Err(Refused::OutOfRange(format!(
+            "tier {} is past the {} saved tiers; no row was served",
+            asked.tier, summary.tiers
+        )));
     }
     let tier = candidate_trades::tier(root, &summary, asked.tier, crate::detail::MAX_SCAN_BYTES)?;
     let (kind, total, rows, selected) = match (asked.rank, asked.direction) {
         (Some(rank), Some(direction)) => {
+            if rank > tier.evaluated {
+                return Err(Refused::OutOfRange(format!(
+                    "rank {rank} is past the tier's {} saved ranks; no row was served",
+                    tier.evaluated
+                )));
+            }
             let key = Key {
                 tier: asked.tier,
                 rank,
@@ -246,6 +246,7 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
                 .evaluated
                 .checked_mul(2)
                 .ok_or("candidate side count overflow")?;
+            first_row(total, asked.offset, "candidate sides")?;
             let rows = candidate_trades::candidates_page(
                 root,
                 &summary,
@@ -261,7 +262,7 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
                 None,
             )
         }
-        _ => return Err("candidate key is incomplete".to_owned()),
+        _ => return Err("candidate key is incomplete".into()),
     };
     validate_window(total, asked.offset, rows.len())?;
     let observed = candidate_trades::read_model(
@@ -273,7 +274,7 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     )?
     .ok_or("candidate catalog disappeared during read")?;
     if observed.digest != summary.digest {
-        return Err("candidate catalog changed during read; no mixed page exposed".to_owned());
+        return Err("candidate catalog changed during read; no mixed page exposed".into());
     }
     let lifecycle = cli::sweep_evidence::read_attempt(
         root,
@@ -288,11 +289,16 @@ fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
         .map(|value| value.to_string());
     let mut body = json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":lifecycle.map(|value|value.completion.as_str()),"kind":kind,"tier_count":summary.tiers.to_string(),"candidate_side_count":summary.candidates.to_string(),"tier":tier_json(&tier),"offset":asked.offset.to_string(),"limit":asked.limit,"total_count":total.to_string(),"next_offset":next,"page_complete":true,"selected":selected,"rows":rows,"refusal":null});
     crate::detail::put_equity_note(&mut body, note)?;
-    Ok(Read::Page(body.to_string()))
+    Ok(body.to_string())
 }
-fn empty_catalog(summary: &Summary, asked: &Asked, note: String) -> Result<String, String> {
+fn empty_catalog(summary: &Summary, asked: &Asked, note: String) -> Result<String, Refused> {
+    // An empty catalog's only page is its first: any other tier, offset or
+    // rank asks past what was saved, `416`.
     if asked.tier != 0 || asked.offset != 0 || asked.rank.is_some() {
-        return Err("empty candidate catalog has only its initial metadata page".to_owned());
+        return Err(Refused::OutOfRange(
+            "an empty candidate catalog has only its initial metadata page; no row was served"
+                .to_owned(),
+        ));
     }
     let mut body = json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":null,"kind":"candidates","tier_count":"0","candidate_side_count":"0","tier":null,"offset":"0","limit":asked.limit,"total_count":"0","next_offset":null,"page_complete":true,"selected":null,"rows":[],"refusal":null});
     crate::detail::put_equity_note(&mut body, note)?;
@@ -306,6 +312,16 @@ fn validate_window(total: u64, offset: u64, count: usize) -> Result<(), String> 
             .is_none_or(|end| end > total)
     {
         return Err("candidate page is outside its exact recorded extent".to_owned());
+    }
+    Ok(())
+}
+/// THE EXTENT STEP of a candidate page (D-7551), before the page is read: its
+/// first row must be saved, an empty result's first page alone excepted --
+/// the range half of [`validate_window`], decided here so a page past the
+/// extent is the client's `416` and never the read's `503`.
+fn first_row(total: u64, offset: u64, rows: &str) -> Result<(), Refused> {
+    if offset != 0 && offset >= total {
+        return Err(crate::status_rule::beyond(&offset, &total, rows));
     }
     Ok(())
 }
@@ -324,7 +340,7 @@ fn trade_page(
     key: Key,
     offset: u64,
     limit: usize,
-) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
+) -> Result<(Candidate, Vec<cli::trades::Row>), Refused> {
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
     let mut cached = CACHE
         .get_or_init(|| Mutex::new(None))
@@ -341,6 +357,9 @@ fn trade_page(
 /// its own refusal said to reopen. The refusal still answers this request; the
 /// next one cold-opens and re-verifies every row and the seal, as every sibling
 /// cache does. D-2763, apicache-1.
+///
+/// A page past the candidate's saved trades is refused before the page is
+/// read, by [`first_row`]: the client's `416`, and the reader stays held.
 fn page_through(
     cached: &mut Option<Cached>,
     root: &Path,
@@ -348,7 +367,7 @@ fn page_through(
     key: Key,
     offset: u64,
     limit: usize,
-) -> Result<(Candidate, Vec<cli::trades::Row>), String> {
+) -> Result<(Candidate, Vec<cli::trades::Row>), Refused> {
     if cached.as_ref().is_none_or(|held| {
         held.model != summary.model
             || held.root != root
@@ -369,11 +388,16 @@ fn page_through(
         });
     }
     let held = cached.as_mut().ok_or("candidate reader cache missing")?;
+    first_row(
+        held.reader.candidate().cell.map_or(0, |cell| cell.trades),
+        offset,
+        "trades",
+    )?;
     match held.reader.page(offset, limit) {
         Ok(rows) => Ok((held.reader.candidate().clone(), rows)),
         Err(why) => {
             *cached = None;
-            Err(why)
+            Err(why.into())
         }
     }
 }
@@ -406,14 +430,10 @@ fn trade_json(row: cli::trades::Row) -> Value {
 mod tests {
     use super::*;
     const ID: &str = "4242424242424242424242424242424242424242424242424242424242424242";
-    /// [`render`]'s page, or its typed absence and stale pin as refusals: the
-    /// shape these tests read pages in.
+    /// [`render`]'s page, or its typed refusal in words: the shape these
+    /// tests read pages in.
     fn page(root: &Path, asked: &Asked) -> Result<String, String> {
-        match render(root, asked)? {
-            Read::Page(body) => Ok(body),
-            Read::Absent => Err("absent".to_owned()),
-            Read::PinNotHeld => Err("pin not held".to_owned()),
-        }
+        render(root, asked).map_err(|refused| refused.to_string())
     }
     #[test]
     fn exact_query_bounds_and_continuation_authority_are_required() {
@@ -447,7 +467,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("candidate-api-missing-{}", std::process::id()));
         let asked = Asked::parse(&format!("identity={ID}&attempt=1"))?;
-        assert!(matches!(render(&root, &asked)?, Read::Absent));
+        assert_eq!(render(&root, &asked), Err(Refused::Absent));
         // THE ONE NOT-FOUND (D-7550): 404 with the one body, never a 200.
         let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
         assert_eq!(fault.status(), axum::http::StatusCode::NOT_FOUND);
@@ -459,6 +479,135 @@ mod tests {
         let pinned = answer(Ok(root.clone()), &pinned).err().ok_or("refused")?;
         assert_eq!(pinned.status(), axum::http::StatusCode::NOT_FOUND);
         assert!(!root.exists(), "reading created nothing");
+        Ok(())
+    }
+    /// **A tier, a rank or a page past the saved extent is the client's
+    /// `416`, and a stale digest the one `404`** (D-7550, D-7551), each
+    /// decided by its own step before the page is read, never the `503` they
+    /// answered before. One tier of one rank, two sides, no cells; and an
+    /// empty catalog, whose only page is its first.
+    #[test]
+    fn a_selector_or_page_past_the_saved_extent_is_the_clients_416() -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-status-rule-extents");
+        let base = and_capture(&root, [43; 32], true)?;
+        let first: Value = serde_json::from_str(&page(&root, &Asked::parse(&base)?)?)
+            .map_err(|e| e.to_string())?;
+        let digest = first
+            .get("catalog_digest")
+            .and_then(Value::as_str)
+            .ok_or("a digest")?
+            .to_owned();
+        let pinned = format!("{base}&digest={digest}");
+        let answered = |query: String| -> Result<(axum::http::StatusCode, String), String> {
+            Ok(match answer(Ok(root.clone()), &Asked::parse(&query)?) {
+                Ok(body) => (axum::http::StatusCode::OK, body),
+                Err(fault) => (fault.status(), fault.why),
+            })
+        };
+        let past = axum::http::StatusCode::RANGE_NOT_SATISFIABLE;
+        let found = axum::http::StatusCode::OK;
+        for (query, status, says) in [
+            (format!("{pinned}&offset=1"), found, "\"total_count\":\"2\""),
+            (
+                format!("{pinned}&offset=2"),
+                past,
+                "offset 2 is past the 2 saved candidate sides",
+            ),
+            (
+                format!("{pinned}&offset={}", u64::MAX),
+                past,
+                "saved candidate sides",
+            ),
+            (
+                format!("{pinned}&tier=1"),
+                past,
+                "tier 1 is past the 1 saved tiers",
+            ),
+            (format!("{pinned}&tier={}", u64::MAX), past, "saved tiers"),
+            (
+                format!("{pinned}&rank=2&direction=long"),
+                past,
+                "rank 2 is past the tier's 1",
+            ),
+            (
+                format!("{pinned}&rank=1&direction=short"),
+                found,
+                "\"total_count\":\"0\"",
+            ),
+            (
+                format!("{pinned}&rank=1&direction=short&offset=1"),
+                past,
+                "past the 0 saved trades",
+            ),
+            // A digest the catalog is not is the pin not held: `404`.
+            (
+                format!("{base}&digest={ID}&offset=1"),
+                axum::http::StatusCode::NOT_FOUND,
+                "pinned",
+            ),
+            // COMBINATION: a stale digest beside a tier past the count is the
+            // pin's `404`; a tier past the count beside a rank and a page past
+            // theirs names the tier, the first step to refuse.
+            (
+                format!("{base}&digest={ID}&tier=9"),
+                axum::http::StatusCode::NOT_FOUND,
+                "digest",
+            ),
+            (
+                format!("{pinned}&tier=9&rank=9&direction=long&offset=9"),
+                past,
+                "tier 9",
+            ),
+            // OUT OF THE BOX: the largest rank a client can name is past the
+            // tier, never an overflow of the side ordinal.
+            (
+                format!("{pinned}&rank={}&direction=long", u64::MAX),
+                past,
+                "saved ranks",
+            ),
+        ] {
+            let (got, why) = answered(query.clone())?;
+            assert_eq!(got, status, "{query}: {why}");
+            assert!(why.contains(says), "{query}: {why}");
+        }
+        let empty = and_capture(&root, [44; 32], false)?;
+        let first: Value = serde_json::from_str(&page(&root, &Asked::parse(&empty)?)?)
+            .map_err(|e| e.to_string())?;
+        let pinned = format!(
+            "{empty}&digest={}",
+            first
+                .get("catalog_digest")
+                .and_then(Value::as_str)
+                .ok_or("digest")?
+        );
+        for query in [
+            format!("{pinned}&offset=1"),
+            format!("{pinned}&tier=1"),
+            format!("{pinned}&rank=1&direction=long"),
+        ] {
+            let (got, why) = answered(query.clone())?;
+            assert_eq!(got, past, "{query}: {why}");
+            assert!(
+                why.contains("only its initial metadata page"),
+                "{query}: {why}"
+            );
+        }
+        // The extent step alone: a page must start on a saved row, the empty
+        // result's first page excepted.
+        for (total, offset, passes) in [
+            (0, 0, true),
+            (0, 1, false),
+            (5, 0, true),
+            (5, 4, true),
+            (5, 5, false),
+        ] {
+            assert_eq!(
+                first_row(total, offset, "rows").is_ok(),
+                passes,
+                "{total} {offset}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
     #[test]
@@ -518,10 +667,7 @@ mod tests {
             crate::server::hex32([42; 32]),
             attempt.token()
         );
-        assert!(matches!(
-            render(&root, &Asked::parse(&base)?)?,
-            Read::Absent
-        ));
+        assert_eq!(render(&root, &Asked::parse(&base)?), Err(Refused::Absent));
         let saved: Value = serde_json::from_str(&page(
             &root,
             &Asked::parse(&format!("{base}&model=expression"))?,
@@ -665,7 +811,7 @@ mod tests {
             direction: Direction::Long,
         };
         let mut slot = None;
-        page_through(&mut slot, &root, &summary, key, 0, 16)?;
+        page_through(&mut slot, &root, &summary, key, 0, 16).map_err(|why| why.to_string())?;
         assert!(slot.is_some(), "the first page caches its reader");
 
         let directory = root

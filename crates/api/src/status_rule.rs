@@ -47,19 +47,26 @@
 //! A well-formed identity that names nothing the store holds is `404` with one
 //! body shape ([`Fault::identity_body`]) on every identity route. It is decided
 //! by one `symlink_metadata` of the path the identity names — never a listing
-//! of a directory — and, only when that answers `NotFound`, one `metadata` of
-//! the root, which is what tells "this store holds no such result" (`404`)
-//! from "the configured store root is not there" (`503`). Why `404` and not
-//! the others, D-7550 says: `200` is an answer, `503` blames the server for the
-//! client's question, `400` calls a well-formed identity malformed, and `410`
-//! is kept for a key that once was and was retired.
+//! of a directory, never a second look. Its `NotFound` is `404` whether the
+//! entry, its namespace or the root is the missing part, and the sentence
+//! names the configured root, so a root that is not the store the command
+//! wrote reads as exactly that ([`absent`]). Why `404` and not the others,
+//! D-7550 says: `200` is an answer, `503` blames the server for the client's
+//! question, `400` calls a well-formed identity malformed, and `410` is kept
+//! for a key that once was and was retired.
+//!
+//! Inside a result the probe found, a route's refusals are one [`Refused`],
+//! typed by the step that refused: the reader's typed absence and a pin the
+//! store no longer holds are the same `404`, a page past the saved extent is
+//! `416` ([`reach`], D-7551), and only the read's own refusal is `503`.
 //!
 //! # Cost
 //!
 //! A parameter's rule is one pass over its bytes, at most
 //! [`store::path::MAX_SEGMENT_LEN`] for a symbol and [`IDENTITY_HEX`] for an
-//! identity. A probe is one `stat`, two on a `NotFound`. Neither depends on how
-//! much the store holds (`docs/06-limits.md` L-STATUS-01).
+//! identity. A probe is one `stat`. The extent step compares two integers.
+//! None depends on how much the store holds (`docs/06-limits.md`
+//! L-STATUS-01).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -96,7 +103,7 @@ pub enum Class {
     Saturated,
     /// What exists could not be read: permission, a file where a folder
     /// should be, an I/O error, a torn or undecodable file, a writer holding
-    /// it, or a store root that is not there.
+    /// it, or no store root configured at all.
     Unreadable,
 }
 
@@ -229,7 +236,11 @@ impl std::fmt::Display for Malformed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let quoted: String = self.value.chars().take(QUOTED_CHARS).collect();
         if quoted.len() == self.value.len() {
-            write!(f, "{}={quoted:?} is malformed: {}", self.parameter, self.rule)
+            write!(
+                f,
+                "{}={quoted:?} is malformed: {}",
+                self.parameter, self.rule
+            )
         } else {
             write!(
                 f,
@@ -515,6 +526,115 @@ pub fn probe_identity(
         &Path::new(namespace).join(crate::server::hex32(identity)),
         what,
     )
+}
+
+// ══ Refusals inside a found result ══════════════════════════════════════════
+
+/// Why a page of an entry the probe found was not served, typed by the step
+/// that refused — never by its words (D-7550, D-7551). Every identity route of
+/// this part reads into one of these, and [`Refused::fault`] is the one place
+/// each becomes its class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// The reader's typed absence (`Ok(None)`): nothing saved for this key
+    /// under the folder the probe found — an attempt, a model's catalog, a
+    /// namespace. The one not-found, [`absent`]'s sentence.
+    Absent,
+    /// A pin the client sent — a completion, an attempt, a catalog digest, a
+    /// snapshot — that the store no longer holds: the same `404`, saying to
+    /// restart, and never a replacement page.
+    NotHeld(String),
+    /// The client's page past the found result's saved extent, or a selector
+    /// past its saved count: `416`.
+    OutOfRange(String),
+    /// The read of what the probe found refused: `503`, naming it.
+    Unreadable(String),
+}
+
+impl From<String> for Refused {
+    /// A reader's own refusal is the store's: [`Refused::Unreadable`]. A
+    /// client's refusal is typed by its step before the read, never recovered
+    /// from these words.
+    fn from(why: String) -> Self {
+        Self::Unreadable(why)
+    }
+}
+
+impl From<&str> for Refused {
+    /// As the `String` conversion above: the store's refusal.
+    fn from(why: &str) -> Self {
+        Self::Unreadable(why.to_owned())
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => f.write_str("nothing saved for this key"),
+            Self::NotHeld(why) | Self::OutOfRange(why) | Self::Unreadable(why) => f.write_str(why),
+        }
+    }
+}
+
+impl Refused {
+    /// The one status rule's fault for this refusal of the entry `shown`
+    /// (relative to `root`), `what` naming the entry as [`absent`] says it.
+    #[must_use]
+    pub fn fault(self, root: &Path, shown: String, what: &str) -> Fault {
+        let (class, why) = match self {
+            Self::Absent => return absent(root, shown, what),
+            Self::NotHeld(why) => (Class::NotFound, why),
+            Self::OutOfRange(why) => (Class::OutOfRange, why),
+            Self::Unreadable(why) => (Class::Unreadable, why),
+        };
+        Fault {
+            class,
+            why,
+            path: Some(shown),
+            kind: None,
+        }
+    }
+}
+
+/// THE EXTENT STEP (D-7551): a page whose `offset` passes the `total` rows the
+/// found result saved is the client's page, [`Refused::OutOfRange`], decided
+/// here before any row is read. An offset AT the extent is the empty last page
+/// and passes; `rows` names what is counted ("coordinates").
+///
+/// # Errors
+///
+/// [`Refused::OutOfRange`], naming the offset and the extent.
+pub fn reach(offset: usize, total: usize, rows: &str) -> Result<(), Refused> {
+    if offset > total {
+        return Err(beyond(&offset, &total, rows));
+    }
+    Ok(())
+}
+
+/// [`reach`] over rows held in memory: the rows from `offset` on, or the same
+/// [`Refused::OutOfRange`] for an offset past them.
+///
+/// # Errors
+///
+/// [`Refused::OutOfRange`], naming the offset and the extent.
+pub fn tail<'a, T>(rows: &'a [T], offset: usize, what: &str) -> Result<&'a [T], Refused> {
+    rows.get(offset..)
+        .ok_or_else(|| beyond(&offset, &rows.len(), what))
+}
+
+/// The extent step's one sentence, for a route whose page contract is its
+/// own (a candidate page must start on a saved row): the `offset` the client
+/// sent, the `total` the found result saved.
+#[must_use]
+pub fn beyond(
+    offset: &dyn std::fmt::Display,
+    total: &dyn std::fmt::Display,
+    rows: &str,
+) -> Refused {
+    Refused::OutOfRange(format!(
+        "offset {offset} is past the {total} saved {rows}; restart within the extent, no row was \
+         served"
+    ))
 }
 
 // ══ The one path every identity route answers through ═══════════════════════
