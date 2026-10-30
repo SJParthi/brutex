@@ -1008,9 +1008,16 @@ fn a_reserved_revision_from_another_source_or_with_other_bars_is_a_conflict() {
 }
 
 /// **A REFUSED SOURCE RELEASE ON THE DROP DOOR'S REUSE SAYS THE PUBLICATION
-/// MAY BE VISIBLE** (BASE-REDS-1023 repair 3, verify r3): as for `publish`,
-/// with the reader's own release let through first (its open releases its
-/// revision lock before the door releases the source's).
+/// MAY BE VISIBLE** (BASE-REDS-1023 repair 3, verify r3): as for `publish`.
+///
+/// Two unlocks are let through first, both the revision reader's: its open
+/// releases its own guard on the revision's lock, and the raw bar file it
+/// keeps holds a second shared lock there, which that file's guard `Drop`
+/// releases as the reader goes out of scope, before the door releases the
+/// source's. With one let through, the refusal lands in that `Drop`, which
+/// can only log it, and the call answered `Reused` (repair 3's first run,
+/// `state/fix/round2/logs-BRED1023-r3-c2.log`). If that order changes again,
+/// the refusal lands elsewhere and this test fails on the error it compares.
 #[test]
 fn a_refused_source_release_on_a_reused_drop_says_the_publication_may_be_visible() {
     let _sink_is_mine = crate::emits::hold_the_sink();
@@ -1029,7 +1036,7 @@ fn a_refused_source_release_on_a_reused_drop_says_the_publication_may_be_visible
         )
     };
     assert_eq!(ask(), Ok(Published::Created));
-    refuse_unlock(1, io::ErrorKind::PermissionDenied);
+    refuse_unlock(2, io::ErrorKind::PermissionDenied);
     let source_lock = path().with_file(FileKind::Lock).to_path_buf(&fixture.root);
     assert_eq!(
         ask(),
@@ -1052,10 +1059,12 @@ fn a_refused_source_release_on_a_reused_drop_says_the_publication_may_be_visible
 /// (BASE-REDS-1023 repair 3, verify r3's sides no test took).
 #[test]
 fn same_bar_compares_every_field_and_excuses_only_an_absent_open_interest() {
+    // A field's name, and the change that makes that field alone differ.
+    type OneOff = (&'static str, fn(&mut Bar));
     let held = bar(2);
     assert!(super::same_bar(&held, &held, true));
     assert!(super::same_bar(&held, &held, false));
-    let one_off: [(&str, fn(&mut Bar)); 7] = [
+    let one_off: [OneOff; 7] = [
         ("ts_micros", |b| b.ts_micros += 60_000_000),
         ("open", |b| b.open += 1),
         ("high", |b| b.high += 1),
