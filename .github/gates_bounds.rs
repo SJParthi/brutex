@@ -1570,6 +1570,16 @@ mod tests {
             "Xlat bar, Flax bar, flatbar"
         );
         assert_eq!(s("a flatjson object"), "a flatjson object");
+        // Each of `claim_scrub`'s own reads holds its whole pattern
+        // (BASE-REDS-1023 repair 3: four mutants of verify r3's unsampled M2
+        // shards, found by a pre-check of every mutant): `Xlat (` and
+        // `Flax (` are not `flat (`; a `flat (` at the start of a line is
+        // read from its first byte; `worst c` is not `worst case`; and a
+        // `flat JSON` is a sense only with ` object` after it.
+        assert_eq!(s("Xlat (a), Flax (b)"), "Xlat (a), Flax (b)");
+        assert_eq!(s("flat (x)"), " (x)");
+        assert_eq!(s("the worst cost here"), "the worst cost here");
+        assert_eq!(s("a flat JSON file here"), "a flat JSON file here");
         assert_eq!(s("came out flat; is charged Flat; rA flat"), "; ; r");
         // A trade's outcome is not a cost (D-1930, D-1939).
         assert_eq!(

@@ -802,7 +802,8 @@ fn format_names(text: &str) -> Vec<String> {
         if j > start && !b[start].is_ascii_digit() && matches!(b.get(j), Some(b'}' | b':')) {
             out.push(text[start..j].to_owned());
         }
-        i = j.max(i + 1);
+        // `j` began at `start`, one past the `{`, so the scan moves on.
+        i = j;
     }
     out
 }
@@ -858,13 +859,13 @@ fn web_stmt(t: &[Token]) -> WebStmt {
         }
     }
     let lower = |n: &&str| n.starts_with(|c: char| c.is_ascii_lowercase() || c == '_');
-    // The names a binding READS are its initializer's, after its `=`: the
-    // name it binds is not read by binding it.
+    // The names a binding READS are its initializer's, from its `=` on (the
+    // `=` itself is no name): the name it binds is not read by binding it.
     let init = |from: usize| {
         t.iter()
             .skip(from)
             .position(|y| y.tok == Tok::Punct('='))
-            .map_or(t.len(), |p| from + p + 1)
+            .map_or(t.len(), |p| from + p)
     };
     let mut reads_from = 0;
     match t.get(k).and_then(ident) {
@@ -876,7 +877,8 @@ fn web_stmt(t: &[Token]) -> WebStmt {
                 .filter(|n| !matches!(*n, "mut" | "ref") && lower(n))
                 .map(str::to_owned)
                 .collect();
-            reads_from = init(k + 1);
+            // From the `let` itself: it is no `=`, so the first `=` is found.
+            reads_from = init(k);
         }
         Some("const" | "static") if !is_ident(t.get(k + 1), "fn") => {
             st.item = true;
@@ -886,7 +888,7 @@ fn web_stmt(t: &[Token]) -> WebStmt {
                 .find(|n| *n != "mut")
                 .map(|n| vec![n.to_owned()])
                 .unwrap_or_default();
-            reads_from = init(k + 1);
+            reads_from = init(k);
         }
         _ => {}
     }
@@ -983,7 +985,8 @@ fn test_regions(src: &str, t: &[Token]) -> Vec<(usize, usize)> {
     for i in 0..t.len() {
         // `test` is a name-only cfg, so `all(test` is followed by `,` or `)`.
         if at(i, &["#", "[", "cfg", "(", "all", "(", "test"]) || at(i, &["#", "[", "test", "]"]) {
-            let last = item_end(t, skip_group(t, i + 1));
+            // From the `#`, which no group counts: the `[` after it opens.
+            let last = item_end(t, skip_group(t, i));
             spans.push((t[i].start, t.get(last).map_or(src.len(), |x| x.end)));
         }
     }
@@ -5754,5 +5757,131 @@ mod tests {
         assert_eq!(format_names("{my_root}/web"), ["my_root"]);
         assert!(format_names("no braces").is_empty());
         assert!(format_names("{9a} {").is_empty());
+    }
+
+    /// `f` on a thread of its own, answered within 5 s or failed: a scanner
+    /// loop that stops moving on fails a test here instead of hanging it.
+    fn within_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("answered within 5 s")
+    }
+
+    /// The tokens of `src`.
+    fn toks(src: &str) -> Vec<Token> {
+        lex(src).unwrap().tokens
+    }
+
+    /// What the first statement of `src` holds and binds.
+    fn stmt(src: &str) -> WebStmt {
+        let t = toks(src);
+        let (a, b) = statement_ranges(&t)[0];
+        web_stmt(&t[a..b])
+    }
+
+    /// Gate 1h's own readers, each pinned to its exact answer
+    /// (BASE-REDS-1023 repair 3: mutants of a pre-check of every mutant of
+    /// this part's set that no other test told apart). `climbs_into_web` is
+    /// a `..` segment followed by a `web` one, neither alone; every brace
+    /// shape `format_names` meets moves the scan on (a scan that stops is a
+    /// failure here within 5 s); statements are the non-empty runs between
+    /// `;`, `{` and `}`.
+    #[test]
+    fn climbs_format_names_and_statements_answer_exactly() {
+        assert!(climbs_into_web("../web"));
+        assert!(climbs_into_web("../../web/x.js"));
+        assert!(climbs_into_web("..\\web"));
+        assert!(!climbs_into_web("../x"));
+        assert!(!climbs_into_web("../x/web"));
+        assert!(!climbs_into_web("a/web"));
+        for (text, names) in [
+            ("{root}", &["root"][..]),
+            ("{ab}", &["ab"][..]),
+            ("{{root}}", &[][..]),
+            ("x{{y}}", &[][..]),
+            ("{a}{{b}}{c:?}", &["a", "c"][..]),
+        ] {
+            assert_eq!(within_deadline(move || format_names(text)), names, "{text}");
+        }
+        assert_eq!(
+            statement_ranges(&toks("a; ;b{c}")),
+            [(0, 1), (3, 4), (5, 6)]
+        );
+        assert_eq!(statement_ranges(&toks("a; b")), [(0, 1), (2, 3)]);
+        assert!(statement_ranges(&toks(";{}")).is_empty());
+    }
+
+    /// `web_stmt` pinned field by field: a `let` binds its lowercase names
+    /// (an `_` one included, a constructor and `mut` not) and reads from its
+    /// `=` on; a `const` or `static` item binds its name, a `const fn` is no
+    /// item, with or without `pub`; and only a `concat!` group is joined,
+    /// exactly its own literals (BASE-REDS-1023 repair 3, as above).
+    #[test]
+    fn web_stmt_binds_reads_and_joins_exactly() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        let st = stmt("let _root = \"../web\";");
+        assert_eq!(
+            (st.bound, st.idents, st.lits, st.item),
+            (s(&["_root"]), s(&[]), s(&["../web"]), false)
+        );
+        let st = stmt("let Some(root) = found;");
+        assert_eq!((st.bound, st.idents), (s(&["root"]), s(&["found"])));
+        let st = stmt("let mut root: PathBuf = base;");
+        assert_eq!((st.bound, st.idents), (s(&["root"]), s(&["base"])));
+        let st = stmt("pub const ROOT: &str = concat!(\".\", \"./web\");");
+        assert_eq!(
+            (st.bound, st.idents, st.lits, st.item),
+            (
+                s(&["ROOT"]),
+                s(&["concat"]),
+                s(&["../web", ".", "./web"]),
+                true
+            )
+        );
+        let st = stmt("const X: &str = \"a\";");
+        assert_eq!(
+            (st.bound, st.idents, st.lits, st.item),
+            (s(&["X"]), s(&[]), s(&["a"]), true)
+        );
+        for item in [
+            "pub const fn root() -> u8 { 1 }",
+            "const fn root() -> u8 { 1 }",
+        ] {
+            let st = stmt(item);
+            assert!(!st.item && st.bound.is_empty(), "{item}");
+        }
+        let st = stmt("let p = format!(\"../web\");");
+        assert_eq!((st.idents, st.lits), (s(&["format"]), s(&["../web"])));
+        let st = stmt("let q = (\"..\", concat!(\"/web\"));");
+        assert_eq!(
+            (st.idents, st.lits),
+            (s(&["concat"]), s(&["..", "/web", "/web"]))
+        );
+        let st = stmt("let r = f(concat!(\".\"), \"./web\");");
+        assert_eq!(
+            (st.idents, st.lits),
+            (s(&["f", "concat"]), s(&[".", ".", "./web"]))
+        );
+    }
+
+    /// A literal that starts on the very byte a test item ends is outside
+    /// it: the lexer reads tokens, not items, and a test region holds the
+    /// tokens that START inside it (BASE-REDS-1023 repair 3, as above).
+    #[test]
+    fn a_literal_on_the_byte_a_test_item_ends_is_outside_it() {
+        let src = "#[test]\nfn t() {}\"../../web\";\n";
+        assert_eq!(
+            web_read_findings("crates/a/src/x.rs", src, false, &WebNames::default()),
+            Ok(Vec::new())
+        );
+        let inside = "#[test]\nfn t() { \"../../web\"; }\n";
+        assert_eq!(
+            web_read_findings("crates/a/src/x.rs", inside, false, &WebNames::default())
+                .map(|found| found.len()),
+            Ok(1)
+        );
     }
 }
