@@ -17276,10 +17276,13 @@ async fn same_origin_writes_only(
 /// The drain costs O(body) once per refused request and never more than
 /// `MAX_FORM_BYTES` plus the one frame that crosses it, the bound every
 /// handler's extractor already has; a body that does not arrive is cut by
-/// [`BODY_READ_TIMEOUT`] as any body is (L-BRED23-08). What the drain meets
-/// does not change the answer, which is the refusal: a body past the bound is
-/// left unread from there on (its client can still lose the answer, and the
-/// bound says why), and nothing of the body is kept or parsed.
+/// [`BODY_READ_TIMEOUT`] as any body is (L-BRED23-08). A body past the bound
+/// is left unread from there on and still answered with the refusal (its
+/// client can still lose the answer, and the bound says why), and nothing of
+/// the body is kept or parsed. A body that STALLS is not answered with the
+/// refusal: verify-BASE-REDS-1023-r3's attack E10 saw `408 Request Timeout`
+/// once `BODY_READ_TIMEOUT` ran out (not reproduced by repair 3, which sends
+/// no POST; this sentence used to say the drain never changes the answer).
 async fn refused_after_draining(
     request: axum::extract::Request,
     why: String,
