@@ -399,6 +399,19 @@ pub mod trades;
 /// Exact-timestamp, reference-only NSE-INDIAVIX one-minute lookup.
 pub mod vix_reference;
 
+// ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
+// ---- part; each part inserts its `pub mod` line (with its doc lines) directly
+// ---- under its slot.
+// slot FNO-CLOCK (fno_clock)
+
+// slot FNO-DAYMASK (fno_daymask)
+
+// slot FNO-RECORDS (fno_records)
+
+// slot FNO-RUN (fno_run)
+
+// slot FNO-SEC-WIRE (fno_seconds)
+
 use brutex_core::vendor::Vendor;
 use costs::fill::Direction;
 use engine::Ladder;

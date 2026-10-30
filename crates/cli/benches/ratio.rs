@@ -98,6 +98,19 @@ use std::time::Instant;
 
 use cli::results::{Record, Results, field};
 
+// ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
+// ---- part; each part inserts its bench module (the path attribute naming
+// ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
+// slot bench-mod FNO-CLOCK
+
+// slot bench-mod FNO-DAYMASK
+
+// slot bench-mod FNO-RECORDS
+
+// slot bench-mod FNO-RUN
+
+// slot bench-mod FNO-SEC-WIRE
+
 /// How far a ratio may sit from 1.000 before the row is a breach.
 ///
 /// 2.500x, the same figure `crates/runner`'s bench uses and for the same reason:
@@ -551,6 +564,14 @@ fn main() {
     let budgets = the_encode_stays_within_its_budget(floor)
         & the_duplicate_check_stays_within_its_budget(&big, floor);
     let ok = ratios & budgets;
+    // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). Each part puts one
+    // statement directly under its slot, `let ok = ok & fno_<x>::row(floor);`
+    // (`&`, never `&&`, so every row still runs).
+    // slot bench-row FNO-CLOCK
+    // slot bench-row FNO-DAYMASK
+    // slot bench-row FNO-RECORDS
+    // slot bench-row FNO-RUN
+    // slot bench-row FNO-SEC-WIRE
 
     // The fixtures are temp directories and are removed whether or not a row
     // breached — a bench that leaves state behind makes the NEXT run's numbers

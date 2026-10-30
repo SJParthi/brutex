@@ -1119,3 +1119,55 @@ the first was closed in code afterwards.
 | `.grk` greeks per contract-second (spot same second, IV, rate) | Not started: needs the RBI 91-day T-bill rate of `feat/rate-tbill` (D-2810); no rate is defaulted |
 | `/db` spot read, `/ticks.json`, futures | `/db` spot is `feat/db-spot` (D-2807); no futures exist in the GDFL data |
 | Lookup by time O(1) (`.tix`, PR #74) | Another thread; merge `origin/final/all-fixes` when it carries it, then add the `.tix`-agrees-with-`.bin` test and re-measure |
+
+## F&O strategy path: part blocks (D-8100..D-8339)
+
+<!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). -->
+
+<!-- slot FNO-LAW -->
+
+<!-- slot FNO-COSTS -->
+
+<!-- slot FNO-SEC-EXEC -->
+
+<!-- slot FNO-LADDER -->
+
+<!-- slot FNO-DAYMASK -->
+
+<!-- slot FNO-LEVERAGE -->
+
+<!-- slot FNO-RANK -->
+
+<!-- slot FNO-PAUSE -->
+
+<!-- slot FNO-PORTFOLIO -->
+
+<!-- slot FNO-WFT -->
+
+<!-- slot FNO-DAILY -->
+
+<!-- slot FNO-BAND -->
+
+<!-- slot FNO-CLOCK -->
+
+<!-- slot FNO-NET -->
+
+<!-- slot FNO-EXITS -->
+
+<!-- slot FNO-SEC-WIRE -->
+
+<!-- slot FNO-STRAT -->
+
+<!-- slot FNO-RECORDS -->
+
+<!-- slot FNO-FILTER -->
+
+<!-- slot FNO-API -->
+
+<!-- slot FNO-RUN -->
+
+<!-- slot FNO-LEAN -->
+
+<!-- slot FNO-SWEEP-WIRE -->
+
+<!-- slot FNO-BAND-FILES -->

@@ -58,6 +58,29 @@ use runner::identity::{Direction, Params, Run, data_digest, identity};
 use runner::{Sweeper, report, synthetic};
 use vocab::ConditionMask;
 
+// ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
+// ---- part; each part inserts its bench module (the path attribute naming
+// ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
+// slot bench-mod FNO-BAND
+
+// slot bench-mod FNO-RANK
+
+// slot bench-mod FNO-DAILY
+
+// slot bench-mod FNO-SEC-EXEC
+
+// slot bench-mod FNO-EXITS
+
+// slot bench-mod FNO-FILTER
+
+// slot bench-mod FNO-NET
+
+// slot bench-mod FNO-PORTFOLIO
+
+// slot bench-mod FNO-STRAT
+
+// slot bench-mod FNO-WFT
+
 /// How far a ratio may sit from 1.000 before the row is a breach.
 ///
 /// 2.500x. Wider than the engine's rows because every measurement here contains
@@ -564,6 +587,18 @@ fn main() {
         the_identity_does_not_depend_on_how_many_bars_the_digest_covered(),
         the_column_build_stays_within_its_budget(),
         the_equity_column_build_stays_within_its_budget(),
+        // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2): each part puts its row
+        // call directly under its slot.
+        // slot bench-row FNO-BAND
+        // slot bench-row FNO-RANK
+        // slot bench-row FNO-DAILY
+        // slot bench-row FNO-SEC-EXEC
+        // slot bench-row FNO-EXITS
+        // slot bench-row FNO-FILTER
+        // slot bench-row FNO-NET
+        // slot bench-row FNO-PORTFOLIO
+        // slot bench-row FNO-STRAT
+        // slot bench-row FNO-WFT
     ];
     let breached = rows.iter().filter(|ok| !**ok).count();
     if breached > 0 {

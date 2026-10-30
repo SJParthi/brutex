@@ -87511,3 +87511,55 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+## F&O strategy path: part blocks (D-8100..D-8339)
+
+<!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). -->
+
+<!-- slot FNO-LAW -->
+
+<!-- slot FNO-COSTS -->
+
+<!-- slot FNO-SEC-EXEC -->
+
+<!-- slot FNO-LADDER -->
+
+<!-- slot FNO-DAYMASK -->
+
+<!-- slot FNO-LEVERAGE -->
+
+<!-- slot FNO-RANK -->
+
+<!-- slot FNO-PAUSE -->
+
+<!-- slot FNO-PORTFOLIO -->
+
+<!-- slot FNO-WFT -->
+
+<!-- slot FNO-DAILY -->
+
+<!-- slot FNO-BAND -->
+
+<!-- slot FNO-CLOCK -->
+
+<!-- slot FNO-NET -->
+
+<!-- slot FNO-EXITS -->
+
+<!-- slot FNO-SEC-WIRE -->
+
+<!-- slot FNO-STRAT -->
+
+<!-- slot FNO-RECORDS -->
+
+<!-- slot FNO-FILTER -->
+
+<!-- slot FNO-API -->
+
+<!-- slot FNO-RUN -->
+
+<!-- slot FNO-LEAN -->
+
+<!-- slot FNO-SWEEP-WIRE -->
+
+<!-- slot FNO-BAND-FILES -->

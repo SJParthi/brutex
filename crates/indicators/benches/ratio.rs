@@ -62,6 +62,13 @@ use indicators::pattern::Thresholds;
 use indicators::vwap::{Availability, ITERATION_CEILING, isqrt_i128, isqrt_i128_counted};
 use indicators::{Candle, OI_NULL};
 
+// ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
+// ---- part; each part inserts its bench module (the path attribute naming
+// ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
+// slot bench-mod FNO-LADDER
+
+// slot bench-mod FNO-PAUSE
+
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
 ///
 /// 3.0x — `docs/04-invariants.md`, the shared-CI number.
@@ -757,6 +764,14 @@ fn main() {
         the_column_costs_the_same_per_bar_however_long_it_is(),
         a_known_step_stays_within_its_budget(),
     ];
+    // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). `verdicts` is typed
+    // `[bool; ROWS]`, so a row inside the array would make every part edit the one
+    // `ROWS` line. Each part instead puts one statement directly under its slot:
+    //     let verdicts: Vec<bool> =
+    //         verdicts.iter().copied().chain([fno_<x>::row(floor)]).collect();
+    // It runs its row after every row above and folds it into the check below.
+    // slot bench-row FNO-LADDER
+    // slot bench-row FNO-PAUSE
     if verdicts.contains(&false) {
         println!("A RATIO BREACHED ITS CEILING — see the lines marked BREACH.");
         std::process::exit(1);

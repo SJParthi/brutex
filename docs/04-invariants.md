@@ -9093,3 +9093,55 @@ report, NEEDS THE MAC).
 | R312-18 | **A ceiling of zero is no ceiling**: a served `0` keeps the build's copy and is named, as a negative or non-number one is | `web/tests/no-typed-lists.test.js` (the ceilings test) | ✓ |
 | R312-19 | **Every branch of the touched modules the merged tree left unrun has a test or is named unreachable**: the edges of the scope, the answers' checks, the facets loader, the refresh log, the moved lines, the worker side and `selection-model.js` | `web/tests/census-scope-edges.test.js`, `web/tests/selection-model-edges.test.js`, `web/tests/census-worker.test.js`, `web/tests/store-census.test.js` (the delta refusal test); the unreachable branches are L-R312-11 | ✓ |
 | R312-20 | **The Coverage drawer of an imported contract reads the import journal over one day, the contract's own expiry, never the journal's whole span**: both ends are always named and taken from the data on screen, a value that is not a day asks nothing, and no /db page file builds an `/imports.json` request of its own (R3-12 repair 1; the whole span was 11,508 rows and 253,074 B a contract opened on the real store, L-R312-18) | `web/tests/census-scope.test.js`: `a_contract_reads_the_import_journal_over_one_day` | ✓ |
+
+## F&O strategy path: part blocks (D-8100..D-8339)
+
+<!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). -->
+
+<!-- slot FNO-LAW -->
+
+<!-- slot FNO-COSTS -->
+
+<!-- slot FNO-SEC-EXEC -->
+
+<!-- slot FNO-LADDER -->
+
+<!-- slot FNO-DAYMASK -->
+
+<!-- slot FNO-LEVERAGE -->
+
+<!-- slot FNO-RANK -->
+
+<!-- slot FNO-PAUSE -->
+
+<!-- slot FNO-PORTFOLIO -->
+
+<!-- slot FNO-WFT -->
+
+<!-- slot FNO-DAILY -->
+
+<!-- slot FNO-BAND -->
+
+<!-- slot FNO-CLOCK -->
+
+<!-- slot FNO-NET -->
+
+<!-- slot FNO-EXITS -->
+
+<!-- slot FNO-SEC-WIRE -->
+
+<!-- slot FNO-STRAT -->
+
+<!-- slot FNO-RECORDS -->
+
+<!-- slot FNO-FILTER -->
+
+<!-- slot FNO-API -->
+
+<!-- slot FNO-RUN -->
+
+<!-- slot FNO-LEAN -->
+
+<!-- slot FNO-SWEEP-WIRE -->
+
+<!-- slot FNO-BAND-FILES -->

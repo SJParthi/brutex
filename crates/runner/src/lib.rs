@@ -79,6 +79,28 @@ pub mod topn;
 pub mod trade;
 pub mod validate;
 
+// ---- F&O strategy path (state/fib-strategy-20261030/PARTS.md 4.2). One slot per
+// ---- part; each part inserts its single `pub mod` line directly under its slot.
+// slot FNO-BAND (fno_band)
+
+// slot FNO-RANK (fno_cross_section)
+
+// slot FNO-DAILY (fno_daily)
+
+// slot FNO-SEC-EXEC (fno_exec)
+
+// slot FNO-EXITS (fno_exits)
+
+// slot FNO-FILTER (fno_filter)
+
+// slot FNO-NET (fno_net)
+
+// slot FNO-PORTFOLIO (fno_portfolio)
+
+// slot FNO-STRAT (fno_strategy)
+
+// slot FNO-WFT (fno_wft)
+
 use engine::{Ladder, Sweep};
 use indicators::column::{Census, Column};
 use indicators::evaluator::Evaluator;
