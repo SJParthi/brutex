@@ -170,6 +170,10 @@ pub enum Rule {
         /// The upper-case digit.
         byte: u8,
     },
+    /// Every digit is `0`: the null value, which names no saved result. The
+    /// single-stop routes refused it and the others did not, so one input had
+    /// two statuses; it is malformed everywhere now.
+    IdentityZero,
 }
 
 impl std::fmt::Display for Rule {
@@ -195,6 +199,10 @@ impl std::fmt::Display for Rule {
                 f,
                 "byte {byte:#04x} at {at} is an upper-case hex digit; an identity is exactly \
                  {IDENTITY_HEX} lowercase hex digits, refused rather than folded"
+            ),
+            Self::IdentityZero => f.write_str(
+                "every digit is 0, the null value, which names no saved result and is never \
+                 written for one",
             ),
         }
     }
@@ -298,6 +306,9 @@ pub fn identity_of(text: &str, name: &'static str) -> Result<[u8; 32], Malformed
             value = (value << 4) | digit;
         }
         *slot = value;
+    }
+    if out == [0; 32] {
+        return Err(refuse(Rule::IdentityZero));
     }
     Ok(out)
 }

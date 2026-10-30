@@ -87511,3 +87511,120 @@ L-BDENY-2;
 **Cost.** No repository operation changes: one lock version, one table row,
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
+
+### D-7550 — One status rule through one typed classifier: a malformed request is `400` before the store, a key that names nothing is one `404`, `503` only for what exists and cannot be read (BASE-STATUS-CODES) — 2026-10-30
+
+**Context.** The assurance attack of 29 October 2026 sent 3,286 requests and
+got eight `5xx`; every one of the eight was a client's input
+(`state/assure-20261029/api-attack/90-totals.txt`, failure n=31).
+`/sources/day.json` and `/sources/bars.json` with `symbol=nifty` or
+`symbol=reliance` answered `503` *"path segment symbol holds byte 0x6e in the
+wrong case"* while `/bars.json` and `/gaps.json` answered the same question
+`400`: `Instrument::parse` admitted the symbol (`Symbol::new` folds case),
+`StorePath` refused it later, and `sources::Refusal::store` turned every store
+error into a `503`, telling a retired key from the rest by reading its words.
+One unknown 64-hex research identity got four answers: `503` on
+`/boolean-candidates.json`, `/boolean-statistics.json` and `/index-stop.json`;
+`200` with `"status":"missing"` on `/expression-search.json` and
+`/sweep-evidence.json`; `200` with no rows and a refusal sentence on
+`/frontier.json`; and `400` on `/candidate-trades.json`, which had not been
+sent its required `attempt` (and `200` `"missing"` once it was).
+
+**Decision.**
+
+1. **One table** (`crates/api/src/status_rule.rs`, `Class::status`):
+   malformed `400`, not found `404`, retired `410` (D-3331), out of range
+   `416` (D-7551), over the route's bound `422`, a full detail pool `429`, what
+   exists and cannot be read `503`. The being-written `503` with `Retry-After`
+   (R3-08) is an unreadable answer whose body says so, unchanged. Every
+   refusal of the routes this part owns takes its status from that table:
+   `sources::Refusal`'s constructors are the table's (`Refusal::of`).
+2. **Malformed is decided before any store file is opened**, naming the
+   parameter, the value (quoted to 80 characters, its length named past them)
+   and the rule (`status_rule::Malformed`, `Rule`):
+   - a `symbol=` by the store's own path rule, `store::path::check_segment`
+     (1 to 24 bytes of `A-Z 0-9 - _ &`, upper case): refused, never folded,
+     in `Instrument::parse`, so every `/sources*` route answers it; a byte
+     outside ASCII is refused by its first byte, so a dotless `ı` or a Kelvin
+     sign (whose Unicode case folds are ASCII) is never folded into a real key;
+   - an identity — and every 64-hex field read through
+     `candidatejson::hex_param` (completion, digest, pin, seal) — is exactly
+     64 lowercase hex digits and never all zeros. Upper case is refused, not
+     folded (`/frontier.json` folded it, through `detail::Selector`, and
+     answered a run). All zeros is the null value: the single-stop routes
+     refused it and the others did not, so one input had two statuses.
+3. **The not-found status is `404`.** A `200` is an answer: a page read the
+   empty "missing" body as data, and a run that ranked nothing looked like a
+   run never recorded. A `503` blames the server for the client's question
+   and invites a retry that can never succeed. A `400` calls a well-formed
+   identity malformed. `410` is kept for a key that was and was retired.
+   `/bars.json` (`month_absent`) and `/provenance.json` already answer an
+   absent month `404`.
+4. **Decided by ONE probe, never a listing.** `status_rule::probe` is one
+   `symlink_metadata` of `<root>/<namespace>/<identity hex>` before any reader
+   opens anything (and before a held reader's cache is touched, so a key that
+   names nothing never evicts it). `NotFound` is `404` whether the entry, its
+   namespace or the root is the missing part — nothing is there — and the
+   sentence names the root probed, so a dashboard whose `BRUTEX_STORE` is not
+   the store the command wrote says so on every answer. A reader's own typed
+   absence after the probe (`Ok(None)`: no `starts.bin`, no catalog for the
+   attempt) is the same `404`; so is `/frontier.json`'s receipt index finding
+   no committed receipt. One body on every identity route
+   (`Fault::identity_body`): `schema_version`, `status` (the class's word),
+   `identity`, `refusal`, `rows: []`, `path`, `error_kind`, `rule: "D-7550"`.
+5. **`503` only for what exists and cannot be read**: any other
+   `io::ErrorKind` of the probe (`PermissionDenied`, `NotADirectory` for a
+   file where a folder should be, an I/O error), or the reader's refusal of an
+   entry the probe found (a torn or undecodable file), naming the path and,
+   where an `io::ErrorKind` decided it, the kind; and a server with no store
+   root configured. `/frontier.json`'s store faults — a receipt that cannot be
+   read, rows that fail their receipt's check, a committed `frontier.bin`
+   missing or unreadable — move from `400` to `503`.
+6. **Typed, never words.** `Refusal::store` no longer answers `410` when its
+   sentence looks like a retired key (`pull::gdfl_lineage::is_contract_refused`
+   on the message); a retired key is refused by type, by `refuse_retired`,
+   before any read, on every `/sources*` route
+   (`a_key_the_rekey_retired_is_gone_on_every_route` still proves the `410`).
+   The class comes from an `io::ErrorKind`, the store's `PathError`, or which
+   step refused.
+7. **One path.** `status_rule::serve` (the route's parse, its `400` before
+   admission; `429` with the route's sentence at a full pool; `503` for a task
+   that could not be joined) and `status_rule::page` (`200`, a fault's one
+   body, `503` for a page over the response bound) answer every identity
+   route of this part: `/boolean-candidates.json`, `/boolean-statistics.json`,
+   `/boolean-admission.json`, `/boolean-qualification.json`,
+   `/index-stop.json`, `/frontier.json`, `/expression-search.json`,
+   `/sweep-evidence.json` and `/candidate-trades.json`.
+8. **A pin that names nothing held is the same `404`:** an expression-search
+   snapshot no session holds, a sweep attempt pin that is not the saved
+   attempt, a candidate digest pin that is not the saved catalog's. They were
+   `503`.
+9. **The request line is unchanged** (`logs.rs`, BASE-LOG-SEARCH's): a `5xx`
+   is written at `error`, a `4xx` at `warn`. The specification said "5xx
+   warn, 4xx info"; the code at the head is the fact. This part picks the
+   status; the line records it, so the eight attack answers move from the
+   durable audit stream's `error` to the rationed `warn` ring.
+
+**Not changed, and named.** Routes outside this part's files answer as they
+did; `docs/06-limits.md` L-STATUS-02 lists where that differs from this rule,
+with each owner, and the table test holds each to its answer today so a
+change is seen.
+
+**Proof.** `crates/api/src/status_rule_tests.rs`: the table over every GET
+route of `route_table`, read from its source
+(`every_route_of_the_route_table_has_a_row`,
+`every_symbol_and_identity_route_answers_the_one_status_rule`), the extreme
+cases, the 64-client burst, the timings at one, ten and a hundred times the
+store, and the namespace bindings; `web/tests/status-rule-readers.test.js`.
+Invariants STATUS-01 to STATUS-12; limits L-STATUS-01 to L-STATUS-03.
+
+### D-7551 — A page past a found result's extent is `416` on every identity route of this part, as `/frontier.json` answered it (BASE-STATUS-CODES) — 2026-10-30
+
+`/frontier.json` answered a page past its run's rows `416` (`range_refusal`);
+`/sweep-evidence.json` answered the same client input `503`, the status of a
+store fault. A page or a limit that the saved total does not reach is the
+client's page, not the store's fault: `Class::OutOfRange`, `416`, decided by
+which step refused (the page-window step, `detail::seek_window`), never by
+its sentence. `sweepevidence_tests` (in `sweepevidence.rs`) moves its two
+`503` expectations to `416`; every other assertion of those cases is kept.
+D-7552 to D-7559 are unused.

@@ -9093,3 +9093,32 @@ report, NEEDS THE MAC).
 | R312-18 | **A ceiling of zero is no ceiling**: a served `0` keeps the build's copy and is named, as a negative or non-number one is | `web/tests/no-typed-lists.test.js` (the ceilings test) | ✓ |
 | R312-19 | **Every branch of the touched modules the merged tree left unrun has a test or is named unreachable**: the edges of the scope, the answers' checks, the facets loader, the refresh log, the moved lines, the worker side and `selection-model.js` | `web/tests/census-scope-edges.test.js`, `web/tests/selection-model-edges.test.js`, `web/tests/census-worker.test.js`, `web/tests/store-census.test.js` (the delta refusal test); the unreachable branches are L-R312-11 | ✓ |
 | R312-20 | **The Coverage drawer of an imported contract reads the import journal over one day, the contract's own expiry, never the journal's whole span**: both ends are always named and taken from the data on screen, a value that is not a day asks nothing, and no /db page file builds an `/imports.json` request of its own (R3-12 repair 1; the whole span was 11,508 rows and 253,074 B a contract opened on the real store, L-R312-18) | `web/tests/census-scope.test.js`: `a_contract_reads_the_import_journal_over_one_day` | ✓ |
+
+## One status rule through one typed classifier (BASE-STATUS-CODES; D-7550, D-7551)
+
+`crates/api/src/status_rule.rs` (the table `Class`, the parameter rules
+`segment` and `identity`, the probe `probe`/`probe_identity`/`absent`, the one
+path `serve`/`page`), used by `crates/api/src/sources.rs` (`Refusal`'s
+constructors, `Instrument::parse`'s symbol) and the nine identity routes of
+`booleanjson.rs`, `booleanevidencejson.rs`, `indexstopjson.rs`,
+`frontierjson.rs`, `expressionsearchjson.rs`, `sweepevidence.rs` and
+`candidatejson.rs`; the readers in `web/src/lib/detail-refusal.js`,
+`sweep-evidence.js`, `expression-search.js`, `candidate-trades.js` and
+`frontier-pages.js`. Proofs in `crates/api/src/status_rule_tests.rs` unless
+named. Every fixture is invented; no store is real. Built in the cloud; the
+real-store replay is the Mac's (BASE-STATUS-CODES report, NEEDS THE MAC).
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| STATUS-01 | **Every refusal's status comes from one table**: malformed `400`, not found `404`, retired `410`, out of range `416`, over the bound `422`, a full pool `429`, what exists and cannot be read `503`; no client's question is a `5xx` and no server fault a `4xx` | `every_class_has_its_one_status_and_its_own_word` | ✓ |
+| STATUS-02 | **Every GET route of `route_table` has a row, read from `route_table`'s own source**: a route added without saying whether it takes a symbol or an identity fails, and a row naming a route that is not registered fails | `every_route_of_the_route_table_has_a_row` | ✓ |
+| STATUS-03 | **Through the real router, every route of this part answers the one rule**: a lower-case, mixed-case, blank, wrong-segment or Unicode-folding symbol `400` before the store; an unknown identity the one `404` body; a malformed one (63 or 65 digits, upper case, all zeros, a NUL) `400`; a root that is a regular file `503`; each row sending its route's other required fields, its control proving them; routes outside the part held to their answers today (L-STATUS-02) | `every_symbol_and_identity_route_answers_the_one_status_rule` | ✓ |
+| STATUS-04 | **A symbol is refused by the store's own path rule and never folded**, the first breach in the rule's order named: `nifty`, `NiFtY`, a trailing blank, empty, `..`, 25 bytes, 25 lower-case bytes (length first), a dotless `ı`, a Kelvin sign | `a_wrong_case_or_blank_symbol_is_malformed_and_never_folded`, `the_segment_rule_names_empty_traversal_and_length`, `a_symbol_both_too_long_and_lower_case_is_refused_for_its_length_first`, `a_symbol_whose_unicode_fold_is_ascii_is_malformed_never_folded` | ✓ |
+| STATUS-05 | **An identity is exactly 64 lowercase hex digits and never all zeros**, the first breach named: 63, 65, upper case at 0 and at 63, a non-digit, a NUL, a multi-byte character that makes the length right, a trailing blank; a refused value is quoted to 80 characters | `an_identity_is_sixty_four_lowercase_hex_digits_exactly`, `an_identity_is_refused_for_its_first_breach_in_the_declared_order`, `a_refused_value_is_quoted_to_a_bound_and_its_length_named` | ✓ |
+| STATUS-06 | **One probe decides held, not found or unreadable**: an entry there is held (a dangling link too); a missing entry, namespace or root is `404` naming the root; mode 000 (re-run where the bits bind) and a file where a folder should be are `503` naming the path and the `io::ErrorKind`; no configured root is `503` | `one_probe_decides_held_not_found_or_unreadable`, `a_dangling_link_at_the_entry_is_held_and_never_not_found`, `a_root_that_points_nowhere_is_not_found_naming_the_root`, `a_root_whose_mode_is_000_is_unreadable_never_not_found`, `no_configured_root_is_unreadable` | ✓ |
+| STATUS-07 | **One body for every fault on every identity route**: the same eight keys, the class's word as `status` | `every_identity_fault_has_one_body_shape` | ✓ |
+| STATUS-08 | **Every namespace the probe uses is the one its `cli` reader opens** | `every_probed_namespace_is_the_one_its_reader_opens` | ✓ |
+| STATUS-09 | **A malformed question takes no detail slot and the one path answers every outcome**: 64 parallel malformed clients each get their exact `400`, none a `5xx` or `429`; a full pool is `429` with the route's sentence; a lost task `503`; a page over the bound refused whole | `sixty_four_parallel_malformed_clients_each_get_their_exact_refusal`, `a_full_detail_pool_is_429_with_the_routes_sentence`, `serve_refuses_before_admission_runs_the_work_and_names_a_lost_task`, `a_page_is_served_its_fault_answered_and_an_oversized_page_refused_whole` | ✓ |
+| STATUS-10 | **A lower-case symbol beside a malformed date is one refusal, the symbol's** (the first in the route's declared order) | `a_lower_case_symbol_beside_a_malformed_date_is_refused_for_the_symbol` | ✓ |
+| STATUS-11 | **A `400` and a not-found cost the same at one, ten and a hundred times the store**, interleaved, n = 200 per size | `a_refusal_and_a_not_found_cost_the_same_at_one_ten_and_a_hundred_times_the_store` | ✓ |
+| STATUS-12 | **A page shows "nothing saved" only for the exact not-found answer**, and a pinned page is never replaced by it | `web/tests/status-rule-readers.test.js` | ✓ |
