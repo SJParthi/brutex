@@ -2771,7 +2771,7 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
 /// restated, as a load of every line says.
 #[test]
 fn a_refresh_that_names_a_restated_day_keeps_it_restated() {
-    let root = scratch("wp12f-refresh-restated");
+    let root = scratch("Wp12fRefreshRestated");
     std::fs::create_dir_all(root.join("imports")).unwrap();
     let path = journal_path(&root);
     let on = day(2026, 8, 4);

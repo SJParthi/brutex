@@ -1245,11 +1245,12 @@ fn first_measurement_that_holds(
 }
 
 /// Every side of the write door's measurement decisions, with invented
-/// figures (BASE-REDS-1023 repair 3, verify r3's sides no test took): a flat
-/// door misses nothing; e0668a4b's stalled open at 22,500 bars (3,022.7 us
-/// against raw 612.0 us) is a miss by name; a door that scans the month
-/// misses all three ratios; a miss then a hold stops at the second run, and
-/// three misses fail with the last.
+/// figures (BASE-REDS-1023 repair 3, verify r3's sides no test took): figures
+/// within every bound miss nothing; e0668a4b's stalled open at 22,500 bars
+/// (3,022.7 us against raw 612.0 us) is a miss by name; figures at the
+/// largest size far past three times the smallest's and a millisecond miss
+/// all three ratios; a miss then a hold stops at the second run, and three
+/// misses fail with the last.
 #[test]
 fn the_door_measurement_misses_by_name_and_stops_at_the_first_that_holds() {
     let fig = |size, open, raw_open, reoffer, refusal| DoorFigures {

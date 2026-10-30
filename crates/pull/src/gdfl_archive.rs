@@ -2491,7 +2491,7 @@ mod tests {
         }
     }
 
-    /// **THE END OF A ZIP, EVERY SIDE OF ITS TWO O(1) CHECKS**
+    /// **THE END OF A ZIP, EVERY SIDE OF ITS TWO CHECKS**
     /// (BASE-REDS-1023 repair 3, verify r3's sides no test took): an end
     /// record nearer the start than a locator and a ZIP64 record can be
     /// holds no ZIP64 record; bytes there without its signature hold none

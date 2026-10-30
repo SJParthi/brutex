@@ -5178,7 +5178,7 @@ fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
     let header = usize::try_from(spool::HEADER_LEN).unwrap();
     let record = usize::try_from(spool::RECORD_LEN).unwrap();
     // HEADER ALONE.
-    let root = scratch("bare-header");
+    let root = scratch("BareHeader");
     let before = SpoolWriter::new(&root, 35, Mode::ZerodhaMerge, 1);
     before
         .append(
@@ -5209,7 +5209,7 @@ fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
     assert_eq!(keys, ["NSE-INDEX-B"], "appended straight after the header");
     assert_eq!(std::fs::read(&path).unwrap().len(), header + record);
     // A TAIL OF DETAILS: a verdict record with two details, the verdict cut.
-    let root = scratch("detail-tail");
+    let root = scratch("DetailTail");
     let mut with = spooled(on, "NSE-INDEX-A", Code::Match, 1);
     with.details.push(Detail {
         kind: 4,
@@ -5247,7 +5247,7 @@ fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
     assert_eq!(grown.len(), header + 3 * record, "after the two details");
     assert_eq!(&grown[..cut.len()], &cut[..], "nothing written over");
     // A LIVE LOCK THAT WOULD NOT OPEN.
-    let root = scratch("dead-live");
+    let root = scratch("DeadLive");
     std::fs::create_dir_all(root.join("verify")).unwrap();
     std::fs::write(root.join("verify").join("running"), b"a file, not a folder").unwrap();
     let mut faults = Vec::new();

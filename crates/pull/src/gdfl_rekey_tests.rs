@@ -2811,7 +2811,7 @@ fn applies_of_disjoint_underlying_plans_do_not_refuse_each_other() {
 /// recorded, kept, moved or retired again.
 #[test]
 fn every_contradiction_of_the_ledger_is_left_by_name() {
-    let fixture = Scratch::new("contradictions");
+    let fixture = Scratch::new("Contradictions");
     let other = Survey {
         other_rungs: vec!["NSE-FNO-NIFTY-2023-06-28-1000000-PE 1day".to_owned()],
         root: fixture.root().to_path_buf(),
