@@ -1,5 +1,5 @@
 import { decodeMaskWords } from './mask.js';
-import { detailRefusal } from './detail-refusal.js';
+import { detailRefusal, notFoundWhy } from './detail-refusal.js';
 const MAX_U64 = (1n << 64n) - 1n;
 const MIN_I64 = -(1n << 63n);
 const MAX_I64 = (1n << 63n) - 1n;
@@ -56,13 +56,18 @@ export async function fetchCandidatePage(selection, request) {
   if (digest) query.set('digest', digest);
   if (rank !== null) { query.set('rank', rank); query.set('direction', direction); }
   const response = await request('/candidate-trades.json?' + query);
+  // NO CAPTURE SAVED FOR THIS ATTEMPT is the one not-found every identity route
+  // answers (D-7550): HTTP 404 naming this identity. For a pinned page it is the
+  // pinned catalog no longer being held, which never becomes "missing".
+  if (response?.status === 404) {
+    const why = notFoundWhy(response, await response.json().catch(() => null), identity);
+    if (why === null) throw new Error('Candidate detail request failed (HTTP 404).');
+    if (digest !== null || offset !== '0' || tier !== '0' || rank !== null) throw new Error('Missing candidate evidence must be explicit and cannot replace a pinned page. ' + why);
+    return { schema_version: 1, status: 'missing', model, identity, attempt, rows: [], refusal: null, why };
+  }
   if (!response?.ok) throw new Error(await detailRefusal(response, 'Candidate detail request failed (HTTP ' + String(response?.status) + ').'));
   const body = await response.json();
   if (!object(body) || body.schema_version !== 1 || body.model !== model || body.identity !== identity || body.attempt !== attempt || body.refusal !== null || !Array.isArray(body.rows)) throw new Error('Candidate evidence is refused or belongs to another attempt or predicate model.');
-  if (body.status === 'missing') {
-    if (digest !== null || offset !== '0' || tier !== '0' || rank !== null || body.rows.length !== 0 || typeof body.why !== 'string' || !body.why.trim()) throw new Error('Missing candidate evidence must be explicit and cannot replace a pinned page.');
-    return body;
-  }
   if (body.status !== 'saved' || !hex(body.catalog_digest) || (digest !== null && body.catalog_digest !== digest) ||
       !hex(body.execution_digest) || body.capture !== 'sealed-pricing-evidence' ||
       ![null, 'running', 'completed', 'halted', 'refused'].includes(body.audit_completion) ||

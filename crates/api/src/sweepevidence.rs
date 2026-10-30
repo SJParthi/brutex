@@ -35,12 +35,10 @@ impl Asked {
                 ));
             }
         }
-        let raw = crate::server::param(query, "identity");
-        let identity = crate::trades::from_hex_public(&raw)
-            .ok_or("identity must be 64 canonical lowercase hex characters")?;
-        if raw != crate::server::hex32(identity) {
-            return Err("identity must use canonical lowercase hex".to_owned());
-        }
+        // THE ONE IDENTITY RULE (D-7550), the same words on every route.
+        let identity = crate::status_rule::identity(query, "identity")
+            .map_err(|why| why.to_string())?
+            .ok_or("identity is required: one run's 64 lowercase hex digits")?;
         let ranked = match crate::server::param(query, "kind").as_str() {
             "" | "depth" => false,
             "ranked" => true,
@@ -71,54 +69,94 @@ impl Asked {
     }
 }
 
-/// Read one bounded saved page without blocking an async worker.
+/// Read one bounded saved page without blocking an async worker, through the
+/// one status rule's path (D-7550).
 pub async fn evidence_json(uri: axum::http::Uri) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default()) {
-        Ok(asked) => asked,
-        Err(why) => return refusal(axum::http::StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || respond(root, &asked)).await {
-        Ok(response) => response,
-        Err(crate::detail::RunError::Saturated) => refusal(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "sweep evidence capacity is full; no blocking task was queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => {
-            refusal(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why)
-        }
-    }
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default())
+            .map_err(|why| refusal(axum::http::StatusCode::BAD_REQUEST, &why)),
+        refusal,
+        "sweep evidence capacity is full; no blocking task was queued",
+        move |asked| respond(root, &asked),
+    )
+    .await
 }
 
 fn respond(root: Result<PathBuf, String>, asked: &Asked) -> Response {
-    match root.and_then(|root| render(&root, asked)) {
-        Ok(body) if body.len() <= crate::detail::MAX_RESPONSE_BYTES => {
-            (axum::http::StatusCode::OK, headers(), body)
-        }
-        Ok(_) => refusal(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "saved evidence exceeds the JSON response bound; no prefix was exposed",
-        ),
-        Err(why) => refusal(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
+    crate::status_rule::page(
+        answer(root, asked),
+        Some(asked.identity),
+        headers()[0].1,
+        refusal,
+        "saved evidence exceeds the JSON response bound; no prefix was exposed",
+    )
+}
+
+/// What the evidence names nothing of, as the not-found sentence says it.
+const WHAT: &str = "Sweep attempt evidence";
+
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the identity's evidence folder before the reader opens
+/// anything -- an identity that names nothing is `404`, on page zero or later
+/// -- then the read. Evidence the reader finds absent (no `starts.bin`, or no
+/// event in it) and an attempt pin the saved attempt is not are the same
+/// `404`, decided by their typed absence; any other refusal of an entry the
+/// probe found is `503`, naming it.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<String, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let held = crate::status_rule::probe_identity(
+        &root,
+        crate::status_rule::namespace::SWEEP_EVIDENCE,
+        asked.identity,
+        WHAT,
+    )?;
+    match render(&root, asked) {
+        Ok(Read::Page(body)) => Ok(body),
+        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, held.shown, WHAT)),
+        Ok(Read::AttemptNotHeld(saved)) => Err(crate::status_rule::Fault {
+            class: crate::status_rule::Class::NotFound,
+            why: format!(
+                "the pinned attempt is not held: this identity's saved attempt is {saved}; restart \
+                 at page zero, no replacement page was served"
+            ),
+            path: Some(held.shown),
+            kind: None,
+        }),
+        Ok(Read::OutOfRange(why)) => Err(crate::status_rule::Fault {
+            class: crate::status_rule::Class::OutOfRange,
+            why,
+            path: Some(held.shown),
+            kind: None,
+        }),
+        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(held.shown), why)),
     }
 }
 
-fn render(root: &Path, asked: &Asked) -> Result<String, String> {
+/// What one read found: a page, the reader's typed absence, an attempt pin
+/// that is not the saved attempt (which it names), or a page the saved total
+/// does not reach.
+enum Read {
+    Page(String),
+    Absent,
+    AttemptNotHeld(u64),
+    OutOfRange(String),
+}
+
+fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     let identity = crate::server::hex32(asked.identity);
     let Some(evidence) = sweep_evidence::read(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
     else {
-        if asked.attempt.is_some() || asked.page.number != 0 {
-            return Err("the requested saved attempt is no longer available; no replacement page was served".to_owned());
-        }
-        return Ok(format!(
-            r#"{{"schema_version":1,"identity":"{identity}","status":"missing","evidence":null,"rows":[],"refusal":null,"why":"No versioned sweep attempt evidence is stored for this identity. Older result rows cannot reconstruct the missing levels."}}"#
-        ));
+        return Ok(Read::Absent);
     };
     if asked
         .attempt
         .is_some_and(|attempt| evidence.attempt != attempt)
     {
-        return Err("the saved attempt changed between pages; restart at page zero".to_owned());
+        return Ok(Read::AttemptNotHeld(evidence.attempt));
     }
     // A STOCK'S SAVED ATTEMPT SAYS WHAT ITS FIGURES ARE MADE OF. A ranked
     // page is a sweep's retained combinations with their hits, means, wins and
@@ -138,10 +176,17 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     };
     // SEEKED, NOT HELD: `ranked_page` and `depth_page` read one page at its
     // offset, so the 4,096-row hold cap does not apply. W1-api6-5, D-0954.
-    let window = crate::detail::seek_window(
+    // THE WINDOW STEP REFUSES ONLY THE CLIENT'S PAGE against a saved total:
+    // past the extent, or a limit too small to reach it. That is the client's
+    // page, never the store's fault: `416`, as `/frontier.json` answers it
+    // (D-7551), decided by which step refused and not by its words.
+    let window = match crate::detail::seek_window(
         usize::try_from(total).map_err(|why| why.to_string())?,
         asked.page,
-    )?;
+    ) {
+        Ok(window) => window,
+        Err(why) => return Ok(Read::OutOfRange(why)),
+    };
     let limit = window.end - window.start;
     let offset = asked.page.offset();
     let mut rows = String::new();
@@ -185,12 +230,12 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     let next = window
         .next_page
         .map_or_else(|| "null".to_owned(), |next| next.to_string());
-    Ok(format!(
+    Ok(Read::Page(format!(
         r#"{{"schema_version":1,"identity":"{identity}"{note},"status":"saved","evidence":{},"kind":"{kind}","page":{},"limit":{},"total_count":"{total}","next_page":{next},"page_complete":true,"rows":[{rows}],"refusal":null}}"#,
         metadata(evidence),
         asked.page.number,
         asked.page.limit
-    ))
+    )))
 }
 
 fn metadata(e: Evidence) -> String {
@@ -349,8 +394,12 @@ pub(crate) mod tests {
         let newer =
             sweep_evidence::begin(&dir, id, sweep_evidence::Operation::Sweep).expect("new attempt");
         let (status, _, refused) = respond(Ok(dir.clone()), &next);
-        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert!(refused.contains("attempt changed"));
+        // A PINNED ATTEMPT THE STORE NO LONGER HOLDS NAMES NOTHING (D-7550):
+        // the one not-found, naming the attempt that is held, never a 503.
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert!(refused.contains("pinned attempt is not held"), "{refused}");
+        assert!(refused.contains(r#""status":"not_found""#), "{refused}");
+        assert!(refused.contains(r#""rows":[]"#), "{refused}");
         drop(newer);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -589,9 +638,10 @@ pub(crate) mod tests {
                 );
             }
             let (status, _, past) = ask(last + 1, 256);
+            // A PAGE PAST THE SAVED EXTENT IS THE CLIENT'S PAGE (D-7551).
             assert_eq!(
                 status,
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
                 "{past}"
             );
             assert!(past.contains("past this run's"), "{past}");
@@ -612,7 +662,7 @@ pub(crate) mod tests {
                 for (status, _, body) in [at_max_page, narrow] {
                     assert_eq!(
                         status,
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
                         "{body}"
                     );
                     let needed = total.div_ceil(crate::detail::MAX_PAGE + 1);
@@ -638,8 +688,10 @@ pub(crate) mod tests {
         let query = format!("identity={}", "1a".repeat(32));
         let asked = Asked::parse(&query).expect("canonical identity");
         let (status, _, body) = respond(Ok(dir.clone()), &asked);
-        assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(body.contains(r#""status":"missing""#));
+        // THE ONE NOT-FOUND (D-7550): 404, never a 200 a page reads as data.
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert!(body.contains(r#""status":"not_found""#), "{body}");
+        assert!(body.contains(r#""rows":[]"#), "{body}");
         assert!(!dir.exists());
         for suffix in [
             "&page=1",
@@ -658,9 +710,10 @@ pub(crate) mod tests {
         }
         assert!(Asked::parse(&format!("identity={}", "AB".repeat(32))).is_err());
         assert!(Asked::parse(&"x".repeat(crate::detail::MAX_QUERY_BYTES + 1)).is_err());
-        let (_, _, failure) = respond(Err("unreadable evidence root".to_owned()), &asked);
-        assert!(failure.contains(r#""status":"refused""#));
-        assert!(!failure.contains(r#""status":"missing""#));
+        let (status, _, failure) = respond(Err("unreadable evidence root".to_owned()), &asked);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(failure.contains(r#""status":"unreadable""#), "{failure}");
+        assert!(!failure.contains(r#""status":"not_found""#));
     }
 
     #[test]

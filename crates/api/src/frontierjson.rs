@@ -76,30 +76,40 @@
 /// The headers every JSON route here answers with.
 type JsonHeaders = [(axum::http::header::HeaderName, &'static str); 1];
 
+/// One answer: status, headers, body.
+type Reply = (axum::http::StatusCode, JsonHeaders, String);
+
 /// One run's ranked combinations, with every measurement the operator ranks on.
 pub async fn frontier_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
     let query = uri.query().unwrap_or("");
-    if let Err(why) = crate::detail::query_is_bounded(query) {
-        return refuse(json_headers(), &why);
-    }
     // PARSED BEFORE ADMISSION, so a selector that can only be refused never
     // takes a detail slot and is never answered 429 in place of its 400.
     // D-0689; `detail::Selector` keeps the blocking path's order and words.
-    let asked = match crate::detail::Selector::parse(crate::server::store_dir(), query) {
-        Ok(asked) => asked,
-        Err(why) => return refuse(json_headers(), &why),
-    };
-    match crate::detail::run(move || respond(asked)).await {
-        Ok(response) => response,
-        Err(crate::detail::RunError::Saturated) => unavailable(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "detail read capacity is full; no blocking task was queued. Retry after another trade/frontier request finishes",
-        ),
-        Err(crate::detail::RunError::Join(why)) => unavailable(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            &format!("the bounded frontier-detail task could not be joined: {why}"),
-        ),
+    // The admission is the one status rule's path (D-7550).
+    crate::status_rule::serve(
+        crate::detail::query_is_bounded(query)
+            .map_err(|why| refuse(json_headers(), &why))
+            .and_then(|()| selected(crate::server::store_dir(), query)),
+        unavailable,
+        "detail read capacity is full; no blocking task was queued. Retry after another trade/frontier request finishes",
+        respond,
+    )
+    .await
+}
+
+/// The selector a request names, or its refusal, in the one status rule's
+/// order (D-7550): THE ONE IDENTITY RULE first -- `Selector::parse` folds an
+/// upper-case or padded identity into one that names a run, which every other
+/// identity route refuses, so the same input got two statuses -- then the
+/// configured root (`503`: a server with no store root is no client's fault,
+/// where the selector called it a `400`), then the selector's own fields.
+fn selected(root: Result<std::path::PathBuf, String>, query: &str) -> Result<crate::detail::Selector, Reply> {
+    if let Err(why) = crate::status_rule::identity(query, "identity") {
+        return Err(refuse(json_headers(), &why.to_string()));
     }
+    let root = crate::status_rule::configured(root)
+        .map_err(|fault| unavailable(fault.status(), &fault.why))?;
+    crate::detail::Selector::parse(Ok(root), query).map_err(|why| refuse(json_headers(), &why))
 }
 
 #[expect(
@@ -125,9 +135,11 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
         return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why);
     }
 
+    // A RECEIPT THAT CANNOT BE READ IS THE STORE'S, NOT THE QUESTION'S:
+    // `503`, where this answered `400` (D-7550).
     let committed = match crate::detail::committed_receipt(&root, &identity) {
         Ok(committed) => committed,
-        Err(why) => return refuse(json, &why),
+        Err(why) => return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
     };
     // THESE ARE A RUN'S RANKED COMBINATIONS, AND A STOCK'S SAY WHAT THEY ARE
     // MADE OF. The ledger parent the receipt read confirms names the
@@ -170,29 +182,23 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
         |file| file.of_run_against_receipt(&identity, receipt),
     ) {
         Ok(Ok(pair)) => pair,
-        Ok(Err(why)) => return refuse(json, &why),
+        // ROWS THAT FAIL THEIR RECEIPT'S CHECK ARE A FILE THAT CANNOT BE
+        // READ: `503`, where this answered `400` (D-7550).
+        Ok(Err(why)) => return unavailable(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
         Err(why) => {
             return missing_file_response(&root, &identity, receipt, &note, page, json, &why);
         }
     };
     if receipt.is_none() {
-        return absent_response(
-            json,
-            &identity,
-            page,
-            &format!(
-                "run {} has no committed result-set receipt at this request's canonical read. No clean empty or orphan frontier answer is exposed",
-                crate::server::hex32(identity)
-            ),
-        );
+        return absent_response(&root, &identity, json);
     }
     let window = match crate::detail::window(rows.len(), page) {
         Ok(window) => window,
         Err(why) => return range_refusal(json, &identity, rows.len(), &why),
     };
     let Some(page_rows) = rows.get(window.start..window.end) else {
-        return refuse(
-            json,
+        return unavailable(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "the validated frontier page window did not fit its verified row vector; no fallback page is exposed",
         );
     };
@@ -296,11 +302,13 @@ fn missing_file_response(
     why: &str,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     let child = cli::frontier::Frontier::path(root);
+    // WHAT EXISTS AND CANNOT BE READ IS `503`, never the `400` these were
+    // (D-7550): the file is there, or its absence could not be checked.
     match std::fs::metadata(&child) {
         Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {
-            return refuse(
-                json,
+            return unavailable(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 &format!(
                     "{why}. {} still exists, so its open failure is corruption or unreadability rather than an absent zero-row child",
                     child.display()
@@ -308,11 +316,12 @@ fn missing_file_response(
             );
         }
         Err(unreadable) => {
-            return refuse(
-                json,
+            return unavailable(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 &format!(
-                    "{why}. {} could not be checked for absence: {unreadable}",
-                    child.display()
+                    "{why}. {} could not be checked for absence: {unreadable} ({:?})",
+                    child.display(),
+                    unreadable.kind()
                 ),
             );
         }
@@ -333,37 +342,38 @@ fn missing_file_response(
                 ),
             )
         }
-        Some(receipt) => refuse(
-            json,
+        // A RUN THE RECEIPTS COMMIT WHOSE ROWS ARE GONE IS A RESULT THAT
+        // EXISTS AND CANNOT BE READ: `503`, never the `400` it was (D-7550).
+        Some(receipt) => unavailable(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
             &format!(
                 "run {} is committed for {} frontier row(s), but frontier.bin is missing: {why}. No empty or partial answer is exposed",
                 crate::server::hex32(*identity),
                 receipt.frontier_rows
             ),
         ),
-        None => absent_response(json, identity, page, why),
+        None => absent_response(root, identity, json),
     }
 }
 
-fn absent_response(
-    json: JsonHeaders,
-    identity: &[u8; 32],
-    page: crate::detail::Page,
-    why: &str,
-) -> (axum::http::StatusCode, JsonHeaders, String) {
-    if let Err(range) = crate::detail::window(0, page) {
-        return range_refusal(json, identity, 0, &range);
-    }
+/// THE ONE NOT-FOUND (D-7550): no committed result-set receipt names this
+/// run, so the identity names nothing held. Decided by the receipt index's
+/// typed absence (`committed_receipt` answered `None`), never by a listing,
+/// and answered `404` with the one body every identity route answers, on any
+/// page. This was a `200` with empty rows and a refusal sentence, which a
+/// page read as a run that ranked nothing.
+fn absent_response(root: &std::path::Path, identity: &[u8; 32], json: JsonHeaders) -> Reply {
+    let receipts = cli::result_set::Receipts::path(root);
+    let shown = format!(
+        "{} for run {}",
+        receipts.strip_prefix(root).unwrap_or(&receipts).display(),
+        crate::server::hex32(*identity)
+    );
+    let fault = crate::status_rule::absent(root, shown, "Run frontier");
     (
-        axum::http::StatusCode::OK,
+        fault.status(),
         json,
-        format!(
-            r#"{{"identity":"{}","rows":[],"count":0,"total_count":0,"admitted":0,"total_admitted":0,"rules":null,"page":{},"limit":{},"page_complete":true,"complete":true,"next_page":null,"refusal":{}}}"#,
-            crate::server::hex32(*identity),
-            page.number,
-            page.limit,
-            crate::render::json_string(why)
-        ),
+        fault.identity_body(Some(*identity)).to_string(),
     )
 }
 
@@ -636,9 +646,9 @@ mod tests {
         root: Result<std::path::PathBuf, String>,
         query: &str,
     ) -> (axum::http::StatusCode, super::JsonHeaders, String) {
-        match crate::detail::Selector::parse(root, query) {
+        match super::selected(root, query) {
             Ok(asked) => super::respond(asked),
-            Err(why) => super::refuse(super::json_headers(), &why),
+            Err(reply) => reply,
         }
     }
 
@@ -973,7 +983,7 @@ mod tests {
 
         let query = format!("identity={}", "6b".repeat(32));
         let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "a corrupt row is the store's: {body}");
         assert!(body.contains(r#""rows":null"#), "no prefix: {body}");
         assert!(body.contains("No partial frontier"), "cause: {body}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1003,7 +1013,7 @@ mod tests {
 
         let query = format!("identity={}", "6c".repeat(32));
         let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "lost rows are the store's: {body}");
         assert!(body.contains(r#""rows":null"#), "not empty: {body}");
         assert!(
             body.contains("committed for 1 frontier row"),
@@ -1029,14 +1039,17 @@ mod tests {
             .expect("malformed child");
         let query = format!("identity={}", "6d".repeat(32));
         let (status, _, body) = respond(Ok(dir.join("empty")), &query);
-        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "an unreadable file is the store's: {body}");
         assert!(body.contains(r#""rows":null"#), "not absent: {body}");
         assert!(body.contains("still exists"), "cause: {body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An unswept store answers empty AND says why, so "nothing recorded" and
-    /// "could not be read" are never the same response.
+    /// An unswept store answers THE ONE NOT-FOUND AND says why, so "nothing
+    /// recorded" and "could not be read" are never the same response, and a
+    /// run that ranked nothing is never mistaken for one never recorded. This
+    /// was a `200` with empty rows; it is the `404` every identity route
+    /// answers an identity that names nothing with, on every page (D-7550).
     #[test]
     fn an_absent_file_answers_empty_and_names_why() {
         let dir = std::env::temp_dir().join(format!(
@@ -1045,15 +1058,22 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let query = format!("identity={}", "b".repeat(64));
-        let (status, _, body) = respond(Ok(dir.clone()), &query);
-        assert_eq!(status, axum::http::StatusCode::OK);
-        assert_body_identity(&body, &"b".repeat(64));
-        assert!(body.contains(r#""rows":[]"#), "an empty list: {body}");
-        assert!(
-            !body.contains(r#""refusal":null"#),
-            "and it says why: {body}"
-        );
+        for query in [
+            format!("identity={}", "b".repeat(64)),
+            format!("identity={}&page=3", "b".repeat(64)),
+        ] {
+            let (status, headers, body) = respond(Ok(dir.clone()), &query);
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(headers[0].1, "application/json; charset=utf-8");
+            let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            assert_eq!(body["status"], "not_found", "{body}");
+            assert_eq!(body["identity"], "b".repeat(64));
+            assert_eq!(body["rows"], serde_json::json!([]), "an empty list: {body}");
+            assert!(
+                body["refusal"].as_str().is_some_and(|why| why.contains("Run frontier not held")),
+                "and it says why: {body}"
+            );
+        }
         assert!(
             !cli::frontier::Frontier::path(&dir).exists(),
             "and reading must not have created it"

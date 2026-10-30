@@ -125,36 +125,26 @@ fn refused(status: StatusCode, why: &str) -> Response {
         &json!({"schema_version":1,"status":"refused","refusal":why,"rows":[]}),
     )
 }
-/// Read a bounded saved catalog page on the common blocking-work budget.
+/// Read a bounded saved catalog page on the common blocking-work budget,
+/// through the one status rule's path (D-7550).
 pub async fn boolean_json(uri: Uri) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default()) {
-        Ok(asked) => asked,
-        Err(why) => return refused(StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || match root.and_then(|root| render(&root, &asked)) {
-        Ok(body) => {
-            let result = response(StatusCode::OK, &body);
-            if result.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-                result
-            } else {
-                refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "catalog response exceeds byte admission; no prefix returned",
-                )
-            }
-        }
-        Err(why) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    })
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default())
+            .map_err(|why| refused(StatusCode::BAD_REQUEST, &why)),
+        refused,
+        "catalog detail capacity full; nothing queued",
+        move |asked| {
+            crate::status_rule::page(
+                answer(root, &asked).map(|body| body.to_string()),
+                Some(asked.identity),
+                "application/json",
+                refused,
+                "catalog response exceeds byte admission; no prefix returned",
+            )
+        },
+    )
     .await
-    {
-        Ok(value) => value,
-        Err(crate::detail::RunError::Saturated) => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            "catalog detail capacity full; nothing queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    }
 }
 
 #[cfg(test)]
@@ -170,6 +160,24 @@ struct Cached {
     identity: [u8; 32],
     budget: crate::detail::BooleanObservationBudget,
     reader: Reader,
+}
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the catalog's entry before the cache or the reader is touched
+/// -- so an identity that names nothing is `404` and never evicts the held
+/// catalog -- then the read, whose refusal of an entry the probe found is
+/// `503`, naming the entry.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<Value, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let held = crate::status_rule::probe_identity(
+        &root,
+        crate::status_rule::namespace::BOOLEAN_CANDIDATES,
+        asked.identity,
+        "Boolean catalog",
+    )?;
+    render(&root, asked).map_err(|why| crate::status_rule::Fault::unreadable(Some(held.shown), why))
 }
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     render_with_budget(

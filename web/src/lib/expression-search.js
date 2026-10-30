@@ -1,5 +1,5 @@
 import { decodeMaskWords } from './mask.js';
-import { detailRefusal } from './detail-refusal.js';
+import { detailRefusal, notFoundWhy } from './detail-refusal.js';
 const max = (1n << 64n) - 1n;
 const hex = (/** @type {any} */ x) => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x);
 const uint = (/** @type {any} */ x) => typeof x === 'string' && /^(0|[1-9][0-9]*)$/.test(x) && x.length <= 20 && BigInt(x) <= max;
@@ -15,13 +15,18 @@ export async function fetchExpressionSearch(selection, request) {
   if (snapshot) { query.set('snapshot', snapshot.sequence); query.set('snapshot_seal', snapshot.seal); }
   if (cursor) { query.set('cursor', cursor.sequence); query.set('cursor_seal', cursor.seal); }
   const response = await request('/expression-search.json?' + query);
+  // NOTHING RECORDED FOR THIS SEARCH is the one not-found every identity route
+  // answers (D-7550): HTTP 404 naming this identity. For a pinned page it is the
+  // pin no longer being held, which never replaces the page with "missing".
+  if (response?.status === 404) {
+    const why = notFoundWhy(response, await response.json().catch(() => null), identity);
+    if (why === null) throw new Error('Search receipts unavailable (HTTP 404).');
+    if (snapshot !== null || cursor !== null) throw new Error('Missing search evidence cannot replace a pinned page. ' + why);
+    return { schema_version: 1, status: 'missing', identity, why, rows: [], refusal: null };
+  }
   if (!response?.ok) throw new Error(await detailRefusal(response, 'Search receipts unavailable (HTTP ' + String(response?.status) + ').'));
   const body = await response.json();
   if (!object(body) || body.schema_version !== 1 || body.identity !== identity || body.refusal !== null || !Array.isArray(body.rows)) throw new Error('Search evidence is refused or belongs to another identity.');
-  if (body.status === 'missing') {
-    if (snapshot !== null || cursor !== null || body.rows.length !== 0 || typeof body.why !== 'string' || !body.why.trim()) throw new Error('Missing search evidence cannot replace a pinned page.');
-    return body;
-  }
   if (body.status !== 'observed' || body.authority !== 'saved-receipts-and-grammar-transitions' ||
       (body.snapshot !== null && !anchor(body.snapshot)) || (snapshot !== null && !same(snapshot, body.snapshot)) ||
       !['work','candidates','qualifying','signal_rows','interrupted_reservations'].every((key) => uint(body[key])) ||

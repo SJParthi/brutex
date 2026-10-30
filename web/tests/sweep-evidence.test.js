@@ -23,6 +23,11 @@ function pageOf(/** @type {number} */ count, page = 0) {
   };
 }
 const response = (/** @type {any} */ body) => ({ ok: true, status: 200, json: async () => body });
+/** The one not-found every identity route answers (D-7550). @param {string} why */
+const notFound = (why) => ({
+  ok: false, status: 404,
+  json: async () => ({ schema_version: 1, status: 'not_found', identity, refusal: why, rows: [], path: null, error_kind: 'NotFound', rule: 'D-7550' })
+});
 
 test('later-period lifecycle never proves campaign completion, trades or promotion',async()=>{
   const body=pageOf(0);body.evidence.operation='boolean-oos';
@@ -64,10 +69,9 @@ test('keeps huge counters exact and distinguishes measured mismatch from forged 
 });
 
 test('missing evidence, empty published rankings and absent rankings remain distinct', async () => {
-  const missing = await fetchSweepEvidence(identity, async () => response({
-    schema_version: 1, identity, status: 'missing', evidence: null, rows: [], refusal: null, why: 'Older run has no saved depths.'
-  }));
+  const missing = await fetchSweepEvidence(identity, async () => notFound('Older run has no saved depths.'));
   assert.equal(missing.status, 'missing');
+  assert.equal(missing.why, 'Older run has no saved depths.');
   const empty = await fetchSweepEvidence(identity, async () => response(pageOf(0)));
   assert.equal(empty.evidence.ranked_available, true);
   const unpublished = pageOf(0);
@@ -157,9 +161,7 @@ test('complete Boolean catalog evidence never becomes exhaustive search or insti
 });
 
 test('missing and failed summary reads cannot certify trade availability or offer an absent detail view', async () => {
-  const missing = await fetchSweepEvidence(identity, async () => response({
-    schema_version: 1, identity, status: 'missing', evidence: null, rows: [], refusal: null, why: 'Older run has no saved attempt.'
-  }));
+  const missing = await fetchSweepEvidence(identity, async () => notFound('Older run has no saved attempt.'));
   assert.equal(canInspectCandidateTrades(missing), false);
   assert.equal(evidenceComparison(missing).find((row) => row.area === 'Exact trade replay')?.status, 'Not recorded');
   await assert.rejects(fetchSweepEvidence(identity, async () => ({ ok: false, status: 503 })), /HTTP 503/);

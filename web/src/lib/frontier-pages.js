@@ -5,6 +5,8 @@
  * Any changed receipt facts, missing page, or non-pagination refusal aborts the
  * assembly. The caller still validates every row's financial and mask facts.
  */
+import { notFoundWhy } from './detail-refusal.js';
+
 export const MAX_FRONTIER_ROWS = 4_096;
 export const FRONTIER_PAGE_ROWS = 256;
 
@@ -40,6 +42,18 @@ export async function fetchCompleteFrontier(identity, request) {
     const response = await request(
       `/frontier.json?identity=${encodeURIComponent(identity)}&page=${page}&limit=${FRONTIER_PAGE_ROWS}`
     );
+    // A RUN WITH NO COMMITTED RECEIPT is the one not-found every identity route
+    // answers (D-7550): HTTP 404 naming this identity, on page zero only. It
+    // used to be a 200 with no rows and a refusal sentence; it is still shown
+    // as the explicit absence it is, never as a run that ranked nothing.
+    if (response.status === 404) {
+      const why = notFoundWhy(response, await response.json().catch(() => null), identity);
+      if (why === null || page !== 0) throw new Error(`/frontier.json answered 404 on page ${page}.`);
+      return {
+        identity, rows: [], count: 0, total_count: 0, admitted: 0, total_admitted: 0, rules: null,
+        page: 0, limit: FRONTIER_PAGE_ROWS, page_complete: true, complete: true, next_page: null, refusal: why
+      };
+    }
     if (!response.ok || (response.status !== 200 && response.status !== 206)) {
       throw new Error(`/frontier.json answered ${response.status} on page ${page}.`);
     }
@@ -88,9 +102,7 @@ export async function fetchCompleteFrontier(identity, request) {
       refuse('next_page is missing, cyclic, skipped, or inconsistent with total_count.');
     }
     const paginationNotice = `partial page only: page ${page} returns rows ${offset}..${end} of ${body.total_count}. Fetch every page and reconcile \`total_count\`; this response is not a complete frontier`;
-    const explicitAbsence = wholePage && body.total_count === 0 && body.rules === null &&
-      body.total_admitted === 0 && typeof body.refusal === 'string' && body.refusal.length > 0;
-    if (!explicitAbsence && body.refusal !== (wholePage ? null : paginationNotice)) {
+    if (body.refusal !== (wholePage ? null : paginationNotice)) {
       refuse(typeof body.refusal === 'string' ? body.refusal : 'refusal metadata is missing or invalid.');
     }
     if (!first) first = body;
@@ -109,7 +121,7 @@ export async function fetchCompleteFrontier(identity, request) {
         complete: true,
         page_complete: true,
         next_page: null,
-        refusal: explicitAbsence ? first.refusal : null
+        refusal: null
       };
     }
   }

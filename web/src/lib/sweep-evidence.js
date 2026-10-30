@@ -1,4 +1,5 @@
 /** Saved evidence is a separate, attempt-bound contract. Never turn absence into zero. */
+import { notFoundWhy } from './detail-refusal.js';
 const U64_MAX = (1n << 64n) - 1n;
 const I64_MIN = -(1n << 63n);
 const I64_MAX = (1n << 63n) - 1n;
@@ -40,17 +41,19 @@ export async function fetchSweepEvidence(identity, request) {
     const url = '/sweep-evidence.json?identity=' + identity + '&kind=depth&page=' + page +
       '&limit=' + PAGE_ROWS + (summary ? '&attempt=' + summary.attempt : '');
     const response = await request(url);
+    // NOTHING SAVED FOR THIS RUN is the one not-found every identity route
+    // answers (D-7550): HTTP 404 naming this identity. On a later page it is
+    // the pinned attempt no longer being held, never a missing run.
+    if (response?.status === 404) {
+      const why = notFoundWhy(response, await response.json().catch(() => null), identity);
+      if (why === null) throw new Error('Saved evidence request failed (HTTP 404).');
+      if (summary) throw new Error('Saved attempt changed between pages; no mixed result is shown. ' + why);
+      return { status: 'missing', evidence: null, rows: [], why };
+    }
     if (!response?.ok) throw new Error('Saved evidence request failed (HTTP ' + String(response?.status) + ').');
     const body = await response.json();
     if (!object(body) || body.schema_version !== 1 || body.identity !== identity || body.refusal !== null) {
       throw new Error('Saved evidence is refused or belongs to another run.');
-    }
-    if (body.status === 'missing') {
-      if (page !== 0 || body.evidence !== null || !Array.isArray(body.rows) || body.rows.length !== 0 ||
-        typeof body.why !== 'string' || !body.why.trim()) {
-        throw new Error('Missing evidence must be explicit, empty, and explained.');
-      }
-      return { status: 'missing', evidence: null, rows: [], why: body.why };
     }
     if (body.status !== 'saved') throw new Error('Unknown saved evidence state.');
     validateSummary(body.evidence);

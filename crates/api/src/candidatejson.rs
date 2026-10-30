@@ -111,47 +111,34 @@ pub(crate) fn integer(query: &str, name: &str) -> Result<Option<u64>, String> {
     }
     Ok(Some(value))
 }
-pub(crate) fn hex_param(query: &str, name: &str) -> Result<Option<[u8; 32]>, String> {
-    let raw = crate::server::param(query, name);
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let value = crate::trades::from_hex_public(&raw)
-        .ok_or("candidate identity/digest must be 64 lowercase hex characters")?;
-    if raw != crate::server::hex32(value) {
-        return Err("candidate identity/digest must use canonical lowercase hex".to_owned());
-    }
-    Ok(Some(value))
+/// `name=` as one 64-hex value, or `None` where the query does not name it,
+/// by THE ONE IDENTITY RULE (D-7550): every route that reads an identity, a
+/// completion, a digest, a pin or a seal through here refuses the same input
+/// with the same words, naming the field and the breach.
+pub(crate) fn hex_param(query: &str, name: &'static str) -> Result<Option<[u8; 32]>, String> {
+    crate::status_rule::identity(query, name).map_err(|why| why.to_string())
 }
 
-/// Serves one bounded candidate manifest or exact trade page outside async workers.
+/// Serves one bounded candidate manifest or exact trade page outside async
+/// workers, through the one status rule's path (D-7550).
 pub async fn candidate_json(uri: axum::http::Uri) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default()) {
-        Ok(value) => value,
-        Err(why) => return refusal(axum::http::StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || match root.and_then(|root| render(&root, &asked)) {
-        Ok(body) if body.len() <= crate::detail::MAX_RESPONSE_BYTES => {
-            (axum::http::StatusCode::OK, headers(), body)
-        }
-        Ok(_) => refusal(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "candidate JSON exceeds its response bound; no prefix exposed",
-        ),
-        Err(why) => refusal(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why),
-    })
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default())
+            .map_err(|why| refusal(axum::http::StatusCode::BAD_REQUEST, &why)),
+        refusal,
+        "candidate detail capacity is full; no work was queued",
+        move |asked| {
+            crate::status_rule::page(
+                answer(root, &asked),
+                Some(asked.identity),
+                headers()[0].1,
+                refusal,
+                "candidate JSON exceeds its response bound; no prefix exposed",
+            )
+        },
+    )
     .await
-    {
-        Ok(response) => response,
-        Err(crate::detail::RunError::Saturated) => refusal(
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "candidate detail capacity is full; no work was queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => {
-            refusal(axum::http::StatusCode::SERVICE_UNAVAILABLE, &why)
-        }
-    }
 }
 fn headers() -> [(axum::http::header::HeaderName, &'static str); 1] {
     [(axum::http::header::CONTENT_TYPE, "application/json")]
@@ -163,7 +150,51 @@ fn refusal(status: axum::http::StatusCode, why: &str) -> Response {
         json!({"schema_version":1,"status":"refused","refusal":why,"rows":[]}).to_string(),
     )
 }
-fn render(root: &Path, asked: &Asked) -> Result<String, String> {
+/// What the catalog names nothing of, as the not-found sentence says it.
+const WHAT: &str = "Priced candidate catalog";
+
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the identity's folder of this model's catalogs before the
+/// reader opens anything -- an identity that names nothing is `404`, pinned
+/// or not -- then the read. A catalog the reader finds absent for this
+/// attempt, and a digest pin that is not the saved catalog's, are the same
+/// `404`, decided by their typed absence; any other refusal of an entry the
+/// probe found is `503`, naming it.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<String, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let namespace = match asked.model {
+        Model::And => crate::status_rule::namespace::CANDIDATE_TRADES,
+        Model::Expression => crate::status_rule::namespace::EXPRESSION_CANDIDATE_TRADES,
+    };
+    let held = crate::status_rule::probe_identity(&root, namespace, asked.identity, WHAT)?;
+    let attempt = format!("{} (attempt {})", held.shown, asked.attempt);
+    match render(&root, asked) {
+        Ok(Read::Page(body)) => Ok(body),
+        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, attempt, WHAT)),
+        Ok(Read::PinNotHeld) => Err(crate::status_rule::Fault {
+            class: crate::status_rule::Class::NotFound,
+            why: "the pinned candidate catalog digest is not the saved catalog's; restart from \
+                  its first page, no replacement page was exposed"
+                .to_owned(),
+            path: Some(attempt),
+            kind: None,
+        }),
+        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(attempt), why)),
+    }
+}
+
+/// What one read found: a page, the reader's typed absence of this attempt's
+/// catalog, or a digest pin that is not the saved catalog's.
+enum Read {
+    Page(String),
+    Absent,
+    PinNotHeld,
+}
+
+fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     let Some(summary) = candidate_trades::read_model(
         root,
         asked.identity,
@@ -172,15 +203,10 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         crate::detail::MAX_SCAN_BYTES,
     )?
     else {
-        if asked.digest.is_some() {
-            return Err(
-                "the pinned candidate catalog is absent; no replacement page exposed".to_owned(),
-            );
-        }
-        return Ok(json!({"schema_version":1,"status":"missing","model":asked.model.as_str(),"identity":crate::server::hex32(asked.identity),"attempt":asked.attempt.to_string(),"rows":[],"refusal":null,"why":"No sealed priced-candidate capture is saved for this attempt. An absent or unfinished capture is not a measured zero."}).to_string());
+        return Ok(Read::Absent);
     };
     if asked.digest.is_some_and(|digest| digest != summary.digest) {
-        return Err("candidate catalog changed; restart from its first page".to_owned());
+        return Ok(Read::PinNotHeld);
     }
     // A STOCK AUDIT'S PRICED CANDIDATES SAY WHAT THEY ARE MADE OF. Each page
     // serves per-trade best, worst, adverse and favourable figures, and a
@@ -196,7 +222,7 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         Model::Expression => String::new(),
     };
     if summary.tiers == 0 {
-        return empty_catalog(&summary, asked, note);
+        return empty_catalog(&summary, asked, note).map(Read::Page);
     }
     let tier = candidate_trades::tier(root, &summary, asked.tier, crate::detail::MAX_SCAN_BYTES)?;
     let (kind, total, rows, selected) = match (asked.rank, asked.direction) {
@@ -262,7 +288,7 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .map(|value| value.to_string());
     let mut body = json!({"schema_version":1,"status":"saved","model":summary.model.as_str(),"expression":expression_json(summary.expression()),"identity":crate::server::hex32(summary.identity),"attempt":summary.attempt.to_string(),"catalog_digest":crate::server::hex32(summary.digest),"execution_digest":crate::server::hex32(summary.execution_digest),"capture":"sealed-pricing-evidence","audit_completion":lifecycle.map(|value|value.completion.as_str()),"kind":kind,"tier_count":summary.tiers.to_string(),"candidate_side_count":summary.candidates.to_string(),"tier":tier_json(&tier),"offset":asked.offset.to_string(),"limit":asked.limit,"total_count":total.to_string(),"next_offset":next,"page_complete":true,"selected":selected,"rows":rows,"refusal":null});
     crate::detail::put_equity_note(&mut body, note)?;
-    Ok(body.to_string())
+    Ok(Read::Page(body.to_string()))
 }
 fn empty_catalog(summary: &Summary, asked: &Asked, note: String) -> Result<String, String> {
     if asked.tier != 0 || asked.offset != 0 || asked.rank.is_some() {
@@ -380,6 +406,15 @@ fn trade_json(row: cli::trades::Row) -> Value {
 mod tests {
     use super::*;
     const ID: &str = "4242424242424242424242424242424242424242424242424242424242424242";
+    /// [`render`]'s page, or its typed absence and stale pin as refusals: the
+    /// shape these tests read pages in.
+    fn page(root: &Path, asked: &Asked) -> Result<String, String> {
+        match render(root, asked)? {
+            Read::Page(body) => Ok(body),
+            Read::Absent => Err("absent".to_owned()),
+            Read::PinNotHeld => Err("pin not held".to_owned()),
+        }
+    }
     #[test]
     fn exact_query_bounds_and_continuation_authority_are_required() {
         let first = format!("identity={ID}&attempt=9007199254740993&limit=256");
@@ -412,11 +447,18 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("candidate-api-missing-{}", std::process::id()));
         let asked = Asked::parse(&format!("identity={ID}&attempt=1"))?;
-        let response = render(&root, &asked)?;
-        assert!(response.contains("\"status\":\"missing\""));
-        assert!(!response.contains("\"capture\":\"sealed"));
+        assert!(matches!(render(&root, &asked)?, Read::Absent));
+        // THE ONE NOT-FOUND (D-7550): 404 with the one body, never a 200.
+        let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
+        assert_eq!(fault.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = fault.identity_body(Some(asked.identity)).to_string();
+        assert!(body.contains("\"status\":\"not_found\""), "{body}");
+        assert!(!body.contains("\"capture\":\"sealed"), "{body}");
         let pinned = Asked::parse(&format!("identity={ID}&attempt=1&digest={ID}"))?;
-        assert!(render(&root, &pinned).is_err());
+        assert!(page(&root, &pinned).is_err());
+        let pinned = answer(Ok(root.clone()), &pinned).err().ok_or("refused")?;
+        assert_eq!(pinned.status(), axum::http::StatusCode::NOT_FOUND);
+        assert!(!root.exists(), "reading created nothing");
         Ok(())
     }
     #[test]
@@ -476,9 +518,11 @@ mod tests {
             crate::server::hex32([42; 32]),
             attempt.token()
         );
-        let and = render(&root, &Asked::parse(&base)?)?;
-        assert!(and.contains("\"status\":\"missing\""));
-        let saved: Value = serde_json::from_str(&render(
+        assert!(matches!(
+            render(&root, &Asked::parse(&base)?)?,
+            Read::Absent
+        ));
+        let saved: Value = serde_json::from_str(&page(
             &root,
             &Asked::parse(&format!("{base}&model=expression"))?,
         )?)
@@ -543,7 +587,7 @@ mod tests {
         );
         let asked = Asked::parse(&base)?;
         let first: Value =
-            serde_json::from_str(&render(&root, &asked)?).map_err(|why| why.to_string())?;
+            serde_json::from_str(&page(&root, &asked)?).map_err(|why| why.to_string())?;
         assert_eq!(first.get("next_offset"), Some(&json!("256")));
         assert_eq!(
             first.get("audit_completion"),
@@ -560,7 +604,7 @@ mod tests {
         );
         let asked = Asked::parse(&query)?;
         let second: Value =
-            serde_json::from_str(&render(&root, &asked)?).map_err(|why| why.to_string())?;
+            serde_json::from_str(&page(&root, &asked)?).map_err(|why| why.to_string())?;
         assert_eq!(
             second.get("rows").and_then(Value::as_array).map(Vec::len),
             Some(2)
@@ -572,7 +616,7 @@ mod tests {
         );
         let exact = Asked::parse(&query)?;
         let empty: Value =
-            serde_json::from_str(&render(&root, &exact)?).map_err(|why| why.to_string())?;
+            serde_json::from_str(&page(&root, &exact)?).map_err(|why| why.to_string())?;
         assert_eq!(
             empty.get("selected").and_then(|value| value.get("cell")),
             Some(&Value::Null)
@@ -585,7 +629,7 @@ mod tests {
             .join("0-129-1-candidate.bin");
         std::fs::remove_file(child).map_err(|why| why.to_string())?;
         assert!(
-            render(&root, &asked).is_err(),
+            page(&root, &asked).is_err(),
             "no shortened replacement page"
         );
         Ok(())
@@ -686,7 +730,7 @@ mod tests {
             .collect::<Result<Vec<_>, String>>()?;
         let expression_id = [0xb5_u8; 32];
         let expression_query = expression_capture(&root, expression_id)?;
-        let read = |query: &str| -> Result<String, String> { render(&root, &Asked::parse(query)?) };
+        let read = |query: &str| -> Result<String, String> { page(&root, &Asked::parse(query)?) };
         let before = pages
             .iter()
             .map(|(query, _, _)| read(query))

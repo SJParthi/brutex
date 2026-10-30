@@ -86,42 +86,50 @@ fn refused(status: StatusCode, why: &str) -> Response {
         &json!({"schema_version":1,"status":"refused","refusal":why,"rows":[]}),
     )
 }
-/// Read only a bounded settings/trades/events/day page from an exact receipt.
+/// Read only a bounded settings/trades/events/day page from an exact receipt,
+/// through the one status rule's path (D-7550).
 pub async fn index_stop_json(uri: Uri) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default()) {
-        Ok(value) => value,
-        Err(why) => return refused(StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || match root.and_then(|root| render(&root, &asked)) {
-        Ok(body) => {
-            let reply = response(StatusCode::OK, &body);
-            if reply.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-                reply
-            } else {
-                refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "single-stop response exceeds byte limit; no prefix returned",
-                )
-            }
-        }
-        Err(why) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    })
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default())
+            .map_err(|why| refused(StatusCode::BAD_REQUEST, &why)),
+        refused,
+        "single-stop detail capacity full; nothing queued",
+        move |asked| {
+            crate::status_rule::page(
+                answer(root, &asked).map(|body| body.to_string()),
+                Some(asked.identity),
+                "application/json",
+                refused,
+                "single-stop response exceeds byte limit; no prefix returned",
+            )
+        },
+    )
     .await
-    {
-        Ok(value) => value,
-        Err(crate::detail::RunError::Saturated) => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            "single-stop detail capacity full; nothing queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    }
 }
 struct Cached {
     root: PathBuf,
     identity: [u8; 32],
     budget: crate::detail::BooleanObservationBudget,
     reader: Reader,
+}
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the candidate's entry under `cli`'s own namespace before the
+/// held reader or a cold open is touched -- an identity that names nothing is
+/// `404` -- then the read, whose refusal of an entry the probe found is
+/// `503`, naming the entry.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<Value, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let held = crate::status_rule::probe_identity(
+        &root,
+        crate::status_rule::namespace::INDEX_STOP,
+        asked.identity,
+        "Single-stop candidate",
+    )?;
+    render(&root, asked).map_err(|why| crate::status_rule::Fault::unreadable(Some(held.shown), why))
 }
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();

@@ -55,7 +55,7 @@ impl Asked {
         })
     }
 }
-fn anchor(query: &str, number: &str, seal: &str) -> Result<Option<Anchor>, String> {
+fn anchor(query: &str, number: &str, seal: &'static str) -> Result<Option<Anchor>, String> {
     match (
         crate::candidatejson::integer(query, number)?,
         crate::candidatejson::hex_param(query, seal)?,
@@ -78,57 +78,89 @@ fn refused(status: StatusCode, why: &str) -> Response {
         json!({"schema_version":1,"status":"refused","refusal":why,"rows":[]}).to_string(),
     )
 }
-/// Serves observed search receipts using bounded background detail workers.
+/// Serves observed search receipts using bounded background detail workers,
+/// through the one status rule's path (D-7550).
 pub async fn expression_search_json(uri: Uri) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default()) {
-        Ok(asked) => asked,
-        Err(why) => return refused(StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || match root.and_then(|root| render(&root, &asked)) {
-        Ok(body) if body.len() <= crate::detail::MAX_RESPONSE_BYTES => {
-            response(StatusCode::OK, body)
-        }
-        Ok(_) => refused(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "search JSON exceeds its response admission; no prefix exposed",
-        ),
-        Err(why) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    })
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default())
+            .map_err(|why| refused(StatusCode::BAD_REQUEST, &why)),
+        refused,
+        "search detail capacity full; nothing queued",
+        move |asked| {
+            crate::status_rule::page(
+                answer(root, &asked),
+                Some(asked.identity),
+                "application/json",
+                refused,
+                "search JSON exceeds its response admission; no prefix exposed",
+            )
+        },
+    )
     .await
-    {
-        Ok(reply) => reply,
-        Err(crate::detail::RunError::Saturated) => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            "search detail capacity full; nothing queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    }
 }
 struct Session {
     root: PathBuf,
     identity: [u8; 32],
     reader: Reader,
 }
-fn render(root: &Path, asked: &Asked) -> Result<String, String> {
+/// What the search names nothing of, as the not-found sentence says it.
+const WHAT: &str = "Expression search";
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the search's checkpoint namespace before any snapshot or
+/// reader is touched -- an identity that names nothing is `404`, pinned or
+/// not -- then the read. A snapshot pin no session holds and a namespace the
+/// reader finds gone are the same `404`, decided by their typed absence; any
+/// other refusal of an entry the probe found is `503`, naming it.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<String, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let held = crate::status_rule::probe_identity(
+        &root,
+        crate::status_rule::namespace::EXPRESSION_SEARCH,
+        asked.identity,
+        WHAT,
+    )?;
+    match render(&root, asked) {
+        Ok(Read::Page(body)) => Ok(body),
+        Ok(Read::Absent) => Err(crate::status_rule::absent(&root, held.shown, WHAT)),
+        Ok(Read::Unpinned) => Err(crate::status_rule::Fault {
+            class: crate::status_rule::Class::NotFound,
+            why: "search snapshot is not admitted or expired; refresh its first page".to_owned(),
+            path: Some(held.shown),
+            kind: None,
+        }),
+        Err(why) => Err(crate::status_rule::Fault::unreadable(Some(held.shown), why)),
+    }
+}
+/// What one read found: a page, the reader's typed absence of the namespace,
+/// or a snapshot pin no held session names.
+enum Read {
+    Page(String),
+    Absent,
+    Unpinned,
+}
+fn render(root: &Path, asked: &Asked) -> Result<Read, String> {
     static SESSIONS: OnceLock<Mutex<VecDeque<Session>>> = OnceLock::new();
     let mut sessions = SESSIONS
         .get_or_init(|| Mutex::new(VecDeque::new()))
         .lock()
         .map_err(|_| "search snapshot cache poisoned")?;
     let index = if let Some(snapshot) = asked.snapshot {
-        sessions
-            .iter()
-            .position(|held| {
-                held.root == root
-                    && held.identity == asked.identity
-                    && held.reader.progress().checkpoint == Some(snapshot)
-            })
-            .ok_or("search snapshot is not admitted or expired; refresh its first page")?
+        let Some(index) = sessions.iter().position(|held| {
+            held.root == root
+                && held.identity == asked.identity
+                && held.reader.progress().checkpoint == Some(snapshot)
+        }) else {
+            return Ok(Read::Unpinned);
+        };
+        index
     } else {
         let Some(reader) = Reader::open(root, asked.identity, crate::detail::MAX_SCAN_BYTES)?
         else {
-            return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
+            return Ok(Read::Absent);
         };
         sessions.retain(|held| {
             held.root != root
@@ -151,7 +183,7 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     let page = held
         .reader
         .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
-    Ok(body(held.reader.progress(), &page, asked.limit))
+    Ok(Read::Page(body(held.reader.progress(), &page, asked.limit)))
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -194,13 +226,26 @@ mod tests {
         let asked = Asked::parse(&full)?;
         assert_eq!(asked.cursor.map(|value| value.sequence), Some(88));
         assert!(
-            render(
-                &crate::scratch::path("unadmitted-expression-snapshot"),
-                &asked
-            )
-            .is_err(),
+            matches!(
+                render(
+                    &crate::scratch::path("unadmitted-expression-snapshot"),
+                    &asked
+                ),
+                Ok(Read::Unpinned)
+            ),
             "unadmitted snapshot cannot splice a path"
         );
+        // A PIN NO SESSION HOLDS NAMES NOTHING HELD (D-7550): one not-found,
+        // never a 503 for the client's own stale pin.
+        let root = crate::scratch::path("unadmitted-expression-pin");
+        let held = root
+            .join(crate::status_rule::namespace::EXPRESSION_SEARCH)
+            .join(&id);
+        std::fs::create_dir_all(&held).map_err(|why| why.to_string())?;
+        let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
+        assert_eq!(fault.class, crate::status_rule::Class::NotFound);
+        assert!(fault.why.contains("not admitted or expired"), "{}", fault.why);
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
     #[test]
@@ -209,8 +254,14 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("brutex-expression-api-{}", std::process::id()));
         let asked = Asked::parse(&format!("identity={}", "ab".repeat(32)))?;
-        let missing = render(&root, &asked)?;
-        assert!(missing.contains("\"status\":\"missing\""));
+        assert!(matches!(render(&root, &asked)?, Read::Absent));
+        // THE ROUTE'S ANSWER IS THE ONE NOT-FOUND (D-7550), never a 200.
+        let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
+        assert_eq!(fault.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            fault.identity_body(Some(asked.identity))["status"],
+            "not_found"
+        );
         assert!(!root.exists());
         let progress = Progress {
             identity: [1; 32],

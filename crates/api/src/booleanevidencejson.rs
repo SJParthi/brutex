@@ -41,6 +41,14 @@ impl Model {
             Self::Qualification => "qualification",
         }
     }
+    /// The store root's folder of this model's saved evidence (D-7550).
+    const fn namespace(self) -> &'static str {
+        match self {
+            Self::Statistics => crate::status_rule::namespace::BOOLEAN_STATISTICS,
+            Self::Admission => crate::status_rule::namespace::BOOLEAN_ADMISSION,
+            Self::Qualification => crate::status_rule::namespace::BOOLEAN_QUALIFICATION,
+        }
+    }
 }
 struct Asked {
     model: Model,
@@ -197,35 +205,25 @@ pub(crate) fn search_comparison(
 pub(crate) fn search_policy(policy: &cli::boolean_evidence::AdmissionPolicyV1) -> Value {
     admission_projection::policy(policy)
 }
+/// One model's page through the one status rule's path (D-7550).
 async fn serve(uri: Uri, model: Model) -> Response {
-    let asked = match Asked::parse(uri.query().unwrap_or_default(), model) {
-        Ok(asked) => asked,
-        Err(why) => return refused(StatusCode::BAD_REQUEST, &why),
-    };
     let root = crate::server::store_dir();
-    match crate::detail::run(move || match root.and_then(|root| render(&root, &asked)) {
-        Ok(body) => {
-            let response = response(StatusCode::OK, &body);
-            if response.2.len() <= crate::detail::MAX_RESPONSE_BYTES {
-                response
-            } else {
-                refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Boolean evidence response exceeds its byte ceiling; no prefix returned",
-                )
-            }
-        }
-        Err(why) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    })
+    crate::status_rule::serve(
+        Asked::parse(uri.query().unwrap_or_default(), model)
+            .map_err(|why| refused(StatusCode::BAD_REQUEST, &why)),
+        refused,
+        "Boolean evidence detail capacity full; nothing queued",
+        move |asked| {
+            crate::status_rule::page(
+                answer(root, &asked).map(|body| body.to_string()),
+                Some(asked.identity),
+                "application/json",
+                refused,
+                "Boolean evidence response exceeds its byte ceiling; no prefix returned",
+            )
+        },
+    )
     .await
-    {
-        Ok(response) => response,
-        Err(crate::detail::RunError::Saturated) => refused(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Boolean evidence detail capacity full; nothing queued",
-        ),
-        Err(crate::detail::RunError::Join(why)) => refused(StatusCode::SERVICE_UNAVAILABLE, &why),
-    }
 }
 enum Reader {
     Statistics(Box<Statistics>),
@@ -275,6 +273,24 @@ fn held_for<'a, R>(slot: Option<&'a Held<R>>, key: &Key) -> Option<&'a Held<R>> 
     slot.filter(|held| held.key == *key)
 }
 type Cached = Held<Reader>;
+/// The page, or the one status rule's fault (D-7550): a configured root, then
+/// ONE probe of the model's entry for the identity before the cache or any
+/// reader is touched -- an identity that names nothing is `404` and never
+/// evicts the held tree -- then the read, whose refusal of an entry the probe
+/// found is `503`, naming the entry.
+fn answer(
+    root: Result<PathBuf, String>,
+    asked: &Asked,
+) -> Result<Value, crate::status_rule::Fault> {
+    let root = crate::status_rule::configured(root)?;
+    let held = crate::status_rule::probe_identity(
+        &root,
+        asked.model.namespace(),
+        asked.identity,
+        &format!("Boolean {} evidence", asked.model.name()),
+    )?;
+    render(&root, asked).map_err(|why| crate::status_rule::Fault::unreadable(Some(held.shown), why))
+}
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     render_with_budget(
         root,

@@ -192,43 +192,43 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    /// A `400` naming what was wrong with the question.
-    fn bad(why: impl Into<String>) -> Self {
+    /// A refusal of `class`, with the one status D-7550 gives it
+    /// ([`crate::status_rule::Class::status`]): every constructor below is
+    /// this, so no status is spelled twice.
+    fn of(class: crate::status_rule::Class, why: impl Into<String>) -> Self {
         Self {
-            status: axum::http::StatusCode::BAD_REQUEST,
+            status: class.status(),
             why: why.into(),
         }
+    }
+
+    /// A `400` naming what was wrong with the question.
+    fn bad(why: impl Into<String>) -> Self {
+        Self::of(crate::status_rule::Class::Malformed, why)
     }
 
     /// A `422`: the question was well formed and answering it would cost
     /// more than the bound this route states.
     fn over(why: impl Into<String>) -> Self {
-        Self {
-            status: axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            why: why.into(),
-        }
+        Self::of(crate::status_rule::Class::OverBound, why)
     }
 
-    /// A `503`: the store could not be read. A month refused because its
-    /// key was RETIRED by the re-key is no store fault: [`Self::gone`].
+    /// A `503`: what the store holds could not be read. Every caller reaches
+    /// it after the question was parsed, so a client's malformed input never
+    /// gets here: [`Instrument::parse`] refuses a symbol by the store's own
+    /// path rule first (D-7550). The status is decided by WHICH STEP refused,
+    /// never by the sentence: this read the sentence and answered `410` when
+    /// it looked like a retired key, which is why the classification was
+    /// called message text (BASE-STATUS-CODES, n=31). A retired key is
+    /// refused by type, by [`refuse_retired`], before any read.
     fn store(why: impl Into<String>) -> Self {
-        let why = why.into();
-        if pull::gdfl_lineage::is_contract_refused(&why) {
-            return Self::gone(why);
-        }
-        Self {
-            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            why,
-        }
+        Self::of(crate::status_rule::Class::Unreadable, why)
     }
 
     /// A `410`: a GDFL option key the re-key RETIRED, with the ledger's
     /// sentence, as every bar route answers it (D-3331; WP-12c, DB-A18).
     fn gone(why: impl Into<String>) -> Self {
-        Self {
-            status: axum::http::StatusCode::GONE,
-            why: why.into(),
-        }
+        Self::of(crate::status_rule::Class::Retired, why)
     }
 
     fn json(&self) -> Value {
@@ -299,11 +299,10 @@ impl Instrument {
         let segment = Segment::parse(&segment_text)
             .map_err(|_| format!("segment={segment_text:?} is not INDEX, CASH or FNO"))?;
         let symbol = param(query, "symbol");
-        if Symbol::new(&symbol).is_err() {
-            return Err(format!(
-                "symbol={symbol:?} is not a symbol this store files: 1 to 24 bytes"
-            ));
-        }
+        // THE STORE'S OWN PATH RULE, BEFORE THE STORE (D-7550): `nifty` was
+        // admitted here (`Symbol::new` folds case) and refused later by
+        // `StorePath`, and that refusal was answered `503`.
+        crate::status_rule::segment("symbol", &symbol).map_err(|why| why.to_string())?;
         let contract_text = param(query, "contract");
         let contract = if contract_text.is_empty() {
             None

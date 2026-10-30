@@ -91,12 +91,28 @@ test('empty, one-row, and exactly full-page results require one request', async 
     assert.equal(body.rows.length, total);
     assert.equal(validateFrontierPayload(body, identity).ok, true);
   }
-  const missing = server(0, ({ body }) => { body.refusal = 'No committed result-set receipt exists.'; });
-  const body = await fetchCompleteFrontier(identity, missing.request);
+  // A RUN WITH NO COMMITTED RECEIPT IS THE ONE NOT-FOUND (D-7550): 404 naming
+  // this identity, shown as the explicit absence it was as a 200.
+  const calls = [];
+  const body = await fetchCompleteFrontier(identity, async (/** @type {string} */ url) => {
+    calls.push(url);
+    return {
+      ok: false, status: 404,
+      json: async () => ({
+        schema_version: 1, status: 'not_found', identity, rows: [], path: 'results/detail-sets.bin for run ' + identity,
+        error_kind: 'NotFound', rule: 'D-7550', refusal: 'No committed result-set receipt exists.'
+      })
+    };
+  });
+  assert.equal(calls.length, 1);
   const checked = validateFrontierPayload(body, identity);
   assert.equal(checked.ok, true);
   assert.equal(checked.empty, true);
   assert.equal(checked.why, 'No committed result-set receipt exists.');
+  // The old 200 that carried a refusal beside no rows is no answer the server
+  // gives now, so it is refused rather than shown as an absence.
+  const stale = server(0, ({ body }) => { body.refusal = 'No committed result-set receipt exists.'; });
+  await assert.rejects(fetchCompleteFrontier(identity, stale.request), /refused: No committed/);
 });
 
 test('failed HTTP and JSON responses and transport failures never publish a preceding page', async () => {

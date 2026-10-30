@@ -129,6 +129,9 @@ pub mod server;
 pub mod speed;
 /// `GET /speed.json`: [`speed`]'s report (R3-14).
 pub mod speed_route;
+/// One status rule through one typed classifier: malformed input `400`, a key
+/// naming nothing `404`, `503` only for what exists and cannot be read (D-7550).
+pub mod status_rule;
 pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was
 /// missing, because a page that reports on work it cannot start needs a
