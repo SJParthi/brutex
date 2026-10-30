@@ -1181,6 +1181,58 @@ confirmed by two skeptics; their corrections are applied.
   requests, so no run was ever empty, but the rule did not say so. FIXED:
   an empty run never holds; its test failed before ("left: Ok(0)") and
   passes after (D-7152 addendum, BRED-31).
+- **BRED23-F33: gate 1e was red on 14 of 16 Mac runs since 19 Oct, and only
+  its whole build could say so** (assurance attack of 29 Oct 2026, RA-01 and
+  RO-08, `state/assure-20261029/rust-only/refute/44-46, 83, 84`): two
+  `api::server::bars_export` tests read `web/src/lib/db/bars-plan.js` and
+  `export.js` through `env!("CARGO_MANIFEST_DIR")` joined to `../../web`, so
+  `cargo test` exited 101 in 1e's worktree with `web/` deleted. Repair 1
+  (D-7153) moved the cross-check to
+  `web/tests/export-agrees-with-the-server.test.js`, and verify r3 ran only
+  `--fast`, which skips 1e. FIXED twice over: gate 1h (`source_scan
+  web-reads`, BRED-32) refuses any crate test that reads a path into `web/`
+  in seconds, red on f01d7a0e4's file at its two lines and green here; and
+  gate 1e itself ran WHOLE on this repair's final tip (D-7153 addendum of 30
+  Oct). The moved web test still binds the server: with `EXPORT_CEILING`
+  20,000 changed to 20,001, or the first column `feed` to `feed_x`, in a
+  scratch copy of `bars_export.rs`, it failed, and passed again restored
+  (`state/fix/round2/bred1023-r3-evidence/bind-*.log`).
+- **BRED23-F34: the two journal-append load tests asked again after a
+  refusal, which no caller of that append does** (TST-01 of the same
+  attack, `coverage-tests/23-flake-notes.txt`, `25-flake-state-at-tip.txt`,
+  `refute/NEW-audit-callers.txt`): `eight_concurrent_appenders_lose_no_record`
+  and the code-4 barrier experiment counted a refusal as asked again, while
+  every production caller of the plain `Journal::append` surfaces it once
+  (RunLedger's opening keeps `opened_refused`, the receipts name it,
+  `fno_opened` answers "NO", the spot route returns it, the autopilot keeps
+  it as the tick's journal error). Only `RunLedger::write` (the member
+  failures) offers a refused record again, at its next flush. FIXED: both
+  tests ask each record once, as its caller does; a refusal is accepted only
+  when it waited the whole `APPEND_LOCK_WAIT` and names it, a sooner one
+  (the `try_lock` build's) fails, and the journal must hold exactly the
+  answered successes; the refusals are printed and their rate under load is
+  a stated limit (L-BRED23-16), never hidden by a retry (BRED-08, BRED-18).
+- **BRED23-F35: verify r3 found 216 coverage gaps and 4 surviving mutants
+  in this part's D2 set** (D3, operator decisions D2 and D3, D-7250):
+  production refusal and comparison sides no test drove (the drop door's
+  reuse check and `same_bar`, the quarantine snapshot and summary of an
+  empty feed, `padded_on`'s decreasing counts, the repair door's derive,
+  the re-key plan's ledger contradictions, the end of a zip, the spool's
+  resume and live lock, the journal's refresh, a horizon inside its alert
+  window), sides of this part's own tests that only a loaded machine took,
+  two `#[ignore]` measurements, and survivors in `gates_bounds.rs`
+  `flat_spaces` and `gates_ledger.rs` `disarms`/`opens_disarm`. FIXED by a
+  test reaching each side (BRED-33 to BRED-39, BRED-32's gate tests, the
+  M2 kill tests) and by removing three redundancies rather than covering
+  them: `judge`'s unreachable whole-month arm, `note_hole_skipped`'s done
+  and restated arm (its parameter is now the hole's reason), and a second
+  spelling an assertion accepted that no page writes. Every survivor was
+  shown failing under its mutant. Not closed here: see this repair's notes.
+- **BRED23-F36: L-BRED23-10 timed a refusal as the route**
+  (verify-BASE-REDS-1023-r3): its `/calendar-days.json` figures were of
+  `limit=50`, which the route answers 400 for 2024 (20 excluded days besides
+  weekends). FIXED: timed again on answered requests (`limit=20`, and
+  `reason=Holiday&limit=16`), the old figures named as a 400's.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

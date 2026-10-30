@@ -84592,6 +84592,68 @@ lines given the `at` and `by` their type names, and a failure message that
 read a `method` no sheet row carries (it names the row's page now). The
 gate (`--only W3`, bred1023-web17): 0 errors. No ceiling was raised.
 
+**Addenda, 30 Oct 2026 (BASE-REDS-1023 repair 3; verify-BASE-REDS-1023-r3
+and the assurance attack of 29 Oct 2026).** The D-7145..D-7154 block is
+used, so each is an addendum to the entry it extends; nothing above is
+edited.
+
+1. **D-7153, gate 1e: gate 1h.** Gate 1e builds and tests a worktree with
+   `web/` deleted, and it was red on 14 of 16 Mac runs from 19 Oct because
+   two `bars_export` tests read `web/` (RA-01, RO-08); verify r3 ran only
+   `--fast`, which skips 1e. A new step, Gate 1h, runs `source_scan
+   web-reads` over every tracked path: it reads the TEST code of each `.rs`
+   under `crates/` (whole files under `tests/`, `benches/`, `examples/`,
+   `src/` files only a test module mounts, and the `#[cfg(test)]`,
+   `#[cfg(all(test, ..))]` and `#[test]` items of the rest) and refuses a
+   statement that climbs with `..` into `web`, holds a `web` segment beside
+   a repository anchor, or reads a name bound to a path into `web/` (by the
+   test, or by a production `const`/`static` of its crate); every `concat!`
+   joined, every literal decoded; and a tracked link under `crates/` into
+   `web/`. The rule is the shape every such read has taken, not a list of
+   files: a fixture's own `web/` under a temp root, a comment and a
+   production read pass. It is red on f01d7a0e4 (`bars_export.rs:1162` and
+   `:1165`) and green here; its seven tests run in gate 0. The bound and
+   what it cannot see are L-BRED23-17. Gate 1e itself ran whole on the
+   final tip (state/fix/round2/, named in this repair's report), and the
+   moved web test was shown to bind the server: a ceiling of 20,001 and a
+   first column `feed_x` in a scratch copy of `bars_export.rs` each failed
+   it.
+2. **D-7152 item 4 and its addendum: no test asks again where its caller
+   does not (TST-01).** Every production caller of the plain
+   `Journal::append` and of `open_run`/`close_run`/`close_unopened` surfaces
+   an `APPEND_LOCK_WAIT` refusal once (L-BRED23-16 lists each, file and
+   line); only `RunLedger::write` offers a refused member failure again, at
+   its next flush. So `eight_concurrent_appenders_lose_no_record` and the
+   code-4 barrier experiment ask each record once: a refusal is accepted
+   only when the call itself waited the whole bound and names it (a sooner
+   one, the `try_lock` build's shape, fails), and the journal must hold
+   exactly the answered successes, whole and once. Round 2's
+   `a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_asked_again`
+   is `..._is_named` now. The wait and the refusals of eight appenders at
+   1x, 10x and 100x records held are printed by
+   `eight_appenders_at_one_ten_and_a_hundred_times_the_records_held` and
+   written in L-BRED23-16 with their loads: a refusal rate above zero under
+   load is a stated limit, not a retry.
+3. **D3 (operator decisions D2 and D3, D-7250) on this part's set, narrow
+   reading.** Each coverage gap verify r3 measured has a test that reaches
+   it (BRED-33 to BRED-39), or its code was removed as redundant, never
+   covered by weakening: `quarantine::judge` reads its two stamp sets
+   directly (its `named_by` closure had a whole-month arm no caller
+   reached); `note_hole_skipped` takes the hole's reason and whether it is
+   repairable (a `Skip` parameter gave it a done/restated arm its one
+   caller never passed); `zerodha_spool::live_probe`'s answer to one
+   `flock` attempt is `probed`, which a test hands the host refusal no lock
+   file gives on request; one assertion keeps the one spelling its page
+   writes. This part's load-robust measurements put their decisions in
+   functions their own tests drive with invented figures (the write door's
+   misses and stop rule, the lookup ratio's `settled`, the feed run's
+   verdicts), so no side waits for a loaded machine to be taken. The four
+   M2 survivors (`flat_spaces` `||`/`>`, `disarms` `+=`, `opens_disarm`)
+   each have a test that fails under the mutant.
+4. **L-BRED23-10 corrected.** Its `/calendar-days.json` figures timed the
+   route's 400 for `limit=50`; they are timed again on answered requests.
+
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store
