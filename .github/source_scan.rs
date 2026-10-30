@@ -5851,7 +5851,7 @@ mod tests {
             "const fn root() -> u8 { 1 }",
         ] {
             let st = stmt(item);
-            assert!(!st.item && st.bound.is_empty(), "{item}");
+            assert_eq!((st.item, st.bound), (false, s(&[])), "{item}");
         }
         let st = stmt("let p = format!(\"../web\");");
         assert_eq!((st.idents, st.lits), (s(&["format"]), s(&["../web"])));
