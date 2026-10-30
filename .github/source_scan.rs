@@ -966,16 +966,23 @@ fn web_read_of(st: &WebStmt, names: &mut WebNames) -> Option<String> {
 /// `#[cfg(all(test, ..))]` and `#[test]` item, merged where they overlap.
 fn test_regions(src: &str, t: &[Token]) -> Vec<(usize, usize)> {
     let mut spans = test_spans(src, t);
+    // Each token's word, once: an identifier or a punctuation mark, else "".
+    let words: Vec<String> = t
+        .iter()
+        .map(|x| match &x.tok {
+            Tok::Ident(s) => s.clone(),
+            Tok::Punct(c) => c.to_string(),
+            _ => String::new(),
+        })
+        .collect();
+    let at = |i: usize, want: &[&str]| {
+        words
+            .get(i..i + want.len())
+            .is_some_and(|got| got.iter().zip(want).all(|(g, w)| g.as_str() == *w))
+    };
     for i in 0..t.len() {
-        let attr = is_punct(t.get(i), '#') && is_punct(t.get(i + 1), '[');
-        let all_test = is_ident(t.get(i + 2), "cfg")
-            && is_punct(t.get(i + 3), '(')
-            && is_ident(t.get(i + 4), "all")
-            && is_punct(t.get(i + 5), '(')
-            && is_ident(t.get(i + 6), "test")
-            && (is_punct(t.get(i + 7), ',') || is_punct(t.get(i + 7), ')'));
-        let test_attr = is_ident(t.get(i + 2), "test") && is_punct(t.get(i + 3), ']');
-        if attr && (all_test || test_attr) {
+        // `test` is a name-only cfg, so `all(test` is followed by `,` or `)`.
+        if at(i, &["#", "[", "cfg", "(", "all", "(", "test"]) || at(i, &["#", "[", "test", "]"]) {
             let last = item_end(t, skip_group(t, i + 1));
             spans.push((t[i].start, t.get(last).map_or(src.len(), |x| x.end)));
         }
@@ -3706,7 +3713,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-reads|web-roots|paths|paths-prod|closure|orphans|prod-files|toml|deps|build-keys|bench-keys|fork-refusal|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-roots|paths|paths-prod|closure|orphans|prod-files|toml|deps|build-keys|bench-keys|fork-refusal|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -3741,26 +3748,6 @@ fn run(args: &[String]) -> Result<bool, String> {
                 }
                 clean &= found.is_empty();
             }
-        }
-        "web-reads" => {
-            let listing = rest
-                .first()
-                .ok_or("web-reads needs a NUL-separated tracked listing")?;
-            let tracked = tracked_set(&read_file(listing)?);
-            let read = |p: &str| {
-                tracked
-                    .contains(p)
-                    .then(|| std::fs::read_to_string(p).ok())
-                    .flatten()
-            };
-            let (found, scanned) = web_reads(&tracked, &read, Path::new("."))?;
-            for l in &found {
-                println!("{l}");
-            }
-            println!(
-                "scanned the test code of {scanned} tracked .rs file(s) and every tracked link under crates/"
-            );
-            clean &= found.is_empty();
         }
         "web-roots" => {
             let listing = rest
@@ -4013,18 +4000,57 @@ fn run(args: &[String]) -> Result<bool, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
+    exit_code(dispatch(&args, Path::new(".")), args.is_empty())
+}
+
+/// The subcommand `args` names, over the tree at `root` (the working
+/// directory): gate 1h's `web-reads` ([`web_reads_cli`], BASE-REDS-1023
+/// repair 3) here, every other in [`run`]. Apart from `main` so the tests
+/// drive every way in, with a tree of their own.
+fn dispatch(args: &[String], root: &Path) -> Result<bool, String> {
+    match args.split_first() {
+        Some((cmd, rest)) if cmd == "web-reads" => web_reads_cli(rest, root),
+        _ => run(args),
+    }
+}
+
+/// The process's answer: 0 when every file read is clean, 1 when a finding
+/// was printed, and 2 for a refusal, with the usage when no subcommand was
+/// given.
+fn exit_code(outcome: Result<bool, String>, no_args: bool) -> ExitCode {
+    match outcome {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {
             eprintln!("source_scan: {e}");
-            if args.is_empty() {
-                usage()
-            } else {
-                ExitCode::from(2)
-            }
+            if no_args { usage() } else { ExitCode::from(2) }
         }
     }
+}
+
+/// `web-reads <NUL-separated tracked listing>`: gate 1h ([`web_reads`]) over
+/// the tree at `root`, each finding a line, then what was read; clean when
+/// nothing was found.
+fn web_reads_cli(rest: &[String], root: &Path) -> Result<bool, String> {
+    let listing = rest
+        .first()
+        .ok_or("web-reads needs a NUL-separated tracked listing")?;
+    let tracked = tracked_set(&read_file(listing)?);
+    let read = |p: &str| {
+        tracked
+            .contains(p)
+            .then(|| std::fs::read_to_string(root.join(p)).ok())
+            .flatten()
+    };
+    let (found, scanned) = web_reads(&tracked, &read, root)?;
+    for l in &found {
+        println!("{l}");
+    }
+    println!(
+        "web-reads: {} finding(s) in the test code of {scanned} tracked .rs file(s) and every tracked link under crates/",
+        found.len()
+    );
+    Ok(found.is_empty())
 }
 
 #[cfg(test)]
@@ -5421,6 +5447,26 @@ mod tests {
                 "the run-time manifest directory",
                 "let _ = Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap()).join(\"web\");",
             ),
+            (
+                "a mut binding pushed out of the crate",
+                "let mut base = Path::new(env!(\"CARGO_MANIFEST_DIR\")).to_path_buf();\n        base.push(\"..\");\n        let _ = std::fs::read(base.join(\"web/x.js\"));",
+            ),
+            (
+                "a file!() join",
+                "let _ = Path::new(file!()).parent().unwrap().join(\"web\");",
+            ),
+            (
+                "the working directory",
+                "let _ = std::env::current_dir().unwrap().join(\"web\");",
+            ),
+            (
+                "a braced concat!",
+                "let _ = std::fs::read(concat!{\"../../\", \"web/x.js\"});",
+            ),
+            (
+                "a slice joined by .concat()",
+                "let _ = std::fs::read([\"../../\", \"web/x.js\"].concat());",
+            ),
         ] {
             let hits = web_hits(&in_test(body));
             assert!(!hits.is_empty(), "{case} passed: {body}");
@@ -5480,12 +5526,47 @@ mod tests {
                 "a name that is only rebound",
                 "let at = |text: &str| text.len();\n        assert_eq!(at(\"web\"), 3);",
             ),
+            (
+                "a let-else whose pattern names web",
+                "let Some(\"web\") = parts.next() else {\n            return;\n        };",
+            ),
         ] {
             let hits = web_hits(&in_test(body));
             assert!(hits.is_empty(), "{case} refused: {hits:?}");
         }
-        let production = "pub fn page() -> String {\n    std::fs::read_to_string(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../../web/build/index.html\")).unwrap_or_default()\n}\n";
+        let production = "pub fn page() -> String {\n    std::fs::read_to_string(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../../web/build/index.html\")).unwrap_or_default()\n}\npub const fn served() -> u8 {\n    1\n}\n";
         assert!(web_hits(production).is_empty());
+    }
+
+    /// Test items OUTSIDE a test module are test code too: a
+    /// `#[cfg(all(test, ..))]` item, and two `#[test]` functions with
+    /// production code between them, each read as its own region.
+    #[test]
+    fn test_items_outside_a_test_module_are_read_region_by_region() {
+        let all_test = "#[cfg(all(test, unix))]\nfn helper() {\n    let _ = std::fs::read(\"../../web/x.js\");\n}\nfn served() {}\n";
+        let hits = web_hits(all_test);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].starts_with("crates/a/src/x.rs:3: climbs into web/"),
+            "{hits:?}"
+        );
+        let two = "#[test]\nfn a() {}\nfn served() -> &'static str {\n    \"../../web\"\n}\n#[test]\nfn b() {\n    let _ = std::fs::read(\"../../web/x.js\");\n}\n";
+        let hits = web_hits(two);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the production literal is not test code: {hits:?}"
+        );
+        assert!(
+            hits[0].starts_with("crates/a/src/x.rs:8: climbs into web/"),
+            "{hits:?}"
+        );
+        let t = lex("a; b").unwrap().tokens;
+        assert_eq!(
+            statement_ranges(&t),
+            vec![(0, 1), (2, 3)],
+            "a statement with no terminator after it is still one"
+        );
     }
 
     /// COMBINATIONS: a test join through a `const` that PRODUCTION code
@@ -5585,12 +5666,92 @@ mod tests {
         assert!(link_into_web(&root, "crates/a/tests/abs").is_some());
         assert_eq!(link_into_web(&root, "crates/a/tests/local"), None);
         assert_eq!(link_into_web(&root, "crates/a/Cargo.toml"), None);
+        std::fs::create_dir_all(root.join("crates/a/src")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("crates/a/src"),
+            root.join("crates/a/tests/abs-in"),
+        )
+        .unwrap();
+        assert_eq!(
+            link_into_web(&root, "crates/a/tests/abs-in"),
+            None,
+            "an absolute link that stays in the crate"
+        );
+        // Over the tree: the link is a finding by its target, and the walk
+        // goes on; a build script outside `src/` is read by its test items.
+        let files = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("crates/a/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/a/build.rs", "fn main() {}\n"),
+            ("crates/a/tests/fixtures", ""),
+        ];
+        let listed: BTreeSet<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
+        let (read, _) = tracked(&files);
+        let (hits, scanned) = web_reads(&listed, &read, &root).unwrap();
+        assert_eq!(scanned, 2, "lib.rs and build.rs");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].starts_with("crates/a/tests/fixtures: a link into web/"),
+            "{hits:?}"
+        );
+    }
+
+    /// The process's ways in, with a tree of the test's own on disk:
+    /// `web-reads` clean, with a finding, with no listing and with a listing
+    /// that names no crate; another subcommand goes to `run`; the exit codes
+    /// of every outcome; and `main` with no subcommand answers the usage's 2.
+    #[test]
+    fn the_web_reads_subcommand_and_every_exit_code() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("brutex-gate1h-cli-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(root.join("crates/a/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/a/tests")).unwrap();
+        let mut files = vec![
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("crates/a/src/lib.rs", "pub fn f() {}\n"),
+        ];
+        let write = |files: &[(&str, &str)]| {
+            for (p, text) in files {
+                std::fs::write(root.join(p), text).unwrap();
+            }
+            let listing: String = files.iter().map(|(p, _)| format!("{p}\0")).collect();
+            let at = root.join("tracked.z");
+            std::fs::write(&at, listing).unwrap();
+            vec!["web-reads".to_owned(), at.display().to_string()]
+        };
+        let clean = write(&files);
+        assert_eq!(dispatch(&clean, &root), Ok(true));
+        files.push((
+            "crates/a/tests/t.rs",
+            "fn read() {\n    let _ = std::fs::read(\"../../web/x.js\");\n}\n",
+        ));
+        let red = write(&files);
+        assert_eq!(dispatch(&red, &root), Ok(false));
+        assert!(dispatch(&["web-reads".to_owned()], &root).is_err());
+        let no_crate = write(&[("Cargo.toml", "[workspace]\nmembers = []\n")]);
+        assert!(dispatch(&no_crate, &root).is_err());
+        assert_eq!(dispatch(&["browser".to_owned()], &root), Ok(true));
+        assert_eq!(exit_code(Ok(true), false), ExitCode::SUCCESS);
+        assert_eq!(exit_code(Ok(false), false), ExitCode::from(1));
+        assert_eq!(exit_code(Err("x".to_owned()), false), ExitCode::from(2));
+        assert_eq!(exit_code(Err("x".to_owned()), true), ExitCode::from(2));
+        assert_eq!(
+            main(),
+            ExitCode::from(2),
+            "the harness gives main no subcommand"
+        );
     }
 
     /// The inline format arguments a literal reads, and the ones it does not.
     #[test]
     fn format_names_reads_inline_arguments_only() {
         assert_eq!(format_names("{root}/web/{f:?} {} {0} {{x}}"), ["root", "f"]);
+        assert_eq!(format_names("{my_root}/web"), ["my_root"]);
         assert!(format_names("no braces").is_empty());
         assert!(format_names("{9a} {").is_empty());
     }
