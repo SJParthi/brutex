@@ -1081,12 +1081,23 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
             assert_eq!(headers[0].1, "application/json; charset=utf-8");
             let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-            assert_eq!(body["status"], "not_found", "{body}");
-            assert_eq!(body["identity"], "b".repeat(64));
-            assert_eq!(body["rows"], serde_json::json!([]), "an empty list: {body}");
+            assert_eq!(
+                body.get("status"),
+                Some(&serde_json::json!("not_found")),
+                "{body}"
+            );
+            assert_eq!(
+                body.get("identity"),
+                Some(&serde_json::json!("b".repeat(64)))
+            );
+            assert_eq!(
+                body.get("rows"),
+                Some(&serde_json::json!([])),
+                "an empty list: {body}"
+            );
             assert!(
-                body["refusal"]
-                    .as_str()
+                body.get("refusal")
+                    .and_then(serde_json::Value::as_str)
                     .is_some_and(|why| why.contains("Run frontier not held")),
                 "and it says why: {body}"
             );
@@ -1225,8 +1236,11 @@ mod tests {
         // 404 for that run alone, beside another run's committed frontier.
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-        assert_eq!(parsed["identity"], "94".repeat(32));
-        assert_eq!(parsed["status"], "not_found");
+        assert_eq!(
+            parsed.get("identity"),
+            Some(&serde_json::json!("94".repeat(32)))
+        );
+        assert_eq!(parsed.get("status"), Some(&serde_json::json!("not_found")));
         assert!(body.contains(r#""rows":[]"#), "{body}");
         assert!(body.contains("Run frontier not held"), "{body}");
         assert!(!body.contains(r#""rank":1"#), "foreign row leaked: {body}");

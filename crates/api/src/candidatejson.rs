@@ -213,19 +213,13 @@ fn render(root: &Path, asked: &Asked) -> Result<String, Refused> {
     // A TIER OR A RANK PAST THE SAVED COUNT is the client's selector, `416`,
     // decided before the reader is asked for it (D-7551).
     if asked.tier >= summary.tiers {
-        return Err(Refused::OutOfRange(format!(
-            "tier {} is past the {} saved tiers; no row was served",
-            asked.tier, summary.tiers
-        )));
+        return Err(past("tier", asked.tier, summary.tiers));
     }
     let tier = candidate_trades::tier(root, &summary, asked.tier, crate::detail::MAX_SCAN_BYTES)?;
     let (kind, total, rows, selected) = match (asked.rank, asked.direction) {
         (Some(rank), Some(direction)) => {
             if rank > tier.evaluated {
-                return Err(Refused::OutOfRange(format!(
-                    "rank {rank} is past the tier's {} saved ranks; no row was served",
-                    tier.evaluated
-                )));
+                return Err(past("rank", rank, tier.evaluated));
             }
             let key = Key {
                 tier: asked.tier,
@@ -314,6 +308,13 @@ fn validate_window(total: u64, offset: u64, count: usize) -> Result<(), String> 
         return Err("candidate page is outside its exact recorded extent".to_owned());
     }
     Ok(())
+}
+/// A `selector` (a tier, a rank) the client named past the `saved` count:
+/// the client's `416` (D-7551).
+fn past(selector: &str, asked: u64, saved: u64) -> Refused {
+    Refused::OutOfRange(format!(
+        "{selector} {asked} is past the {saved} saved {selector}s; no row was served"
+    ))
 }
 /// THE EXTENT STEP of a candidate page (D-7551), before the page is read: its
 /// first row must be saved, an empty result's first page alone excepted --
@@ -484,8 +485,7 @@ mod tests {
     /// **A tier, a rank or a page past the saved extent is the client's
     /// `416`, and a stale digest the one `404`** (D-7550, D-7551), each
     /// decided by its own step before the page is read, never the `503` they
-    /// answered before. One tier of one rank, two sides, no cells; and an
-    /// empty catalog, whose only page is its first.
+    /// answered before. One tier of one rank, two sides, no cells.
     #[test]
     fn a_selector_or_page_past_the_saved_extent_is_the_clients_416() -> Result<(), String> {
         let root = crate::scratch::path("candidate-api-status-rule-extents");
@@ -527,7 +527,7 @@ mod tests {
             (
                 format!("{pinned}&rank=2&direction=long"),
                 past,
-                "rank 2 is past the tier's 1",
+                "rank 2 is past the 1 saved ranks",
             ),
             (
                 format!("{pinned}&rank=1&direction=short"),
@@ -570,6 +570,24 @@ mod tests {
             assert_eq!(got, status, "{query}: {why}");
             assert!(why.contains(says), "{query}: {why}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+    /// **An empty catalog's only page is its first; any other tier, offset or
+    /// rank is the client's `416`** (D-7551), and the extent step alone: a
+    /// candidate page must start on a saved row, an empty result's first page
+    /// excepted.
+    #[test]
+    fn an_empty_catalogs_only_page_is_its_first_and_a_page_starts_on_a_saved_row()
+    -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-status-rule-empty");
+        let answered = |query: String| -> Result<(axum::http::StatusCode, String), String> {
+            Ok(match answer(Ok(root.clone()), &Asked::parse(&query)?) {
+                Ok(body) => (axum::http::StatusCode::OK, body),
+                Err(fault) => (fault.status(), fault.why),
+            })
+        };
+        let past = axum::http::StatusCode::RANGE_NOT_SATISFIABLE;
         let empty = and_capture(&root, [44; 32], false)?;
         let first: Value = serde_json::from_str(&page(&root, &Asked::parse(&empty)?)?)
             .map_err(|e| e.to_string())?;

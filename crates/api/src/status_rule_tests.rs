@@ -1815,6 +1815,10 @@ fn not_a_directory() -> String {
     std::io::Error::from_raw_os_error(20).to_string()
 }
 
+/// One Boolean reader's open of an identity's entry under a root, at a byte
+/// budget: `Ok` when it opened, or its refusal.
+type Opens = fn(&Path, [u8; 32], u64) -> Result<(), String>;
+
 /// **EVERY NAMESPACE THE PROBE USES IS THE ONE ITS `cli` READER OPENS** — a
 /// probe looking anywhere else would answer `404` for every saved result. Each
 /// reader is asked on an empty root and then with something planted exactly
@@ -1873,7 +1877,7 @@ fn every_probed_namespace_is_the_one_its_reader_opens() {
         ));
     }
 
-    let opened: [(&str, fn(&Path, [u8; 32], u64) -> Result<(), String>); 4] = [
+    let opened: [(&str, Opens); 4] = [
         (namespace::BOOLEAN_CANDIDATES, |root, id, max| {
             cli::boolean_observation::Reader::open(root, id, max).map(drop)
         }),

@@ -253,8 +253,11 @@ mod tests {
         let fault = answer(Ok(root.clone()), &asked).err().ok_or("refused")?;
         assert_eq!(fault.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            fault.identity_body(Some(asked.identity))["status"],
-            "not_found"
+            fault
+                .identity_body(Some(asked.identity))
+                .get("status")
+                .cloned(),
+            Some(serde_json::json!("not_found"))
         );
         assert!(!root.exists());
         let progress = Progress {
