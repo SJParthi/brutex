@@ -439,6 +439,40 @@ jobs:
           "$gt" gate-1f prepare "$work"
           st=0; xargs -0 -r "$scan" browser < "$work/rs.z" > "$work/browser" || st=$?
           "$gt" gate-1f verdict "$work" "$st"
+      - name: Gate 1h — no crate test reads a path into web/
+        run: |
+          set -euo pipefail
+          # GATE 1E SAYS THIS AFTER A WHOLE BUILD; THIS SAYS IT IN SECONDS.
+          # CLAUDE.md section 2: `cargo test` must pass on a machine with no
+          # `web/` build ever run, and gate 1e builds and tests a worktree of
+          # this commit with `web/` deleted. Two tests of
+          # crates/api/src/bars_export.rs read web/src/lib/db/bars-plan.js and
+          # export.js through env!("CARGO_MANIFEST_DIR") joined to
+          # "../../web", so 1e was red on 14 of 16 Mac runs from 19 Oct, and
+          # only its full build could say so (the assurance attack of 29 Oct
+          # 2026, RA-01/RO-08; BASE-REDS-1023 repair 3, D-7154 addendum).
+          #
+          # `source_scan web-reads` lexes the TEST code of every tracked .rs
+          # under crates/ -- whole files under tests/, benches/ and
+          # examples/, src/ files only a test module mounts, and the
+          # #[cfg(test)], #[cfg(all(test, ..))] and #[test] items of the
+          # rest -- and refuses a statement that climbs with `..` into `web`,
+          # a `web` segment beside a repository anchor (a `..`,
+          # CARGO_MANIFEST_DIR, file!(), current_dir, or a name bound to one),
+          # or a name bound to a path into web/ by the test or by a const or
+          # static of the crate's production code; every concat! is joined
+          # and every literal decoded first. A tracked link under crates/
+          # whose target lands in web/ is refused too. Its own tests run in
+          # gate 0. A move into web/tests (as bars_export's cross-check did,
+          # web/tests/export-agrees-with-the-server.test.js) is the fix.
+          #
+          # WHAT IT CANNOT SEE: a path assembled at run time from pieces none
+          # of which names web, and a test that calls production code which
+          # reads web/ at run time; gate 1e still runs for both.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          work=$(mktemp -d)
+          git ls-files -z > "$work/tracked.z"
+          "$scan" web-reads "$work/tracked.z"
       - name: Gate 1c — no literal credential path
         run: |
           set -euo pipefail

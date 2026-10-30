@@ -1561,6 +1561,15 @@ mod tests {
         );
         assert_eq!(s("a flat JSON object here"), "a  here");
         assert_eq!(s("a flat json object here"), "a  here");
+        // `flat_spaces` reads `[Ff]lat` and nothing else, and only with a
+        // blank or one `-` after it: `Xlat` and `Flax` are not the word, and
+        // `flatbar` has no blank (BASE-REDS-1023 repair 3, the two M2
+        // survivors of verify r3: `||` read as `&&`, `>` read as `>=`).
+        assert_eq!(
+            s("Xlat bar, Flax bar, flatbar"),
+            "Xlat bar, Flax bar, flatbar"
+        );
+        assert_eq!(s("a flatjson object"), "a flatjson object");
         assert_eq!(s("came out flat; is charged Flat; rA flat"), "; ; r");
         // A trade's outcome is not a cost (D-1930, D-1939).
         assert_eq!(

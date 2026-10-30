@@ -3978,6 +3978,26 @@ mod tests {
         }
         let clean = format!("{inner}dead_code)]\nfn a() {{}}\n");
         assert!(g11(&[("crates/a/src/x.rs", &clean)], &lists()).0);
+        // The lint on a later line than the opening one, with a line between
+        // that closes nothing: the depth is the SUM of the lines' brackets,
+        // so the attribute is read whole to its `)]` (BASE-REDS-1023 repair
+        // 3, verify r3's M2 survivor `+=` read as `*=`).
+        let late = format!(
+            "{ALLOW_ATTR}\n    reason = \"x\",\n    clippy::unwrap_used,\n)]\nfn a() {{}}\n"
+        );
+        let (ok, text) = g11(&[("crates/a/src/x.rs", &late)], &lists());
+        assert!(!ok, "{late}");
+        assert!(text.contains("rule 5c: 1 occurrence(s)"), "{text}");
+        // A line that NAMES a denied lint and opens no attribute is not a
+        // disarm: a comment, and a string in code (verify r3's M2 survivor
+        // `opens_disarm` read as `true`).
+        for named in [
+            "// clippy::unwrap_used is denied at the workspace root\nfn a() {}\n",
+            "fn a() -> &'static str {\n    \"clippy::panic\"\n}\n",
+        ] {
+            let (ok, text) = g11(&[("crates/a/src/x.rs", named)], &lists());
+            assert!(ok, "{named}: {text}");
+        }
         for hit in [
             "let p = xs.into_iter().find(|x| x.ok());\n",
             "let p = xs.into_iter().position(|x| x.ok());\n",

@@ -721,6 +721,405 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+// ----------------------------------------- no crate test reads web/ (1h) --
+//
+// BASE-REDS-1023 repair 3 (the assurance attack of 29 Oct 2026, RA-01 and
+// RO-08; D-7154 addendum). CLAUDE.md section 2: `cargo test` must pass on a
+// machine with no `web/` build ever run, and gate 1e proves it by building
+// and testing a worktree with `web/` DELETED. Two tests of
+// `crates/api/src/bars_export.rs` read `web/src/lib/db/bars-plan.js` and
+// `export.js` through `Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web")`,
+// so gate 1e was red on 14 of 16 Mac runs since 19 Oct, and only the full
+// build of 1e could say so. This check says it in seconds, from tokens.
+//
+// TEST CODE is a whole file under `crates/<c>/tests/`, `benches/` or
+// `examples/`, a whole `crates/<c>/src/` file that no production build
+// compiles (a test-only module), and in every other file the `#[cfg(test)]`,
+// `#[cfg(all(test, ..))]` and `#[test]` items. It READS A PATH INTO `web/`
+// when one statement of it (the tokens between `;`, `{` and `}`) holds:
+//   * a literal that climbs with `..` straight into `web` (`../../web`,
+//     `{}/../../web/{}`, the `../../../web/x.js` of an `include_str!`),
+//     each `concat!` joined first and every raw or escaped literal decoded;
+//   * a literal with a `web` segment beside a repository anchor: a `..`
+//     segment, `CARGO_MANIFEST_DIR` (by `env!`, `option_env!` or
+//     `env::var`), `file!()`, `current_dir`, or a name bound to one;
+//   * a name bound to a path into `web/`: by an earlier statement of the
+//     test code, or by a `const` or `static` of the crate's production code.
+// A link under `crates/` whose target lands in `web/` is refused too.
+//
+// WHAT IT CANNOT SEE, stated: a path assembled at run time from pieces none
+// of which names `web` (`["w", "eb"].concat()`), and a test that calls a
+// production function that reads `web/` at run time (`assets::Assets`, the
+// server's own run-time read, which section 2 allows). Gate 1e still runs.
+
+/// A literal's path segments, split on `/` and `\`.
+fn path_segments(text: &str) -> Vec<&str> {
+    text.split(['/', '\\']).collect()
+}
+
+/// Does `text` climb with `..` straight into `web`?
+fn climbs_into_web(text: &str) -> bool {
+    path_segments(text)
+        .windows(2)
+        .any(|w| w[0] == ".." && w[1] == "web")
+}
+
+/// Does `text` hold a path segment that is exactly `web`?
+fn names_web(text: &str) -> bool {
+    path_segments(text).contains(&"web")
+}
+
+/// Is `text` an anchor at the repository: a `..` segment, or the name of
+/// the variable cargo sets to the crate's own directory?
+fn anchors_at_repo(text: &str) -> bool {
+    path_segments(text).contains(&"..")
+        || matches!(text, "CARGO_MANIFEST_DIR" | "CARGO_WORKSPACE_DIR")
+}
+
+/// The names a literal's inline format arguments read: `{root}` and
+/// `{root:?}` read `root`; `{}`, `{0}` and `{{` read none.
+fn format_names(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        if b.get(i + 1) == Some(&b'{') {
+            i += 2;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while b
+            .get(j)
+            .is_some_and(|c| *c == b'_' || c.is_ascii_alphanumeric())
+        {
+            j += 1;
+        }
+        if j > start && !b[start].is_ascii_digit() && matches!(b.get(j), Some(b'}' | b':')) {
+            out.push(text[start..j].to_owned());
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// The names a production `const` or `static`, or an earlier test
+/// statement, gave a repository anchor (`anchors`) or a path into `web/`
+/// (`web`).
+#[derive(Clone, Debug, Default)]
+struct WebNames {
+    anchors: BTreeSet<String>,
+    web: BTreeSet<String>,
+}
+
+/// One statement: its literals (each `concat!` also joined),
+/// the names it reads, the names it binds, and whether it is a `const` or
+/// `static` item.
+#[derive(Debug, Default)]
+struct WebStmt {
+    lits: Vec<String>,
+    idents: Vec<String>,
+    bound: Vec<String>,
+    item: bool,
+    file_macro: bool,
+}
+
+/// The token ranges between `;`, `{` and `}`.
+fn statement_ranges(t: &[Token]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, x) in t.iter().enumerate() {
+        if matches!(x.tok, Tok::Punct(';' | '{' | '}')) {
+            if i > start {
+                out.push((start, i));
+            }
+            start = i + 1;
+        }
+    }
+    if t.len() > start {
+        out.push((start, t.len()));
+    }
+    out
+}
+
+/// What the statement `t` holds and binds.
+fn web_stmt(t: &[Token]) -> WebStmt {
+    let mut st = WebStmt::default();
+    // A leading visibility (`pub`, `pub(crate)`) is not the binding.
+    let mut k = 0;
+    if is_ident(t.first(), "pub") {
+        k = 1;
+        if is_punct(t.get(1), '(') {
+            k = skip_group(t, 1);
+        }
+    }
+    let lower = |n: &&str| n.starts_with(|c: char| c.is_ascii_lowercase() || c == '_');
+    // The names a binding READS are its initializer's, after its `=`: the
+    // name it binds is not read by binding it.
+    let init = |from: usize| {
+        t.iter()
+            .skip(from)
+            .position(|y| y.tok == Tok::Punct('='))
+            .map_or(t.len(), |p| from + p + 1)
+    };
+    let mut reads_from = 0;
+    match t.get(k).and_then(ident) {
+        Some("let") => {
+            st.bound = t[k + 1..]
+                .iter()
+                .take_while(|y| !matches!(y.tok, Tok::Punct('=' | ':')))
+                .filter_map(ident)
+                .filter(|n| !matches!(*n, "mut" | "ref") && lower(n))
+                .map(str::to_owned)
+                .collect();
+            reads_from = init(k + 1);
+        }
+        Some("const" | "static") if !is_ident(t.get(k + 1), "fn") => {
+            st.item = true;
+            st.bound = t[k + 1..]
+                .iter()
+                .filter_map(ident)
+                .find(|n| *n != "mut")
+                .map(|n| vec![n.to_owned()])
+                .unwrap_or_default();
+            reads_from = init(k + 1);
+        }
+        _ => {}
+    }
+    for (i, x) in t.iter().enumerate() {
+        match &x.tok {
+            Tok::Str(s) => {
+                if i >= reads_from {
+                    st.idents.extend(format_names(s));
+                }
+                st.lits.push(s.clone());
+            }
+            Tok::Ident(n) => {
+                st.file_macro |= n == "file" && is_punct(t.get(i + 1), '!');
+                if i >= reads_from {
+                    st.idents.push(n.clone());
+                }
+            }
+            _ => {}
+        }
+        // concat!("../..", "/web") is one literal to the compiler.
+        if is_ident(t.get(i), "concat")
+            && is_punct(t.get(i + 1), '!')
+            && t.get(i + 2)
+                .is_some_and(|y| matches!(y.tok, Tok::Punct('(' | '[')))
+        {
+            let end = skip_group(t, i + 2).min(t.len());
+            st.lits.push(
+                t[i + 2..end]
+                    .iter()
+                    .filter_map(|y| match &y.tok {
+                        Tok::Str(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+    }
+    st
+}
+
+/// Why the statement reads a path into `web/`, if it does; then its
+/// bindings update `names` (a binding to neither forgets the name, so a
+/// shadowing `let root = tempdir` is not an anchor).
+fn web_read_of(st: &WebStmt, names: &mut WebNames) -> Option<String> {
+    let anchor = st.file_macro
+        || st.lits.iter().any(|l| anchors_at_repo(l))
+        || st
+            .idents
+            .iter()
+            .any(|n| n == "current_dir" || names.anchors.contains(n));
+    let why = if let Some(l) = st.lits.iter().find(|l| climbs_into_web(l)) {
+        Some(format!("climbs into web/: {l:?}"))
+    } else if let Some(l) = st.lits.iter().find(|l| names_web(l)).filter(|_| anchor) {
+        Some(format!("a web segment beside a repository anchor: {l:?}"))
+    } else {
+        st.idents
+            .iter()
+            .find(|n| names.web.contains(*n))
+            .map(|n| format!("reads `{n}`, a name bound to a path into web/"))
+    };
+    for n in &st.bound {
+        if anchor {
+            names.anchors.insert(n.clone());
+        } else {
+            names.anchors.remove(n);
+        }
+        if why.is_some() {
+            names.web.insert(n.clone());
+        } else {
+            names.web.remove(n);
+        }
+    }
+    why
+}
+
+/// The byte spans of a file's test items: `#[cfg(test)]` regions, and every
+/// `#[cfg(all(test, ..))]` and `#[test]` item, merged where they overlap.
+fn test_regions(src: &str, t: &[Token]) -> Vec<(usize, usize)> {
+    let mut spans = test_spans(src, t);
+    for i in 0..t.len() {
+        let attr = is_punct(t.get(i), '#') && is_punct(t.get(i + 1), '[');
+        let all_test = is_ident(t.get(i + 2), "cfg")
+            && is_punct(t.get(i + 3), '(')
+            && is_ident(t.get(i + 4), "all")
+            && is_punct(t.get(i + 5), '(')
+            && is_ident(t.get(i + 6), "test")
+            && (is_punct(t.get(i + 7), ',') || is_punct(t.get(i + 7), ')'));
+        let test_attr = is_ident(t.get(i + 2), "test") && is_punct(t.get(i + 3), ']');
+        if attr && (all_test || test_attr) {
+            let last = item_end(t, skip_group(t, i + 1));
+            spans.push((t[i].start, t.get(last).map_or(src.len(), |x| x.end)));
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// Gate 1h over one file: every statement of its test code (the whole file
+/// when `whole`) that reads a path into `web/`, as `path:line: why`. `prod`
+/// holds the names its crate's production `const` and `static` items bind.
+fn web_read_findings(
+    path: &str,
+    src: &str,
+    whole: bool,
+    prod: &WebNames,
+) -> Result<Vec<String>, String> {
+    let t = lex(src)?.tokens;
+    let regions = if whole {
+        vec![(0, src.len())]
+    } else {
+        test_regions(src, &t)
+    };
+    let mut names = prod.clone();
+    let mut out = Vec::new();
+    for (s, e) in regions {
+        let part: Vec<Token> = t
+            .iter()
+            .filter(|x| x.start >= s && x.start < e)
+            .cloned()
+            .collect();
+        for (a, b) in statement_ranges(&part) {
+            if let Some(why) = web_read_of(&web_stmt(&part[a..b]), &mut names) {
+                out.push(format!("{path}:{}: {why}", part[a].line));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The names a PRODUCTION `const` or `static` of `src` binds to a
+/// repository anchor or to a path into `web/`, added to `names`.
+fn production_web_names(src: &str, names: &mut WebNames) -> Result<(), String> {
+    let t = production_tokens(src)?;
+    for (a, b) in statement_ranges(&t) {
+        let st = web_stmt(&t[a..b]);
+        if st.item {
+            web_read_of(&st, names);
+        }
+    }
+    Ok(())
+}
+
+/// A tracked `rel` under `root` that is a symbolic link whose target lands
+/// in `web/`: a relative target read against the link's own folder, an
+/// absolute one compared with `web/` itself.
+fn link_into_web(root: &Path, rel: &str) -> Option<String> {
+    let at = root.join(rel);
+    if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
+    let target = std::fs::read_link(&at).ok()?;
+    let lands = if target.is_absolute() {
+        let web = std::fs::canonicalize(root.join("web")).ok();
+        let real = std::fs::canonicalize(&target).ok();
+        matches!((real, web), (Some(r), Some(w)) if r.starts_with(&w))
+    } else {
+        normalise(
+            &Path::new(rel)
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join(&target),
+        )
+        .starts_with("web")
+    };
+    lands.then(|| format!("{rel}: a link into web/ ({})", target.display()))
+}
+
+/// Is `f` test code from its first token: a file under a crate's `tests/`,
+/// `benches/` or `examples/`, or a `src/` file no production build compiles?
+fn whole_test_file(f: &str, prod: &BTreeSet<String>) -> bool {
+    match f.split('/').collect::<Vec<_>>().as_slice() {
+        ["crates", _, "tests" | "benches" | "examples", ..] => true,
+        ["crates", _, "src", ..] => !prod.contains(f),
+        _ => false,
+    }
+}
+
+/// Gate 1h over the tracked tree: the findings and the number of `.rs`
+/// files read. A module that does not resolve is a finding, never a skip.
+fn web_reads(
+    tracked: &BTreeSet<String>,
+    read: &dyn Fn(&str) -> Option<String>,
+    root: &Path,
+) -> Result<(Vec<String>, usize), String> {
+    let under: Vec<&String> = tracked
+        .iter()
+        .filter(|f| f.starts_with("crates/"))
+        .collect();
+    if under.is_empty() {
+        return Err("web-reads: no tracked path under crates/".to_owned());
+    }
+    let roots: Vec<String> = compiled_roots(tracked, read)?
+        .into_iter()
+        .filter(|r| is_prod_root(r))
+        .collect();
+    let exists = |p: &str| tracked.contains(p);
+    let (prod, errs) = prod_closure(&roots, read, &exists);
+    let mut out: Vec<String> = errs.iter().map(|e| format!("UNRESOLVED {e}")).collect();
+    let crate_of = |f: &str| f.split('/').take(2).collect::<Vec<_>>().join("/");
+    let mut names: BTreeMap<String, WebNames> = BTreeMap::new();
+    for f in &prod {
+        let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
+        production_web_names(&src, names.entry(crate_of(f)).or_default())
+            .map_err(|e| format!("{f}: {e}"))?;
+    }
+    let mut scanned = 0;
+    for f in under {
+        if let Some(l) = link_into_web(root, f) {
+            out.push(l);
+            continue;
+        }
+        if !f.ends_with(".rs") {
+            continue;
+        }
+        let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
+        let none = WebNames::default();
+        let crate_names = names.get(&crate_of(f)).unwrap_or(&none);
+        out.extend(
+            web_read_findings(f, &src, whole_test_file(f, &prod), crate_names)
+                .map_err(|e| format!("{f}: {e}"))?,
+        );
+        scanned += 1;
+    }
+    Ok((out, scanned))
+}
+
 /// Every function a file declares, by line and name: each `fn` keyword token
 /// followed by an identifier. A `fn` in a comment or a string literal is not a
 /// token, so prose cannot add a function, and a `*`-led line is code.
@@ -3307,7 +3706,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-roots|paths|paths-prod|closure|orphans|prod-files|toml|deps|build-keys|bench-keys|fork-refusal|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-reads|web-roots|paths|paths-prod|closure|orphans|prod-files|toml|deps|build-keys|bench-keys|fork-refusal|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -3342,6 +3741,26 @@ fn run(args: &[String]) -> Result<bool, String> {
                 }
                 clean &= found.is_empty();
             }
+        }
+        "web-reads" => {
+            let listing = rest
+                .first()
+                .ok_or("web-reads needs a NUL-separated tracked listing")?;
+            let tracked = tracked_set(&read_file(listing)?);
+            let read = |p: &str| {
+                tracked
+                    .contains(p)
+                    .then(|| std::fs::read_to_string(p).ok())
+                    .flatten()
+            };
+            let (found, scanned) = web_reads(&tracked, &read, Path::new("."))?;
+            for l in &found {
+                println!("{l}");
+            }
+            println!(
+                "scanned the test code of {scanned} tracked .rs file(s) and every tracked link under crates/"
+            );
+            clean &= found.is_empty();
         }
         "web-roots" => {
             let listing = rest
@@ -4941,5 +5360,238 @@ mod tests {
         }
         let ok = "fn main() {\n    println!(\"cargo:rerun-if-env-changed=BRUTEX_COMMIT\");\n    println!(\"cargo:rerun-if-changed={}\", p.display());\n    println!(\"cargo:rustc-env=BRUTEX_COMMIT={commit}\");\n    println!(\"cargo:warning=x: {}\", r);\n    let _ = std::fs::read(\"x\");\n}\n#[cfg(test)]\nmod tests { fn t() { std::fs::write(\"x\", \"y\").ok(); } }\n";
         assert_eq!(build_findings("b.rs", ok).unwrap(), Vec::<String>::new());
+    }
+
+    // ---- gate 1h: no crate test reads a path into web/ (BASE-REDS-1023) ----
+
+    /// The findings of one file's test code, its own production `const`
+    /// and `static` items read first, as the gate reads a crate.
+    fn web_hits(src: &str) -> Vec<String> {
+        let mut names = WebNames::default();
+        production_web_names(src, &mut names).unwrap();
+        web_read_findings("crates/a/src/x.rs", src, false, &names).unwrap()
+    }
+
+    /// A test module around `body`, inside a `#[test]` fn.
+    fn in_test(body: &str) -> String {
+        format!(
+            "fn served() -> u8 {{ 1 }}\n#[cfg(test)]\nmod tests {{\n    use std::path::Path;\n    #[test]\n    fn t() {{\n        {body}\n    }}\n}}\n"
+        )
+    }
+
+    /// Every spelling of a test that reads a path into `web/`, one per
+    /// extreme case the assurance attack of 29 Oct named (RA-01, RO-08),
+    /// each refused at its own line.
+    #[test]
+    fn every_way_a_test_reaches_into_web_is_refused() {
+        for (case, body) in [
+            (
+                "a ../../web join",
+                "let _ = std::fs::read(Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../../web\").join(\"src/x.js\"));",
+            ),
+            (
+                "a path built with concat!",
+                "let _ = std::fs::read(concat!(\"../..\", \"/web/src/x.js\"));",
+            ),
+            (
+                "a path built with format!",
+                "let _ = std::fs::read(format!(\"{}/web/{}\", \"../..\", \"x.js\"));",
+            ),
+            (
+                "an env!(CARGO_MANIFEST_DIR) join in pieces",
+                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"..\").join(\"..\").join(\"web\");",
+            ),
+            (
+                "a raw string",
+                "let _ = std::fs::read(r#\"../../web/src/app.html\"#);",
+            ),
+            (
+                "an include_str! of a web file",
+                "let _ = include_str!(\"../../../web/src/lib/db/export.js\");",
+            ),
+            (
+                "a name bound by an earlier statement",
+                "let base = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\");\n        let _ = std::fs::read(base.join(\"web/src/app.html\"));",
+            ),
+            (
+                "an inline format argument naming an anchor",
+                "let root = env!(\"CARGO_MANIFEST_DIR\");\n        let _ = std::fs::read(format!(\"{root}/web/x.js\"));",
+            ),
+            (
+                "the run-time manifest directory",
+                "let _ = Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap()).join(\"web\");",
+            ),
+        ] {
+            let hits = web_hits(&in_test(body));
+            assert!(!hits.is_empty(), "{case} passed: {body}");
+            assert!(
+                hits.iter().all(|h| h.starts_with("crates/a/src/x.rs:")),
+                "{case}: {hits:?}"
+            );
+        }
+    }
+
+    /// The f01d7a0e4 helper of `crates/api/src/bars_export.rs`, verbatim:
+    /// refused at its join and at the read that follows it, the two lines
+    /// gate 1e's full build found on 14 of 16 Mac runs.
+    #[test]
+    fn the_bars_export_helper_gate_1e_found_is_refused_at_its_two_lines() {
+        let src = "pub fn csv() {}\n#[cfg(test)]\nmod tests {\n    fn web(path: &str) -> String {\n        let at = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"))\n            .join(\"../../web\")\n            .join(path);\n        std::fs::read_to_string(&at).unwrap_or_else(|why| panic!(\"{}: {why}\", at.display()))\n    }\n}\n";
+        let hits = web_hits(src);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert!(
+            hits[0].starts_with("crates/a/src/x.rs:5: climbs into web/"),
+            "{hits:?}"
+        );
+        assert!(
+            hits[1].starts_with("crates/a/src/x.rs:8: reads `at`"),
+            "{hits:?}"
+        );
+    }
+
+    /// What a test may do: name `web/` in a comment, build its own `web/`
+    /// under a temporary root, assert on a path's text, and read a crate
+    /// file; and production code may read the web build at run time (the
+    /// server's own read, section 2's allowance).
+    #[test]
+    fn a_comment_a_fixture_web_and_a_production_read_pass() {
+        for (case, body) in [
+            (
+                "a comment naming web/",
+                "// It used to be include_str!(\"../../../web/typeahead.js\").\n        assert!(true);",
+            ),
+            (
+                "a fixture that builds its own web/ under a temp root",
+                "let chunks = fixture.root.join(\"web/build/_app/immutable/chunks\");\n        std::fs::create_dir_all(&chunks).unwrap();",
+            ),
+            (
+                "a temp root's web/ handed to the server",
+                "let front = Assets::new(&root.join(\"web\"));",
+            ),
+            (
+                "a shadowing binding forgets the anchor",
+                "let base = Path::new(env!(\"CARGO_MANIFEST_DIR\"));\n        let base = tmp.path();\n        let _ = base.join(\"web\");",
+            ),
+            (
+                "a crate's own file by its manifest directory",
+                "let _ = std::fs::read(Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"Cargo.toml\"));",
+            ),
+            (
+                "a name that is only rebound",
+                "let at = |text: &str| text.len();\n        assert_eq!(at(\"web\"), 3);",
+            ),
+        ] {
+            let hits = web_hits(&in_test(body));
+            assert!(hits.is_empty(), "{case} refused: {hits:?}");
+        }
+        let production = "pub fn page() -> String {\n    std::fs::read_to_string(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../../web/build/index.html\")).unwrap_or_default()\n}\n";
+        assert!(web_hits(production).is_empty());
+    }
+
+    /// COMBINATIONS: a test join through a `const` that PRODUCTION code
+    /// defines (the path itself, or the anchor it is joined to), and an
+    /// `include_str!` of a web file inside a `macro_rules!` expansion in a
+    /// test module.
+    #[test]
+    fn a_production_const_and_a_test_macro_carry_the_read_into_the_test() {
+        let web_const = "pub const WEB: &str = \"../../web\";\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = std::fs::read(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(super::WEB).join(\"src/x.js\"));\n    }\n}\n";
+        let hits = web_hits(web_const);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].contains("reads `WEB`"), "{hits:?}");
+        let anchor_const = "pub(crate) const ROOT: &str = concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../..\");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let _ = std::fs::read(std::path::Path::new(super::ROOT).join(\"web/src/x.js\"));\n    }\n}\n";
+        let hits = web_hits(anchor_const);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].contains("beside a repository anchor"), "{hits:?}");
+        // The same const read only by production code is production's read.
+        let prod_only =
+            "pub const WEB: &str = \"../../web\";\npub fn f() -> &'static str { WEB }\n";
+        assert!(web_hits(prod_only).is_empty());
+        let macro_in_test = "#[cfg(test)]\nmod tests {\n    macro_rules! page {\n        () => {\n            include_str!(\"../../../web/src/app.html\")\n        };\n    }\n    #[test]\n    fn t() {\n        assert!(!page!().is_empty());\n    }\n}\n";
+        let hits = web_hits(macro_in_test);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].starts_with("crates/a/src/x.rs:5: climbs into web/"),
+            "{hits:?}"
+        );
+    }
+
+    /// The tree: a `tests/` file and a `src/` file only a test module mounts
+    /// are test code from their first token, a production const is read
+    /// across files of its crate, and an empty listing is a refusal.
+    #[test]
+    fn whole_test_files_and_a_crate_wide_const_are_read_over_the_tree() {
+        let files = [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            (
+                "crates/a/src/lib.rs",
+                "pub mod paths;\n#[cfg(test)]\nmod x_tests;\npub fn f() {}\n",
+            ),
+            (
+                "crates/a/src/paths.rs",
+                "pub const WEB: &str = \"../../web\";\n",
+            ),
+            (
+                "crates/a/src/x_tests.rs",
+                "fn read() {\n    let _ = std::fs::read(crate::paths::WEB);\n}\n",
+            ),
+            (
+                "crates/a/tests/t.rs",
+                "fn read() {\n    let _ = std::fs::read(\"../../web/src/x.js\");\n}\n",
+            ),
+            (
+                "crates/a/benches/b.rs",
+                "fn main() {\n    let _ = std::fs::read(\"src/lib.rs\");\n}\n",
+            ),
+        ];
+        let listed: BTreeSet<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
+        let (read, _) = tracked(&files);
+        let (hits, scanned) =
+            web_reads(&listed, &read, Path::new("/nonexistent-brutex-root")).unwrap();
+        assert_eq!(scanned, 5);
+        assert_eq!(
+            hits,
+            vec![
+                "crates/a/src/x_tests.rs:2: reads `WEB`, a name bound to a path into web/"
+                    .to_owned(),
+                "crates/a/tests/t.rs:2: climbs into web/: \"../../web/src/x.js\"".to_owned(),
+            ]
+        );
+        let none: BTreeSet<String> = ["Cargo.toml".to_owned()].into_iter().collect();
+        assert!(web_reads(&none, &read, Path::new(".")).is_err());
+    }
+
+    /// OUT OF THE BOX: a tracked link under `crates/` whose target lands in
+    /// `web/` (a folder of fixtures, say) is refused by its target, relative
+    /// or absolute; a link that stays inside `crates/` is not.
+    #[test]
+    fn a_link_under_crates_into_web_is_refused() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("brutex-gate1h-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/a/tests")).unwrap();
+        std::os::unix::fs::symlink("../../../web/src", root.join("crates/a/tests/fixtures"))
+            .unwrap();
+        std::os::unix::fs::symlink(root.join("web/src"), root.join("crates/a/tests/abs")).unwrap();
+        std::os::unix::fs::symlink("../src", root.join("crates/a/tests/local")).unwrap();
+        let rel = link_into_web(&root, "crates/a/tests/fixtures").unwrap();
+        assert!(
+            rel.starts_with("crates/a/tests/fixtures: a link into web/"),
+            "{rel}"
+        );
+        assert!(link_into_web(&root, "crates/a/tests/abs").is_some());
+        assert_eq!(link_into_web(&root, "crates/a/tests/local"), None);
+        assert_eq!(link_into_web(&root, "crates/a/Cargo.toml"), None);
+    }
+
+    /// The inline format arguments a literal reads, and the ones it does not.
+    #[test]
+    fn format_names_reads_inline_arguments_only() {
+        assert_eq!(format_names("{root}/web/{f:?} {} {0} {{x}}"), ["root", "f"]);
+        assert!(format_names("no braces").is_empty());
+        assert!(format_names("{9a} {").is_empty());
     }
 }
