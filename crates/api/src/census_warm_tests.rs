@@ -535,19 +535,25 @@ async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
         &reads[mark..]
     );
 
-    // THE CHANGE LANDS: the background re-read is served, current.
+    // THE CHANGE LANDS: the background re-read is served, current, and it is
+    // exactly one generation on. Polled until current, then the generation
+    // asserted: the change made the census stale (`stale` above), so the
+    // first current answer is the re-read's, and a census current at any
+    // other generation fails here as it used to fail at the deadline
+    // (BASE-REDS-1023 repair 3: no poll may hold a side no run takes).
     let deadline = Instant::now() + Duration::from_mins(1);
-    loop {
+    let generation = loop {
         let (generation, freshness) = fno_generation(&site);
-        if freshness == Freshness::Current && generation == before + 1 {
-            break;
+        if freshness == Freshness::Current {
+            break generation;
         }
         assert!(
             Instant::now() < deadline,
             "never current: {generation} {freshness:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    assert_eq!(generation, before + 1, "the change is one generation on");
     let rows = warmth(&site);
     assert_eq!(row_of(&rows, CENSUS, Vendor::Gdfl).state, WarmState::Ready);
     assert_eq!(

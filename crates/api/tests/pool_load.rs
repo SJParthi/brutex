@@ -237,9 +237,9 @@ async fn feeds_beside(
                 while !stop.load(Ordering::Acquire) {
                     let path = routes[next % routes.len()];
                     next += 1;
-                    if get_blocking(addr, path).is_some() {
-                        done += 1;
-                    }
+                    // Counted, not branched: a request with no answer adds
+                    // nothing (BASE-REDS-1023 repair 3, verify r3).
+                    done += u64::from(get_blocking(addr, path).is_some());
                 }
                 done
             })
@@ -361,6 +361,28 @@ impl FeedsRun {
             self.loaded.1 <= self.control.1 * 2
         }
     }
+
+    /// The run's two verdicts as its line prints them: whether the target is
+    /// measurable on this host now, and whether the run holds the bound. One
+    /// method, so the stop-rule test reads every side a noisy run prints
+    /// (BASE-REDS-1023 repair 3, verify r3).
+    fn verdicts(&self) -> (String, &'static str) {
+        let measurable = if self.measurable() {
+            "the 10 ms target is measurable on this host now".to_owned()
+        } else {
+            format!(
+                "the 10 ms target is NOT MEASURABLE on this host now: the control alone is \
+                 {:?} at p99, half the budget or more",
+                self.control.1
+            )
+        };
+        let holds = if self.holds() {
+            "this run holds the bound"
+        } else {
+            "this run does NOT hold the bound"
+        };
+        (measurable, holds)
+    }
 }
 
 /// Runs `run` (its argument is the run's number, from 0) until one run
@@ -423,26 +445,14 @@ async fn feeds_fast_run(run: u32) -> FeedsRun {
         };
         let (control_median, control_tail, control_worst) = measured.control;
         let (p50, p99, max) = measured.loaded;
+        let (measurable, holds) = measured.verdicts();
         println!(
             "R3-08 /feeds.json run {run} of at most {FEEDS_FAST_RUNS}, n={ASKED} sequential, \
              fresh connections: beside {CLIENTS} clients looping /health ({by_control} requests \
              by them) p50={control_median:?} p99={control_tail:?} max={control_worst:?}; beside \
              {CLIENTS} clients looping every pooled route and {HELD_MONTH_SEEKERS} seeking the \
              held month ({loaded} requests by them) \
-             p50={p50:?} p99={p99:?} max={max:?}; {}; {}",
-            if measured.measurable() {
-                "the 10 ms target is measurable on this host now".to_owned()
-            } else {
-                format!(
-                    "the 10 ms target is NOT MEASURABLE on this host now: the control alone is \
-                     {control_tail:?} at p99, half the budget or more"
-                )
-            },
-            if measured.holds() {
-                "this run holds the bound"
-            } else {
-                "this run does NOT hold the bound"
-            }
+             p50={p50:?} p99={p99:?} max={max:?}; {measurable}; {holds}"
         );
         measured
     })
@@ -492,6 +502,22 @@ async fn the_first_feed_run_that_holds_ends_the_runs_and_none_holding_fails_with
         !noisy.holds(),
         "and its 35.1 ms p99 failed the 10 ms target"
     );
+    // What each run's line says, every side (BASE-REDS-1023 repair 3).
+    assert_eq!(
+        noisy.verdicts(),
+        (
+            "the 10 ms target is measurable on this host now".to_owned(),
+            "this run does NOT hold the bound"
+        )
+    );
+    assert_eq!(clean.verdicts().1, "this run holds the bound");
+    let (measurable, holds) = figures(millis(5), millis(10)).verdicts();
+    assert_eq!(
+        measurable,
+        "the 10 ms target is NOT MEASURABLE on this host now: the control alone is 5ms at p99, \
+         half the budget or more"
+    );
+    assert_eq!(holds, "this run holds the bound");
     let slow = figures(nanos(2_940_000), nanos(16_150_000));
     assert!(!slow.holds(), "verify r2: 16.15 ms beside 2.94 ms");
     let slower = figures(nanos(4_120_000), nanos(30_310_000));

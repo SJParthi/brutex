@@ -1389,12 +1389,34 @@ mod tests {
         for pair in 0..31 {
             fast = fast.min(sample(&a));
             slow = slow.min(sample(&b));
-            if pair >= 6 && slow <= fast.saturating_mul(4).max(4) {
+            if settled(pair, fast, slow) {
                 break;
             }
         }
         let grew =
             format!("the lookup grew with the universe: {fast} ns against {slow} ns, {sizes}");
         assert!(slow <= fast.saturating_mul(4).max(4), "{grew}");
+    }
+
+    /// Whether the pairs taken so far settle the lookup's ratio: seven at
+    /// least, and the minima within the unchanged 4x ceiling (a zero minimum
+    /// read as 1 ns). Interference only adds time, so a further pair can
+    /// only clear a false failure (BASE-REDS-1023, D-7152).
+    fn settled(pair: usize, fast: u128, slow: u128) -> bool {
+        pair >= 6 && slow <= fast.saturating_mul(4).max(4)
+    }
+
+    /// Every side of [`settled`] (BASE-REDS-1023 repair 3, verify r3: the
+    /// seventh pair outside 4x was a side no run took).
+    #[test]
+    fn seven_pairs_within_4x_settle_the_lookup_ratio_and_nothing_less_does() {
+        assert!(!settled(5, 10, 10), "six pairs never settle");
+        assert!(!settled(6, 10, 41), "a seventh pair outside 4x samples on");
+        assert!(settled(6, 10, 40), "4x is inside");
+        assert!(
+            settled(30, 0, 4),
+            "a zero minimum reads 1 ns, so 4 ns is 4x"
+        );
+        assert!(!settled(30, 0, 5));
     }
 }

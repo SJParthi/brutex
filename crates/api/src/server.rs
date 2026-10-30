@@ -27358,8 +27358,11 @@ mod tests {
                 over.contains("not inclusive"),
                 "and the correction is stated, not performed in silence: {over}"
             );
+            // The one spelling this page writes (its NOT STARTED receipt):
+            // the second the assertion also took was a side no run reached
+            // (BASE-REDS-1023 repair 3, verify r3).
             assert!(
-                over.contains("no vendor was contacted") || over.contains("no vendor is contacted"),
+                over.contains("no vendor was contacted"),
                 "and it says nothing ran: {over}"
             );
 
