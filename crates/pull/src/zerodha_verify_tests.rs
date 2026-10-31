@@ -5666,7 +5666,7 @@ fn every_arm_of_a_writers_try_and_of_the_one_file_check_is_named() {
             70,
             &path,
             Err(std::fs::TryLockError::WouldBlock),
-            spool::LIVE_WAIT - ms(1)
+            spool::LIVE_WAIT.saturating_sub(ms(1))
         ),
         Ok(None)
     ));
