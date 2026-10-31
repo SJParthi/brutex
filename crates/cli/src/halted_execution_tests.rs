@@ -102,9 +102,12 @@ impl HaltStore {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir(&root)
-            .map_err(|why| format!("{}: {why}", root.display()))
-            .expect("a scratch root no earlier process holds");
+        if let Err(why) = fs::create_dir(&root) {
+            panic!(
+                "{}: {why}: a scratch root no earlier process holds",
+                root.display()
+            );
+        }
         let store = Self { root };
         let mut index = 0_i64;
         let days = std::iter::once((2_u8, 28_u8)).chain((2..=23).map(|date| (3, date)));

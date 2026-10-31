@@ -5776,7 +5776,9 @@ fn a_live_lock_held_past_the_wait_is_refused_busy_by_name() {
                     0,
                 )],
             );
-            (refused.map(|_| ()), started.elapsed())
+            // The refusal alone: an append that went is `None`, read as not
+            // refused below (no closure here runs only on a pass).
+            (refused.err(), started.elapsed())
         })
     };
     let waits = [
@@ -5787,7 +5789,7 @@ fn a_live_lock_held_past_the_wait_is_refused_busy_by_name() {
         let (refused, took) = waited.join().unwrap();
         assert!(took >= spool::LIVE_WAIT, "run {run} waited only {took:?}");
         match refused {
-            Err(SpoolError::Busy {
+            Some(SpoolError::Busy {
                 run: busy,
                 lock,
                 holder,
