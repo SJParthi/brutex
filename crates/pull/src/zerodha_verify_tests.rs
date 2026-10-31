@@ -5393,16 +5393,16 @@ fn a_resumed_writer_a_dead_live_lock_and_a_refused_flock_are_each_named() {
 
 // ------------------------------------------- BASE-REDS-1023 repair 5 --
 
-/// One run's spool, written through a store whose `verify/<folder>` is the
+/// One run's spool, written through a store whose `verify/<real>` is the
 /// real folder and `verify/<link>` a link to it, then followed to its merge:
 /// the case [`the_old_folder_as_a_link_to_the_new_is_one_live_lock`] names.
-fn spool_through_aliased_live_folders(tag: &str, (folder, link): (&str, &str), run: u64) {
+fn spool_through_aliased_live_folders(tag: &str, (real, link): (&str, &str), run: u64) {
     let on = regular();
     let key = format!("NSE-INDEX-ZZALIAS{run}");
     let root = scratch(tag);
     let verify = root.join("verify");
-    std::fs::create_dir_all(verify.join(folder)).unwrap();
-    std::os::unix::fs::symlink(folder, verify.join(link)).unwrap();
+    std::fs::create_dir_all(verify.join(real)).unwrap();
+    std::os::unix::fs::symlink(real, verify.join(link)).unwrap();
     let old_name = spool::OLD_LIVE_DIR
         .iter()
         .fold(root.clone(), |at, segment| at.join(segment))
