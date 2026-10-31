@@ -567,6 +567,8 @@ fn main() {
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). Each part puts one
     // statement directly under its slot and names its bench ids in it, one string each:
     //     let ok = ok & fno_<x>::row(floor, &["C-FNO-<CODE>-01"]);
+    // <CODE> is upper-case letters and hyphens only: cost_invariants.rs reads C-FNO-1DAY-01
+    // or C-FNO-SecWire-01 as no id at all, and then checks its row in neither direction.
     // (`&`, never `&&`, so every row still runs). The ids are written here because
     // crates/core/tests/cost_invariants.rs reads the ids a bench prints from the
     // top-level benches/*.rs files only, never from benches/ratio/*.rs (the C-PIT-01
@@ -575,6 +577,9 @@ fn main() {
     // `pub(crate) fn row(floor: u128, ids: &[&str]) -> bool` and prints each id it is
     // given as the first word of a line. `pub(crate)`, because the workspace lint
     // `unreachable_pub` is an error under clippy `-D warnings`.
+    // The `other five` and `all six` above, and the banner's `the two budget rows`, count
+    // the six base rows. The first cli part to land (FNO-DAYMASK, wave 1) makes the banner
+    // count-free; no other part edits it.
     // slot bench-row FNO-CLOCK
     // slot bench-row FNO-DAYMASK
     // slot bench-row FNO-RECORDS

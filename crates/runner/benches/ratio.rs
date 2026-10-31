@@ -590,6 +590,8 @@ fn main() {
         // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2): each part puts its row
         // call directly under its slot and names its bench ids in it, one string each:
         //     fno_<x>::row(&["C-FNO-<CODE>-01"]),
+        // <CODE> is upper-case letters and hyphens only: cost_invariants.rs reads C-FNO-1DAY-01
+        // or C-FNO-SecWire-01 as no id at all, and then checks its row in neither direction.
         // The ids are written here because crates/core/tests/cost_invariants.rs reads
         // the ids a bench prints from the top-level benches/*.rs files only, never from
         // benches/ratio/*.rs (the C-PIT-01 precedent in crates/pull/benches/ratio.rs),

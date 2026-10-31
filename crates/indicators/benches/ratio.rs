@@ -727,7 +727,8 @@ fn a_session_rollover_costs_what_an_ordinary_candle_costs() -> bool {
     )
 }
 
-/// How many rows this bench judges.
+/// How many rows the array in `main` judges; the F&O rows (PARTS.md 4.2) are
+/// chained on below it and are not counted here.
 ///
 /// The array in `main` is annotated with it, so removing a row is a type error rather than
 /// a quiet loss of coverage. That was worth a line here because two of the first six — `C-I-05`
@@ -773,6 +774,8 @@ fn main() {
     //         .copied()
     //         .chain([fno_<x>::row(floor, &["C-FNO-<CODE>-01"])])
     //         .collect();
+    // <CODE> is upper-case letters and hyphens only: cost_invariants.rs reads C-FNO-1DAY-01
+    // or C-FNO-SecWire-01 as no id at all, and then checks its row in neither direction.
     // (the form `cargo fmt` keeps). It runs its row after every row above and folds it
     // into the check below. The ids are written here because
     // crates/core/tests/cost_invariants.rs reads the ids a bench prints from the
