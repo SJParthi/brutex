@@ -2149,6 +2149,1030 @@ fn web_reads(
     Ok((out, files.len()))
 }
 
+#[cfg(test)]
+mod gate_1h_tests {
+    //! Gate 1h's tests of BASE-REDS-1023 repair 4 (check r4 of 30 Oct 2026),
+    //! beside the code they prove and in a module of their own, so the change
+    //! a D3 set is read from stays the change itself.
+    use super::tests::{in_test, toks, tracked, web_hits};
+    use super::*;
+
+    // ---- gate 1h, repair 4: helpers, doc examples, macros, case, links ----
+
+    /// `lines` joined into one source, each ended by a newline, so a test
+    /// names a finding by the index of its line plus one.
+    fn src(lines: &[&str]) -> String {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// Gate 1h over a tree of `files` with no links on disk: its findings.
+    fn tree_hits(files: &[(&str, &str)]) -> Vec<String> {
+        let listed: BTreeSet<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
+        let (read, _) = tracked(files);
+        web_reads(&listed, &read, Path::new("/nonexistent-brutex-root"))
+            .unwrap()
+            .0
+    }
+
+    /// CHECK R4, V4-2 (30 Oct 2026): a test reads `web/` through a helper
+    /// whose VALUE is the repository root -- the tree's own `repo()`,
+    /// `read(relative)` (crates/store/tests/cited_commits.rs) and
+    /// `workspace_root()` (crates/core/tests/cost_invariants.rs) -- and the
+    /// checker's two probes are refused at their own lines, as are its E1
+    /// and E2 and a helper followed through a `let`, a chain written in any
+    /// order, `format!`, a method, `Self::`, a module path, a test module,
+    /// a production function, a macro, a static and another crate. A
+    /// document read through the same helper, a text check of a root and a
+    /// same-named helper of another file read nothing and pass.
+    #[test]
+    fn a_helper_whose_value_is_the_repository_root_carries_the_read() {
+        let paths = src(&[
+            "use std::path::PathBuf;",
+            "pub const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
+            "pub fn root() -> PathBuf {",
+            "    PathBuf::from(ROOT).join(\"../..\")",
+            "}",
+        ]);
+        let x = src(&[
+            "use std::path::{Path, PathBuf};",
+            "pub fn default_web_dir() -> PathBuf {",
+            "    web_beside(Path::new(env!(\"CARGO_MANIFEST_DIR\")))",
+            "}",
+            "fn web_beside(manifest: &Path) -> PathBuf {",
+            "    manifest.join(\"web\")",
+            "}",
+            "macro_rules! here {",
+            "    () => {",
+            "        env!(\"CARGO_MANIFEST_DIR\")",
+            "    };",
+            "}",
+            "pub static TOP: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| crate::paths::root());",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    use super::*;",
+            "    fn root() -> PathBuf {",
+            "        Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "    }",
+            "    #[test]",
+            "    fn p02_a_test_module_helper() {",
+            "        let _ = std::fs::read(root().join(\"web/src/x.js\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_production_root_joined_to_web() {",
+            "        let _ = std::fs::read(crate::paths::root().join(\"web/x.js\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_text_check_reads_nothing() {",
+            "        assert!(default_web_dir().ends_with(\"web\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_macro_root_and_a_static_root() {",
+            "        let _ = std::fs::read(Path::new(here!()).join(\"web/x.js\"));",
+            "        let _ = std::fs::read(TOP.join(\"web/y.js\"));",
+            "    }",
+            "}",
+        ]);
+        let cited = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn repo() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\"))",
+            "        .parent()",
+            "        .and_then(Path::parent)",
+            "        .expect(\"crates/a is two levels below the root\")",
+            "        .to_owned()",
+            "}",
+            "fn read(relative: &str) -> String {",
+            "    std::fs::read_to_string(repo().join(relative))",
+            "        .unwrap_or_else(|why| panic!(\"{relative} is readable: {why}\"))",
+            "}",
+            "#[test]",
+            "fn probe_reads_web_through_read() {",
+            "    assert!(!read(\"web/src/lib/db/export.js\").is_empty());",
+            "}",
+            "#[test]",
+            "fn a_document_read_is_no_read_of_web() {",
+            "    let doc = read(\"docs/04-invariants.md\");",
+            "    assert!(doc.contains(\"web/tests/x.test.js\"));",
+            "}",
+        ]);
+        let workspace = src(&[
+            "use std::path::PathBuf;",
+            "mod common;",
+            "fn workspace_root() -> PathBuf {",
+            "    let mut root = PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"));",
+            "    root.pop();",
+            "    root.pop();",
+            "    root",
+            "}",
+            "#[test]",
+            "fn probe_reads_web_through_workspace_root() {",
+            "    let _ = std::fs::read_to_string(workspace_root().join(\"web/src/lib/db/bars-plan.js\")).unwrap();",
+            "}",
+            "#[test]",
+            "fn e1_web_then_a_file() {",
+            "    let _ = std::fs::read(workspace_root().join(\"web\").join(\"src/x.js\"));",
+            "}",
+            "#[test]",
+            "fn a_bound_root_then_web() {",
+            "    let base = later();",
+            "    let _ = std::fs::read(base.join(\"web/x.js\"));",
+            "}",
+            "fn later() -> PathBuf {",
+            "    middle().join(\"x\")",
+            "}",
+            "fn middle() -> PathBuf {",
+            "    workspace_root()",
+            "}",
+            "#[test]",
+            "fn a_formatted_root() {",
+            "    let _ = std::fs::read(format!(\"{}/web/x.js\", workspace_root().display()));",
+            "}",
+            "struct Fx;",
+            "impl Fx {",
+            "    fn root(&self) -> PathBuf {",
+            "        workspace_root()",
+            "    }",
+            "    fn web(&self) -> PathBuf {",
+            "        Self::root(self).join(\"web\")",
+            "    }",
+            "}",
+            "#[test]",
+            "fn a_method_root() {",
+            "    let _ = std::fs::read(Fx.root().join(\"web/x.js\"));",
+            "}",
+            "#[test]",
+            "fn a_module_root() {",
+            "    let _ = std::fs::read(common::repo().join(\"web/x.js\"));",
+            "}",
+        ]);
+        let common = src(&[
+            "use std::path::{Path, PathBuf};",
+            "pub fn repo() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "}",
+        ]);
+        let other = src(&[
+            "fn read(path: &str) -> String {",
+            "    std::fs::read_to_string(path).unwrap_or_default()",
+            "}",
+            "#[test]",
+            "fn a_read_of_another_file_is_its_own() {",
+            "    let _ = read(\"web/x.js\");",
+            "    let _ = std::fs::read(\"web/y.js\");",
+            "}",
+        ]);
+        let e2 = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn repo(rel: &str) -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(rel)",
+            "}",
+            "#[test]",
+            "fn e2_the_web_in_the_caller() {",
+            "    let _ = std::fs::read(repo(\"web/src/lib/db/bars-plan.js\"));",
+            "}",
+            "#[test]",
+            "fn another_crates_root() {",
+            "    let _ = std::fs::read(a::paths::root().join(\"web/x.js\"));",
+            "}",
+        ]);
+        let files = [
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+            ),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            (
+                "crates/a/src/lib.rs",
+                "pub mod paths;\npub mod x;\npub fn f() {}\n",
+            ),
+            ("crates/a/src/paths.rs", paths.as_str()),
+            ("crates/a/src/x.rs", x.as_str()),
+            ("crates/a/tests/cited.rs", cited.as_str()),
+            ("crates/a/tests/common/mod.rs", common.as_str()),
+            ("crates/a/tests/other.rs", other.as_str()),
+            ("crates/a/tests/workspace.rs", workspace.as_str()),
+            ("crates/b/Cargo.toml", "[package]\nname = \"b\"\n"),
+            ("crates/b/src/lib.rs", "pub fn g() {}\n"),
+            ("crates/b/tests/t.rs", e2.as_str()),
+        ];
+        let hits = tree_hits(&files);
+        let at: Vec<&str> = hits
+            .iter()
+            .map(|h| h.split(": ").next().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:22",
+                "crates/a/src/x.rs:26",
+                "crates/a/src/x.rs:34",
+                "crates/a/src/x.rs:35",
+                "crates/a/tests/cited.rs:15",
+                "crates/a/tests/workspace.rs:11",
+                "crates/a/tests/workspace.rs:15",
+                "crates/a/tests/workspace.rs:20",
+                "crates/a/tests/workspace.rs:30",
+                "crates/a/tests/workspace.rs:38",
+                "crates/a/tests/workspace.rs:43",
+                "crates/a/tests/workspace.rs:47",
+                "crates/b/tests/t.rs:7",
+                "crates/b/tests/t.rs:11",
+            ],
+            "{hits:#?}"
+        );
+        // The checker's two probes, by their reason; the rest by either
+        // reason (workspace_root's own `let mut root` stays bound for the
+        // file's later statements, so `Fx.root()` reads as that anchor: the
+        // gate reads statements, not scopes, which can only refuse more).
+        for probe in [
+            "crates/a/tests/cited.rs:15: a web segment joined to the repository's root from a helper: \"web/src/lib/db/export.js\"",
+            "crates/a/tests/workspace.rs:11: a web segment joined to the repository's root from a helper: \"web/src/lib/db/bars-plan.js\"",
+        ] {
+            assert!(hits.iter().any(|h| h == probe), "{probe}: {hits:#?}");
+        }
+        assert!(
+            hits.iter().all(
+                |h| h.contains("joined to the repository's root from a helper")
+                    || h.contains("beside a repository anchor")
+            ),
+            "{hits:#?}"
+        );
+    }
+
+    /// What a helper that is no root leaves alone: a function that only
+    /// uses the root inside, or returns a count; one whose value is a
+    /// temporary folder; a parameter named like a root helper; a `std` path
+    /// named like one; and `Path::new` beside a root `new` of another type.
+    #[test]
+    fn a_function_that_only_uses_the_root_is_no_root() {
+        let controls = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn root() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "}",
+            "fn count() -> usize {",
+            "    std::fs::read_dir(root()).map_or(0, Iterator::count)",
+            "}",
+            "fn label() -> String {",
+            "    let _ = root();",
+            "    String::from(\"x\")",
+            "}",
+            "fn scratch() -> PathBuf {",
+            "    std::env::temp_dir().join(\"x\")",
+            "}",
+            "fn read(p: &str) -> String {",
+            "    std::fs::read_to_string(root().join(p)).unwrap_or_default()",
+            "}",
+            "struct Fx;",
+            "impl Fx {",
+            "    fn new() -> PathBuf {",
+            "        root()",
+            "    }",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    use super::*;",
+            "    fn build(root: &Path) {",
+            "        let _ = root.join(\"web\");",
+            "    }",
+            "    #[test]",
+            "    fn controls() {",
+            "        let _ = count().to_string() + \"web\";",
+            "        let _ = label().push_str(\"web\");",
+            "        let _ = std::fs::read(scratch().join(\"web/x.js\"));",
+            "        build(Path::new(\"/tmp/x\"));",
+            "        let _ = std::fs::read(\"web/x.js\");",
+            "        let _ = Path::new(\"web\");",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(web_hits(&controls), Vec::<String>::new());
+    }
+
+    /// CHECK R4, E3: the Rust of a doc comment is test code -- `cargo test`
+    /// compiles and runs every example rustdoc reads as Rust -- so a fenced
+    /// example (backtick or tilde, `ignore` and `no_run` too), a hidden
+    /// `# ` line, an indented block, a `//!` and a `/** */` example that
+    /// reads `web/` are each refused at their own line; a `text` fence, an
+    /// indented line that belongs to a list item, a `////` comment, prose
+    /// that does not lex and an empty fence are not; a fenced Rust example
+    /// that does not lex is a finding by name, never a skip.
+    #[test]
+    fn a_doc_example_is_test_code() {
+        let docs = src(&[
+            "/// Reads the front end.",
+            "///",
+            "/// ```",
+            "/// let _ = std::fs::read(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/src/x.js\"));",
+            "/// ```",
+            "pub fn a() {}",
+            "/// ```rust,ignore",
+            "/// # let _ = include_str!(\"../../../web/x.js\");",
+            "/// ```",
+            "pub fn b() {}",
+            "/// ~~~no_run",
+            "/// let _ = std::fs::read(\"../../web/y.js\");",
+            "/// ~~~",
+            "pub fn c() {}",
+            "/// ```text",
+            "/// ../../web/not-code.txt",
+            "/// ```",
+            "pub fn d() {}",
+            "/// Indented, after a blank line:",
+            "///",
+            "///     let _ = std::fs::read(\"../../web/z.js\");",
+            "pub fn e() {}",
+            "/// A list:",
+            "///",
+            "/// - an item",
+            "///",
+            "///     ../../web/item-text",
+            "pub fn f() {}",
+            "//// ```",
+            "//// let _ = std::fs::read(\"../../web/q.js\");",
+            "//// ```",
+            "pub fn g() {}",
+            "/** A block doc:",
+            " * ```",
+            " * let _ = std::fs::read(\"../../web/r.js\");",
+            " * ```",
+            " */",
+            "pub fn h() {}",
+            "/// Text:",
+            "///",
+            "///     let _ = std::fs::read(\"../../web/k.js\");",
+            "///",
+            "/// After.",
+            "pub fn k() {}",
+            "/// - item",
+            "///       ```",
+            "pub fn l() {}",
+        ]);
+        let at: Vec<String> = web_hits(&docs)
+            .iter()
+            .map(|h| {
+                h.split(": in a doc example, climbs into web/")
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:4",
+                "crates/a/src/x.rs:8",
+                "crates/a/src/x.rs:12",
+                "crates/a/src/x.rs:21",
+                "crates/a/src/x.rs:35",
+                "crates/a/src/x.rs:41",
+            ]
+        );
+        let odd = src(&[
+            "//! ```",
+            "//! let _ = std::fs::read(\"../../web/i.js\");",
+            "//! ```",
+            "/// ```",
+            "/// let s = \"unterminated;",
+            "/// ```",
+            "pub fn u() {}",
+            "/// Prose:",
+            "///",
+            "///     it's \"quoted",
+            "pub fn v() {}",
+            "/// ```",
+            "/// ```",
+            "pub fn w() {}",
+            "/*! ```",
+            "let _ = std::fs::read(\"../../web/j.js\");",
+            "``` */",
+            "pub fn y() {}",
+            "/*** a banner, not a doc: ``` */",
+            "/**/",
+            "/* plain */",
+        ]);
+        assert_eq!(
+            web_hits(&odd),
+            [
+                "crates/a/src/x.rs:2: in a doc example, climbs into web/: \"../../web/i.js\"",
+                "crates/a/src/x.rs:5: a doc example rustdoc reads as Rust that gate 1h cannot read: line 1: unterminated string",
+                "crates/a/src/x.rs:16: in a doc example, climbs into web/: \"../../web/j.js\"",
+            ]
+        );
+    }
+
+    /// CHECK R4, E4 (a combination): a `macro_rules!` that PRODUCTION code
+    /// defines, whose body reads a path into `web/`, expanded in a test, is
+    /// refused at the expansion; expanded only in production, it passes.
+    #[test]
+    fn a_production_macro_expanded_in_a_test_carries_the_read() {
+        let s = src(&[
+            "macro_rules! web_file {",
+            "    ($p:expr) => {",
+            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/\", $p)",
+            "    };",
+            "}",
+            "macro_rules! in_prod {",
+            "    () => {",
+            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/x.js\")",
+            "    };",
+            "}",
+            "pub fn served() -> &'static str {",
+            "    in_prod!()",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    #[test]",
+            "    fn t() {",
+            "        let _ = std::fs::read(web_file!(\"src/x.js\"));",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            web_hits(&s),
+            [
+                "crates/a/src/x.rs:18: expands `web_file!`, a macro whose body reads a path into web/"
+            ]
+        );
+    }
+
+    /// CHECK R4, E5 and E7: `web` in any case is `web` (this Mac's volume
+    /// is case-blind), and `stringify!(web)` is the literal `web`, in a
+    /// `concat!` or alone.
+    #[test]
+    fn web_in_any_case_and_a_stringified_web_are_web() {
+        for (case, body) in [
+            (
+                "a capital Web",
+                "let _ = std::fs::read(\"../../Web/src/x.js\");",
+            ),
+            (
+                "WEB beside an anchor",
+                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(\"WEB\");",
+            ),
+            (
+                "stringify! in a concat!",
+                "let _ = std::fs::read(concat!(\"../../\", stringify!(web), \"/src/x.js\"));",
+            ),
+            (
+                "stringify! alone",
+                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(stringify!(web));",
+            ),
+        ] {
+            assert_eq!(web_hits(&in_test(body)).len(), 1, "{case} passed: {body}");
+        }
+    }
+
+    /// CHECK R4, E7: a test harness's attribute (`#[tokio::test]`, with or
+    /// without arguments, `#[bench]`) and a `cfg` that names `test` where it
+    /// can hold (`any(test, ..)`, `not(not(test))`, an inner `#![cfg(..)]`
+    /// to the end of its block) make test code wherever they stand; an
+    /// attribute named otherwise, `not(test)` and `test = ".."` do not.
+    #[test]
+    fn harness_attributes_and_test_cfgs_make_test_code_anywhere() {
+        let s = src(&[
+            "#[tokio::test]",
+            "async fn a() {",
+            "    let _ = std::fs::read(\"../../web/a.js\");",
+            "}",
+            "#[tokio::test(flavor = \"multi_thread\")]",
+            "async fn b() {",
+            "    let _ = std::fs::read(\"../../web/b.js\");",
+            "}",
+            "#[bench]",
+            "fn c() {",
+            "    let _ = std::fs::read(\"../../web/c.js\");",
+            "}",
+            "#[testing]",
+            "fn d() -> &'static str {",
+            "    \"../../web/d.js\"",
+            "}",
+            "#[cfg(any(test, feature = \"x\"))]",
+            "fn e() {",
+            "    let _ = std::fs::read(\"../../web/e.js\");",
+            "}",
+            "#[cfg(not(test))]",
+            "fn f() -> &'static str {",
+            "    \"../../web/f.js\"",
+            "}",
+            "#[cfg(not(not(test)))]",
+            "fn g() {",
+            "    let _ = std::fs::read(\"../../web/g.js\");",
+            "}",
+            "#[cfg(test = \"x\")]",
+            "fn h() -> &'static str {",
+            "    \"../../web/h.js\"",
+            "}",
+            "mod m {",
+            "    #![cfg(any(test, unix))]",
+            "    fn i() {",
+            "        let _ = std::fs::read(\"../../web/i.js\");",
+            "    }",
+            "}",
+            "pub fn after() -> &'static str {",
+            "    \"../../web/after.js\"",
+            "}",
+        ]);
+        let at: Vec<String> = web_hits(&s)
+            .iter()
+            .map(|h| h.split(": climbs").next().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:3",
+                "crates/a/src/x.rs:7",
+                "crates/a/src/x.rs:11",
+                "crates/a/src/x.rs:19",
+                "crates/a/src/x.rs:27",
+                "crates/a/src/x.rs:36",
+            ]
+        );
+        let whole = src(&[
+            "#![cfg(any(test, unix))]",
+            "pub fn served() -> &'static str {",
+            "    \"../../web/w.js\"",
+            "}",
+        ]);
+        assert_eq!(web_hits(&whole).len(), 1);
+    }
+
+    /// CHECK R4, E6 (out of the box) and E5: a tracked link under `crates/`
+    /// to a folder that HOLDS `web/` -- the repository root, or above it,
+    /// relative or absolute -- is refused, and so is a link into `Web/` in
+    /// another case; a link that stays in the crate, or whose absolute
+    /// target does not exist, is not.
+    #[test]
+    fn a_link_to_the_repository_root_or_above_is_refused() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("brutex-gate1h-r4-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/a/src")).unwrap();
+        let link = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, root.join("crates/a").join(name)).unwrap();
+        };
+        link(Path::new("../.."), "repo");
+        link(Path::new("../../.."), "up");
+        link(Path::new("../../Web/src"), "front");
+        link(&root, "abs-root");
+        link(Path::new("/"), "abs-slash");
+        link(Path::new("src"), "stays");
+        link(Path::new("/nonexistent-brutex-r4-target"), "dangling");
+        for (name, want) in [
+            ("repo", Some("a link to a folder that holds web/")),
+            ("up", Some("a link to a folder that holds web/")),
+            ("front", Some("a link into web/")),
+            ("abs-root", Some("a link to a folder that holds web/")),
+            ("abs-slash", Some("a link to a folder that holds web/")),
+            ("stays", None),
+            ("dangling", None),
+        ] {
+            let rel = format!("crates/a/{name}");
+            let got = link_into_web(&root, &rel);
+            match want {
+                Some(why) => assert!(
+                    got.as_deref()
+                        .is_some_and(|g| g.starts_with(&format!("{rel}: {why}"))),
+                    "{name}: {got:?}"
+                ),
+                None => assert_eq!(got, None, "{name}"),
+            }
+        }
+    }
+
+    /// The call readers pinned to each answer: a bare call, a method, a
+    /// path by the segment before the name, `crate`/`self`/`super` as bare,
+    /// `Self::` as a method, a `std`/`core`/`alloc` path as none, a `fn`
+    /// item's own name and a name with no `(` as none; and what a group
+    /// hands its contents to.
+    #[test]
+    fn calls_and_callees_are_read_by_how_they_name_the_callee() {
+        let call = |text: &str| {
+            let t = toks(text);
+            let i = (0..t.len())
+                .rev()
+                .find(|&k| ident(&t[k]).is_some() && is_punct(t.get(k + 1), '('))
+                .unwrap_or(0);
+            call_at(&t, i, ident(&t[i]).unwrap_or(""))
+        };
+        let s = |x: &str| x.to_owned();
+        assert_eq!(call("repo()"), Some(Call::Bare(s("repo"))));
+        assert_eq!(call("let x = repo()"), Some(Call::Bare(s("repo"))));
+        assert_eq!(call("fx.root()"), Some(Call::Method(s("root"))));
+        assert_eq!(
+            call("a::paths::root()"),
+            Some(Call::Path(s("paths"), s("root")))
+        );
+        assert_eq!(call("v = a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("let v = a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("<X>::a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("crate::root()"), Some(Call::Bare(s("root"))));
+        assert_eq!(call("super::super::root()"), Some(Call::Bare(s("root"))));
+        assert_eq!(call("Self::root()"), Some(Call::Method(s("root"))));
+        assert_eq!(call("std::fs::read()"), None);
+        assert_eq!(call("core::x::y()"), None);
+        assert_eq!(call("alloc::x()"), None);
+        assert_eq!(call("<T as X>::f()"), None);
+        assert_eq!(call("fn repo()"), None);
+        let t = toks("repo");
+        assert_eq!(call_at(&t, 0, "repo"), None, "no ( after it");
+        assert_eq!(Call::Bare(s("r")).key("f.rs"), "f.rs/r");
+        assert_eq!(Call::Method(s("r")).key("f.rs"), "f.rs/.r");
+        assert_eq!(Call::Path(s("m"), s("r")).key("f.rs"), "m::r");
+        let callee = |text: &str| {
+            let t = toks(text);
+            let open = t
+                .iter()
+                .rposition(|x| x.tok == Tok::Punct('('))
+                .unwrap_or(0);
+            callee_of(&t, open)
+        };
+        for builds in [
+            "format!(",
+            "concat!(",
+            "include_str!(",
+            "include_bytes!(",
+            "include!(",
+            "x.join(",
+            "x.push(",
+            "x.with_file_name(",
+            "x.set_file_name(",
+            "Path::new(",
+            "PathBuf::from(",
+            "std::ffi::OsStr::new(",
+            "OsString::from(",
+        ] {
+            assert_eq!(callee(builds), Callee::Builds, "{builds}");
+        }
+        for other in [
+            "vec!(",
+            "(",
+            "1(",
+            "x: f(",
+            "x.ends_with(",
+            "String::new(",
+            "Path::join(",
+        ] {
+            let got = callee(other);
+            assert!(!matches!(got, Callee::Builds), "{other}: {got:?}");
+        }
+        assert_eq!(callee("read("), Callee::Call(Call::Bare(s("read"))));
+        assert_eq!(callee("std::fs::read("), Callee::Other);
+    }
+
+    /// The scope readers: an `impl` header's self type (after generics and
+    /// `for`, before `where`), what a `{` opens, a file's module and crate,
+    /// a `fn`'s body and whether its signature returns a path.
+    #[test]
+    fn scopes_modules_bodies_and_return_types_answer_exactly() {
+        let ty = |text: &str| impl_type(&toks(text));
+        assert_eq!(ty("Fx"), "Fx");
+        assert_eq!(ty("<T> Fx<T>"), "Fx");
+        assert_eq!(ty("<F: Fn() -> u8> Trait for a::Fx<F>"), "Fx");
+        assert_eq!(ty("dyn Trait"), "Trait");
+        assert_eq!(ty("Fx where T: Bound"), "Fx");
+        assert_eq!(ty("const unsafe mut Fx"), "Fx");
+        assert_eq!(ty(">"), "");
+        let scope = |text: &str| {
+            let t = toks(text);
+            let i = t
+                .iter()
+                .rposition(|x| x.tok == Tok::Punct('{'))
+                .unwrap_or(0);
+            scope_at(&t, i)
+        };
+        let s = |x: &str| x.to_owned();
+        assert_eq!(scope("impl Fx {"), Some((true, s("Fx"))));
+        assert_eq!(
+            scope("x; #[cfg(test)] pub(crate) mod tests {"),
+            Some((false, s("tests")))
+        );
+        assert_eq!(scope("pub unsafe trait T {"), Some((true, s("T"))));
+        assert_eq!(
+            scope("#![allow(x)] default auto trait T {"),
+            Some((true, s("T")))
+        );
+        assert_eq!(scope("fn f() {"), None);
+        assert_eq!(scope("{"), None);
+        assert_eq!(scope("mod {"), None);
+        assert_eq!(scope("= 1 {"), None);
+        assert_eq!(home_of("crates/a/src/x.rs"), "crates/a");
+        for (path, module) in [
+            ("crates/a/src/lib.rs", "a"),
+            ("crates/a/src/main.rs", "a"),
+            ("crates/a/src/x/mod.rs", "x"),
+            ("crates/a/src/x/lib.rs", "lib"),
+            ("crates/a/tests/common/mod.rs", "common"),
+            ("crates/a/tests/t.rs", "t"),
+            ("lib.rs", "lib"),
+            ("", ""),
+        ] {
+            assert_eq!(module_of(path), module, "{path}");
+        }
+        let body = |text: &str| fn_body(&toks(text), 0);
+        assert_eq!(body("fn f() { a }"), Some((5, 6)));
+        assert_eq!(
+            body("fn f<const N: [u8; 2]>(x: [u8; N]) -> u8 { a b }"),
+            Some((25, 27))
+        );
+        assert_eq!(body("fn f();"), None);
+        assert_eq!(body("fn f() }"), None);
+        assert_eq!(body("fn f()"), None);
+        assert_eq!(body("fn f() { a"), Some((5, 6)), "a body the file cuts");
+        for (sig, path) in [
+            ("() -> PathBuf", true),
+            ("() -> Result<std::path::PathBuf, String>", true),
+            ("(x: &Path) -> &str", true),
+            ("() -> Option<OsString>", true),
+            ("() -> Cow<'static, OsStr>", true),
+            ("() -> impl AsRef<Path>", true),
+            ("(p: &Path)", false),
+            ("(f: fn() -> PathBuf) -> u8", false),
+            ("() -> usize where T: Into<String>", false),
+            ("() -> Vec<u8>", false),
+            ("() -> [String; 2]", true),
+            ("> String", false),
+        ] {
+            assert_eq!(returns_path(&toks(sig)), path, "{sig}");
+        }
+    }
+
+    /// A function's value: its statements after its last `;` of its own
+    /// depth, and each `return`; a body with neither has none. The value
+    /// is the root through a `let` of the body, a SCREAMING root value of
+    /// its crate, a call or a macro known; a `let` rebound to another
+    /// value forgets the root.
+    #[test]
+    fn a_functions_value_is_read_through_its_lets_and_returns() {
+        let summary =
+            |text: &str| fn_summary("crates/a", "f.rs", vec!["k".to_owned()], &toks(text));
+        assert!(summary("a; b;").is_none(), "no value");
+        assert!(summary("").is_none(), "an empty body");
+        let f = summary("let a = 1; if c { a } else { b }").unwrap();
+        assert_eq!(
+            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
+            [false, true, true, true, true]
+        );
+        let f = summary("if x { return root(); } y;").unwrap();
+        assert_eq!(
+            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        let known = WebNames {
+            fns: ["f.rs/root".to_owned()].into_iter().collect(),
+            macros: ["here".to_owned()].into_iter().collect(),
+            ..WebNames::default()
+        };
+        let none = BTreeSet::new();
+        let roots: BTreeSet<String> = ["ROOT".to_owned()].into_iter().collect();
+        for (text, want) in [
+            ("let r = env!(\"CARGO_MANIFEST_DIR\"); r", true),
+            ("let r = env!(\"CARGO_MANIFEST_DIR\"); let r = 1; r", false),
+            ("let r = x; r", false),
+            ("root().join(p)", true),
+            ("here!()", true),
+            ("PathBuf::from(ROOT)", true),
+            ("PathBuf::from(OTHER)", false),
+            ("Path::new(file!()).join(\"x\")", true),
+            ("\"../..\"", true),
+            ("\"..\"", false),
+            ("let r = root(); r.join(\"x\")", true),
+            ("let _ = root(); x", false),
+        ] {
+            let f = summary(text).unwrap();
+            let r = if text.contains("ROOT") { &roots } else { &none };
+            assert_eq!(f.returns_anchor(r, &known), want, "{text}");
+        }
+        assert!(screaming("ROOT_2"));
+        assert!(!screaming("Root"));
+        assert!(!screaming("_2"));
+        assert!(roots_at_repo("../.."));
+        assert!(roots_at_repo("./../../"));
+        assert!(roots_at_repo("CARGO_MANIFEST_DIR"));
+        assert!(roots_at_repo("CARGO_WORKSPACE_DIR"));
+        assert!(!roots_at_repo(".."));
+        assert!(!roots_at_repo("../../web"));
+        assert!(!roots_at_repo("."));
+    }
+
+    /// The fixpoint: a chain of helpers written callee-last resolves in as
+    /// many rounds as it is long, a root value read by a helper makes it a
+    /// root, a root macro and a production macro that reads `web/` are
+    /// learnt, a test macro that reads `web/` is no production macro, and a
+    /// file that does not lex is a refusal.
+    #[test]
+    fn the_fixpoint_learns_every_helper_whatever_the_order() {
+        let s = src(&[
+            "use std::path::PathBuf;",
+            "const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
+            "const OTHER: &str = ROOT;",
+            "type F = fn(u8) -> PathBuf;",
+            "trait T { fn f() -> PathBuf; }",
+            "fn c() -> PathBuf { b() }",
+            "fn b() -> PathBuf { a() }",
+            "fn a() -> PathBuf { PathBuf::from(ROOT) }",
+            "macro_rules! here { () => { env!(\"CARGO_MANIFEST_DIR\") }; }",
+            "macro_rules! page { () => { include_str!(\"../../../web/p.html\") }; }",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    macro_rules! tpage { () => { include_str!(\"../../../web/t.html\") }; }",
+            "}",
+        ]);
+        let mut got = Collected::default();
+        got.add("crates/a/src/x.rs", &s, true).unwrap();
+        let names = got.settle();
+        let n = &names["crates/a"];
+        for key in [
+            "crates/a/src/x.rs/a",
+            "crates/a/src/x.rs/b",
+            "crates/a/src/x.rs/c",
+            "x::c",
+        ] {
+            assert!(n.fns.contains(key), "{key}: {:?}", n.fns);
+        }
+        assert!(n.roots.contains("ROOT"));
+        assert!(n.anchors.contains("ROOT"));
+        assert!(
+            n.roots.contains("OTHER"),
+            "a root read by a value is a root"
+        );
+        let mut odd = Collected::default();
+        odd.add(
+            "crates/a/src/y.rs",
+            "macro_rules x; macro_rules! (); macro_rules! m; fn() {}",
+            true,
+        )
+        .unwrap();
+        assert!(odd.macros.is_empty());
+        assert!(odd.fns.is_empty());
+        assert!(n.macros.contains("here"));
+        assert!(!n.macros.contains("page"), "a climb into web/ is no root");
+        assert_eq!(
+            n.web_macros.iter().collect::<Vec<_>>(),
+            ["page"],
+            "tpage is a test's"
+        );
+        let mut bad = Collected::default();
+        assert!(bad.add("crates/a/src/x.rs", "\"open", true).is_err());
+        assert!(
+            bad.add("crates/a/tests/t.rs", "fn f() -> PathBuf { a }", false)
+                .is_ok()
+        );
+        assert_eq!(
+            bad.values["crates/a"].len(),
+            0,
+            "a test file has no production values"
+        );
+        assert!(
+            web_read_findings("crates/a/src/x.rs", "\"open", false, &WebNames::default()).is_err()
+        );
+    }
+
+    /// The doc readers pinned: which fence info strings rustdoc reads as
+    /// Rust; what opens and closes a fence; a list item's width; how a
+    /// hidden line is shown; and the line of an example's line.
+    #[test]
+    fn fences_lists_and_hidden_lines_are_read_as_rustdoc_reads_them() {
+        for (info, rust) in [
+            ("", true),
+            ("rust", true),
+            ("rust,ignore", true),
+            ("ignore", true),
+            ("no_run, should_panic", true),
+            ("compile_fail E0499", true),
+            ("edition2021 test_harness standalone_crate", true),
+            ("ignore-wasm32", true),
+            ("{.class}", true),
+            ("text", false),
+            ("sh", false),
+            ("Eabcd", false),
+            ("abcde", false),
+            ("E049", false),
+            ("text,rust", true),
+        ] {
+            assert_eq!(rust_fence(info), rust, "{info:?}");
+        }
+        let s = |x: &str| x.to_owned();
+        assert_eq!(fence("```rust"), Some((s("```"), "rust")));
+        assert_eq!(fence("~~~~ no_run "), Some((s("~~~~"), "no_run")));
+        assert_eq!(fence("``"), None);
+        assert_eq!(fence("``` a`b"), None);
+        assert_eq!(fence("~~~ a`b"), Some((s("~~~"), "a`b")));
+        assert_eq!(fence("text"), None);
+        assert!(closes("````", "```"));
+        assert!(closes("   ```", "```"));
+        assert!(!closes("    ```", "```"));
+        assert!(!closes("``", "```"));
+        assert!(!closes("``` x", "```"));
+        assert!(!closes("~~~", "```"));
+        assert!(
+            !closes("```", "````"),
+            "a shorter run closes no longer fence"
+        );
+        assert!(!closes("text", "```"));
+        for (t, w) in [
+            ("- a", Some(2)),
+            ("* a", Some(2)),
+            ("+ a", Some(2)),
+            ("1. a", Some(3)),
+            ("10) a", Some(4)),
+            ("-a", None),
+            ("1 a", None),
+            ("a", None),
+            ("", None),
+        ] {
+            assert_eq!(list_item(t), w, "{t:?}");
+        }
+        let ex = example(
+            &[
+                (7, "# let a = 1;"),
+                (8, "#"),
+                (9, "##[x]"),
+                (10, "#[y]"),
+                (11, "plain"),
+            ],
+            0,
+            true,
+        );
+        assert_eq!(ex.text, "let a = 1;\n\n#[x]\n#[y]\nplain\n");
+        assert_eq!(
+            (ex.line(0), ex.line(1), ex.line(5), ex.line(9)),
+            (7, 7, 11, 11)
+        );
+        let ex = example(&[(3, "      x"), (4, "")], 4, false);
+        assert_eq!(ex.text, "  x\n\n");
+        assert!(!ex.fenced);
+    }
+
+    /// The test-region readers pinned: a test harness's attribute path,
+    /// with or without arguments, and a `cfg` that names `test` where it
+    /// can hold.
+    #[test]
+    fn test_attributes_and_cfgs_answer_exactly() {
+        let attr = |text: &str| test_attr(&toks(text));
+        assert!(attr("test"));
+        assert!(attr("tokio::test"));
+        assert!(attr("tokio::test(flavor = \"x\")"));
+        assert!(attr("bench"));
+        assert!(!attr("testing"));
+        assert!(!attr("test x"));
+        assert!(!attr("test(x) y"));
+        assert!(!attr("tokio::"));
+        assert!(!attr(""));
+        let cfg = |text: &str| cfg_test_attr(&toks(text));
+        assert!(cfg("cfg(test)"));
+        assert!(cfg("cfg(any(test, unix))"));
+        assert!(cfg("cfg(not(not(test)))"));
+        assert!(!cfg("cfg(not(test))"));
+        assert!(!cfg("cfg(test = \"x\")"));
+        assert!(!cfg("cfg(unix)"));
+        assert!(!cfg("cfg(test) x"));
+        assert!(!cfg("cfg_attr(test, x)"));
+        assert!(!cfg("cfg"));
+        assert!(mentions_test(&toks("(test)")));
+        for stray in ["# x\n", "#!x\n", "#![allow(x)]\nfn f() {}\n"] {
+            assert!(test_regions(stray, &toks(stray)).is_empty(), "{stray:?}");
+        }
+    }
+
+    /// The group readers pinned: the tokens inside a group (to its closer,
+    /// or to the end when the statement cuts it), what `stringify!` and
+    /// `concat!` make, and a group opener.
+    #[test]
+    fn groups_stringify_and_concat_answer_exactly() {
+        let t = toks("f(a, (b), c) d");
+        assert_eq!(inside(&t, 1).len(), 7);
+        let cut = toks("f(a, b");
+        assert_eq!(inside(&cut, 1).len(), 3);
+        assert_eq!(stringified(&toks("web")), "web");
+        assert_eq!(stringified(&toks("a b::c 1 \"s\"")), "a b::c");
+        assert_eq!(
+            joined(&toks("\"../\", stringify!(web), \"/x\"")),
+            "../web/x"
+        );
+        assert_eq!(
+            joined(&toks("\"a\", stringify!(b")),
+            "ab",
+            "a stringify! the statement cuts"
+        );
+        assert_eq!(joined(&toks("\"a\", stringify!, \"c\"")), "ac");
+        assert_eq!(joined(&toks("stringify \"a\"")), "a");
+        assert!(opens_group(toks("[").first()));
+        assert!(!opens_group(toks("x").first()));
+        assert!(!opens_group(None));
+        assert!(is_web("WeB"));
+        assert!(!is_web("webs"));
+        assert!(under_dir(Path::new("/a/B/c"), Path::new("/A/b")));
+        assert!(!under_dir(Path::new("/a"), Path::new("/a/b")));
+        assert!(!under_dir(Path::new("/x/b"), Path::new("/a/b")));
+    }
+}
+
 /// Every function a file declares, by line and name: each `fn` keyword token
 /// followed by an identifier. A `fn` in a comment or a string literal is not a
 /// token, so prose cannot add a function, and a `*`-led line is code.
@@ -5079,7 +6103,7 @@ fn web_reads_cli(rest: &[String], root: &Path) -> Result<bool, String> {
 mod tests {
     use super::*;
 
-    fn tracked(
+    pub(super) fn tracked(
         files: &[(&str, &str)],
     ) -> (
         impl Fn(&str) -> Option<String> + use<>,
@@ -6414,7 +7438,7 @@ mod tests {
 
     /// The findings of one file's test code, its own production `const`
     /// and `static` items read first, as the gate reads a crate.
-    fn web_hits(src: &str) -> Vec<String> {
+    pub(super) fn web_hits(src: &str) -> Vec<String> {
         let mut got = Collected::default();
         got.add("crates/a/src/x.rs", src, true).unwrap();
         let names = got.settle();
@@ -6426,7 +7450,7 @@ mod tests {
     }
 
     /// A test module around `body`, inside a `#[test]` fn.
-    fn in_test(body: &str) -> String {
+    pub(super) fn in_test(body: &str) -> String {
         format!(
             "fn served() -> u8 {{ 1 }}\n#[cfg(test)]\nmod tests {{\n    use std::path::Path;\n    #[test]\n    fn t() {{\n        {body}\n    }}\n}}\n"
         )
@@ -6795,7 +7819,7 @@ mod tests {
     }
 
     /// The tokens of `src`.
-    fn toks(src: &str) -> Vec<Token> {
+    pub(super) fn toks(src: &str) -> Vec<Token> {
         lex(src).unwrap().tokens
     }
 
@@ -6911,1020 +7935,5 @@ mod tests {
                 .map(|found| found.len()),
             Ok(1)
         );
-    }
-
-    // ---- gate 1h, repair 4: helpers, doc examples, macros, case, links ----
-
-    /// `lines` joined into one source, each ended by a newline, so a test
-    /// names a finding by the index of its line plus one.
-    fn src(lines: &[&str]) -> String {
-        let mut out = lines.join("\n");
-        out.push('\n');
-        out
-    }
-
-    /// Gate 1h over a tree of `files` with no links on disk: its findings.
-    fn tree_hits(files: &[(&str, &str)]) -> Vec<String> {
-        let listed: BTreeSet<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
-        let (read, _) = tracked(files);
-        web_reads(&listed, &read, Path::new("/nonexistent-brutex-root"))
-            .unwrap()
-            .0
-    }
-
-    /// CHECK R4, V4-2 (30 Oct 2026): a test reads `web/` through a helper
-    /// whose VALUE is the repository root -- the tree's own `repo()`,
-    /// `read(relative)` (crates/store/tests/cited_commits.rs) and
-    /// `workspace_root()` (crates/core/tests/cost_invariants.rs) -- and the
-    /// checker's two probes are refused at their own lines, as are its E1
-    /// and E2 and a helper followed through a `let`, a chain written in any
-    /// order, `format!`, a method, `Self::`, a module path, a test module,
-    /// a production function, a macro, a static and another crate. A
-    /// document read through the same helper, a text check of a root and a
-    /// same-named helper of another file read nothing and pass.
-    #[test]
-    fn a_helper_whose_value_is_the_repository_root_carries_the_read() {
-        let paths = src(&[
-            "use std::path::PathBuf;",
-            "pub const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
-            "pub fn root() -> PathBuf {",
-            "    PathBuf::from(ROOT).join(\"../..\")",
-            "}",
-        ]);
-        let x = src(&[
-            "use std::path::{Path, PathBuf};",
-            "pub fn default_web_dir() -> PathBuf {",
-            "    web_beside(Path::new(env!(\"CARGO_MANIFEST_DIR\")))",
-            "}",
-            "fn web_beside(manifest: &Path) -> PathBuf {",
-            "    manifest.join(\"web\")",
-            "}",
-            "macro_rules! here {",
-            "    () => {",
-            "        env!(\"CARGO_MANIFEST_DIR\")",
-            "    };",
-            "}",
-            "pub static TOP: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| crate::paths::root());",
-            "#[cfg(test)]",
-            "mod tests {",
-            "    use super::*;",
-            "    fn root() -> PathBuf {",
-            "        Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
-            "    }",
-            "    #[test]",
-            "    fn p02_a_test_module_helper() {",
-            "        let _ = std::fs::read(root().join(\"web/src/x.js\"));",
-            "    }",
-            "    #[test]",
-            "    fn a_production_root_joined_to_web() {",
-            "        let _ = std::fs::read(crate::paths::root().join(\"web/x.js\"));",
-            "    }",
-            "    #[test]",
-            "    fn a_text_check_reads_nothing() {",
-            "        assert!(default_web_dir().ends_with(\"web\"));",
-            "    }",
-            "    #[test]",
-            "    fn a_macro_root_and_a_static_root() {",
-            "        let _ = std::fs::read(Path::new(here!()).join(\"web/x.js\"));",
-            "        let _ = std::fs::read(TOP.join(\"web/y.js\"));",
-            "    }",
-            "}",
-        ]);
-        let cited = src(&[
-            "use std::path::{Path, PathBuf};",
-            "fn repo() -> PathBuf {",
-            "    Path::new(env!(\"CARGO_MANIFEST_DIR\"))",
-            "        .parent()",
-            "        .and_then(Path::parent)",
-            "        .expect(\"crates/a is two levels below the root\")",
-            "        .to_owned()",
-            "}",
-            "fn read(relative: &str) -> String {",
-            "    std::fs::read_to_string(repo().join(relative))",
-            "        .unwrap_or_else(|why| panic!(\"{relative} is readable: {why}\"))",
-            "}",
-            "#[test]",
-            "fn probe_reads_web_through_read() {",
-            "    assert!(!read(\"web/src/lib/db/export.js\").is_empty());",
-            "}",
-            "#[test]",
-            "fn a_document_read_is_no_read_of_web() {",
-            "    let doc = read(\"docs/04-invariants.md\");",
-            "    assert!(doc.contains(\"web/tests/x.test.js\"));",
-            "}",
-        ]);
-        let workspace = src(&[
-            "use std::path::PathBuf;",
-            "mod common;",
-            "fn workspace_root() -> PathBuf {",
-            "    let mut root = PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"));",
-            "    root.pop();",
-            "    root.pop();",
-            "    root",
-            "}",
-            "#[test]",
-            "fn probe_reads_web_through_workspace_root() {",
-            "    let _ = std::fs::read_to_string(workspace_root().join(\"web/src/lib/db/bars-plan.js\")).unwrap();",
-            "}",
-            "#[test]",
-            "fn e1_web_then_a_file() {",
-            "    let _ = std::fs::read(workspace_root().join(\"web\").join(\"src/x.js\"));",
-            "}",
-            "#[test]",
-            "fn a_bound_root_then_web() {",
-            "    let base = later();",
-            "    let _ = std::fs::read(base.join(\"web/x.js\"));",
-            "}",
-            "fn later() -> PathBuf {",
-            "    middle().join(\"x\")",
-            "}",
-            "fn middle() -> PathBuf {",
-            "    workspace_root()",
-            "}",
-            "#[test]",
-            "fn a_formatted_root() {",
-            "    let _ = std::fs::read(format!(\"{}/web/x.js\", workspace_root().display()));",
-            "}",
-            "struct Fx;",
-            "impl Fx {",
-            "    fn root(&self) -> PathBuf {",
-            "        workspace_root()",
-            "    }",
-            "    fn web(&self) -> PathBuf {",
-            "        Self::root(self).join(\"web\")",
-            "    }",
-            "}",
-            "#[test]",
-            "fn a_method_root() {",
-            "    let _ = std::fs::read(Fx.root().join(\"web/x.js\"));",
-            "}",
-            "#[test]",
-            "fn a_module_root() {",
-            "    let _ = std::fs::read(common::repo().join(\"web/x.js\"));",
-            "}",
-        ]);
-        let common = src(&[
-            "use std::path::{Path, PathBuf};",
-            "pub fn repo() -> PathBuf {",
-            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
-            "}",
-        ]);
-        let other = src(&[
-            "fn read(path: &str) -> String {",
-            "    std::fs::read_to_string(path).unwrap_or_default()",
-            "}",
-            "#[test]",
-            "fn a_read_of_another_file_is_its_own() {",
-            "    let _ = read(\"web/x.js\");",
-            "    let _ = std::fs::read(\"web/y.js\");",
-            "}",
-        ]);
-        let e2 = src(&[
-            "use std::path::{Path, PathBuf};",
-            "fn repo(rel: &str) -> PathBuf {",
-            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(rel)",
-            "}",
-            "#[test]",
-            "fn e2_the_web_in_the_caller() {",
-            "    let _ = std::fs::read(repo(\"web/src/lib/db/bars-plan.js\"));",
-            "}",
-            "#[test]",
-            "fn another_crates_root() {",
-            "    let _ = std::fs::read(a::paths::root().join(\"web/x.js\"));",
-            "}",
-        ]);
-        let files = [
-            (
-                "Cargo.toml",
-                "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
-            ),
-            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
-            (
-                "crates/a/src/lib.rs",
-                "pub mod paths;\npub mod x;\npub fn f() {}\n",
-            ),
-            ("crates/a/src/paths.rs", paths.as_str()),
-            ("crates/a/src/x.rs", x.as_str()),
-            ("crates/a/tests/cited.rs", cited.as_str()),
-            ("crates/a/tests/common/mod.rs", common.as_str()),
-            ("crates/a/tests/other.rs", other.as_str()),
-            ("crates/a/tests/workspace.rs", workspace.as_str()),
-            ("crates/b/Cargo.toml", "[package]\nname = \"b\"\n"),
-            ("crates/b/src/lib.rs", "pub fn g() {}\n"),
-            ("crates/b/tests/t.rs", e2.as_str()),
-        ];
-        let hits = tree_hits(&files);
-        let at: Vec<&str> = hits
-            .iter()
-            .map(|h| h.split(": ").next().unwrap_or(""))
-            .collect();
-        assert_eq!(
-            at,
-            [
-                "crates/a/src/x.rs:22",
-                "crates/a/src/x.rs:26",
-                "crates/a/src/x.rs:34",
-                "crates/a/src/x.rs:35",
-                "crates/a/tests/cited.rs:15",
-                "crates/a/tests/workspace.rs:11",
-                "crates/a/tests/workspace.rs:15",
-                "crates/a/tests/workspace.rs:20",
-                "crates/a/tests/workspace.rs:30",
-                "crates/a/tests/workspace.rs:38",
-                "crates/a/tests/workspace.rs:43",
-                "crates/a/tests/workspace.rs:47",
-                "crates/b/tests/t.rs:7",
-                "crates/b/tests/t.rs:11",
-            ],
-            "{hits:#?}"
-        );
-        // The checker's two probes, by their reason; the rest by either
-        // reason (workspace_root's own `let mut root` stays bound for the
-        // file's later statements, so `Fx.root()` reads as that anchor: the
-        // gate reads statements, not scopes, which can only refuse more).
-        for probe in [
-            "crates/a/tests/cited.rs:15: a web segment joined to the repository's root from a helper: \"web/src/lib/db/export.js\"",
-            "crates/a/tests/workspace.rs:11: a web segment joined to the repository's root from a helper: \"web/src/lib/db/bars-plan.js\"",
-        ] {
-            assert!(hits.iter().any(|h| h == probe), "{probe}: {hits:#?}");
-        }
-        assert!(
-            hits.iter().all(
-                |h| h.contains("joined to the repository's root from a helper")
-                    || h.contains("beside a repository anchor")
-            ),
-            "{hits:#?}"
-        );
-    }
-
-    /// What a helper that is no root leaves alone: a function that only
-    /// uses the root inside, or returns a count; one whose value is a
-    /// temporary folder; a parameter named like a root helper; a `std` path
-    /// named like one; and `Path::new` beside a root `new` of another type.
-    #[test]
-    fn a_function_that_only_uses_the_root_is_no_root() {
-        let controls = src(&[
-            "use std::path::{Path, PathBuf};",
-            "fn root() -> PathBuf {",
-            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
-            "}",
-            "fn count() -> usize {",
-            "    std::fs::read_dir(root()).map_or(0, Iterator::count)",
-            "}",
-            "fn label() -> String {",
-            "    let _ = root();",
-            "    String::from(\"x\")",
-            "}",
-            "fn scratch() -> PathBuf {",
-            "    std::env::temp_dir().join(\"x\")",
-            "}",
-            "fn read(p: &str) -> String {",
-            "    std::fs::read_to_string(root().join(p)).unwrap_or_default()",
-            "}",
-            "struct Fx;",
-            "impl Fx {",
-            "    fn new() -> PathBuf {",
-            "        root()",
-            "    }",
-            "}",
-            "#[cfg(test)]",
-            "mod tests {",
-            "    use super::*;",
-            "    fn build(root: &Path) {",
-            "        let _ = root.join(\"web\");",
-            "    }",
-            "    #[test]",
-            "    fn controls() {",
-            "        let _ = count().to_string() + \"web\";",
-            "        let _ = label().push_str(\"web\");",
-            "        let _ = std::fs::read(scratch().join(\"web/x.js\"));",
-            "        build(Path::new(\"/tmp/x\"));",
-            "        let _ = std::fs::read(\"web/x.js\");",
-            "        let _ = Path::new(\"web\");",
-            "    }",
-            "}",
-        ]);
-        assert_eq!(web_hits(&controls), Vec::<String>::new());
-    }
-
-    /// CHECK R4, E3: the Rust of a doc comment is test code -- `cargo test`
-    /// compiles and runs every example rustdoc reads as Rust -- so a fenced
-    /// example (backtick or tilde, `ignore` and `no_run` too), a hidden
-    /// `# ` line, an indented block, a `//!` and a `/** */` example that
-    /// reads `web/` are each refused at their own line; a `text` fence, an
-    /// indented line that belongs to a list item, a `////` comment, prose
-    /// that does not lex and an empty fence are not; a fenced Rust example
-    /// that does not lex is a finding by name, never a skip.
-    #[test]
-    fn a_doc_example_is_test_code() {
-        let docs = src(&[
-            "/// Reads the front end.",
-            "///",
-            "/// ```",
-            "/// let _ = std::fs::read(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/src/x.js\"));",
-            "/// ```",
-            "pub fn a() {}",
-            "/// ```rust,ignore",
-            "/// # let _ = include_str!(\"../../../web/x.js\");",
-            "/// ```",
-            "pub fn b() {}",
-            "/// ~~~no_run",
-            "/// let _ = std::fs::read(\"../../web/y.js\");",
-            "/// ~~~",
-            "pub fn c() {}",
-            "/// ```text",
-            "/// ../../web/not-code.txt",
-            "/// ```",
-            "pub fn d() {}",
-            "/// Indented, after a blank line:",
-            "///",
-            "///     let _ = std::fs::read(\"../../web/z.js\");",
-            "pub fn e() {}",
-            "/// A list:",
-            "///",
-            "/// - an item",
-            "///",
-            "///     ../../web/item-text",
-            "pub fn f() {}",
-            "//// ```",
-            "//// let _ = std::fs::read(\"../../web/q.js\");",
-            "//// ```",
-            "pub fn g() {}",
-            "/** A block doc:",
-            " * ```",
-            " * let _ = std::fs::read(\"../../web/r.js\");",
-            " * ```",
-            " */",
-            "pub fn h() {}",
-            "/// Text:",
-            "///",
-            "///     let _ = std::fs::read(\"../../web/k.js\");",
-            "///",
-            "/// After.",
-            "pub fn k() {}",
-            "/// - item",
-            "///       ```",
-            "pub fn l() {}",
-        ]);
-        let at: Vec<String> = web_hits(&docs)
-            .iter()
-            .map(|h| {
-                h.split(": in a doc example, climbs into web/")
-                    .next()
-                    .unwrap_or("")
-                    .to_owned()
-            })
-            .collect();
-        assert_eq!(
-            at,
-            [
-                "crates/a/src/x.rs:4",
-                "crates/a/src/x.rs:8",
-                "crates/a/src/x.rs:12",
-                "crates/a/src/x.rs:21",
-                "crates/a/src/x.rs:35",
-                "crates/a/src/x.rs:41",
-            ]
-        );
-        let odd = src(&[
-            "//! ```",
-            "//! let _ = std::fs::read(\"../../web/i.js\");",
-            "//! ```",
-            "/// ```",
-            "/// let s = \"unterminated;",
-            "/// ```",
-            "pub fn u() {}",
-            "/// Prose:",
-            "///",
-            "///     it's \"quoted",
-            "pub fn v() {}",
-            "/// ```",
-            "/// ```",
-            "pub fn w() {}",
-            "/*! ```",
-            "let _ = std::fs::read(\"../../web/j.js\");",
-            "``` */",
-            "pub fn y() {}",
-            "/*** a banner, not a doc: ``` */",
-            "/**/",
-            "/* plain */",
-        ]);
-        assert_eq!(
-            web_hits(&odd),
-            [
-                "crates/a/src/x.rs:2: in a doc example, climbs into web/: \"../../web/i.js\"",
-                "crates/a/src/x.rs:5: a doc example rustdoc reads as Rust that gate 1h cannot read: line 1: unterminated string",
-                "crates/a/src/x.rs:16: in a doc example, climbs into web/: \"../../web/j.js\"",
-            ]
-        );
-    }
-
-    /// CHECK R4, E4 (a combination): a `macro_rules!` that PRODUCTION code
-    /// defines, whose body reads a path into `web/`, expanded in a test, is
-    /// refused at the expansion; expanded only in production, it passes.
-    #[test]
-    fn a_production_macro_expanded_in_a_test_carries_the_read() {
-        let s = src(&[
-            "macro_rules! web_file {",
-            "    ($p:expr) => {",
-            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/\", $p)",
-            "    };",
-            "}",
-            "macro_rules! in_prod {",
-            "    () => {",
-            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/x.js\")",
-            "    };",
-            "}",
-            "pub fn served() -> &'static str {",
-            "    in_prod!()",
-            "}",
-            "#[cfg(test)]",
-            "mod tests {",
-            "    #[test]",
-            "    fn t() {",
-            "        let _ = std::fs::read(web_file!(\"src/x.js\"));",
-            "    }",
-            "}",
-        ]);
-        assert_eq!(
-            web_hits(&s),
-            [
-                "crates/a/src/x.rs:18: expands `web_file!`, a macro whose body reads a path into web/"
-            ]
-        );
-    }
-
-    /// CHECK R4, E5 and E7: `web` in any case is `web` (this Mac's volume
-    /// is case-blind), and `stringify!(web)` is the literal `web`, in a
-    /// `concat!` or alone.
-    #[test]
-    fn web_in_any_case_and_a_stringified_web_are_web() {
-        for (case, body) in [
-            (
-                "a capital Web",
-                "let _ = std::fs::read(\"../../Web/src/x.js\");",
-            ),
-            (
-                "WEB beside an anchor",
-                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(\"WEB\");",
-            ),
-            (
-                "stringify! in a concat!",
-                "let _ = std::fs::read(concat!(\"../../\", stringify!(web), \"/src/x.js\"));",
-            ),
-            (
-                "stringify! alone",
-                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(stringify!(web));",
-            ),
-        ] {
-            assert_eq!(web_hits(&in_test(body)).len(), 1, "{case} passed: {body}");
-        }
-    }
-
-    /// CHECK R4, E7: a test harness's attribute (`#[tokio::test]`, with or
-    /// without arguments, `#[bench]`) and a `cfg` that names `test` where it
-    /// can hold (`any(test, ..)`, `not(not(test))`, an inner `#![cfg(..)]`
-    /// to the end of its block) make test code wherever they stand; an
-    /// attribute named otherwise, `not(test)` and `test = ".."` do not.
-    #[test]
-    fn harness_attributes_and_test_cfgs_make_test_code_anywhere() {
-        let s = src(&[
-            "#[tokio::test]",
-            "async fn a() {",
-            "    let _ = std::fs::read(\"../../web/a.js\");",
-            "}",
-            "#[tokio::test(flavor = \"multi_thread\")]",
-            "async fn b() {",
-            "    let _ = std::fs::read(\"../../web/b.js\");",
-            "}",
-            "#[bench]",
-            "fn c() {",
-            "    let _ = std::fs::read(\"../../web/c.js\");",
-            "}",
-            "#[testing]",
-            "fn d() -> &'static str {",
-            "    \"../../web/d.js\"",
-            "}",
-            "#[cfg(any(test, feature = \"x\"))]",
-            "fn e() {",
-            "    let _ = std::fs::read(\"../../web/e.js\");",
-            "}",
-            "#[cfg(not(test))]",
-            "fn f() -> &'static str {",
-            "    \"../../web/f.js\"",
-            "}",
-            "#[cfg(not(not(test)))]",
-            "fn g() {",
-            "    let _ = std::fs::read(\"../../web/g.js\");",
-            "}",
-            "#[cfg(test = \"x\")]",
-            "fn h() -> &'static str {",
-            "    \"../../web/h.js\"",
-            "}",
-            "mod m {",
-            "    #![cfg(any(test, unix))]",
-            "    fn i() {",
-            "        let _ = std::fs::read(\"../../web/i.js\");",
-            "    }",
-            "}",
-            "pub fn after() -> &'static str {",
-            "    \"../../web/after.js\"",
-            "}",
-        ]);
-        let at: Vec<String> = web_hits(&s)
-            .iter()
-            .map(|h| h.split(": climbs").next().unwrap_or("").to_owned())
-            .collect();
-        assert_eq!(
-            at,
-            [
-                "crates/a/src/x.rs:3",
-                "crates/a/src/x.rs:7",
-                "crates/a/src/x.rs:11",
-                "crates/a/src/x.rs:19",
-                "crates/a/src/x.rs:27",
-                "crates/a/src/x.rs:36",
-            ]
-        );
-        let whole = src(&[
-            "#![cfg(any(test, unix))]",
-            "pub fn served() -> &'static str {",
-            "    \"../../web/w.js\"",
-            "}",
-        ]);
-        assert_eq!(web_hits(&whole).len(), 1);
-    }
-
-    /// CHECK R4, E6 (out of the box) and E5: a tracked link under `crates/`
-    /// to a folder that HOLDS `web/` -- the repository root, or above it,
-    /// relative or absolute -- is refused, and so is a link into `Web/` in
-    /// another case; a link that stays in the crate, or whose absolute
-    /// target does not exist, is not.
-    #[test]
-    fn a_link_to_the_repository_root_or_above_is_refused() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let root =
-            std::env::temp_dir().join(format!("brutex-gate1h-r4-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(root.join("web/src")).unwrap();
-        std::fs::create_dir_all(root.join("crates/a/src")).unwrap();
-        let link = |target: &Path, name: &str| {
-            std::os::unix::fs::symlink(target, root.join("crates/a").join(name)).unwrap();
-        };
-        link(Path::new("../.."), "repo");
-        link(Path::new("../../.."), "up");
-        link(Path::new("../../Web/src"), "front");
-        link(&root, "abs-root");
-        link(Path::new("/"), "abs-slash");
-        link(Path::new("src"), "stays");
-        link(Path::new("/nonexistent-brutex-r4-target"), "dangling");
-        for (name, want) in [
-            ("repo", Some("a link to a folder that holds web/")),
-            ("up", Some("a link to a folder that holds web/")),
-            ("front", Some("a link into web/")),
-            ("abs-root", Some("a link to a folder that holds web/")),
-            ("abs-slash", Some("a link to a folder that holds web/")),
-            ("stays", None),
-            ("dangling", None),
-        ] {
-            let rel = format!("crates/a/{name}");
-            let got = link_into_web(&root, &rel);
-            match want {
-                Some(why) => assert!(
-                    got.as_deref()
-                        .is_some_and(|g| g.starts_with(&format!("{rel}: {why}"))),
-                    "{name}: {got:?}"
-                ),
-                None => assert_eq!(got, None, "{name}"),
-            }
-        }
-    }
-
-    /// The call readers pinned to each answer: a bare call, a method, a
-    /// path by the segment before the name, `crate`/`self`/`super` as bare,
-    /// `Self::` as a method, a `std`/`core`/`alloc` path as none, a `fn`
-    /// item's own name and a name with no `(` as none; and what a group
-    /// hands its contents to.
-    #[test]
-    fn calls_and_callees_are_read_by_how_they_name_the_callee() {
-        let call = |text: &str| {
-            let t = toks(text);
-            let i = (0..t.len())
-                .rev()
-                .find(|&k| ident(&t[k]).is_some() && is_punct(t.get(k + 1), '('))
-                .unwrap_or(0);
-            call_at(&t, i, ident(&t[i]).unwrap_or(""))
-        };
-        let s = |x: &str| x.to_owned();
-        assert_eq!(call("repo()"), Some(Call::Bare(s("repo"))));
-        assert_eq!(call("let x = repo()"), Some(Call::Bare(s("repo"))));
-        assert_eq!(call("fx.root()"), Some(Call::Method(s("root"))));
-        assert_eq!(
-            call("a::paths::root()"),
-            Some(Call::Path(s("paths"), s("root")))
-        );
-        assert_eq!(call("v = a::b()"), Some(Call::Path(s("a"), s("b"))));
-        assert_eq!(call("let v = a::b()"), Some(Call::Path(s("a"), s("b"))));
-        assert_eq!(call("<X>::a::b()"), Some(Call::Path(s("a"), s("b"))));
-        assert_eq!(call("crate::root()"), Some(Call::Bare(s("root"))));
-        assert_eq!(call("super::super::root()"), Some(Call::Bare(s("root"))));
-        assert_eq!(call("Self::root()"), Some(Call::Method(s("root"))));
-        assert_eq!(call("std::fs::read()"), None);
-        assert_eq!(call("core::x::y()"), None);
-        assert_eq!(call("alloc::x()"), None);
-        assert_eq!(call("<T as X>::f()"), None);
-        assert_eq!(call("fn repo()"), None);
-        let t = toks("repo");
-        assert_eq!(call_at(&t, 0, "repo"), None, "no ( after it");
-        assert_eq!(Call::Bare(s("r")).key("f.rs"), "f.rs/r");
-        assert_eq!(Call::Method(s("r")).key("f.rs"), "f.rs/.r");
-        assert_eq!(Call::Path(s("m"), s("r")).key("f.rs"), "m::r");
-        let callee = |text: &str| {
-            let t = toks(text);
-            let open = t
-                .iter()
-                .rposition(|x| x.tok == Tok::Punct('('))
-                .unwrap_or(0);
-            callee_of(&t, open)
-        };
-        for builds in [
-            "format!(",
-            "concat!(",
-            "include_str!(",
-            "include_bytes!(",
-            "include!(",
-            "x.join(",
-            "x.push(",
-            "x.with_file_name(",
-            "x.set_file_name(",
-            "Path::new(",
-            "PathBuf::from(",
-            "std::ffi::OsStr::new(",
-            "OsString::from(",
-        ] {
-            assert_eq!(callee(builds), Callee::Builds, "{builds}");
-        }
-        for other in [
-            "vec!(",
-            "(",
-            "1(",
-            "x: f(",
-            "x.ends_with(",
-            "String::new(",
-            "Path::join(",
-        ] {
-            let got = callee(other);
-            assert!(!matches!(got, Callee::Builds), "{other}: {got:?}");
-        }
-        assert_eq!(callee("read("), Callee::Call(Call::Bare(s("read"))));
-        assert_eq!(callee("std::fs::read("), Callee::Other);
-    }
-
-    /// The scope readers: an `impl` header's self type (after generics and
-    /// `for`, before `where`), what a `{` opens, a file's module and crate,
-    /// a `fn`'s body and whether its signature returns a path.
-    #[test]
-    fn scopes_modules_bodies_and_return_types_answer_exactly() {
-        let ty = |text: &str| impl_type(&toks(text));
-        assert_eq!(ty("Fx"), "Fx");
-        assert_eq!(ty("<T> Fx<T>"), "Fx");
-        assert_eq!(ty("<F: Fn() -> u8> Trait for a::Fx<F>"), "Fx");
-        assert_eq!(ty("dyn Trait"), "Trait");
-        assert_eq!(ty("Fx where T: Bound"), "Fx");
-        assert_eq!(ty("const unsafe mut Fx"), "Fx");
-        assert_eq!(ty(">"), "");
-        let scope = |text: &str| {
-            let t = toks(text);
-            let i = t
-                .iter()
-                .rposition(|x| x.tok == Tok::Punct('{'))
-                .unwrap_or(0);
-            scope_at(&t, i)
-        };
-        let s = |x: &str| x.to_owned();
-        assert_eq!(scope("impl Fx {"), Some((true, s("Fx"))));
-        assert_eq!(
-            scope("x; #[cfg(test)] pub(crate) mod tests {"),
-            Some((false, s("tests")))
-        );
-        assert_eq!(scope("pub unsafe trait T {"), Some((true, s("T"))));
-        assert_eq!(
-            scope("#![allow(x)] default auto trait T {"),
-            Some((true, s("T")))
-        );
-        assert_eq!(scope("fn f() {"), None);
-        assert_eq!(scope("{"), None);
-        assert_eq!(scope("mod {"), None);
-        assert_eq!(scope("= 1 {"), None);
-        assert_eq!(home_of("crates/a/src/x.rs"), "crates/a");
-        for (path, module) in [
-            ("crates/a/src/lib.rs", "a"),
-            ("crates/a/src/main.rs", "a"),
-            ("crates/a/src/x/mod.rs", "x"),
-            ("crates/a/src/x/lib.rs", "lib"),
-            ("crates/a/tests/common/mod.rs", "common"),
-            ("crates/a/tests/t.rs", "t"),
-            ("lib.rs", "lib"),
-            ("", ""),
-        ] {
-            assert_eq!(module_of(path), module, "{path}");
-        }
-        let body = |text: &str| fn_body(&toks(text), 0);
-        assert_eq!(body("fn f() { a }"), Some((5, 6)));
-        assert_eq!(
-            body("fn f<const N: [u8; 2]>(x: [u8; N]) -> u8 { a b }"),
-            Some((25, 27))
-        );
-        assert_eq!(body("fn f();"), None);
-        assert_eq!(body("fn f() }"), None);
-        assert_eq!(body("fn f()"), None);
-        assert_eq!(body("fn f() { a"), Some((5, 6)), "a body the file cuts");
-        for (sig, path) in [
-            ("() -> PathBuf", true),
-            ("() -> Result<std::path::PathBuf, String>", true),
-            ("(x: &Path) -> &str", true),
-            ("() -> Option<OsString>", true),
-            ("() -> Cow<'static, OsStr>", true),
-            ("() -> impl AsRef<Path>", true),
-            ("(p: &Path)", false),
-            ("(f: fn() -> PathBuf) -> u8", false),
-            ("() -> usize where T: Into<String>", false),
-            ("() -> Vec<u8>", false),
-            ("() -> [String; 2]", true),
-            ("> String", false),
-        ] {
-            assert_eq!(returns_path(&toks(sig)), path, "{sig}");
-        }
-    }
-
-    /// A function's value: its statements after its last `;` of its own
-    /// depth, and each `return`; a body with neither has none. The value
-    /// is the root through a `let` of the body, a SCREAMING root value of
-    /// its crate, a call or a macro known; a `let` rebound to another
-    /// value forgets the root.
-    #[test]
-    fn a_functions_value_is_read_through_its_lets_and_returns() {
-        let summary =
-            |text: &str| fn_summary("crates/a", "f.rs", vec!["k".to_owned()], &toks(text));
-        assert!(summary("a; b;").is_none(), "no value");
-        assert!(summary("").is_none(), "an empty body");
-        let f = summary("let a = 1; if c { a } else { b }").unwrap();
-        assert_eq!(
-            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
-            [false, true, true, true, true]
-        );
-        let f = summary("if x { return root(); } y;").unwrap();
-        assert_eq!(
-            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
-            [false, true, false]
-        );
-        let known = WebNames {
-            fns: ["f.rs/root".to_owned()].into_iter().collect(),
-            macros: ["here".to_owned()].into_iter().collect(),
-            ..WebNames::default()
-        };
-        let none = BTreeSet::new();
-        let roots: BTreeSet<String> = ["ROOT".to_owned()].into_iter().collect();
-        for (text, want) in [
-            ("let r = env!(\"CARGO_MANIFEST_DIR\"); r", true),
-            ("let r = env!(\"CARGO_MANIFEST_DIR\"); let r = 1; r", false),
-            ("let r = x; r", false),
-            ("root().join(p)", true),
-            ("here!()", true),
-            ("PathBuf::from(ROOT)", true),
-            ("PathBuf::from(OTHER)", false),
-            ("Path::new(file!()).join(\"x\")", true),
-            ("\"../..\"", true),
-            ("\"..\"", false),
-            ("let r = root(); r.join(\"x\")", true),
-            ("let _ = root(); x", false),
-        ] {
-            let f = summary(text).unwrap();
-            let r = if text.contains("ROOT") { &roots } else { &none };
-            assert_eq!(f.returns_anchor(r, &known), want, "{text}");
-        }
-        assert!(screaming("ROOT_2"));
-        assert!(!screaming("Root"));
-        assert!(!screaming("_2"));
-        assert!(roots_at_repo("../.."));
-        assert!(roots_at_repo("./../../"));
-        assert!(roots_at_repo("CARGO_MANIFEST_DIR"));
-        assert!(roots_at_repo("CARGO_WORKSPACE_DIR"));
-        assert!(!roots_at_repo(".."));
-        assert!(!roots_at_repo("../../web"));
-        assert!(!roots_at_repo("."));
-    }
-
-    /// The fixpoint: a chain of helpers written callee-last resolves in as
-    /// many rounds as it is long, a root value read by a helper makes it a
-    /// root, a root macro and a production macro that reads `web/` are
-    /// learnt, a test macro that reads `web/` is no production macro, and a
-    /// file that does not lex is a refusal.
-    #[test]
-    fn the_fixpoint_learns_every_helper_whatever_the_order() {
-        let s = src(&[
-            "use std::path::PathBuf;",
-            "const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
-            "const OTHER: &str = ROOT;",
-            "type F = fn(u8) -> PathBuf;",
-            "trait T { fn f() -> PathBuf; }",
-            "fn c() -> PathBuf { b() }",
-            "fn b() -> PathBuf { a() }",
-            "fn a() -> PathBuf { PathBuf::from(ROOT) }",
-            "macro_rules! here { () => { env!(\"CARGO_MANIFEST_DIR\") }; }",
-            "macro_rules! page { () => { include_str!(\"../../../web/p.html\") }; }",
-            "#[cfg(test)]",
-            "mod tests {",
-            "    macro_rules! tpage { () => { include_str!(\"../../../web/t.html\") }; }",
-            "}",
-        ]);
-        let mut got = Collected::default();
-        got.add("crates/a/src/x.rs", &s, true).unwrap();
-        let names = got.settle();
-        let n = &names["crates/a"];
-        for key in [
-            "crates/a/src/x.rs/a",
-            "crates/a/src/x.rs/b",
-            "crates/a/src/x.rs/c",
-            "x::c",
-        ] {
-            assert!(n.fns.contains(key), "{key}: {:?}", n.fns);
-        }
-        assert!(n.roots.contains("ROOT"));
-        assert!(n.anchors.contains("ROOT"));
-        assert!(
-            n.roots.contains("OTHER"),
-            "a root read by a value is a root"
-        );
-        let mut odd = Collected::default();
-        odd.add(
-            "crates/a/src/y.rs",
-            "macro_rules x; macro_rules! (); macro_rules! m; fn() {}",
-            true,
-        )
-        .unwrap();
-        assert!(odd.macros.is_empty());
-        assert!(odd.fns.is_empty());
-        assert!(n.macros.contains("here"));
-        assert!(!n.macros.contains("page"), "a climb into web/ is no root");
-        assert_eq!(
-            n.web_macros.iter().collect::<Vec<_>>(),
-            ["page"],
-            "tpage is a test's"
-        );
-        let mut bad = Collected::default();
-        assert!(bad.add("crates/a/src/x.rs", "\"open", true).is_err());
-        assert!(
-            bad.add("crates/a/tests/t.rs", "fn f() -> PathBuf { a }", false)
-                .is_ok()
-        );
-        assert_eq!(
-            bad.values["crates/a"].len(),
-            0,
-            "a test file has no production values"
-        );
-        assert!(
-            web_read_findings("crates/a/src/x.rs", "\"open", false, &WebNames::default()).is_err()
-        );
-    }
-
-    /// The doc readers pinned: which fence info strings rustdoc reads as
-    /// Rust; what opens and closes a fence; a list item's width; how a
-    /// hidden line is shown; and the line of an example's line.
-    #[test]
-    fn fences_lists_and_hidden_lines_are_read_as_rustdoc_reads_them() {
-        for (info, rust) in [
-            ("", true),
-            ("rust", true),
-            ("rust,ignore", true),
-            ("ignore", true),
-            ("no_run, should_panic", true),
-            ("compile_fail E0499", true),
-            ("edition2021 test_harness standalone_crate", true),
-            ("ignore-wasm32", true),
-            ("{.class}", true),
-            ("text", false),
-            ("sh", false),
-            ("Eabcd", false),
-            ("abcde", false),
-            ("E049", false),
-            ("text,rust", true),
-        ] {
-            assert_eq!(rust_fence(info), rust, "{info:?}");
-        }
-        let s = |x: &str| x.to_owned();
-        assert_eq!(fence("```rust"), Some((s("```"), "rust")));
-        assert_eq!(fence("~~~~ no_run "), Some((s("~~~~"), "no_run")));
-        assert_eq!(fence("``"), None);
-        assert_eq!(fence("``` a`b"), None);
-        assert_eq!(fence("~~~ a`b"), Some((s("~~~"), "a`b")));
-        assert_eq!(fence("text"), None);
-        assert!(closes("````", "```"));
-        assert!(closes("   ```", "```"));
-        assert!(!closes("    ```", "```"));
-        assert!(!closes("``", "```"));
-        assert!(!closes("``` x", "```"));
-        assert!(!closes("~~~", "```"));
-        assert!(
-            !closes("```", "````"),
-            "a shorter run closes no longer fence"
-        );
-        assert!(!closes("text", "```"));
-        for (t, w) in [
-            ("- a", Some(2)),
-            ("* a", Some(2)),
-            ("+ a", Some(2)),
-            ("1. a", Some(3)),
-            ("10) a", Some(4)),
-            ("-a", None),
-            ("1 a", None),
-            ("a", None),
-            ("", None),
-        ] {
-            assert_eq!(list_item(t), w, "{t:?}");
-        }
-        let ex = example(
-            &[
-                (7, "# let a = 1;"),
-                (8, "#"),
-                (9, "##[x]"),
-                (10, "#[y]"),
-                (11, "plain"),
-            ],
-            0,
-            true,
-        );
-        assert_eq!(ex.text, "let a = 1;\n\n#[x]\n#[y]\nplain\n");
-        assert_eq!(
-            (ex.line(0), ex.line(1), ex.line(5), ex.line(9)),
-            (7, 7, 11, 11)
-        );
-        let ex = example(&[(3, "      x"), (4, "")], 4, false);
-        assert_eq!(ex.text, "  x\n\n");
-        assert!(!ex.fenced);
-    }
-
-    /// The test-region readers pinned: a test harness's attribute path,
-    /// with or without arguments, and a `cfg` that names `test` where it
-    /// can hold.
-    #[test]
-    fn test_attributes_and_cfgs_answer_exactly() {
-        let attr = |text: &str| test_attr(&toks(text));
-        assert!(attr("test"));
-        assert!(attr("tokio::test"));
-        assert!(attr("tokio::test(flavor = \"x\")"));
-        assert!(attr("bench"));
-        assert!(!attr("testing"));
-        assert!(!attr("test x"));
-        assert!(!attr("test(x) y"));
-        assert!(!attr("tokio::"));
-        assert!(!attr(""));
-        let cfg = |text: &str| cfg_test_attr(&toks(text));
-        assert!(cfg("cfg(test)"));
-        assert!(cfg("cfg(any(test, unix))"));
-        assert!(cfg("cfg(not(not(test)))"));
-        assert!(!cfg("cfg(not(test))"));
-        assert!(!cfg("cfg(test = \"x\")"));
-        assert!(!cfg("cfg(unix)"));
-        assert!(!cfg("cfg(test) x"));
-        assert!(!cfg("cfg_attr(test, x)"));
-        assert!(!cfg("cfg"));
-        assert!(mentions_test(&toks("(test)")));
-        for stray in ["# x\n", "#!x\n", "#![allow(x)]\nfn f() {}\n"] {
-            assert!(test_regions(stray, &toks(stray)).is_empty(), "{stray:?}");
-        }
-    }
-
-    /// The group readers pinned: the tokens inside a group (to its closer,
-    /// or to the end when the statement cuts it), what `stringify!` and
-    /// `concat!` make, and a group opener.
-    #[test]
-    fn groups_stringify_and_concat_answer_exactly() {
-        let t = toks("f(a, (b), c) d");
-        assert_eq!(inside(&t, 1).len(), 7);
-        let cut = toks("f(a, b");
-        assert_eq!(inside(&cut, 1).len(), 3);
-        assert_eq!(stringified(&toks("web")), "web");
-        assert_eq!(stringified(&toks("a b::c 1 \"s\"")), "a b::c");
-        assert_eq!(
-            joined(&toks("\"../\", stringify!(web), \"/x\"")),
-            "../web/x"
-        );
-        assert_eq!(
-            joined(&toks("\"a\", stringify!(b")),
-            "ab",
-            "a stringify! the statement cuts"
-        );
-        assert_eq!(joined(&toks("\"a\", stringify!, \"c\"")), "ac");
-        assert_eq!(joined(&toks("stringify \"a\"")), "a");
-        assert!(opens_group(toks("[").first()));
-        assert!(!opens_group(toks("x").first()));
-        assert!(!opens_group(None));
-        assert!(is_web("WeB"));
-        assert!(!is_web("webs"));
-        assert!(under_dir(Path::new("/a/B/c"), Path::new("/A/b")));
-        assert!(!under_dir(Path::new("/a"), Path::new("/a/b")));
-        assert!(!under_dir(Path::new("/x/b"), Path::new("/a/b")));
     }
 }
