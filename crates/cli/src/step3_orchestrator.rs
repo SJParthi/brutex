@@ -5517,7 +5517,7 @@ mod tests {
         // Every fallible call below that spans lines binds its `Result` first
         // and takes `?` in a statement of its own: a `?` alone on a call's
         // closing line is a line that no passing run executes (D3 line
-        // coverage of this test, D-7410 repair 1).
+        // coverage of this test, D-7411).
         let nifty_request =
             fixture_request(&fixture.source, "NIFTY", &diagnostic_sweeper, &long, &short);
         let nifty_min_hits = maximum_fixture_singleton_support(&nifty_request?)?;

@@ -87595,3 +87595,35 @@ only stack size a test states is the rule: an explicit raise stays forbidden
 prepared or decoded, one per frame), against tens of 13 KiB stack copies per
 call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
 unused.
+
+### D-7411 — BASE-STACK-1028 repair 1: the two test bodies this part changed hold no line a passing run cannot execute; a fallible call that spans lines binds its `Result` and takes `?` in a statement of its own — 2026-10-31
+
+**Context.** The D3 deep step on `bcac15e2c4d9`
+(`state/fix/round2/verify-BASE-STACK-1028-r1-deep.json`, Route B, opt-level 0,
+branch coverage) measured the D2 set of D-7410 and found GAPs in two test
+functions the part changed, so each counts whole:
+`index_stop_search_checkpoint_tests.rs`
+`an_empty_batch_completes_without_children_and_keeps_the_last_saved_table`
+held a search loop whose body never ran (its fixture's first one-node
+reservation is already the empty one), and `step3_orchestrator.rs`
+`stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes` held
+fourteen lines that were only a call's closing `)?` (the `?` error return is
+the one region that starts there), two `map_err` closure bodies, a `let`-`else`
+that returned an error, an `assert!` whose second and third alternatives were
+never tried, and a `match` on the Admission V3 status with three arms no
+fixture row reached.
+
+**Decision.** Fixed in the test bodies, never by an exclusion or by weakening
+an assertion. The loop is gone: the test asserts the first reservation is
+empty and not exhausted, then completes it as before. In the Step 3 test every
+fallible call that spans lines binds its `Result` and takes `?` in a one-line
+statement (`let bounds = bounds?;`), so the line that holds the `?` also holds
+code every passing run executes; the retained-pair check is
+`assert_eq!(.., Ok(()))`; one named closure maps both fixture I/O errors; the
+stale-source attack asserts the exact refusal (it starts with
+`Execution V3 retained Population source refused: ` and names
+`Finalization`), so an `Ok` fails the test instead of returning an error; and
+the per-status counts are four comparisons in the receipt's order plus a check
+that they sum to the row count, which still fails if a fifth status appears.
+No production code changes, and no fixture byte, receipt or refusal changes.
+This entry takes D-7411; D-7412 to D-7419 stay unused.
