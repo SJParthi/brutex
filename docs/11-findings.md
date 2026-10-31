@@ -1256,6 +1256,29 @@ confirmed by two skeptics; their corrections are applied.
   `gates_ledger` 18 of 18 and `source_scan` 132 of 133 caught (1
   unviable). The cargo-mutants run of the same lists (Route M2) is the
   proof; this repair's report says whether it ran.
+- **BRED23-F38: gate 1h let a helper carry the read** (check r4 of 30 Oct
+  2026, V4-2, and its routes E1 to E7): it bound a repository anchor only
+  through `let`, `const` and `static`, so a test reading `web/` through the
+  tree's own `read(relative)` (crates/store/tests/cited_commits.rs) or
+  `workspace_root()` (crates/core/tests/cost_invariants.rs) passed it, as
+  did a doc comment's example, a production `macro_rules!` expanded in a
+  test, `../../Web`, a link to the repository root, `stringify!(web)`, a
+  top-level `#[tokio::test]` and a `cfg(any(test, ..))` item. FIXED
+  (BASE-REDS-1023 repair 4, D-7153 addendum 5): helpers whose value is the
+  root are found over the tree to a fixpoint and a `web` joined onto one is
+  refused; each other route is refused by its own rule (BRED-41); what is
+  still unseen is named in L-BRED23-17. Two broader readings of "a helper"
+  were measured first and refused 30 to 37 statements of this tree that
+  read nothing; the one kept refuses exactly the checker's two probes.
+- **BRED23-F39: the live-lock rename read every old-build run as free**
+  (check r4, V4-1): D-7148 moved the Zerodha verify run's live lock to
+  `running` on the word of a 23 Oct listing ("no store holds a `verify/`
+  directory"); on 30 and 31 Oct the real store held the old folder with 12,
+  then 49, run locks, so a merger of the new build would have merged a run
+  an old-build writer was still spooling. FIXED (BASE-REDS-1023 repair 4,
+  D-7148 addendum 6): while the store holds the old folder, writer and
+  merger take a run's lock there too, and a run whose old lock is held is
+  live (BRED-42); L-BRED23-06 states what that cannot cover.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

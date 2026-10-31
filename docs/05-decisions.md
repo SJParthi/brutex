@@ -84660,6 +84660,57 @@ edited.
    route's 400 for `limit=50`; they are timed again on answered requests.
 
 
+**Addenda, 31 Oct 2026 (BASE-REDS-1023 repair 4; check r4 of 30 Oct 2026,
+cut by the operator's hold before it returned, its items listed from its
+own notes).** The block is used, so each is again an addendum to the entry
+it extends; nothing above is edited.
+
+5. **D-7153, gate 1h: a helper whose value is the repository root carries
+   the read (V4-2).** Gate 1h bound a repository anchor only through `let`,
+   `const` and `static`, never through a function, so the tree's own helpers
+   carried a `web/` read past it: on repair 3's tip, `read("web/src/lib/db/export.js")`
+   appended to `crates/store/tests/cited_commits.rs` (its `read` joins
+   `repo()`, the manifest directory two levels up) and
+   `workspace_root().join("web/src/lib/db/bars-plan.js")` appended to
+   `crates/core/tests/cost_invariants.rs` gave `0 finding(s)`, rc 0
+   (reproduced here, the checker's probes verbatim). Now a function whose
+   VALUE holds the root (its tail or a `return`: `CARGO_MANIFEST_DIR`,
+   `file!()`, `current_dir`, a climb of two `..` or more and nothing else, a
+   root value of its crate, a `let` of its body bound to one, or a call to
+   another such function) and whose return type can carry a path is a root
+   helper, found over the whole tree to a fixpoint; and a test statement
+   that JOINS a `web` segment onto one (an argument of `.join`, `.push`,
+   `Path::new`, `format!`, `concat!`, or of the helper itself) is refused.
+   Two readings were measured on this tree and dropped first, by their
+   counts, not by taste: "any anchor anywhere in the body" made 26,406
+   functions anchors (a bare `..` in validators and messages, and a test
+   file's `read` matched every `read(..)` of its crate), and with strong
+   anchors only, still 17,636 through crate-wide method names; each refused
+   30 to 37 statements that read nothing. So a bare or method call reaches a
+   helper of its own file only, a path call one anywhere, and a helper whose
+   value is the root refuses only a JOINED `web` (`default_web_dir().ends_with("web")`
+   compares text and passes). Check r4's other routes are refused too: a doc
+   comment's examples (E3), a production `macro_rules!` expanded in a test
+   (E4), `web` in any case (E5, the Mac's volume is case-blind), a tracked
+   link to the repository root or above it (E6), `stringify!(web)`,
+   `#[tokio::test]` and `cfg(any(test, ..))` items (E7). What it still cannot
+   see is named in ci.yml's gate 1h and L-BRED23-17. On this tree: worktree
+   0 findings; the probe tree exactly the two probes; f01d7a0e4 still its
+   two `bars_export.rs` lines.
+6. **D-7148: the old live-lock folder is honoured, both ways (V4-1).** The
+   entry's "No store holds a `verify/` directory (... 23 Oct: none)" is no
+   longer true: the real store, listed read-only on 30 Oct (12 run locks)
+   and on 31 Oct 2026 14:29 IST, holds the old folder (`live` under
+   `verify`) with 49 run locks and their 49 spools, and no `running`. A
+   writer of the build before the rename takes its run's lock there alone,
+   so the new merger probed only `running` and read every such run as free.
+   Now, whenever the store holds the old folder, the merger takes a run's
+   lock there too, after the new one, and a run whose OLD lock is held is
+   live (its spools wait, named); a writer takes both, so a merger of the
+   old build reads its run live. A store without the old folder never gets
+   one. The deploy precondition of L-BRED23-06 is narrowed to what this
+   cannot cover, stated there.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store

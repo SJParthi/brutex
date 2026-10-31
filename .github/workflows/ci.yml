@@ -454,21 +454,44 @@ jobs:
           #
           # `source_scan web-reads` lexes the TEST code of every tracked .rs
           # under crates/ -- whole files under tests/, benches/ and
-          # examples/, src/ files only a test module mounts, and the
-          # #[cfg(test)], #[cfg(all(test, ..))] and #[test] items of the
-          # rest -- and refuses a statement that climbs with `..` into `web`,
-          # a `web` segment beside a repository anchor (a `..`,
-          # CARGO_MANIFEST_DIR, file!(), current_dir, or a name bound to one),
-          # or a name bound to a path into web/ by the test or by a const or
-          # static of the crate's production code; every concat! is joined
-          # and every literal decoded first. A tracked link under crates/
-          # whose target lands in web/ is refused too. Its own tests run in
+          # examples/, src/ files only a test module mounts, the items of
+          # the rest a cfg naming `test` where it can hold governs
+          # (#[cfg(test)], all(test, ..), any(test, ..), an inner #![cfg]
+          # to the end of its block) and every #[test], #[tokio::test] or
+          # #[bench] item -- and the Rust of every doc comment (each example
+          # rustdoc compiles: a fence it reads as Rust, `ignore` and `no_run`
+          # too, or an indented block, its hidden `# ` lines shown). It
+          # refuses a statement that climbs with `..` into `web`, a `web`
+          # segment beside a repository anchor (a `..`, CARGO_MANIFEST_DIR,
+          # file!(), current_dir, or a name bound to one), a `web` segment
+          # JOINED onto a helper whose value is the repository root (the
+          # tree's own repo(), workspace_root() and read(relative), found
+          # over the whole tree and followed through every call: check r4
+          # of 30 Oct, V4-2), a name bound to a path into web/ by the test
+          # or by a const or static of the crate's production code, or an
+          # expansion of a production macro_rules! whose body reads one;
+          # every concat! is joined, every stringify! read as its text and
+          # every literal decoded first, and `web` is read in any case (the
+          # Mac's volume is case-blind). A tracked link under crates/ whose
+          # target lands in web/, or in a folder that holds it (the
+          # repository root or above), is refused too. Its own tests run in
           # gate 0. A move into web/tests (as bars_export's cross-check did,
           # web/tests/export-agrees-with-the-server.test.js) is the fix.
           #
-          # WHAT IT CANNOT SEE: a path assembled at run time from pieces none
-          # of which names web, and a test that calls production code which
-          # reads web/ at run time; gate 1e still runs for both.
+          # WHAT IT CANNOT SEE (docs/06-limits.md L-BRED23-17): a path
+          # assembled at run time from pieces none of which names web (or
+          # read from a file, or from a variable other than
+          # CARGO_MANIFEST_DIR); a test that calls production code which
+          # reads web/ at run time, or a production helper whose value is
+          # already a path into web/ (default_web_dir()); a helper reached
+          # through a value instead of called by its name (a function
+          # pointer, a closure in a field, a trait object) or by a
+          # turbofish; a helper of another file called by its bare name
+          # after a `use`, or a method of a type of another file (path calls
+          # are read anywhere); a helper whose only root is a lower-case
+          # const or static; the text a #[doc = ..] attribute supplies, and an
+          # indented example inside a list item; and code a build script or
+          # a procedural macro writes. Gate 1e still runs for all of them.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           work=$(mktemp -d)
           git ls-files -z > "$work/tracked.z"

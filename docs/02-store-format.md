@@ -3630,6 +3630,17 @@ one per run, so a lock is never unlinked under its holder. Measured before
 the lock (the second check of 22 Oct 2026): a `verify-merge` started during
 a cold run committed 38,096 of 39,024 records and lost 928, every exit 0.
 
+**The old live-lock folder is honoured** (BASE-REDS-1023 repair 4, D-7148
+addendum 6). Until D-7148 the run's lock lived in the folder `live` beside
+`running` under `verify`, and a writer or merger of a build from then takes
+its run's lock there alone; the real store held that folder on 30 and 31 Oct
+2026 (49 run locks on 31 Oct). Whenever a store holds it, the writer and the
+merger take the run's `<run>.lock` there TOO, after the one under `running`:
+a run whose old lock is held is live whoever holds its new one, and a merger
+of the old build reads a run of this build as live. A store without the old
+folder never gets one; while it exists it keeps one more empty lock file per
+run, never removed (`pull::zerodha_spool::OLD_LIVE_DIR`, L-BRED23-06).
+
 **One reader, the merge, length-based** (D-4881): it takes the
 ⌊(len − 64) ÷ 160⌋ whole records. Bytes past them are a torn append; a
 **last** whole record that fails its CRC is an append that never finished

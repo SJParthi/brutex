@@ -759,19 +759,23 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
 // link under `crates/` whose target lands in `web/`, or in a folder that
 // holds it (the repository root, or above it), is refused too.
 //
-// WHAT IT CANNOT SEE, stated (BASE-REDS-1023 repair 4): a path assembled at
-// run time from pieces none of which names `web` (`["w", "eb"].concat()`, a
-// path read from a file or from a variable other than `CARGO_MANIFEST_DIR`);
-// a test that calls production code which reads `web/` at run time
-// (`assets::Assets`, the server's own read, which section 2 allows); a
-// helper reached through a value rather than called by its name (a function
-// pointer, a closure in a field, a trait object) or by a turbofish
-// (`root::<T>()`); a method of ANOTHER crate's type (a method call is read
-// against the caller's crate); a helper whose only anchor is a lower-case
-// `const` or `static` (rustc warns on one); the text a `#[doc = ..]`
-// attribute supplies, and an indented example inside a list item (read as
-// the item's text); and code a build script or a procedural macro writes.
-// Gate 1e still runs for all of them.
+// WHAT IT CANNOT SEE, stated (BASE-REDS-1023 repair 4; docs/06-limits.md
+// L-BRED23-17): a path assembled at run time from pieces none of which
+// names `web` (`["w", "eb"].concat()`, a path read from a file or from a
+// variable other than `CARGO_MANIFEST_DIR`); a test that calls production
+// code which reads `web/` at run time (`assets::Assets`, the server's own
+// read, which section 2 allows), or a production helper whose value is
+// already a path into `web/` (`default_web_dir()`, which its tests compare
+// by text); a helper reached through a value rather than called by its
+// name (a function pointer, a closure in a field, a trait object) or by a
+// turbofish (`root::<T>()`); a helper of another file called by its bare
+// name after a `use`, or a method of a type of another file (a bare call
+// and a method call are read against the caller's own file, a path call
+// anywhere); a helper whose only root is a lower-case `const` or `static`
+// (rustc warns on one); the text a `#[doc = ..]` attribute supplies, and an
+// indented example inside a list item (read as the item's text); and code a
+// build script or a procedural macro writes. Gate 1e still runs for all of
+// them.
 
 /// A literal's path segments, split on `/` and `\`.
 fn path_segments(text: &str) -> Vec<&str> {
@@ -7570,11 +7574,8 @@ mod tests {
             "String::new(",
             "Path::join(",
         ] {
-            assert!(
-                !matches!(callee(other), Callee::Builds),
-                "{other}: {:?}",
-                callee(other)
-            );
+            let got = callee(other);
+            assert!(!matches!(got, Callee::Builds), "{other}: {got:?}");
         }
         assert_eq!(callee("read("), Callee::Call(Call::Bare(s("read"))));
         assert_eq!(callee("std::fs::read("), Callee::Other);
@@ -7693,6 +7694,7 @@ mod tests {
             ("here!()", true),
             ("PathBuf::from(ROOT)", true),
             ("PathBuf::from(OTHER)", false),
+            ("Path::new(file!()).join(\"x\")", true),
             ("\"../..\"", true),
             ("\"..\"", false),
             ("let r = root(); r.join(\"x\")", true),
@@ -7724,6 +7726,9 @@ mod tests {
         let s = src(&[
             "use std::path::PathBuf;",
             "const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
+            "const OTHER: &str = ROOT;",
+            "type F = fn(u8) -> PathBuf;",
+            "trait T { fn f() -> PathBuf; }",
             "fn c() -> PathBuf { b() }",
             "fn b() -> PathBuf { a() }",
             "fn a() -> PathBuf { PathBuf::from(ROOT) }",
@@ -7746,7 +7751,21 @@ mod tests {
         ] {
             assert!(n.fns.contains(key), "{key}: {:?}", n.fns);
         }
-        assert!(n.roots.contains("ROOT") && n.anchors.contains("ROOT"));
+        assert!(n.roots.contains("ROOT"));
+        assert!(n.anchors.contains("ROOT"));
+        assert!(
+            n.roots.contains("OTHER"),
+            "a root read by a value is a root"
+        );
+        let mut odd = Collected::default();
+        odd.add(
+            "crates/a/src/y.rs",
+            "macro_rules x; macro_rules! (); macro_rules! m; fn() {}",
+            true,
+        )
+        .unwrap();
+        assert!(odd.macros.is_empty());
+        assert!(odd.fns.is_empty());
         assert!(n.macros.contains("here"));
         assert!(!n.macros.contains("page"), "a climb into web/ is no root");
         assert_eq!(
@@ -7807,6 +7826,10 @@ mod tests {
         assert!(!closes("``", "```"));
         assert!(!closes("``` x", "```"));
         assert!(!closes("~~~", "```"));
+        assert!(
+            !closes("```", "````"),
+            "a shorter run closes no longer fence"
+        );
         assert!(!closes("text", "```"));
         for (t, w) in [
             ("- a", Some(2)),
@@ -7868,6 +7891,9 @@ mod tests {
         assert!(!cfg("cfg_attr(test, x)"));
         assert!(!cfg("cfg"));
         assert!(mentions_test(&toks("(test)")));
+        for stray in ["# x\n", "#!x\n", "#![allow(x)]\nfn f() {}\n"] {
+            assert!(test_regions(stray, &toks(stray)).is_empty(), "{stray:?}");
+        }
     }
 
     /// The group readers pinned: the tokens inside a group (to its closer,
@@ -7891,10 +7917,12 @@ mod tests {
             "a stringify! the statement cuts"
         );
         assert_eq!(joined(&toks("\"a\", stringify!, \"c\"")), "ac");
+        assert_eq!(joined(&toks("stringify \"a\"")), "a");
         assert!(opens_group(toks("[").first()));
         assert!(!opens_group(toks("x").first()));
         assert!(!opens_group(None));
-        assert!(is_web("WeB") && !is_web("webs"));
+        assert!(is_web("WeB"));
+        assert!(!is_web("webs"));
         assert!(under_dir(Path::new("/a/B/c"), Path::new("/A/b")));
         assert!(!under_dir(Path::new("/a"), Path::new("/a/b")));
         assert!(!under_dir(Path::new("/x/b"), Path::new("/a/b")));
