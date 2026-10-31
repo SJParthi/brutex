@@ -2,7 +2,7 @@
 //! never advances the cursor; acknowledged predecessors are verified by pin.
 use super::{
     AdmissionPolicyV1, Batch, Cursor, Journal, Path, PopulationStatisticsProcedureV2,
-    PreparedSources, Request, allocation_for, debug, display, hash, month_days, qualification,
+    PreparedSources, Request, allocation_for, display, hash, month_days, qualification,
 };
 use crate::search_checkpoint::Saved;
 use vocab::expression_search::CURSOR_BYTES;
@@ -103,7 +103,8 @@ pub(super) struct Frame {
     pub location: Option<(u64, [u8; 32])>,
     pub pending: bool,
     pub completed_batches: u64,
-    pub cursor: Cursor,
+    /// Boxed for the same reason as the cursors inside `Batch` (D-7410).
+    pub cursor: Box<Cursor>,
     pub work: u64,
     pub programs: u64,
     pub exhausted: bool,
@@ -115,7 +116,11 @@ pub(super) struct Frame {
     replayed_nodes: u64,
 }
 impl Frame {
-    pub(super) fn declaration(declaration: Vec<u8>, cursor: Cursor, scope: u8) -> Self {
+    pub(super) fn declaration(
+        declaration: Vec<u8>,
+        cursor: impl Into<Box<Cursor>>,
+        scope: u8,
+    ) -> Self {
         Self {
             declaration,
             scope,
@@ -123,7 +128,7 @@ impl Frame {
             location: None,
             pending: false,
             completed_batches: 0,
-            cursor,
+            cursor: cursor.into(),
             work: 0,
             programs: 0,
             exhausted: false,
@@ -194,7 +199,7 @@ impl Frame {
                 .completed_batches
                 .checked_add(1)
                 .ok_or("single-stop batch counter overflow")?,
-            cursor: batch.next_cursor(),
+            cursor: batch.next_cursor_boxed(),
             work: batch.work(),
             programs: batch.cumulative_programs()?,
             exhausted: batch.exhausted(),
@@ -322,7 +327,7 @@ impl Frame {
         let programs = raw.word()?;
         let declaration_bytes = raw.word()?;
         let batch_bytes = raw.word()?;
-        let cursor = Cursor::decode(&raw.array::<CURSOR_BYTES>()?).map_err(debug)?;
+        let cursor = crate::boolean_grammar_batch::decode_boxed(&raw.array::<CURSOR_BYTES>()?)?;
         let mut links = [None; 8];
         for slot in &mut links {
             let identity = raw.array()?;
@@ -536,7 +541,7 @@ pub(super) fn transition(prior: Option<&Frame>, next: &Frame) -> Result<(), Stri
             || Some(next.completed_batches) != prior.completed_batches.checked_add(1)
             || next.work != batch.work()
             || next.programs != batch.cumulative_programs()?
-            || next.cursor.encode() != batch.next_cursor().encode()
+            || next.cursor.encode() != batch.next_cursor_boxed().encode()
             || next.exhausted != batch.exhausted()
         {
             return Err("single-stop completion changed the reserved programs or counters".into());

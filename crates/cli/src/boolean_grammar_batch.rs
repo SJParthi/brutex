@@ -17,9 +17,16 @@ pub(crate) struct Budget {
     pub bytes: u64,
 }
 
+/// Both cursors live on the heap (D-7410). A `Cursor` is about 13 KiB inline
+/// (`offered` plus four `MAX_INSTRUCTIONS`-long arrays), and at opt-level 0
+/// every move or temporary of a value gets its own stack slot, so an inline
+/// pair made each function that holds a `Batch` (or a checkpoint frame
+/// holding one) reserve tens of copies: the instrumented native search
+/// overflowed the 2 MiB test thread. Boxed, a `Batch` is a few machine words
+/// and its size no longer scales with the grammar's capacity.
 pub(crate) struct Batch {
-    before: Cursor,
-    after: Cursor,
+    before: Box<Cursor>,
+    after: Box<Cursor>,
     work_before: u64,
     work_after: u64,
     programs_before: u64,
@@ -28,9 +35,45 @@ pub(crate) struct Batch {
     exhausted: bool,
 }
 
+/// Decodes a saved cursor straight into a box. The `Cursor`-sized
+/// temporaries of the decode (its `Result`, the `?` and the move into the
+/// box, each its own stack slot at opt-level 0) live only in this frame, which
+/// has returned before the caller goes deeper (D-7410).
+#[inline(never)]
+pub(crate) fn decode_boxed(bytes: &[u8; CURSOR_BYTES]) -> Result<Box<Cursor>, String> {
+    Cursor::decode(bytes).map(Box::new).map_err(debug)
+}
+
+/// Runs `body` on its own thread whose stack is exactly `bytes`, SMALLER than
+/// the harness's 2 MiB default, so a test proves the code fits with margin in
+/// every build (instrumented opt-level 0 included) instead of hoping the
+/// default suffices (D-7410). A panic in `body` is re-raised unchanged. A
+/// stack overflow is not a panic: it aborts the whole test process, which is
+/// the loud failure this bound exists to produce. Never raises a budget.
+///
+/// # Errors
+/// The OS would not start the thread.
+#[cfg(test)]
+pub(crate) fn on_bounded_stack<T: Send>(
+    name: &str,
+    bytes: usize,
+    body: impl FnOnce() -> T + Send,
+) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        let handle = std::thread::Builder::new()
+            .name(name.to_owned())
+            .stack_size(bytes)
+            .spawn_scoped(scope, body)
+            .map_err(|why| format!("bounded-stack thread {name} did not start: {why}"))?;
+        Ok(handle
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    })
+}
+
 impl Batch {
     pub(crate) fn prepare(
-        before: Cursor,
+        before: impl Into<Box<Cursor>>,
         work_before: u64,
         programs_before: u64,
         budget: Budget,
@@ -50,6 +93,7 @@ impl Batch {
         programs
             .try_reserve_exact(usize::try_from(budget.programs).map_err(display)?)
             .map_err(display)?;
+        let before: Box<Cursor> = before.into();
         let mut after = before.clone();
         let mut work_after = work_before;
         let mut exhausted = false;
@@ -90,6 +134,12 @@ impl Batch {
     }
 
     pub(crate) fn next_cursor(&self) -> Cursor {
+        Cursor::clone(&self.after)
+    }
+
+    /// The next cursor already on the heap, for a holder that keeps it boxed;
+    /// no `Cursor`-sized temporary passes through the caller's frame.
+    pub(crate) fn next_cursor_boxed(&self) -> Box<Cursor> {
         self.after.clone()
     }
 
@@ -167,7 +217,7 @@ impl Batch {
         {
             return Err("grammar batch count or replay work admission refused".into());
         }
-        let before = Cursor::decode(&field(raw, 64)?).map_err(debug)?;
+        let before = decode_boxed(&field(raw, 64)?)?;
         let expected = Self::prepare(
             before,
             number(raw, 8)?,

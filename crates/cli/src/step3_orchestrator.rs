@@ -5492,6 +5492,17 @@ mod tests {
         assert_ne!(nifty as usize, banknifty as usize);
     }
 
+    /// D-7410: builds one committed chain value straight into a box. Each
+    /// Committed* value holds its predecessor inline (30 to 40 KiB here), and
+    /// at opt-level 0 every move, `Result` and `?` of one is its own stack
+    /// slot, so the test below reserved 2,837,264 B in ONE frame of the
+    /// instrumented coverage build and overflowed the 2 MiB test thread. Made
+    /// here, those copies live only in this short frame; the test holds boxes.
+    #[inline(never)]
+    fn boxed<T, E>(make: impl FnOnce() -> Result<T, E>) -> Result<Box<T>, E> {
+        make().map(Box::new)
+    }
+
     #[test]
     #[expect(
         clippy::too_many_lines,
@@ -5524,24 +5535,29 @@ mod tests {
             PopulationStatisticsV2Bounds::new(4, 1_000_000, 64, 1_000_000, 512 * 1_024 * 1_024)?;
         let procedure = PopulationStatisticsProcedureV2::new(16, 7, 2)?;
 
-        let first_nifty =
-            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)?;
-        let first_banknifty = committed_stored_family(
-            &fixture.source,
-            "BANKNIFTY",
-            &banknifty_sweeper,
-            &long,
-            &short,
-        )?;
-        let mut first = commit_stored_observation_statistics_v2(
-            first_nifty,
-            first_banknifty,
-            &fixture.observation,
-            &fixture.statistics,
-            observation_bounds,
-            statistics_bounds,
-            procedure,
-        )?;
+        let first_nifty = boxed(|| {
+            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)
+        })?;
+        let first_banknifty = boxed(|| {
+            committed_stored_family(
+                &fixture.source,
+                "BANKNIFTY",
+                &banknifty_sweeper,
+                &long,
+                &short,
+            )
+        })?;
+        let mut first = boxed(|| {
+            commit_stored_observation_statistics_v2(
+                *first_nifty,
+                *first_banknifty,
+                &fixture.observation,
+                &fixture.statistics,
+                observation_bounds,
+                statistics_bounds,
+                procedure,
+            )
+        })?;
 
         assert!(matches!(
             first.observation_commit(),
@@ -5704,8 +5720,9 @@ mod tests {
             2 * crate::anchored_search_lineage_v4::ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES
                 as u64,
         )?;
-        let first_lineage =
-            commit_stored_search_lineage_v4(first, &fixture.search_lineage, search_lineage_bounds)?;
+        let first_lineage = boxed(|| {
+            commit_stored_search_lineage_v4(*first, &fixture.search_lineage, search_lineage_bounds)
+        })?;
         let first_lineage_authority = first_lineage.lineage();
         assert_ne!(
             first_lineage_authority.structural_receipt().pair_id(),
@@ -5728,12 +5745,14 @@ mod tests {
             candidate_count,
         )?;
         let admission_policy = population_admission_policy()?;
-        let mut first_population_admission = commit_stored_population_admission_v3(
-            first_lineage,
-            &fixture.admission,
-            admission_bounds,
-            &admission_policy,
-        )?;
+        let mut first_population_admission = boxed(|| {
+            commit_stored_population_admission_v3(
+                *first_lineage,
+                &fixture.admission,
+                admission_bounds,
+                &admission_policy,
+            )
+        })?;
         let first_admission_receipt = first_population_admission.admission_receipt();
         assert_eq!(first_admission_receipt.decision_count(), candidate_count);
         let first_admission_projection = first_population_admission
@@ -5761,11 +5780,13 @@ mod tests {
             crate::population_finalization_v3::POPULATION_FINALIZATION_V3_COMPLETION_BYTES as u64,
             candidate_count,
         )?;
-        let mut first_finalization = commit_stored_population_finalization_v3(
-            first_population_admission,
-            &fixture.finalization,
-            finalization_bounds,
-        )?;
+        let mut first_finalization = boxed(|| {
+            commit_stored_population_finalization_v3(
+                *first_population_admission,
+                &fixture.finalization,
+                finalization_bounds,
+            )
+        })?;
         let first_finalization_receipt = first_finalization.finalization_receipt();
         assert_eq!(
             first_finalization_receipt.admission_block_id(),
@@ -5828,11 +5849,13 @@ mod tests {
             crate::population_v5::POPULATION_V5_COMPLETION_BYTES as u64,
             candidate_count,
         )?;
-        let mut first_population_v5 = crate::population_v5::commit_population_v5(
-            &fixture.population_v5,
-            population_v5_bounds,
-            first_finalization,
-        )?;
+        let mut first_population_v5 = boxed(|| {
+            crate::population_v5::commit_population_v5(
+                &fixture.population_v5,
+                population_v5_bounds,
+                *first_finalization,
+            )
+        })?;
         assert!(first_population_v5.was_written());
         let first_population_v5_receipt = first_population_v5.structural_receipt();
         assert_eq!(first_population_v5_receipt.row_count(), candidate_count);
@@ -5980,11 +6003,13 @@ mod tests {
             candidate_count,
             execution_percentile_records,
         )?;
-        let mut first_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
-            &fixture.execution_v3,
-            execution_bounds,
-            first_population_v5,
-        )?;
+        let mut first_execution_v3 = boxed(|| {
+            crate::execution_v3::commit_stored_execution_v3(
+                &fixture.execution_v3,
+                execution_bounds,
+                *first_population_v5,
+            )
+        })?;
         assert!(first_execution_v3.was_written());
         let first_execution_v3_receipt = first_execution_v3.structural_receipt();
         assert_eq!(
@@ -6006,31 +6031,36 @@ mod tests {
         fs::create_dir(&selection_root).map_err(|why| format!("selection fixture root: {why}"))?;
         let (first_execution_v3, first_selection_receipt) =
             crate::selection_v5::prove_stored_selection(
-                first_execution_v3,
+                *first_execution_v3,
                 &selection_root,
                 false,
             )?;
         let selection_bytes = directory_bytes(&selection_root)?;
         drop(first_execution_v3);
 
-        let retry_nifty =
-            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)?;
-        let retry_banknifty = committed_stored_family(
-            &fixture.source,
-            "BANKNIFTY",
-            &banknifty_sweeper,
-            &long,
-            &short,
-        )?;
-        let mut retry = commit_stored_observation_statistics_v2(
-            retry_nifty,
-            retry_banknifty,
-            &fixture.observation,
-            &fixture.statistics,
-            observation_bounds,
-            statistics_bounds,
-            procedure,
-        )?;
+        let retry_nifty = boxed(|| {
+            committed_stored_family(&fixture.source, "NIFTY", &nifty_sweeper, &long, &short)
+        })?;
+        let retry_banknifty = boxed(|| {
+            committed_stored_family(
+                &fixture.source,
+                "BANKNIFTY",
+                &banknifty_sweeper,
+                &long,
+                &short,
+            )
+        })?;
+        let mut retry = boxed(|| {
+            commit_stored_observation_statistics_v2(
+                *retry_nifty,
+                *retry_banknifty,
+                &fixture.observation,
+                &fixture.statistics,
+                observation_bounds,
+                statistics_bounds,
+                procedure,
+            )
+        })?;
         assert!(matches!(
             retry.observation_commit(),
             ObservationAuthorityCommitV1::Reused(_)
@@ -6056,8 +6086,9 @@ mod tests {
         );
         assert_eq!(directory_bytes(&fixture.observation)?, observation_bytes);
         assert_eq!(directory_bytes(&fixture.statistics)?, statistics_bytes);
-        let retry_lineage =
-            commit_stored_search_lineage_v4(retry, &fixture.search_lineage, search_lineage_bounds)?;
+        let retry_lineage = boxed(|| {
+            commit_stored_search_lineage_v4(*retry, &fixture.search_lineage, search_lineage_bounds)
+        })?;
         assert_eq!(
             retry_lineage.lineage().structural_receipt(),
             first_lineage_authority.structural_receipt()
@@ -6066,12 +6097,14 @@ mod tests {
             directory_bytes(&fixture.search_lineage)?,
             search_lineage_bytes
         );
-        let mut retry_population_admission = commit_stored_population_admission_v3(
-            retry_lineage,
-            &fixture.admission,
-            admission_bounds,
-            &admission_policy,
-        )?;
+        let mut retry_population_admission = boxed(|| {
+            commit_stored_population_admission_v3(
+                *retry_lineage,
+                &fixture.admission,
+                admission_bounds,
+                &admission_policy,
+            )
+        })?;
         assert_eq!(
             retry_population_admission.admission_receipt(),
             first_admission_receipt
@@ -6083,11 +6116,13 @@ mod tests {
             first_admission_projection
         );
         assert_eq!(directory_bytes(&fixture.admission)?, admission_bytes);
-        let mut retry_finalization = commit_stored_population_finalization_v3(
-            retry_population_admission,
-            &fixture.finalization,
-            finalization_bounds,
-        )?;
+        let mut retry_finalization = boxed(|| {
+            commit_stored_population_finalization_v3(
+                *retry_population_admission,
+                &fixture.finalization,
+                finalization_bounds,
+            )
+        })?;
         assert_eq!(
             retry_finalization.finalization_receipt(),
             first_finalization_receipt
@@ -6101,11 +6136,13 @@ mod tests {
             first_population_v5_inputs
         );
         assert_eq!(directory_bytes(&fixture.finalization)?, finalization_bytes);
-        let mut retry_population_v5 = crate::population_v5::commit_population_v5(
-            &fixture.population_v5,
-            population_v5_bounds,
-            retry_finalization,
-        )?;
+        let mut retry_population_v5 = boxed(|| {
+            crate::population_v5::commit_population_v5(
+                &fixture.population_v5,
+                population_v5_bounds,
+                *retry_finalization,
+            )
+        })?;
         assert!(!retry_population_v5.was_written());
         assert_eq!(
             retry_population_v5.structural_receipt(),
@@ -6119,11 +6156,13 @@ mod tests {
             directory_bytes(&fixture.population_v5)?,
             population_v5_bytes
         );
-        let retry_execution_v3 = crate::execution_v3::commit_stored_execution_v3(
-            &fixture.execution_v3,
-            execution_bounds,
-            retry_population_v5,
-        )?;
+        let retry_execution_v3 = boxed(|| {
+            crate::execution_v3::commit_stored_execution_v3(
+                &fixture.execution_v3,
+                execution_bounds,
+                *retry_population_v5,
+            )
+        })?;
         assert!(!retry_execution_v3.was_written());
         assert_eq!(
             retry_execution_v3.structural_receipt(),
@@ -6131,7 +6170,11 @@ mod tests {
         );
         assert_eq!(directory_bytes(&fixture.execution_v3)?, execution_v3_bytes);
         let (mut retry_execution_v3, retry_selection_receipt) =
-            crate::selection_v5::prove_stored_selection(retry_execution_v3, &selection_root, true)?;
+            crate::selection_v5::prove_stored_selection(
+                *retry_execution_v3,
+                &selection_root,
+                true,
+            )?;
         assert_eq!(retry_selection_receipt, first_selection_receipt);
         assert_eq!(directory_bytes(&selection_root)?, selection_bytes);
         let finalization_row_path = fixture.finalization.join("population-finalization-v3.bin");

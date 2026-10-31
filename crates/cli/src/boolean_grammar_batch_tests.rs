@@ -340,3 +340,189 @@ fn batch_count_and_exact_length_admission_precede_cursor_parsing() {
         "node admission is unconditional, independently of count and length"
     );
 }
+
+// D-7410: a `Batch` keeps its cursors on the heap, so every function holding
+// one stays small even at opt-level 0, and the replay path fits a stack far
+// below the harness's 2 MiB default in every build. Measured peak of these
+// tests in the instrumented opt-level-0 build: over 208 KiB, at most 224 KiB
+// (L-STACK1028-02); the bound is twice that.
+const BATCH_STACK: usize = 448 << 10;
+const MANY: u64 = 300;
+const MANY_PROGRAMS: usize = 300;
+
+fn many_budget(programs: u64, nodes: u64) -> Budget {
+    Budget {
+        programs,
+        nodes,
+        bytes: 4 * 1024 * 1024,
+    }
+}
+
+fn replays_exactly(batch: &Batch, bytes: u64, nodes: u64) -> Vec<u8> {
+    let raw = batch.encode().unwrap();
+    let replayed = Batch::decode(&raw, bytes, nodes).unwrap();
+    assert_eq!(replayed.encode().unwrap(), raw);
+    assert_eq!(
+        replayed.next_cursor_boxed().encode(),
+        batch.next_cursor().encode()
+    );
+    raw
+}
+
+#[test]
+fn a_batch_holds_its_cursors_off_the_stack_whatever_the_grammar_capacity() {
+    let start = Cursor::new(&[30, 31]).unwrap();
+    let cursor = std::mem::size_of_val(&start);
+    let batch = Batch::prepare(start, 0, 0, budget(3, 1000)).unwrap();
+    let inline = std::mem::size_of_val(&batch);
+    // Two inline cursors were 2 * 13 KiB; boxed, a batch is a few words.
+    assert!(cursor > 8 * 1024, "the cursor itself is {cursor} bytes");
+    assert!(inline <= 256, "Batch is {inline} bytes inline");
+    assert!(inline < cursor / 32);
+    assert_eq!(
+        batch.next_cursor_boxed().encode(),
+        batch.next_cursor().encode()
+    );
+    // An owned box and an owned cursor prepare the same batch.
+    let boxed = Batch::prepare(
+        Box::new(Cursor::new(&[30, 31]).unwrap()),
+        0,
+        0,
+        budget(3, 1000),
+    )
+    .unwrap();
+    assert_eq!(boxed.encode().unwrap(), batch.encode().unwrap());
+}
+
+#[test]
+fn empty_single_many_and_terminal_batches_replay_exactly_on_a_bounded_stack() {
+    let sizes = on_bounded_stack("batch-replay-bounded", BATCH_STACK, || {
+        let first = Batch::prepare(Cursor::new(&[30]).unwrap(), 0, 0, budget(5, 1)).unwrap();
+        assert_eq!(first.programs().len(), 1);
+        let empty =
+            Batch::prepare(first.next_cursor_boxed(), first.work(), 1, budget(5, 1)).unwrap();
+        assert!(empty.programs().is_empty());
+        assert!(!empty.exhausted());
+        let many = Batch::prepare(
+            Cursor::new(&[30, 31]).unwrap(),
+            0,
+            0,
+            many_budget(MANY, 1_000_000),
+        )
+        .unwrap();
+        assert_eq!(many.programs().len() as u64, MANY);
+        let mut raw = Cursor::new(&[30]).unwrap().encode();
+        raw.get_mut(10..12).unwrap().copy_from_slice(
+            &u16::try_from(runner::expression::MAX_INSTRUCTIONS)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        *raw.get_mut(14).unwrap() = 1;
+        let terminal = Batch::prepare(Cursor::decode(&raw).unwrap(), 9, 4, budget(2, 100)).unwrap();
+        assert!(terminal.exhausted() && terminal.programs().is_empty());
+        [
+            replays_exactly(&empty, BYTES, 1).len(),
+            replays_exactly(&first, BYTES, 1).len(),
+            replays_exactly(&many, 4 * 1024 * 1024, 1_000_000).len(),
+            replays_exactly(&terminal, BYTES, 100).len(),
+        ]
+    })
+    .unwrap();
+    let one = runner::expression::ENCODED_LEN;
+    assert_eq!(
+        sizes,
+        [HEADER, HEADER + one, HEADER + MANY_PROGRAMS * one, HEADER]
+    );
+}
+
+#[test]
+fn many_programs_paused_by_nodes_then_resumed_twice_match_one_whole_batch_on_a_bounded_stack() {
+    // Combination: a large program cap that the node allowance pauses first,
+    // resumed twice, each piece replayed at exactly its own byte length.
+    on_bounded_stack("batch-resume-bounded", BATCH_STACK, || {
+        let whole = Batch::prepare(
+            Cursor::new(&[30, 31]).unwrap(),
+            0,
+            0,
+            many_budget(MANY, 1_000_000),
+        )
+        .unwrap();
+        let mut cursor: Box<Cursor> = Box::new(Cursor::new(&[30, 31]).unwrap());
+        let (mut work, mut count, mut seen) = (0, 0, Vec::new());
+        let mut pieces = 0;
+        while (seen.len() as u64) < MANY {
+            let piece =
+                Batch::prepare(cursor, work, count, many_budget(MANY, whole.work() / 3 + 1))
+                    .unwrap();
+            // Replay admits exactly the declared capacity, never one byte less.
+            let capacity = MANY * runner::expression::ENCODED_LEN as u64 + HEADER as u64;
+            replays_exactly(&piece, capacity, whole.work());
+            assert!(Batch::decode(&piece.encode().unwrap(), capacity - 1, whole.work()).is_err());
+            seen.extend(
+                piece
+                    .programs()
+                    .iter()
+                    .take(MANY_PROGRAMS - seen.len())
+                    .map(Expression::encode),
+            );
+            cursor = piece.next_cursor_boxed();
+            work = piece.work();
+            count = piece.cumulative_programs().unwrap();
+            pieces += 1;
+        }
+        assert!(pieces >= 3, "the node allowance paused {pieces} times");
+        assert_eq!(
+            seen,
+            whole
+                .programs()
+                .iter()
+                .map(Expression::encode)
+                .collect::<Vec<_>>()
+        );
+    })
+    .unwrap();
+}
+
+#[test]
+fn concurrent_bounded_stack_replays_of_one_batch_agree_byte_for_byte() {
+    // Out of the box: eight readers replay the same saved bytes at once, each
+    // on its own small stack; none may differ or need the default stack.
+    let batch = Batch::prepare(Cursor::new(&[30, 31]).unwrap(), 0, 0, budget(40, 100_000)).unwrap();
+    let raw = batch.encode().unwrap();
+    let replays: Vec<Vec<u8>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|reader| {
+                let raw = &raw;
+                scope.spawn(move || {
+                    on_bounded_stack(&format!("batch-reader-{reader}"), BATCH_STACK, || {
+                        Batch::decode(raw, BYTES, 100_000)
+                            .unwrap()
+                            .encode()
+                            .unwrap()
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    assert_eq!(replays.len(), 8);
+    assert!(replays.iter().all(|bytes| *bytes == raw));
+}
+
+#[test]
+fn a_bounded_stack_body_keeps_its_panic_and_its_value() {
+    // A refusal inside the bounded body surfaces as the same panic, never as
+    // a pass or as a different message.
+    let panicked = std::panic::catch_unwind(|| {
+        on_bounded_stack("batch-panics", BATCH_STACK, || -> u8 {
+            std::panic::resume_unwind(Box::new("generated refusal"))
+        })
+    });
+    let message = panicked.err().unwrap();
+    assert_eq!(message.downcast_ref::<&str>(), Some(&"generated refusal"));
+    assert_eq!(on_bounded_stack("batch-ok", BATCH_STACK, || 7).unwrap(), 7);
+}

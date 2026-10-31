@@ -87512,6 +87512,90 @@ L-BDENY-2;
 three new tests. The floor is test-time only, one parse of the lock and one pass
 over its 194 stanzas per row.
 
+### D-7410 — The instrumented cli tests' stack overflow is fixed at its cause: the grammar cursors a batch and a checkpoint frame hold live on the heap, and no stack budget is raised anywhere (BASE-STACK-1028) — 2026-10-29
+
+**Context** (BASE-STACK-1028, found 28 Oct 2026 by TESTTIME-1025's D3 deep
+step). D3 coverage Route B (`state/decisions-20261027/d3-route-b.sh`) builds
+the `cli` lib unit tests instrumented at opt-level 0. That binary aborted
+with SIGABRT: `index_stop_search::tests::complete_native_search_reopens_all_ancestors_and_resumes_without_duplicating_the_batch`
+overflowed the 2 MiB test thread, and a process ended by a signal writes no
+profile, so no `cli` file of any D2 set could be read and D3 coverage of every
+`cli` part was NOT PROVED. Some agents worked around it with a raised
+`RUST_MIN_STACK`; the D3 recipe forbids that, and so does this decision.
+
+**Measured on 29 Oct 2026, before** (the tip `f01d7a0e4`, the exact Route B
+build): the test overflows at 2 MiB and passes at 2176 KiB and every larger
+size tried, so its peak is over 2048 KiB and at most 2176 KiB (a
+`RUST_MIN_STACK` sweep used only to measure). No frame recursed on data depth:
+`index_stop_search_checkpoint::recover` already walks the acknowledged
+ancestry in a loop. The depth was frame SIZE. Read from the instrumented
+binary's own prologues (llvm-objdump of the nightly's llvm-tools), one call
+chain held `execute_observed_with` 650,064 B, `open_checkpoint` 424,288 B,
+`recover` 471,024 B, `Frame::decode` 227,936 B and `Batch::decode` 198,560 B:
+1,971,872 B before the test's own frame and the qualification replay. The
+reason is `vocab::expression_search::Cursor`, about 13 KiB inline (`offered`
+plus four `MAX_INSTRUCTIONS`-long arrays): a `Batch` held two, a checkpoint
+`Frame` one plus an `Option<Batch>`, and at opt-level 0 every move and every
+temporary of a value gets its own stack slot, so each of those functions
+reserved tens of `Frame`-sized copies.
+
+**Decision.** Fix it at the cause, never by a stack raise in the recipe, CI, a
+script, a test or the environment. `Batch` keeps `before` and `after` as
+`Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
+changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded
+straight into a box in a frame of its own (`decode_boxed`). After (the same
+build, this tip): those five frames are 36,144, 92,768, 28,992, 19,168 and
+14,384 B, and the end-to-end test overflows a 704 KiB test thread and passes on
+768 KiB, so its peak is over 704 KiB and at most 768 KiB, under the 2 MiB
+default 2.6 times; `Batch` and `Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
+admission changes: `encode` and `decode` are untouched apart from where the
+decoded cursor lives, and every existing round-trip and refusal test of the
+batch, the checkpoint, the reader and the end-to-end search passes unchanged.
+
+**The second overflow behind the first.** With the native search fixed, the
+same Route B run aborted later, on
+`step3_orchestrator::tests::stored_pair_commits_observation_and_statistics_then_reuses_exact_bytes`:
+that ONE test frame reserved 2,837,264 B, more than the whole 2 MiB thread.
+Each Committed* value of the Step 3 chain holds its predecessor inline (the
+family 10,488 B, observation-statistics 30,304, lineage 31,432, admission
+35,344, finalization 36,344, Population V5 37,296, Execution V3 38,696 B,
+measured with `size_of` in that build), and the test made two chains with every
+move, `Result` and `?` a slot of its own. The test now builds each chain value
+through a small `boxed` helper and holds boxes: its frame is 611,584 B and it
+passes on the default test thread. Production types are unchanged here (their
+inline retention is the D-0648 shape; boxing them is a wider change left for
+the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
+
+**A third overflow, in the release test build.** `cargo test -p cli
+--release` aborted on `build_provenance::tests::a_delta_chain_resolves_to_exactly_max_delta_depth_and_no_further`
+(feat/db-fix's code, unchanged by this part before this paragraph): the
+commit-stamp git reader resolves a chain of `MAX_DELTA_DEPTH` (128) reference
+deltas by recursion, bounded by that constant, and with the zlib decoder's
+state inlined `read_bytes` reserved 54,096 B per level, about 6.9 MB for the
+chain. Inflation now happens in its own `#[inline(never)] fn inflate`, a leaf
+called after the base is resolved: `read_bytes` is 496 B, `inflate` 53,808 B
+once, and the test passes on a 256 KiB thread in the release build. The
+recursion stays bounded by `MAX_DELTA_DEPTH`; its behaviour is unchanged. The
+entry reader's own refusals (not a pack, a self-naming delta, an overlong
+size, a reserved kind) gain a test, so every line of the changed functions is
+run.
+
+**Held by tests, smaller than the default, never larger.** The end-to-end
+test is unchanged and runs on the harness's default thread (2.6 times its
+measured peak; an earlier draft ran it on a 1.25 MiB thread, which it fits,
+and that wrapper was not kept, so the unchanged test adds no lines to the D2
+set); the batch and checkpoint tests run their bodies on 448 KiB and 384 KiB
+threads (twice their measured peaks); and `Batch` and `Frame` sizes are
+bounded. A value that creeps back onto the stack overflows there, in every
+plain `cargo test`, with the thread named. That a lower explicit stack is the
+only stack size a test states is the rule: an explicit raise stays forbidden
+(docs/06-limits.md L-STACK1028-01..03, docs/04-invariants.md STACK1028-01..04).
+
+**Cost.** One heap allocation per cursor a batch or frame keeps (one per batch
+prepared or decoded, one per frame), against tens of 13 KiB stack copies per
+call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
+unused.
+
 ## F&O strategy path: part blocks (D-8100..D-8339)
 
 <!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). Entries of other work go above this section's heading, never below its last slot. Other work takes its decision numbers from state/decision-blocks.json, never the largest number in this file plus one: this section's blocks are reserved. -->
