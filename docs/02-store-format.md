@@ -3640,6 +3640,10 @@ a run whose old lock is held is live whoever holds its new one, and a merger
 of the old build reads a run of this build as live. A store without the old
 folder never gets one; while it exists it keeps one more empty lock file per
 run, never removed (`pull::zerodha_spool::OLD_LIVE_DIR`, L-BRED23-06).
+When the old folder and `running` are one folder under two names (a link
+either way), a run's two lock names are one file, and it is locked once: the
+writer and the merger compare the two open files by device and inode
+(BASE-REDS-1023 repair 5, D-7148 addendum 8, BRED-43).
 
 **One reader, the merge, length-based** (D-4881): it takes the
 ⌊(len − 64) ÷ 160⌋ whole records. Bytes past them are a torn append; a

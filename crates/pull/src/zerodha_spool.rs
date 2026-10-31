@@ -24,7 +24,9 @@
 //! and, while the store holds the old layout's folder (`live`, beside
 //! `running` under `verify`: [`OLD_LIVE_DIR`]), the run's `<run>.lock` there
 //! too, which a writer or merger of the build before D-7148 takes
-//! (BASE-REDS-1023 repair 4).
+//! (BASE-REDS-1023 repair 4) — unless the two folders are one folder under
+//! two names (a link either way), when the two names are one lock file and
+//! it is taken once (repair 5).
 //!
 //! `<run>` is the run's id from the store-wide runs ledger (D-4880): never
 //! given twice, so an orphan spool and a new run never share a directory.
@@ -72,6 +74,10 @@
 //!   holds the old layout's folder ([`OLD_LIVE_DIR`]), writer and merger each
 //!   take the run's lock there as well, after the new one: a run whose OLD
 //!   lock is held is live whoever holds its new one (BASE-REDS-1023 repair 4).
+//!   A lock file is locked once by one taker: when the old name opens the
+//!   file the new one already holds (one device and inode: the folders are
+//!   one folder under two names), it is not locked a second time, which
+//!   would wait on itself (repair 5, check r5's E10).
 //! * **The merge log** (`.vsp.merged`, 16-byte records {day, generation,
 //!   state, exchange, CRC}) says which days are merged, so a re-merge after a
 //!   crash writes no duplicate generation; its own torn tail is written over
@@ -102,7 +108,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
@@ -161,7 +167,12 @@ const LIVE_STEP: std::time::Duration = std::time::Duration::from_millis(50);
 /// run's `<run>.lock` in it TOO, after the one under [`LIVE_DIR`]: a writer
 /// or a merger of either build sees the other's run across a deploy
 /// (BASE-REDS-1023 repair 4, check r4's V4-1). A store without the folder
-/// never gets one.
+/// never gets one. When the folder and [`LIVE_DIR`] are one folder under two
+/// names (a link either way, or both links to a third), a run's two lock
+/// names open one file, and that file is locked once ([`is_held`]; repair
+/// 5, check r5's E10): `flock(2)` locks a file and every open of it is a
+/// holder, so a second lock of it through the other name waited
+/// [`LIVE_WAIT`] on its own taker.
 pub const OLD_LIVE_DIR: [&str; 2] = ["verify", "live"];
 
 /// `<root>/verify/running/<run>.lock`: held by run `run`'s writer while it
@@ -181,14 +192,20 @@ pub fn old_live_lock_path(root: &Path, run: u64) -> Option<PathBuf> {
     dir.is_dir().then(|| dir.join(format!("{run}.lock")))
 }
 
+/// One live lock held: the open lock file, shared with every try of it, so
+/// a writer waiting for its run's lock locks the very file it compared
+/// ([`is_held`]), never a new open of a name that may since have changed.
+type LiveLock = store::flock::Flock<Arc<File>>;
+
 /// The live locks of one run, held until dropped: the one under
 /// [`LIVE_DIR`], then the old layout's ([`OLD_LIVE_DIR`]) when the store
-/// holds that folder.
+/// holds that folder and it is another file.
 #[derive(Debug)]
-pub struct LiveLocks(Vec<store::flock::Flock<File>>);
+pub struct LiveLocks(Vec<LiveLock>);
 
 impl LiveLocks {
-    /// How many lock files it holds: one, or two beside the old layout.
+    /// How many lock files it holds: one, or two beside an old layout's
+    /// folder that is a folder of its own.
     #[must_use]
     pub const fn files(&self) -> usize {
         self.0.len()
@@ -206,18 +223,24 @@ pub enum Live {
 
 /// Tries run `run`'s live locks once, never waiting: [`Live::Taken`] when no
 /// writer of the run holds the one under [`LIVE_DIR`] nor, when the store
-/// holds the old layout's folder, the one there (O(1): at most two opens
-/// and two `flock`s). A run whose old lock is held is spooling, whoever
-/// holds its new one: a writer of the build before D-7148 holds only that.
+/// holds the old layout's folder, the one there (O(1): at most two opens,
+/// two `fstat`s and two `flock`s). A run whose old lock is held is spooling,
+/// whoever holds its new one: a writer of the build before D-7148 holds only
+/// that. When the old name opens the file the new one already holds (the
+/// two folders one folder under two names), that one lock is the run's
+/// whole hold ([`Live::Taken`] with one file), never locked again through
+/// the other name, which would read the probe's own hold as a writer's
+/// (repair 5, check r5's E10).
 ///
 /// # Errors
 ///
-/// A lock could not be opened or the host refused a `flock` call: the
-/// caller names it and leaves the run's spools waiting.
-/// UNVERIFIED: no test or bench times this; the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01).
+/// A lock could not be opened, its file could not be stated, or the host
+/// refused a `flock` call: the caller names it and leaves the run's spools
+/// waiting.
+/// UNVERIFIED as a bound: no bench gates it, the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01); the test `a_live_probe_is_a_fixed_number_of_calls_in_every_layout` prints its p50, p99 and max over 200 probes in each layout (repair 5, L-BRED23-18).
 pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
     let path = live_lock_path(root, run);
-    let file = open_live(root, &path)?;
+    let file = Arc::new(open_live(root, &path)?);
     let running = match probed(&path, store::flock::Flock::try_lock(file, path.clone()))? {
         Ok(lock) => lock,
         Err(holder) => return Ok(Live::Spooling(holder)),
@@ -226,12 +249,44 @@ pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
         return Ok(Live::Taken(LiveLocks(vec![running])));
     };
     let file = open_lock(&old, OLD_LIVE_DIR[1])?;
+    // ONE FILE IS ONE LOCK (repair 5): the old name opened the file this
+    // probe already holds.
+    if is_held(&running, &path, &file, &old)? {
+        return Ok(Live::Taken(LiveLocks(vec![running])));
+    }
     Ok(
-        match probed(&old, store::flock::Flock::try_lock(file, old.clone()))? {
+        match probed(
+            &old,
+            store::flock::Flock::try_lock(Arc::new(file), old.clone()),
+        )? {
             Ok(lock) => Live::Taken(LiveLocks(vec![running, lock])),
             Err(holder) => Live::Spooling(holder),
         },
     )
+}
+
+/// Whether the lock file `file`, opened at `at`, is the file `held`, opened
+/// at `held_at`, already locks: one device and inode, one `fstat` of each.
+/// It is when the old layout's folder and [`LIVE_DIR`] are one folder under
+/// two names; a lock file is never a link itself, since `open_lock` refuses
+/// a link or a second name at a lock's name.
+fn is_held(held: &File, held_at: &Path, file: &File, at: &Path) -> Result<bool, SpoolError> {
+    one_file((held.metadata(), held_at), (file.metadata(), at))
+}
+
+/// [`is_held`]'s comparison of two `fstat` answers, each beside the name its
+/// file was opened at: equal device and inode, or the host's refusal by
+/// name, never read as two files. Apart so a test hands it the refusal no
+/// open lock file gives on request, as [`probed`] is apart from
+/// [`live_probe`] (BASE-REDS-1023 repair 5).
+pub(super) fn one_file(
+    (held, held_at): (io::Result<fs::Metadata>, &Path),
+    (file, at): (io::Result<fs::Metadata>, &Path),
+) -> Result<bool, SpoolError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let held = held.map_err(|why| SpoolError::io(held_at, "stat", why))?;
+    let file = file.map_err(|why| SpoolError::io(at, "stat", why))?;
+    Ok((held.dev(), held.ino()) == (file.dev(), file.ino()))
 }
 
 /// What one `flock` attempt on the live lock at `path` says: taken (the
@@ -241,11 +296,38 @@ pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
 /// verify r3).
 pub(super) fn probed(
     path: &Path,
-    attempt: Result<store::flock::Flock<File>, std::fs::TryLockError>,
-) -> Result<Result<store::flock::Flock<File>, String>, SpoolError> {
+    attempt: Result<LiveLock, std::fs::TryLockError>,
+) -> Result<Result<LiveLock, String>, SpoolError> {
     match attempt {
         Ok(lock) => Ok(Ok(lock)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(Err(store::flock::holder_note(path))),
+        Err(std::fs::TryLockError::Error(why)) => Err(SpoolError::io(path, "lock", why)),
+    }
+}
+
+/// What one try of a WRITER's live lock at `path` decides, `waited` after
+/// its first try: the lock; `None` to try again after [`LIVE_STEP`] while
+/// `waited` is under [`LIVE_WAIT`] (a merger is merging run `run`'s spools
+/// of an earlier process); `run_live_busy` ([`SpoolError::Busy`]) naming
+/// the lock and its holder once it is not; or the host's refusal of the
+/// `flock` by name, never read as free. Apart from [`SpoolWriter`]'s loop so
+/// a test hands it the host's refusal, which no lock file gives on request,
+/// and a wait already spent, as [`probed`] is apart from [`live_probe`]
+/// (BASE-REDS-1023 repair 5, check r5's coverage of the writer's wait).
+pub(super) fn tried(
+    run: u64,
+    path: &Path,
+    attempt: Result<LiveLock, std::fs::TryLockError>,
+    waited: std::time::Duration,
+) -> Result<Option<LiveLock>, SpoolError> {
+    match attempt {
+        Ok(lock) => Ok(Some(lock)),
+        Err(std::fs::TryLockError::WouldBlock) if waited < LIVE_WAIT => Ok(None),
+        Err(std::fs::TryLockError::WouldBlock) => Err(SpoolError::Busy {
+            run,
+            lock: path.to_path_buf(),
+            holder: store::flock::holder_note(path),
+        }),
         Err(std::fs::TryLockError::Error(why)) => Err(SpoolError::io(path, "lock", why)),
     }
 }
@@ -893,43 +975,40 @@ impl SpoolWriter {
     /// Takes the run's live locks: the one under [`LIVE_DIR`], then, when the
     /// store holds the old layout's folder ([`OLD_LIVE_DIR`]), the one there,
     /// so a merger of the build before D-7148 sees this run as live too
-    /// (BASE-REDS-1023 repair 4).
+    /// (BASE-REDS-1023 repair 4) — unless the old name opens the very file
+    /// just locked (the two folders one folder under two names): that file
+    /// is the run's one lock, never locked a second time, which waited
+    /// [`LIVE_WAIT`] on this writer and refused every append (repair 5,
+    /// check r5's E10).
     fn take_live(&self) -> Result<LiveLocks, SpoolError> {
         let path = live_lock_path(&self.root, self.run);
-        let mut locks = vec![self.take_one(&path, || open_live(&self.root, &path))?];
-        if let Some(old) = old_live_lock_path(&self.root, self.run) {
-            locks.push(self.take_one(&old, || open_lock(&old, OLD_LIVE_DIR[1]))?);
+        let running = self.take_one(&path, open_live(&self.root, &path)?)?;
+        let Some(old) = old_live_lock_path(&self.root, self.run) else {
+            return Ok(LiveLocks(vec![running]));
+        };
+        let file = open_lock(&old, OLD_LIVE_DIR[1])?;
+        // ONE FILE IS ONE LOCK (repair 5).
+        if is_held(&running, &path, &file, &old)? {
+            return Ok(LiveLocks(vec![running]));
         }
-        Ok(LiveLocks(locks))
+        Ok(LiveLocks(vec![running, self.take_one(&old, file)?]))
     }
 
-    /// Takes the live lock at `path` (`open` opens it): at once when it is
-    /// free, else tried every [`LIVE_STEP`] for at most [`LIVE_WAIT`] (a
-    /// merger is merging this run's spools of an earlier process), then
-    /// refused by name.
-    fn take_one(
-        &self,
-        path: &Path,
-        open: impl Fn() -> Result<File, SpoolError>,
-    ) -> Result<store::flock::Flock<File>, SpoolError> {
+    /// Takes the live lock on `file`, opened at `path`: at once when it is
+    /// free, else tried again every [`LIVE_STEP`] for at most [`LIVE_WAIT`]
+    /// (a merger is merging this run's spools of an earlier process), then
+    /// refused by name ([`tried`]). Every try locks this one open file, the
+    /// file [`Self::take_live`] compared with the run's other lock.
+    fn take_one(&self, path: &Path, file: File) -> Result<LiveLock, SpoolError> {
+        let file = Arc::new(file);
         let started = std::time::Instant::now();
         loop {
-            match store::flock::Flock::try_lock_noted(open()?, path.to_path_buf()) {
-                Ok(lock) => return Ok(lock),
-                Err(std::fs::TryLockError::WouldBlock) if started.elapsed() < LIVE_WAIT => {
-                    std::thread::sleep(LIVE_STEP);
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(SpoolError::Busy {
-                        run: self.run,
-                        lock: path.to_path_buf(),
-                        holder: store::flock::holder_note(path),
-                    });
-                }
-                Err(std::fs::TryLockError::Error(why)) => {
-                    return Err(SpoolError::io(path, "lock", why));
-                }
+            let attempt =
+                store::flock::Flock::try_lock_noted(Arc::clone(&file), path.to_path_buf());
+            if let Some(lock) = tried(self.run, path, attempt, started.elapsed())? {
+                return Ok(lock);
             }
+            std::thread::sleep(LIVE_STEP);
         }
     }
 

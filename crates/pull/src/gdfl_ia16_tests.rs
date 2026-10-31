@@ -966,6 +966,89 @@ fn restated_option_day_read_again_with_other_bars_is_named_once() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// ROW 3 THROUGH THE RUN ITSELF (BASE-REDS-1023 repair 5, check r5's
+/// coverage of `admit`): an OPTION contract-day whose last close is `done`
+/// under definition 2, no longer current for options, offered again by a run
+/// that asks to skip restated days (`skip_restated`, D-4885). The day is
+/// counted in `restated_skipped` and passed over before the calendar gate:
+/// not a file is read, nothing is named restated or resumed, and the journal
+/// gains no line. Asked by a run that does not skip them, the same day is
+/// read again (D-2822, as
+/// `restated_option_day_read_again_with_other_bars_is_named_once` shows).
+/// Every row is invented.
+#[test]
+fn a_restated_day_a_run_asks_to_skip_is_counted_and_never_read() {
+    let root = scratch("ia16-r5-restated-skipped");
+    let stem = "NIFTY04APR2422000CE";
+    let world = root.join("world");
+    world_of(
+        &world,
+        &[(
+            d1(),
+            Tree::Options,
+            vec![(
+                entry_of(Tree::Options, d1(), stem),
+                option_file(stem, d1(), "101.5"),
+            )],
+        )],
+    );
+    let store = root.join("S");
+    let only = ["NIFTY".to_owned()];
+    let run = |options: RunOptions<'_>| {
+        import_with(
+            &world,
+            (ImportKind::Options, d1(), d1()),
+            (&store, &only),
+            options,
+        )
+        .unwrap()
+    };
+    let got = run(RunOptions::default());
+    assert!(got.failures.is_empty(), "{:?}", got.failures);
+    assert_eq!(got.restated_skipped, 0, "{got:?}");
+    // The day's `done` as definition 2 wrote it.
+    let current = format!("definition={BAR_DEFINITION}");
+    let text: String = journal(&store)
+        .lines()
+        .map(|line| {
+            let line = if line.starts_with("done options 2024-04-01 NIFTY ") {
+                assert!(line.contains(&current), "{line}");
+                line.replace(&current, "definition=2")
+            } else {
+                line.to_owned()
+            };
+            line + "\n"
+        })
+        .collect();
+    std::fs::write(journal_path(&store), &text).unwrap();
+    let skipped = run(RunOptions {
+        skip_restated: true,
+        ..RunOptions::default()
+    });
+    assert_eq!(skipped.restated_skipped, 1, "{skipped:?}");
+    assert_eq!(skipped.files, 0, "{skipped:?}");
+    assert_eq!(
+        (
+            skipped.days_skipped,
+            skipped.days_refused,
+            skipped.days_closed
+        ),
+        (0, 0, 0),
+        "{skipped:?}"
+    );
+    assert!(
+        skipped.restated.is_empty() && skipped.resumed.is_empty(),
+        "{skipped:?}"
+    );
+    assert!(skipped.failures.is_empty(), "{skipped:?}");
+    assert_eq!(journal(&store), text, "no line");
+    // Not asked to skip, the run reads the day again.
+    let read = run(RunOptions::default());
+    assert_eq!(read.restated_skipped, 0, "{read:?}");
+    assert_eq!(read.restated, vec![d1()], "{read:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// FM-118, under the one-command cut (D-6900: no action item; the named hole
 /// on the journal close and the receipt is the proof): an option contract-day
 /// whose month holds its first half, offered again whole by a copy whose

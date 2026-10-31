@@ -84720,6 +84720,66 @@ it extends; nothing above is edited.
    branches. Gate 1e whole, the full gate run, the crates' full suites and
    Route B of the crates are owed, as they were after repair 3.
 
+**Addenda, 31 Oct 2026 (BASE-REDS-1023 repair 5; check r5 of 31 Oct 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r5.json`, verdict fail on five
+items, each reproduced here first).** The block is still used, so each is
+an addendum to the entry it extends; nothing above is edited.
+
+8. **D-7148: one folder under two names is one lock, taken once (E10).**
+   Repair 4 took a run's lock in the old folder whenever that folder
+   existed and never asked whether it is the folder `running` already is.
+   With either a link to the other (a deploy giving both builds one folder
+   makes exactly that), a run's two lock names open one file, and
+   `flock(2)` locks a file with each open of it a holder: the writer locked
+   it, then waited `LIVE_WAIT` on its own lock through the other name and
+   refused every append `run_live_busy`, naming its own pid as another
+   process (30.03 s, the checker's probe, both directions); a merger
+   locked it and then read its own hold as a writer's, so every such run
+   read live for ever and its spools never merged. Now both compare the two
+   open files by device and inode (`one_file`: one `fstat` each) and lock
+   one file once; the writer opens each lock file once and every try of its
+   wait locks that open file, so a name that changes during a wait cannot
+   bring the self-wait back. A refused `fstat` is refused by name, never
+   read as two files. Chosen over comparing the two folders' canonical
+   paths because the open files are what `flock` locks: no name resolved
+   before the open can disagree with the file locked after it. BRED-43;
+   L-BRED23-06 (what a deploy must not do) and L-BRED23-18 (the cost).
+9. **D-7153, gate 1e: a fixture's scratch root is never one an earlier
+   process left.** Check r5's one full gate run was red in gate 1e alone,
+   on `halted_execution_tests`'s fixture: its root was named by the pid
+   and the process's counter, made with `create_dir` and never removed, so
+   542 of them (all counter 0) were in the temp folder and a test process
+   under a pid macOS gave again failed `File exists`. A failure that a
+   re-run passes is not cleared by the re-run (D1): the root's name holds
+   the wall clock's nanoseconds as well, so an earlier process under the
+   same pid ran at another instant and cannot hold it, and `Drop` removes
+   the root (a root that would not go is left, and no later fixture can
+   claim its name). The regression test makes the old names of the next 64
+   fixtures first and still claims a fresh root (BRED-47). The tree holds
+   more fixtures of the same shape (a pid-only name in
+   `strict_range_config.rs` and `boolean_catalog_command.rs`, roots kept by
+   many others: 1,228,394 entries in the temp folder on 31 Oct 2026); they
+   are a follow-up, named in this repair's report, not changed here.
+10. **D-7148, D-7150: the three coverage gaps check r5 measured, closed by
+    tests through production code.** `SpoolError`'s `Display` (its
+    `run_live_busy` arm changed in repair 4) formatted four refusals no
+    test formatted: each is now built by the code that refuses (a writer
+    meeting another run's header, a reader meeting a failed CRC, a merge
+    log damaged before its last record, a run past `u32::MAX`, a link at a
+    spool's name) and read by its words (BRED-45). The writer's wait
+    (repair 4's `take_one`) never reached its `LIVE_WAIT` refusal or the
+    host's refusal of the `flock`: one try's decision is now `tried`, a
+    seam as `probed` is for the merger's probe, driven arm by arm, and the
+    writer itself is held past the wait for each of a run's two locks at
+    once (BRED-44, one 30 s wait in the suite). `admit` (repair 3) never
+    met a restated day a run asks to skip: a run with `skip_restated` now
+    counts one and reads nothing (BRED-46).
+11. **What repair 5 ran** is in this repair's report
+    (`state/fix/round2/fix-BASE-REDS-1023.json`) and its progress file,
+    with each command's result line: the fails-before run of the new tests
+    on repair 4's tree, the gates, the full `ci-shell-gates.sh` run with
+    gate 1e whole, and D3 Route B on the final tip.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store

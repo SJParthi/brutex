@@ -1279,6 +1279,38 @@ confirmed by two skeptics; their corrections are applied.
   D-7148 addendum 6): while the store holds the old folder, writer and
   merger take a run's lock there too, and a run whose old lock is held is
   live (BRED-42); L-BRED23-06 states what that cannot cover.
+- **BRED23-F40: repair 4's live-lock fix waited on itself when the two
+  folders are one** (check r5 of 31 Oct 2026, E10): with the old folder a
+  link to `running`, or `running` a link to the old folder (the alias a
+  store holding only the old folder invites), a run's two lock names open
+  one file, and repair 4's writer and merger each locked it twice through
+  its two names. `flock(2)` locks a file with each open of it a holder, so
+  the writer's first append waited `LIVE_WAIT` (30.03 s) on itself and was
+  refused `run_live_busy` naming its own pid as another process, and
+  `live_probe` of a run nobody spooled read it live, so its spools never
+  merged. Reproduced first: the two new tests fail on repair 4's tip.
+  FIXED (BASE-REDS-1023 repair 5, D-7148 addendum 8): the two open files
+  are compared by device and inode and one file is locked once (BRED-43),
+  and every try of a writer's wait locks the file it compared.
+- **BRED23-F41: gate 1e red on a fixture's root an earlier process left**
+  (check r5, its one full gate run): `halted_execution_tests`'s fixture
+  named its root by the pid and the process's counter alone, made it with
+  `create_dir` and never removed it; 542 such roots (546 by this repair's
+  count) were in the temp folder, so a test process whose pid macOS gave
+  again failed `scratch: ... File exists`, in gate 1e and in any Mac
+  `cargo test`. FIXED (BASE-REDS-1023 repair 5, D-7153 addendum 9): the
+  root's name holds the wall clock's nanoseconds too and `Drop` removes it
+  (BRED-47). Other fixtures in the tree name roots by the pid alone or keep
+  them (the temp folder held 1,228,394 entries on 31 Oct 2026); they are
+  listed as a follow-up, not changed here.
+- **BRED23-F42: three production functions repair 3 and 4 changed were
+  short of full coverage** (check r5's D3 Route B): `SpoolError`'s
+  `Display` formatted four refusals no test formatted, the writer's wait
+  never reached its `LIVE_WAIT` refusal or the host's refusal of the
+  `flock`, and `admit` never met a restated day a run asked to skip. FIXED
+  (BASE-REDS-1023 repair 5, D-7148 addendum 10): each is driven through the
+  production code that builds it (BRED-44, BRED-45, BRED-46), the wait's
+  arms through `tried`, a seam as `probed` is.
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
