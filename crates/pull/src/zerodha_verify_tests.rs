@@ -4865,7 +4865,10 @@ fn the_old_live_lock_folder_is_honoured_both_ways() {
     let writer = append(&root, 52, "NSE-INDEX-ZZOLDB");
     let old_merger = std::fs::File::open(old_dir(&root).join("52.lock")).unwrap();
     assert!(
-        matches!(old_merger.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        matches!(
+            old_merger.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ),
         "a merger of the old build reads run 52 as live"
     );
     drop(writer);

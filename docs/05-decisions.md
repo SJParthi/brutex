@@ -84710,6 +84710,15 @@ it extends; nothing above is edited.
    old build reads its run live. A store without the old folder never gets
    one. The deploy precondition of L-BRED23-06 is narrowed to what this
    cannot cover, stated there.
+7. **What repair 4 ran, and what stays owed.** `state/fix/DRAIN-base-reds`
+   was set at 14:39 IST on 31 Oct, after this step began, so it started no
+   long cargo run. It ran `ci-shell-gates --jobs language-purity --fast`
+   (RED none), the Zerodha tests of `cargo test -p pull --lib` (82 passed),
+   `cargo clippy -p pull --all-targets -- -D warnings`, `cargo fmt --all
+   --check` and `cargo deny check` (each green), and D3 phase A: Route C of
+   the `.github` files, `source_scan.rs` 2127 of 2127 lines and 354 of 354
+   branches. Gate 1e whole, the full gate run, the crates' full suites and
+   Route B of the crates are owed, as they were after repair 3.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
