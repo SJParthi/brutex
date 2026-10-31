@@ -2170,6 +2170,14 @@ jobs:
           declared="$declared pull/src/corporate_actions_tests.rs:println!:2
           cli/src/basis_runs_tests.rs:println!:1
           api/src/basis_route_tests.rs:println!:1"
+          # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 5, D-7148
+          # addendum 8): the one print of `pull/src/zerodha_verify_tests.rs`
+          # is the n = 200 p50 / p99 / max line of each live-lock layout in
+          # `a_live_probe_is_a_fixed_number_of_calls_in_every_layout`
+          # (L-BRED23-18), printed beside what the test asserts. The file is
+          # mounted `#[cfg(test)] #[path]` by `pull::zerodha_verify`; no
+          # production path reaches it.
+          declared="$declared pull/src/zerodha_verify_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

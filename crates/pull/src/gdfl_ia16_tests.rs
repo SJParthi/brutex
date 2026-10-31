@@ -978,7 +978,9 @@ fn restated_option_day_read_again_with_other_bars_is_named_once() {
 /// Every row is invented.
 #[test]
 fn a_restated_day_a_run_asks_to_skip_is_counted_and_never_read() {
-    let root = scratch("ia16-r5-restated-skipped");
+    // The scratch tag of FM-095's restated day, the day this test restates
+    // too (declared for gate 1d; `scratch` makes each root its own).
+    let root = scratch("ia16-fm095-restated");
     let stem = "NIFTY04APR2422000CE";
     let world = root.join("world");
     world_of(
