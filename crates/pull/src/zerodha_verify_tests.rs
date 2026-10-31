@@ -5419,7 +5419,9 @@ fn spool_through_aliased_live_folders(tag: &str, (folder, link): (&str, &str), r
     assert!(
         appended.is_ok(),
         "{tag}: the append was refused after {took:?}: {}",
-        appended.map_or_else(|why| why.to_string(), |_| String::new())
+        appended
+            .as_ref()
+            .map_or_else(ToString::to_string, |_| String::new())
     );
     assert!(
         took < spool::LIVE_WAIT / 2,
@@ -5698,18 +5700,21 @@ fn every_arm_of_a_writers_try_and_of_the_one_file_check_is_named() {
     // THE ONE-FILE CHECK.
     let second = root.join("other.lock");
     std::fs::write(&second, b"").unwrap();
-    let stat = std::fs::metadata;
-    assert!(spool::one_file((stat(&path), &path), (stat(&path), &path)).unwrap());
-    assert!(!spool::one_file((stat(&path), &path), (stat(&second), &second)).unwrap());
-    let host = || Err(std::io::Error::other("fstat refused by the host"));
+    let (held, beside) = (path.as_path(), second.as_path());
+    let stat = std::fs::metadata::<&Path>;
+    assert!(spool::one_file((stat(held), held), (stat(held), held)).unwrap());
+    assert!(!spool::one_file((stat(held), held), (stat(beside), beside)).unwrap());
+    let host = || -> std::io::Result<std::fs::Metadata> {
+        Err(std::io::Error::other("fstat refused by the host"))
+    };
     for (refused, named) in [
         (
-            spool::one_file((host(), &path), (stat(&second), &second)),
-            &path,
+            spool::one_file((host(), held), (stat(beside), beside)),
+            held,
         ),
         (
-            spool::one_file((stat(&path), &path), (host(), &second)),
-            &second,
+            spool::one_file((stat(held), held), (host(), beside)),
+            beside,
         ),
     ] {
         match refused {
@@ -5749,15 +5754,15 @@ fn a_live_lock_held_past_the_wait_is_refused_busy_by_name() {
     let new_root = scratch("BusyNewLock");
     let new_lock = spool::live_lock_path(&new_root, 71);
     std::fs::create_dir_all(new_lock.parent().unwrap()).unwrap();
-    let new_holder = hold(&new_lock);
+    let new_holder = hold(new_lock.as_path());
     let old_root = scratch("BusyOldLock");
     let old_dir = spool::OLD_LIVE_DIR
         .iter()
         .fold(old_root.clone(), |at, segment| at.join(segment));
     std::fs::create_dir_all(&old_dir).unwrap();
     let old_lock = old_dir.join("72.lock");
-    let old_holder = hold(&old_lock);
-    let wait = |root: PathBuf, run: u64| {
+    let old_holder = hold(old_lock.as_path());
+    let wait = move |root: PathBuf, run: u64| {
         std::thread::spawn(move || {
             let writer = SpoolWriter::new(&root, run, Mode::ZerodhaMerge, 1);
             let started = std::time::Instant::now();
