@@ -588,8 +588,15 @@ fn main() {
         the_column_build_stays_within_its_budget(),
         the_equity_column_build_stays_within_its_budget(),
         // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2): each part puts its row
-        // call directly under its slot. The row fn is `pub(crate)` and returns `bool`:
-        // the workspace lint `unreachable_pub` is an error under clippy `-D warnings`.
+        // call directly under its slot and names its bench ids in it, one string each:
+        //     fno_<x>::row(&["C-FNO-<CODE>-01"]),
+        // The ids are written here because crates/core/tests/cost_invariants.rs reads
+        // the ids a bench prints from the top-level benches/*.rs files only, never from
+        // benches/ratio/*.rs (the C-PIT-01 precedent in crates/pull/benches/ratio.rs),
+        // and pairs them with docs/04-invariants.md both ways: each id is a row there.
+        // The row fn is `pub(crate) fn row(ids: &[&str]) -> bool` and prints each id it
+        // is given as the first word of a line. `pub(crate)`, because the workspace lint
+        // `unreachable_pub` is an error under clippy `-D warnings`.
         // slot bench-row FNO-BAND
         // slot bench-row FNO-RANK
         // slot bench-row FNO-DAILY

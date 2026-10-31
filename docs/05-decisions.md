@@ -87514,7 +87514,7 @@ over its 194 stanzas per row.
 
 ## F&O strategy path: part blocks (D-8100..D-8339)
 
-<!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). -->
+<!-- One slot line per F&O strategy part, in the part order of state/fib-strategy-20261030/PARTS.md section 7 (decision blocks of ten from D-8100, PARTS 4.4). Each part inserts its own rows directly under its own slot line and edits no other line of this file (PARTS 4.1 and 4.2). Entries of other work go above this section's heading, never below its last slot. Other work takes its decision numbers from state/decision-blocks.json, never the largest number in this file plus one: this section's blocks are reserved. -->
 
 <!-- slot FNO-LAW -->
 

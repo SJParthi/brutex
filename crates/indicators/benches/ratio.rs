@@ -766,15 +766,22 @@ fn main() {
     ];
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). `verdicts` is typed
     // `[bool; ROWS]`, so a row inside the array would make every part edit the one
-    // `ROWS` line. Each part instead puts one statement directly under its slot:
+    // `ROWS` line. Each part instead puts one statement directly under its slot and
+    // names its bench ids in it, one string each:
     //     let verdicts: Vec<bool> = verdicts
     //         .iter()
     //         .copied()
-    //         .chain([fno_<x>::row(floor)])
+    //         .chain([fno_<x>::row(floor, &["C-FNO-<CODE>-01"])])
     //         .collect();
-    // (the form `cargo fmt` keeps). The row is `pub(crate) fn row(floor: u128) -> bool`:
-    // the workspace lint `unreachable_pub` is an error under clippy `-D warnings`.
-    // It runs its row after every row above and folds it into the check below.
+    // (the form `cargo fmt` keeps). It runs its row after every row above and folds it
+    // into the check below. The ids are written here because
+    // crates/core/tests/cost_invariants.rs reads the ids a bench prints from the
+    // top-level benches/*.rs files only, never from benches/ratio/*.rs (the C-PIT-01
+    // precedent in crates/pull/benches/ratio.rs), and pairs them with
+    // docs/04-invariants.md both ways: each id is a row there. The row is
+    // `pub(crate) fn row(floor: u128, ids: &[&str]) -> bool` and prints each id it is
+    // given as the first word of a line. `pub(crate)`, because the workspace lint
+    // `unreachable_pub` is an error under clippy `-D warnings`.
     // slot bench-row FNO-LADDER
     // slot bench-row FNO-PAUSE
     if verdicts.contains(&false) {
