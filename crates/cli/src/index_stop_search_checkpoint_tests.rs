@@ -765,25 +765,15 @@ fn an_empty_batch_completes_without_children_and_keeps_the_last_saved_table() {
     // After the one-instruction program the next needs more than one node,
     // so this reservation holds no program at all.
     let batch = Batch::prepare(done.cursor.clone(), done.work, done.programs, one_node).unwrap();
-    let mut first = Frame::pending(&done, batch).unwrap();
-    first.location = Some((4, [8; 32]));
-    let mut empty = first;
-    loop {
-        if empty.batch.as_ref().unwrap().programs().is_empty() {
-            break;
-        }
-        let mut finished = Frame::done(empty, &fake_links()).unwrap();
-        finished.location = Some((5, [9; 32]));
-        let batch = Batch::prepare(
-            finished.cursor.clone(),
-            finished.work,
-            finished.programs,
-            one_node,
-        )
-        .unwrap();
-        empty = Frame::pending(&finished, batch).unwrap();
-        empty.location = Some((6, [10; 32]));
-    }
+    // The very first reservation is the empty one: a fixed fixture, so there
+    // is no loop that searches for it (a loop here had a body no run reached).
+    assert!(
+        batch.programs().is_empty(),
+        "the one-node reservation is empty"
+    );
+    assert!(!batch.exhausted(), "an empty reservation is not the end");
+    let mut empty = Frame::pending(&done, batch).unwrap();
+    empty.location = Some((4, [8; 32]));
     let carried = empty.latest_saved;
     assert!(carried.is_some(), "the earlier completions saved a table");
     // The saved table is rebuilt from ancestors, never decoded, so the prior
