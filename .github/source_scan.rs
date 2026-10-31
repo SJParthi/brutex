@@ -734,39 +734,67 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
 //
 // TEST CODE is a whole file under `crates/<c>/tests/`, `benches/` or
 // `examples/`, a whole `crates/<c>/src/` file that no production build
-// compiles (a test-only module), and in every other file the `#[cfg(test)]`,
-// `#[cfg(all(test, ..))]` and `#[test]` items. It READS A PATH INTO `web/`
+// compiles (a test-only module); in every other file the items a `cfg` that
+// names `test` where it can hold governs (`#[cfg(test)]`,
+// `#[cfg(all(test, ..))]`, `#[cfg(any(test, ..))]`, an inner `#![cfg(..)]`
+// to the end of its block) and every `#[test]`, `#[tokio::test]` or
+// `#[bench]` item; and in every file the Rust its doc comments hold, each
+// example as rustdoc compiles it (a fence rustdoc reads as Rust, or an
+// indented block, its hidden `# ` lines shown). It READS A PATH INTO `web/`
 // when one statement of it (the tokens between `;`, `{` and `}`) holds:
 //   * a literal that climbs with `..` straight into `web` (`../../web`,
 //     `{}/../../web/{}`, the `../../../web/x.js` of an `include_str!`),
-//     each `concat!` joined first and every raw or escaped literal decoded;
+//     each `concat!` joined first, each `stringify!` read as its text and
+//     every raw or escaped literal decoded;
 //   * a literal with a `web` segment beside a repository anchor: a `..`
 //     segment, `CARGO_MANIFEST_DIR` (by `env!`, `option_env!` or
-//     `env::var`), `file!()`, `current_dir`, or a name bound to one;
+//     `env::var`), `file!()`, `current_dir`, a name bound to one, or a call
+//     to a function, or an expansion of a macro, whose body holds one (the
+//     tree's own `repo()`, `workspace_root()` and `read(relative)` helpers,
+//     followed through every call: check r4 of 30 Oct, V4-2);
 //   * a name bound to a path into `web/`: by an earlier statement of the
-//     test code, or by a `const` or `static` of the crate's production code.
-// A link under `crates/` whose target lands in `web/` is refused too.
+//     test code, or by a `const` or `static` of the crate's production code;
+//     or an expansion of a production `macro_rules!` whose body reads one.
+// `web` is read in any case: the Mac's APFS volume is case-blind. A tracked
+// link under `crates/` whose target lands in `web/`, or in a folder that
+// holds it (the repository root, or above it), is refused too.
 //
-// WHAT IT CANNOT SEE, stated: a path assembled at run time from pieces none
-// of which names `web` (`["w", "eb"].concat()`), and a test that calls a
-// production function that reads `web/` at run time (`assets::Assets`, the
-// server's own run-time read, which section 2 allows). Gate 1e still runs.
+// WHAT IT CANNOT SEE, stated (BASE-REDS-1023 repair 4): a path assembled at
+// run time from pieces none of which names `web` (`["w", "eb"].concat()`, a
+// path read from a file or from a variable other than `CARGO_MANIFEST_DIR`);
+// a test that calls production code which reads `web/` at run time
+// (`assets::Assets`, the server's own read, which section 2 allows); a
+// helper reached through a value rather than called by its name (a function
+// pointer, a closure in a field, a trait object) or by a turbofish
+// (`root::<T>()`); a method of ANOTHER crate's type (a method call is read
+// against the caller's crate); a helper whose only anchor is a lower-case
+// `const` or `static` (rustc warns on one); the text a `#[doc = ..]`
+// attribute supplies, and an indented example inside a list item (read as
+// the item's text); and code a build script or a procedural macro writes.
+// Gate 1e still runs for all of them.
 
 /// A literal's path segments, split on `/` and `\`.
 fn path_segments(text: &str) -> Vec<&str> {
     text.split(['/', '\\']).collect()
 }
 
+/// Is `seg` the segment `web`, in any case? `/Volumes/WD_BLACK` is a
+/// case-blind APFS volume, so `Web` and `WEB` open `web/` there (check r4,
+/// E5).
+fn is_web(seg: &str) -> bool {
+    seg.eq_ignore_ascii_case("web")
+}
+
 /// Does `text` climb with `..` straight into `web`?
 fn climbs_into_web(text: &str) -> bool {
     path_segments(text)
         .windows(2)
-        .any(|w| w[0] == ".." && w[1] == "web")
+        .any(|w| w[0] == ".." && is_web(w[1]))
 }
 
-/// Does `text` hold a path segment that is exactly `web`?
+/// Does `text` hold a path segment that is `web`?
 fn names_web(text: &str) -> bool {
-    path_segments(text).contains(&"web")
+    path_segments(text).into_iter().any(is_web)
 }
 
 /// Is `text` an anchor at the repository: a `..` segment, or the name of
@@ -805,25 +833,115 @@ fn format_names(text: &str) -> Vec<String> {
     out
 }
 
-/// The names a production `const` or `static`, or an earlier test
-/// statement, gave a repository anchor (`anchors`) or a path into `web/`
-/// (`web`).
-#[derive(Clone, Debug, Default)]
-struct WebNames {
-    anchors: BTreeSet<String>,
-    web: BTreeSet<String>,
+/// One call a statement makes, by how it names its callee (BASE-REDS-1023
+/// repair 4, check r4's V4-2).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Call {
+    /// `name(..)`, or a path through `crate`, `self` or `super`: a function
+    /// of the caller's own crate.
+    Bare(String),
+    /// `x.name(..)` or `Self::name(..)`: a method of the caller's crate.
+    Method(String),
+    /// `seg::name(..)`: a function of a module or crate named `seg`, or of a
+    /// type named `seg`, anywhere in the tree.
+    Path(String, String),
 }
 
-/// One statement: its literals (each `concat!` also joined),
-/// the names it reads, the names it binds, and whether it is a `const` or
-/// `static` item.
+impl Call {
+    /// The key [`WebNames::fns`] holds for this call made in the file
+    /// `scope`: a bare call or a method reaches a function of that file only
+    /// (a test file's `read` helper is no anchor for every `read(..)` of its
+    /// crate: check r4's V4-2 repair), a path reaches one anywhere.
+    fn key(&self, scope: &str) -> String {
+        match self {
+            Self::Bare(n) => format!("{scope}/{n}"),
+            Self::Method(n) => format!("{scope}/.{n}"),
+            Self::Path(seg, n) => format!("{seg}::{n}"),
+        }
+    }
+}
+
+/// What gate 1h knows the names of one crate stand for, read in one of its
+/// files (`scope`): the names a production `const`
+/// or `static`, or an earlier test statement, gave a repository anchor
+/// (`anchors`) or the root through a helper (`soft`, [`is_soft_anchor`]), a
+/// path into `web/` (`web`) or the repository's root itself
+/// (`roots`, [`is_root`]); and, over the whole tree, the functions whose
+/// value is the root, by every key a call reaches one by (`fns`,
+/// [`Call::key`]), the `macro_rules!` whose body holds it (`macros`), and
+/// the production `macro_rules!` whose body reads a path into `web/`
+/// (`web_macros`).
+#[derive(Clone, Debug, Default)]
+struct WebNames {
+    scope: String,
+    anchors: BTreeSet<String>,
+    soft: BTreeSet<String>,
+    web: BTreeSet<String>,
+    roots: BTreeSet<String>,
+    fns: BTreeSet<String>,
+    macros: BTreeSet<String>,
+    web_macros: BTreeSet<String>,
+}
+
+/// One statement: its literals (each `concat!` also joined, each
+/// `stringify!` also as its text); those a path is built from (`joins`:
+/// the arguments of `.join`, `.push`, `Path::new`, `format!` and their
+/// kin, [`callee_of`]) and those handed to another call (`args`, with the
+/// call); the names it reads, the calls it makes and the macros it expands
+/// from its initializer on; the names it binds; and whether it is a `const`
+/// or `static` item.
 #[derive(Debug, Default)]
 struct WebStmt {
     lits: Vec<String>,
+    joins: Vec<String>,
+    args: Vec<(Call, String)>,
     idents: Vec<String>,
+    calls: Vec<Call>,
+    macros: Vec<String>,
     bound: Vec<String>,
     item: bool,
     file_macro: bool,
+}
+
+/// What a literal inside a `(` group is an argument of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Callee {
+    /// A call a path is built with: `.join`, `.push`, `.with_file_name`,
+    /// `.set_file_name`, `Path::new`, `PathBuf::from` and their `OsStr`
+    /// kin, and `format!`, `concat!` and the `include` macros.
+    Builds,
+    /// Any other call, by how it names its callee ([`call_at`]).
+    Call(Call),
+    /// A group no name calls, or a call this gate has no use for.
+    Other,
+}
+
+/// What the `(` at `t[open]` hands its contents to ([`Callee`]).
+fn callee_of(t: &[Token], open: usize) -> Callee {
+    let before = |k: usize| open.checked_sub(k).and_then(|j| t.get(j));
+    if is_punct(before(1), '!') {
+        return match before(2).and_then(ident) {
+            Some("format" | "concat" | "include_str" | "include_bytes" | "include") => {
+                Callee::Builds
+            }
+            _ => Callee::Other,
+        };
+    }
+    let Some(name) = before(1).and_then(ident) else {
+        return Callee::Other;
+    };
+    let ty = (is_punct(before(2), ':') && is_punct(before(3), ':'))
+        .then(|| before(4).and_then(ident))
+        .flatten();
+    let method = is_punct(before(2), '.')
+        && matches!(name, "join" | "push" | "with_file_name" | "set_file_name");
+    let path = matches!(ty, Some("Path" | "PathBuf" | "OsStr" | "OsString"))
+        && matches!(name, "new" | "from");
+    if method || path {
+        Callee::Builds
+    } else {
+        call_at(t, open - 1, name).map_or(Callee::Other, Callee::Call)
+    }
 }
 
 /// The token ranges between `;`, `{` and `}`.
@@ -842,6 +960,105 @@ fn statement_ranges(t: &[Token]) -> Vec<(usize, usize)> {
         out.push((start, t.len()));
     }
     out
+}
+
+/// Does a bracket group open at `t`?
+fn opens_group(t: Option<&Token>) -> bool {
+    t.is_some_and(|y| matches!(y.tok, Tok::Punct('(' | '[' | '{')))
+}
+
+/// The tokens inside the bracket group that opens at `t[open]`: to its
+/// closer, or to the end of `t` when the statement cuts the group.
+fn inside(t: &[Token], open: usize) -> &[Token] {
+    let mut depth = 0_i64;
+    for (k, x) in t.iter().enumerate().skip(open) {
+        match x.tok {
+            Tok::Punct('(' | '[' | '{') => depth += 1,
+            Tok::Punct(')' | ']' | '}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return &t[open + 1..k];
+                }
+            }
+            _ => {}
+        }
+    }
+    &t[open + 1..]
+}
+
+/// The text `stringify!` makes of the tokens `g`: names and marks as
+/// written, a space between two names (literals are read as literals).
+fn stringified(g: &[Token]) -> String {
+    let mut out = String::new();
+    for (k, x) in g.iter().enumerate() {
+        match &x.tok {
+            Tok::Ident(n) => {
+                if k > 0 && ident(&g[k - 1]).is_some() {
+                    out.push(' ');
+                }
+                out.push_str(n);
+            }
+            Tok::Punct(c) => out.push(*c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What `concat!` makes of the tokens `g`: its literals joined in order, a
+/// `stringify!` group as its text.
+fn joined(g: &[Token]) -> String {
+    let mut out = String::new();
+    let mut k = 0;
+    while k < g.len() {
+        if is_ident(g.get(k), "stringify")
+            && is_punct(g.get(k + 1), '!')
+            && opens_group(g.get(k + 2))
+        {
+            let text = inside(g, k + 2);
+            out.push_str(&stringified(text));
+            k += 4 + text.len();
+            continue;
+        }
+        if let Tok::Str(s) = &g[k].tok {
+            out.push_str(s);
+        }
+        k += 1;
+    }
+    out
+}
+
+/// The call the name `name` at `t[i]` makes when `(` follows it: a method
+/// after `.`, a path's last segment by the segment before it, else a bare
+/// call. A `fn` item's own name is no call, and neither is a path from
+/// `std`, `core` or `alloc`: no function of theirs holds this tree's
+/// anchors.
+fn call_at(t: &[Token], i: usize, name: &str) -> Option<Call> {
+    let name = name.to_owned();
+    if !is_punct(t.get(i + 1), '(') {
+        return None;
+    }
+    let before = i.checked_sub(1).and_then(|k| t.get(k));
+    if is_ident(before, "fn") {
+        return None;
+    }
+    if is_punct(before, '.') {
+        return Some(Call::Method(name));
+    }
+    if i < 3 || !is_path_sep(t, i - 2) {
+        return Some(Call::Bare(name));
+    }
+    let seg = ident(&t[i - 3])?.to_owned();
+    let mut root = i - 3;
+    while root >= 3 && is_path_sep(t, root - 2) && ident(&t[root - 3]).is_some() {
+        root -= 3;
+    }
+    match (ident(&t[root]), seg.as_str()) {
+        (Some("std" | "core" | "alloc"), _) => None,
+        (_, "crate" | "self" | "super") => Some(Call::Bare(name)),
+        (_, "Self") => Some(Call::Method(name)),
+        _ => Some(Call::Path(seg, name)),
+    }
 }
 
 /// What the statement `t` holds and binds.
@@ -889,68 +1106,168 @@ fn web_stmt(t: &[Token]) -> WebStmt {
         }
         _ => {}
     }
+    // The callee of each open group, innermost last ([`callee_of`]).
+    let mut callers: Vec<Callee> = Vec::new();
     for (i, x) in t.iter().enumerate() {
         match &x.tok {
+            Tok::Punct('(') => callers.push(callee_of(t, i)),
+            Tok::Punct('[' | '{') => callers.push(Callee::Other),
+            Tok::Punct(')' | ']' | '}') => {
+                callers.pop();
+            }
             Tok::Str(s) => {
                 if i >= reads_from {
                     st.idents.extend(format_names(s));
                 }
-                st.lits.push(s.clone());
+                st.note(s.clone(), callers.last());
             }
             Tok::Ident(n) => {
                 st.file_macro |= n == "file" && is_punct(t.get(i + 1), '!');
                 if i >= reads_from {
                     st.idents.push(n.clone());
+                    st.calls.extend(call_at(t, i, n));
+                    if n != "macro_rules"
+                        && is_punct(t.get(i + 1), '!')
+                        && opens_group(t.get(i + 2))
+                    {
+                        st.macros.push(n.clone());
+                    }
                 }
             }
             _ => {}
         }
-        // concat!("../..", "/web") is one literal to the compiler.
-        if is_ident(t.get(i), "concat")
+        // concat!("../..", "/web") is one literal to the compiler, and
+        // stringify!(web) is the literal "web" (check r4, E7).
+        let concat = is_ident(t.get(i), "concat");
+        if (concat || is_ident(t.get(i), "stringify"))
             && is_punct(t.get(i + 1), '!')
-            && t.get(i + 2)
-                .is_some_and(|y| matches!(y.tok, Tok::Punct('(' | '[')))
+            && opens_group(t.get(i + 2))
         {
-            let end = skip_group(t, i + 2).min(t.len());
-            st.lits.push(
-                t[i + 2..end]
-                    .iter()
-                    .filter_map(|y| match &y.tok {
-                        Tok::Str(s) => Some(s.as_str()),
-                        _ => None,
-                    })
-                    .collect(),
+            let g = inside(t, i + 2);
+            st.note(
+                if concat { joined(g) } else { stringified(g) },
+                callers.last(),
             );
         }
     }
     st
 }
 
+impl WebStmt {
+    /// Takes the literal `lit`, an argument of `callee`'s group: a path is
+    /// built from it, it is handed to that call, or neither.
+    fn note(&mut self, lit: String, callee: Option<&Callee>) {
+        match callee {
+            Some(Callee::Builds) => self.joins.push(lit.clone()),
+            Some(Callee::Call(c)) => self.args.push((c.clone(), lit.clone())),
+            _ => {}
+        }
+        self.lits.push(lit);
+    }
+}
+
+/// Does the statement hold an anchor by itself: a literal anchor,
+/// `file!()` or `current_dir`?
+fn holds_anchor(st: &WebStmt) -> bool {
+    st.file_macro
+        || st.lits.iter().any(|l| anchors_at_repo(l))
+        || st.idents.iter().any(|n| n == "current_dir")
+}
+
+/// Is `text` the repository's root by itself, as a function's value can be:
+/// the name of the variable cargo sets to the crate's directory, or a climb
+/// of two `..` or more and nothing else, which from the crate's directory
+/// (where `cargo test` runs a test) is the repository root or above it? A
+/// lone `..` is not: validators and messages name it (check r4's V4-2
+/// repair: read as an anchor of a function's value, it made 17,636 of the
+/// tree's functions anchors).
+fn roots_at_repo(text: &str) -> bool {
+    let s = path_segments(text);
+    matches!(text, "CARGO_MANIFEST_DIR" | "CARGO_WORKSPACE_DIR")
+        || (s.iter().all(|x| matches!(*x, ".." | "." | ""))
+            && s.iter().filter(|x| **x == "..").count() >= 2)
+}
+
+/// Does the statement hold the repository's root by itself: a literal root
+/// ([`roots_at_repo`]), `file!()` or `current_dir`?
+fn holds_root(st: &WebStmt) -> bool {
+    st.file_macro
+        || st.lits.iter().any(|l| roots_at_repo(l))
+        || st.idents.iter().any(|n| n == "current_dir")
+}
+
+/// Does the statement hold the repository's root: by itself
+/// ([`holds_root`]), by a value of its crate bound to one, by a call to a
+/// function whose value is one, or by an expansion of a macro whose body
+/// holds one?
+fn is_root(st: &WebStmt, names: &WebNames) -> bool {
+    holds_root(st)
+        || st.idents.iter().any(|n| names.roots.contains(n))
+        || st
+            .calls
+            .iter()
+            .any(|c| names.fns.contains(&c.key(&names.scope)))
+        || st.macros.iter().any(|m| names.macros.contains(m))
+}
+
+/// Does the statement hold a repository anchor by its own tokens: by itself
+/// ([`holds_anchor`]) or by a name bound to one?
+fn is_anchor(st: &WebStmt, names: &WebNames) -> bool {
+    holds_anchor(st) || st.idents.iter().any(|n| names.anchors.contains(n))
+}
+
+/// Does the statement hold the repository's root through a helper: a call
+/// to a function whose value is the root, an expansion of a macro whose
+/// body holds it, or a name bound to either? Such a root is read only with
+/// the `web` a path is built from onto it ([`WebStmt::joins`], or an
+/// argument of the helper itself): `default_web_dir().ends_with("web")`
+/// reads nothing, `workspace_root().join("web")` and `read("web/x.js")` do.
+fn is_soft_anchor(st: &WebStmt, names: &WebNames) -> bool {
+    st.calls
+        .iter()
+        .any(|c| names.fns.contains(&c.key(&names.scope)))
+        || st.macros.iter().any(|m| names.macros.contains(m))
+        || st.idents.iter().any(|n| names.soft.contains(n))
+}
+
 /// Why the statement reads a path into `web/`, if it does; then its
 /// bindings update `names` (a binding to neither forgets the name, so a
 /// shadowing `let root = tempdir` is not an anchor).
 fn web_read_of(st: &WebStmt, names: &mut WebNames) -> Option<String> {
-    let anchor = st.file_macro
-        || st.lits.iter().any(|l| anchors_at_repo(l))
-        || st
-            .idents
+    let anchor = is_anchor(st, names);
+    let soft = is_soft_anchor(st, names);
+    let joined = st.joins.iter().chain(
+        st.args
             .iter()
-            .any(|n| n == "current_dir" || names.anchors.contains(n));
+            .filter(|(c, _)| names.fns.contains(&c.key(&names.scope)))
+            .map(|(_, l)| l),
+    );
     let why = if let Some(l) = st.lits.iter().find(|l| climbs_into_web(l)) {
         Some(format!("climbs into web/: {l:?}"))
     } else if let Some(l) = st.lits.iter().find(|l| names_web(l)).filter(|_| anchor) {
         Some(format!("a web segment beside a repository anchor: {l:?}"))
+    } else if let Some(l) = joined.clone().find(|l| names_web(l)).filter(|_| soft) {
+        Some(format!(
+            "a web segment joined to the repository's root from a helper: {l:?}"
+        ))
+    } else if let Some(n) = st.idents.iter().find(|n| names.web.contains(*n)) {
+        Some(format!("reads `{n}`, a name bound to a path into web/"))
     } else {
-        st.idents
+        st.macros
             .iter()
-            .find(|n| names.web.contains(*n))
-            .map(|n| format!("reads `{n}`, a name bound to a path into web/"))
+            .find(|m| names.web_macros.contains(*m))
+            .map(|m| format!("expands `{m}!`, a macro whose body reads a path into web/"))
     };
     for n in &st.bound {
         if anchor {
             names.anchors.insert(n.clone());
         } else {
             names.anchors.remove(n);
+        }
+        if soft && !anchor {
+            names.soft.insert(n.clone());
+        } else {
+            names.soft.remove(n);
         }
         if why.is_some() {
             names.web.insert(n.clone());
@@ -961,31 +1278,88 @@ fn web_read_of(st: &WebStmt, names: &mut WebNames) -> Option<String> {
     why
 }
 
-/// The byte spans of a file's test items: `#[cfg(test)]` regions, and every
-/// `#[cfg(all(test, ..))]` and `#[test]` item, merged where they overlap.
+/// Does the `cfg` predicate `p` name `test` where it can hold: outside
+/// every `not(..)`, or inside an even number of them?
+fn mentions_test(p: &[Token]) -> bool {
+    let mut negated = vec![false];
+    for (k, x) in p.iter().enumerate() {
+        let top = negated.last().copied().unwrap_or(false);
+        match &x.tok {
+            Tok::Punct('(') => {
+                negated.push(top ^ is_ident(k.checked_sub(1).and_then(|j| p.get(j)), "not"));
+            }
+            Tok::Punct(')') => {
+                negated.pop();
+            }
+            Tok::Ident(n) if n == "test" && !top && !is_punct(p.get(k + 1), '=') => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Is the attribute `a` (the tokens inside its `[..]`) a `cfg` that names
+/// `test` where it can hold ([`mentions_test`])?
+fn cfg_test_attr(a: &[Token]) -> bool {
+    is_ident(a.first(), "cfg")
+        && is_punct(a.get(1), '(')
+        && skip_group(a, 1) == a.len()
+        && mentions_test(&a[2..a.len() - 1])
+}
+
+/// Is the attribute `a` a test harness's: a path whose last segment is
+/// `test` or `bench` (`test`, `tokio::test`), with or without arguments?
+fn test_attr(a: &[Token]) -> bool {
+    let mut k = 0;
+    let mut last = "";
+    while let Some(n) = a.get(k).and_then(ident) {
+        last = n;
+        k += 1;
+        if !is_path_sep(a, k) {
+            break;
+        }
+        k += 2;
+    }
+    matches!(last, "test" | "bench")
+        && (k == a.len() || (is_punct(a.get(k), '(') && skip_group(a, k) == a.len()))
+}
+
+/// The byte spans of a file's test items: `#[cfg(test)]` regions, every
+/// item a test `cfg` ([`cfg_test_attr`]) or a test harness's attribute
+/// ([`test_attr`]) governs, and from an inner `#![cfg(..)]` of test the rest
+/// of its block, merged where they overlap.
 fn test_regions(src: &str, t: &[Token]) -> Vec<(usize, usize)> {
     let mut spans = test_spans(src, t);
-    // Each token's word, once: an identifier or a punctuation mark, else "".
-    let words: Vec<String> = t
-        .iter()
-        .map(|x| match &x.tok {
-            Tok::Ident(s) => s.clone(),
-            Tok::Punct(c) => c.to_string(),
-            _ => String::new(),
-        })
-        .collect();
-    let at = |i: usize, want: &[&str]| {
-        words
-            .get(i..i + want.len())
-            .is_some_and(|got| got.iter().zip(want).all(|(g, w)| g.as_str() == *w))
-    };
-    for i in 0..t.len() {
-        // `test` is a name-only cfg, so `all(test` is followed by `,` or `)`.
-        if at(i, &["#", "[", "cfg", "(", "all", "(", "test"]) || at(i, &["#", "[", "test", "]"]) {
+    let mut open: Vec<usize> = Vec::new();
+    for (i, x) in t.iter().enumerate() {
+        match x.tok {
+            Tok::Punct('{') => open.push(i),
+            Tok::Punct('}') => {
+                open.pop();
+            }
+            _ => {}
+        }
+        let inner = is_punct(t.get(i + 1), '!');
+        let bracket = i + 1 + usize::from(inner);
+        if x.tok != Tok::Punct('#') || !is_punct(t.get(bracket), '[') {
+            continue;
+        }
+        let attr = inside(t, bracket);
+        let end = if inner && cfg_test_attr(attr) {
+            // To the `}` of the enclosing block, or the end of the file.
+            open.last().map_or(src.len(), |&o| {
+                t[o + 1 + inside(t, o).len()..]
+                    .first()
+                    .map_or(src.len(), |c| c.start)
+            })
+        } else if !inner && (cfg_test_attr(attr) || test_attr(attr)) {
             // From the `#`, which no group counts: the `[` after it opens.
             let last = item_end(t, skip_group(t, i));
-            spans.push((t[i].start, t.get(last).map_or(src.len(), |x| x.end)));
-        }
+            t.get(last).map_or(src.len(), |y| y.end)
+        } else {
+            continue;
+        };
+        spans.push((x.start, end));
     }
     spans.sort_unstable();
     let mut merged: Vec<(usize, usize)> = Vec::new();
@@ -998,24 +1372,218 @@ fn test_regions(src: &str, t: &[Token]) -> Vec<(usize, usize)> {
     merged
 }
 
-/// Gate 1h over one file: every statement of its test code (the whole file
-/// when `whole`) that reads a path into `web/`, as `path:line: why`. `prod`
-/// holds the names its crate's production `const` and `static` items bind.
-fn web_read_findings(
-    path: &str,
-    src: &str,
-    whole: bool,
-    prod: &WebNames,
-) -> Result<Vec<String>, String> {
-    let t = lex(src)?.tokens;
-    let regions = if whole {
-        vec![(0, src.len())]
-    } else {
-        test_regions(src, &t)
+/// One example a doc comment holds, as rustdoc compiles it: its text, the
+/// file line each of its lines came from (never none), and whether a fence
+/// rather than an indent made it.
+#[derive(Debug)]
+struct DocExample {
+    text: String,
+    lines: Vec<usize>,
+    fenced: bool,
+}
+
+impl DocExample {
+    /// The file line of the example's line `n` (counted from 1).
+    fn line(&self, n: usize) -> usize {
+        self.lines[n.clamp(1, self.lines.len()) - 1]
+    }
+}
+
+/// The fence a line opens or closes, from its first byte: its run of three
+/// or more "`" or "~" and the info string after it (a "`" fence holds no
+/// "`" in its info string).
+fn fence(t: &str) -> Option<(String, &str)> {
+    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = t.len() - t.trim_start_matches(c).len();
+    let info = t[run..].trim();
+    (run >= 3 && !(c == '`' && info.contains('`'))).then(|| (t[..run].to_owned(), info))
+}
+
+/// Does `l` close the fence `mark`: indented less than four, a run of at
+/// least as many of its character, and nothing after it?
+fn closes(l: &str, mark: &str) -> bool {
+    let t = l.trim_start();
+    l.len() - t.len() < 4
+        && fence(t).is_some_and(|(run, info)| {
+            info.is_empty() && run.len() >= mark.len() && run.starts_with(&mark[..1])
+        })
+}
+
+/// Does rustdoc read a fence with the info string `info` as Rust? Yes when
+/// one word is `rust`, else unless a word it does not know names another
+/// language (rustdoc's `LangString::parse`: `ignore` and `no_run` examples
+/// are Rust, and `cargo test -- --ignored` runs an `ignore` one).
+fn rust_fence(info: &str) -> bool {
+    let known = |w: &str| {
+        matches!(
+            w,
+            "should_panic"
+                | "no_run"
+                | "ignore"
+                | "test_harness"
+                | "compile_fail"
+                | "standalone_crate"
+        ) || w.starts_with("edition")
+            || w.starts_with("ignore-")
+            || w.starts_with('{')
+            || (w.len() == 5 && w.starts_with('E') && w[1..].bytes().all(|b| b.is_ascii_digit()))
     };
-    let mut names = prod.clone();
+    let mut words = info
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty());
+    words.clone().any(|w| w == "rust") || words.all(known)
+}
+
+/// The width of the list marker `t` starts with, its space included
+/// (`- `, `* `, `+ `, `1. `, `10) `).
+fn list_item(t: &str) -> Option<usize> {
+    let b = t.as_bytes();
+    let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    let mark = if digits > 0 {
+        b.get(digits).filter(|c| matches!(c, b'.' | b')'))?;
+        digits + 1
+    } else {
+        b.first().filter(|c| matches!(c, b'-' | b'*' | b'+'))?;
+        1
+    };
+    (b.get(mark) == Some(&b' ')).then_some(mark + 1)
+}
+
+/// An example from its lines, `strip` columns off each, every hidden line
+/// (`# x`, or `#` alone) shown as rustdoc compiles it and a `##` as `#`.
+fn example(lines: &[(usize, &str)], strip: usize, fenced: bool) -> DocExample {
+    let mut text = String::new();
+    for (_, l) in lines {
+        let l = l.get(strip..).unwrap_or("");
+        let shown = match l.trim_start().strip_prefix('#') {
+            Some("") => "",
+            Some(rest) if rest.starts_with([' ', '#']) => rest.strip_prefix(' ').unwrap_or(rest),
+            _ => l,
+        };
+        text.push_str(shown);
+        text.push('\n');
+    }
+    DocExample {
+        text,
+        lines: lines.iter().map(|(n, _)| *n).collect(),
+        fenced,
+    }
+}
+
+/// The examples of one doc text (its lines, each with its file line), as
+/// rustdoc reads the Markdown: unindented by its least indent; a fence
+/// indented less than four (past a list item's marker) whose info string
+/// rustdoc reads as Rust ([`rust_fence`]), to its closing fence or the end;
+/// and an indented block, four columns past the text of the list item it
+/// is in (none outside a list), after a blank line or at the start.
+fn examples_in(text: &[(usize, String)]) -> Vec<DocExample> {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let least = text
+        .iter()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(_, l)| indent(l))
+        .min()
+        .unwrap_or(0);
+    let lines: Vec<(usize, &str)> = text
+        .iter()
+        .map(|(n, l)| (*n, l.get(least..).unwrap_or("")))
+        .collect();
     let mut out = Vec::new();
-    for (s, e) in regions {
+    let mut k = 0;
+    // At the start, after a blank line or after a fence: a block may open.
+    let mut fresh = true;
+    // The column a list item's text starts at; 0 outside a list.
+    let mut item = 0;
+    while k < lines.len() {
+        let l = lines[k].1;
+        let lead = indent(l);
+        let t = l.trim_start();
+        if t.is_empty() {
+            fresh = true;
+            k += 1;
+        } else if let Some((mark, info)) = fence(t).filter(|_| lead < item + 4) {
+            let close = (k + 1..lines.len())
+                .find(|&j| closes(lines[j].1, &mark))
+                .unwrap_or(lines.len());
+            if rust_fence(info) && close > k + 1 {
+                out.push(example(&lines[k + 1..close], 0, true));
+            }
+            k = close + 1;
+            fresh = true;
+        } else if fresh && lead >= item + 4 {
+            let cut = (k..lines.len())
+                .find(|&j| !lines[j].1.trim().is_empty() && indent(lines[j].1) < item + 4)
+                .unwrap_or(lines.len());
+            let end = (k..cut)
+                .rev()
+                .find(|&j| !lines[j].1.trim().is_empty())
+                .map_or(cut, |j| j + 1);
+            out.push(example(&lines[k..end], item + 4, false));
+            k = end;
+            fresh = false;
+        } else {
+            item = list_item(t).map_or(if fresh && lead == 0 { 0 } else { item }, |w| lead + w);
+            fresh = false;
+            k += 1;
+        }
+    }
+    out
+}
+
+/// Every example the doc comments of a file hold ([`examples_in`]): a run
+/// of `///` (or of `//!`) lines with only blank space between them is one
+/// doc text, and so is each `/** */` (or `/*! */`) comment, a leading `*`
+/// of each of its lines dropped.
+fn doc_examples(src: &str, comments: &[(usize, usize)]) -> Vec<DocExample> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(k, _)| k + 1))
+        .collect();
+    let line_of = |at: usize| starts.partition_point(|&s| s <= at);
+    let mut texts: Vec<Vec<(usize, String)>> = Vec::new();
+    let mut run: Vec<(usize, String)> = Vec::new();
+    let mut run_at: Option<(&str, usize)> = None;
+    for &(s, e) in comments {
+        let c = &src[s..e];
+        let line = line_of(s);
+        if let Some(m) = ["///", "//!"]
+            .into_iter()
+            .find(|m| c.starts_with(m) && !c.starts_with("////"))
+        {
+            if !run_at.is_some_and(|(open, end)| open == m && src[end..s].trim().is_empty()) {
+                texts.push(std::mem::take(&mut run));
+            }
+            run.push((line, c[3..].to_owned()));
+            run_at = Some((m, e));
+            continue;
+        }
+        run_at = None;
+        if (c.starts_with("/**") && !c.starts_with("/***") && c.len() > 4) || c.starts_with("/*!") {
+            texts.push(
+                c[3..c.len() - 2]
+                    .split('\n')
+                    .enumerate()
+                    .map(|(k, l)| {
+                        let t = l.trim_start();
+                        (line + k, t.strip_prefix('*').unwrap_or(l).to_owned())
+                    })
+                    .collect(),
+            );
+        }
+    }
+    texts.push(run);
+    texts.iter().flat_map(|t| examples_in(t)).collect()
+}
+
+/// Every statement of the tokens `t` that start inside `regions` and read a
+/// path into `web/`, as (line, why), read in order against `names`.
+fn statement_hits(
+    t: &[Token],
+    regions: &[(usize, usize)],
+    names: &WebNames,
+) -> Vec<(usize, String)> {
+    let mut names = names.clone();
+    let mut out = Vec::new();
+    for &(s, e) in regions {
         let part: Vec<Token> = t
             .iter()
             .filter(|x| x.start >= s && x.start < e)
@@ -1023,49 +1591,497 @@ fn web_read_findings(
             .collect();
         for (a, b) in statement_ranges(&part) {
             if let Some(why) = web_read_of(&web_stmt(&part[a..b]), &mut names) {
-                out.push(format!("{path}:{}: {why}", part[a].line));
+                out.push((part[a].line, why));
             }
+        }
+    }
+    out
+}
+
+/// Gate 1h over one file: every statement of its test code (the whole file
+/// when `whole`) and of its doc examples that reads a path into `web/`, as
+/// `path:line: why`; a fenced example rustdoc reads as Rust that does not
+/// lex is a finding too, never a skip (an indented block that does not lex
+/// is prose). `names` is what its crate's names stand for.
+fn web_read_findings(
+    path: &str,
+    src: &str,
+    whole: bool,
+    names: &WebNames,
+) -> Result<Vec<String>, String> {
+    let lexed = lex(src)?;
+    let regions = if whole {
+        vec![(0, src.len())]
+    } else {
+        test_regions(src, &lexed.tokens)
+    };
+    let mut out: Vec<String> = statement_hits(&lexed.tokens, &regions, names)
+        .into_iter()
+        .map(|(line, why)| format!("{path}:{line}: {why}"))
+        .collect();
+    for ex in doc_examples(src, &lexed.comments) {
+        match lex(&ex.text) {
+            Ok(l) => out.extend(
+                statement_hits(&l.tokens, &[(0, ex.text.len())], names)
+                    .into_iter()
+                    .map(|(line, why)| {
+                        format!("{path}:{}: in a doc example, {why}", ex.line(line))
+                    }),
+            ),
+            Err(e) if ex.fenced => out.push(format!(
+                "{path}:{}: a doc example rustdoc reads as Rust that gate 1h cannot read: {e}",
+                ex.line(1)
+            )),
+            Err(_) => {}
         }
     }
     Ok(out)
 }
 
-/// The names a PRODUCTION `const` or `static` of `src` binds to a
-/// repository anchor or to a path into `web/`, added to `names`.
-fn production_web_names(src: &str, names: &mut WebNames) -> Result<(), String> {
-    let t = production_tokens(src)?;
-    for (a, b) in statement_ranges(&t) {
-        let st = web_stmt(&t[a..b]);
-        if st.item {
-            web_read_of(&st, names);
+/// A crate's folder, `crates/<c>`, from one of its paths.
+fn home_of(path: &str) -> String {
+    path.split('/').take(2).collect::<Vec<_>>().join("/")
+}
+
+/// The module a file's top-level items are reached through by a path: the
+/// crate's own name for `src/lib.rs` and `src/main.rs`, the folder for a
+/// `mod.rs`, else the file's stem.
+fn module_of(path: &str) -> String {
+    let p = Path::new(path);
+    let name = |up: usize| {
+        p.ancestors()
+            .nth(up)
+            .and_then(Path::file_name)
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+    };
+    let stem = p
+        .file_stem()
+        .map_or(String::new(), |s| s.to_string_lossy().into_owned());
+    match stem.as_str() {
+        "mod" => name(1),
+        "lib" | "main" if name(1) == "src" => name(2),
+        _ => stem,
+    }
+}
+
+/// The self type an `impl` header (the tokens after `impl`) names: its last
+/// name outside every `<..>`, before `where`, after `for` when it has one.
+fn impl_type(h: &[Token]) -> String {
+    let mut depth = 0_i64;
+    let mut last = "";
+    for (k, x) in h.iter().enumerate() {
+        match &x.tok {
+            Tok::Punct('<') => depth += 1,
+            Tok::Punct('>') if k == 0 || !is_punct(h.get(k - 1), '-') => depth -= 1,
+            Tok::Ident(n) if depth == 0 => {
+                if n == "where" {
+                    break;
+                }
+                if !matches!(n.as_str(), "for" | "dyn" | "mut" | "const" | "unsafe") {
+                    last = n;
+                }
+            }
+            _ => {}
         }
     }
-    Ok(())
+    last.to_owned()
+}
+
+/// What the `{` at `t[i]` opens, as a path reaches into it: `(true, T)` for
+/// an `impl` of the type `T` or a `trait T`, `(false, m)` for a `mod m`;
+/// `None` for any other block.
+fn scope_at(t: &[Token], i: usize) -> Option<(bool, String)> {
+    let start = t[..i]
+        .iter()
+        .rposition(|x| matches!(x.tok, Tok::Punct(';' | '{' | '}')))
+        .map_or(0, |k| k + 1);
+    let h = &t[start..i];
+    let mut k = 0;
+    loop {
+        if is_punct(h.get(k), '#') {
+            k = skip_group(h, k);
+        } else if matches!(
+            h.get(k).and_then(ident),
+            Some("pub" | "unsafe" | "default" | "auto")
+        ) {
+            k += 1;
+            if is_punct(h.get(k), '(') {
+                k = skip_group(h, k);
+            }
+        } else {
+            break;
+        }
+    }
+    match h.get(k).and_then(ident)? {
+        "impl" => Some((true, impl_type(&h[k + 1..]))),
+        kind @ ("mod" | "trait") => {
+            let name = h.get(k + 1).and_then(ident)?;
+            Some((kind == "trait", name.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// The token range of the body of the `fn` at `t[i]`, from after its `{` to
+/// its closing `}`; `None` for a declaration without one.
+fn fn_body(t: &[Token], i: usize) -> Option<(usize, usize)> {
+    let mut k = i + 2;
+    loop {
+        match t.get(k)?.tok {
+            Tok::Punct('(' | '[') => k = skip_group(t, k),
+            Tok::Punct('{') => return Some((k + 1, k + 1 + inside(t, k).len())),
+            Tok::Punct(';' | '}') => return None,
+            _ => k += 1,
+        }
+    }
+}
+
+/// Is `n` written as a `const` or `static` is: no lower-case letter, one
+/// upper-case letter at least?
+fn screaming(n: &str) -> bool {
+    n.bytes().any(|b| b.is_ascii_uppercase()) && !n.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// One statement of a function body, as the anchor fixpoint reads it: it
+/// holds the root by itself ([`holds_root`]); the names it reads that an
+/// earlier `let` of the body binds, or that are SCREAMING_CASE (a `const` or
+/// `static` of its crate may be an anchor); its calls and expansions; the
+/// names it binds; and whether its value is the function's (its tail, or a
+/// `return`).
+#[derive(Debug)]
+struct BodyStmt {
+    holds: bool,
+    reads: Vec<String>,
+    calls: Vec<Call>,
+    macros: Vec<String>,
+    bound: Vec<String>,
+    result: bool,
+}
+
+/// A function whose value can be the repository's root, for the anchor
+/// fixpoint ([`Collected::settle`]): its crate, its file, the keys a call
+/// reaches it by ([`Call::key`]) and its statements.
+#[derive(Debug)]
+struct FnBody {
+    home: String,
+    scope: String,
+    keys: Vec<String>,
+    stmts: Vec<BodyStmt>,
+}
+
+impl FnBody {
+    /// Is the function's value the repository's root: does a statement whose
+    /// value is the function's ([`BodyStmt::result`]) hold it, read through
+    /// its own `let`s in order, the root values of its crate (`roots`) and the
+    /// functions and macros `known` holds ([`is_root`])? So
+    /// `fn repo() -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("../..") }`
+    /// and `fn read(rel: &str) -> String { fs::read_to_string(repo().join(rel)).unwrap() }`
+    /// are, and a function that only uses the root inside is not.
+    fn returns_anchor(&self, roots: &BTreeSet<String>, known: &WebNames) -> bool {
+        let mut local: BTreeSet<&str> = BTreeSet::new();
+        for s in &self.stmts {
+            let anchor = s.holds
+                || s.reads
+                    .iter()
+                    .any(|n| local.contains(n.as_str()) || roots.contains(n))
+                || s.calls
+                    .iter()
+                    .any(|c| known.fns.contains(&c.key(&self.scope)))
+                || s.macros.iter().any(|m| known.macros.contains(m));
+            if s.result && anchor {
+                return true;
+            }
+            for n in &s.bound {
+                if anchor {
+                    local.insert(n);
+                } else {
+                    local.remove(n.as_str());
+                }
+            }
+        }
+        false
+    }
+}
+
+/// A `macro_rules!` body: its crate, its file, its name, whether production
+/// code defines it, and its statements.
+#[derive(Debug)]
+struct MacroBody {
+    home: String,
+    scope: String,
+    name: String,
+    production: bool,
+    stmts: Vec<WebStmt>,
+}
+
+/// What gate 1h reads before it judges one statement: each crate's
+/// production `const` and `static` items in file order (each with its file),
+/// every function whose value can be a path, and every `macro_rules!` body
+/// of the tree.
+#[derive(Debug, Default)]
+struct Collected {
+    values: BTreeMap<String, Vec<(String, WebStmt)>>,
+    fns: Vec<FnBody>,
+    macros: Vec<MacroBody>,
+}
+
+/// Does the signature `sig` (the tokens between a `fn`'s name and its body)
+/// return a type a path can travel in: `PathBuf`, `Path`, `String`, `str`,
+/// `OsString` or `OsStr`, bare or inside another type (`Result`, `Option`,
+/// `Cow`, `impl AsRef<..>`)? A function that returns none of them is no
+/// root a caller can join `web` to.
+fn returns_path(sig: &[Token]) -> bool {
+    let mut depth = 0_i64;
+    let mut after = false;
+    let mut out = false;
+    for (k, x) in sig.iter().enumerate() {
+        match &x.tok {
+            Tok::Punct('(' | '[') => depth += 1,
+            Tok::Punct(')' | ']') => depth -= 1,
+            Tok::Punct('>') if depth == 0 && k > 0 && is_punct(sig.get(k - 1), '-') => {
+                after = true;
+            }
+            Tok::Ident(n) if after && n == "where" => break,
+            Tok::Ident(n) if after => {
+                out |= matches!(
+                    n.as_str(),
+                    "PathBuf" | "Path" | "String" | "str" | "OsString" | "OsStr"
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+impl Collected {
+    /// Reads one tracked `.rs` file at `path`: when `prod`, the `const` and
+    /// `static` items outside its test regions; in every file each function
+    /// that returns a path ([`returns_path`]) and has a value, by the keys
+    /// its place gives it (a method of an `impl` or `trait`, a function of an
+    /// inline `mod` or of the file's own module), and each `macro_rules!`.
+    fn add(&mut self, path: &str, src: &str, prod: bool) -> Result<(), String> {
+        let t = lex(src)?.tokens;
+        let home = home_of(path);
+        let tests = if prod {
+            test_regions(src, &t)
+        } else {
+            vec![(0, src.len())]
+        };
+        let production = |x: &Token| !tests.iter().any(|&(s, e)| x.start >= s && x.start < e);
+        let p: Vec<Token> = t.iter().filter(|x| production(x)).cloned().collect();
+        let items = self.values.entry(home.clone()).or_default();
+        for (a, b) in statement_ranges(&p) {
+            let st = web_stmt(&p[a..b]);
+            if st.item {
+                items.push((path.to_owned(), st));
+            }
+        }
+        let module = module_of(path);
+        let mut scopes: Vec<Option<(bool, String)>> = Vec::new();
+        for (i, x) in t.iter().enumerate() {
+            match x.tok {
+                Tok::Punct('{') => scopes.push(scope_at(&t, i)),
+                Tok::Punct('}') => {
+                    scopes.pop();
+                }
+                _ => {}
+            }
+            if is_ident(Some(x), "fn")
+                && let Some(name) = t.get(i + 1).and_then(ident)
+                && let Some((a, b)) = fn_body(&t, i)
+                && returns_path(&t[i + 2..a - 1])
+            {
+                let keys = match scopes.iter().rev().flatten().next() {
+                    Some((true, ty)) => vec![format!("{path}/.{name}"), format!("{ty}::{name}")],
+                    Some((false, m)) => vec![format!("{path}/{name}"), format!("{m}::{name}")],
+                    None => vec![format!("{path}/{name}"), format!("{module}::{name}")],
+                };
+                self.fns.extend(fn_summary(&home, path, keys, &t[a..b]));
+            }
+            if is_ident(Some(x), "macro_rules")
+                && is_punct(t.get(i + 1), '!')
+                && let Some(name) = t.get(i + 2).and_then(ident)
+                && opens_group(t.get(i + 3))
+            {
+                let body = inside(&t, i + 3);
+                self.macros.push(MacroBody {
+                    home: home.clone(),
+                    scope: path.to_owned(),
+                    name: name.to_owned(),
+                    production: production(x),
+                    stmts: statement_ranges(body)
+                        .into_iter()
+                        .map(|(a, b)| web_stmt(&body[a..b]))
+                        .collect(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Each crate's names: its production values read in file order, each in
+    /// its own file, with the tree-wide sets of `known`.
+    fn values_with(&self, known: &WebNames) -> BTreeMap<String, WebNames> {
+        self.values
+            .iter()
+            .map(|(home, stmts)| {
+                let mut n = known.clone();
+                for (scope, st) in stmts {
+                    n.scope.clone_from(scope);
+                    let root = is_root(st, &n);
+                    web_read_of(st, &mut n);
+                    for b in &st.bound {
+                        if root {
+                            n.roots.insert(b.clone());
+                        } else {
+                            n.roots.remove(b);
+                        }
+                    }
+                }
+                (home.clone(), n)
+            })
+            .collect()
+    }
+
+    /// Every crate's names once nothing more is learnt: each round reads the
+    /// production values against the functions and macros known so far,
+    /// then takes each function whose value is the repository's root
+    /// ([`FnBody::returns_anchor`]), each macro whose body holds it
+    /// ([`is_root`]) and each production macro whose body reads a path into
+    /// `web/`. A round adds at least one or is the last, so there are at most
+    /// as many rounds as functions and macros, plus one.
+    fn settle(&self) -> BTreeMap<String, WebNames> {
+        let mut known = WebNames::default();
+        let mut done = vec![false; self.fns.len()];
+        loop {
+            let names = self.values_with(&known);
+            let mut grew = false;
+            for (f, d) in self.fns.iter().zip(done.iter_mut()) {
+                if !*d && f.returns_anchor(&names[&f.home].roots, &known) {
+                    *d = true;
+                    grew = true;
+                    known.fns.extend(f.keys.iter().cloned());
+                }
+            }
+            for m in &self.macros {
+                let mut n = WebNames {
+                    scope: m.scope.clone(),
+                    fns: known.fns.clone(),
+                    macros: known.macros.clone(),
+                    web_macros: known.web_macros.clone(),
+                    ..names[&m.home].clone()
+                };
+                if !known.macros.contains(&m.name) && m.stmts.iter().any(|st| is_root(st, &n)) {
+                    known.macros.insert(m.name.clone());
+                    grew = true;
+                }
+                if m.production
+                    && !known.web_macros.contains(&m.name)
+                    && m.stmts.iter().any(|st| web_read_of(st, &mut n).is_some())
+                {
+                    known.web_macros.insert(m.name.clone());
+                    grew = true;
+                }
+            }
+            if !grew {
+                return names;
+            }
+        }
+    }
+}
+
+/// The statements of one function body ([`BodyStmt`]) from its tokens, or
+/// `None` when the body has no value: no `return`, and nothing after its
+/// last `;` of its own depth. Every statement after that `;` is the value's
+/// (a tail, or each arm of a final `match` or `if`).
+fn fn_summary(home: &str, scope: &str, keys: Vec<String>, body: &[Token]) -> Option<FnBody> {
+    let mut depth = 0_i64;
+    let mut tail = 0;
+    for (k, x) in body.iter().enumerate() {
+        match x.tok {
+            Tok::Punct('(' | '[' | '{') => depth += 1,
+            Tok::Punct(')' | ']' | '}') => depth -= 1,
+            Tok::Punct(';') if depth == 0 => tail = k + 1,
+            _ => {}
+        }
+    }
+    let ranges = statement_ranges(body);
+    let mut bound: BTreeSet<String> = BTreeSet::new();
+    let mut stmts = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges {
+        let st = web_stmt(&body[a..b]);
+        let result = a >= tail || is_ident(body.get(a), "return");
+        stmts.push(BodyStmt {
+            holds: holds_root(&st),
+            reads: st
+                .idents
+                .into_iter()
+                .filter(|n| bound.contains(n) || screaming(n))
+                .collect(),
+            calls: st.calls,
+            macros: st.macros,
+            bound: st.bound.clone(),
+            result,
+        });
+        bound.extend(st.bound);
+    }
+    stmts.iter().any(|s| s.result).then(|| FnBody {
+        home: home.to_owned(),
+        scope: scope.to_owned(),
+        keys,
+        stmts,
+    })
+}
+
+/// Is `a` at or under `b`, component by component, in any case (the Mac's
+/// volume is case-blind)?
+fn under_dir(a: &Path, b: &Path) -> bool {
+    let mut a = a.components();
+    b.components().all(|c| {
+        a.next()
+            .is_some_and(|x| x.as_os_str().eq_ignore_ascii_case(c.as_os_str()))
+    })
 }
 
 /// A tracked `rel` under `root` that is a symbolic link whose target lands
-/// in `web/`: a relative target read against the link's own folder, an
-/// absolute one compared with `web/` itself.
+/// in `web/`, or in a folder that holds `web/` (the repository root, or
+/// above it: check r4, E6): a relative target read against the link's own
+/// folder, an absolute one against the root's real path, in any case.
 fn link_into_web(root: &Path, rel: &str) -> Option<String> {
     let at = root.join(rel);
     if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
         return None;
     }
     let target = std::fs::read_link(&at).ok()?;
-    let lands = if target.is_absolute() {
-        let web = std::fs::canonicalize(root.join("web")).ok();
-        let real = std::fs::canonicalize(&target).ok();
-        matches!((real, web), (Some(r), Some(w)) if r.starts_with(&w))
+    let (into, holds) = if target.is_absolute() {
+        match (std::fs::canonicalize(&target), std::fs::canonicalize(root)) {
+            (Ok(real), Ok(top)) => (under_dir(&real, &top.join("web")), under_dir(&top, &real)),
+            _ => (false, false),
+        }
     } else {
-        normalise(
+        let lands = normalise(
             &Path::new(rel)
                 .parent()
                 .unwrap_or(Path::new(""))
                 .join(&target),
+        );
+        let first = lands.components().next();
+        (
+            first.is_some_and(|c| is_web(&c.as_os_str().to_string_lossy())),
+            first.is_none_or(|c| c == Component::ParentDir),
         )
-        .starts_with("web")
     };
-    lands.then(|| format!("{rel}: a link into web/ ({})", target.display()))
+    if into {
+        Some(format!("{rel}: a link into web/ ({})", target.display()))
+    } else {
+        holds.then(|| {
+            format!(
+                "{rel}: a link to a folder that holds web/, the repository root or above it ({})",
+                target.display()
+            )
+        })
+    }
 }
 
 /// Is `f` test code from its first token: a file under a crate's `tests/`,
@@ -1079,7 +2095,9 @@ fn whole_test_file(f: &str, prod: &BTreeSet<String>) -> bool {
 }
 
 /// Gate 1h over the tracked tree: the findings and the number of `.rs`
-/// files read. A module that does not resolve is a finding, never a skip.
+/// files read. Every `.rs` file under `crates/` is read twice: once for what
+/// its crate's names stand for ([`Collected`]), once for its findings. A
+/// module that does not resolve is a finding, never a skip.
 fn web_reads(
     tracked: &BTreeSet<String>,
     read: &dyn Fn(&str) -> Option<String>,
@@ -1099,32 +2117,32 @@ fn web_reads(
     let exists = |p: &str| tracked.contains(p);
     let (prod, errs) = prod_closure(&roots, read, &exists);
     let mut out: Vec<String> = errs.iter().map(|e| format!("UNRESOLVED {e}")).collect();
-    let crate_of = |f: &str| f.split('/').take(2).collect::<Vec<_>>().join("/");
-    let mut names: BTreeMap<String, WebNames> = BTreeMap::new();
-    for f in &prod {
-        let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
-        production_web_names(&src, names.entry(crate_of(f)).or_default())
-            .map_err(|e| format!("{f}: {e}"))?;
-    }
-    let mut scanned = 0;
+    let mut files = Vec::new();
     for f in under {
         if let Some(l) = link_into_web(root, f) {
             out.push(l);
-            continue;
+        } else if f.ends_with(".rs") {
+            let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
+            files.push((f, src));
         }
-        if !f.ends_with(".rs") {
-            continue;
-        }
-        let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
-        let none = WebNames::default();
-        let crate_names = names.get(&crate_of(f)).unwrap_or(&none);
+    }
+    let mut got = Collected::default();
+    for (f, src) in &files {
+        got.add(f, src, !whole_test_file(f, &prod))
+            .map_err(|e| format!("{f}: {e}"))?;
+    }
+    let names = got.settle();
+    for (f, src) in &files {
+        let mine = WebNames {
+            scope: (*f).clone(),
+            ..names[&home_of(f)].clone()
+        };
         out.extend(
-            web_read_findings(f, &src, whole_test_file(f, &prod), crate_names)
+            web_read_findings(f, src, whole_test_file(f, &prod), &mine)
                 .map_err(|e| format!("{f}: {e}"))?,
         );
-        scanned += 1;
     }
-    Ok((out, scanned))
+    Ok((out, files.len()))
 }
 
 /// Every function a file declares, by line and name: each `fn` keyword token
@@ -5393,9 +6411,14 @@ mod tests {
     /// The findings of one file's test code, its own production `const`
     /// and `static` items read first, as the gate reads a crate.
     fn web_hits(src: &str) -> Vec<String> {
-        let mut names = WebNames::default();
-        production_web_names(src, &mut names).unwrap();
-        web_read_findings("crates/a/src/x.rs", src, false, &names).unwrap()
+        let mut got = Collected::default();
+        got.add("crates/a/src/x.rs", src, true).unwrap();
+        let names = got.settle();
+        let mine = WebNames {
+            scope: "crates/a/src/x.rs".to_owned(),
+            ..names["crates/a"].clone()
+        };
+        web_read_findings("crates/a/src/x.rs", src, false, &mine).unwrap()
     }
 
     /// A test module around `body`, inside a `#[test]` fn.
@@ -5884,5 +6907,996 @@ mod tests {
                 .map(|found| found.len()),
             Ok(1)
         );
+    }
+
+    // ---- gate 1h, repair 4: helpers, doc examples, macros, case, links ----
+
+    /// `lines` joined into one source, each ended by a newline, so a test
+    /// names a finding by the index of its line plus one.
+    fn src(lines: &[&str]) -> String {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// Gate 1h over a tree of `files` with no links on disk: its findings.
+    fn tree_hits(files: &[(&str, &str)]) -> Vec<String> {
+        let listed: BTreeSet<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
+        let (read, _) = tracked(files);
+        web_reads(&listed, &read, Path::new("/nonexistent-brutex-root"))
+            .unwrap()
+            .0
+    }
+
+    /// CHECK R4, V4-2 (30 Oct 2026): a test reads `web/` through a helper
+    /// whose VALUE is the repository root -- the tree's own `repo()`,
+    /// `read(relative)` (crates/store/tests/cited_commits.rs) and
+    /// `workspace_root()` (crates/core/tests/cost_invariants.rs) -- and the
+    /// checker's two probes are refused at their own lines, as are its E1
+    /// and E2 and a helper followed through a `let`, a chain written in any
+    /// order, `format!`, a method, `Self::`, a module path, a test module,
+    /// a production function, a macro, a static and another crate. A
+    /// document read through the same helper, a text check of a root and a
+    /// same-named helper of another file read nothing and pass.
+    #[test]
+    fn a_helper_whose_value_is_the_repository_root_carries_the_read() {
+        let paths = src(&[
+            "use std::path::PathBuf;",
+            "pub const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
+            "pub fn root() -> PathBuf {",
+            "    PathBuf::from(ROOT).join(\"../..\")",
+            "}",
+        ]);
+        let x = src(&[
+            "use std::path::{Path, PathBuf};",
+            "pub fn default_web_dir() -> PathBuf {",
+            "    web_beside(Path::new(env!(\"CARGO_MANIFEST_DIR\")))",
+            "}",
+            "fn web_beside(manifest: &Path) -> PathBuf {",
+            "    manifest.join(\"web\")",
+            "}",
+            "macro_rules! here {",
+            "    () => {",
+            "        env!(\"CARGO_MANIFEST_DIR\")",
+            "    };",
+            "}",
+            "pub static TOP: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| crate::paths::root());",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    use super::*;",
+            "    fn root() -> PathBuf {",
+            "        Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "    }",
+            "    #[test]",
+            "    fn p02_a_test_module_helper() {",
+            "        let _ = std::fs::read(root().join(\"web/src/x.js\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_production_root_joined_to_web() {",
+            "        let _ = std::fs::read(crate::paths::root().join(\"web/x.js\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_text_check_reads_nothing() {",
+            "        assert!(default_web_dir().ends_with(\"web\"));",
+            "    }",
+            "    #[test]",
+            "    fn a_macro_root_and_a_static_root() {",
+            "        let _ = std::fs::read(Path::new(here!()).join(\"web/x.js\"));",
+            "        let _ = std::fs::read(TOP.join(\"web/y.js\"));",
+            "    }",
+            "}",
+        ]);
+        let cited = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn repo() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\"))",
+            "        .parent()",
+            "        .and_then(Path::parent)",
+            "        .expect(\"crates/a is two levels below the root\")",
+            "        .to_owned()",
+            "}",
+            "fn read(relative: &str) -> String {",
+            "    std::fs::read_to_string(repo().join(relative))",
+            "        .unwrap_or_else(|why| panic!(\"{relative} is readable: {why}\"))",
+            "}",
+            "#[test]",
+            "fn probe_reads_web_through_read() {",
+            "    assert!(!read(\"web/src/lib/db/export.js\").is_empty());",
+            "}",
+            "#[test]",
+            "fn a_document_read_is_no_read_of_web() {",
+            "    let doc = read(\"docs/04-invariants.md\");",
+            "    assert!(doc.contains(\"web/tests/x.test.js\"));",
+            "}",
+        ]);
+        let workspace = src(&[
+            "use std::path::PathBuf;",
+            "mod common;",
+            "fn workspace_root() -> PathBuf {",
+            "    let mut root = PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"));",
+            "    root.pop();",
+            "    root.pop();",
+            "    root",
+            "}",
+            "#[test]",
+            "fn probe_reads_web_through_workspace_root() {",
+            "    let _ = std::fs::read_to_string(workspace_root().join(\"web/src/lib/db/bars-plan.js\")).unwrap();",
+            "}",
+            "#[test]",
+            "fn e1_web_then_a_file() {",
+            "    let _ = std::fs::read(workspace_root().join(\"web\").join(\"src/x.js\"));",
+            "}",
+            "#[test]",
+            "fn a_bound_root_then_web() {",
+            "    let base = later();",
+            "    let _ = std::fs::read(base.join(\"web/x.js\"));",
+            "}",
+            "fn later() -> PathBuf {",
+            "    middle().join(\"x\")",
+            "}",
+            "fn middle() -> PathBuf {",
+            "    workspace_root()",
+            "}",
+            "#[test]",
+            "fn a_formatted_root() {",
+            "    let _ = std::fs::read(format!(\"{}/web/x.js\", workspace_root().display()));",
+            "}",
+            "struct Fx;",
+            "impl Fx {",
+            "    fn root(&self) -> PathBuf {",
+            "        workspace_root()",
+            "    }",
+            "    fn web(&self) -> PathBuf {",
+            "        Self::root(self).join(\"web\")",
+            "    }",
+            "}",
+            "#[test]",
+            "fn a_method_root() {",
+            "    let _ = std::fs::read(Fx.root().join(\"web/x.js\"));",
+            "}",
+            "#[test]",
+            "fn a_module_root() {",
+            "    let _ = std::fs::read(common::repo().join(\"web/x.js\"));",
+            "}",
+        ]);
+        let common = src(&[
+            "use std::path::{Path, PathBuf};",
+            "pub fn repo() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "}",
+        ]);
+        let other = src(&[
+            "fn read(path: &str) -> String {",
+            "    std::fs::read_to_string(path).unwrap_or_default()",
+            "}",
+            "#[test]",
+            "fn a_read_of_another_file_is_its_own() {",
+            "    let _ = read(\"web/x.js\");",
+            "    let _ = std::fs::read(\"web/y.js\");",
+            "}",
+        ]);
+        let e2 = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn repo(rel: &str) -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(rel)",
+            "}",
+            "#[test]",
+            "fn e2_the_web_in_the_caller() {",
+            "    let _ = std::fs::read(repo(\"web/src/lib/db/bars-plan.js\"));",
+            "}",
+            "#[test]",
+            "fn another_crates_root() {",
+            "    let _ = std::fs::read(a::paths::root().join(\"web/x.js\"));",
+            "}",
+        ]);
+        let files = [
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+            ),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            (
+                "crates/a/src/lib.rs",
+                "pub mod paths;\npub mod x;\npub fn f() {}\n",
+            ),
+            ("crates/a/src/paths.rs", paths.as_str()),
+            ("crates/a/src/x.rs", x.as_str()),
+            ("crates/a/tests/cited.rs", cited.as_str()),
+            ("crates/a/tests/common/mod.rs", common.as_str()),
+            ("crates/a/tests/other.rs", other.as_str()),
+            ("crates/a/tests/workspace.rs", workspace.as_str()),
+            ("crates/b/Cargo.toml", "[package]\nname = \"b\"\n"),
+            ("crates/b/src/lib.rs", "pub fn g() {}\n"),
+            ("crates/b/tests/t.rs", e2.as_str()),
+        ];
+        let hits = tree_hits(&files);
+        let at: Vec<&str> = hits
+            .iter()
+            .map(|h| h.split(": ").next().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:22",
+                "crates/a/src/x.rs:26",
+                "crates/a/src/x.rs:34",
+                "crates/a/src/x.rs:35",
+                "crates/a/tests/cited.rs:15",
+                "crates/a/tests/workspace.rs:11",
+                "crates/a/tests/workspace.rs:15",
+                "crates/a/tests/workspace.rs:20",
+                "crates/a/tests/workspace.rs:30",
+                "crates/a/tests/workspace.rs:38",
+                "crates/a/tests/workspace.rs:43",
+                "crates/a/tests/workspace.rs:47",
+                "crates/b/tests/t.rs:7",
+                "crates/b/tests/t.rs:11",
+            ],
+            "{hits:#?}"
+        );
+        // The checker's two probes, by their reason; the rest by either
+        // reason (workspace_root's own `let mut root` stays bound for the
+        // file's later statements, so `Fx.root()` reads as that anchor: the
+        // gate reads statements, not scopes, which can only refuse more).
+        for probe in [
+            "crates/a/tests/cited.rs:15: a web segment joined to the repository's root from a helper: \"web/src/lib/db/export.js\"",
+            "crates/a/tests/workspace.rs:11: a web segment joined to the repository's root from a helper: \"web/src/lib/db/bars-plan.js\"",
+        ] {
+            assert!(hits.iter().any(|h| h == probe), "{probe}: {hits:#?}");
+        }
+        assert!(
+            hits.iter().all(
+                |h| h.contains("joined to the repository's root from a helper")
+                    || h.contains("beside a repository anchor")
+            ),
+            "{hits:#?}"
+        );
+    }
+
+    /// What a helper that is no root leaves alone: a function that only
+    /// uses the root inside, or returns a count; one whose value is a
+    /// temporary folder; a parameter named like a root helper; a `std` path
+    /// named like one; and `Path::new` beside a root `new` of another type.
+    #[test]
+    fn a_function_that_only_uses_the_root_is_no_root() {
+        let controls = src(&[
+            "use std::path::{Path, PathBuf};",
+            "fn root() -> PathBuf {",
+            "    Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")",
+            "}",
+            "fn count() -> usize {",
+            "    std::fs::read_dir(root()).map_or(0, Iterator::count)",
+            "}",
+            "fn label() -> String {",
+            "    let _ = root();",
+            "    String::from(\"x\")",
+            "}",
+            "fn scratch() -> PathBuf {",
+            "    std::env::temp_dir().join(\"x\")",
+            "}",
+            "fn read(p: &str) -> String {",
+            "    std::fs::read_to_string(root().join(p)).unwrap_or_default()",
+            "}",
+            "struct Fx;",
+            "impl Fx {",
+            "    fn new() -> PathBuf {",
+            "        root()",
+            "    }",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    use super::*;",
+            "    fn build(root: &Path) {",
+            "        let _ = root.join(\"web\");",
+            "    }",
+            "    #[test]",
+            "    fn controls() {",
+            "        let _ = count().to_string() + \"web\";",
+            "        let _ = label().push_str(\"web\");",
+            "        let _ = std::fs::read(scratch().join(\"web/x.js\"));",
+            "        build(Path::new(\"/tmp/x\"));",
+            "        let _ = std::fs::read(\"web/x.js\");",
+            "        let _ = Path::new(\"web\");",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(web_hits(&controls), Vec::<String>::new());
+    }
+
+    /// CHECK R4, E3: the Rust of a doc comment is test code -- `cargo test`
+    /// compiles and runs every example rustdoc reads as Rust -- so a fenced
+    /// example (backtick or tilde, `ignore` and `no_run` too), a hidden
+    /// `# ` line, an indented block, a `//!` and a `/** */` example that
+    /// reads `web/` are each refused at their own line; a `text` fence, an
+    /// indented line that belongs to a list item, a `////` comment, prose
+    /// that does not lex and an empty fence are not; a fenced Rust example
+    /// that does not lex is a finding by name, never a skip.
+    #[test]
+    fn a_doc_example_is_test_code() {
+        let docs = src(&[
+            "/// Reads the front end.",
+            "///",
+            "/// ```",
+            "/// let _ = std::fs::read(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/src/x.js\"));",
+            "/// ```",
+            "pub fn a() {}",
+            "/// ```rust,ignore",
+            "/// # let _ = include_str!(\"../../../web/x.js\");",
+            "/// ```",
+            "pub fn b() {}",
+            "/// ~~~no_run",
+            "/// let _ = std::fs::read(\"../../web/y.js\");",
+            "/// ~~~",
+            "pub fn c() {}",
+            "/// ```text",
+            "/// ../../web/not-code.txt",
+            "/// ```",
+            "pub fn d() {}",
+            "/// Indented, after a blank line:",
+            "///",
+            "///     let _ = std::fs::read(\"../../web/z.js\");",
+            "pub fn e() {}",
+            "/// A list:",
+            "///",
+            "/// - an item",
+            "///",
+            "///     ../../web/item-text",
+            "pub fn f() {}",
+            "//// ```",
+            "//// let _ = std::fs::read(\"../../web/q.js\");",
+            "//// ```",
+            "pub fn g() {}",
+            "/** A block doc:",
+            " * ```",
+            " * let _ = std::fs::read(\"../../web/r.js\");",
+            " * ```",
+            " */",
+            "pub fn h() {}",
+            "/// Text:",
+            "///",
+            "///     let _ = std::fs::read(\"../../web/k.js\");",
+            "///",
+            "/// After.",
+            "pub fn k() {}",
+            "/// - item",
+            "///       ```",
+            "pub fn l() {}",
+        ]);
+        let at: Vec<String> = web_hits(&docs)
+            .iter()
+            .map(|h| {
+                h.split(": in a doc example, climbs into web/")
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:4",
+                "crates/a/src/x.rs:8",
+                "crates/a/src/x.rs:12",
+                "crates/a/src/x.rs:21",
+                "crates/a/src/x.rs:35",
+                "crates/a/src/x.rs:41",
+            ]
+        );
+        let odd = src(&[
+            "//! ```",
+            "//! let _ = std::fs::read(\"../../web/i.js\");",
+            "//! ```",
+            "/// ```",
+            "/// let s = \"unterminated;",
+            "/// ```",
+            "pub fn u() {}",
+            "/// Prose:",
+            "///",
+            "///     it's \"quoted",
+            "pub fn v() {}",
+            "/// ```",
+            "/// ```",
+            "pub fn w() {}",
+            "/*! ```",
+            "let _ = std::fs::read(\"../../web/j.js\");",
+            "``` */",
+            "pub fn y() {}",
+            "/*** a banner, not a doc: ``` */",
+            "/**/",
+            "/* plain */",
+        ]);
+        assert_eq!(
+            web_hits(&odd),
+            [
+                "crates/a/src/x.rs:2: in a doc example, climbs into web/: \"../../web/i.js\"",
+                "crates/a/src/x.rs:5: a doc example rustdoc reads as Rust that gate 1h cannot read: line 1: unterminated string",
+                "crates/a/src/x.rs:16: in a doc example, climbs into web/: \"../../web/j.js\"",
+            ]
+        );
+    }
+
+    /// CHECK R4, E4 (a combination): a `macro_rules!` that PRODUCTION code
+    /// defines, whose body reads a path into `web/`, expanded in a test, is
+    /// refused at the expansion; expanded only in production, it passes.
+    #[test]
+    fn a_production_macro_expanded_in_a_test_carries_the_read() {
+        let s = src(&[
+            "macro_rules! web_file {",
+            "    ($p:expr) => {",
+            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/\", $p)",
+            "    };",
+            "}",
+            "macro_rules! in_prod {",
+            "    () => {",
+            "        concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../web/x.js\")",
+            "    };",
+            "}",
+            "pub fn served() -> &'static str {",
+            "    in_prod!()",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    #[test]",
+            "    fn t() {",
+            "        let _ = std::fs::read(web_file!(\"src/x.js\"));",
+            "    }",
+            "}",
+        ]);
+        assert_eq!(
+            web_hits(&s),
+            [
+                "crates/a/src/x.rs:18: expands `web_file!`, a macro whose body reads a path into web/"
+            ]
+        );
+    }
+
+    /// CHECK R4, E5 and E7: `web` in any case is `web` (this Mac's volume
+    /// is case-blind), and `stringify!(web)` is the literal `web`, in a
+    /// `concat!` or alone.
+    #[test]
+    fn web_in_any_case_and_a_stringified_web_are_web() {
+        for (case, body) in [
+            (
+                "a capital Web",
+                "let _ = std::fs::read(\"../../Web/src/x.js\");",
+            ),
+            (
+                "WEB beside an anchor",
+                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(\"WEB\");",
+            ),
+            (
+                "stringify! in a concat!",
+                "let _ = std::fs::read(concat!(\"../../\", stringify!(web), \"/src/x.js\"));",
+            ),
+            (
+                "stringify! alone",
+                "let _ = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\").join(stringify!(web));",
+            ),
+        ] {
+            assert_eq!(web_hits(&in_test(body)).len(), 1, "{case} passed: {body}");
+        }
+    }
+
+    /// CHECK R4, E7: a test harness's attribute (`#[tokio::test]`, with or
+    /// without arguments, `#[bench]`) and a `cfg` that names `test` where it
+    /// can hold (`any(test, ..)`, `not(not(test))`, an inner `#![cfg(..)]`
+    /// to the end of its block) make test code wherever they stand; an
+    /// attribute named otherwise, `not(test)` and `test = ".."` do not.
+    #[test]
+    fn harness_attributes_and_test_cfgs_make_test_code_anywhere() {
+        let s = src(&[
+            "#[tokio::test]",
+            "async fn a() {",
+            "    let _ = std::fs::read(\"../../web/a.js\");",
+            "}",
+            "#[tokio::test(flavor = \"multi_thread\")]",
+            "async fn b() {",
+            "    let _ = std::fs::read(\"../../web/b.js\");",
+            "}",
+            "#[bench]",
+            "fn c() {",
+            "    let _ = std::fs::read(\"../../web/c.js\");",
+            "}",
+            "#[testing]",
+            "fn d() -> &'static str {",
+            "    \"../../web/d.js\"",
+            "}",
+            "#[cfg(any(test, feature = \"x\"))]",
+            "fn e() {",
+            "    let _ = std::fs::read(\"../../web/e.js\");",
+            "}",
+            "#[cfg(not(test))]",
+            "fn f() -> &'static str {",
+            "    \"../../web/f.js\"",
+            "}",
+            "#[cfg(not(not(test)))]",
+            "fn g() {",
+            "    let _ = std::fs::read(\"../../web/g.js\");",
+            "}",
+            "#[cfg(test = \"x\")]",
+            "fn h() -> &'static str {",
+            "    \"../../web/h.js\"",
+            "}",
+            "mod m {",
+            "    #![cfg(any(test, unix))]",
+            "    fn i() {",
+            "        let _ = std::fs::read(\"../../web/i.js\");",
+            "    }",
+            "}",
+            "pub fn after() -> &'static str {",
+            "    \"../../web/after.js\"",
+            "}",
+        ]);
+        let at: Vec<String> = web_hits(&s)
+            .iter()
+            .map(|h| h.split(": climbs").next().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(
+            at,
+            [
+                "crates/a/src/x.rs:3",
+                "crates/a/src/x.rs:7",
+                "crates/a/src/x.rs:11",
+                "crates/a/src/x.rs:19",
+                "crates/a/src/x.rs:27",
+                "crates/a/src/x.rs:36",
+            ]
+        );
+        let whole = src(&[
+            "#![cfg(any(test, unix))]",
+            "pub fn served() -> &'static str {",
+            "    \"../../web/w.js\"",
+            "}",
+        ]);
+        assert_eq!(web_hits(&whole).len(), 1);
+    }
+
+    /// CHECK R4, E6 (out of the box) and E5: a tracked link under `crates/`
+    /// to a folder that HOLDS `web/` -- the repository root, or above it,
+    /// relative or absolute -- is refused, and so is a link into `Web/` in
+    /// another case; a link that stays in the crate, or whose absolute
+    /// target does not exist, is not.
+    #[test]
+    fn a_link_to_the_repository_root_or_above_is_refused() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let root =
+            std::env::temp_dir().join(format!("brutex-gate1h-r4-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(root.join("web/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/a/src")).unwrap();
+        let link = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, root.join("crates/a").join(name)).unwrap();
+        };
+        link(Path::new("../.."), "repo");
+        link(Path::new("../../.."), "up");
+        link(Path::new("../../Web/src"), "front");
+        link(&root, "abs-root");
+        link(Path::new("/"), "abs-slash");
+        link(Path::new("src"), "stays");
+        link(Path::new("/nonexistent-brutex-r4-target"), "dangling");
+        for (name, want) in [
+            ("repo", Some("a link to a folder that holds web/")),
+            ("up", Some("a link to a folder that holds web/")),
+            ("front", Some("a link into web/")),
+            ("abs-root", Some("a link to a folder that holds web/")),
+            ("abs-slash", Some("a link to a folder that holds web/")),
+            ("stays", None),
+            ("dangling", None),
+        ] {
+            let rel = format!("crates/a/{name}");
+            let got = link_into_web(&root, &rel);
+            match want {
+                Some(why) => assert!(
+                    got.as_deref()
+                        .is_some_and(|g| g.starts_with(&format!("{rel}: {why}"))),
+                    "{name}: {got:?}"
+                ),
+                None => assert_eq!(got, None, "{name}"),
+            }
+        }
+    }
+
+    /// The call readers pinned to each answer: a bare call, a method, a
+    /// path by the segment before the name, `crate`/`self`/`super` as bare,
+    /// `Self::` as a method, a `std`/`core`/`alloc` path as none, a `fn`
+    /// item's own name and a name with no `(` as none; and what a group
+    /// hands its contents to.
+    #[test]
+    fn calls_and_callees_are_read_by_how_they_name_the_callee() {
+        let call = |text: &str| {
+            let t = toks(text);
+            let i = (0..t.len())
+                .rev()
+                .find(|&k| ident(&t[k]).is_some() && is_punct(t.get(k + 1), '('))
+                .unwrap_or(0);
+            call_at(&t, i, ident(&t[i]).unwrap_or(""))
+        };
+        let s = |x: &str| x.to_owned();
+        assert_eq!(call("repo()"), Some(Call::Bare(s("repo"))));
+        assert_eq!(call("let x = repo()"), Some(Call::Bare(s("repo"))));
+        assert_eq!(call("fx.root()"), Some(Call::Method(s("root"))));
+        assert_eq!(
+            call("a::paths::root()"),
+            Some(Call::Path(s("paths"), s("root")))
+        );
+        assert_eq!(call("v = a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("let v = a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("<X>::a::b()"), Some(Call::Path(s("a"), s("b"))));
+        assert_eq!(call("crate::root()"), Some(Call::Bare(s("root"))));
+        assert_eq!(call("super::super::root()"), Some(Call::Bare(s("root"))));
+        assert_eq!(call("Self::root()"), Some(Call::Method(s("root"))));
+        assert_eq!(call("std::fs::read()"), None);
+        assert_eq!(call("core::x::y()"), None);
+        assert_eq!(call("alloc::x()"), None);
+        assert_eq!(call("<T as X>::f()"), None);
+        assert_eq!(call("fn repo()"), None);
+        let t = toks("repo");
+        assert_eq!(call_at(&t, 0, "repo"), None, "no ( after it");
+        assert_eq!(Call::Bare(s("r")).key("f.rs"), "f.rs/r");
+        assert_eq!(Call::Method(s("r")).key("f.rs"), "f.rs/.r");
+        assert_eq!(Call::Path(s("m"), s("r")).key("f.rs"), "m::r");
+        let callee = |text: &str| {
+            let t = toks(text);
+            let open = t
+                .iter()
+                .rposition(|x| x.tok == Tok::Punct('('))
+                .unwrap_or(0);
+            callee_of(&t, open)
+        };
+        for builds in [
+            "format!(",
+            "concat!(",
+            "include_str!(",
+            "include_bytes!(",
+            "include!(",
+            "x.join(",
+            "x.push(",
+            "x.with_file_name(",
+            "x.set_file_name(",
+            "Path::new(",
+            "PathBuf::from(",
+            "std::ffi::OsStr::new(",
+            "OsString::from(",
+        ] {
+            assert_eq!(callee(builds), Callee::Builds, "{builds}");
+        }
+        for other in [
+            "vec!(",
+            "(",
+            "1(",
+            "x: f(",
+            "x.ends_with(",
+            "String::new(",
+            "Path::join(",
+        ] {
+            assert!(
+                !matches!(callee(other), Callee::Builds),
+                "{other}: {:?}",
+                callee(other)
+            );
+        }
+        assert_eq!(callee("read("), Callee::Call(Call::Bare(s("read"))));
+        assert_eq!(callee("std::fs::read("), Callee::Other);
+    }
+
+    /// The scope readers: an `impl` header's self type (after generics and
+    /// `for`, before `where`), what a `{` opens, a file's module and crate,
+    /// a `fn`'s body and whether its signature returns a path.
+    #[test]
+    fn scopes_modules_bodies_and_return_types_answer_exactly() {
+        let ty = |text: &str| impl_type(&toks(text));
+        assert_eq!(ty("Fx"), "Fx");
+        assert_eq!(ty("<T> Fx<T>"), "Fx");
+        assert_eq!(ty("<F: Fn() -> u8> Trait for a::Fx<F>"), "Fx");
+        assert_eq!(ty("dyn Trait"), "Trait");
+        assert_eq!(ty("Fx where T: Bound"), "Fx");
+        assert_eq!(ty("const unsafe mut Fx"), "Fx");
+        assert_eq!(ty(">"), "");
+        let scope = |text: &str| {
+            let t = toks(text);
+            let i = t
+                .iter()
+                .rposition(|x| x.tok == Tok::Punct('{'))
+                .unwrap_or(0);
+            scope_at(&t, i)
+        };
+        let s = |x: &str| x.to_owned();
+        assert_eq!(scope("impl Fx {"), Some((true, s("Fx"))));
+        assert_eq!(
+            scope("x; #[cfg(test)] pub(crate) mod tests {"),
+            Some((false, s("tests")))
+        );
+        assert_eq!(scope("pub unsafe trait T {"), Some((true, s("T"))));
+        assert_eq!(
+            scope("#![allow(x)] default auto trait T {"),
+            Some((true, s("T")))
+        );
+        assert_eq!(scope("fn f() {"), None);
+        assert_eq!(scope("{"), None);
+        assert_eq!(scope("mod {"), None);
+        assert_eq!(scope("= 1 {"), None);
+        assert_eq!(home_of("crates/a/src/x.rs"), "crates/a");
+        for (path, module) in [
+            ("crates/a/src/lib.rs", "a"),
+            ("crates/a/src/main.rs", "a"),
+            ("crates/a/src/x/mod.rs", "x"),
+            ("crates/a/src/x/lib.rs", "lib"),
+            ("crates/a/tests/common/mod.rs", "common"),
+            ("crates/a/tests/t.rs", "t"),
+            ("lib.rs", "lib"),
+            ("", ""),
+        ] {
+            assert_eq!(module_of(path), module, "{path}");
+        }
+        let body = |text: &str| fn_body(&toks(text), 0);
+        assert_eq!(body("fn f() { a }"), Some((5, 6)));
+        assert_eq!(
+            body("fn f<const N: [u8; 2]>(x: [u8; N]) -> u8 { a b }"),
+            Some((25, 27))
+        );
+        assert_eq!(body("fn f();"), None);
+        assert_eq!(body("fn f() }"), None);
+        assert_eq!(body("fn f()"), None);
+        assert_eq!(body("fn f() { a"), Some((5, 6)), "a body the file cuts");
+        for (sig, path) in [
+            ("() -> PathBuf", true),
+            ("() -> Result<std::path::PathBuf, String>", true),
+            ("(x: &Path) -> &str", true),
+            ("() -> Option<OsString>", true),
+            ("() -> Cow<'static, OsStr>", true),
+            ("() -> impl AsRef<Path>", true),
+            ("(p: &Path)", false),
+            ("(f: fn() -> PathBuf) -> u8", false),
+            ("() -> usize where T: Into<String>", false),
+            ("() -> Vec<u8>", false),
+            ("() -> [String; 2]", true),
+            ("> String", false),
+        ] {
+            assert_eq!(returns_path(&toks(sig)), path, "{sig}");
+        }
+    }
+
+    /// A function's value: its statements after its last `;` of its own
+    /// depth, and each `return`; a body with neither has none. The value
+    /// is the root through a `let` of the body, a SCREAMING root value of
+    /// its crate, a call or a macro known; a `let` rebound to another
+    /// value forgets the root.
+    #[test]
+    fn a_functions_value_is_read_through_its_lets_and_returns() {
+        let summary =
+            |text: &str| fn_summary("crates/a", "f.rs", vec!["k".to_owned()], &toks(text));
+        assert!(summary("a; b;").is_none(), "no value");
+        assert!(summary("").is_none(), "an empty body");
+        let f = summary("let a = 1; if c { a } else { b }").unwrap();
+        assert_eq!(
+            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
+            [false, true, true, true, true]
+        );
+        let f = summary("if x { return root(); } y;").unwrap();
+        assert_eq!(
+            f.stmts.iter().map(|s| s.result).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        let known = WebNames {
+            fns: ["f.rs/root".to_owned()].into_iter().collect(),
+            macros: ["here".to_owned()].into_iter().collect(),
+            ..WebNames::default()
+        };
+        let none = BTreeSet::new();
+        let roots: BTreeSet<String> = ["ROOT".to_owned()].into_iter().collect();
+        for (text, want) in [
+            ("let r = env!(\"CARGO_MANIFEST_DIR\"); r", true),
+            ("let r = env!(\"CARGO_MANIFEST_DIR\"); let r = 1; r", false),
+            ("let r = x; r", false),
+            ("root().join(p)", true),
+            ("here!()", true),
+            ("PathBuf::from(ROOT)", true),
+            ("PathBuf::from(OTHER)", false),
+            ("\"../..\"", true),
+            ("\"..\"", false),
+            ("let r = root(); r.join(\"x\")", true),
+            ("let _ = root(); x", false),
+        ] {
+            let f = summary(text).unwrap();
+            let r = if text.contains("ROOT") { &roots } else { &none };
+            assert_eq!(f.returns_anchor(r, &known), want, "{text}");
+        }
+        assert!(screaming("ROOT_2"));
+        assert!(!screaming("Root"));
+        assert!(!screaming("_2"));
+        assert!(roots_at_repo("../.."));
+        assert!(roots_at_repo("./../../"));
+        assert!(roots_at_repo("CARGO_MANIFEST_DIR"));
+        assert!(roots_at_repo("CARGO_WORKSPACE_DIR"));
+        assert!(!roots_at_repo(".."));
+        assert!(!roots_at_repo("../../web"));
+        assert!(!roots_at_repo("."));
+    }
+
+    /// The fixpoint: a chain of helpers written callee-last resolves in as
+    /// many rounds as it is long, a root value read by a helper makes it a
+    /// root, a root macro and a production macro that reads `web/` are
+    /// learnt, a test macro that reads `web/` is no production macro, and a
+    /// file that does not lex is a refusal.
+    #[test]
+    fn the_fixpoint_learns_every_helper_whatever_the_order() {
+        let s = src(&[
+            "use std::path::PathBuf;",
+            "const ROOT: &str = env!(\"CARGO_MANIFEST_DIR\");",
+            "fn c() -> PathBuf { b() }",
+            "fn b() -> PathBuf { a() }",
+            "fn a() -> PathBuf { PathBuf::from(ROOT) }",
+            "macro_rules! here { () => { env!(\"CARGO_MANIFEST_DIR\") }; }",
+            "macro_rules! page { () => { include_str!(\"../../../web/p.html\") }; }",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    macro_rules! tpage { () => { include_str!(\"../../../web/t.html\") }; }",
+            "}",
+        ]);
+        let mut got = Collected::default();
+        got.add("crates/a/src/x.rs", &s, true).unwrap();
+        let names = got.settle();
+        let n = &names["crates/a"];
+        for key in [
+            "crates/a/src/x.rs/a",
+            "crates/a/src/x.rs/b",
+            "crates/a/src/x.rs/c",
+            "x::c",
+        ] {
+            assert!(n.fns.contains(key), "{key}: {:?}", n.fns);
+        }
+        assert!(n.roots.contains("ROOT") && n.anchors.contains("ROOT"));
+        assert!(n.macros.contains("here"));
+        assert!(!n.macros.contains("page"), "a climb into web/ is no root");
+        assert_eq!(
+            n.web_macros.iter().collect::<Vec<_>>(),
+            ["page"],
+            "tpage is a test's"
+        );
+        let mut bad = Collected::default();
+        assert!(bad.add("crates/a/src/x.rs", "\"open", true).is_err());
+        assert!(
+            bad.add("crates/a/tests/t.rs", "fn f() -> PathBuf { a }", false)
+                .is_ok()
+        );
+        assert_eq!(
+            bad.values["crates/a"].len(),
+            0,
+            "a test file has no production values"
+        );
+        assert!(
+            web_read_findings("crates/a/src/x.rs", "\"open", false, &WebNames::default()).is_err()
+        );
+    }
+
+    /// The doc readers pinned: which fence info strings rustdoc reads as
+    /// Rust; what opens and closes a fence; a list item's width; how a
+    /// hidden line is shown; and the line of an example's line.
+    #[test]
+    fn fences_lists_and_hidden_lines_are_read_as_rustdoc_reads_them() {
+        for (info, rust) in [
+            ("", true),
+            ("rust", true),
+            ("rust,ignore", true),
+            ("ignore", true),
+            ("no_run, should_panic", true),
+            ("compile_fail E0499", true),
+            ("edition2021 test_harness standalone_crate", true),
+            ("ignore-wasm32", true),
+            ("{.class}", true),
+            ("text", false),
+            ("sh", false),
+            ("Eabcd", false),
+            ("abcde", false),
+            ("E049", false),
+            ("text,rust", true),
+        ] {
+            assert_eq!(rust_fence(info), rust, "{info:?}");
+        }
+        let s = |x: &str| x.to_owned();
+        assert_eq!(fence("```rust"), Some((s("```"), "rust")));
+        assert_eq!(fence("~~~~ no_run "), Some((s("~~~~"), "no_run")));
+        assert_eq!(fence("``"), None);
+        assert_eq!(fence("``` a`b"), None);
+        assert_eq!(fence("~~~ a`b"), Some((s("~~~"), "a`b")));
+        assert_eq!(fence("text"), None);
+        assert!(closes("````", "```"));
+        assert!(closes("   ```", "```"));
+        assert!(!closes("    ```", "```"));
+        assert!(!closes("``", "```"));
+        assert!(!closes("``` x", "```"));
+        assert!(!closes("~~~", "```"));
+        assert!(!closes("text", "```"));
+        for (t, w) in [
+            ("- a", Some(2)),
+            ("* a", Some(2)),
+            ("+ a", Some(2)),
+            ("1. a", Some(3)),
+            ("10) a", Some(4)),
+            ("-a", None),
+            ("1 a", None),
+            ("a", None),
+            ("", None),
+        ] {
+            assert_eq!(list_item(t), w, "{t:?}");
+        }
+        let ex = example(
+            &[
+                (7, "# let a = 1;"),
+                (8, "#"),
+                (9, "##[x]"),
+                (10, "#[y]"),
+                (11, "plain"),
+            ],
+            0,
+            true,
+        );
+        assert_eq!(ex.text, "let a = 1;\n\n#[x]\n#[y]\nplain\n");
+        assert_eq!(
+            (ex.line(0), ex.line(1), ex.line(5), ex.line(9)),
+            (7, 7, 11, 11)
+        );
+        let ex = example(&[(3, "      x"), (4, "")], 4, false);
+        assert_eq!(ex.text, "  x\n\n");
+        assert!(!ex.fenced);
+    }
+
+    /// The test-region readers pinned: a test harness's attribute path,
+    /// with or without arguments, and a `cfg` that names `test` where it
+    /// can hold.
+    #[test]
+    fn test_attributes_and_cfgs_answer_exactly() {
+        let attr = |text: &str| test_attr(&toks(text));
+        assert!(attr("test"));
+        assert!(attr("tokio::test"));
+        assert!(attr("tokio::test(flavor = \"x\")"));
+        assert!(attr("bench"));
+        assert!(!attr("testing"));
+        assert!(!attr("test x"));
+        assert!(!attr("test(x) y"));
+        assert!(!attr("tokio::"));
+        assert!(!attr(""));
+        let cfg = |text: &str| cfg_test_attr(&toks(text));
+        assert!(cfg("cfg(test)"));
+        assert!(cfg("cfg(any(test, unix))"));
+        assert!(cfg("cfg(not(not(test)))"));
+        assert!(!cfg("cfg(not(test))"));
+        assert!(!cfg("cfg(test = \"x\")"));
+        assert!(!cfg("cfg(unix)"));
+        assert!(!cfg("cfg(test) x"));
+        assert!(!cfg("cfg_attr(test, x)"));
+        assert!(!cfg("cfg"));
+        assert!(mentions_test(&toks("(test)")));
+    }
+
+    /// The group readers pinned: the tokens inside a group (to its closer,
+    /// or to the end when the statement cuts it), what `stringify!` and
+    /// `concat!` make, and a group opener.
+    #[test]
+    fn groups_stringify_and_concat_answer_exactly() {
+        let t = toks("f(a, (b), c) d");
+        assert_eq!(inside(&t, 1).len(), 7);
+        let cut = toks("f(a, b");
+        assert_eq!(inside(&cut, 1).len(), 3);
+        assert_eq!(stringified(&toks("web")), "web");
+        assert_eq!(stringified(&toks("a b::c 1 \"s\"")), "a b::c");
+        assert_eq!(
+            joined(&toks("\"../\", stringify!(web), \"/x\"")),
+            "../web/x"
+        );
+        assert_eq!(
+            joined(&toks("\"a\", stringify!(b")),
+            "ab",
+            "a stringify! the statement cuts"
+        );
+        assert_eq!(joined(&toks("\"a\", stringify!, \"c\"")), "ac");
+        assert!(opens_group(toks("[").first()));
+        assert!(!opens_group(toks("x").first()));
+        assert!(!opens_group(None));
+        assert!(is_web("WeB") && !is_web("webs"));
+        assert!(under_dir(Path::new("/a/B/c"), Path::new("/A/b")));
+        assert!(!under_dir(Path::new("/a"), Path::new("/a/b")));
+        assert!(!under_dir(Path::new("/x/b"), Path::new("/a/b")));
     }
 }
