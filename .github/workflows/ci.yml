@@ -490,8 +490,12 @@ jobs:
           # after a `use`, or a method of a type of another file (path calls
           # are read anywhere); a helper whose only root is a lower-case
           # const or static; the text a #[doc = ..] attribute supplies, and an
-          # indented example inside a list item; and code a build script or
-          # a procedural macro writes. Gate 1e still runs for all of them.
+          # indented example inside a list item; a root taken from
+          # current_exe(), canonicalize(".") or CARGO_TARGET_TMPDIR, and a
+          # bare "web" segment bound to a name of its own and joined beside a
+          # climb or an anchor later (check r5's E1, E2: named, not refused);
+          # and code a build script or a procedural macro writes. Gate 1e
+          # still runs for all of them.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           work=$(mktemp -d)
           git ls-files -z > "$work/tracked.z"
