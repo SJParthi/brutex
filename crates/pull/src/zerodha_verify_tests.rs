@@ -4778,10 +4778,126 @@ fn an_orphan_log_is_stray_and_a_full_spool_refuses_the_append() {
     assert!(words.to_string().contains("nothing was appended"));
     let busy = SpoolError::Busy {
         run: 41,
+        lock: spool::live_lock_path(Path::new(""), 41),
         holder: "a test holder".to_owned(),
     };
     assert_eq!(busy.code(), "run_live_busy");
     assert!(busy.to_string().contains("verify/running/41.lock"));
+}
+
+/// **THE OLD LIVE-LOCK FOLDER IS HONOURED BOTH WAYS** (BASE-REDS-1023
+/// repair 4, check r4's V4-1). A writer of the build before D-7148 holds its
+/// run's lock in the old layout's folder (`verify`, then `live`) alone, and
+/// the real store held that folder on 30 and 31 Oct 2026 (49 run locks,
+/// listed read-only). A lock held there, as that writer holds it, leaves the
+/// run's spools waiting and the run named live, never merged under it; let
+/// go, they merge. A writer of THIS build, in a store that holds the old
+/// folder, holds its run's lock there too, so a merger of the old build sees
+/// the run live, and lets it go with the writer. A store without the old
+/// folder never gets one; a lock there that would not open is named, never
+/// read as free; and a run's locks are counted as the files they are.
+#[test]
+fn the_old_live_lock_folder_is_honoured_both_ways() {
+    let on = regular();
+    let id = |run: u64| SpoolId {
+        run,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_1,
+        month: on.year_month().unwrap(),
+    };
+    let old_dir = |root: &Path| {
+        spool::OLD_LIVE_DIR
+            .iter()
+            .fold(root.to_path_buf(), |at, segment| at.join(segment))
+    };
+    let append = |root: &Path, run: u64, key: &str| {
+        let writer = SpoolWriter::new(root, run, Mode::ZerodhaMerge, 1);
+        writer
+            .append(
+                Segment::Index,
+                Timeframe::MINUTE_1,
+                &[spooled(on, key, Code::Match, 0)],
+            )
+            .unwrap();
+        writer
+    };
+    // A WRITER OF THE OLD BUILD: its run's record spooled, its lock held in
+    // the old folder alone.
+    let root = scratch("OldLayout");
+    drop(append(&root, 51, "NSE-INDEX-ZZOLDA"));
+    std::fs::create_dir_all(old_dir(&root)).unwrap();
+    let old_writer = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(old_dir(&root).join("51.lock"))
+        .unwrap();
+    old_writer.try_lock().unwrap();
+    let first = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (first.spools_merged, first.generations, first.waiting),
+        (0, 0, 1),
+        "{first:?}"
+    );
+    assert_eq!(
+        first.live.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(),
+        [(51, 1)]
+    );
+    assert!(first.faults.is_empty(), "{:?}", first.faults);
+    assert_eq!(
+        looked_up(&root, Timeframe::MINUTE_1, on, "NSE-INDEX-ZZOLDA"),
+        None
+    );
+    drop(old_writer);
+    let after = merge_all(&root, None, None).unwrap();
+    assert_eq!(
+        (after.spools_merged, after.generations, after.waiting),
+        (1, 1, 0),
+        "{after:?}"
+    );
+    assert_eq!(
+        looked_up(&root, Timeframe::MINUTE_1, on, "NSE-INDEX-ZZOLDA"),
+        Some(Code::Match)
+    );
+    // A WRITER OF THIS BUILD beside the old folder: an old merger's probe of
+    // the old lock finds it held, and free once the writer goes.
+    let writer = append(&root, 52, "NSE-INDEX-ZZOLDB");
+    let old_merger = std::fs::File::open(old_dir(&root).join("52.lock")).unwrap();
+    assert!(
+        matches!(old_merger.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "a merger of the old build reads run 52 as live"
+    );
+    drop(writer);
+    assert!(old_merger.try_lock().is_ok(), "free once the writer goes");
+    drop(old_merger);
+    match spool::live_probe(&root, 52).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 2),
+        spool::Live::Spooling(holder) => panic!("run 52 read as live: {holder}"),
+    }
+    // A STORE WITHOUT THE OLD FOLDER never gets one.
+    let fresh = scratch("NewLayoutOnly");
+    drop(append(&fresh, 53, "NSE-INDEX-ZZNEWC"));
+    let merged = merge_all(&fresh, None, None).unwrap();
+    assert_eq!((merged.spools_merged, merged.waiting), (1, 0), "{merged:?}");
+    assert_eq!(spool::old_live_lock_path(&fresh, 53), None);
+    assert!(!old_dir(&fresh).exists());
+    match spool::live_probe(&fresh, 53).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 1),
+        spool::Live::Spooling(holder) => panic!("run 53 read as live: {holder}"),
+    }
+    // A LOCK IN THE OLD FOLDER THAT WOULD NOT OPEN (a folder where it goes).
+    let odd = scratch("OldLockFolder");
+    std::fs::create_dir_all(old_dir(&odd).join("54.lock")).unwrap();
+    let mut faults = Vec::new();
+    let (free, held) = super::not_live(&odd, vec![id(54)], &mut faults);
+    assert!(free.is_empty() && held.is_empty());
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert!(
+        faults[0].starts_with("run 54's live lock would not open, so its spools wait: "),
+        "{}",
+        faults[0]
+    );
 }
 
 /// A verdict record counts the details that follow it (IA-9 repair 1, the
