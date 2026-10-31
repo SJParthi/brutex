@@ -767,8 +767,13 @@ fn main() {
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). `verdicts` is typed
     // `[bool; ROWS]`, so a row inside the array would make every part edit the one
     // `ROWS` line. Each part instead puts one statement directly under its slot:
-    //     let verdicts: Vec<bool> =
-    //         verdicts.iter().copied().chain([fno_<x>::row(floor)]).collect();
+    //     let verdicts: Vec<bool> = verdicts
+    //         .iter()
+    //         .copied()
+    //         .chain([fno_<x>::row(floor)])
+    //         .collect();
+    // (the form `cargo fmt` keeps). The row is `pub(crate) fn row(floor: u128) -> bool`:
+    // the workspace lint `unreachable_pub` is an error under clippy `-D warnings`.
     // It runs its row after every row above and folds it into the check below.
     // slot bench-row FNO-LADDER
     // slot bench-row FNO-PAUSE

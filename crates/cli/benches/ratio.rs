@@ -566,7 +566,9 @@ fn main() {
     let ok = ratios & budgets;
     // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2). Each part puts one
     // statement directly under its slot, `let ok = ok & fno_<x>::row(floor);`
-    // (`&`, never `&&`, so every row still runs).
+    // (`&`, never `&&`, so every row still runs). The row is
+    // `pub(crate) fn row(floor: u128) -> bool`: the workspace lint `unreachable_pub`
+    // is an error under clippy `-D warnings`.
     // slot bench-row FNO-CLOCK
     // slot bench-row FNO-DAYMASK
     // slot bench-row FNO-RECORDS

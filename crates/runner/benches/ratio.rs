@@ -588,7 +588,8 @@ fn main() {
         the_column_build_stays_within_its_budget(),
         the_equity_column_build_stays_within_its_budget(),
         // F&O rows (state/fib-strategy-20261030/PARTS.md 4.2): each part puts its row
-        // call directly under its slot.
+        // call directly under its slot. The row fn is `pub(crate)` and returns `bool`:
+        // the workspace lint `unreachable_pub` is an error under clippy `-D warnings`.
         // slot bench-row FNO-BAND
         // slot bench-row FNO-RANK
         // slot bench-row FNO-DAILY
