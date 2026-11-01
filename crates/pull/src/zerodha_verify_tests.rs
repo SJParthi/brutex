@@ -5758,7 +5758,7 @@ fn a_probe_names_the_hosts_refusal_of_either_live_lock() {
                 why.to_string(),
                 format!("io: lock {}: refused by the host", refused_at.display())
             ),
-            other => panic!("{}: the refusal was not named: {other:?}", refused_at.display()),
+            other => panic!("{refused_at:?}: the refusal was not named: {other:?}"),
         }
     }
     match spool::live_probe(&root, 80).unwrap() {
