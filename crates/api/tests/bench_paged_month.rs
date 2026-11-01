@@ -228,7 +228,7 @@ impl Served {
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .expect("a head");
-        let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+        let head = String::from_utf8_lossy(&raw[..split]);
         let status = head
             .split(' ')
             .nth(1)

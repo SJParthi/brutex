@@ -87583,9 +87583,55 @@ NIFTY 1s 2018-09 holds 400,200 rows, `/bars.json` refuses it naming the
 60,000 cap (200 refusals: p50 0.588 ms, p99 0.952 ms, max 4.691 ms) and the
 pager reads all 400,200 in 401 pages (a page p50 2.220 ms, p99 2.828 ms);
 BANKNIFTY, a NIFTY option, an illiquid strike and an F&O share the same
-(`docs/06-limits.md` L-BBENCH-1). The workspace run did NOT exit 0: past the api bench it stopped on `crates/telemetry`'s C-AU-01 (48.705x, then 6.341x BREACH), a red the api one hid, in a file this part does not own (L-BBENCH-5). D-7401 to D-7409 are unused.
+(`docs/06-limits.md` L-BBENCH-1). The workspace run did NOT exit 0: past the api bench it stopped on `crates/telemetry`'s C-AU-01 (48.705x, then 6.341x BREACH), a red the api one hid, in a file this part does not own (L-BBENCH-5).
 
 **Cost.** No served route changes and no store file changes: the change is
 the bench and a test. The bench's own run grows by the paged reads (about
 103 requests a sample at 100x, 200 samples) and three lone-month stores, the
 largest 2,592,000 rows built once.
+
+### D-7401 — What the ratio bench decides off its timed path lives where a test can reach it (BASE-BENCH-1028, repair 1) — 2026-11-01
+
+**Context.** The D3 check of BASE-BENCH-1028 at 954ca59bb measured its D2 set
+short of the bar: 43 lines and 14 branch sides in 10 items
+(`state/fix/round2/verify-BASE-BENCH-1028-r1-deep.json`). The bench target is
+`test = false`, and a run over a healthy store never takes its failing or
+waiting paths, so no run reached the arm of `sample` that turns a refused
+paged read into an answer, the wait in `warmed` for a route still building, or
+the four set-up refusals of `lone_month`. The test file held a retry no test
+drove, a chunked decoder for an answer no route here sends, and a closure
+never called.
+
+**Decision.** The logic moves, it is not excused. `benches/ratio/paged.rs`,
+which the bench and `tests/bench_paged_month.rs` both mount, gains
+`sample_month`, `answered_in_full`, `until_in_full`, `write_census` and
+`or_stop`; `served.rs` keeps thin calls and its own checks of what it timed.
+Each is driven by the input that really reaches it: a server that refuses on
+page one or on a later page, answers still building, a patience of zero, a
+root that is a file, a start image that is no census, an entry of no rows, a
+directory where the census file goes. `write_census` takes the image it starts
+from, so a refused start is an input and not an unreachable arm of a constant
+call. `or_stop` takes the stop as a function, so the bench hands it `refuse`,
+which ends the process, and a test hands it a stand-in that panics. The test
+file's retry becomes `patient`, driven by fakes down to its two-second panic;
+its closure is shared with a control query, a key merely spelled like a paging
+key, which is asked exactly once. The chunked decoder is removed: the test asks
+with `Connection: close` and reads to the close, D3 measured that no answer in
+any test was chunked, the 60,000-row `/bars.json` answer included.
+
+**Rejected.** Ruling the set-up refusals failing sides of a self-checking
+bench: the D3 bar names `refuse()` helpers and `?` as needing a test that
+drives them. Writing them as `?` or `.unwrap_or_else(|why| refuse(&why))`: the
+line count would read covered while the region stays unreached, which is the
+gap with its label removed. A self-test mode in the bench binary: CI's
+`cargo bench` would never run it.
+
+**Proof.** Invariant BBENCH-05. `bench_paged_month`: 27 tests. Five faults
+planted at once (a `503` no longer busy, building ignored, the cold figure
+taken from the last ask, a refused sample answering `200`, a census entry's
+refusal dropped) failed seven of them
+(`state/fix/round2/logs-BENCH1028/r1/planted-faults.log`), restored after.
+
+**Cost.** No served route and no store file changes. The bench's timed path
+makes the same requests and does the same work per page; only where the code
+lives moved. D-7402 to D-7409 are unused.
