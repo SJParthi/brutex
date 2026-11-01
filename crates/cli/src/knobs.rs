@@ -253,6 +253,10 @@ pub(crate) fn refuse_value(name: &str, raw: &str) {
 /// happened.
 #[must_use]
 pub fn refused() -> Option<String> {
+    #[cfg(test)]
+    if !scope::this_thread_sees_the_store() {
+        return None;
+    }
     let held = refusals().read().ok()?;
     if held.is_empty() {
         return None;
@@ -309,6 +313,10 @@ pub fn var(name: &str) -> Option<String> {
 
 /// What this process has been asked to use for `name`, if anything.
 fn set_here(name: &str) -> Option<String> {
+    #[cfg(test)]
+    if !scope::this_thread_sees_the_store() {
+        return None;
+    }
     store().read().ok()?.get(name).cloned()
 }
 
@@ -337,6 +345,8 @@ fn resolve(here: Option<String>, environment: impl FnOnce() -> Option<String>) -
 /// every parse of it would fail into a default — which is the same class of
 /// silent fallback §4 bans.
 pub fn set(name: &str, value: &str) {
+    #[cfg(test)]
+    scope::assert_a_tests_thread_holds_the_guard();
     if let Ok(mut held) = store().write() {
         if value.trim().is_empty() {
             held.remove(name);
@@ -358,13 +368,120 @@ pub fn set(name: &str, value: &str) {
 /// landed, which is exactly the signal a flaky test is worst at giving.
 ///
 /// One lock for the crate. Any test that calls `set` or `clear_all` takes it.
+/// A test that only reads needs nothing: see [`scope`].
 #[cfg(test)]
-pub(crate) fn serially() -> std::sync::MutexGuard<'static, ()> {
-    static ONE_AT_A_TIME: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    ONE_AT_A_TIME
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+pub(crate) fn serially() -> scope::Serially {
+    scope::Serially::take()
+}
+
+/// What a test's thread may see of this process-wide store.
+///
+/// # The race this closes, and why the readers needed nothing done to them
+///
+/// `serially` serialised the tests that MOVE a knob, and no test that only READS
+/// one took it: a dynamic count of the crate's lib tests (BASE-REDS-1023 repair
+/// 6, 1 Nov 2026) found about 200 tests reading knobs with no guard, 696,136 reads
+/// in one run. So a knob another test set could move between two reads of one
+/// run. `the_audit_renders_every_stage_of_the_institutional_stack` ended `RESULT
+/// NOT RECORDED: the final admitted long candidate could not reproduce its
+/// selected exit cell` in the full suite and passed alone, because
+/// `BRUTEX_MAX_STOP_POINTS` moved between its screen and its exact rebuild: a
+/// thread moving that knob every 3 ms ended 4 of 12 audits that way, no knob
+/// moving 0 of 4 (check r6).
+///
+/// A guard in every reader would have serialised those tests against each other
+/// or needed a second lock that a reader holds across every lock the production
+/// path takes under it, and it would hold only for the readers someone
+/// remembered. So the cause is closed where it is: **a test's own thread that
+/// holds no guard sees no knob another test set**. It reads the store as the
+/// process starts it, empty, and blocks on nothing. Only test builds compile this.
+///
+/// The same count found no read on any other thread, in guarded and unguarded
+/// tests alike, and no move by a thread that held no guard. Should a read move
+/// to a worker: a thread that is not a test's own cannot be told apart by name,
+/// so it sees the store only while some test holds the guard, which is what a
+/// holder's own worker needs. A worker of a test with no guard reads nothing
+/// then, and could read a holder's knob while another test holds the guard: that
+/// one is `docs/06-limits.md` L-BRED23-20, and no such read exists today.
+#[cfg(test)]
+pub(crate) mod scope {
+    use std::cell::Cell;
+    use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+
+    /// The one lock of [`Serially`].
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        /// Whether this thread holds [`ONE_AT_A_TIME`], through [`Serially`].
+        static HOLDS_THE_GUARD: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The guard of [`super::serially`]: its thread sees the store while it lives.
+    #[must_use = "the guard must be held for the test, not dropped immediately"]
+    pub(crate) struct Serially {
+        /// Released after [`Drop::drop`] says this thread no longer holds it.
+        _held: MutexGuard<'static, ()>,
+    }
+
+    impl Serially {
+        /// Waits for the lock. A test that panicked holding it leaves it free.
+        pub(super) fn take() -> Self {
+            let held = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+            HOLDS_THE_GUARD.with(|holds| holds.set(true));
+            Self { _held: held }
+        }
+    }
+
+    impl Drop for Serially {
+        fn drop(&mut self) {
+            HOLDS_THE_GUARD.with(|holds| holds.set(false));
+        }
+    }
+
+    /// The test harness names each test's thread by the test's path; the threads
+    /// this crate names (`brutex-ordered-3`, `index-stop-boundaries`) and the
+    /// unnamed workers carry no `::`, and `main` runs no test here.
+    pub(super) fn is_a_tests_thread(name: Option<&str>) -> bool {
+        name.is_some_and(|name| name.contains("::"))
+    }
+
+    /// The rule, over its three facts, so each side can be driven whatever else
+    /// the suite is doing. The lock is asked about last: no test thread asks it.
+    pub(super) fn sees_the_store(
+        holds_the_guard: bool,
+        a_tests_thread: bool,
+        guard_is_held: impl FnOnce() -> bool,
+    ) -> bool {
+        holds_the_guard || (!a_tests_thread && guard_is_held())
+    }
+
+    /// Whether some thread holds the lock right now. A lock poisoned by a test
+    /// that panicked holding it is free: nobody holds it.
+    pub(super) fn guard_is_held() -> bool {
+        matches!(ONE_AT_A_TIME.try_lock(), Err(TryLockError::WouldBlock))
+    }
+
+    /// A test's own thread moves a knob only under the guard: `clear_all` is not
+    /// scoped to a name, so one with no guard would take a holder's knobs away in
+    /// the middle of its run. Refused by name, every time, whatever else runs.
+    pub(super) fn assert_a_tests_thread_holds_the_guard() {
+        let thread = std::thread::current();
+        assert!(
+            HOLDS_THE_GUARD.with(Cell::get) || !is_a_tests_thread(thread.name()),
+            "{} moved a knob with no knobs::serially()",
+            thread.name().unwrap_or_default()
+        );
+    }
+
+    /// [`sees_the_store`] for the calling thread.
+    pub(super) fn this_thread_sees_the_store() -> bool {
+        let thread = std::thread::current();
+        sees_the_store(
+            HOLDS_THE_GUARD.with(Cell::get),
+            is_a_tests_thread(thread.name()),
+            guard_is_held,
+        )
+    }
 }
 
 /// Forget every knob, so the next run starts from the environment again.
@@ -377,6 +494,8 @@ pub(crate) fn serially() -> std::sync::MutexGuard<'static, ()> {
 /// typo on a clean run's report — which is the same class of leak
 /// `sweeprun::Applied::drop` exists to stop for the settings themselves.
 pub fn clear_all() {
+    #[cfg(test)]
+    scope::assert_a_tests_thread_holds_the_guard();
     if let Ok(mut held) = store().write() {
         held.clear();
     }
@@ -399,6 +518,10 @@ pub fn clear_all() {
 /// Sorted so two runs at the same settings log the same string, per §3 rule 5.
 #[must_use]
 pub fn describe() -> String {
+    #[cfg(test)]
+    if !scope::this_thread_sees_the_store() {
+        return String::new();
+    }
     let Ok(held) = store().read() else {
         return String::new();
     };
@@ -444,7 +567,7 @@ mod tests {
     use super::serially;
     use super::{
         clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve,
-        set, set_here, var,
+        scope, set, set_here, var,
     };
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -763,5 +886,154 @@ mod tests {
             "a refusal names a value THIS request supplied, so it must not \
              outlive the request"
         );
+    }
+
+    /// CHECK R6'S RACE, BY ITS CAUSE, WITH NO CLOCK: while another test holds the
+    /// guard with a knob and a refusal set, a test that holds no guard reads
+    /// neither, and that other test reads both. The two threads hand over by
+    /// channels, so the read happens with the knob set on every run.
+    #[test]
+    fn another_tests_knob_never_reaches_a_test_that_holds_no_guard() {
+        let name = "BRUTEX_KNOBS_TEST_ANOTHER_TESTS";
+        let (set_done, knob_is_set) = std::sync::mpsc::channel();
+        let (read_done, reader_has_read) = std::sync::mpsc::channel::<()>();
+        let mover = std::thread::Builder::new()
+            .name("knobs::tests::a_test_that_moves_a_knob".to_owned())
+            .spawn(move || {
+                let _serial = serially();
+                clear_all();
+                set(name, "7");
+                refuse_value(name, "50%");
+                let saw = (var(name), describe(), refused());
+                set_done.send(()).expect("the reader waits");
+                reader_has_read.recv().expect("the reader answers");
+                clear_all();
+                saw
+            })
+            .expect("a thread");
+        knob_is_set.recv().expect("the mover sets it");
+        assert_eq!(var(name), None, "another test's knob");
+        assert_eq!(
+            describe(),
+            "",
+            "another test's knobs, as an audit event says them"
+        );
+        assert_eq!(refused(), None, "another test's refusal");
+        assert_eq!(count(name), None, "and through a counting reader");
+        read_done.send(()).expect("the mover waits");
+        let (value, said, refusal) = mover.join().expect("the mover ends");
+        assert_eq!(value.as_deref(), Some("7"), "the holder reads its own");
+        assert!(said.contains("BRUTEX_KNOBS_TEST_ANOTHER_TESTS=7"), "{said}");
+        assert!(refusal.is_some_and(|block| block.contains("50%")));
+    }
+
+    /// A holder's own worker reads what its test set: a thread that is no test's
+    /// own sees the store while the guard is held.
+    #[test]
+    fn a_worker_of_the_test_that_holds_the_guard_reads_what_it_set() {
+        let name = "BRUTEX_KNOBS_TEST_WORKER";
+        let _serial = serially();
+        clear_all();
+        set(name, "8");
+        let on_a_worker = std::thread::spawn(move || (var(name), describe()))
+            .join()
+            .expect("the worker ends");
+        assert_eq!(on_a_worker.0.as_deref(), Some("8"));
+        assert!(
+            on_a_worker.1.contains("BRUTEX_KNOBS_TEST_WORKER=8"),
+            "{}",
+            on_a_worker.1
+        );
+        clear_all();
+    }
+
+    /// When the guard ends, what its thread sees ends with it, whatever is still
+    /// in the store. The next holder starts from `clear_all`, and this one clears.
+    #[test]
+    fn the_end_of_the_guard_ends_what_its_thread_sees() {
+        let name = "BRUTEX_KNOBS_TEST_GUARD_ENDS";
+        {
+            let _serial = serially();
+            clear_all();
+            set(name, "9");
+            assert_eq!(var(name).as_deref(), Some("9"));
+        }
+        assert_eq!(var(name), None, "no guard, no knob");
+        let _serial = serially();
+        clear_all();
+    }
+
+    /// A test's own thread is told by the path in its name; the harness names it
+    /// so, and this test's own thread is the proof. No thread this crate names
+    /// reads as one.
+    #[test]
+    fn a_tests_thread_is_told_by_the_path_in_its_name() {
+        assert!(scope::is_a_tests_thread(std::thread::current().name()));
+        assert!(scope::is_a_tests_thread(Some("knobs::tests::a_test")));
+        for other in [
+            Some("brutex-ordered-3"),
+            Some("index-stop-boundaries"),
+            Some("main"),
+            None,
+        ] {
+            assert!(!scope::is_a_tests_thread(other), "{other:?}");
+        }
+    }
+
+    /// The rule on each of its sides, the lock asked only for a thread that is no
+    /// test's own and holds no guard.
+    #[test]
+    fn each_side_of_what_a_thread_sees() {
+        let asked = std::cell::Cell::new(0);
+        let held = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        let free = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert!(scope::sees_the_store(true, true, &held), "the holder");
+        assert!(
+            scope::sees_the_store(true, false, &free),
+            "a holder by any name"
+        );
+        assert!(
+            !scope::sees_the_store(false, true, &held),
+            "a test with no guard"
+        );
+        assert_eq!(asked.get(), 0, "none of them asks the lock");
+        assert!(
+            scope::sees_the_store(false, false, &held),
+            "a worker, the guard held"
+        );
+        assert!(
+            !scope::sees_the_store(false, false, &free),
+            "a worker, nobody holds it"
+        );
+        assert_eq!(asked.get(), 2);
+    }
+
+    /// The lock says it is held while this test holds it.
+    #[test]
+    fn the_guard_is_held_while_a_test_holds_it() {
+        let _serial = serially();
+        assert!(scope::guard_is_held());
+    }
+
+    /// A test's own thread with no guard moves nothing: its `set` is refused by
+    /// name, on every run, so a new test that forgets the guard fails at once.
+    #[test]
+    #[should_panic(expected = "moved a knob with no knobs::serially()")]
+    fn a_tests_thread_with_no_guard_may_not_set_a_knob() {
+        set("BRUTEX_KNOBS_TEST_NO_GUARD", "1");
+    }
+
+    /// And its `clear_all`: it is not scoped to a name, so it would take a holder's
+    /// knobs away.
+    #[test]
+    #[should_panic(expected = "moved a knob with no knobs::serially()")]
+    fn a_tests_thread_with_no_guard_may_not_clear_the_knobs() {
+        clear_all();
     }
 }

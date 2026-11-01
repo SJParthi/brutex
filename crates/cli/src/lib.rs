@@ -24933,6 +24933,47 @@ mod tests {
         );
     }
 
+    /// A KNOB MOVED BESIDE AN AUDIT NEVER REACHES IT (check r6, BASE-REDS-1023
+    /// repair 6). With `BRUTEX_MAX_STOP_POINTS` moving every few milliseconds, an
+    /// audit on a thread with no guard read it at its screen and not at its exact
+    /// rebuild, or the other way round, and ended `RESULT NOT RECORDED: the final
+    /// admitted long candidate could not reproduce its selected exit cell`: 4 of 12
+    /// in check r6's probe, one red full suite before that. The mover here is what
+    /// a test that moves knobs is: named as a test's thread and under the guard.
+    /// `knobs::scope` is the cause closed, and
+    /// `knobs::tests::another_tests_knob_never_reaches_a_test_that_holds_no_guard`
+    /// its proof with no clock; this is the audit itself, whole.
+    #[test]
+    fn a_knob_moved_beside_an_audit_never_reaches_it() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = std::sync::Arc::clone(&stop);
+        let mover = std::thread::Builder::new()
+            .name("tests::a_test_that_moves_the_stop_knob".to_owned())
+            .spawn(move || {
+                let mut moves = 0_u32;
+                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    {
+                        let _serial = crate::knobs::serially();
+                        crate::knobs::clear_all();
+                        crate::knobs::set("BRUTEX_MAX_STOP_POINTS", "50");
+                        std::thread::sleep(std::time::Duration::from_millis(3));
+                        crate::knobs::clear_all();
+                    }
+                    moves += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+                moves
+            })
+            .expect("a thread");
+        for _ in 0..3 {
+            let text = audit_run_within(12, 1_400, 50_000);
+            assert!(!text.contains("RESULT NOT RECORDED"), "{text}");
+            assert!(text.contains("walk-forward folds 2 ·"), "{text}");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(mover.join().expect("the mover ends") > 0, "the knob moved");
+    }
+
     /// A threshold nothing can meet reaches the audit and says so plainly.
     #[test]
     fn an_audit_with_no_closed_combination_says_that_is_extinction() {
