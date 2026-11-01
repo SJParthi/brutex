@@ -1361,6 +1361,14 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
   // browser's own timestamp, so waiting for it changes no measurement.
   /** @type {Record<string, object[]>} */
   const queued = { paint: [], longtask: [] };
+  // WHAT THE WAIT DID, COUNTED, BESIDE WHAT THE CLOCK SAYS (BASE-REDS-1023 repair 6, check r6's class): an upper bound in
+  // milliseconds here read the machine as well as the wait. A flush after the paint was taken, or a timer more than the
+  // cap's own polls, is the wait going on, on any machine.
+  let paintTaken = false;
+  let flushesAfterThePaint = 0;
+  let timersAsked = 0;
+  /** @param {(...a: unknown[]) => void} fn @param {number} ms */
+  const countedTimeout = (fn, ms) => { timersAsked += 1; return setTimeout(fn, ms); };
   class Late {
     /** @param {unknown} callback */
     constructor(callback) {
@@ -1374,13 +1382,17 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
     takeRecords() {
       const records = queued[this.type];
       queued[this.type] = [];
+      if (this.type === 'paint') {
+        if (paintTaken) flushesAfterThePaint += 1;
+        if (records.length > 0) paintTaken = true;
+      }
       return records;
     }
   }
   assert.equal(harness.PAINT_WAIT_MS, 2_000);
   /** @type {any} */
   const win = {};
-  new Function('window', 'PerformanceObserver', harness.OBSERVER)(win, Late);
+  new Function('window', 'PerformanceObserver', 'setTimeout', harness.OBSERVER)(win, Late, countedTimeout);
   const read = (/** @type {any} */ w) => new Function('window', `return ${harness.READ_FIGURES}`)(w);
   assert.equal(read(win).fcp, null, 'read at once, the paint not yet delivered reads as none');
   setTimeout(() => queued.paint.push({ name: 'first-contentful-paint', startTime: 40 }), 120);
@@ -1388,21 +1400,25 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
   const waited = await new Function('window', `return ${harness.AWAIT_PAINT}`)(win);
   const took = performance.now() - t0;
   assert.equal(waited.fcp, 40, 'the paint delivered late is the paint read');
+  assert.equal(flushesAfterThePaint, 1, 'it waited for the paint and no longer: one flush took it, the next and last read the figures');
   assert.equal(read(win).fcp, 40);
-  assert.ok(took >= 100 && took < harness.PAINT_WAIT_MS, `it waited for the paint and no longer: ${took} ms`);
+  assert.ok(took >= 100, `it waited for the paint: ${took} ms`);
   // A page that never paints is not waited on for ever, and is never given a figure.
   /** @type {any} */
   const blank = {};
-  new Function('window', 'PerformanceObserver', harness.OBSERVER)(blank, Late);
+  new Function('window', 'PerformanceObserver', 'setTimeout', harness.OBSERVER)(blank, Late, countedTimeout);
   const t1 = performance.now();
+  const timersBeforeTheCap = timersAsked;
   const never = await new Function('window', `return ${harness.AWAIT_PAINT}`)(blank);
   const cap = performance.now() - t1;
   assert.equal(never.fcp, null);
-  assert.ok(cap >= harness.PAINT_WAIT_MS - 50 && cap < harness.PAINT_WAIT_MS + 1_500, `bounded by the cap: ${cap} ms`);
-  // A page that has painted is not waited on at all.
-  const t2 = performance.now();
+  assert.ok(cap >= harness.PAINT_WAIT_MS - 50, `it waited to the cap: ${cap} ms`);
+  // Every 25 ms up to the cap is 80 polls at the most; a stalled machine fits fewer, never more.
+  assert.ok(timersAsked - timersBeforeTheCap <= harness.PAINT_WAIT_MS / 25 + 1, `bounded by the cap: ${timersAsked - timersBeforeTheCap} polls in ${cap} ms`);
+  // A page that has painted is not waited on at all: no timer is asked.
+  const timersBeforeThePainted = timersAsked;
   await new Function('window', `return ${harness.AWAIT_PAINT}`)(win);
-  assert.ok(performance.now() - t2 < 100);
+  assert.equal(timersAsked, timersBeforeThePainted, 'a painted page is answered at once');
   // Every load waits for its paint before it reads, and that wait is bounded here too, not by the page's clock alone (repair 4).
   assert.match(source('ci/browser-harness.mjs'), /await tab\.within\(AWAIT_PAINT, PAINT_WAIT_MS\);\s*h = await tab\.evaluate\(READ_FIGURES\);/);
 });

@@ -49,6 +49,20 @@ fn pattern(i: usize) -> u8 {
     u8::try_from(i % 251).unwrap()
 }
 
+/// The pattern bytes of the longest body any of these tests asks for, made once
+/// and before a server starts, so a handler's answer takes no work.
+///
+/// Each handler made its body per request: 16 MiB through one iterator, on the
+/// runtime the head clock runs on. Under instrumentation that took longer than
+/// the head deadline [`T`], and the client saw `ConnectionReset` and an empty
+/// body with no defect in the server (BASE-REDS-1023 repair 6, check r6's
+/// follow-up); on a loaded machine it was the same race with less room. What
+/// these tests time is the server's writes, never the fixture's arithmetic.
+fn patterned() -> &'static axum::body::Bytes {
+    static BODY: std::sync::OnceLock<axum::body::Bytes> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| (0..BIG).map(pattern).collect::<Vec<u8>>().into())
+}
+
 /// A finite body of `total` pattern bytes, sent in 64 KiB frames with no
 /// declared length, so hyper frames it as chunked.
 struct Chunks {
@@ -79,11 +93,12 @@ impl http_body::Body for Chunks {
 fn app() -> axum::Router {
     use axum::extract::Path;
     use axum::routing::get;
+    let _made_before_the_server_starts = patterned();
     axum::Router::new()
         .route("/ok", get(|| async { "ok" }))
         .route(
             "/big/{n}",
-            get(|Path(n): Path<usize>| async move { (0..n).map(pattern).collect::<Vec<u8>>() }),
+            get(|Path(n): Path<usize>| async move { patterned().slice(..n) }),
         )
         .route(
             "/chunked/{n}",
@@ -376,14 +391,15 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
 async fn a_cut_db_read_is_taken_back_out_of_its_served_count() {
     let _sink = crate::emitted::sink();
     let from = crate::emitted::mark();
+    let _made_before_the_server_starts = patterned();
     let router = axum::Router::new()
         .route(
             "/store.json",
-            axum::routing::get(|| async { (0..BIG).map(pattern).collect::<Vec<u8>>() }),
+            axum::routing::get(|| async { patterned().clone() }),
         )
         .route(
             "/other",
-            axum::routing::get(|| async { (0..BIG).map(pattern).collect::<Vec<u8>>() }),
+            axum::routing::get(|| async { patterned().clone() }),
         )
         .layer(axum::middleware::from_fn(crate::logs::note_request));
     let (addr, stop) = start_app(limits(T, 8), router).await;
@@ -765,7 +781,9 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
     let length = 8 << 20;
     let began = Instant::now();
     let mut readers = Vec::new();
+    let (holds, mut held) = tokio::sync::mpsc::channel(2);
     for _ in 0..2 {
+        let holds = holds.clone();
         readers.push(tokio::spawn(async move {
             let mut client = connect(addr).await;
             client
@@ -773,6 +791,7 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
                 .await
                 .unwrap();
             let (head, rest) = head(&mut client).await;
+            holds.send(()).await.unwrap();
             let (body, closed) = paced(&mut client, rest, content_length(&head), CHUNK, PACE).await;
             assert!(!closed, "cut after {} bytes", body.len());
             assert_pattern(&body);
@@ -781,7 +800,12 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
             done
         }));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // THE ORDER, NOT A SLEEP (BASE-REDS-1023 repair 6): this slept 100 ms and
+    // assumed both readers held their slots by then. A head read says so, and a
+    // reader that fails before its head drops its sender, so this fails too.
+    drop(holds);
+    held.recv().await.unwrap();
+    held.recv().await.unwrap();
     let mut next = TcpStream::connect(addr).await.unwrap();
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await
