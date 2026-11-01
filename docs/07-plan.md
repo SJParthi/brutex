@@ -1128,6 +1128,10 @@ the first was closed in code afterwards.
 
 <!-- slot FNO-COSTS -->
 
+| Item | State |
+|---|---|
+| FNO-COSTS: dated NSE cash-equity intraday table, every RD-* reading, two clocks per trade with the worse as the headline, the 24 contract notes (D-8110..D-8116) | Built on `fix/fib-fno-costs`; not merged (D1). FNO-NET is cut from its passed tip. Open until a Dhan contract note or written statement settles them: per-fill brokerage, the STT base, the rounding level, DP on intraday (COSTS.md section 8) |
+
 <!-- slot FNO-SEC-EXEC -->
 
 <!-- slot FNO-LADDER -->

@@ -2408,9 +2408,10 @@ mod tests {
             ),
             Ok(from_card)
         );
-        // And a day the dated selector cannot price is refused at open.
+        // And a day the dated selector cannot price is refused at open: BSE
+        // equity has no dated rows (D-8111).
         assert!(
-            ClientSecurityDay::open(INTRADAY, Exchange::Nse, CURRENT_AS_OF, RateSelector::Dated)
+            ClientSecurityDay::open(INTRADAY, Exchange::Bse, CURRENT_AS_OF, RateSelector::Dated)
                 .is_err()
         );
     }
@@ -2848,7 +2849,7 @@ mod tests {
         // One rate set, in order: netted, and the net names that set.
         let carried = NetTrade::of_days(&open_dated, &close_dated).expect("one rate set");
         assert_eq!(carried.rate_set(), dated);
-        assert_eq!(carried.versions(), ("dated-regime/r2", "precise/r2"));
+        assert_eq!(carried.versions(), ("dated-regime/r3", "precise/r2"));
         assert_eq!(
             carried.charges(),
             rs(open_dated.total().raw() + close_dated.total().raw())
@@ -2870,7 +2871,7 @@ mod tests {
             NetTrade::of_day(&intraday)
                 .expect("a round trip")
                 .versions(),
-            ("dated-regime/r2", "precise/r2")
+            ("dated-regime/r3", "precise/r2")
         );
     }
 

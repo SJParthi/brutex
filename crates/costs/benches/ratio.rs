@@ -64,6 +64,8 @@ use brutex_core::instrument::{Exchange, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
 use costs::day::TradeDay;
+use costs::equity_clock::{measure_price_trade, measure_rates_on, measure_worst};
+use costs::equity_dated::{READ_ON, WINDOW_START};
 use costs::expiry::{next_monthly_expiry, next_weekly_expiry};
 use costs::fill::{Bar, Direction, Fills, worst_case_fills};
 use costs::lot::{LotSize, contract_quantity, lot_size_on, notional};
@@ -706,6 +708,167 @@ fn the_stage_three_refusals_are_still_refusals() -> bool {
     ok & ratio("C-K-12 a priced trip vs a refused one", base, at)
 }
 
+// ---------------------------------------------------------------------------
+// Package FNO-COSTS: NSE cash-equity intraday on two cost clocks
+// (state/fib-strategy-20261030/PARTS.md section 11; D-8110..D-8116).
+//
+// Thin wrappers: the measuring functions are `costs::equity_clock::measure_*`,
+// which the crate's own tests run at tiny sizes. Each row prints p50, p99 and
+// max at 1x, 10x and 100x, then asserts that the p99 stays flat (the crate's
+// CEILING_PERMILLE, from 1x and from 10x to 100x) and inside its absolute
+// budget. The budgets are PARTS 11's targets, ESTIMATES until measured. These
+// rows hold no `ratio` call, so gate 14's measurement-point pin for this file
+// is unchanged.
+// ---------------------------------------------------------------------------
+
+/// Samples per size for the FNO-COSTS rows.
+const FNO_SAMPLES: usize = 2_000;
+
+/// Lookups timed together in one `C-FNO-COSTS-01` sample (one lookup is
+/// shorter than the clock's resolution).
+const FNO_BATCH: usize = 64;
+
+/// `C-FNO-COSTS-01`: one dated lookup, p99 at most 200 ns.
+const C_FNO_COSTS_01_BUDGET_PS: u64 = 200_000;
+
+/// `C-FNO-COSTS-02`: two-clock pricing per fill, p99 at most 2 µs.
+const C_FNO_COSTS_02_BUDGET_PS: u64 = 2_000_000;
+
+/// `C-FNO-COSTS-03`: the worst over every reading, p99 at most 30 µs a trade.
+const C_FNO_COSTS_03_BUDGET_PS: u64 = 30_000_000;
+
+/// One size's p50, p99 and largest, in picoseconds.
+#[derive(Clone, Copy, Default)]
+struct Spread {
+    p50: u64,
+    p99: u64,
+    max: u64,
+    samples: usize,
+}
+
+/// Sorts `samples` and reads its spread; all zero for no sample.
+fn spread(samples: &mut [u64]) -> Spread {
+    samples.sort_unstable();
+    let Some(&max) = samples.last() else {
+        return Spread::default();
+    };
+    let at = |per_mille: usize| {
+        samples
+            .get((samples.len() - 1) * per_mille / 1_000)
+            .copied()
+            .unwrap_or(max)
+    };
+    Spread {
+        p50: at(500),
+        p99: at(990),
+        max,
+        samples: samples.len(),
+    }
+}
+
+/// Prints one size's spread and returns its p99.
+fn p99_of(id: &str, size: &str, unit: &str, samples: &mut [u64]) -> u64 {
+    let s = spread(samples);
+    println!(
+        "  {id} {size}: p50 {:>9} ps, p99 {:>9} ps, max {:>11} ps {unit} ({} samples)",
+        s.p50, s.p99, s.max, s.samples
+    );
+    s.p99
+}
+
+/// Whether `at` stays within the ceiling of `base`, printed; a baseline that
+/// timed at zero measured nothing, so it fails.
+fn stays_flat(label: &str, base: u64, at: u64) -> bool {
+    if base == 0 {
+        println!("  {label:<52} UNMEASURABLE — the baseline timed at zero");
+        return false;
+    }
+    let permille = u128::from(at) * 1_000 / u128::from(base);
+    let flat = permille <= CEILING_PERMILLE;
+    println!(
+        "  {label:<52} {base:>9} ps -> {at:>9} ps   {}.{:03}x  {}",
+        permille / 1_000,
+        permille % 1_000,
+        if flat { "ok" } else { "BREACH" }
+    );
+    flat
+}
+
+/// Whether the last of three p99s stays within the ceiling of the first two,
+/// and all three inside the budget, printed.
+fn flat_and_within(label: &str, [one, ten, hundred]: [u64; 3], budget: u64) -> bool {
+    let from_one = stays_flat(&format!("{label}, 1x -> 100x"), one, hundred);
+    let from_ten = stays_flat(&format!("{label}, 10x -> 100x"), ten, hundred);
+    let worst = one.max(ten).max(hundred);
+    let within = worst <= budget;
+    println!(
+        "  {label:<52} budget {budget:>9} ps, worst p99 {worst:>9} ps   {}",
+        if within { "ok" } else { "BREACH" }
+    );
+    from_one && from_ten && within
+}
+
+/// C-FNO-COSTS-01 — the dated rate lookup costs the same over 30, 300 and
+/// all 2,980 days of the window.
+fn the_dated_equity_lookup_stays_flat_and_within_its_budget() -> bool {
+    let days: Vec<TradeDay> = (WINDOW_START.ordinal()..=READ_ON.ordinal())
+        .filter_map(|ordinal| TradeDay::from_ordinal(ordinal).ok())
+        .collect();
+    let mut p99 = [0; 3];
+    for (slot, size) in p99.iter_mut().zip([30, 300, 2_980]) {
+        let window: Vec<TradeDay> = days.iter().copied().take(size).collect();
+        let mut samples = measure_rates_on(&window, FNO_SAMPLES, FNO_BATCH);
+        let label = format!("rates_on over {size:>5} days");
+        *slot = p99_of("C-FNO-COSTS-01", &label, "per lookup", &mut samples);
+    }
+    flat_and_within(
+        "C-FNO-COSTS-01 rates_on, 30 to 2,980 days, p99",
+        p99,
+        C_FNO_COSTS_01_BUDGET_PS,
+    )
+}
+
+/// C-FNO-COSTS-02 — two-clock pricing costs the same per fill at 5, 50 and
+/// 500 fills, and the ends of the 1..512 span stay inside the budget.
+fn two_clock_pricing_per_fill_stays_flat_and_within_its_budget() -> bool {
+    let measured = |fills: usize| -> u64 {
+        let mut samples = measure_price_trade(fills, READ_ON, FNO_SAMPLES / 2).unwrap_or_default();
+        let label = format!("price_trade, {fills:>3} entry fills");
+        p99_of("C-FNO-COSTS-02", &label, "per fill", &mut samples)
+    };
+    let p99 = [5, 50, 500].map(measured);
+    let ends = [1, 512].map(measured);
+    let ends_within = ends
+        .iter()
+        .all(|&p99| p99 > 0 && p99 <= C_FNO_COSTS_02_BUDGET_PS);
+    println!(
+        "  C-FNO-COSTS-02 at 1 and 512 fills                     {}",
+        if ends_within { "ok" } else { "BREACH" }
+    );
+    let flat = flat_and_within(
+        "C-FNO-COSTS-02 price_trade per fill, 5 to 500, p99",
+        p99,
+        C_FNO_COSTS_02_BUDGET_PS,
+    );
+    flat && ends_within
+}
+
+/// C-FNO-COSTS-03 — the worst over every reading (the 15 States included,
+/// on a pre-2020 day) costs the same at 1x, 10x and 100x the trade's size.
+fn the_worst_reading_stays_flat_and_within_its_budget() -> bool {
+    let mut p99 = [0; 3];
+    for (slot, scale) in p99.iter_mut().zip([1, 10, 100]) {
+        let mut samples = measure_worst(scale, WINDOW_START, FNO_SAMPLES).unwrap_or_default();
+        let label = format!("worst, {scale:>3}x size");
+        *slot = p99_of("C-FNO-COSTS-03", &label, "per trade", &mut samples);
+    }
+    flat_and_within(
+        "C-FNO-COSTS-03 worst over every reading, p99",
+        p99,
+        C_FNO_COSTS_03_BUDGET_PS,
+    )
+}
+
 fn main() {
     println!("crates/costs — gate 8, per-lookup cost");
     println!(
@@ -728,6 +891,9 @@ fn main() {
     ok &= the_charge_stack_stays_within_its_budget();
     ok &= the_entry_point_costs_the_same_whatever_it_is_asked();
     ok &= the_stage_three_refusals_are_still_refusals();
+    ok &= the_dated_equity_lookup_stays_flat_and_within_its_budget();
+    ok &= two_clock_pricing_per_fill_stays_flat_and_within_its_budget();
+    ok &= the_worst_reading_stays_flat_and_within_its_budget();
 
     if ok {
         println!("  every ratio held.");

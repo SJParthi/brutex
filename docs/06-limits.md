@@ -22150,6 +22150,17 @@ stack peak is not a timing; these rows bound memory, not time.
 
 <!-- slot FNO-COSTS -->
 
+### FNO-COSTS: NSE cash equity intraday on two cost clocks (D-8110..D-8116)
+
+| ID | Limit | Why | Bound | Package |
+|---|---|---|---|---|
+| L-FNO-COSTS-01 | One pass over a trade's fills in `NoteInput::from_fills` | per-fill brokerage is a sum over the fills, so `price_trade` is linear in a trade's fills; every other step is a fixed number of operations per order. The walk that supplies the fills is FNO-SEC-EXEC's, one step per traded second | constant per fill (`C-FNO-COSTS-02`), at most `MAX_FILLS` (131,072) fills a trade | FNO-COSTS |
+| L-FNO-COSTS-02 | The dated table ends on its read day | every source was read on 2026-10-30, so `rates_on` and both clocks refuse any later day by name. A run over a later day needs the sources re-read and a new table version, not a default | 2018-09-03..=2026-10-30 | FNO-COSTS |
+| L-FNO-COSTS-03 | A note is one trade, priced alone | `price_trade` does not see the client's other trades that day. A DP reading and a State cap apply per trade, so two trades of one stock on one day pay the DP reading twice, which over-states the day. The rupee rounding of STT and stamp is per note here, while NSE and NCL round the client's day total across stocks: several notes each rounded down could together round up, so the client-day figure can exceed the sum of the notes by at most 50 paise a line a trade (Rs 1.00 a trade, about 0.4% of a typical Rs 240 charge). No part yet computes that day-level reading; it belongs to the account replay. The official column is "priced alone" | per trade; under-statement bounded by Rs 1.00 a trade | FNO-COSTS |
+| L-FNO-COSTS-04 | The readings stay open until Dhan settles them | COSTS.md section 8: per-fill brokerage (up to Rs 23.60 per extra fill second), the STT base, the rounding level, DP on intraday (Rs 14.76), the client's State for 2018-09-03..2020-06-30 (worst listed State, SECONDARY rates, about Rs 85 a trade). The worse of each is priced and each is named by `ReadingSet::labels`, so none is a guess; none is verified | UNVERIFIED, each priced at its worse | FNO-COSTS |
+| L-FNO-COSTS-05 | Rows the table found no source for | OT-CLR (no clearing charge found), OT-INT (no interest on a squared-off day, an inference), IP-OLD's start and BRK-1's start are `Unverified` or carry a `from_note`; absence is not proof (COSTS.md section 8) | UNVERIFIED, stated on the row | FNO-COSTS |
+| L-FNO-COSTS-06 | The State table's duty is half-up to the paisa or the rupee, both priced | the State schedules were not read, so neither rounding is known; the worst takes the larger | at most 50 paise a trade | FNO-COSTS |
+
 <!-- slot FNO-SEC-EXEC -->
 
 <!-- slot FNO-LADDER -->

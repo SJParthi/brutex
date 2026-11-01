@@ -16,11 +16,15 @@
 //! can take a 2019 figure for a 2019 rate.
 //!
 //! [`RateSelector::Dated`] is the existing dated regime lookup in
-//! [`crate::regime`], **unchanged**. It covers index options only, because
-//! options are the only kind this repository holds a dated history for. A
-//! dated equity or futures card is a [`crate::error::Refusal`] — not today's
+//! [`crate::regime`], **unchanged**, for index options, and since package
+//! FNO-COSTS (D-8111) the dated cash-equity table [`crate::equity_dated`] for
+//! NSE equity intraday from 2022-07-18 to 2026-10-30 — the days on which this
+//! stack's one GST base and one stamp law are the dated ones. Every other
+//! dated card (equity delivery and MTF, futures, BSE equity, and NSE equity
+//! intraday outside those days) is a [`crate::error::Refusal`] — not today's
 //! rate applied backwards without a label, which is the one thing the dated
-//! selector exists not to do.
+//! selector exists not to do; the earlier intraday days are priced by
+//! [`crate::equity_clock::price_trade`].
 //!
 //! # Lookup cost
 //!
@@ -605,7 +609,10 @@ pub const TODAYS_RATES_VERSION: &str = "todays-rates/2026-10-16/r1";
 /// 0.03503%; r2 charges the 0.03553% the trip stack does. Package CHG-0's
 /// FA73061 row re-splits that same total, so it leaves every figure here —
 /// and the fingerprint — as they are.
-pub const DATED_RATES_VERSION: &str = "dated-regime/r2";
+/// r3 (D-8111, package FNO-COSTS): the card prices NSE equity intraday from
+/// 2022-07-18 to 2026-10-30 at the dated cash-equity table
+/// (`costs-table/2026-10-30/r1`); every options figure is r2's.
+pub const DATED_RATES_VERSION: &str = "dated-regime/r3";
 
 impl RateSelector {
     /// The version string a run identity records for this rate set.
@@ -619,7 +626,7 @@ impl RateSelector {
     ///     RateSelector::CurrentOnEveryDate.version(),
     ///     "todays-rates/2026-10-16/r1"
     /// );
-    /// assert_eq!(RateSelector::Dated.version(), "dated-regime/r2");
+    /// assert_eq!(RateSelector::Dated.version(), "dated-regime/r3");
     /// ```
     #[must_use]
     pub const fn version(self) -> &'static str {
@@ -793,9 +800,10 @@ impl RateCard {
     /// # Errors
     ///
     /// * [`ChargeError::Cost`] carrying a [`Refusal`] under
-    ///   [`RateSelector::Dated`]: for equity and futures on every date (no
-    ///   dated history is recorded), and for options wherever the regime
-    ///   refuses (every day before 2024-10-01).
+    ///   [`RateSelector::Dated`]: for equity delivery and MTF and for futures
+    ///   on every date (no dated history is recorded), for BSE equity, for NSE
+    ///   equity intraday outside 2022-07-18..=2026-10-30 (D-8111), and for
+    ///   options wherever the regime refuses (every day before 2024-10-01).
     /// * [`ChargeError::NoRate`] for BSE futures under today's rates — no BSE
     ///   futures figure is recorded at all.
     ///
@@ -996,22 +1004,66 @@ const REGIME_EXCHANGE_BSE: &str = "crate::regime::exchange_charge_rate on the tr
      crate::regime::ipft_rate, which for BSE is crate::rate::BSE_IPFT on every day, a zero that \
      is UNVERIFIED.";
 
-/// What a dated equity or futures refusal says.
+/// What a dated equity delivery, MTF or futures refusal says.
 const NO_DATED_HISTORY: &str = "UNVERIFIED — this repository records no dated history of the \
-     equity cash or futures charge rates. Today's rates are recorded (FA73061 and the CHG-1 \
-     brief, docs/00-charter.md) and are applied to any date only under \
+     equity delivery, equity MTF or futures charge rates (the dated cash-equity table of package \
+     FNO-COSTS, costs-table/2026-10-30/r1, is intraday only). Today's rates are recorded (FA73061 \
+     and the CHG-1 brief, docs/00-charter.md) and are applied to any date only under \
      RateSelector::CurrentOnEveryDate, labelled \"today's rates applied to <date>\".";
 
-/// The remedy a dated equity or futures refusal names.
+/// The remedy a dated equity delivery, MTF or futures refusal names.
 const NO_DATED_HISTORY_REMEDY: &str = "price under RateSelector::CurrentOnEveryDate (the backtest rate set, \
      labelled), or source each superseded circular and add a dated table for this kind to \
      crates/costs/src/schedule.rs, with a docs/05-decisions.md entry";
 
-/// The dated card: the regime tables for options, a refusal for the rest.
+/// What a dated equity intraday refusal names as its charge.
+const DATED_INTRADAY: &str = "equity intraday charge stack (dated rates)";
+
+/// The first day this stack prices NSE equity intraday at the dated table:
+/// GST-SEBI's start, 2022-07-18 (D-8111).
+pub const DATED_INTRADAY_FROM: TradeDay = crate::equity_dated::GST_SEBI.from;
+
+/// Why a dated BSE equity card is refused.
+const NO_DATED_BSE_EQUITY: &str = "UNVERIFIED — the dated cash-equity table \
+     (costs-table/2026-10-30/r1, crate::equity_dated) holds NSE's rows only; no dated BSE \
+     cash-market rate is recorded";
+
+/// Why a dated NSE equity intraday card before 2022-07-18 is refused.
+const INTRADAY_BEFORE_GST_SEBI: &str = "this stack has one GST base (brokerage + exchange \
+     charge + SEBI fee) and one stamp law (0.003% of the buy value); the dated cash-equity table \
+     puts no GST on the SEBI fee before 2022-07-18 (row GST-SEBI) and charges stamp duty under \
+     State law on both sides before 2020-07-01 (row SD-STATE), so this stack cannot carry those \
+     days (D-8111)";
+
+/// How to price an intraday day before 2022-07-18.
+const INTRADAY_BEFORE_REMEDY: &str = "price the trade with costs::equity_clock::price_trade, \
+     which carries both clocks and every reading on every day of the window, or under \
+     RateSelector::CurrentOnEveryDate (labelled)";
+
+/// Why a dated NSE equity intraday card after 2026-10-30 is refused.
+const INTRADAY_AFTER_READ: &str = "every source of the dated cash-equity table was read on \
+     2026-10-30; no rate after it is verified";
+
+/// How to close the refusal after the read day.
+const INTRADAY_AFTER_REMEDY: &str = "re-read every source of costs-table.json for the new day, add \
+     the dated rows to crates/costs/src/equity_dated.rs and move EQUITY_DATED_VERSION and \
+     DATED_RATES_VERSION, with a docs/05-decisions.md entry";
+
+/// The source line a dated equity exchange charge carries.
+const DATED_EQUITY_EXCHANGE: &str = "crate::equity_dated: NSE's transaction charge row (EX-*) \
+     plus the IPFT row (IP-*) in force on the trade day, as one line (costs-table/2026-10-30/r1, \
+     COSTS.md section 3); each row cites its circular";
+
+/// The dated card: the regime tables for options, the dated cash-equity
+/// table for NSE equity intraday on the days this stack can carry (D-8111), a
+/// refusal for the rest.
 fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
     let charge = match kind {
         TradeKind::Options => return dated_option_card(exchange, day),
-        TradeKind::Equity(_) => "equity cash charge stack (dated rates)",
+        TradeKind::Equity(Product::Intraday) => return dated_intraday_card(exchange, day),
+        TradeKind::Equity(Product::Delivery | Product::Mtf) => {
+            "equity delivery and MTF charge stack (dated rates)"
+        }
         TradeKind::Futures => "futures charge stack (dated rates)",
         TradeKind::Etf => return Err(ETF_REFUSAL),
         TradeKind::Commodity => return Err(COMMODITY_REFUSAL),
@@ -1026,6 +1078,76 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
         NO_DATED_HISTORY_REMEDY,
     )
     .into())
+}
+
+/// A row of the dated cash-equity table as a cited rate.
+const fn cited_row(row: &crate::equity_dated::DatedRow) -> Cited {
+    Cited {
+        rate: row.rate.ratio(),
+        source: row.source,
+        status: row.status,
+    }
+}
+
+/// The dated NSE equity intraday card: the rows of `crate::equity_dated` in
+/// force on `day`, on the days from [`DATED_INTRADAY_FROM`] to the table's
+/// read day (D-8111).
+fn dated_intraday_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
+    let refused = |window_start, verified_from, source, remedy| {
+        Err(Refusal::with_remediation(
+            DATED_INTRADAY,
+            Some(exchange),
+            day,
+            window_start,
+            verified_from,
+            source,
+            remedy,
+        )
+        .into())
+    };
+    if exchange == Exchange::Bse {
+        return refused(
+            TradeDay::MIN,
+            None,
+            NO_DATED_BSE_EQUITY,
+            NO_DATED_HISTORY_REMEDY,
+        );
+    }
+    if day.before(DATED_INTRADAY_FROM) {
+        return refused(
+            TradeDay::MIN,
+            Some(DATED_INTRADAY_FROM),
+            INTRADAY_BEFORE_GST_SEBI,
+            INTRADAY_BEFORE_REMEDY,
+        );
+    }
+    if crate::equity_dated::READ_ON.before(day) {
+        return refused(
+            crate::equity_dated::AFTER_READ_ON,
+            None,
+            INTRADAY_AFTER_READ,
+            INTRADAY_AFTER_REMEDY,
+        );
+    }
+    let rates = crate::equity_dated::in_force_on(day);
+    Ok(RateCard {
+        basis: RateBasis::InForceOn(day),
+        exchange,
+        exchange_charge: Cited {
+            rate: rates.exchange_rate(),
+            source: DATED_EQUITY_EXCHANGE,
+            status: Status::Cited,
+        },
+        sebi: cited_row(rates.sebi),
+        gst: cited_row(rates.gst),
+        taxes: Taxes::Equity {
+            product: Product::Intraday,
+            stt_non_delivery: cited_row(rates.stt),
+            stt_delivery: STT_EQUITY_DELIVERY,
+            stamp_non_delivery: cited_row(rates.stamp),
+            stamp_delivery: STAMP_EQUITY_DELIVERY,
+        },
+    })
 }
 
 /// The dated options card: the regime's rows on `day`, the fixed rates from
@@ -1485,10 +1607,11 @@ mod tests {
         }
     }
 
+    // The name stays because invariant row CHG-05 cites it; since D-8111 "equity"
+    // here is delivery and MTF, and NSE intraday has its own two tests below.
     #[test]
     fn the_dated_selector_refuses_equity_and_futures_on_every_date_and_names_the_remedy() {
         for kind in [
-            TradeKind::Equity(Product::Intraday),
             TradeKind::Equity(Product::Delivery),
             TradeKind::Equity(Product::Mtf),
             TradeKind::Futures,
@@ -1496,11 +1619,11 @@ mod tests {
             for exchange in [Exchange::Nse, Exchange::Bse] {
                 for when in [TradeDay::MIN, day(2018, 1, 1), CURRENT_AS_OF, TradeDay::MAX] {
                     let refused = RateCard::resolve(kind, exchange, when, RateSelector::Dated)
-                        .expect_err("no dated equity or futures history");
+                        .expect_err("no dated delivery, MTF or futures history");
                     let want = if kind == TradeKind::Futures {
                         "futures charge stack (dated rates)"
                     } else {
-                        "equity cash charge stack (dated rates)"
+                        "equity delivery and MTF charge stack (dated rates)"
                     };
                     // Every field of the refusal, at once: the charge, the
                     // venue, the day, an open window from the start of
@@ -1520,6 +1643,148 @@ mod tests {
                     assert!(refused.to_string().contains("CurrentOnEveryDate"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_dated_intraday_card_refuses_bse_and_the_days_this_stack_cannot_carry() {
+        let intraday = TradeKind::Equity(Product::Intraday);
+        let refusal = |exchange, when, start, from, source, remedy| {
+            ChargeError::Cost(CostError::Unverified(Refusal::with_remediation(
+                DATED_INTRADAY,
+                Some(exchange),
+                when,
+                start,
+                from,
+                source,
+                remedy,
+            )))
+        };
+        let dated =
+            |exchange, when| RateCard::resolve(intraday, exchange, when, RateSelector::Dated);
+        // BSE: no dated rows, on any day.
+        for when in [day(2018, 9, 3), day(2024, 10, 1), TradeDay::MAX] {
+            assert_eq!(
+                dated(Exchange::Bse, when),
+                Err(refusal(
+                    Exchange::Bse,
+                    when,
+                    TradeDay::MIN,
+                    None,
+                    NO_DATED_BSE_EQUITY,
+                    NO_DATED_HISTORY_REMEDY
+                ))
+            );
+        }
+        // NSE before 2022-07-18: the stack's one GST base and one stamp law
+        // are not the dated ones; equity_clock prices those days.
+        for when in [
+            TradeDay::MIN,
+            day(2018, 9, 3),
+            day(2020, 6, 30),
+            day(2022, 7, 17),
+        ] {
+            let refused = dated(Exchange::Nse, when).expect_err("before GST on the SEBI fee");
+            assert_eq!(
+                refused,
+                refusal(
+                    Exchange::Nse,
+                    when,
+                    TradeDay::MIN,
+                    Some(DATED_INTRADAY_FROM),
+                    INTRADAY_BEFORE_GST_SEBI,
+                    INTRADAY_BEFORE_REMEDY
+                )
+            );
+            assert!(refused.to_string().contains("price_trade"));
+        }
+        // After the read day.
+        for when in [day(2026, 10, 31), TradeDay::MAX] {
+            assert_eq!(
+                dated(Exchange::Nse, when),
+                Err(refusal(
+                    Exchange::Nse,
+                    when,
+                    crate::equity_dated::AFTER_READ_ON,
+                    None,
+                    INTRADAY_AFTER_READ,
+                    INTRADAY_AFTER_REMEDY
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn the_dated_intraday_card_is_the_equity_table_on_the_days_this_stack_can_carry() {
+        let intraday = TradeKind::Equity(Product::Intraday);
+        let dated =
+            |exchange, when| RateCard::resolve(intraday, exchange, when, RateSelector::Dated);
+        // Inside: the rows in force, labelled with the day.
+        assert_eq!(DATED_INTRADAY_FROM, day(2022, 7, 18));
+        for (when, exchange_per_crore) in [
+            (day(2022, 7, 18), 345_01),
+            (day(2023, 3, 31), 345_01),
+            (day(2023, 4, 1), 335_00),
+            (day(2024, 4, 1), 332_00),
+            (day(2024, 10, 1), 307_00),
+            (day(2026, 3, 1), 307_00),
+            (crate::equity_dated::READ_ON, 307_00),
+        ] {
+            let card = dated(Exchange::Nse, when).expect("a dated equity day");
+            assert_eq!(card.basis(), RateBasis::InForceOn(when));
+            assert_eq!(card.kind(), intraday);
+            assert_eq!(card.exchange(), Exchange::Nse);
+            assert_eq!(
+                per_crore(card.exchange_charge()),
+                exchange_per_crore,
+                "{when}"
+            );
+            assert_eq!(card.exchange_charge().source(), DATED_EQUITY_EXCHANGE);
+            assert_eq!(per_crore(card.sebi()), 10_00);
+            assert_eq!(card.gst().rate(), GST.rate());
+            let Taxes::Equity {
+                stt_non_delivery,
+                stt_delivery,
+                stamp_non_delivery,
+                stamp_delivery,
+                ..
+            } = card.taxes()
+            else {
+                panic!("an equity card carries equity taxes");
+            };
+            assert_eq!(stt_non_delivery.rate(), STT_EQUITY_NON_DELIVERY.rate());
+            assert_eq!(stamp_non_delivery.rate(), STAMP_EQUITY_NON_DELIVERY.rate());
+            assert_eq!(stt_delivery, STT_EQUITY_DELIVERY);
+            assert_eq!(stamp_delivery, STAMP_EQUITY_DELIVERY);
+            assert_eq!(
+                stt_non_delivery.source(),
+                crate::equity_dated::STT_ND.source
+            );
+            assert_eq!(stamp_non_delivery.status(), Status::Cited);
+        }
+        // On the read day the dated card is today's card, rate for rate.
+        let today = RateCard::resolve(
+            intraday,
+            Exchange::Nse,
+            crate::equity_dated::READ_ON,
+            RateSelector::CurrentOnEveryDate,
+        )
+        .expect("today's card");
+        let on_read_day = dated(Exchange::Nse, crate::equity_dated::READ_ON).expect("dated");
+        // Equal as fractions: the table holds every rate per crore, so one
+        // reduced differently is the same rate.
+        let same_rate = |a: Option<Cited>, b: Option<Cited>| match (a, b) {
+            (Some(a), Some(b)) => {
+                let (a, b) = (a.rate(), b.rate());
+                i128::from(a.numerator()) * i128::from(b.denominator())
+                    == i128::from(b.numerator()) * i128::from(a.denominator())
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        let dated_rates = on_read_day.rates();
+        for (at, rate) in today.rates().into_iter().enumerate() {
+            assert!(same_rate(dated_rates[at], rate), "rate {at}");
         }
     }
 
@@ -1808,7 +2073,7 @@ mod tests {
             ],
             [
                 ("todays-rates/2026-10-16/r1", TODAYS_FINGERPRINT),
-                ("dated-regime/r2", DATED_FINGERPRINT),
+                ("dated-regime/r3", DATED_FINGERPRINT),
             ],
             "a rate table changed: bump its version (TODAYS_RATES_VERSION or \
              DATED_RATES_VERSION) and re-pin its fingerprint"
@@ -1823,7 +2088,9 @@ mod tests {
     /// `todays_fingerprint()` on the r1 table.
     const TODAYS_FINGERPRINT: u64 = 4_405_649_805_164_050_705;
 
-    /// `dated_fingerprint()` on the r2 regime (r1 dropped the NSE options
-    /// IPFT from 2026-03-01; D-5131).
-    const DATED_FINGERPRINT: u64 = 11_353_183_212_436_303_133;
+    /// `dated_fingerprint()` on r3: the r2 regime (r1 dropped the NSE options
+    /// IPFT from 2026-03-01; D-5131) and the dated NSE equity intraday card
+    /// from 2022-07-18 to 2026-10-30 (D-8111). r2 was
+    /// `11_353_183_212_436_303_133`.
+    const DATED_FINGERPRINT: u64 = 992_812_682_537_415_957;
 }

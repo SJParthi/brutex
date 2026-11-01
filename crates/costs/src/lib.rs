@@ -163,6 +163,20 @@
 //! | [`stack`] | the precise stack: one order, one client-security-day |
 //! | [`dhan_calc`] | Dhan's calculator, line by line, labelled an estimate |
 //! | [`ledger`] | the per client-security-day accumulator a backtest drives |
+//!
+//! # Package FNO-COSTS: NSE cash-equity intraday on two cost clocks
+//!
+//! The F&O top-mover strategy trades F&O stocks' cash shares intraday from
+//! 3 Sep 2018, and every trade is priced on two clocks (operator rule 7):
+//! the official rates in force on its own day, and Dhan's rates of today,
+//! each under the official method and under every open reading at its
+//! worst; the headline is the worse of the two worst. D-8110 to D-8116.
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`equity_dated`] | the 25 dated rows of `costs-table.json`, the State stamp table, the lookup |
+//! | [`equity_readings`] | one contract note under each reading set, and the worst |
+//! | [`equity_clock`] | both clocks on one trade, the headline, and the bench measurements |
 
 #![forbid(unsafe_code)]
 
@@ -171,6 +185,9 @@ mod dated;
 pub mod charge_error;
 pub mod day;
 pub mod dhan_calc;
+pub mod equity_clock;
+pub mod equity_dated;
+pub mod equity_readings;
 pub mod error;
 pub mod exact;
 pub mod expiry;
