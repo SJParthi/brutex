@@ -1334,6 +1334,10 @@ confirmed by two skeptics; their corrections are applied.
   repair's loaded runs, load 130-165: 'within 20000 ms: 32033 ms', and once a
   command unanswered for 30 s). FIXED (D-7152 addendum 15): `waited` is what
   the bound reads; the named answer is asked again, twice at most (BRED-52).
+- **BRED23-F48: the harness said "still had a request in flight after 30 s"
+  of a load 3.8 s old** (this repair's loaded runs, load 164-197; `settle`
+  answered at once for a request that started during its two frames). FIXED
+  (D-7152 addendum 15): it waits for that request up to the same cap (BRED-52).
 - **BRED23-F47: `knobs.rs` said a knob is read once per rung or run; 388,143
   lookups in one audit say otherwise** (this repair's probe). Stated, not
   changed: the doc and L-BRED23-21 say what runs.

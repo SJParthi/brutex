@@ -84841,7 +84841,13 @@ an addendum to the entry it extends; nothing above is edited.
     two commands after them took 26 s on a starved renderer, and once did not
     answer in a command's whole 30 s, which the harness says by name. The
     bound stands and now reads what it was written for (`waited`), and that
-    one named answer is asked again, twice at most (BRED-52). The paint-wait
+    one named answer is asked again, twice at most (BRED-52). The next
+    loaded round (three whole suites, load 164-197) found the harness saying
+    something false: "1 loads still had a request in flight after 30 s" about
+    a load 3.8 s old, when a page the machine had slowed asked during the
+    settle's two frames. `settle` now waits for that request too, up to the
+    same cap, so the sentence is true whenever it is said; a stand-in protocol
+    proves it with no clock, red before the change. The paint-wait
     test's clock bounds became counts of what the wait did. `head_deadline_body_tests`,
     check r6's follow-up, made 16 MiB in its handlers under a 300 ms head
     deadline, and slept 100 ms to assume two readers held their slots: both

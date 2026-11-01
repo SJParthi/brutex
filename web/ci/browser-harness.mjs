@@ -1220,13 +1220,21 @@ export async function openTab(cdp, context, options = {}) {
      * `frameMs` — a hidden tab draws none, and that is said in `frames.drew`
      * rather than waited on (verify r4, 23 Oct: the two-frame wait had no
      * bound). Whether no request was still waiting.
+     *
+     * A REQUEST THAT STARTS DURING THE TWO FRAMES IS WAITED FOR TOO, up to the
+     * same cap: this answered at once that a load "still had a request in
+     * flight after 30 s" when a page slowed by the machine asked after the
+     * quiet had passed, 3 s into its load (BASE-REDS-1023 repair 6, load 170).
      */
     settle: async (quietMs = 500, capMs = 30_000, frameMs = FRAME_WAIT_MS) => {
       const end = Date.now() + capMs;
       const waiting = () => [...inflight.values()].some((r) => !r.answered);
-      while (Date.now() < end && (waiting() || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
-      frames.drew = await drawn(frameMs);
-      return !waiting();
+      for (;;) {
+        while (Date.now() < end && (waiting() || Date.now() - lastActivity < quietMs)) await new Promise((r) => setTimeout(r, 25));
+        frames.drew = await drawn(frameMs);
+        if (!waiting()) return true;
+        if (Date.now() >= end) return false;
+      }
     },
     drawn,
     within,

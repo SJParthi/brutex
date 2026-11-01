@@ -3453,6 +3453,48 @@ test('a load whose navigation the browser does not answer, or whose page stops a
   assert.ok(e.waited >= 29, `${e.waited} ms of the waits`);
 });
 
+test('a request that starts while a settle waits for its frames is waited for too, and a load is said in flight only at the cap', async () => {
+  // Before (BASE-REDS-1023 repair 6, load 170): settle answered at once that a request was in flight, and the sheet said
+  // "1 loads still had a request in flight after 30 s" about a load 3 s old. A stand-in protocol, so no clock decides it.
+  /** @type {Set<(m: any) => void>} */
+  const listeners = new Set();
+  /** @param {string} method @param {any} params */
+  const fire = (method, params) => { for (const f of listeners) f({ sessionId: 's', method, params }); };
+  let frameWaits = 0;
+  /** @type {() => void} */
+  let onFrames = () => undefined;
+  const cdp = /** @type {any} */ ({
+    on: (/** @type {(m: any) => void} */ f) => (listeners.add(f), () => listeners.delete(f)),
+    send: async (/** @type {string} */ method) => {
+      if (method === 'Target.createTarget') return { targetId: 't' };
+      if (method === 'Target.attachToTarget') return { sessionId: 's' };
+      if (method !== 'Runtime.evaluate') return {};
+      frameWaits += 1;
+      onFrames();
+      return { result: { value: true } };
+    }
+  });
+  const tab = await harness.openTab(cdp, undefined);
+  // The page asks during the first wait for its frames, and that answer comes while the settle waits again.
+  onFrames = () => {
+    onFrames = () => undefined;
+    fire('Network.requestWillBeSent', { requestId: 'late', request: { method: 'GET', url: 'http://h:1/late' } });
+    setTimeout(() => fire('Network.loadingFinished', { requestId: 'late', encodedDataLength: 1 }), 60);
+  };
+  assert.equal(await tab.settle(5, 60_000, 50), true, 'the request ended inside the cap, so the load settled');
+  assert.equal(frameWaits, 2, 'two frames were waited for again, after the request');
+  // One that never ends: the settle ends at its cap, and only then says so.
+  frameWaits = 0;
+  onFrames = () => {
+    onFrames = () => undefined;
+    fire('Network.requestWillBeSent', { requestId: 'never', request: { method: 'GET', url: 'http://h:1/never' } });
+  };
+  const t = performance.now();
+  assert.equal(await tab.settle(5, 100, 50), false, 'still waiting at the cap');
+  assert.ok(performance.now() - t >= 99, 'at the cap, never before it');
+  assert.ok(frameWaits >= 2, 'the frames waited for again before it said so');
+});
+
 test('a sort edge the server does not answer is NOT MEASURED by name, within the load bound', { timeout: 120_000 }, async () => {
   const chrome = harness.parseArgs(['--base', 'http://h:1']).chrome;
   assert.ok(chrome, 'this test needs Chrome or Chromium: set BRUTEX_CHROME');
