@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { build, probe, MAX_PREFIX } from '../src/lib/prefix.js';
+import { costsInTurn } from './in-turn.js';
 
 /**
  * A catalogue of `n` distinct symbols, shaped like the master's rows.
@@ -88,24 +89,13 @@ test('a symbol shorter than the prefix bound is still indexed to its own length'
 
 /* ── the claim itself ─────────────────────────────────────────────────── */
 
-/**
- * Nanoseconds for one call, taken as the best of several runs to shed noise.
- *
- * @param {number} reps
- * @param {() => unknown} op
- * @returns {number}
+/*
+ * THE TWO SIDES OF A RATIO ARE TIMED IN TURN (BASE-REDS-1023 repair 6, check r6; tests/in-turn.js). Each was the best of
+ * five runs, one side after the other, so a stall landed on one side only: 'the long-query filter grew 3.49x' (and
+ * 5.05x before it) on code that had not moved. The 3.0 ceiling stands, a search that walks the catalogue is about 100x
+ * in every sample and still fails, and tests/in-turn.test.js proves the decision with invented figures.
  */
-function cost(reps, op) {
-  let best = Infinity;
-  for (let run = 0; run < 5; run += 1) {
-    op(); // warm
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < reps; i += 1) op();
-    const ns = Number(process.hrtime.bigint() - t0) / reps;
-    if (ns < best) best = ns;
-  }
-  return best;
-}
+const under3x = (/** @type {number} */ large, /** @type {number} */ small) => large / small < 3;
 
 test('a keystroke costs the same at 800 instruments and at 80,000', () => {
   // 800 is the bound `index.svelte.js` names; 100× it is the headroom. The
@@ -127,13 +117,11 @@ test('a keystroke costs the same at 800 instruments and at 80,000', () => {
   assert.equal(probe(ixL, large, 'A'), ixL.get('A'));
   assert.equal(probe(ixS, small, 'a'), ixS.get('A'));
 
-  /** @param {Map<string, Array<any>>} ix @param {Array<any>} rows */
-  const at = (ix, rows) => cost(20_000, () => probe(ix, rows, 'A'));
-  const ratio = at(ixL, large) / at(ixS, small);
+  const m = costsInTurn(20_000, () => probe(ixL, large, 'A'), () => probe(ixS, small, 'A'), under3x);
 
   assert.ok(
-    ratio < 3,
-    `probe cost grew ${ratio.toFixed(2)}× for a 100× catalogue — it is a Map probe ` +
+    m.held,
+    `probe cost grew ${(m.first / m.second).toFixed(2)}× for a 100× catalogue after ${m.rounds} rounds — it is a Map probe ` +
       `returning a bucket by reference and must not scale with the catalogue`
   );
 });
@@ -160,11 +148,10 @@ test('the one place cost is NOT constant is named, and it is bounded by a bucket
   assert.equal(probe(ixL, large, 'ABCD1').length, 111); // ABCD1, ABCD10..19, ABCD100..199
   assert.deepEqual(probe(ixL, large, 'ABCD1'), probe(ixS, small, 'ABCD1'));
 
-  const ratio =
-    cost(2_000, () => probe(ixL, large, 'ABCD1')) / cost(2_000, () => probe(ixS, small, 'ABCD1'));
+  const m = costsInTurn(2_000, () => probe(ixL, large, 'ABCD1'), () => probe(ixS, small, 'ABCD1'), under3x);
   assert.ok(
-    ratio < 3,
-    `the long-query filter grew ${ratio.toFixed(2)}× for a 100× catalogue with the ` +
-      `same bucket — it must filter the four-character bucket, not the catalogue`
+    m.held,
+    `the long-query filter grew ${(m.first / m.second).toFixed(2)}× for a 100× catalogue with the ` +
+      `same bucket after ${m.rounds} rounds — it must filter the four-character bucket, not the catalogue`
   );
 });
