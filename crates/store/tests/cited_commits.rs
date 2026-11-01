@@ -926,12 +926,17 @@ const NEW_SENTENCE: &str = "A sentence main's copy does not hold";
 /// The commit the texts cite that the compiler's repository holds.
 const NIGHTLY: &str = "1a98b1e13";
 
-/// Runs `body` over a fresh [`Fixture`], or says why it cannot. `program` is
-/// what stands for `git` in the question, so a machine with none is a case of
-/// its own rather than a branch no run reaches.
-fn with_history(program: &str, tag: &str, body: impl FnOnce(&Fixture)) {
-    if Command::new(program).arg("--version").output().is_err() {
-        println!("SKIPPING: {program} cannot run the synthetic history fixture");
+/// Whether `git` runs here, which a fixture asks before it builds a history.
+fn git_runs() -> bool {
+    Command::new("git").arg("--version").output().is_ok()
+}
+
+/// Runs `body` over a fresh [`Fixture`], or says why it cannot. `git` is what
+/// [`git_runs`] answered, so a machine with none is a case of its own rather
+/// than a branch no run reaches.
+fn with_history(git: bool, tag: &str, body: impl FnOnce(&Fixture)) {
+    if !git {
+        println!("SKIPPING: git cannot run the synthetic history fixture");
         return;
     }
     let root = scratch_root(tag);
@@ -975,7 +980,7 @@ fn faults_of(fixture: &Fixture, commit: &str, listing: &[(&str, Off)]) -> Vec<St
 #[test]
 fn a_fixture_on_a_machine_with_no_git_runs_nothing() {
     let ran = std::cell::Cell::new(false);
-    with_history("a-program-no-machine-has", "no-git", |_| ran.set(true));
+    with_history(false, "no-git", |_| ran.set(true));
     assert!(!ran.get(), "no history can be built without git");
 }
 
@@ -987,7 +992,7 @@ fn a_fixture_on_a_machine_with_no_git_runs_nothing() {
 /// object and names no commit, so it is refused the same way.
 #[test]
 fn a_citation_nobody_lists_passes_only_when_main_holds_it() {
-    with_history("git", "unlisted", |fixture| {
+    with_history(git_runs(), "unlisted", |fixture| {
         assert!(faults_of(fixture, &fixture.on_main, &[]).is_empty());
         for commit in [
             &*fixture.on_head,
@@ -1012,7 +1017,7 @@ fn a_citation_nobody_lists_passes_only_when_main_holds_it() {
 /// second way to be wrong under [`Off::MainsOwnText`].
 #[test]
 fn a_listed_commit_main_holds_is_refused_for_every_reason() {
-    with_history("git", "listed-on-main", |fixture| {
+    with_history(git_runs(), "listed-on-main", |fixture| {
         let commit = &*fixture.on_main;
         for (off, more) in [
             (Off::Neither, "and it is an ancestor of HEAD"),
@@ -1039,7 +1044,7 @@ fn a_listed_commit_main_holds_is_refused_for_every_reason() {
 /// commit, or not resolve at all, and `main` need hold no sentence citing it.
 #[test]
 fn a_commit_off_every_branch_may_not_be_one_this_branch_holds() {
-    with_history("git", "off-every-branch", |fixture| {
+    with_history(git_runs(), "off-every-branch", |fixture| {
         for off in [Off::Neither, Off::Compiler] {
             let held = &*fixture.on_head;
             assert_eq!(
@@ -1061,7 +1066,7 @@ fn a_commit_off_every_branch_may_not_be_one_this_branch_holds() {
 /// one file share one read of `main`'s copy.
 #[test]
 fn the_commented_file_is_compared_by_its_comment_lines_alone() {
-    with_history("git", "commented", |fixture| {
+    with_history(git_runs(), "commented", |fixture| {
         let commit = "abcdef0123456789abcdef0123456789abcdef0123";
         let citing = |sentence: &str| Citing {
             name: "the comments".to_owned(),
@@ -1094,7 +1099,7 @@ fn the_commented_file_is_compared_by_its_comment_lines_alone() {
 /// branch holds, and one nobody listed.
 #[test]
 fn every_reason_at_once_names_only_the_wrong_citation() {
-    with_history("git", "every-reason", |fixture| {
+    with_history(git_runs(), "every-reason", |fixture| {
         let mut cited = probe_citation(&fixture.on_main, NEW_SENTENCE);
         for commit in [
             &*fixture.on_head,
