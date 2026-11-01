@@ -15,7 +15,7 @@
 //! | `stamp` | RD-ROUND-TAX | the client-day to the rupee; the security-day; each buy order |
 //! | `exchange` | RD-ROUND-EX | one line; transaction charge and IPFT as two lines; per order; per order in two lines |
 //! | `sebi` | RD-ROUND-EX | one line; per order |
-//! | `gst`, `dp_gst` | RD-GST | 18% once; CGST 9% and SGST 9% each rounded |
+//! | `gst`, `dp_gst` | RD-GST | 18% once; CGST 9% and SGST 9% each rounded (on the DP charge's GST too: D-8113) |
 //! | `dp` | RD-DP | none; Rs 12.50 once per scrip-day with a sell |
 //! | `square_off` | RD-SQ | the fee on top of the order's brokerage; instead of it |
 //! | `square_off_split` | SPEC.md OP-27 | one fee per broker order; one per traded second it filled in |

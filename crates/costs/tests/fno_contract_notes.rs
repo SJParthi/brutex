@@ -1538,7 +1538,7 @@ fn every_rate_change_moves_exactly_its_own_line_on_the_trading_days_either_side(
         (Sell, false, &[(100_000, 100_000)]),
     ];
     // (day, exchange + IPFT, SEBI, stamp, GST, total), in paise.
-    let table: [((u16, u8, u8), i64, i64, i64, i64, i64); 20] = [
+    let table = [
         (
             (2019, 3, 29),
             650_020,
