@@ -87626,11 +87626,20 @@ line count would read covered while the region stays unreached, which is the
 gap with its label removed. A self-test mode in the bench binary: CI's
 `cargo bench` would never run it.
 
-**Proof.** Invariant BBENCH-05. `bench_paged_month`: 27 tests. Five faults
+**Proof.** Invariant BBENCH-05. `bench_paged_month`: 28 tests. Five faults
 planted at once (a `503` no longer busy, building ignored, the cold figure
 taken from the last ask, a refused sample answering `200`, a census entry's
-refusal dropped) failed seven of them
+refusal dropped) failed seven of the 27 then written
 (`state/fix/round2/logs-BENCH1028/r1/planted-faults.log`), restored after.
+
+**Measured** with the recipe's flags (instrumented, opt-level 0, test object
+and the bench's `--served-only` run; `r1/cov-b`, 1 Nov 2026): `paged.rs` lines
+185/185, branches 30/30; `lone_month` 16/16 and 0/0; `sample` 20/20 and 2/2;
+`bench_paged_month.rs` 619/621 and 16/20, its uncovered lines the two after
+`axum::serve`, which never returns, and its uncovered branch sides the failing
+arms of two asserts. `paged_rows`, `warmed`, `flat` and `refusals_are_flat`
+hold only the bench's own failing checks and the two arms whose array lengths
+are fixed, as the check at 954ca59bb listed them.
 
 **Cost.** No served route and no store file changes. The bench's timed path
 makes the same requests and does the same work per page; only where the code
