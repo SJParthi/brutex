@@ -87708,7 +87708,7 @@ the owners of those modules).
 sentence citing the commit to say it "is in neither `main`'s history nor this"
 branch, and the sentence here stands in a row Decision 1 keeps byte for byte, so
 that listing fails with the words "by a sentence that does not say" (run on 1 Nov
-2026, `state/fix/round2/logs-STACK1028/repair2/proof-neither.log`). It would also
+2026, `state/fix/round2/logs-STACK1028/repair2b/proof-neither.log`). It would also
 not say what is true: the commit is the compiler repository's, and no history of
 this one can hold it. The new reason's words are the whole print in backticks, so
 it exempts that one quotation of that one nightly and nothing else; another pin

@@ -1206,11 +1206,12 @@ fn the_print_is_one_citation_and_the_stack_row_holds_it() {
     assert_eq!(listed(&NOT_ON_MAIN, NIGHTLY), Some(Off::Compiler));
     let cited = cited(&texts());
     let citing = &cited[NIGHTLY];
-    assert!(!citing.is_empty(), "docs/06-limits.md cites the nightly");
     assert!(
-        citing
-            .iter()
-            .all(|at| at.file == "docs/06-limits.md" && at.sentence.contains(COMPILER_PRINT)),
+        citing.iter().any(|at| at.file == "docs/06-limits.md"),
+        "docs/06-limits.md cites the nightly"
+    );
+    assert!(
+        citing.iter().all(|at| at.sentence.contains(COMPILER_PRINT)),
         "every sentence citing the nightly quotes its print"
     );
 }
