@@ -3,7 +3,7 @@
 // below compares a hundredfold on purpose: nothing a scheduler does brings it under the bound.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costOnce, costsInTurn, minimaInTurn, untilTicks } from './in-turn.js';
+import { costOnce, costsInTurn, minimaInTurn, said, untilTicks } from './in-turn.js';
 
 /** @param {Array<[number, number]>} figures */
 const replay = (figures) => (/** @type {number} */ round) => figures[Math.min(round, figures.length - 1)];
@@ -52,6 +52,10 @@ test('a greater-than holds the same way: the crowded side stays dearer than the 
   // The first reads upside down, as a stalled spread side would; the rounds go on until the minima say what is so.
   const answer = minimaInTurn(replay([[500, 900], [500, 900], [500, 900], [500, 900], [500, 20]]), dearer);
   assert.deepEqual(answer, { held: true, first: 500, second: 20, rounds: 5 });
+});
+
+test('what a measure read is said with both minima, the ratio and the rounds', () => {
+  assert.equal(said('a probe', { held: true, first: 30, second: 20, rounds: 5 }), 'a probe: 30.0 ns against 20.0 ns, 1.50x, the minimum of each side over 5 rounds in turn');
 });
 
 test('costOnce warms once, then times exactly the reps it was asked for', () => {

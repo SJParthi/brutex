@@ -1250,6 +1250,12 @@ export async function openTab(cdp, context, options = {}) {
  * figures are not figures of the page. Before, `/stall` (headers and part of
  * a body, never the end) held a run for 9 min 49 s with nothing printed.
  *
+ * `waited` is the milliseconds from the load event to the end of the paint
+ * wait: the settle and the two page-side waits this process bounds with its
+ * own timers. The command answers either side of it are the renderer's, and a
+ * hidden tab's renderer on a loaded machine can take 26 s over one
+ * (BASE-REDS-1023 repair 6), so this is what a bound on the waits reads.
+ *
  * @param {Awaited<ReturnType<typeof openTab>>} tab
  * @param {Cdp} cdp
  * @param {string} url
@@ -1274,7 +1280,7 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
     // What the tab is still loading is stopped; the caller closes the tab.
     await cdp.send('Page.stopLoading', {}, tab.sessionId).catch(() => undefined);
     const seen = tab.seen();
-    return { ended: false, why, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
+    return { ended: false, why, waited: 0, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
   };
   let ended;
   try {
@@ -1290,10 +1296,13 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   let settled;
   let h;
   let heap;
+  const loadedAt = Date.now();
+  let waited = 0;
   try {
     settled = await tab.settle(settleMs);
     // At most PAINT_WAIT_MS by the page's clock, and FRAME_SLACK_MS more by this one (D-5915 item 9).
     await tab.within(AWAIT_PAINT, PAINT_WAIT_MS);
+    waited = Date.now() - loadedAt;
     h = await tab.evaluate(READ_FIGURES);
     heap = await cdp.send('Runtime.getHeapUsage', {}, tab.sessionId);
   } catch (why) {
@@ -1305,6 +1314,7 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   return {
     ended: true,
     why: '',
+    waited,
     fcp: typeof h.fcp === 'number' ? h.fcp : null,
     longest: Number(h.longest),
     heap: Number(heap.usedSize),

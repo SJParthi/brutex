@@ -71,6 +71,16 @@ export function minimaInTurn(sample, holds, { atLeast = 5, atMost = 120 } = {}) 
 }
 
 /**
+ * What a measure read, for `t.diagnostic`, so a green run still says its figures.
+ *
+ * @param {string} what
+ * @param {{held: boolean, first: number, second: number, rounds: number}} measure
+ * @returns {string}
+ */
+export const said = (what, { first, second, rounds }) =>
+  `${what}: ${first.toFixed(1)} ns against ${second.toFixed(1)} ns, ${(first / second).toFixed(2)}x, the minimum of each side over ${rounds} rounds in turn`;
+
+/**
  * `minimaInTurn` over two operations timed by `costOnce`, `reps` calls a sample.
  *
  * @param {number} reps

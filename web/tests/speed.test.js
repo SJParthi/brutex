@@ -3084,23 +3084,29 @@ test('the two frames a settle waits for are bounded: a hidden tab draws none, is
     for (const t of tabs) states.push(await t.evaluate('document.visibilityState'));
     assert.ok(states.includes('hidden') && states.at(-1) === 'visible', `a window draws its newest tab: ${states.join(', ')}`);
     for (const [i, t] of tabs.entries()) {
+      // The visible tab draws: 500 ms is what a hidden tab is held to, and a drawing tab on a loaded machine is given more.
+      const frameMs = states[i] === 'visible' ? 10_000 : 500;
       const t0 = performance.now();
-      assert.equal(await t.settle(50, 1_000, 500), true);
+      assert.equal(await t.settle(50, 1_000, frameMs), true);
       const took = performance.now() - t0;
       assert.equal(t.frames.drew, states[i] === 'visible', `tab ${i} (${states[i]}): drew ${t.frames.drew}`);
-      assert.ok(took < 1_000 + 500 + harness.FRAME_SLACK_MS + 1_000, `tab ${i} (${states[i]}) settled in ${took.toFixed(0)} ms`);
+      assert.ok(took < 1_000 + frameMs + harness.FRAME_SLACK_MS + 1_000, `tab ${i} (${states[i]}) settled in ${took.toFixed(0)} ms`);
     }
     // A page-side wait is bounded here too: one the page never answers is late after its time and the slack.
     const hiddenTab = tabs[states.indexOf('hidden')];
     const t2 = performance.now();
     assert.deepEqual(await hiddenTab.within('new Promise(() => {})', 100), { value: undefined, late: true });
     assert.ok(performance.now() - t2 < 100 + harness.FRAME_SLACK_MS + 1_000, 'never answered: late after the bound');
-    assert.deepEqual(await tabs[2].within('Promise.resolve(1 + 1)', 100), { value: 2, late: false });
+    assert.deepEqual(await tabs[2].within('Promise.resolve(1 + 1)', 10_000), { value: 2, late: false });
     // A load in a hidden tab says it drew no frame, and is judged so by name; its paint and frame waits are each bounded.
+    // THE WAITS ARE WHAT IS BOUNDED, SO THE WAITS ARE WHAT IS READ (BASE-REDS-1023 repair 6): the bound read the whole
+    // load, and at load 100-150 a hidden tab's renderer, starved at its background priority, took 26 s to answer the
+    // commands after the waits ('within 20000 ms: 32033 ms', phases load 12, settle 3069, paint 6069, heap 32032 ms).
+    // The bound is unchanged. A wait with no bound never ends, here as before.
     const t1 = performance.now();
     const hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
     const bound = 2 * (harness.FRAME_WAIT_MS + harness.FRAME_SLACK_MS) + 14_000;
-    assert.ok(performance.now() - t1 < bound, `a load in a hidden tab ends within ${bound} ms: ${(performance.now() - t1).toFixed(0)} ms`);
+    assert.ok(hidden.waited < bound, `a load in a hidden tab waits within ${bound} ms: ${hidden.waited} ms of its ${(performance.now() - t1).toFixed(0)} ms`);
     assert.equal(hidden.ended, true);
     assert.equal(hidden.drew, false);
     assert.ok(harness.judge('/x', 'cold', [hidden]).failures.includes('/x cold: 1 of 1 loads drew no frame within 2000 ms of settling (a hidden tab draws none), so they are not settled loads'));
@@ -3410,6 +3416,7 @@ test('a load whose navigation the browser does not answer, or whose page stops a
   stuck.tab.doc.status = 200;
   const b = await harness.loadOnce(stuck.tab, stuck.cdp, 'http://h:1/x', 10, 5_000);
   assert.equal(b.ended, false);
+  assert.equal(b.waited, 0, 'a load that did not end has no waits to report');
   assert.match(b.why, /^the page stopped answering \d+ ms after its load began: the browser did not answer Runtime\.evaluate within 3000 ms$/);
   const broken = loadedThen(async () => { throw new TypeError('not a timeout'); });
   await assert.rejects(harness.loadOnce(broken.tab, broken.cdp, 'http://h:1/x', 10, 5_000), /^TypeError: not a timeout$/);
@@ -3418,6 +3425,14 @@ test('a load whose navigation the browser does not answer, or whose page stops a
   fine.tab.frames.drew = true;
   const c = await harness.loadOnce(fine.tab, fine.cdp, 'http://h:1/x', 10, 5_000);
   assert.deepEqual([c.ended, c.why, c.fcp, c.drew, c.wire], [true, '', 1, true, 7]);
+  // `waited` holds the settle and the paint wait, and only them: a command answered late after them is not in it.
+  const slow = loadedThen(async () => { await new Promise((done) => setTimeout(done, 30)); return true; });
+  const lateAnswer = slow.tab.evaluate;
+  slow.tab.evaluate = async () => { await new Promise((done) => setTimeout(done, 200)); return lateAnswer(); };
+  const t = performance.now();
+  const d = await harness.loadOnce(slow.tab, slow.cdp, 'http://h:1/x', 10, 5_000);
+  const all = performance.now() - t;
+  assert.ok(d.waited >= 29 && d.waited < all - 150, `${d.waited} ms of the waits in a load of ${all.toFixed(0)} ms`);
 });
 
 test('a sort edge the server does not answer is NOT MEASURED by name, within the load bound', { timeout: 120_000 }, async () => {

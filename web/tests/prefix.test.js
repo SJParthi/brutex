@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { build, probe, MAX_PREFIX } from '../src/lib/prefix.js';
-import { costsInTurn } from './in-turn.js';
+import { costsInTurn, said } from './in-turn.js';
 
 /**
  * A catalogue of `n` distinct symbols, shaped like the master's rows.
@@ -97,7 +97,7 @@ test('a symbol shorter than the prefix bound is still indexed to its own length'
  */
 const under3x = (/** @type {number} */ large, /** @type {number} */ small) => large / small < 3;
 
-test('a keystroke costs the same at 800 instruments and at 80,000', () => {
+test('a keystroke costs the same at 800 instruments and at 80,000', (t) => {
   // 800 is the bound `index.svelte.js` names; 100× it is the headroom. The
   // ceiling is 3.0×, the same one `crates/*/benches/ratio.rs` uses, and for the
   // same reason: below that a wall-clock ratio on a shared machine is noise.
@@ -118,6 +118,7 @@ test('a keystroke costs the same at 800 instruments and at 80,000', () => {
   assert.equal(probe(ixS, small, 'a'), ixS.get('A'));
 
   const m = costsInTurn(20_000, () => probe(ixL, large, 'A'), () => probe(ixS, small, 'A'), under3x);
+  t.diagnostic(said('a one-letter probe at 80,000 against 800', m));
 
   assert.ok(
     m.held,
@@ -126,7 +127,7 @@ test('a keystroke costs the same at 800 instruments and at 80,000', () => {
   );
 });
 
-test('the one place cost is NOT constant is named, and it is bounded by a bucket', () => {
+test('the one place cost is NOT constant is named, and it is bounded by a bucket', (t) => {
   // Beyond four characters `probe` filters the four-character bucket. The
   // module says so. This pins that the cost tracks the BUCKET and not the
   // catalogue: a hundredfold catalogue whose `ABCD` bucket stays the same size
@@ -149,6 +150,7 @@ test('the one place cost is NOT constant is named, and it is bounded by a bucket
   assert.deepEqual(probe(ixL, large, 'ABCD1'), probe(ixS, small, 'ABCD1'));
 
   const m = costsInTurn(2_000, () => probe(ixL, large, 'ABCD1'), () => probe(ixS, small, 'ABCD1'), under3x);
+  t.diagnostic(said('a five-letter filter at 40,400 rows against 400', m));
   assert.ok(
     m.held,
     `the long-query filter grew ${(m.first / m.second).toFixed(2)}× for a 100× catalogue with the ` +
