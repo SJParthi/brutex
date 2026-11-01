@@ -551,116 +551,66 @@ fn a_refused_paged_sample_answers_status_0_with_its_sentence() {
     }
 }
 
-/// Every way an answer can be, or not be, the full one a target wants. Two
-/// extremes at once: a building answer with the wanted status and needle
-/// (only its sign of building is wrong), and an answer wrong in every way.
+/// Whether an answer is the full one the paged target wants: `200`, holding
+/// a `total`.
+fn in_full_for_a_page(status: u16, head: &str, text: &str) -> bool {
+    paged::answered_in_full(status, head, text, 200, "\"total\":")
+}
+
+/// An answer with what its target wants is in full, whatever that is: a
+/// `304` wants no body at all, the refusal case wants a refusal, and the word
+/// building without its quotes is a word, not a sign.
+#[test]
+fn an_answer_with_what_its_target_wants_is_in_full() {
+    assert!(in_full_for_a_page(200, "", "{\"total\":1}"));
+    assert!(in_full_for_a_page(200, "", "a building, \"total\":1"));
+    assert!(paged::answered_in_full(304, "etag: x", "", 304, ""));
+    assert!(paged::answered_in_full(
+        400,
+        "",
+        "too_many_rows",
+        400,
+        "too_many_rows"
+    ));
+}
+
+/// Every way an answer is not the full one. Two extremes at once: an answer
+/// wrong in every way, and one with its status and needle just right whose
+/// only fault is its sign of building.
 #[test]
 fn an_answer_is_in_full_only_with_its_status_its_needle_and_no_sign_of_building() {
-    let total = "\"total\":";
-    let cases: [(&str, u16, &str, &str, u16, &str, bool); 11] = [
+    let cases = [
+        ("a refused paged sample", 0, "", "answered 400"),
+        ("the wrong status", 500, "", "{\"total\":1}"),
+        ("no needle", 200, "", "{\"other\":1}"),
         (
-            "the plain full answer",
+            "building, in its body",
             200,
             "",
-            "{\"total\":1}",
-            200,
-            total,
-            true,
+            "{\"building\":1,\"total\":1}",
         ),
         (
-            "a 304 wants an empty body",
-            304,
-            "etag: x",
-            "",
-            304,
-            "",
-            true,
-        ),
-        (
-            "a wanted refusal",
-            400,
-            "",
-            "too_many_rows",
-            400,
-            "too_many_rows",
-            true,
-        ),
-        (
-            "the word without its quotes",
-            200,
-            "",
-            "a building, \"total\":1",
-            200,
-            total,
-            true,
-        ),
-        (
-            "a refused paged sample",
-            0,
-            "",
-            "answered 400",
-            200,
-            total,
-            false,
-        ),
-        (
-            "the wrong status",
-            500,
-            "",
-            "{\"total\":1}",
-            200,
-            total,
-            false,
-        ),
-        ("no needle", 200, "", "{\"other\":1}", 200, total, false),
-        (
-            "still building, in its body",
-            200,
-            "",
-            "{\"building\":true,\"total\":1}",
-            200,
-            total,
-            false,
-        ),
-        (
-            "still building, in its head",
+            "building, in its head",
             200,
             "retry-after: 1",
             "{\"total\":1}",
-            200,
-            total,
-            false,
         ),
-        (
-            "building, all else right",
-            503,
-            "retry-after: 1",
-            "\"building\"",
-            503,
-            "\"building\"",
-            false,
-        ),
-        (
-            "wrong in every way",
-            0,
-            "retry-after: 9",
-            "\"building\"",
-            200,
-            total,
-            false,
-        ),
+        ("wrong in every way", 0, "retry-after: 9", "\"building\""),
     ];
-    for (what, status, head, text, wanted, needle, full) in cases {
-        assert_eq!(
-            paged::answered_in_full(status, head, text, wanted, needle),
-            full,
-            "{what}"
-        );
+    for (what, status, head, text) in cases {
+        assert!(!in_full_for_a_page(status, head, text), "{what}");
     }
+    assert!(!paged::answered_in_full(
+        503,
+        "retry-after: 1",
+        "\"building\"",
+        503,
+        "\"building\""
+    ));
 }
 
 /// A long patience that is never used.
-const NO_HURRY: std::time::Duration = std::time::Duration::from_secs(3_600);
+const NO_HURRY: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// A pause too short to slow a test.
 const A_MOMENT: std::time::Duration = std::time::Duration::from_millis(1);
