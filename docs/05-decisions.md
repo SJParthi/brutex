@@ -87544,12 +87544,10 @@ script, a test or the environment. `Batch` keeps `before` and `after` as
 `Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
 changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded
 straight into a box in a frame of its own (`decode_boxed`). After (the same
-build, on `c7c14b544` on 29 Oct and again on `c00b31a76` on 1 Nov, D-7412):
-those five frames are 36,144, 92,768, 28,992, 19,168 and 14,384 B on both,
-and the end-to-end test overflows a 704 KiB test thread and passes on 768 KiB
-(on `c00b31a76` it overflows 736 KiB as well), so its peak is over 736 KiB and
-at most 768 KiB, under the 2 MiB default at least 2.6 times; `Batch` and
-`Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
+build, this tip): those five frames are 36,144, 92,768, 28,992, 19,168 and
+14,384 B, and the end-to-end test overflows a 704 KiB test thread and passes on
+768 KiB, so its peak is over 704 KiB and at most 768 KiB, under the 2 MiB
+default 2.6 times; `Batch` and `Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
 admission changes: `encode` and `decode` are untouched apart from where the
 decoded cursor lives, and every existing round-trip and refusal test of the
 batch, the checkpoint, the reader and the end-to-end search passes unchanged.
@@ -87563,11 +87561,8 @@ family 10,488 B, observation-statistics 30,304, lineage 31,432, admission
 35,344, finalization 36,344, Population V5 37,296, Execution V3 38,696 B,
 measured with `size_of` in that build), and the test made two chains with every
 move, `Result` and `?` a slot of its own. The test now builds each chain value
-through a small `boxed` helper and holds boxes: its frame was 611,584 B on
-`c7c14b544`, and on `c00b31a76`, after repair 1 bound each fallible call's
-`Result` before its `?` (D-7411), it is 690,096 B; there its body overflows a
-1472 KiB thread and passes on 1536 KiB, so the default 2 MiB test thread holds
-its peak at least 1.33 times (docs/06-limits.md L-STACK1028-06, D-7412). Production types are unchanged here (their
+through a small `boxed` helper and holds boxes: its frame is 611,584 B and it
+passes on the default test thread. Production types are unchanged here (their
 inline retention is the D-0648 shape; boxing them is a wider change left for
 the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
 
@@ -87598,8 +87593,8 @@ only stack size a test states is the rule: an explicit raise stays forbidden
 
 **Cost.** One heap allocation per cursor a batch or frame keeps (one per batch
 prepared or decoded, one per frame), against tens of 13 KiB stack copies per
-call at opt-level 0. O(1) per operation is unchanged. D-7411 and D-7412
-record this part's repairs; D-7413 to D-7419 are unused.
+call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
+unused.
 
 ### D-7411 — BASE-STACK-1028 repair 1: the two test bodies this part changed hold no line a passing run cannot execute; a fallible call that spans lines binds its `Result` and takes `?` in a statement of its own — 2026-10-31
 
@@ -87631,46 +87626,94 @@ stale-source attack asserts the exact refusal (it starts with
 the per-status counts are four comparisons in the receipt's order plus a check
 that they sum to the row count, which still fails if a fifth status appears.
 No production code changes, and no fixture byte, receipt or refusal changes.
-This entry takes D-7411; D-7412 records repair 2.
+This entry takes D-7411; D-7412 to D-7419 stay unused.
 
-### D-7412 — BASE-STACK-1028 repair 2: every stack figure of this part names the commit it was measured on; the Step 3 test's frame and peak are measured again after repair 1 and its margin is stated — 2026-11-01
+### D-7412 — BASE-STACK-1028 repair 2: each correction of this part's figures is a new row that names what it corrects, the rows at the data parts' cut point stay byte for byte; the Step 3 test's frame and peak are measured again after repair 1; the nightly's commit is listed as the compiler's — 2026-11-01
 
-**Context.** The second agent's check of `c00b31a76`
-(`state/fix/round2/verify-BASE-STACK-1028-r2.json`) found the Step 3
-success-path test's frame stated as 611,584 B in D-7410, docs/04-invariants.md
-STACK1028-05 and docs/06-limits.md L-STACK1028-04, while at that commit it is
-690,096 B: repair 1 (D-7411) bound each fallible call's `Result` before its
-`?`, which gives the test more stack slots at opt-level 0, and the frame was
-not measured again. The same rows gave no peak or margin for that test, and
-two rows cited "the full Route B run of `cli` on this tip" for runs taken on
-earlier commits.
+**Context.** Three findings of the second agent's check of `c00b31a76`
+(`state/fix/round2/verify-BASE-STACK-1028-r2.json`) and of the independent
+levers check (`state/post-landing-20261101/check-levers-r2.md`, its B5):
 
-**Decision.** Measured again, and every figure names its commit. On
-`c00b31a76`, in a scratch build of that commit with the Route B flags whose only
-additions were two ignored probe tests that run a test body on a thread of a
-stated size (never committed; `state/fix/round2/logs-STACK1028/repair2/`), the
-prologues read with the nightly's `llvm-objdump` give the Step 3 test 690,096 B
-and the five native-search frames of D-7410 unchanged. The Step 3 body overflows 1280, 1344,
+- The Step 3 success-path test's frame was stated as 611,584 B in D-7410,
+  docs/04-invariants.md STACK1028-05 and docs/06-limits.md L-STACK1028-04,
+  while at `c00b31a76` it is 690,096 B: repair 1 (D-7411) bound each fallible
+  call's `Result` before its `?`, which gives the test more stack slots at
+  opt-level 0, and the frame was not measured again. The same rows gave no peak
+  or margin for that test, and two rows cited "the full Route B run of `cli` on
+  this tip" for runs taken on earlier commits.
+- An earlier attempt of this repair, `1f5a8d5f8`, corrected those figures by
+  rewriting the rows. They sit at `bcac15e2c`, the commit the data parts and
+  FNO-SEAM were cut from and append right after, and the five ledgers are
+  append-only (`state/decisions-20261027/d1-landing.txt`), so the family's
+  landing tool refuses docs/05 and docs/06 for every one of them as "not an
+  append".
+- `crates/store/tests/cited_commits.rs` has been red since `bcac15e2c`.
+  docs/06-limits.md's section preamble names the coverage nightly as `rustc -V`
+  prints it, `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, and the test reads
+  that word as a commit of this repository, on no branch and listed nowhere.
+
+**Decision 1: a correction is a new row.** D-7410, STACK1028-01 to -07, and
+docs/06's section preamble with L-STACK1028-01 to -05 are byte for byte what
+`bcac15e2c` holds, and D-7411 what `c00b31a76` holds:
+`git diff bcac15e2c <tip> -- docs/04-invariants.md docs/05-decisions.md
+docs/06-limits.md` shows additions only. So some of those rows still say what
+they said; where one disagrees with a newer row, the newer row wins, and it
+names the row it corrects (L-STACK1028-06 to -10, STACK1028-08 and -09).
+`crates/cli/tests/stack_rows_kept.rs` reads the rows against that commit, by
+lines and in order, so a rewrite fails in every plain `cargo test -p cli` and
+never again waits for the family's landing to find it; it fails on `1f5a8d5f8`.
+
+**Decision 2: the figures, measured again.** On `c00b31a76`, in a scratch build
+of that commit with the Route B flags whose only additions were ignored probe
+tests and an override that run a test body on a thread of a stated size, never
+committed (`state/fix/round2/logs-STACK1028/repair2/`), the prologues read with
+the nightly's `llvm-objdump` give the Step 3 test 690,096 B and the five
+native-search frames of D-7410 unchanged. The Step 3 body overflows 1280, 1344,
 1408 and 1472 KiB threads, each time naming its thread, and passes on 1536 KiB,
 so its peak is over 1472 KiB and at most 1536 KiB and the default 2 MiB test
-thread holds it at least 1.33 times (docs/06-limits.md L-STACK1028-06). The
-end-to-end native search overflows 704 and 736 KiB and passes on 768 KiB.
-The batch and checkpoint peaks of D-7410 were swept by the builder on
-`fa43b2e86`, before later commits changed those tests; docs/06-limits.md
-L-STACK1028-02 now says so and marks them UNVERIFIED after it, beside the
-bound that holds on `c00b31a76` (every bounded test passes on its 448 KiB or
-384 KiB threads in the instrumented build). The Route B citations name the
-commits those full `cli` runs were taken on, `3f30357e4df4`, `29d3f566ab8b`
-and `bcac15e2c4d9`; none ended a test process by a signal.
+thread holds it at least 1.33 times (L-STACK1028-06). The end-to-end native
+search overflows 704 and 736 KiB and passes on 768 KiB (L-STACK1028-07). The
+batch and checkpoint peaks measure the same as D-7410's (L-STACK1028-08). No
+`crates/cli` source changes after `c00b31a76`, this part's new test file apart,
+so these hold on every later tip of this part; its D3 step reads the frames
+again from its own build.
 
-**Why the Step 3 test keeps the default thread.** D-7410 lets a test state
-only a stack smaller than the default, and any such bound would sit closer to
-this peak than the default does. The headroom is already under 576 KiB, a chain
-that gains a Committed* value uses it up sooner, and an overflow aborts the
-whole instrumented `cli` run, so no `cli` file of any part could be read: the
-failure this part exists to remove. The margin is stated instead, beside what
-would widen it: the production chain values are still held inline
-(docs/06-limits.md L-STACK1028-04, for the owners of those modules).
+**The commits those rows speak of.** docs/04 and docs/06 are read whole by the
+citation test, and a commit of this branch named there is a new citation that a
+fold of the branch would leave unresolved, so the new rows say "repair 1's tip"
+and this entry, which that test does not read, names each:
 
-**Cost.** Documents only: no code, test or fixture changes. This entry takes
-D-7412; D-7413 to D-7419 stay unused.
+| The rows' words | Commit | Where |
+|---|---|---|
+| the part's base, "before" | `f01d7a0e4` | D-7410 |
+| the builder's earlier commit, the batch and checkpoint sweep | `fa43b2e86` | `scratch/stack1028-sweep-after`, 29 Oct 11:23 to 11:27 IST |
+| the builder's measuring commit: "after" frames, 704 and 768 KiB, 611,584 B | `c7c14b544` | `scratch/stack1028-sweep-final`, 29 Oct 15:46 to 15:47 IST |
+| the commit that made `inflate` a leaf, the release figures | `6ef8b8638` | `crates/cli/build_provenance.rs`; only tests were added to it since |
+| repair 1's tip | `c00b31a76` | `state/fix/round2/logs-STACK1028/repair2/` (`frames-c00b31a76.txt`, `sweep2/`, `sweep3/`) |
+| the three full Route B runs of `cli`, 2,501 tests | `3f30357e4df4` | `state/fix/round2/logs-STACK1028/routeb-3f30357e4df4.log`, EXIT 0 |
+| 2,506 tests | `29d3f566ab8b` | `state/fix/round2/logs-STACK1028/routeb-29d3f566ab8b.log`, EXIT 3 only because `crates/cli/build_provenance.rs` is mounted by a `#[path]` the script's plain path does not name |
+| 2,507 tests | `bcac15e2c4d9` | `scratch/deep-BASE-STACK-1028-logs/route-b-2.log`, EXIT 3 for the same reason |
+
+**Why the Step 3 test keeps the default thread.** D-7410 lets a test state only
+a stack smaller than the default, and any such bound would sit closer to this
+peak than the default does. The headroom is already under 576 KiB, a chain that
+gains a Committed* value uses it up sooner, and an overflow aborts the whole
+instrumented `cli` run, so no `cli` file of any part could be read: the failure
+this part exists to remove. The margin is stated instead, beside what would
+widen it: the production chain values are still held inline (L-STACK1028-04, for
+the owners of those modules).
+
+**Decision 3: the compiler's commit has a reason of its own.** `1a98b1e13` is in
+`NOT_ON_MAIN` as `Off::Compiler`, not `Off::Neither`. `Off::Neither` asks every
+sentence citing the commit to say it "is in neither `main`'s history nor this"
+branch, and the sentence here stands in a row Decision 1 keeps byte for byte, so
+that listing fails with the words "by a sentence that does not say" (run on 1 Nov
+2026, `state/fix/round2/logs-STACK1028/repair2/proof-neither.log`). It would also
+not say what is true: the commit is the compiler repository's, and no history of
+this one can hold it. The new reason's words are the whole print in backticks, so
+it exempts that one quotation of that one nightly and nothing else; another pin
+is refused until it is listed. A commit this branch or `main` holds is refused
+under it exactly as under `Off::Neither`.
+
+**Cost.** Tests and documents only: no production code, fixture or report byte
+changes. This entry takes D-7412; D-7413 to D-7419 stay unused.

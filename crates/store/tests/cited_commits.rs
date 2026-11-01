@@ -68,6 +68,11 @@
 //!   append-only rule never edits, so it cannot be made to say so. Every
 //!   sentence citing it is one `main`'s copy of the same file holds, word for
 //!   word, so no new sentence can cite it and pass.
+//! - [`Off::Compiler`], a commit of the compiler's own repository, which no
+//!   history of this one can hold: the commit `rustc -V` prints for the nightly
+//!   the coverage route is pinned to. Every sentence citing it quotes that
+//!   print whole, in backticks, so the reason exempts the one quotation and
+//!   nothing else, and if it resolves, it is no ancestor of `HEAD` (D-7412).
 //!
 //! A listed commit that resolves must not be an ancestor of `main`, and each
 //! listed commit must still be cited. A commit that does not resolve, as this
@@ -112,7 +117,13 @@ enum Off {
     Squashed,
     /// Cited only by sentences `main` already held.
     MainsOwnText,
+    /// A commit of the compiler's repository, as `rustc -V` prints it.
+    Compiler,
 }
+
+/// What `rustc -V` prints for the nightly the coverage route is pinned to, as
+/// the sentences citing its commit quote it.
+const COMPILER_PRINT: &str = "`rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`";
 
 impl Off {
     /// The words every sentence citing such a commit uses, if any.
@@ -121,12 +132,18 @@ impl Off {
             Self::Neither => Some("is in neither `main`'s history nor this"),
             Self::Squashed => Some("`main`'s squash merge does not keep"),
             Self::MainsOwnText => None,
+            Self::Compiler => Some(COMPILER_PRINT),
         }
+    }
+
+    /// Whether the reason says no branch of this repository holds the commit.
+    const fn is_off_every_branch(self) -> bool {
+        matches!(self, Self::Neither | Self::Compiler)
     }
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 55] = [
+const NOT_ON_MAIN: [(&str, Off); 56] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -211,6 +228,11 @@ const NOT_ON_MAIN: [(&str, Off); 55] = [
     ("a8814e64", Off::MainsOwnText),
     ("eb95996", Off::MainsOwnText),
     ("f046b36", Off::MainsOwnText),
+    // BASE-STACK-1028's stack measurements in docs/06-limits.md name the
+    // coverage route's nightly as `rustc -V` prints it. That row stays as it
+    // was written, the ledger being append-only, so this reason's words are
+    // the print the row already holds (D-7412).
+    ("1a98b1e13", Off::Compiler),
 ];
 
 /// The history the texts are read against.
@@ -562,8 +584,16 @@ fn listed(listing: &[(&str, Off)], commit: &str) -> Option<Off> {
 /// commit is cited, and every sentence citing it says why it is not on
 /// `main`, where its reason has words.
 fn listing_faults(cited: &BTreeMap<String, Vec<Citing>>) -> Vec<String> {
+    listing_faults_in(cited, &NOT_ON_MAIN)
+}
+
+/// [`listing_faults`] over `listing`, so a fixture can name a listing of its own.
+fn listing_faults_in(
+    cited: &BTreeMap<String, Vec<Citing>>,
+    listing: &[(&str, Off)],
+) -> Vec<String> {
     let mut faults = Vec::new();
-    for (commit, off) in NOT_ON_MAIN {
+    for &(commit, off) in listing {
         let Some(citing) = cited.get(commit) else {
             faults.push(format!(
                 "{commit} is listed as {off:?}, and no text cites it"
@@ -610,13 +640,13 @@ fn history_faults_at(
         if is_ancestor_at(root, commit, main_ref) {
             faults.push(format!("{commit} is listed as {off:?}, and it is on main"));
         }
-        if off == Off::Neither && is_ancestor_at(root, commit, "HEAD") {
+        if off.is_off_every_branch() && is_ancestor_at(root, commit, "HEAD") {
             faults.push(format!(
                 "{commit} is listed as {off:?}, and it is an ancestor of HEAD"
             ));
         }
         let held_by_head = off == Off::Squashed && is_ancestor_at(root, commit, "HEAD");
-        if off == Off::Neither || held_by_head {
+        if off.is_off_every_branch() || held_by_head {
             continue;
         }
         for at in citing {
@@ -870,6 +900,319 @@ fn main_text_exemptions_require_the_whole_sentence_in_the_same_file() {
         }
     }
     std::fs::remove_dir_all(root).expect("fixture removed");
+}
+
+/// One synthetic history holding each kind of commit [`history_faults_at`]
+/// tells apart.
+struct Fixture {
+    root: PathBuf,
+    /// On `main`, and so an ancestor of `HEAD` as well.
+    on_main: String,
+    /// Held by `HEAD`'s branch alone.
+    on_head: String,
+    /// Held by another branch alone: it resolves, and is an ancestor of neither.
+    elsewhere: String,
+    /// The hash of a file on `main`: an object of this history, and no commit.
+    blob: String,
+}
+
+/// The fixture's [`COMMENTED`] file: one comment line and one code line.
+const FIXTURE_COMMENTED: &str = "//! A comment on main cites the commit.\n\
+                                 const SAID: &str = \"Code on main cites the commit.\";\n";
+
+/// A sentence no fixture's `main` holds.
+const NEW_SENTENCE: &str = "A sentence main's copy does not hold";
+
+/// The commit the texts cite that the compiler's repository holds.
+const NIGHTLY: &str = "1a98b1e13";
+
+/// Runs `body` over a fresh [`Fixture`], or says why it cannot. `program` is
+/// what stands for `git` in the question, so a machine with none is a case of
+/// its own rather than a branch no run reaches.
+fn with_history(program: &str, tag: &str, body: impl FnOnce(&Fixture)) {
+    if Command::new(program).arg("--version").output().is_err() {
+        println!("SKIPPING: {program} cannot run the synthetic history fixture");
+        return;
+    }
+    let root = scratch_root(tag);
+    fixture_git(&root, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(root.join("docs")).expect("fixture docs");
+    std::fs::create_dir_all(root.join("crates/store/tests")).expect("fixture tests");
+    std::fs::write(root.join("docs/06-limits.md"), "Limits on main.\n").expect("fixture limits");
+    std::fs::write(root.join(COMMENTED), FIXTURE_COMMENTED).expect("fixture comments");
+    fixture_git(&root, &["add", "."]);
+    fixture_git(&root, &["commit", "-m", "on main"]);
+    let on_main = fixture_git(&root, &["rev-parse", "HEAD"]);
+    let blob = fixture_git(&root, &["rev-parse", "HEAD:docs/06-limits.md"]);
+    fixture_git(&root, &["checkout", "-b", "elsewhere"]);
+    fixture_git(&root, &["commit", "--allow-empty", "-m", "another branch"]);
+    let elsewhere = fixture_git(&root, &["rev-parse", "HEAD"]);
+    fixture_git(&root, &["checkout", "-b", "change", "main"]);
+    fixture_git(&root, &["commit", "--allow-empty", "-m", "this branch"]);
+    let on_head = fixture_git(&root, &["rev-parse", "HEAD"]);
+    let fixture = Fixture {
+        root,
+        on_main,
+        on_head,
+        elsewhere,
+        blob,
+    };
+    body(&fixture);
+    std::fs::remove_dir_all(&fixture.root).expect("fixture removed");
+}
+
+/// What [`history_faults_at`] says of one new sentence citing `commit`.
+fn faults_of(fixture: &Fixture, commit: &str, listing: &[(&str, Off)]) -> Vec<String> {
+    history_faults_at(
+        &fixture.root,
+        "main",
+        &probe_citation(commit, NEW_SENTENCE),
+        listing,
+    )
+}
+
+/// **A MACHINE WITH NO `git` SAYS SO AND BUILDS NO FIXTURE.**
+#[test]
+fn a_fixture_on_a_machine_with_no_git_runs_nothing() {
+    let ran = std::cell::Cell::new(false);
+    with_history("a-program-no-machine-has", "no-git", |_| ran.set(true));
+    assert!(!ran.get(), "no history can be built without git");
+}
+
+/// **A CITATION NOBODY LISTS PASSES ONLY IF `main` HOLDS IT, AND ITS REFUSAL
+/// NAMES IT.**
+///
+/// The compiler's commit stood here unlisted from the day its row was written,
+/// and these are the words it was refused in. A blob's hash resolves as an
+/// object and names no commit, so it is refused the same way.
+#[test]
+fn a_citation_nobody_lists_passes_only_when_main_holds_it() {
+    with_history("git", "unlisted", |fixture| {
+        assert!(faults_of(fixture, &fixture.on_main, &[]).is_empty());
+        for commit in [
+            &*fixture.on_head,
+            &*fixture.elsewhere,
+            &*fixture.blob,
+            NIGHTLY,
+        ] {
+            assert_eq!(
+                faults_of(fixture, commit, &[]),
+                [format!(
+                    "{commit}, cited in {{\"a probe\"}}, is not an ancestor of main and \
+                     NOT_ON_MAIN does not list it"
+                )]
+            );
+        }
+    });
+}
+
+/// **A LISTED COMMIT `main` HOLDS IS REFUSED, WHATEVER THE REASON.** Under the
+/// two reasons that say no branch holds it, the same commit is also `HEAD`'s
+/// ancestor, so both faults come at once; a sentence `main` never held is a
+/// second way to be wrong under [`Off::MainsOwnText`].
+#[test]
+fn a_listed_commit_main_holds_is_refused_for_every_reason() {
+    with_history("git", "listed-on-main", |fixture| {
+        let commit = &*fixture.on_main;
+        for (off, more) in [
+            (Off::Neither, "and it is an ancestor of HEAD"),
+            (Off::Compiler, "and it is an ancestor of HEAD"),
+            (Off::MainsOwnText, "does not hold"),
+        ] {
+            let faults = faults_of(fixture, commit, &[(commit, off)]);
+            assert_eq!(faults.len(), 2, "{off:?}: {faults:#?}");
+            assert_eq!(
+                faults[0],
+                format!("{commit} is listed as {off:?}, and it is on main")
+            );
+            assert!(faults[1].contains(more), "{off:?}: {faults:#?}");
+        }
+        assert_eq!(
+            faults_of(fixture, commit, &[(commit, Off::Squashed)]),
+            [format!("{commit} is listed as Squashed, and it is on main")]
+        );
+    });
+}
+
+/// **A COMMIT NO BRANCH HOLDS MAY NOT BE ONE THIS BRANCH HOLDS, AND NOTHING ELSE
+/// IS ASKED OF IT.** It may resolve on another branch, be an object that is no
+/// commit, or not resolve at all, and `main` need hold no sentence citing it.
+#[test]
+fn a_commit_off_every_branch_may_not_be_one_this_branch_holds() {
+    with_history("git", "off-every-branch", |fixture| {
+        for off in [Off::Neither, Off::Compiler] {
+            let held = &*fixture.on_head;
+            assert_eq!(
+                faults_of(fixture, held, &[(held, off)]),
+                [format!(
+                    "{held} is listed as {off:?}, and it is an ancestor of HEAD"
+                )]
+            );
+            for commit in [&*fixture.elsewhere, &*fixture.blob, NIGHTLY] {
+                let faults = faults_of(fixture, commit, &[(commit, off)]);
+                assert!(faults.is_empty(), "{off:?}: {faults:#?}");
+            }
+        }
+    });
+}
+
+/// **THE COMMENTED FILE IS COMPARED BY ITS COMMENT LINES ALONE.** A sentence in
+/// a code line of `main`'s copy is one no comment holds, and two sentences of
+/// one file share one read of `main`'s copy.
+#[test]
+fn the_commented_file_is_compared_by_its_comment_lines_alone() {
+    with_history("git", "commented", |fixture| {
+        let commit = "abcdef0123456789abcdef0123456789abcdef0123";
+        let citing = |sentence: &str| Citing {
+            name: "the comments".to_owned(),
+            file: COMMENTED,
+            sentence: sentence.to_owned(),
+        };
+        let cited = BTreeMap::from([(
+            commit.to_owned(),
+            vec![
+                citing("A comment on main cites the commit"),
+                citing("Code on main cites the commit"),
+            ],
+        )]);
+        let faults = history_faults_at(
+            &fixture.root,
+            "main",
+            &cited,
+            &[(commit, Off::MainsOwnText)],
+        );
+        assert_eq!(faults.len(), 1, "{faults:#?}");
+        assert!(
+            faults[0].ends_with("Code on main cites the commit"),
+            "{faults:#?}"
+        );
+    });
+}
+
+/// **EVERY REASON AT ONCE, AND ONLY THE WRONG CITATION NAMED.** One map holds a
+/// citation `main` has, a squashed one `HEAD` holds, one for each reason no
+/// branch holds, and one nobody listed.
+#[test]
+fn every_reason_at_once_names_only_the_wrong_citation() {
+    with_history("git", "every-reason", |fixture| {
+        let mut cited = probe_citation(&fixture.on_main, NEW_SENTENCE);
+        for commit in [
+            &*fixture.on_head,
+            &*fixture.elsewhere,
+            &*fixture.blob,
+            NIGHTLY,
+        ] {
+            cited.extend(probe_citation(commit, NEW_SENTENCE));
+        }
+        let listing = [
+            (&*fixture.on_head, Off::Squashed),
+            (&*fixture.elsewhere, Off::Compiler),
+            (&*fixture.blob, Off::Neither),
+        ];
+        assert_eq!(
+            history_faults_at(&fixture.root, "main", &cited, &listing),
+            [format!(
+                "{NIGHTLY}, cited in {{\"a probe\"}}, is not an ancestor of main and \
+                 NOT_ON_MAIN does not list it"
+            )]
+        );
+    });
+}
+
+/// **A LISTED COMMIT NO TEXT CITES IS REFUSED, WHATEVER THE REASON.**
+#[test]
+fn a_listed_commit_no_text_cites_is_refused_for_every_reason() {
+    for off in [
+        Off::Neither,
+        Off::Squashed,
+        Off::MainsOwnText,
+        Off::Compiler,
+    ] {
+        assert_eq!(
+            listing_faults_in(&BTreeMap::new(), &[(NIGHTLY, off)]),
+            [format!(
+                "{NIGHTLY} is listed as {off:?}, and no text cites it"
+            )]
+        );
+    }
+}
+
+/// **EACH REASON ASKS ITS OWN WORDS OF EVERY SENTENCE CITING THE COMMIT.**
+///
+/// The row that cites the compiler's commit holds [`COMPILER_PRINT`] and not
+/// [`Off::Neither`]'s words, and the ledger never rewords it: that is why the
+/// compiler has a reason of its own. The bare hash, another nightly's print and
+/// the print out of its backticks are each refused under it.
+#[test]
+fn each_reason_asks_its_own_words_of_every_sentence_citing_the_commit() {
+    let faults_for = |off: Off, sentence: &str| {
+        listing_faults_in(&probe_citation(NIGHTLY, sentence), &[(NIGHTLY, off)])
+    };
+    let bare = "Measured with 1a98b1e13";
+    for (off, says) in [
+        (
+            Off::Neither,
+            "`1a98b1e13` is in neither `main`'s history nor this row's branch",
+        ),
+        (
+            Off::Squashed,
+            "`1a98b1e13` is one `main`'s squash merge does not keep",
+        ),
+        (
+            Off::Compiler,
+            "Built by `rustc 1.99.0-nightly (1a98b1e13 2026-08-07)`, at opt-level 0",
+        ),
+    ] {
+        assert!(faults_for(off, says).is_empty(), "{off:?}: {says}");
+        let faults = faults_for(off, bare);
+        assert_eq!(faults.len(), 1, "{off:?}: {faults:#?}");
+        assert!(faults[0].contains("does not say"), "{faults:#?}");
+    }
+    assert!(faults_for(Off::MainsOwnText, bare).is_empty());
+    for not_the_print in [
+        "Built by `rustc 1.99.0-nightly (1a98b1e13 2026-08-08)`",
+        "Built by `rustc 1.100.0-nightly (1a98b1e13 2026-08-07)`",
+        "Built by rustc 1.99.0-nightly (1a98b1e13 2026-08-07)",
+    ] {
+        assert_eq!(
+            faults_for(Off::Compiler, not_the_print).len(),
+            1,
+            "{not_the_print}"
+        );
+    }
+    assert_eq!(
+        faults_for(Off::Neither, COMPILER_PRINT).len(),
+        1,
+        "the print is not what Off::Neither asks for"
+    );
+    let two_sentences = BTreeMap::from([(
+        NIGHTLY.to_owned(),
+        [COMPILER_PRINT, bare]
+            .into_iter()
+            .flat_map(|sentence| probe_citation(NIGHTLY, sentence).into_values())
+            .flatten()
+            .collect(),
+    )]);
+    let faults = listing_faults_in(&two_sentences, &[(NIGHTLY, Off::Compiler)]);
+    assert_eq!(faults.len(), 1, "only the sentence without it: {faults:#?}");
+    assert!(faults[0].ends_with(bare), "{faults:#?}");
+}
+
+/// **THE PRINT IS READ AS ONE CITATION, AND THE ROW HOLDS IT.** Nothing else in
+/// the print is hash-shaped: not the version's numbers, not the date.
+#[test]
+fn the_print_is_one_citation_and_the_stack_row_holds_it() {
+    assert_eq!(citations(COMPILER_PRINT), [NIGHTLY]);
+    assert_eq!(listed(&NOT_ON_MAIN, NIGHTLY), Some(Off::Compiler));
+    let cited = cited(&texts());
+    let citing = &cited[NIGHTLY];
+    assert!(!citing.is_empty(), "docs/06-limits.md cites the nightly");
+    assert!(
+        citing
+            .iter()
+            .all(|at| at.file == "docs/06-limits.md" && at.sentence.contains(COMPILER_PRINT)),
+        "every sentence citing the nightly quotes its print"
+    );
 }
 
 /// D-0693's bracket sites: each module and the lines listed for it.
