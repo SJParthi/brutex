@@ -61,9 +61,13 @@
 //!
 //! The lock is an `RwLock`, so the read path — which is the one on every
 //! knob lookup — does not serialise the rungs against each other. It is never
-//! taken inside a loop over bars or candidates: every knob in this workspace is
-//! read once per rung or once per run, which is the granularity gate 17
-//! prescribes for anything that is not free.
+//! taken inside a loop over bars: a knob is read per rung or per run, which is
+//! the granularity gate 17 prescribes for anything that is not free, and in one
+//! place more often than that: `Rules::operator` reads ten knobs per call and the
+//! tier ladder asks for it per tier, 388,143 reads in one generated 12-session
+//! audit at a 50,000 ceiling, every one on the run's own thread (counted by a
+//! throwaway probe, BASE-REDS-1023 repair 6; this said "once per rung or once per
+//! run" until then; `docs/06-limits.md` L-BRED23-21).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
 //! times this, so the shape above is read from the source rather
@@ -379,22 +383,21 @@ pub(crate) fn serially() -> scope::Serially {
 /// # The race this closes, and why the readers needed nothing done to them
 ///
 /// `serially` serialised the tests that MOVE a knob, and no test that only READS
-/// one took it: a dynamic count of the crate's lib tests (BASE-REDS-1023 repair
-/// 6, 1 Nov 2026) found about 200 tests reading knobs with no guard, 696,136 reads
-/// in one run. So a knob another test set could move between two reads of one
-/// run. `the_audit_renders_every_stage_of_the_institutional_stack` ended `RESULT
+/// one took it: a count of the crate's lib tests by a throwaway probe in this
+/// module (BASE-REDS-1023 repair 6, 1 Nov 2026) found 68 tests reading knobs with
+/// no guard, 696,136 reads in one run. So a knob another test set could move
+/// between two reads of one run. `the_audit_renders_every_stage_of_the_institutional_stack` ended `RESULT
 /// NOT RECORDED: the final admitted long candidate could not reproduce its
 /// selected exit cell` in the full suite and passed alone, because
 /// `BRUTEX_MAX_STOP_POINTS` moved between its screen and its exact rebuild: a
 /// thread moving that knob every 3 ms ended 4 of 12 audits that way, no knob
 /// moving 0 of 4 (check r6).
 ///
-/// A guard in every reader would have serialised those tests against each other
-/// or needed a second lock that a reader holds across every lock the production
-/// path takes under it, and it would hold only for the readers someone
-/// remembered. So the cause is closed where it is: **a test's own thread that
-/// holds no guard sees no knob another test set**. It reads the store as the
-/// process starts it, empty, and blocks on nothing. Only test builds compile this.
+/// A guard in each of the 68 would have held only for the readers someone
+/// remembered, and made the next one a race again. So the cause is closed where
+/// it is: **a test's own thread that holds no guard sees no knob another test
+/// set**. It reads the store as the process starts it, empty, and blocks on
+/// nothing. Only test builds compile this.
 ///
 /// The same count found no read on any other thread, in guarded and unguarded
 /// tests alike, and no move by a thread that held no guard. Should a read move

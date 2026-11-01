@@ -84791,6 +84791,65 @@ an addendum to the entry it extends; nothing above is edited.
     goes with it (BRED-48). Chosen over a test of `probed` alone, which
     already existed and never reached the probe's own refusal.
 
+**Addenda, 1 Nov 2026 (BASE-REDS-1023 repair 6; check r6 of 1 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r6.json`, verdict fail on three
+items, each reproduced here first).** The block is still used, so each is
+an addendum to the entry it extends; nothing above is edited.
+
+13. **D-7152: a test's own thread with no guard sees no knob another test
+    set (check r6, blocking 1).** `knobs::serially` serialised the tests
+    that move a knob and no test that only reads one took it. A throwaway
+    probe in `knobs.rs` counted 68 of the 2,437 cli lib tests reading knobs
+    with no guard, 696,136 reads in one run, every one on the test's own
+    thread, and no move by a thread with no guard. A knob moving between
+    two reads of one run ended `the_audit_renders_every_stage_of_the_institutional_stack`
+    with `RESULT NOT RECORDED` (red once in gate Tests; 4 of 12 audits in
+    check r6's probe). Chosen: `knobs::scope`, compiled only in test builds:
+    a test's own thread (the harness names it by the test's path) that holds
+    no guard reads the store as empty, blocks on nothing, and has its `set`
+    and `clear_all` refused by name; any other thread sees the store while
+    the guard is held, which is what a holder's worker needs. Refused: a
+    guard in each of the 68 (check r6's own suggestion), which holds only for
+    the readers someone remembered, so the next new test is the same race,
+    and which serialises tests that have no reason to wait. A shared lock
+    each reader holds for its whole run was refused too: a run takes
+    production locks (`LEDGER`, the writer caches) as well, and a reader and
+    a mover taking such a pair in opposite orders would hang the suite, which
+    is worse than a red test. The residual, a worker of a test with no guard
+    while another test holds it, is L-BRED23-20; the count found none.
+14. **D-7152: a web test waits for an order and times a ratio's two sides
+    in turn (check r6, blocking 2 and 3).** Two of four whole `npm test`
+    runs on one tip were red, each by a different test: 'the long-query
+    filter grew 3.49x' (and 5.05x before) measured one side after the other,
+    so a stall landed on one side; and 'the watch asked 1 time(s) in 40 ms at
+    a 5 ms period', a sleep assuming how many periods fit in it. Reproduced
+    with no load: a preload reading a test's first ten clock reads at five
+    times their length turned `prefix.test.js` red three of three ('grew
+    5.47x', '4.70x', '5.76x'); test timers falling due at once turned
+    `store-watch.test.js` red. `web/tests/in-turn.js` holds both tools (BRED-51). Every
+    bound stands. A hundredfold walk still fails, and its test measures one
+    for real, through the same code.
+15. **D-7152: the class, looked for before the next check found it.** The
+    whole web suite ran with each test timer falling due at once, then with
+    a 30 ms stall before every timer callback: store-watch was the only wait
+    race among 1,810 tests (the squeezed run's six other reds are fixtures
+    whose delay is the behaviour under test). Then three whole suites at once
+    beside eight CPU hogs, twice, at load 103-234: prefix, find and
+    store-watch held, and one more test fell, a real browser's hidden tab:
+    'a load in a hidden tab ends within 20000 ms: 32033 ms', with phases
+    load 12, settle 3069, paint 6069, heap 32032 ms. The waits were 6 s; the
+    two commands after them took 26 s on a starved renderer, and once did not
+    answer in a command's whole 30 s, which the harness says by name. The
+    bound stands and now reads what it was written for (`waited`), and that
+    one named answer is asked again, twice at most (BRED-52). The paint-wait
+    test's clock bounds became counts of what the wait did. `head_deadline_body_tests`,
+    check r6's follow-up, made 16 MiB in its handlers under a 300 ms head
+    deadline, and slept 100 ms to assume two readers held their slots: both
+    gone (BRED-53). Other wall-clock bounds in Rust tests (69 sites by a
+    grep, most in seconds) are as they were: none has been seen red since
+    this package's earlier repairs, and a change to them with no red to
+    prove it would be guesswork.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store

@@ -1319,6 +1319,25 @@ confirmed by two skeptics; their corrections are applied.
   host's refusal of each of a run's two locks: each is refused by name and
   holds nothing after (BRED-48).
 
+- **BRED23-F44: a moved knob reached 68 tests that read knobs with no
+  guard** (check r6, gate Tests red once): `the_audit_renders_every_stage_of_the_institutional_stack`
+  ended `RESULT NOT RECORDED` in the full suite and passed alone. FIXED
+  (BASE-REDS-1023 repair 6, D-7152 addendum 13): `knobs::scope`, test builds
+  only; `another_tests_knob_never_reaches_a_test_that_holds_no_guard` fails
+  before it with no clock (BRED-49, BRED-50). The residual is L-BRED23-20.
+- **BRED23-F45: two of four whole web runs red on one tip, each by a timing
+  test** (check r6): `prefix.test.js` ('grew 3.49x', 5.05x before),
+  `find.test.js` of the same shape, `store-watch.test.js` ('asked 1 time(s)
+  in 40 ms'). FIXED (D-7152 addendum 14): `web/tests/in-turn.js`; each
+  reproduced with no load first (BRED-51).
+- **BRED23-F46: a hidden tab's load bound read a starved renderer** (this
+  repair's loaded runs, load 130-165: 'within 20000 ms: 32033 ms', and once a
+  command unanswered for 30 s). FIXED (D-7152 addendum 15): `waited` is what
+  the bound reads; the named answer is asked again, twice at most (BRED-52).
+- **BRED23-F47: `knobs.rs` said a knob is read once per rung or run; 388,143
+  lookups in one audit say otherwise** (this repair's probe). Stated, not
+  changed: the doc and L-BRED23-21 say what runs.
+
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
 One row, for the guard that went red, because it breaks a written rule (design
