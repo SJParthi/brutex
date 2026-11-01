@@ -466,11 +466,20 @@ pub(crate) mod scope {
 
     /// A test's own thread moves a knob only under the guard: `clear_all` is not
     /// scoped to a name, so one with no guard would take a holder's knobs away in
-    /// the middle of its run. Refused by name, every time, whatever else runs.
+    /// the middle of its run. Any other thread cannot be told from a holder's worker.
+    pub(super) fn may_move(holds_the_guard: bool, a_tests_thread: bool) -> bool {
+        holds_the_guard || !a_tests_thread
+    }
+
+    /// [`may_move`] for the calling thread, refused by name on every run, whatever
+    /// else runs.
     pub(super) fn assert_a_tests_thread_holds_the_guard() {
         let thread = std::thread::current();
         assert!(
-            HOLDS_THE_GUARD.with(Cell::get) || !is_a_tests_thread(thread.name()),
+            may_move(
+                HOLDS_THE_GUARD.with(Cell::get),
+                is_a_tests_thread(thread.name())
+            ),
             "{} moved a knob with no knobs::serially()",
             thread.name().unwrap_or_default()
         );
@@ -1022,6 +1031,18 @@ mod tests {
     fn the_guard_is_held_while_a_test_holds_it() {
         let _serial = serially();
         assert!(scope::guard_is_held());
+    }
+
+    /// Who may move a knob, on each side.
+    #[test]
+    fn each_side_of_who_may_move_a_knob() {
+        assert!(scope::may_move(true, true), "a test holding the guard");
+        assert!(scope::may_move(true, false), "any thread holding it");
+        assert!(!scope::may_move(false, true), "a test with no guard");
+        assert!(
+            scope::may_move(false, false),
+            "a thread that may be a holder's worker"
+        );
     }
 
     /// A test's own thread with no guard moves nothing: its `set` is refused by
