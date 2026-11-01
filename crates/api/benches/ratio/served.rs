@@ -351,26 +351,13 @@ pub(crate) fn lone_month(rows: usize) -> Served {
     let started = Instant::now();
     let (file, root) = super::month_file("lone", rows);
     drop(file);
-    if let Err(why) = std::fs::create_dir_all(root.join("manifest")) {
-        refuse(&format!("the lone month's census directory: {why}"));
-    }
-    let Ok(mut manifest) = Manifest::open(Vendor::Gdfl, &[], &[]) else {
-        refuse("a genesis census");
-    };
-    let last = super::second(rows.saturating_sub(1));
     let held = Entry {
         key: nifty(Segment::Index, None),
         rows: u64::try_from(rows).unwrap_or(u64::MAX),
         first_ts_micros: super::second(0),
-        last_ts_micros: last,
+        last_ts_micros: super::second(rows.saturating_sub(1)),
     };
-    if manifest.record(held).is_err() {
-        refuse("the lone month's census entry");
-    }
-    let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
-    if let Err(why) = std::fs::write(&path, manifest.image()) {
-        refuse(&format!("the lone month's census would not write: {why}"));
-    }
+    paged::or_stop(paged::write_census(&root, &[], [held]), refuse);
     let served = serve(rows, 0, root);
     println!(
         "  lone month: {rows} bars, no other series, built and loaded in {} ms",
@@ -538,35 +525,21 @@ fn sample(served: &mut Served, target: &Target) -> (Answer, Option<MonthRead>) {
     if !matches!(target.per, Per::Paged) {
         return (served.ask(&target.path, &target.extra), None);
     }
-    let mut first = None;
-    let read = paged::read_month(&target.path, |path| {
+    let sampled = paged::sample_month(&target.path, |path| {
         let answer = served.ask(path, &target.extra);
-        if first.is_none() {
-            first = Some(answer.body.chars().take(220).collect::<String>());
-        }
         Page {
             status: answer.status,
             body: answer.body,
         }
     });
-    match read {
-        Ok(read) => (
-            Answer {
-                status: 200,
-                head: String::new(),
-                body: first.unwrap_or_default(),
-            },
-            Some(read),
-        ),
-        Err(why) => (
-            Answer {
-                status: 0,
-                head: String::new(),
-                body: why,
-            },
-            None,
-        ),
-    }
+    (
+        Answer {
+            status: sampled.status,
+            head: String::new(),
+            body: sampled.body,
+        },
+        sampled.read,
+    )
 }
 
 /// The rows a paged read divides by: every row of the asked month, from its
@@ -609,47 +582,50 @@ fn spread(times: &mut [u128]) -> (u128, u128, u128) {
 /// Asks `target` until it answers in full, at most a minute; the first
 /// answer's time in µs, and what the gated figure is divided by.
 fn warmed(served: &mut Served, target: &Target) -> (u128, u128) {
-    let started = Instant::now();
-    let mut first = None;
-    loop {
-        let asked = Instant::now();
-        let (answer, read) = sample(served, target);
-        let took = asked.elapsed().as_micros();
-        let _ = first.get_or_insert(took);
-        let building = answer.body.contains("\"building\"") || answer.head.contains("retry-after");
-        if answer.status == target.status && !building && answer.body.contains(&target.needle) {
-            let per = match target.per {
-                Per::Request => 1,
-                Per::Row(row) => answer.body.matches(row).count(),
-                Per::MonthBar => served.bars,
-                Per::Paged => paged_rows(served, target, read.as_ref()),
-            };
-            if per == 0 {
-                refuse(&format!("{} answered no row to divide by", target.label));
-            }
-            if served.census == CENSUS_SIZES[0] {
-                // WHAT WAS TIMED, SHOWN: the answer's first bytes at 1x, so a
-                // reader sees a full answer and not a refusal wearing its
-                // status.
-                let shown: String = answer.body.chars().take(220).collect();
-                println!(
-                    "  {} answers {} ({} bytes): {shown}",
-                    target.label,
-                    answer.status,
-                    answer.body.len()
-                );
-            }
-            return (first.unwrap_or(took), u128::try_from(per).unwrap_or(1));
-        }
-        if started.elapsed() > Duration::from_mins(1) {
-            let shown: String = answer.body.chars().take(600).collect();
-            refuse(&format!(
-                "{} at {} bars answered {} without {:?} after a minute: {shown}",
-                target.label, served.bars, answer.status, target.needle
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    let waited = paged::until_in_full(
+        Duration::from_mins(1),
+        Duration::from_millis(50),
+        || sample(served, target),
+        |(answer, _)| {
+            paged::answered_in_full(
+                answer.status,
+                &answer.head,
+                &answer.body,
+                target.status,
+                &target.needle,
+            )
+        },
+    );
+    let (answer, read) = waited.last;
+    if !waited.in_full {
+        let shown: String = answer.body.chars().take(600).collect();
+        refuse(&format!(
+            "{} at {} bars answered {} without {:?} after a minute: {shown}",
+            target.label, served.bars, answer.status, target.needle
+        ));
     }
+    let per = match target.per {
+        Per::Request => 1,
+        Per::Row(row) => answer.body.matches(row).count(),
+        Per::MonthBar => served.bars,
+        Per::Paged => paged_rows(served, target, read.as_ref()),
+    };
+    if per == 0 {
+        refuse(&format!("{} answered no row to divide by", target.label));
+    }
+    if served.census == CENSUS_SIZES[0] {
+        // WHAT WAS TIMED, SHOWN: the answer's first bytes at 1x, so a
+        // reader sees a full answer and not a refusal wearing its
+        // status.
+        let shown: String = answer.body.chars().take(220).collect();
+        println!(
+            "  {} answers {} ({} bytes): {shown}",
+            target.label,
+            answer.status,
+            answer.body.len()
+        );
+    }
+    (waited.first_micros, u128::try_from(per).unwrap_or(1))
 }
 
 /// Times every target of a family at every size and gates each p50 ratio.

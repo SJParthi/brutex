@@ -36,9 +36,25 @@
 //! bounded: each page either ends the read, refuses, or advances the offset
 //! by exactly one full page toward a `total` that may not change.
 //!
+//! # What else lives here, and why (D-7401)
+//!
+//! A bench is `test = false`, so what only a bench calls is reached by no
+//! test, and a run of a healthy store never takes its failing or waiting
+//! paths. So the parts of the bench's read that decide something and are not
+//! its own timing live here, where a test can hand them any input: a sample
+//! that turns a refused read into an answer ([`sample_month`]), the wait for
+//! a route still building ([`until_in_full`], [`answered_in_full`]), and the
+//! one-month census set-up ([`write_census`], [`or_stop`]).
+//!
 //! Mounted by the bench (`benches/ratio.rs`) and by
 //! `crates/api/tests/bench_paged_month.rs`, which proves it against the
 //! production router; it names nothing from the bench, so both can mount it.
+
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use brutex_core::vendor::Vendor;
+use pull::manifest::{Entry, Manifest};
 
 /// The most rows one `/bars.json` answer serves (R3-08):
 /// `MAX_MONTH_ANSWER_ROWS` in `crates/api/src/bars_route.rs`, private to the
@@ -200,5 +216,136 @@ pub(crate) fn read_month(
                 read.rows
             ));
         }
+    }
+}
+
+/// How many characters of the first page a sample keeps, to show what was
+/// timed.
+const SHOWN_CHARS: usize = 220;
+
+/// One sample of a whole paged read, in the shape of one answer, so the
+/// bench checks it as it checks any other.
+pub(crate) struct Sampled {
+    /// `200` when the read took every row; `0` when it refused. No route
+    /// answers 0, so the bench's status check stops on it by name.
+    pub(crate) status: u16,
+    /// The first page's first [`SHOWN_CHARS`] characters, or the sentence
+    /// naming what the read refused.
+    pub(crate) body: String,
+    /// What the read took, when it took every row.
+    pub(crate) read: Option<MonthRead>,
+}
+
+/// Reads `query`'s whole window through `ask` as one sample.
+pub(crate) fn sample_month(query: &str, mut ask: impl FnMut(&str) -> Page) -> Sampled {
+    let mut first = None;
+    let read = read_month(query, |path| {
+        let page = ask(path);
+        if first.is_none() {
+            first = Some(page.body.chars().take(SHOWN_CHARS).collect::<String>());
+        }
+        page
+    });
+    match read {
+        Ok(read) => Sampled {
+            status: 200,
+            body: first.unwrap_or_default(),
+            read: Some(read),
+        },
+        Err(why) => Sampled {
+            status: 0,
+            body: why,
+            read: None,
+        },
+    }
+}
+
+/// Whether an answer is the full one a target wants: its status, its
+/// needle, and no sign that the route is still building it.
+pub(crate) fn answered_in_full(
+    status: u16,
+    head: &str,
+    body: &str,
+    wanted: u16,
+    needle: &str,
+) -> bool {
+    let building = body.contains("\"building\"") || head.contains("retry-after");
+    status == wanted && !building && body.contains(needle)
+}
+
+/// What [`until_in_full`] ended on.
+pub(crate) struct Waited<A> {
+    /// The first answer's time, in microseconds: the cold figure.
+    pub(crate) first_micros: u128,
+    /// The last answer asked.
+    pub(crate) last: A,
+    /// Whether that last answer was in full. False means the patience ran
+    /// out, and the caller stops on it by name.
+    pub(crate) in_full: bool,
+}
+
+/// Asks through `ask` until `in_full` says so or `patience` has run out,
+/// `pause` between asks.
+///
+/// BOUNDED: the loop ends on the first answer in full or on the first ask
+/// after `patience`, and it always asks once. An answer in full is taken
+/// even when it arrived after the patience ran out.
+pub(crate) fn until_in_full<A>(
+    patience: Duration,
+    pause: Duration,
+    mut ask: impl FnMut() -> A,
+    in_full: impl Fn(&A) -> bool,
+) -> Waited<A> {
+    let started = Instant::now();
+    let mut first = None;
+    loop {
+        let asked = Instant::now();
+        let last = ask();
+        let took = asked.elapsed().as_micros();
+        let first_micros = *first.get_or_insert(took);
+        let done = in_full(&last);
+        if done || started.elapsed() > patience {
+            return Waited {
+                first_micros,
+                last,
+                in_full: done,
+            };
+        }
+        std::thread::sleep(pause);
+    }
+}
+
+/// Writes the GDFL census of a bench or test store under `root`: `start`
+/// (the image of a census already held, empty for none) with `held` added.
+///
+/// # Errors
+///
+/// The sentence naming which step refused: the directory, `start`, an entry
+/// the census will not hold (it holds no empty month), or the write.
+pub(crate) fn write_census(
+    root: &Path,
+    start: &[u8],
+    held: impl IntoIterator<Item = Entry>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(root.join("manifest"))
+        .map_err(|why| format!("the census directory under {}: {why}", root.display()))?;
+    let mut census = Manifest::open_image(Vendor::Gdfl, start)
+        .map_err(|why| format!("the census to start from: {why}"))?;
+    for entry in held {
+        let _append = census
+            .record(entry)
+            .map_err(|why| format!("a census entry: {why}"))?;
+    }
+    let path = pull::manifest::manifest_path(root, Vendor::Gdfl);
+    std::fs::write(&path, census.image())
+        .map_err(|why| format!("the census at {} would not write: {why}", path.display()))
+}
+
+/// The value of `done`, or `stop` on its sentence: the bench hands its
+/// `refuse` here, so a set-up that fails stops the bench by name.
+pub(crate) fn or_stop<T>(done: Result<T, String>, stop: fn(&str) -> !) -> T {
+    match done {
+        Ok(value) => value,
+        Err(why) => stop(&why),
     }
 }

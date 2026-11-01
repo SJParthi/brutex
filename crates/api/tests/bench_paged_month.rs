@@ -157,21 +157,17 @@ fn served(tag: &str, months: &[Month]) -> Served {
     let root =
         std::env::temp_dir().join(format!("brutex-bench-paged-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("manifest")).expect("a scratch root");
-    let mut manifest = Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    let mut held = Vec::with_capacity(months.len());
     for month in months {
         let entry = write_month(&root, month);
         // THE CENSUS HOLDS NO EMPTY MONTH (`EmptyEntry`): an empty month is
         // its file alone, as a month created and never filled is.
         if month.rows > 0 {
-            manifest.record(entry).expect("a census entry");
+            held.push(entry);
         }
     }
-    std::fs::write(
-        pull::manifest::manifest_path(&root, Vendor::Gdfl),
-        manifest.image(),
-    )
-    .expect("the census writes");
+    paged::write_census(&root, &[], held).expect("the census writes");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let addr = listener.local_addr().expect("its address");
     listener.set_nonblocking(true).expect("non-blocking");
@@ -197,20 +193,28 @@ fn served(tag: &str, months: &[Month]) -> Served {
     Served { root, addr }
 }
 
-impl Served {
-    /// One GET on a fresh connection, read to its close; a full pool (`429`)
-    /// or a route still building is asked again, at most two seconds.
-    fn get(&self, path: &str) -> Page {
-        for _ in 0..400 {
-            let page = self.once(path);
-            if page.status != 429 && page.status != 503 {
-                return page;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+/// The first answer from `once` that is not busy: a full pool (`429`) or a
+/// route still building (`503`) is asked again, at most two seconds. Any
+/// other answer, a refusal included, is the answer.
+fn patient(path: &str, mut once: impl FnMut() -> Page) -> Page {
+    for _ in 0..400 {
+        let page = once();
+        if page.status != 429 && page.status != 503 {
+            return page;
         }
-        panic!("{path} stayed busy for two seconds");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("{path} stayed busy for two seconds");
+}
+
+impl Served {
+    /// One GET on fresh connections, patiently.
+    fn get(&self, path: &str) -> Page {
+        patient(path, || self.once(path))
     }
 
+    /// One GET on a fresh connection, read to its close (`Connection: close`,
+    /// so the close ends the body: no route here answers chunked).
     fn once(&self, path: &str) -> Page {
         let mut socket = TcpStream::connect(self.addr).expect("connect");
         let request = format!(
@@ -230,41 +234,15 @@ impl Served {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .expect("a status");
-        let mut body = raw[split + 4..].to_vec();
-        if head.contains("transfer-encoding: chunked") {
-            body = dechunk(&body);
-        }
         Page {
             status,
-            body: String::from_utf8(body).expect("UTF-8"),
+            body: String::from_utf8(raw[split + 4..].to_vec()).expect("UTF-8"),
         }
     }
 
     /// The whole month as the bench reads it.
     fn read(&self, query: &str) -> Result<MonthRead, String> {
         read_month(query, |path| self.get(path))
-    }
-}
-
-/// A chunked body, joined.
-fn dechunk(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    loop {
-        let end = at
-            + raw[at..]
-                .windows(2)
-                .position(|w| w == b"\r\n")
-                .expect("a chunk size line");
-        let text = std::str::from_utf8(&raw[at..end]).expect("ASCII");
-        let size =
-            usize::from_str_radix(text.split(';').next().unwrap().trim(), 16).expect("a hex size");
-        at = end + 2;
-        if size == 0 {
-            return out;
-        }
-        out.extend_from_slice(&raw[at..at + size]);
-        at += size + 2;
     }
 }
 
@@ -426,23 +404,501 @@ fn two_readers_at_once_both_read_the_whole_month() {
     }
 }
 
+/// What [`read_month`] did with `query`, a server answering an empty month:
+/// its result, and how many requests it made.
+fn asked_of(query: &str) -> (Result<MonthRead, String>, usize) {
+    let mut asked = 0;
+    let read = read_month(query, |_| {
+        asked += 1;
+        ok(0, &[])
+    });
+    (read, asked)
+}
+
 /// The paging keys belong to the reader: a query that brings its own is
-/// refused before a request is made, by the key's name.
+/// refused before a request is made, by the key's name, wherever it stands
+/// and with or without a value. A key merely spelled like one is another
+/// key: it is asked, exactly once.
 #[test]
 fn a_query_carrying_its_own_paging_keys_is_refused_before_asking() {
     for key in ["dir", "limit", "offset", "sort"] {
-        let mut asked = 0;
-        let refused = read_month(&format!("{}&{key}=1", june()), |_| {
-            asked += 1;
-            Page {
-                status: 200,
-                body: String::new(),
-            }
-        });
-        let why = refused.expect_err("its own paging key");
-        assert!(why.contains(&format!("{key}=")), "{why}");
-        assert_eq!(asked, 0, "{key}: nothing is asked");
+        for query in [
+            format!("{}&{key}=1", june()),
+            format!("{key}=1&{}", june()),
+            format!("{}&{key}", june()),
+        ] {
+            let (refused, asked) = asked_of(&query);
+            let why = refused.expect_err("its own paging key");
+            assert!(why.contains(&format!("{key}=")), "{why}");
+            assert_eq!(asked, 0, "{query}: nothing is asked");
+        }
+        for other in [format!("{key}s"), format!("x{key}")] {
+            let (read, asked) = asked_of(&format!("{}&{other}=1", june()));
+            assert_eq!(read, Ok(whole(0, JUNE_START_S)), "{other}");
+            assert_eq!(asked, 1, "{other}");
+        }
     }
+}
+
+/// `patient` asks a busy route again and stops at the first other answer: a
+/// full pool and a route still building are waited through, in turn.
+#[test]
+fn a_busy_answer_is_asked_again_until_it_is_not() {
+    let mut statuses = [429, 503, 429, 200].into_iter();
+    let mut asked = 0;
+    let page = patient("/busy", || {
+        asked += 1;
+        answer(statuses.next().expect("asked past the last"), "done")
+    });
+    assert_eq!((page.status, page.body.as_str(), asked), (200, "done", 4));
+}
+
+/// A refusal or a fault is an answer, never a wait: asked once, handed back.
+#[test]
+fn a_refusal_or_a_fault_is_never_asked_again() {
+    for status in [400, 404, 428, 430, 500, 502, 504] {
+        let mut asked = 0;
+        let page = patient("/refused", || {
+            asked += 1;
+            answer(status, "no")
+        });
+        assert_eq!((page.status, asked), (status, 1));
+    }
+}
+
+/// A route busy for the whole two seconds stops the test by name: a wait
+/// that never ends would hang the suite and prove nothing.
+#[test]
+#[should_panic(expected = "/always-busy stayed busy for two seconds")]
+fn a_route_busy_for_two_seconds_stops_the_test() {
+    let _never = patient("/always-busy", || answer(503, "building"));
+}
+
+/// A sample of a read that took every row answers `200`, shows the FIRST
+/// page's first 220 characters and says what the read took; it asks every
+/// page to get there.
+#[test]
+fn a_whole_paged_sample_answers_200_and_shows_its_first_page() {
+    let limit = api::bars::MAX_WINDOW_LIMIT;
+    let shown: String = body(1_500, &run(0, limit), 0, 0)
+        .chars()
+        .take(220)
+        .collect();
+    let mut pages = vec![ok(1_500, &run(0, limit)), ok(1_500, &run(1_000, 500))].into_iter();
+    let sampled = paged::sample_month(&june(), |_| pages.next().expect("two pages"));
+    assert_eq!(sampled.status, 200);
+    assert_eq!(sampled.body, shown);
+    assert_eq!(
+        sampled.read,
+        Some(MonthRead {
+            rows: 1_500,
+            pages: 2,
+            first_t: Some(0),
+            last_t: Some(1_499),
+        })
+    );
+    assert!(pages.next().is_none(), "every page was asked");
+}
+
+/// An empty month's body is shorter than what a sample shows: all of it.
+#[test]
+fn a_sample_shorter_than_what_it_shows_shows_all_of_it() {
+    let sampled = paged::sample_month(&june(), |_| ok(0, &[]));
+    assert_eq!(sampled.status, 200);
+    assert_eq!(sampled.body, body(0, &[], 0, 0));
+    assert_eq!(sampled.read, Some(whole(0, JUNE_START_S)));
+}
+
+/// OUT OF THE BOX: a first page whose 220th character is two bytes wide. A
+/// cut by bytes would split it and panic; the sample cuts by characters.
+#[test]
+fn a_sample_cuts_its_first_page_on_a_whole_character() {
+    let wide = "é".repeat(300);
+    let page = format!(
+        "{{\"total\":0,\"months_missing\":0,\"faulted_records\":0,\"note\":\"{wide}\",\"bars\":[]}}"
+    );
+    let sampled = paged::sample_month(&june(), |_| answer(200, &page));
+    assert_eq!(sampled.status, 200);
+    assert_eq!(sampled.body.chars().count(), 220);
+    assert!(sampled.body.ends_with('é'), "{}", sampled.body);
+}
+
+/// A read refused on its first page, or on a later one after the first was
+/// fine, answers status 0 with the refusal's sentence as its body and no
+/// read: the bench's status check stops on it, never timing it as a read,
+/// and the good first page never stands in for the refusal.
+#[test]
+fn a_refused_paged_sample_answers_status_0_with_its_sentence() {
+    let limit = api::bars::MAX_WINDOW_LIMIT;
+    let cases = [
+        (vec![answer(400, "{\"error\":\"no\"}")], "answered 400"),
+        (
+            vec![ok(2_000, &run(0, limit)), answer(500, "a fault")],
+            "answered 500",
+        ),
+        (
+            vec![ok(2_000, &run(0, limit)), ok(2_001, &run(1_000, limit))],
+            "changed under the read",
+        ),
+    ];
+    for (pages, says) in cases {
+        let mut pages = pages.into_iter();
+        let sampled = paged::sample_month(&june(), |_| pages.next().expect("a page"));
+        assert_eq!(sampled.status, 0, "{says}");
+        assert!(sampled.body.contains(says), "{says}: {}", sampled.body);
+        assert!(!sampled.body.contains("\"total\":2000"), "{}", sampled.body);
+        assert_eq!(sampled.read, None, "{says}");
+    }
+}
+
+/// Every way an answer can be, or not be, the full one a target wants. Two
+/// extremes at once: a building answer with the wanted status and needle
+/// (only its sign of building is wrong), and an answer wrong in every way.
+#[test]
+fn an_answer_is_in_full_only_with_its_status_its_needle_and_no_sign_of_building() {
+    let total = "\"total\":";
+    let cases: [(&str, u16, &str, &str, u16, &str, bool); 11] = [
+        (
+            "the plain full answer",
+            200,
+            "",
+            "{\"total\":1}",
+            200,
+            total,
+            true,
+        ),
+        (
+            "a 304 wants an empty body",
+            304,
+            "etag: x",
+            "",
+            304,
+            "",
+            true,
+        ),
+        (
+            "a wanted refusal",
+            400,
+            "",
+            "too_many_rows",
+            400,
+            "too_many_rows",
+            true,
+        ),
+        (
+            "the word without its quotes",
+            200,
+            "",
+            "a building, \"total\":1",
+            200,
+            total,
+            true,
+        ),
+        (
+            "a refused paged sample",
+            0,
+            "",
+            "answered 400",
+            200,
+            total,
+            false,
+        ),
+        (
+            "the wrong status",
+            500,
+            "",
+            "{\"total\":1}",
+            200,
+            total,
+            false,
+        ),
+        ("no needle", 200, "", "{\"other\":1}", 200, total, false),
+        (
+            "still building, in its body",
+            200,
+            "",
+            "{\"building\":true,\"total\":1}",
+            200,
+            total,
+            false,
+        ),
+        (
+            "still building, in its head",
+            200,
+            "retry-after: 1",
+            "{\"total\":1}",
+            200,
+            total,
+            false,
+        ),
+        (
+            "building, all else right",
+            503,
+            "retry-after: 1",
+            "\"building\"",
+            503,
+            "\"building\"",
+            false,
+        ),
+        (
+            "wrong in every way",
+            0,
+            "retry-after: 9",
+            "\"building\"",
+            200,
+            total,
+            false,
+        ),
+    ];
+    for (what, status, head, text, wanted, needle, full) in cases {
+        assert_eq!(
+            paged::answered_in_full(status, head, text, wanted, needle),
+            full,
+            "{what}"
+        );
+    }
+}
+
+/// A long patience that is never used.
+const NO_HURRY: std::time::Duration = std::time::Duration::from_secs(3_600);
+
+/// A pause too short to slow a test.
+const A_MOMENT: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// An answer in full at once is one ask and no pause, however long the pause.
+#[test]
+fn an_answer_in_full_at_once_is_one_ask_and_no_pause() {
+    let started = std::time::Instant::now();
+    let mut asked = 0;
+    let waited = paged::until_in_full(
+        NO_HURRY,
+        NO_HURRY,
+        || {
+            asked += 1;
+            asked
+        },
+        |_| true,
+    );
+    assert_eq!((waited.last, waited.in_full), (1, true));
+    assert_eq!(asked, 1);
+    assert!(started.elapsed() < NO_HURRY, "it never paused");
+}
+
+/// A route still building is asked again until it is not, with the pause
+/// between asks, and the cold figure stays the FIRST answer's: the first
+/// ask here is the only slow one, so a figure taken from a later one fails.
+#[test]
+fn a_route_still_building_is_waited_for_and_its_first_answer_is_the_cold_one() {
+    const SLOW: std::time::Duration = std::time::Duration::from_millis(20);
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+    let started = std::time::Instant::now();
+    let mut asked = 0;
+    let waited = paged::until_in_full(
+        NO_HURRY,
+        PAUSE,
+        || {
+            asked += 1;
+            if asked == 1 {
+                std::thread::sleep(SLOW);
+            }
+            asked
+        },
+        |&answer| answer == 3,
+    );
+    assert_eq!((waited.last, waited.in_full), (3, true));
+    assert!(
+        waited.first_micros >= SLOW.as_micros(),
+        "{}",
+        waited.first_micros
+    );
+    assert!(
+        started.elapsed() >= SLOW + 2 * PAUSE,
+        "the pause was skipped"
+    );
+}
+
+/// With no patience at all it still asks, then gives up and says so,
+/// handing back the last answer for the caller's sentence.
+#[test]
+fn a_route_that_never_answers_in_full_ends_the_wait_not_in_full() {
+    let mut asked = 0;
+    let waited = paged::until_in_full(
+        std::time::Duration::ZERO,
+        A_MOMENT,
+        || {
+            asked += 1;
+            asked
+        },
+        |_| false,
+    );
+    assert!(!waited.in_full);
+    assert!(waited.last >= 1);
+    assert_eq!(waited.last, asked, "the last answer is the last asked");
+}
+
+/// TWO EXTREMES AT ONCE: no patience and an answer in full on the very ask
+/// that used it up. A full answer is taken, never thrown away for its timing.
+#[test]
+fn an_answer_in_full_is_taken_even_past_the_patience() {
+    let waited = paged::until_in_full(
+        std::time::Duration::ZERO,
+        A_MOMENT,
+        || std::thread::sleep(A_MOMENT),
+        |()| true,
+    );
+    assert!(waited.in_full);
+}
+
+/// The stop a test hands [`paged::or_stop`] in place of the bench's `refuse`,
+/// which ends the process.
+fn stopped(why: &str) -> ! {
+    panic!("stopped: {why}");
+}
+
+/// A set-up that worked is its value; the stop is never called.
+#[test]
+fn a_set_up_that_worked_hands_back_its_value() {
+    assert_eq!(paged::or_stop(Ok(7_u8), stopped), 7);
+    paged::or_stop(Ok(()), stopped);
+}
+
+/// A set-up that failed reaches the stop with its own sentence.
+#[test]
+#[should_panic(expected = "stopped: the census at /x would not write")]
+fn a_set_up_that_failed_stops_on_its_sentence() {
+    let _never: u8 = paged::or_stop(Err("the census at /x would not write".to_owned()), stopped);
+}
+
+/// A scratch directory of this test's own, empty, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("brutex-bench-census-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A census entry for NIFTY's one-second month `number` of 2024, of `rows`.
+fn entry(number: u8, rows: u64) -> Entry {
+    let start_s = JUNE_START_S + i64::from(number - 6) * 31 * 86_400;
+    Entry {
+        key: EntryKey {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").expect("a symbol"),
+            timeframe: Timeframe::SECOND_1,
+            month: YearMonth::new(2024, number).expect("a real month"),
+        },
+        rows,
+        first_ts_micros: start_s * 1_000_000,
+        last_ts_micros: (start_s + 86_400) * 1_000_000,
+    }
+}
+
+/// The census written under `root`, as a reader opens it.
+fn census_at(root: &Path) -> Manifest {
+    let path = pull::manifest::manifest_path(root, Vendor::Gdfl);
+    let image = std::fs::read(path).expect("the census is there");
+    Manifest::open_image(Vendor::Gdfl, &image).expect("it reads back")
+}
+
+/// A census of nothing, of one month, and of one more added to an image
+/// already held each read back as exactly those months.
+#[test]
+fn a_census_written_reads_back_as_the_months_it_holds() {
+    let scratch = Scratch::new("reads-back");
+
+    let none = scratch.0.join("none");
+    paged::write_census(&none, &[], []).expect("an empty census");
+    assert_eq!(census_at(&none).held_keys().count(), 0);
+
+    let one = scratch.0.join("one");
+    paged::write_census(&one, &[], [entry(6, 10)]).expect("one month");
+    let read = census_at(&one);
+    assert_eq!(read.held_keys().count(), 1);
+    assert_eq!(read.held(&entry(6, 10).key).expect("June").entry.rows, 10);
+
+    let image = read.image();
+    let two = scratch.0.join("two");
+    paged::write_census(&two, &image, [entry(7, 20)]).expect("one more");
+    let read = census_at(&two);
+    assert_eq!(read.held_keys().count(), 2);
+    assert_eq!(read.held(&entry(6, 10).key).expect("June").entry.rows, 10);
+    assert_eq!(read.held(&entry(7, 20).key).expect("July").entry.rows, 20);
+}
+
+/// OUT OF THE BOX: a root whose name holds a space and a wide character is a
+/// root like any other, and a census written twice over one root is the
+/// second one, not a mix of the two.
+#[test]
+fn a_census_under_a_strange_root_written_twice_is_its_second_writing() {
+    let scratch = Scratch::new("strange");
+    let root = scratch.0.join("a réal root");
+    paged::write_census(&root, &[], [entry(6, 10), entry(7, 20)]).expect("the first");
+    paged::write_census(&root, &[], [entry(8, 30)]).expect("the second");
+    let read = census_at(&root);
+    assert_eq!(read.held_keys().count(), 1);
+    assert_eq!(read.held(&entry(8, 30).key).expect("August").entry.rows, 30);
+}
+
+/// Each step's refusal names its step, from the input that really reaches
+/// it, and leaves no census behind where it stopped before the write.
+#[test]
+fn each_census_refusal_names_its_step() {
+    let scratch = Scratch::new("refusals");
+
+    // THE DIRECTORY: the root is a file, so no directory can go under it.
+    let a_file = scratch.0.join("a-file");
+    std::fs::write(&a_file, b"not a directory").expect("a file");
+    let why = paged::write_census(&a_file, &[], []).expect_err("a file for a root");
+    assert!(why.contains("the census directory under"), "{why}");
+
+    // THE START: bytes that are no census.
+    let junk = scratch.0.join("junk");
+    let why = paged::write_census(&junk, b"junk", []).expect_err("junk to start from");
+    assert!(why.contains("the census to start from"), "{why}");
+    assert!(!pull::manifest::manifest_path(&junk, Vendor::Gdfl).exists());
+
+    // AN ENTRY: the census holds no empty month.
+    let empty = scratch.0.join("empty");
+    let why = paged::write_census(&empty, &[], [entry(6, 0)]).expect_err("an empty month");
+    assert!(why.contains("a census entry"), "{why}");
+    assert!(!pull::manifest::manifest_path(&empty, Vendor::Gdfl).exists());
+
+    // THE WRITE: a directory stands where the census file goes.
+    let blocked = scratch.0.join("blocked");
+    std::fs::create_dir_all(pull::manifest::manifest_path(&blocked, Vendor::Gdfl))
+        .expect("a directory in the way");
+    let why = paged::write_census(&blocked, &[], []).expect_err("a directory in the way");
+    assert!(why.contains("would not write"), "{why}");
+}
+
+/// TWO EXTREMES AT ONCE: every step would refuse, and the first one speaks.
+/// A good entry after an empty one does not rescue it either.
+#[test]
+fn a_census_wrong_in_every_way_is_refused_at_its_first_step() {
+    let scratch = Scratch::new("every-way");
+    let a_file = scratch.0.join("a-file");
+    std::fs::write(&a_file, b"not a directory").expect("a file");
+    let why = paged::write_census(&a_file, b"junk", [entry(6, 0)]).expect_err("every way");
+    assert!(why.contains("the census directory under"), "{why}");
+
+    let root = scratch.0.join("empty-first");
+    let why =
+        paged::write_census(&root, &[], [entry(6, 0), entry(7, 20)]).expect_err("an empty first");
+    assert!(why.contains("a census entry"), "{why}");
+    assert!(!pull::manifest::manifest_path(&root, Vendor::Gdfl).exists());
 }
 
 /// A page body the reader is handed, `total` rows held, `stamps` on it.
