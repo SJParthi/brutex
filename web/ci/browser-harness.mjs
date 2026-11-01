@@ -1275,12 +1275,13 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   let timer;
   const bound = new Promise((resolve) => (timer = setTimeout(() => resolve(false), loadWaitMs)));
   const t0 = Date.now();
+  let waited = 0;
   /** @param {string} why */
   const unended = async (why) => {
     // What the tab is still loading is stopped; the caller closes the tab.
     await cdp.send('Page.stopLoading', {}, tab.sessionId).catch(() => undefined);
     const seen = tab.seen();
-    return { ended: false, why, waited: 0, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
+    return { ended: false, why, waited, fcp: null, longest: 0, heap: 0, wire: seen.reduce((s, r) => s + r.bytes, 0), settled: false, drew: false, status: tab.doc.status, build: tab.doc.build, requests: seen.map((r) => ({ method: r.method, url: r.url, status: r.status, failed: r.failed })) };
   };
   let ended;
   try {
@@ -1297,7 +1298,6 @@ export async function loadOnce(tab, cdp, url, settleMs, loadWaitMs = LOAD_WAIT_M
   let h;
   let heap;
   const loadedAt = Date.now();
-  let waited = 0;
   try {
     settled = await tab.settle(settleMs);
     // At most PAINT_WAIT_MS by the page's clock, and FRAME_SLACK_MS more by this one (D-5915 item 9).

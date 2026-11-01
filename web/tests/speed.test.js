@@ -1420,7 +1420,7 @@ test('a load waits, bounded, for a paint the browser has not delivered yet, and 
   await new Function('window', `return ${harness.AWAIT_PAINT}`)(win);
   assert.equal(timersAsked, timersBeforeThePainted, 'a painted page is answered at once');
   // Every load waits for its paint before it reads, and that wait is bounded here too, not by the page's clock alone (repair 4).
-  assert.match(source('ci/browser-harness.mjs'), /await tab\.within\(AWAIT_PAINT, PAINT_WAIT_MS\);\s*h = await tab\.evaluate\(READ_FIGURES\);/);
+  assert.match(source('ci/browser-harness.mjs'), /await tab\.within\(AWAIT_PAINT, PAINT_WAIT_MS\);\s*waited = Date\.now\(\) - loadedAt;\s*h = await tab\.evaluate\(READ_FIGURES\);/);
 });
 
 test('a read-only run sends no write: the page\'s own report is blocked in the browser, named, and never reaches the server', { timeout: 300_000 }, async () => {
@@ -3063,7 +3063,7 @@ test('a load that does not end within its bound fails its page by name, and the 
   }
 });
 
-test('the two frames a settle waits for are bounded: a hidden tab draws none, is said so, and is never waited on', { timeout: 120_000 }, async () => {
+test('the two frames a settle waits for are bounded: a hidden tab draws none, is said so, and is never waited on', { timeout: 300_000 }, async () => {
   // Before (verify r4, 23 Oct): settle's last step waited for two animation
   // frames with no bound, and a hidden tab draws no frame (3 of 3 hidden
   // tabs gave none in 10 s), so a load in a hidden tab never settled.
@@ -3102,12 +3102,22 @@ test('the two frames a settle waits for are bounded: a hidden tab draws none, is
     // THE WAITS ARE WHAT IS BOUNDED, SO THE WAITS ARE WHAT IS READ (BASE-REDS-1023 repair 6): the bound read the whole
     // load, and at load 100-150 a hidden tab's renderer, starved at its background priority, took 26 s to answer the
     // commands after the waits ('within 20000 ms: 32033 ms', phases load 12, settle 3069, paint 6069, heap 32032 ms).
-    // The bound is unchanged. A wait with no bound never ends, here as before.
-    const t1 = performance.now();
-    const hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
+    // The bound is unchanged. A wait with no bound never ends, here as before. And at load 165 the renderer did not answer
+    // for the whole of a command's 30 s, which the harness says by name: the harness working, not the test's subject. So
+    // that one answer, and only it, is asked again, twice at most. A hidden load that never ends fails all three.
     const bound = 2 * (harness.FRAME_WAIT_MS + harness.FRAME_SLACK_MS) + 14_000;
+    /** @type {string[]} */
+    const starved = [];
+    const t1 = performance.now();
+    let hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
+    for (let again = 0; again < 2 && !hidden.ended; again += 1) {
+      assert.match(hidden.why, /^the page stopped answering \d+ ms after its load began: the browser did not answer /, hidden.why);
+      assert.ok(hidden.waited < bound, `a load in a hidden tab waits within ${bound} ms: ${hidden.waited} ms`);
+      starved.push(hidden.why);
+      hidden = await harness.loadOnce(hiddenTab, b.cdp, page, 50);
+    }
     assert.ok(hidden.waited < bound, `a load in a hidden tab waits within ${bound} ms: ${hidden.waited} ms of its ${(performance.now() - t1).toFixed(0)} ms`);
-    assert.equal(hidden.ended, true);
+    assert.equal(hidden.ended, true, starved.join('; '));
     assert.equal(hidden.drew, false);
     assert.ok(harness.judge('/x', 'cold', [hidden]).failures.includes('/x cold: 1 of 1 loads drew no frame within 2000 ms of settling (a hidden tab draws none), so they are not settled loads'));
     const visible = await harness.loadOnce(tabs[2], b.cdp, page, 50);
@@ -3433,6 +3443,14 @@ test('a load whose navigation the browser does not answer, or whose page stops a
   const d = await harness.loadOnce(slow.tab, slow.cdp, 'http://h:1/x', 10, 5_000);
   const all = performance.now() - t;
   assert.ok(d.waited >= 29 && d.waited < all - 150, `${d.waited} ms of the waits in a load of ${all.toFixed(0)} ms`);
+  // A renderer that stops answering after the waits: the load did not end, by name, and the waits it did are still said.
+  const starved = loadedThen(async () => { await new Promise((done) => setTimeout(done, 30)); return true; });
+  starved.tab.doc.status = 200;
+  starved.tab.evaluate = async () => { throw new CdpTimeout('the browser did not answer Runtime.evaluate within 30000 ms'); };
+  const e = await harness.loadOnce(starved.tab, starved.cdp, 'http://h:1/x', 10, 5_000);
+  assert.equal(e.ended, false);
+  assert.match(e.why, /^the page stopped answering \d+ ms after its load began: the browser did not answer Runtime\.evaluate within 30000 ms$/);
+  assert.ok(e.waited >= 29, `${e.waited} ms of the waits`);
 });
 
 test('a sort edge the server does not answer is NOT MEASURED by name, within the load bound', { timeout: 120_000 }, async () => {
