@@ -5727,6 +5727,46 @@ fn every_arm_of_a_writers_try_and_of_the_one_file_check_is_named() {
     }
 }
 
+/// **A PROBE NAMES THE HOST'S REFUSAL OF EITHER LIVE LOCK, HOLDING NOTHING
+/// AFTER** (BASE-REDS-1023 repair 5; D3 on the repair's first tip found the
+/// old lock's refusal in [`spool::live_probe`] reached by no test). Through
+/// [`spool::live_probe_with`], on a store whose old layout's folder is a
+/// folder of its own (a run's two lock files): the host refuses the `flock`
+/// of the lock under [`spool::LIVE_DIR`], then, the new one taken, of the
+/// old one. Each probe is refused `io: lock <that lock>` by name, never read
+/// as free or as live, and the lock it took goes with it: a probe that asks
+/// the host itself finds the run free, with both its files.
+#[test]
+fn a_probe_names_the_hosts_refusal_of_either_live_lock() {
+    let root = scratch("ProbeHostRefusal");
+    let old = spool::OLD_LIVE_DIR
+        .iter()
+        .fold(root.clone(), |at, segment| at.join(segment));
+    std::fs::create_dir_all(&old).unwrap();
+    for refused_at in [spool::live_lock_path(&root, 80), old.join("80.lock")] {
+        let host = |file: std::sync::Arc<std::fs::File>, at: PathBuf| {
+            if at == refused_at {
+                Err(std::fs::TryLockError::Error(std::io::Error::other(
+                    "refused by the host",
+                )))
+            } else {
+                store::flock::Flock::try_lock(file, at)
+            }
+        };
+        match spool::live_probe_with(&root, 80, host) {
+            Err(why @ SpoolError::Io { action: "lock", .. }) => assert_eq!(
+                why.to_string(),
+                format!("io: lock {}: refused by the host", refused_at.display())
+            ),
+            other => panic!("{}: the refusal was not named: {other:?}", refused_at.display()),
+        }
+    }
+    match spool::live_probe(&root, 80).unwrap() {
+        spool::Live::Taken(locks) => assert_eq!(locks.files(), 2),
+        spool::Live::Spooling(holder) => panic!("run 80 read as live: {holder}"),
+    }
+}
+
 /// **A LIVE LOCK HELD PAST THE WAIT IS REFUSED BUSY, BY NAME** (BASE-REDS-1023
 /// repair 5, check r5's coverage of `SpoolWriter::take_one`), through the
 /// writer itself, for each of a run's two locks at once (one wait of

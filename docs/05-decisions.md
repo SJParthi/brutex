@@ -84779,6 +84779,17 @@ an addendum to the entry it extends; nothing above is edited.
     with each command's result line: the fails-before run of the new tests
     on repair 4's tree, the gates, the full `ci-shell-gates.sh` run with
     gate 1e whole, and D3 Route B on the final tip.
+12. **D-7148: the merger's probe names the host's refusal of either lock
+    (D3 on repair 5's first tip).** D3 Route B on the first tip of this
+    repair (1 Nov 2026) found one line of `live_probe` no test reached:
+    its refusal when the host refuses the `flock` of the old folder's lock
+    (a store on a volume whose host refuses advisory locks), which repair
+    5's own change had moved onto a line of its own. Its body is now
+    `live_probe_with`, which takes the `flock` try; `live_probe` hands it
+    the real one. A test hands it the host's refusal of each of a run's
+    two locks in turn: each probe is refused by name and the lock it took
+    goes with it (BRED-48). Chosen over a test of `probed` alone, which
+    already existed and never reached the probe's own refusal.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 

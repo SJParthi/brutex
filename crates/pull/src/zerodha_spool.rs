@@ -239,9 +239,28 @@ pub enum Live {
 /// waiting.
 /// UNVERIFIED as a bound: no bench gates it, the bound is the structural argument above (BASE-REDS-1023, D-7149; docs/06-limits.md L-BRED23-01); the test `a_live_probe_is_a_fixed_number_of_calls_in_every_layout` prints its p50, p99 and max over 200 probes in each layout (repair 5, L-BRED23-18).
 pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
+    live_probe_with(root, run, LiveLock::try_lock)
+}
+
+/// [`live_probe`] with its `flock` try handed in: `try_lock` takes one open
+/// lock file and the name it was opened at, and is the real try for
+/// [`live_probe`]. Apart so a test hands it the host's refusal of either
+/// lock's `flock` (a store on a volume whose host refuses advisory locks),
+/// which no lock file gives on request, as [`probed`] and [`tried`] are
+/// apart (BASE-REDS-1023 repair 5: D3 on the repair's first tip found the
+/// old lock's refusal reached by no test).
+///
+/// # Errors
+///
+/// As [`live_probe`].
+pub(super) fn live_probe_with(
+    root: &Path,
+    run: u64,
+    try_lock: impl Fn(Arc<File>, PathBuf) -> Result<LiveLock, std::fs::TryLockError>,
+) -> Result<Live, SpoolError> {
     let path = live_lock_path(root, run);
     let file = Arc::new(open_live(root, &path)?);
-    let running = match probed(&path, store::flock::Flock::try_lock(file, path.clone()))? {
+    let running = match probed(&path, try_lock(file, path.clone()))? {
         Ok(lock) => lock,
         Err(holder) => return Ok(Live::Spooling(holder)),
     };
@@ -254,15 +273,10 @@ pub fn live_probe(root: &Path, run: u64) -> Result<Live, SpoolError> {
     if is_held(&running, &path, &file, &old)? {
         return Ok(Live::Taken(LiveLocks(vec![running])));
     }
-    Ok(
-        match probed(
-            &old,
-            store::flock::Flock::try_lock(Arc::new(file), old.clone()),
-        )? {
-            Ok(lock) => Live::Taken(LiveLocks(vec![running, lock])),
-            Err(holder) => Live::Spooling(holder),
-        },
-    )
+    Ok(match probed(&old, try_lock(Arc::new(file), old.clone()))? {
+        Ok(lock) => Live::Taken(LiveLocks(vec![running, lock])),
+        Err(holder) => Live::Spooling(holder),
+    })
 }
 
 /// Whether the lock file `file`, opened at `at`, is the file `held`, opened

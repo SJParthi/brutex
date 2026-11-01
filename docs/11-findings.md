@@ -1311,6 +1311,13 @@ confirmed by two skeptics; their corrections are applied.
   (BASE-REDS-1023 repair 5, D-7148 addendum 10): each is driven through the
   production code that builds it (BRED-44, BRED-45, BRED-46), the wait's
   arms through `tried`, a seam as `probed` is.
+- **BRED23-F43: the merger's probe never met the host's refusal of the old
+  folder's lock** (this repair's own D3 Route B on its first tip, 1 Nov
+  2026: `live_probe` lines 18/19, the refusal after `probed` on a line of
+  its own). FIXED (BASE-REDS-1023 repair 5, D-7148 addendum 12): the probe
+  takes its `flock` try through `live_probe_with`, and a test hands it the
+  host's refusal of each of a run's two locks: each is refused by name and
+  holds nothing after (BRED-48).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
