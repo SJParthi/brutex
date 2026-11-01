@@ -87544,10 +87544,12 @@ script, a test or the environment. `Batch` keeps `before` and `after` as
 `Box<Cursor>` (`prepare` takes `impl Into<Box<Cursor>>`, so no caller
 changes); `Frame.cursor` is a `Box<Cursor>`; a saved cursor is decoded
 straight into a box in a frame of its own (`decode_boxed`). After (the same
-build, this tip): those five frames are 36,144, 92,768, 28,992, 19,168 and
-14,384 B, and the end-to-end test overflows a 704 KiB test thread and passes on
-768 KiB, so its peak is over 704 KiB and at most 768 KiB, under the 2 MiB
-default 2.6 times; `Batch` and `Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
+build, on `c7c14b544` on 29 Oct and again on `c00b31a76` on 1 Nov, D-7412):
+those five frames are 36,144, 92,768, 28,992, 19,168 and 14,384 B on both,
+and the end-to-end test overflows a 704 KiB test thread and passes on 768 KiB
+(on `c00b31a76` it overflows 736 KiB as well), so its peak is over 736 KiB and
+at most 768 KiB, under the 2 MiB default at least 2.6 times; `Batch` and
+`Frame` are a few hundred bytes inline. No byte format, identity, report, progress record, refusal or
 admission changes: `encode` and `decode` are untouched apart from where the
 decoded cursor lives, and every existing round-trip and refusal test of the
 batch, the checkpoint, the reader and the end-to-end search passes unchanged.
@@ -87561,8 +87563,11 @@ family 10,488 B, observation-statistics 30,304, lineage 31,432, admission
 35,344, finalization 36,344, Population V5 37,296, Execution V3 38,696 B,
 measured with `size_of` in that build), and the test made two chains with every
 move, `Result` and `?` a slot of its own. The test now builds each chain value
-through a small `boxed` helper and holds boxes: its frame is 611,584 B and it
-passes on the default test thread. Production types are unchanged here (their
+through a small `boxed` helper and holds boxes: its frame was 611,584 B on
+`c7c14b544`, and on `c00b31a76`, after repair 1 bound each fallible call's
+`Result` before its `?` (D-7411), it is 690,096 B; there its body overflows a
+1472 KiB thread and passes on 1536 KiB, so the default 2 MiB test thread holds
+its peak at least 1.33 times (docs/06-limits.md L-STACK1028-06, D-7412). Production types are unchanged here (their
 inline retention is the D-0648 shape; boxing them is a wider change left for
 the owners of those modules, named in docs/06-limits.md L-STACK1028-04).
 
@@ -87593,8 +87598,8 @@ only stack size a test states is the rule: an explicit raise stays forbidden
 
 **Cost.** One heap allocation per cursor a batch or frame keeps (one per batch
 prepared or decoded, one per frame), against tens of 13 KiB stack copies per
-call at opt-level 0. O(1) per operation is unchanged. D-7411 to D-7419 are
-unused.
+call at opt-level 0. O(1) per operation is unchanged. D-7411 and D-7412
+record this part's repairs; D-7413 to D-7419 are unused.
 
 ### D-7411 — BASE-STACK-1028 repair 1: the two test bodies this part changed hold no line a passing run cannot execute; a fallible call that spans lines binds its `Result` and takes `?` in a statement of its own — 2026-10-31
 
@@ -87626,4 +87631,46 @@ stale-source attack asserts the exact refusal (it starts with
 the per-status counts are four comparisons in the receipt's order plus a check
 that they sum to the row count, which still fails if a fifth status appears.
 No production code changes, and no fixture byte, receipt or refusal changes.
-This entry takes D-7411; D-7412 to D-7419 stay unused.
+This entry takes D-7411; D-7412 records repair 2.
+
+### D-7412 — BASE-STACK-1028 repair 2: every stack figure of this part names the commit it was measured on; the Step 3 test's frame and peak are measured again after repair 1 and its margin is stated — 2026-11-01
+
+**Context.** The second agent's check of `c00b31a76`
+(`state/fix/round2/verify-BASE-STACK-1028-r2.json`) found the Step 3
+success-path test's frame stated as 611,584 B in D-7410, docs/04-invariants.md
+STACK1028-05 and docs/06-limits.md L-STACK1028-04, while at that commit it is
+690,096 B: repair 1 (D-7411) bound each fallible call's `Result` before its
+`?`, which gives the test more stack slots at opt-level 0, and the frame was
+not measured again. The same rows gave no peak or margin for that test, and
+two rows cited "the full Route B run of `cli` on this tip" for runs taken on
+earlier commits.
+
+**Decision.** Measured again, and every figure names its commit. On
+`c00b31a76`, in a scratch build of that commit with the Route B flags whose only
+additions were two ignored probe tests that run a test body on a thread of a
+stated size (never committed; `state/fix/round2/logs-STACK1028/repair2/`), the
+prologues read with the nightly's `llvm-objdump` give the Step 3 test 690,096 B
+and the five native-search frames of D-7410 unchanged. The Step 3 body overflows 1280, 1344,
+1408 and 1472 KiB threads, each time naming its thread, and passes on 1536 KiB,
+so its peak is over 1472 KiB and at most 1536 KiB and the default 2 MiB test
+thread holds it at least 1.33 times (docs/06-limits.md L-STACK1028-06). The
+end-to-end native search overflows 704 and 736 KiB and passes on 768 KiB.
+The batch and checkpoint peaks of D-7410 were swept by the builder on
+`fa43b2e86`, before later commits changed those tests; docs/06-limits.md
+L-STACK1028-02 now says so and marks them UNVERIFIED after it, beside the
+bound that holds on `c00b31a76` (every bounded test passes on its 448 KiB or
+384 KiB threads in the instrumented build). The Route B citations name the
+commits those full `cli` runs were taken on, `3f30357e4df4`, `29d3f566ab8b`
+and `bcac15e2c4d9`; none ended a test process by a signal.
+
+**Why the Step 3 test keeps the default thread.** D-7410 lets a test state
+only a stack smaller than the default, and any such bound would sit closer to
+this peak than the default does. The headroom is already under 576 KiB, a chain
+that gains a Committed* value uses it up sooner, and an overflow aborts the
+whole instrumented `cli` run, so no `cli` file of any part could be read: the
+failure this part exists to remove. The margin is stated instead, beside what
+would widen it: the production chain values are still held inline
+(docs/06-limits.md L-STACK1028-04, for the owners of those modules).
+
+**Cost.** Documents only: no code, test or fixture changes. This entry takes
+D-7412; D-7413 to D-7419 stay unused.
