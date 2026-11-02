@@ -1384,7 +1384,7 @@ pub(crate) async fn census_warm_json(
 
 #[cfg(test)]
 #[path = "census_warm_tests.rs"]
-mod warm_tests;
+pub(in crate::server) mod warm_tests;
 
 /// A pause inside every census read under one store root, set by a test
 /// that must make a read slow on demand: what decides whether a reader

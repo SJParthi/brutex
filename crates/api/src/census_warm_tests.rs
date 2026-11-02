@@ -417,7 +417,7 @@ async fn a_census_change_never_blocks_a_request() {
 /// How many runs [`a_census_change_never_blocks_a_request`] may make before
 /// it fails: each run that does not hold costs about the census read's five
 /// seconds more.
-const NEVER_BLOCKS_RUNS: u32 = 7;
+pub(in crate::server) const NEVER_BLOCKS_RUNS: u32 = 7;
 
 /// A run's (p50, p99, max) of `took`, sorted: the 500th, 990th and last of
 /// 1,000, the same ranks scaled for any other count.
@@ -434,7 +434,7 @@ fn ranks(took: &[Duration]) -> (Duration, Duration, Duration) {
 /// slowest time is under `bound`, at most `runs` times: that run's number,
 /// or every run's [`ranks`] when none held. Each run's times must come back
 /// sorted. A run that timed nothing measured nothing, so it never holds.
-async fn first_run_within<F, R>(
+pub(in crate::server) async fn first_run_within<F, R>(
     bound: Duration,
     runs: u32,
     mut run: F,
@@ -583,7 +583,10 @@ fn a_change_is_answered_stale_until_its_read_can_have_landed() {
         Err("stale before the change, at 0".to_owned())
     );
     let too_late = answer(&run(201, &[(true, at(3))])).expect_err("the 201st");
-    assert!(too_late.contains("from the previous read: Some(201)"), "{too_late}");
+    assert!(
+        too_late.contains("from the previous read: Some(201)"),
+        "{too_late}"
+    );
     let never = answer(&run(100, &vec![(false, at(1)); 900])).expect_err("never stale");
     assert!(never.contains("from the previous read: None"), "{never}");
     let early = answer(&run(100, &[(true, at(1)), (false, at(4_999))])).expect_err("inside");
@@ -832,9 +835,9 @@ async fn serve_site(
 /// of up to [`NEVER_BLOCKS_RUNS`] asks (L-BRED23-14's rule), every census-backed
 /// answer saying `x-brutex-census-refreshing: <refreshing>`. Asked again on a
 /// slow answer because a view on a stalled machine took 903 ms to 1.7 s with
-/// nothing to wait for (load about 300; 11 of 587 runs); a view that waited for
-/// a held read answers only once the read is out, and then says 0, so the next
-/// ask fails on what it says, whatever the clock.
+/// nothing to wait for (this repair's overload). A view that waited for a held
+/// read answers only once the read is out, and then says 0, so that ask fails
+/// on what it says, whatever the clock.
 async fn ask_every(addr: std::net::SocketAddr, views: &[String], refreshing: u8) {
     for view in views {
         let held = first_run_within(Duration::from_millis(900), NEVER_BLOCKS_RUNS, |_| async {

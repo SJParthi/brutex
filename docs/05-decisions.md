@@ -84972,6 +84972,13 @@ extends; nothing above is edited.
     answers only when the read is out and says 0, so what it says fails it,
     whatever the clock. The never-blocks test's last step read its row beside
     the census's swap ('left: Refreshing'), and now waits for the row.
+    `a_reader_that_stops_reading_is_closed_and_logged_as_cut` took 1.15 s
+    against its 1 s in one copy; its upper bound takes the same rule, a run of
+    its own each time, and a reader never cut holds its slot past the next
+    client's six seconds in every run. Loops of the census, view, stop and
+    warming tests under the same load: 1,103 runs, 18 failed before the last
+    two changes (`scratch/repair-BASE-REDS-1023-r7/after3.log`), 471 runs, 0
+    failed after (`after4.log`), and four whole copies green beside them.
     Refused: a longer pause alone, which moves the race; a count scaled by the
     time the loop took, which keeps a clock in the assertion.
 22. **D-7152: a minute line reached the log after a flush had returned.**

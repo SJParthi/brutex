@@ -2548,16 +2548,14 @@ pub(crate) fn parallel<T: Send>(
                 })
             })
             .collect();
-        handles.into_iter().fold(
-            Ok(Vec::new()),
-            |joined: Result<Vec<_>, String>, handle| {
-                let answer = handle.join().map_err(|_| "a worker stopped".to_owned());
-                joined.and_then(|mut all| {
-                    all.push(answer?);
-                    Ok(all)
-                })
-            },
-        )
+        let joined: Vec<_> = handles
+            .into_iter()
+            .map(std::thread::ScopedJoinHandle::join)
+            .collect();
+        joined
+            .into_iter()
+            .map(|answers| answers.map_err(|_| "a worker stopped".to_owned()))
+            .collect::<Result<Vec<_>, String>>()
     })?;
     for (at, answer) in answers.into_iter().flatten() {
         if let Some(slot) = slots.get_mut(at) {

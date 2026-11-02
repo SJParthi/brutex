@@ -21,6 +21,7 @@
     clippy::panic
 )]
 
+use super::census_cache::warm_tests::{NEVER_BLOCKS_RUNS, first_run_within};
 use super::{ConnectionLimits, HeadDeadline, HeadState, Slot, Slots, serve_limited};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -327,14 +328,32 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
 /// the request, its `200`, its declared length and the bytes that went, which
 /// are fewer; no "closed by the client" line is written for it. Before D-4975
 /// the close came at the same time but nothing was logged.
+///
+/// THE UPPER BOUND HOLDS IN ONE OF UP TO [`NEVER_BLOCKS_RUNS`] RUNS (L-BRED23-14's
+/// rule, BASE-REDS-1023 repair 7): 1.15 s against 1 s in one whole copy under
+/// this repair's overload, a slot the cut had freed and the machine had not yet
+/// answered on. A reader that is never cut holds its slot past the next client's
+/// six seconds in every run; every other assertion holds in every run.
 #[tokio::test]
 async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
     let _sink = crate::emitted::sink();
+    let held = first_run_within(T + SLACK, NEVER_BLOCKS_RUNS, one_stopped_reader).await;
+    assert!(
+        held.is_ok(),
+        "a stopped reader held its slot in every run, (p50, p99, max) each: {held:?}"
+    );
+}
+
+/// One run of [`a_reader_that_stops_reading_is_closed_and_logged_as_cut`] on a
+/// server of its own, its every assertion but the upper bound held: when the
+/// slot came back.
+async fn one_stopped_reader(run: u32) -> Vec<Duration> {
     let from = crate::emitted::mark();
+    let mark = format!("test=stops{run}");
     let (addr, stop) = start(limits(T, 1)).await;
     let mut reader = connect(addr).await;
     reader
-        .write_all(format!("GET /big/{BIG}?test=stops HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+        .write_all(format!("GET /big/{BIG}?{mark} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
         .await
         .unwrap();
     let (head, rest) = head(&mut reader).await;
@@ -352,17 +371,13 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
         freed + EARLY >= T,
         "the slot came back at {freed:?}, before a stall deadline"
     );
-    assert!(
-        freed < T + SLACK,
-        "a stopped reader held its slot for {freed:?}"
-    );
     let (body, closed) = paced(&mut reader, rest, length, 1 << 20, Duration::ZERO).await;
     assert!(
         closed && body.len() < length,
         "{} of {length} bytes",
         body.len()
     );
-    let cut = lines(from, "response cut", "test=stops");
+    let cut = lines(from, "response cut", &mark);
     assert_eq!(cut.len(), 1, "{cut:?}");
     let line = &cut[0];
     assert!(crate::emitted::counts(line, "status", 200), "{line:?}");
@@ -383,8 +398,9 @@ async fn a_reader_that_stops_reading_is_closed_and_logged_as_cut() {
         went > 0 && went < u64::try_from(BIG).unwrap(),
         "{went} bytes written"
     );
-    assert!(lines(from, "response closed by the client", "test=stops").is_empty());
+    assert!(lines(from, "response closed by the client", &mark).is_empty());
     let _ = stop.send(());
+    vec![freed]
 }
 
 /// A CUT `/db` READ IS NOT COUNTED SERVED. Behind the console's own

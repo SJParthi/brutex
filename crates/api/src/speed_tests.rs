@@ -652,7 +652,13 @@ fn a_roll_writes_one_line_for_each_asked_row_at_a_cost_it_prints() {
     let mut took = Vec::with_capacity(200);
     for roll in 1..=200_u64 {
         for row in 0..64 {
-            speed.record(&format!("/roll/{row}"), Kind::Route, 3, Outcome::Answered, 0);
+            speed.record(
+                &format!("/roll/{row}"),
+                Kind::Route,
+                3,
+                Outcome::Answered,
+                0,
+            );
         }
         let mut lines = 0;
         let began = std::time::Instant::now();

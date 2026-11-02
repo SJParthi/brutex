@@ -1380,6 +1380,11 @@ confirmed by two skeptics; their corrections are applied.
   line; the line was written 68 ms later). A real gap of the stop path as well
   as of the test. FIXED (D-7152 addendum 22): `Speed::roll_writing` (BRED-58,
   L-BRED23-23).
+- **BRED23-F58: three more wall-clock assertions at the same load** (this
+  repair's overload): the view test's 900 ms (903 ms to 1.7 s), the never-blocks
+  test's row read beside the swap ('left: Refreshing'), and the cut test's 1 s
+  (1.15 s). FIXED (D-7152 addendum 21): the two bounds hold in one of up to seven
+  asks or runs, unchanged (L-BRED23-14), and the row is waited for (BRED-57).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
