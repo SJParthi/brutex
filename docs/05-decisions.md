@@ -87603,7 +87603,7 @@ it. Nothing in the server changed. Proof: BCA-11.
 
 **Status: locked as a record; the bar is NOT met.** D3 recipe v4, Route B, pins as in D-7340, deep dir `tgt/deep-6`,
 reading `whole:api`, set `state/fix/round2/deep-BASE-COV-API-4beea8da837b-set.txt` (205 files), tree
-`4beea8da837b`, whose `.rs` files are this part's final ones (the commits after it are `docs/` only).
+`4beea8da837b`. The tip differs from that tree in `docs/` and in one move inside test-only code: the seam of item 3 of D-7344 went from a `#[cfg(test)]` statement into the `#[cfg(test)]` module `detail::lost_work`, so gate 11's assert rule reads nothing new; no production line moved, and `cargo test -p api` passes at the tip (3,077 passed, 16 ignored).
 
 1. **Figures.** Lines 170,737 / 175,573 (4,836 uncovered), branches 12,565 / 15,408 (2,843 uncovered sides), 182
    files read. At check r1 they were 6,330 and 2,906, at the branch cut 6,407 and 2,924. `gaps_route.rs` 3,851/3,865
