@@ -26,7 +26,10 @@ fn the_table_builders_make_what_their_rows_say_at_run_time_too() {
 #[test]
 fn a_days_facts_at_the_newest_version_are_its_facts() {
     let day = FIRST_DAY + 10;
-    assert_eq!(DayFacts::of(day), DayFacts::at(CalendarVersion::newest(), day));
+    assert_eq!(
+        DayFacts::of(day),
+        DayFacts::at(CalendarVersion::newest(), day)
+    );
 }
 
 /// A span with an end outside the record has no sessions to count, and one

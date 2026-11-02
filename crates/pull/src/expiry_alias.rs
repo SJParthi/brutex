@@ -1057,7 +1057,7 @@ mod tests {
     /// set the basis and change nothing else.
     #[test]
     fn the_basis_builders_set_the_basis_and_nothing_else() {
-        let row = ROWS[0];
+        let row = ALIASES[0];
         let kept = sourced(row, "an invented circular");
         assert_eq!(kept.basis, Basis::Sourced("an invented circular"));
         assert_eq!((kept.stated, kept.settled), (row.stated, row.settled));

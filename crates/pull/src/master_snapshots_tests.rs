@@ -89,7 +89,7 @@ pub(super) fn dump(rows: &[String]) -> String {
     out
 }
 
-fn nse_file(rows: &[(&str, &str)]) -> String {
+pub(super) fn nse_file(rows: &[(&str, &str)]) -> String {
     let mut out = String::from(NSE_HEAD);
     for (symbol, isin) in rows {
         let _infallible = write!(out, "\nZq {symbol} Ltd.,Testing,{symbol},EQ,{isin}");

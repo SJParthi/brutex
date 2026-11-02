@@ -327,7 +327,12 @@ fn a_stored_lineage_walks_both_ways_from_any_link() {
     let back: Vec<&str> = lineage.backward("ZQC").map(|hop| hop.old).collect();
     assert_eq!(back, ["ZQB", "ZQA"]);
     assert_eq!(lineage.backward("ZQA").count(), 0);
-    assert_eq!(lineage.filed_under("ZQB", (2021, 6, 1)), Ok("ZQC"));
+    let inside = brutex_core::alias::Ymd {
+        year: 2021,
+        month: 6,
+        day: 1,
+    };
+    assert_eq!(lineage.filed_under("ZQB", inside), Ok("ZQC"));
 }
 
 #[test]

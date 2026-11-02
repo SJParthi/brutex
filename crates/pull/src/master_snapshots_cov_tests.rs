@@ -364,13 +364,7 @@ fn a_diff_tells_each_change_of_a_token_apart() {
         words.contains(&"expiry") && words.contains(&"lot_size"),
         "{words:?}"
     );
-    let isins = |isin: &str| {
-        let mut held = HashMap::new();
-        held.insert("ZQSHARE".to_owned(), isin.to_owned());
-        held
-    };
-    let cash = |at: Stamp| parse(at, &[share(9_000_002, "ZQSHARE", "ZQ SHARE")]);
-    let same = isins("INE000INVENT");
+    let same = Isins::parse(&super::tests::nse_file(&[("ZQSHARE", "INE000INVENT")])).unwrap();
     assert_eq!(diff(&cash(a), &cash(b), Some(&same), Some(&same)), []);
     let kept = parse(
         b,
