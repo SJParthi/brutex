@@ -385,9 +385,9 @@ fn twenty_restarts(store: &Store, feeds: &[Vendor], caches: usize) {
 /// **A CENSUS CHANGE NEVER BLOCKS A REQUEST** (R3-09; DB-G80, RA-032). The
 /// census changes beside 1,000 feed-list requests while every census read
 /// under the store pauses five seconds: no request waits for it. Each is
-/// answered from the previous read and says so, none takes 50 ms, no request
-/// thread reads the census, and once the background re-read lands the
-/// change is served, current.
+/// answered from the previous read and says so until the re-read lands, none
+/// takes 50 ms, no request thread reads the census, and once the background
+/// re-read lands the change is served, current.
 ///
 /// THE 50 MS BOUND HOLDS IN ONE OF UP TO [`NEVER_BLOCKS_RUNS`] RUNS, EACH A
 /// STORE OF ITS OWN, AND IS UNCHANGED (BASE-REDS-1023 repair 1, D-7152
@@ -487,6 +487,76 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
     );
 }
 
+/// How long every census read pauses in [`one_change_beside_a_thousand_requests`].
+const NEVER_BLOCKS_READ_PAUSE_MS: u64 = 5_000;
+
+/// One request's word on the census: whether it was stale, and how long
+/// after the change it answered (`None` before the change).
+type Said = (bool, Option<Duration>);
+
+/// Whether `said`, the requests of one run in order, is what a census read
+/// that pauses `pause` can answer: nothing stale before the change, stale from
+/// at most 100 requests after the 100th, and current again only once the
+/// pause is out, because only the re-read makes it current and it starts
+/// after the change. The first stale request's number, or what went wrong.
+///
+/// NOT A COUNT OF STALE ANSWERS (BASE-REDS-1023 repair 7): "at least 800 of
+/// 1,000" raced the five seconds against the requests, so a machine slower
+/// than 5.6 ms a request saw the re-read land inside the loop and failed a
+/// design that had waited for nothing (load about 300, four whole copies at
+/// once: 347 to 584 stale, each). At speed the two say the same: every
+/// request inside the pause, stale from the 200th at the latest.
+fn stale_until_the_read_lands(said: &[Said], pause: Duration) -> Result<usize, String> {
+    let mut first = None;
+    for (n, (stale, since)) in said.iter().enumerate() {
+        match (*stale, *since) {
+            (true, None) => return Err(format!("stale before the change, at {n}")),
+            (true, Some(_)) => {
+                first.get_or_insert(n);
+            }
+            (false, Some(since)) if first.is_some() && since < pause => {
+                return Err(format!(
+                    "current again at {n}, {since:?} after the change, inside the {pause:?} read"
+                ));
+            }
+            (false, _) => {}
+        }
+    }
+    first.filter(|n| *n <= 200).ok_or_else(|| {
+        format!("the requests after the change were answered from the previous read: {first:?}")
+    })
+}
+
+/// [`stale_until_the_read_lands`] on invented runs: each side of the rule, and
+/// the run the old count failed, whose re-read lands inside the loop.
+#[test]
+fn a_change_is_answered_stale_until_its_read_can_have_landed() {
+    let pause = Duration::from_secs(5);
+    let at = |ms| Some(Duration::from_millis(ms));
+    let before = (false, None);
+    let run = |first_stale: usize, then: &[Said]| -> Vec<Said> {
+        let mut said = vec![before; 100];
+        said.resize(first_stale, (false, at(1)));
+        said.extend_from_slice(then);
+        said
+    };
+    let answer = |said: &[Said]| stale_until_the_read_lands(said, pause);
+    assert_eq!(answer(&run(100, &vec![(true, at(1)); 900])), Ok(100));
+    assert_eq!(answer(&run(200, &vec![(true, at(2)); 800])), Ok(200));
+    let landed_in_the_loop = [(true, at(4_999)), (false, at(5_000)), (false, at(9_000))];
+    assert_eq!(answer(&run(100, &landed_in_the_loop)), Ok(100));
+    assert_eq!(
+        answer(&[(true, None)]),
+        Err("stale before the change, at 0".to_owned())
+    );
+    let too_late = answer(&run(201, &[(true, at(3))])).expect_err("the 201st");
+    assert!(too_late.contains("from the previous read: Some(201)"), "{too_late}");
+    let never = answer(&run(100, &vec![(false, at(1)); 900])).expect_err("never stale");
+    assert!(never.contains("from the previous read: None"), "{never}");
+    let early = answer(&run(100, &[(true, at(1)), (false, at(4_999))])).expect_err("inside");
+    assert!(early.contains("current again at 101"), "{early}");
+}
+
 /// One run of [`a_census_change_never_blocks_a_request`] over a store of its
 /// own, its every assertion but the bound held: its 1,000 request times,
 /// sorted.
@@ -498,12 +568,14 @@ async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
     let (before, freshness) = fno_generation(&site);
     assert_eq!(freshness, Freshness::Current);
 
-    slow_read::set(&store.root, 5_000);
+    slow_read::set(&store.root, NEVER_BLOCKS_READ_PAUSE_MS);
     let mark = store.reads().len();
     let mut took: Vec<Duration> = Vec::with_capacity(1_000);
-    let mut stale = 0_usize;
+    let mut said: Vec<Said> = Vec::with_capacity(1_000);
+    let mut changed = None;
     for n in 0..1_000 {
         if n == 100 {
+            changed = Some(Instant::now());
             store.append(&[row(option_key(10_000), 7)]);
         }
         let began = Instant::now();
@@ -514,18 +586,17 @@ async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
         took.push(began.elapsed());
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
         assert!(body.starts_with('['), "{body}");
-        if now.freshness().is_stale() {
-            stale += 1;
-            assert!(n >= 100, "stale before the change, at {n}");
-        }
+        said.push((
+            now.freshness().is_stale(),
+            changed.map(|at: Instant| at.elapsed()),
+        ));
     }
     slow_read::set(&store.root, 0);
     took.sort_unstable();
     assert_eq!(took.len(), 1_000, "every request was timed");
-    assert!(
-        stale >= 800,
-        "the requests after the change were answered from the previous read: {stale}"
-    );
+    let pause = Duration::from_millis(NEVER_BLOCKS_READ_PAUSE_MS);
+    let answered = stale_until_the_read_lands(&said, pause);
+    assert!(answered.is_ok(), "{answered:?}");
     let reads = store.reads();
     assert!(
         reads[mark..]
@@ -537,7 +608,7 @@ async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
 
     // THE CHANGE LANDS: the background re-read is served, current, and it is
     // exactly one generation on. Polled until current, then the generation
-    // asserted: the change made the census stale (`stale` above), so the
+    // asserted: the change made the census stale (`said` above), so the
     // first current answer is the re-read's, and a census current at any
     // other generation fails here as it used to fail at the deadline
     // (BASE-REDS-1023 repair 3: no poll may hold a side no run takes).
