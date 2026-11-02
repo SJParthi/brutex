@@ -87785,3 +87785,33 @@ target dirs were held by other steps for the whole attempt and the build
 queue held this part's commands for up to 143 minutes each. The gaps list is
 `state/fix/round2/base-cov-libs-gaps-a1-after.txt`, the (F)/(U) list
 `state/fix/round2/base-cov-libs-fu.txt` (provisional, attempt 1).
+
+### D-7328 — `telemetry`: the seed's merge answers the line it took, and three more arms no input reached are gone; the crash-recovery lines are reached by their real inputs (BASE-COV-LIBS attempt 4, assurance 29 Oct COV-11)
+
+**Status: IN PROGRESS, as D-7320.** `seed_state` chose a side and then held an
+`if let` for a chosen side that held nothing; the match now answers the line
+itself, so no side can be taken empty. `seed_aside` syncs through
+`map_or(Ok(()), File::sync_all)` (an opened stream has its file),
+`count_code`'s full table always has a least entry, `clock::push_padded` walks
+its twenty slots by `for`, and `tail` takes the file and its `fstat` in one
+result, so one arm names both refusals. No line of a stream changes.
+
+The crash-recovery lines are production paths, so each has its input, in
+`crates/telemetry/src/sink_recovery_tests.rs`: a seed under a read-only parent,
+in four forms (half a seed, empty, a file, a dangling link), kept and named,
+healed by the next start; a seed whose path is one byte past the host's
+`PATH_MAX`, and the same at the limit; the directory taken away while
+`mark_coverage` is parked in a read of a FIFO, proved parked by a write-only
+non-blocking open and never by a sleep; a posting path with no parent, alone
+and with a full handle table.
+
+### D-7329 — `engine`: a test-only arm of `reserved` refuses the n-th reservation, so every memory refusal of the walk is reached (BASE-COV-LIBS attempt 4; closes L-BCL-4)
+
+**Status: IN PROGRESS, as D-7320.** `reserved` is the one door to a walk's
+allocations. Under `#[cfg(test)]` it asks for `usize::MAX` on the n-th call of
+the thread, so `try_reserve_exact` answers the genuine `TryReserveError` and
+everything after it is shipping code; nothing of it is compiled into a build.
+`crates/engine/src/refusal_cover_tests.rs` drives each entry point and runs a
+real walk once per reservation: each is a Memory halt and every reported level
+reconciles. `keep::offer`'s eviction reads the root it has just read through
+`into_iter`, so the arm for an empty heap is gone.

@@ -1489,6 +1489,6 @@ mod tests {
         assert!(marked(low, true) < marked(high, false));
         let (one, other) = (super::ByPath(low), super::ByPath(high));
         assert_eq!(one.partial_cmp(&other), Some(one.cmp(&other)));
-        assert_eq!(one.partial_cmp(&one), Some(Ordering::Equal));
+        assert_eq!(one.partial_cmp(&one), Some(std::cmp::Ordering::Equal));
     }
 }
