@@ -533,7 +533,13 @@ impl core::fmt::Display for ImportRefusal {
                  matches no file"
             ),
             Self::UnderlyingSplit { held } => split_said(f, held),
-            Self::Stopped { .. } => stop_said(f, self),
+            Self::Stopped {
+                kind,
+                day,
+                by,
+                requested,
+                done,
+            } => stop_said(f, (kind, day, by), *requested, done.days_imported),
             Self::Store { kind, why } => write!(f, "{} ({}): {why}", door_said(*kind), kind.code()),
             Self::HeldBack { month, after } => write!(
                 f,
@@ -659,17 +665,12 @@ impl core::fmt::Display for ImportRefusal {
 
 /// [`ImportRefusal::Stopped`]'s sentence (IA-2): who asked and when, where
 /// the run ended and what it had done.
-fn stop_said(f: &mut core::fmt::Formatter<'_>, stopped: &ImportRefusal) -> core::fmt::Result {
-    let ImportRefusal::Stopped {
-        kind,
-        day,
-        by,
-        requested,
-        done,
-    } = stopped
-    else {
-        return f.write_str("stopped");
-    };
+fn stop_said(
+    f: &mut core::fmt::Formatter<'_>,
+    (kind, day, by): (&ImportKind, &Option<Day>, &str),
+    requested: u64,
+    days_imported: usize,
+) -> core::fmt::Result {
     // WHAT A RESUME READS, said only as far as it is known here (IA-2 repair
     // 1): the day's own journal line (D-4853) says whether it closed
     // `incomplete stage=run reason=stopped`, closed `done` (the stop came
@@ -693,13 +694,13 @@ fn stop_said(f: &mut core::fmt::Formatter<'_>, stopped: &ImportRefusal) -> core:
         "a stop asked by {by} at {requested} (UNIX s) ended the {} run at a file boundary \
          {at}, after {} day(s) imported; {resume}",
         kind.as_str(),
-        done.days_imported
+        days_imported
     )
 }
 
 /// What a store or repair door's refusal of `kind` means for the day, said
 /// before the door's own words (IA-16, design §5.8).
-const fn door_said(kind: FailKind) -> &'static str {
+pub(super) const fn door_said(kind: FailKind) -> &'static str {
     match kind {
         FailKind::MonthBusy => {
             "another process held the month past the retry; the file is held back and read \

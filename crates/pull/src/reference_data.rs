@@ -3210,3 +3210,6 @@ fn calendar_seed() -> Result<Draft, String> {
 #[cfg(test)]
 #[path = "reference_data_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "reference_data_cov_tests.rs"]
+mod cov_tests;

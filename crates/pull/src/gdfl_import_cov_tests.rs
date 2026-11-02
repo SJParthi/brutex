@@ -784,3 +784,128 @@ fn an_unattributed_band_is_said_only_when_there_is_one() {
     note_unattributed(day(2024, 3, 1), "INVENTEDX", "X.csv", 0);
     note_unattributed(day(2024, 3, 1), "INVENTEDX", "X.csv", 1);
 }
+
+/// What each store or repair door's refusal means for the day: a page reads
+/// these words, so every one is stated, and no two kinds share a sentence.
+#[test]
+fn every_doors_refusal_says_what_it_means_for_the_day() {
+    use crate::ingest::FailKind as K;
+    let kinds = [
+        (K::Superseded, "served from a repair revision and this file"),
+        (K::RepairRefused, "a later build or repair can lift"),
+        (K::RepairImpossible, "refused the month for good"),
+        (K::BatchRefused, "an importer defect"),
+        (K::Sealed, "its successor generation was not filed"),
+        (K::Other, "the store refused the file"),
+    ];
+    let mut said = std::collections::HashSet::new();
+    for (kind, word) in kinds {
+        let sentence = causes::door_said(kind);
+        assert!(sentence.contains(word), "{kind:?}: {sentence}");
+        assert!(said.insert(sentence), "{kind:?} shares a sentence");
+    }
+}
+
+/// A stop says where it ended: on a day, or between two; and a refusal that
+/// is no stop says only that.
+#[test]
+fn a_stop_says_where_it_ended_and_what_a_resume_reads() {
+    let stopped = |day| ImportRefusal::Stopped {
+        kind: ImportKind::Stocks,
+        day,
+        by: "an invented operator".to_owned(),
+        requested: 1_700_000_000,
+        done: Box::new(Report::default()),
+    };
+    let on = stopped(Some(day(2024, 3, 1))).to_string();
+    assert!(on.contains("at a file boundary on 2024-03-01, after 0 day(s)"), "{on}");
+    assert!(on.contains("unless its journal line closed it done"), "{on}");
+    let between = stopped(None).to_string();
+    assert!(between.contains("between two days"), "{between}");
+    assert!(between.contains("the first day not done"), "{between}");
+}
+
+/// A refusal that carries what the run did reports it; each other reports
+/// nothing. The lineage and durability refusals say their own words.
+#[test]
+fn a_refusal_reports_only_what_it_carries() {
+    let done = || Box::new(Report::default());
+    let on = day(2024, 3, 1);
+    let carrying = [
+        ImportRefusal::Durability {
+            kind: ImportKind::Indices,
+            day: on,
+            why: "an invented fsync refusal".to_owned(),
+            done: done(),
+        },
+        ImportRefusal::Stopped {
+            kind: ImportKind::Indices,
+            day: None,
+            by: "x".to_owned(),
+            requested: 0,
+            done: done(),
+        },
+    ];
+    for refusal in &carrying {
+        assert!(refusal.report().is_some(), "{refusal:?}");
+    }
+    assert_eq!(
+        carrying[0].to_string(),
+        "indices 2024-03-01: an invented fsync refusal; the run stopped there after 0 day(s) imported"
+    );
+    let lineage = ImportRefusal::Lineage {
+        why: "an invented ledger".to_owned(),
+    };
+    assert!(lineage.report().is_none());
+    assert_eq!(lineage.to_string(), "the lineage ledger: an invented ledger");
+}
+
+/// Each reader refusal has its one cause; a stage or a close that drifts is a
+/// journal line a resume reads differently.
+#[test]
+fn every_reader_refusal_left_has_its_cause() {
+    use crate::gdfl_cm::CmRefusal as C;
+    use crate::gdfl_nfo::NfoRefusal as N;
+    let line = 7;
+    for (got, code) in [
+        (cm_cause(&C::FolderUnknown), "folder_unknown"),
+        (cm_cause(&C::ExtensionUnknown), "extension_unknown"),
+        (cm_cause(&C::TickerMismatch { line }), "ticker_mismatch"),
+        (cm_cause(&C::DateMismatch { line }), "date_mismatch"),
+        (cm_cause(&C::MalformedRow { line }), "malformed_row"),
+        (cm_cause(&C::RowsOverCap { cap: 1 }), "rows_over_cap"),
+        (
+            nfo_cause(&N::TickerAmbiguous {
+                ticker: "T".into(),
+            }),
+            "ticker_ambiguous",
+        ),
+        (nfo_cause(&N::TickerMismatch { line }), "ticker_mismatch"),
+        (nfo_cause(&N::DateMismatch { line }), "date_mismatch"),
+        (
+            nfo_cause(&N::OpenInterestRefused { line }),
+            "open_interest_refused",
+        ),
+        (nfo_cause(&N::RowsOverCap { cap: 1 }), "rows_over_cap"),
+    ] {
+        assert_eq!((got.stage, got.code, got.closes), (Stage::Vendor, code, true));
+    }
+    let open = nfo_cause(&N::MonthlyExpiryUnmeasured {
+        ticker: "T".into(),
+    });
+    assert_eq!(
+        (open.stage, open.code, open.closes),
+        (Stage::Calendar, "monthly_expiry_unmeasured", false)
+    );
+}
+
+/// A hole is an open cause at stage `file` with a hole's code, and nothing
+/// else: the same code at another stage, or closing, is none.
+#[test]
+fn a_hole_takes_all_three_of_its_conditions() {
+    let code = crate::ingest::FailKind::Superseded.code();
+    assert!(Cause::open(Stage::File, code).is_hole());
+    assert!(!Cause::open(Stage::Journal, code).is_hole());
+    assert!(!Cause::open(Stage::File, "an_invented_code").is_hole());
+    assert!(!Cause::vendor(code).is_hole());
+}
