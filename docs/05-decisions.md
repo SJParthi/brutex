@@ -87815,3 +87815,10 @@ everything after it is shipping code; nothing of it is compiled into a build.
 real walk once per reservation: each is a Memory halt and every reported level
 reconciles. `keep::offer`'s eviction reads the root it has just read through
 `into_iter`, so the arm for an empty heap is gone.
+
+**Attempt 4 ended unproved.** Its tests (D-7328, D-7329, and the runner's
+report, signal-candle stop, top-N, portfolio, split and rank cases) passed
+`cargo fmt` and were never compiled or run: from 19:07 to 00:09 IST the build
+queue gave this part no slot (it is not on the priority file) and no deep
+target dir came free, so no Route B figure exists after D-7320's. The next
+attempt compiles them first.

@@ -135,7 +135,10 @@ fn every_reservation_of_a_real_walk_refused_in_turn_is_a_memory_halt() {
     for n in 0..256 {
         let (sweep, fired) = refusing(n, || ladder().walk_column(&column, &live, NO_REPORT));
         if !fired {
-            assert_eq!(sweep.halted.map(|h| h.breach), whole.halted.map(|h| h.breach));
+            assert_eq!(
+                sweep.halted.map(|h| h.breach),
+                whole.halted.map(|h| h.breach)
+            );
             assert_eq!(sweep.levels.len(), whole.levels.len());
             assert!(refused >= 6, "only {refused} reservations were reached");
             return;

@@ -61,7 +61,10 @@ fn a_ranked_run_renders_every_section_with_no_identity_said_so() {
     for section in ["SWEEP", "LADDER", "SIGNIFICANCE", "VERDICT"] {
         assert!(text.contains(section), "{section}: {text}");
     }
-    assert!(cell(&text, "identity").starts_with("NOT RECORDED"), "{text}");
+    assert!(
+        cell(&text, "identity").starts_with("NOT RECORDED"),
+        "{text}"
+    );
     assert!(cell(&text, "outcome").starts_with("complete"), "{text}");
     assert!(ran.outcome.is_complete());
     assert!(cell(&text, "trustworthy as a whole answer").starts_with("yes"));
@@ -122,7 +125,10 @@ fn a_walk_with_no_levels_or_no_bars_says_nothing_was_measured() {
             outcome.sweep.bars = 0;
         }
         let text = render_ranked(&outcome, None);
-        assert!(cell(&text, "outcome").starts_with("NOTHING MEASURED"), "{text}");
+        assert!(
+            cell(&text, "outcome").starts_with("NOTHING MEASURED"),
+            "{text}"
+        );
     }
 }
 
@@ -189,7 +195,10 @@ fn a_mispaired_row_and_refused_exits_are_each_said_for_the_run() {
     row.edge.refused = u64::MAX;
     let text = render_ranked_findings(&ran.ranked, &ran.outcome);
     assert!(text.contains("MISPAIRED: 1 of"), "{text}");
-    assert!(text.contains(&format!("REFUSED EXITS: {}", u64::MAX)), "{text}");
+    assert!(
+        text.contains(&format!("REFUSED EXITS: {}", u64::MAX)),
+        "{text}"
+    );
 }
 
 /// NOTHING KEPT IS SAID, and no table is drawn for it.

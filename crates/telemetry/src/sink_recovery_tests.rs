@@ -31,11 +31,19 @@ use std::time::{Duration, Instant};
 
 /// The host's `PATH_MAX`, terminator included: a path of this many bytes is
 /// refused with `ENAMETOOLONG`, one byte fewer is not.
-const PATH_MAX: usize = if cfg!(target_os = "macos") { 1024 } else { 4096 };
+const PATH_MAX: usize = if cfg!(target_os = "macos") {
+    1024
+} else {
+    4096
+};
 
 /// `O_NONBLOCK` and `ENXIO` of the two hosts this repository runs on; this
 /// crate has no `libc` and takes none for a test.
-const O_NONBLOCK: i32 = if cfg!(target_os = "macos") { 0x4 } else { 0x800 };
+const O_NONBLOCK: i32 = if cfg!(target_os = "macos") {
+    0x4
+} else {
+    0x800
+};
 const ENXIO: i32 = 6;
 
 /// How long a test waits for a thread it parked. Far beyond any healthy
@@ -260,7 +268,10 @@ fn open_while_the_directory_goes_away(name: &str, bytes: &[u8]) -> (Parked, Path
         {
             Ok(parked) => break parked,
             Err(e) if e.raw_os_error() == Some(ENXIO) => {
-                assert!(Instant::now() < deadline, "the writer never reached the read");
+                assert!(
+                    Instant::now() < deadline,
+                    "the writer never reached the read"
+                );
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(e) => panic!("{}: {e}", fifo.display()),
@@ -359,7 +370,11 @@ fn a_full_handle_table_and_a_path_with_no_parent_stay_bounded() {
     audit.post(again.clone(), &image).unwrap();
     assert_eq!(audit.handles.len(), 1);
     let held = std::fs::metadata(&again).unwrap().len();
-    assert_eq!(held, 2 * AUDIT_POINTER_BYTES as u64, "an append, not a new file");
+    assert_eq!(
+        held,
+        2 * AUDIT_POINTER_BYTES as u64,
+        "an append, not a new file"
+    );
 }
 
 /// The picture's counters with no ring to date (a direct construction: every
@@ -403,5 +418,10 @@ fn a_full_code_table_replaces_its_least_entry() {
     assert_eq!(counters.codes_replaced, 1);
     let held = counters.codes.iter().find(|(code, _)| code == "newcomer");
     assert_eq!(held.map(|(_, count)| *count), Some(2));
-    assert!(counters.codes.iter().any(|(code, count)| code == "code-0" && *count == 2));
+    assert!(
+        counters
+            .codes
+            .iter()
+            .any(|(code, count)| code == "code-0" && *count == 2)
+    );
 }

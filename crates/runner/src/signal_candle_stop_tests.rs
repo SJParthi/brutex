@@ -832,10 +832,12 @@ fn every_error_reason_and_exit_has_its_own_words() {
         Error::Allocation,
         Error::Encoding,
     ];
-    let said: std::collections::HashSet<String> =
-        errors.iter().map(ToString::to_string).collect();
+    let said: std::collections::HashSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(said.len(), errors.len());
-    assert!(said.iter().all(|word| word.starts_with("signal-candle stop")));
+    assert!(
+        said.iter()
+            .all(|word| word.starts_with("signal-candle stop"))
+    );
     let reasons = [
         Reason::None,
         Reason::Unreachable,
@@ -885,10 +887,7 @@ fn a_priced_trade_reads_back_as_its_statistical_row() {
         assert_eq!(*result.program(), always());
         assert!(!result.alignment().is_empty());
         let family = result.family();
-        assert_eq!(
-            family,
-            ResearchFamilyV1::new(fixture.key).unwrap()
-        );
+        assert_eq!(family, ResearchFamilyV1::new(fixture.key).unwrap());
         assert!(family.legacy_index_family().is_some());
         let trade = exact_trade(&result);
         let row = trade.statistical_row().unwrap();

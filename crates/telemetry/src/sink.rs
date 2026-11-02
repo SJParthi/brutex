@@ -4077,23 +4077,23 @@ impl Audit {
                     }
                 }
             };
-                line.push(b'\n');
-                // A LINE THAT DID NOT LAND is counted as dropped by `append`
-                // and named in the health; only one that landed is seeded.
-                let failed = self.append(
-                    &line,
-                    record.seq,
-                    record.level,
-                    record.at_unix_millis,
-                    &record,
-                );
-                self.health.seeded = self
-                    .health
-                    .seeded
-                    .saturating_add(u64::from(failed.is_none()));
-                // A TEST STOPS A SEED HERE, part-way, as a killed start would.
-                #[cfg(test)]
-                state_tests::seed_copied(self.health.seeded);
+            line.push(b'\n');
+            // A LINE THAT DID NOT LAND is counted as dropped by `append`
+            // and named in the health; only one that landed is seeded.
+            let failed = self.append(
+                &line,
+                record.seq,
+                record.level,
+                record.at_unix_millis,
+                &record,
+            );
+            self.health.seeded = self
+                .health
+                .seeded
+                .saturating_add(u64::from(failed.is_none()));
+            // A TEST STOPS A SEED HERE, part-way, as a killed start would.
+            #[cfg(test)]
+            state_tests::seed_copied(self.health.seeded);
         }
         // A FILE THAT IS THERE AND COULD NOT BE READ is named in this
         // stream's health, which every `/logs.json` answer serves: the seed is

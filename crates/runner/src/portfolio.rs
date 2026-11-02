@@ -1228,7 +1228,9 @@ mod tests {
         let mut fresh = GlobalSinglePositionV1::default();
         assert_eq!(fresh, GlobalSinglePositionV1::new());
         assert_eq!(fresh.last_minute_micros(), None);
-        let schedule = fresh.schedule_minute(60_000_000, &[]).expect("an empty minute");
+        let schedule = fresh
+            .schedule_minute(60_000_000, &[])
+            .expect("an empty minute");
         assert_eq!(schedule.entry_micros(), 60_000_000);
         assert_eq!(schedule.occupied_through_micros(), None);
         assert_eq!(fresh.last_minute_micros(), Some(60_000_000));

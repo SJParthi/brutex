@@ -1303,7 +1303,10 @@ mod tests {
     /// BASE-COV-LIBS: the small public faces of the pass.
     #[test]
     fn the_defaults_and_counters_read_what_they_hold() {
-        assert_eq!(PopulationPass::default().finish(), PopulationPass::new().finish());
+        assert_eq!(
+            PopulationPass::default().finish(),
+            PopulationPass::new().finish()
+        );
         assert_eq!(policy().weights(), Weights::equal());
         let mut extrema = Extrema::default();
         assert_eq!((extrema.observed(), extrema.admitted()), (0, 0));
