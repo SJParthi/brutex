@@ -84966,7 +84966,12 @@ extends; nothing above is edited.
     machine says what is true. `no_db_view_reads_the_whole_census` raced a
     second of pause against its views the same way: `slow_read::pause` now ends
     when its test sets zero, and that test and the warming test hold the read
-    across what they ask, the 900 ms bounds as they were.
+    across what they ask. Its 900 ms bounds stand, in one of up to seven asks,
+    L-BRED23-14's rule, because a view on the stalled machine took 903 ms to
+    1.7 s with nothing to wait for; a view that waited for the held read
+    answers only when the read is out and says 0, so what it says fails it,
+    whatever the clock. The never-blocks test's last step read its row beside
+    the census's swap ('left: Refreshing'), and now waits for the row.
     Refused: a longer pause alone, which moves the race; a count scaled by the
     time the loop took, which keeps a clock in the assertion.
 22. **D-7152: a minute line reached the log after a flush had returned.**

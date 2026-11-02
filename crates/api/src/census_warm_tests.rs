@@ -658,7 +658,8 @@ async fn one_change_beside_a_thousand_requests(run: u32) -> Vec<Duration> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     assert_eq!(generation, before + 1, "the change is one generation on");
-    let rows = warmth(&site);
+    // The census is served before its row says so: the row is waited for.
+    let rows = wait_ready(&site);
     assert_eq!(row_of(&rows, CENSUS, Vendor::Gdfl).state, WarmState::Ready);
     assert_eq!(
         row_of(&rows, CENSUS, Vendor::Gdfl).generation,
@@ -827,24 +828,33 @@ async fn serve_site(
     (addr, stop, server)
 }
 
-/// Every one of `views` asked once over `addr`: each answered within 900 ms,
-/// and every census-backed one saying `x-brutex-census-refreshing: <refreshing>`.
+/// Every one of `views` asked over `addr`: each answered within 900 ms in one
+/// of up to [`NEVER_BLOCKS_RUNS`] asks (L-BRED23-14's rule), every census-backed
+/// answer saying `x-brutex-census-refreshing: <refreshing>`. Asked again on a
+/// slow answer because a view on a stalled machine took 903 ms to 1.7 s with
+/// nothing to wait for (load about 300; 11 of 587 runs); a view that waited for
+/// a held read answers only once the read is out, and then says 0, so the next
+/// ask fails on what it says, whatever the clock.
 async fn ask_every(addr: std::net::SocketAddr, views: &[String], refreshing: u8) {
     for view in views {
-        let began = Instant::now();
-        let reply = crate::server::tests::get(addr, view).await;
-        let took = began.elapsed();
-        assert!(answered(view, &reply), "{view}: {reply:.400}");
+        let held = first_run_within(Duration::from_millis(900), NEVER_BLOCKS_RUNS, |_| async {
+            let began = Instant::now();
+            let reply = crate::server::tests::get(addr, view).await;
+            let took = began.elapsed();
+            assert!(answered(view, &reply), "{view}: {reply:.400}");
+            if census_backed(view) {
+                assert!(
+                    reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
+                    "{view} says how current it is: {reply:.600}"
+                );
+            }
+            vec![took]
+        })
+        .await;
         assert!(
-            took < Duration::from_millis(900),
-            "{view} waited for the re-read: {took:?}"
+            held.is_ok(),
+            "{view} waited for the re-read in every ask: {held:?}"
         );
-        if census_backed(view) {
-            assert!(
-                reply.contains(&format!("x-brutex-census-refreshing: {refreshing}")),
-                "{view} says how current it is: {reply:.600}"
-            );
-        }
     }
 }
 
@@ -870,22 +880,23 @@ async fn no_db_view_reads_the_whole_census() {
     std::fs::write(&catalogue, "index_name,category\nNIFTY 50,broad\n").expect("invented");
     let nse = crate::indexmap::Published::read(&catalogue).expect("reads");
     let index_map = || {
-        let began = Instant::now();
-        let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
-        assert_eq!(
-            code,
-            axum::http::StatusCode::OK,
-            "the index map's census half"
-        );
-        assert!(
-            began.elapsed() < Duration::from_millis(900),
-            "the index map waited"
-        );
+        first_run_within(Duration::from_millis(900), NEVER_BLOCKS_RUNS, |_| async {
+            let began = Instant::now();
+            let code = crate::indexmap::answer(&site, &nse, Vendor::Gdfl, Vec::new()).0;
+            let took = began.elapsed();
+            assert_eq!(
+                code,
+                axum::http::StatusCode::OK,
+                "the index map's census half"
+            );
+            vec![took]
+        })
     };
 
     let mark = store.reads().len();
     ask_every(addr, &views, 0).await;
-    index_map();
+    let held = index_map().await;
+    assert!(held.is_ok(), "the index map waited: {held:?}");
     assert_eq!(
         store.reads().len(),
         mark,
@@ -900,7 +911,8 @@ async fn no_db_view_reads_the_whole_census() {
     store.append(&[row(option_key(500), 3)]);
     let mark = store.reads().len();
     ask_every(addr, &views, 1).await;
-    index_map();
+    let held = index_map().await;
+    assert!(held.is_ok(), "the index map waited: {held:?}");
     let reads = store.reads();
     assert!(
         reads[mark..]
