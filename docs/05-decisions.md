@@ -87717,3 +87717,54 @@ under it exactly as under `Off::Neither`.
 
 **Cost.** Tests and documents only: no production code, fixture or report byte
 changes. This entry takes D-7412; D-7413 to D-7419 stay unused.
+
+### D-7413 — BASE-STACK-1028 repair 3: the proof cell of STACK1028-03 names its tests, the one rewrite of this part's rows at the data parts' cut point, allowed by the main session; a `Cursor` is about 12 KiB
+
+**Context.** The second agent's check of `862ddd7aa8b8`
+(`state/fix/round2/verify-BASE-STACK-1028-r3.json`) found gate 10 refusing
+STACK1028-03. Its proof cell named two bare test files and no test, so the gate
+says "a ✓ row names no test, gate or front-end test file". The landing runs that
+gate, so this part could not land. The row is one `bcac15e2c` holds, and D-7412's
+Decision 1 keeps those rows byte for byte and makes every correction a new row.
+Two rules collided, and only on this row.
+
+**Why a new row could not cure it.** `names_a_proof` in
+`.github/invariant_paths.rs` reads only the row's own cell. That file is
+BASE-REDS-1023's. A declaration written only to satisfy the gate would hide the
+very defect the gate exists to find, so it was never an option. The cell had to
+change, and D-7412 binds this part, so the change was not this part's to allow.
+
+**Who allowed it.** The main session, on 2 Nov 2026 at about 18:44 IST, in
+answer to this repair's question. It is the main session's decision, not the
+operator's, and the operator may override it. Its words are in
+`state/fix/round2/repair-BASE-STACK-1028-progress.md`.
+
+**Decision.** That one cell changes, to the form the other rows use: each test
+file by its path, then the eight tests that prove the row's claim. Every other
+byte of every row `bcac15e2c` holds stays. `crates/cli/tests/stack_rows_kept.rs`
+holds the cell's two texts in `AGREED`, so that row must read as it did
+everywhere else and this cell must read exactly as agreed: another cell changed,
+this cell written another way, the row put back, moved, doubled or removed, or
+the same change to any other row each fail. STACK1028-12 is the new row that
+proves it, and it narrows STACK1028-10.
+
+BASE-REDS-1023 rewrites R427-11's proof cell the same way, so landing that part
+first and this one second meets both.
+
+**What the main session asked for before the long coverage run.** Gate 10 and
+the chain simulation on this text; each data part and FNO-SEAM merged with this
+tip through the family tool's `resolve-ledger`, with no "not an append" refusal
+on `docs/04`, `docs/05` or `docs/06`; and gate 10 on the merge with
+BASE-REDS-1023's tip. The results are in this repair's report and logs,
+`state/fix/round2/fix-BASE-STACK-1028.json` and
+`state/fix/round2/logs-STACK1028/repair3/`, not here: an entry cannot state a
+result taken on the commit that holds it.
+
+**Also corrected.** A `Cursor` is 12,286 B inline, about 12 KiB. D-7410 and
+L-STACK1028-01 say 13 KiB and stay as written; the comment on `Batch` is corrected
+and L-STACK1028-11 is the new row. The stack figures were measured and do not
+rest on that word.
+
+**Cost.** One ledger cell, one test file and one comment: no production code,
+fixture or report byte changes. This entry takes D-7413; D-7414 to D-7419 stay
+unused.

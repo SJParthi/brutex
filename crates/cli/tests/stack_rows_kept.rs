@@ -14,6 +14,9 @@
 //!
 //! It asks `git`, so a tree that cannot answer, because it holds no history or
 //! a clone that does not hold [`CUT`], says so and compares nothing.
+//!
+//! One cell is the agreed exception, [`AGREED`] (D-7413): gate 10 reads only a
+//! row's own proof cell, so that one row could not be cured by a new row.
 
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
@@ -35,6 +38,18 @@ const GROUPS: [(&str, &str, usize); 3] = [
         15,
     ),
 ];
+
+/// The one agreed change to a row of [`GROUPS`] (D-7413): the start of that row,
+/// its proof cell as [`CUT`] held it, and that cell as it reads now.
+///
+/// Only the two cell texts are held, so the row must still read as [`CUT`] held
+/// it everywhere else: another cell changed, this cell written any other way, or
+/// the row put back as it was are each still a lost row.
+const AGREED: (&str, &str, &str) = (
+    "| STACK1028-03 |",
+    "| the bounded-stack tests of `boolean_grammar_batch_tests.rs` and `index_stop_search_checkpoint_tests.rs` |",
+    "| `crates/cli/src/boolean_grammar_batch_tests.rs`: `empty_single_many_and_terminal_batches_replay_exactly_on_a_bounded_stack`, `many_programs_paused_by_nodes_then_resumed_twice_match_one_whole_batch_on_a_bounded_stack`, `concurrent_bounded_stack_replays_of_one_batch_agree_byte_for_byte`; `crates/cli/src/index_stop_search_checkpoint_tests.rs`: `ancestries_of_one_and_two_frames_recover_exactly_on_a_bounded_stack`, `the_deepest_ancestry_is_walked_in_a_loop_and_refused_at_its_oldest_unverified_child`, `a_deep_ancestry_of_full_batches_at_exact_record_and_byte_admission_fits_a_bounded_stack`, `a_pending_reservation_cut_and_reopened_twice_recovers_the_same_bytes_on_a_bounded_stack`, `a_second_owner_is_refused_while_a_deep_recovery_holds_the_journal_and_then_agrees` |",
+);
 
 /// The repository root: `crates/cli` is two levels below it.
 fn repo() -> PathBuf {
@@ -89,20 +104,37 @@ fn rows_of<'a>(old: &'a str, (file, first, lines): (&str, &str, usize)) -> Vec<&
     rows
 }
 
+/// `row` as it must read now: as it was, unless it is the row `agreed` names,
+/// and then with that one cell changed. A row that no longer holds the old cell
+/// is left as it is, so it answers for nothing.
+fn as_agreed(row: &str, (first, was, now): (&str, &str, &str)) -> String {
+    if row.starts_with(first) {
+        row.replacen(was, now, 1)
+    } else {
+        row.to_owned()
+    }
+}
+
 /// What `root`'s copy of the group's ledger has lost of what `cut` held, each
-/// line as it was. A commit `git` cannot show here compares nothing, and says so.
+/// line as it must read now. A commit `git` cannot show here compares nothing,
+/// and says so.
 fn lost_since(root: &Path, cut: &str, ledger: (&str, &str, usize)) -> Vec<String> {
     let file = ledger.0;
     let Some(old) = copy_at(root, cut, file) else {
         println!("SKIPPING: {file} at {cut} cannot be read here, so its rows are not compared.");
         return Vec::new();
     };
-    let rows = rows_of(&old, ledger);
+    let rows: Vec<String> = rows_of(&old, ledger)
+        .into_iter()
+        .map(|row| as_agreed(row, AGREED))
+        .collect();
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
     let now = std::fs::read_to_string(root.join(file)).expect("the ledger is readable");
     lost(&rows, &now).into_iter().map(str::to_owned).collect()
 }
 
-/// **THIS PART'S ROWS AT THE CUT POINT ARE KEPT BYTE FOR BYTE, AND IN ORDER.**
+/// **THIS PART'S ROWS AT THE CUT POINT ARE KEPT BYTE FOR BYTE, AND IN ORDER**,
+/// but for the one cell [`AGREED`] names.
 ///
 /// Fails on the repair that rewrote the rows of L-STACK1028-01 to -05, their
 /// preamble, D-7410, STACK1028-04 and STACK1028-05 to correct their figures.
@@ -245,4 +277,121 @@ fn line_endings_lose_nothing_and_one_character_outside_ascii_does() {
         lost(&rows, "| A | \u{2717} |\n| B |\n"),
         ["| A | \u{2713} |"]
     );
+}
+
+/// A row shaped as the agreed one, with `claim` and `proof` in its cells.
+fn agreed_shape(claim: &str, proof: &str) -> String {
+    format!("{} {claim} {proof} \u{2713} |", AGREED.0)
+}
+
+/// **THE EXCEPTION CHANGES ONE CELL OF ONE ROW AND NOTHING ELSE.** The claim and
+/// the status survive it, and no other row is touched, even one holding that
+/// very cell.
+#[test]
+fn the_agreed_change_touches_one_cell_of_one_row() {
+    let (_, was, now) = AGREED;
+    assert_eq!(
+        as_agreed(&agreed_shape("| a claim", was), AGREED),
+        agreed_shape("| a claim", now)
+    );
+    let other = format!("| STACK1028-02 | a claim {was} \u{2713} |");
+    assert_eq!(as_agreed(&other, AGREED), other);
+    assert_eq!(as_agreed("", AGREED), "");
+    assert_eq!(as_agreed(AGREED.0, AGREED), AGREED.0);
+}
+
+/// **ONLY THE AGREED TEXT PASSES.** The row as agreed is no loss; the same row
+/// with another cell changed, with its proof written another way, or put back as
+/// it was is lost, and is named.
+#[test]
+fn only_the_agreed_text_of_that_row_passes() {
+    let (_, was, now) = AGREED;
+    let old = agreed_shape("| a claim", was);
+    let must_read = as_agreed(&old, AGREED);
+    let rows = [must_read.as_str()];
+    assert!(lost(&rows, &agreed_shape("| a claim", now)).is_empty());
+    for changed in [
+        agreed_shape("| another claim", now),
+        agreed_shape("| a claim", "| another proof |"),
+        agreed_shape("| a claim", &now.replace("`, `", "`; `")),
+        agreed_shape("| a claim", &now[..now.len() - 3]),
+        agreed_shape("| a claim", was),
+        must_read.replace('\u{2713}', "\u{2717}"),
+    ] {
+        assert_eq!(lost(&rows, &changed), [must_read.as_str()], "{changed}");
+    }
+}
+
+/// A second row changed the same way is no exception: naming one row allows one.
+#[test]
+fn the_same_change_to_any_other_row_is_still_lost() {
+    let (_, was, now) = AGREED;
+    let other = format!("| STACK1028-04 | a claim {was} \u{2713} |");
+    let rows = [as_agreed(&other, AGREED)];
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let rewritten = other.replace(was, now);
+    assert_eq!(lost(&rows, &rewritten), [other.as_str()]);
+}
+
+/// Every extreme at once. The compare is in order, so the agreed row moved below
+/// the rows after it loses those rows, while a rewrite beside it and another
+/// part's row between them change nothing about what is named. Put back as it
+/// was, in its place, it is lost itself and the row after the rewrite is found.
+#[test]
+fn a_moved_or_restored_agreed_row_and_a_rewrite_beside_it_name_exactly_those_rows() {
+    let (_, was, _) = AGREED;
+    let agreed = as_agreed(&agreed_shape("| a claim", was), AGREED);
+    let rows = ["| B | one |", agreed.as_str(), "| C | two |", "| D |"];
+    let kept = format!(
+        "| between |\n| B | one |\n{agreed}\n| between |\n| C | changed |\n| between |\n| D |\n"
+    );
+    assert_eq!(lost(&rows, &kept), ["| C | two |"]);
+    let moved = format!("| B | one |\n| between |\n| C | changed |\n| D |\n{agreed}\n");
+    assert_eq!(lost(&rows, &moved), ["| C | two |", "| D |"]);
+    let restored = format!(
+        "| B | one |\n{}\n| C | changed |\n| D |\n",
+        agreed_shape("| a claim", was)
+    );
+    assert_eq!(lost(&rows, &restored), [agreed.as_str(), "| C | two |"]);
+}
+
+/// Out of the box: an old cell written twice changes only once, so a row that
+/// somehow held it twice cannot pass by a blanket replace; and a row that no
+/// longer holds the old cell is left as it is and agrees with nothing new.
+#[test]
+fn the_old_cell_changes_once_and_a_row_without_it_stays() {
+    let (_, was, now) = AGREED;
+    let twice = agreed_shape("| a claim", &format!("{was} {was}"));
+    assert_eq!(
+        as_agreed(&twice, AGREED),
+        agreed_shape("| a claim", &format!("{now} {was}"))
+    );
+    let without = agreed_shape("| a claim", "| no such cell |");
+    assert_eq!(as_agreed(&without, AGREED), without);
+}
+
+/// **THE LEDGER HOLDS THE AGREED ROW ONCE, AS AGREED.** The old cell is gone from
+/// it, so gate 10 reads the new one, and each test the cell names is declared
+/// in the file the cell names for it.
+#[test]
+fn the_ledger_holds_the_agreed_row_once_and_its_tests_exist() {
+    let (first, was, now) = AGREED;
+    let ledger =
+        std::fs::read_to_string(repo().join("docs/04-invariants.md")).expect("the invariants");
+    let held: Vec<&str> = ledger
+        .lines()
+        .filter(|line| line.starts_with(first))
+        .collect();
+    assert_eq!(held.len(), 1, "{first} is one row");
+    assert!(held[0].contains(now), "{first} reads as agreed");
+    assert!(!held[0].contains(was), "{first} no longer names bare files");
+    for files in now.trim_matches(['|', ' ']).split("; ") {
+        let (file, tests) = files.split_once(": ").expect("a file, then its tests");
+        let source = std::fs::read_to_string(repo().join(file.trim_matches('`')))
+            .expect("the file the cell names");
+        for test in tests.split(", ") {
+            let declared = format!("fn {}(", test.trim_matches('`'));
+            assert!(source.contains(&declared), "{file}: {declared}");
+        }
+    }
 }
