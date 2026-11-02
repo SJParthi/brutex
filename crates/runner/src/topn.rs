@@ -1337,6 +1337,7 @@ mod tests {
     /// and an unmeasured value, which is neutral in both.
     #[test]
     fn a_value_outside_the_population_cannot_be_scored() {
+        use super::{NEUTRAL, Preference, Range};
         let empty = Range::default();
         assert_eq!(
             empty.normalise(Some(1), Preference::Higher),
