@@ -846,26 +846,39 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "a timing, printed"]
     fn end_line_fold_timing() {
-        const RUNS: u64 = 100_000;
+        end_lines_folded_beside(100_000);
+    }
+
+    /// The timing's own path at three runs: every end line folds into its
+    /// run and the percentiles of so short a list still name a sample, so the
+    /// hand-run target cannot rot unseen (BASE-COV-API, D-7344).
+    #[test]
+    fn the_end_line_timing_runs_at_a_small_size() {
+        end_lines_folded_beside(3);
+    }
+
+    /// Folds `runs` end lines into a reader that holds `runs` runs, each
+    /// timed, and prints the spread.
+    fn end_lines_folded_beside(runs: u64) {
         let mut parsed = Parsed::default();
         let mut number = 0_u64;
-        for id in 1..=RUNS {
+        for id in 1..=runs {
             number += 1;
             parsed.line(number, &format!("run {id} source=tickstore started={id}"));
         }
-        let mut took = Vec::with_capacity(100_000);
-        for id in 1..=RUNS {
+        let mut took = Vec::new();
+        for id in 1..=runs {
             number += 1;
             let text = format!("run {id} ended={id} outcome=finished definition=2");
             let began = std::time::Instant::now();
             parsed.line(number, &text);
             took.push(began.elapsed());
         }
-        assert_eq!(parsed.runs.len(), 100_000);
+        assert_eq!(parsed.runs.len() as u64, runs);
         took.sort_unstable();
         let n = took.len();
         println!(
-            "end line folded beside {RUNS} runs: n={n} p50={:?} p99={:?} max={:?}",
+            "end line folded beside {runs} runs: n={n} p50={:?} p99={:?} max={:?}",
             took[n / 2],
             took[n * 99 / 100],
             took[n - 1]
@@ -1076,7 +1089,18 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "a timing, printed"]
     fn end_line_fold_cost_by_field_count() {
-        const RUNS: u64 = 2_000;
+        end_line_fold_at_widths(2_000);
+    }
+
+    /// The field-count timing's own path at two runs (D-7344).
+    #[test]
+    fn the_field_count_timing_runs_at_a_small_size() {
+        end_line_fold_at_widths(2);
+    }
+
+    /// `runs` runs of 8, 64 and 512 start fields, each ended by a line of as
+    /// many differing fields, every fold timed and printed.
+    fn end_line_fold_at_widths(runs: u64) {
         for width in [8_usize, 64, 512] {
             let mut parsed = Parsed::default();
             let mut number = 0_u64;
@@ -1085,19 +1109,19 @@ pub(crate) mod tests {
                 let _ = std::fmt::Write::write_fmt(&mut start_fields, format_args!(" f{f}=s"));
                 let _ = std::fmt::Write::write_fmt(&mut end_fields, format_args!(" f{f}=e"));
             }
-            for id in 1..=RUNS {
+            for id in 1..=runs {
                 number += 1;
                 parsed.line(number, &format!("run {id}{start_fields}"));
             }
-            let mut took = Vec::with_capacity(2_000);
-            for id in 1..=RUNS {
+            let mut took = Vec::new();
+            for id in 1..=runs {
                 number += 1;
                 let text = format!("run {id} ended={id}{end_fields}");
                 let began = std::time::Instant::now();
                 parsed.line(number, &text);
                 took.push(began.elapsed());
             }
-            assert_eq!(parsed.runs.len(), 2_000);
+            assert_eq!(parsed.runs.len() as u64, runs);
             took.sort_unstable();
             let n = took.len();
             println!(

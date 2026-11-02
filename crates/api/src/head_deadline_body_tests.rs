@@ -258,6 +258,17 @@ fn lines(from: u64, message: &str, tag: &str) -> Vec<telemetry::Record> {
 /// count equals `Content-Length`, and the kept-alive socket then serves a
 /// second request. Before D-4975 the connection closed one deadline after the
 /// first byte with most of the body unsent.
+///
+/// THE SECOND REQUEST GOES OUT BEFORE THE BODY IS READ (D-7343; the failure
+/// the instrumented runs of 27 and 28 Oct showed, `""` at the last assert).
+/// A kept-alive connection's idle clock starts at the server's own flush,
+/// and the client's last read comes later by whatever the kernel still holds
+/// for it: at this pace 1.9 MB of send buffer is one deadline already, and a
+/// loaded machine stretches every pause. A request sent after the last byte
+/// was read then found the connection closed, with nothing said: the head
+/// deadline doing its job on an idle socket, not a cut body. Sent ahead, the
+/// request is waiting when the first response ends, so no idle clock runs and
+/// the outcome does not depend on the load.
 #[tokio::test]
 async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     let (addr, stop) = start(limits(T, 8)).await;
@@ -271,6 +282,10 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{head:?}");
     let length = content_length(&head);
     assert_eq!(length, BIG);
+    client
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
     let (body, closed) = paced(&mut client, rest, length, CHUNK, PACE).await;
     let took = began.elapsed();
     assert!(
@@ -284,10 +299,6 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
         took >= T * 4,
         "the body drained in {took:?}: too fast to prove a slow reader is safe"
     );
-    client
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
     let (said, closed) = drain(&mut client, T * 10).await;
     assert!(
         closed && said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),

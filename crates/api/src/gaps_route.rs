@@ -2494,6 +2494,118 @@ mod tests {
     };
     use brutex_core::vendor::Vendor;
 
+    /// One run of not-owed minutes on `on`, from minute `from` to `to`.
+    fn not_owed_run(on: i64, from: u16, to: u16, why: pull::gaps::NotOwed) -> pull::gaps::Gap {
+        pull::gaps::Gap {
+            day: on,
+            from,
+            to,
+            reason: pull::gaps::Reason::NotOwed(why),
+        }
+    }
+
+    /// **A NOT-OWED ROW STATES WHAT ITS ANSWER HAS, AND ONLY THAT** (check r1
+    /// of BASE-COV-API: neither of these arms had run). An unread day names
+    /// no source, so its row carries no date, no master and no symbol; a
+    /// listing answer on a span that no master stated carries `master: null`
+    /// rather than a file nobody read. Extremes: an empty ledger, a span of
+    /// each source that is not a master's, no span at all, one day counted
+    /// once across two runs, two answers in one month together, the first
+    /// and the last minute of a day, the epoch's first day and a sha of all
+    /// ones, and a run of another reason beside them that adds nothing.
+    #[test]
+    fn a_not_owed_row_states_what_its_answer_has_and_only_that() {
+        use pull::gaps::{Key, Ledger, NotOwed, Reason};
+        use pull::listing::{Source, Span};
+        let listed = pull::session::Day::new(2024, 3, 11).unwrap();
+        let day_of = |d: u32| i64::from(pull::session::Day::new(2024, 3, d).unwrap().days_from_epoch());
+        let span_from = |source| Span {
+            first: Ok(listed),
+            last: None,
+            source,
+        };
+        let rows = |ledger: &Ledger, key: &Key<'_>| -> Vec<serde_json::Value> {
+            serde_json::from_str(&not_owed_json(ledger, key)).unwrap()
+        };
+
+        assert_eq!(not_owed_json(&Ledger::default(), &Key::NONE), "[]");
+
+        let unread = Ledger {
+            gaps: vec![
+                not_owed_run(day_of(4), 0, 0, NotOwed::Unread),
+                not_owed_run(day_of(4), 1439, 1439, NotOwed::Unread),
+                pull::gaps::Gap {
+                    day: day_of(4),
+                    from: 600,
+                    to: 601,
+                    reason: Reason::VendorHole,
+                },
+                not_owed_run(day_of(5), 555, 929, NotOwed::Unread),
+            ],
+            ..Ledger::default()
+        };
+        let row = rows(&unread, &Key::NONE);
+        assert_eq!(row.len(), 1, "one answer, however many runs: {row:?}");
+        assert_eq!(row[0]["code"], "unread");
+        assert_eq!(row[0]["reason"], "unread");
+        assert_eq!(row[0]["days"], 2, "two runs on one day are one day");
+        assert_eq!(row[0]["minutes"], 377, "the vendor hole is not among them");
+        assert_eq!(row[0]["first"], "2024-03-04");
+        assert_eq!(row[0]["last"], "2024-03-05");
+        assert_eq!(
+            row[0]["evidence"],
+            serde_json::json!(NotOwed::Unread.evidence())
+        );
+        for absent in ["date", "master", "symbol", "from", "through", "sources"] {
+            assert!(row[0].get(absent).is_none(), "{absent}: {row:?}");
+        }
+
+        let before = Ledger {
+            gaps: vec![
+                not_owed_run(day_of(4), 555, 929, NotOwed::BeforeListing { listed_on: listed }),
+                not_owed_run(day_of(5), 555, 555, NotOwed::Unread),
+            ],
+            ..Ledger::default()
+        };
+        for span in [
+            None,
+            Some(span_from(Source::InferredFromVendorSpan)),
+            Some(span_from(Source::NoCheckedMaster)),
+            Some(span_from(Source::NoIsin)),
+        ] {
+            let key = Key { span, ..Key::NONE };
+            let row = rows(&before, &key);
+            assert_eq!(row.len(), 2, "both answers, first seen first: {row:?}");
+            assert_eq!(row[0]["date"], "2024-03-11");
+            assert_eq!(
+                row[0]["master"],
+                serde_json::Value::Null,
+                "no master stated this span: {span:?}"
+            );
+            assert!(row[1].get("master").is_none(), "{row:?}");
+        }
+
+        let sha = [0xff_u8; 32];
+        let key = Key {
+            span: Some(span_from(Source::NseSecurityMaster {
+                file: "master-invented.csv.gz",
+                sha256: &sha,
+            })),
+            ..Key::NONE
+        };
+        let row = rows(&before, &key);
+        assert_eq!(row[0]["master"]["file"], "master-invented.csv.gz");
+        assert_eq!(row[0]["master"]["sha256"], "ff".repeat(32));
+        assert!(row[1].get("master").is_none(), "unread stays bare: {row:?}");
+
+        let epoch = Ledger {
+            gaps: vec![not_owed_run(0, 0, 1439, NotOwed::Unread)],
+            ..Ledger::default()
+        };
+        assert_eq!(rows(&epoch, &key)[0]["first"], "1970-01-01");
+        assert_eq!(rows(&epoch, &key)[0]["minutes"], 1440);
+    }
+
     /// **THE GAPS AUDIT STOPS WHEN ITS READER LEAVES** (R3-08, RA-130; the
     /// verifier proved it live and found no test). A reader still there walks
     /// every month; one that left before the walk reads none; one that leaves

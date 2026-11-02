@@ -795,3 +795,104 @@ fn every_answer_is_an_object_with_its_four_keys() {
         }
     }
 }
+
+/// One request over a real socket through the production router: the status
+/// line, the headers lower-cased, and the body.
+async fn over_the_router(store: &Path, query: &str) -> (String, String, String) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = crate::server::router_serving(
+        Arc::new(crate::server::Site::load(
+            &store.join("masters-none"),
+            store,
+        )),
+        Arc::new(crate::assets::Assets::new(&store.join("web-none"))),
+        addr,
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = tokio::spawn(crate::server::serve(
+        listener,
+        app,
+        Box::pin(async move {
+            let _ = stopped.await;
+            Ok::<(), std::io::Error>(())
+        }),
+    ));
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    socket
+        .write_all(
+            format!(
+                "GET /basis.json?{query} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    socket.read_to_end(&mut answer).await.unwrap();
+    let _ = stop.send(());
+    let _ = served.await;
+    let answer = String::from_utf8(answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let mut lines = head.lines();
+    let status = lines.next().unwrap().to_owned();
+    (
+        status,
+        lines.collect::<Vec<_>>().join("\n").to_ascii_lowercase(),
+        body.to_owned(),
+    )
+}
+
+/// **WHAT THE ROUTER ANSWERS IS WHAT THE ROW SAYS (BCA-05, D-7342).** A
+/// repeated field never reaches the handler: the server-wide request bound
+/// refuses it first, as on every route, in plain text naming the field, and
+/// nothing is read. Everything the handler answers, served or refused, is
+/// JSON that no cache keeps. Check r1 of this part found the row claiming
+/// JSON for the repeated field too, proved by a test that called the handler
+/// directly. Extremes: a second field repeated, a repeat of the empty value,
+/// a repeat out of order, an unknown field repeated, and a handler refusal
+/// and a served answer down the same socket path.
+#[tokio::test]
+async fn the_real_router_answers_what_the_row_says_for_a_repeat_and_for_the_handler() {
+    let store = root("router");
+    install(&store, &[measured_split()]);
+    for (query, field) in [
+        ("symbol=SPLITCO&symbol=SPLITCO", "symbol"),
+        ("symbol=SPLITCO&symbol=OTHERCO", "symbol"),
+        ("day=2025-03-04&symbol=SPLITCO&day=2025-03-04", "day"),
+        ("symbol=&symbol=", "symbol"),
+        ("alien=1&alien=2&symbol=SPLITCO", "alien"),
+    ] {
+        let (status, headers, body) = over_the_router(&store, query).await;
+        assert!(status.contains(" 400 "), "{query}: {status}");
+        assert!(
+            headers.contains("content-type: text/plain"),
+            "{query}: {headers}"
+        );
+        assert!(
+            body.contains(&format!("the query names \"{field}\" more than once")),
+            "{query}: {body}"
+        );
+        assert!(body.contains("Nothing was read or run"), "{query}: {body}");
+    }
+    for (query, wanted) in [
+        ("symbol=SPLITCO&day=2025-03-04", " 200 "),
+        ("symbol=SPLITCO&day=2025-02-29", " 400 "),
+        ("symbol=", " 400 "),
+        ("alien=1", " 400 "),
+    ] {
+        let (status, headers, body) = over_the_router(&store, query).await;
+        assert!(status.contains(wanted), "{query}: {status}");
+        assert!(
+            headers.contains("content-type: application/json; charset=utf-8"),
+            "{query}: {headers}"
+        );
+        assert!(
+            headers.contains("cache-control: no-store"),
+            "{query}: {headers}"
+        );
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        assert!(parsed.is_object(), "{query}: {body}");
+    }
+}

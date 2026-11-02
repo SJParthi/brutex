@@ -2630,14 +2630,31 @@ fn timed(root: &Path, n: usize) -> Vec<u128> {
 #[test]
 #[ignore = "the measured target: builds three stores and times 3,000+ answers; run with --ignored"]
 fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
+    day_band_timed([1, 10, 100], [20, 200, 60], 300);
+}
+
+/// The target's own path at a tenth of its history with two samples and two
+/// clients, its growth gate lifted: every page still answers its 92 days, the
+/// cold copy reads, and the writer and the clients run together (BASE-COV-API,
+/// D-7344).
+#[test]
+fn the_day_band_timing_runs_at_a_small_size() {
+    day_band_timed([1, 2, 3], [2, 2, 2], u128::MAX);
+}
+
+/// `histories` x 1,000 lines no page reads, one store each; `counts` is the
+/// cold samples, the warm samples a page and the clients at once; the warm
+/// p50 at the last history stays within `ceiling` hundredths of the first's.
+fn day_band_timed(histories: [u32; 3], counts: [usize; 3], ceiling: u128) {
+    let [cold_samples, warm_samples, client_count] = counts;
     let mut warm_p50 = Vec::new();
-    for history in [1_u32, 10, 100] {
-        let root = root_of(&format!("r3-13-timing-{history}"));
+    for history in histories {
+        let root = root_of(&format!("r3-13-timing-{history}-{warm_samples}"));
         timing_store(&root, history);
         // COLD: a fresh copy of the store per sample, so no memo holds it.
         let mut cold = Vec::new();
-        for at in 0..20 {
-            let copy = root_of(&format!("r3-13-timing-{history}-cold-{at}"));
+        for at in 0..cold_samples {
+            let copy = root_of(&format!("r3-13-timing-{history}-{warm_samples}-cold-{at}"));
             copy_tree(&root, &copy);
             let asked = ask(TIMED[1]);
             let started = std::time::Instant::now();
@@ -2650,7 +2667,7 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
         let _ = timed(&root, 1);
         for query in TIMED {
             let asked = ask(query);
-            let one: Vec<u128> = (0..200)
+            let one: Vec<u128> = (0..warm_samples)
                 .map(|_| {
                     let started = std::time::Instant::now();
                     let _ = answer(&root, &asked);
@@ -2663,7 +2680,7 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
                 page.0, page.1, page.2, page.3
             );
         }
-        let warm = spread(timed(&root, 200));
+        let warm = spread(timed(&root, warm_samples));
         warm_p50.push(warm.0);
         eprintln!(
             "R3-13 timing history={history}x warm 1 client: p50 {} us, p99 {} us, max {} us, n {}",
@@ -2695,12 +2712,12 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
                     i
                 })
             };
-            let writing = spread(timed(&root, 200));
+            let writing = spread(timed(&root, warm_samples));
             eprintln!(
                 "R3-13 timing history=1x warm 1 client, import writing: p50 {} us, p99 {} us, max {} us, n {}",
                 writing.0, writing.1, writing.2, writing.3
             );
-            let clients: Vec<_> = (0..60)
+            let clients: Vec<_> = (0..client_count)
                 .map(|_| {
                     let root = std::sync::Arc::clone(&shared);
                     std::thread::spawn(move || timed(&root, 4))
@@ -2714,7 +2731,7 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
             let lines = writer.join().expect("the writer");
             let sixty = spread(all);
             eprintln!(
-                "R3-13 timing history=1x 60 clients, import writing ({lines} lines appended): p50 {} us, p99 {} us, max {} us, n {}",
+                "R3-13 timing history=1x {client_count} clients, import writing ({lines} lines appended): p50 {} us, p99 {} us, max {} us, n {}",
                 sixty.0, sixty.1, sixty.2, sixty.3
             );
         }
@@ -2729,7 +2746,7 @@ fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
         ratio(2)
     );
     assert!(
-        ratio(2) <= 300,
+        ratio(2) <= ceiling,
         "the warm answer grew with history no page reads: {warm_p50:?}"
     );
 }
@@ -2870,14 +2887,47 @@ fn the_cold_auction_era_share_page_is_timed() {
         std::env::var_os("BRUTEX_DAYFLAGS_STORE")
             .expect("BRUTEX_DAYFLAGS_STORE names a store root"),
     );
-    let pages = [
-        ("NSE-CASH-DALBHARAT", "2026-08-10", "2026-09-30"),
-        ("NSE-CASH-RELIANCE", "2026-08-03", "2026-09-30"),
-    ];
-    for (instrument, from, to) in pages {
+    cold_share_pages_timed(
+        &root,
+        &[
+            ("NSE-CASH-DALBHARAT", "2026-08-10", "2026-09-30"),
+            ("NSE-CASH-RELIANCE", "2026-08-03", "2026-09-30"),
+        ],
+        200,
+        [20, 10],
+    );
+}
+
+/// The real-store timing's own path over an invented store, twice each with
+/// two rounds of two readers: cold, warm and concurrent still agree
+/// (BASE-COV-API, D-7344).
+#[test]
+fn the_cold_share_page_timing_runs_at_a_small_size() {
+    let root = root_of("r3-13-cold-share-small");
+    timing_store(&root, 1);
+    cold_share_pages_timed(
+        &root,
+        &[("NSE-CASH-RELIANCE", "2024-07-01", "2024-09-30")],
+        2,
+        [2, 2],
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Each of `pages` `(instrument, from, to)` over `root`: `samples` cold,
+/// warm and flags-only answers, then `concurrent` `[rounds, readers]` of
+/// cold readers at once.
+fn cold_share_pages_timed(
+    root: &Path,
+    pages: &[(&str, &str, &str)],
+    samples: usize,
+    concurrent: [usize; 2],
+) {
+    let [rounds, readers] = concurrent;
+    for &(instrument, from, to) in pages {
         let query = format!("feed=zerodha&instrument={instrument}&from={from}&to={to}");
         let asked = ask(&query);
-        let warmed = answer(&root, &asked);
+        let warmed = answer(root, &asked);
         let days: Vec<(Day, bool, bool)> = (day(from).days_from_epoch()
             ..=day(to).days_from_epoch())
             .filter_map(|n| Day::from_days(n).ok())
@@ -2895,31 +2945,31 @@ fn the_cold_auction_era_share_page_is_timed() {
                 forget_flags(&root.join("session-masters"));
             }
             let start = std::time::Instant::now();
-            let _got = answer(&root, &asked);
+            let _got = answer(root, &asked);
             start.elapsed().as_micros()
         };
-        let cold: Vec<u128> = (0..200).map(|_| time(true)).collect();
-        let warm: Vec<u128> = (0..200).map(|_| time(false)).collect();
+        let cold: Vec<u128> = (0..samples).map(|_| time(true)).collect();
+        let warm: Vec<u128> = (0..samples).map(|_| time(false)).collect();
         let symbol = instrument.trim_start_matches("NSE-CASH-");
-        let flags_only: Vec<u128> = (0..200)
+        let flags_only: Vec<u128> = (0..samples)
             .map(|_| {
                 forget_flags(&root.join("session-masters"));
                 let start = std::time::Instant::now();
-                let _flags = CasFlags::of(&root, symbol, true).on_sessions(&days);
+                let _flags = CasFlags::of(root, symbol, true).on_sessions(&days);
                 start.elapsed().as_micros()
             })
             .collect();
         let mut concurrent = Vec::new();
-        for _ in 0..20 {
+        for _ in 0..rounds {
             forget_flags(&root.join("session-masters"));
-            let gate = std::sync::Barrier::new(10);
+            let gate = std::sync::Barrier::new(readers);
             let round: Vec<u128> = std::thread::scope(|scope| {
-                let threads: Vec<_> = (0..10)
+                let threads: Vec<_> = (0..readers)
                     .map(|_| {
                         scope.spawn(|| {
                             gate.wait();
                             let start = std::time::Instant::now();
-                            let _got = answer(&root, &asked);
+                            let _got = answer(root, &asked);
                             start.elapsed().as_micros()
                         })
                     })
@@ -2932,12 +2982,12 @@ fn the_cold_auction_era_share_page_is_timed() {
             concurrent.extend(round);
         }
         assert_eq!(
-            answer(&root, &asked)["days"],
+            answer(root, &asked)["days"],
             warmed["days"],
             "cold, warm and concurrent answers agree"
         );
         println!(
-            "{query}: {read} open sessions; cold {:?}; warm {:?}; flags-only cold {:?}; 10 concurrent cold {:?} (p50, p99, max, n; us)",
+            "{query}: {read} open sessions; cold {:?}; warm {:?}; flags-only cold {:?}; {readers} concurrent cold {:?} (p50, p99, max, n; us)",
             spread(cold),
             spread(warm),
             spread(flags_only),
@@ -2951,11 +3001,22 @@ fn the_cold_auction_era_share_page_is_timed() {
 #[test]
 #[ignore = "a profiler's target: run with --ignored under valgrind"]
 fn the_day_band_pages_for_a_profiler() {
-    let root = root_of("r3-13-profile");
+    profiled_pages("r3-13-profile", 10);
+}
+
+/// The profiler's target at one answer a page (BASE-COV-API, D-7344).
+#[test]
+fn the_profilers_pages_run_at_a_small_size() {
+    profiled_pages("r3-13-profile-small", 1);
+}
+
+/// Every timed page, `rounds` answers each, over the 1x store.
+fn profiled_pages(tag: &str, rounds: usize) {
+    let root = root_of(tag);
     timing_store(&root, 1);
     for query in TIMED {
         let asked = ask(query);
-        for _ in 0..10 {
+        for _ in 0..rounds {
             let body = answer(&root, &asked);
             assert_eq!(body["days"].as_array().map(Vec::len), Some(92));
         }

@@ -5363,29 +5363,43 @@ mod tests {
     #[test]
     #[ignore = "a timing measurement of a synced append: run on demand (docs/06-limits.md L-PREC1-03)"]
     fn append_synced_cost_per_entry_is_measured() {
-        let root = scratch("audit-append-timing");
+        appends_timed("audit-append-timing", 400, 250_000);
+    }
+
+    /// The timing's own path at three appends, its ceiling lifted: a timing
+    /// on a loaded test run is no evidence, and whether every append landed
+    /// whole is (BASE-COV-API, D-7344).
+    #[test]
+    fn the_append_timing_runs_at_a_small_size() {
+        appends_timed("audit-append-timing-small", 3, u128::MAX);
+    }
+
+    /// `n` one-entry appends, each opened, measured, written and synced;
+    /// the file holds `n` whole entries and the p99 is under `ceiling_us`.
+    fn appends_timed(tag: &str, n: usize, ceiling_us: u128) {
+        let root = scratch(tag);
         let path = root.join("timing").join("runs");
         let entry = run_entry(1, 2_000, None);
-        let mut micros: Vec<u128> = Vec::with_capacity(400);
-        for _ in 0..400 {
+        let mut micros: Vec<u128> = Vec::with_capacity(n);
+        for _ in 0..n {
             let started = std::time::Instant::now();
             append_synced(&path, &entry).unwrap();
             micros.push(started.elapsed().as_micros());
         }
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
-            400 * 32,
+            n as u64 * 32,
             "every append landed whole"
         );
         micros.sort_unstable();
-        let at = |q: usize| micros.get(399 * q / 100).copied().unwrap_or(u128::MAX);
+        let at = |q: usize| micros.get((n - 1) * q / 100).copied().unwrap_or(u128::MAX);
         let max = micros.last().copied().unwrap_or(u128::MAX);
         eprintln!(
-            "append_synced n=400 p50={}us p99={}us max={max}us",
+            "append_synced n={n} p50={}us p99={}us max={max}us",
             at(50),
             at(99)
         );
-        assert!(at(99) < 250_000, "p99 {}us", at(99));
+        assert!(at(99) <= ceiling_us, "p99 {}us", at(99));
     }
 
     /// **AN INDEX ENTRY IS ITS OWN, BY MARK AND CHECKSUM**: a run entry and an

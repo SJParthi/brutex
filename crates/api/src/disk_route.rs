@@ -2067,7 +2067,23 @@ mod tests {
     #[test]
     #[ignore = "a timing measurement, run by hand on one test thread"]
     fn the_call_at_its_p99_costs_less_than_the_df_child_at_its_p50() {
-        let tmp = crate::scratch::path("disk-route-timing");
+        timed_against_the_child("disk-route-timing", 1_000, 1);
+    }
+
+    /// The measurement's own path at four samples, the p99's margin lifted:
+    /// each path still answers, the route still says 200 miss and hit, and
+    /// the figures print (BASE-COV-API, D-7344). `LAST` is keyed by its root,
+    /// so a clear here costs another test one more measure and no answer.
+    #[test]
+    fn the_disk_timing_runs_at_a_small_size() {
+        timed_against_the_child("disk-route-timing-small", 4, u128::MAX);
+    }
+
+    /// `n` samples of the child, the call and the uncached answer over two
+    /// roots, then `n` route answers missed and hit; `margin` times the
+    /// child's p50 bounds the call's p99.
+    fn timed_against_the_child(tag: &str, n: usize, margin: u128) {
+        let tmp = crate::scratch::path(tag);
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("masters")).unwrap();
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -2076,7 +2092,7 @@ mod tests {
                 let _ = std::hint::black_box((df_of(root), measure(root), measured(root, None)));
             }
             let (mut child, mut call, mut whole) = (Vec::new(), Vec::new(), Vec::new());
-            for _ in 0..1_000 {
+            for _ in 0..n {
                 let t = Instant::now();
                 let _ = std::hint::black_box(df_of(root));
                 child.push(t.elapsed().as_nanos());
@@ -2094,12 +2110,12 @@ mod tests {
                 ("measured-uncached", whole),
             ] {
                 println!(
-                    "RUST1 root={name} {what} n=1000 p50_ns={p50} p99_ns={p99} max_ns={max} ({})",
+                    "RUST1 root={name} {what} n={n} p50_ns={p50} p99_ns={p99} max_ns={max} ({})",
                     root.display()
                 );
             }
             assert!(
-                call.1 < child.0,
+                call.1 < child.0.saturating_mul(margin),
                 "{name}: {SOURCE} p99 {} ns is not below the df child's p50 {} ns",
                 call.1,
                 child.0
@@ -2112,8 +2128,8 @@ mod tests {
             .build()
             .unwrap();
         for (what, miss) in [("route-miss", true), ("route-hit", false)] {
-            let mut ns = Vec::with_capacity(1_000);
-            for k in 0..1_050 {
+            let mut ns = Vec::with_capacity(n);
+            for k in 0..n + 50 {
                 if miss {
                     *LAST.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 }
@@ -2128,7 +2144,7 @@ mod tests {
                 }
             }
             let (p50, p99, max) = ranks(ns);
-            println!("RUST1 {what} n=1000 p50_ns={p50} p99_ns={p99} max_ns={max}");
+            println!("RUST1 {what} n={n} p50_ns={p50} p99_ns={p99} max_ns={max}");
         }
         *LAST.lock().unwrap_or_else(PoisonError::into_inner) = None;
         let _ = std::fs::remove_dir_all(&tmp);

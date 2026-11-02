@@ -1413,6 +1413,20 @@ fn the_restart_words_name_the_unjournalled_archive_leg() {
 #[test]
 #[ignore = "timing evidence, run by hand: cargo test -p api --release --lib restart_cost -- --ignored --nocapture"]
 fn restart_cost_with_64_open_runs() {
+    costs_with_64_open_runs(8_001, 200);
+}
+
+/// The timing's own path over a 65-record journal, twice each (BASE-COV-API,
+/// D-7344): it still finds the 64 runs open and prints every line.
+#[test]
+fn the_open_runs_timing_runs_at_a_small_size() {
+    costs_with_64_open_runs(65, 2);
+}
+
+/// `restart_scan` over `size` records, 64 of them opening records, then
+/// `status_json` carrying the answer, and one run open: `rounds` timed
+/// calls each.
+fn costs_with_64_open_runs(size: u64, rounds: usize) {
     let spread = cost_spread;
     let mut records = (0..64_u64)
         .map(|run| {
@@ -1426,19 +1440,21 @@ fn restart_cost_with_64_open_runs() {
             )
         })
         .collect::<Vec<_>>();
-    records.extend((0..8_001 - 64).map(|offset| failure(1_000 + offset)));
-    let journal = journal_of("cost-64", &records);
+    records.extend((0..size - 64).map(|offset| failure(1_000 + offset)));
+    let journal = journal_of(&format!("cost-64-{size}"), &records);
     let answer = restart_scan(&journal);
     let run = answer.interrupted().expect("open");
     assert_eq!((run.open_count, run.also_open.len()), (64, 63));
     let time = cost_timed;
     spread(
         "restart_scan (8,001 records, 64 runs open)",
-        time(&mut || assert!(restart_scan(&journal).interrupted().is_some())),
+        time(rounds, &mut || {
+            assert!(restart_scan(&journal).interrupted().is_some());
+        }),
     );
     spread(
         "status_json (64 runs open)",
-        time(&mut || {
+        time(rounds, &mut || {
             let _ = std::hint::black_box(status_json(
                 &Progress::default(),
                 Some(20_738),
@@ -1447,14 +1463,16 @@ fn restart_cost_with_64_open_runs() {
         }),
     );
     let one = journal_of(
-        "cost-1",
+        &format!("cost-1-{size}"),
         &core::iter::once(opened(100, Scope::Spot, "ag01-cost-one", FROM, TO, 1))
-            .chain((0..8_000).map(|offset| failure(1_000 + offset)))
+            .chain((0..size - 1).map(|offset| failure(1_000 + offset)))
             .collect::<Vec<_>>(),
     );
     spread(
         "restart_scan (8,001 records, 1 run open)",
-        time(&mut || assert!(restart_scan(&one).interrupted().is_some())),
+        time(rounds, &mut || {
+            assert!(restart_scan(&one).interrupted().is_some());
+        }),
     );
 }
 
@@ -1471,9 +1489,9 @@ fn cost_spread(what: &str, mut nanos: Vec<u128>) {
     );
 }
 
-/// The wall time of 200 sequential runs of `work`, in nanoseconds each.
-fn cost_timed(work: &mut dyn FnMut()) -> Vec<u128> {
-    (0..200)
+/// The wall time of `rounds` sequential runs of `work`, in nanoseconds each.
+fn cost_timed(rounds: usize, work: &mut dyn FnMut()) -> Vec<u128> {
+    (0..rounds)
         .map(|_| {
             let began = std::time::Instant::now();
             work();
@@ -1493,6 +1511,19 @@ fn cost_timed(work: &mut dyn FnMut()) -> Vec<u128> {
 #[test]
 #[ignore = "timing evidence, run by hand: cargo test -p api --release --lib restart_cost -- --ignored --nocapture"]
 fn restart_cost_of_the_walks_worst_case() {
+    costs_of_the_walks_worst_case(200);
+}
+
+/// The worst case's own path, every answer still checked, each timed call
+/// made twice (BASE-COV-API, D-7344).
+#[test]
+fn the_walks_worst_case_timing_runs_at_a_small_size() {
+    costs_of_the_walks_worst_case(2);
+}
+
+/// 432 walks closed 432 times, and 432 walks closed once: `rounds` timed
+/// calls of each answer.
+fn costs_of_the_walks_worst_case(rounds: usize) {
     let (spread, time) = (cost_spread, cost_timed);
     let walks = |closes: u64| {
         let mut records = (0..432_u64)
@@ -1510,25 +1541,29 @@ fn restart_cost_of_the_walks_worst_case() {
         }));
         records
     };
-    let paired = journal_of("cost-guess-432", &walks(432));
+    let paired = journal_of(&format!("cost-guess-432-{rounds}"), &walks(432));
     assert_eq!(restart_scan(&paired), Restart::Clean);
     spread(
         "restart_scan (864 run records of one F&O key, 432 closes, every close a guess)",
-        time(&mut || assert_eq!(restart_scan(&paired).word(), "clean")),
+        time(rounds, &mut || {
+            assert_eq!(restart_scan(&paired).word(), "clean");
+        }),
     );
     // A GUESSED ANSWER AT ITS LARGEST: 432 walks open and ONE close of the
     // key, so 431 are surely open, which is a count; the document carries
     // the reading, 64 guessed ordinals and the count's 432.
-    let guessed = journal_of("cost-guess-1", &walks(1));
+    let guessed = journal_of(&format!("cost-guess-1-{rounds}"), &walks(1));
     let answer = restart_scan(&guessed);
     assert_eq!(guessed_of(&answer).at_least_open(), 431);
     spread(
         "restart_scan (433 run records of one F&O key, one close: a guessed answer)",
-        time(&mut || assert_eq!(restart_scan(&guessed).word(), "not_known")),
+        time(rounds, &mut || {
+            assert_eq!(restart_scan(&guessed).word(), "not_known");
+        }),
     );
     spread(
         "status_json (that guessed answer)",
-        time(&mut || {
+        time(rounds, &mut || {
             let _ = std::hint::black_box(status_json(
                 &Progress::default(),
                 Some(20_738),

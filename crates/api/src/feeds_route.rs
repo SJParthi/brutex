@@ -2969,6 +2969,21 @@ mod tests {
     #[test]
     #[ignore = "a growth bench: cargo test --release -p api held_span_growth -- --ignored --nocapture"]
     fn held_span_growth_bench() {
+        held_span_growth([1_000, 10_000, 100_000], 200, 4);
+    }
+
+    /// The bench's own path at 20, 30 and 40 keys and two samples a round,
+    /// its growth ratio lifted: a walk per scale, no more, and the span's
+    /// last day hold at any size (BASE-COV-API, D-7344).
+    #[test]
+    fn the_held_span_bench_runs_at_a_small_size() {
+        held_span_growth([20, 30, 40], 2, u128::MAX / 2_000);
+    }
+
+    /// One census per entry of `sizes`: the first measure, `reps` repeats and
+    /// `reps` one-key appends, in three rounds; the largest scale's quietest
+    /// p99 stays within `ratio` times the smallest's.
+    fn held_span_growth(sizes: [u32; 3], reps: u32, ratio: u128) {
         use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
         let entry = |n: u32| Entry {
             key: EntryKey {
@@ -2996,7 +3011,7 @@ mod tests {
         };
         let mut hits_p99 = Vec::new();
         let mut appends_p99 = Vec::new();
-        for keys in [1_000_u32, 10_000, 100_000] {
+        for keys in sizes {
             let root = store_root(&format!("held-bench-{keys}"));
             let path = manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
@@ -3023,7 +3038,7 @@ mod tests {
             let mut hit_rounds = Vec::new();
             let mut append_rounds = Vec::new();
             for round in 0..3_u32 {
-                let hits: Vec<u128> = (0..200)
+                let hits: Vec<u128> = (0..reps)
                     .map(|_| {
                         let at = std::time::Instant::now();
                         let _ = held_spans(Some(&census)).expect("a span");
@@ -3031,9 +3046,9 @@ mod tests {
                     })
                     .collect();
                 let mut appends = Vec::new();
-                for n in 0..200 {
+                for n in 0..reps {
                     manifest
-                        .record(entry(keys + round * 200 + n))
+                        .record(entry(keys + round * reps + n))
                         .expect("records");
                     std::fs::write(&path, manifest.image()).expect("writes");
                     census = census::read_vendor_after(
@@ -3049,7 +3064,7 @@ mod tests {
                 let (ap50, ap99, amax) = quantiles(appends);
                 println!(
                     "held span, {keys} keys, round {round}: walk {walk} ns; hit p50 {hp50} p99 {hp99} \
-                     max {hmax} ns (n=200); one-key append p50 {ap50} p99 {ap99} max {amax} ns (n=200)"
+                     max {hmax} ns (n={reps}); one-key append p50 {ap50} p99 {ap99} max {amax} ns (n={reps})"
                 );
                 hit_rounds.push(hp99);
                 append_rounds.push(ap99);
@@ -3065,9 +3080,12 @@ mod tests {
             hits_p99.push(hit_rounds.into_iter().min().expect("three rounds"));
             appends_p99.push(append_rounds.into_iter().min().expect("three rounds"));
         }
-        assert!(hits_p99[2] <= hits_p99[0].max(1_000) * 4, "{hits_p99:?}");
         assert!(
-            appends_p99[2] <= appends_p99[0].max(1_000) * 4,
+            hits_p99[2] <= hits_p99[0].max(1_000) * ratio,
+            "{hits_p99:?}"
+        );
+        assert!(
+            appends_p99[2] <= appends_p99[0].max(1_000) * ratio,
             "{appends_p99:?}"
         );
     }

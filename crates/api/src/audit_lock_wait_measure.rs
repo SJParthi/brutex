@@ -33,13 +33,32 @@ fn rank(sorted: &[u128], p: usize) -> u128 {
 fn measure_append_latency_under_contention() {
     let root = std::env::var("BRUTEX_AG06_MEASURE_ROOT")
         .expect("BRUTEX_AG06_MEASURE_ROOT names a store root holding a CLONE of the journal");
-    let journal = Arc::new(Journal::at(Path::new(&root)));
+    let _refused = latency_over(Path::new(&root), 200);
+}
+
+/// The measurement's own path over a fresh journal, eight samples an
+/// operation: nothing it asks is refused, and all three writer counts run
+/// (BASE-COV-API, D-7344).
+#[test]
+fn the_lock_wait_measurement_runs_at_a_small_size() {
+    let root = crate::scratch::path("ag06-measure-small");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    assert_eq!(latency_over(&root, 8), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `samples` of each operation with 1, 2 and 8 writers at once over the
+/// journal under `root`, printed; how many operations were refused.
+fn latency_over(root: &Path, samples: usize) -> usize {
+    let journal = Arc::new(Journal::at(root));
     let day = pull::session::Day::new(2025, 7, 1).expect("a date");
     let window = Window::new(day, day).expect("forwards");
     let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_750_000_000);
     println!("journal records before: {}", journal.look().records());
+    let mut all_refused = 0_usize;
     for writers in [1_usize, 2, 8] {
-        let per = 200 / writers;
+        let per = samples / writers;
         let barrier = Arc::new(Barrier::new(writers));
         let samples: Vec<Vec<(usize, u128, bool)>> = (0..writers)
             .map(|w| {
@@ -86,6 +105,7 @@ fn measure_append_latency_under_contention() {
                 }
             }
             micros.sort_unstable();
+            all_refused += refused;
             println!(
                 "AG06 writers={writers} op={name} n={} refused={refused} p50_us={} p99_us={} max_us={}",
                 micros.len(),
@@ -96,4 +116,5 @@ fn measure_append_latency_under_contention() {
         }
     }
     println!("journal records after: {}", journal.look().records());
+    all_refused
 }

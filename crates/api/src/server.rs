@@ -22117,6 +22117,25 @@ mod tests {
     #[test]
     #[ignore = "a measurement, run by hand"]
     fn pull_runtime_costs() {
+        costs_of_the_pull_runtime("pull-runtime-costs-store", 200, 100_000, 8_000);
+    }
+
+    /// The measurement's own path at two samples each, over a journal just
+    /// past the scan's bound, so the run opening it is still read through
+    /// the index (BASE-COV-API, D-7344).
+    #[test]
+    fn the_pull_runtime_measurement_runs_at_a_small_size() {
+        costs_of_the_pull_runtime(
+            "pull-runtime-costs-small",
+            2,
+            2,
+            u64::try_from(crate::pullrun::INTERRUPTED_SCAN).expect("small") + 10,
+        );
+    }
+
+    /// `slow` samples of the paths that touch the disk, `quick` of those
+    /// that do not, and a journal of `failures` failures behind one open run.
+    fn costs_of_the_pull_runtime(tag: &str, slow: usize, quick: usize, failures: u64) {
         fn spread(label: &str, mut nanos: Vec<u128>) {
             nanos.sort_unstable();
             let at = |q: usize| nanos[(nanos.len() * q / 100).min(nanos.len() - 1)];
@@ -22138,24 +22157,24 @@ mod tests {
                 .collect()
         };
         // The store probe: one small file created, synced and removed.
-        let root = crate::scratch::path("pull-runtime-costs-store");
+        let root = crate::scratch::path(tag);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
         spread(
             "store_fault (healthy store)",
-            timed(200, &mut || assert_eq!(store_fault(&root), None)),
+            timed(slow, &mut || assert_eq!(store_fault(&root), None)),
         );
         // The settle gate.
         let regular = pull::calendar::DayKind::Open(pull::calendar::Session::full());
         spread(
             "settled_today",
-            timed(100_000, &mut || {
+            timed(quick, &mut || {
                 assert!(std::hint::black_box(settled_today(regular, Some(930), 936)).is_ok());
             }),
         );
         spread(
             "record_horizon + past_record",
-            timed(100_000, &mut || {
+            timed(quick, &mut || {
                 let _ = std::hint::black_box(pull::calendar::record_horizon(20_738));
                 let _ = std::hint::black_box(pull::calendar::past_record(17_532, 20_900));
             }),
@@ -22181,7 +22200,7 @@ mod tests {
             window,
             "a gap",
         );
-        for _ in 0..8_000 {
+        for _ in 0..failures {
             journal
                 .append_failure(&mut thread, &failure, "a gap")
                 .expect("a failure lands");
@@ -22195,7 +22214,7 @@ mod tests {
         );
         spread(
             "restart_scan (8,001-record journal: 800 read, the run record by its index)",
-            timed(200, &mut || {
+            timed(slow, &mut || {
                 assert!(
                     crate::pullrun::restart_scan(&journal)
                         .interrupted()
@@ -22206,7 +22225,7 @@ mod tests {
         let doc_of = crate::pullrun::Progress::default();
         spread(
             "status_json (default document, with the interrupted run)",
-            timed(100_000, &mut || {
+            timed(quick, &mut || {
                 let _ = std::hint::black_box(crate::pullrun::status_json(
                     &doc_of,
                     Some(20_738),
