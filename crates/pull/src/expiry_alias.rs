@@ -1053,6 +1053,19 @@ pub fn alias_records() -> Result<Vec<AliasRecord>, SettleRefusal> {
     reason = "a test that cannot panic cannot fail"
 )]
 mod tests {
+    /// The const builders, which only the compiler ever ran: at run time they
+    /// set the basis and change nothing else.
+    #[test]
+    fn the_basis_builders_set_the_basis_and_nothing_else() {
+        let row = ROWS[0];
+        let kept = sourced(row, "an invented circular");
+        assert_eq!(kept.basis, Basis::Sourced("an invented circular"));
+        assert_eq!((kept.stated, kept.settled), (row.stated, row.settled));
+        let guessed = inferred(row);
+        assert_eq!(guessed.basis, Basis::Inferred);
+        assert_eq!(guessed.underlying, row.underlying);
+    }
+
     use super::*;
 
     fn d(y: u16, m: u8, dd: u8) -> Day {

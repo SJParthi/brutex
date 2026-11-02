@@ -107,10 +107,8 @@ fn a_contract_gone_from_the_newest_snapshot_is_still_asked() {
     let asked = window(day(2026, 1, 5), day(2026, 1, 27));
     let plan = plan_of(&book, asked, day(2026, 1, 30), day(2026, 1, 27));
     assert_eq!(plan.refused, Vec::<String>::new());
-    assert!(
-        plan.asks.iter().any(|ask| ask.token == 8_000_011),
-        "{plan:?}"
-    );
+    let asked = plan.asks.iter().filter(|ask| ask.token == 8_000_011);
+    assert_eq!(asked.count(), 1, "{plan:?}");
 }
 
 /// A token the newest snapshot gives to another underlying is refused by
@@ -142,13 +140,9 @@ fn a_token_reused_by_another_share_or_carried_twice_is_refused_by_name() {
     snapshot_on(&twice, day(2026, 1, 8), &[jan.clone(), jan, feb]);
     let book = Book::open(&twice).unwrap();
     let plan = plan_of(&book, asked, day(2026, 1, 8), day(2026, 1, 7));
-    assert!(
-        plan.refused
-            .iter()
-            .any(|why| why.starts_with("token_duplicated: ")),
-        "{:?}",
-        plan.refused
-    );
+    let named = plan.refused.iter();
+    let twice = named.filter(|why| why.starts_with("token_duplicated: "));
+    assert_eq!(twice.count(), 1, "{:?}", plan.refused);
 }
 
 #[test]

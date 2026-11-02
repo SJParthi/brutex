@@ -80,7 +80,10 @@ fn a_pricing_refusal_says_nothing_was_priced() {
         &["nothing was priced: an invented ladder"],
     );
     says(
-        &PricingError::NoSpotAtStamp { ts_micros: i64::MIN }.to_string(),
+        &PricingError::NoSpotAtStamp {
+            ts_micros: i64::MIN,
+        }
+        .to_string(),
         &[&i64::MIN.to_string(), "the previous minute's level"],
     );
 }

@@ -6613,3 +6613,7 @@ mod record_tests {
 #[cfg(test)]
 #[path = "calendar_tradable_tests.rs"]
 mod tradable_tests;
+
+#[cfg(test)]
+#[path = "calendar_cov_tests.rs"]
+mod cov_tests;

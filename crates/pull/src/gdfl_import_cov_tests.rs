@@ -406,22 +406,15 @@ fn a_rescan_names_a_declined_day_a_missing_day_and_a_refused_file() {
         .iter()
         .map(|f| (f.instrument.clone(), f.why.clone()))
         .collect();
-    assert!(
-        named
-            .iter()
-            .any(|(what, _)| what == &format!("{sunday} calendar")),
-        "{named:?}"
-    );
+    let calendar = format!("{sunday} calendar");
+    let closed = |(what, _): &&(String, String)| *what == calendar;
+    assert_eq!(named.iter().filter(closed).count(), 1, "{named:?}");
     let past = format!("{missing} past.csv");
     let stamped = |(what, why): &&(String, String)| *what == past && why.contains("86400");
     assert_eq!(named.iter().filter(stamped).count(), 1, "{named:?}");
-    assert!(
-        named
-            .iter()
-            .any(|(what, why)| what == &format!("{missing} member.csv")
-                && why == "an invented refusal"),
-        "{named:?}"
-    );
+    let member = format!("{missing} member.csv");
+    let refused = |(what, why): &&(String, String)| *what == member && why == "an invented refusal";
+    assert_eq!(named.iter().filter(refused).count(), 1, "{named:?}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -929,4 +922,33 @@ fn a_hole_takes_all_three_of_its_conditions() {
     assert!(!Cause::open(Stage::Journal, code).is_hole());
     assert!(!Cause::open(Stage::File, "an_invented_code").is_hole());
     assert!(!Cause::vendor(code).is_hole());
+}
+
+/// A day the journal holds and the source does not: a rescan names it missing
+/// on both doors, and reads no file (a combination: an empty tick store under
+/// a journal that says the day was imported).
+#[test]
+fn a_rescan_of_a_day_the_source_does_not_hold_names_it_missing() {
+    let root = scratch("cov-rescan-gone");
+    let store = root.join("S");
+    let on = day(2019, 5, 30);
+    let journal = format!("done indices {on} *\ndone options {on} *\n");
+    put(&store, "imports/gdfl.journal", journal.as_bytes());
+    let source = root.join("empty-source");
+    std::fs::create_dir_all(&source).unwrap();
+    let cm = rescan_cm(
+        &TickStore::new(&source),
+        ImportKind::Indices,
+        (on, on),
+        &store,
+    )
+    .unwrap();
+    assert_eq!(cm.days_missing, [on]);
+    assert_eq!(cm.files, 0);
+    for lineage in [false, true] {
+        let nfo = rescan_nfo(&NfoTickStore::new(&source), (on, on), &store, lineage).unwrap();
+        assert_eq!(nfo.days_missing, [on], "lineage {lineage}");
+        assert_eq!(nfo.files, 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
