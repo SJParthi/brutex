@@ -157,7 +157,10 @@ fn a_host_is_encoded_cut_on_a_whole_escape_and_never_empty() {
     assert_eq!(host_field("a.b-c9"), "a.b-c9");
     assert_eq!(host_field("a b"), "a%20b");
     let long = host_field(&" ".repeat(100));
-    assert!(long.len() <= HOST_MAX && long.len() % 3 == 0, "{long}");
+    assert!(
+        long.len() <= HOST_MAX && long.len().is_multiple_of(3),
+        "{long}"
+    );
 }
 
 #[test]
