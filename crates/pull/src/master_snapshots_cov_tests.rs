@@ -51,7 +51,12 @@ fn a_listing_of_a_file_is_refused_and_of_nothing_is_empty() {
     let below = file.join("below");
     let why = read_quiesced(&below).unwrap_err();
     assert!(why.contains("could not be read"), "{why}");
-    assert!(Catalog::read(&root.join("missing")).unwrap().incomplete_of(Kind::Kite).is_empty());
+    assert!(
+        Catalog::read(&root.join("missing"))
+            .unwrap()
+            .incomplete_of(Kind::Kite)
+            .is_empty()
+    );
 }
 
 /// A receipt with no body is incomplete, and named by the receipt's own file.
@@ -129,7 +134,11 @@ fn a_body_is_held_to_its_receipt_on_every_count() {
     assert!(expand(&good, &long).unwrap_err().contains("does not match"));
     let mut other = receipt_of(body);
     other.body_sha256 = "0".repeat(64);
-    assert!(expand(&good, &other).unwrap_err().contains("does not match"));
+    assert!(
+        expand(&good, &other)
+            .unwrap_err()
+            .contains("does not match")
+    );
     let binary = compress(&[0xFF]).unwrap();
     let why = expand(&binary, &receipt_of(&[0xFF])).unwrap_err();
     assert!(why.contains("not UTF-8"), "{why}");
@@ -275,11 +284,12 @@ fn a_snapshot_reads_past_blank_lines_and_answers_for_each_row() {
 #[test]
 fn a_contract_differs_in_any_column_of_its_key() {
     let at = stamp(day(2026, 3, 2), 1);
-    let row = |exchange: &str, symbol: &str, expiry: &str, strike: &str, kind: &str, segment: &str| {
-        super::tests::row(
-            9_000_001, symbol, "ZQIDX", expiry, strike, 75, kind, segment, exchange,
-        )
-    };
+    let row =
+        |exchange: &str, symbol: &str, expiry: &str, strike: &str, kind: &str, segment: &str| {
+            super::tests::row(
+                9_000_001, symbol, "ZQIDX", expiry, strike, 75, kind, segment, exchange,
+            )
+        };
     let one = |text: String| Snapshot::parse(at, &dump(&[text])).unwrap();
     let base = one(row("NFO", "ZQA", "2026-03-31", "100", "CE", "NFO-OPT"));
     let listed = base.rows().next().unwrap();
@@ -350,7 +360,10 @@ fn a_diff_tells_each_change_of_a_token_apart() {
         .iter()
         .map(|item| item.change.word())
         .collect();
-    assert!(words.contains(&"expiry") && words.contains(&"lot_size"), "{words:?}");
+    assert!(
+        words.contains(&"expiry") && words.contains(&"lot_size"),
+        "{words:?}"
+    );
     let isins = |isin: &str| {
         let mut held = HashMap::new();
         held.insert("ZQSHARE".to_owned(), isin.to_owned());
@@ -453,7 +466,10 @@ fn a_hook_answer_carries_each_refusal_as_json() {
         ..sample()
     };
     let json = refused.json();
-    assert!(json.contains(r#"{"refusal":"an invented refusal"}"#), "{json}");
+    assert!(
+        json.contains(r#"{"refusal":"an invented refusal"}"#),
+        "{json}"
+    );
     assert!(
         json.contains(r#""held":null,"named":[],"unnamed":null,"refusal":"an unlisted folder""#),
         "{json}"

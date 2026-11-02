@@ -74,7 +74,10 @@ fn a_signed_fraction_is_a_ratio_only_when_positive_and_it_fits() {
 fn an_empty_shelf_indexes_nothing_and_spends_no_budget() {
     let mut shelf: Shelf<Run> = Shelf::default();
     let mut budget = 7;
-    assert_eq!(shelf.index(|row| (row.first, row.last), &mut budget), Ok(()));
+    assert_eq!(
+        shelf.index(|row| (row.first, row.last), &mut budget),
+        Ok(())
+    );
     assert_eq!(budget, 7);
 }
 
@@ -87,12 +90,13 @@ fn a_row_of_the_wrong_width_is_refused_by_both_tables() {
         receipt: receipt(table, standing, 1),
         rows: vec![(7, vec!["ACO".to_owned(), "-".to_owned()])],
     };
-    let actions = CorporateActions::build(
-        &parsed(Table::CorporateActions, Standing::Sourced),
-        path,
-    )
-    .unwrap_err();
-    assert!(actions.to_string().contains("wrong field count"), "{actions}");
+    let actions =
+        CorporateActions::build(&parsed(Table::CorporateActions, Standing::Sourced), path)
+            .unwrap_err();
+    assert!(
+        actions.to_string().contains("wrong field count"),
+        "{actions}"
+    );
     let runs = BasisRuns::build(&parsed(Table::BasisRuns, Standing::Measured), path).unwrap_err();
     assert!(runs.to_string().contains("wrong field count"), "{runs}");
 }
@@ -126,7 +130,10 @@ fn actions_whose_day_tables_would_pass_the_bound_are_refused_by_name() {
         nse("BCO", last, Kind::Dividend, "1"),
     ];
     let said = refused(&actions_draft(Standing::Sourced, &rows));
-    assert!(said.contains("\"BCO\"") && said.contains("share-days"), "{said}");
+    assert!(
+        said.contains("\"BCO\"") && said.contains("share-days"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -200,7 +207,10 @@ fn a_fold_past_the_cap_of_runs_refuses_at_exactly_the_day_past_it() {
             around(on, if i % 2 == 0 { "1" } else { "2" })
         })
     };
-    assert_eq!(fold_runs("ACO", days(cap)).unwrap().len(), MAX_RUNS_PER_SYMBOL);
+    assert_eq!(
+        fold_runs("ACO", days(cap)).unwrap().len(),
+        MAX_RUNS_PER_SYMBOL
+    );
     assert_eq!(fold_runs("ACO", days(cap + 1)), Err(FoldError::TooMany));
 }
 

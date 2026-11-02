@@ -1338,11 +1338,11 @@ async fn pull_one<D: crate::chain::Discovery>(
 }
 
 #[cfg(test)]
-#[path = "fnowork_futures_tests.rs"]
-mod futures_tests;
-#[cfg(test)]
 #[path = "fnowork_cov_tests.rs"]
 mod cov_tests;
+#[cfg(test)]
+#[path = "fnowork_futures_tests.rs"]
+mod futures_tests;
 
 #[cfg(test)]
 #[allow(

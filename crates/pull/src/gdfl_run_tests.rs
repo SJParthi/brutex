@@ -924,7 +924,7 @@ fn the_run_directory_follows_the_census_layout() {
 
 // ═══ The progress record (D-4904) ═══════════════════════════════════════════
 
-fn sample() -> Progress {
+pub(super) fn sample() -> Progress {
     Progress {
         state: RunState::Running.code(),
         mode: 1,

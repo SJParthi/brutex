@@ -324,6 +324,8 @@ mod gdfl_fixtures;
 /// stated, variant by variant, and distinct within its table.
 #[cfg(test)]
 mod base_cov_codes_tests;
+#[cfg(test)]
+mod base_cov_words_tests;
 
 /// Test-only: re-runs a test where the permission bits bind, even as root. The
 /// same file serves this crate's integration tests. D-0995.

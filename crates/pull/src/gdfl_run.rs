@@ -749,18 +749,16 @@ fn flag(word: &str) -> Result<bool, String> {
 fn day_of(text: &str) -> Result<Day, String> {
     let bad = || format!("{} is not a YYYY-MM-DD day", shown(text, 32));
     let parts: Vec<&str> = text.split('-').collect();
-    let number = |part: &str, width: usize| {
-        (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| part.parse::<u16>().ok())
-            .flatten()
-    };
+    let digits =
+        |part: &str, width: usize| part.len() == width && part.bytes().all(|b| b.is_ascii_digit());
     let [y, m, d] = parts.as_slice() else {
         return Err(bad());
     };
-    let (Some(y), Some(m), Some(d)) = (number(y, 4), number(m, 2), number(d, 2)) else {
-        return Err(bad());
-    };
-    let (Ok(m), Ok(d)) = (u8::try_from(m), u8::try_from(d)) else {
+    let (Some(y), Some(m), Some(d)) = (
+        digits(y, 4).then(|| y.parse::<u16>().ok()).flatten(),
+        digits(m, 2).then(|| m.parse::<u8>().ok()).flatten(),
+        digits(d, 2).then(|| d.parse::<u8>().ok()).flatten(),
+    ) else {
         return Err(bad());
     };
     Day::new(y, m, d).map_err(|why| format!("{text}: {why}"))
@@ -2892,6 +2890,10 @@ impl Observer for ProgressFile {
 #[cfg(test)]
 #[path = "gdfl_run_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gdfl_run_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 #[path = "gdfl_run_ia2_tests.rs"]

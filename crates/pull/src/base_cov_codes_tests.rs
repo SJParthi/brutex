@@ -36,41 +36,39 @@ fn day(y: u16, m: u8, d: u8) -> Day {
 fn every_alert_error_has_its_own_code() {
     use crate::alerts::AlertError as E;
     let p = PathBuf::from("/invented");
-    words(
-        &[
-            (
-                E::Unavailable { root: p.clone() }.code(),
-                "alerts_unavailable",
-            ),
-            (E::KindUnknown { kind: 255 }.code(), "alert_kind_unknown"),
-            (E::KeyEmpty.code(), "alert_key_empty"),
-            (E::Damaged { offset: 0 }.code(), "alerts_damaged"),
-            (
-                E::RecordDamaged {
-                    ordinal: u32::MAX,
-                    offset: u64::MAX,
-                }
-                .code(),
-                "alert_record_damaged",
-            ),
-            (
-                E::VersionUnknown { found: u16::MAX }.code(),
-                "alerts_version_unknown",
-            ),
-            (E::NotAFile { path: p }.code(), "alerts_not_a_file"),
-            (E::NoSuchAlert { ordinal: 0 }.code(), "no_such_alert"),
-            (
-                E::AlreadyAcknowledged { ordinal: 1 }.code(),
-                "already_acknowledged",
-            ),
-            (
-                E::AckOutsideWindow { ordinal: 2 }.code(),
-                "ack_outside_window",
-            ),
-            (E::NotDamaged.code(), "alerts_not_damaged"),
-            (E::Full.code(), "alerts_full"),
-        ],
-    );
+    words(&[
+        (
+            E::Unavailable { root: p.clone() }.code(),
+            "alerts_unavailable",
+        ),
+        (E::KindUnknown { kind: 255 }.code(), "alert_kind_unknown"),
+        (E::KeyEmpty.code(), "alert_key_empty"),
+        (E::Damaged { offset: 0 }.code(), "alerts_damaged"),
+        (
+            E::RecordDamaged {
+                ordinal: u32::MAX,
+                offset: u64::MAX,
+            }
+            .code(),
+            "alert_record_damaged",
+        ),
+        (
+            E::VersionUnknown { found: u16::MAX }.code(),
+            "alerts_version_unknown",
+        ),
+        (E::NotAFile { path: p }.code(), "alerts_not_a_file"),
+        (E::NoSuchAlert { ordinal: 0 }.code(), "no_such_alert"),
+        (
+            E::AlreadyAcknowledged { ordinal: 1 }.code(),
+            "already_acknowledged",
+        ),
+        (
+            E::AckOutsideWindow { ordinal: 2 }.code(),
+            "ack_outside_window",
+        ),
+        (E::NotDamaged.code(), "alerts_not_damaged"),
+        (E::Full.code(), "alerts_full"),
+    ]);
 }
 
 #[test]
@@ -113,10 +111,8 @@ fn every_fno_membership_day_status_has_a_word_and_a_reason() {
     for (status, _, _) in table {
         assert!(S::ALL.contains(&status));
     }
-    words(&table.map(|(s, w, _)| (s.word(), w)),
-    );
-    words(&table.map(|(s, _, r)| (s.reason(), r)),
-    );
+    words(&table.map(|(s, w, _)| (s.word(), w)));
+    words(&table.map(|(s, _, r)| (s.reason(), r)));
 }
 
 #[test]
@@ -132,20 +128,18 @@ fn the_stored_index_absent_refusal_has_its_own_code() {
 #[test]
 fn every_run_state_has_its_own_word() {
     use crate::gdfl_run::RunState as R;
-    words(
-        &[
-            (R::Running.as_str(), "running"),
-            (R::Stopping.as_str(), "stopping"),
-            (R::Finished.as_str(), "finished"),
-            (R::Stopped.as_str(), "stopped"),
-            (R::Shutdown.as_str(), "shutdown"),
-            (R::SourceLost.as_str(), "source_lost"),
-            (R::DiskFull.as_str(), "disk_full"),
-            (R::Refused.as_str(), "refused"),
-            (R::Census.as_str(), "census"),
-            (R::Durability.as_str(), "durability"),
-        ],
-    );
+    words(&[
+        (R::Running.as_str(), "running"),
+        (R::Stopping.as_str(), "stopping"),
+        (R::Finished.as_str(), "finished"),
+        (R::Stopped.as_str(), "stopped"),
+        (R::Shutdown.as_str(), "shutdown"),
+        (R::SourceLost.as_str(), "source_lost"),
+        (R::DiskFull.as_str(), "disk_full"),
+        (R::Refused.as_str(), "refused"),
+        (R::Census.as_str(), "census"),
+        (R::Durability.as_str(), "durability"),
+    ]);
 }
 
 #[test]
@@ -183,75 +177,68 @@ fn every_lock_and_ledger_fault_has_its_own_code() {
             "census_unreadable",
         ),
     ];
-    words(&faults.each_ref().map(|(f, w)| (f.code(), *w)),
-    );
+    words(&faults.each_ref().map(|(f, w)| (f.code(), *w)));
     // A ledger's lock fault is named by the lock's own code.
     for (fault, want) in faults {
         assert_eq!(L::Lock(fault).code(), want);
     }
-    words(
-        &[
-            (L::Damaged { offset: 7 }.code(), "runs_ledger_damaged"),
-            (
-                L::ClockImplausible {
-                    now: 0,
-                    why: "invented".to_owned(),
-                }
-                .code(),
-                "clock_implausible",
-            ),
-            (L::Io { why: String::new() }.code(), "runs_ledger_io"),
-            (L::Entry { why: String::new() }.code(), "runs_ledger_entry"),
-        ],
-    );
+    words(&[
+        (L::Damaged { offset: 7 }.code(), "runs_ledger_damaged"),
+        (
+            L::ClockImplausible {
+                now: 0,
+                why: "invented".to_owned(),
+            }
+            .code(),
+            "clock_implausible",
+        ),
+        (L::Io { why: String::new() }.code(), "runs_ledger_io"),
+        (L::Entry { why: String::new() }.code(), "runs_ledger_entry"),
+    ]);
 }
 
 #[test]
 fn every_start_gate_and_stop_refusal_has_its_own_word() {
     use crate::gdfl_run::start::Gate as G;
     use crate::gdfl_run::stop::StopRefusal as S;
-    words(
-        &[
-            (G::Go.as_str(), "go"),
-            (G::Release.as_str(), "release"),
-            (G::Silent.as_str(), "silent"),
-        ],
-    );
-    words(
-        &[
-            (
-                S::NotLive {
-                    asked: String::new(),
-                }
-                .code(),
-                "run_not_live",
-            ),
-            (
-                S::ClaimBeingWritten {
-                    lock: String::new(),
-                }
-                .code(),
-                "claim_being_written",
-            ),
-            (
-                S::ByUnknown {
-                    by: "nobody".to_owned(),
-                }
-                .code(),
-                "stop_by_unknown",
-            ),
-            (
-                S::NotStoppable {
-                    lock: String::new(),
-                    run: u64::MAX,
-                    mode: "census-recount".to_owned(),
-                }
-                .code(),
-                "run_not_stoppable",
-            ),
-            (S::Unwritten { why: String::new() }.code(), "stop_unwritten"),
-        ],
-    );
+    words(&[
+        (G::Go.as_str(), "go"),
+        (G::Release.as_str(), "release"),
+        (G::Silent.as_str(), "silent"),
+    ]);
+    words(&[
+        (
+            S::NotLive {
+                asked: String::new(),
+            }
+            .code(),
+            "run_not_live",
+        ),
+        (
+            S::ClaimBeingWritten {
+                lock: String::new(),
+            }
+            .code(),
+            "claim_being_written",
+        ),
+        (
+            S::ByUnknown {
+                by: "nobody".to_owned(),
+            }
+            .code(),
+            "stop_by_unknown",
+        ),
+        (
+            S::NotStoppable {
+                lock: String::new(),
+                run: u64::MAX,
+                mode: "census-recount".to_owned(),
+            }
+            .code(),
+            "run_not_stoppable",
+        ),
+        (S::Unwritten { why: String::new() }.code(), "stop_unwritten"),
+    ]);
 }
 
 #[test]
@@ -272,64 +259,58 @@ fn every_snapshot_answer_has_its_own_word() {
         ),
         ("already_held", stamp)
     );
-    words(
-        &[
-            (
-                T::Ambiguous {
-                    older: stamp,
-                    newer: stamp,
-                }
-                .word(),
-                "token_ambiguous",
-            ),
-            (T::NotListed { snapshot: stamp }.word(), "token_not_listed"),
-            (T::Duplicated { snapshot: stamp }.word(), "token_duplicated"),
-            (
-                T::BeforeFirst { first: stamp }.word(),
-                "before_first_snapshot",
-            ),
-            (T::NoSnapshot.word(), "no_snapshot"),
-            (
-                T::Unreadable {
-                    snapshot: stamp,
-                    why: "invented".to_owned(),
-                }
-                .word(),
-                "snapshot_unreadable",
-            ),
-        ],
-    );
+    words(&[
+        (
+            T::Ambiguous {
+                older: stamp,
+                newer: stamp,
+            }
+            .word(),
+            "token_ambiguous",
+        ),
+        (T::NotListed { snapshot: stamp }.word(), "token_not_listed"),
+        (T::Duplicated { snapshot: stamp }.word(), "token_duplicated"),
+        (
+            T::BeforeFirst { first: stamp }.word(),
+            "before_first_snapshot",
+        ),
+        (T::NoSnapshot.word(), "no_snapshot"),
+        (
+            T::Unreadable {
+                snapshot: stamp,
+                why: "invented".to_owned(),
+            }
+            .word(),
+            "snapshot_unreadable",
+        ),
+    ]);
 }
 
 #[test]
 fn every_reference_standing_and_refusal_kind_has_its_own_word() {
     use crate::reference_data::{RefusalKind as K, Standing as S};
-    words(
-        &[
-            (S::Sourced.word(), "sourced"),
-            (S::Measured.word(), "measured"),
-            (S::Unverified.word(), "unverified"),
-        ],
-    );
-    words(
-        &[
-            (K::Read.word(), "read"),
-            (K::TooLarge.word(), "too_large"),
-            (K::NotText.word(), "not_text"),
-            (K::Magic.word(), "magic"),
-            (K::Version.word(), "version"),
-            (K::WrongTable.word(), "wrong_table"),
-            (K::Generation.word(), "generation"),
-            (K::Header.word(), "header"),
-            (K::Columns.word(), "columns"),
-            (K::Row.word(), "row"),
-            (K::Duplicate.word(), "duplicate"),
-            (K::RowCount.word(), "row_count"),
-            (K::Checksum.word(), "checksum"),
-            (K::TooMany.word(), "too_many"),
-            (K::Absent.word(), "absent"),
-        ],
-    );
+    words(&[
+        (S::Sourced.word(), "sourced"),
+        (S::Measured.word(), "measured"),
+        (S::Unverified.word(), "unverified"),
+    ]);
+    words(&[
+        (K::Read.word(), "read"),
+        (K::TooLarge.word(), "too_large"),
+        (K::NotText.word(), "not_text"),
+        (K::Magic.word(), "magic"),
+        (K::Version.word(), "version"),
+        (K::WrongTable.word(), "wrong_table"),
+        (K::Generation.word(), "generation"),
+        (K::Header.word(), "header"),
+        (K::Columns.word(), "columns"),
+        (K::Row.word(), "row"),
+        (K::Duplicate.word(), "duplicate"),
+        (K::RowCount.word(), "row_count"),
+        (K::Checksum.word(), "checksum"),
+        (K::TooMany.word(), "too_many"),
+        (K::Absent.word(), "absent"),
+    ]);
 }
 
 #[test]
@@ -337,27 +318,21 @@ fn every_refusal_axis_repair_gap_and_claim_standing_has_its_own_word() {
     use crate::ingest::repair_plan::Missing as M;
     use crate::refusal::Axis as A;
     use crate::vendor::ClaimStanding as C;
-    words(
-        &[
-            (A::Status.word(), "status"),
-            (A::ErrorName.word(), "error_name"),
-        ],
-    );
-    words(
-        &[
-            (M::Front.code(), "front"),
-            (M::Interior.code(), "interior"),
-            (M::Tail.code(), "tail"),
-            (M::Absent.code(), "absent"),
-            (M::BeforeFirst.code(), "before_first"),
-        ],
-    );
-    words(
-        &[
-            (C::VendorDocument.word(), "vendor_doc"),
-            (C::OperatorObservation.word(), "operator"),
-        ],
-    );
+    words(&[
+        (A::Status.word(), "status"),
+        (A::ErrorName.word(), "error_name"),
+    ]);
+    words(&[
+        (M::Front.code(), "front"),
+        (M::Interior.code(), "interior"),
+        (M::Tail.code(), "tail"),
+        (M::Absent.code(), "absent"),
+        (M::BeforeFirst.code(), "before_first"),
+    ]);
+    words(&[
+        (C::VendorDocument.word(), "vendor_doc"),
+        (C::OperatorObservation.word(), "operator"),
+    ]);
 }
 
 #[test]
@@ -421,106 +396,98 @@ fn every_rehearsal_refusal_has_its_own_code_and_part() {
             "list",
         ),
     ];
-    words(&table.each_ref().map(|(r, c, _)| (r.code(), *c)),
-    );
-    words(&table.each_ref().map(|(r, _, p)| (r.part(), *p)),
-    );
+    words(&table.each_ref().map(|(r, c, _)| (r.code(), *c)));
+    words(&table.each_ref().map(|(r, _, p)| (r.part(), *p)));
 }
 
 #[test]
 fn every_keep_reason_and_keep_error_has_its_own_word() {
     use crate::response_keep::{KeepError as K, Reason as R};
-    words(
-        &[
-            (R::Kept.word(), "kept"),
-            (R::PackFull.word(), "pack_full"),
-            (R::StorageFull.word(), "storage_full"),
-            (R::DuplicateBody.word(), "duplicate_body"),
-            (R::LaterMonth.word(), "later_month"),
-            (R::RefusedAnswer.word(), "refused_answer"),
-        ],
-    );
+    words(&[
+        (R::Kept.word(), "kept"),
+        (R::PackFull.word(), "pack_full"),
+        (R::StorageFull.word(), "storage_full"),
+        (R::DuplicateBody.word(), "duplicate_body"),
+        (R::LaterMonth.word(), "later_month"),
+        (R::RefusedAnswer.word(), "refused_answer"),
+    ]);
     let p = || PathBuf::from("/invented");
-    words(
-        &[
-            (
-                K::Path(store::path::PathError::EmptySegment { field: "symbol" }).word(),
-                "path_refused",
-            ),
-            (K::ReceiptsFull { pack: p() }.word(), "receipts_full"),
-            (
-                K::LockStalled {
-                    lock: p(),
-                    waited_ms: 0,
-                }
-                .word(),
-                "lock_stalled",
-            ),
-            (K::NotRegular { path: p() }.word(), "not_a_regular_file"),
-            (K::WindowsFull { journal: p() }.word(), "windows_full"),
-            (K::TooLarge { len: u64::MAX }.word(), "source_refused"),
-            (
-                K::BodyMismatch {
-                    path: p(),
-                    what: "length",
-                }
-                .word(),
-                "body_mismatch",
-            ),
-            (
-                K::NotKept {
-                    reason: R::LaterMonth,
-                }
-                .word(),
-                "body_not_kept",
-            ),
-            (
-                K::Io {
-                    op: "open",
-                    path: p(),
-                    kind: std::io::ErrorKind::PermissionDenied,
-                }
-                .word(),
-                "io",
-            ),
-        ],
-    );
+    words(&[
+        (
+            K::Path(store::path::PathError::EmptySegment { field: "symbol" }).word(),
+            "path_refused",
+        ),
+        (K::ReceiptsFull { pack: p() }.word(), "receipts_full"),
+        (
+            K::LockStalled {
+                lock: p(),
+                waited_ms: 0,
+            }
+            .word(),
+            "lock_stalled",
+        ),
+        (K::NotRegular { path: p() }.word(), "not_a_regular_file"),
+        (K::WindowsFull { journal: p() }.word(), "windows_full"),
+        (K::TooLarge { len: u64::MAX }.word(), "source_refused"),
+        (
+            K::BodyMismatch {
+                path: p(),
+                what: "length",
+            }
+            .word(),
+            "body_mismatch",
+        ),
+        (
+            K::NotKept {
+                reason: R::LaterMonth,
+            }
+            .word(),
+            "body_not_kept",
+        ),
+        (
+            K::Io {
+                op: "open",
+                path: p(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            }
+            .word(),
+            "io",
+        ),
+    ]);
 }
 
 #[test]
 fn every_spool_error_has_its_own_code() {
     use crate::zerodha_verify::spool::SpoolError as S;
     let p = || PathBuf::from("/invented");
-    words(
-        &[
-            (
-                S::Damaged {
-                    path: p(),
-                    record: 0,
-                    why: "crc",
-                }
-                .code(),
-                "spool_damaged",
-            ),
-            (
-                S::Header {
-                    path: p(),
-                    why: String::new(),
-                }
-                .code(),
-                "spool_header_refused",
-            ),
-            (
-                S::LogDamaged {
-                    path: p(),
-                    record: u64::MAX,
-                    why: "crc",
-                }
-                .code(),
-                "merge_log_damaged",
-            ),
-            (S::Record { why: String::new() }.code(), "record_refused"),
-            (S::NotRegular { path: p() }.code(), "not_regular"),
-        ],
-    );
+    words(&[
+        (
+            S::Damaged {
+                path: p(),
+                record: 0,
+                why: "crc",
+            }
+            .code(),
+            "spool_damaged",
+        ),
+        (
+            S::Header {
+                path: p(),
+                why: String::new(),
+            }
+            .code(),
+            "spool_header_refused",
+        ),
+        (
+            S::LogDamaged {
+                path: p(),
+                record: u64::MAX,
+                why: "crc",
+            }
+            .code(),
+            "merge_log_damaged",
+        ),
+        (S::Record { why: String::new() }.code(), "record_refused"),
+        (S::NotRegular { path: p() }.code(), "not_regular"),
+    ]);
 }

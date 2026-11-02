@@ -2949,8 +2949,8 @@ fn note(outcome: &Snapshotted) {
 pub mod first_listed;
 
 #[cfg(test)]
-#[path = "master_snapshots_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "master_snapshots_cov_tests.rs"]
 mod cov_tests;
+#[cfg(test)]
+#[path = "master_snapshots_tests.rs"]
+mod tests;

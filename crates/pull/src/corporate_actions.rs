@@ -2115,8 +2115,8 @@ pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
 }
 
 #[cfg(test)]
-#[path = "corporate_actions_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "corporate_actions_cov_tests.rs"]
 mod cov_tests;
+#[cfg(test)]
+#[path = "corporate_actions_tests.rs"]
+mod tests;

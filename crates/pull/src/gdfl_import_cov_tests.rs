@@ -565,11 +565,7 @@ fn a_file_gone_between_listing_and_size_names_the_file() {
 #[test]
 fn the_walks_faults_keep_their_order_and_a_huge_size_saturates() {
     let (root, dir, file) = walk_root("cov-walk-combo");
-    let (capped, _) = walk(
-        &root,
-        0,
-        vec![Err(std::io::Error::other("never read"))],
-    );
+    let (capped, _) = walk(&root, 0, vec![Err(std::io::Error::other("never read"))]);
     assert!(
         capped
             .fault
@@ -634,7 +630,11 @@ fn yearly_zips_are_read_whole_or_refused() {
         ]
     );
     let refused = yearly_zips(
-        vec![said("2019.zip"), Err(std::io::Error::other("a failing disk"))].into_iter(),
+        vec![
+            said("2019.zip"),
+            Err(std::io::Error::other("a failing disk")),
+        ]
+        .into_iter(),
     )
     .unwrap_err();
     assert_eq!(refused.to_string(), "a failing disk");
@@ -655,7 +655,10 @@ fn a_volume_count_that_overflows_is_named_not_wrapped() {
         )
     );
     let refused = space_of(at, 4096, 1, u64::MAX / 2).unwrap_err();
-    assert!(refused.contains("available blocks of 4096 bytes"), "{refused}");
+    assert!(
+        refused.contains("available blocks of 4096 bytes"),
+        "{refused}"
+    );
     let fits = space_of(at, 1, u64::MAX, u64::MAX).unwrap();
     assert_eq!((fits.total, fits.free), (u64::MAX, u64::MAX));
     let none = space_of(at, 0, u64::MAX, u64::MAX).unwrap();
@@ -739,9 +742,19 @@ fn a_lineage_row_splits_a_run_only_when_it_can_and_a_file_in_its_place_holds_the
     assert!(run(&wanted).names_a_split(row, "TMPV"));
     assert!(run(&[]).names_a_split(row, "TMPV"));
     assert!(!run(&wanted).names_a_split(&unsourced, "TMPV"));
-    assert!(!run(&wanted).names_a_split(row, "TATAMOTORS"), "never moved");
-    assert!(!run(&wanted).names_a_split(row, "LTM"), "the filter names another");
-    put(&store, "bars/gdfl/NSE/FNO/TATAMOTORS", b"a file, not a directory");
+    assert!(
+        !run(&wanted).names_a_split(row, "TATAMOTORS"),
+        "never moved"
+    );
+    assert!(
+        !run(&wanted).names_a_split(row, "LTM"),
+        "the filter names another"
+    );
+    put(
+        &store,
+        "bars/gdfl/NSE/FNO/TATAMOTORS",
+        b"a file, not a directory",
+    );
     assert_eq!(
         run(&wanted).split_underlyings(),
         Ok(vec![("TATAMOTORS".to_owned(), "TMPV".to_owned())])
@@ -818,8 +831,14 @@ fn a_stop_says_where_it_ended_and_what_a_resume_reads() {
         done: Box::new(Report::default()),
     };
     let on = stopped(Some(day(2024, 3, 1))).to_string();
-    assert!(on.contains("at a file boundary on 2024-03-01, after 0 day(s)"), "{on}");
-    assert!(on.contains("unless its journal line closed it done"), "{on}");
+    assert!(
+        on.contains("at a file boundary on 2024-03-01, after 0 day(s)"),
+        "{on}"
+    );
+    assert!(
+        on.contains("unless its journal line closed it done"),
+        "{on}"
+    );
     let between = stopped(None).to_string();
     assert!(between.contains("between two days"), "{between}");
     assert!(between.contains("the first day not done"), "{between}");
@@ -857,7 +876,10 @@ fn a_refusal_reports_only_what_it_carries() {
         why: "an invented ledger".to_owned(),
     };
     assert!(lineage.report().is_none());
-    assert_eq!(lineage.to_string(), "the lineage ledger: an invented ledger");
+    assert_eq!(
+        lineage.to_string(),
+        "the lineage ledger: an invented ledger"
+    );
 }
 
 /// Each reader refusal has its one cause; a stage or a close that drifts is a
@@ -875,9 +897,7 @@ fn every_reader_refusal_left_has_its_cause() {
         (cm_cause(&C::MalformedRow { line }), "malformed_row"),
         (cm_cause(&C::RowsOverCap { cap: 1 }), "rows_over_cap"),
         (
-            nfo_cause(&N::TickerAmbiguous {
-                ticker: "T".into(),
-            }),
+            nfo_cause(&N::TickerAmbiguous { ticker: "T".into() }),
             "ticker_ambiguous",
         ),
         (nfo_cause(&N::TickerMismatch { line }), "ticker_mismatch"),
@@ -888,11 +908,12 @@ fn every_reader_refusal_left_has_its_cause() {
         ),
         (nfo_cause(&N::RowsOverCap { cap: 1 }), "rows_over_cap"),
     ] {
-        assert_eq!((got.stage, got.code, got.closes), (Stage::Vendor, code, true));
+        assert_eq!(
+            (got.stage, got.code, got.closes),
+            (Stage::Vendor, code, true)
+        );
     }
-    let open = nfo_cause(&N::MonthlyExpiryUnmeasured {
-        ticker: "T".into(),
-    });
+    let open = nfo_cause(&N::MonthlyExpiryUnmeasured { ticker: "T".into() });
     assert_eq!(
         (open.stage, open.code, open.closes),
         (Stage::Calendar, "monthly_expiry_unmeasured", false)

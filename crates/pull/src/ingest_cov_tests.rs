@@ -74,12 +74,11 @@ fn a_chunks_counters_are_added_to_the_runs() {
         rows_folded: 50,
         ..Ingested::default()
     };
-    chunk.failures.push(Failure::new("ZQB", "second".to_owned()));
+    chunk
+        .failures
+        .push(Failure::new("ZQB", "second".to_owned()));
     run.absorb(chunk);
-    assert_eq!(
-        (run.members, run.rows_read, run.bars_stored),
-        (11, 22, 33)
-    );
+    assert_eq!((run.members, run.rows_read, run.bars_stored), (11, 22, 33));
     assert_eq!((run.bars_committed, run.rows_folded), (44, 55));
     let order: Vec<&str> = run.failures.iter().map(|f| f.why.as_str()).collect();
     assert_eq!(order, ["first", "second"]);
@@ -125,7 +124,10 @@ fn the_greeks_door_writes_what_it_is_given_and_nothing_when_given_nothing() {
     let held = root.join("bars/gdfl/NSE/FNO/ZQOPT");
     assert!(held.exists(), "the row is filed under its series");
     assert!(write_greeks(&[greek(opening(on))], target("../OUT")).is_err());
-    assert!(write_greeks(&[], target("../OUT")).is_ok(), "nothing to path");
+    assert!(
+        write_greeks(&[], target("../OUT")).is_ok(),
+        "nothing to path"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -176,6 +178,9 @@ fn a_cash_month_that_will_not_open_is_refused_by_name() {
     std::fs::remove_file(&file).unwrap();
     std::fs::write(&file, b"cut").unwrap();
     let why = committed_cash_days(&root, Vendor::Gdfl, "ZQCASH", &[at]).unwrap_err();
-    assert!(why.starts_with("ZQCASH 2026-08: committed cash source: "), "{why}");
+    assert!(
+        why.starts_with("ZQCASH 2026-08: committed cash source: "),
+        "{why}"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

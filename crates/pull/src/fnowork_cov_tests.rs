@@ -10,7 +10,9 @@
 
 use std::cell::RefCell;
 
-use super::futures_tests::{Vendorish, block_on, day, fut, route, scratch, snapshot_on, spec, window};
+use super::futures_tests::{
+    Vendorish, block_on, day, fut, route, scratch, snapshot_on, spec, window,
+};
 use super::*;
 use crate::chain::Refusal;
 use crate::master_snapshots::{self, Book, Kind as Master, Stamp};
@@ -47,11 +49,18 @@ fn cut_entries(masters: &std::path::Path, n: usize) {
 fn a_book_of_more_cut_entries_than_a_plan_names_counts_the_rest() {
     let bound = master_snapshots::INCOMPLETE_NAMED;
     let masters = scratch("cut-at-bound");
-    snapshot_on(&masters, day(2026, 1, 5), &[fut(8_000_011, "ZQIDX26JANFUT", "2026-01-27")]);
+    snapshot_on(
+        &masters,
+        day(2026, 1, 5),
+        &[fut(8_000_011, "ZQIDX26JANFUT", "2026-01-27")],
+    );
     cut_entries(&masters, bound);
     let lines = incomplete_lines(&Book::open(&masters).unwrap());
     assert_eq!(lines.len(), bound);
-    assert!(lines.iter().all(|line| line.contains("never read")), "{lines:?}");
+    assert!(
+        lines.iter().all(|line| line.contains("never read")),
+        "{lines:?}"
+    );
     cut_entries(&masters, bound + 1);
     let lines = incomplete_lines(&Book::open(&masters).unwrap());
     assert_eq!(lines.len(), bound + 1);
@@ -98,7 +107,10 @@ fn a_contract_gone_from_the_newest_snapshot_is_still_asked() {
     let asked = window(day(2026, 1, 5), day(2026, 1, 27));
     let plan = plan_of(&book, asked, day(2026, 1, 30), day(2026, 1, 27));
     assert_eq!(plan.refused, Vec::<String>::new());
-    assert!(plan.asks.iter().any(|ask| ask.token == 8_000_011), "{plan:?}");
+    assert!(
+        plan.asks.iter().any(|ask| ask.token == 8_000_011),
+        "{plan:?}"
+    );
 }
 
 /// A token the newest snapshot gives to another underlying is refused by
@@ -118,7 +130,11 @@ fn a_token_reused_by_another_share_or_carried_twice_is_refused_by_name() {
     let asked = window(day(2026, 1, 5), day(2026, 1, 7));
     let plan = plan_of(&book, asked, day(2026, 1, 8), day(2026, 1, 7));
     assert_eq!(plan.refused.len(), 1, "{:?}", plan.refused);
-    assert!(plan.refused[0].starts_with("token_reused: "), "{:?}", plan.refused);
+    assert!(
+        plan.refused[0].starts_with("token_reused: "),
+        "{:?}",
+        plan.refused
+    );
     assert!(plan.refused[0].contains("ZQOTHER"), "{:?}", plan.refused);
 
     let twice = scratch("carried-twice");
@@ -127,7 +143,9 @@ fn a_token_reused_by_another_share_or_carried_twice_is_refused_by_name() {
     let book = Book::open(&twice).unwrap();
     let plan = plan_of(&book, asked, day(2026, 1, 8), day(2026, 1, 7));
     assert!(
-        plan.refused.iter().any(|why| why.starts_with("token_duplicated: ")),
+        plan.refused
+            .iter()
+            .any(|why| why.starts_with("token_duplicated: ")),
         "{:?}",
         plan.refused
     );
@@ -245,10 +263,7 @@ fn an_answer_that_does_not_decode_stops_its_series_by_name() {
         Ok("this is not the vendor's shape".to_owned())
     });
     assert_eq!(seen.len(), 1);
-    assert!(
-        the_stop(&landed).contains("does not decode"),
-        "{landed:?}"
-    );
+    assert!(the_stop(&landed).contains("does not decode"), "{landed:?}");
 }
 
 /// "Already held" is claimed only of a series that did not stop.
@@ -263,7 +278,10 @@ fn a_stopped_series_claims_nothing_already_held() {
     let stopped = done.stop("the vendor went quiet".to_owned());
     let line = stopped.line("L", "W");
     assert!(!line.contains("already held"), "{line}");
-    assert!(line.ends_with("; then stopped: the vendor went quiet"), "{line}");
+    assert!(
+        line.ends_with("; then stopped: the vendor went quiet"),
+        "{line}"
+    );
     let nothing = SeriesOutcome::default().line("L", "W");
     assert!(!nothing.contains("already held"), "{nothing}");
 }

@@ -84,12 +84,23 @@ fn a_header_is_refused_at_its_own_line() {
     assert!(stranger.detail.contains("line 1 is not"), "{stranger}");
     let version = refused(&with_line(0, &format!("{MAGIC} 999")));
     assert_eq!(version.kind, RefusalKind::Version);
-    assert_eq!(version.detail, format!("version 999; this build reads {VERSION}"));
+    assert_eq!(
+        version.detail,
+        format!("version 999; this build reads {VERSION}")
+    );
     for (at, line, word) in [
         (2, "generation x", "is not a generation"),
-        (4, "source_sha256 xyz", "is neither `-` nor 64 lower-case hex"),
+        (
+            4,
+            "source_sha256 xyz",
+            "is neither `-` nor 64 lower-case hex",
+        ),
         (5, "fetched yesterday", "is not a YYYY-MM-DD day"),
-        (6, "status rumoured", "is not sourced, measured or unverified"),
+        (
+            6,
+            "status rumoured",
+            "is not sourced, measured or unverified",
+        ),
     ] {
         let why = refused(&with_line(at, line));
         assert_eq!(why.kind, RefusalKind::Header, "{line}");
@@ -132,7 +143,10 @@ fn a_row_section_of_any_other_shape_is_refused_by_name() {
 #[test]
 fn more_rows_than_the_bound_are_refused_by_name() {
     let mut lines = header_lines(Table::SymbolChanges);
-    lines.extend(std::iter::repeat_n("row x|x|x|x|x".to_owned(), MAX_ROWS + 1));
+    lines.extend(std::iter::repeat_n(
+        "row x|x|x|x|x".to_owned(),
+        MAX_ROWS + 1,
+    ));
     let why = refused(&file(&lines));
     assert_eq!(why.kind, RefusalKind::TooMany);
 }
@@ -158,14 +172,26 @@ fn a_draft_refused_before_it_is_rendered_says_why() {
     let table = Table::SymbolChanges;
     let mut lines = draft(table, Vec::new());
     lines.source = "two\nlines".to_owned();
-    assert!(render(&lines, 1).unwrap_err().contains("source is not one line"));
+    assert!(
+        render(&lines, 1)
+            .unwrap_err()
+            .contains("source is not one line")
+    );
     let mut sha = draft(table, Vec::new());
     sha.source_sha256 = Some("xyz".to_owned());
-    assert!(render(&sha, 1).unwrap_err().contains("source_sha256 is not 64"));
+    assert!(
+        render(&sha, 1)
+            .unwrap_err()
+            .contains("source_sha256 is not 64")
+    );
     let many = draft(table, vec![row(&["a"]); MAX_ROWS + 1]);
     assert!(render(&many, 1).unwrap_err().contains("more than 200000"));
     let short = draft(table, vec![row(&["a"])]);
-    assert!(render(&short, 1).unwrap_err().contains("row 1 has 1 fields"));
+    assert!(
+        render(&short, 1)
+            .unwrap_err()
+            .contains("row 1 has 1 fields")
+    );
     let bad = draft(table, vec![row(&["a", "b", "", "d", "e"])]);
     assert!(render(&bad, 1).unwrap_err().contains("field \"\" is empty"));
 }
@@ -187,7 +213,9 @@ fn a_calendar_is_refused_for_each_row_that_cannot_stand() {
         rows.extend_from_slice(extra);
         rows
     };
-    assert!(refusal(t, vec![first.clone(), first.clone(), last.clone()]).contains("second `first`"));
+    assert!(
+        refusal(t, vec![first.clone(), first.clone(), last.clone()]).contains("second `first`")
+    );
     assert!(refusal(t, vec![first.clone(), last.clone(), last.clone()]).contains("second `last`"));
     assert!(refusal(t, vec![first.clone()]).contains("needs one `first` and one `last`"));
     for windows in [
@@ -204,7 +232,13 @@ fn a_calendar_is_refused_for_each_row_that_cannot_stand() {
         let said = refusal(t, cal(&[session("2024-01-02", windows)]));
         assert!(said.contains("are not ascending"), "{windows}: {said}");
     }
-    let mixed = cal(&[row(&["holiday", "2024-01-02", "09:15-15:30", "-", "invented"])]);
+    let mixed = cal(&[row(&[
+        "holiday",
+        "2024-01-02",
+        "09:15-15:30",
+        "-",
+        "invented",
+    ])]);
     assert!(refusal(t, mixed).contains("a row is first, last or holiday"));
     let outside = cal(&[session("2024-02-02", "09:15-15:30")]);
     assert!(refusal(t, outside).contains("lies outside the calendar's own span"));
@@ -218,7 +252,19 @@ fn a_calendar_is_refused_for_each_row_that_cannot_stand() {
 /// One good row of the index table, with `edit` applied.
 fn index_row(stem: &str, key: &str) -> Vec<String> {
     row(&[
-        "-", "INVENTED INDEX", stem, "-", key, "-", "no", "-", "-", "-", "-", "-", "sourced",
+        "-",
+        "INVENTED INDEX",
+        stem,
+        "-",
+        key,
+        "-",
+        "no",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "sourced",
         "invented",
     ])
 }
@@ -336,7 +382,10 @@ fn an_fno_table_answers_each_side_of_each_edge() {
     assert_eq!(on("ZQOLD", day(2024, 2, 1)), Membership::NotMember);
     assert_eq!(table.symbols(), ["ZQA", "ZQOLD", "ZQNOW"]);
     let current = table.current();
-    assert!(current.contains(&"ZQA") && current.contains(&"ZQNOW"), "{current:?}");
+    assert!(
+        current.contains(&"ZQA") && current.contains(&"ZQNOW"),
+        "{current:?}"
+    );
     assert!(!current.contains(&"ZQOLD"), "{current:?}");
     let (extra, missing) = table.drift_from_swept();
     assert_eq!(extra, ["ZQA", "ZQNOW"]);
@@ -348,7 +397,14 @@ fn an_expiry_table_refuses_a_key_twice_and_finds_a_move_by_its_share_or_all() {
     let t = Table::ExpiryMoves;
     let moved = |underlying: &str, stated: &str| {
         row(&[
-            underlying, stated, "2024-03-27", "-", "2024-03-01", "holiday", "3", "invented",
+            underlying,
+            stated,
+            "2024-03-27",
+            "-",
+            "2024-03-01",
+            "holiday",
+            "3",
+            "invented",
         ])
     };
     let twice = vec![moved("ZQA", "2024-03-28"), moved("ZQA", "2024-03-28")];
@@ -359,7 +415,10 @@ fn an_expiry_table_refuses_a_key_twice_and_finds_a_move_by_its_share_or_all() {
     let slot = load_one(&store, t, ExpiryTable::build);
     let table = slot.table().unwrap();
     let stated = day(2024, 3, 28);
-    assert_eq!(table.alias_of("ZQA", stated).unwrap().underlying.as_deref(), Some("ZQA"));
+    assert_eq!(
+        table.alias_of("ZQA", stated).unwrap().underlying.as_deref(),
+        Some("ZQA")
+    );
     assert_eq!(table.alias_of("ZQB", stated).unwrap().underlying, None);
     assert!(table.alias_of("ZQA", day(2024, 3, 29)).is_none());
 }
@@ -387,7 +446,6 @@ fn a_write_failure_says_what_it_was() {
     assert!(WriteError::Raced(7).to_string().contains('7'));
 }
 
-
 /// A generation over the byte bound is refused by `read_capped` before a byte
 /// is read; the seed passes a table that is already held.
 #[test]
@@ -401,7 +459,11 @@ fn a_generation_past_the_byte_bound_is_refused_unread() {
     assert!(detail.contains("more than 8388608"), "{detail}");
     let first = seed(&store).unwrap();
     assert!(!first.is_empty());
-    assert_eq!(seed(&store).unwrap(), Vec::<Written>::new(), "held, so nothing lands");
+    assert_eq!(
+        seed(&store).unwrap(),
+        Vec::<Written>::new(),
+        "held, so nothing lands"
+    );
 }
 
 #[test]
