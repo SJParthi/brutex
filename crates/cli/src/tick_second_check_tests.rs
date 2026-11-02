@@ -3165,7 +3165,11 @@ fn a_recorded_archive_the_run_did_not_open_is_named_never_passed_over() {
 #[test]
 fn a_share_day_with_no_usable_landing_is_answered_beside_the_extra_archive_by_name() {
     let (_root, store, land) = imported_store("unusable-landings");
-    let scope = Arc::new(pull::gdfl_run::scope::of(ImportKind::Stocks, &store).unwrap().0);
+    let scope = Arc::new(
+        pull::gdfl_run::scope::of(ImportKind::Stocks, &store)
+            .unwrap()
+            .0,
+    );
     let not_the_same = HashSet::new();
     let sources = Sources::open(
         &[],
@@ -3203,7 +3207,10 @@ fn a_share_day_with_no_usable_landing_is_answered_beside_the_extra_archive_by_na
     assert_eq!(ambiguous.len(), 2, "{ambiguous:?}");
     assert_eq!(ambiguous[0].label.role, Role::Landing, "{ambiguous:?}");
     assert_eq!(ambiguous[0].status, "read_failed:source_ambiguous");
-    assert!(ambiguous[0].detail.contains("invented-two"), "{ambiguous:?}");
+    assert!(
+        ambiguous[0].detail.contains("invented-two"),
+        "{ambiguous:?}"
+    );
     assert_eq!(ambiguous[1].label.role, Role::Extra, "{ambiguous:?}");
     assert_eq!(ambiguous[1].status, "exact_T", "{ambiguous:?}");
 
