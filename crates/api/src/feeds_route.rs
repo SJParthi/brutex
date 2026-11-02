@@ -2977,7 +2977,7 @@ mod tests {
     /// last day hold at any size (BASE-COV-API, D-7344).
     #[test]
     fn the_held_span_bench_runs_at_a_small_size() {
-        held_span_growth([20, 30, 40], 2, u128::MAX / 2_000);
+        held_span_growth([20, 30, 40], 2, u128::MAX);
     }
 
     /// One census per entry of `sizes`: the first measure, `reps` repeats and
@@ -3081,11 +3081,11 @@ mod tests {
             appends_p99.push(append_rounds.into_iter().min().expect("three rounds"));
         }
         assert!(
-            hits_p99[2] <= hits_p99[0].max(1_000) * ratio,
+            hits_p99[2] <= hits_p99[0].max(1_000).saturating_mul(ratio),
             "{hits_p99:?}"
         );
         assert!(
-            appends_p99[2] <= appends_p99[0].max(1_000) * ratio,
+            appends_p99[2] <= appends_p99[0].max(1_000).saturating_mul(ratio),
             "{appends_p99:?}"
         );
     }

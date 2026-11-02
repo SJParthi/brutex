@@ -1100,10 +1100,8 @@ mod tests {
             let root = scratch(&format!("refresh-child-{tag}"));
             let named = root.clone();
             let home = home.map_or(named.as_os_str(), std::ffi::OsStr::new);
-            let _ = crate::isolated::rerun(
-                NAME,
-                &[(REFRESH_CHILD, root.as_os_str()), ("HOME", home)],
-            );
+            let _ =
+                crate::isolated::rerun(NAME, &[(REFRESH_CHILD, root.as_os_str()), ("HOME", home)]);
             assert_eq!(
                 std::fs::read(root.join("child-ran")).ok().as_deref(),
                 Some(&b"refreshed"[..]),

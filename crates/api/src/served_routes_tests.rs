@@ -245,7 +245,10 @@ fn every_pooled_door_names_a_full_pool_and_a_lost_task() {
     std::fs::create_dir_all(&root).expect("the child's root");
     let _ = crate::isolated::rerun(
         "served_routes_tests::every_pooled_door_names_a_full_pool_and_a_lost_task",
-        &[(CHILD, root.as_os_str()), ("BRUTEX_STORE", root.as_os_str())],
+        &[
+            (CHILD, root.as_os_str()),
+            ("BRUTEX_STORE", root.as_os_str()),
+        ],
     );
     assert_eq!(
         std::fs::read(root.join("child-ran")).ok().as_deref(),
@@ -318,14 +321,22 @@ async fn a_door_refuses_what_it_cannot_read_through_the_router() {
             ("/folder.json", 400, "reads no feed called that"),
             ("/folder.json?feed=nosuch", 400, "reads no feed called that"),
             ("/folder.json?feed=zerodha", 400, "has no folder"),
-            ("/calendar.json?feed=zerodha&span=bogus", 400, "is not a span"),
+            (
+                "/calendar.json?feed=zerodha&span=bogus",
+                400,
+                "is not a span",
+            ),
             (
                 "/calendar.json?feed=nosuch&span=bogus",
                 400,
                 "is not a span",
             ),
             ("/ingest/refusals.json", 400, "error"),
-            ("/ingest/refusals.json?feed=zerodha&symbols=a%2Fb", 400, "error"),
+            (
+                "/ingest/refusals.json?feed=zerodha&symbols=a%2Fb",
+                400,
+                "error",
+            ),
         ] {
             let answer = get(addr, target).await;
             assert_eq!(answer.status, status, "{target}: {}", answer.body);

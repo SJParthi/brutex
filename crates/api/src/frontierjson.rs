@@ -1215,7 +1215,11 @@ mod tests {
         for page in ["2", "4294967295"] {
             let query = format!("identity={hex}&page={page}&limit=1");
             let (status, _, body) = respond(Ok(dir.clone()), &query);
-            assert_eq!(status, axum::http::StatusCode::RANGE_NOT_SATISFIABLE, "{body}");
+            assert_eq!(
+                status,
+                axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+                "{body}"
+            );
             assert!(body.contains(r#""rows":null"#), "{body}");
             assert!(body.contains(r#""total_count":2"#), "{body}");
         }
@@ -1231,7 +1235,11 @@ mod tests {
         let first = respond(Ok(empty.clone()), &format!("identity={hex}"));
         assert_eq!(first.0, axum::http::StatusCode::OK, "{}", first.2);
         let (status, _, body) = respond(Ok(empty.clone()), &format!("identity={hex}&page=1"));
-        assert_eq!(status, axum::http::StatusCode::RANGE_NOT_SATISFIABLE, "{body}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+            "{body}"
+        );
         assert!(body.contains(r#""total_count":0"#), "{body}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&empty);

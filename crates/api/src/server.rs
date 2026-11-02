@@ -22129,7 +22129,7 @@ mod tests {
             "pull-runtime-costs-small",
             2,
             2,
-            u64::try_from(crate::pullrun::INTERRUPTED_SCAN).expect("small") + 10,
+            crate::pullrun::INTERRUPTED_SCAN + 10,
         );
     }
 

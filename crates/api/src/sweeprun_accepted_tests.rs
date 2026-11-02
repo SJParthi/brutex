@@ -82,8 +82,10 @@ async fn status_of(site: &Loaded, target: &str) -> (StatusCode, Value) {
 async fn every_press_accepted(root: &Path) {
     telemetry::install(&telemetry::Config::new(root.join("logs"))).expect("this child's sink");
     let store = root.join("store");
-    let site: Loaded = std::sync::Arc::new(crate::server::Site::load(&root.join("masters"), &store));
-    let command = |extra: &str| format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#);
+    let site: Loaded =
+        std::sync::Arc::new(crate::server::Site::load(&root.join("masters"), &store));
+    let command =
+        |extra: &str| format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#);
 
     let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"rungs":["5min"]}}"#);
     let (status, _, body) = run_with(&site, &run, Some(STAMP));
@@ -105,7 +107,11 @@ async fn every_press_accepted(root: &Path) {
     assert!(!settled(&site, "descend", attempt).await.is_empty());
 
     // AN ATTEMPT THE SLOT NO LONGER HOLDS is read from the durable invocation.
-    let (code, answer) = status_of(&site, &format!("/backtest/run.json?attempt={}", attempt - 1)).await;
+    let (code, answer) = status_of(
+        &site,
+        &format!("/backtest/run.json?attempt={}", attempt - 1),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK, "{answer}");
     assert_eq!(
         answer["running"]["attempt"],
@@ -114,13 +120,24 @@ async fn every_press_accepted(root: &Path) {
     );
 
     for (word, body) in [
-        ("audit-range", command(r#""command":"audit-range","rung":"15min","min_hits":500"#)),
+        (
+            "audit-range",
+            command(r#""command":"audit-range","rung":"15min","min_hits":500"#),
+        ),
         (
             "screen",
-            command(r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#),
+            command(
+                r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#,
+            ),
         ),
-        ("auto-stored", command(r#""command":"auto-stored","rung":"15min""#)),
-        ("sweep-stored", command(r#""command":"sweep-stored","rung":"15min","min_hits":500"#)),
+        (
+            "auto-stored",
+            command(r#""command":"auto-stored","rung":"15min""#),
+        ),
+        (
+            "sweep-stored",
+            command(r#""command":"sweep-stored","rung":"15min","min_hits":500"#),
+        ),
         (
             "sweep-stored over two months",
             format!(
@@ -166,7 +183,10 @@ fn every_press_the_routes_accept_runs_to_its_end_and_reads_back() {
     let store = root.join("store");
     let _ = crate::isolated::rerun(
         "sweeprun::accepted_tests::every_press_the_routes_accept_runs_to_its_end_and_reads_back",
-        &[(CHILD, root.as_os_str()), ("BRUTEX_STORE", store.as_os_str())],
+        &[
+            (CHILD, root.as_os_str()),
+            ("BRUTEX_STORE", store.as_os_str()),
+        ],
     );
     assert_eq!(
         std::fs::read(root.join("child-ran")).ok().as_deref(),

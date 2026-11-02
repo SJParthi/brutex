@@ -874,7 +874,7 @@ pub(crate) mod tests {
             parsed.line(number, &text);
             took.push(began.elapsed());
         }
-        assert_eq!(parsed.runs.len() as u64, runs);
+        assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs));
         took.sort_unstable();
         let n = took.len();
         println!(
@@ -1121,7 +1121,7 @@ pub(crate) mod tests {
                 parsed.line(number, &text);
                 took.push(began.elapsed());
             }
-            assert_eq!(parsed.runs.len() as u64, runs);
+            assert_eq!(u64::try_from(parsed.runs.len()), Ok(runs));
             took.sort_unstable();
             let n = took.len();
             println!(

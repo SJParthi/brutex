@@ -2518,7 +2518,13 @@ mod tests {
         use pull::gaps::{Key, Ledger, NotOwed, Reason};
         use pull::listing::{Source, Span};
         let listed = pull::session::Day::new(2024, 3, 11).unwrap();
-        let day_of = |d: u32| i64::from(pull::session::Day::new(2024, 3, d).unwrap().days_from_epoch());
+        let day_of = |d: u8| {
+            i64::from(
+                pull::session::Day::new(2024, 3, d)
+                    .unwrap()
+                    .days_from_epoch(),
+            )
+        };
         let span_from = |source| Span {
             first: Ok(listed),
             last: None,
@@ -2562,7 +2568,12 @@ mod tests {
 
         let before = Ledger {
             gaps: vec![
-                not_owed_run(day_of(4), 555, 929, NotOwed::BeforeListing { listed_on: listed }),
+                not_owed_run(
+                    day_of(4),
+                    555,
+                    929,
+                    NotOwed::BeforeListing { listed_on: listed },
+                ),
                 not_owed_run(day_of(5), 555, 555, NotOwed::Unread),
             ],
             ..Ledger::default()

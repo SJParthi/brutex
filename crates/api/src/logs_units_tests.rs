@@ -32,8 +32,16 @@ fn a_field_value_of_every_kind_has_one_json_and_one_text_spelling() {
         (OwnedValue::Float(1.5), "1.5", "1.5"),
         (OwnedValue::Float(-0.0), "-0", "-0"),
         (OwnedValue::Float(f64::MIN_POSITIVE), "", ""),
-        (OwnedValue::Int(i64::MIN), "-9223372036854775808", "-9223372036854775808"),
-        (OwnedValue::Uint(u64::MAX), "18446744073709551615", "18446744073709551615"),
+        (
+            OwnedValue::Int(i64::MIN),
+            "-9223372036854775808",
+            "-9223372036854775808",
+        ),
+        (
+            OwnedValue::Uint(u64::MAX),
+            "18446744073709551615",
+            "18446744073709551615",
+        ),
         (OwnedValue::Bool(true), "true", "true"),
         (OwnedValue::Bool(false), "false", "false"),
         (OwnedValue::Null, "null", "null"),
@@ -80,7 +88,11 @@ fn a_key_too_long_or_holding_a_separator_is_ignored_by_name() {
     let keys = keys_of("month=2024-13&code=a/b&contract=c/d", &mut ignored);
     assert!(keys.month.is_none() && keys.code.is_none() && keys.contract.is_none());
     let names: Vec<&str> = ignored.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names, ["contract", "code", "month"], "the order keys are read");
+    assert_eq!(
+        names,
+        ["contract", "code", "month"],
+        "the order keys are read"
+    );
 }
 
 /// **AN ANSWER OVER NO LOG DIRECTORY SAYS SO, ON BOTH DOORS.** No half is
@@ -188,7 +200,35 @@ fn the_audit_line_names_what_damaged_a_stream_on_the_stream_it_hit() {
         ..hurt.clone()
     };
     let loud = streams_note(Some(&both), Some(&hurt));
-    assert!(loud.contains("Audit stream damage met on reopening"), "{loud}");
-    assert!(loud.contains("State stream damage met on reopening"), "{loud}");
-    assert!(loud.contains("Most recent failure: a failed roll."), "{loud}");
+    assert!(
+        loud.contains("Audit stream damage met on reopening"),
+        "{loud}"
+    );
+    assert!(
+        loud.contains("State stream damage met on reopening"),
+        "{loud}"
+    );
+    assert!(
+        loud.contains("Most recent failure: a failed roll."),
+        "{loud}"
+    );
+}
+
+/// **WHAT THE BENCH TIMES ANSWERS WHAT THE ROUTE ANSWERS.** The three doors
+/// `benches/ratio/logs_dirs.rs` reads, over a store of no journal: no evidence,
+/// a refused query in the route's own words, and an empty answer that is still
+/// an answer.
+#[test]
+fn the_doors_the_bench_times_answer_over_an_empty_store() {
+    let root = crate::scratch::path("logs-bench-doors");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("a scratch root");
+    assert_eq!(import_evidence_over(&root, "indices", "2024-01-02"), (0, 0));
+    assert_eq!(import_evidence_over(&root, "", ""), (0, 0));
+    let runs = imports_json_over(&root, "feed=gdfl").expect("an answer");
+    let parsed: serde_json::Value = serde_json::from_str(&runs).expect("JSON");
+    assert!(parsed.is_object(), "{runs}");
+    assert!(imports_json_over(&root, "feed=nosuch").is_err());
+    assert!(dayflags_json_over(&root, "nosuch=1").is_err());
+    let _ = std::fs::remove_dir_all(&root);
 }

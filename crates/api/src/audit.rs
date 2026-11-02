@@ -5388,7 +5388,7 @@ mod tests {
         }
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
-            n as u64 * 32,
+            u64::try_from(n).unwrap() * 32,
             "every append landed whole"
         );
         micros.sort_unstable();
