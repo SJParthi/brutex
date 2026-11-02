@@ -1,11 +1,3 @@
-    let free = AtomicBool::new(false);
-    let back = Host {
-        store: &store,
-        commit: Some("0123456789abcdef0123456789abcdef01234567"),
-        now: &|| 7,
-        stop: &free,
-        after_item: &noop,
-    };
 //! `cli upkeep` on invented stores (R3-17, D-6270): a run that stops and
 //! resumes where it stopped, an upkeep and an import shutting each other out
 //! of a month and of the store, the sort index at one and eight workers, a
@@ -197,7 +189,7 @@ fn call(
 ) -> (u8, String) {
     let owned = root.to_path_buf();
     let store = move || Ok(owned.clone());
-Host {
+    let host = Host {
         store: &store,
         commit: Some("0123456789abcdef0123456789abcdef01234567"),
         now: &|| 1_000,
@@ -2305,7 +2297,10 @@ fn bare(root: &Path, at: YearMonth, count: i64) -> StorePath<'static> {
 
 /// The plan's number of months lacking a `.sum`, read off its TOTAL line.
 fn lacking_sum(out: &str) -> usize {
-    let total = out.lines().find(|line| line.contains("TOTAL lacks")).unwrap();
+    let total = out
+        .lines()
+        .find(|line| line.contains("TOTAL lacks"))
+        .unwrap();
     let (_, rest) = total.split_once(", .sum ").unwrap();
     rest.split_whitespace().next().unwrap().parse().unwrap()
 }
@@ -2395,7 +2390,12 @@ fn a_plan_names_the_lacking_months_and_none_after_the_step() {
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("kept 3, small 1"), "{out}");
-    assert!(!small.with_file(FileKind::MonthSummary).to_path_buf(&root.0).exists());
+    assert!(
+        !small
+            .with_file(FileKind::MonthSummary)
+            .to_path_buf(&root.0)
+            .exists()
+    );
 }
 
 /// **A WRITER'S COMMIT LEAVES NO MONTH WITHOUT ITS SUMMARY.** After the step
@@ -2453,7 +2453,10 @@ fn a_run_builds_beside_a_reader_and_refuses_a_writers_month_by_name() {
     let writer = BarFile::open_or_create(&root.0, write_at, id).unwrap();
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
     assert_eq!(code, FAILED, "{out}");
-    assert!(out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-02.bin"), "{out}");
+    assert!(
+        out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-02.bin"),
+        "{out}"
+    );
     assert!(out.contains("is held by another process"), "{out}");
     assert!(out.contains("(3 built, 2 clean, 0 left)"), "{out}");
     assert_eq!(reader.header().n_valid, 1_200);
@@ -2494,7 +2497,11 @@ fn an_all_run_rebuilds_a_spoiled_summary_and_keeps_a_true_one() {
     assert_eq!(code, OK, "{out}");
     assert!(out.contains("built 2, kept 1"), "{out}");
     assert_eq!(fs::read(sum(&root.0, months[0])).unwrap(), true_bytes);
-    assert_eq!(inode(months[2]), kept_inode, "a true summary is not touched");
+    assert_eq!(
+        inode(months[2]),
+        kept_inode,
+        "a true summary is not touched"
+    );
     for at in months {
         assert!(summarised(
             &root.0,
@@ -2570,7 +2577,7 @@ fn an_all_run_builds_a_version_1_summary_whole_as_version_2() {
     fs::write(&beside, v1).unwrap();
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
     assert_eq!(code, OK, "{out}");
-    assert!(out.contains("summary_v1"), "{out}");
+    assert!(root.journal(Kind::MonthSummary).contains("summary_v1"));
     assert_eq!(fs::read(&beside).unwrap(), current, "the same bytes");
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
     assert_eq!(code, OK, "{out}");
@@ -2602,10 +2609,17 @@ fn an_empty_and_a_zero_length_month_are_told_apart() {
     fs::write(torn.to_path_buf(&root.0), b"").unwrap();
     let (code, out) = plain(&root.0, &["plan", "gdfl"]);
     assert_eq!(code, OK, "{out}");
-    assert_eq!(lacking_sum(&out), 2, "the zero-length one proves nothing: {out}");
+    assert_eq!(
+        lacking_sum(&out),
+        2,
+        "the zero-length one proves nothing: {out}"
+    );
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
     assert_eq!(code, FAILED, "{out}");
-    assert!(out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"), "{out}");
+    assert!(
+        out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"),
+        "{out}"
+    );
     assert!(out.contains("(2 built, 1 clean, 0 left)"), "{out}");
     assert!(sum(&root.0, ym(2019, 4)).exists(), "the rest is built");
     assert!(!sum(&root.0, ym(2019, 3)).exists());
@@ -2623,7 +2637,8 @@ fn a_sealed_month_beside_its_raw_form_is_summarised_and_left_as_it_was() {
     let bytes = {
         let raw = BarFile::open_existing(&root.0, at, id).unwrap();
         let rows = raw.read_range(0, raw.records()).unwrap();
-        store::sealed::build(at, &raw.header(), &rows, None, None)
+        let provenance = fs::read(at.with_file(FileKind::Provenance).to_path_buf(&root.0)).ok();
+        store::sealed::build(at, &raw.header(), &rows, provenance.as_deref(), None)
             .unwrap()
             .to_bytes()
     };
@@ -2734,7 +2749,12 @@ fn an_import_during_a_run_stops_it_and_a_resume_finishes_the_same_bytes() {
             *lock = Some(RunLock::take(&root.0, &import).unwrap());
         }
     };
-    let (code, out) = call(&root.0, &["run", "msum", "gdfl"], &AtomicBool::new(false), &after);
+    let (code, out) = call(
+        &root.0,
+        &["run", "msum", "gdfl"],
+        &AtomicBool::new(false),
+        &after,
+    );
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("ENDED stopped"), "{out}");
     assert!(out.contains("run_busy"), "{out}");
@@ -2777,14 +2797,20 @@ fn a_refused_month_then_a_resume_at_another_worker_count_builds_only_it() {
     let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--workers", "1"]);
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("(3 built, 2 clean, 0 left)"), "{out}");
-    assert!(!sum(&root.0, months[1]).exists(), "no name for a refused file");
+    assert!(
+        !sum(&root.0, months[1]).exists(),
+        "no name for a refused file"
+    );
     fs::remove_dir(&staging).unwrap();
     let (code, out) = plain(
         &root.0,
         &["resume", "msum", "gdfl", "1000", "--workers", "8"],
     );
     assert_eq!(code, OK, "{out}");
-    assert!(out.contains("1 worker(s), 1 item(s) given, 2 skipped"), "{out}");
+    assert!(
+        out.contains("1 worker(s), 1 item(s) given, 2 skipped"),
+        "{out}"
+    );
     for at in months {
         assert_eq!(
             fs::read(sum(&root.0, at)).unwrap(),
@@ -2810,16 +2836,6 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
             stop.store(true, Ordering::Release);
         }
     };
-    let host = |now: &'static (dyn Fn() -> u64 + Sync),
-                stop: &'static AtomicBool,
-                after_item: &'static (dyn Fn(&str, &Outcome) + Sync)| Host {
-        store: Box::leak(Box::new(store.clone())),
-        commit: Some("0123456789abcdef0123456789abcdef01234567"),
-        now,
-        stop,
-        after_item,
-    };
-    let _ = host;
     let host = Host {
         store: &store,
         commit: Some("0123456789abcdef0123456789abcdef01234567"),
@@ -2828,16 +2844,19 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
         after_item: &after,
     };
     let mut out = String::new();
-    assert_eq!(command_with(&["run", "msum", "gdfl"], &host, &mut out), FAILED);
+    assert_eq!(
+        command_with(&["run", "msum", "gdfl"], &host, &mut out),
+        FAILED
+    );
     assert!(out.contains("run 5000"), "{out}");
-    let (free, back) = (AtomicBool::new(false), Host {
+    let free = AtomicBool::new(false);
+    let back = Host {
         store: &store,
         commit: Some("0123456789abcdef0123456789abcdef01234567"),
         now: &|| 7,
-        stop: &stop,
+        stop: &free,
         after_item: &noop,
-    });
-    let back = Host { stop: &free, ..back };
+    };
     let mut out = String::new();
     assert_eq!(
         command_with(&["resume", "msum", "gdfl", "5000"], &back, &mut out),
@@ -2858,8 +2877,8 @@ fn a_clock_stepped_back_gives_a_resume_its_own_id() {
 #[test]
 fn a_run_says_on_store_sum_what_it_was_given_and_left() {
     let given = super::msum_given(Vendor::Gdfl, 7, "7 of the 9 month file(s)");
-    assert_eq!(given.target, "store.sum");
-    assert_eq!(given.level, telemetry::Level::Info);
+    assert_eq!(given.target(), "store.sum");
+    assert_eq!(given.level(), telemetry::Level::Info);
     assert!(given.fields().iter().any(|(key, _)| *key == "lacking"));
     let whole = upkeep::Ran {
         id: 9,
@@ -2878,9 +2897,12 @@ fn a_run_says_on_store_sum_what_it_was_given_and_left() {
         outcomes: vec![Some(Outcome::clean("built", "b")), None],
         ..whole.clone()
     };
-    assert_eq!(super::msum_left(Vendor::Zerodha, &whole).level, telemetry::Level::Info);
+    assert_eq!(
+        super::msum_left(Vendor::Zerodha, &whole).level(),
+        telemetry::Level::Info
+    );
     let event = super::msum_left(Vendor::Zerodha, &left);
-    assert_eq!(event.level, telemetry::Level::Warn);
-    assert_eq!(event.target, "store.sum");
+    assert_eq!(event.level(), telemetry::Level::Warn);
+    assert_eq!(event.target(), "store.sum");
     assert!(event.fields().iter().any(|(key, _)| *key == "left"));
 }

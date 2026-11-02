@@ -2128,7 +2128,10 @@ fn the_length_of_a_bar_file_says_when_no_summary_is_owed() {
     );
     assert!(summary_owed_by_len(bytes(INDEX_MIN_ROWS)));
     assert!(summary_owed_by_len(0), "an empty file proves nothing");
-    assert!(summary_owed_by_len(HEADER_LEN - 1), "nor does a torn header");
+    assert!(
+        summary_owed_by_len(HEADER_LEN - 1),
+        "nor does a torn header"
+    );
     assert!(summary_owed_by_len(u64::MAX));
 }
 

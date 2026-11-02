@@ -1,8 +1,4 @@
-    let _ = writeln!(out, "{heading} under {}", root.display());
-    if kind == Kind::MonthSummary {
-        let _dropped_when_filtered = telemetry::emit(&msum_given(vendor, plan.len(), &said));
-    }
-    let busy = || live_run(root, vendor);//! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
+//! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
 //! month lacks, and each builder run over it on N workers with a run id,
 //! progress, Stop and resume, under the import's own locks. R3-17, D-6270;
 //! DB-027, DB-N14.
@@ -1038,6 +1034,9 @@ fn run(
         }
     };
     let _ = writeln!(out, "{heading} under {}", root.display());
+    if kind == Kind::MonthSummary {
+        let _dropped_when_filtered = telemetry::emit(&msum_given(vendor, plan.len(), &said));
+    }
     let busy = || live_run(root, vendor);
     let ask = Ask {
         vendor,
@@ -1081,7 +1080,7 @@ fn msum_given<'a>(vendor: Vendor, given: usize, said: &'a str) -> telemetry::Eve
 /// `store.sum`, INFO, or WARN when the run left work: how one `msum` run ended
 /// and how many of the items it was given it left without a summary. One line
 /// a run. The journal holds each item; a page needs only this.
-fn msum_left<'a>(vendor: Vendor, ran: &'a Ran) -> telemetry::Event<'a> {
+fn msum_left(vendor: Vendor, ran: &Ran) -> telemetry::Event<'_> {
     let message = "months left lacking a summary, at a run's end";
     if ran.whole() {
         telemetry::Event::info("store.sum", message)

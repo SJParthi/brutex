@@ -13,23 +13,7 @@
 //! built stays with the caller (`cli upkeep`), which hands [`run`] the item
 //! keys in order and one function that builds one of them.
 //!
-//! # One         let mut lacks = Lacks::of(Kind::ALL.into_iter().filter(|kind| {
-            kind.sidecar().is_some_and(|file| {
-                fs::symlink_metadata(store_path.with_file(file).to_path_buf(&served))
-                    .is_err_and(|why| why.kind() == ErrorKind::NotFound)
-            })
-        }));
-        // ONE MORE `lstat`, ONLY FOR A MONTH WITH NO `.sum`: a step's plan must
-        // be able to read zero, so a month that is too short to owe a summary
-        // is not listed as lacking one (D-7430).
-        if lacks.has(Kind::MonthSummary)
-            && fs::symlink_metadata(store_path.to_path_buf(&served))
-                .is_ok_and(|bars| !summary_owed_by_len(bars.len()))
-        {
-            lacks = lacks.without(Kind::MonthSummary);
-            walked.sum_small += 1;
-        }
- per vendor and kind, under `<store>/audit/`, append-only
+//! # One file per vendor and kind, under `<store>/audit/`, append-only
 //!
 //! [`journal_name`] — `audit/upkeep.<vendor>.<kind>.log` — holds one line per
 //! event, each whole once its newline is written:
@@ -105,7 +89,8 @@
 //! builder here keeps (`kept`) when it finds them done. [`status`] is one
 //! bounded tail read and one `flock` probe. The months walk ([`months`]) is
 //! O(directory entries) under the scope, with one pointer open and three
-//! `lstat`s per month file.
+//! `lstat`s per month file, and a fourth for a month with no `.sum`, whose
+//! bar file's length says whether one is owed ([`Walked::sum_small`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -1748,14 +1733,12 @@ fn auction_sidecar(name: &str) -> bool {
 ///
 /// The length is the header and every row written, committed or not, so it
 /// never reads short of the committed rows: a month it calls small is small. A
-/// file too short to hold a header proves nothing, and stays owed, so a run
+/// file too short to hold a header proves nothing and stays owed, so a run
 /// meets it and refuses it by name. An uncommitted tail can make a small month
-/// look owed; the run then says `small` for it (`docs/06-limits.md`).
+/// look owed; the run then says `small` for it.
 fn summary_owed_by_len(len: u64) -> bool {
     len.checked_sub(store::format::HEADER_LEN)
-        .is_none_or(|rows| {
-            !store::time_index::below_threshold(rows / store::format::RECORD_STRIDE)
-        })
+        .is_none_or(|rows| !store::time_index::below_threshold(rows / store::format::RECORD_STRIDE))
 }
 
 /// Every month file in one rung directory.
@@ -1805,12 +1788,22 @@ fn walk_rung(
         let served = store::generation::served(at.root, store_path)
             .map_err(|why| format!("{}: {why}", path.display()))?
             .root(at.root);
-        let lacks = Lacks::of(Kind::ALL.into_iter().filter(|kind| {
+        let mut lacks = Lacks::of(Kind::ALL.into_iter().filter(|kind| {
             kind.sidecar().is_some_and(|file| {
                 fs::symlink_metadata(store_path.with_file(file).to_path_buf(&served))
                     .is_err_and(|why| why.kind() == ErrorKind::NotFound)
             })
         }));
+        // ONE MORE `lstat`, ONLY FOR A MONTH WITH NO `.sum`: a step's plan must
+        // be able to read zero, so a month too short to owe a summary is not
+        // listed as lacking one (D-7430).
+        if lacks.has(Kind::MonthSummary)
+            && fs::symlink_metadata(store_path.to_path_buf(&served))
+                .is_ok_and(|bars| !summary_owed_by_len(bars.len()))
+        {
+            lacks = lacks.without(Kind::MonthSummary);
+            walked.sum_small += 1;
+        }
         let key = path
             .strip_prefix(at.root)
             .map_or_else(|_| path.clone(), Path::to_path_buf)

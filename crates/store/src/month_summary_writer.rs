@@ -5,8 +5,7 @@
 //! A child of `crate::file` so it reads committed rows through the verified
 //! path, under the same handle, and cannot drift from what a reader reads.
 //!
-//! # The writer's step, and     write_image(sidecar, &summary.file_image(), Durable::Unsynced).map_err(|why| why.to_string())
- it never fails an append
+//! # The writer's step, and why it never fails an append
 //!
 //! [`BarFile::keep_month_summary`] runs after a writer opens a month and after
 //! every commit, after the sort index's step. The bars are already committed
@@ -54,7 +53,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::sort_index_writer::Hold;
+use super::sort_writer::Hold;
 use super::{
     Action, BarFile, StoreError, classify, fault, lock_fault, open_read, refuse_link, sync_hooked,
     write_fully,
@@ -250,8 +249,8 @@ impl BarFile {
     /// holds the month is [`StoreError::Locked`] and nothing is written, and
     /// no writer can commit while the rows are read. A reader needs no more:
     /// it sees the old name or the new one, whole, and either is checked
-    /// against the header it opened. The sort index's exclusive door would
-    /// refuse a month whenever a reader held it and would make a reader wait
+    /// against the header it opened. An exclusive hold, the sort index's,
+    /// would refuse a month whenever a reader held it and make a reader wait
     /// out the build, past the 200 ms a page waits on the biggest months: a
     /// `/gaps.json` asked during a backfill would answer 503.
     ///
@@ -267,8 +266,8 @@ impl BarFile {
     /// The door syncs the new file before the rename: a backfill closes a
     /// month in its journal once and never looks at it again, so a power cut
     /// must not leave a torn file under the name of a month it called done.
-    /// The writer's per-commit step does not (see the module header): its
-    /// next open repairs what a cut leaves.
+    /// The writer's per-commit step does not (the module header says why):
+    /// its next open repairs what a cut leaves.
     ///
     /// # Errors
     ///
@@ -315,7 +314,7 @@ impl BarFile {
 
 /// Writes `summary` as the month's `.sum`, by staging and rename.
 fn write_summary(sidecar: &SummarySidecar, summary: &MonthSummary) -> Result<(), String> {
-    write_image(sidecar, &summary.file_image()).map_err(|why| why.to_string())
+    write_image(sidecar, &summary.file_image(), Durable::Unsynced).map_err(|why| why.to_string())
 }
 
 /// Whether a summary is on the disk before its name appears.
@@ -331,11 +330,7 @@ enum Durable {
 /// name) and renamed over `<yyyy-mm>.sum`. A failure leaves the name as it
 /// was: a partial file stays under the staging name, read by nobody, and the
 /// next create clears it.
-fn write_image(
-    sidecar: &SummarySidecar,
-    image: &[u8],
-    durable: Durable,
-) -> Result<(), StoreError> {
+fn write_image(sidecar: &SummarySidecar, image: &[u8], durable: Durable) -> Result<(), StoreError> {
     let staging = sidecar.staging();
     refuse_link(&sidecar.path)?;
     // A NAME HELD BY A DIRECTORY, A PIPE OR A DEVICE is left as it is and the
