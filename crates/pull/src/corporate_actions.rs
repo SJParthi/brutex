@@ -818,20 +818,20 @@ impl CorporateActions {
         // IN FILE ORDER, so the share a refusal names is the same every load.
         let mut budget = MAX_INDEXED_DAYS;
         for symbol in &order {
-            if let Some(shelf) = by_symbol.get_mut(symbol) {
-                shelf
-                    .index(|row| (row.ex_date, row.ex_date), &mut budget)
-                    .map_err(|why| {
-                        refusal(
-                            table,
-                            parsed,
-                            path,
-                            RefusalKind::TooMany,
-                            0,
-                            format!("{symbol:?}: {why}"),
-                        )
-                    })?;
-            }
+            by_symbol
+                .entry(symbol.clone())
+                .or_default()
+                .index(|row| (row.ex_date, row.ex_date), &mut budget)
+                .map_err(|why| {
+                    refusal(
+                        table,
+                        parsed,
+                        path,
+                        RefusalKind::TooMany,
+                        0,
+                        format!("{symbol:?}: {why}"),
+                    )
+                })?;
         }
         Ok(Self {
             standing,
@@ -1144,20 +1144,20 @@ impl BasisRuns {
         // IN FILE ORDER, so the share a refusal names is the same every load.
         let mut budget = MAX_INDEXED_DAYS;
         for symbol in &order {
-            if let Some(shelf) = by_symbol.get_mut(symbol) {
-                shelf
-                    .index(|run| (run.first, run.last), &mut budget)
-                    .map_err(|why| {
-                        refusal(
-                            table,
-                            parsed,
-                            path,
-                            RefusalKind::TooMany,
-                            0,
-                            format!("{symbol:?}: {why}"),
-                        )
-                    })?;
-            }
+            by_symbol
+                .entry(symbol.clone())
+                .or_default()
+                .index(|run| (run.first, run.last), &mut budget)
+                .map_err(|why| {
+                    refusal(
+                        table,
+                        parsed,
+                        path,
+                        RefusalKind::TooMany,
+                        0,
+                        format!("{symbol:?}: {why}"),
+                    )
+                })?;
         }
         Ok(Self {
             rows: parsed.rows.len(),
@@ -1614,10 +1614,10 @@ pub struct Judged {
 /// run is the next). A pair whose factor terms would pass [`MAX_TERM`] has
 /// no step: [`steps_skipped`] counts them. O(runs).
 fn indexed_steps(runs: &[Run]) -> Vec<(usize, Step)> {
-    runs.windows(2)
+    runs.iter()
+        .zip(runs.iter().skip(1))
         .enumerate()
-        .filter_map(|(at, pair)| {
-            let [old, new] = pair else { return None };
+        .filter_map(|(at, (old, new))| {
             if old.end != RunEnd::Step {
                 return None;
             }
@@ -2117,3 +2117,6 @@ pub fn check(runs: &BasisRuns, actions: &CorporateActions) -> Vec<Finding> {
 #[cfg(test)]
 #[path = "corporate_actions_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "corporate_actions_cov_tests.rs"]
+mod cov_tests;

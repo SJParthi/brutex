@@ -423,21 +423,14 @@ where
         let from = match held(&cell.key).and_then(day_of) {
             // Nothing held for this key in this month: the whole span is owed.
             None => first,
-            Some(day) if day < through => {
-                // The last representable day has no successor. Counted as
-                // complete rather than asked for again, because there is no
-                // day after it to ask for.
-                let Ok(next) = day.succ() else {
+            Some(day) => match the_day_after(day, through) {
+                Some(next) => next,
+                // Held through the last day this cell can ever owe.
+                None => {
                     out.complete = out.complete.saturating_add(1);
                     continue;
-                };
-                next
-            }
-            // Held through the last day this cell can ever owe.
-            Some(_) => {
-                out.complete = out.complete.saturating_add(1);
-                continue;
-            }
+                }
+            },
         };
         out.resume.push(Resume {
             cell: cell.clone(),
@@ -675,6 +668,12 @@ pub struct FuturesPlan {
     /// At most [`INCOMPLETE_NAMED`](crate::master_snapshots::INCOMPLETE_NAMED)
     /// are named, and one line more counts the rest.
     pub incomplete: Vec<String>,
+}
+
+/// The day after `held`, when `through` still owes it. The last representable
+/// day has no successor, so a cell held there owes nothing.
+fn the_day_after(held: Day, through: Day) -> Option<Day> {
+    held.succ().ok().filter(|next| *next <= through)
 }
 
 /// The book's incomplete Kite entries as a plan names them: newest first, at
@@ -1341,6 +1340,9 @@ async fn pull_one<D: crate::chain::Discovery>(
 #[cfg(test)]
 #[path = "fnowork_futures_tests.rs"]
 mod futures_tests;
+#[cfg(test)]
+#[path = "fnowork_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 #[allow(

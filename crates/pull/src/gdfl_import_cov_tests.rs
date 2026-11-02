@@ -14,7 +14,7 @@
     reason = "a test that cannot panic cannot fail"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::gdfl_fixtures::{Method, put, scratch, zip};
@@ -412,12 +412,9 @@ fn a_rescan_names_a_declined_day_a_missing_day_and_a_refused_file() {
             .any(|(what, _)| what == &format!("{sunday} calendar")),
         "{named:?}"
     );
-    assert!(
-        named
-            .iter()
-            .any(|(what, why)| what == &format!("{missing} past.csv") && why.contains("86400")),
-        "{named:?}"
-    );
+    let past = format!("{missing} past.csv");
+    let stamped = |(what, why): &&(String, String)| *what == past && why.contains("86400");
+    assert_eq!(named.iter().filter(stamped).count(), 1, "{named:?}");
     assert!(
         named
             .iter()
@@ -426,4 +423,364 @@ fn a_rescan_names_a_declined_day_a_missing_day_and_a_refused_file() {
         "{named:?}"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A directory entry that answers what a test says: the real entry's type
+/// (`kind_of`) or a failing disk's error, and the bytes it was told.
+struct SaidEntry {
+    name: std::ffi::OsString,
+    path: PathBuf,
+    kind_of: Option<PathBuf>,
+    bytes: Option<u64>,
+}
+
+impl SaidEntry {
+    /// A named entry of `dir` with the type of the real path `kind_of`.
+    fn new(dir: &Path, name: &str, kind_of: Option<&Path>, bytes: Option<u64>) -> Self {
+        Self {
+            name: name.into(),
+            path: dir.join(name),
+            kind_of: kind_of.map(Path::to_path_buf),
+            bytes,
+        }
+    }
+}
+
+impl OriginEntry for SaidEntry {
+    fn kind(&self) -> std::io::Result<std::fs::FileType> {
+        match &self.kind_of {
+            Some(real) => std::fs::symlink_metadata(real).map(|meta| meta.file_type()),
+            None => Err(std::io::Error::other("said: no type")),
+        }
+    }
+    fn name(&self) -> std::ffi::OsString {
+        self.name.clone()
+    }
+    fn location(&self) -> PathBuf {
+        self.path.clone()
+    }
+    fn bytes(&self) -> std::io::Result<u64> {
+        self.bytes
+            .ok_or_else(|| std::io::Error::other("said: deleted in the walk"))
+    }
+}
+
+/// The walk over `listed`, one directory, with a good `FORMAT.md` in `root`.
+fn walk(root: &Path, cap: usize, listed: Vec<std::io::Result<SaidEntry>>) -> (Measured, u32) {
+    let once = std::cell::RefCell::new((Some(listed), 0_u32));
+    let measured = walk_tick_store(root, cap, &|_dir: &Path| {
+        let mut state = once.borrow_mut();
+        state.1 += 1;
+        Ok(state.0.take().unwrap_or_default().into_iter())
+    });
+    let opened = once.borrow().1;
+    (measured, opened)
+}
+
+/// A real directory and a real file, for the types a said entry answers, and
+/// a good `FORMAT.md`.
+fn walk_root(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = scratch(tag);
+    let file = put(&root, "FORMAT.md", b"# a format of no store\n");
+    let dir = root.join("a-dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    (root, dir, file)
+}
+
+/// A listing that fails mid-way stops the walk with the directory named and
+/// the bytes so far kept; no digest is claimed for a store not wholly read,
+/// though `FORMAT.md` reads, and the directory found before it is never
+/// opened (the walk stops, it does not limp on).
+#[test]
+fn a_listing_that_fails_stops_the_walk_and_names_the_directory() {
+    let (root, dir, file) = walk_root("cov-walk-list");
+    let (measured, opened) = walk(
+        &root,
+        10,
+        vec![
+            Ok(SaidEntry::new(&root, "sub", Some(&dir), None)),
+            Ok(SaidEntry::new(&root, "a.bts", Some(&file), Some(7))),
+            Err(std::io::Error::other("a failing disk")),
+            Ok(SaidEntry::new(&root, "b.bts", Some(&file), Some(100))),
+        ],
+    );
+    assert_eq!(measured.bytes, 7, "the bytes read before the fault stand");
+    assert_eq!(measured.digest, None);
+    assert_eq!(
+        measured.fault,
+        Some(format!("{}: a failing disk", root.display()))
+    );
+    assert_eq!(opened, 1, "the directory found first is not walked");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// An entry whose type cannot be read is the same stop, named by the
+/// directory holding it.
+#[test]
+fn an_entry_of_unknown_type_stops_the_walk() {
+    let (root, _dir, file) = walk_root("cov-walk-kind");
+    let (measured, _) = walk(
+        &root,
+        10,
+        vec![
+            Ok(SaidEntry::new(&root, "a.bts", None, Some(5))),
+            Ok(SaidEntry::new(&root, "b.bts", Some(&file), Some(5))),
+        ],
+    );
+    assert_eq!(measured.bytes, 0);
+    assert_eq!(measured.digest, None);
+    assert_eq!(
+        measured.fault,
+        Some(format!("{}: said: no type", root.display()))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A file deleted between the listing and its size is named by its own path,
+/// not its directory: that is what an operator can go and look at.
+#[test]
+fn a_file_gone_between_listing_and_size_names_the_file() {
+    let (root, _dir, file) = walk_root("cov-walk-bytes");
+    let (measured, _) = walk(
+        &root,
+        10,
+        vec![
+            Ok(SaidEntry::new(&root, "a.bts", Some(&file), Some(3))),
+            Ok(SaidEntry::new(&root, "gone.bts", Some(&file), None)),
+        ],
+    );
+    assert_eq!(measured.bytes, 3);
+    assert_eq!(measured.digest, None);
+    let fault = measured.fault.unwrap();
+    assert!(
+        fault.ends_with("gone.bts: said: deleted in the walk"),
+        "{fault}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Combinations of extremes: the cap is asked before the entry, so a sick
+/// entry past the cap is the cap's fault; and with no `FORMAT.md` as well the
+/// first fault stands. An entry of `u64::MAX` bytes saturates, never wraps.
+#[test]
+fn the_walks_faults_keep_their_order_and_a_huge_size_saturates() {
+    let (root, dir, file) = walk_root("cov-walk-combo");
+    let (capped, _) = walk(
+        &root,
+        0,
+        vec![Err(std::io::Error::other("never read"))],
+    );
+    assert!(
+        capped
+            .fault
+            .is_some_and(|fault| fault.contains("more than 0 entries")),
+    );
+    std::fs::remove_file(&file).unwrap();
+    let kept = root.join("kept-type");
+    std::fs::write(&kept, b"x").unwrap();
+    let (sick, _) = walk(
+        &root,
+        5,
+        vec![
+            Ok(SaidEntry::new(&root, "gone.bts", Some(&kept), None)),
+            Ok(SaidEntry::new(&root, "sub", Some(&dir), None)),
+        ],
+    );
+    assert!(
+        sick.fault
+            .is_some_and(|fault| fault.ends_with("said: deleted in the walk")),
+        "the missing FORMAT.md does not replace the first fault"
+    );
+    std::fs::write(&file, b"# again\n").unwrap();
+    let (huge, _) = walk(
+        &root,
+        5,
+        vec![
+            Ok(SaidEntry::new(&root, "a.bts", Some(&kept), Some(u64::MAX))),
+            Ok(SaidEntry::new(&root, "b.bts", Some(&kept), Some(u64::MAX))),
+        ],
+    );
+    assert_eq!(huge.bytes, u64::MAX);
+    assert_eq!(huge.fault, None);
+    assert!(huge.digest.is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A directory of yearly zips that fails mid-listing refuses the measure
+/// (no partial list of years is ever summed); entries that are not years,
+/// three-digit, five-digit or lettered, are passed over without a fault.
+#[test]
+fn yearly_zips_are_read_whole_or_refused() {
+    let dir = Path::new("/invented");
+    let said = |name: &str| Ok(SaidEntry::new(dir, name, None, None));
+    let years = yearly_zips(
+        vec![
+            said("2019.zip"),
+            said("201.zip"),
+            said("20190.zip"),
+            said("20x9.zip"),
+            said("2019.ZIP"),
+            said(".zip"),
+            said("2020.zip"),
+        ]
+        .into_iter(),
+    )
+    .unwrap();
+    assert_eq!(
+        years,
+        [
+            ("2019.zip".to_owned(), dir.join("2019.zip")),
+            ("2020.zip".to_owned(), dir.join("2020.zip")),
+        ]
+    );
+    let refused = yearly_zips(
+        vec![said("2019.zip"), Err(std::io::Error::other("a failing disk"))].into_iter(),
+    )
+    .unwrap_err();
+    assert_eq!(refused.to_string(), "a failing disk");
+}
+
+/// A `statfs` answer that overflows a `u64` is named with the volume and the
+/// count, for each of the two counts; the largest product that fits is
+/// answered exactly, and a volume of nothing is zero, not a refusal.
+#[test]
+fn a_volume_count_that_overflows_is_named_not_wrapped() {
+    let at = Path::new("/invented/volume");
+    let refused = space_of(at, 2, u64::MAX, 1).unwrap_err();
+    assert_eq!(
+        refused,
+        format!(
+            "/invented/volume: {} total blocks of 2 bytes overflow a u64",
+            u64::MAX
+        )
+    );
+    let refused = space_of(at, 4096, 1, u64::MAX / 2).unwrap_err();
+    assert!(refused.contains("available blocks of 4096 bytes"), "{refused}");
+    let fits = space_of(at, 1, u64::MAX, u64::MAX).unwrap();
+    assert_eq!((fits.total, fits.free), (u64::MAX, u64::MAX));
+    let none = space_of(at, 0, u64::MAX, u64::MAX).unwrap();
+    assert_eq!((none.total, none.free), (0, 0));
+}
+
+/// A contract directory settles a row only when it reads: an entry that will
+/// not read counts as live (unread is not proof of absence), a name that is
+/// no contract, or not UTF-8, is nothing to split, and so is a symbol the
+/// store cannot spell. An empty directory has nothing live.
+#[test]
+fn an_unread_entry_of_an_old_symbol_counts_as_live() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let root = scratch("cov-live");
+    let store = root.join("S");
+    std::fs::create_dir_all(&store).unwrap();
+    let withdrawn = crate::gdfl_rekey::withdrawn(&store).unwrap();
+    let symbol = brutex_core::symbol::Symbol::new("INVENTEDX").ok();
+    let dir = Path::new("/invented");
+    let said = |name: &str| Ok(SaidEntry::new(dir, name, None, None));
+    let contract = "2020-09-24-15000-CE";
+    assert!(!holds_a_live_contract(
+        Vec::<std::io::Result<SaidEntry>>::new().into_iter(),
+        symbol,
+        &withdrawn
+    ));
+    assert!(holds_a_live_contract(
+        vec![Err(std::io::Error::other("a failing disk")), said(contract)].into_iter(),
+        symbol,
+        &withdrawn
+    ));
+    assert!(holds_a_live_contract(
+        vec![said("not-a-contract"), said(contract)].into_iter(),
+        symbol,
+        &withdrawn
+    ));
+    assert!(!holds_a_live_contract(
+        vec![said("not-a-contract")].into_iter(),
+        symbol,
+        &withdrawn
+    ));
+    assert!(!holds_a_live_contract(
+        vec![said(contract)].into_iter(),
+        None,
+        &withdrawn
+    ));
+    let mut bad = SaidEntry::new(dir, "x", None, None);
+    bad.name = std::ffi::OsStr::from_bytes(&[0xFF, 0xFE]).to_os_string();
+    assert!(!holds_a_live_contract(
+        vec![Ok(bad)].into_iter(),
+        symbol,
+        &withdrawn
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Only a row that applies, moved its symbol and is wanted can split a run.
+/// A file where an old symbol's directory should be cannot be read, so the
+/// run is held on it: unread is not proof of absence.
+#[test]
+fn a_lineage_row_splits_a_run_only_when_it_can_and_a_file_in_its_place_holds_the_run() {
+    use brutex_core::alias::{LINEAGE, Status};
+    let root = scratch("cov-names-split");
+    let store = root.join("S");
+    let on = day(2024, 3, 1);
+    let wanted = ["TMPV".to_owned()];
+    let run = |only| Run {
+        kind: ImportKind::Options,
+        from: on,
+        to: on,
+        only,
+        store_root: &store,
+    };
+    let row = LINEAGE
+        .rows()
+        .iter()
+        .find(|row| row.old == "TATAMOTORS")
+        .unwrap();
+    let mut unsourced = *row;
+    unsourced.status = Status::Unverified("no exchange source read");
+    assert!(run(&wanted).names_a_split(row, "TMPV"));
+    assert!(run(&[]).names_a_split(row, "TMPV"));
+    assert!(!run(&wanted).names_a_split(&unsourced, "TMPV"));
+    assert!(!run(&wanted).names_a_split(row, "TATAMOTORS"), "never moved");
+    assert!(!run(&wanted).names_a_split(row, "LTM"), "the filter names another");
+    put(&store, "bars/gdfl/NSE/FNO/TATAMOTORS", b"a file, not a directory");
+    assert_eq!(
+        run(&wanted).split_underlyings(),
+        Ok(vec![("TATAMOTORS".to_owned(), "TMPV".to_owned())])
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The longest name wins whichever order the names come in; a name the ticker
+/// does not start with is passed over; no name at all is no answer.
+#[test]
+fn the_longest_prefix_does_not_depend_on_the_order_of_the_names() {
+    let names = ["NIFTY", "NIFTYNXT50", "BANK"];
+    assert_eq!(longest_prefix("NIFTYNXT5024", names), Some("NIFTYNXT50"));
+    let turned = ["NIFTYNXT50", "NIFTY", "BANK"];
+    assert_eq!(longest_prefix("NIFTYNXT5024", turned), Some("NIFTYNXT50"));
+    assert_eq!(longest_prefix("TV18BRDCST", names), None);
+    assert_eq!(longest_prefix("", ["", "A"]), Some(""));
+    assert_eq!(longest_prefix("A", std::iter::empty()), None);
+}
+
+/// A band that traded at two prices or more says so; none, says nothing.
+/// `u32::MAX` booked rows widens into the event, never wraps.
+#[test]
+fn an_unattributed_band_is_said_only_when_there_is_one() {
+    assert!(unattributed_event("2024-03-01", "INVENTEDX", "X.csv", 0).is_none());
+    let event = unattributed_event("2024-03-01", "INVENTEDX", "X.csv", u32::MAX).unwrap();
+    assert_eq!(event.level(), telemetry::Level::Warn);
+    assert_eq!(
+        event.fields(),
+        &[
+            ("kind", telemetry::Value::from("stocks")),
+            ("day", telemetry::Value::from("2024-03-01")),
+            ("symbol", telemetry::Value::from("INVENTEDX")),
+            ("file", telemetry::Value::from("X.csv")),
+            ("booked_rows", telemetry::Value::from(u64::from(u32::MAX))),
+            ("code", telemetry::Value::from("auction_band_unattributed")),
+        ]
+    );
+    // Both paths of the door itself: nothing to say, and a warn to emit.
+    note_unattributed(day(2024, 3, 1), "INVENTEDX", "X.csv", 0);
+    note_unattributed(day(2024, 3, 1), "INVENTEDX", "X.csv", 1);
 }

@@ -20,18 +20,18 @@ use super::*;
 use crate::gdfl_fixtures::scratch;
 use crate::reference_data::{Slot, load_one, write};
 
-fn day(y: u16, m: u8, d: u8) -> Day {
+pub(super) fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).expect("a real day")
 }
 
-fn r(text: &str) -> Ratio {
+pub(super) fn r(text: &str) -> Ratio {
     Ratio::parse(text).expect("a ratio")
 }
 
 /// A basis day whose interval is `ratio` give or take one part in two
 /// thousand: the width DATA-1's allowance gives a minute of a share near
 /// Rs 1,000 on a 5-paisa grid.
-fn around(on: Day, ratio: &str) -> BasisDay {
+pub(super) fn around(on: Day, ratio: &str) -> BasisDay {
     let ratio = r(ratio);
     BasisDay {
         day: on,
@@ -54,7 +54,7 @@ fn weekdays(from: Day, to: Day, ratio: &str) -> Vec<BasisDay> {
     days
 }
 
-fn runs_draft(runs: &[Run]) -> Draft {
+pub(super) fn runs_draft(runs: &[Run]) -> Draft {
     Draft {
         table: Table::BasisRuns,
         source: "invented basis runs for a test".to_owned(),
@@ -66,7 +66,7 @@ fn runs_draft(runs: &[Run]) -> Draft {
     }
 }
 
-fn actions_draft(standing: Standing, rows: &[Action]) -> Draft {
+pub(super) fn actions_draft(standing: Standing, rows: &[Action]) -> Draft {
     Draft {
         table: Table::CorporateActions,
         source: "https://invented.example/corporate-actions.csv".to_owned(),
@@ -78,7 +78,7 @@ fn actions_draft(standing: Standing, rows: &[Action]) -> Draft {
     }
 }
 
-fn nse(symbol: &str, ex_date: Day, kind: Kind, ratio: &str) -> Action {
+pub(super) fn nse(symbol: &str, ex_date: Day, kind: Kind, ratio: &str) -> Action {
     Action {
         symbol: symbol.to_owned(),
         isin: Some("INE000INVENT".to_owned()),
@@ -95,7 +95,7 @@ fn load_runs(store: &Path) -> Slot<BasisRuns> {
     load_one(store, Table::BasisRuns, BasisRuns::build)
 }
 
-fn load_actions(store: &Path) -> Slot<CorporateActions> {
+pub(super) fn load_actions(store: &Path) -> Slot<CorporateActions> {
     load_one(store, Table::CorporateActions, CorporateActions::build)
 }
 
@@ -835,7 +835,7 @@ fn a_lookup_costs_the_same_at_1x_10x_and_100x_the_shares_measured() {
 
 // ─────────────────────────────── canonical order and the day table ───────────────────────────────
 
-fn run(symbol: &str, first: Day, last: Day, ratio: &str) -> Run {
+pub(super) fn run(symbol: &str, first: Day, last: Day, ratio: &str) -> Run {
     Run {
         symbol: symbol.to_owned(),
         first,

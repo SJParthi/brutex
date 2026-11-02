@@ -20,14 +20,11 @@ use std::path::PathBuf;
 use crate::session::Day;
 
 /// Every word of `table` is the one stated, and no word is used twice.
-fn words(table: &[(&'static str, &'static str)], shared: &[&str]) {
+fn words(table: &[(&'static str, &'static str)]) {
     let mut seen = HashSet::new();
     for &(got, want) in table {
         assert_eq!(got, want);
-        assert!(
-            seen.insert(got) || shared.contains(&got),
-            "the word {got} names two variants"
-        );
+        assert!(seen.insert(got), "the word {got} names two variants");
     }
 }
 
@@ -73,7 +70,6 @@ fn every_alert_error_has_its_own_code() {
             (E::NotDamaged.code(), "alerts_not_damaged"),
             (E::Full.code(), "alerts_full"),
         ],
-        &[],
     );
 }
 
@@ -117,8 +113,10 @@ fn every_fno_membership_day_status_has_a_word_and_a_reason() {
     for (status, _, _) in table {
         assert!(S::ALL.contains(&status));
     }
-    words(&table.map(|(s, w, _)| (s.word(), w)), &[]);
-    words(&table.map(|(s, _, r)| (s.reason(), r)), &[]);
+    words(&table.map(|(s, w, _)| (s.word(), w)),
+    );
+    words(&table.map(|(s, _, r)| (s.reason(), r)),
+    );
 }
 
 #[test]
@@ -147,7 +145,6 @@ fn every_run_state_has_its_own_word() {
             (R::Census.as_str(), "census"),
             (R::Durability.as_str(), "durability"),
         ],
-        &[],
     );
 }
 
@@ -186,7 +183,8 @@ fn every_lock_and_ledger_fault_has_its_own_code() {
             "census_unreadable",
         ),
     ];
-    words(&faults.each_ref().map(|(f, w)| (f.code(), *w)), &[]);
+    words(&faults.each_ref().map(|(f, w)| (f.code(), *w)),
+    );
     // A ledger's lock fault is named by the lock's own code.
     for (fault, want) in faults {
         assert_eq!(L::Lock(fault).code(), want);
@@ -205,7 +203,6 @@ fn every_lock_and_ledger_fault_has_its_own_code() {
             (L::Io { why: String::new() }.code(), "runs_ledger_io"),
             (L::Entry { why: String::new() }.code(), "runs_ledger_entry"),
         ],
-        &[],
     );
 }
 
@@ -219,7 +216,6 @@ fn every_start_gate_and_stop_refusal_has_its_own_word() {
             (G::Release.as_str(), "release"),
             (G::Silent.as_str(), "silent"),
         ],
-        &[],
     );
     words(
         &[
@@ -255,7 +251,6 @@ fn every_start_gate_and_stop_refusal_has_its_own_word() {
             ),
             (S::Unwritten { why: String::new() }.code(), "stop_unwritten"),
         ],
-        &[],
     );
 }
 
@@ -303,7 +298,6 @@ fn every_snapshot_answer_has_its_own_word() {
                 "snapshot_unreadable",
             ),
         ],
-        &[],
     );
 }
 
@@ -316,7 +310,6 @@ fn every_reference_standing_and_refusal_kind_has_its_own_word() {
             (S::Measured.word(), "measured"),
             (S::Unverified.word(), "unverified"),
         ],
-        &[],
     );
     words(
         &[
@@ -336,7 +329,6 @@ fn every_reference_standing_and_refusal_kind_has_its_own_word() {
             (K::TooMany.word(), "too_many"),
             (K::Absent.word(), "absent"),
         ],
-        &[],
     );
 }
 
@@ -350,7 +342,6 @@ fn every_refusal_axis_repair_gap_and_claim_standing_has_its_own_word() {
             (A::Status.word(), "status"),
             (A::ErrorName.word(), "error_name"),
         ],
-        &[],
     );
     words(
         &[
@@ -360,14 +351,12 @@ fn every_refusal_axis_repair_gap_and_claim_standing_has_its_own_word() {
             (M::Absent.code(), "absent"),
             (M::BeforeFirst.code(), "before_first"),
         ],
-        &[],
     );
     words(
         &[
             (C::VendorDocument.word(), "vendor_doc"),
             (C::OperatorObservation.word(), "operator"),
         ],
-        &[],
     );
 }
 
@@ -432,8 +421,10 @@ fn every_rehearsal_refusal_has_its_own_code_and_part() {
             "list",
         ),
     ];
-    words(&table.each_ref().map(|(r, c, _)| (r.code(), *c)), &[]);
-    words(&table.each_ref().map(|(r, _, p)| (r.part(), *p)), &[]);
+    words(&table.each_ref().map(|(r, c, _)| (r.code(), *c)),
+    );
+    words(&table.each_ref().map(|(r, _, p)| (r.part(), *p)),
+    );
 }
 
 #[test]
@@ -448,7 +439,6 @@ fn every_keep_reason_and_keep_error_has_its_own_word() {
             (R::LaterMonth.word(), "later_month"),
             (R::RefusedAnswer.word(), "refused_answer"),
         ],
-        &[],
     );
     let p = || PathBuf::from("/invented");
     words(
@@ -494,7 +484,6 @@ fn every_keep_reason_and_keep_error_has_its_own_word() {
                 "io",
             ),
         ],
-        &[],
     );
 }
 
@@ -533,6 +522,5 @@ fn every_spool_error_has_its_own_code() {
             (S::Record { why: String::new() }.code(), "record_refused"),
             (S::NotRegular { path: p() }.code(), "not_regular"),
         ],
-        &[],
     );
 }

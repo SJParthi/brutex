@@ -26,7 +26,7 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 const URL: &str = "https://api.kite.trade/instruments";
 
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -38,19 +38,19 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn day(y: u16, m: u8, d: u8) -> Day {
+pub(super) fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).expect("a real day")
 }
 
-fn window(from: Day, to: Day) -> Window {
+pub(super) fn window(from: Day, to: Day) -> Window {
     Window::new(from, to).expect("an ordered window")
 }
 
-fn route() -> ContinuousSpec {
+pub(super) fn route() -> ContinuousSpec {
     crate::vendor::ZERODHA_CONTINUOUS
 }
 
-fn spec() -> HttpSpec {
+pub(super) fn spec() -> HttpSpec {
     let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Zerodha.descriptor().transport
     else {
         panic!("Zerodha is an HTTP feed");
@@ -58,14 +58,14 @@ fn spec() -> HttpSpec {
     spec
 }
 
-fn fut(token: u64, symbol: &str, expiry: &str) -> String {
+pub(super) fn fut(token: u64, symbol: &str, expiry: &str) -> String {
     format!(
         "{token},{},{symbol},\"ZQIDX\",0,{expiry},0,0.05,75,FUT,NFO-FUT,NFO",
         token / 256
     )
 }
 
-fn snapshot_on(root: &Path, on: Day, rows: &[String]) {
+pub(super) fn snapshot_on(root: &Path, on: Day, rows: &[String]) {
     let mut body = String::from(crate::vendor::KITE_MASTER_HEADER);
     for one in rows {
         body.push('\n');
@@ -105,9 +105,9 @@ fn answer(candles: &[String]) -> String {
 
 /// A transport standing in for the vendor: it records every URL and answers
 /// from `reply`.
-struct Vendorish {
-    seen: RefCell<Vec<String>>,
-    reply: fn(&str) -> Result<String, Refusal>,
+pub(super) struct Vendorish {
+    pub(super) seen: RefCell<Vec<String>>,
+    pub(super) reply: fn(&str) -> Result<String, Refusal>,
 }
 
 impl Discovery for Vendorish {
@@ -117,7 +117,7 @@ impl Discovery for Vendorish {
     }
 }
 
-fn block_on<F: core::future::Future>(future: F) -> F::Output {
+pub(super) fn block_on<F: core::future::Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

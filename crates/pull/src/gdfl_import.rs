@@ -717,6 +717,83 @@ fn central_directory_bytes(path: &Path) -> Result<Vec<u8>, String> {
     read(offset, size)
 }
 
+/// What the walks of an origin ask of a directory entry (D-7333). A real entry
+/// answers from the disk; a test's answers what a failing disk or a file
+/// deleted in the middle of a walk answers, which a healthy disk never gives
+/// a test, so every fault arm of a walk has its test.
+trait OriginEntry {
+    /// The entry's type, its link not followed.
+    fn kind(&self) -> std::io::Result<std::fs::FileType>;
+    /// The entry's last path component.
+    fn name(&self) -> std::ffi::OsString;
+    /// The entry's whole path.
+    fn location(&self) -> PathBuf;
+    /// The entry's size in bytes.
+    fn bytes(&self) -> std::io::Result<u64>;
+}
+
+impl OriginEntry for std::fs::DirEntry {
+    fn kind(&self) -> std::io::Result<std::fs::FileType> {
+        self.file_type()
+    }
+    fn name(&self) -> std::ffi::OsString {
+        self.file_name()
+    }
+    fn location(&self) -> PathBuf {
+        self.path()
+    }
+    fn bytes(&self) -> std::io::Result<u64> {
+        self.metadata().map(|meta| meta.len())
+    }
+}
+
+/// The entries of a directory of yearly zips that are named `<yyyy>.zip`, with
+/// their paths. The first entry the directory will not give is the answer.
+fn yearly_zips<E: OriginEntry>(
+    entries: impl Iterator<Item = std::io::Result<E>>,
+) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut years = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.name().to_string_lossy().into_owned();
+        let year = name
+            .strip_suffix(".zip")
+            .is_some_and(|stem| stem.len() == 4 && stem.bytes().all(|b| b.is_ascii_digit()));
+        if year {
+            years.push((name, entry.location()));
+        }
+    }
+    Ok(years)
+}
+
+/// Whether an old symbol's directory holds a contract no withdrawal covers. An
+/// entry the directory will not give counts as live: unread is not proof of
+/// absence.
+fn holds_a_live_contract<E: OriginEntry>(
+    mut entries: impl Iterator<Item = std::io::Result<E>>,
+    symbol: Option<brutex_core::symbol::Symbol>,
+    withdrawn: &crate::gdfl_rekey::Withdrawn,
+) -> bool {
+    entries.any(|entry| {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.name();
+        let contract = name
+            .to_str()
+            .and_then(|name| Contract::parse(name).filter(|c| c.as_str() == name));
+        match (symbol, contract) {
+            (Some(symbol), Some(contract)) => {
+                withdrawn.superseded(symbol, contract).is_none()
+                    && withdrawn.retired(symbol, contract).is_none()
+            }
+            // Not a contract the store files, or a table symbol the store
+            // cannot spell: nothing here to split.
+            _ => false,
+        }
+    })
+}
+
 /// A zip source's bytes and digest ([`Origin::digest`]): one outer zip, or a
 /// directory of the yearly zips `gdfl_nfo::NfoZips` opens, `<yyyy>.zip`.
 fn measure_zips(path: &Path) -> Measured {
@@ -736,24 +813,10 @@ fn measure_zips(path: &Path) -> Measured {
             fault,
         };
     }
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
+    let mut years = match std::fs::read_dir(path).and_then(yearly_zips) {
+        Ok(years) => years,
         Err(why) => return Measured::failed(format!("{shown}: {why}")),
     };
-    let mut years: Vec<(String, PathBuf)> = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(why) => return Measured::failed(format!("{shown}: {why}")),
-        };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let year = name
-            .strip_suffix(".zip")
-            .is_some_and(|stem| stem.len() == 4 && stem.bytes().all(|b| b.is_ascii_digit()));
-        if year {
-            years.push((name, entry.path()));
-        }
-    }
     years.sort_unstable();
     let mut measured = Measured {
         bytes: 0,
@@ -806,6 +869,20 @@ fn measure_tick_store(root: &Path) -> Measured {
 /// its refusal with three entries, not a million; production passes
 /// [`ORIGIN_WALK_CAP`] and nothing else).
 fn measure_tick_store_within(root: &Path, cap: usize) -> Measured {
+    walk_tick_store(root, cap, &|dir| std::fs::read_dir(dir))
+}
+
+/// The walk of [`measure_tick_store_within`], reading each directory through
+/// `open` (D-7333: a test hands in the faults a healthy disk never gives).
+fn walk_tick_store<E, I>(
+    root: &Path,
+    cap: usize,
+    open: &dyn Fn(&Path) -> std::io::Result<I>,
+) -> Measured
+where
+    E: OriginEntry,
+    I: Iterator<Item = std::io::Result<E>>,
+{
     use sha2::Digest as _;
     let mut measured = Measured {
         bytes: 0,
@@ -815,7 +892,7 @@ fn measure_tick_store_within(root: &Path, cap: usize) -> Measured {
     let mut stack = vec![root.to_path_buf()];
     let mut visited: usize = 0;
     'walk: while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match open(&dir) {
             Ok(entries) => entries,
             Err(why) => {
                 measured.fault = Some(format!("{}: {why}", dir.display()));
@@ -831,7 +908,7 @@ fn measure_tick_store_within(root: &Path, cap: usize) -> Measured {
                 ));
                 break 'walk;
             }
-            let found = entry.and_then(|entry| Ok((entry.file_type()?, entry)));
+            let found = entry.and_then(|entry| Ok((entry.kind()?, entry)));
             let (kind, entry) = match found {
                 Ok(found) => found,
                 Err(why) => {
@@ -839,21 +916,21 @@ fn measure_tick_store_within(root: &Path, cap: usize) -> Measured {
                     break 'walk;
                 }
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = entry.name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
             }
             if kind.is_dir() {
-                stack.push(entry.path());
+                stack.push(entry.location());
             } else if kind.is_file()
                 && Path::new(&name)
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("bts"))
             {
-                match entry.metadata() {
-                    Ok(meta) => measured.bytes = measured.bytes.saturating_add(meta.len()),
+                match entry.bytes() {
+                    Ok(bytes) => measured.bytes = measured.bytes.saturating_add(bytes),
                     Err(why) => {
-                        measured.fault = Some(format!("{}: {why}", entry.path().display()));
+                        measured.fault = Some(format!("{}: {why}", entry.location().display()));
                         break 'walk;
                     }
                 }
@@ -985,6 +1062,17 @@ pub fn volume_space(path: &Path) -> Result<crate::disk_projection::Space, String
         let vfs = rustix::fs::statvfs(path).map_err(|why| refused("statvfs", why))?;
         (vfs.f_frsize, vfs.f_blocks, vfs.f_bavail)
     };
+    space_of(path, fragment, blocks, available)
+}
+
+/// A volume's bytes from what its file system reports. A count that overflows
+/// a `u64` is named, never wrapped (a damaged or lying `statfs` answer).
+fn space_of(
+    path: &Path,
+    fragment: u64,
+    blocks: u64,
+    available: u64,
+) -> Result<crate::disk_projection::Space, String> {
     let bytes = |count: u64, what: &str| {
         count.checked_mul(fragment).ok_or_else(|| {
             format!(
@@ -1823,7 +1911,7 @@ impl Run<'_> {
         let mut ledger: Option<crate::gdfl_rekey::Withdrawn> = None;
         for row in brutex_core::alias::LINEAGE.rows() {
             let filed = brutex_core::alias::LINEAGE.current(row.old);
-            if !row.status.applies() || filed == row.old || !self.wants(filed) {
+            if !self.names_a_split(row, filed) {
                 continue;
             }
             let entries = match std::fs::read_dir(base.join(row.old)) {
@@ -1842,29 +1930,17 @@ impl Run<'_> {
                 ),
             };
             let symbol = brutex_core::symbol::Symbol::new(row.old).ok();
-            let live = entries.into_iter().any(|entry| {
-                let Ok(entry) = entry else {
-                    return true;
-                };
-                let name = entry.file_name();
-                let contract = name
-                    .to_str()
-                    .and_then(|name| Contract::parse(name).filter(|c| c.as_str() == name));
-                match (symbol, contract) {
-                    (Some(symbol), Some(contract)) => {
-                        withdrawn.superseded(symbol, contract).is_none()
-                            && withdrawn.retired(symbol, contract).is_none()
-                    }
-                    // Not a contract the store files, or a table symbol the
-                    // store cannot spell: nothing here to split.
-                    _ => false,
-                }
-            });
-            if live {
+            if holds_a_live_contract(entries, symbol, withdrawn) {
                 held.push((row.old.to_owned(), filed.to_owned()));
             }
         }
         Ok(held)
+    }
+
+    /// Whether a lineage `row`, filed under `filed` today, can split this
+    /// run: it applies, it moved its symbol, and the run wants the new name.
+    fn names_a_split(&self, row: &brutex_core::alias::SymbolChange, filed: &str) -> bool {
+        row.status.applies() && filed != row.old && self.wants(filed)
     }
 
     /// Whether `symbol` passes the filter.
@@ -2162,16 +2238,16 @@ where
     // The run's census memory, kept across its days (R3-19).
     let mut census = StoreCensus::default();
     drive_core(run, options, (&mut census, scoped), |day, filer| {
-        if cached.as_ref().is_none_or(|(held, _, _)| *held != day) {
-            cached = None;
+        let held = cached.as_ref().filter(|(held, _, _)| *held == day);
+        let (_, listing, sum) = if let Some(held) = held {
+            held
+        } else {
             let (listed, listing) = cm_list(source, (tree, day));
-            match listing {
-                Some(listing) => cached = Some((day, listing, listed.listing)),
-                None => return listed.close(Vec::new()).0,
-            }
-        }
-        let Some((_, listing, sum)) = cached.as_ref() else {
-            return Listed::default().close(Vec::new()).0;
+            let Some(listing) = listing else {
+                cached = None;
+                return listed.close(Vec::new()).0;
+            };
+            cached.insert((day, listing, listed.listing))
         };
         let mut listed = Listed {
             held: true,
@@ -2610,23 +2686,32 @@ fn note_series(day: Day, symbol: &str, name: &str) {
 /// rows there stayed ordinary rows of phase `cas` (SC-CLOSE-6): never a
 /// silent choice. Nothing to say for any other file.
 fn note_unattributed(day: Day, symbol: &str, name: &str, booked: u32) {
-    if booked == 0 {
-        return;
-    }
     let day_text = day.to_string();
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn(
+    if let Some(event) = unattributed_event(&day_text, symbol, name, booked) {
+        let _dropped_when_filtered = telemetry::emit(&event);
+    }
+}
+
+/// The event of [`note_unattributed`], when there is one to say.
+fn unattributed_event<'a>(
+    day: &'a str,
+    symbol: &'a str,
+    name: &'a str,
+    booked: u32,
+) -> Option<telemetry::Event<'a>> {
+    (booked > 0).then(|| {
+        telemetry::Event::warn(
             TARGET,
             "the auction's match band traded at two prices or more: its booked rows stay \
              ordinary rows of phase cas, none is called the auction's",
         )
         .with("kind", ImportKind::Stocks.as_str())
-        .with("day", day_text.as_str())
+        .with("day", day)
         .with("symbol", symbol)
         .with("file", name)
         .with("booked_rows", u64::from(booked))
-        .with("code", "auction_band_unattributed"),
-    );
+        .with("code", "auction_band_unattributed")
+    })
 }
 
 /// Reads one wanted capital-market file: fetched, checked and decoded, and

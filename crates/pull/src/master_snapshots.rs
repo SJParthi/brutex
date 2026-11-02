@@ -421,9 +421,7 @@ impl Catalog {
         for entry in entries {
             let entry =
                 entry.map_err(|why| format!("{} could not be listed: {why}", root.display()))?;
-            if let Ok(name) = entry.file_name().into_string() {
-                names.push(name);
-            }
+            names.extend(entry.file_name().into_string().ok());
         }
         let mut seen: HashMap<(Kind, Stamp), (bool, bool)> = HashMap::with_capacity(names.len());
         let mut partials = Vec::new();
@@ -2953,3 +2951,6 @@ pub mod first_listed;
 #[cfg(test)]
 #[path = "master_snapshots_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "master_snapshots_cov_tests.rs"]
+mod cov_tests;

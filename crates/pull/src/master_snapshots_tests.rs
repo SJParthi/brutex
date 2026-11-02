@@ -20,7 +20,7 @@ use std::sync::Arc;
 use super::*;
 
 const URL: &str = "https://api.kite.trade/instruments";
-const HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange";
+pub(super) const HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange";
 const NSE_HEAD: &str = "Company Name,Industry,Symbol,Series,ISIN Code";
 
 /// The `today` a staleness check is asked under: a fixed day, so no test here
@@ -32,7 +32,7 @@ const TODAY: Day = match Day::new(2026, 10, 23) {
 
 /// A new, empty folder of this test's own. Left for the main session's
 /// clean-up: nothing in this suite deletes a file.
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -42,17 +42,17 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn day(y: u16, m: u8, d: u8) -> Day {
+pub(super) fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).expect("a real day")
 }
 
-fn stamp(day: Day, ordinal: u32) -> Stamp {
+pub(super) fn stamp(day: Day, ordinal: u32) -> Stamp {
     Stamp { day, ordinal }
 }
 
 /// One invented dump row.
 #[allow(clippy::too_many_arguments, reason = "one argument per Kite column")]
-fn row(
+pub(super) fn row(
     token: u64,
     symbol: &str,
     name: &str,
@@ -69,17 +69,17 @@ fn row(
     )
 }
 
-fn fut(token: u64, symbol: &str, expiry: &str, lot: u32) -> String {
+pub(super) fn fut(token: u64, symbol: &str, expiry: &str, lot: u32) -> String {
     row(
         token, symbol, "ZQIDX", expiry, "0", lot, "FUT", "NFO-FUT", "NFO",
     )
 }
 
-fn share(token: u64, symbol: &str, name: &str) -> String {
+pub(super) fn share(token: u64, symbol: &str, name: &str) -> String {
     row(token, symbol, name, "", "0", 1, "EQ", "NSE", "NSE")
 }
 
-fn dump(rows: &[String]) -> String {
+pub(super) fn dump(rows: &[String]) -> String {
     let mut out = String::from(HEAD);
     for one in rows {
         out.push('\n');

@@ -7212,3 +7212,7 @@ mod tests {
         assert_eq!(one_month(&[row(8), row(9)]), None);
     }
 }
+
+#[cfg(test)]
+#[path = "ingest_cov_tests.rs"]
+mod cov_tests;
