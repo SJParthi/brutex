@@ -495,6 +495,31 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
 /// inside a minute. The test ends the hold with zero ([`slow_read::pause`]).
 const READ_HELD_MS: u64 = 60_000;
 
+/// A read held for a minute ends when its test sets zero, and one a test has
+/// shortened ends with what is left of the shorter time.
+#[test]
+fn a_held_read_ends_when_its_test_lets_it_go() {
+    let root = crate::scratch::path("held-read");
+    let began = Instant::now();
+    for (let_go_with, took_at_least) in [(0, Duration::ZERO), (1, Duration::from_millis(1))] {
+        slow_read::set(&root, READ_HELD_MS);
+        let asked = Instant::now();
+        std::thread::scope(|scope| {
+            let read = scope.spawn(|| slow_read::pause(&root));
+            std::thread::sleep(Duration::from_millis(2));
+            slow_read::set(&root, let_go_with);
+            read.join().expect("the read");
+        });
+        assert!(asked.elapsed() >= took_at_least, "{let_go_with}");
+    }
+    slow_read::set(&root, 0);
+    assert!(
+        began.elapsed() < Duration::from_millis(READ_HELD_MS / 2),
+        "a read waited out its hold: {:?}",
+        began.elapsed()
+    );
+}
+
 /// How long every census read pauses in [`one_change_beside_a_thousand_requests`].
 const NEVER_BLOCKS_READ_PAUSE_MS: u64 = 5_000;
 

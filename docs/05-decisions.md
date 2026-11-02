@@ -84913,7 +84913,12 @@ extends; nothing above is edited.
     `zerodha_index_alone`, a mutex of the test module held for the whole of
     the three tests that index that vendor, this repository's `CACHE_TEST` and
     `PRESS_TESTS` shape. The odd file's answers are still taken in turn with
-    the regular ones and held to the same 20 regular answers and 50 ms. @@AFTER1@@
+    the regular ones and held to the same 20 regular answers and 50 ms. The
+    same two loads on the repaired binary: alone 2,769 runs, beside whole
+    copies 814 runs, 0 failed. A 300 ms sleep put by hand on `open_plain`'s
+    refusal of a file that is not regular still fails it, 'answered in
+    301.129834ms against a regular file's 75.584µs', in each of three runs, so
+    a real wait is seen (`state/fix/round2/logs-BRED1023-r7-wait.log`).
     Refused: another vendor for the FIFO test, because none is free (the regular root's
     answer would restart the index under the read counts of the Dhan and
     TrueData tests and the steps of the Groww test, and gdfl's dozen tests would
@@ -84929,7 +84934,9 @@ extends; nothing above is edited.
     `refused_of`, which is `judged`: past the bound and named counts one and
     is printed, inside the bound or unnamed fails, `held >= 50` and
     `unnamed == 0` as they were. `the_hand_off_counts_a_named_refusal_and_fails_a_lost_one`
-    proves the count on invented refusals. @@AFTER2@@ A grep of the workspace for the
+    proves the count on invented refusals. Beside this repair's overload the
+    test alone ran 128 times, green each time: 61,440 appends, 20 refused by
+    the bound, at most 3 in one run. A grep of the workspace for the
     shape found three more in `flock_patient_tests.rs`, on `store::flock`'s
     1 s bound: their holds are a 1 or 2 ms sleep with no `fsync`, no saved log
     shows one red, and check r7's store hunt passed them, so they are left as
@@ -84945,6 +84952,36 @@ extends; nothing above is edited.
     12 ignored, 2,425 run. `knobs::scope::may_move` lets a thread that is no
     test's own move a knob with no guard, which L-BRED23-20 now says beside the
     reads; the probe counted no such move.
+21. **D-7152: three more, found by this repair's own overload (48 test loops,
+    16 flock loops, 8 hand-off loops and four whole api lib copies at once,
+    load up to about 300), none by check r7.** Reading addendum 15 as a claim
+    to test, not one to trust, this repair ran the suite heavier than any gate
+    does before it committed. `a_census_change_never_blocks_a_request`
+    failed in 4 of 4 copies at once, 347 to 584 stale where it asked 800: the
+    count raced the read's five seconds, so it held only below 5.6 ms a
+    request, and it is no bound the seven runs of L-BRED23-14 retry. Now
+    `stale_until_the_read_lands`, a function a test drives with invented runs:
+    stale from the 200th request at the latest and current again only once the
+    pause is out, which at speed says what the count said and on a slow
+    machine says what is true. `no_db_view_reads_the_whole_census` raced a
+    second of pause against its views the same way: `slow_read::pause` now ends
+    when its test sets zero, and that test and the warming test hold the read
+    across what they ask, the 900 ms bounds as they were.
+    Refused: a longer pause alone, which moves the race; a count scaled by the
+    time the loop took, which keeps a clock in the assertion.
+22. **D-7152: a minute line reached the log after a flush had returned.**
+    `a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free` read no
+    line for its route (left (0, 0)) in one copy, and the line is in that
+    copy's log 68 ms after the test's own flush: `Speed::roll` froze under the
+    roll lock and every caller wrote after it, so a flush beside it had taken
+    the count, and held it unwritten, when this test's flush returned empty.
+    The test was right and the code was not: on a stopping process the minute
+    thread can hold the last line the same way, and the last flush returns
+    past it, so that count would never reach the log. `Speed::roll_writing`
+    writes under the lock, on both paths; the minute thread waits for its
+    table with `OnceLock::wait` (it starts inside the table's first use), which
+    also takes away a branch only a minute's edge could reach. No request
+    takes that lock. Cost measured in L-BRED23-23.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 

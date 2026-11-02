@@ -1368,6 +1368,18 @@ confirmed by two skeptics; their corrections are applied.
 - **BRED23-F54: a second stopped worker panicked `thread::scope` in place of
   its refusal** (check r7's follow-up; no input stops a worker today). FIXED
   (D-7152 addendum 20): `parallel` joins every worker first (BRED-56).
+- **BRED23-F55: the never-blocks test's count raced its read's five seconds**
+  (this repair's overload: 4 of 4 whole api lib copies, 347 to 584 stale).
+  FIXED (D-7152 addendum 21): `stale_until_the_read_lands`, proved on invented
+  runs, the 50 ms bound unchanged (BRED-57).
+- **BRED23-F56: `no_db_view_reads_the_whole_census` raced a second of pause
+  against its views** (this repair's overload: 'says how current it is'). FIXED
+  (D-7152 addendum 21): the read is held across the asks (BRED-57).
+- **BRED23-F57: a minute line frozen by one flush reached the log after
+  another flush had returned** (this repair's overload: a stop test read no
+  line; the line was written 68 ms later). A real gap of the stop path as well
+  as of the test. FIXED (D-7152 addendum 22): `Speed::roll_writing` (BRED-58,
+  L-BRED23-23).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
