@@ -202,7 +202,7 @@ async fn full_pools_and_lost_tasks(root: &Path) {
                 ));
             }
         }
-        crate::detail::lose_admitted_work(true);
+        crate::detail::lost_work::lose_admitted_work(true);
         for (_, target) in pooled_doors() {
             let lost = get(addr, &target).await;
             if lost.status < 500 || lost.body.is_empty() {
@@ -213,7 +213,7 @@ async fn full_pools_and_lost_tasks(root: &Path) {
                 ));
             }
         }
-        crate::detail::lose_admitted_work(false);
+        crate::detail::lost_work::lose_admitted_work(false);
         // THE SERVER LIVES: a door that lost its task leaves its slot free.
         let after = get(addr, "/feeds.json").await;
         assert_eq!(after.status, 200, "{}{}", after.head, after.body);

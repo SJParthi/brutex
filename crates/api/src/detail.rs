@@ -603,15 +603,25 @@ pub fn admission_refused(
 /// Makes every admitted task die before its work starts, as a panic in it
 /// would: the one way a test reaches [`RunError::Join`] through a real
 /// handler. Process-wide, so only a child process of one test may set it
-/// ([`crate::isolated`]; [`served_routes_tests`], D-7344).
+/// (`crate::isolated`; `served_routes_tests`, D-7344).
 #[cfg(test)]
-static LOSE_ADMITTED_WORK: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub(crate) mod lost_work {
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Sets [`LOSE_ADMITTED_WORK`].
-#[cfg(test)]
-pub(crate) fn lose_admitted_work(lose: bool) {
-    LOSE_ADMITTED_WORK.store(lose, Ordering::Relaxed);
+    static LOSE: AtomicBool = AtomicBool::new(false);
+
+    /// Whether admitted work dies before it starts.
+    pub(crate) fn lose_admitted_work(lose: bool) {
+        LOSE.store(lose, Ordering::Relaxed);
+    }
+
+    /// Dies when asked to, inside the admitted task.
+    pub(super) fn die_if_asked() {
+        assert!(
+            !LOSE.load(Ordering::Relaxed),
+            "admitted work lost, as a test asked"
+        );
+    }
 }
 
 /// Runs admitted work on the blocking pool, its slot held until it ends,
@@ -628,10 +638,7 @@ where
     let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         #[cfg(test)]
-        assert!(
-            !LOSE_ADMITTED_WORK.load(Ordering::Relaxed),
-            "admitted work lost, as a test asked"
-        );
+        lost_work::die_if_asked();
         store::flock::with_patience(std::time::Duration::from_millis(READ_PATIENCE_MS), work)
     })
     .await

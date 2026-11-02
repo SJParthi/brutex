@@ -87593,7 +87593,7 @@ it. Nothing in the server changed. Proof: BCA-11.
 2. **A child process reaches what a test binary cannot.** `served_routes_tests`, `logs::units_tests`,
    `sweeprun::accepted_tests` and the masters refresh test each run one test alone through `crate::isolated`:
    its crowds refuse no other test, and its environment can name a store root or an empty `HOME`.
-3. **One test seam.** `detail::LOSE_ADMITTED_WORK`, compiled only under `cfg(test)`, makes an admitted task panic
+3. **One test seam.** `detail::lost_work`, a module compiled only under `cfg(test)`, makes an admitted task panic
    before its work starts: the one way a test reaches `RunError::Join` through a real handler. Only a child may
    set it.
 4. **One split.** `mastersrun::refresh_work` hands its work from the first fetch on to `refresh_over`, generic in
