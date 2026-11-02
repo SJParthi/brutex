@@ -894,3 +894,7 @@ pub fn read_all(store: &Path) -> Result<Vec<Result<Entry, u64>>, String> {
         .map(|(record, at)| Entry::of(record).ok_or(at))
         .collect())
 }
+
+#[cfg(test)]
+#[path = "gdfl_run_ledger_cov_tests.rs"]
+mod cov_tests;

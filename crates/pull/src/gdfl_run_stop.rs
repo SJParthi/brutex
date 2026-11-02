@@ -477,3 +477,7 @@ pub fn request_stop(
     }
     Err(StopRefusal::NotLive { asked })
 }
+
+#[cfg(test)]
+#[path = "gdfl_run_stop_cov_tests.rs"]
+mod cov_tests;

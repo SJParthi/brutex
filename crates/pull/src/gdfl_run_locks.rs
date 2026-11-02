@@ -1429,3 +1429,7 @@ fn read_head(file: &File) -> String {
 pub fn stop_names_run(path: &Path, run: u64) -> bool {
     super::stop::read_stop(path).is_some_and(|stop| stop.run == run)
 }
+
+#[cfg(test)]
+#[path = "gdfl_run_locks_cov_tests.rs"]
+mod cov_tests;
