@@ -604,8 +604,18 @@ async fn refresh_work(
         }
     };
 
-    let clock = masters::Clock;
-    let mut landed = refresh_with(&from, &clock, &dir, Transport::Public).await;
+    refresh_over(&site, &dir, &from, &masters::Clock).await
+}
+
+/// [`refresh_work`] from its first fetch on, over any public transport: what
+/// a test can drive without a host (BASE-COV-API, D-7344).
+async fn refresh_over<D: Discovery, P: masters::Pause>(
+    site: &crate::server::Loaded,
+    dir: &Path,
+    from: &D,
+    clock: &P,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let mut landed = refresh_with(from, clock, dir, Transport::Public).await;
 
     // AND THE CREDENTIALED ONE, because three of four is not the masters.
     //
@@ -619,7 +629,7 @@ async fn refresh_work(
     // A failure here is ONE SOURCE'S refusal, not the call's: the three public
     // masters that already landed must not be undone because an AWS identity is
     // missing. `complete` below is what turns it into a non-200.
-    credentialed_leg(&mut landed, &clock, &dir).await;
+    credentialed_leg(&mut landed, clock, dir).await;
 
     // EVERY SOURCE'S OWN STORY, DURABLY. The summary below is three counts,
     // and three counts cannot say which file failed or what the host said.
@@ -687,7 +697,7 @@ async fn refresh_work(
     // version of this route reported, as a 200. `complete` answers the question
     // an operator is actually asking: **is every master this engine reads now
     // present on disk?** A skip makes it false, whatever the fetches did.
-    let on_disk = |source: &Source| masters::path_of(&dir, source).is_file();
+    let on_disk = |source: &Source| masters::path_of(dir, source).is_file();
     let complete = masters::SOURCES.iter().all(on_disk);
     let missing: Vec<String> = masters::SOURCES
         .iter()
@@ -695,7 +705,7 @@ async fn refresh_work(
         .map(|source| crate::render::json_string(source.file))
         .collect();
 
-    let reloaded = reload(&site, &dir);
+    let reloaded = reload(site, dir);
 
     let status = if attempted_landed && complete && reloaded.is_ok() {
         axum::http::StatusCode::OK
@@ -1045,6 +1055,61 @@ mod tests {
             handler.contains("detached(refresh_work(site)).await"),
             "the handler runs its work detached: {handler}"
         );
+    }
+
+    /// Names the refresh child's scratch folder.
+    const REFRESH_CHILD: &str = "BRUTEX_TEST_MASTERS_REFRESH_CHILD";
+
+    /// **A REFRESH THAT COULD NOT READ THE CREDENTIAL LANDS THE PUBLIC MASTERS
+    /// AND IS NOT A SUCCESS** (BASE-COV-API, D-7344). In a child whose `HOME`
+    /// holds no credential file, so no host is asked for anything: the public
+    /// sources land from an invented transport, the credentialed one is
+    /// refused in the credential read's own words, its ledger empty, and the
+    /// whole answer is a `502` that names the master missing from the disk.
+    /// The universe is re-parsed over what landed either way. Extremes: an
+    /// empty `HOME`, refused rather than read as the working directory, and a
+    /// `HOME` with no credential file at all.
+    #[test]
+    fn a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole() {
+        const NAME: &str = "mastersrun::tests::a_refresh_with_no_credential_lands_the_public_masters_and_says_it_is_not_whole";
+        if let Some(root) = std::env::var_os(REFRESH_CHILD) {
+            let root = std::path::Path::new(&root);
+            let dir = root.join("masters");
+            std::fs::create_dir_all(&dir).expect("the masters");
+            let site: crate::server::Loaded =
+                std::sync::Arc::new(crate::server::Site::load(&dir, root));
+            let from = Recording {
+                body: a_master(),
+                seen: std::sync::Mutex::new(Vec::new()),
+            };
+            let (status, _, body) = block_on(refresh_over(&site, &dir, &from, &NoWait));
+            assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY, "{body}");
+            let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+            assert_eq!(parsed["complete"], false, "{body}");
+            let missing = masters::SOURCES
+                .iter()
+                .filter(|source| source.needs_token)
+                .map(|source| serde_json::json!(source.file))
+                .collect::<Vec<_>>();
+            assert_eq!(parsed["missing"], serde_json::json!(missing), "{body}");
+            assert!(body.contains("credential"), "{body}");
+            std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
+            return;
+        }
+        for (tag, home) in [("no-file", None), ("empty", Some(""))] {
+            let root = scratch(&format!("refresh-child-{tag}"));
+            let named = root.clone();
+            let home = home.map_or(named.as_os_str(), std::ffi::OsStr::new);
+            let _ = crate::isolated::rerun(
+                NAME,
+                &[(REFRESH_CHILD, root.as_os_str()), ("HOME", home)],
+            );
+            assert_eq!(
+                std::fs::read(root.join("child-ran")).ok().as_deref(),
+                Some(&b"refreshed"[..]),
+                "{tag}"
+            );
+        }
     }
 
     #[test]

@@ -7888,3 +7888,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// A press the routes accept, in a child with an empty store (BASE-COV-API,
+/// D-7344).
+#[cfg(test)]
+#[path = "sweeprun_accepted_tests.rs"]
+mod accepted_tests;

@@ -146,6 +146,16 @@ pub mod verify;
 #[cfg(test)]
 pub(crate) mod scratch;
 
+/// What every saved-research door shares, through each one's own handler
+/// (BASE-COV-API, D-7344).
+#[cfg(test)]
+mod research_doors_tests;
+
+/// The production router over a real socket: every pooled door with its pool
+/// full and its task lost, in a child process (BASE-COV-API, D-7344).
+#[cfg(test)]
+mod served_routes_tests;
+
 /// One test of this binary re-run in a child process with a chosen
 /// environment. Compiled only under `cfg(test)`: it is how a test reaches a
 /// route that reads its configuration from the environment, which no test may

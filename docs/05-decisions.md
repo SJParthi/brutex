@@ -87542,7 +87542,7 @@ code of `crates/api` to line and branch coverage 100% so that §9's whole-crate 
 
 **Proof.** The two Route B logs (`scratch/deep-BASE-COV-API-logs/f01d7a0e430e-routeb-a1.log`,
 `e730d3b193fc-routeb-after.log`), each ending `EXIT 3` only for the bench files' NOT READ lines; invariants
-BCA-01 to BCA-04. D-7342 to D-7349 are unused.
+BCA-01 to BCA-04. D-7342 to D-7345 are this part's repair round 1; D-7346 to D-7349 are unused.
 
 ### D-7341 — Two answers built as objects are no longer asked back for their object (BASE-COV-API) — 2026-10-28
 
@@ -87556,3 +87556,45 @@ pairs. Output is unchanged: the same keys and values (serde_json's map is ordere
 `every_answer_is_an_object_with_its_four_keys` (BCA-03). Test-only: `gaps_route`'s `what_it_says` helper
 now `expect`s the shape it compares instead of skipping a body of another shape, and the cancelled-walk test's
 reader panics if called.
+
+### D-7342 — A repeated field on `/basis.json` is the request bound's refusal, and the row says so (BASE-COV-API, repair 1) — 2026-11-02
+
+**Status: locked.** Check r1 of this part found BCA-01 claiming that every `/basis.json` answer, a repeated field
+included, is JSON marked `no-store`, proved by a test that called the handler directly. Through the production
+router `GET /basis.json?symbol=X&symbol=X` answers `400` in `text/plain` with no `Cache-Control`:
+`request_bounds_refusal` refuses a repeated field on every route before any handler runs (probeapi-5, D-1202).
+That guard is right and is server-wide, so no code changed: the row was the claim that overreached. BCA-01 now
+speaks of what the handler answers and BCA-05 of the router, proved over a real socket. `param`'s own "given
+twice" stays: it answers a direct caller of `asked`, which the bench is. Proof:
+`api::server::basis_route::tests::the_real_router_answers_what_the_row_says_for_a_repeat_and_for_the_handler`.
+
+### D-7343 — The slow-reader test sends its second request ahead, so the load cannot decide it (BASE-COV-API, repair 1) — 2026-11-02
+
+**Status: locked.** `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole` failed on the instrumented
+runs of 27 and 28 Oct with `""` at its last assert, and passed in the ordinary run (L-BCA-4). The cause is load
+timing in the test, not a defect: a kept-alive connection's idle clock starts at the server's own flush, the
+client's last read comes later by whatever the kernel still holds for it (at 6.4 MB/s, 1.9 MB of send buffer is
+one 300 ms deadline, and a loaded machine stretches every 10 ms pause), so a request sent after the last byte
+could find the connection already closed, with nothing said. That close is the head deadline doing its job on an
+idle socket; no body was cut, and the assert on the body had passed. The second request now goes out as soon as
+the head is read: it is waiting when the first response ends, no idle clock runs, and the socket still serves
+it. Nothing in the server changed. Proof: BCA-11.
+
+### D-7344 — What the whole-crate bar closed in repair 1, and the seam it needed (BASE-COV-API, repair 1) — 2026-11-02
+
+**Status: locked as a record; the bar is still NOT met** (D-7345 has the figures).
+
+1. **Hand-run timings keep their scale and gain a small one.** Each `#[ignore]`d timing of `import_journal` (2),
+   `audit` (1), `audit_lock_wait_measure` (1), `pullrun_restart_tests` (2), `disk_route` (1), `feeds_route` (1),
+   `server` (1) and `dayflags_rules_tests` (3) now calls a function of its scale, and a test that is not ignored
+   calls that same function at a small size with its timing ceiling lifted: the path cannot rot unseen, and what
+   it asserts about the answers still holds. The hand-run figures are unchanged. The ignored wrapper's own lines
+   stay uncovered by design of `#[ignore]` (L-BCA-3).
+2. **A child process reaches what a test binary cannot.** `served_routes_tests`, `logs::units_tests`,
+   `sweeprun::accepted_tests` and the masters refresh test each run one test alone through `crate::isolated`:
+   its crowds refuse no other test, and its environment can name a store root or an empty `HOME`.
+3. **One test seam.** `detail::LOSE_ADMITTED_WORK`, compiled only under `cfg(test)`, makes an admitted task panic
+   before its work starts: the one way a test reaches `RunError::Join` through a real handler. Only a child may
+   set it.
+4. **One split.** `mastersrun::refresh_work` hands its work from the first fetch on to `refresh_over`, generic in
+   its transport as `refresh_with` already was, so the part after the fetch runs with no host. Output unchanged.

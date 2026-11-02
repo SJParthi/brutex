@@ -1192,6 +1192,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A PAGE PAST THE LAST ROW IS A `416` NAMING THE TOTAL, NEVER AN EMPTY
+    /// PAGE** (BASE-COV-API, D-7344), over a saved frontier and over a
+    /// committed frontier of no row whose file is gone. Extremes: the first
+    /// page past the end, the page at the top of its range, a limit of one,
+    /// the two rows of a whole first page beside it, and a deleted file of no
+    /// row asked for page zero, which is the one page that exists.
+    #[test]
+    fn a_page_past_the_last_row_is_refused_naming_the_total() {
+        let dir = crate::scratch::path("frontier-past-the-end");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch root");
+        let identity = [0x96; 32];
+        let hex = "96".repeat(32);
+        cli::frontier::Frontier::open(&dir)
+            .expect("frontier")
+            .append_all(&[verdict_row(identity, 1), verdict_row(identity, 2)])
+            .expect("two ranked rows of one run");
+        commit_frontier_fixture(&dir, identity, 2);
+        let whole = respond(Ok(dir.clone()), &format!("identity={hex}"));
+        assert_eq!(whole.0, axum::http::StatusCode::OK, "{}", whole.2);
+        for page in ["2", "4294967295"] {
+            let query = format!("identity={hex}&page={page}&limit=1");
+            let (status, _, body) = respond(Ok(dir.clone()), &query);
+            assert_eq!(status, axum::http::StatusCode::RANGE_NOT_SATISFIABLE, "{body}");
+            assert!(body.contains(r#""rows":null"#), "{body}");
+            assert!(body.contains(r#""total_count":2"#), "{body}");
+        }
+        let empty = crate::scratch::path("frontier-past-the-end-none");
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).expect("a scratch root");
+        cli::frontier::Frontier::open(&empty)
+            .expect("frontier")
+            .append_all(&[])
+            .expect("no row");
+        commit_frontier_fixture(&empty, identity, 0);
+        std::fs::remove_file(cli::frontier::Frontier::path(&empty)).expect("the file goes");
+        let first = respond(Ok(empty.clone()), &format!("identity={hex}"));
+        assert_eq!(first.0, axum::http::StatusCode::OK, "{}", first.2);
+        let (status, _, body) = respond(Ok(empty.clone()), &format!("identity={hex}&page=1"));
+        assert_eq!(status, axum::http::StatusCode::RANGE_NOT_SATISFIABLE, "{body}");
+        assert!(body.contains(r#""total_count":0"#), "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// The sentinel for "not measured" is `null`, never a figure.
+    #[test]
+    fn an_unmeasured_figure_is_null_and_a_measured_one_is_itself() {
+        assert_eq!(super::measurable(i64::MAX), "null");
+        for value in [i64::MIN, -1, 0, i64::MAX - 1] {
+            assert_eq!(super::measurable(value), value.to_string());
+        }
+    }
+
     /// The child half of the test below reads its store root from this.
     const ADMITTED_CHILD: &str = "BRUTEX_API_FRONTIER_ADMITTED_CHILD";
 

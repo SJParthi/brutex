@@ -600,6 +600,20 @@ pub fn admission_refused(
     (status, body.to_string())
 }
 
+/// Makes every admitted task die before its work starts, as a panic in it
+/// would: the one way a test reaches [`RunError::Join`] through a real
+/// handler. Process-wide, so only a child process of one test may set it
+/// ([`crate::isolated`]; [`served_routes_tests`], D-7344).
+#[cfg(test)]
+static LOSE_ADMITTED_WORK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Sets [`LOSE_ADMITTED_WORK`].
+#[cfg(test)]
+pub(crate) fn lose_admitted_work(lose: bool) {
+    LOSE_ADMITTED_WORK.store(lose, Ordering::Relaxed);
+}
+
 /// Runs admitted work on the blocking pool, its slot held until it ends,
 /// PATIENT for a writer on the months it opens ([`READ_PATIENCE_MS`]), and
 /// counted: answered when its reader is still there, cancelled when the
@@ -613,6 +627,11 @@ where
     let left = Leaving(Some(&pool.cancelled));
     let joined = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        #[cfg(test)]
+        assert!(
+            !LOSE_ADMITTED_WORK.load(Ordering::Relaxed),
+            "admitted work lost, as a test asked"
+        );
         store::flock::with_patience(std::time::Duration::from_millis(READ_PATIENCE_MS), work)
     })
     .await

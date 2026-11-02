@@ -12548,3 +12548,8 @@ mod r3_24_torn_tests {
         let _ignored = std::fs::remove_dir_all(&stream);
     }
 }
+
+/// What no other test of this file reached (BASE-COV-API, D-7344).
+#[cfg(test)]
+#[path = "logs_units_tests.rs"]
+mod units_tests;
