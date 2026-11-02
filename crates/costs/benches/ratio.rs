@@ -713,16 +713,23 @@ fn the_stage_three_refusals_are_still_refusals() -> bool {
 // (state/fib-strategy-20261030/PARTS.md section 11; D-8110..D-8116).
 //
 // Thin wrappers: the measuring functions are `costs::equity_clock::measure_*`,
-// which the crate's own tests run at tiny sizes. Each row prints p50, p99 and
-// max at 1x, 10x and 100x, then asserts that the p99 stays flat (the crate's
-// CEILING_PERMILLE, from 1x and from 10x to 100x) and inside its absolute
-// budget. The budgets are PARTS 11's targets, ESTIMATES until measured. These
-// rows hold no `ratio` call, so gate 14's measurement-point pin for this file
-// is unchanged.
+// which the crate's own tests run at tiny sizes. Each row times its sizes in
+// turns, FNO_ROUNDS times over, and prints each size's best round (p50, p99 and
+// max at 1x, 10x and 100x) with the median and worst round's p99 beside it. It
+// then asserts that the best p99 stays flat (the crate's CEILING_PERMILLE, from
+// 1x and from 10x to 100x) and inside its absolute budget. The budgets are
+// PARTS 11's targets, ESTIMATES until measured. These rows hold no `ratio`
+// call, so gate 14's measurement-point pin for this file is unchanged.
 // ---------------------------------------------------------------------------
 
-/// Samples per size for the FNO-COSTS rows.
+/// Samples per round for the FNO-COSTS rows.
 const FNO_SAMPLES: usize = 2_000;
+
+/// Rounds at each size of an FNO-COSTS row. The round with the smallest p99 is
+/// the figure, as `cost_ps` takes the minimum of its trials and FNO-LADDER's
+/// rows take their best round: a burst of other work is not this step's cost.
+/// The median and the worst round are printed beside it.
+const FNO_ROUNDS: usize = 20;
 
 /// Lookups timed together in one `C-FNO-COSTS-01` sample (one lookup is
 /// shorter than the clock's resolution).
@@ -766,12 +773,46 @@ fn spread(samples: &mut [u64]) -> Spread {
     }
 }
 
-/// Prints one size's spread and returns its p99.
-fn p99_of(id: &str, size: &str, unit: &str, samples: &mut [u64]) -> u64 {
-    let s = spread(samples);
+/// One size's rounds: the best round, then the median and the worst p99.
+#[derive(Clone, Copy)]
+struct Rounds {
+    best: Spread,
+    median_p99: u64,
+    worst_p99: u64,
+}
+
+/// Times every size in turn, [`FNO_ROUNDS`] times over, and reads each size's
+/// rounds. In turns, never one size's rounds and then the next's: a slower core
+/// or a burst that outlasts one size's rounds then falls on every size of the
+/// row, so a row never compares a size on a quiet core with one on a busy core
+/// (D-8116).
+fn rounds_of<T, const SIZES: usize>(
+    sizes: &[T; SIZES],
+    mut round: impl FnMut(&T) -> Vec<u64>,
+) -> [Rounds; SIZES] {
+    let mut seen: [Vec<Spread>; SIZES] = std::array::from_fn(|_| Vec::with_capacity(FNO_ROUNDS));
+    for _ in 0..FNO_ROUNDS {
+        for (size, rounds) in sizes.iter().zip(seen.iter_mut()) {
+            rounds.push(spread(&mut round(size)));
+        }
+    }
+    seen.map(|mut rounds| {
+        rounds.sort_unstable_by_key(|one| one.p99);
+        let at = |index: usize| rounds.get(index).copied().unwrap_or_default();
+        Rounds {
+            best: at(0),
+            median_p99: at(FNO_ROUNDS / 2).p99,
+            worst_p99: at(FNO_ROUNDS - 1).p99,
+        }
+    })
+}
+
+/// Prints one size's best round beside its rounds and returns the best p99.
+fn p99_of(id: &str, size: &str, unit: &str, rounds: Rounds) -> u64 {
+    let s = rounds.best;
     println!(
-        "  {id} {size}: p50 {:>9} ps, p99 {:>9} ps, max {:>11} ps {unit} ({} samples)",
-        s.p50, s.p99, s.max, s.samples
+        "  {id} {size}: p50 {:>9} ps, p99 {:>9} ps, max {:>11} ps {unit} ({} samples); round p99 median {:>9} ps, worst {:>9} ps",
+        s.p50, s.p99, s.max, s.samples, rounds.median_p99, rounds.worst_p99
     );
     s.p99
 }
@@ -795,12 +836,13 @@ fn stays_flat(label: &str, base: u64, at: u64) -> bool {
 }
 
 /// Whether the last of three p99s stays within the ceiling of the first two,
-/// and all three inside the budget, printed.
+/// and all three inside the budget, printed. A last size that timed at zero
+/// measured nothing, and zero would pass both, so it fails.
 fn flat_and_within(label: &str, [one, ten, hundred]: [u64; 3], budget: u64) -> bool {
     let from_one = stays_flat(&format!("{label}, 1x -> 100x"), one, hundred);
     let from_ten = stays_flat(&format!("{label}, 10x -> 100x"), ten, hundred);
     let worst = one.max(ten).max(hundred);
-    let within = worst <= budget;
+    let within = hundred > 0 && worst <= budget;
     println!(
         "  {label:<52} budget {budget:>9} ps, worst p99 {worst:>9} ps   {}",
         if within { "ok" } else { "BREACH" }
@@ -814,12 +856,15 @@ fn the_dated_equity_lookup_stays_flat_and_within_its_budget() -> bool {
     let days: Vec<TradeDay> = (WINDOW_START.ordinal()..=READ_ON.ordinal())
         .filter_map(|ordinal| TradeDay::from_ordinal(ordinal).ok())
         .collect();
+    let sizes = [30, 300, 2_980];
+    let windows = sizes.map(|size| days.iter().copied().take(size).collect::<Vec<TradeDay>>());
+    let rounds = rounds_of(&windows, |window| {
+        measure_rates_on(window, FNO_SAMPLES, FNO_BATCH)
+    });
     let mut p99 = [0; 3];
-    for (slot, size) in p99.iter_mut().zip([30, 300, 2_980]) {
-        let window: Vec<TradeDay> = days.iter().copied().take(size).collect();
-        let mut samples = measure_rates_on(&window, FNO_SAMPLES, FNO_BATCH);
+    for ((slot, size), round) in p99.iter_mut().zip(sizes).zip(rounds) {
         let label = format!("rates_on over {size:>5} days");
-        *slot = p99_of("C-FNO-COSTS-01", &label, "per lookup", &mut samples);
+        *slot = p99_of("C-FNO-COSTS-01", &label, "per lookup", round);
     }
     flat_and_within(
         "C-FNO-COSTS-01 rates_on, 30 to 2,980 days, p99",
@@ -831,14 +876,17 @@ fn the_dated_equity_lookup_stays_flat_and_within_its_budget() -> bool {
 /// C-FNO-COSTS-02 — two-clock pricing costs the same per fill at 5, 50 and
 /// 500 fills, and the ends of the 1..512 span stay inside the budget.
 fn two_clock_pricing_per_fill_stays_flat_and_within_its_budget() -> bool {
-    let measured = |fills: usize| -> u64 {
-        let mut samples = measure_price_trade(fills, READ_ON, FNO_SAMPLES / 2).unwrap_or_default();
+    let sizes = [5, 50, 500, 1, 512];
+    let rounds = rounds_of(&sizes, |&fills| {
+        measure_price_trade(fills, READ_ON, FNO_SAMPLES / 2).unwrap_or_default()
+    });
+    let mut p99 = [0; 5];
+    for ((slot, fills), round) in p99.iter_mut().zip(sizes).zip(rounds) {
         let label = format!("price_trade, {fills:>3} entry fills");
-        p99_of("C-FNO-COSTS-02", &label, "per fill", &mut samples)
-    };
-    let p99 = [5, 50, 500].map(measured);
-    let ends = [1, 512].map(measured);
-    let ends_within = ends
+        *slot = p99_of("C-FNO-COSTS-02", &label, "per fill", round);
+    }
+    let [five, fifty, five_hundred, one, most] = p99;
+    let ends_within = [one, most]
         .iter()
         .all(|&p99| p99 > 0 && p99 <= C_FNO_COSTS_02_BUDGET_PS);
     println!(
@@ -847,7 +895,7 @@ fn two_clock_pricing_per_fill_stays_flat_and_within_its_budget() -> bool {
     );
     let flat = flat_and_within(
         "C-FNO-COSTS-02 price_trade per fill, 5 to 500, p99",
-        p99,
+        [five, fifty, five_hundred],
         C_FNO_COSTS_02_BUDGET_PS,
     );
     flat && ends_within
@@ -856,11 +904,14 @@ fn two_clock_pricing_per_fill_stays_flat_and_within_its_budget() -> bool {
 /// C-FNO-COSTS-03 — the worst over every reading (the 15 States included,
 /// on a pre-2020 day) costs the same at 1x, 10x and 100x the trade's size.
 fn the_worst_reading_stays_flat_and_within_its_budget() -> bool {
+    let sizes = [1, 10, 100];
+    let rounds = rounds_of(&sizes, |&scale| {
+        measure_worst(scale, WINDOW_START, FNO_SAMPLES).unwrap_or_default()
+    });
     let mut p99 = [0; 3];
-    for (slot, scale) in p99.iter_mut().zip([1, 10, 100]) {
-        let mut samples = measure_worst(scale, WINDOW_START, FNO_SAMPLES).unwrap_or_default();
+    for ((slot, scale), round) in p99.iter_mut().zip(sizes).zip(rounds) {
         let label = format!("worst, {scale:>3}x size");
-        *slot = p99_of("C-FNO-COSTS-03", &label, "per trade", &mut samples);
+        *slot = p99_of("C-FNO-COSTS-03", &label, "per trade", round);
     }
     flat_and_within(
         "C-FNO-COSTS-03 worst over every reading, p99",
