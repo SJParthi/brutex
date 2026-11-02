@@ -87641,6 +87641,14 @@ arms of two asserts. `paged_rows`, `warmed`, `flat` and `refusals_are_flat`
 hold only the bench's own failing checks and the two arms whose array lengths
 are fixed, as the check at 954ca59bb listed them.
 
+**Gate 8 stays RED here, and this part does not claim it green.** The whole
+complexity step on the final tree exits 1 on `C-T-04` in
+`crates/telemetry/benches/ratio.rs` (4,898.774 floors, budget 1,000). Alone,
+the same row went over budget on `feat/db-fix` without this part's commits
+(2,525.759 floors) as on this tip (3,853.093), one run in five on each side,
+so it stays RED by name in L-BBENCH-5 and no ceiling moves. Gate 8 green
+belongs to the part that takes that file.
+
 **Cost.** No served route and no store file changes. The bench's timed path
 makes the same requests and does the same work per page; only where the code
 lives moved. D-7402 to D-7409 are unused.
