@@ -115,6 +115,7 @@ fn pooled_doors() -> Vec<(Named, String)> {
                 "/indexmap.json?feed=zerodha".to_owned(),
                 format!("/bars.json?{month}"),
                 format!("/bars/export.csv?{span}"),
+                format!("/bars/window.json?{span}&limit=10"),
                 "/census/facets.json?feed=zerodha".to_owned(),
                 "/census/rollup.json?feed=gdfl&segment=FNO&underlying=NIFTY".to_owned(),
                 "/imports.json?feed=gdfl".to_owned(),
@@ -137,10 +138,6 @@ fn pooled_doors() -> Vec<(Named, String)> {
         (
             Named::Calendar,
             vec![format!("/gaps.json?{month}")],
-        ),
-        (
-            Named::Scan,
-            vec![format!("/bars/window.json?{span}&limit=10")],
         ),
         (
             Named::OpsRead,
