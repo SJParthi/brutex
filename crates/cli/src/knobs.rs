@@ -1005,22 +1005,22 @@ mod tests {
             asked.set(asked.get() + 1);
             false
         };
-        assert!(scope::sees_the_store(true, true, &held), "the holder");
+        assert!(scope::sees_the_store(true, true, held), "the holder");
         assert!(
-            scope::sees_the_store(true, false, &free),
+            scope::sees_the_store(true, false, free),
             "a holder by any name"
         );
         assert!(
-            !scope::sees_the_store(false, true, &held),
+            !scope::sees_the_store(false, true, held),
             "a test with no guard"
         );
         assert_eq!(asked.get(), 0, "none of them asks the lock");
         assert!(
-            scope::sees_the_store(false, false, &held),
+            scope::sees_the_store(false, false, held),
             "a worker, the guard held"
         );
         assert!(
-            !scope::sees_the_store(false, false, &free),
+            !scope::sees_the_store(false, false, free),
             "a worker, nobody holds it"
         );
         assert_eq!(asked.get(), 2);

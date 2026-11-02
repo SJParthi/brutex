@@ -767,6 +767,35 @@ fn a_tick_store_landing_is_checked_against_that_tick_store_day_and_a_changed_day
         "landing".to_owned(),
     )];
     assert_eq!(unset["status"], "read_failed:tickstore_unset", "{unset:?}");
+    // Compared with an archive beside that landing: a tick-store landing is no
+    // member of any archive, so the archive's row is filed as not the landing
+    // source, and the landing's own row stands.
+    let beside_root = scratch("tickstore-beside");
+    let beside = beside_root.join("other.zip");
+    std::fs::write(&beside, v2()).unwrap();
+    let beside_text = beside.to_str().unwrap().to_owned();
+    let (_, out, beside_dir) = check(
+        &beside_root,
+        &store,
+        &env,
+        &["2025", "--archive", &beside_text],
+    );
+    let rows = rows_of(&read(&beside_dir, "tick-to-second-2025.v001.csv"));
+    let extra = &rows[&(
+        "ZZALPHA".to_owned(),
+        "2025-03-07".to_owned(),
+        "extra".to_owned(),
+    )];
+    assert_eq!(extra["status"], "exact_T", "{out}\n{extra:?}");
+    assert_eq!(extra["source"], "archive_not_the_landing_source");
+    assert!(!extra["landing"].is_empty(), "{extra:?}");
+    let landing = &rows[&(
+        "ZZALPHA".to_owned(),
+        "2025-03-07".to_owned(),
+        "landing".to_owned(),
+    )];
+    assert_eq!(landing["status"], "exact_T", "{landing:?}");
+    assert_eq!(landing["source"], "tickstore_day");
 }
 
 #[test]
@@ -2989,4 +3018,268 @@ fn a_status_lookup_costs_the_same_on_one_symbol_and_on_four_thousand() {
         large_p50 <= small_p50.max(1) * 16,
         "a lookup in 4,096 symbols ({large_p50} ns per {BATCH}) is more than 16 times one in one symbol ({small_p50} ns)"
     );
+}
+
+/// The cells of the row of `(symbol, on, role)` in `rows`.
+fn cell<'r>(
+    rows: &'r HashMap<(String, String, String), HashMap<String, String>>,
+    symbol: &str,
+    on: &str,
+    role: &str,
+) -> &'r HashMap<String, String> {
+    &rows[&(symbol.to_owned(), on.to_owned(), role.to_owned())]
+}
+
+/// `--archive` naming the very file a landing came from: that landing is read
+/// once (no extra row beside it), the file's raw-only shares are looked for
+/// once, and a share of the day the file lists nothing of is `store_only`
+/// under the check's own words, never a blank row.
+#[test]
+fn the_landing_archive_given_as_the_extra_archive_is_read_once() {
+    let (root, store, land) = imported_store("same-archive");
+    let land_text = land.to_str().unwrap().to_owned();
+    let (code, out, dir) = check(&root, &store, &none, &["2025", "--archive", &land_text]);
+    assert_eq!(code, FAILED, "ZZDELTA is store_only: {out}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let alpha = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(alpha["status"], "exact_T", "{alpha:?}");
+    assert_eq!(alpha["source"], "archive_member", "{alpha:?}");
+    let extra: Vec<_> = rows.keys().filter(|(_, _, role)| role == "extra").collect();
+    assert_eq!(extra.len(), 1, "only the unrecorded share-day: {extra:?}");
+    let delta = cell(&rows, "ZZDELTA", "2025-03-10", "extra");
+    assert_eq!(delta["status"], "store_only", "{delta:?}");
+    assert!(
+        delta["detail"].contains("the archive's day zip lists no file of this share"),
+        "{delta:?}"
+    );
+}
+
+/// A landing archive that is gone is `read_failed:source_missing` on every
+/// row it answered, naming the archive, and the day is read again once the
+/// file is back.
+#[test]
+fn a_landing_archive_that_is_gone_is_named_on_its_rows_and_read_again_when_it_is_back() {
+    let (root, store, land) = imported_store("gone");
+    let moved = root.join("moved.zip");
+    std::fs::rename(&land, &moved).unwrap();
+    let (code, out, dir) = check(&root, &store, &none, &["2025"]);
+    assert_eq!(code, FAILED, "{out}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let alpha = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(alpha["status"], "read_failed:source_missing", "{alpha:?}");
+    assert_eq!(alpha["source"], "archive_member", "{alpha:?}");
+    assert!(alpha["detail"].contains("land.zip"), "{alpha:?}");
+    std::fs::rename(&moved, &land).unwrap();
+    let (_, out, _) = check(&root, &store, &none, &["2025"]);
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v002.csv"));
+    let back = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(back["status"], "exact_T", "{out}\n{back:?}");
+}
+
+/// The same bytes under another entry name are not the recorded member: the
+/// listing reads `\` as `/`, so the share is found, its size and CRC-32 fit,
+/// and only the name's BLAKE3 tells them apart.
+#[test]
+fn a_member_of_the_same_bytes_under_another_entry_name_is_a_changed_source() {
+    let (root, store, land) = imported_store("entry-name");
+    let folder = pull::gdfl_cm::day_folder_name(CmKind::Stocks, d(D1));
+    let inner = zip(&[(format!("{folder}\\ZZALPHA.NSE.csv"), csv(&alpha_d1()))]);
+    let zip_name = pull::gdfl_archive::day_zip_name(CmKind::Stocks, d(D1));
+    std::fs::write(&land, zip(&[(zip_name, inner)])).unwrap();
+    let (code, out, dir) = check(&root, &store, &none, &["2025", "--symbols", "ZZALPHA"]);
+    assert_eq!(code, FAILED, "{out}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let alpha = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(alpha["status"], "read_failed:source_changed", "{alpha:?}");
+}
+
+/// A day zip of the extra archive that is no zip is that day's refusal, on
+/// each of its share-days by name, never a run's and never a silent day.
+#[test]
+fn an_extra_archive_whose_day_zip_cannot_be_listed_is_named_on_the_days_rows() {
+    let (root, store, _) = imported_store("unlistable");
+    let torn = root.join("torn.zip");
+    let zip_name = pull::gdfl_archive::day_zip_name(CmKind::Stocks, d(D1));
+    std::fs::write(&torn, zip(&[(zip_name, b"not a zip".to_vec())])).unwrap();
+    let torn_text = torn.to_str().unwrap().to_owned();
+    let (code, out, dir) = check(&root, &store, &none, &["2025", "--archive", &torn_text]);
+    assert_eq!(code, FAILED, "{out}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    for symbol in ["ZZALPHA", "ZZBETA"] {
+        let row = cell(&rows, symbol, "2025-03-07", "extra");
+        assert_eq!(row["status"], "read_failed:source_listing", "{row:?}");
+        assert!(!row["detail"].is_empty(), "{row:?}");
+    }
+    // The landing rows of that day stand: the refusal is the extra archive's.
+    let alpha = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(alpha["status"], "exact_T", "{alpha:?}");
+}
+
+/// `run` opens every archive a plan names, so this needs a direct call: a
+/// recorded archive absent from [`Sources`] is named on its row, never passed
+/// over.
+#[test]
+fn a_recorded_archive_the_run_did_not_open_is_named_never_passed_over() {
+    let root = scratch("not-opened");
+    let store = root.join("store");
+    let zip_name = pull::gdfl_archive::day_zip_name(CmKind::Stocks, d(D1));
+    let landed = Landed {
+        key: "invented-landing".to_owned(),
+        kind: SourceKind::ArchiveMember,
+        name: format!("/nowhere/land.zip!{zip_name}!entry"),
+        truncated: false,
+        name_hash: [0; 32],
+        bytes: 1,
+        crc32: 1,
+    };
+    let sources = Sources {
+        archives: HashMap::new(),
+        extra: None,
+        tickstore: Err("unset".to_owned()),
+    };
+    let item = Item {
+        symbol: "ZZALPHA".to_owned(),
+        day: d(D1),
+        source: DaySource::Recorded(landed),
+    };
+    let job = DayJob {
+        items: vec![(item, false, true)],
+        extra_seen: true,
+    };
+    let inputs = DayInputs {
+        store: &store,
+        symbols: None,
+    };
+    let done = check_day(&sources, &inputs, d(D1), &job);
+    assert_eq!(done.rows.len(), 1, "{:?}", done.rows);
+    let row = &done.rows[0];
+    assert_eq!(row.status, "read_failed:source_not_opened", "{row:?}");
+    assert_eq!(row.label.landing, "invented-landing", "{row:?}");
+    assert_eq!(row.label.source, Source::ArchiveMember, "{row:?}");
+}
+
+/// A day's job with an extra archive beside it, as no plan makes it: a share
+/// with no landing record leaves its answer to the extra archive, one whose
+/// records disagree is named and still compared, and a symbol the store would
+/// not file or a share the scope does not file is named on its extra row.
+#[test]
+fn a_share_day_with_no_usable_landing_is_answered_beside_the_extra_archive_by_name() {
+    let (_root, store, land) = imported_store("unusable-landings");
+    let scope = Arc::new(pull::gdfl_run::scope::of(ImportKind::Stocks, &store).unwrap().0);
+    let not_the_same = HashSet::new();
+    let sources = Sources::open(
+        &[],
+        Some((land.as_path(), &not_the_same)),
+        Err("unset".to_owned()),
+        &scope,
+    )
+    .unwrap();
+    let inputs = DayInputs {
+        store: &store,
+        symbols: None,
+    };
+    let day_of = |symbol: &str, source: DaySource, landing_done: bool| {
+        let item = Item {
+            symbol: symbol.to_owned(),
+            day: d(D1),
+            source,
+        };
+        let job = DayJob {
+            items: vec![(item, landing_done, false)],
+            extra_seen: true,
+        };
+        check_day(&sources, &inputs, d(D1), &job).rows
+    };
+    let unrecorded = day_of("ZZALPHA", DaySource::Unrecorded, false);
+    assert_eq!(unrecorded.len(), 1, "no landing row: {unrecorded:?}");
+    assert_eq!(unrecorded[0].label.role, Role::Extra, "{unrecorded:?}");
+    assert_eq!(unrecorded[0].status, "exact_T", "{unrecorded:?}");
+
+    let ambiguous = day_of(
+        "ZZALPHA",
+        DaySource::Ambiguous("invented-one; invented-two".to_owned()),
+        false,
+    );
+    assert_eq!(ambiguous.len(), 2, "{ambiguous:?}");
+    assert_eq!(ambiguous[0].label.role, Role::Landing, "{ambiguous:?}");
+    assert_eq!(ambiguous[0].status, "read_failed:source_ambiguous");
+    assert!(ambiguous[0].detail.contains("invented-two"), "{ambiguous:?}");
+    assert_eq!(ambiguous[1].label.role, Role::Extra, "{ambiguous:?}");
+    assert_eq!(ambiguous[1].status, "exact_T", "{ambiguous:?}");
+
+    let refused = day_of("ZZ,BAD", DaySource::Unrecorded, true);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].status, "read_failed:store_symbol", "{refused:?}");
+
+    let unfiled = day_of("ZZOTHER", DaySource::Unrecorded, true);
+    assert_eq!(unfiled.len(), 1, "{unfiled:?}");
+    assert_eq!(unfiled[0].status, "read_failed:NotSwept", "{unfiled:?}");
+}
+
+/// A year no [`Day`] can name holds no day of an extra archive. The verb's
+/// own parser refuses such a year, so this needs a direct call.
+#[test]
+fn a_year_no_day_can_name_adds_no_day_of_the_extra_archive() {
+    let root = scratch("unnamed-year");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let extra = root.join("extra.zip");
+    std::fs::write(&extra, v1()).unwrap();
+    let asked = Ask {
+        year: Some(1969),
+        out: root.join("out"),
+        workers: Some(1),
+        symbols: None,
+        archive: Some(extra),
+    };
+    let report = run(&asked, &none, &|| Ok(store.clone())).unwrap();
+    assert_eq!((report.days, report.rows), (0, 0));
+    assert_eq!(report.unchanged, vec![1969]);
+}
+
+/// A worker that stops ends the run by name, and takes the run's lock with
+/// it: the next run of the same directory reads every day.
+#[test]
+fn a_worker_that_stops_ends_the_run_by_name_and_the_next_run_reads_every_day() {
+    let (root, store, _) = imported_store("worker-stopped");
+    let asked = Ask {
+        year: Some(2025),
+        out: root.join("out"),
+        workers: Some(1),
+        symbols: None,
+        archive: None,
+    };
+    let held = store.clone();
+    let stopped = run_with(&asked, &none, &|| Ok(held.clone()), &|_, _, _, _| {
+        panic!("invented: a day's check that stops")
+    });
+    assert_eq!(stopped.err().as_deref(), Some("a worker stopped"));
+    let (_, out, dir) = check(&root, &store, &none, &["2025"]);
+    assert!(out.contains("tick-to-second-2025.v001.csv"), "{out}");
+    let rows = rows_of(&read(&dir, "tick-to-second-2025.v001.csv"));
+    let alpha = cell(&rows, "ZZALPHA", "2025-03-07", "landing");
+    assert_eq!(alpha["status"], "exact_T", "{alpha:?}");
+}
+
+/// The last name but one a version publishes, refused: the run says so by
+/// name, and with no index yet no reader takes the version as answered.
+#[test]
+fn a_refused_timings_file_refuses_the_run_and_no_reader_takes_the_version() {
+    let (root, store, _) = imported_store("timings-refused");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // `store::staging` clears a stale regular file; a directory it refuses.
+    let staging = out_dir.join(format!(
+        ".tick-to-second-2025.v001.timings.txt.{}.tmp",
+        std::process::id()
+    ));
+    std::fs::create_dir(&staging).unwrap();
+    let (code, out, dir) = check(&root, &store, &none, &["2025"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED"), "{out}");
+    assert!(out.contains("timings.txt"), "{out}");
+    assert!(dir.join("tick-to-second-2025.v001.csv").exists(), "{out}");
+    assert!(!dir.join("tick-to-second-2025.v001.idx").exists(), "{out}");
+    let why = SecondChecks::open(&dir).map(|c| c.versions());
+    assert_eq!(why, Ok(Vec::new()), "no index, no version a reader takes");
 }

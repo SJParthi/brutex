@@ -781,9 +781,9 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
     let length = 8 << 20;
     let began = Instant::now();
     let mut readers = Vec::new();
-    let (holds, mut held) = tokio::sync::mpsc::channel(2);
+    let (read_one, mut reads) = tokio::sync::mpsc::channel(2);
     for _ in 0..2 {
-        let holds = holds.clone();
+        let read_one = read_one.clone();
         readers.push(tokio::spawn(async move {
             let mut client = connect(addr).await;
             client
@@ -791,7 +791,7 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
                 .await
                 .unwrap();
             let (head, rest) = head(&mut client).await;
-            holds.send(()).await.unwrap();
+            read_one.send(()).await.unwrap();
             let (body, closed) = paced(&mut client, rest, content_length(&head), CHUNK, PACE).await;
             assert!(!closed, "cut after {} bytes", body.len());
             assert_pattern(&body);
@@ -803,9 +803,9 @@ async fn slow_readers_at_the_cap_are_served_whole_and_the_next_waits() {
     // THE ORDER, NOT A SLEEP (BASE-REDS-1023 repair 6): this slept 100 ms and
     // assumed both readers held their slots by then. A head read says so, and a
     // reader that fails before its head drops its sender, so this fails too.
-    drop(holds);
-    held.recv().await.unwrap();
-    held.recv().await.unwrap();
+    drop(read_one);
+    reads.recv().await.unwrap();
+    reads.recv().await.unwrap();
     let mut next = TcpStream::connect(addr).await.unwrap();
     next.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         .await

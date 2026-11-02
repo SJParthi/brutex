@@ -235,6 +235,55 @@ fn the_plan_rows_are_taken_by_symbol_cause_action_and_window() {
     );
 }
 
+/// What `rows_of` passes over and what it refuses, each by one row: a row
+/// outside the ask is not this act's, and a malformed one is named, never
+/// read around.
+#[test]
+fn a_plan_row_outside_the_ask_is_passed_over_and_a_malformed_one_is_named() {
+    let asked = ask(&[
+        SYMBOL,
+        "2018-12-01",
+        "2019-01-31",
+        "--cause",
+        "foreign_level",
+        "--reason",
+        "r",
+    ])
+    .expect("ask");
+    let good = plan_text(&[("1min", "2018-12", "timestamps", "foreign_level", &[1])]);
+    let count = |text: &str| rows_of(text, &asked).map(|rows| rows.len());
+    assert_eq!(count(&good), Ok(1), "the row every case below changes");
+
+    let segment = good.replace("NSE-CASH-", "NSE-FNO-");
+    assert_eq!(count(&segment), Ok(0), "another segment's key");
+    let symbol = good.replace(&format!("NSE-CASH-{SYMBOL}\t"), "NSE-CASH-ZZOTHER\t");
+    assert_eq!(count(&symbol), Ok(0), "another symbol");
+    let action = good.replace("\tquarantine\t", "\tkeep\t");
+    assert_eq!(count(&action), Ok(0), "an action this verb does not take");
+    let after = plan_text(&[("1min", "2019-02", "timestamps", "foreign_level", &[1])]);
+    assert_eq!(count(&after), Ok(0), "the month after the window");
+
+    let refusal = |text: &str| rows_of(text, &asked).expect_err("a malformed row");
+    let short = good.replace("\tquarantine\t1\t1", "\tquarantine\t1");
+    assert!(
+        refusal(&short).contains("a plan row has 7 fields, not 8"),
+        "{}",
+        refusal(&short)
+    );
+    let rung = good.replace("\t1min\t", "\t5min\t");
+    assert!(
+        refusal(&rung).contains("a plan row names rung `5min`"),
+        "{}",
+        refusal(&rung)
+    );
+    let scope = good.replace("\ttimestamps\tforeign_level", "\thalf_month\tforeign_level");
+    assert!(
+        refusal(&scope).contains("a plan row names scope `half_month`"),
+        "{}",
+        refusal(&scope)
+    );
+}
+
 #[test]
 fn a_derived_bucket_is_named_when_its_span_holds_a_named_minute() {
     let five: Vec<Bar> = (0..4).map(|i| minute(i * 5, 100)).collect();

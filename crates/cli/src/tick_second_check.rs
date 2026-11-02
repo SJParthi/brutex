@@ -3626,14 +3626,25 @@ fn take_lock(path: &Path) -> Result<std::fs::File, String> {
 }
 
 /// The run behind [`command_with`].
-#[expect(
-    clippy::too_many_lines,
-    reason = "one run in order: roots, lock, plan, sources, days, fold; each step is a call"
-)]
 fn run(
     ask: &Ask,
     env: &dyn Fn(&str) -> Option<OsString>,
     store: &dyn Fn() -> Result<PathBuf, String>,
+) -> Result<Report, String> {
+    run_with(ask, env, store, &check_day)
+}
+
+/// [`run`] with the day's check passed in: a worker that stops is the one
+/// refusal no input reaches, and a test hands it a check that stops.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one run in order: roots, lock, plan, sources, days, fold; each step is a call"
+)]
+fn run_with(
+    ask: &Ask,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    store: &dyn Fn() -> Result<PathBuf, String>,
+    day_check: &(dyn Fn(&Sources, &DayInputs<'_>, Day, &DayJob) -> DayOut + Sync),
 ) -> Result<Report, String> {
     let store = store()?;
     if inside(&ask.out, &store)? {
@@ -3903,7 +3914,7 @@ fn run(
                 return Ok(DayOut::default());
             };
             let day = Day::from_days(*d).map_err(|w| w.to_string())?;
-            let done = check_day(&sources, &inputs, day, job);
+            let done = day_check(&sources, &inputs, day, job);
             note_day(day, &done);
             // A row byte-identical to the one the year already holds for its
             // key (a retried failure that failed the same way) is not filed
