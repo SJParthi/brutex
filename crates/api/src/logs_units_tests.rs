@@ -157,7 +157,7 @@ fn a_route_that_is_no_db_read_keeps_no_access_line() {
     let _shared = crate::emitted::sink();
     let mark = crate::emitted::mark();
     let listed = DB_READS[0];
-    let now = telemetry::now_millis();
+    let now = telemetry::now_millis().unsigned_abs();
     note_access("/not-a-db-read.json", (400, 1), &[], true, now);
     note_access("/not-a-db-read.json", (500, u64::MAX), &[], true, u64::MAX);
     note_access(listed, (400, 1), &[], true, now);

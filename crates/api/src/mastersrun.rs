@@ -1082,7 +1082,7 @@ mod tests {
                 body: a_master(),
                 seen: std::sync::Mutex::new(Vec::new()),
             };
-            let (status, _, body) = block_on(refresh_over(&site, &dir, &from, &NoWait));
+            let (status, _, body) = block_on(super::refresh_over(&site, &dir, &from, &NoWait));
             assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY, "{body}");
             let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
             assert_eq!(parsed["complete"], false, "{body}");

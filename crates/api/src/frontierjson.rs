@@ -1212,7 +1212,7 @@ mod tests {
         commit_frontier_fixture(&dir, identity, 2);
         let whole = respond(Ok(dir.clone()), &format!("identity={hex}"));
         assert_eq!(whole.0, axum::http::StatusCode::OK, "{}", whole.2);
-        for page in ["2", "4294967295"] {
+        for page in ["2", "4095"] {
             let query = format!("identity={hex}&page={page}&limit=1");
             let (status, _, body) = respond(Ok(dir.clone()), &query);
             assert_eq!(

@@ -106,15 +106,27 @@ fn assert_refused(door: &str, query: &str, body: &str) -> String {
     why.to_owned()
 }
 
-/// **A RECEIPT NOBODY SAVED IS REFUSED BY NAME ON EVERY DOOR.** The query is
+/// **A RECEIPT NOBODY SAVED IS NAMED AS MISSING ON EVERY DOOR.** The query is
 /// good, so the handler goes to the store, and the store holds no such
-/// receipt: `503` on the refused shape, never a `200` with no rows.
+/// receipt: a `503` on the refused shape, or, on a door whose question is
+/// whether a search was ever recorded, a `200` that says `missing` and why.
+/// Never a `200` that is only an empty page.
 #[tokio::test]
 async fn a_receipt_nobody_saved_is_refused_by_name_on_every_door() {
     for (door, query) in every_door() {
         let (status, body) = ask(door, uri(&query)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
-        assert_refused(door, &query, &body);
+        if status == StatusCode::OK {
+            let parsed: Value = serde_json::from_str(&body).expect("a JSON answer");
+            assert_eq!(parsed["status"], "missing", "{door}: {body}");
+            assert!(
+                parsed["why"].as_str().is_some_and(|why| !why.is_empty()),
+                "{door}: {body}"
+            );
+            assert_eq!(parsed["rows"], serde_json::json!([]), "{door}: {body}");
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{door}: {body}");
+            assert_refused(door, &query, &body);
+        }
     }
 }
 

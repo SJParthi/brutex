@@ -105,6 +105,7 @@ fn pooled_doors() -> Vec<(Named, String)> {
     let id = format!("identity={ID}");
     let rung = cli::EVERY_RUNG[0];
     let month = "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2024-01";
+    let span = "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&from=2024-01&to=2024-01";
     let mut doors = Vec::new();
     for (pool, targets) in [
         (
@@ -113,12 +114,13 @@ fn pooled_doors() -> Vec<(Named, String)> {
                 "/instruments.json?feed=zerodha".to_owned(),
                 "/indexmap.json?feed=zerodha".to_owned(),
                 format!("/bars.json?{month}"),
-                format!("/bars/export.csv?{month}"),
+                format!("/bars/export.csv?{span}"),
                 "/census/facets.json?feed=zerodha".to_owned(),
                 "/census/rollup.json?feed=gdfl&segment=FNO&underlying=NIFTY".to_owned(),
                 "/imports.json?feed=gdfl".to_owned(),
                 "/ingest/refusals.json?feed=zerodha&symbols=NIFTY".to_owned(),
-                "/dayflags.json?feed=zerodha&symbol=NIFTY".to_owned(),
+                "/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-01-01&to=2024-01-31"
+                    .to_owned(),
                 "/tick-checks.json?year=2024&limit=1&offset=0".to_owned(),
                 "/pull/repair.json?feed=zerodha&instrument=NIFTY&timeframe=1min&month=2024-01"
                     .to_owned(),
@@ -138,7 +140,7 @@ fn pooled_doors() -> Vec<(Named, String)> {
         ),
         (
             Named::Scan,
-            vec![format!("/bars/window.json?{month}&limit=10")],
+            vec![format!("/bars/window.json?{span}&limit=10")],
         ),
         (
             Named::OpsRead,
@@ -170,7 +172,7 @@ fn pooled_doors() -> Vec<(Named, String)> {
                 format!("/boolean-qualified-campaign.json?{id}"),
                 format!("/boolean-qualified-search.json?{id}"),
                 format!("/boolean-oos.json?{id}"),
-                "/selection-v6.json?family=RELIANCE".to_owned(),
+                "/selection-v6.json?family=NIFTY".to_owned(),
                 "/live.json".to_owned(),
                 "/backtest.json".to_owned(),
                 format!("/index-stop.json?{id}"),
@@ -318,7 +320,7 @@ async fn a_door_refuses_what_it_cannot_read_through_the_router() {
     std::fs::create_dir_all(&root).expect("a scratch root");
     served(&root, |addr| async move {
         for (target, status, said) in [
-            ("/folder.json", 400, "reads no feed called that"),
+            ("/folder.json", 400, "has no folder"),
             ("/folder.json?feed=nosuch", 400, "reads no feed called that"),
             ("/folder.json?feed=zerodha", 400, "has no folder"),
             (
