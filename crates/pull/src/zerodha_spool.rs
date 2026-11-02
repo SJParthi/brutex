@@ -1595,3 +1595,7 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(take::<8>(bytes, at))
 }
+
+#[cfg(test)]
+#[path = "zerodha_spool_cov_tests.rs"]
+mod cov_tests;
