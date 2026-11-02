@@ -14,6 +14,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    clippy::indexing_slicing,
     reason = "a test that cannot panic cannot fail"
 )]
 
@@ -49,7 +50,7 @@ fn attempt_of(route: &str, status: StatusCode, body: &str) -> u64 {
 
 /// Waits for the slot to finish `attempt`; the text it finished with.
 async fn settled(site: &Loaded, route: &str, attempt: u64) -> String {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let held = site.sweep.lock().expect("the slot").clone();
         if let Some(progress) = held

@@ -1085,13 +1085,21 @@ mod tests {
             let (status, _, body) = block_on(super::refresh_over(&site, &dir, &from, &NoWait));
             assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY, "{body}");
             let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
-            assert_eq!(parsed["complete"], false, "{body}");
+            assert_eq!(
+                parsed.get("complete"),
+                Some(&serde_json::json!(false)),
+                "{body}"
+            );
             let missing = masters::SOURCES
                 .iter()
                 .filter(|source| source.needs_token)
                 .map(|source| serde_json::json!(source.file))
                 .collect::<Vec<_>>();
-            assert_eq!(parsed["missing"], serde_json::json!(missing), "{body}");
+            assert_eq!(
+                parsed.get("missing"),
+                Some(&serde_json::json!(missing)),
+                "{body}"
+            );
             assert!(body.contains("credential"), "{body}");
             std::fs::write(root.join("child-ran"), b"refreshed").expect("the child's proof");
             return;
