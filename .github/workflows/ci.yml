@@ -2070,15 +2070,20 @@ jobs:
           # `cli::tick_second_check`; no production path reaches it.
           declared="$declared cli/src/tick_second_check_tests.rs:println!:4"
           # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 3, TST-01 of
-          # the assurance attack of 29 Oct 2026): the three prints of
+          # the assurance attack of 29 Oct 2026): the four prints of
           # `api/src/audit_lock_wait_tests.rs` are the APPEND_WAIT lines (n,
           # p50, p99 and max of eight appenders' waits, and their refusals)
           # of the eight-appender test and of the 1x/10x/100x measurement,
-          # and the code-4 barrier's count of refusals by the bound, printed
-          # beside what each test asserts. The file is mounted
-          # `#[cfg(test)] #[path]` by `api::audit`; no production path
-          # reaches it.
-          declared="$declared api/src/audit_lock_wait_tests.rs:eprintln!:3"
+          # the code-4 barrier's count of refusals by the bound, and the
+          # hand-off test's (repair 7), printed beside what each test asserts.
+          # The file is mounted `#[cfg(test)] #[path]` by `api::audit`; no
+          # production path reaches it.
+          declared="$declared api/src/audit_lock_wait_tests.rs:eprintln!:4"
+          # ONE MORE FILE, the same kind (BASE-REDS-1023 repair 7): the n = 200
+          # p50, p99 and max of a roll of 64 rows in `api/src/speed_tests.rs`,
+          # for docs/06-limits.md L-BRED23-23, printed beside what the test
+          # asserts. The file is mounted `#[cfg(test)] #[path]` by `api::speed`.
+          declared="$declared api/src/speed_tests.rs:eprintln!:1"
           # ONE MORE FILE, the same kind, from IA-10c (declared at its repair
           # round 1, 23 Oct 2026, D-6268): `pull/src/landing_run_tests.rs`
           # println! 8, all in the `#[ignore]`d `ia10c_timings`, inside the
