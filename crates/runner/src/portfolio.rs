@@ -1220,4 +1220,62 @@ mod tests {
             0
         );
     }
+
+    /// BASE-COV-LIBS: the state's small faces, on the first decision and on a
+    /// new scheduler, and that the default is the new one.
+    #[test]
+    fn a_new_scheduler_holds_nothing_and_a_decision_reads_back() {
+        let mut fresh = GlobalSinglePositionV1::default();
+        assert_eq!(fresh, GlobalSinglePositionV1::new());
+        assert_eq!(fresh.last_minute_micros(), None);
+        let schedule = fresh.schedule_minute(60_000_000, &[]).expect("an empty minute");
+        assert_eq!(schedule.entry_micros(), 60_000_000);
+        assert_eq!(schedule.occupied_through_micros(), None);
+        assert_eq!(fresh.last_minute_micros(), Some(60_000_000));
+    }
+
+    /// THE CANONICALLY FIRST BAD INTENT IS THE ONE NAMED, whichever order
+    /// they came in: for each check, a later key must not displace an earlier
+    /// one that was offered first.
+    #[test]
+    fn the_first_bad_intent_is_named_whatever_order_they_came_in() {
+        let of = |digest, priority| {
+            intent(
+                constituent(digest, priority, false, Direction::Long, 1),
+                Evidence::Unreachable,
+            )
+        };
+        let above = u16::try_from(MAX_PRIORITY_PER_RUNG + 1).expect("a priority");
+        let (low, high) = (of(1, above), of(2, above));
+        assert_eq!(
+            super::invalid_priority(&[low, high]),
+            super::invalid_priority(&[high, low])
+        );
+        let rung = |digest| {
+            intent(
+                constituent(digest, 1, false, Direction::Long, 7),
+                Evidence::Unreachable,
+            )
+        };
+        assert_eq!(
+            super::unsupported_rung(&[rung(1), rung(2)]),
+            super::unsupported_rung(&[rung(2), rung(1)])
+        );
+        let mut stock = rung(1);
+        stock.constituent.rung_minutes = 1;
+        stock.constituent.instrument = InstrumentKey::cash(Exchange::Nse, "ZZTEST").expect("a key");
+        let mut later = stock;
+        later.constituent.strategy_digest = StrategyDigest::new([2; 32]);
+        assert_eq!(
+            super::unsweepable_instrument(&[stock, later]),
+            super::unsweepable_instrument(&[later, stock])
+        );
+        // COMBINED: two pairs of duplicates; the first pair is the one named,
+        // in both orders.
+        let (a, b) = (of(1, 1), of(2, 1));
+        assert_eq!(
+            super::duplicate_ordering_key(&[b, b, a, a]),
+            super::duplicate_ordering_key(&[a, a, b, b])
+        );
+    }
 }

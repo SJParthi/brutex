@@ -819,3 +819,123 @@ fn a_tabled_day_window_seals_exactly_what_the_full_row_walk_did() {
     ];
     assert_eq!(fold.finalize(), pin);
 }
+
+/// BASE-COV-LIBS: each word a run or a page can show is its own, so two
+/// failures are never one sentence.
+#[test]
+fn every_error_reason_and_exit_has_its_own_words() {
+    let errors = [
+        Error::Scope,
+        Error::Source,
+        Error::Arithmetic,
+        Error::Bound,
+        Error::Allocation,
+        Error::Encoding,
+    ];
+    let said: std::collections::HashSet<String> =
+        errors.iter().map(ToString::to_string).collect();
+    assert_eq!(said.len(), errors.len());
+    assert!(said.iter().all(|word| word.starts_with("signal-candle stop")));
+    let reasons = [
+        Reason::None,
+        Reason::Unreachable,
+        Reason::TooLate,
+        Reason::GapInvalid,
+        Reason::WhileOpen,
+        Reason::EntryRefused,
+        Reason::PathRefused,
+        Reason::ClosingMinute,
+    ];
+    let words: std::collections::HashSet<&str> =
+        reasons.iter().map(|reason| reason.as_str()).collect();
+    assert_eq!(words.len(), reasons.len());
+    assert_eq!(Reason::None.as_str(), "priced");
+    assert_ne!(ExitReason::Stop.as_str(), ExitReason::Forced1510.as_str());
+    for (code, reason) in (0_u64..).zip(reasons) {
+        assert_eq!(Reason::decode(code), Ok(reason));
+    }
+    for code in [8, 9, u64::MAX] {
+        assert_eq!(Reason::decode(code), Err(Error::Encoding));
+    }
+    assert_eq!(Policy::V1.digest(), hash(&Policy::V1.canonical_bytes()));
+    assert_ne!(Policy::V1.digest(), hash(&[]));
+}
+
+/// The ppm rule at its edges: no entry, a negative one, a negative distance,
+/// nothing at all, and a distance whose ppm cannot fit.
+#[test]
+fn ppm_refuses_what_has_no_ratio_and_what_cannot_fit() {
+    assert_eq!(ppm(1, 0), Err(Error::Arithmetic));
+    assert_eq!(ppm(1, -1), Err(Error::Arithmetic));
+    assert_eq!(ppm(-1, 1), Err(Error::Arithmetic));
+    assert_eq!(ppm(0, 1), Ok(0));
+    assert_eq!(ppm(1, 2), Ok(500_000));
+    assert_eq!(ppm(i64::MAX, 1), Err(Error::Arithmetic));
+    assert_eq!(ppm(i64::MAX, i64::MAX), Ok(1_000_000));
+}
+
+/// A TRADE'S STATISTICAL ROW IS THE TRADE'S OWN FIGURES, and the evaluation
+/// says what it was asked: family, side, program and the bars it aligned.
+#[test]
+fn a_priced_trade_reads_back_as_its_statistical_row() {
+    let fixture = Fixture::new(1, 30);
+    for side in [Direction::Long, Direction::Short] {
+        let result = fixture.evaluate(side);
+        assert_eq!(result.direction(), side);
+        assert_eq!(*result.program(), always());
+        assert!(!result.alignment().is_empty());
+        let family = result.family();
+        assert_eq!(
+            family,
+            ResearchFamilyV1::new(fixture.key).unwrap()
+        );
+        assert!(family.legacy_index_family().is_some());
+        let trade = exact_trade(&result);
+        let row = trade.statistical_row().unwrap();
+        assert_eq!(row.best, trade.optimistic_paisa);
+        assert_eq!(row.worst, trade.pessimistic_paisa);
+        assert_eq!(row.entry_micros, trade.entry_micros);
+        assert_eq!(row.exit_micros, trade.exit_bar_micros);
+        assert_eq!(row.adverse_paisa, trade.adverse_paisa);
+        assert_eq!(
+            row.adverse,
+            ppm(trade.adverse_paisa, trade.entry_paisa).unwrap()
+        );
+        // COMBINED: a row whose entry is gone refuses, whatever else it holds.
+        let mut broken = trade;
+        broken.entry_paisa = 0;
+        assert_eq!(broken.statistical_row().err(), Some(Error::Arithmetic));
+    }
+}
+
+/// Every word of a canonical record that only one value may hold is refused
+/// at any other: an exit reason, the gap flag, an option flag.
+#[test]
+fn a_canonical_word_outside_its_values_is_refused() {
+    let fixture = Fixture::new(1, 30);
+    let result = fixture.evaluate(Direction::Long);
+    let row = exact_trade(&result);
+    assert_eq!(option(0, 0), Ok(None));
+    assert_eq!(option(1, 0), Ok(Some(0)));
+    assert_eq!(option(0, 1), Err(Error::Encoding));
+    assert_eq!(option(2, 0), Err(Error::Encoding));
+    let good = row.canonical_bytes();
+    let mut refused = 0_usize;
+    // Eight-byte words after the eight-byte magic: each one, to a value none
+    // of them holds. Only the record's own checks can answer.
+    for word in 0..(Trade::BYTE_LEN / 8).saturating_sub(1) {
+        let mut bytes = good;
+        let at = 8 + word * 8;
+        bytes
+            .get_mut(at..at + 8)
+            .unwrap()
+            .copy_from_slice(&u64::MAX.to_le_bytes());
+        if Trade::decode(&bytes).is_err() {
+            refused += 1;
+        }
+    }
+    assert!(refused > 10, "only {refused} words were checked");
+    let mut bytes = good;
+    bytes.get_mut(..8).unwrap().copy_from_slice(b"BRSCXX01");
+    assert_eq!(Trade::decode(&bytes), Err(Error::Encoding));
+}

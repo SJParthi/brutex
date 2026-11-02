@@ -574,4 +574,18 @@ mod tests {
             assert!(!f.test.is_empty(), "the test window still exists");
         }
     }
+
+    /// BASE-COV-LIBS: the words a report prints, and the rolling shape's
+    /// refusals: no split, no bars, and fewer bars than blocks.
+    #[test]
+    fn the_shapes_name_themselves_and_rolling_refuses_what_it_cannot_cut() {
+        use super::{Shape, rolling_folds};
+        assert_eq!(Shape::Anchored.label(), "anchored");
+        assert_eq!(Shape::Rolling.label(), "rolling");
+        let horizon = Horizon::DEFAULT;
+        assert!(rolling_folds(100, horizon, 0).is_empty());
+        assert!(rolling_folds(0, horizon, 3).is_empty());
+        assert!(rolling_folds(3, horizon, 3).is_empty());
+        assert!(Shape::Rolling.folds(0, horizon, 3).is_empty());
+    }
 }

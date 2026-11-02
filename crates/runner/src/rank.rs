@@ -1476,4 +1476,19 @@ mod tests {
             );
         }
     }
+
+    /// BASE-COV-LIBS: a heap's wrappers answer the same order by every
+    /// operator: a mark compares by what it ranks and never by the closure
+    /// verdict beside it, and the path order is total.
+    #[test]
+    fn every_operator_of_a_ranking_wrapper_agrees_with_its_order() {
+        let (low, high) = (scored(1.0, 1), scored(2.0, 2));
+        let marked = |ranked, closed| super::Marked { ranked, closed };
+        assert!(marked(low, true) == marked(low, false));
+        assert!(marked(low, true) != marked(high, true));
+        assert!(marked(low, true) < marked(high, false));
+        let (one, other) = (super::ByPath(low), super::ByPath(high));
+        assert_eq!(one.partial_cmp(&other), Some(one.cmp(&other)));
+        assert_eq!(one.partial_cmp(&one), Some(Ordering::Equal));
+    }
 }

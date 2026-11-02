@@ -2019,3 +2019,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "report_cover_tests.rs"]
+mod cover_tests;

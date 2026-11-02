@@ -1299,4 +1299,61 @@ mod tests {
             assert!(seen.insert(digest), "each criterion occupies its own slot");
         }
     }
+
+    /// BASE-COV-LIBS: the small public faces of the pass.
+    #[test]
+    fn the_defaults_and_counters_read_what_they_hold() {
+        assert_eq!(PopulationPass::default().finish(), PopulationPass::new().finish());
+        assert_eq!(policy().weights(), Weights::equal());
+        let mut extrema = Extrema::default();
+        assert_eq!((extrema.observed(), extrema.admitted()), (0, 0));
+        extrema.observe(&candidate(1, 5));
+        extrema.observe(&candidate(2, 6));
+        assert_eq!((extrema.observed(), extrema.admitted()), (2, 2));
+    }
+
+    /// A KEEPER OF NOTHING OR OF MORE THAN THE BOUND IS REFUSED BY NAME, and
+    /// the bound itself is kept.
+    #[test]
+    fn a_keeper_asked_for_zero_or_past_its_bound_is_refused() {
+        let extrema = Extrema::default();
+        assert_eq!(
+            Keeper::new(0, policy(), extrema).err(),
+            Some(Refusal::TopIsZero)
+        );
+        assert_eq!(
+            Keeper::new(MAX_TOP + 1, policy(), extrema).err(),
+            Some(Refusal::TopAboveMaximum)
+        );
+        assert_eq!(
+            Keeper::new(usize::MAX, policy(), extrema).err(),
+            Some(Refusal::TopAboveMaximum)
+        );
+        assert!(Keeper::new(MAX_TOP, policy(), extrema).is_ok());
+    }
+
+    /// A VALUE FROM OUTSIDE THE FIRST PASS IS REFUSED, NEVER NORMALISED: a
+    /// range that saw nothing, a value on either side of a range that did,
+    /// and an unmeasured value, which is neutral in both.
+    #[test]
+    fn a_value_outside_the_population_cannot_be_scored() {
+        let empty = Range::default();
+        assert_eq!(
+            empty.normalise(Some(1), Preference::Higher),
+            Err(Refusal::CandidateOutsidePopulation)
+        );
+        assert_eq!(empty.normalise(None, Preference::Lower), Ok(NEUTRAL));
+        let mut range = Range::default();
+        range.observe(10);
+        range.observe(20);
+        for value in [9, 21, i128::MIN, i128::MAX] {
+            assert_eq!(
+                range.normalise(Some(value), Preference::Higher),
+                Err(Refusal::CandidateOutsidePopulation),
+                "{value}"
+            );
+        }
+        assert_eq!(range.normalise(None, Preference::Higher), Ok(NEUTRAL));
+        assert!(range.normalise(Some(10), Preference::Lower).is_ok());
+    }
 }
