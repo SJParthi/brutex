@@ -10001,3 +10001,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "vendor_cov_tests.rs"]
+mod cov_tests;

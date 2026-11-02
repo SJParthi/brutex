@@ -2066,3 +2066,7 @@ mod tests {
         assert!(!code.contains(".text()"), "the whole-body read is back");
     }
 }
+
+#[cfg(test)]
+#[path = "ssm_cov_tests.rs"]
+mod cov_tests;

@@ -952,3 +952,98 @@ fn a_rescan_of_a_day_the_source_does_not_hold_names_it_missing() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A key's day word is a day only when it is exactly `YYYY-MM-DD`: any other
+/// word is no day, so a share's key that cannot say when it was is read again.
+#[test]
+fn a_journal_days_word_is_exact_or_no_day() {
+    use journal::{current_for, journal_day};
+    assert_eq!(journal_day("2024-03-01"), Some(day(2024, 3, 1)));
+    for bad in [
+        "2024-03",
+        "2024-03-01-02",
+        "24-03-01",
+        "2024-3-01",
+        "2024-03-1",
+        "2024-13-01",
+        "2024-02-30",
+        "20x4-03-01",
+        "",
+    ] {
+        assert_eq!(journal_day(bad), None, "{bad:?}");
+    }
+    assert!(current_for("no-such-kind", "2024-03-01", BAR_DEFINITION));
+    assert!(!current_for("no-such-kind", "2024-03-01", 0));
+    assert!(current_for("options", "not-a-day", BAR_DEFINITION));
+}
+
+/// The one directory a writer makes: never the root, never over a file, and a
+/// parent that is not a directory is named. A bare name has no parent at all.
+#[test]
+fn a_leaf_directory_is_made_only_below_a_root_that_is_there() {
+    use journal::make_leaf_dir;
+    let root = scratch("cov-leaf");
+    make_leaf_dir(&root).unwrap();
+    let leaf = root.join("imports");
+    make_leaf_dir(&leaf).unwrap();
+    assert!(leaf.is_dir());
+    let file = root.join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    assert_eq!(
+        make_leaf_dir(&file).unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "a file at the name is no directory, and is left as it is"
+    );
+    let under = file.join("imports");
+    let why = make_leaf_dir(&under).unwrap_err();
+    assert_eq!(why.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        why.to_string().contains("a-file is not a directory"),
+        "{why}"
+    );
+    let bare = make_leaf_dir(Path::new("no-such-relative-leaf-of-a-test")).unwrap_err();
+    assert!(bare.to_string().contains("the store root (none)"), "{bare}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A journal that grew by something no journal line starts with is refused by
+/// name, with a newline or without; a torn tail is kept back, and a journal
+/// whose folder went away is refused, not read as empty.
+#[test]
+fn a_refresh_refuses_a_foreign_tail_and_a_folder_gone() {
+    use std::io::Write as _;
+    let root = scratch("cov-refresh");
+    let store = root.join("S");
+    let path = put(&store, "imports/gdfl.journal", b"");
+    let grow = |text: &[u8]| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(text).unwrap();
+    };
+    let mut held = Journal::read_only(path.clone()).unwrap();
+    assert!(matches!(held.refresh(), Ok(Refreshed::Unchanged)));
+    grow(b"not a line of this journal");
+    assert!(held.refresh().is_err(), "no newline, and foreign");
+    let mut second = Journal::read_only(put(&root, "second.journal", b"")).unwrap();
+    let path2 = root.join("second.journal");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path2)
+        .unwrap();
+    file.write_all(b"done indices 2024-03-01 *\nnot a line of this journal")
+        .unwrap();
+    drop(file);
+    assert!(
+        second.refresh().is_err(),
+        "a whole line, then foreign bytes"
+    );
+    let gone = root.join("gone");
+    let mut third = Journal::read_only(put(&gone, "imports/gdfl.journal", b"")).unwrap();
+    let dir = gone.join("imports");
+    std::fs::rename(&dir, gone.join("moved")).unwrap();
+    std::fs::write(&dir, b"a file where the folder was").unwrap();
+    assert!(third.refresh().is_err(), "ENOTDIR is no empty journal");
+    std::fs::remove_dir_all(root).unwrap();
+}

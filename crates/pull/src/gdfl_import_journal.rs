@@ -163,7 +163,7 @@ fn current_under(kind: ImportKind, auction_era: bool, definition: u64) -> bool {
 /// that is no kind is current only under [`BAR_DEFINITION`], and a day word
 /// that is no `YYYY-MM-DD` day is taken to be in the auction's era, so a
 /// share's key that cannot say when it was is read again, never passed.
-fn current_for(kind: &str, day: &str, definition: u32) -> bool {
+pub(super) fn current_for(kind: &str, day: &str, definition: u32) -> bool {
     let Ok(kind) = ImportKind::parse(kind) else {
         return definition == BAR_DEFINITION;
     };
@@ -172,7 +172,7 @@ fn current_for(kind: &str, day: &str, definition: u32) -> bool {
 }
 
 /// A journal key's day word as a day: exactly `YYYY-MM-DD`, a real date.
-fn journal_day(text: &str) -> Option<Day> {
+pub(super) fn journal_day(text: &str) -> Option<Day> {
     let mut parts = text.split('-');
     let (Some(y), Some(m), Some(d), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
