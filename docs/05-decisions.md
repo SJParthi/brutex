@@ -84869,6 +84869,23 @@ an addendum to the entry it extends; nothing above is edited.
     the one refusal of the run no input reaches, and `run` passes `check_day`.
     Refused: reading the refusal as unreachable, since the join's `Err` is
     real and its sentence is the operator's only word for it.
+17. **D-7152: two more found by this repair's own Route B, at load 80.**
+    `a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole` read
+    an empty second answer: the head clock starts when the server hands its
+    last byte to the socket, and this client then read what the kernel held
+    at its slow pace and checked 16 MiB before asking, so the idle socket
+    closed first, as an idle socket must. The second request now goes before
+    the first response ends, as the pipelining test next to it sends one, so
+    the socket has to outlive the body to answer and no clock decides it.
+    `both_second_formats_answer_the_same_bars_at_p99` read a sealed lookup
+    p99 of 284.0 µs against raw 7.8 and a bound of 231.2: the two forms are
+    timed one after the other, so a stall landed on one. It takes the rule
+    the write door took in repair 1: up to five whole measurements, stopping
+    at the first that holds, the decision a function a test drives with
+    invented figures, every bound unchanged (L-BRED23-22). Refused: timing
+    the forms in turn alone, which does not close it, because a sealed
+    lookup takes twenty times a raw one here and so is twenty times as likely
+    to hold a stall.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 

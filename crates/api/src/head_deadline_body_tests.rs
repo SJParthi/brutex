@@ -273,6 +273,14 @@ fn lines(from: u64, message: &str, tag: &str) -> Vec<telemetry::Record> {
 /// count equals `Content-Length`, and the kept-alive socket then serves a
 /// second request. Before D-4975 the connection closed one deadline after the
 /// first byte with most of the body unsent.
+///
+/// THE SECOND REQUEST IS ON THE WIRE BEFORE THE FIRST RESPONSE ENDS (BASE-REDS-1023
+/// repair 6). It was sent after this client had read the last byte and checked
+/// all 16 MiB, but the head clock starts when the server hands its last byte to
+/// the socket, so the client's own reading of what the kernel still held and
+/// its own check ran on that clock: under instrumentation at load 80 the idle
+/// socket closed first, as an idle socket must, and `said` was empty. The
+/// socket still has to outlive the body to answer.
 #[tokio::test]
 async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     let (addr, stop) = start(limits(T, 8)).await;
@@ -286,6 +294,10 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{head:?}");
     let length = content_length(&head);
     assert_eq!(length, BIG);
+    client
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
     let (body, closed) = paced(&mut client, rest, length, CHUNK, PACE).await;
     let took = began.elapsed();
     assert!(
@@ -299,10 +311,6 @@ async fn a_body_longer_than_the_head_deadline_reaches_a_slow_reader_whole() {
         took >= T * 4,
         "the body drained in {took:?}: too fast to prove a slow reader is safe"
     );
-    client
-        .write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
     let (said, closed) = drain(&mut client, T * 10).await;
     assert!(
         closed && said.starts_with("HTTP/1.1 200 OK") && said.ends_with("ok"),

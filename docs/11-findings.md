@@ -1346,6 +1346,15 @@ confirmed by two skeptics; their corrections are applied.
   (D-7152 addendum 16): a test for each refusal and skip a test can drive,
   the seam `run_with` for a stopped worker, and the rest listed with its proof
   (BRED-54).
+- **BRED23-F50: the slow-reader test asked its second question after the head
+  clock could run out** (this repair's Route B, api, load 80: `said` empty).
+  FIXED (D-7152 addendum 17): the request is on the wire before the first
+  response ends (BRED-55).
+- **BRED23-F51: the sealed door's p99 test timed its two forms one after the
+  other** (this repair's Route B, store, load 80: 284.0 µs against raw 7.8).
+  FIXED (D-7152 addendum 17): the first of up to five whole measurements that
+  holds the unchanged bounds, the decision tested with invented figures
+  (BRED-55, L-BRED23-22).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 
