@@ -407,7 +407,7 @@ fn an_expiry_table_refuses_a_key_twice_and_finds_a_move_by_its_share_or_all() {
             "2024-03-27",
             "-",
             "2024-03-01",
-            "holiday",
+            "closed_day",
             "3",
             "invented",
         ])

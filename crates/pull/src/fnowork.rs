@@ -423,14 +423,14 @@ where
         let from = match held(&cell.key).and_then(day_of) {
             // Nothing held for this key in this month: the whole span is owed.
             None => first,
-            Some(day) => match the_day_after(day, through) {
-                Some(next) => next,
+            Some(day) => {
                 // Held through the last day this cell can ever owe.
-                None => {
+                let Some(next) = the_day_after(day, through) else {
                     out.complete = out.complete.saturating_add(1);
                     continue;
-                }
-            },
+                };
+                next
+            }
         };
         out.resume.push(Resume {
             cell: cell.clone(),

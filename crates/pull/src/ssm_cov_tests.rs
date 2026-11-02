@@ -2,7 +2,11 @@
 //! refusal, no network and no credential: `SigV4` is deterministic and these
 //! are its inputs. The identity below is invented.
 
-#![allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
 
 use super::*;
 
@@ -15,7 +19,7 @@ fn a_day_count_is_its_civil_date_on_every_edge() {
     assert_eq!(civil_from_days(-1), (1969, 12, 31));
     assert_eq!(civil_from_days(58), (1970, 2, 28));
     assert_eq!(civil_from_days(59), (1970, 3, 1));
-    assert_eq!(civil_from_days(790), (1972, 2, 29));
+    assert_eq!(civil_from_days(789), (1972, 2, 29));
     assert_eq!(civil_from_days(10_957), (2000, 1, 1));
     assert_eq!(civil_from_days(11_016), (2000, 2, 29));
     assert_eq!(civil_from_days(47_541), (2100, 3, 1));

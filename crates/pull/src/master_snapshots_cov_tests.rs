@@ -335,7 +335,14 @@ fn a_later_snapshot_that_will_not_read_leaves_the_token_unread() {
     let (first, later) = (day(2026, 3, 2), day(2026, 3, 9));
     let row = fut(9_000_001, "ZQIDX26MARFUT", "2026-03-31", 75);
     for on in [first, later] {
-        snapshot(&root, Kind::Kite, on, URL, dump(&[row.clone()]).as_bytes()).unwrap();
+        snapshot(
+            &root,
+            Kind::Kite,
+            on,
+            URL,
+            dump(std::slice::from_ref(&row)).as_bytes(),
+        )
+        .unwrap();
     }
     let body = root.join(file_name(Kind::Kite, stamp(later, 1)));
     fs::remove_file(&body).unwrap();
@@ -364,6 +371,7 @@ fn a_diff_tells_each_change_of_a_token_apart() {
         words.contains(&"expiry") && words.contains(&"lot_size"),
         "{words:?}"
     );
+    let cash = |at: Stamp| parse(at, &[share(9_000_002, "ZQSHARE", "ZQ SHARE")]);
     let same = Isins::parse(&super::tests::nse_file(&[("ZQSHARE", "INE000INVENT")])).unwrap();
     assert_eq!(diff(&cash(a), &cash(b), Some(&same), Some(&same)), []);
     let kept = parse(
@@ -428,7 +436,14 @@ fn a_diff_is_never_written_over_and_a_directory_at_its_name_is_refused() {
     let (a, b) = (day(2026, 3, 2), day(2026, 3, 3));
     let row = fut(9_000_001, "ZQIDX26MARFUT", "2026-03-31", 75);
     for on in [a, b] {
-        snapshot(&root, Kind::Kite, on, URL, dump(&[row.clone()]).as_bytes()).unwrap();
+        snapshot(
+            &root,
+            Kind::Kite,
+            on,
+            URL,
+            dump(std::slice::from_ref(&row)).as_bytes(),
+        )
+        .unwrap();
     }
     let path = root.join(diff_name(stamp(b, 1)));
     fs::create_dir(&path).unwrap();

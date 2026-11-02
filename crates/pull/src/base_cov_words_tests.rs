@@ -236,7 +236,7 @@ fn a_run_lock_or_ledger_fault_says_who_holds_what() {
             why: "an invented refusal".to_owned(),
         }
         .to_string(),
-        "imports/invented.lock: an invented refusal"
+        "run_lock_refused: imports/invented.lock: an invented refusal"
     );
     says(
         &F::Replaced { lock: lock() }.to_string(),
@@ -247,7 +247,7 @@ fn a_run_lock_or_ledger_fault_says_who_holds_what() {
             why: "an invented layout".to_owned(),
         }
         .to_string(),
-        "the census layout cannot be read: an invented layout"
+        "census_unreadable: the census layout cannot be read: an invented layout"
     );
     says(
         &L::Damaged { offset: u64::MAX }.to_string(),
@@ -371,11 +371,11 @@ fn an_alert_refusal_says_its_code_and_the_ordinal() {
 
 #[test]
 fn a_discovery_refusal_says_what_was_not_reached() {
-    use crate::chain::Refusal as R;
-    assert_eq!(
-        R::Lookup("an invented lookup".to_owned()).to_string(),
-        "an invented lookup"
-    );
+    use crate::chain::ChainError as R;
+    let lookup = crate::fno::FnoError::RepeatedKey {
+        key: "zq".to_owned(),
+    };
+    assert_eq!(R::Lookup(lookup.clone()).to_string(), lookup.to_string());
     assert_eq!(
         R::Transport {
             url: "https://invented.example".to_owned(),
