@@ -800,3 +800,81 @@ fn a_v1_summary_reads_padded_as_not_counted() {
         Summarized::Kept
     );
 }
+
+/// **THE DOOR EXCLUDES WRITERS, NOT READERS (D-7430).** A reader mid-request
+/// neither refuses the door nor is refused by it: the exclusive hold this door
+/// had before refused the month while a page read it, and made every page
+/// wait out the build. A writer is still refused, by name, and nothing is
+/// written; once it goes the same door builds.
+#[test]
+fn the_door_refuses_a_writer_and_never_a_reader() {
+    let root = root("door-readers");
+    let at = path(Timeframe::SECOND_1);
+    let mut writer = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
+    writer.append(&session(12, 1_500, 1, 9)).unwrap();
+    let beside = path_beside(writer.path());
+    drop(writer);
+    let image = fs::read(&beside).unwrap();
+
+    // A WRITER HOLDS THE MONTH: refused, naming the month's lock. (Its open
+    // keeps the `.sum`, so the name is taken away under it.)
+    let held = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
+    fs::rename(&beside, beside.with_extension("aside")).unwrap();
+    match BarFile::month_summary_existing(&root, at, SYMBOL) {
+        Err(StoreError::Locked { path }) => {
+            assert_eq!(path.extension().unwrap(), "lock", "{}", path.display());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!beside.exists(), "nothing written beside a writer");
+    drop(held);
+
+    // TWO READERS MID-REQUEST: the door builds beside them, and each still
+    // reads the month, and a third opens while the first two hold it.
+    let reader = BarFile::open_existing(&root, at, SYMBOL).unwrap();
+    assert!(matches!(
+        BarFile::month_summary_existing(&root, at, SYMBOL).unwrap(),
+        Summarized::Built(_)
+    ));
+    assert_eq!(fs::read(&beside).unwrap(), image, "the writer's own bytes");
+    let second = BarFile::open_existing(&root, at, SYMBOL).unwrap();
+    assert_eq!(
+        read_beside(reader.path(), &reader.header(), may()).unwrap(),
+        read_beside(second.path(), &second.header(), may()).unwrap()
+    );
+}
+
+/// **TWO DOORS OVER ONE MONTH ARE KEPT APART.** The staging name belongs to
+/// one writer at a time (`crate::staging`), and two shared holds do not keep
+/// them apart: a second door's own lock on the bar file does. It is refused
+/// by name, nothing is written and no staging name is left. A summary that
+/// is already kept asks for no such lock, so a rerun is never refused.
+#[test]
+fn a_second_door_is_refused_by_the_bar_files_own_lock() {
+    let root = root("door-doors");
+    let at = path(Timeframe::SECOND_1);
+    let mut writer = BarFile::open_or_create(&root, at, SYMBOL).unwrap();
+    writer.append(&session(12, 1_500, 1, 9)).unwrap();
+    let (bars, beside) = (writer.path().to_path_buf(), path_beside(writer.path()));
+    drop(writer);
+    fs::rename(&beside, beside.with_extension("aside")).unwrap();
+    let door = crate::flock::Flock::try_lock(fs::File::open(&bars).unwrap(), bars.clone()).unwrap();
+    assert_eq!(
+        BarFile::month_summary_existing(&root, at, SYMBOL),
+        Err(StoreError::Locked { path: bars.clone() })
+    );
+    assert!(!beside.exists(), "nothing written");
+    assert!(!beside.with_extension("new.sum").exists(), "nothing staged");
+    drop(door);
+    assert!(matches!(
+        BarFile::month_summary_existing(&root, at, SYMBOL).unwrap(),
+        Summarized::Built(_)
+    ));
+    let held = crate::flock::Flock::try_lock(fs::File::open(&bars).unwrap(), bars).unwrap();
+    assert_eq!(
+        BarFile::month_summary_existing(&root, at, SYMBOL).unwrap(),
+        Summarized::Kept,
+        "a kept summary writes nothing, so it needs no door of its own"
+    );
+    drop(held);
+}

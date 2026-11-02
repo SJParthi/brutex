@@ -28,8 +28,10 @@
 //! * a month that is not held is reported and NOTHING is created for it;
 //! * the bar file, its checksums and its indexes are opened read-only and
 //!   never change;
-//! * a month another process holds — a writer, or a reader mid-request — is
-//!   refused by the store's own exclusive lock, named, and left as it was;
+//! * a month a writer holds is refused by the store's lock, named, and left as
+//!   it was; a reader is neither refused nor made to wait (D-7430: the door
+//!   holds the month's lock shared), so a page asked during a run answers as
+//!   it did before;
 //! * a month whose summary already describes its committed header is kept, so
 //!   a rerun is safe and resumes where one stopped;
 //! * anything else is written whole into a NEW file renamed over the old name
@@ -144,8 +146,8 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         Err(StoreError::Locked { path }) => {
             return Line::Refused {
                 why: format!(
-                    "{} is held by another process (a writer, or a reader mid-request) and is \
-                     not waited for",
+                    "{} is held by another process (a writer, or a second summary door) and \
+                     is not waited for",
                     path.display()
                 ),
             };

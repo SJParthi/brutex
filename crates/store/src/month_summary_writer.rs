@@ -5,7 +5,8 @@
 //! A child of `crate::file` so it reads committed rows through the verified
 //! path, under the same handle, and cannot drift from what a reader reads.
 //!
-//! # The writer's step, and why it never fails an append
+//! # The writer's step, and     write_image(sidecar, &summary.file_image(), Durable::Unsynced).map_err(|why| why.to_string())
+ it never fails an append
 //!
 //! [`BarFile::keep_month_summary`] runs after a writer opens a month and after
 //! every commit, after the sort index's step. The bars are already committed
@@ -53,7 +54,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{Action, BarFile, StoreError, classify, fault, refuse_link, write_fully};
+use super::sort_index_writer::Hold;
+use super::{
+    Action, BarFile, StoreError, classify, fault, lock_fault, open_read, refuse_link, sync_hooked,
+    write_fully,
+};
+use crate::flock::Flock;
 use crate::format::Bar;
 use crate::month_summary::{MonthSummary, Refused, path_beside};
 use crate::path::{FileKind, StorePath};
@@ -233,10 +239,36 @@ impl BarFile {
     /// (`store_writes_needed` names the run that walks it over the store).
     ///
     /// Opened as [`Self::sort_index_existing`] opens a month: read-only bars,
-    /// the month's lock EXCLUSIVE and non-blocking, no link below the root
-    /// followed, the served generation's bar file. A summary that already
-    /// describes these bars is [`Summarized::Kept`] and no byte changes; a
-    /// month under the threshold with none is [`Summarized::BelowThreshold`].
+    /// no link below the root followed, the served generation's bar file. A
+    /// summary that already describes these bars is [`Summarized::Kept`] and
+    /// no byte changes; a month under the threshold with none is
+    /// [`Summarized::BelowThreshold`].
+    ///
+    /// # A writer is refused, a reader is not (D-7430)
+    ///
+    /// The month's lock is taken SHARED and non-blocking, so a writer that
+    /// holds the month is [`StoreError::Locked`] and nothing is written, and
+    /// no writer can commit while the rows are read. A reader needs no more:
+    /// it sees the old name or the new one, whole, and either is checked
+    /// against the header it opened. The sort index's exclusive door would
+    /// refuse a month whenever a reader held it and would make a reader wait
+    /// out the build, past the 200 ms a page waits on the biggest months: a
+    /// `/gaps.json` asked during a backfill would answer 503.
+    ///
+    /// Two doors over one month are kept apart by an exclusive `flock` on the
+    /// bar file itself, taken only when there is a summary to write, because
+    /// the staging name belongs to one writer at a time ([`crate::staging`]).
+    /// Nothing else locks a bar file, so this costs a reader and a writer
+    /// nothing. The second door is [`StoreError::Locked`], naming the bar
+    /// file.
+    ///
+    /// # Durable before its name appears
+    ///
+    /// The door syncs the new file before the rename: a backfill closes a
+    /// month in its journal once and never looks at it again, so a power cut
+    /// must not leave a torn file under the name of a month it called done.
+    /// The writer's per-commit step does not (see the module header): its
+    /// next open repairs what a cut leaves.
     ///
     /// # Errors
     ///
@@ -248,7 +280,7 @@ impl BarFile {
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Summarized, StoreError> {
-        let (mut file, _served) = Self::open_to_sort(root, path, symbol_id)?;
+        let (mut file, _served) = Self::open_held(root, path, symbol_id, Hold::Shared)?;
         let sidecar = SummarySidecar {
             path: path_beside(&file.bars_path),
         };
@@ -268,9 +300,14 @@ impl BarFile {
             Err(Refused::BelowThreshold) => return Ok(Summarized::BelowThreshold),
             Err(why) => why.to_string(),
         };
+        let _one_door = Flock::try_lock(
+            open_read(&file.bars_path).map_err(|why| why.refusal(&file.bars_path))?,
+            file.bars_path.clone(),
+        )
+        .map_err(|refusal| lock_fault(&file.bars_path, refusal))?;
         file.msum = Some(sidecar.clone());
         let summary = file.whole_summary()?;
-        write_image(&sidecar, &summary.file_image())?;
+        write_image(&sidecar, &summary.file_image(), Durable::Synced)?;
         note_summary_built(&sidecar.path, &because, file.header.n_valid);
         Ok(Summarized::Built(because))
     }
@@ -281,9 +318,24 @@ fn write_summary(sidecar: &SummarySidecar, summary: &MonthSummary) -> Result<(),
     write_image(sidecar, &summary.file_image()).map_err(|why| why.to_string())
 }
 
+/// Whether a summary is on the disk before its name appears.
+#[derive(Clone, Copy)]
+enum Durable {
+    /// Synced, then renamed: the rebuild door.
+    Synced,
+    /// Renamed: a writer's per-commit step (the module header says why).
+    Unsynced,
+}
+
 /// `image` into `<yyyy-mm>.new.sum` (a new inode, never one already at the
-/// name) and renamed over `<yyyy-mm>.sum`.
-fn write_image(sidecar: &SummarySidecar, image: &[u8]) -> Result<(), StoreError> {
+/// name) and renamed over `<yyyy-mm>.sum`. A failure leaves the name as it
+/// was: a partial file stays under the staging name, read by nobody, and the
+/// next create clears it.
+fn write_image(
+    sidecar: &SummarySidecar,
+    image: &[u8],
+    durable: Durable,
+) -> Result<(), StoreError> {
     let staging = sidecar.staging();
     refuse_link(&sidecar.path)?;
     // A NAME HELD BY A DIRECTORY, A PIPE OR A DEVICE is left as it is and the
@@ -314,6 +366,9 @@ fn write_image(sidecar: &SummarySidecar, image: &[u8]) -> Result<(), StoreError>
         },
     })?;
     write_fully(&staged.file, &staging, 0, image)?;
+    if matches!(durable, Durable::Synced) {
+        fault(sync_hooked(&staged.file), &staging, Action::Sync)?;
+    }
     drop(staged);
     fault(
         fs::rename(&staging, &sidecar.path),

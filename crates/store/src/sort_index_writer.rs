@@ -125,6 +125,19 @@ pub struct SortIndexed {
     pub outcome: Resorted,
 }
 
+/// How a door over a held month takes the month's lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Hold {
+    /// The writer's own: no writer and no reader beside it. The sort index
+    /// and its readers take turns on the month.
+    Exclusive,
+    /// A reader's: no writer beside it, every reader welcome. The month
+    /// summary's door reads the bars once and renames one new file over
+    /// the old name, so a reader mid-request costs it nothing and it costs
+    /// a reader nothing (BASE-MSUM-BACKFILL, D-7430).
+    Shared,
+}
+
 /// What the writer's step decided for one month.
 enum Plan {
     /// The index orders every committed row.
@@ -310,7 +323,14 @@ impl BarFile {
     }
 
     /// Every committed row as ONE run's bytes, or why no run can order them
-    /// (the inner refusal); the outer one is a bar that would not read.
+    /// (the inner         let handle = writer_open(open_rw(&lock_path), &lock_path)?;
+        let lock = match hold {
+            Hold::Exclusive => Flock::try_lock_noted(handle, lock_path.clone()),
+            Hold::Shared => Flock::try_lock_shared_patiently(handle, lock_path.clone()),
+        }
+        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        let file = Self::validated(); the outer one is a bar that would not read.
     fn whole_image(&self, sidecar: &SortSidecar) -> Result<Result<Vec<u8>, Why>, String> {
         let bars = self.committed_rows(0, self.header.n_valid)?;
         Ok(sort_index::build_run_as(
@@ -352,6 +372,18 @@ impl BarFile {
         store_root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
+    ) -> Result<(Self, PathBuf), StoreError> {
+        Self::open_held(store_root, path, symbol_id, Hold::Exclusive)
+    }
+
+    /// [`Self::open_to_sort`] under the hold `hold` names: the one door the
+    /// sort index and the month summary share, so they resolve one generation
+    /// and refuse one set of links.
+    pub(super) fn open_held(
+        store_root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+        hold: Hold,
     ) -> Result<(Self, PathBuf), StoreError> {
         if path.file() != FileKind::Bars {
             return Err(StoreError::NotABarPath { found: path.file() });

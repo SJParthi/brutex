@@ -2110,3 +2110,35 @@ fn a_resume_with_no_journal_writes_nothing() {
     assert!(why.contains("no run 77 in this journal"), "{why}");
     assert_eq!(root.journal(Kind::MonthSummary), before);
 }
+
+/// **THE LENGTH SAYS WHEN NO `.sum` IS OWED (D-7430).** Only a whole header
+/// and fewer rows than the small-month rule asks prove it: one row short of
+/// the threshold owes none, the threshold owes one, and a file too short to
+/// hold a header proves nothing and stays owed, so a run meets it by name.
+#[test]
+fn the_length_of_a_bar_file_says_when_no_summary_is_owed() {
+    use store::format::{HEADER_LEN, RECORD_STRIDE};
+    use store::time_index::INDEX_MIN_ROWS;
+    let bytes = |rows: u64| HEADER_LEN + rows * RECORD_STRIDE;
+    assert!(!summary_owed_by_len(bytes(0)), "header only: empty");
+    assert!(!summary_owed_by_len(bytes(INDEX_MIN_ROWS - 1)));
+    assert!(
+        !summary_owed_by_len(bytes(INDEX_MIN_ROWS) - 1),
+        "a torn last row is no row"
+    );
+    assert!(summary_owed_by_len(bytes(INDEX_MIN_ROWS)));
+    assert!(summary_owed_by_len(0), "an empty file proves nothing");
+    assert!(summary_owed_by_len(HEADER_LEN - 1), "nor does a torn header");
+    assert!(summary_owed_by_len(u64::MAX));
+}
+
+/// A set without a kind keeps the rest and ignores a kind with no sidecar.
+#[test]
+fn a_set_of_lacks_without_a_kind_keeps_the_rest() {
+    let all = Lacks::of(Kind::ALL);
+    assert_eq!(
+        all.without(Kind::MonthSummary).kinds().collect::<Vec<_>>(),
+        [Kind::DayIndex, Kind::SortIndex]
+    );
+    assert_eq!(all.without(Kind::Recount), all);
+}

@@ -25,7 +25,10 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::tests::{arm_host_fault, host_fault_armed, host_fault_on};
+use super::tests::{
+    arm_host_fault, arm_sync_fault, disarm_host_fault, host_fault_armed, host_fault_on,
+    sync_fault_fires,
+};
 use super::{
     Action, Appended, BarFile, GATHERED_DIRECTORIES, Gathering, StoreError, TimeLookup,
     refuse_link, refuse_links_below, writer_open,
@@ -1034,4 +1037,74 @@ fn a_small_months_refused_index_look_is_not_the_small_month_rule() {
             .outcome,
         super::Reindexed::Kept
     );
+}
+
+/// A month over the summary threshold whose `.sum` was left out: what a store
+/// written before D-4980 holds. Its `.sum` path is returned.
+fn month_with_no_summary(root: &Root) -> PathBuf {
+    let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    writer.append(&bars(0, 1_100)).unwrap();
+    drop(writer);
+    let sum = root.at(FileKind::MonthSummary);
+    fs::rename(&sum, sum.with_extension("aside")).unwrap();
+    sum
+}
+
+/// **A FULL DISK NEVER PUTS A PARTIAL SUMMARY UNDER ITS NAME.** The write of
+/// the new file is refused: the door says the disk is full, the month still
+/// has no `.sum`, and the next door, with the disk back, clears the leftover
+/// and builds exactly the bytes the writer wrote. Test first (D-7430).
+#[test]
+fn a_full_disk_leaves_no_partial_summary_under_its_name() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("sum-full");
+    let sum = month_with_no_summary(&root);
+    let staging = sum.with_extension("new.sum");
+    arm_host_fault(Action::Write, &staging, 0, ErrorKind::StorageFull);
+    let refused =
+        BarFile::month_summary_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap_err();
+    disarm_host_fault();
+    assert_eq!(
+        refused,
+        StoreError::DiskFull {
+            path: staging.clone(),
+            action: Action::Write
+        }
+    );
+    assert!(!sum.exists(), "no partial file under the name");
+    assert!(matches!(
+        BarFile::month_summary_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap(),
+        crate::file::Summarized::Built(_)
+    ));
+    assert_eq!(
+        fs::read(&sum).unwrap(),
+        fs::read(sum.with_extension("aside")).unwrap()
+    );
+    assert!(!staging.exists(), "the leftover went with the rename");
+}
+
+/// **A SUMMARY THE DISK WILL NOT SYNC NEVER GETS ITS NAME.** The door flushes
+/// before the rename: a refused flush is the door's refusal and the name
+/// stays free, so a power cut cannot leave a torn file under the name of a
+/// month a run closed clean.
+#[test]
+fn a_refused_sync_leaves_the_name_free() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let root = Root::new("sum-sync");
+    let sum = month_with_no_summary(&root);
+    arm_sync_fault(0);
+    let refused =
+        BarFile::month_summary_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap_err();
+    assert!(!sync_fault_fires(), "the door's sync was refused");
+    assert!(
+        matches!(
+            refused,
+            StoreError::Io {
+                action: Action::Sync,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+    assert!(!sum.exists(), "the name appears only after the flush");
 }

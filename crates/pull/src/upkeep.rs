@@ -13,7 +13,23 @@
 //! built stays with the caller (`cli upkeep`), which hands [`run`] the item
 //! keys in order and one function that builds one of them.
 //!
-//! # One file per vendor and kind, under `<store>/audit/`, append-only
+//! # One         let mut lacks = Lacks::of(Kind::ALL.into_iter().filter(|kind| {
+            kind.sidecar().is_some_and(|file| {
+                fs::symlink_metadata(store_path.with_file(file).to_path_buf(&served))
+                    .is_err_and(|why| why.kind() == ErrorKind::NotFound)
+            })
+        }));
+        // ONE MORE `lstat`, ONLY FOR A MONTH WITH NO `.sum`: a step's plan must
+        // be able to read zero, so a month that is too short to owe a summary
+        // is not listed as lacking one (D-7430).
+        if lacks.has(Kind::MonthSummary)
+            && fs::symlink_metadata(store_path.to_path_buf(&served))
+                .is_ok_and(|bars| !summary_owed_by_len(bars.len()))
+        {
+            lacks = lacks.without(Kind::MonthSummary);
+            walked.sum_small += 1;
+        }
+ per vendor and kind, under `<store>/audit/`, append-only
 //!
 //! [`journal_name`] — `audit/upkeep.<vendor>.<kind>.log` — holds one line per
 //! event, each whole once its newline is written:
@@ -1426,6 +1442,12 @@ impl Lacks {
         self.0 & Self::bit(kind) != 0
     }
 
+    /// This set without `kind`.
+    #[must_use]
+    pub const fn without(self, kind: Kind) -> Self {
+        Self(self.0 & !Self::bit(kind))
+    }
+
     /// The kinds lacked, in [`Kind::ALL`] order.
     pub fn kinds(self) -> impl Iterator<Item = Kind> {
         Kind::ALL.into_iter().filter(move |kind| self.has(*kind))
@@ -1471,6 +1493,10 @@ pub struct Walked {
     pub strays: u64,
     /// The first [`crate::gdfl_rekey::NAMED`] of them.
     pub strays_named: Vec<PathBuf>,
+    /// Months with no `.sum` whose bar file is too short to hold
+    /// [`store::time_index::INDEX_MIN_ROWS`] bars: none is owed (D-4933), so
+    /// none is counted as lacking one ([`summary_owed_by_len`]).
+    pub sum_small: u64,
 }
 
 impl Walked {
@@ -1715,6 +1741,21 @@ fn auction_sidecar(name: &str) -> bool {
     name.strip_suffix(crate::gdfl_cm::auction::EXTENSION)
         .and_then(|stem| stem.strip_suffix('.'))
         .is_some_and(|stem| month_named(stem).is_some())
+}
+
+/// Whether a bar file of `len` bytes may owe a `.sum`: `false` only when its
+/// length proves it holds fewer rows than the small-month rule asks (D-4933).
+///
+/// The length is the header and every row written, committed or not, so it
+/// never reads short of the committed rows: a month it calls small is small. A
+/// file too short to hold a header proves nothing, and stays owed, so a run
+/// meets it and refuses it by name. An uncommitted tail can make a small month
+/// look owed; the run then says `small` for it (`docs/06-limits.md`).
+fn summary_owed_by_len(len: u64) -> bool {
+    len.checked_sub(store::format::HEADER_LEN)
+        .is_none_or(|rows| {
+            !store::time_index::below_threshold(rows / store::format::RECORD_STRIDE)
+        })
 }
 
 /// Every month file in one rung directory.

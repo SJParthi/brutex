@@ -1,3 +1,11 @@
+    let free = AtomicBool::new(false);
+    let back = Host {
+        store: &store,
+        commit: Some("0123456789abcdef0123456789abcdef01234567"),
+        now: &|| 7,
+        stop: &free,
+        after_item: &noop,
+    };
 //! `cli upkeep` on invented stores (R3-17, D-6270): a run that stops and
 //! resumes where it stopped, an upkeep and an import shutting each other out
 //! of a month and of the store, the sort index at one and eight workers, a
@@ -189,7 +197,7 @@ fn call(
 ) -> (u8, String) {
     let owned = root.to_path_buf();
     let store = move || Ok(owned.clone());
-    let host = Host {
+Host {
         store: &store,
         commit: Some("0123456789abcdef0123456789abcdef01234567"),
         now: &|| 1_000,
@@ -2270,4 +2278,609 @@ fn an_empty_span_is_said_as_it_was_asked() {
         assert_eq!(code, FAILED, "{out}");
         assert!(out.contains(said), "{out}");
     }
+}
+
+// ═══ BASE-MSUM-BACKFILL: the msum store half (D-7430) ═══════════════════════
+
+/// The tracked store-steps list.
+const STORE_STEPS: &str = include_str!("../../../config/store-steps.toml");
+
+/// `.sum` of a NIFTY spot month.
+fn sum(root: &Path, at: YearMonth) -> PathBuf {
+    store_path("INDEX", "NIFTY", None, at, FileKind::MonthSummary).to_path_buf(root)
+}
+
+/// Whether a reader finds a `.sum` describing `at`'s committed header.
+fn summarised(root: &Path, at: StorePath<'_>, symbol: &str) -> bool {
+    let file = BarFile::open_existing(root, at, crate::srt_builder::symbol_id(symbol)).unwrap();
+    store::month_summary::read_beside(file.path(), &file.header(), at.month()).is_ok()
+}
+
+/// A NIFTY spot month of `count` bars with no sidecar.
+fn bare(root: &Path, at: YearMonth, count: i64) -> StorePath<'static> {
+    let path = store_path("INDEX", "NIFTY", None, at, FileKind::Bars);
+    month(root, path, "NIFTY", count, true);
+    path
+}
+
+/// The plan's number of months lacking a `.sum`, read off its TOTAL line.
+fn lacking_sum(out: &str) -> usize {
+    let total = out.lines().find(|line| line.contains("TOTAL lacks")).unwrap();
+    let (_, rest) = total.split_once(", .sum ").unwrap();
+    rest.split_whitespace().next().unwrap().parse().unwrap()
+}
+
+/// The step of the list whose `command` runs `command`.
+fn step_running(command: &str) -> Option<&'static str> {
+    STORE_STEPS
+        .split("[[step]]")
+        .skip(1)
+        .find(|step| step.contains(&format!("\"{command}\"")))
+}
+
+/// **THE STORE HALF OF THE MONTH SUMMARY IS A STEP, ONE PER FEED.** R3-06
+/// closed DB-A30 in code and left the run to the operator: no step named it,
+/// so no plan, page or check could say it was owed and `/gaps.json` read
+/// every bar of every month it was asked (assurance 29 Oct, n = 4). Each row
+/// names the run on all the workers it was rehearsed at, waits for no import
+/// or pull, carries its measured time and bytes, and stays pending: the live
+/// run is the operator's (D-7430).
+#[test]
+fn the_msum_store_half_is_a_pending_step_for_each_feed() {
+    for (feed, command) in [
+        ("gdfl", "cli upkeep run msum gdfl --workers 8"),
+        ("zerodha", "cli upkeep run msum zerodha --workers 8"),
+    ] {
+        let step = step_running(command).unwrap_or_else(|| panic!("no step runs `{command}`"));
+        assert!(step.contains("state = \"pending\""), "{feed}: {step}");
+        for word in [
+            "rehearsed_ms",
+            "rehearsed_bytes",
+            "rehearsed_on",
+            "rehearsed_result",
+            "prerequisites",
+            "disk",
+        ] {
+            assert!(step.contains(word), "{feed} names no {word}: {step}");
+        }
+        assert!(
+            step.contains(&format!("cli upkeep plan {feed}"))
+                && step.contains(&format!("cli upkeep status msum {feed}")),
+            "{feed}: its check reads the plan and the run: {step}"
+        );
+        assert!(step.contains("/gaps.json"), "{feed}: {step}");
+        assert!(
+            step.contains("no import") || step.contains("no pull"),
+            "{feed}: {step}"
+        );
+    }
+}
+
+/// **A PLAN NAMES THE MONTHS LACKING A SUMMARY, AND NONE AFTER THE STEP.** A
+/// small month is not owed one (D-4933): it is counted apart, so the number
+/// reads zero when the step is done and not only "lacking, small ones among
+/// them". A later run has nothing to take and is no failure.
+#[test]
+fn a_plan_names_the_lacking_months_and_none_after_the_step() {
+    let root = Root::new();
+    let held = spot_months(&root.0, 3);
+    let small = bare(&root.0, ym(2019, 7), 1_023);
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 3, "{out}");
+    assert!(out.contains("SMALL: 1 month(s) with no .sum"), "{out}");
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--workers", "2"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("3 of the 4 month file(s)") && out.contains("1 under 1,024 bars owe none"),
+        "{out}"
+    );
+    assert!(out.contains("(3 built, 3 clean, 0 left)"), "{out}");
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 0, "{out}");
+    assert!(out.contains("SMALL: 1 month(s) with no .sum"), "{out}");
+    for at in held {
+        assert!(summarised(
+            &root.0,
+            store_path("INDEX", "NIFTY", None, at, FileKind::Bars),
+            "NIFTY"
+        ));
+    }
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("(0 built, 0 clean, 0 left)"), "{out}");
+    // A small month: no `.sum` even when a run is told to look at it, and the
+    // run says so; a reader summarises its at most 1,023 rows itself.
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("kept 3, small 1"), "{out}");
+    assert!(!small.with_file(FileKind::MonthSummary).to_path_buf(&root.0).exists());
+}
+
+/// **A WRITER'S COMMIT LEAVES NO MONTH WITHOUT ITS SUMMARY.** After the step
+/// a commit to a held month and a new month over the threshold each keep
+/// their own `.sum`, so the plan stays at zero with no second run.
+#[test]
+fn a_writer_commit_leaves_no_month_without_its_summary() {
+    let root = Root::new();
+    let held = spot_months(&root.0, 1)[0];
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    let at = store_path("INDEX", "NIFTY", None, held, FileKind::Bars);
+    let mut writer =
+        BarFile::open_or_create(&root.0, at, crate::srt_builder::symbol_id("NIFTY")).unwrap();
+    let last = writer.header().last_ts_micros;
+    let more: Vec<Bar> = (1..=40_i64)
+        .map(|k| Bar {
+            ts_micros: last + k * 1_000_000,
+            open: 3_210_000,
+            high: 3_210_050,
+            low: 3_209_950,
+            close: 3_210_010,
+            volume: 3,
+            open_interest: OI_NULL,
+        })
+        .collect();
+    writer.append(&more).unwrap();
+    drop(writer);
+    month(
+        &root.0,
+        store_path("INDEX", "NIFTY", None, ym(2019, 5), FileKind::Bars),
+        "NIFTY",
+        1_100,
+        false,
+    );
+    assert!(summarised(&root.0, at, "NIFTY"));
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 0, "{out}");
+}
+
+/// **A BACKFILL TURNS NO READER AWAY AND IS TURNED AWAY BY NONE.** A reader
+/// holds a month through the whole run: the run builds it, and the reader's
+/// month still answers. A month a writer holds is refused by name, left as
+/// it was, and a resume builds it. Before D-7430 the reader's month was
+/// refused too, and the reader of a month in the build waited on its lock.
+#[test]
+fn a_run_builds_beside_a_reader_and_refuses_a_writers_month_by_name() {
+    let root = Root::new();
+    let months = spot_months(&root.0, 3);
+    let id = crate::srt_builder::symbol_id("NIFTY");
+    let read_at = store_path("INDEX", "NIFTY", None, months[0], FileKind::Bars);
+    let write_at = store_path("INDEX", "NIFTY", None, months[1], FileKind::Bars);
+    let reader = BarFile::open_existing(&root.0, read_at, id).unwrap();
+    let writer = BarFile::open_or_create(&root.0, write_at, id).unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-02.bin"), "{out}");
+    assert!(out.contains("is held by another process"), "{out}");
+    assert!(out.contains("(3 built, 2 clean, 0 left)"), "{out}");
+    assert_eq!(reader.header().n_valid, 1_200);
+    assert!(summarised(&root.0, read_at, "NIFTY"));
+    drop((reader, writer));
+    let (code, out) = plain(&root.0, &["resume", "msum", "gdfl", "1000", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("1 item(s) given"), "{out}");
+    assert!(summarised(&root.0, write_at, "NIFTY"));
+}
+
+/// **WHAT THE NAME CANNOT SAY, `--all` CHECKS.** A spoiled `.sum` and a zero
+/// byte one have a name, so the plan does not list them and a plain run does
+/// not take them; a reader refuses them by name and reads the bars. `--all`
+/// opens every month, rebuilds each whole as a new file and keeps the true
+/// ones: one rerun of the step mends what a cut left.
+#[test]
+fn an_all_run_rebuilds_a_spoiled_summary_and_keeps_a_true_one() {
+    let root = Root::new();
+    let months = spot_months(&root.0, 3);
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    let true_bytes = fs::read(sum(&root.0, months[0])).unwrap();
+    let inode = |at| {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::metadata(sum(&root.0, at)).unwrap().ino()
+    };
+    let kept_inode = inode(months[2]);
+    let spoiled = true_bytes.len() / 2;
+    let mut bytes = true_bytes.clone();
+    bytes[spoiled] ^= 0x5a;
+    fs::write(sum(&root.0, months[0]), &bytes).unwrap();
+    fs::write(sum(&root.0, months[1]), b"").unwrap();
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 0, "the name is there: {out}");
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("built 2, kept 1"), "{out}");
+    assert_eq!(fs::read(sum(&root.0, months[0])).unwrap(), true_bytes);
+    assert_eq!(inode(months[2]), kept_inode, "a true summary is not touched");
+    for at in months {
+        assert!(summarised(
+            &root.0,
+            store_path("INDEX", "NIFTY", None, at, FileKind::Bars),
+            "NIFTY"
+        ));
+    }
+}
+
+/// A `.sum` image of a one-minute month as a version 1 build wrote it: no
+/// flat-carry bitmaps, its flag clear, a true CRC. The bitmaps' length is found
+/// by the decoder, which takes exactly one.
+fn version_1_image(current: &[u8]) -> Vec<u8> {
+    use store::month_summary::{MAGIC, MonthSummary, VERSION_1};
+    let payload = &current[12..current.len() - 4];
+    (1..payload.len())
+        .find_map(|cut| {
+            let mut body = payload[..payload.len() - cut].to_vec();
+            body[12] &= !0b10;
+            let mut section = VERSION_1.to_le_bytes().to_vec();
+            section.extend_from_slice(&[0, 0]);
+            section.extend_from_slice(&body);
+            let crc = store::crc::crc32c(&section);
+            section.extend_from_slice(&crc.to_le_bytes());
+            let mut image = MAGIC.to_vec();
+            image.extend_from_slice(&section);
+            MonthSummary::from_file_image(&image)
+                .is_ok_and(|summary| summary.wants_carries())
+                .then_some(image)
+        })
+        .unwrap()
+}
+
+/// **A VERSION 1 SUMMARY IS UPGRADED ONCE, AND NAMED** (L-R427-03): a one-minute
+/// month whose `.sum` counts no padded minute is built whole as version 2 by
+/// an `--all` run, and the next run keeps it.
+#[test]
+fn an_all_run_builds_a_version_1_summary_whole_as_version_2() {
+    let root = Root::new();
+    let at = StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: ym(2019, 6),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let open = ym(2019, 6).ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+    let rows: Vec<Bar> = (0..1_100_i64)
+        .map(|k| Bar {
+            ts_micros: open + k * 60_000_000,
+            open: 3_210_000 + k % 17,
+            high: 3_210_050 + k % 17,
+            low: 3_209_950 + k % 17,
+            close: 3_210_010 + k % 13,
+            volume: 5,
+            open_interest: OI_NULL,
+        })
+        .collect();
+    let id = crate::srt_builder::symbol_id("NIFTY");
+    let mut writer = BarFile::open_or_create(&root.0, at, id).unwrap();
+    writer.append(&rows).unwrap();
+    drop(writer);
+    let beside = at.with_file(FileKind::MonthSummary).to_path_buf(&root.0);
+    let current = fs::read(&beside).unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("kept 1"), "the writer's own summary: {out}");
+    let v1 = version_1_image(&current);
+    fs::write(&beside, v1).unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("summary_v1"), "{out}");
+    assert_eq!(fs::read(&beside).unwrap(), current, "the same bytes");
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("kept 1"), "{out}");
+}
+
+/// **AN EMPTY MONTH FILE, TWO WAYS.** A header and no row is `empty`: owed
+/// nothing, taken only under `--all`, and clean. A zero-length `.bin` proves
+/// nothing by its length, so the run meets it and refuses it by name; the
+/// other months are built and the run says it is not whole. A rung with one
+/// bar is `small`.
+#[test]
+fn an_empty_and_a_zero_length_month_are_told_apart() {
+    let root = Root::new();
+    let at = store_path("INDEX", "NIFTY", None, ym(2019, 1), FileKind::Bars);
+    drop(BarFile::open_or_create(&root.0, at, crate::srt_builder::symbol_id("NIFTY")).unwrap());
+    bare(&root.0, ym(2019, 2), 1);
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 0, "{out}");
+    assert!(out.contains("SMALL: 2 month(s)"), "{out}");
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--all"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("empty 1, small 1"), "{out}");
+
+    let torn = store_path("INDEX", "NIFTY", None, ym(2019, 3), FileKind::Bars);
+    bare(&root.0, ym(2019, 4), 1_100);
+    fs::create_dir_all(torn.to_path_buf(&root.0).parent().unwrap()).unwrap();
+    fs::write(torn.to_path_buf(&root.0), b"").unwrap();
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 2, "the zero-length one proves nothing: {out}");
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("NOT CLEAN bars/gdfl/NSE/INDEX/NIFTY/1s/2019-03.bin"), "{out}");
+    assert!(out.contains("(2 built, 1 clean, 0 left)"), "{out}");
+    assert!(sum(&root.0, ym(2019, 4)).exists(), "the rest is built");
+    assert!(!sum(&root.0, ym(2019, 3)).exists());
+}
+
+/// **A SEALED MONTH (L-R317-14).** While its `.bin` is beside its `.sbar` the
+/// walk lists it, the run builds a `.sum` from the raw form and a reader, who
+/// opens the sealed form, finds that summary describing its header. The bar
+/// file and the `.sbar` do not change.
+#[test]
+fn a_sealed_month_beside_its_raw_form_is_summarised_and_left_as_it_was() {
+    let root = Root::new();
+    let at = bare(&root.0, ym(2019, 8), 1_200);
+    let id = crate::srt_builder::symbol_id("NIFTY");
+    let bytes = {
+        let raw = BarFile::open_existing(&root.0, at, id).unwrap();
+        let rows = raw.read_range(0, raw.records()).unwrap();
+        store::sealed::build(at, &raw.header(), &rows, None, None)
+            .unwrap()
+            .to_bytes()
+    };
+    let sealed = at.with_file(FileKind::SealedBars).to_path_buf(&root.0);
+    fs::write(&sealed, &bytes).unwrap();
+    let raw = fs::read(at.to_path_buf(&root.0)).unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("(1 built, 1 clean, 0 left)"), "{out}");
+    assert!(summarised(&root.0, at, "NIFTY"));
+    assert_eq!(fs::read(&sealed).unwrap(), bytes);
+    assert_eq!(fs::read(at.to_path_buf(&root.0)).unwrap(), raw);
+}
+
+/// **A MONTH REPAIRED MID-RUN KEEPS ITS OWN SUMMARY.** A repair lands between
+/// two items. The month taken next is opened at the generation every reader
+/// opens, so its `.sum` lands beside the revision and a reader finds it; the
+/// month built before the repair was of the original, and the plan says the
+/// revision lacks none because the repair writes its own, and a resume or an
+/// `--all` run confirms it. Nothing is written to the original's files.
+#[test]
+fn a_month_repaired_mid_run_keeps_its_own_summary() {
+    let root = Root::new();
+    let months = spot_months(&root.0, 2);
+    let id = crate::srt_builder::symbol_id("NIFTY");
+    let at = store_path("INDEX", "NIFTY", None, months[1], FileKind::Bars);
+    let done = AtomicBool::new(false);
+    let repair = |_: &str, _: &Outcome| {
+        if done.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let held: Vec<Bar> = {
+            let file = BarFile::open_existing(&root.0, at, id).unwrap();
+            (0..file.header().n_valid)
+                .map(|row| file.read_record(row).unwrap())
+                .collect()
+        };
+        let first = months[1].ist_bounds_micros().0 + 555 * 60 * 1_000_000;
+        let leading: Vec<Bar> = (0..40_i64)
+            .map(|k| Bar {
+                ts_micros: first + k * 1_000_000,
+                open: 3_190_000 + k,
+                high: 3_190_040 + k,
+                low: 3_189_960 + k,
+                close: 3_190_005 + k,
+                volume: 1,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let offered: Vec<Bar> = leading.iter().chain(&held).copied().collect();
+        let _ = store::repair::repair_month(
+            &root.0,
+            at,
+            id,
+            &offered,
+            store::repair::Policy {
+                open_interest_applies: false,
+                basis_witness: false,
+            },
+        )
+        .unwrap();
+    };
+    let (code, out) = call(
+        &root.0,
+        &["run", "msum", "gdfl"],
+        &AtomicBool::new(false),
+        &repair,
+    );
+    assert_eq!(code, OK, "{out}");
+    let revision = at
+        .with_file(FileKind::MonthSummary)
+        .to_path_buf(&root.0.join("bar-revisions-v1/1"));
+    assert!(revision.is_file(), "beside the generation a reader opens");
+    assert!(!sum(&root.0, months[1]).exists(), "never the original's");
+    assert!(summarised(&root.0, at, "NIFTY"));
+    let (code, out) = plain(&root.0, &["plan", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert_eq!(lacking_sum(&out), 0, "{out}");
+}
+
+/// **COMBINATION: AN IMPORT STARTS DURING THE RUN, THEN A STOP AND A RESUME.**
+/// The run takes no further item once the import's lock is held, ends
+/// `stopped` naming the claim, and a `resume` beside the live import is
+/// refused before its walk. Once the import is gone the resume at another
+/// worker count builds exactly what was left, and the bytes are the bytes of
+/// one uninterrupted run.
+#[test]
+fn an_import_during_a_run_stops_it_and_a_resume_finishes_the_same_bytes() {
+    let whole = Root::new();
+    let months = spot_months(&whole.0, 4);
+    let (code, out) = plain(&whole.0, &["run", "msum", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+
+    let root = Root::new();
+    let _ = spot_months(&root.0, 4);
+    let import = Holder {
+        pid: 4_242,
+        run_started: 7,
+        kind: ImportKind::Options,
+        verb: "gdfl-import options zip 2019-01-01 2019-01-31".to_owned(),
+        claim: None,
+        sidecar: None,
+    };
+    let held = Mutex::new(None);
+    let after = |_: &str, _: &Outcome| {
+        let mut lock = held.lock().unwrap();
+        if lock.is_none() {
+            *lock = Some(RunLock::take(&root.0, &import).unwrap());
+        }
+    };
+    let (code, out) = call(&root.0, &["run", "msum", "gdfl"], &AtomicBool::new(false), &after);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("ENDED stopped"), "{out}");
+    assert!(out.contains("run_busy"), "{out}");
+    assert!(out.contains("(1 built, 1 clean, 3 left)"), "{out}");
+    let (code, out) = plain(&root.0, &["resume", "msum", "gdfl", "1000"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("REFUSED: run_busy"), "{out}");
+    drop(held.into_inner().unwrap());
+    let (code, out) = plain(
+        &root.0,
+        &["resume", "msum", "gdfl", "1000", "--workers", "3"],
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("3 item(s) given"), "{out}");
+    for at in months {
+        assert_eq!(
+            fs::read(sum(&root.0, at)).unwrap(),
+            fs::read(sum(&whole.0, at)).unwrap()
+        );
+    }
+}
+
+/// **COMBINATION: THE DISK REFUSES A MONTH, THEN A RESUME AT ANOTHER WORKER
+/// COUNT.** What the store's door refuses to write (a staging name that cannot
+/// be created stands in here for a full disk: `store::file`'s tests refuse the
+/// write itself and the sync) leaves no name behind, the run says the month
+/// is not clean, and the resume at another worker count builds that month
+/// and none other, with the bytes of one uninterrupted run.
+#[test]
+fn a_refused_month_then_a_resume_at_another_worker_count_builds_only_it() {
+    let whole = Root::new();
+    let months = spot_months(&whole.0, 3);
+    let (code, _) = plain(&whole.0, &["run", "msum", "gdfl", "--workers", "1"]);
+    assert_eq!(code, OK);
+
+    let root = Root::new();
+    let _ = spot_months(&root.0, 3);
+    let staging = sum(&root.0, months[1]).with_extension("new.sum");
+    fs::create_dir(&staging).unwrap();
+    let (code, out) = plain(&root.0, &["run", "msum", "gdfl", "--workers", "1"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("(3 built, 2 clean, 0 left)"), "{out}");
+    assert!(!sum(&root.0, months[1]).exists(), "no name for a refused file");
+    fs::remove_dir(&staging).unwrap();
+    let (code, out) = plain(
+        &root.0,
+        &["resume", "msum", "gdfl", "1000", "--workers", "8"],
+    );
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("1 worker(s), 1 item(s) given, 2 skipped"), "{out}");
+    for at in months {
+        assert_eq!(
+            fs::read(sum(&root.0, at)).unwrap(),
+            fs::read(sum(&whole.0, at)).unwrap()
+        );
+    }
+}
+
+/// **OUT OF THE BOX: THE CLOCK STEPS BACK DURING A RUN.** A run's id comes from
+/// the clock, and a clock set back would hand a later run an old id, whose
+/// resume chain would then read another run's lines. The id stays above every
+/// id in the journal, the resume finds its chain by name, and a stop asked of
+/// the earlier id is refused rather than left for the new one.
+#[test]
+fn a_clock_stepped_back_gives_a_resume_its_own_id() {
+    let root = Root::new();
+    let _ = spot_months(&root.0, 3);
+    let owned = root.0.clone();
+    let store = move || Ok(owned.clone());
+    let (stop, seen) = (AtomicBool::new(false), AtomicUsize::new(0));
+    let after = |_: &str, _: &Outcome| {
+        if seen.fetch_add(1, Ordering::AcqRel) == 0 {
+            stop.store(true, Ordering::Release);
+        }
+    };
+    let host = |now: &'static (dyn Fn() -> u64 + Sync),
+                stop: &'static AtomicBool,
+                after_item: &'static (dyn Fn(&str, &Outcome) + Sync)| Host {
+        store: Box::leak(Box::new(store.clone())),
+        commit: Some("0123456789abcdef0123456789abcdef01234567"),
+        now,
+        stop,
+        after_item,
+    };
+    let _ = host;
+    let host = Host {
+        store: &store,
+        commit: Some("0123456789abcdef0123456789abcdef01234567"),
+        now: &|| 5_000,
+        stop: &stop,
+        after_item: &after,
+    };
+    let mut out = String::new();
+    assert_eq!(command_with(&["run", "msum", "gdfl"], &host, &mut out), FAILED);
+    assert!(out.contains("run 5000"), "{out}");
+    let (free, back) = (AtomicBool::new(false), Host {
+        store: &store,
+        commit: Some("0123456789abcdef0123456789abcdef01234567"),
+        now: &|| 7,
+        stop: &stop,
+        after_item: &noop,
+    });
+    let back = Host { stop: &free, ..back };
+    let mut out = String::new();
+    assert_eq!(
+        command_with(&["resume", "msum", "gdfl", "5000"], &back, &mut out),
+        OK,
+        "{out}"
+    );
+    assert!(out.contains("run 5001 (resumes run 5000)"), "{out}");
+    assert!(out.contains("2 item(s) given, 1 skipped"), "{out}");
+    let (code, out) = plain(&root.0, &["stop", "msum", "gdfl", "5000"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("run 5000 is not running"), "{out}");
+}
+
+/// **EVERY `msum` RUN SAYS WHAT IT WAS GIVEN AND WHAT IT LEFT, ON `store.sum`.**
+/// One line at its start and one at its end, so the months lacking a summary
+/// are searched on `/logs` and no walk is needed to see them. A run that
+/// leaves work says so at WARN.
+#[test]
+fn a_run_says_on_store_sum_what_it_was_given_and_left() {
+    let given = super::msum_given(Vendor::Gdfl, 7, "7 of the 9 month file(s)");
+    assert_eq!(given.target, "store.sum");
+    assert_eq!(given.level, telemetry::Level::Info);
+    assert!(given.fields().iter().any(|(key, _)| *key == "lacking"));
+    let whole = upkeep::Ran {
+        id: 9,
+        resumed: None,
+        workers: 1,
+        skipped: 0,
+        outcomes: vec![Some(Outcome::clean("built", "b"))],
+        how: How::Done,
+        why: String::new(),
+        torn: 0,
+        millis: 1,
+        flushes: 1,
+    };
+    let left = upkeep::Ran {
+        how: How::Stopped,
+        outcomes: vec![Some(Outcome::clean("built", "b")), None],
+        ..whole.clone()
+    };
+    assert_eq!(super::msum_left(Vendor::Zerodha, &whole).level, telemetry::Level::Info);
+    let event = super::msum_left(Vendor::Zerodha, &left);
+    assert_eq!(event.level, telemetry::Level::Warn);
+    assert_eq!(event.target, "store.sum");
+    assert!(event.fields().iter().any(|(key, _)| *key == "left"));
 }

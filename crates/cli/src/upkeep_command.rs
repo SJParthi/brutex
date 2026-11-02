@@ -1,4 +1,8 @@
-//! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
+    let _ = writeln!(out, "{heading} under {}", root.display());
+    if kind == Kind::MonthSummary {
+        let _dropped_when_filtered = telemetry::emit(&msum_given(vendor, plan.len(), &said));
+    }
+    let busy = || live_run(root, vendor);//! `cli upkeep` — the store's catch-up steps as tracked runs: what each stored
 //! month lacks, and each builder run over it on N workers with a run id,
 //! progress, Stop and resume, under the import's own locks. R3-17, D-6270;
 //! DB-027, DB-N14.
@@ -33,7 +37,14 @@
 //! `plan` writes nothing: it walks the scope once (`pull::upkeep::months`)
 //! and says, per series, how many months lack each index, and how the last
 //! run of each kind ended. A month under 1,024 bars needs none of the three
-//! (D-4933); the plan counts it as lacking and the run names it `small`.
+//! (D-4933). For `.tix` and `.srt` the plan counts it as lacking and the run
+//! names it `small`; for `.sum` the walk reads its length, the month is counted
+//! apart as `small`, and a run takes it only under `--all`, so the months
+//! lacking a `.sum` read zero once the step is done (D-7430).
+//!
+//! Every `msum` run says on `store.sum`, at its start and at its end, what it
+//! was given and what it left ([`msum_given`], [`msum_left`]), so the months
+//! lacking a summary are found on `/logs` without a walk.
 //!
 //! `run` is one tracked run (`pull::upkeep::run`): its journal is
 //! `audit/upkeep.<vendor>.<kind>.log`, each item one line carrying the run's
@@ -476,6 +487,12 @@ fn items(
                 walked.links,
                 walked.strays
             );
+            // THE SMALL MONTHS ARE SAID, never dropped silently (D-7430).
+            let said = if kind == Kind::MonthSummary {
+                format!("{said}; {} under 1,024 bars owe none", walked.sum_small)
+            } else {
+                said
+            };
             Ok((months, said))
         }
     }
@@ -831,6 +848,12 @@ fn plan(out: &mut String, root: &Path, vendor: Vendor, scope: &Scope) -> u8 {
     );
     let _ = writeln!(
         out,
+        "  SMALL: {} month(s) with no .sum are under 1,024 bars by their length and owe none \
+         (D-4933), so they are not among those lacking one; a run takes them only under --all",
+        walked.sum_small
+    );
+    let _ = writeln!(
+        out,
         "  NOT WALKED: {} symbolic link(s), never followed, and {} name(s) that are not part of a \
          store path",
         walked.links, walked.strays
@@ -1040,7 +1063,37 @@ fn run(
         }
     };
     render_run(out, (kind, vendor), &said, &ran, &plan);
+    if kind == Kind::MonthSummary {
+        let _dropped_when_filtered = telemetry::emit(&msum_left(vendor, &ran));
+    }
     if ran.whole() { OK } else { FAILED }
+}
+
+/// `store.sum`, INFO: what one `msum` run was given, before its first item.
+/// One line a run. `said` carries the months in scope and those that owe none.
+fn msum_given<'a>(vendor: Vendor, given: usize, said: &'a str) -> telemetry::Event<'a> {
+    telemetry::Event::info("store.sum", "months lacking a summary, at a run's start")
+        .with("vendor", vendor.as_str())
+        .with("lacking", given)
+        .with("scope", said)
+}
+
+/// `store.sum`, INFO, or WARN when the run left work: how one `msum` run ended
+/// and how many of the items it was given it left without a summary. One line
+/// a run. The journal holds each item; a page needs only this.
+fn msum_left<'a>(vendor: Vendor, ran: &'a Ran) -> telemetry::Event<'a> {
+    let message = "months left lacking a summary, at a run's end";
+    if ran.whole() {
+        telemetry::Event::info("store.sum", message)
+    } else {
+        telemetry::Event::warn("store.sum", message)
+    }
+    .with("vendor", vendor.as_str())
+    .with("run", ran.id)
+    .with("how", ran.how.word())
+    .with("built", ran.built())
+    .with("clean", ran.clean())
+    .with("left", ran.left())
 }
 
 /// `cli upkeep`, against the CLI's store root (`BRUTEX_STORE`), stamped with
