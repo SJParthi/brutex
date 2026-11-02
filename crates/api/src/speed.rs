@@ -522,7 +522,8 @@ pub struct Speed {
     /// both roll; two rolls interleaved row by row could push a later copy
     /// before an earlier one, and the next difference would then be taken
     /// backwards and wrap to four billion. A roll holds this for its whole
-    /// walk; a request never takes it.
+    /// walk, and [`Self::roll_writing`] across its writes too; a request never
+    /// takes it.
     rolling: Mutex<()>,
 }
 
@@ -626,6 +627,26 @@ impl Speed {
     /// shutdown, whose minute was not over.
     pub fn roll(&self, now_ms: u64, partial: bool) -> Vec<MinuteLine> {
         let _one_roll = self.rolling.lock().unwrap_or_else(PoisonError::into_inner);
+        self.frozen_lines(now_ms, partial)
+    }
+
+    /// [`Self::roll`], with `write` called on each line before the next roll
+    /// can freeze anything; how many lines. A roll that has returned therefore
+    /// has every earlier roll's lines written, never only frozen, so the last
+    /// flush of a stopping process cannot return while the minute thread still
+    /// holds a line it froze, and a caller that reads the log after its flush
+    /// finds the lines of any flush beside it (BASE-REDS-1023 repair 7:
+    /// `a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free`
+    /// read an empty log while another flush held its count).
+    fn roll_writing(&self, now_ms: u64, partial: bool, write: impl FnMut(&MinuteLine)) -> usize {
+        let _one_roll = self.rolling.lock().unwrap_or_else(PoisonError::into_inner);
+        let lines = self.frozen_lines(now_ms, partial);
+        lines.iter().for_each(write);
+        lines.len()
+    }
+
+    /// [`Self::roll`]'s freeze, under the caller's hold of `rolling`.
+    fn frozen_lines(&self, now_ms: u64, partial: bool) -> Vec<MinuteLine> {
         let mut lines = Vec::new();
         for row in self.all() {
             let minute_max = row.live.minute_max.swap(0, Ordering::Relaxed);
@@ -762,17 +783,20 @@ pub fn global() -> &'static Speed {
     })
 }
 
-/// Sleeps to each minute's end and freezes the table, writing its lines.
+/// One [`Speed::roll_writing`] line, to the process log.
+fn written(line: &MinuteLine) {
+    let _written = line.emit();
+}
+
+/// Sleeps to each minute's end and freezes the table, writing its lines. It is
+/// started by the table's own first use, so it waits for that to finish.
 fn minute_thread() {
+    let table = TABLE.wait();
     loop {
         let now = now_ms();
         let wait = MINUTE_MS - now % MINUTE_MS;
         std::thread::sleep(std::time::Duration::from_millis(wait));
-        if let Some(table) = TABLE.get() {
-            for line in table.roll(now_ms(), false) {
-                let _written = line.emit();
-            }
-        }
+        let _lines = table.roll_writing(now_ms(), false, written);
     }
 }
 
@@ -783,11 +807,7 @@ pub fn flush_at_shutdown() -> usize {
     let Some(table) = TABLE.get() else {
         return 0;
     };
-    let lines = table.roll(now_ms(), true);
-    for line in &lines {
-        let _written = line.emit();
-    }
-    lines.len()
+    table.roll_writing(now_ms(), true, written)
 }
 
 /// The open requests named in one line: `route=n` each, comma-separated, and

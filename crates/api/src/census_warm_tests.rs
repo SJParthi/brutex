@@ -259,8 +259,9 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
                 .flat_map(|feed| WARMED.into_iter().skip(1).map(move |name| (name, *feed))),
         )
         .collect();
-    // EVERY CENSUS READ UNDER THIS ROOT PAUSES, so the warm is caught warming.
-    slow_read::set(&store.root, 300);
+    // EVERY CENSUS READ UNDER THIS ROOT IS HELD, so the warm is caught warming
+    // however long this test takes to look; zero, below, lets it go.
+    slow_read::set(&store.root, READ_HELD_MS);
     let site = store.site();
     assert!(!in_background(&site), "not before the start");
     start(&site, &feeds).expect("the warm thread starts");
@@ -276,7 +277,7 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
     assert_eq!(
         row_of(&listed, CENSUS, Vendor::Gdfl).state,
         WarmState::Warming,
-        "GDFL's census read takes 300 ms"
+        "GDFL's census read is held"
     );
     let order: Vec<(&str, Vendor)> = listed.iter().map(|row| (row.name, row.vendor)).collect();
     assert_eq!(
@@ -300,6 +301,8 @@ fn every_cache_is_warm_or_says_warming_after_a_restart() {
     assert_eq!(body["caches"][0]["feed"], "gdfl", "the offered feeds lead");
     assert_eq!(body["caches"][0]["state"], "warming");
 
+    // LET THE READS GO: from now each takes what is left of 300 ms.
+    slow_read::set(&store.root, 300);
     let ready = wait_ready(&site);
     slow_read::set(&store.root, 0);
     for (name, vendor) in &expected {
@@ -486,6 +489,11 @@ async fn the_first_run_within_the_bound_ends_the_runs_and_none_within_fails_with
         )
     );
 }
+
+/// How long a read a test holds across what it asks can last: past any stall,
+/// and short enough that a request that waited for the read fails its bound
+/// inside a minute. The test ends the hold with zero ([`slow_read::pause`]).
+const READ_HELD_MS: u64 = 60_000;
 
 /// How long every census read pauses in [`one_change_beside_a_thousand_requests`].
 const NEVER_BLOCKS_READ_PAUSE_MS: u64 = 5_000;
@@ -860,8 +868,10 @@ async fn no_db_view_reads_the_whole_census() {
         &store.reads()[mark..]
     );
 
-    // A CHANGE, AND A RE-READ THAT TAKES A SECOND.
-    slow_read::set(&store.root, 1_000);
+    // A CHANGE, AND A RE-READ HELD UNTIL EVERY VIEW HAS ANSWERED: with a second
+    // of pause, a machine that took a second over the views saw the read land
+    // half way, and a later view said, rightly, that it was current.
+    slow_read::set(&store.root, READ_HELD_MS);
     store.append(&[row(option_key(500), 3)]);
     let mark = store.reads().len();
     ask_every(addr, &views, 1).await;

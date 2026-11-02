@@ -1398,7 +1398,7 @@ pub(crate) mod slow_read {
     static PAUSES: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
 
     /// Every census read under `root` from now pauses `ms` milliseconds;
-    /// zero stops it.
+    /// zero stops it, a read already paused included.
     pub(crate) fn set(root: &Path, ms: u64) {
         let mut pauses = PAUSES
             .lock()
@@ -1420,11 +1420,19 @@ pub(crate) mod slow_read {
             .map_or(0, |(_, ms)| *ms)
     }
 
-    /// Pauses, if a test asked for it under `root`.
+    /// Pauses, if a test asked for it under `root`: until the time it asked
+    /// is out or it sets zero. So a test that needs a read held across what it
+    /// asks holds it by a long pause and ends it by zero, and no clock of the
+    /// test's decides whether the read landed first (BASE-REDS-1023 repair 7).
     pub(crate) fn pause(root: &Path) {
-        let ms = ms(root);
-        if ms > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
+        let began = std::time::Instant::now();
+        loop {
+            let asked = std::time::Duration::from_millis(ms(root));
+            let left = asked.saturating_sub(began.elapsed());
+            if left.is_zero() {
+                return;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
         }
     }
 }
