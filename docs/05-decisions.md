@@ -84887,6 +84887,65 @@ an addendum to the entry it extends; nothing above is edited.
     lookup takes twenty times a raw one here and so is twenty times as likely
     to hold a stall.
 
+**Addenda, 2 Nov 2026 (BASE-REDS-1023 repair 7; check r7 of 2 Nov 2026,
+`state/fix/round2/verify-BASE-REDS-1023-r7.json`, verdict fail on two
+items).** The block is still used, so each is an addendum to the entry it
+extends; nothing above is edited.
+
+18. **D-7152: a timed refusal stood behind another test's re-read (check r7,
+    blocking 1); addendum 15 corrected here, because the ledger is
+    append-only.** Addendum 15 said of the other wall-clock bounds in Rust
+    tests that "none has been seen red since". That claim rested on no count
+    of who shares a lock, and it fell at the next gate:
+    `a_fifo_a_directory_or_a_symlink_at_a_scrub_file_is_refused_at_once`, the
+    bound this package's first repair made a ratio, failed gate 1e on tip
+    4a486314a with 308.5 ms against a regular file's 1.2 ms. The route was
+    right and the measure was not. `KEPT` is one lock a vendor in the whole
+    process and `with_index` holds it across a re-read;
+    `a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start`, next
+    in the binary's order, asks for that lock from eight threads; the regular
+    root of the FIFO test takes the vendor's index for its own ledger, so the
+    growing ledger's next reader starts again from byte 0 and the next timed
+    refusal waits for it. Measured on the tip's binary: the two alone in 48
+    loops at load 250, 3,888 runs, 0 failed; beside four whole api lib copies,
+    815 runs, 14 failed, every one on the ledger, which is refused under the
+    lock, and none on the cursor, refused before it. Chosen:
+    `zerodha_index_alone`, a mutex of the test module held for the whole of
+    the three tests that index that vendor, this repository's `CACHE_TEST` and
+    `PRESS_TESTS` shape. The odd file's answers are still taken in turn with
+    the regular ones and held to the same 20 regular answers and 50 ms. @@AFTER1@@
+    Refused: another vendor for the FIFO test, because none is free (the regular root's
+    answer would restart the index under the read counts of the Dhan and
+    TrueData tests and the steps of the Groww test, and gdfl's dozen tests would
+    stand in its timing); refusing a non-regular file before the lock, which
+    changes a correct route to please a test.
+19. **D-7152: the third test of TST-01's shape (check r7, blocking 2).**
+    `the_holder_is_named_through_every_in_process_hand_off` still asserted no
+    refusal at all, the assertion repair 3 took out of the two tests beside
+    it, and failed 'no append refused' left 1 right 0 in 3 of 4 whole api lib
+    copies under check r7's load. Its sampler's attempts take the same lock,
+    and no production caller of the plain append that meets the bound hides
+    it. Each record is now asked once and its answer goes through
+    `refused_of`, which is `judged`: past the bound and named counts one and
+    is printed, inside the bound or unnamed fails, `held >= 50` and
+    `unnamed == 0` as they were. `the_hand_off_counts_a_named_refusal_and_fails_a_lost_one`
+    proves the count on invented refusals. @@AFTER2@@ A grep of the workspace for the
+    shape found three more in `flock_patient_tests.rs`, on `store::flock`'s
+    1 s bound: their holds are a 1 or 2 ms sleep with no `fsync`, no saved log
+    shows one red, and check r7's store hunt passed them, so they are left as
+    they are, by that reading and not by a claim that they cannot fail.
+20. **D-7152: `parallel` joins every worker before it reads an answer, and two
+    of the ledger's sentences (check r7's follow-ups).** Collecting the joins
+    into a `Result` stopped at the first `Err`, so a second stopped worker
+    stayed unjoined and `thread::scope` panicked in place of "a worker
+    stopped": BRED-54's sentence held for one stopped worker only (an exact
+    copy of the old function, 'a scoped thread panicked'). No input stops one
+    today; the fold costs nothing and makes the sentence true for any number.
+    Addendum 13's 2,437 and L-BRED23-20's 2,425 are one count: 2,437 listed,
+    12 ignored, 2,425 run. `knobs::scope::may_move` lets a thread that is no
+    test's own move a knob with no guard, which L-BRED23-20 now says beside the
+    reads; the probe counted no such move.
+
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
 **What was wrong.** D-5185 item 5 and T2S-10 said an `--out` inside the store

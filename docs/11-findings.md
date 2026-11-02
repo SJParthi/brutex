@@ -1355,6 +1355,19 @@ confirmed by two skeptics; their corrections are applied.
   FIXED (D-7152 addendum 17): the first of up to five whole measurements that
   holds the unchanged bounds, the decision tested with invented figures
   (BRED-55, L-BRED23-22).
+- **BRED23-F52: a FIFO's timed refusal stood behind another test's re-read**
+  (check r7, gate 1e red on 4a486314a): 308.5 ms against a regular file's
+  1.2 ms, 14 of 815 runs here beside four whole api lib copies, every one on
+  the ledger. FIXED (D-7152 addendum 18): the tests that index zerodha hold
+  `zerodha_index_alone`, the bound unchanged (BRED-56). Addendum 15's "none
+  has been seen red since" is corrected there.
+- **BRED23-F53: the hand-off test still asserted no refusal** (check r7: 3 of
+  4 whole api lib copies, 'no append refused' left 1). The third test of
+  TST-01's shape. FIXED (D-7152 addendum 19): each answer judged by
+  `refused_of`, proved on invented refusals (BRED-56, L-BRED23-16).
+- **BRED23-F54: a second stopped worker panicked `thread::scope` in place of
+  its refusal** (check r7's follow-up; no input stops a worker today). FIXED
+  (D-7152 addendum 20): `parallel` joins every worker first (BRED-56).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

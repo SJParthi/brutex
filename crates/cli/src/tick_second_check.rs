@@ -2518,9 +2518,13 @@ fn store_only_row(ctx: &DayContext<'_>, item: &Item, label: Label, why: &str) ->
 /// Runs `job` over `0..n` on `workers` threads, each taking the next index;
 /// the answers in index order. A worker that panicked is named.
 ///
+/// EVERY WORKER IS JOINED before an answer is read (check r7): collecting the
+/// joins into a `Result` stopped at the first `Err`, so a second stopped worker
+/// stayed unjoined and `thread::scope` panicked in place of this refusal.
+///
 /// # Errors
 ///
-/// `"a worker stopped"` when a worker thread panicked.
+/// `"a worker stopped"` when any worker thread panicked.
 pub(crate) fn parallel<T: Send>(
     n: usize,
     workers: usize,
@@ -2544,10 +2548,16 @@ pub(crate) fn parallel<T: Send>(
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().map_err(|_| "a worker stopped".to_owned()))
-            .collect::<Result<Vec<_>, String>>()
+        handles.into_iter().fold(
+            Ok(Vec::new()),
+            |joined: Result<Vec<_>, String>, handle| {
+                let answer = handle.join().map_err(|_| "a worker stopped".to_owned());
+                joined.and_then(|mut all| {
+                    all.push(answer?);
+                    Ok(all)
+                })
+            },
+        )
     })?;
     for (at, answer) in answers.into_iter().flatten() {
         if let Some(slot) = slots.get_mut(at) {

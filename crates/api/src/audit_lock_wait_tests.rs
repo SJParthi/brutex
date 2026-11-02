@@ -256,6 +256,10 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
     // wrong both times while the lock stays held is the defect. Fails on the
     // build before the repair (the journal's appends never reached
     // `store::flock`'s registry, so every sample read "another process").
+    // Each record is asked once and its answer judged as the eight appenders'
+    // are: the sampler's attempts take the lock too, so under load a hand-off
+    // can meet the bound, and that named refusal is L-BRED23-16's stated limit,
+    // printed; a refusal inside the bound or with no name is a loss and fails.
     let (root, journal) = journal_with_one_record("hand-off");
     let journal = Arc::new(journal);
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -263,9 +267,12 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
         .map(|w| {
             let journal = Arc::clone(&journal);
             std::thread::spawn(move || {
-                (0..120)
-                    .filter(|i| journal.append(&closed(&format!("h{w}-{i}"))).is_err())
-                    .count()
+                refused_of((0..120).map(|i| {
+                    let asked = Instant::now();
+                    let answer = journal.append(&closed(&format!("h{w}-{i}")));
+                    (answer, asked.elapsed())
+                }))
+                .expect("a refusal is the bound's, never a loss")
             })
         })
         .collect();
@@ -300,7 +307,7 @@ fn the_holder_is_named_through_every_in_process_hand_off() {
         .sum();
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let (held, unnamed) = sampler.join().expect("the sampler");
-    assert_eq!(refused, 0, "no append refused");
+    eprintln!("hand-off: {refused} of 480 appends refused by the bound, {held} samples held");
     assert!(
         held >= 50,
         "the sampler saw the lock held often enough to judge: {held}"
@@ -649,6 +656,19 @@ fn judged(answer: Result<(), String>, waited: Duration) -> Result<bool, String> 
     }
 }
 
+/// How many of `answers` (each a plain append's answer and its wait, in the
+/// order they were asked) the bound refused by name; the first that is a loss
+/// ends the count ([`judged`]).
+fn refused_of(
+    answers: impl IntoIterator<Item = (Result<(), String>, Duration)>,
+) -> Result<usize, String> {
+    answers
+        .into_iter()
+        .try_fold(0, |refused, (answer, waited)| {
+            judged(answer, waited).map(|landed| refused + usize::from(!landed))
+        })
+}
+
 /// Appends `record` once and answers whether it landed; a loss panics.
 fn once(journal: &Journal, record: &Record) -> bool {
     let asked = Instant::now();
@@ -729,6 +749,26 @@ fn a_refusal_inside_the_bound_is_a_loss_and_one_that_waited_it_out_is_named() {
         Ok(1)
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// THE HAND-OFF TEST'S COUNT, ON INVENTED REFUSALS (BASE-REDS-1023 repair 7,
+/// check r7: that test still asserted none at all). A landed append counts
+/// nothing, a refusal past the bound with its name counts one, and a refusal
+/// inside the bound or with no name is a loss, whatever landed before it.
+#[test]
+fn the_hand_off_counts_a_named_refusal_and_fails_a_lost_one() {
+    let named = "/j: cannot take the journal append lock for a closed record (y) within its 1000 ms bound (APPEND_LOCK_WAIT): held; so this record was refused rather than interleaved";
+    let landed = || (Ok(()), Duration::ZERO);
+    let refused = || (Err(named.to_owned()), APPEND_LOCK_WAIT);
+    assert_eq!(refused_of([]), Ok(0), "nothing asked, nothing refused");
+    assert_eq!(refused_of([landed(), landed()]), Ok(0));
+    assert_eq!(refused_of([landed(), refused(), refused()]), Ok(2));
+    let inside = (Err(named.to_owned()), Duration::from_millis(1));
+    let why = refused_of([landed(), inside]).expect_err("inside the bound");
+    assert!(why.contains("inside the"), "{why}");
+    let unnamed = (Err("/j: held".to_owned()), APPEND_LOCK_WAIT);
+    let why = refused_of([refused(), unnamed, refused()]).expect_err("no name");
+    assert!(why.contains("does not name its bound"), "{why}");
 }
 
 /// code-5 itself: a run whose opening met another writer's append, and whose

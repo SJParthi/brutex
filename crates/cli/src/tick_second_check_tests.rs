@@ -3244,6 +3244,25 @@ fn a_year_no_day_can_name_adds_no_day_of_the_extra_archive() {
     assert_eq!(report.unchanged, vec![1969]);
 }
 
+/// Two workers that stop are the same refusal as one, by name: the second
+/// was left unjoined and `thread::scope` panicked in place of it (check r7).
+/// Each stops on its first day, so with two days both do. One that stops
+/// beside one that answers is the same refusal, and workers that all answer
+/// answer in index order, whichever of them took a day.
+#[test]
+fn two_workers_that_stop_are_one_refusal_by_name_and_the_answers_keep_their_order() {
+    let stopped: Result<Vec<usize>, String> = parallel(2, 2, |day| std::panic::panic_any(day));
+    assert_eq!(stopped, Err("a worker stopped".to_owned()));
+    let one_of_two: Result<Vec<usize>, String> = parallel(2, 2, |day| {
+        if day == 1 {
+            std::panic::panic_any(day);
+        }
+        day
+    });
+    assert_eq!(one_of_two, Err("a worker stopped".to_owned()));
+    assert_eq!(parallel(5, 3, |day| day * 2), Ok(vec![0, 2, 4, 6, 8]));
+}
+
 /// A worker that stops ends the run by name, and takes the run's lock with
 /// it: the next run of the same directory reads every day.
 #[test]

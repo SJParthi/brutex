@@ -1356,6 +1356,24 @@ mod tests {
         root
     }
 
+    /// HELD FOR THE WHOLE OF EVERY TEST HERE THAT INDEXES [`Vendor::Zerodha`]
+    /// (BASE-REDS-1023 repair 7, check r7). [`KEPT`] is one lock a vendor in
+    /// the whole process and `with_index` holds it across a re-read.
+    /// `a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start`
+    /// asks for it from eight threads, and the regular root of the test beside
+    /// it takes the vendor's index for its own ledger, so that test's next
+    /// timed refusal stood behind a re-read of the growing ledger from byte 0:
+    /// 308 ms against a regular file's 1.2 ms, every failure on the ledger,
+    /// which is refused under the lock, and none on the cursor, refused before
+    /// it. Every other test of this binary names another vendor or has no
+    /// zerodha cursor, so `standing` answers before the index.
+    static ZERODHA_INDEX: Mutex<()> = Mutex::new(());
+
+    /// [`ZERODHA_INDEX`], held; a test that failed under it leaves it usable.
+    fn zerodha_index_alone() -> std::sync::MutexGuard<'static, ()> {
+        ZERODHA_INDEX.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn write(root: &Path, vendor: Vendor, cursor: &str, ledger: &str) {
         std::fs::write(root.join(cli::scrub_cursor_name(vendor)), cursor).unwrap();
         std::fs::write(root.join(cli::scrub_ledger_name(vendor)), ledger).unwrap();
@@ -1900,6 +1918,7 @@ mod tests {
     /// key; and a query that cannot be read is refused by name.
     #[test]
     fn a_vendor_never_scrubbed_says_so_and_a_bad_query_is_refused() {
+        let _alone = zerodha_index_alone();
         let root = root_of("scrub-route-never");
         let body = answer(&root, "feed=zerodha&key=NSE-INDEX-NIFTY").expect("answered");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
@@ -2304,6 +2323,7 @@ mod tests {
     /// "nothing found".
     #[test]
     fn a_fifo_a_directory_or_a_symlink_at_a_scrub_file_is_refused_at_once() {
+        let _alone = zerodha_index_alone();
         let root = root_of("scrub-route-odd");
         let plain = root_of("scrub-route-odd-plain");
         write(
@@ -2347,7 +2367,9 @@ mod tests {
                 // on a root of its own; each side's fastest is its least
                 // disturbed estimate, and the odd file's may cost at most 20
                 // regular answers and 50 ms. A refusal that waited on the
-                // FIFO would be seconds against a millisecond.
+                // FIFO would be seconds against a millisecond. No other test
+                // holds this vendor's index meanwhile (`zerodha_index_alone`),
+                // so what is timed is the refusal, never another test's read.
                 let query = "feed=zerodha&timeframe=1min&key=NSE-INDEX-NIFTY";
                 let (mut odd, mut base) = (std::time::Duration::MAX, std::time::Duration::MAX);
                 let mut body = String::new();
@@ -2547,6 +2569,7 @@ mod tests {
     #[test]
     fn a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start() {
         use std::io::Write as _;
+        let _alone = zerodha_index_alone();
         let root = root_of("scrub-route-growing");
         let vendor = Vendor::Zerodha;
         let line =
