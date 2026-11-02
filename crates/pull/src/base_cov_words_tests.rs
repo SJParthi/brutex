@@ -448,3 +448,68 @@ fn the_stored_filter_is_sorted_and_names_each_once() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn a_day_not_owed_says_which_document_says_so() {
+    use crate::gaps::NotOwed;
+    use crate::session::Day;
+    let on = Day::new(2024, 3, 1).unwrap();
+    says(
+        &NotOwed::BeforeListing { listed_on: on }.evidence(),
+        &["before its listing on 2024-03-01", "NSE security master"],
+    );
+    says(
+        &NotOwed::AfterDelisting { delisted_on: on }.evidence(),
+        &["after its removal on 2024-03-01"],
+    );
+    assert_eq!(
+        NotOwed::Unread.evidence(),
+        "no stored reading covers the day"
+    );
+}
+
+#[test]
+fn an_axis_says_its_own_word() {
+    use crate::refusal::Axis;
+    for axis in [Axis::Status, Axis::ErrorName] {
+        assert_eq!(axis.to_string(), axis.word());
+    }
+}
+
+/// A folder of no day zips answers its own root and takes the scope it is
+/// given.
+#[test]
+fn a_day_zips_source_keeps_its_root_and_takes_its_scope() {
+    use crate::gdfl_dayzips::DayZips;
+    let root = crate::gdfl_fixtures::scratch("cov-dayzips");
+    let loose = DayZips::open(&root).unwrap();
+    assert_eq!(loose.root(), root);
+    let scope = std::sync::Arc::new(crate::gdfl_cm::CmScope::swept());
+    let scoped = loose.with_scope(scope.clone());
+    assert!(std::sync::Arc::ptr_eq(
+        &crate::gdfl_cm::CmSource::scope(&scoped),
+        &scope
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_contract_is_asked_as_a_derivative_for_the_window_given() {
+    use crate::vendor::{Granularity, Listing};
+    let (from, to) = (
+        crate::session::Day::new(2024, 3, 1).unwrap(),
+        crate::session::Day::new(2024, 3, 2).unwrap(),
+    );
+    let window = crate::session::Window::new(from, to).unwrap();
+    let found = crate::fno::Found {
+        vendor_symbol: "ZQ24MARFUT".to_owned(),
+        underlying: "ZQ".to_owned(),
+        contract: brutex_core::instrument::Contract::parse("2024-03-28-FUT").unwrap(),
+        expiry: brutex_core::instrument::Expiry::new(2024, 3, 28).unwrap(),
+        option: None,
+    };
+    let asked = crate::chain::request(&found, window, Granularity::Day1);
+    assert_eq!(asked.instrument_id, "ZQ24MARFUT");
+    assert_eq!(asked.listing, Listing::Derivative);
+    assert_eq!(asked.window, window);
+}

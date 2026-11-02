@@ -763,3 +763,76 @@ fn a_check_line_field_cannot_forge_another() {
     );
     assert_eq!(words[5], "outcome=failed");
 }
+
+// ═══ BASE-COV-PULL: the words no test had read (Route B, recipe v4) ═════════
+
+#[test]
+fn a_stamp_is_one_name_and_one_integer() {
+    assert_eq!(Stamp::parse("abc 12").unwrap().unix, 12);
+    for bad in ["", "abc", "abc 12 13"] {
+        assert!(Stamp::parse(bad).unwrap_err().contains("is not"), "{bad:?}");
+    }
+    assert!(
+        Stamp::parse("abc x")
+            .unwrap_err()
+            .contains("is not unix seconds")
+    );
+}
+
+#[test]
+fn each_refusal_names_its_kind_and_what_it_waits_for() {
+    let kind = || "a-kind".to_owned();
+    let stamp = || Stamp {
+        name: "abc".to_owned(),
+        unix: 1,
+    };
+    let refusals = [
+        Refusal::Stale {
+            kind: kind(),
+            rehearsed: stamp(),
+            writer: stamp(),
+        },
+        Refusal::NotReady {
+            kind: kind(),
+            waits_for: vec!["one".to_owned(), "two".to_owned()],
+        },
+        Refusal::OperatorPending {
+            kind: kind(),
+            step: "a-step".to_owned(),
+            items: vec!["the disk has room".to_owned()],
+        },
+        Refusal::StepClosed {
+            kind: kind(),
+            step: "a-step".to_owned(),
+            state: "closed".to_owned(),
+        },
+        Refusal::NeverAutomatic {
+            kind: kind(),
+            word: "never",
+        },
+        Refusal::ListUnreadable {
+            kind: kind(),
+            why: "an invented why".to_owned(),
+        },
+    ];
+    for refusal in &refusals {
+        assert_eq!(refusal.kind(), "a-kind");
+        assert!(refusal.to_string().contains("a-kind"), "{refusal}");
+    }
+    assert_eq!(
+        refusals[1].to_string(),
+        "not ready: a-kind waits for one, two"
+    );
+    assert_eq!(
+        refusals[5].to_string(),
+        "list unreadable: a-kind cannot be judged: an invented why"
+    );
+}
+
+/// A line of the record cannot be forged by a field: a line break, a return,
+/// a tab and an equals sign are all escaped.
+#[test]
+fn a_record_field_escapes_every_byte_that_would_make_it_two() {
+    assert_eq!(field("a b\nc\rd\te=f%"), "a%20b%0Ac%0Dd%09e%3Df%25");
+    assert_eq!(field(""), "");
+}
