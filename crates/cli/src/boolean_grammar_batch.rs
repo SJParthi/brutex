@@ -17,7 +17,7 @@ pub(crate) struct Budget {
     pub bytes: u64,
 }
 
-/// Both cursors live on the heap (D-7410). A `Cursor` is about 13 KiB inline
+/// Both cursors live on the heap (D-7410). A `Cursor` is about 12 KiB inline
 /// (`offered` plus four `MAX_INSTRUCTIONS`-long arrays), and at opt-level 0
 /// every move or temporary of a value gets its own stack slot, so an inline
 /// pair made each function that holds a `Batch` (or a checkpoint frame

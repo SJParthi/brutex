@@ -130,6 +130,7 @@ fn each_stale_figure_has_a_newer_row_that_names_it() {
         (&limits, "| L-STACK1028-09 |", "L-STACK1028-03", "D-7412"),
         (&limits, "| L-STACK1028-09 |", "L-STACK1028-04", "this tip"),
         (&limits, "| L-STACK1028-10 |", "L-STACK1028-05", "D-7412"),
+        (&limits, "| L-STACK1028-11 |", "L-STACK1028-01", "12,286 B"),
         (&invariants, "| STACK1028-08 |", "STACK1028-04", "736 KiB"),
         (&invariants, "| STACK1028-09 |", "STACK1028-05", "690,096 B"),
     ] {
