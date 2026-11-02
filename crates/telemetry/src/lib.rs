@@ -417,10 +417,12 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let ran = output.status.success() && stdout.contains("1 passed");
         // Formatted unconditionally, so no line is reached only when the child fails.
         let said = format!("child {test} (uid {uid}) failed or ran no test:\n{stdout}\n{stderr}");
-        assert!(ran, "{said}");
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{said}"
+        );
     }
 
     /// This process's effective uid, read as the owner of a file it just made.

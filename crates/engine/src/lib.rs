@@ -203,6 +203,14 @@ use std::collections::{HashSet, TryReserveError};
 
 /// Reserve completely before a collection is populated.
 fn reserved<T>(capacity: usize) -> Result<Vec<T>, TryReserveError> {
+    // A test refuses the n-th call by asking the allocator's own bound for
+    // more than it can give: the error is the real one (D-7329).
+    #[cfg(test)]
+    let capacity = if refusal_cover_tests::this_reservation_is_refused() {
+        usize::MAX
+    } else {
+        capacity
+    };
     let mut rows = Vec::new();
     rows.try_reserve_exact(capacity)?;
     Ok(rows)
@@ -2510,6 +2518,10 @@ const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 /// several tests below read this file only up to its first `#[cfg(test)]`.
 #[cfg(test)]
 mod manifest;
+
+#[cfg(test)]
+#[path = "refusal_cover_tests.rs"]
+mod refusal_cover_tests;
 
 #[cfg(test)]
 mod tests {

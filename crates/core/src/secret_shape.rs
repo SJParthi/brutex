@@ -216,6 +216,32 @@ mod tests {
 
     const FIELDS: [&str; 2] = ["access-token", "api-key"];
 
+    /// A LONG WORD OF ONE KIND IS A FOLDER WHEN THE MIXED TEST ASKS: letters
+    /// alone, digits alone, full-width letters alone, and a letter-only run
+    /// with its only digit past a stop, which starts a new run.
+    #[test]
+    fn the_mixed_test_wants_a_letter_and_a_digit_in_one_run() {
+        for word in [
+            "a".repeat(40),
+            "7".repeat(40),
+            "\u{FF41}".repeat(40),
+            format!("{}.7", "a".repeat(40)),
+        ] {
+            assert!(!word_is_a_token(&word, true), "{word}");
+        }
+        assert!(word_is_a_token(&"a".repeat(40), false));
+        assert!(word_is_a_token(&format!("{}7", "a".repeat(40)), true));
+    }
+
+    /// A TRAILING SIGN OF A NAME STAYS IN THE NAME: `-` and `_` end a field
+    /// that is not the one asked for, where a quote or a stop is trimmed.
+    #[test]
+    fn a_hyphen_or_underscore_after_a_field_is_part_of_its_name() {
+        assert!(!word_is_a_parameter_path("/a/b/c/access-token-", &FIELDS));
+        assert!(!word_is_a_parameter_path("/a/b/c/access-token_", &FIELDS));
+        assert!(word_is_a_parameter_path("/a/b/c/access-token'.", &FIELDS));
+    }
+
     #[test]
     fn exactly_twenty_is_refused_and_nineteen_is_allowed() {
         let twenty = "a1b2c3d4e5f6g7h8i9j0";

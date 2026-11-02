@@ -394,6 +394,21 @@ mod tests {
         Record::decode(&out).unwrap_or_else(|e| panic!("its own bytes did not decode: {e}"))
     }
 
+    /// **A RECORD WITH ANOTHER DROPPED-FIELD COUNT IS ANOTHER EVENT**, every
+    /// other word of it the same: `matches` compares the count, in both
+    /// directions and at the extremes, and an event with nothing dropped
+    /// matches its own record (BASE-COV-LIBS).
+    #[test]
+    fn a_record_that_lost_a_different_number_of_fields_does_not_match() {
+        let event = Event::info("t", "m").with("a", 1_u32);
+        let mut record = round_trip(&event);
+        assert!(record.matches(&event));
+        for other in [1, 2, u64::MAX] {
+            record.dropped_fields = other;
+            assert!(!record.matches(&event), "dropped {other}");
+        }
+    }
+
     /// AN EVENT SURVIVES THE FILE, FIELD FOR FIELD.
     ///
     /// Not "a line was produced and it parsed" — every typed value goes out

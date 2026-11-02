@@ -124,10 +124,12 @@ pub(crate) fn push_rfc3339(out: &mut Vec<u8>, millis: i64) {
 
 /// A number, zero-padded to at least `width` digits.
 pub(crate) fn push_padded(out: &mut Vec<u8>, value: u64, width: usize) {
+    // TWENTY SLOTS, THE WIDTH OF u64::MAX: the walk ends on `rest == 0` at the
+    // twentieth digit at the latest (BASE-COV-LIBS, D-7328).
     let mut digits = [0u8; 20];
     let mut count = 0usize;
     let mut rest = value;
-    loop {
+    for slot in &mut digits {
         // A `match` and not `b'0' + (rest % 10) as u8`: the cast is denied by
         // the workspace lints, and every arm here is driven by formatting a
         // number that uses every digit.
@@ -143,9 +145,7 @@ pub(crate) fn push_padded(out: &mut Vec<u8>, value: u64, width: usize) {
             8 => b'8',
             _ => b'9',
         };
-        if let Some(slot) = digits.get_mut(count) {
-            *slot = digit;
-        }
+        *slot = digit;
         count = count.saturating_add(1);
         rest /= 10;
         if rest == 0 {
@@ -155,11 +155,7 @@ pub(crate) fn push_padded(out: &mut Vec<u8>, value: u64, width: usize) {
     for _ in count..width {
         out.push(b'0');
     }
-    for i in (0..count).rev() {
-        if let Some(byte) = digits.get(i) {
-            out.push(*byte);
-        }
-    }
+    out.extend(digits.iter().take(count).rev());
 }
 
 /// A signed number, with a `-` when it needs one.

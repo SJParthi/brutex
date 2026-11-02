@@ -923,10 +923,16 @@ impl Counters {
             self.codes.push((code.to_owned(), 1));
             return;
         }
-        if let Some(least) = self.codes.iter_mut().min_by_key(|(_, count)| *count) {
-            *least = (code.to_owned(), least.1.saturating_add(1));
-            self.codes_replaced = self.codes_replaced.saturating_add(1);
-        }
+        // THE TABLE IS FULL HERE, so it has a least entry: no arm is left for a
+        // table with none (BASE-COV-LIBS, D-7328).
+        self.codes
+            .iter_mut()
+            .min_by_key(|(_, count)| *count)
+            .into_iter()
+            .for_each(|least| {
+                *least = (code.to_owned(), least.1.saturating_add(1));
+                self.codes_replaced = self.codes_replaced.saturating_add(1);
+            });
     }
 
     /// The ring rolled: a new current file, the oldest dropped.
@@ -3827,10 +3833,12 @@ impl Audit {
         }
         seeding.seed_state(parent, ring_keep);
         // THE SEED IS ON DISK BEFORE ITS NAME APPEARS.
-        if let Some(file) = &seeding.file {
-            file.sync_all()
-                .map_err(|e| cannot("the seed cannot be synced", &e))?;
-        }
+        // An opened stream has its file; `Opened::Failed` returned above.
+        seeding
+            .file
+            .as_ref()
+            .map_or(Ok(()), File::sync_all)
+            .map_err(|e| cannot("the seed cannot be synced", &e))?;
         let mut seeded = std::mem::take(&mut seeding.health);
         drop(seeding);
         std::fs::rename(&staging, dir).map_err(|e| {
@@ -4037,25 +4045,38 @@ impl Audit {
         let mut ring = StateLines::new(ring_files);
         let (mut left, mut right) = (audited.next(), ring.next());
         loop {
-            let take_left = match (&left, &right) {
+            // THE OLDER LINE IS TAKEN, whichever side holds it: the match
+            // answers the line itself, so no side can be taken empty
+            // (BASE-COV-LIBS, D-7328: this was a side chosen and then an arm
+            // for a chosen side that held nothing, which no input reaches).
+            let (record, mut line) = match (left.take(), right.take()) {
                 (None, None) => break,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (Some((one, one_line)), Some((other, other_line))) => {
+                (Some(one), None) => {
+                    left = audited.next();
+                    one
+                }
+                (None, Some(other)) => {
+                    right = ring.next();
+                    other
+                }
+                (Some(one), Some(other)) => {
                     // THE SAME LINE IN BOTH is one line: the ring's copy goes.
-                    if one.seq == other.seq && one_line == other_line {
+                    if one.0.seq == other.0.seq && one.1 == other.1 {
+                        left = Some(one);
                         right = ring.next();
                         continue;
                     }
-                    one.seq <= other.seq
+                    if one.0.seq <= other.0.seq {
+                        right = Some(other);
+                        left = audited.next();
+                        one
+                    } else {
+                        left = Some(one);
+                        right = ring.next();
+                        other
+                    }
                 }
             };
-            let taken = if take_left {
-                std::mem::replace(&mut left, audited.next())
-            } else {
-                std::mem::replace(&mut right, ring.next())
-            };
-            if let Some((record, mut line)) = taken {
                 line.push(b'\n');
                 // A LINE THAT DID NOT LAND is counted as dropped by `append`
                 // and named in the health; only one that landed is seeded.
@@ -4073,7 +4094,6 @@ impl Audit {
                 // A TEST STOPS A SEED HERE, part-way, as a killed start would.
                 #[cfg(test)]
                 state_tests::seed_copied(self.health.seeded);
-            }
         }
         // A FILE THAT IS THERE AND COULD NOT BE READ is named in this
         // stream's health, which every `/logs.json` answer serves: the seed is
@@ -8006,6 +8026,11 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_root_that_is_not_there_holds_no_files() {
+        assert_eq!(files_under(Path::new("/no/such/telemetry/root")), 0);
+    }
+
     /// Every file under `root`, counted by walking it; 0 when it is not there.
     fn files_under(root: &Path) -> usize {
         let Ok(entries) = std::fs::read_dir(root) else {
@@ -10240,10 +10265,9 @@ mod state_tests {
         let mut out: Vec<Record> = postings
             .pointers
             .iter()
-            .filter_map(|pointer| match audit_read(dir, serial, pointer) {
-                AuditLine::Found(record) => Some(record),
-                AuditLine::RolledOff => None,
-                AuditLine::Unreadable(why) => panic!("{dimension}={value}: {why}"),
+            .map(|pointer| match audit_read(dir, serial, pointer) {
+                AuditLine::Found(record) => record,
+                other => panic!("{dimension}={value}: {other:?}"),
             })
             .collect();
         out.reverse();
@@ -11663,3 +11687,7 @@ mod tests_support {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sink_recovery_tests.rs"]
+mod recovery_tests;

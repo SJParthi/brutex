@@ -393,7 +393,9 @@ fn walked(dir: &Path, keep_files: u8, query: &Query) -> Tail {
         // two lookups, and a roll landing between them gave the length of one
         // file and the bytes of another. One `open` and one `fstat` cannot
         // disagree with each other.
-        let mut file = match std::fs::File::open(&path) {
+        let opened =
+            std::fs::File::open(&path).and_then(|file| file.metadata().map(|meta| (file, meta)));
+        let (mut file, meta) = match opened {
             // AN ABSENT FILE IS NOT AN ERROR. The set is sparse until it has
             // rolled `keep_files` times, so "no such file" is the ordinary
             // state and not a thing to report.
@@ -402,15 +404,9 @@ fn walked(dir: &Path, keep_files: u8, query: &Query) -> Tail {
                 out.errors.push(format!("{}: {e}", path.display()));
                 continue;
             }
-            Ok(file) => file,
+            Ok(opened) => opened,
         };
-        let (len, id) = match file.metadata() {
-            Ok(meta) => (meta.len(), (meta.dev(), meta.ino())),
-            Err(e) => {
-                out.errors.push(format!("{}: {e}", path.display()));
-                continue;
-            }
-        };
+        let (len, id) = (meta.len(), (meta.dev(), meta.ino()));
         if len == 0 {
             continue;
         }

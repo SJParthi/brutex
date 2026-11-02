@@ -768,10 +768,15 @@ trait NoDefault<Marker> {
 impl<T> NoDefault<()> for T {}
 impl<T: Default> NoDefault<u8> for T {}
 
-const _: fn() = || {
+/// The check itself: it compiles only while neither type has a `Default`, and
+/// the `const` below keeps it compiled in every build. A plain function, so a
+/// test runs the very lines the compiler checks.
+fn neither_type_has_a_default() {
     let _ = <DayLedger as NoDefault<_>>::witness;
     let _ = <RateSelector as NoDefault<_>>::witness;
-};
+}
+
+const _: fn() = neither_type_has_a_default;
 
 #[cfg(test)]
 #[allow(
@@ -1704,6 +1709,7 @@ mod tests {
     /// same call names two items and does not compile (the check itself).
     #[test]
     fn the_no_default_witness_is_the_every_type_item_for_both_checked_types() {
+        super::neither_type_has_a_default();
         assert!(<DayLedger as NoDefault<()>>::witness().ends_with("::DayLedger"));
         assert!(<RateSelector as NoDefault<()>>::witness().ends_with("::RateSelector"));
         // A `Default` type answers to the second marker as well.

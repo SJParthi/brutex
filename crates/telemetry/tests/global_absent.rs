@@ -96,6 +96,10 @@ fn admits_with_no_sink_is_false_and_the_macro_evaluates_nothing() {
         evaluated.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         7_u64
     };
+    // The counter itself works: it moves when the argument runs, so the
+    // figure it holds below is the macro's doing.
+    assert_eq!(count(), 7);
+    evaluated.store(0, std::sync::atomic::Ordering::Relaxed);
     let outcome = telemetry::emit_if!(
         Level::Error,
         "pull.member",

@@ -395,9 +395,10 @@ impl Best {
             .first()
             .is_some_and(|weakest| ranks_below(weakest, &candidate))
         {
-            if let Some(evicted) = self.take_root() {
+            // The weakest was just read at the root, so the heap has one.
+            self.take_root().into_iter().for_each(|evicted| {
                 self.masks.remove(&evicted.mask);
-            }
+            });
             self.held.push(candidate);
             self.sift_up(self.held.len().saturating_sub(1));
         } else {
