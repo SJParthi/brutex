@@ -1480,7 +1480,7 @@ pub struct Walked {
     pub strays_named: Vec<PathBuf>,
     /// Months with no `.sum` whose bar file is too short to hold
     /// [`store::time_index::INDEX_MIN_ROWS`] bars: none is owed (D-4933), so
-    /// none is counted as lacking one ([`summary_owed_by_len`]).
+    /// none is counted as lacking one (`summary_owed_by_len`).
     pub sum_small: u64,
 }
 

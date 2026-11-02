@@ -2323,7 +2323,7 @@ fn step_running(command: &str) -> Option<&'static str> {
 #[test]
 fn the_msum_store_half_is_a_pending_step_for_each_feed() {
     for (feed, command) in [
-        ("gdfl", "cli upkeep run msum gdfl --workers 8"),
+        ("gdfl", "cli upkeep run msum gdfl NSE/INDEX --workers 8"),
         ("zerodha", "cli upkeep run msum zerodha --workers 8"),
     ] {
         let step = step_running(command).unwrap_or_else(|| panic!("no step runs `{command}`"));

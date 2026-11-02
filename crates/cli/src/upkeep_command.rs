@@ -39,7 +39,7 @@
 //! lacking a `.sum` read zero once the step is done (D-7430).
 //!
 //! Every `msum` run says on `store.sum`, at its start and at its end, what it
-//! was given and what it left ([`msum_given`], [`msum_left`]), so the months
+//! was given and what it left (`msum_given`, `msum_left`), so the months
 //! lacking a summary are found on `/logs` without a walk.
 //!
 //! `run` is one tracked run (`pull::upkeep::run`): its journal is
