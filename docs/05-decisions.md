@@ -87604,3 +87604,70 @@ holds no listed row), `Standing`, `RefusalKind`, `Axis`, `Missing`,
 `u64::MAX`, `i64::MIN`, empty strings), and checks no word is used twice in
 its table. Red first: one word of each table changed by hand failed exactly
 its test (12 of 12). Invariant BCP-02.
+
+### D-7333 — BASE-COV-PULL repair 1: the origin walks read their entries through `OriginEntry`, arms no input reaches are removed rather than excused, and 168 more tests drive the refusals of sixteen modules; the bar is still NOT held — 2026-11-02
+
+**Why.** The second check of attempt 1 (`state/fix/round2/verify-BASE-COV-PULL-r1.json`)
+found the bar not held, fault arms inside `measure_tick_store_within` with no
+test, and two uncovered sides in this part's own test files that were no
+failing arm. A production refusal is never (F), and "needs a fault" is never
+(U) (recipe v4 step 4), so those arms needed a way in.
+
+1. **The seam.** `gdfl_import.rs`: trait `OriginEntry` (`kind`, `name`,
+   `location`, `bytes`), implemented for `std::fs::DirEntry`.
+   `measure_tick_store_within` is now `walk_tick_store` over `std::fs::read_dir`;
+   `yearly_zips` and `holds_a_live_contract` take an iterator of entries. A test
+   hands in the entry a failing disk gives (`SaidEntry`), which a healthy APFS
+   never gives. Production passes the real listing and nothing else; the fault
+   texts are unchanged. `space_of` is split from `volume_space` so a count that
+   overflows a `u64` is reached with numbers, and `names_a_split` is split from
+   `split_underlyings` so an unsourced row and a row that never moved its symbol
+   are reached with a row the compiled table does not hold. `unattributed_event`
+   is split from `note_unattributed`, so the event's fields are stated.
+2. **Arms no input reaches are gone, not excused** (no behaviour changes, each
+   branch a test now reaches or no branch at all): the `let Some(..) = cached`
+   after the listing was just cached (`gdfl_import.rs`, `cached.insert` answers
+   it); the `let ImportRefusal::Stopped` else in `stop_said` (it now takes the
+   fields); the `day.succ()` else in `fnowork::owed` (`the_day_after` answers
+   `None` for the last representable day and for a cell held through its last
+   owed day, one rule); `if let Some(shelf)` in both `corporate_actions` builds
+   (`order` only ever holds a key of `by_symbol`); the two-element pattern of
+   `indexed_steps` (a zip, not `windows(2)`); the `u8::try_from` of `gdfl_run::day_of`
+   (two digits fit, so the parse goes straight to `u8`); the `if let Ok(name)` of
+   `Catalog::read` (`extend` over the `Option`, the same passing-over of a
+   non-UTF-8 name, which APFS refuses to create).
+3. **Blocking 3.** `base_cov_codes_tests.rs`: the `shared` parameter of `words`
+   was `&[]` at all 20 sites, so it is gone. `gdfl_import_cov_tests.rs` counts the
+   matches of a list instead of `.any`, so the non-matching side runs and "named
+   twice" fails too. The new test files hold no `.any`.
+4. **Tests**, each file with its boundary, its extremes (`u64::MAX`, `i64::MIN`,
+   NaN, infinity, the last representable day, an empty body, a name that is not
+   UTF-8), a combination of extremes and something out of the box (`/dev/null`
+   at a lock's path; a root the writer can enter and not list): new files
+   `corporate_actions_cov_tests.rs` (19), `fnowork_cov_tests.rs` (12),
+   `master_snapshots_cov_tests.rs` (26), `ingest_cov_tests.rs` (6),
+   `reference_data_cov_tests.rs` (17), `gdfl_run_cov_tests.rs` (9),
+   `gdfl_run_locks_cov_tests.rs` (12), `gdfl_run_ledger_cov_tests.rs` (5),
+   `gdfl_run_stop_cov_tests.rs` (3), `zerodha_spool_cov_tests.rs` (3),
+   `ssm_cov_tests.rs` (5), `vendor_cov_tests.rs` (4), `calendar_cov_tests.rs` (3),
+   `base_cov_words_tests.rs` (21); more in `gdfl_import_cov_tests.rs` (19) and
+   `rehearsal_tests.rs` (3); one in `expiry_alias.rs`. `const fn` builders of the
+   tables (`one_window`, `note`, `auction_note`, `shape_agrees`, `sourced`,
+   `inferred`) only ever ran in the compiler, which Route B does not count, so
+   they are called at run time and their rows stated.
+5. **Red first.** With seven behaviour lines changed by hand together (the
+   `<=` of `the_day_after`, `Ratio::new`'s denominator bound, the walk's
+   `saturating_add`, the `MAX_ROWS` bound, the cash eligibility test, the
+   `MAX_SPAN_DAYS` bound and the `MAX_RUNS_PER_SYMBOL` bound) exactly the seven
+   matching tests failed and 153 passed; restored with `git checkout`.
+6. **Figures** (the instrument of D-7330, Route B, tip `6eeee6a0de6f`, reading
+   `whole:pull`): NOT MEASURED on this tip: all six deep target dirs stayed held by other steps from 22:16 to 23:30 IST on 2 Nov 2026, and the set file `state/fix/round2/deep-BASE-COV-PULL-6eeee6a0de6f-set.txt` is written for the next measure, so nothing here is claimed as a figure.
+   BEFORE (attempt 1's tip `0b8a21a5b`): lines 147,430/155,508 (8,078 uncovered),
+   branches 11,275/14,190 (2,915 uncovered sides). The (F)/(U) list and the gaps,
+   classified from those figures and provisional until the next measure:
+   `state/fix/round2/base-cov-pull-fu.txt` and
+   `state/fix/round2/base-cov-pull-gaps-a2.txt`.
+7. **What is not done.** The bar: at 0b8a21a5b production held 3,557 uncovered lines and 1,165 sides, test code 811 lines and 310 sides that are no failing arm, and the `#[ignore]` bodies 3,050 lines and 254 sides. This repair's tests reach part of the production rows; how much is UNVERIFIED until Route B runs on this tip. Not reached at all: most of `zerodha_verify`, `gdfl_dropbox`, `census_store`, `gdfl_rekey`, `masters`, `tickstore_write`, `gdfl_import_day`, `response_keep`, `fno_membership`. D-7250's narrow reading therefore does NOT end for
+   `pull` at this tip. Limit L-BCP-1 stands, L-BCP-2 is closed by item 1, and
+   L-BCP-3 names the real-data tests. Invariants BCP-04 to BCP-07. D-7334 to
+   D-7339 are unused.
