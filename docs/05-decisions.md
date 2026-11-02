@@ -87598,3 +87598,27 @@ it. Nothing in the server changed. Proof: BCA-11.
    set it.
 4. **One split.** `mastersrun::refresh_work` hands its work from the first fetch on to `refresh_over`, generic in
    its transport as `refresh_with` already was, so the part after the fetch runs with no host. Output unchanged.
+
+### D-7345 — Repair 1's figures: the bar is still not met, and what stands in its way (BASE-COV-API, repair 1) — 2026-11-03
+
+**Status: locked as a record; the bar is NOT met.** D3 recipe v4, Route B, pins as in D-7340, deep dir `tgt/deep-6`,
+reading `whole:api`, set `state/fix/round2/deep-BASE-COV-API-4beea8da837b-set.txt` (205 files), tree
+`4beea8da837b`, whose `.rs` files are this part's final ones (the commits after it are `docs/` only).
+
+1. **Figures.** Lines 170,737 / 175,573 (4,836 uncovered), branches 12,565 / 15,408 (2,843 uncovered sides), 182
+   files read. At check r1 they were 6,330 and 2,906, at the branch cut 6,407 and 2,924. `gaps_route.rs` 3,851/3,865
+   lines with no row of `not_owed_json` left; `basis_route.rs` 233/233 and 30/30; `sweeprun.rs` 4,106/4,234;
+   `mastersrun.rs` 1,015/1,097; `logs.rs` 7,149/7,238; `server.rs` 18,622/19,053. Every row:
+   `state/fix/round2/base-cov-api-gaps-r1.txt`.
+2. **The (F)/(U) list** is `state/fix/round2/base-cov-api-fu.txt`, as D-7340 named it: 577 lines and 1,172 sides (F),
+   classified by rule from the code's text and still to be read by hand, and the (U) items with their proofs.
+   GAP rows: 4,259 lines and 1,671 sides.
+3. **Not closed**, each named in `docs/06-limits.md`: the 22 bench files (L-BCA-2), the ignored tests' wrappers and
+   real-store bodies (L-BCA-3), three load-bound tests (L-BCA-4), the research projections (L-BCA-5), the paths that
+   end at a real host (L-BCA-6), and the remaining rows file by file, most in `recovery.rs`, `server.rs` and
+   `dayflags.rs`.
+4. D-7340's item 5 stands: because the bar is not met, `Merge BASE-COV-API:` must not happen on these figures, and
+   D-7250's narrow reading holds for `api`.
+
+**Proof.** `scratch/deep-BASE-COV-API-logs/4beea8da837b-routeb-r1.log`, 02:07-02:50 IST on 3 Nov, ending with the
+`NOT PROVED` lines of the 22 benches and `lib.rs` only.
