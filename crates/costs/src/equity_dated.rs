@@ -1340,7 +1340,8 @@ mod tests {
         assert_eq!(OT_CLR.rate.ratio(), Ratio::new(0, 1));
         // The compile-time checks, run: every per-crore row passes, and a
         // percentage row or a malformed one does not.
-        assert!(is_per_crore(&EX_2009) && is_per_crore(&IP_2026));
+        assert!(is_per_crore(&EX_2009));
+        assert!(is_per_crore(&IP_2026));
         assert!(!is_per_crore(&STT_ND));
         let malformed = DatedRow {
             rate: RowRate::Ratio(Ratio::new(1, 0)),
@@ -1395,7 +1396,7 @@ mod tests {
                 assert!(row.covers(on), "{} on {on}", row.id);
                 let covering: Vec<&str> = EQUITY_DATED_ROWS
                     .iter()
-                    .filter(|r| r.component == component && r.clocks.dated && r.covers(on))
+                    .filter(|r| r.component == component && r.covers(on))
                     .map(|r| r.id)
                     .collect();
                 assert_eq!(covering, [row.id], "{on}");
@@ -1506,7 +1507,8 @@ mod tests {
             TODAY_RATES.gst_on_sebi.expect("GST on the SEBI fee today"),
         ];
         for row in rows {
-            assert!(row.clocks.today && row.covers(READ_ON), "{}", row.id);
+            assert!(row.clocks.today, "{}", row.id);
+            assert!(row.covers(READ_ON), "{}", row.id);
         }
         // Every row that serves the today clock and prices something is one
         // of them (BRK-CT is not used; OT-CLR and OT-INT price nothing).

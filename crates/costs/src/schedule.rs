@@ -1772,19 +1772,17 @@ mod tests {
         .expect("today's card");
         let on_read_day = dated(Exchange::Nse, crate::equity_dated::READ_ON).expect("dated");
         // Equal as fractions: the table holds every rate per crore, so one
-        // reduced differently is the same rate.
-        let same_rate = |a: Option<Cited>, b: Option<Cited>| match (a, b) {
-            (Some(a), Some(b)) => {
-                let (a, b) = (a.rate(), b.rate());
-                i128::from(a.numerator()) * i128::from(b.denominator())
-                    == i128::from(b.numerator()) * i128::from(a.denominator())
-            }
-            (None, None) => true,
-            _ => false,
-        };
+        // reduced differently is the same rate. Every slot of an equity card
+        // holds a rate on both sides.
         let dated_rates = on_read_day.rates();
         for (at, rate) in today.rates().into_iter().enumerate() {
-            assert!(same_rate(dated_rates[at], rate), "rate {at}");
+            let a = dated_rates[at].expect("a dated rate").rate();
+            let b = rate.expect("today's rate").rate();
+            assert_eq!(
+                i128::from(a.numerator()) * i128::from(b.denominator()),
+                i128::from(b.numerator()) * i128::from(a.denominator()),
+                "rate {at}"
+            );
         }
     }
 

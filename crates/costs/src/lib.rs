@@ -204,3 +204,21 @@ pub mod stack;
 pub mod strike;
 pub mod trip;
 pub mod venue;
+
+#[cfg(test)]
+mod tests {
+    use crate::{equity_clock, equity_dated, equity_readings};
+
+    /// The strategy path reaches the three equity modules from the crate
+    /// root, and the version a run's identity names is the table they price.
+    #[test]
+    fn the_equity_modules_answer_from_the_crate_root() {
+        assert_eq!(
+            equity_dated::EQUITY_DATED_VERSION,
+            "costs-table/2026-10-30/r1"
+        );
+        assert_eq!(equity_dated::EQUITY_DATED_ROWS.len(), 25);
+        assert_eq!(equity_readings::NOTE_LINE_NAMES.len(), 11);
+        assert_eq!(equity_clock::DHAN_DATA_API_MONTHLY.raw(), 49_900);
+    }
+}
