@@ -1341,6 +1341,11 @@ confirmed by two skeptics; their corrections are applied.
 - **BRED23-F47: `knobs.rs` said a knob is read once per rung or run; 388,143
   lookups in one audit say otherwise** (this repair's probe). Stated, not
   changed: the doc and L-BRED23-21 say what runs.
+- **BRED23-F49: cli's D2 set had never been measured, and 97 uncovered lines
+  and branches stood in it** (check r6's direct run on e53cd7f60). FIXED
+  (D-7152 addendum 16): a test for each refusal and skip a test can drive,
+  the seam `run_with` for a stopped worker, and the rest listed with its proof
+  (BRED-54).
 
 ### Base reds 2026-10-25, BASE-FIXTURE-1025 (the full gate on 666ddf7f7) — dispositions — 2026-10-25
 

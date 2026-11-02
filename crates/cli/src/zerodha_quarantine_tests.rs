@@ -265,22 +265,16 @@ fn a_plan_row_outside_the_ask_is_passed_over_and_a_malformed_one_is_named() {
 
     let refusal = |text: &str| rows_of(text, &asked).expect_err("a malformed row");
     let short = good.replace("\tquarantine\t1\t1", "\tquarantine\t1");
-    assert!(
-        refusal(&short).contains("a plan row has 7 fields, not 8"),
-        "{}",
-        refusal(&short)
-    );
+    let said = refusal(&short);
+    assert!(said.contains("a plan row has 7 fields, not 8"), "{said}");
     let rung = good.replace("\t1min\t", "\t5min\t");
-    assert!(
-        refusal(&rung).contains("a plan row names rung `5min`"),
-        "{}",
-        refusal(&rung)
-    );
+    let said = refusal(&rung);
+    assert!(said.contains("a plan row names rung `5min`"), "{said}");
     let scope = good.replace("\ttimestamps\tforeign_level", "\thalf_month\tforeign_level");
+    let said = refusal(&scope);
     assert!(
-        refusal(&scope).contains("a plan row names scope `half_month`"),
-        "{}",
-        refusal(&scope)
+        said.contains("a plan row names scope `half_month`"),
+        "{said}"
     );
 }
 

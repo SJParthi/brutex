@@ -578,8 +578,8 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
 mod tests {
     use super::serially;
     use super::{
-        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve,
-        scope, set, set_here, var,
+        clear_all, count, count_usize_within, describe, refusals, refuse_value, refused, render,
+        resolve, scope, set, set_here, store, var,
     };
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -1059,5 +1059,44 @@ mod tests {
     #[should_panic(expected = "moved a knob with no knobs::serially()")]
     fn a_tests_thread_with_no_guard_may_not_clear_the_knobs() {
         clear_all();
+    }
+
+    /// A THREAD THAT PANICS HOLDING A STORE'S WRITE LOCK POISONS IT. Every knob
+    /// then reads as unset, `set` and `clear_all` move nothing and nothing here
+    /// panics, so a run takes its documented defaults, and what the knobs held
+    /// comes back unchanged once the poison is cleared. Under the guard, so no
+    /// other test's thread reads the store while it is poisoned.
+    #[test]
+    fn a_poisoned_store_reads_as_empty_and_moves_nothing() {
+        let name = "BRUTEX_KNOBS_TEST_POISONED";
+        let _guard = serially();
+        clear_all();
+        set(name, "7");
+        refuse_value(name, "not a number");
+        let a_writer_stops = |writes: fn()| {
+            assert!(std::thread::spawn(writes).join().is_err(), "it stopped");
+        };
+        a_writer_stops(|| {
+            let _held = store().write();
+            panic!("invented: a writer that stops holding the knobs");
+        });
+        a_writer_stops(|| {
+            let _held = refusals().write();
+            panic!("invented: a writer that stops holding the refusals");
+        });
+        assert!(store().is_poisoned() && refusals().is_poisoned());
+
+        set(name, "8");
+        clear_all();
+        assert_eq!(var(name), None, "a poisoned store reads as unset");
+        assert_eq!(describe(), "", "and describes nothing");
+        assert_eq!(refused(), None, "and refuses nothing");
+
+        store().clear_poison();
+        refusals().clear_poison();
+        assert_eq!(var(name), Some("7".to_owned()), "neither move landed");
+        assert!(refused().is_some_and(|said| said.contains(name)));
+        clear_all();
+        assert_eq!(var(name), None, "the store moves again");
     }
 }

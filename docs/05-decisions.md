@@ -84855,6 +84855,20 @@ an addendum to the entry it extends; nothing above is edited.
     grep, most in seconds) are as they were: none has been seen red since
     this package's earlier repairs, and a change to them with no red to
     prove it would be guesswork.
+16. **D-7152: cli's set measured for the first time, and its gaps closed.**
+    The instrumented cli lib binary overflowed its 2 MiB test threads, so no
+    earlier round read a figure for cli; check r6 cleared it with
+    `RUST_MIN_STACK=67108864` (environment only: `BASE-STACK-1028` is the
+    package that fixes the cause). That first figure, on e53cd7f60, named 97
+    uncovered lines and branches in functions this part touched by one line:
+    `check_day`, `extra_pass`, `run`, `rows_of`, `refuse_quarantined`,
+    `encode`. Each is a refusal or a skip a test can drive, so each has one
+    (BRED-54), except what no input and no direct call reaches, listed with its
+    proof in `state/fix/round2/deep-BASE-REDS-1023-<tip>-fu.txt`. One seam was
+    added: `run_with` takes the day's check, because a worker that stops is
+    the one refusal of the run no input reaches, and `run` passes `check_day`.
+    Refused: reading the refusal as unreachable, since the join's `Err` is
+    real and its sentence is the operator's only word for it.
 
 ### D-5187 — `--out` is held outside the store and the tick store by where the run would really write: made absolute, `..` walked, links resolved, and in the written form too (DATA-2 repair, verify-DATA-2-r1) — 2026-10-21
 
