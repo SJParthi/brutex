@@ -72,9 +72,26 @@ profiles: 17 profiles written by uid 65534, 55 by root.
 
 ## Step 3: closing the gaps (in progress)
 
-Four helpers in their own worktrees and target dirs, one file family each (zerodha_verify; gdfl_dropbox; ingest and
-ingest_failkind; tickstore_write and http); I take masters, kite and the small production files. Their work lands
-here file by file as it is checked.
+Six helpers (subagents of this session) work in detached worktrees of this branch with their own target dirs, one
+file family each, under one brief (G3's files only, no git writes, red first, 8 extreme cases a file, root-host and
+telemetry notes): zerodha_verify; gdfl_dropbox; ingest and ingest_failkind; tickstore_write and http; the GDFL
+family (gdfl_import_lineage, gdfl_import_journal, gdfl_lineage, gdfl_tickstore, gdfl_archive, gdfl_run_scope,
+gdfl_run_start); the small files (gap_backfill, rolling, resolve, gaps, archive, session, totp, tenor,
+day_universe). I take masters and the test-only files, check each helper's diff against the rules, run its tests,
+fmt and clippy here, and commit it. Builds share two slots (flock), about 2.7 GB each.
+
+Landed so far (each commit pushed):
+
+- `c0230d8d` masters: 16 new tests (13 in the new `masters_land_tests.rs`), every refusal of the landing path;
+  quick instrumented run (`masters::`) masters.rs lines 1742/1765, branches 181/202 with every item left an (F),
+  the hostless-URL (U) or one plant side closed by `plants_for_two_sources_at_once_meet_only_their_own`.
+- `9341c620` gdfl_ia16_tests (no test-side gap left but (F)) and gdfl_nfo_attack_tests (oracles tested directly).
+- `8e306353` tests/no_scheduler_delete.rs: 318/318 lines, 112/112 branches.
+- `e11fc694` tests/derive.rs and tests/pipeline.rs: only (F) left.
+- `454a6797` gdfl_dropbox (helper db): gdfl_dropbox.rs lines 1977/2133 -> 2145/2145, branches 370/450 -> 447/448;
+  **a real defect fixed**: the staging lock outlived its press in a forked child's copy of the description
+  (the press-2 `run_busy` that made `a_duplicate_refused_by_its_sha256_stays_refused_on_every_later_press` red once
+  under load); and gdfl_cm_admission_tests' fixture predicate tested directly.
 
 ## NEEDS THE MAC
 
