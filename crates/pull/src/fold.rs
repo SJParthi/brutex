@@ -2690,3 +2690,8 @@ mod cloud_mutant_tests {
         );
     }
 }
+
+// BASE-COV-PULL-PS2 (the (U) audit): the tail check by direct call.
+#[cfg(test)]
+#[path = "fold_ps2_tests.rs"]
+mod ps2_tests;
