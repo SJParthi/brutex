@@ -1160,13 +1160,15 @@ fn stock_of(name: &str) -> Option<Symbol> {
 fn read_held(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match store::safe_open::open_read_len(path) {
         Err(why) if why.is_missing() => Ok(None),
-        Err(why) => Err(why.to_string()),
-        Ok((mut file, len)) => {
-            let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-            file.read_to_end(&mut bytes)
-                .map(|_| Some(bytes))
-                .map_err(|why| why.to_string())
-        }
+        // A refused open and a failed read are said in one place, in the
+        // reader's own words.
+        opened => opened
+            .map_err(std::io::Error::other)
+            .and_then(|(mut file, len)| {
+                let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+                file.read_to_end(&mut bytes).map(|_| Some(bytes))
+            })
+            .map_err(|why| why.to_string()),
     }
 }
 
@@ -2348,10 +2350,10 @@ mod tests {
 
     #[test]
     fn the_back_step_is_the_largest_fall_below_the_running_high() {
-        assert_eq!(back_step([]), BackStep::default());
-        assert_eq!(back_step([5, 5, 6, 9]), BackStep::default());
+        assert_eq!(back_step(Vec::new()), BackStep::default());
+        assert_eq!(back_step(vec![5, 5, 6, 9]), BackStep::default());
         assert_eq!(
-            back_step([10, 12, 9, 13, 5, 13, 13, 11]),
+            back_step(vec![10, 12, 9, 13, 5, 13, 13, 11]),
             BackStep { step_s: 8, rows: 3 }
         );
     }
@@ -2548,14 +2550,24 @@ mod tests {
         assert_eq!(Flags::from_bits(seen), Some(Flags(seen)));
         assert_eq!(Flags::from_bits(1 << 9), None);
         let both = Flags::TIED.with(Flags::TICKS_ABSENT);
-        assert!(both.has(Flags::TIED) && both.any(Flags::UNMEASURED));
-        assert!(!both.has(Flags::UNMEASURED) && !both.any(Flags::UNCALIBRATED));
+        assert_eq!(
+            [
+                both.has(Flags::TIED),
+                both.any(Flags::UNMEASURED),
+                both.has(Flags::UNMEASURED),
+                both.any(Flags::UNCALIBRATED),
+            ],
+            [true, true, false, false]
+        );
     }
 
     #[test]
     fn two_levels_of_the_sparse_table_cover_one_minute() {
         let widest = 1_i64 << (LEVELS - 1);
-        assert!(widest <= SECS_PER_MINUTE && SECS_PER_MINUTE < 2 * widest);
+        assert_eq!(
+            [widest <= SECS_PER_MINUTE, SECS_PER_MINUTE < 2 * widest],
+            [true, true]
+        );
     }
 
     // ── the grid and the search ─────────────────────────────────────────────
@@ -2571,11 +2583,12 @@ mod tests {
             })
             .filter_map(|(_, cell)| *cell)
             .collect();
+        let first = traded.first()?;
         Some(Prices {
-            open: traded.first()?.open,
-            high: traded.iter().map(|p| p.high).max()?,
-            low: traded.iter().map(|p| p.low).min()?,
-            close: traded.last()?.close,
+            open: first.open,
+            high: traded.iter().fold(first.high, |top, p| top.max(p.high)),
+            low: traded.iter().fold(first.low, |bottom, p| bottom.min(p.low)),
+            close: traded.last().unwrap_or(first).close,
         })
     }
 
@@ -3058,10 +3071,27 @@ mod tests {
         let out = scratch("folder").join("a-file");
         fs::write(&out, b"").unwrap();
         let (keys, bars) = feeds(|_| 0);
-        assert!(matches!(
-            build(&keys, &bars, &ticks(), &out),
-            Err(BuildRefusal::Io { path, .. }) if path == out.join(TABLE_DIR)
-        ));
+        let refused = build(&keys, &bars, &ticks(), &out).unwrap_err();
+        assert!(matches!(refused, BuildRefusal::Io { .. }), "{refused:?}");
+        let named = out.join(TABLE_DIR).display().to_string();
+        assert!(refused.to_string().contains(&named), "{refused}");
+    }
+
+    #[test]
+    fn a_day_the_tick_source_does_not_hold_leaves_the_back_step_absent() {
+        let out = scratch("unheld");
+        let at = day(2024, 4, 4);
+        let k = key("RELIANCE", at);
+        let bars = Feeds {
+            days: HashMap::from([(k, walked_day(at, 15, 8, 5))]),
+            refuse: None,
+        };
+        let built = build(&[k], &bars, &ticks(), &out).unwrap();
+        assert_eq!((built.offset_only, built.tick_refusals), (1, 0));
+        let row = *Table::open(&out).unwrap().get(k).unwrap();
+        assert_eq!(row.flags, Flags::TICKS_ABSENT);
+        assert_eq!(row.floor(), Floor::OffsetOnly(5));
+        let _ = fs::remove_dir_all(&out);
     }
 
     #[test]
