@@ -22170,6 +22170,15 @@ stack peak is not a timing; these rows bound memory, not time.
 
 <!-- slot FNO-BAND -->
 
+| ID | Limit | Why | Bound | Package |
+|---|---|---|---|---|
+| L-FNO-BAND-01 | R-BAND-1's base rests on the session's first traded minute | SPEC 10.2 measures `rho(D)` there, so for a second inside that minute the base reads that minute's last GDFL trade and its Zerodha close. The ratio is the session's adjustment constant read through two feeds' prices of one minute, and only the feeds' gap carries into it | the base moves by the feeds' gap in that minute (where the feeds differ, the median gap is 4.55 bp, SPEC 19); R-BAND-2 reads nothing from D, and the headline takes the worse lane (D-8210) | FNO-BAND |
+| L-FNO-BAND-02 | R-BAND-2 across a corporate action | its base is D-1's raw last trade, which on a split, bonus or rights ex-day is in the old basis, and no table adjusts it until R4-26 is live. The design's flex reading refuses it when the action moves the price more than 20%; SPEC's flexes until it holds the day's prints | a wrong band can only lower the headline, which takes the worse lane per trade; R-BAND-1 holds across the action (`runner::fno_band::tests::a_split_day_takes_the_adjusted_close_times_the_session_ratio_inside_one_session`) | FNO-BAND |
+| L-FNO-BAND-03 | The band is computed, not read from NSE's file | NSE rounds its band to the tick, which is UNVERIFIED before 2024-02-05 (SPEC 10.1); this band rounds inward to the paisa. A lock printing at a tick NSE rounded outward reads here as a flex, and one at a tick rounded inward as a paisa or more inside the band | UNMEASURED until FNO-BAND-FILES counts agreement with `PricRg` per stock-day from 2024-02-05; every band carries the label "band computed" | FNO-BAND, FNO-BAND-FILES |
+| L-FNO-BAND-04 | Which flex reading NSE applies | the kit reads T06-03 two ways and its source is on the operator's Mac (D-8211) | UNVERIFIED; both readings are walked as lanes, the worse is the headline, and a print past 20% refuses the design's | FNO-BAND |
+| L-FNO-BAND-05 | "At the band" is a print, not a queue | the store holds trades, not the order book: a second at the band is a printed price at the limit, not a locked queue (SPEC 10.2) | stated; a buy at the upper limit or a sell at the lower one fills nothing in that second, the strict reading | FNO-BAND |
+| L-FNO-BAND-06 | A look-back is a binary search, not a constant | `limits` at a second before a side's latest flex searches that side's flexes of the day; a check at the walk's own second reads the latest flex | at most `log2(flexes + 1)` comparisons a side, and the design's reading has three flexes a side at most; C-FNO-BAND-01 times both in `crates/runner/benches/ratio.rs` | FNO-BAND |
+
 <!-- slot FNO-CLOCK -->
 
 <!-- slot FNO-NET -->

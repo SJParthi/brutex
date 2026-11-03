@@ -1148,6 +1148,10 @@ the first was closed in code afterwards.
 
 <!-- slot FNO-BAND -->
 
+| Item | State |
+|---|---|
+| FNO-BAND: `runner::fno_band`, the computed price band of every stock-day — both base readings (R-BAND-1, R-BAND-2) and both flex readings (SPEC 10.2's and the design's, D-8211), each flex observed from a print and kept with its second, plain limits for rule 4 and the lane test — with the bench row C-FNO-BAND-01, D-8210 to D-8212, FNO-BAND-I01 to FNO-BAND-I07 and L-FNO-BAND-01 to L-FNO-BAND-06 | Built on 3 Nov 2026 in a cloud session; its independent check (coverage by Route B, gates 12 and 14, the decision-citation test, the bench on the Mac) is owed before it counts, and it lands with family F1 |
+
 <!-- slot FNO-CLOCK -->
 
 <!-- slot FNO-NET -->

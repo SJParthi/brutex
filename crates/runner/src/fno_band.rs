@@ -1733,10 +1733,15 @@ mod tests {
             })
         );
         let mut design = band(big, FlexReading::FiveThreeTwo);
-        assert!(matches!(
+        assert_eq!(
             design.observe(at(0, i64::MAX)),
-            Err(Refusal::PastTheLastFlex { .. })
-        ));
+            Err(Refusal::PastTheLastFlex {
+                ts: 0,
+                side: BandSide::Upper,
+                price: i64::MAX
+            }),
+            "the design's reading is refuted before its limit could leave i64"
+        );
     }
 
     /// The lane test: within one price step of a limit, or past one.
@@ -1933,9 +1938,15 @@ mod tests {
                         }
                         (Err(why), None) => {
                             refuted += 1;
+                            let past = |side, price| Refusal::PastTheLastFlex {
+                                ts: sec.ts,
+                                side,
+                                price,
+                            };
                             assert!(
-                                matches!(why, Refusal::PastTheLastFlex { .. }),
-                                "seed {seed}: {why}"
+                                [past(BandSide::Upper, sec.high), past(BandSide::Lower, sec.low)]
+                                    .contains(&why),
+                                "seed {seed}: only a reading with a last flex breaks: {why}"
                             );
                             broke = Some(why);
                         }

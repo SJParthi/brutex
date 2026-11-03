@@ -87624,6 +87624,141 @@ unused.
 
 <!-- slot FNO-BAND -->
 
+### D-8210 — The price band of every stock-day is computed, on two base readings walked as lanes, with each flex observed from a print, kept with its second and never undone, and handed on as plain limits for rule 4 (FNO-BAND) — 2026-11-03
+
+**Why this entry exists.** Rule 4 of the seconds fill walk (SPEC 9.3) needs
+each stock-day's price band: a buy fills nothing in a second whose printed high
+is at or above the upper limit, and a sell nothing in one whose printed low is
+at or below the lower limit, until a second prints off the band. NSE's daily
+security file holds the band only from 2024-02-05 (`PricRg`, T06-10), and
+FNO-BAND-FILES reads it in F3; the first run needs a band on every date (SPEC
+10.2, OP-12). `runner::fno_band` computes it. Every choice below is one the
+FNO-BAND design (PARTS section 5) or the spec leaves to its builder.
+
+**Decision.**
+
+1. **Computed for every date, and labelled.** A `DayBand` is one stock-day's
+   band under one base reading and one flex reading (D-8211). Every band
+   carries `LABEL`, "band computed". `BAND_RULE` is the rule's word for the
+   run identity's `band_rule` term (PARTS READINESS ADDENDUM item 2, built by
+   FNO-SEC-WIRE), today `fno-band-v1`; a changed rule is a new word.
+2. **Both base readings, as lanes.** R-BAND-1, SPEC 10.2's:
+   `C_z(D-1) x rho(D)`, where `rho(D) = G / Z` at the session's first traded
+   minute (SPEC 6.6, R1), snapped to the paisa half-up once
+   (`Base::close_times_ratio`). R-BAND-2: GDFL's last trade of D-1, as given
+   (`Base::last_trade_before`). Both are computed. FNO-RUN walks each as a
+   lane, and the headline takes the lower net per trade. `DayBand::near` is
+   the design's lane test: a second within one price step of a limit, or past
+   one, the step being the stock's measured price step (SPEC 10.1), the
+   caller's to give. A second no standing lane calls near has the same rule-4
+   outcome in every lane, so a trade made only of such seconds walks one lane.
+3. **Ten per cent either way, rounded inward.** For a half-width of `w` parts
+   per million the upper limit is `base + floor(base x w / 10^6)` and the lower
+   `base - floor(base x w / 10^6)`: the narrowest paise band the rule allows,
+   OP-12's "the strict way". A one-paisa base has a band of one paisa. NSE's
+   rounding of its own band to the tick is UNVERIFIED before 2024-02-05 (SPEC
+   10.1); FNO-BAND-FILES counts agreement per stock-day from that date.
+4. **Flexes are observed, never predicted.** No trade prints outside the band
+   in force, so a print past a limit says the band had flexed by that second.
+   `DayBand::observe` widens that side by the fewest steps of its flex reading
+   whose limit holds the print, and the flex is in force from that second, so
+   the band in force in a second holds every print of that second. A print
+   exactly at a limit is at the band and widens nothing. The two sides flex
+   apart, each in its move's direction; the flexes behind a no-trade gap land
+   together in the second after it; the band never narrows within its day.
+5. **No look-ahead, by construction.** Each flex is kept with its second, and
+   `DayBand::limits(ts)` answers from the flexes at or before `ts`, so a print
+   observed after `ts` never moves the answer, in whatever order the caller
+   asks. FNO-RUN may observe a whole day once and walk its lanes after.
+6. **Traded prints only.** The band observes a second's traded high and low.
+   The quote range of the N4 decision is never a trade, so it widens nothing;
+   FNO-SEC-EXEC compares its own worse range with the limits.
+7. **Plain limits, and the design's one change of shape.** `limits` returns
+   `Limits { lower, upper }`, and `Limits::pair` the plain `(lower, upper)`
+   that FNO-RUN adapts to FNO-SEC-EXEC's `Bands` trait. The design's
+   `DayBand::new(base_reading, base)` is `DayBand::new(base, flex)`: the
+   reading travels inside `Base`, which only the two readings' constructors
+   make, so the two cannot disagree, and the flex reading is the second
+   argument (D-8211).
+8. **C-FNO-BAND-01** times one check (one `observe` and one `limits` at the
+   walk's second) and one look-back (`limits` at an earlier second of the day)
+   under both flex readings, at 1x, 10x and 100x the seconds of a day with
+   22,500 samples at each, through the library's `measure_checks`, which a
+   unit test runs at a tiny size. The row needs each p99 flat within runner's
+   2,500 permille ceiling and at most 100 ns (PARTS section 11; an ESTIMATE
+   until the Mac's bench).
+
+### D-8211 — The kit reads the flex rule two ways, SPEC's 5% a step and the design's 5%, then 3%, then 2%; both are computed and walked as lanes until the source's own words settle it (FNO-BAND) — 2026-11-03
+
+**Why this entry exists.** T06-03 (`sources-leverage-execution.md` lines 21
+and 189) is read two ways in the kit. SPEC 10.2: the operating range "flexes 5%
+at a time in the move's direction after a cooling-off period". The FNO-BAND
+design: "the flex observed in the data, 5%, then 3%, then 2%". FNO-LAW's
+charter row for T06-03 quotes both and leaves the choice to this part. The
+research file is on the operator's Mac and not in this repository, so which
+reading NSE applies is UNVERIFIED here, and choosing one by opinion would be
+the invention `CLAUDE.md` §3 rule 1 forbids.
+
+**Decision.**
+
+1. **Both readings, typed.** `FlexReading::FivePerStep`, SPEC 10.2's: each
+   flex adds 5% of the base (`SPEC_FLEX_PPM`), with no last flex.
+   `FlexReading::FiveThreeTwo`, the design's: a side's half-width steps to
+   15%, 18% and 20% of the base (`DESIGN_WIDTHS_PPM`), and there is no fourth.
+2. **Walked as lanes; the worse per trade.** FNO-RUN walks each flex reading
+   as a lane beside the base readings (D-8210 item 2), and the headline takes
+   the lower net per trade: SPEC FIB-I5's rule for a reading a source leaves
+   open. The lanes stay a constant of the run, two base readings by two flex
+   readings.
+3. **A reading the data refutes is refused by name.** A print past the
+   design's third flex, more than 20% from the base, cannot be held by that
+   reading: `observe` returns `Refusal::PastTheLastFlex` with the second, the
+   side and the price, and that band refuses every later second while its
+   earlier answers stand. FNO-RUN drops that lane from that second and records
+   the refusal; nothing fills it from the other reading.
+4. **While both hold, the design's band is never wider than SPEC's** on the
+   same prints, because its ladder (15%, 18%, 20%) never lies above SPEC's
+   (15%, 20%, 25%, ...); a test proves it on seeded sessions.
+5. **How it is settled.** The main session or the part's checker reads lines
+   21 and 189 of `sources-leverage-execution.md`. A new entry, never an edit of
+   this one, then retires the reading the source refutes, and `BAND_RULE`
+   takes a new word.
+
+### D-8212 — What the band refuses, the integers it keeps, and the readings' stated limits (FNO-BAND) — 2026-11-03
+
+**Why this entry exists.** `CLAUDE.md` §4 bans a fallback that hides a failure,
+SPEC FIB-I10 keeps every decision path in integers, and THE BAR names the
+`i128` overflow guards among its out-of-box cases. A test of `runner::fno_band`
+drives each refusal below.
+
+**Decision.**
+
+1. **Refused by name, never defaulted.** `Refusal::DemergerExDay` on a day
+   marked `ExDay::Demerger`: prices after a demerger's ex-date are on a new
+   basis, and no table adjusts either base across one until R4-26 is live, so
+   neither reading holds; the day mask skips the day too (M7, M11).
+   `NotPositive`: a price the base needs that is not a positive number of
+   paise, or a base that snaps to none. `BaseOutOfRange`: a base, or its band
+   before any flex, past paise `i64`. `BadPrints`: a low under one paisa or
+   above its high. `OutOfOrder`: a second before one already observed (the
+   same second again is allowed). `NegativeStep`, asked of `near`.
+   `PastTheLastFlex` (D-8211). `OutOfRange`: a flex whose half-width is past
+   `u64` parts per million, or whose limit is past paise `i64`. A refusal
+   while observing changes nothing, except the last two, which break the band
+   from their second: every later call returns that same refusal, and every
+   earlier answer stands.
+2. **Integers only.** Prices are paise `i64`, shares of the base parts per
+   million, and products `i128`. R-BAND-1's half-up numerator
+   `2 x C_z x G + Z` stays below `i128::MAX` for every positive `i64` input.
+   Nothing is wrapped or saturated.
+3. **Stated limits,** written under FNO-BAND's slot of `docs/06-limits.md`:
+   R-BAND-1's ratio is measured in the session's first traded minute (SPEC
+   10.2); R-BAND-2's base is in the old basis across a split, bonus or rights
+   issue while R4-26 is not live; NSE's rounding of its band to the tick;
+   which flex reading NSE applies; "at the band" is a printed price, not a
+   locked queue (SPEC 10.2); and a look-back's binary search.
+4. **D-8213 to D-8219 are unused.**
+
 <!-- slot FNO-CLOCK -->
 
 <!-- slot FNO-NET -->

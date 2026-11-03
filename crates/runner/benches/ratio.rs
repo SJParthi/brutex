@@ -62,6 +62,8 @@ use vocab::ConditionMask;
 // ---- part; each part inserts its bench module (the path attribute naming
 // ---- benches/ratio/fno_<x>.rs and its mod line) directly under its slot.
 // slot bench-mod FNO-BAND
+#[path = "ratio/fno_band.rs"]
+mod fno_band;
 
 // slot bench-mod FNO-RANK
 
@@ -600,6 +602,7 @@ fn main() {
         // is given as the first word of a line. `pub(crate)`, because the workspace lint
         // `unreachable_pub` is an error under clippy `-D warnings`.
         // slot bench-row FNO-BAND
+        fno_band::row(&["C-FNO-BAND-01"]),
         // slot bench-row FNO-RANK
         // slot bench-row FNO-DAILY
         // slot bench-row FNO-SEC-EXEC
