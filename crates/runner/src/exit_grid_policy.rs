@@ -8160,6 +8160,78 @@ mod tests {
                 .is_err()
         );
     }
+    /// BASE-COV-LIBS-LS2: EVERY SELECTOR PICKS ONE POLICY-ADMITTED COORDINATE
+    /// from the same evaluated grid, each by its own key.
+    #[test]
+    fn every_selector_picks_a_policy_admitted_coordinate() {
+        let training = crate::synthetic::sessions(6);
+        for selector in [
+            ExitGridSelectorV1::PessimisticTotal,
+            ExitGridSelectorV1::EdgeThenPessimistic,
+            ExitGridSelectorV1::GuaranteedFloor,
+            ExitGridSelectorV1::OperatorRule,
+        ] {
+            let mut with = policy();
+            with.selector = selector;
+            let resolved = with
+                .resolve(&nifty(), &training)
+                .unwrap_or_else(|_| unreachable_resolved());
+            let selected = selected_for(&resolved, &training)
+                .expect("every selector picks one admitted coordinate");
+            assert!(
+                resolved.chosen_is_in_bounds(selected.coordinate),
+                "{selector:?}"
+            );
+            assert_eq!(
+                selected.resolution_digest,
+                resolved.digest(),
+                "{selector:?}"
+            );
+        }
+    }
+
+    /// A RESOLUTION WITH MORE LEVELS ON AN AXIS THAN ITS LIMIT IS REFUSED BY
+    /// NAME: a forced stop that adds a third stop level to a limit of two, and
+    /// (by a direct edit past the plan's own check) a target or trail plan with
+    /// three distinct levels.
+    #[test]
+    fn a_resolution_past_its_axis_limit_is_refused_by_name() {
+        let input = bars(100);
+        let mut forced = policy();
+        forced.forced_stop = ForcedStopV1::IncludeExactObserved(75);
+        forced.rungs.max_levels_per_axis = 2;
+        assert!(matches!(
+            forced.resolve(&nifty(), &input),
+            Err(ExitGridErrorV1::ResolvedRungLimitExceeded {
+                stop: 3,
+                max: 2,
+                ..
+            })
+        ));
+        let three = vec![p(1, 4), p(1, 2), p(3, 4)];
+        let mut targets = policy();
+        targets.rungs.max_levels_per_axis = 2;
+        targets.rungs.target = three.clone();
+        assert!(matches!(
+            targets.resolve(&nifty(), &input),
+            Err(ExitGridErrorV1::ResolvedRungLimitExceeded {
+                target: 3,
+                max: 2,
+                ..
+            })
+        ));
+        let mut trails = policy();
+        trails.rungs.max_levels_per_axis = 2;
+        trails.rungs.trail = three;
+        assert!(matches!(
+            trails.resolve(&nifty(), &input),
+            Err(ExitGridErrorV1::ResolvedRungLimitExceeded {
+                trail: 3,
+                max: 2,
+                ..
+            })
+        ));
+    }
 }
 
 #[cfg(test)]
