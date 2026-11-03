@@ -2842,6 +2842,21 @@ static WRITER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
 ///
 /// Every [`WriteError`]; a refused draft writes nothing at a final name.
 pub fn write(store: &Path, draft: &Draft) -> Result<Written, WriteError> {
+    write_linking(store, draft, &|staging, path| {
+        std::fs::hard_link(staging, path)
+    })
+}
+
+/// [`write`] with the link of the staging file to the generation's final name
+/// as an argument (BASE-COV-PULL-PS1, D-7335): production hard-links, and a
+/// test hands a link that answers what another writer landing first, or a
+/// staging name gone, would make it answer, a race between the listing and
+/// the link that no input of a write makes happen on demand.
+fn write_linking(
+    store: &Path,
+    draft: &Draft,
+    link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Written, WriteError> {
     let table = draft.table;
     let dir = table.dir(store);
     std::fs::create_dir_all(&dir)
@@ -2908,7 +2923,7 @@ pub fn write(store: &Path, draft: &Draft) -> Result<Written, WriteError> {
         .write_all(text.as_bytes())
         .and_then(|()| staged.file.sync_all())
         .map_err(|why| WriteError::Io(format!("{}: {why}", staging.display())))?;
-    let linked = std::fs::hard_link(&staging, &path);
+    let linked = link(&staging, &path);
     // The staging name is this writer's own: removing it changes no byte of
     // the generation, which now has its final name (or was refused).
     let _left_for_the_next_create = std::fs::remove_file(&staging);
